@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "pim",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-24",
+  "compatibility_flags": ["nodejs_compat"],
+  // Workers AI runs the model; under `wrangler dev` it calls your logged-in account.
+  "ai": { "binding": "AI", "remote": true },
+  "durable_objects": {
+    "bindings": [{ "name": "Pim", "class_name": "Pim" }]
+  },
+  // SQLite-backed Durable Objects are available on the Workers free plan.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Pim"] }],
+  "vars": {
+    // Any Workers AI id (`@cf/...`) or AI Gateway catalog id (`anthropic/...`).
+    "PIM_MODEL": "@cf/zai-org/glm-4.7-flash",
+    // IANA time zone of the person the agent works for.
+    "PIM_TIME_ZONE": "UTC",
+    // Set to "exa", "ceramic" or "linkup" to enable web_search (billed by AI Gateway).
+    "PIM_WEB_SEARCH": ""
+  },
+  // Secrets (set with `wrangler secret put`):
+  //   PIM_API_TOKEN          bearer token every API request must carry
+  //   PIM_NOTIFY_WEBHOOK     optional URL that receives notifications as JSON POSTs
+  "observability": { "enabled": true }
+}

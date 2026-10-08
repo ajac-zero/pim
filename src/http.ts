@@ -13,9 +13,11 @@ export function json(value: unknown, status = 200): Response {
 }
 
 export async function readJson<T extends object>(request: Request): Promise<Partial<T>> {
-	if (!request.body) return {};
+	// An empty POST still has a body stream on Workers; no content means no fields.
+	const raw = request.body ? await request.text() : "";
+	if (raw.trim() === "") return {};
 	try {
-		const value: unknown = await request.json();
+		const value: unknown = JSON.parse(raw);
 		if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error();
 		return value as Partial<T>;
 	} catch {

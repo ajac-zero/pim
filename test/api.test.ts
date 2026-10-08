@@ -59,6 +59,20 @@ describe("agent", () => {
 		expect(tools.has("fetch_url")).toBe(true);
 	});
 
+	it("accepts POSTs without a body where every field is optional, and rejects bodies that are not objects", async () => {
+		const { id } = (await post("/sessions")).body;
+		// What `curl -X POST` sends: an empty body, not a missing one.
+		const empty = await exports.default.fetch(url(`/sessions/${id}/reset`), {
+			method: "POST",
+			headers: { Authorization: `Bearer ${TOKEN}` },
+			body: "",
+		});
+		expect(empty.status).toBe(200);
+		expect(await empty.json()).toEqual({ reset: true });
+		const array = await api(`/sessions/${id}/reset`, { method: "POST", body: "[1]" });
+		expect(array.status).toBe(400);
+	});
+
 	it("answers 404 for unknown paths and 405 for wrong methods", async () => {
 		expect((await api("/nope")).status).toBe(404);
 		expect((await api("/memory/log", { method: "PUT" })).status).toBe(405);

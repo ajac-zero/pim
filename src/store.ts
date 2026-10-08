@@ -1,14 +1,9 @@
 /**
  * Pim's own state, in the Durable Object's SQLite database next to pi's
- * tables (pi's are prefixed `pi_`, the SDK's `cf_`). A deployment has one
+ * tables (pi's are prefixed `pi_`, the SDK's `cf_`, long-term memory's
+ * `optmem_`). A deployment has one
  * agent, so everything here belongs to the person who deployed it.
  */
-
-export type Memory = {
-	readonly id: string;
-	readonly content: string;
-	readonly createdAt: number;
-};
 
 export type GoalStatus = "active" | "paused" | "done" | "abandoned";
 
@@ -57,11 +52,6 @@ export type Notification = {
 type Row = Record<string, SqlStorageValue>;
 
 const SCHEMA = `
-CREATE TABLE IF NOT EXISTS pim_memories (
-	id TEXT PRIMARY KEY,
-	content TEXT NOT NULL,
-	created_at INTEGER NOT NULL
-);
 CREATE TABLE IF NOT EXISTS pim_goals (
 	id TEXT PRIMARY KEY,
 	title TEXT NOT NULL,
@@ -93,10 +83,6 @@ CREATE TABLE IF NOT EXISTS pim_notifications (
 	read_at INTEGER
 );
 `;
-
-function memoryOf(row: Row): Memory {
-	return { id: String(row.id), content: String(row.content), createdAt: Number(row.created_at) };
-}
 
 function goalOf(row: Row): Goal {
 	return {
@@ -143,49 +129,6 @@ export class PimStore {
 	constructor(sql: SqlStorage) {
 		this.#sql = sql;
 		this.#sql.exec(SCHEMA);
-	}
-
-	// Memories
-
-	addMemory(content: string, id: string = crypto.randomUUID()): Memory {
-		this.#sql.exec(
-			"INSERT OR IGNORE INTO pim_memories (id, content, created_at) VALUES (?, ?, ?)",
-			id,
-			content,
-			Date.now(),
-		);
-		return this.memory(id)!;
-	}
-
-	memory(id: string): Memory | undefined {
-		const [row] = this.#sql.exec("SELECT * FROM pim_memories WHERE id = ?", id).toArray();
-		return row ? memoryOf(row) : undefined;
-	}
-
-	memories(limit = 200): Memory[] {
-		return this.#sql
-			.exec("SELECT * FROM pim_memories ORDER BY created_at DESC, rowid DESC LIMIT ?", limit)
-			.toArray()
-			.map(memoryOf);
-	}
-
-	/** Memories that contain any word of `query` (case-insensitive), most matches first. */
-	searchMemories(query: string, limit = 20): Memory[] {
-		const words = [...new Set(query.toLowerCase().split(/\W+/).filter((word) => word.length > 2))];
-		if (words.length === 0) return this.memories(limit);
-		const score = words.map(() => "(instr(lower(content), ?) > 0)").join(" + ");
-		return this.#sql
-			.exec(
-				`SELECT *, (${score}) AS score FROM pim_memories WHERE score > 0 ORDER BY score DESC, created_at DESC, rowid DESC LIMIT ?`,
-				...words,
-				limit,
-			)
-			.toArray()
-			.map(memoryOf);
-	}
-
-	deleteMemory(id: string): boolean {
-		return this.#sql.exec("DELETE FROM pim_memories WHERE id = ?", id).rowsWritten > 0;
 	}
 
 	// Goals

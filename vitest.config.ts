@@ -8,7 +8,8 @@ export default defineConfig({
 			main: "./test/worker.ts",
 			wrangler: { configPath: "./wrangler.jsonc" },
 			remoteBindings: false,
-			miniflare: { bindings: { PIM_API_TOKEN: "test-token", PIM_TIME_ZONE: "America/New_York" } },
+			// An 8-line memory view, so a few dozen memories exercise every level of the tree.
+			miniflare: { bindings: { PIM_API_TOKEN: "test-token", PIM_TIME_ZONE: "America/New_York", PIM_MEMORY_LINES: "8" } },
 		}),
 	],
 	test: { testTimeout: 20_000 },

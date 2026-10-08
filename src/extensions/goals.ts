@@ -76,7 +76,8 @@ export function goalsExtension({ store }: PimServices) {
 		sections: [
 			section("active_goals", () => {
 				const goals = store.goals("active");
-				return goals.length === 0 ? undefined : goals.map(describeGoal).join("\n");
+				// Always present: a section that appears later out of order makes pi re-send every section.
+				return goals.length === 0 ? "No active goals." : goals.map(describeGoal).join("\n");
 			}),
 		],
 	});

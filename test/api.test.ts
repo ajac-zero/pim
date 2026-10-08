@@ -28,7 +28,7 @@ describe("auth", () => {
 	});
 
 	it("answers CORS preflights without a token, allowing every method the API uses", async () => {
-		const response = await exports.default.fetch(url("/memories/x"), {
+		const response = await exports.default.fetch(url("/memory/log/1"), {
 			method: "OPTIONS",
 			headers: { Origin: "https://ui.example", "Access-Control-Request-Method": "DELETE" },
 		});
@@ -53,7 +53,7 @@ describe("agent", () => {
 		expect(body).toMatchObject({ model: "@cf/zai-org/glm-4.7-flash", timeZone: "America/New_York", rootSession: "1" });
 		const tools = new Map((body.tools as { name: string; requiresApproval: boolean }[]).map((tool) => [tool.name, tool]));
 		expect(tools.get("http_request")?.requiresApproval).toBe(true);
-		expect(tools.get("remember")?.requiresApproval).toBe(false);
+		expect(tools.get("note")?.requiresApproval).toBe(false);
 		// web_search costs money and is off unless configured.
 		expect(tools.has("web_search")).toBe(false);
 		expect(tools.has("fetch_url")).toBe(true);
@@ -61,7 +61,7 @@ describe("agent", () => {
 
 	it("answers 404 for unknown paths and 405 for wrong methods", async () => {
 		expect((await api("/nope")).status).toBe(404);
-		expect((await api("/memories", { method: "PUT" })).status).toBe(405);
+		expect((await api("/memory/log", { method: "PUT" })).status).toBe(405);
 	});
 });
 

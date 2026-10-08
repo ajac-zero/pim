@@ -17,7 +17,11 @@
     // IANA time zone of the person the agent works for.
     "PIM_TIME_ZONE": "UTC",
     // Set to "exa", "ceramic" or "linkup" to enable web_search (billed by AI Gateway).
-    "PIM_WEB_SEARCH": ""
+    "PIM_WEB_SEARCH": "",
+    // Model that compresses long-term memory; empty uses the conversation's model.
+    "PIM_MEMORY_MODEL": "",
+    // Lines of long-term memory in every prompt; empty is 96 (about 8k tokens).
+    "PIM_MEMORY_LINES": ""
   },
   // Secrets (set with `wrangler secret put`):
   //   PIM_API_TOKEN          bearer token every API request must carry

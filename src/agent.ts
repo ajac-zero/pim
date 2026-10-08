@@ -1,13 +1,23 @@
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/pi-ai";
 import { createModels, type Models } from "@earendil-works/pi-ai/models";
-import { type AgentEventStream, createRegistry, Harness } from "@earendil-works/pi-durable";
+import {
+	type AgentEventStream,
+	createRegistry,
+	Harness,
+	type HarnessSettings,
+	type ModelRef,
+	ROOT_CONVERSATION_ID,
+} from "@earendil-works/pi-durable";
 import { Agent, type Connection, type ConnectionContext, type Schedule, type WSMessage } from "agents";
 import { type PiModel, PiHarness, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
 import { approvalsExtension, type GatedAction, httpRequest } from "./extensions/approvals";
 import { goalsExtension } from "./extensions/goals";
-import { memoryExtension } from "./extensions/memory";
 import { notifyExtension } from "./extensions/notify";
+import { createOptMem } from "./extensions/optmem";
+import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
+import { byteLength, ENTRY_BYTES, entryLine } from "./extensions/optmem/store";
 import { personaExtension } from "./extensions/persona";
 import { describeSchedule, scheduleExtension } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
@@ -39,6 +49,13 @@ function errorMessage(error: unknown): string {
 export class Pim extends Agent<Env> {
 	readonly store = new PimStore(this.ctx.storage.sql);
 	readonly ai = createAI({ binding: this.env.AI });
+	/** Long-term memory: an OptMem-style log and summary tree. */
+	readonly memory = createOptMem({
+		sql: this.ctx.storage.sql,
+		timeZone: this.env.PIM_TIME_ZONE || "UTC",
+		viewLines: Number(this.env.PIM_MEMORY_LINES) || undefined,
+		compressionModel: () => this.memoryModel(),
+	});
 	readonly registry = createRegistry();
 	/** Actions that run only after the user approves them. */
 	readonly actions: readonly GatedAction[] = [httpRequest as GatedAction];
@@ -47,23 +64,18 @@ export class Pim extends Agent<Env> {
 		harness: ({ storage, context }) => {
 			const services = this.services();
 			this.registry.install(personaExtension(services));
-			this.registry.install(memoryExtension(services));
 			this.registry.install(goalsExtension(services));
 			this.registry.install(scheduleExtension(services));
 			this.registry.install(notifyExtension(services));
 			this.registry.install(approvalsExtension(services, this.actions));
 			this.registry.install(webExtension({ ai: this.env.AI, searchProvider: this.env.PIM_WEB_SEARCH }));
+			this.registry.install(this.memory.extension);
 			return Harness.open(
 				storage,
 				{
 					models: this.models(),
 					registry: this.registry,
-					settings: {
-						// 1, 2, 4, 8, 16 s: about 30 s for a rate-limited model to recover.
-						retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
-						// Fewer storage writes while streaming; a crash loses at most this window.
-						progress: { partialIntervalMs: 250, outputIntervalMs: 250 },
-					},
+					settings: this.harnessSettings(),
 					onReport: (error) => console.warn("pi report", error),
 				},
 				context,
@@ -80,6 +92,16 @@ export class Pim extends Agent<Env> {
 		this.lifecycle.use(this.harness);
 	}
 
+	/** pi's run policy, shared by every session. */
+	protected harnessSettings(): HarnessSettings {
+		return {
+			// 1, 2, 4, 8, 16 s: about 30 s for a rate-limited model to recover.
+			retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
+			// Fewer storage writes while streaming; a crash loses at most this window.
+			progress: { partialIntervalMs: 250, outputIntervalMs: 250 },
+		};
+	}
+
 	/** The model catalog pi resolves sessions' models against. */
 	protected models(): Models {
 		const models = createModels();
@@ -90,6 +112,35 @@ export class Pim extends Agent<Env> {
 	/** The model new sessions start with. */
 	protected defaultModel(): PiModel {
 		return this.ai(this.env.PIM_MODEL);
+	}
+
+	/** The model that compresses memories; undefined uses the conversation's model. */
+	protected memoryModel(): ModelRef | undefined {
+		const id = this.env.PIM_MEMORY_MODEL;
+		if (!id) return undefined;
+		const model = this.ai(id);
+		return { provider: model.provider, modelId: model.id };
+	}
+
+	/**
+	 * Starts memory compression from outside a tool call, such as after the
+	 * user edits memory through the API. The task belongs to the root session.
+	 */
+	async startMemoryNap(): Promise<void> {
+		const pi = await this.harness.pi();
+		const context = BACKGROUND_CONTEXT;
+		const root = await pi.conversation(ROOT_CONVERSATION_ID, context);
+		if (!root) return;
+		const id = await this.memory.startNap({
+			getTask: (task) => pi.getTask(task, context),
+			createTask: () =>
+				root.commit(
+					(tx) => tx.createTask(this.memory.NapTask, {}, { ownership: { kind: "conversation" }, background: true }),
+					context,
+				),
+		});
+		// No session run is waiting on it, so keep the object up until it settles.
+		if (id !== undefined) void this.keepAliveWhile(() => pi.waitForTask(id, context));
 	}
 
 	protected services(): PimServices {
@@ -310,30 +361,85 @@ export class Pim extends Agent<Env> {
 			},
 		],
 
-		// Memory: what the agent knows about the person. They can always make it forget.
+		// Long-term memory: what the agent knows about the person. They can always make it forget.
 		[
 			"GET",
-			"/memories",
+			"/memory",
+			() => ({
+				count: this.memory.store.count(),
+				pendingCompressions: this.memory.store.pending().length,
+				view: this.memory.view(),
+			}),
+		],
+		[
+			"GET",
+			"/memory/log",
 			(_params, _request, url) => {
-				const query = url.searchParams.get("q");
-				return { memories: query ? this.store.searchMemories(query, 100) : this.store.memories() };
+				const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 100, 1), 500);
+				const pattern = url.searchParams.get("q");
+				if (pattern !== null) {
+					let regex: RegExp;
+					try {
+						regex = new RegExp(pattern, "i");
+					} catch (error) {
+						throw new HttpError(400, errorMessage(error));
+					}
+					return this.memory.store.search(regex, limit);
+				}
+				const before = url.searchParams.get("before");
+				return { entries: this.memory.store.page(limit, before === null ? undefined : Number(before)) };
 			},
 		],
 		[
 			"POST",
-			"/memories",
+			"/memory/log",
 			async (_params, request) => {
-				const { content } = await readJson<{ content: string }>(request);
-				if (typeof content !== "string" || content.trim() === "") throw new HttpError(400, "content must be a non-empty string");
-				return Response.json(this.store.addMemory(content.trim()), { status: 201 });
+				const { text } = await readJson<{ text: string }>(request);
+				const line = typeof text === "string" ? text.trim() : "";
+				if (line === "" || /[\r\n]/.test(line)) throw new HttpError(400, "text must be one non-empty line");
+				if (byteLength(line) > ENTRY_BYTES) throw new HttpError(400, `text is limited to ${ENTRY_BYTES} bytes`);
+				const entry = this.memory.store.append(line, this.memory.today());
+				await this.startMemoryNap();
+				return Response.json(entry, { status: 201 });
 			},
 		],
 		[
 			"DELETE",
-			"/memories/:id",
-			({ id }) => {
-				if (!this.store.deleteMemory(id!)) throw new HttpError(404, `No memory ${id}`);
-				return { deleted: true };
+			"/memory/log/:id",
+			async ({ id }) => {
+				if (!/^\d+$/.test(id!) || !this.memory.store.forget(Number(id))) throw new HttpError(404, `No memory ${id}`);
+				await this.startMemoryNap();
+				return { forgotten: Number(id) };
+			},
+		],
+		[
+			"GET",
+			"/memory/tree/:block",
+			({ block: name }) => {
+				const block = parseBlock(name!);
+				if (!block) throw new HttpError(400, `${name} is not a block, like 16-31`);
+				if (block[0] >= this.memory.store.count()) throw new HttpError(404, `No memories in ${name}`);
+				return {
+					block: blockName(block),
+					summary: this.memory.store.summary(block) ?? null,
+					halves: halves(block).map((half) =>
+						half[1] - half[0] === 1
+							? { block: String(half[0]), line: this.memory.store.entry(half[0]) ? entryLine(this.memory.store.entry(half[0])!) : null }
+							: { block: blockName(half), summary: this.memory.store.summary(half) ?? null },
+					),
+				};
+			},
+		],
+		[
+			"DELETE",
+			"/memory/tree/:block",
+			async ({ block: name }) => {
+				const block = parseBlock(name!);
+				if (!block) throw new HttpError(400, `${name} is not a block, like 16-31`);
+				const dropped = this.memory.store.dropSummary(block);
+				if (dropped === 0) throw new HttpError(404, `No summary ${name}`);
+				await this.startMemoryNap();
+				return { dropped };
 			},
 		],
 

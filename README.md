@@ -16,7 +16,7 @@ This repository is only the agent and its API. Chat apps, mobile apps, and messa
                                        │   ▼                                          │
                                        │ Durable Object "Pim" (src/agent.ts), just one│
                                        │  ├ PiHarness ── pi-durable runs, tasks, inbox│
-                                       │  ├ Extensions: memory, goals, schedule,      │
+                                       │  ├ Extensions: optmem, goals, schedule,      │
                                        │  │   notify, approvals, web                  │
                                        │  ├ Scheduler (alarms) ── background wake-ups │
                                        │  └ SQLite: pi's tables + pim_* tables        │
@@ -34,7 +34,7 @@ This repository is only the agent and its API. Chat apps, mobile apps, and messa
 
 | Capability | Tools | How |
 | --- | --- | --- |
-| Memory | `remember`, `recall`, `forget` | Facts are stored in the agent's database and included in the system prompt. You can list and delete them over the API. |
+| Long-term memory | `note`, `recall`, `zoom`, `forget` | OptMem-style: an append-only log, compressed in the background into a tree of summaries. Every conversation sees a fixed-size view of it. See [Memory](#memory). |
 | Goals and plans | `create_goal`, `update_goal`, `list_goals` | Goals have step-by-step plans and progress notes. Active goals are always in the prompt. |
 | Background work | `schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task` | Delays, dates, or cron. When a task fires, the agent receives a `[Scheduled task]` message in the session that scheduled it. |
 | Reaching you | `notify_user` | Stored, pushed to connected sockets, and POSTed to an optional webhook. |
@@ -61,6 +61,8 @@ Configuration lives in `vars` in `wrangler.jsonc`:
 | `PIM_MODEL` | `@cf/zai-org/glm-4.7-flash` | Model for new sessions: a Workers AI id or an AI Gateway catalog id |
 | `PIM_TIME_ZONE` | `UTC` | The person's IANA time zone |
 | `PIM_WEB_SEARCH` | empty | `exa`, `ceramic`, or `linkup` enables `web_search` |
+| `PIM_MEMORY_MODEL` | empty | Model that compresses memories; empty uses the conversation's model |
+| `PIM_MEMORY_LINES` | `96` | Lines of long-term memory in every prompt (about 8k tokens) |
 
 For local development, copy `.dev.vars.example` to `.dev.vars` and run `pnpm dev`. The `AI` binding is remote, so `wrangler dev` needs a Cloudflare login, and model calls bill that account.
 
@@ -80,8 +82,12 @@ Every request except `GET /health` needs `Authorization: Bearer <PIM_API_TOKEN>`
 | POST | `/sessions/:s/abort` | `{ operationId? }` | Withdraws one operation, or stops everything |
 | POST | `/sessions/:s/reset` | `{ handoff? }` | Starts a fresh context; history stays stored |
 | PUT | `/sessions/:s/model` | `{ model }` | Changes the session's model |
-| GET, POST | `/memories` | `?q=keywords` / `{ content }` | Memories |
-| DELETE | `/memories/:id` | | Forget one |
+| GET | `/memory` | | `{ count, pendingCompressions, view }`: the view is what the model sees |
+| GET | `/memory/log` | `?q=regex` or `?before=id`, `?limit=` | Raw memories, newest first |
+| POST | `/memory/log` | `{ text }` (one line, ≤ 280 bytes) | Records a memory as the user |
+| DELETE | `/memory/log/:id` | | Forgets one memory and rebuilds the summaries over it |
+| GET | `/memory/tree/:block` | a block such as `0-15` | Its summary and its two halves |
+| DELETE | `/memory/tree/:block` | | Drops a bad summary and those built on it; they are rebuilt |
 | GET | `/goals`, `/goals/:id` | `?status=active\|paused\|done\|abandoned` | Goals with steps and notes |
 | DELETE | `/goals/:id` | | |
 | GET | `/schedules` | | Pending scheduled tasks |
@@ -106,6 +112,38 @@ Connect to `wss://<host>/ws?session=1&token=...`. Each socket follows one sessio
 
 To fold events into a chat view, see the reducer in Cloudflare's [pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi/src/view.ts).
 
+## Memory
+
+Long-term memory follows Victor Taelin's [OptMem](https://github.com/VictorTaelin/OptMem), reimplemented as a pi-durable extension in [`src/extensions/optmem`](src/extensions/optmem).
+
+- **The log is the truth.** The agent records one-line memories (up to 280 bytes) with `note` as it learns things. Memories are numbered in order and never edited.
+- **Summaries form a binary tree.** Block `#0-1` summarizes memories 0 and 1, `#0-3` summarizes `#0-1` and `#2-3`, and so on. A background pi task compresses each block as soon as it is complete, smallest first: blocks up to 16 memories from the raw lines, larger ones from their two halves. The tree is a cache; any summary can be dropped and rebuilt.
+- **The view has a fixed size.** Every conversation's prompt holds `PIM_MEMORY_LINES` lines: the newest memories verbatim, older ones as summaries that get coarser with age. The model gets back detail with `recall` (a regular expression over the whole log) and `zoom` (a block's two halves).
+- **Forgetting is real.** `forget` blanks the memory, keeping its number, and drops every summary built over it; they are rebuilt without it. A summary that was being written when a memory was forgotten is discarded.
+
+Where pim differs from OptMem:
+
+- The view is a prompt section rather than a `wake` command, so the model always has it.
+- Compression runs in a durable background task instead of interrupting the conversation.
+- OptMem never deletes; pim lets you forget.
+
+### Memory and the prompt cache
+
+pi never edits what it already sent, so the provider's prompt cache keeps hitting. A changed system-prompt section is appended to the transcript as a whole new copy, and old copies stay until a compaction writes a fresh baseline. The memory is built to change that prompt as little as possible:
+
+- **A conversation keeps the view it was first shown.** Most requests add nothing to the prompt.
+- **Notes a conversation takes itself** are already in its transcript, so they trigger nothing.
+- **Memories from elsewhere** (the API, other sessions) are listed in a small `memory_since` section after the view. When the list changes, only the list is re-sent.
+- **The view is re-rendered only when:**
+  - a memory is forgotten, so the old view stops showing it;
+  - more than an eighth of the view (at least 4 memories) piles up in `memory_since`;
+  - a full view's worth of memories has arrived since it was shown.
+- **Compaction** writes every section again anyway, and the old view goes with the compacted entries, so the conversation gets a fresh view at no extra cost.
+
+The same rule applies to every section: one that appears later than sections after it makes pi remove and re-send all of them. That is why `active_goals` says "No active goals." instead of disappearing.
+
+Forgetting removes a memory from the log, the tree, and future views. It does not erase the conversation where it came up: that stays in the session's transcript until you reset the session.
+
 ## Develop
 
 ```sh
@@ -122,4 +160,4 @@ To add a tool, write a pi extension in `src/extensions/` and install it in `Pim`
 - A sandboxed computer and browser for the agent: Cloudflare Containers or Browser Rendering.
 - Tools the agent writes for itself, run in Dynamic Workers (codemode).
 - Secret placeholders, so approved requests can use credentials the model never sees.
-- Semantic memory search with Vectorize.
+- Semantic recall. `recall` is a regular expression over the log, so it finds words, not meanings.

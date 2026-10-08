@@ -72,6 +72,15 @@ export type AppWatch = {
 	readonly createdAt: number;
 };
 
+/** A session's name and activity, for listing conversations. */
+export type SessionInfo = {
+	readonly id: string;
+	/** Null until named: by the first message the user sends, or by renaming. */
+	readonly title: string | null;
+	readonly createdAt: number;
+	readonly updatedAt: number;
+};
+
 type Row = Record<string, SqlStorageValue>;
 
 function watchOf(row: Row): AppWatch {
@@ -144,6 +153,12 @@ CREATE TABLE IF NOT EXISTS pim_app_watches (
 	last_error TEXT,
 	last_event_at INTEGER,
 	created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pim_sessions (
+	id TEXT PRIMARY KEY,
+	title TEXT,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pim_meta (
 	key TEXT PRIMARY KEY,
@@ -411,6 +426,32 @@ export class PimStore {
 
 	deleteWatch(id: string): boolean {
 		return this.#sql.exec("DELETE FROM pim_app_watches WHERE id = ?", id).rowsWritten > 0;
+	}
+
+	// Sessions: what a sidebar shows. pi owns the conversations; this is their title and activity.
+
+	sessionInfo(id: string): SessionInfo | undefined {
+		const [row] = this.#sql.exec("SELECT * FROM pim_sessions WHERE id = ?", id).toArray();
+		return row
+			? { id, title: row.title === null ? null : String(row.title), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) }
+			: undefined;
+	}
+
+	/** Records activity in a session; `title` names it only if it has no name yet. */
+	touchSession(id: string, title?: string): void {
+		const now = Date.now();
+		this.#sql.exec(
+			"INSERT INTO pim_sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET updated_at = excluded.updated_at, title = COALESCE(pim_sessions.title, excluded.title)",
+			id,
+			title ?? null,
+			now,
+			now,
+		);
+	}
+
+	renameSession(id: string, title: string): void {
+		this.touchSession(id);
+		this.#sql.exec("UPDATE pim_sessions SET title = ? WHERE id = ?", title, id);
 	}
 
 	meta(key: string): string | undefined {

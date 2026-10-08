@@ -21,7 +21,9 @@
     // Model that compresses long-term memory; empty uses the conversation's model.
     "PIM_MEMORY_MODEL": "",
     // Lines of long-term memory in every prompt; empty is 96 (about 8k tokens).
-    "PIM_MEMORY_LINES": ""
+    "PIM_MEMORY_LINES": "",
+    // This deployment's public URL, for app event callbacks; empty learns it from API requests.
+    "PIM_PUBLIC_URL": ""
   },
   // Secrets (set with `wrangler secret put`):
   //   PIM_API_TOKEN          bearer token every API request must carry

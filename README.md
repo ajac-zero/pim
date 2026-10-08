@@ -40,6 +40,8 @@ This repository is only the agent and its API. Chat apps, mobile apps, and messa
 | Reaching you | `notify_user` | Stored, pushed to connected sockets, and POSTed to an optional webhook. |
 | Asking first | `http_request` | Gated: the call files an approval request. The action runs only when you approve, and the result is posted back into the conversation. |
 | Connected apps | `connect_app` (gated), `list_apps`, plus each app's tools | Remote MCP servers, with OAuth sign-in. Tools that don't declare themselves read-only need approval. See [Connected apps](#connected-apps). |
+| App skills | `read_skill`, `read_skill_file` | Instructions apps publish over the MCP Skills extension, checked against the app's digests. |
+| App events | `list_app_events`, `watch_app_event` (gated), `list_watches`, `stop_watch` | Apps notify Pim when something happens (draft MCP Events, webhooks); each event starts a run with the watch's instruction. |
 | The web | `fetch_url`, `web_search` (opt-in) | `web_search` is billed by AI Gateway, so it is off until `PIM_WEB_SEARCH` names a provider. |
 | Time | `current_time` | Shows UTC and the user's `PIM_TIME_ZONE`. |
 
@@ -64,6 +66,7 @@ Configuration lives in `vars` in `wrangler.jsonc`:
 | `PIM_WEB_SEARCH` | empty | `exa`, `ceramic`, or `linkup` enables `web_search` |
 | `PIM_MEMORY_MODEL` | empty | Model that compresses memories; empty uses the conversation's model |
 | `PIM_MEMORY_LINES` | `96` | Lines of long-term memory in every prompt (about 8k tokens) |
+| `PIM_PUBLIC_URL` | empty | Public URL apps deliver events to; empty uses the origin of your API requests |
 
 For local development, copy `.dev.vars.example` to `.dev.vars` and run `pnpm dev`. The `AI` binding is remote, so `wrangler dev` needs a Cloudflare login, and model calls bill that account.
 
@@ -100,6 +103,10 @@ Every request except `GET /health` needs `Authorization: Bearer <PIM_API_TOKEN>`
 | PUT | `/mcp/:id` | `{ approval: "writes" \| "all" \| "none" }` | Which of its tools need approval |
 | DELETE | `/mcp/:id` | | Disconnects it |
 | GET | `/mcp/callback` | | Where an app's sign-in returns; no token needed |
+| GET | `/mcp/:id/skills`, `/mcp/:id/events` | | The skills and watchable events an app offers |
+| GET | `/watches` | | Event watches: app, event, instruction, state, next renewal |
+| DELETE | `/watches/:id` | | Stops a watch and unsubscribes |
+| POST | `/mcp/events/:watch` | Standard Webhooks-signed event | Where apps deliver events; no token needed, the signature is checked |
 | GET | `/notifications` | `?unread=true` | Notifications |
 | POST | `/notifications/:id/read` | | Marks one read |
 
@@ -159,12 +166,30 @@ Apps connect through remote [MCP](https://modelcontextprotocol.io) servers: the 
 - **Approvals.** With the default `writes` policy, tools that do not declare `readOnlyHint` file an approval like `http_request`, and the call is made when you approve. `all` gates every tool; `none` trusts the app. The read-only hint comes from the app itself, so only connect apps you trust.
 - **Prompt cache.** The apps' tools come last in pi's tool list, so a newly connected app's tools are appended to what the provider has cached instead of re-sending every tool. Changing an app's approval policy changes its tools' descriptions, which re-sends the tool list once.
 
-MCP servers expose tools, prompts and resources; pim uses their tools and instructions. They cannot add hooks or change how pim runs, which is also what keeps them safe to connect.
+### Skills from apps
+
+Apps that implement the [MCP Skills extension](https://modelcontextprotocol.io/extensions/skills/overview) (`io.modelcontextprotocol/skills`) ship instructions for using them as [Agent Skills](https://agentskills.io). pim reads an app's `skills/list` when it connects and again when the listing's TTL runs out, and lists each skill's name and description under the app in the prompt. The model loads one with `read_skill`, and supporting files with `read_skill_file`.
+
+- Every file is checked against the SHA-256 digest and size the app published; a mismatch re-reads the listing once, so an app that updated a skill is picked up, and content that still doesn't match is refused.
+- Skill content is labeled with the app it came from, as the extension requires: it is the app's text, not the user's.
+- pim runs no code from skills. Anything a skill tells the model to do goes through the app's tools and their approvals.
+
+### Events from apps
+
+Apps that implement the draft [MCP Events](https://github.com/modelcontextprotocol/experimental-ext-triggers-events) extension can tell Pim when something happens: a price changed, a message arrived. pim supports webhook delivery, the same slice ChatGPT implements.
+
+- **Watching.** Ask Pim ("tell me when the JFK–Lisbon price drops below $500"); `watch_app_event` files an approval naming the app, the event and the instruction. Once approved, pim calls `events/subscribe` with a callback URL (`/mcp/events/<watch>`) and a fresh signing secret, and renews the subscription before the app's grant runs out.
+- **Receiving.** Each delivery must carry a valid Standard Webhooks signature from the last five minutes. The event becomes a message to the conversation that created the watch, with the instruction and the event data marked as untrusted. The event id is its idempotency key, so a delivery the app retries starts one run, not two.
+- **Ending.** `stop_watch` or `DELETE /watches/:id` unsubscribes. A watch the app terminates, or refuses to renew, ends with a notification. Removing an app stops its watches.
+- **Draft.** The extension is not ratified. Today's MCP SDKs drop its `events` capability from the handshake, so pim also asks an app for `events/list` when it declares nothing.
+
+MCP servers expose tools, prompts and resources; pim uses their tools, instructions and skills. They cannot add hooks or change how pim runs, which is also what keeps them safe to connect.
 
 ## Develop
 
 ```sh
 pnpm test        # Vitest in workerd, with pi-ai's faux model; no Cloudflare account needed
+pnpm test:live   # live checks against real MCP servers (Hugging Face's); needs the network
 pnpm typecheck
 pnpm types       # regenerate worker-configuration.d.ts after editing wrangler.jsonc
 ```

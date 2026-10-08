@@ -1,5 +1,6 @@
 import { type ImageContent, type TextContent, type TSchema, Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section, type ToolRegistration } from "@earendil-works/pi-durable";
+import type { AppCatalog } from "./app-catalog";
 import { APPROVAL_NOTE, defineGatedAction, fileApproval, type GatedAction } from "./approvals";
 import { json, type PimServices, text } from "./services";
 
@@ -57,6 +58,24 @@ export type McpBridge = {
 	call(serverId: string, name: string, args: Record<string, unknown>): Promise<McpCallResult>;
 	/** Adds and connects a server; `authUrl` when the user must sign in first. */
 	connect(name: string, url: string): Promise<{ id: string; state: string; authUrl?: string }>;
+	/** The server's capabilities from its handshake, or undefined while it is not connected. */
+	capabilities(serverId: string): McpCapabilities | undefined;
+	/** A raw JSON-RPC request, for MCP extensions the client SDK does not implement yet. */
+	request(serverId: string, method: string, params: Record<string, unknown>): Promise<unknown>;
+	readResource(serverId: string, uri: string): Promise<{ readonly contents: readonly McpResourceContent[] }>;
+};
+
+export type McpCapabilities = {
+	readonly extensions?: Record<string, unknown>;
+	readonly events?: unknown;
+	readonly [key: string]: unknown;
+};
+
+export type McpResourceContent = {
+	readonly uri: string;
+	readonly mimeType?: string;
+	readonly text?: string;
+	readonly blob?: string;
 };
 
 const MAX_RESULT_CHARS = 20_000;
@@ -172,7 +191,11 @@ export function mcpActions(bridge: McpBridge): GatedAction[] {
  * anywhere, `tools` (the apps' own tools, no sections) goes last. A newly
  * connected app's tools are then appended to what the provider has cached.
  */
-export function mcpExtensions(bridge: McpBridge, services: PimServices) {
+export function mcpExtensions(
+	bridge: McpBridge,
+	services: PimServices,
+	extras: { catalog: AppCatalog; tools: readonly ToolRegistration[] },
+) {
 	const servers = new Map(bridge.servers().map((server) => [server.id, server]));
 	const tools: ToolRegistration[] = [];
 	for (const tool of bridge.tools()) {
@@ -225,18 +248,30 @@ export function mcpExtensions(bridge: McpBridge, services: PimServices) {
 
 	const apps = defineExtension({
 		name: "pim.apps",
-		tools: [listApps],
+		tools: [listApps, ...extras.tools],
 		sections: [
 			// Always present, so it never appears out of order (which makes pi re-send every section).
 			section("connected_apps", () => {
 				const ready = [...servers.values()].filter((server) => server.state === "ready");
 				if (ready.length === 0) return "No apps are connected. The user can connect one, or ask you to with connect_app.";
 				return ready
-					.map((server) =>
-						server.instructions
-							? `## ${server.name}\n${clip(server.instructions, MAX_INSTRUCTION_CHARS)}`
-							: `## ${server.name}`,
-					)
+					.map((server) => {
+						const lines = [`## ${server.name}`];
+						if (server.instructions) lines.push(clip(server.instructions, MAX_INSTRUCTION_CHARS));
+						// Skills come from the app and are untrusted like its instructions; they load with read_skill.
+						const skills = extras.catalog.skills(server.id);
+						if (skills.length > 0) {
+							lines.push(
+								`Skills from ${server.name} (load with read_skill):`,
+								...skills.map((skill) => `- ${skill.name}: ${clip(skill.description, 300)}`),
+							);
+						}
+						const events = extras.catalog.events(server.id);
+						if (events.length > 0) {
+							lines.push(`Events you can watch (watch_app_event): ${events.map((event) => event.name).join(", ")}`);
+						}
+						return lines.join("\n");
+					})
 					.join("\n\n");
 			}),
 		],

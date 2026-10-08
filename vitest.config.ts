@@ -12,5 +12,9 @@ export default defineConfig({
 			miniflare: { bindings: { PIM_API_TOKEN: "test-token", PIM_TIME_ZONE: "America/New_York", PIM_MEMORY_LINES: "8" } },
 		}),
 	],
-	test: { testTimeout: 20_000 },
+	test: {
+		testTimeout: 20_000,
+		// Live checks against real third-party servers need the network: `pnpm test:live`.
+		include: process.env.PIM_LIVE === "1" ? ["test/live/**/*.test.ts"] : ["test/*.test.ts"],
+	},
 });

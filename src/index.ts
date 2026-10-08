@@ -1,5 +1,5 @@
 import { getAgentByName } from "agents";
-import { MCP_CALLBACK_PATH } from "./agent";
+import { AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_EVENTS_PATH } from "./agent";
 
 export { Pim } from "./agent";
 
@@ -47,10 +47,13 @@ export default {
 		if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
 		const { pathname } = new URL(request.url);
 		if (pathname === "/health") return withCors(Response.json({ name: "pim", ok: true }));
-		// An app's sign-in page redirects the user's browser here, without the API token;
-		// the MCP client checks the OAuth state parameter instead.
-		const callback = pathname === MCP_CALLBACK_PATH && request.method === "GET";
-		const denied = callback ? undefined : await authorize(request, env);
+		// Two paths are public, each checked another way: an app's sign-in page redirects the
+		// user's browser to the callback (the MCP client checks the OAuth state), and apps deliver
+		// event webhooks (checked against the watch's signing secret).
+		const isPublic =
+			(pathname === MCP_CALLBACK_PATH && request.method === "GET") ||
+			(pathname.startsWith(MCP_EVENTS_PATH) && request.method === "POST");
+		const denied = isPublic ? undefined : await authorize(request, env);
 		if (denied) return withCors(denied);
 		// The agent accepts sockets on any path; keep them on one.
 		const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
@@ -59,7 +62,10 @@ export default {
 		}
 		const agent = await getAgentByName(env.Pim, AGENT_NAME);
 		// Bodies are small JSON; buffering them lets the agent answer without reading one.
-		const forwarded = request.body === null ? request : new Request(request, { body: await request.arrayBuffer() });
+		const forwarded = request.body === null ? new Request(request) : new Request(request, { body: await request.arrayBuffer() });
+		// Tells the agent the request carried the token, so it can trust details like the origin.
+		forwarded.headers.delete(AUTHORIZED_HEADER);
+		if (!isPublic) forwarded.headers.set(AUTHORIZED_HEADER, "1");
 		return withCors(await agent.fetch(forwarded));
 	},
 } satisfies ExportedHandler<Env>;

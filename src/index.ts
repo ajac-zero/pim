@@ -1,4 +1,5 @@
 import { getAgentByName } from "agents";
+import { MCP_CALLBACK_PATH } from "./agent";
 
 export { Pim } from "./agent";
 
@@ -46,7 +47,10 @@ export default {
 		if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
 		const { pathname } = new URL(request.url);
 		if (pathname === "/health") return withCors(Response.json({ name: "pim", ok: true }));
-		const denied = await authorize(request, env);
+		// An app's sign-in page redirects the user's browser here, without the API token;
+		// the MCP client checks the OAuth state parameter instead.
+		const callback = pathname === MCP_CALLBACK_PATH && request.method === "GET";
+		const denied = callback ? undefined : await authorize(request, env);
 		if (denied) return withCors(denied);
 		// The agent accepts sockets on any path; keep them on one.
 		const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";

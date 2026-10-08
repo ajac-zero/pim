@@ -74,6 +74,10 @@ CREATE TABLE IF NOT EXISTS pim_approvals (
 	created_at INTEGER NOT NULL,
 	decided_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS pim_mcp_servers (
+	id TEXT PRIMARY KEY,
+	approval TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS pim_notifications (
 	id TEXT PRIMARY KEY,
 	session TEXT,
@@ -240,6 +244,25 @@ export class PimStore {
 
 	recordApprovalResult(id: string, result: string): void {
 		this.#sql.exec("UPDATE pim_approvals SET result = ? WHERE id = ?", result, id);
+	}
+
+	// Connected apps: the MCP client stores the servers; this is pim's policy for each.
+
+	mcpApproval(id: string): string | undefined {
+		const [row] = this.#sql.exec("SELECT approval FROM pim_mcp_servers WHERE id = ?", id).toArray();
+		return row ? String(row.approval) : undefined;
+	}
+
+	setMcpApproval(id: string, approval: string): void {
+		this.#sql.exec(
+			"INSERT INTO pim_mcp_servers (id, approval) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET approval = excluded.approval",
+			id,
+			approval,
+		);
+	}
+
+	deleteMcpApproval(id: string): void {
+		this.#sql.exec("DELETE FROM pim_mcp_servers WHERE id = ?", id);
 	}
 
 	// Notifications

@@ -39,6 +39,7 @@ This repository is only the agent and its API. Chat apps, mobile apps, and messa
 | Background work | `schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task` | Delays, dates, or cron. When a task fires, the agent receives a `[Scheduled task]` message in the session that scheduled it. |
 | Reaching you | `notify_user` | Stored, pushed to connected sockets, and POSTed to an optional webhook. |
 | Asking first | `http_request` | Gated: the call files an approval request. The action runs only when you approve, and the result is posted back into the conversation. |
+| Connected apps | `connect_app` (gated), `list_apps`, plus each app's tools | Remote MCP servers, with OAuth sign-in. Tools that don't declare themselves read-only need approval. See [Connected apps](#connected-apps). |
 | The web | `fetch_url`, `web_search` (opt-in) | `web_search` is billed by AI Gateway, so it is off until `PIM_WEB_SEARCH` names a provider. |
 | Time | `current_time` | Shows UTC and the user's `PIM_TIME_ZONE`. |
 
@@ -94,6 +95,11 @@ Every request except `GET /health` needs `Authorization: Bearer <PIM_API_TOKEN>`
 | DELETE | `/schedules/:id` | | Cancel one |
 | GET | `/approvals`, `/approvals/:id` | `?status=pending\|approved\|denied` | Approval requests |
 | POST | `/approvals/:id/approve`, `/approvals/:id/deny` | `{ note? }` | The decided approval; `409` if already decided |
+| GET | `/mcp` | | Connected apps, their state, sign-in link, approval policy and tools |
+| POST | `/mcp` | `{ name, url, headers?, approval? }` | Connects an app; `201` with `{ id, state, authUrl? }` (`authUrl`: send the user there to sign in) |
+| PUT | `/mcp/:id` | `{ approval: "writes" \| "all" \| "none" }` | Which of its tools need approval |
+| DELETE | `/mcp/:id` | | Disconnects it |
+| GET | `/mcp/callback` | | Where an app's sign-in returns; no token needed |
 | GET | `/notifications` | `?unread=true` | Notifications |
 | POST | `/notifications/:id/read` | | Marks one read |
 
@@ -144,6 +150,17 @@ The same rule applies to every section: one that appears later than sections aft
 
 Forgetting removes a memory from the log, the tree, and future views. It does not erase the conversation where it came up: that stays in the session's transcript until you reset the session.
 
+## Connected apps
+
+Apps connect through remote [MCP](https://modelcontextprotocol.io) servers: the vendor's own (many apps publish one), or one you deploy as another Worker. The `agents` SDK's MCP client handles the connection, OAuth sign-in (with dynamic client registration), token storage in the agent's database, and reconnecting after a wake.
+
+- **Connecting.** `POST /mcp` with a name and URL, or ask Pim: its `connect_app` tool files an approval, and the connection is made when you approve. If the app needs sign-in, the response (or Pim) gives you a link; the app sends you back to `/mcp/callback`.
+- **Tools.** Each MCP tool becomes a pi tool named `<app>_<tool>`. pi picks up added and removed tools from the next request, without a restart. The app's instructions go in the `connected_apps` prompt section.
+- **Approvals.** With the default `writes` policy, tools that do not declare `readOnlyHint` file an approval like `http_request`, and the call is made when you approve. `all` gates every tool; `none` trusts the app. The read-only hint comes from the app itself, so only connect apps you trust.
+- **Prompt cache.** The apps' tools come last in pi's tool list, so a newly connected app's tools are appended to what the provider has cached instead of re-sending every tool. Changing an app's approval policy changes its tools' descriptions, which re-sends the tool list once.
+
+MCP servers expose tools, prompts and resources; pim uses their tools and instructions. They cannot add hooks or change how pim runs, which is also what keeps them safe to connect.
+
 ## Develop
 
 ```sh
@@ -156,8 +173,7 @@ To add a tool, write a pi extension in `src/extensions/` and install it in `Pim`
 
 ## Not built yet
 
-- App connectors (email, calendar) through MCP servers with OAuth, via the `agents` SDK's MCP client.
 - A sandboxed computer and browser for the agent: Cloudflare Containers or Browser Rendering.
-- Tools the agent writes for itself, run in Dynamic Workers (codemode).
+- Extensions beyond MCP: Agent Skills, and full pi extensions that Pim builds into itself by redeploying its own Worker.
 - Secret placeholders, so approved requests can use credentials the model never sees.
 - Semantic recall. `recall` is a regular expression over the log, so it finds words, not meanings.

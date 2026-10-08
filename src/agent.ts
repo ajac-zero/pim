@@ -14,6 +14,16 @@ import { type PiModel, PiHarness, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
 import { approvalsExtension, type GatedAction, httpRequest } from "./extensions/approvals";
 import { goalsExtension } from "./extensions/goals";
+import {
+	MCP_APPROVALS,
+	type McpApproval,
+	type McpBridge,
+	mcpActions,
+	mcpExtensions,
+	needsApproval,
+	slug,
+	toolName,
+} from "./extensions/mcp";
 import { notifyExtension } from "./extensions/notify";
 import { createOptMem } from "./extensions/optmem";
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
@@ -28,6 +38,9 @@ import { type Approval, type GoalStatus, type Notification, PimStore } from "./s
 import { projectEntries } from "./transcript";
 
 const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
+/** Where MCP servers send the user back after OAuth sign-in; served without the API token. */
+export const MCP_CALLBACK_PATH = "/mcp/callback";
+
 const SESSION_ID = /^[1-9][0-9]{0,15}$/;
 const GOAL_STATUSES: readonly GoalStatus[] = ["active", "paused", "done", "abandoned"];
 
@@ -58,10 +71,27 @@ export class Pim extends Agent<Env> {
 	});
 	readonly registry = createRegistry();
 	/** Actions that run only after the user approves them. */
-	readonly actions: readonly GatedAction[] = [httpRequest as GatedAction];
+	/** Connected apps: the SDK's MCP client, as the bridge pim's extension builds tools from. */
+	readonly apps: McpBridge = {
+		servers: () =>
+			Object.entries(this.getMcpServers().servers).map(([id, server]) => ({
+				id,
+				name: server.name,
+				url: server.server_url,
+				state: server.state,
+				error: server.error,
+				authUrl: server.auth_url,
+				instructions: server.instructions,
+				approval: (this.store.mcpApproval(id) ?? "writes") as McpApproval,
+			})),
+		tools: () => this.mcp.listTools(),
+		call: async (serverId, name, args) => this.mcp.callTool({ serverId, name, arguments: args }),
+		connect: (name, url) => this.connectApp(name, url),
+	};
+	readonly actions: readonly GatedAction[] = [httpRequest as GatedAction, ...mcpActions(this.apps)];
 
 	readonly harness = new PiHarness({
-		harness: ({ storage, context }) => {
+		harness: async ({ storage, context }) => {
 			const services = this.services();
 			this.registry.install(personaExtension(services));
 			this.registry.install(goalsExtension(services));
@@ -69,7 +99,13 @@ export class Pim extends Agent<Env> {
 			this.registry.install(notifyExtension(services));
 			this.registry.install(approvalsExtension(services, this.actions));
 			this.registry.install(webExtension({ ai: this.env.AI, searchProvider: this.env.PIM_WEB_SEARCH }));
+			// Restored connections reconnect in the background after a wake; give them a moment.
+			await this.mcp.waitForConnections({ timeout: 5_000 });
+			const apps = mcpExtensions(this.apps, services);
+			this.registry.install(apps.apps);
 			this.registry.install(this.memory.extension);
+			// Last: the apps' tools come and go, and pi only appends cheaply at the end.
+			this.registry.install(apps.tools);
 			return Harness.open(
 				storage,
 				{
@@ -90,6 +126,46 @@ export class Pim extends Agent<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		this.lifecycle.use(this.harness);
+		// A new, removed, signed-in or failed app changes the tools: pi uses the new set from the next request.
+		this.mcp.onServerStateChanged(() => this.#installApps());
+	}
+
+	/**
+	 * Connects a remote MCP server under a new name. A failed connection
+	 * leaves nothing behind; `authUrl` is set when the user must sign in.
+	 */
+	async connectApp(
+		name: string,
+		url: string,
+		options: { headers?: Record<string, string>; approval?: McpApproval } = {},
+	): Promise<{ id: string; state: string; authUrl?: string }> {
+		const id = slug(name);
+		if (this.apps.servers().some((server) => server.id === id)) {
+			throw new HttpError(409, `An app named ${name} is already connected`);
+		}
+		this.store.setMcpApproval(id, options.approval ?? "writes");
+		try {
+			const result = await this.addMcpServer(name, url, {
+				id,
+				callbackPath: MCP_CALLBACK_PATH,
+				...(options.headers ? { transport: { headers: options.headers } } : {}),
+			});
+			this.#installApps();
+			return result;
+		} catch (error) {
+			await this.removeMcpServer(id).catch(() => undefined);
+			this.store.deleteMcpApproval(id);
+			throw new HttpError(502, `Could not connect ${name}: ${errorMessage(error)}`);
+		}
+	}
+
+	/** Rebuilds the connected apps' extension, once pi's registry has been set up. */
+	#installApps(): void {
+		if (!this.registry.snapshot().extension("pim.mcp")) return;
+		// Same names: each replaces its installed extension in place, keeping the order.
+		const apps = mcpExtensions(this.apps, this.services());
+		this.registry.install(apps.apps);
+		this.registry.install(apps.tools);
 	}
 
 	/** pi's run policy, shared by every session. */
@@ -163,6 +239,15 @@ export class Pim extends Agent<Env> {
 	}
 
 	async onStart(): Promise<void> {
+		this.mcp.configureOAuthCallback({
+			customHandler: (result) =>
+				new Response(
+					result.authSuccess
+						? "<!doctype html><title>Connected</title><p>Connected. You can close this window and go back to Pim.</p>"
+						: `<!doctype html><title>Not connected</title><p>Sign-in failed: ${String(result.authError ?? "unknown error").replace(/[<&]/g, "")}</p>`,
+					{ status: result.authSuccess ? 200 : 400, headers: { "content-type": "text/html; charset=utf-8" } },
+				),
+		});
 		// Sockets survive hibernation and restarts; their watches do not.
 		for (const connection of this.getConnections<SocketState>()) {
 			if (connection.state?.session) await this.#watch(connection, connection.state.session);
@@ -234,6 +319,11 @@ export class Pim extends Agent<Env> {
 
 	tools(): ToolInfo[] {
 		const gated = new Set(this.actions.map((action) => action.name));
+		const servers = new Map(this.apps.servers().map((server) => [server.id, server]));
+		for (const tool of this.apps.tools()) {
+			const server = servers.get(tool.serverId);
+			if (server && needsApproval(tool, server.approval)) gated.add(toolName(server.id, tool.name));
+		}
 		return this.registry
 			.snapshot()
 			.tools()
@@ -518,6 +608,57 @@ export class Pim extends Agent<Env> {
 			},
 		],
 
+		// Connected apps (remote MCP servers).
+		["GET", "/mcp", () => ({ servers: this.#describeApps() })],
+		[
+			"POST",
+			"/mcp",
+			async (_params, request) => {
+				const body = await readJson<{ name: string; url: string; headers: Record<string, string>; approval: McpApproval }>(
+					request,
+				);
+				if (typeof body.name !== "string" || body.name.trim() === "") throw new HttpError(400, "name is required");
+				if (typeof body.url !== "string" || !/^https?:\/\//.test(body.url)) throw new HttpError(400, "url must be http(s)");
+				if (body.approval !== undefined && !MCP_APPROVALS.includes(body.approval)) {
+					throw new HttpError(400, `approval must be one of ${MCP_APPROVALS.join(", ")}`);
+				}
+				const headers = body.headers;
+				if (headers !== undefined && (typeof headers !== "object" || Object.values(headers).some((v) => typeof v !== "string"))) {
+					throw new HttpError(400, "headers must map names to strings");
+				}
+				const result = await this.connectApp(body.name.trim(), body.url, {
+					...(headers ? { headers } : {}),
+					...(body.approval ? { approval: body.approval } : {}),
+				});
+				return Response.json(result, { status: 201 });
+			},
+		],
+		[
+			"PUT",
+			"/mcp/:id",
+			async ({ id }, request) => {
+				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No app ${id}`);
+				const { approval } = await readJson<{ approval: McpApproval }>(request);
+				if (!MCP_APPROVALS.includes(approval as McpApproval)) {
+					throw new HttpError(400, `approval must be one of ${MCP_APPROVALS.join(", ")}`);
+				}
+				this.store.setMcpApproval(id!, approval!);
+				this.#installApps();
+				return this.#describeApps().find((server) => server.id === id);
+			},
+		],
+		[
+			"DELETE",
+			"/mcp/:id",
+			async ({ id }) => {
+				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No app ${id}`);
+				await this.removeMcpServer(id!);
+				this.store.deleteMcpApproval(id!);
+				this.#installApps();
+				return { deleted: true };
+			},
+		],
+
 		// Notifications the agent sent.
 		[
 			"GET",
@@ -536,6 +677,20 @@ export class Pim extends Agent<Env> {
 			},
 		],
 	];
+
+	#describeApps() {
+		const catalog = this.apps.tools();
+		return this.apps.servers().map((server) => ({
+			...server,
+			tools: catalog
+				.filter((tool) => tool.serverId === server.id)
+				.map((tool) => ({
+					name: toolName(server.id, tool.name),
+					description: tool.description ?? null,
+					requiresApproval: needsApproval(tool, server.approval),
+				})),
+		}));
+	}
 
 	// WebSocket API
 

@@ -1,5 +1,11 @@
+import type { Context } from "@earendil-works/chord";
 import { type Static, type TSchema, Type } from "@earendil-works/pi-ai";
-import { defineExtension, defineTool } from "@earendil-works/pi-durable";
+import {
+	defineExtension,
+	defineTool,
+	type ToolExecutionApi,
+	type ToolExecutionResult,
+} from "@earendil-works/pi-durable";
 import { type PimServices, text } from "./services";
 
 /**
@@ -17,40 +23,54 @@ export type GatedAction<P extends TSchema = TSchema> = {
 	summarize(args: Static<P>): string;
 	/** Performs the action after approval; the text is reported to the model. */
 	run(args: Static<P>): Promise<string>;
+	/** Not a tool of its own: other tools file approvals for it (such as MCP tool calls). */
+	readonly internal?: boolean;
 };
 
 export function defineGatedAction<P extends TSchema>(action: GatedAction<P>): GatedAction<P> {
 	return action;
 }
 
+/** Appended to the description of every tool that only files an approval request. */
+export const APPROVAL_NOTE =
+	'Requires the user\'s approval: calling this files a request and returns immediately; the outcome arrives later in a message starting with "[Approval".';
+
+/**
+ * Files an approval request for the gated action `action` from inside a tool
+ * call. Replay-safe: a replayed call finds the request it already filed.
+ */
+export async function fileApproval(
+	services: PimServices,
+	api: ToolExecutionApi,
+	context: Context,
+	request: { action: string; args: unknown; summary: string },
+): Promise<ToolExecutionResult> {
+	const id = await api.memo("approval", crypto.randomUUID(), context);
+	const known = services.store.approval(id);
+	const approval = services.store.requestApproval({ id, session: String(api.conversationId), ...request });
+	if (!known) await services.approvalRequested(approval);
+	return text(
+		`Approval requested (id ${approval.id}): ${approval.summary}\nThe user has been asked. Do not call this again for the same action; tell the user what you are waiting for.`,
+	);
+}
+
 function gatedTool(action: GatedAction, services: PimServices) {
 	return defineTool({
 		name: action.name,
-		description: `${action.description} Requires the user's approval: calling this files a request and returns immediately; the outcome arrives later in a message starting with "[Approval".`,
+		description: `${action.description} ${APPROVAL_NOTE}`,
 		parameters: action.parameters,
 		replay: "safe",
 		async execute(args, api, context) {
-			const id = await api.memo("approval", crypto.randomUUID(), context);
-			const known = services.store.approval(id);
-			const approval = services.store.requestApproval({
-				id,
-				session: String(api.conversationId),
-				action: action.name,
-				args,
-				summary: action.summarize(args),
-			});
-			if (!known) await services.approvalRequested(approval);
-			return text(
-				`Approval requested (id ${approval.id}): ${approval.summary}\nThe user has been asked. Do not call this again for the same action; tell the user what you are waiting for.`,
-			);
+			return fileApproval(services, api, context, { action: action.name, args, summary: action.summarize(args) });
 		},
 	});
 }
 
+/** Tools for the actions the model calls directly; actions with `internal` set are filed by other tools. */
 export function approvalsExtension(services: PimServices, actions: readonly GatedAction[]) {
 	return defineExtension({
 		name: "pim.approvals",
-		tools: actions.map((action) => gatedTool(action, services)),
+		tools: actions.filter((action) => !action.internal).map((action) => gatedTool(action, services)),
 	});
 }
 

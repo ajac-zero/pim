@@ -52,7 +52,7 @@ describe("auth", () => {
 describe("agent", () => {
 	it("describes itself and marks the tools that need approval", async () => {
 		const { body } = await api("/");
-		expect(body).toMatchObject({ model: "@cf/zai-org/glm-4.7-flash", timeZone: "America/New_York", rootSession: "1" });
+		expect(body).toMatchObject({ model: "faux-model", timeZone: "America/New_York", rootSession: "1" });
 		const tools = new Map((body.tools as { name: string; requiresApproval: boolean }[]).map((tool) => [tool.name, tool]));
 		expect(tools.get("http_request")?.requiresApproval).toBe(true);
 		expect(tools.get("note")?.requiresApproval).toBe(false);

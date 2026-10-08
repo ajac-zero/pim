@@ -13,6 +13,8 @@ import {
 import { Agent, type Connection, type ConnectionContext, type Schedule, type WSMessage } from "agents";
 import { type PiModel, PiHarness, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
+import { CHATGPT_PROVIDER, ChatGPT, chatgptCredentials } from "./chatgpt";
+import { SqlCredentialStore } from "./credentials";
 import { AppCatalog } from "./extensions/app-catalog";
 import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
 import { skillTools } from "./extensions/app-skills";
@@ -57,6 +59,8 @@ export const MCP_CALLBACK_PATH = "/mcp/callback";
 /** Where apps deliver event webhooks, as `/mcp/events/<watch id>`; signed, so served without the API token. */
 export const MCP_EVENTS_PATH = "/mcp/events/";
 const WATCH_REFRESH_CALLBACK = "refreshAppWatch";
+/** `pim_meta` key of the model chosen through the API. */
+const MODEL_KEY = "model";
 /** Set by the Worker on requests that carried the API token. */
 export const AUTHORIZED_HEADER = "x-pim-authorized";
 /** Accepts any JSON-RPC result: pim checks the shapes of extension results itself. */
@@ -79,6 +83,11 @@ function titleFrom(content: UserInput): string | undefined {
 	return text.trim() === "" ? undefined : clipTitle(text);
 }
 
+/** A model as the API shows it. */
+function describeModel(model: PiModel) {
+	return { provider: model.provider, id: model.id, name: "name" in model && typeof model.name === "string" ? model.name : model.id };
+}
+
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -95,6 +104,10 @@ function errorMessage(error: unknown): string {
 export class Pim extends Agent<Env> {
 	readonly store = new PimStore(this.ctx.storage.sql);
 	readonly ai = createAI({ binding: this.env.AI });
+	/** Model credentials (the ChatGPT plan's tokens), refreshed by pi-ai. */
+	readonly credentials = new SqlCredentialStore(this.store);
+	readonly chatgpt = new ChatGPT(this.store, chatgptCredentials(this.credentials));
+	#modelCatalog: Models | undefined;
 	/** Long-term memory: an OptMem-style log and summary tree. */
 	readonly memory = createOptMem({
 		sql: this.ctx.storage.sql,
@@ -171,7 +184,7 @@ export class Pim extends Agent<Env> {
 			return Harness.open(
 				storage,
 				{
-					models: this.models(),
+					models: this.modelCatalog(),
 					registry: this.registry,
 					settings: this.harnessSettings(),
 					onReport: (error) => console.warn("pi report", error),
@@ -274,23 +287,54 @@ export class Pim extends Agent<Env> {
 		};
 	}
 
-	/** The model catalog pi resolves sessions' models against. */
+	/** The model catalog pi resolves sessions' models against: Workers AI, and the ChatGPT plan. */
 	protected models(): Models {
-		const models = createModels();
+		const models = createModels({ credentials: this.credentials });
 		models.setProvider(this.ai.provider);
+		models.setProvider(this.chatgpt.provider());
 		return models;
 	}
 
-	/** The model new sessions start with. */
+	/** One catalog for pi and the API, so a token refresh is never run twice at once. */
+	modelCatalog(): Models {
+		this.#modelCatalog ??= this.models();
+		return this.#modelCatalog;
+	}
+
+	/** The deployment's model (`PIM_MODEL`), used whenever no other is chosen. */
 	protected defaultModel(): PiModel {
 		return this.ai(this.env.PIM_MODEL);
 	}
 
-	/** The model that compresses memories; undefined uses the conversation's model. */
+	/** The model every session uses: the one chosen through the API, or the default. */
+	chosenModel(): PiModel {
+		const json = this.store.meta(MODEL_KEY);
+		if (json !== undefined) {
+			const { provider, id } = JSON.parse(json) as { provider: string; id: string };
+			const model = this.modelCatalog().getModel(provider, id);
+			if (model) return model;
+		}
+		return this.defaultModel();
+	}
+
+	/** Makes `model` every session's model, and new sessions'; null goes back to the default. */
+	async chooseModel(model: PiModel | null): Promise<PiModel> {
+		if (model === null) this.store.deleteMeta(MODEL_KEY);
+		else this.store.setMeta(MODEL_KEY, JSON.stringify({ provider: model.provider, id: model.id }));
+		const chosen = this.chosenModel();
+		for (const session of await this.harness.sessions.list()) {
+			await this.harness.session(session.id).setModel(chosen);
+		}
+		return chosen;
+	}
+
+	/**
+	 * The model that compresses memories: `PIM_MEMORY_MODEL`, else `PIM_MODEL`
+	 * on Workers AI. Never the chosen model, so background work does not spend
+	 * a ChatGPT plan.
+	 */
 	protected memoryModel(): ModelRef | undefined {
-		const id = this.env.PIM_MEMORY_MODEL;
-		if (!id) return undefined;
-		const model = this.ai(id);
+		const model = this.ai(this.env.PIM_MEMORY_MODEL || this.env.PIM_MODEL);
 		return { provider: model.provider, modelId: model.id };
 	}
 
@@ -466,7 +510,7 @@ export class Pim extends Agent<Env> {
 			"GET",
 			"/",
 			() => ({
-				model: this.env.PIM_MODEL,
+				model: this.chosenModel().id,
 				timeZone: this.env.PIM_TIME_ZONE || "UTC",
 				rootSession: ROOT_SESSION,
 				tools: this.tools(),
@@ -497,6 +541,7 @@ export class Pim extends Agent<Env> {
 			async (_params, request) => {
 				const { title } = await readJson<{ title: string }>(request);
 				const { id } = await this.harness.sessions.create();
+				await this.harness.session(id).setModel(this.chosenModel());
 				this.store.touchSession(id, typeof title === "string" && title.trim() !== "" ? clipTitle(title) : undefined);
 				return { id, ...this.store.sessionInfo(id) };
 			},
@@ -605,6 +650,72 @@ export class Pim extends Agent<Env> {
 				}
 				await this.harness.session(id).setModel(resolved);
 				return { model };
+			},
+		],
+
+		// The model every session uses, and the ChatGPT plan it can run on.
+		[
+			"GET",
+			"/model",
+			async () => {
+				const chatgpt = await this.chatgpt.status();
+				let chatgptModels: PiModel[] = [];
+				let chatgptError: string | null = null;
+				if (chatgpt.connected) {
+					try {
+						chatgptModels = await this.chatgpt.models(this.modelCatalog());
+					} catch (error) {
+						chatgptError = errorMessage(error);
+					}
+				}
+				const fallback = this.defaultModel();
+				return {
+					model: describeModel(this.chosenModel()),
+					default: describeModel(fallback),
+					choices: [fallback, ...chatgptModels].map(describeModel),
+					chatgpt: { ...chatgpt, error: chatgptError },
+				};
+			},
+		],
+		[
+			"PUT",
+			"/model",
+			async (_params, request) => {
+				const { provider, id } = await readJson<{ provider: string; id: string }>(request);
+				if (typeof provider !== "string" || typeof id !== "string") {
+					throw new HttpError(400, "provider and id must be strings");
+				}
+				const fallback = this.defaultModel();
+				if (provider === fallback.provider && id === fallback.id) {
+					return { model: describeModel(await this.chooseModel(null)) };
+				}
+				const model = this.modelCatalog().getModel(provider, id);
+				if (!model) throw new HttpError(400, `No model ${provider}/${id}`);
+				if (provider === CHATGPT_PROVIDER && !(await this.chatgpt.status()).connected) {
+					throw new HttpError(409, "Sign in with ChatGPT first");
+				}
+				return { model: describeModel(await this.chooseModel(model)) };
+			},
+		],
+		["GET", "/chatgpt", () => this.chatgpt.status()],
+		["POST", "/chatgpt/login", () => this.chatgpt.startLogin()],
+		[
+			"POST",
+			"/chatgpt/callback",
+			async (_params, request) => {
+				const { url } = await readJson<{ url: string }>(request);
+				if (typeof url !== "string" || url.trim() === "") throw new HttpError(400, "url must be the address the browser landed on");
+				return this.chatgpt.finishLogin(url);
+			},
+		],
+		[
+			"DELETE",
+			"/chatgpt",
+			async () => {
+				await this.chatgpt.logout();
+				// Sessions on the plan would fail without it: back to the default.
+				if (this.chosenModel().provider === CHATGPT_PROVIDER) await this.chooseModel(null);
+				return this.chatgpt.status();
 			},
 		],
 

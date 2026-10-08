@@ -164,6 +164,10 @@ CREATE TABLE IF NOT EXISTS pim_meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pim_credentials (
+	provider TEXT PRIMARY KEY,
+	credential TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS pim_notifications (
 	id TEXT PRIMARY KEY,
 	session TEXT,
@@ -465,6 +469,36 @@ export class PimStore {
 			key,
 			value,
 		);
+	}
+
+	// Model credentials, as pi-ai's JSON, by provider id
+
+	credential(provider: string): string | undefined {
+		const [row] = this.#sql.exec("SELECT credential FROM pim_credentials WHERE provider = ?", provider).toArray();
+		return row ? String(row.credential) : undefined;
+	}
+
+	credentialProviders(): string[] {
+		return this.#sql
+			.exec("SELECT provider FROM pim_credentials ORDER BY provider")
+			.toArray()
+			.map((row) => String(row.provider));
+	}
+
+	putCredential(provider: string, credential: string): void {
+		this.#sql.exec(
+			"INSERT INTO pim_credentials (provider, credential) VALUES (?, ?) ON CONFLICT (provider) DO UPDATE SET credential = excluded.credential",
+			provider,
+			credential,
+		);
+	}
+
+	deleteCredential(provider: string): void {
+		this.#sql.exec("DELETE FROM pim_credentials WHERE provider = ?", provider);
+	}
+
+	deleteMeta(key: string): void {
+		this.#sql.exec("DELETE FROM pim_meta WHERE key = ?", key);
 	}
 
 	// Notifications

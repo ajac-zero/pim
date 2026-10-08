@@ -6,7 +6,7 @@ import { createExecutionContext, env, runInDurableObject } from "cloudflare:test
 import { exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { signWebhook } from "../src/extensions/app-events";
+import { newSecret, signWebhook } from "../src/extensions/app-events";
 import { AGENT_NAME } from "../src/index";
 import type { Approval } from "../src/store";
 import { api, lastUserText, post, say, toolUse, url } from "./helpers";
@@ -320,7 +320,7 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 
 	it("refuses deliveries that are forged, stale, or for another event", async () => {
 		const event = { eventId: "evt_x", name: "flight.price_changed", timestamp: "2026-10-08T12:00:00Z", data: {} };
-		expect((await deliver(`/mcp/events/${watchId}`, secret, event, { signWith: "whsec_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" })).status).toBe(401);
+		expect((await deliver(`/mcp/events/${watchId}`, secret, event, { signWith: newSecret() })).status).toBe(401);
 		expect((await deliver(`/mcp/events/${watchId}`, secret, event, { timestamp: Math.floor(Date.now() / 1000) - 600 })).status).toBe(401);
 		expect((await deliver(`/mcp/events/${watchId}`, secret, { ...event, name: "other.event" })).status).toBe(400);
 		expect((await deliver("/mcp/events/no-such-watch", secret, event)).status).toBe(410);

@@ -1,9 +1,11 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { TranscriptMessage } from "../src/transcript";
 import { api, connect, post, say, TOKEN, textOf, url } from "./helpers";
-import { faux } from "./worker";
+import { AGENT_NAME } from "../src/index";
+import { faux, type Pim } from "./worker";
 
 describe("auth", () => {
 	it("rejects requests without the API token", async () => {
@@ -101,6 +103,41 @@ describe("conversation", () => {
 		const { body } = await api(`/sessions/${created.id}/messages`);
 		expect(body.messages.map(textOf)).toEqual(["hi", "In the new session."]);
 		expect((await api("/sessions/999/messages")).status).toBe(404);
+	});
+
+	it("names sessions by the user's first message and lists the most recently active first", async () => {
+		const first = (await post("/sessions")).body.id;
+		const second = (await post("/sessions", { title: "  Groceries  " })).body.id;
+		const third = (await post("/sessions")).body.id;
+		const titles = async () =>
+			Object.fromEntries(
+				((await api("/sessions")).body.sessions as { id: string; title: string | null }[]).map((s) => [s.id, s.title]),
+			);
+		const order = async () => ((await api("/sessions")).body.sessions as { id: string }[]).map((s) => s.id);
+
+		faux.setResponses([fauxAssistantMessage("Sure.")]);
+		await say("Plan my trip to Lisbon\nwith lots of detail", first);
+		faux.setResponses([fauxAssistantMessage("Ok.")]);
+		await say("Milk and eggs", second);
+		// A message Pim sends itself (a scheduled task, an event) does not name a session.
+		await runInDurableObject(env.Pim.getByName(AGENT_NAME), async (instance: Pim) => {
+			faux.setResponses([fauxAssistantMessage("Reminder sent.")]);
+			const receipt = await instance.submitTo(third, "[Scheduled task] remind", {}, "pim");
+			await instance.harness.wait(receipt.operationId, { session: third });
+		});
+		expect(await titles()).toMatchObject({ [first]: "Plan my trip to Lisbon", [second]: "Groceries", [third]: null });
+		expect((await order()).slice(0, 3)).toEqual([third, second, first]);
+
+		// Activity moves a session up; later messages do not rename it.
+		faux.setResponses([fauxAssistantMessage("Booked.")]);
+		await say("Book the flights", first);
+		expect((await order())[0]).toBe(first);
+		expect((await titles())[first]).toBe("Plan my trip to Lisbon");
+
+		const renamed = await api(`/sessions/${first}`, { method: "PUT", body: JSON.stringify({ title: "Lisbon" }) });
+		expect(renamed.body).toMatchObject({ id: first, title: "Lisbon", createdAt: expect.any(Number), updatedAt: expect.any(Number) });
+		expect((await api(`/sessions/${first}`, { method: "PUT", body: JSON.stringify({ title: " " }) })).status).toBe(400);
+		expect((await api("/sessions/999", { method: "PUT", body: JSON.stringify({ title: "x" }) })).status).toBe(404);
 	});
 
 	it("returns a receipt without waiting, and the operation settles later", async () => {

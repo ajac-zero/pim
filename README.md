@@ -78,8 +78,9 @@ Every request except `GET /health` needs `Authorization: Bearer <PIM_API_TOKEN>`
 | --- | --- | --- | --- |
 | GET | `/health` | | `{ name: "pim", ok: true }`; no token needed |
 | GET | `/` | | Model, time zone, root session, and tools (with `requiresApproval`) |
-| GET | `/sessions` | | `{ sessions: [{ id, parent?, busy }] }` |
-| POST | `/sessions` | | `{ id }` of a new session |
+| GET | `/sessions` | | `{ sessions: [{ id, title, busy, createdAt, updatedAt }] }`, most recently active first; `title` is the start of the user's first message until renamed |
+| POST | `/sessions` | `{ title? }` | A new session |
+| PUT | `/sessions/:s` | `{ title }` | Renames it |
 | GET | `/sessions/:s/messages` | | `{ busy, pending, messages }`: the transcript as display messages |
 | POST | `/sessions/:s/messages` | `{ content, wait?, whenBusy?: "followUp" \| "steer", operationId? }` | `202` with a receipt `{ operationId, accepted }`, or the result `{ status, text?, reason? }` when `wait` is true |
 | GET | `/sessions/:s/operations/:op` | `?timeout=ms` (max 60000) | The result once settled, or `{ status: "pending" }` |

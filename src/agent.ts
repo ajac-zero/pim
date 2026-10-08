@@ -3,6 +3,7 @@ import type { JsonValue } from "@earendil-works/pi-ai";
 import { createModels, type Models } from "@earendil-works/pi-ai/models";
 import {
 	type AgentEventStream,
+	type UserInput,
 	createRegistry,
 	Harness,
 	type HarnessSettings,
@@ -10,7 +11,7 @@ import {
 	ROOT_CONVERSATION_ID,
 } from "@earendil-works/pi-durable";
 import { Agent, type Connection, type ConnectionContext, type Schedule, type WSMessage } from "agents";
-import { type PiModel, PiHarness, ROOT_SESSION } from "agents/harness/pi";
+import { type PiModel, PiHarness, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
 import { AppCatalog } from "./extensions/app-catalog";
 import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
@@ -57,6 +58,18 @@ const SESSION_ID = /^[1-9][0-9]{0,15}$/;
 const GOAL_STATUSES: readonly GoalStatus[] = ["active", "paused", "done", "abandoned"];
 
 type SocketState = { readonly session: string };
+
+function clipTitle(text: string): string {
+	const line = text.trim().split(/\r?\n/)[0]!.trim();
+	return line.length > 80 ? `${line.slice(0, 79).trimEnd()}…` : line;
+}
+
+/** A session's default name: the start of the first thing the user said. */
+function titleFrom(content: UserInput): string | undefined {
+	const text =
+		typeof content === "string" ? content : content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join(" ");
+	return text.trim() === "" ? undefined : clipTitle(text);
+}
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -118,7 +131,7 @@ export class Pim extends Agent<Env> {
 		publicUrl: () => this.env.PIM_PUBLIC_URL || this.store.meta("public_origin"),
 		scheduleRefresh: (id, at) => this.#scheduleWatchRefresh(id, at),
 		submit: async (session, content, operationId) => {
-			await this.harness.submit(content, { session, operationId });
+			await this.submitTo(session, content, { operationId }, "pim");
 		},
 		notify: async (title, body) => {
 			const notification = this.store.addNotification({ id: crypto.randomUUID(), session: null, title, body });
@@ -329,16 +342,32 @@ export class Pim extends Agent<Env> {
 		}
 	}
 
+	/**
+	 * Every message into a session goes through here, so the session list
+	 * knows its activity; the user's first message also names it.
+	 */
+	async submitTo(
+		session: string,
+		content: UserInput,
+		options: { operationId?: string; whenBusy?: "followUp" | "steer" },
+		from: "user" | "pim",
+	): Promise<PiReceipt> {
+		this.store.touchSession(session, from === "user" ? titleFrom(content) : undefined);
+		return this.harness.submit(content, { session, ...options });
+	}
+
 	// Background work
 
 	/** Fired by `schedule_task` schedules: hands the instruction to the session that made it. */
 	async runScheduledTask(payload: ScheduledTaskPayload, schedule: Schedule<ScheduledTaskPayload>): Promise<void> {
 		const label = payload.label ? ` "${payload.label}"` : "";
-		await this.harness.submit(`[Scheduled task${label} ${schedule.id}] ${payload.instruction}`, {
-			session: payload.session,
+		await this.submitTo(
+			payload.session,
+			`[Scheduled task${label} ${schedule.id}] ${payload.instruction}`,
 			// The same firing retried is one submission.
-			operationId: `schedule:${schedule.id}:${schedule.time}`,
-		});
+			{ operationId: `schedule:${schedule.id}:${schedule.time}` },
+			"pim",
+		);
 	}
 
 	async deliverNotification(notification: Notification): Promise<void> {
@@ -386,7 +415,7 @@ export class Pim extends Agent<Env> {
 		} else {
 			message = `[Approval ${id}] The user denied: ${approval.summary}${noteLine}\nDo not perform this action.`;
 		}
-		await this.harness.submit(message, { session: approval.session, operationId: `approval:${id}` });
+		await this.submitTo(approval.session, message, { operationId: `approval:${id}` }, "pim");
 		const decided = this.store.approval(id)!;
 		this.broadcastMessage({ type: "approval", approval: decided });
 		return decided;
@@ -437,8 +466,44 @@ export class Pim extends Agent<Env> {
 		],
 
 		// Sessions: separate conversations, each with its own transcript and runs.
-		["GET", "/sessions", async () => ({ sessions: await this.harness.sessions.list() })],
-		["POST", "/sessions", async () => ({ id: (await this.harness.sessions.create()).id })],
+		[
+			"GET",
+			"/sessions",
+			async () => {
+				const sessions = (await this.harness.sessions.list()).map((session) => {
+					const info = this.store.sessionInfo(session.id);
+					return {
+						...session,
+						title: info?.title ?? null,
+						createdAt: info?.createdAt ?? null,
+						updatedAt: info?.updatedAt ?? null,
+					};
+				});
+				// Most recently active first; sessions never used last.
+				return { sessions: sessions.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)) };
+			},
+		],
+		[
+			"POST",
+			"/sessions",
+			async (_params, request) => {
+				const { title } = await readJson<{ title: string }>(request);
+				const { id } = await this.harness.sessions.create();
+				this.store.touchSession(id, typeof title === "string" && title.trim() !== "" ? clipTitle(title) : undefined);
+				return { id, ...this.store.sessionInfo(id) };
+			},
+		],
+		[
+			"PUT",
+			"/sessions/:session",
+			async ({ session }, request) => {
+				const id = await this.#session(session!);
+				const { title } = await readJson<{ title: string }>(request);
+				if (typeof title !== "string" || title.trim() === "") throw new HttpError(400, "title must be a non-empty string");
+				this.store.renameSession(id, clipTitle(title));
+				return this.store.sessionInfo(id);
+			},
+		],
 		[
 			"GET",
 			"/sessions/:session/messages",
@@ -470,11 +535,15 @@ export class Pim extends Agent<Env> {
 				if (body.whenBusy !== undefined && body.whenBusy !== "followUp" && body.whenBusy !== "steer") {
 					throw new HttpError(400, "whenBusy must be followUp or steer");
 				}
-				const receipt = await this.harness.submit(body.content, {
-					session: id,
-					...(body.whenBusy ? { whenBusy: body.whenBusy } : {}),
-					...(typeof body.operationId === "string" ? { operationId: body.operationId } : {}),
-				});
+				const receipt = await this.submitTo(
+					id,
+					body.content,
+					{
+						...(body.whenBusy ? { whenBusy: body.whenBusy } : {}),
+						...(typeof body.operationId === "string" ? { operationId: body.operationId } : {}),
+					},
+					"user",
+				);
 				if (!body.wait) return Response.json(receipt, { status: 202 });
 				return this.harness.wait(receipt.operationId, { session: id });
 			},
@@ -860,10 +929,15 @@ export class Pim extends Agent<Env> {
 		const handle = this.harness.session(session);
 		switch (message.type) {
 			case "submit":
-				return await handle.submit(message.content, {
-					...(message.whenBusy ? { whenBusy: message.whenBusy } : {}),
-					...(message.operationId ? { operationId: message.operationId } : {}),
-				});
+				return await this.submitTo(
+					session,
+					message.content,
+					{
+						...(message.whenBusy ? { whenBusy: message.whenBusy } : {}),
+						...(message.operationId ? { operationId: message.operationId } : {}),
+					},
+					"user",
+				);
 			case "abort":
 				return await handle.abort(message.operationId);
 			case "reset":

@@ -10,7 +10,8 @@
     "deploy": "wrangler deploy",
     "types": "wrangler types",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:live": "PIM_LIVE=1 vitest run"
   },
   "dependencies": {
     "@earendil-works/chord": "1.1.0",

@@ -12,12 +12,17 @@ import {
 import { Agent, type Connection, type ConnectionContext, type Schedule, type WSMessage } from "agents";
 import { type PiModel, PiHarness, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
+import { AppCatalog } from "./extensions/app-catalog";
+import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
+import { skillTools } from "./extensions/app-skills";
 import { approvalsExtension, type GatedAction, httpRequest } from "./extensions/approvals";
 import { goalsExtension } from "./extensions/goals";
 import {
 	MCP_APPROVALS,
 	type McpApproval,
 	type McpBridge,
+	type McpCapabilities,
+	type McpResourceContent,
 	mcpActions,
 	mcpExtensions,
 	needsApproval,
@@ -40,6 +45,13 @@ import { projectEntries } from "./transcript";
 const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 /** Where MCP servers send the user back after OAuth sign-in; served without the API token. */
 export const MCP_CALLBACK_PATH = "/mcp/callback";
+/** Where apps deliver event webhooks, as `/mcp/events/<watch id>`; signed, so served without the API token. */
+export const MCP_EVENTS_PATH = "/mcp/events/";
+const WATCH_REFRESH_CALLBACK = "refreshAppWatch";
+/** Set by the Worker on requests that carried the API token. */
+export const AUTHORIZED_HEADER = "x-pim-authorized";
+/** Accepts any JSON-RPC result: pim checks the shapes of extension results itself. */
+const ANY_RESULT = { "~standard": { version: 1, vendor: "pim", validate: (value: unknown) => ({ value }) } };
 
 const SESSION_ID = /^[1-9][0-9]{0,15}$/;
 const GOAL_STATUSES: readonly GoalStatus[] = ["active", "paused", "done", "abandoned"];
@@ -87,8 +99,37 @@ export class Pim extends Agent<Env> {
 		tools: () => this.mcp.listTools(),
 		call: async (serverId, name, args) => this.mcp.callTool({ serverId, name, arguments: args }),
 		connect: (name, url) => this.connectApp(name, url),
+		capabilities: (serverId) => this.mcp.mcpConnections[serverId]?.serverCapabilities as McpCapabilities | undefined,
+		request: async (serverId, method, params) => {
+			const connection = this.mcp.mcpConnections[serverId];
+			if (!connection) throw new Error(`The app ${serverId} is not connected`);
+			return connection.client.request({ method, params } as never, ANY_RESULT as never);
+		},
+		readResource: async (serverId, uri) =>
+			(await this.mcp.readResource({ serverId, uri })) as { contents: readonly McpResourceContent[] },
 	};
-	readonly actions: readonly GatedAction[] = [httpRequest as GatedAction, ...mcpActions(this.apps)];
+	/** Apps' skills and event types, cached in this object's database. */
+	readonly catalog = new AppCatalog(this.apps, this.store);
+	/** Watches on apps' events (MCP Events, webhook delivery). */
+	readonly appEvents = new AppEvents({
+		bridge: this.apps,
+		store: this.store,
+		catalog: this.catalog,
+		publicUrl: () => this.env.PIM_PUBLIC_URL || this.store.meta("public_origin"),
+		scheduleRefresh: (id, at) => this.#scheduleWatchRefresh(id, at),
+		submit: async (session, content, operationId) => {
+			await this.harness.submit(content, { session, operationId });
+		},
+		notify: async (title, body) => {
+			const notification = this.store.addNotification({ id: crypto.randomUUID(), session: null, title, body });
+			await this.deliverNotification(notification);
+		},
+	});
+	readonly actions: readonly GatedAction[] = [
+		httpRequest as GatedAction,
+		...mcpActions(this.apps),
+		watchAction(this.apps, this.appEvents),
+	];
 
 	readonly harness = new PiHarness({
 		harness: async ({ storage, context }) => {
@@ -101,7 +142,7 @@ export class Pim extends Agent<Env> {
 			this.registry.install(webExtension({ ai: this.env.AI, searchProvider: this.env.PIM_WEB_SEARCH }));
 			// Restored connections reconnect in the background after a wake; give them a moment.
 			await this.mcp.waitForConnections({ timeout: 5_000 });
-			const apps = mcpExtensions(this.apps, services);
+			const apps = mcpExtensions(this.apps, services, this.#appExtras(services));
 			this.registry.install(apps.apps);
 			this.registry.install(this.memory.extension);
 			// Last: the apps' tools come and go, and pi only appends cheaply at the end.
@@ -127,7 +168,15 @@ export class Pim extends Agent<Env> {
 		super(ctx, env);
 		this.lifecycle.use(this.harness);
 		// A new, removed, signed-in or failed app changes the tools: pi uses the new set from the next request.
-		this.mcp.onServerStateChanged(() => this.#installApps());
+		this.mcp.onServerStateChanged(() => {
+			this.#installApps();
+			// An app that just became ready gets its skills and event types read once.
+			for (const server of this.apps.servers()) {
+				if (server.state === "ready" && !this.catalog.known(server.id)) {
+					void this.catalog.refresh(server.id).catch((error) => console.warn(`reading ${server.id}'s catalog failed`, error));
+				}
+			}
+		});
 	}
 
 	/**
@@ -150,6 +199,9 @@ export class Pim extends Agent<Env> {
 				callbackPath: MCP_CALLBACK_PATH,
 				...(options.headers ? { transport: { headers: options.headers } } : {}),
 			});
+			if (result.state === "ready") {
+				await this.catalog.refresh(id).catch((error) => console.warn(`reading ${id}'s catalog failed`, error));
+			}
 			this.#installApps();
 			return result;
 		} catch (error) {
@@ -159,11 +211,34 @@ export class Pim extends Agent<Env> {
 		}
 	}
 
+	#appExtras(services: PimServices) {
+		return {
+			catalog: this.catalog,
+			tools: [...skillTools(this.apps, this.catalog), ...eventTools(this.apps, this.catalog, this.appEvents, services)],
+		};
+	}
+
+	/** One pending renewal per watch: a new one replaces the old. */
+	async #scheduleWatchRefresh(id: string, at: Date): Promise<void> {
+		for (const schedule of await this.listSchedules()) {
+			if (schedule.callback === WATCH_REFRESH_CALLBACK && (schedule.payload as { id?: string } | undefined)?.id === id) {
+				await this.cancelSchedule(schedule.id);
+			}
+		}
+		await this.schedule(at, WATCH_REFRESH_CALLBACK, { id });
+	}
+
+	/** Fired by a watch's renewal schedule. */
+	async refreshAppWatch(payload: { id: string }): Promise<void> {
+		await this.appEvents.refresh(payload.id);
+	}
+
 	/** Rebuilds the connected apps' extension, once pi's registry has been set up. */
 	#installApps(): void {
 		if (!this.registry.snapshot().extension("pim.mcp")) return;
 		// Same names: each replaces its installed extension in place, keeping the order.
-		const apps = mcpExtensions(this.apps, this.services());
+		const services = this.services();
+		const apps = mcpExtensions(this.apps, services, this.#appExtras(services));
 		this.registry.install(apps.apps);
 		this.registry.install(apps.tools);
 	}
@@ -333,6 +408,11 @@ export class Pim extends Agent<Env> {
 	// HTTP API
 
 	async onRequest(request: Request): Promise<Response> {
+		// Apps deliver events to callback URLs on this origin, so remember the one the owner uses.
+		if (request.headers.get(AUTHORIZED_HEADER) === "1") {
+			const origin = new URL(request.url).origin;
+			if (this.store.meta("public_origin") !== origin) this.store.setMeta("public_origin", origin);
+		}
 		return dispatch(this.#routes, request, new URL(request.url).pathname);
 	}
 
@@ -652,9 +732,41 @@ export class Pim extends Agent<Env> {
 			"/mcp/:id",
 			async ({ id }) => {
 				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No app ${id}`);
+				for (const watch of this.store.watches(id)) await this.appEvents.stop(watch.id);
 				await this.removeMcpServer(id!);
 				this.store.deleteMcpApproval(id!);
+				this.catalog.forget(id!);
 				this.#installApps();
+				return { deleted: true };
+			},
+		],
+
+		[
+			"GET",
+			"/mcp/:id/skills",
+			({ id }) => {
+				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No app ${id}`);
+				return { skills: this.catalog.skills(id!) };
+			},
+		],
+		[
+			"GET",
+			"/mcp/:id/events",
+			({ id }) => {
+				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No app ${id}`);
+				return { events: this.catalog.events(id!) };
+			},
+		],
+		// Deliveries from apps; authenticated by their Standard Webhooks signature, not the API token.
+		["POST", "/mcp/events/:watch", ({ watch }, request) => this.appEvents.receive(watch!, request)],
+
+		// Event watches.
+		["GET", "/watches", () => ({ watches: this.appEvents.list() })],
+		[
+			"DELETE",
+			"/watches/:id",
+			async ({ id }) => {
+				if (!(await this.appEvents.stop(id!))) throw new HttpError(404, `No watch ${id}`);
 				return { deleted: true };
 			},
 		],

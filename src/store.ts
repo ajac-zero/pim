@@ -49,7 +49,50 @@ export type Notification = {
 	readonly readAt: number | null;
 };
 
+/** A subscription to one event type of a connected app, and what to do when it fires. */
+export type AppWatch = {
+	readonly id: string;
+	readonly serverId: string;
+	readonly event: string;
+	readonly arguments: Record<string, unknown>;
+	readonly instruction: string;
+	/** The session events are delivered to. */
+	readonly session: string;
+	/** Standard Webhooks secret (`whsec_...`) the app signs deliveries with. */
+	readonly secret: string;
+	/** The callback URL the app delivers to. */
+	readonly url: string;
+	readonly remoteId: string | null;
+	readonly cursor: string | null;
+	/** When the subscription must be renewed (ms), or null when it does not expire. */
+	readonly refreshBefore: number | null;
+	readonly status: "pending" | "active" | "ended";
+	readonly lastError: string | null;
+	readonly lastEventAt: number | null;
+	readonly createdAt: number;
+};
+
 type Row = Record<string, SqlStorageValue>;
+
+function watchOf(row: Row): AppWatch {
+	return {
+		id: String(row.id),
+		serverId: String(row.server_id),
+		event: String(row.event),
+		arguments: JSON.parse(String(row.arguments)) as Record<string, unknown>,
+		instruction: String(row.instruction),
+		session: String(row.session),
+		secret: String(row.secret),
+		url: String(row.url),
+		remoteId: row.remote_id === null ? null : String(row.remote_id),
+		cursor: row.cursor === null ? null : String(row.cursor),
+		refreshBefore: row.refresh_before === null ? null : Number(row.refresh_before),
+		status: String(row.status) as AppWatch["status"],
+		lastError: row.last_error === null ? null : String(row.last_error),
+		lastEventAt: row.last_event_at === null ? null : Number(row.last_event_at),
+		createdAt: Number(row.created_at),
+	};
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS pim_goals (
@@ -77,6 +120,34 @@ CREATE TABLE IF NOT EXISTS pim_approvals (
 CREATE TABLE IF NOT EXISTS pim_mcp_servers (
 	id TEXT PRIMARY KEY,
 	approval TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pim_app_catalog (
+	server_id TEXT NOT NULL,
+	kind TEXT NOT NULL,
+	data TEXT NOT NULL,
+	expires_at INTEGER NOT NULL,
+	PRIMARY KEY (server_id, kind)
+);
+CREATE TABLE IF NOT EXISTS pim_app_watches (
+	id TEXT PRIMARY KEY,
+	server_id TEXT NOT NULL,
+	event TEXT NOT NULL,
+	arguments TEXT NOT NULL,
+	instruction TEXT NOT NULL,
+	session TEXT NOT NULL,
+	secret TEXT NOT NULL,
+	url TEXT NOT NULL,
+	remote_id TEXT,
+	cursor TEXT,
+	refresh_before INTEGER,
+	status TEXT NOT NULL,
+	last_error TEXT,
+	last_event_at INTEGER,
+	created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pim_meta (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pim_notifications (
 	id TEXT PRIMARY KEY,
@@ -263,6 +334,96 @@ export class PimStore {
 
 	deleteMcpApproval(id: string): void {
 		this.#sql.exec("DELETE FROM pim_mcp_servers WHERE id = ?", id);
+	}
+
+	// What connected apps offer beyond tools: skills and event types, cached per app.
+
+	catalog<T>(serverId: string, kind: "skills" | "events"): { data: T; expiresAt: number } | undefined {
+		const [row] = this.#sql
+			.exec("SELECT data, expires_at FROM pim_app_catalog WHERE server_id = ? AND kind = ?", serverId, kind)
+			.toArray();
+		return row ? { data: JSON.parse(String(row.data)) as T, expiresAt: Number(row.expires_at) } : undefined;
+	}
+
+	setCatalog(serverId: string, kind: "skills" | "events", data: unknown, expiresAt: number): void {
+		this.#sql.exec(
+			"INSERT INTO pim_app_catalog (server_id, kind, data, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT (server_id, kind) DO UPDATE SET data = excluded.data, expires_at = excluded.expires_at",
+			serverId,
+			kind,
+			JSON.stringify(data),
+			expiresAt,
+		);
+	}
+
+	deleteCatalog(serverId: string): void {
+		this.#sql.exec("DELETE FROM pim_app_catalog WHERE server_id = ?", serverId);
+	}
+
+	// Event watches: subscriptions to connected apps' events.
+
+	addWatch(watch: Omit<AppWatch, "remoteId" | "cursor" | "refreshBefore" | "status" | "lastError" | "lastEventAt" | "createdAt">): AppWatch {
+		this.#sql.exec(
+			"INSERT OR IGNORE INTO pim_app_watches (id, server_id, event, arguments, instruction, session, secret, url, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+			watch.id,
+			watch.serverId,
+			watch.event,
+			JSON.stringify(watch.arguments),
+			watch.instruction,
+			watch.session,
+			watch.secret,
+			watch.url,
+			Date.now(),
+		);
+		return this.watch(watch.id)!;
+	}
+
+	watch(id: string): AppWatch | undefined {
+		const [row] = this.#sql.exec("SELECT * FROM pim_app_watches WHERE id = ?", id).toArray();
+		return row ? watchOf(row) : undefined;
+	}
+
+	watches(serverId?: string): AppWatch[] {
+		const rows =
+			serverId === undefined
+				? this.#sql.exec("SELECT * FROM pim_app_watches ORDER BY created_at, rowid")
+				: this.#sql.exec("SELECT * FROM pim_app_watches WHERE server_id = ? ORDER BY created_at, rowid", serverId);
+		return rows.toArray().map(watchOf);
+	}
+
+	updateWatch(
+		id: string,
+		change: Partial<Pick<AppWatch, "remoteId" | "cursor" | "refreshBefore" | "status" | "lastError" | "lastEventAt">>,
+	): void {
+		const watch = this.watch(id);
+		if (!watch) return;
+		const next = { ...watch, ...change };
+		this.#sql.exec(
+			"UPDATE pim_app_watches SET remote_id = ?, cursor = ?, refresh_before = ?, status = ?, last_error = ?, last_event_at = ? WHERE id = ?",
+			next.remoteId,
+			next.cursor,
+			next.refreshBefore,
+			next.status,
+			next.lastError,
+			next.lastEventAt,
+			id,
+		);
+	}
+
+	deleteWatch(id: string): boolean {
+		return this.#sql.exec("DELETE FROM pim_app_watches WHERE id = ?", id).rowsWritten > 0;
+	}
+
+	meta(key: string): string | undefined {
+		const [row] = this.#sql.exec("SELECT value FROM pim_meta WHERE key = ?", key).toArray();
+		return row ? String(row.value) : undefined;
+	}
+
+	setMeta(key: string, value: string): void {
+		this.#sql.exec(
+			"INSERT INTO pim_meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+			key,
+			value,
+		);
 	}
 
 	// Notifications

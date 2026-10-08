@@ -1,13 +1,7 @@
 import { getAgentByName } from "agents";
-import { AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_EVENTS_PATH } from "./agent";
+import { AGENT_NAME, AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_EVENTS_PATH } from "./agent";
 
 export { Pim } from "./agent";
-
-/**
- * A deployment is one person's agent: every request goes to the same
- * Durable Object. Anyone who wants their own Pim deploys their own copy.
- */
-export const AGENT_NAME = "pim";
 
 const CORS_HEADERS: Record<string, string> = {
 	"Access-Control-Allow-Origin": "*",

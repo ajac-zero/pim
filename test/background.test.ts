@@ -1,7 +1,7 @@
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
-import { AGENT_NAME } from "../src/index";
+import { AGENT_NAME } from "../src/agent";
 import { api, connect, lastUserText, post, say, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
 

@@ -4,7 +4,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { cover } from "../src/extensions/optmem/cover";
-import { AGENT_NAME } from "../src/index";
+import { AGENT_NAME } from "../src/agent";
 import { api, lastUserText, post, say, toolUse } from "./helpers";
 import { faux, napper, type Pim } from "./worker";
 

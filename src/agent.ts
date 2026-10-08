@@ -45,6 +45,14 @@ import { projectEntries } from "./transcript";
 
 const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 /** Where MCP servers send the user back after OAuth sign-in; served without the API token. */
+/**
+ * A deployment is one person's agent: every request goes to the same
+ * Durable Object. Anyone who wants their own Pim deploys their own copy.
+ * (Not exported from the entry module: workerd reads its named exports as
+ * entrypoints and refuses a string.)
+ */
+export const AGENT_NAME = "pim";
+
 export const MCP_CALLBACK_PATH = "/mcp/callback";
 /** Where apps deliver event webhooks, as `/mcp/events/<watch id>`; signed, so served without the API token. */
 export const MCP_EVENTS_PATH = "/mcp/events/";

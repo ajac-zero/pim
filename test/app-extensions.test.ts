@@ -7,7 +7,7 @@ import { exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { newSecret, signWebhook } from "../src/extensions/app-events";
-import { AGENT_NAME } from "../src/index";
+import { AGENT_NAME } from "../src/agent";
 import type { Approval } from "../src/store";
 import { api, lastUserText, post, say, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";

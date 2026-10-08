@@ -4,7 +4,7 @@ import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { TranscriptMessage } from "../src/transcript";
 import { api, connect, post, say, TOKEN, textOf, url } from "./helpers";
-import { AGENT_NAME } from "../src/index";
+import { AGENT_NAME } from "../src/agent";
 import { faux, type Pim } from "./worker";
 
 describe("auth", () => {

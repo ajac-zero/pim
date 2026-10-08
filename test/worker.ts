@@ -13,10 +13,12 @@ export const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-model"
 export const napper = fauxProvider({ provider: "napper", models: [{ id: "napper-model" }] });
 
 export class Pim extends RealPim {
+	/** The scripted models, plus the real ChatGPT provider: tests script OpenAI over `fetch`. */
 	protected override models(): Models {
-		const models = createModels();
+		const models = createModels({ credentials: this.credentials });
 		models.setProvider(faux.provider);
 		models.setProvider(napper.provider);
+		models.setProvider(this.chatgpt.provider());
 		return models;
 	}
 

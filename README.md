@@ -29,6 +29,7 @@ This repository is only the agent and its API. Chat apps, mobile apps, and messa
 - **[pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable)** runs the agent. Every model turn and tool call is a durable task committed to the Durable Object's SQLite before anything is shown. If the object is evicted mid-run, the `agents` SDK's `PiHarness` alarm wakes it, and pi resumes where it stopped.
 - **One agent per deployment.** The Worker sends every request to a single Durable Object, which holds the whole agent in its SQLite database.
 - **Workers AI** is the default model (`@cf/zai-org/glm-4.7-flash`), so no vendor API keys are needed. Any AI Gateway catalog model works too, such as `anthropic/claude-opus-4.8`.
+- **Your ChatGPT plan**, optionally. Sign in with ChatGPT (Plus or Pro) and Pim runs on OpenAI's models, such as GPT-6.1 Sol, using the plan's included usage. See [ChatGPT plan](#chatgpt-plan).
 
 ## What the agent can do
 
@@ -64,7 +65,7 @@ Configuration lives in `vars` in `wrangler.jsonc`:
 | `PIM_MODEL` | `@cf/zai-org/glm-4.7-flash` | Model for new sessions: a Workers AI id or an AI Gateway catalog id |
 | `PIM_TIME_ZONE` | `UTC` | The person's IANA time zone |
 | `PIM_WEB_SEARCH` | empty | `exa`, `ceramic`, or `linkup` enables `web_search` |
-| `PIM_MEMORY_MODEL` | empty | Model that compresses memories; empty uses the conversation's model |
+| `PIM_MEMORY_MODEL` | empty | Model that compresses memories; empty uses `PIM_MODEL`, never the ChatGPT plan |
 | `PIM_MEMORY_LINES` | `96` | Lines of long-term memory in every prompt (about 8k tokens) |
 | `PIM_PUBLIC_URL` | empty | Public URL apps deliver events to; empty uses the origin of your API requests |
 
@@ -86,7 +87,13 @@ Every request except `GET /health` needs `Authorization: Bearer <PIM_API_TOKEN>`
 | GET | `/sessions/:s/operations/:op` | `?timeout=ms` (max 60000) | The result once settled, or `{ status: "pending" }` |
 | POST | `/sessions/:s/abort` | `{ operationId? }` | Withdraws one operation, or stops everything |
 | POST | `/sessions/:s/reset` | `{ handoff? }` | Starts a fresh context; history stays stored |
-| PUT | `/sessions/:s/model` | `{ model }` | Changes the session's model |
+| PUT | `/sessions/:s/model` | `{ model }` | Changes one session's model: a Workers AI or AI Gateway id |
+| GET | `/model` | | `{ model, default, choices, chatgpt: { connected, email, error } }`: the model every session uses, and the ones you can choose |
+| PUT | `/model` | `{ provider, id }`, one of `choices` | Moves every session, and new ones, to that model |
+| GET | `/chatgpt` | | `{ connected, email }` |
+| POST | `/chatgpt/login` | | `{ url }` to open in a browser, to sign in with ChatGPT |
+| POST | `/chatgpt/callback` | `{ url }`: the `http://127.0.0.1:1455/...` address the browser landed on | `{ connected, email }` |
+| DELETE | `/chatgpt` | | Disconnects; sessions on a ChatGPT model go back to the default |
 | GET | `/memory` | | `{ count, pendingCompressions, view }`: the view is what the model sees |
 | GET | `/memory/log` | `?q=regex` or `?before=id`, `?limit=` | Raw memories, newest first |
 | POST | `/memory/log` | `{ text }` (one line, ≤ 280 bytes) | Records a memory as the user |
@@ -158,6 +165,19 @@ The same rule applies to every section: one that appears later than sections aft
 
 Forgetting removes a memory from the log, the tree, and future views. It does not erase the conversation where it came up: that stays in the session's transcript until you reset the session.
 
+## ChatGPT plan
+
+Pim supports OpenAI's [ChatGPT plan usage for open-source apps](https://developers.openai.com/siwc/token-sharing-open-source): sign in with ChatGPT, and requests to OpenAI models count against your Plus or Pro plan's included usage instead of an API bill. ChatGPT's settings show Pim's usage and let you cap it.
+
+OpenAI only redirects a sign-in to a loopback address (`http://127.0.0.1:1455/...`), which can't reach a Worker. So the sign-in has a paste step:
+
+1. `POST /chatgpt/login` returns a URL. Open it, sign in, and approve Pim.
+2. The browser lands on a `http://127.0.0.1:1455/auth/callback?code=...` page that doesn't load. Copy that whole address.
+3. `POST /chatgpt/callback` with `{ url }`. Pim exchanges the code (with PKCE), checks the ID token against OpenAI's keys, and stores the tokens in its database.
+4. `PUT /model` with one of `GET /model`'s choices, such as `{ "provider": "openai", "id": "gpt-6.1-sol" }`.
+
+Pim registers with OpenAI as one agent host (a `urn:uuid:` ID it keeps) and refreshes the token itself, one refresh at a time, since OpenAI rotates refresh tokens. Memory compression stays on `PIM_MODEL`, so background work doesn't spend the plan. pi-ai sends these requests the way the flow requires: `store: false`, streaming, and no `temperature` or `max_output_tokens`.
+
 ## Connected apps
 
 Apps connect through remote [MCP](https://modelcontextprotocol.io) servers: the vendor's own (many apps publish one), or one you deploy as another Worker. The `agents` SDK's MCP client handles the connection, OAuth sign-in (with dynamic client registration), token storage in the agent's database, and reconnecting after a wake.
@@ -199,6 +219,7 @@ To add a tool, write a pi extension in `src/extensions/` and install it in `Pim`
 
 ## Not built yet
 
+- Falling back to `PIM_MODEL` when the ChatGPT plan's usage limit is reached. Until then, a run that hits the limit fails with OpenAI's error.
 - A sandboxed computer and browser for the agent: Cloudflare Containers or Browser Rendering.
 - Extensions beyond MCP: Agent Skills, and full pi extensions that Pim builds into itself by redeploying its own Worker.
 - Secret placeholders, so approved requests can use credentials the model never sees.

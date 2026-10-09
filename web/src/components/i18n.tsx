@@ -15,6 +15,14 @@ const translations = {
   en: {
     approvalRequested: "Pim needs your approval",
     approve: "Approve",
+    alwaysApprove: "Always approve",
+    moreApprovalOptions: "More approval options",
+    alwaysApproved: "Always approved",
+    alwaysApprovedDescription:
+      "Pim uses these tools without asking first. Remove one to be asked again.",
+    noAlwaysApproved:
+      "None yet. Choose Always approve on a request to stop being asked about that tool.",
+    stopAlwaysApproving: "Ask before {tool} again",
     awaitingApproval: "Waiting for your approval",
     approved: "Approved",
     arguments: "Arguments",
@@ -159,6 +167,14 @@ const translations = {
   es: {
     approvalRequested: "Pim necesita tu aprobación",
     approve: "Aprobar",
+    alwaysApprove: "Aprobar siempre",
+    moreApprovalOptions: "Más opciones de aprobación",
+    alwaysApproved: "Aprobadas siempre",
+    alwaysApprovedDescription:
+      "Pim usa estas herramientas sin preguntar antes. Quita una para que vuelva a preguntarte.",
+    noAlwaysApproved:
+      "Ninguna todavía. Elige Aprobar siempre en una solicitud para que no vuelva a preguntarte por esa herramienta.",
+    stopAlwaysApproving: "Volver a preguntar antes de {tool}",
     awaitingApproval: "Espera tu aprobación",
     approved: "Aprobado",
     arguments: "Argumentos",

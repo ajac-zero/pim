@@ -42,7 +42,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 | Goals and plans | `create_goal`, `update_goal`, `list_goals` | Goals have step-by-step plans and progress notes. Active goals are always in the prompt. |
 | Background work | `schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task` | Delays, dates, or cron. When a task fires, the agent receives a `[Scheduled task]` message in the session that scheduled it. |
 | Reaching you | `notify_user` | Stored, pushed to connected sockets, and POSTed to an optional webhook. |
-| Asking first | `http_request` | Gated: the call files an approval request. The action runs when you approve, or automatically after 30 seconds without an answer so autonomous jobs never block; deny to stop it. The call waits for your answer, and the result comes back within the same turn. |
+| Asking first | `http_request` | Gated: the call files an approval request. The action runs when you approve, or automatically after 30 seconds without an answer so autonomous jobs never block; deny to stop it. The call waits for your answer, and the result comes back within the same turn. Choose **Always approve** and later calls to that tool run without asking; Settings lists those tools and takes them back. |
 | Connected apps | `connect_app` (gated), `list_apps`, plus each app's tools | Remote MCP servers, with OAuth sign-in. Tools that don't declare themselves read-only need approval. See [Connected apps](#connected-apps). |
 | App skills | `read_skill`, `read_skill_file` | Instructions apps publish over the MCP Skills extension, checked against the app's digests. |
 | App events | `list_app_events`, `watch_app_event` (gated), `list_watches`, `stop_watch` | Apps notify Pim when something happens (draft MCP Events, webhooks); each event starts a run with the watch's instruction. |
@@ -123,6 +123,9 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | DELETE | `/schedules/:id` | | Cancel one |
 | GET | `/approvals`, `/approvals/:id` | `?status=pending\|approved\|denied` | Approval requests |
 | POST | `/approvals/:id/approve`, `/approvals/:id/deny` | `{ note? }` | The decided approval; `409` if already decided |
+| POST | `/approvals/:id/approve` | `{ note?, always: true }` | Also approves every later call to the same tool (the approval's `tool`), and other pending calls to it |
+| GET | `/always-approved` | | `{ tools: [{ tool, createdAt }] }`: tools whose calls are approved without asking |
+| DELETE | `/always-approved/:tool` | | Asks before that tool again; `404` if it was not always approved |
 | GET | `/mcp` | | Connected apps, their state, sign-in link, approval policy and tools |
 | POST | `/mcp` | `{ name, url, headers?, approval? }` | Connects an app; `201` with `{ id, state, authUrl? }` (`authUrl`: send the user there to sign in) |
 | PUT | `/mcp/:id` | `{ approval: "writes" \| "all" \| "none" }` | Which of its tools need approval |

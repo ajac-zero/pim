@@ -13,7 +13,8 @@ import { type PimServices, text } from "./services";
  * for it: calling the tool files an approval request and waits a short time
  * for the user. The agent runs `run` once the user approves, or when the wait
  * runs out so autonomous work is never blocked, and the tool returns the
- * outcome within the same turn. A call interrupted by an eviction replays,
+ * outcome within the same turn. Calls to a tool the user chose to always
+ * approve are approved at once. A call interrupted by an eviction replays,
  * finds its request, and waits again.
  */
 export type GatedAction<P extends TSchema = TSchema> = {
@@ -44,7 +45,7 @@ export async function fileApproval(
 	services: PimServices,
 	api: ToolExecutionApi,
 	context: Context,
-	request: { action: string; args: unknown; summary: string },
+	request: { action: string; tool: string; args: unknown; summary: string },
 ): Promise<ToolExecutionResult> {
 	const id = await api.memo("approval", crypto.randomUUID(), context);
 	const known = services.store.approval(id);
@@ -55,7 +56,8 @@ export async function fileApproval(
 		expiresAt: Date.now() + services.approvalTimeoutMs,
 		...request,
 	});
-	if (!known) await services.approvalRequested(approval);
+	// A tool the user always approves is approved without asking.
+	if (!known && !services.store.alwaysApproves(request.tool)) await services.approvalRequested(approval);
 	return text(await services.awaitApproval(approval));
 }
 
@@ -66,7 +68,7 @@ function gatedTool(action: GatedAction, services: PimServices) {
 		parameters: action.parameters,
 		replay: "safe",
 		async execute(args, api, context) {
-			return fileApproval(services, api, context, { action: action.name, args, summary: action.summarize(args) });
+			return fileApproval(services, api, context, { action: action.name, tool: action.name, args, summary: action.summarize(args) });
 		},
 	});
 }

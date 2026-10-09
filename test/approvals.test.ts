@@ -72,6 +72,51 @@ describe("approvals", () => {
 		expect(hook).not.toHaveBeenCalled();
 	});
 
+	it("stops asking about a tool the user always approves, until they take it back", async () => {
+		const hook = mockHook();
+		let seen = "";
+		faux.setResponses([
+			toolUse("http_request", { method: "POST", url: "https://hooks.example.test/first" }),
+			fauxAssistantMessage("Sent."),
+		]);
+		const first = say("Send the first.");
+		const asked = await pendingApproval();
+		expect(asked.tool).toBe("http_request");
+		const decided = await post<Approval>(`/approvals/${asked.id}/approve`, { always: true });
+		expect(decided.body).toMatchObject({ status: "approved", result: "HTTP 201 Created\norder 42 created" });
+		expect(await first).toMatchObject({ status: "done" });
+		expect((await api("/always-approved")).body.tools).toEqual([
+			{ tool: "http_request", createdAt: expect.any(Number) },
+		]);
+
+		// The next call runs at once, not after the timeout.
+		faux.setResponses([
+			toolUse("http_request", { method: "POST", url: "https://hooks.example.test/second" }),
+			(context) => {
+				seen = toolResult(context.messages);
+				return fauxAssistantMessage("Sent again.");
+			},
+		]);
+		expect(await say("Send the second.")).toMatchObject({ status: "done", text: "Sent again." });
+		expect(hook).toHaveBeenCalledTimes(2);
+		expect(seen).toContain("The user always approves http_request, so it was approved automatically");
+		const [second] = (await api<{ approvals: Approval[] }>("/approvals")).body.approvals;
+		expect(second).toMatchObject({ summary: "POST https://hooks.example.test/second", status: "approved" });
+
+		// Taken back, the tool asks again.
+		expect((await api("/always-approved/http_request", { method: "DELETE" })).body).toEqual({ deleted: true });
+		expect((await api("/always-approved/http_request", { method: "DELETE" })).status).toBe(404);
+		faux.setResponses([
+			toolUse("http_request", { method: "POST", url: "https://hooks.example.test/third" }),
+			fauxAssistantMessage("Okay."),
+		]);
+		const third = say("Send the third.");
+		const again = await pendingApproval();
+		await post(`/approvals/${again.id}/deny`);
+		expect(await third).toMatchObject({ status: "done" });
+		expect(hook).toHaveBeenCalledTimes(2);
+	});
+
 	it("approves on its own when the user does not answer in time", async () => {
 		const hook = mockHook();
 		let seen = "";

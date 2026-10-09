@@ -75,22 +75,13 @@ export function sessionTitle(session: Pick<Session, "title">, t: T) {
 const SIDEBAR_TOOLTIP_CLASS =
   "rounded-md border border-sidebar-border bg-sidebar px-2.5 py-1.5 font-normal text-xs text-sidebar-foreground shadow-md";
 
-/** Creates a session and opens it. */
+/** Opens an empty draft; the session is created when its first message is sent. */
 export function useNewChat(onDone?: () => void) {
-  const queryClient = useQueryClient();
   const navigate = useNavigate();
-  return useMutation({
-    mutationFn: () => pim.createSession(),
-    onSuccess: (session) => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      navigate({
-        to: "/chat/$sessionId",
-        params: { sessionId: session.id },
-      });
-      onDone?.();
-    },
-    onError: (error) => toast.error(error.message),
-  });
+  return () => {
+    navigate({ to: "/new" });
+    onDone?.();
+  };
 }
 
 export function AppSidebar({
@@ -208,8 +199,7 @@ export function AppSidebar({
               <button
                 type="button"
                 className={ITEM_CLASS(collapsed)}
-                onClick={() => newChat.mutate()}
-                disabled={newChat.isPending}
+                onClick={newChat}
                 aria-label={t("newChat")}
               >
                 {content}

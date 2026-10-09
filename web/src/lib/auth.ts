@@ -14,6 +14,8 @@ export type AuthSession = {
   /** The passkey this browser signed in with. */
   passkey: string | null;
   hasPasskeys: boolean;
+  /** Right after a deploy, a Pim that never had a passkey takes the first one with no link. */
+  canClaim: boolean;
 };
 
 export type Passkey = {
@@ -133,7 +135,7 @@ export const auth = {
     });
   },
 
-  /** Needs a setup link's code unless this browser is signed in already. */
+  /** Needs a setup link's code unless this browser is signed in, or Pim can be claimed. */
   async addPasskey(setup?: string) {
     const options = await post<CreationOptions>(
       "/passkeys/options",

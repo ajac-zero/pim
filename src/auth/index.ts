@@ -3,10 +3,16 @@
  *
  * Passkeys live in the Auth Durable Object (./store.ts). Signing in sets a
  * session cookie the Worker signs with a key kept there, and removing a
- * passkey signs out the sessions it started. A new passkey takes a signed-in
- * session, or a setup link: a one-time code the Worker writes to its own logs
- * when the sign-in screen asks. Reading those logs takes the Cloudflare
- * account's login, so that is what proves a setup link's holder owns this Pim.
+ * passkey signs out the sessions it started. A new passkey takes one of:
+ *
+ * - a signed-in session;
+ * - the claim window: in the first minutes after a deploy, a Pim that has
+ *   never had a passkey lets whoever opens it create the first one, so a
+ *   fresh deploy needs nothing but a click;
+ * - a setup link, for a lost passkey or a missed window: a one-time code the
+ *   Worker writes to its own logs when the sign-in screen asks. Reading those
+ *   logs takes the Cloudflare account's login, which proves its holder owns
+ *   this Pim.
  */
 
 import { base64UrlDecode, base64UrlEncode } from "./encoding";
@@ -21,6 +27,8 @@ const SESSION_COOKIE = "__Host-pim-session";
 const CHALLENGE_COOKIE = "__Host-pim-challenge";
 const SESSION_SECONDS = 30 * 24 * 60 * 60;
 const CHALLENGE_SECONDS = 5 * 60;
+/** How long after a deploy an unclaimed Pim takes its first passkey without a link. */
+export const CLAIM_WINDOW_MS = 15 * 60 * 1000;
 /** One person per deployment, so one WebAuthn user: "pim". */
 const USER_ID = base64UrlEncode(new TextEncoder().encode("pim"));
 
@@ -32,6 +40,8 @@ type Sealed = {
 		ceremony: "create" | "get";
 		/** The setup code that allowed this passkey, if one did. */
 		setup?: string;
+		/** Set when the claim window allowed this passkey. */
+		claim?: true;
 	};
 };
 
@@ -124,9 +134,16 @@ export function fromAnotherSite(request: Request): boolean {
 	return origin !== new URL(request.url).origin;
 }
 
-async function challengeCookie(env: Env, ceremony: "create" | "get", now: number, setup?: string) {
+/** Whether an unclaimed Pim still takes its first passkey from anyone: the window after this version was deployed. */
+async function claimOpen(env: Env, now: number): Promise<boolean> {
+	const deployed = Date.parse(env.CF_VERSION_METADATA?.timestamp ?? "");
+	if (!(now >= deployed && now < deployed + CLAIM_WINDOW_MS)) return false;
+	return !(await authStore(env).claimed());
+}
+
+async function challengeCookie(env: Env, ceremony: "create" | "get", now: number, allowedBy: { setup?: string; claim?: true } = {}) {
 	const challenge = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
-	const sealed = await seal(env, "challenge", { challenge, ceremony, ...(setup ? { setup } : {}) }, CHALLENGE_SECONDS, now);
+	const sealed = await seal(env, "challenge", { challenge, ceremony, ...allowedBy }, CHALLENGE_SECONDS, now);
 	return { challenge, cookie: setCookie(CHALLENGE_COOKIE, sealed, CHALLENGE_SECONDS) };
 }
 
@@ -146,12 +163,13 @@ export async function handleAuth(request: Request, env: Env, now = Date.now()): 
 	const pendingChallenge = () => unseal(env, "challenge", readCookie(request, CHALLENGE_COOKIE), now);
 
 	if (route === "GET /session") {
-		const [session, passkeys] = await Promise.all([currentSession(request, env, now), store.passkeys()]);
+		const [session, passkeys, canClaim] = await Promise.all([currentSession(request, env, now), store.passkeys(), claimOpen(env, now)]);
 		return json({
 			signedIn: session !== null,
 			method: session ? "passkey" : null,
 			passkey: session?.passkey ?? null,
 			hasPasskeys: passkeys.length > 0,
+			canClaim,
 		});
 	}
 
@@ -192,10 +210,14 @@ export async function handleAuth(request: Request, env: Env, now = Date.now()): 
 		const body = (await request.json().catch(() => null)) as { setup?: unknown } | null;
 		const signedIn = (await currentSession(request, env, now)) !== null;
 		const setup = !signedIn && typeof body?.setup === "string" ? body.setup : undefined;
-		if (!signedIn && !(setup && (await store.isSetupCode(setup, now)))) {
-			return fail(401, "This setup link has expired or was already used. Get a new one from the sign-in screen.");
+		let allowedBy: { setup?: string; claim?: true } = {};
+		if (!signedIn) {
+			if (setup && (await store.isSetupCode(setup, now))) allowedBy = { setup };
+			else if (!setup && (await claimOpen(env, now))) allowedBy = { claim: true };
+			else if (setup) return fail(401, "This setup link has expired or was already used. Get a new one from the sign-in screen.");
+			else return fail(401, "Sign in to add a passkey.");
 		}
-		const { challenge, cookie } = await challengeCookie(env, "create", now, setup);
+		const { challenge, cookie } = await challengeCookie(env, "create", now, allowedBy);
 		const existing = await store.passkeys();
 		return json(
 			{
@@ -232,7 +254,16 @@ export async function handleAuth(request: Request, env: Env, now = Date.now()): 
 		if (pending.setup && !(await store.useSetupCode(pending.setup, now))) {
 			return fail(401, "This setup link was already used.");
 		}
-		const passkey: Passkey = await store.addPasskey(registration.id, key, registration.name.trim().slice(0, 64) || "Passkey", now);
+		const name = registration.name.trim().slice(0, 64) || "Passkey";
+		let passkey: Passkey | null;
+		if (pending.claim) {
+			// Two visitors could have opened the window at once; only one claims it.
+			passkey = await store.claim(registration.id, key, name, now);
+			if (!passkey) return fail(401, "This Pim already has a passkey. Sign in with it.");
+			console.log(`Pim's first passkey was created: ${name}, at ${new Date(now).toISOString()}.`);
+		} else {
+			passkey = await store.addPasskey(registration.id, key, name, now);
+		}
 		// A browser already signed in with a passkey stays on its own.
 		const session = await currentSession(request, env, now);
 		const cookies = [clearCookie(CHALLENGE_COOKIE)];

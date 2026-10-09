@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+log_dir="$HOME/.cache/amp/logs"
+mkdir -p "$log_dir"
+exec > >(tee -a "$log_dir/setup.log") 2>&1
+
+run_step() {
+	local label="$1"
+	shift
+	local start=$SECONDS
+	printf '\n[%s] %s\n' "$(date -Is)" "$label"
+	"$@"
+	printf '[%s] Completed in %ss: %s\n' "$(date -Is)" "$((SECONDS - start))" "$label"
+}
+
+check_toolchain() {
+	command -v node >/dev/null || {
+		echo 'Node.js is required but is not available in this orb.' >&2
+		return 1
+	}
+	command -v pnpm >/dev/null || {
+		echo 'pnpm is required but is not available in this orb.' >&2
+		return 1
+	}
+
+	local expected_pnpm actual_pnpm
+	expected_pnpm="$(node -p 'JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).packageManager.split("@")[1]')"
+	actual_pnpm="$(pnpm --version)"
+	printf 'Node.js %s; pnpm %s (expected %s)\n' "$(node --version)" "$actual_pnpm" "$expected_pnpm"
+	if [[ "$actual_pnpm" != "$expected_pnpm" ]]; then
+		echo "Expected pnpm $expected_pnpm; found $actual_pnpm." >&2
+		return 1
+	fi
+}
+
+install_dependencies() {
+	pnpm install --frozen-lockfile --prefer-offline
+}
+
+run_step 'Check required Node.js and pinned pnpm toolchain' check_toolchain
+run_step 'Install workspace dependencies from pnpm-lock.yaml' install_dependencies

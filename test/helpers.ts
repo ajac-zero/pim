@@ -15,9 +15,14 @@ export function url(path: string) {
 	return `https://pim.test${path}`;
 }
 
+/** A path in the agent's API, which the Worker serves under `/api`. */
+export function apiUrl(path: string) {
+	return url(`/api${path}`);
+}
+
 export async function api<T = any>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
 	const response = await exports.default.fetch(
-		new Request(url(path), {
+		new Request(apiUrl(path), {
 			...init,
 			headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json", ...init.headers },
 		}),
@@ -39,7 +44,7 @@ export async function say(content: string, session = "1") {
 /** Opens the WebSocket and collects every message the server sends. */
 export async function connect(session?: string) {
 	const query = new URLSearchParams({ token: TOKEN, ...(session ? { session } : {}) });
-	const upgrade = await exports.default.fetch(url(`/ws?${query}`), { headers: { Upgrade: "websocket" } });
+	const upgrade = await exports.default.fetch(apiUrl(`/ws?${query}`), { headers: { Upgrade: "websocket" } });
 	expect(upgrade.status).toBe(101);
 	const socket = upgrade.webSocket!;
 	const received: any[] = [];

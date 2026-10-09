@@ -1,3 +1,5 @@
+packages:
+  - web
 allowBuilds:
   '@google/genai': false
   core-js-pure: false

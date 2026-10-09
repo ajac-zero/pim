@@ -44,6 +44,9 @@
   // Secrets (set with `wrangler secret put`):
   //   PIM_API_TOKEN          optional bearer token for clients other than the web app
   //   PIM_NOTIFY_WEBHOOK     optional URL that receives notifications as JSON POSTs
-  // Workers Logs: where setup links for the first passkey show up.
+  // When this version was deployed: the first passkey can be made without a link
+  // for a few minutes after.
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+  // Workers Logs: where setup links show up, for a lost passkey.
   "observability": { "enabled": true }
 }

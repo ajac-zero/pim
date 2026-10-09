@@ -12,13 +12,21 @@ import type { Pim } from "./worker";
 const ORIGIN = "https://pim.test";
 const RP_ID = "pim.test";
 
-// Tests in a file share storage: every test starts with no passkeys and no setup link.
+// Tests in a file share storage: every test starts with a Pim that never had a passkey.
 beforeEach(async () => {
 	await runInDurableObject(env.Auth.getByName("auth"), async (_instance: Auth, state) => {
 		state.storage.sql.exec("DELETE FROM auth_passkeys");
-		state.storage.sql.exec("DELETE FROM auth_meta WHERE key = 'setup_code'");
+		state.storage.sql.exec("DELETE FROM auth_meta WHERE key != 'cookie_key'");
 	});
 });
+
+/** This Worker as deployed `ago` milliseconds before now. */
+function deployed(ago: number): Env {
+	return { ...env, CF_VERSION_METADATA: { ...env.CF_VERSION_METADATA, timestamp: new Date(Date.now() - ago).toISOString() } };
+}
+
+/** Long enough after the deploy that a first passkey needs a setup link. */
+const settled = deployed(24 * 60 * 60 * 1000);
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -28,14 +36,15 @@ afterEach(() => {
 class Browser {
 	cookies = new Map<string, string>();
 
+	constructor(readonly env: Env = settled) {}
+
 	async fetch(path: string, init: RequestInit & { json?: unknown } = {}) {
 		const headers = new Headers(init.headers);
 		if (!headers.has("origin") && init.method && init.method !== "GET") headers.set("origin", ORIGIN);
 		if (this.cookies.size > 0) headers.set("cookie", [...this.cookies].map(([k, v]) => `${k}=${v}`).join("; "));
 		if (init.json !== undefined) headers.set("content-type", "application/json");
-		const response = await exports.default.fetch(
-			new Request(url(path), { ...init, headers, body: init.json === undefined ? init.body : JSON.stringify(init.json) }),
-		);
+		const request = new Request(url(path), { ...init, headers, body: init.json === undefined ? init.body : JSON.stringify(init.json) });
+		const response = await worker.fetch(request as Request<unknown, IncomingRequestCfProperties>, this.env);
 		for (const cookie of response.headers.getSetCookie()) {
 			const [pair = "", ...attributes] = cookie.split("; ");
 			const [name = "", ...value] = pair.split("=");
@@ -228,7 +237,67 @@ async function signedInBrowser() {
 	return { browser, passkey };
 }
 
-describe("setting up", () => {
+describe("claiming a fresh Pim", () => {
+	it("lets the first visitor create the first passkey right after a deploy, with no link", async () => {
+		const browser = new Browser(deployed(60 * 1000));
+		expect(await (await browser.fetch("/auth/session")).json()).toMatchObject({ signedIn: false, hasPasskeys: false, canClaim: true });
+
+		await addPasskey(browser, await Authenticator.make());
+
+		expect(await browser.signedIn()).toBe(true);
+		const next = new Browser(deployed(60 * 1000));
+		expect(await (await next.fetch("/auth/session")).json()).toMatchObject({ hasPasskeys: true, canClaim: false });
+		expect((await next.fetch("/auth/passkeys/options", { method: "POST", json: {} })).status).toBe(401);
+	});
+
+	it("closes the window 15 minutes after the deploy", async () => {
+		const open = new Browser(deployed(14 * 60 * 1000));
+		expect(await (await open.fetch("/auth/session")).json()).toMatchObject({ canClaim: true });
+		const late = new Browser(deployed(16 * 60 * 1000));
+		expect(await (await late.fetch("/auth/session")).json()).toMatchObject({ canClaim: false });
+		expect((await late.fetch("/auth/passkeys/options", { method: "POST", json: {} })).status).toBe(401);
+	});
+
+	it("never reopens once claimed, even after removing every passkey and deploying again", async () => {
+		const owner = new Browser(deployed(60 * 1000));
+		const passkey = await Authenticator.make();
+		await addPasskey(owner, passkey);
+		await owner.fetch(`/auth/passkeys/${encodeURIComponent(passkey.credentialId)}`, { method: "DELETE" });
+
+		const stranger = new Browser(deployed(0));
+		expect(await (await stranger.fetch("/auth/session")).json()).toMatchObject({ hasPasskeys: false, canClaim: false });
+		expect((await stranger.fetch("/auth/passkeys/options", { method: "POST", json: {} })).status).toBe(401);
+		// The owner gets back in with a setup link from the logs.
+		await addPasskey(new Browser(), await Authenticator.make(), await setupLink());
+	});
+
+	it("lets only one of two visitors in the window claim it", async () => {
+		const visitors = [new Browser(deployed(60 * 1000)), new Browser(deployed(60 * 1000))];
+		const challenges: { challenge: string }[] = [];
+		for (const visitor of visitors) {
+			const options = await visitor.fetch("/auth/passkeys/options", { method: "POST", json: {} });
+			expect(options.status).toBe(200);
+			challenges.push((await options.json()) as { challenge: string });
+		}
+		const statuses = [];
+		for (const [i, visitor] of visitors.entries()) {
+			const response = await visitor.fetch("/auth/passkeys", {
+				method: "POST",
+				json: await (await Authenticator.make()).register(challenges[i] as { challenge: string }),
+			});
+			statuses.push(response.status);
+		}
+		expect(statuses).toEqual([200, 401]);
+		expect(await visitors[1]?.signedIn()).toBe(false);
+	});
+
+	it("is closed when the deploy time is unknown", async () => {
+		const unknown = new Browser({ ...env, CF_VERSION_METADATA: { ...env.CF_VERSION_METADATA, timestamp: "" } });
+		expect(await (await unknown.fetch("/auth/session")).json()).toMatchObject({ canClaim: false });
+	});
+});
+
+describe("setting up with a link", () => {
 	it("creates the first passkey from a setup link, which signs this browser in to the API", async () => {
 		const browser = new Browser();
 		expect(await (await browser.fetch("/auth/session")).json()).toMatchObject({ signedIn: false, hasPasskeys: false });

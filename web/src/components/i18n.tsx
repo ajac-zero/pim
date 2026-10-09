@@ -143,7 +143,11 @@ const translations = {
     lostPasskey: "Lost your passkey?",
     openCloudflareDashboard: "Open the Cloudflare dashboard",
     setUpBody:
-      "Pim signs you in with a passkey. Your first one comes from a setup link that Pim just wrote to its logs in your Cloudflare account, where only you can read it.",
+      "Pim signs you in with a passkey. This page makes the first one by itself only in the 15 minutes after deploying, so now it takes a setup link. Pim just wrote one to its logs in your Cloudflare account, where only you can read it.",
+    claimBody:
+      "Pim signs you in with a passkey: your face, fingerprint, or PIN on this device. Create the one you'll use.",
+    claimNote:
+      "Only Pim's first passkey is made this way, in the 15 minutes after deploying. Add more later from Settings.",
     setUpTitle: "Set up Pim",
     setupLinkWritten: "Link written to the logs. It works once, for an hour.",
     setupStepDashboard:
@@ -287,7 +291,11 @@ const translations = {
     lostPasskey: "¿Perdiste tu llave de acceso?",
     openCloudflareDashboard: "Abrir el panel de Cloudflare",
     setUpBody:
-      "Pim inicia tu sesión con una llave de acceso. La primera viene de un enlace de configuración que Pim acaba de escribir en sus registros de tu cuenta de Cloudflare, donde solo tú puedes leerlo.",
+      "Pim inicia tu sesión con una llave de acceso. Esta página crea la primera por sí sola solo en los 15 minutos después de desplegar, así que ahora hace falta un enlace de configuración. Pim acaba de escribir uno en sus registros de tu cuenta de Cloudflare, donde solo tú puedes leerlo.",
+    claimBody:
+      "Pim inicia tu sesión con una llave de acceso: tu rostro, huella o PIN en este dispositivo. Crea la que vas a usar.",
+    claimNote:
+      "Solo la primera llave de acceso de Pim se crea así, en los 15 minutos después de desplegar. Agrega más luego desde Configuración.",
     setUpTitle: "Configura Pim",
     setupLinkWritten:
       "Enlace escrito en los registros. Funciona una vez, durante una hora.",

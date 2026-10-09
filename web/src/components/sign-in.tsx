@@ -12,11 +12,18 @@ const DASHBOARD_URL =
   "https://dash.cloudflare.com/?to=/:account/workers-and-pages";
 
 /**
- * Shown instead of the app until a passkey signs this browser in. Without
- * one, it has the Worker write a setup link to its logs, which only the
- * Cloudflare account's owner can read; opening that link creates a passkey.
+ * Shown instead of the app until a passkey signs this browser in. A fresh
+ * deploy creates its first passkey right here. Otherwise, without a passkey,
+ * it has the Worker write a setup link to its logs, which only the Cloudflare
+ * account's owner can read; opening that link creates a passkey.
  */
-export function SignIn({ hasPasskeys }: { hasPasskeys: boolean }) {
+export function SignIn({
+  hasPasskeys,
+  canClaim,
+}: {
+  hasPasskeys: boolean;
+  canClaim: boolean;
+}) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const router = useRouter();
@@ -60,7 +67,26 @@ export function SignIn({ hasPasskeys }: { hasPasskeys: boolean }) {
     <main className="flex min-h-svh flex-col items-center justify-center px-6 py-12">
       <div className="w-full max-w-sm">
         <PimMark className="mb-6 size-10" />
-        {setup ? (
+        {!setup && !hasPasskeys && canClaim ? (
+          <>
+            <h1 className="font-semibold text-2xl">{t("setUpTitle")}</h1>
+            <p className="mt-2 text-muted-foreground text-sm">
+              {t("claimBody")}
+            </p>
+            <Button
+              className="mt-6 w-full"
+              size="lg"
+              onClick={() => create.mutate()}
+              disabled={pending}
+            >
+              {icon}
+              {t("createPasskey")}
+            </Button>
+            <p className="mt-4 text-muted-foreground text-xs">
+              {t("claimNote")}
+            </p>
+          </>
+        ) : setup ? (
           <>
             <h1 className="font-semibold text-2xl">
               {t("createPasskeyTitle")}

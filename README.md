@@ -55,11 +55,11 @@ On the Workers free plan, SQLite-backed Durable Objects and Workers AI's daily f
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ajac-zero/pim)
 
-The button copies this repository to your GitHub account and deploys it to your Cloudflare account. It asks for nothing. Then open the Worker's URL and set up your passkey:
+The button copies this repository to your GitHub account and deploys it to your Cloudflare account. It asks for nothing. Then open the Worker's URL and create your passkey: your face, fingerprint, or PIN. That's the whole setup.
 
-1. The app asks for a setup link and the Worker writes it to its logs. Only someone signed in to your Cloudflare account can read those, which is what shows this Pim is yours.
-2. In the Cloudflare dashboard, open Workers & Pages, then `pim`, then Observability, and open the link in the log that starts with "Pim setup link". It works once, for an hour.
-3. Create the passkey. Add more (your phone, another browser) from Settings. Lost them all? "Lost your passkey?" on the sign-in screen writes a new link.
+- **The first passkey** can be made that way for 15 minutes after a deploy, and only if this Pim has never had one. Until you create it, whoever opens the URL first could, so open it right after deploying. If someone else gets there first, you'll see the sign-in screen instead of setup. Get a setup link from the logs (below), then remove the passkey you didn't make in Settings. The Worker logs when the first passkey was made.
+- **More passkeys** (your phone, another browser) come from Settings.
+- **Missed the 15 minutes, or lost every passkey?** The sign-in screen has the Worker write a one-time setup link to its logs, which only someone signed in to your Cloudflare account can read. In the dashboard, open Workers & Pages, then `pim`, then Observability, and open the link in the log that starts with "Pim setup link". It works once, for an hour.
 
 Sessions last 30 days, and removing a passkey signs out the browsers it signed in. Passkeys belong to the hostname the app is served from, so moving Pim to another domain means creating new ones.
 
@@ -73,7 +73,7 @@ pnpm wrangler secret put PIM_NOTIFY_WEBHOOK # optional
 pnpm run deploy                             # builds web/ first
 ```
 
-With the CLI, `pnpm wrangler tail` shows setup links as the sign-in screen asks for them.
+Open the URL `wrangler deploy` prints to create your passkey. With the CLI, `pnpm wrangler tail` shows setup links as the sign-in screen asks for them.
 
 Configuration lives in `vars` in `wrangler.jsonc`:
 
@@ -86,7 +86,7 @@ Configuration lives in `vars` in `wrangler.jsonc`:
 | `PIM_MEMORY_LINES` | `96` | Lines of long-term memory in every prompt (about 8k tokens) |
 | `PIM_PUBLIC_URL` | empty | Public URL apps deliver events to; empty uses the origin of your API requests |
 
-For local development, copy `.dev.vars.example` to `.dev.vars` and run `pnpm dev`: the Worker and the built web app at `http://localhost:8787`, with setup links in the terminal. For the web app with hot reload, also run `PIM_API_TOKEN=... pnpm dev:web` (port 3000), which signs in with the token. The `AI` binding is remote, so `wrangler dev` needs a Cloudflare login, and model calls bill that account.
+For local development, copy `.dev.vars.example` to `.dev.vars` and run `pnpm dev`: the Worker and the built web app at `http://localhost:8787`. Its first 15 minutes count as just deployed, and setup links show up in the terminal. For the web app with hot reload, also run `PIM_API_TOKEN=... pnpm dev:web` (port 3000), which signs in with the token. The `AI` binding is remote, so `wrangler dev` needs a Cloudflare login, and model calls bill that account.
 
 ## API
 

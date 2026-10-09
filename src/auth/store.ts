@@ -3,7 +3,8 @@ import { base64UrlEncode } from "./encoding";
 import type { PublicKey } from "./webauthn";
 
 /**
- * Who may use this Pim: its passkeys, the one-time setup code that creates a
+ * Who may use this Pim: its passkeys, whether it has ever had one (so the
+ * first can be claimed only once), the one-time setup code that creates a
  * passkey without one, and the key that signs session cookies. It lives in
  * its own Durable Object, apart from the agent, so signing in never wakes the
  * agent. One object also makes "use the setup code once" a single step.
@@ -89,7 +90,18 @@ export class Auth extends DurableObject<Env> {
 			}));
 	}
 
+	/** Whether this Pim has ever had a passkey, even if all were removed since. */
+	claimed(): boolean {
+		return this.#meta("claimed") !== null;
+	}
+
+	/** Adds the first passkey ever, or nothing if this Pim was claimed already. */
+	claim(id: string, key: PublicKey, name: string, now: number): Passkey | null {
+		return this.claimed() ? null : this.addPasskey(id, key, name, now);
+	}
+
 	addPasskey(id: string, key: PublicKey, name: string, now: number): Passkey {
+		this.#setMeta("claimed", String(now));
 		this.ctx.storage.sql.exec(
 			"INSERT INTO auth_passkeys (id, spki, algorithm, name, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)",
 			id,

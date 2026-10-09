@@ -48,6 +48,7 @@ export default defineConfig(({ mode }) => {
                 method: "dev",
                 passkey: null,
                 hasPasskeys: false,
+                canClaim: false,
               }),
             );
           });

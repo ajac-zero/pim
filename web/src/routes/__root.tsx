@@ -65,7 +65,9 @@ function SignedIn({ children }: { children: ReactNode }) {
     );
   }
   if (!data) return null;
-  if (!data.signedIn) return <SignIn hasPasskeys={data.hasPasskeys} />;
+  if (!data.signedIn) {
+    return <SignIn hasPasskeys={data.hasPasskeys} canClaim={data.canClaim} />;
+  }
   return children;
 }
 

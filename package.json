@@ -4,6 +4,7 @@
   "description": "An open-source personal agent, with its web app, deployable to Cloudflare Durable Objects.",
   "license": "MIT",
   "private": true,
+  "packageManager": "pnpm@12.0.0",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",

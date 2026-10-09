@@ -61,6 +61,9 @@ export const MCP_EVENTS_PATH = "/mcp/events/";
 const WATCH_REFRESH_CALLBACK = "refreshAppWatch";
 /** How long a tool call waits for the user to decide before the approval is granted automatically, so no task is blocked indefinitely. */
 const APPROVAL_TIMEOUT_MS = 30_000;
+
+/** Why an approval was granted without the user deciding: it timed out, or the user always approves its tool. */
+type AutoApproval = "timeout" | "always";
 /** `pim_meta` key of the model chosen through the API. */
 const MODEL_KEY = "model";
 /** Set by the Worker on requests that carried the API token. */
@@ -448,18 +451,23 @@ export class Pim extends Agent<Env> {
 
 	/**
 	 * Holds a tool call until the user decides or `APPROVAL_TIMEOUT_MS` passes,
-	 * which approves it. Returns the outcome, so the turn carries on. A decided
-	 * approval (a replayed call) returns its recorded outcome at once.
+	 * which approves it; a tool the user always approves is approved at once.
+	 * Returns the outcome, so the turn carries on. A decided approval (a
+	 * replayed call) returns its recorded outcome at once.
 	 */
 	async #awaitApproval(approval: Approval): Promise<string> {
 		if (approval.status !== "pending") return this.#outcome(approval);
 		return this.keepAliveWhile(async () => {
 			const decided = new Promise<string>((resolve) => this.#approvalWaiters.set(approval.id, resolve));
-			const timer = setTimeout(() => {
-				this.decideApproval(approval.id, "approve", undefined, true).catch((error) =>
-					console.warn(`auto-approving ${approval.id} failed`, error),
-				);
-			}, Math.max(0, (approval.expiresAt ?? Date.now() + this.approvalTimeoutMs()) - Date.now()));
+			const always = approval.tool !== null && this.store.alwaysApproves(approval.tool);
+			const timer = setTimeout(
+				() => {
+					this.decideApproval(approval.id, "approve", undefined, always ? "always" : "timeout").catch((error) =>
+						console.warn(`auto-approving ${approval.id} failed`, error),
+					);
+				},
+				always ? 0 : Math.max(0, (approval.expiresAt ?? Date.now() + this.approvalTimeoutMs()) - Date.now()),
+			);
 			try {
 				return await decided;
 			} finally {
@@ -473,24 +481,27 @@ export class Pim extends Agent<Env> {
 		return APPROVAL_TIMEOUT_MS;
 	}
 
-	#outcome(approval: Approval, auto = false): string {
+	#outcome(approval: Approval, auto?: AutoApproval): string {
 		const note = approval.note ? `\nThe user's note: ${approval.note}` : "";
 		if (approval.status === "denied") {
 			return `[Approval ${approval.id}] The user denied: ${approval.summary}${note}\nDo not perform this action.`;
 		}
-		const who = auto
-			? `The user did not respond within ${this.approvalTimeoutMs() / 1000} seconds, so it was approved automatically`
-			: "The user approved";
+		const who =
+			auto === "timeout"
+				? `The user did not respond within ${this.approvalTimeoutMs() / 1000} seconds, so it was approved automatically`
+				: auto === "always"
+					? `The user always approves ${approval.tool}, so it was approved automatically`
+					: "The user approved";
 		return `[Approval ${approval.id}] ${who}: ${approval.summary}${note}\nResult:\n${approval.result ?? ""}`;
 	}
 
 	/**
-	 * Applies a decision (the timeout's, with `auto`). An approved action runs
-	 * here. The outcome goes to the tool call waiting for it, so its turn
-	 * continues; with no call waiting (it was evicted, or the turn was
+	 * Applies a decision (made without the user, with `auto`). An approved
+	 * action runs here. The outcome goes to the tool call waiting for it, so
+	 * its turn continues; with no call waiting (it was evicted, or the turn was
 	 * stopped) it goes to the requesting session as a new message instead.
 	 */
-	async decideApproval(id: string, decision: "approve" | "deny", note?: string, auto = false): Promise<Approval> {
+	async decideApproval(id: string, decision: "approve" | "deny", note?: string, auto?: AutoApproval): Promise<Approval> {
 		const approval = this.store.approval(id);
 		if (!approval) throw new HttpError(404, `No approval ${id}`);
 		if (!this.store.decideApproval(id, decision === "approve" ? "approved" : "denied", note ?? null)) {
@@ -515,6 +526,26 @@ export class Pim extends Agent<Env> {
 		else await this.submitTo(approval.session, message, { operationId: `approval:${id}` }, "pim");
 		this.broadcastMessage({ type: "approval", approval: decided });
 		return decided;
+	}
+
+	/**
+	 * Approves `id` and every later call to the same tool. Other calls to that
+	 * tool still waiting for the user are approved too.
+	 */
+	async alwaysApprove(id: string, note?: string): Promise<Approval> {
+		const approval = this.store.approval(id);
+		if (!approval) throw new HttpError(404, `No approval ${id}`);
+		if (approval.tool === null) throw new HttpError(400, `Approval ${id} does not record its tool`);
+		if (approval.status !== "pending") throw new HttpError(409, `Approval ${id} is already ${approval.status}`);
+		// Remembered first, so calls filed while this action runs are not asked about.
+		this.store.alwaysApprove(approval.tool);
+		for (const pending of this.store.approvals("pending")) {
+			if (pending.tool !== approval.tool || pending.id === id) continue;
+			void this.decideApproval(pending.id, "approve", undefined, "always").catch((error) =>
+				console.warn(`approving ${pending.id} failed`, error),
+			);
+		}
+		return this.decideApproval(id, "approve", note);
 	}
 
 	tools(): ToolInfo[] {
@@ -907,8 +938,9 @@ export class Pim extends Agent<Env> {
 			"POST",
 			"/approvals/:id/approve",
 			async ({ id }, request) => {
-				const { note } = await readJson<{ note: string }>(request);
-				return this.decideApproval(id!, "approve", typeof note === "string" ? note : undefined);
+				const { note, always } = await readJson<{ note: string; always: boolean }>(request);
+				const given = typeof note === "string" ? note : undefined;
+				return always === true ? this.alwaysApprove(id!, given) : this.decideApproval(id!, "approve", given);
 			},
 		],
 		[
@@ -917,6 +949,15 @@ export class Pim extends Agent<Env> {
 			async ({ id }, request) => {
 				const { note } = await readJson<{ note: string }>(request);
 				return this.decideApproval(id!, "deny", typeof note === "string" ? note : undefined);
+			},
+		],
+		["GET", "/always-approved", () => ({ tools: this.store.alwaysApproved() })],
+		[
+			"DELETE",
+			"/always-approved/:tool",
+			({ tool }) => {
+				if (!this.store.stopAlwaysApproving(tool!)) throw new HttpError(404, `${tool} is not always approved`);
+				return { deleted: true };
 			},
 		],
 

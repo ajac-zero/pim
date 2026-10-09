@@ -2,6 +2,8 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Bell,
   Check,
+  CheckCheck,
+  ChevronDown,
   ChevronRight,
   Copy,
   RotateCcw,
@@ -22,6 +24,12 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "~/components/ui/collapsible";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "~/components/ui/dropdown-menu";
 import {
   Reasoning,
   ReasoningContent,
@@ -285,14 +293,20 @@ export const ApprovalBlock = memo(function ApprovalBlock({
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const decide = useMutation({
-    mutationFn: (decision: "approve" | "deny") =>
-      pim.decide(approval.id, decision),
-    onSuccess: (decided) =>
+    mutationFn: (decision: "approve" | "deny" | "always") =>
+      decision === "always"
+        ? pim.decide(approval.id, "approve", true)
+        : pim.decide(approval.id, decision),
+    onSuccess: (decided, decision) => {
       queryClient.setQueryData<Approval[]>(["approvals"], (approvals) =>
         approvals?.map((candidate) =>
           candidate.id === decided.id ? decided : candidate,
         ),
-      ),
+      );
+      if (decision === "always") {
+        queryClient.invalidateQueries({ queryKey: ["always-approved"] });
+      }
+    },
     onError: (error) => toast.error(error.message),
   });
   const pending = approval.status === "pending";
@@ -352,20 +366,24 @@ export const ApprovalBlock = memo(function ApprovalBlock({
             </Collapsible>
           )}
       {pending && (
-        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-          <div className="flex flex-1 gap-2 sm:justify-end">
-            <Button
-              variant="outline"
-              onClick={() => decide.mutate("deny")}
-              disabled={decide.isPending}
-              className="flex-1"
-            >
-              <X className="size-4" /> {t("deny")}
-            </Button>
+        <div className="mt-3 flex gap-2">
+          <Button
+            variant="outline"
+            onClick={() => decide.mutate("deny")}
+            disabled={decide.isPending}
+            className="flex-1"
+          >
+            <X className="size-4" /> {t("deny")}
+          </Button>
+          {/* Approve, with "always" one step away in its menu rather than a button of its own. */}
+          <div className="flex flex-1">
             <Button
               onClick={() => decide.mutate("approve")}
               disabled={decide.isPending}
-              className="flex-1"
+              className={cn(
+                "flex-1",
+                approval.tool !== null && "rounded-r-none",
+              )}
             >
               {approval.expiresAt !== null ? (
                 <CountdownRing
@@ -377,6 +395,28 @@ export const ApprovalBlock = memo(function ApprovalBlock({
               )}{" "}
               {t("approve")}
             </Button>
+            {approval.tool !== null && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="icon"
+                    disabled={decide.isPending}
+                    aria-label={t("moreApprovalOptions")}
+                    className="rounded-l-none border-primary-foreground/20 border-l"
+                  >
+                    <ChevronDown className="size-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    className="cursor-pointer"
+                    onSelect={() => decide.mutate("always")}
+                  >
+                    <CheckCheck /> {t("alwaysApprove")}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         </div>
       )}

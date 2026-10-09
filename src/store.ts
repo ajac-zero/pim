@@ -30,6 +30,8 @@ export type Approval = {
 	readonly session: string;
 	/** The gated action's name, such as `http_request`. */
 	readonly action: string;
+	/** The tool the model called, which "always approve" remembers; null for approvals filed before it was recorded. */
+	readonly tool: string | null;
 	readonly args: unknown;
 	/** One line the user reads to decide. */
 	readonly summary: string;
@@ -130,7 +132,12 @@ CREATE TABLE IF NOT EXISTS pim_approvals (
 	created_at INTEGER NOT NULL,
 	decided_at INTEGER,
 	call_id TEXT,
-	expires_at INTEGER
+	expires_at INTEGER,
+	tool TEXT
+);
+CREATE TABLE IF NOT EXISTS pim_always_approved (
+	tool TEXT PRIMARY KEY,
+	created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pim_mcp_servers (
 	id TEXT PRIMARY KEY,
@@ -202,6 +209,7 @@ function approvalOf(row: Row): Approval {
 		id: String(row.id),
 		session: String(row.session),
 		action: String(row.action),
+		tool: row.tool === null ? null : String(row.tool),
 		args: JSON.parse(String(row.args)) as unknown,
 		summary: String(row.summary),
 		status: String(row.status) as ApprovalStatus,
@@ -235,6 +243,7 @@ export class PimStore {
 		const columns = this.#sql.exec("PRAGMA table_info(pim_approvals)").toArray().map((row) => String(row.name));
 		if (!columns.includes("call_id")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN call_id TEXT");
 		if (!columns.includes("expires_at")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN expires_at INTEGER");
+		if (!columns.includes("tool")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN tool TEXT");
 	}
 
 	// Goals
@@ -309,16 +318,18 @@ export class PimStore {
 		id: string;
 		session: string;
 		action: string;
+		tool: string;
 		args: unknown;
 		summary: string;
 		callId: string;
 		expiresAt: number;
 	}): Approval {
 		this.#sql.exec(
-			"INSERT OR IGNORE INTO pim_approvals (id, session, action, args, summary, status, created_at, call_id, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+			"INSERT OR IGNORE INTO pim_approvals (id, session, action, tool, args, summary, status, created_at, call_id, expires_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
 			input.id,
 			input.session,
 			input.action,
+			input.tool,
 			JSON.stringify(input.args),
 			input.summary,
 			Date.now(),
@@ -356,6 +367,28 @@ export class PimStore {
 
 	recordApprovalResult(id: string, result: string): void {
 		this.#sql.exec("UPDATE pim_approvals SET result = ? WHERE id = ?", result, id);
+	}
+
+	// Tools the user always approves: their calls are approved without asking.
+
+	alwaysApproves(tool: string): boolean {
+		return this.#sql.exec("SELECT 1 FROM pim_always_approved WHERE tool = ?", tool).toArray().length > 0;
+	}
+
+	alwaysApproved(): { tool: string; createdAt: number }[] {
+		return this.#sql
+			.exec("SELECT tool, created_at FROM pim_always_approved ORDER BY tool")
+			.toArray()
+			.map((row) => ({ tool: String(row.tool), createdAt: Number(row.created_at) }));
+	}
+
+	alwaysApprove(tool: string): void {
+		this.#sql.exec("INSERT OR IGNORE INTO pim_always_approved (tool, created_at) VALUES (?, ?)", tool, Date.now());
+	}
+
+	/** False when the tool was not always approved. */
+	stopAlwaysApproving(tool: string): boolean {
+		return this.#sql.exec("DELETE FROM pim_always_approved WHERE tool = ?", tool).rowsWritten > 0;
 	}
 
 	// Connected apps: the MCP client stores the servers; this is pim's policy for each.

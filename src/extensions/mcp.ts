@@ -218,6 +218,7 @@ export function mcpExtensions(
 					if (gated) {
 						return fileApproval(services, api, context, {
 							action: "mcp_call",
+							tool: name,
 							args: call,
 							summary: summarizeCall(server.name, tool.name, call.arguments),
 						});

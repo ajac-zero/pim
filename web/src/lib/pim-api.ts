@@ -20,6 +20,8 @@ export type Approval = {
   id: string;
   session: string;
   action: string;
+  /** The tool the model called; null for approvals filed before it was recorded. */
+  tool: string | null;
   args: unknown;
   summary: string;
   status: ApprovalStatus;
@@ -32,6 +34,9 @@ export type Approval = {
   /** When it is approved automatically if still pending. */
   expiresAt: number | null;
 };
+
+/** A tool whose calls are approved without asking. */
+export type AlwaysApproved = { tool: string; createdAt: number };
 
 export type PimNotification = {
   id: string;
@@ -119,9 +124,18 @@ export const pim = {
     call<{ approvals: Approval[] }>(
       `/approvals${status ? `?status=${status}` : ""}`,
     ).then((body) => body.approvals),
-  decide: (id: string, decision: "approve" | "deny") =>
+  decide: (id: string, decision: "approve" | "deny", always = false) =>
     call<Approval>(`/approvals/${id}/${decision}`, {
       method: "POST",
+      body: JSON.stringify(always ? { always } : {}),
+    }),
+  alwaysApproved: () =>
+    call<{ tools: AlwaysApproved[] }>("/always-approved").then(
+      (body) => body.tools,
+    ),
+  stopAlwaysApproving: (tool: string) =>
+    call<{ deleted: boolean }>(`/always-approved/${encodeURIComponent(tool)}`, {
+      method: "DELETE",
     }),
   notifications: () =>
     call<{ notifications: PimNotification[] }>("/notifications").then(

@@ -317,6 +317,7 @@ export function eventTools(bridge: McpBridge, catalog: AppCatalog, events: AppEv
 			const watch = { serverId: server.id, event, arguments: args ?? {}, instruction, session: String(api.conversationId) };
 			return fileApproval(services, api, context, {
 				action: "watch_app_event",
+				tool: "watch_app_event",
 				args: watch,
 				summary: `When ${server.name} reports "${event}"${args && Object.keys(args).length > 0 ? ` ${JSON.stringify(args)}` : ""}, Pim will: ${instruction}`,
 			});

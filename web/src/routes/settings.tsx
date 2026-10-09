@@ -7,6 +7,7 @@ import {
   KeyRound,
   Loader2,
   LogOut,
+  ShieldCheck,
   Trash2,
 } from "lucide-react";
 import { useState } from "react";
@@ -29,7 +30,7 @@ import {
   type ModelSettings,
   pim,
 } from "~/lib/pim-api";
-import { modelQuery } from "~/lib/queries";
+import { alwaysApprovedQuery, modelQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 export const Route = createFileRoute("/settings")({
@@ -53,6 +54,7 @@ function SettingsPage() {
         </h2>
         <ModelChoices settings={data} />
       </section>
+      <AlwaysApprovedSection />
       <PasskeysSection />
     </Page>
   );
@@ -273,6 +275,63 @@ function ChatGPTCard({ settings }: { settings: ModelSettings }) {
           <ChatGPTLogo className="size-4" />
           {t("continueWithChatGPT")}
         </Button>
+      )}
+    </section>
+  );
+}
+
+/** The tools Pim uses without asking, from "Always approve" on a request. */
+function AlwaysApprovedSection() {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const { data: tools } = useQuery(alwaysApprovedQuery());
+  const remove = useMutation({
+    mutationFn: pim.stopAlwaysApproving,
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["always-approved"] }),
+    onError: (error) => toast.error(error.message),
+  });
+
+  if (!tools) return null;
+  return (
+    <section className="mt-10 space-y-3">
+      <h2 className="font-medium text-muted-foreground text-sm">
+        {t("alwaysApproved")}
+      </h2>
+      <p className="px-1 text-muted-foreground text-xs">
+        {tools.length > 0
+          ? t("alwaysApprovedDescription")
+          : t("noAlwaysApproved")}
+      </p>
+      {tools.length > 0 && (
+        <ul
+          className="divide-y rounded-xl border"
+          aria-label={t("alwaysApproved")}
+        >
+          {tools.map(({ tool }) => (
+            <li key={tool} className="flex items-center gap-3 px-4 py-3">
+              <ShieldCheck className="size-5 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 truncate font-mono text-sm">
+                {tool}
+              </span>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-muted-foreground"
+                aria-label={t("stopAlwaysApproving", { tool })}
+                title={t("stopAlwaysApproving", { tool })}
+                onClick={() => remove.mutate(tool)}
+                disabled={remove.isPending && remove.variables === tool}
+              >
+                {remove.isPending && remove.variables === tool ? (
+                  <Loader2 className="animate-spin" />
+                ) : (
+                  <Trash2 />
+                )}
+              </Button>
+            </li>
+          ))}
+        </ul>
       )}
     </section>
   );

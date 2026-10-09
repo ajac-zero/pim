@@ -1,7 +1,6 @@
 import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import {
-  approvalIdOf,
   EMPTY_STREAM,
   noticeOf,
   reduceAll,
@@ -365,22 +364,5 @@ describe("noticeOf", () => {
     const title = noticeOf(`[App event] ${"x".repeat(200)}`)?.title ?? "";
     expect(title).toHaveLength(120);
     expect(title.endsWith("…")).toBe(true);
-  });
-});
-
-describe("approvalIdOf", () => {
-  it("reads the id from the result of a gated call", () => {
-    expect(
-      approvalIdOf(
-        "Approval requested (id 3f1c9a2e-7b4d-4e1a-9c0f-2d8e6b5a1c47): POST https://hooks.example.com/x (deploy)\nThe user has been asked.",
-      ),
-    ).toBe("3f1c9a2e-7b4d-4e1a-9c0f-2d8e6b5a1c47");
-  });
-
-  it("ignores other tool results that mention approvals", () => {
-    expect(
-      approvalIdOf("Page text: Approval requested (id x1): ..."),
-    ).toBeNull();
-    expect(approvalIdOf("[Approval a1] The user approved: x")).toBeNull();
   });
 });

@@ -9,7 +9,7 @@ import { z } from "zod";
 import { newSecret, signWebhook } from "../src/extensions/app-events";
 import { AGENT_NAME } from "../src/agent";
 import type { Approval } from "../src/store";
-import { api, apiUrl, lastUserText, post, say, toolUse, url } from "./helpers";
+import { api, apiUrl, lastUserText, pendingApproval, post, say, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /**
@@ -246,17 +246,16 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 				arguments: { route: "JFK-LIS" },
 				instruction: "Tell me if it drops below $500.",
 			}),
-			fauxAssistantMessage("I'll watch it once you approve."),
+			fauxAssistantMessage("Watching."),
 		]);
-		await say("Watch JFK to Lisbon prices.");
+		const turn = say("Watch JFK to Lisbon prices.");
+		const approval = await pendingApproval();
 		expect(subscribes).toEqual([]);
-		const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
-		expect(approval!.summary).toBe('When Travel reports "flight.price_changed" {"route":"JFK-LIS"}, Pim will: Tell me if it drops below $500.');
+		expect(approval.summary).toBe('When Travel reports "flight.price_changed" {"route":"JFK-LIS"}, Pim will: Tell me if it drops below $500.');
 
-		faux.setResponses([fauxAssistantMessage("Watching.")]);
-		const decided = await post<Approval>(`/approvals/${approval!.id}/approve`);
+		const decided = await post<Approval>(`/approvals/${approval.id}/approve`);
 		expect(decided.body.result).toMatch(/^Watching Travel for "flight.price_changed" \(watch [0-9a-f-]{36}\)/);
-		await api(`/sessions/1/operations/approval:${approval!.id}`);
+		await turn;
 
 		const [watch] = (await api("/watches")).body.watches;
 		watchId = watch.id;
@@ -347,13 +346,12 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		const watchOnce = async () => {
 			faux.setResponses([
 				toolUse("watch_app_event", { app: "Travel", event: "flight.price_changed", instruction: "Tell me." }),
-				fauxAssistantMessage("Waiting."),
+				fauxAssistantMessage("Watching."),
 			]);
-			await say("Watch prices.");
-			const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
-			faux.setResponses([fauxAssistantMessage("Watching.")]);
-			await post(`/approvals/${approval!.id}/approve`);
-			await api(`/sessions/1/operations/approval:${approval!.id}`);
+			const turn = say("Watch prices.");
+			const approval = await pendingApproval();
+			await post(`/approvals/${approval.id}/approve`);
+			await turn;
 			const watches = (await api("/watches")).body.watches as { id: string; status: string }[];
 			return watches.find((watch) => watch.status === "active")!.id;
 		};

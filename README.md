@@ -42,7 +42,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 | Goals and plans | `create_goal`, `update_goal`, `list_goals` | Goals have step-by-step plans and progress notes. Active goals are always in the prompt. |
 | Background work | `schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task` | Delays, dates, or cron. When a task fires, the agent receives a `[Scheduled task]` message in the session that scheduled it. |
 | Reaching you | `notify_user` | Stored, pushed to connected sockets, and POSTed to an optional webhook. |
-| Asking first | `http_request` | Gated: the call files an approval request. The action runs only when you approve, and the result is posted back into the conversation. |
+| Asking first | `http_request` | Gated: the call files an approval request. The action runs when you approve, or automatically after 30 seconds without an answer so autonomous jobs never block; deny to stop it. The call waits for your answer, and the result comes back within the same turn. |
 | Connected apps | `connect_app` (gated), `list_apps`, plus each app's tools | Remote MCP servers, with OAuth sign-in. Tools that don't declare themselves read-only need approval. See [Connected apps](#connected-apps). |
 | App skills | `read_skill`, `read_skill_file` | Instructions apps publish over the MCP Skills extension, checked against the app's digests. |
 | App events | `list_app_events`, `watch_app_event` (gated), `list_watches`, `stop_watch` | Apps notify Pim when something happens (draft MCP Events, webhooks); each event starts a run with the watch's instruction. |

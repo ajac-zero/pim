@@ -59,6 +59,8 @@ export const MCP_CALLBACK_PATH = "/mcp/callback";
 /** Where apps deliver event webhooks, as `/mcp/events/<watch id>`; signed, so served without the API token. */
 export const MCP_EVENTS_PATH = "/mcp/events/";
 const WATCH_REFRESH_CALLBACK = "refreshAppWatch";
+/** How long a tool call waits for the user to decide before the approval is granted automatically, so no task is blocked indefinitely. */
+const APPROVAL_TIMEOUT_MS = 30_000;
 /** `pim_meta` key of the model chosen through the API. */
 const MODEL_KEY = "model";
 /** Set by the Worker on requests that carried the API token. */
@@ -374,7 +376,9 @@ export class Pim extends Agent<Env> {
 				return this.cancelSchedule(id);
 			},
 			notify: (notification) => this.deliverNotification(notification),
+			approvalTimeoutMs: this.approvalTimeoutMs(),
 			approvalRequested: async (approval) => this.broadcastMessage({ type: "approval", approval }),
+			awaitApproval: (approval) => this.#awaitApproval(approval),
 		};
 	}
 
@@ -439,19 +443,59 @@ export class Pim extends Agent<Env> {
 		}
 	}
 
+	/** Tool calls waiting for a decision, by approval id; each resolves with the outcome the model reads. */
+	readonly #approvalWaiters = new Map<string, (outcome: string) => void>();
+
 	/**
-	 * Applies the user's decision. An approved action runs here, outside any
-	 * model turn; either way the outcome goes to the requesting session as a
-	 * new message so the agent can carry on.
+	 * Holds a tool call until the user decides or `APPROVAL_TIMEOUT_MS` passes,
+	 * which approves it. Returns the outcome, so the turn carries on. A decided
+	 * approval (a replayed call) returns its recorded outcome at once.
 	 */
-	async decideApproval(id: string, decision: "approve" | "deny", note?: string): Promise<Approval> {
+	async #awaitApproval(approval: Approval): Promise<string> {
+		if (approval.status !== "pending") return this.#outcome(approval);
+		return this.keepAliveWhile(async () => {
+			const decided = new Promise<string>((resolve) => this.#approvalWaiters.set(approval.id, resolve));
+			const timer = setTimeout(() => {
+				this.decideApproval(approval.id, "approve", undefined, true).catch((error) =>
+					console.warn(`auto-approving ${approval.id} failed`, error),
+				);
+			}, Math.max(0, (approval.expiresAt ?? Date.now() + this.approvalTimeoutMs()) - Date.now()));
+			try {
+				return await decided;
+			} finally {
+				clearTimeout(timer);
+				this.#approvalWaiters.delete(approval.id);
+			}
+		});
+	}
+
+	protected approvalTimeoutMs(): number {
+		return APPROVAL_TIMEOUT_MS;
+	}
+
+	#outcome(approval: Approval, auto = false): string {
+		const note = approval.note ? `\nThe user's note: ${approval.note}` : "";
+		if (approval.status === "denied") {
+			return `[Approval ${approval.id}] The user denied: ${approval.summary}${note}\nDo not perform this action.`;
+		}
+		const who = auto
+			? `The user did not respond within ${this.approvalTimeoutMs() / 1000} seconds, so it was approved automatically`
+			: "The user approved";
+		return `[Approval ${approval.id}] ${who}: ${approval.summary}${note}\nResult:\n${approval.result ?? ""}`;
+	}
+
+	/**
+	 * Applies a decision (the timeout's, with `auto`). An approved action runs
+	 * here. The outcome goes to the tool call waiting for it, so its turn
+	 * continues; with no call waiting (it was evicted, or the turn was
+	 * stopped) it goes to the requesting session as a new message instead.
+	 */
+	async decideApproval(id: string, decision: "approve" | "deny", note?: string, auto = false): Promise<Approval> {
 		const approval = this.store.approval(id);
 		if (!approval) throw new HttpError(404, `No approval ${id}`);
 		if (!this.store.decideApproval(id, decision === "approve" ? "approved" : "denied", note ?? null)) {
 			throw new HttpError(409, `Approval ${id} is already ${approval.status}`);
 		}
-		const noteLine = note ? `\nThe user's note: ${note}` : "";
-		let message: string;
 		if (decision === "approve") {
 			const action = this.actions.find((candidate) => candidate.name === approval.action);
 			let result: string;
@@ -463,12 +507,12 @@ export class Pim extends Agent<Env> {
 				result = `The action failed: ${errorMessage(error)}`;
 			}
 			this.store.recordApprovalResult(id, result);
-			message = `[Approval ${id}] The user approved: ${approval.summary}${noteLine}\nResult:\n${result}`;
-		} else {
-			message = `[Approval ${id}] The user denied: ${approval.summary}${noteLine}\nDo not perform this action.`;
 		}
-		await this.submitTo(approval.session, message, { operationId: `approval:${id}` }, "pim");
 		const decided = this.store.approval(id)!;
+		const message = this.#outcome(decided, auto);
+		const waiter = this.#approvalWaiters.get(id);
+		if (waiter) waiter(message);
+		else await this.submitTo(approval.session, message, { operationId: `approval:${id}` }, "pim");
 		this.broadcastMessage({ type: "approval", approval: decided });
 		return decided;
 	}

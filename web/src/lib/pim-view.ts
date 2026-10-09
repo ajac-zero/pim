@@ -90,15 +90,6 @@ export function noticeOf(text: string): PimNotice | null {
   return null;
 }
 
-/**
- * The approval a gated tool call filed, from the result Pim's `fileApproval`
- * returns ("Approval requested (id …): …"). The chat shows such a call as the
- * approval itself.
- */
-export function approvalIdOf(output: string): string | null {
-  return /^Approval requested \(id ([^)\s]+)\)/.exec(output)?.[1] ?? null;
-}
-
 /** One assistant content block as an item. */
 function blockItem(
   block: AssistantMessage["content"][number],

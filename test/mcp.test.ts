@@ -7,7 +7,7 @@ import { exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { Approval } from "../src/store";
-import { api, apiUrl, lastUserText, post, say, toolUse, url } from "./helpers";
+import { api, apiUrl, lastUserText, pendingApproval, post, say, toolUse, url } from "./helpers";
 import { faux } from "./worker";
 
 /**
@@ -116,28 +116,25 @@ describe("connected apps (MCP)", () => {
 		expect(system).toContain("## Calendar\\nTimes are in Eastern time.");
 	});
 
-	it("files an approval for a tool that changes things, and calls the app once approved", async () => {
-		faux.setResponses([
-			toolUse("calendar_create_event", { title: "Lunch with Ana", day: "friday" }),
-			fauxAssistantMessage("I've asked for your approval."),
-		]);
-		await say("Book lunch with Ana on Friday.");
-		expect(created).toEqual([]);
-		const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
-		expect(approval!.summary).toBe('Calendar: create_event {"title":"Lunch with Ana","day":"friday"}');
-
+	it("holds a tool that changes things until the user approves, then finishes the same turn", async () => {
 		let reported = "";
 		faux.setResponses([
+			toolUse("calendar_create_event", { title: "Lunch with Ana", day: "friday" }),
 			(context) => {
-				reported = lastUserText(context.messages);
+				reported = toolResults(context.messages);
 				return fauxAssistantMessage("Booked.");
 			},
 		]);
-		const decided = await post<Approval>(`/approvals/${approval!.id}/approve`);
+		const turn = say("Book lunch with Ana on Friday.");
+		const approval = await pendingApproval();
+		expect(created).toEqual([]);
+		expect(approval.summary).toBe('Calendar: create_event {"title":"Lunch with Ana","day":"friday"}');
+
+		const decided = await post<Approval>(`/approvals/${approval.id}/approve`);
 		expect(decided.body).toMatchObject({ status: "approved", result: 'Created "Lunch with Ana" on friday.' });
 		expect(created).toEqual([{ title: "Lunch with Ana", day: "friday" }]);
-		await api(`/sessions/1/operations/approval:${approval!.id}`);
-		expect(reported).toContain('Created "Lunch with Ana" on friday.');
+		expect(await turn).toMatchObject({ status: "done", text: "Booked." });
+		expect(reported).toContain('Created \\"Lunch with Ana\\" on friday.');
 	});
 
 	it("follows each app's approval policy", async () => {
@@ -185,24 +182,21 @@ describe("connected apps (MCP)", () => {
 	});
 
 	it("lets the model connect an app once the user approves", async () => {
-		faux.setResponses([
-			toolUse("connect_app", { name: "Weather", url: "https://weather.example.test/mcp" }),
-			fauxAssistantMessage("Waiting for your approval."),
-		]);
-		await say("Connect the weather app.");
-		expect((await api("/mcp")).body.servers).toHaveLength(1);
-		const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
-		expect(approval!.summary).toBe("Connect Weather (https://weather.example.test/mcp) and let me use its tools");
-
 		let reported = "";
 		faux.setResponses([
+			toolUse("connect_app", { name: "Weather", url: "https://weather.example.test/mcp" }),
 			(context) => {
-				reported = lastUserText(context.messages);
+				reported = toolResults(context.messages);
 				return fauxAssistantMessage("Connected.");
 			},
 		]);
-		await post(`/approvals/${approval!.id}/approve`);
-		await api(`/sessions/1/operations/approval:${approval!.id}`);
+		const turn = say("Connect the weather app.");
+		const approval = await pendingApproval();
+		expect((await api("/mcp")).body.servers).toHaveLength(1);
+		expect(approval.summary).toBe("Connect Weather (https://weather.example.test/mcp) and let me use its tools");
+
+		await post(`/approvals/${approval.id}/approve`);
+		await turn;
 		expect(reported).toContain("Connected Weather. Its tools: weather_forecast.");
 		expect((await api("/mcp")).body.servers.map((server: { id: string }) => server.id).sort()).toEqual(["calendar", "weather"]);
 	});

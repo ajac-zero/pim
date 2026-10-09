@@ -27,6 +27,10 @@ export type Approval = {
   result: string | null;
   createdAt: number;
   decidedAt: number | null;
+  /** The tool call that filed it. */
+  callId: string | null;
+  /** When it is approved automatically if still pending. */
+  expiresAt: number | null;
 };
 
 export type PimNotification = {
@@ -115,10 +119,9 @@ export const pim = {
     call<{ approvals: Approval[] }>(
       `/approvals${status ? `?status=${status}` : ""}`,
     ).then((body) => body.approvals),
-  decide: (id: string, decision: "approve" | "deny", note?: string) =>
+  decide: (id: string, decision: "approve" | "deny") =>
     call<Approval>(`/approvals/${id}/${decision}`, {
       method: "POST",
-      body: JSON.stringify(note ? { note } : {}),
     }),
   notifications: () =>
     call<{ notifications: PimNotification[] }>("/notifications").then(

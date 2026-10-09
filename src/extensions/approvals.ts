@@ -10,10 +10,11 @@ import { type PimServices, text } from "./services";
 
 /**
  * An action with effects outside the conversation. The model can only ask
- * for it: calling the tool files an approval request and returns at once.
- * The agent runs `run` when the user approves, and reports the outcome to
- * the conversation as a new message, so nothing waits in memory for a
- * human and the flow survives evictions and restarts.
+ * for it: calling the tool files an approval request and waits a short time
+ * for the user. The agent runs `run` once the user approves, or when the wait
+ * runs out so autonomous work is never blocked, and the tool returns the
+ * outcome within the same turn. A call interrupted by an eviction replays,
+ * finds its request, and waits again.
  */
 export type GatedAction<P extends TSchema = TSchema> = {
 	readonly name: string;
@@ -33,7 +34,7 @@ export function defineGatedAction<P extends TSchema>(action: GatedAction<P>): Ga
 
 /** Appended to the description of every tool that only files an approval request. */
 export const APPROVAL_NOTE =
-	'Requires the user\'s approval: calling this files a request and returns immediately; the outcome arrives later in a message starting with "[Approval".';
+	'Requires the user\'s approval: calling this waits up to 30 seconds for the user, who may approve or deny; with no answer it is approved automatically. The result of the action is the result of this call.';
 
 /**
  * Files an approval request for the gated action `action` from inside a tool
@@ -47,11 +48,15 @@ export async function fileApproval(
 ): Promise<ToolExecutionResult> {
 	const id = await api.memo("approval", crypto.randomUUID(), context);
 	const known = services.store.approval(id);
-	const approval = services.store.requestApproval({ id, session: String(api.conversationId), ...request });
+	const approval = services.store.requestApproval({
+		id,
+		session: String(api.conversationId),
+		callId: api.callId,
+		expiresAt: Date.now() + services.approvalTimeoutMs,
+		...request,
+	});
 	if (!known) await services.approvalRequested(approval);
-	return text(
-		`Approval requested (id ${approval.id}): ${approval.summary}\nThe user has been asked. Do not call this again for the same action; tell the user what you are waiting for.`,
-	);
+	return text(await services.awaitApproval(approval));
 }
 
 function gatedTool(action: GatedAction, services: PimServices) {

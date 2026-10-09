@@ -27,11 +27,7 @@ import type {
   ReasoningItem,
 } from "~/lib/openresponses";
 import type { Approval } from "~/lib/pim-api";
-import {
-  approvalIdOf,
-  type SessionView,
-  type ThreadEntry,
-} from "~/lib/pim-view";
+import { type SessionView, type ThreadEntry } from "~/lib/pim-view";
 import { approvalsQuery } from "~/lib/queries";
 
 /* Insets clearing the floating header and composer (see the chat route). */
@@ -87,17 +83,15 @@ export const Thread = memo(function Thread({
   }, [entries]);
   /* A gated tool call renders as the approval it filed. */
   const { data: approvals } = useQuery(approvalsQuery());
-  const approvalsByCall = useMemo(() => {
-    const byId = new Map(approvals?.map((approval) => [approval.id, approval]));
-    const map = new Map<string, Approval>();
-    for (const [callId, output] of outputs) {
-      const id =
-        typeof output.output === "string" ? approvalIdOf(output.output) : null;
-      const approval = id ? byId.get(id) : undefined;
-      if (approval) map.set(callId, approval);
-    }
-    return map;
-  }, [approvals, outputs]);
+  const approvalsByCall = useMemo(
+    () =>
+      new Map(
+        (approvals ?? []).flatMap((approval) =>
+          approval.callId ? [[approval.callId, approval] as const] : [],
+        ),
+      ),
+    [approvals],
+  );
   const placed = useMemo(
     () => new Set([...approvalsByCall.values()].map((approval) => approval.id)),
     [approvalsByCall],

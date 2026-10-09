@@ -4,15 +4,18 @@ An open-source personal agent you deploy to your own Cloudflare account. Inspire
 
 Each deployment is one agent, for the one person who deployed it. There is no hosted, multi-user pim: if you want one, you deploy your own, and your conversations and memories stay in your Cloudflare account.
 
-This repository is only the agent and its API. Chat apps, mobile apps, and messaging bridges are separate projects that talk to this API.
+This repository is the agent, its API, and its web app ([`web/`](web)): chat, approvals, notifications and settings, signed in with a passkey. One Worker serves all of it. Mobile apps and messaging bridges can use the same API with an API token.
 
 ## How it works
 
 ```
- UI (web, mobile, bot)                    Cloudflare
+ Browser, bot, app                        Cloudflare
 ┌─────────────────────┐   HTTPS / WS   ┌──────────────────────────────────────────────┐
-│ REST + WebSocket    │───────────────▶│ Worker (src/index.ts): bearer-token auth     │
-└─────────────────────┘                │   │ every request                            │
+│ web app, or REST +  │───────────────▶│ Worker (src/index.ts)                        │
+│ WebSocket at /api   │                │  ├ /*       the web app (web/, static files) │
+└─────────────────────┘                │  ├ /auth/*  passkeys (Durable Object "Auth") │
+                                       │  └ /api/*   passkey session or API token     │
+                                       │   │                                          │
                                        │   ▼                                          │
                                        │ Durable Object "Pim" (src/agent.ts), just one│
                                        │  ├ PiHarness ── pi-durable runs, tasks, inbox│
@@ -50,13 +53,27 @@ This repository is only the agent and its API. Chat apps, mobile apps, and messa
 
 On the Workers free plan, SQLite-backed Durable Objects and Workers AI's daily free allocation are enough for personal use.
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ajac-zero/pim)
+
+The button copies this repository to your GitHub account and deploys it to your Cloudflare account. It asks for nothing. Then open the Worker's URL and set up your passkey:
+
+1. The app asks for a setup link and the Worker writes it to its logs. Only someone signed in to your Cloudflare account can read those, which is what shows this Pim is yours.
+2. In the Cloudflare dashboard, open Workers & Pages, then `pim`, then Observability, and open the link in the log that starts with "Pim setup link". It works once, for an hour.
+3. Create the passkey. Add more (your phone, another browser) from Settings. Lost them all? "Lost your passkey?" on the sign-in screen writes a new link.
+
+Sessions last 30 days, and removing a passkey signs out the browsers it signed in. Passkeys belong to the hostname the app is served from, so moving Pim to another domain means creating new ones.
+
+Or from a checkout:
+
 ```sh
 pnpm install
 pnpm wrangler login
-pnpm wrangler secret put PIM_API_TOKEN      # any long random string; your UIs send it
+pnpm wrangler secret put PIM_API_TOKEN      # optional: for clients other than the web app
 pnpm wrangler secret put PIM_NOTIFY_WEBHOOK # optional
-pnpm run deploy
+pnpm run deploy                             # builds web/ first
 ```
+
+With the CLI, `pnpm wrangler tail` shows setup links as the sign-in screen asks for them.
 
 Configuration lives in `vars` in `wrangler.jsonc`:
 
@@ -69,15 +86,15 @@ Configuration lives in `vars` in `wrangler.jsonc`:
 | `PIM_MEMORY_LINES` | `96` | Lines of long-term memory in every prompt (about 8k tokens) |
 | `PIM_PUBLIC_URL` | empty | Public URL apps deliver events to; empty uses the origin of your API requests |
 
-For local development, copy `.dev.vars.example` to `.dev.vars` and run `pnpm dev`. The `AI` binding is remote, so `wrangler dev` needs a Cloudflare login, and model calls bill that account.
+For local development, copy `.dev.vars.example` to `.dev.vars` and run `pnpm dev`: the Worker and the built web app at `http://localhost:8787`, with setup links in the terminal. For the web app with hot reload, also run `PIM_API_TOKEN=... pnpm dev:web` (port 3000), which signs in with the token. The `AI` binding is remote, so `wrangler dev` needs a Cloudflare login, and model calls bill that account.
 
 ## API
 
-Every request except `GET /health` needs `Authorization: Bearer <PIM_API_TOKEN>`. Browser WebSockets can't set headers, so they pass `?token=<PIM_API_TOKEN>` instead. Sessions are separate conversations. The root session is `1`.
+The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out the prefix. The web app calls it with its passkey session. Other clients send `Authorization: Bearer <PIM_API_TOKEN>`, which works only once you set that secret; WebSockets from clients that can't set headers pass `?token=<PIM_API_TOKEN>` instead. Only the two paths connected apps call stay at the root, without the prefix: `/mcp/callback` and `/mcp/events/:watch`. Sessions are separate conversations. The root session is `1`.
 
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
-| GET | `/health` | | `{ name: "pim", ok: true }`; no token needed |
+| GET | `/health` | | `{ name: "pim", ok: true }`; no token needed; also at the root |
 | GET | `/` | | Model, time zone, root session, and tools (with `requiresApproval`) |
 | GET | `/sessions` | | `{ sessions: [{ id, title, busy, createdAt, updatedAt }] }`, most recently active first; `title` is the start of the user's first message until renamed |
 | POST | `/sessions` | `{ title? }` | A new session |
@@ -110,11 +127,11 @@ Every request except `GET /health` needs `Authorization: Bearer <PIM_API_TOKEN>`
 | POST | `/mcp` | `{ name, url, headers?, approval? }` | Connects an app; `201` with `{ id, state, authUrl? }` (`authUrl`: send the user there to sign in) |
 | PUT | `/mcp/:id` | `{ approval: "writes" \| "all" \| "none" }` | Which of its tools need approval |
 | DELETE | `/mcp/:id` | | Disconnects it |
-| GET | `/mcp/callback` | | Where an app's sign-in returns; no token needed |
+| GET | `/mcp/callback` (root, no `/api`) | | Where an app's sign-in returns; no token needed |
 | GET | `/mcp/:id/skills`, `/mcp/:id/events` | | The skills and watchable events an app offers |
 | GET | `/watches` | | Event watches: app, event, instruction, state, next renewal |
 | DELETE | `/watches/:id` | | Stops a watch and unsubscribes |
-| POST | `/mcp/events/:watch` | Standard Webhooks-signed event | Where apps deliver events; no token needed, the signature is checked |
+| POST | `/mcp/events/:watch` (root, no `/api`) | Standard Webhooks-signed event | Where apps deliver events; no token needed, the signature is checked |
 | GET | `/notifications` | `?unread=true` | Notifications |
 | POST | `/notifications/:id/read` | | Marks one read |
 
@@ -122,7 +139,7 @@ Submissions are idempotent by `operationId`. Retrying with the same id returns t
 
 ### WebSocket
 
-Connect to `wss://<host>/ws?session=1&token=...`. Each socket follows one session. Message types are in [`src/protocol.ts`](src/protocol.ts).
+Connect to `wss://<host>/api/ws?session=1` (add `&token=...` without a passkey session). Each socket follows one session. Message types are in [`src/protocol.ts`](src/protocol.ts).
 
 - Server → client:
   - `hello`: the session and tools.
@@ -210,11 +227,13 @@ MCP servers expose tools, prompts and resources; pim uses their tools, instructi
 ## Develop
 
 ```sh
-pnpm test        # Vitest in workerd, with pi-ai's faux model; no Cloudflare account needed
+pnpm test        # Vitest in workerd, with pi-ai's faux model, then the web app's tests; no Cloudflare account needed
 pnpm test:live   # live checks against real MCP servers (Hugging Face's); needs the network
 pnpm typecheck
 pnpm types       # regenerate worker-configuration.d.ts after editing wrangler.jsonc
 ```
+
+The web app is in [`web/`](web), with its own README. Passkey sign-in is in [`src/auth/`](src/auth).
 
 To add a tool, write a pi extension in `src/extensions/` and install it in `Pim`'s harness factory. A tool with effects outside the conversation should be a `GatedAction` (see `src/extensions/approvals.ts`) so it runs only after approval.
 

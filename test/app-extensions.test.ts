@@ -9,7 +9,7 @@ import { z } from "zod";
 import { newSecret, signWebhook } from "../src/extensions/app-events";
 import { AGENT_NAME } from "../src/agent";
 import type { Approval } from "../src/store";
-import { api, lastUserText, post, say, toolUse, url } from "./helpers";
+import { api, apiUrl, lastUserText, post, say, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /**
@@ -325,7 +325,7 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		expect((await deliver(`/mcp/events/${watchId}`, secret, { ...event, name: "other.event" })).status).toBe(400);
 		expect((await deliver("/mcp/events/no-such-watch", secret, event)).status).toBe(410);
 		// Other paths still need the API token.
-		expect((await exports.default.fetch(url("/watches"))).status).toBe(401);
+		expect((await exports.default.fetch(apiUrl("/watches"))).status).toBe(401);
 	});
 
 	it("renews with the latest cursor, and ends the watch when the app refuses", async () => {

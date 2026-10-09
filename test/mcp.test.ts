@@ -7,7 +7,7 @@ import { exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { Approval } from "../src/store";
-import { api, lastUserText, post, say, toolUse, url } from "./helpers";
+import { api, apiUrl, lastUserText, post, say, toolUse, url } from "./helpers";
 import { faux } from "./worker";
 
 /**
@@ -225,7 +225,7 @@ describe("connected apps (MCP)", () => {
 	it("lets the sign-in callback through without the API token, and nothing else", async () => {
 		const callback = await exports.default.fetch(url("/mcp/callback?state=forged&code=x"));
 		expect(callback.status).not.toBe(401);
-		expect((await exports.default.fetch(url("/mcp/callback"), { method: "POST" })).status).toBe(401);
-		expect((await exports.default.fetch(url("/mcp"))).status).toBe(401);
+		expect((await exports.default.fetch(url("/mcp/callback"), { method: "POST" })).status).toBe(405);
+		expect((await exports.default.fetch(apiUrl("/mcp"))).status).toBe(401);
 	});
 });

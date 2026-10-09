@@ -3,25 +3,25 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { TranscriptMessage } from "../src/transcript";
-import { api, connect, post, say, TOKEN, textOf, url } from "./helpers";
+import { api, apiUrl, connect, post, say, TOKEN, textOf, url } from "./helpers";
 import { AGENT_NAME } from "../src/agent";
 import { faux, type Pim } from "./worker";
 
 describe("auth", () => {
 	it("rejects requests without the API token", async () => {
-		expect((await exports.default.fetch(url("/"))).status).toBe(401);
-		const wrong = await exports.default.fetch(url("/"), { headers: { Authorization: "Bearer nope" } });
+		expect((await exports.default.fetch(apiUrl("/"))).status).toBe(401);
+		const wrong = await exports.default.fetch(apiUrl("/"), { headers: { Authorization: "Bearer nope" } });
 		expect(wrong.status).toBe(401);
 		// A token that only shares a prefix with the real one is still wrong.
-		const prefix = await exports.default.fetch(url("/"), { headers: { Authorization: "Bearer test" } });
+		const prefix = await exports.default.fetch(apiUrl("/"), { headers: { Authorization: "Bearer test" } });
 		expect(prefix.status).toBe(401);
-		const socket = await exports.default.fetch(url("/ws"), { headers: { Upgrade: "websocket" } });
+		const socket = await exports.default.fetch(apiUrl("/ws"), { headers: { Upgrade: "websocket" } });
 		expect(socket.status).toBe(401);
 	});
 
 	it("accepts the token as a bearer header or a query parameter", async () => {
 		expect((await api("/")).status).toBe(200);
-		expect((await exports.default.fetch(url(`/?token=${TOKEN}`))).status).toBe(200);
+		expect((await exports.default.fetch(apiUrl(`/?token=${TOKEN}`))).status).toBe(200);
 	});
 
 	it("serves health without a token", async () => {
@@ -30,7 +30,7 @@ describe("auth", () => {
 	});
 
 	it("answers CORS preflights without a token, allowing every method the API uses", async () => {
-		const response = await exports.default.fetch(url("/memory/log/1"), {
+		const response = await exports.default.fetch(apiUrl("/memory/log/1"), {
 			method: "OPTIONS",
 			headers: { Origin: "https://ui.example", "Access-Control-Request-Method": "DELETE" },
 		});
@@ -38,12 +38,12 @@ describe("auth", () => {
 		expect(response.headers.get("Access-Control-Allow-Methods")).toContain("DELETE");
 		expect(response.headers.get("Access-Control-Allow-Headers")).toContain("Authorization");
 		// Actual responses carry CORS headers too, including errors.
-		const denied = await exports.default.fetch(url("/"));
+		const denied = await exports.default.fetch(apiUrl("/"));
 		expect(denied.headers.get("Access-Control-Allow-Origin")).toBe("*");
 	});
 
 	it("takes WebSockets only at /ws", async () => {
-		const elsewhere = await exports.default.fetch(url(`/sessions?token=${TOKEN}`), { headers: { Upgrade: "websocket" } });
+		const elsewhere = await exports.default.fetch(apiUrl(`/sessions?token=${TOKEN}`), { headers: { Upgrade: "websocket" } });
 		expect(elsewhere.status).toBe(404);
 		expect((await api("/ws")).status).toBe(426);
 	});
@@ -64,7 +64,7 @@ describe("agent", () => {
 	it("accepts POSTs without a body where every field is optional, and rejects bodies that are not objects", async () => {
 		const { id } = (await post("/sessions")).body;
 		// What `curl -X POST` sends: an empty body, not a missing one.
-		const empty = await exports.default.fetch(url(`/sessions/${id}/reset`), {
+		const empty = await exports.default.fetch(apiUrl(`/sessions/${id}/reset`), {
 			method: "POST",
 			headers: { Authorization: `Bearer ${TOKEN}` },
 			body: "",

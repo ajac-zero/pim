@@ -43,3 +43,31 @@ install_dependencies() {
 
 run_step 'Check required Node.js and pinned pnpm toolchain' check_toolchain
 run_step 'Install workspace dependencies from pnpm-lock.yaml' install_dependencies
+
+install_fonts() {
+	# The app uses the system font stack (ui-sans-serif, system-ui, ...), which falls back
+	# to DejaVu in the orb and makes screenshots look wrong. Install real UI fonts and make
+	# them the fontconfig defaults.
+	if ! dpkg -s fonts-inter fonts-liberation >/dev/null 2>&1; then
+		sudo apt-get update -qq
+		sudo apt-get install -y -qq fonts-inter fonts-liberation
+	fi
+	mkdir -p "$HOME/.config/fontconfig"
+	cat >"$HOME/.config/fontconfig/fonts.conf" <<'CONF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <alias binding="same"><family>sans-serif</family><prefer><family>Inter</family></prefer></alias>
+  <alias binding="same"><family>system-ui</family><prefer><family>Inter</family></prefer></alias>
+  <alias binding="same"><family>ui-sans-serif</family><prefer><family>Inter</family></prefer></alias>
+  <alias binding="same"><family>monospace</family><prefer><family>Liberation Mono</family></prefer></alias>
+  <alias binding="same"><family>ui-monospace</family><prefer><family>Liberation Mono</family></prefer></alias>
+</fontconfig>
+CONF
+	fc-cache -f >/dev/null
+	fc-match sans-serif
+	fc-match system-ui
+	fc-match monospace
+}
+
+run_step 'Install UI fonts for browser screenshots' install_fonts

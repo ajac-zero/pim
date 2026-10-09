@@ -1,3 +1,4 @@
 # Copy to .dev.vars for `wrangler dev`. In production, use `wrangler secret put`.
-PIM_API_TOKEN=change-me
+# Both are optional: the web app signs you in with a passkey.
+# PIM_API_TOKEN=a-long-random-string
 # PIM_NOTIFY_WEBHOOK=https://example.com/pim-notifications

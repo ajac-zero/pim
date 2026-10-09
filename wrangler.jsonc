@@ -4,13 +4,29 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-24",
   "compatibility_flags": ["nodejs_compat"],
+  // The web app, built from web/ before every `wrangler dev` and `wrangler deploy`.
+  "build": { "command": "pnpm --filter pim-web build", "watch_dir": "web/src" },
+  "assets": {
+    "directory": "./web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    // Everything else is the app's pages and files.
+    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp/callback", "/mcp/events/*"]
+  },
   // Workers AI runs the model; under `wrangler dev` it calls your logged-in account.
   "ai": { "binding": "AI", "remote": true },
   "durable_objects": {
-    "bindings": [{ "name": "Pim", "class_name": "Pim" }]
+    "bindings": [
+      { "name": "Pim", "class_name": "Pim" },
+      // Passkeys and setup links for signing in to the web app.
+      { "name": "Auth", "class_name": "Auth" }
+    ]
   },
   // SQLite-backed Durable Objects are available on the Workers free plan.
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Pim"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Pim"] },
+    { "tag": "v2", "new_sqlite_classes": ["Auth"] }
+  ],
   "vars": {
     // Any Workers AI id (`@cf/...`) or AI Gateway catalog id (`anthropic/...`).
     "PIM_MODEL": "@cf/zai-org/glm-4.7-flash",
@@ -26,7 +42,8 @@
     "PIM_PUBLIC_URL": ""
   },
   // Secrets (set with `wrangler secret put`):
-  //   PIM_API_TOKEN          bearer token every API request must carry
+  //   PIM_API_TOKEN          optional bearer token for clients other than the web app
   //   PIM_NOTIFY_WEBHOOK     optional URL that receives notifications as JSON POSTs
+  // Workers Logs: where setup links for the first passkey show up.
   "observability": { "enabled": true }
 }

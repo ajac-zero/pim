@@ -1,6 +1,7 @@
 import { type ImageContent, type TextContent, type TSchema, Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { AppCatalog } from "./app-catalog";
+import { describeCandidates, searchRegistry } from "./app-directory";
 import { APPROVAL_NOTE, defineGatedAction, fileApproval, type GatedAction } from "./approvals";
 import { json, type PimServices, text } from "./services";
 
@@ -246,9 +247,26 @@ export function mcpExtensions(
 		},
 	});
 
+	const findApp = defineTool({
+		name: "find_app",
+		description:
+			"Find an app's remote MCP server in the official MCP Registry, to connect it with connect_app. The app's own server comes first; others are third parties that relay the app through their own server.",
+		parameters: Type.Object({
+			app: Type.String({ minLength: 2, maxLength: 60, description: "The app's name, like Linear or Notion." }),
+		}),
+		replay: "safe",
+		async execute({ app }) {
+			try {
+				return text(describeCandidates(app, await searchRegistry(app)));
+			} catch (error) {
+				return text(`Searching the MCP Registry failed: ${error instanceof Error ? error.message : String(error)}`, true);
+			}
+		},
+	});
+
 	const apps = defineExtension({
 		name: "pim.apps",
-		tools: [listApps, ...extras.tools],
+		tools: [listApps, findApp, ...extras.tools],
 		sections: [
 			// Always present, so it never appears out of order (which makes pi re-send every section).
 			section("connected_apps", () => {

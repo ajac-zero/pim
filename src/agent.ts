@@ -229,7 +229,12 @@ export class Pim extends Agent<Env> {
 		options: { headers?: Record<string, string>; approval?: McpApproval } = {},
 	): Promise<{ id: string; state: string; authUrl?: string }> {
 		const id = slug(name);
-		if (this.apps.servers().some((server) => server.id === id)) {
+		const existing = this.apps.servers().find((server) => server.id === id);
+		if (existing?.state === "failed") {
+			// A connection that failed earlier is not connected: clear it so the user can try again.
+			await this.removeMcpServer(id).catch(() => undefined);
+			this.store.deleteMcpApproval(id);
+		} else if (existing) {
 			throw new HttpError(409, `An app named ${name} is already connected`);
 		}
 		this.store.setMcpApproval(id, options.approval ?? "writes");

@@ -27,6 +27,11 @@ export class Pim extends RealPim {
 		return faux.getModel();
 	}
 
+	/** Long enough for a test to answer an approval, short enough to wait out. */
+	protected override approvalTimeoutMs(): number {
+		return 1_500;
+	}
+
 	/** Compactions keep almost nothing, so a test can compact a short conversation. */
 	protected override harnessSettings(): HarnessSettings {
 		return { ...super.harnessSettings(), compaction: { keepRecentTokens: 1 } };

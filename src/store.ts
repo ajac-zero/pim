@@ -38,6 +38,10 @@ export type Approval = {
 	readonly result: string | null;
 	readonly createdAt: number;
 	readonly decidedAt: number | null;
+	/** The tool call that filed it, so a client can show the two as one. */
+	readonly callId: string | null;
+	/** When it is approved automatically if still pending. */
+	readonly expiresAt: number | null;
 };
 
 export type Notification = {
@@ -124,7 +128,9 @@ CREATE TABLE IF NOT EXISTS pim_approvals (
 	note TEXT,
 	result TEXT,
 	created_at INTEGER NOT NULL,
-	decided_at INTEGER
+	decided_at INTEGER,
+	call_id TEXT,
+	expires_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS pim_mcp_servers (
 	id TEXT PRIMARY KEY,
@@ -203,6 +209,8 @@ function approvalOf(row: Row): Approval {
 		result: row.result === null ? null : String(row.result),
 		createdAt: Number(row.created_at),
 		decidedAt: row.decided_at === null ? null : Number(row.decided_at),
+		callId: row.call_id === null ? null : String(row.call_id),
+		expiresAt: row.expires_at === null ? null : Number(row.expires_at),
 	};
 }
 
@@ -223,6 +231,10 @@ export class PimStore {
 	constructor(sql: SqlStorage) {
 		this.#sql = sql;
 		this.#sql.exec(SCHEMA);
+		// Approvals made before these columns existed have neither.
+		const columns = this.#sql.exec("PRAGMA table_info(pim_approvals)").toArray().map((row) => String(row.name));
+		if (!columns.includes("call_id")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN call_id TEXT");
+		if (!columns.includes("expires_at")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN expires_at INTEGER");
 	}
 
 	// Goals
@@ -293,15 +305,25 @@ export class PimStore {
 	// Approvals
 
 	/** Idempotent on `id`: a replayed tool call finds the request it already made. */
-	requestApproval(input: { id: string; session: string; action: string; args: unknown; summary: string }): Approval {
+	requestApproval(input: {
+		id: string;
+		session: string;
+		action: string;
+		args: unknown;
+		summary: string;
+		callId: string;
+		expiresAt: number;
+	}): Approval {
 		this.#sql.exec(
-			"INSERT OR IGNORE INTO pim_approvals (id, session, action, args, summary, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+			"INSERT OR IGNORE INTO pim_approvals (id, session, action, args, summary, status, created_at, call_id, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
 			input.id,
 			input.session,
 			input.action,
 			JSON.stringify(input.args),
 			input.summary,
 			Date.now(),
+			input.callId,
+			input.expiresAt,
 		);
 		return this.approval(input.id)!;
 	}

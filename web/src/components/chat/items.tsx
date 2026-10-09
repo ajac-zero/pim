@@ -9,7 +9,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
@@ -22,7 +22,6 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "~/components/ui/collapsible";
-import { Input } from "~/components/ui/input";
 import {
   Reasoning,
   ReasoningContent,
@@ -285,10 +284,9 @@ export const ApprovalBlock = memo(function ApprovalBlock({
 }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const [note, setNote] = useState("");
   const decide = useMutation({
     mutationFn: (decision: "approve" | "deny") =>
-      pim.decide(approval.id, decision, note.trim() || undefined),
+      pim.decide(approval.id, decision),
     onSuccess: (decided) =>
       queryClient.setQueryData<Approval[]>(["approvals"], (approvals) =>
         approvals?.map((candidate) =>
@@ -355,14 +353,7 @@ export const ApprovalBlock = memo(function ApprovalBlock({
           )}
       {pending && (
         <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-          <Input
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            placeholder={t("noteForPim")}
-            className="h-9 flex-1"
-            disabled={decide.isPending}
-          />
-          <div className="flex gap-2">
+          <div className="flex flex-1 gap-2 sm:justify-end">
             <Button
               variant="outline"
               onClick={() => decide.mutate("deny")}
@@ -376,7 +367,15 @@ export const ApprovalBlock = memo(function ApprovalBlock({
               disabled={decide.isPending}
               className="flex-1"
             >
-              <Check className="size-4" /> {t("approve")}
+              {approval.expiresAt !== null ? (
+                <CountdownRing
+                  from={approval.createdAt}
+                  until={approval.expiresAt}
+                />
+              ) : (
+                <Check className="size-4" />
+              )}{" "}
+              {t("approve")}
             </Button>
           </div>
         </div>
@@ -384,6 +383,61 @@ export const ApprovalBlock = memo(function ApprovalBlock({
     </article>
   );
 });
+
+/** A ring that empties as `until` nears, with the seconds left inside. */
+function CountdownRing({ from, until }: { from: number; until: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 200);
+    return () => clearInterval(timer);
+  }, []);
+  const left = Math.max(0, until - now);
+  const radius = 12;
+  const circumference = 2 * Math.PI * radius;
+  return (
+    <svg
+      viewBox="0 0 32 32"
+      className="size-8 shrink-0 -rotate-90"
+      role="img"
+      aria-label={`${Math.ceil(left / 1000)}`}
+    >
+      <circle
+        cx="16"
+        cy="16"
+        r={radius}
+        fill="none"
+        stroke="currentColor"
+        strokeOpacity={0.25}
+        strokeWidth={2.5}
+      />
+      <circle
+        cx="16"
+        cy="16"
+        r={radius}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2.5}
+        strokeLinecap="round"
+        strokeDasharray={circumference}
+        strokeDashoffset={circumference * (1 - left / (until - from))}
+      />
+      {/* Turned back upright. Digits are about 0.72em tall, so a baseline 0.36em below the middle centres their ink, whatever the font. */}
+      <text
+        x="16"
+        y="16"
+        dy="0.36em"
+        transform="rotate(90 16 16)"
+        textAnchor="middle"
+        fill="currentColor"
+        fontSize="10"
+        fontWeight="500"
+        style={{ fontVariantNumeric: "tabular-nums" }}
+      >
+        {Math.ceil(left / 1000)}
+      </text>
+    </svg>
+  );
+}
 
 const FIELD_LABEL_CLASS =
   "font-mono text-muted-foreground text-xs [overflow-wrap:anywhere]";

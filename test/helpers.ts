@@ -2,6 +2,7 @@ import type { JsonValue, Message } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { exports } from "cloudflare:workers";
 import { afterEach, expect, vi } from "vitest";
+import type { Approval } from "../src/store";
 import type { TranscriptMessage } from "../src/transcript";
 import { faux } from "./worker";
 
@@ -39,6 +40,15 @@ export async function say(content: string, session = "1") {
 	const { status, body } = await post(`/sessions/${session}/messages`, { content, wait: true });
 	expect(status).toBe(200);
 	return body as { status: string; text?: string; reason?: string };
+}
+
+/** The approval a running turn is waiting on: the tool call holds the turn until it is decided. */
+export async function pendingApproval() {
+	return vi.waitFor(async () => {
+		const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
+		expect(approval).toBeDefined();
+		return approval!;
+	});
 }
 
 /** Opens the WebSocket and collects every message the server sends. */

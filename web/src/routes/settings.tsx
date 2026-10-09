@@ -17,6 +17,7 @@ import { useI18n } from "~/components/i18n";
 import { Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
+import { Switch } from "~/components/ui/switch";
 import {
   auth,
   authSessionQuery,
@@ -30,6 +31,12 @@ import {
   type ModelSettings,
   pim,
 } from "~/lib/pim-api";
+import {
+  disablePush,
+  enablePush,
+  pushEnabled,
+  pushSupported,
+} from "~/lib/push";
 import { alwaysApprovedQuery, modelQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
@@ -55,6 +62,7 @@ function SettingsPage() {
         <ModelChoices settings={data} />
       </section>
       <AlwaysApprovedSection />
+      <PushSection />
       <PasskeysSection />
     </Page>
   );
@@ -332,6 +340,48 @@ function AlwaysApprovedSection() {
             </li>
           ))}
         </ul>
+      )}
+    </section>
+  );
+}
+
+/** Whether this browser gets Pim's notifications as pushes. */
+function PushSection() {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const supported = pushSupported();
+  const { data: enabled = false } = useQuery({
+    queryKey: ["push"],
+    queryFn: pushEnabled,
+    enabled: supported,
+  });
+  const toggle = useMutation({
+    mutationFn: (on: boolean) => (on ? enablePush() : disablePush()),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["push"] }),
+    onError: (error) => {
+      if (error.message !== "notifications-blocked") toast.error(error.message);
+    },
+  });
+  const blocked = supported && Notification.permission === "denied";
+
+  return (
+    <section className="mt-10 space-y-3">
+      <h2 className="font-medium text-muted-foreground text-sm">
+        {t("pushNotifications")}
+      </h2>
+      <div className="flex items-center gap-3 rounded-xl border px-4 py-3">
+        <p className="min-w-0 flex-1 text-sm">{t("pushDescription")}</p>
+        <Switch
+          checked={enabled}
+          disabled={!supported || blocked || toggle.isPending}
+          onCheckedChange={(on) => toggle.mutate(on)}
+          aria-label={t("pushNotifications")}
+        />
+      </div>
+      {(!supported || blocked) && (
+        <p className="px-1 text-muted-foreground text-xs">
+          {t(supported ? "pushBlocked" : "pushUnsupported")}
+        </p>
       )}
     </section>
   );

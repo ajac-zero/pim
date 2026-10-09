@@ -5,6 +5,8 @@
  * agent, so everything here belongs to the person who deployed it.
  */
 
+import type { PushSubscription } from "./push";
+
 export type GoalStatus = "active" | "paused" | "done" | "abandoned";
 
 export type GoalStep = { readonly text: string; readonly done: boolean };
@@ -188,6 +190,12 @@ CREATE TABLE IF NOT EXISTS pim_notifications (
 	body TEXT NOT NULL,
 	created_at INTEGER NOT NULL,
 	read_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS pim_push_subscriptions (
+	endpoint TEXT PRIMARY KEY,
+	p256dh TEXT NOT NULL,
+	auth TEXT NOT NULL,
+	created_at INTEGER NOT NULL
 );
 `;
 
@@ -554,6 +562,29 @@ export class PimStore {
 
 	deleteMeta(key: string): void {
 		this.#sql.exec("DELETE FROM pim_meta WHERE key = ?", key);
+	}
+
+	// Web Push subscriptions, one per browser that turned notifications on
+
+	pushSubscriptions(): PushSubscription[] {
+		return this.#sql
+			.exec("SELECT endpoint, p256dh, auth FROM pim_push_subscriptions ORDER BY created_at")
+			.toArray()
+			.map((row) => ({ endpoint: String(row.endpoint), p256dh: String(row.p256dh), auth: String(row.auth) }));
+	}
+
+	putPushSubscription(subscription: PushSubscription): void {
+		this.#sql.exec(
+			"INSERT INTO pim_push_subscriptions (endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth",
+			subscription.endpoint,
+			subscription.p256dh,
+			subscription.auth,
+			Date.now(),
+		);
+	}
+
+	deletePushSubscription(endpoint: string): void {
+		this.#sql.exec("DELETE FROM pim_push_subscriptions WHERE endpoint = ?", endpoint);
 	}
 
 	// Notifications

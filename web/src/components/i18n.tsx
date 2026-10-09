@@ -62,6 +62,13 @@ const translations = {
     noNotifications: "No notifications yet.",
     notifications: "Notifications",
     notificationsDescription: "What Pim told you while you were away.",
+    pushNotifications: "Push notifications",
+    pushDescription:
+      "Get Pim's notifications on this device, even when the app is closed.",
+    pushBlocked:
+      "Notifications are blocked for this site. Allow them in your browser's settings.",
+    pushUnsupported:
+      "This browser can't receive push notifications. On an iPhone or iPad, add Pim to your Home Screen first.",
     older: "Older",
     openChat: "Open chat",
     openSidebar: "Open sidebar",
@@ -214,6 +221,13 @@ const translations = {
     noNotifications: "Aún no hay notificaciones.",
     notifications: "Notificaciones",
     notificationsDescription: "Lo que Pim te avisó mientras no estabas.",
+    pushNotifications: "Notificaciones push",
+    pushDescription:
+      "Recibe las notificaciones de Pim en este dispositivo, incluso con la app cerrada.",
+    pushBlocked:
+      "Las notificaciones están bloqueadas para este sitio. Permítelas en los ajustes de tu navegador.",
+    pushUnsupported:
+      "Este navegador no puede recibir notificaciones push. En un iPhone o iPad, primero agrega Pim a tu pantalla de inicio.",
     older: "Anteriores",
     openChat: "Abrir chat",
     openSidebar: "Abrir barra lateral",

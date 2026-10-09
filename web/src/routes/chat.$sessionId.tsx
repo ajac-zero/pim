@@ -34,7 +34,7 @@ function SessionNotFound() {
   return (
     <main className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3">
       <p className="text-muted-foreground">{t("chatNotFound")}</p>
-      <Button variant="outline" onClick={() => newChat.mutate()}>
+      <Button variant="outline" onClick={newChat}>
         {t("startNewChat")}
       </Button>
     </main>

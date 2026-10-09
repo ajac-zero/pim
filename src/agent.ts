@@ -230,8 +230,8 @@ export class Pim extends Agent<Env> {
 	): Promise<{ id: string; state: string; authUrl?: string }> {
 		const id = slug(name);
 		const existing = this.apps.servers().find((server) => server.id === id);
-		if (existing?.state === "failed") {
-			// A connection that failed earlier is not connected: clear it so the user can try again.
+		if (existing && existing.state !== "ready") {
+			// A connection that failed, or is still waiting for sign-in (an abandoned or expired one), is not connected: clear it so the user can try again.
 			await this.removeMcpServer(id).catch(() => undefined);
 			this.store.deleteMcpApproval(id);
 		} else if (existing) {

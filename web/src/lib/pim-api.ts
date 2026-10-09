@@ -143,6 +143,22 @@ export const pim = {
     ),
   markRead: (id: string) =>
     call<PimNotification>(`/notifications/${id}/read`, { method: "POST" }),
+  pushKey: () =>
+    call<{ publicKey: string }>("/push/key").then((body) => body.publicKey),
+  subscribePush: (subscription: {
+    endpoint: string;
+    p256dh: string;
+    auth: string;
+  }) =>
+    call<{ subscribed: boolean }>("/push/subscription", {
+      method: "PUT",
+      body: JSON.stringify(subscription),
+    }),
+  unsubscribePush: (endpoint: string) =>
+    call<{ subscribed: boolean }>("/push/subscription", {
+      method: "DELETE",
+      body: JSON.stringify({ endpoint }),
+    }),
   model: () => call<ModelSettings>("/model"),
   chooseModel: (model: Pick<ModelInfo, "provider" | "id">) =>
     call<{ model: ModelInfo }>("/model", {

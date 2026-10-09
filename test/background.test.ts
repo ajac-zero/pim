@@ -95,3 +95,91 @@ describe("notifications", () => {
 		elsewhere.socket.close();
 	});
 });
+
+describe("web push", () => {
+	const decoder = new TextDecoder();
+	const bytes = (text: string) => new TextEncoder().encode(text);
+
+	/** A browser's side of a push subscription, which can read what the agent sends it. */
+	async function browser(endpoint: string) {
+		const pair = (await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"])) as CryptoKeyPair;
+		const p256dh = new Uint8Array((await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer);
+		const auth = crypto.getRandomValues(new Uint8Array(16));
+		const b64 = (data: Uint8Array) => btoa(String.fromCharCode(...data)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+		const derive = async (salt: Uint8Array, secret: Uint8Array, info: Uint8Array, length: number) =>
+			new Uint8Array(
+				await crypto.subtle.deriveBits(
+					{ name: "HKDF", hash: "SHA-256", salt, info },
+					await crypto.subtle.importKey("raw", secret, "HKDF", false, ["deriveBits"]),
+					length * 8,
+				),
+			);
+		return {
+			subscription: { endpoint, p256dh: b64(p256dh), auth: b64(auth) },
+			/** RFC 8291 section 3.4, from the receiver's side. */
+			async decrypt(body: Uint8Array) {
+				const salt = body.slice(0, 16);
+				const keyLength = body[20]!;
+				const theirs = body.slice(21, 21 + keyLength);
+				const record = body.slice(21 + keyLength);
+				const shared = new Uint8Array(
+					await crypto.subtle.deriveBits(
+						{ name: "ECDH", public: await crypto.subtle.importKey("raw", theirs, { name: "ECDH", namedCurve: "P-256" }, false, []) } as any,
+						pair.privateKey,
+						256,
+					),
+				);
+				const secret = await derive(auth, shared, new Uint8Array([...bytes("WebPush: info\0"), ...p256dh, ...theirs]), 32);
+				const key = await crypto.subtle.importKey("raw", await derive(salt, secret, bytes("Content-Encoding: aes128gcm\0"), 16), "AES-GCM", false, ["decrypt"]);
+				const nonce = await derive(salt, secret, bytes("Content-Encoding: nonce\0"), 12);
+				const plain = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce }, key, record));
+				// The record ends with its 0x02 delimiter.
+				expect(plain.at(-1)).toBe(2);
+				return JSON.parse(decoder.decode(plain.slice(0, -1)));
+			},
+		};
+	}
+
+	const deliver = (title: string, body: string) =>
+		runInDurableObject(env.Pim.get(env.Pim.idFromName(AGENT_NAME)) as unknown as DurableObjectStub<Pim>, (agent) =>
+			agent.deliverNotification(agent.store.addNotification({ id: crypto.randomUUID(), session: "1", title, body })),
+		);
+
+	it("sends a notification to a subscribed browser, readable only by it and signed with the deployment's key", async () => {
+		const phone = await browser("https://push.example/phone");
+		expect((await api("/push/subscription", { method: "PUT", body: JSON.stringify(phone.subscription) })).status).toBe(200);
+		const { publicKey } = (await api("/push/key")).body;
+
+		const fetched = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 201 }));
+		try {
+			await deliver("Price drop", "Your flight is $80 cheaper.");
+			const [[endpoint, init]] = fetched.mock.calls as [[string, RequestInit]];
+			expect(endpoint).toBe("https://push.example/phone");
+			expect(await phone.decrypt(new Uint8Array(init.body as ArrayBuffer))).toMatchObject({ title: "Price drop", body: "Your flight is $80 cheaper.", session: "1" });
+
+			// The VAPID token is signed by the key /push/key advertises, for the push service's origin.
+			const header = (init.headers as Record<string, string>).Authorization!;
+			expect(header).toContain(`k=${publicKey}`);
+			const [, signing, signature] = header.match(/t=([\w-]+\.[\w-]+)\.([\w-]+)/)!;
+			const raw = (value: string) => Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=")), (c) => c.charCodeAt(0));
+			const verifier = await crypto.subtle.importKey("raw", raw(publicKey), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+			expect(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, verifier, raw(signature!), bytes(signing!))).toBe(true);
+			expect(JSON.parse(decoder.decode(raw(signing!.split(".")[1]!))).aud).toBe("https://push.example");
+
+			// A browser the push service has dropped is forgotten.
+			fetched.mockResolvedValue(new Response(null, { status: 410 }));
+			await deliver("Again", "Anyone there?");
+			fetched.mockClear();
+			await deliver("Once more", "Nobody should get this.");
+			expect(fetched).not.toHaveBeenCalled();
+		} finally {
+			fetched.mockRestore();
+		}
+	});
+
+	it("rejects subscriptions that are not https push subscriptions", async () => {
+		const phone = await browser("http://push.example/phone");
+		expect((await api("/push/subscription", { method: "PUT", body: JSON.stringify(phone.subscription) })).status).toBe(400);
+		expect((await api("/push/subscription", { method: "PUT", body: JSON.stringify({ endpoint: "https://x.example/" }) })).status).toBe(400);
+	});
+});

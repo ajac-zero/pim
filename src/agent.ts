@@ -42,6 +42,7 @@ import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import { dispatch, HttpError, readJson, type Route } from "./http";
 import type { ClientMessage, ServerMessage, ToolInfo } from "./protocol";
+import { generateVapidKeys, type PushSubscription, sendPush, validSubscription, type VapidKeys } from "./push";
 import { type Approval, type GoalStatus, type Notification, PimStore } from "./store";
 import { projectEntries } from "./transcript";
 
@@ -431,6 +432,38 @@ export class Pim extends Agent<Env> {
 
 	async deliverNotification(notification: Notification): Promise<void> {
 		this.broadcastMessage({ type: "notification", notification });
+		await Promise.all([this.#pushNotification(notification), this.#postWebhook(notification)]);
+	}
+
+	/** This deployment's VAPID keys, made the first time a browser asks to subscribe. */
+	async #vapidKeys(): Promise<VapidKeys> {
+		const stored = this.store.meta("vapid_keys");
+		if (stored) return JSON.parse(stored) as VapidKeys;
+		const keys = await generateVapidKeys();
+		this.store.setMeta("vapid_keys", JSON.stringify(keys));
+		return keys;
+	}
+
+	/** Web Push to every browser that turned notifications on, even with the app closed. */
+	async #pushNotification({ id, session, title, body }: Notification): Promise<void> {
+		const subscriptions = this.store.pushSubscriptions();
+		if (subscriptions.length === 0) return;
+		const keys = await this.#vapidKeys();
+		const subject = this.env.PIM_PUBLIC_URL || this.store.meta("public_origin") || "https://pim.invalid";
+		// A push message holds about 4 KB; the full text is in the app.
+		const message = { id, session, title: title.slice(0, 120), body: body.slice(0, 500) };
+		await Promise.all(
+			subscriptions.map(async (subscription) => {
+				try {
+					if (!(await sendPush(subscription, message, keys, subject))) this.store.deletePushSubscription(subscription.endpoint);
+				} catch (error) {
+					console.warn("web push failed", error);
+				}
+			}),
+		);
+	}
+
+	async #postWebhook(notification: Notification): Promise<void> {
 		const webhook = this.env.PIM_NOTIFY_WEBHOOK;
 		if (!webhook) return;
 		try {
@@ -1041,6 +1074,29 @@ export class Pim extends Agent<Env> {
 			async ({ id }) => {
 				if (!(await this.appEvents.stop(id!))) throw new HttpError(404, `No watch ${id}`);
 				return { deleted: true };
+			},
+		],
+
+		// Web Push: the key a browser subscribes with, and the subscription it gets.
+		["GET", "/push/key", async () => ({ publicKey: (await this.#vapidKeys()).publicKey })],
+		[
+			"PUT",
+			"/push/subscription",
+			async (_params, request) => {
+				const subscription = await readJson<PushSubscription>(request);
+				if (!validSubscription(subscription)) throw new HttpError(400, "Body must be a push subscription: https endpoint, p256dh and auth");
+				this.store.putPushSubscription(subscription);
+				return { subscribed: true };
+			},
+		],
+		[
+			"DELETE",
+			"/push/subscription",
+			async (_params, request) => {
+				const { endpoint } = await readJson<{ endpoint: string }>(request);
+				if (typeof endpoint !== "string") throw new HttpError(400, "Body must have an endpoint");
+				this.store.deletePushSubscription(endpoint);
+				return { subscribed: false };
 			},
 		],
 

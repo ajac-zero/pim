@@ -9,6 +9,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { RouteError } from "~/components/route-error";
 import { SignInRequired } from "~/lib/pim-api";
+import { registerServiceWorker } from "~/lib/push";
 import { routeTree } from "~/routeTree.gen";
 import "~/styles/app.css";
 
@@ -44,6 +45,8 @@ declare module "@tanstack/react-router" {
     router: typeof router;
   }
 }
+
+registerServiceWorker();
 
 // biome-ignore lint/style/noNonNullAssertion: index.html has #root
 createRoot(document.getElementById("root")!).render(

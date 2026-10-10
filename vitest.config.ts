@@ -25,7 +25,8 @@ export default defineConfig({
 					include: live ? ["test/live/**/*.test.ts"] : ["test/*.test.ts"],
 				},
 			},
-			{
+			// Pimling has no live checks of its own.
+			...(live ? [] : [{
 				extends: true,
 				plugins: [
 					cloudflareTest({
@@ -41,9 +42,9 @@ export default defineConfig({
 				],
 				test: {
 					name: "hosted",
-					include: live ? [] : ["test/hosted/*.test.ts"],
+					include: ["test/hosted/*.test.ts"],
 				},
-			},
+			}]),
 		],
 	},
 });

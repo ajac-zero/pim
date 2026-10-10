@@ -1084,6 +1084,17 @@ export class Pim extends Agent<Env> {
 			},
 		],
 		["GET", "/usage", () => this.usageReport()],
+		[
+			"GET",
+			"/export",
+			async () =>
+				new Response(await this.exportData(), {
+					headers: {
+						"content-type": "application/json",
+						"content-disposition": `attachment; filename="pim-export-${new Date().toISOString().slice(0, 10)}.json"`,
+					},
+				}),
+		],
 		["GET", "/chatgpt", () => this.chatgpt.status()],
 		["POST", "/chatgpt/login", () => this.chatgpt.startLogin()],
 		[

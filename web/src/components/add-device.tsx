@@ -89,7 +89,15 @@ export function AddDevice() {
                 {copied ? <Check /> : <Copy />}
                 {copied ? t("copied") : t("copyLink")}
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => setLink(null)}>
+              {/* Ending it here stops the link working at once, not in ten minutes. */}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setLink(null);
+                  void auth.cancelDeviceLink().catch(() => undefined);
+                }}
+              >
                 {t("done")}
               </Button>
             </div>

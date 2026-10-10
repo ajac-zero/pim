@@ -248,9 +248,13 @@ function ChatGPTCard({ settings }: { settings: ModelSettings }) {
             if (address.trim()) finish.mutate();
           }}
         >
+          <p className="text-muted-foreground text-sm">
+            {t("chatGPTWhyPaste")}
+          </p>
           <ol className="list-decimal space-y-1 pl-5 text-sm">
             <li>{t("chatGPTStepApprove")}</li>
             <li>{t("chatGPTStepCopy")}</li>
+            <li>{t("chatGPTStepPaste")}</li>
           </ol>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Input
@@ -283,6 +287,9 @@ function ChatGPTCard({ settings }: { settings: ModelSettings }) {
               </Button>
             </div>
           </div>
+          <p className="text-muted-foreground text-xs">
+            {t("chatGPTAfterPaste")}
+          </p>
         </form>
       ) : (
         <Button

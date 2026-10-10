@@ -80,6 +80,8 @@ export type OwnerStatus = "active" | "suspended";
 
 /** What a hosted service tells an agent about its owner when it provisions it. */
 export type OwnerProfile = { readonly ownerId: string; readonly username: string; readonly publicUrl: string };
+/** How long an erasure waits for runs to stop and apps to unsubscribe before wiping anyway. */
+const ERASE_COURTESY_MS = 3_000;
 /** `pim_meta` key of the model chosen through the API. */
 const MODEL_KEY = "model";
 /** `pim_meta` keys a hosting service sets: the owner's profile, a suspension, the agent's own limits. */
@@ -165,7 +167,11 @@ export class Pim extends Agent<Env> {
 				approval: (this.store.mcpApproval(id) ?? "writes") as McpApproval,
 			})),
 		tools: () => this.mcp.listTools(),
-		call: async (serverId, name, args) => this.mcp.callTool({ serverId, name, arguments: args }),
+		call: async (serverId, name, args) => {
+			// Work still under way on an agent being erased acts on nobody's behalf.
+			this.#assertOpen();
+			return this.mcp.callTool({ serverId, name, arguments: args });
+		},
 		connect: (name, url) => this.connectApp(name, url),
 		capabilities: (serverId) => this.mcp.mcpConnections[serverId]?.serverCapabilities as McpCapabilities | undefined,
 		request: async (serverId, method, params) => {
@@ -552,6 +558,7 @@ export class Pim extends Agent<Env> {
 	}
 
 	async deliverNotification(notification: Notification): Promise<void> {
+		if (this.#closed()) return;
 		this.broadcastMessage({ type: "notification", notification });
 		await Promise.all([this.#pushNotification(notification), this.#postWebhook(notification)]);
 	}
@@ -662,6 +669,8 @@ export class Pim extends Agent<Env> {
 	 * stopped) it goes to the requesting session as a new message instead.
 	 */
 	async decideApproval(id: string, decision: "approve" | "deny", note?: string, auto?: AutoApproval): Promise<Approval> {
+		// An approval's timer can outlive the agent's erasure; its action must not run.
+		this.#assertOpen();
 		const approval = this.store.approval(id);
 		if (!approval) throw new HttpError(404, `No approval ${id}`);
 		if (!this.store.decideApproval(id, decision === "approve" ? "approved" : "denied", note ?? null, auto ?? "user")) {
@@ -885,12 +894,16 @@ export class Pim extends Agent<Env> {
 	 */
 	async deleteEverything(): Promise<void> {
 		this.#erasing = true;
-		for (const session of await this.harness.sessions.list().catch(() => [])) {
-			await this.harness.session(session.id).abort().catch(() => undefined);
-		}
-		// Apps stop sending events to an agent that is gone.
-		for (const watch of this.store.watches()) await this.appEvents.stop(watch.id).catch(() => undefined);
 		for (const connection of this.getConnections()) connection.close(4010, "Deleted");
+		// Stopping runs and ending apps' subscriptions is courtesy: the wipe and the end of this
+		// instance stop everything regardless. So they get a few seconds, and a hung model
+		// request or app can't hold the deletion.
+		const courtesy = async () => {
+			const sessions = await this.harness.sessions.list();
+			await Promise.allSettled(sessions.map((session) => this.harness.session(session.id).abort()));
+			await Promise.allSettled(this.store.watches().map((watch) => this.appEvents.stop(watch.id)));
+		};
+		await Promise.race([courtesy().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, ERASE_COURTESY_MS))]);
 		await this.ctx.storage.deleteAll();
 		this.store.markErased(Date.now());
 		await this.ctx.storage.sync();

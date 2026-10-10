@@ -611,8 +611,13 @@ export class Pim extends Agent<Env> {
 	}
 
 	async #session(id: string): Promise<string> {
+		// The root stays reachable when deleted: it is where API clients talk by default.
 		if (id === ROOT_SESSION) return id;
-		if (!SESSION_ID.test(id) || !(await this.harness.sessions.list()).some((session) => session.id === id)) {
+		if (
+			!SESSION_ID.test(id) ||
+			this.store.deletedSessions().has(id) ||
+			!(await this.harness.sessions.list()).some((session) => session.id === id)
+		) {
 			throw new HttpError(404, `No session ${id}`);
 		}
 		return id;
@@ -635,7 +640,8 @@ export class Pim extends Agent<Env> {
 			"GET",
 			"/sessions",
 			async () => {
-				const sessions = (await this.harness.sessions.list()).map((session) => {
+				const deleted = this.store.deletedSessions();
+				const sessions = (await this.harness.sessions.list()).filter((session) => !deleted.has(session.id)).map((session) => {
 					const info = this.store.sessionInfo(session.id);
 					return {
 						...session,
@@ -668,6 +674,24 @@ export class Pim extends Agent<Env> {
 				if (typeof title !== "string" || title.trim() === "") throw new HttpError(400, "title must be a non-empty string");
 				this.store.renameSession(id, clipTitle(title));
 				return this.store.sessionInfo(id);
+			},
+		],
+		[
+			"DELETE",
+			"/sessions/:session",
+			async ({ session }) => {
+				const id = await this.#session(session!);
+				this.store.deleteSession(id);
+				// Nothing keeps working in a chat the user can no longer see.
+				await this.harness.session(id).abort();
+				const services = this.services();
+				for (const schedule of await services.listSchedules()) {
+					if (schedule.payload.session === id) await services.cancelSchedule(schedule.id);
+				}
+				for (const watch of this.store.watches()) {
+					if (watch.session === id) await this.appEvents.stop(watch.id);
+				}
+				return { deleted: true };
 			},
 		],
 		[

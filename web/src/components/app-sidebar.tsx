@@ -16,6 +16,7 @@ import {
   SlidersHorizontal,
   SquarePen,
   Sun,
+  Trash2,
   X,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -43,6 +44,7 @@ import {
   TooltipTrigger,
 } from "~/components/ui/tooltip";
 import { pim, type Session } from "~/lib/pim-api";
+import { pimClient } from "~/lib/pim-client";
 import {
   approvalsQuery,
   notificationsQuery,
@@ -579,6 +581,19 @@ function SessionRow({
     setRenaming(false);
   };
 
+  const navigate = useNavigate();
+  // Delete asks twice: the first click turns the item into a confirmation.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const deleteMutation = useMutation({
+    mutationFn: () => pim.deleteSession(session.id),
+    onSuccess: async () => {
+      if (pimClient.getState().session === session.id) pimClient.close();
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      if (active) await navigate({ to: "/" });
+    },
+    onError: (error) => toast.error(error.message),
+  });
+
   if (renaming) {
     return (
       <li className="flex items-center gap-1 px-1">
@@ -637,7 +652,7 @@ function SessionRow({
         )}
         {awaitingApproval && <AwaitingApprovalMark />}
       </Link>
-      <DropdownMenu>
+      <DropdownMenu onOpenChange={() => setConfirmingDelete(false)}>
         <DropdownMenuTrigger asChild>
           <button
             type="button"
@@ -658,6 +673,29 @@ function SessionRow({
             }}
           >
             <Pencil className="size-4" /> {t("rename")}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            variant="destructive"
+            disabled={deleteMutation.isPending}
+            onSelect={(event) => {
+              if (!confirmingDelete) {
+                event.preventDefault();
+                setConfirmingDelete(true);
+                return;
+              }
+              deleteMutation.mutate();
+            }}
+            className="relative overflow-hidden"
+          >
+            <Trash2 className="size-4" />
+            <span aria-hidden={confirmingDelete}>{t("deleteChat")}</span>
+            {/* Slides in over Delete; the second click lands on it. */}
+            {confirmingDelete && (
+              <span className="absolute inset-0 flex animate-in items-center gap-2 bg-destructive px-2 text-destructive-foreground duration-300 ease-out slide-in-from-right">
+                <Check className="size-4 text-destructive-foreground" />
+                {t("confirmDeleteChat")}
+              </span>
+            )}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

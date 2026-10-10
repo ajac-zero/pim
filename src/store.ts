@@ -173,7 +173,8 @@ CREATE TABLE IF NOT EXISTS pim_sessions (
 	id TEXT PRIMARY KEY,
 	title TEXT,
 	created_at INTEGER NOT NULL,
-	updated_at INTEGER NOT NULL
+	updated_at INTEGER NOT NULL,
+	deleted_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS pim_meta (
 	key TEXT PRIMARY KEY,
@@ -252,6 +253,8 @@ export class PimStore {
 		if (!columns.includes("call_id")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN call_id TEXT");
 		if (!columns.includes("expires_at")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN expires_at INTEGER");
 		if (!columns.includes("tool")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN tool TEXT");
+		const sessionColumns = this.#sql.exec("PRAGMA table_info(pim_sessions)").toArray().map((row) => String(row.name));
+		if (!sessionColumns.includes("deleted_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN deleted_at INTEGER");
 	}
 
 	// Goals
@@ -504,15 +507,39 @@ export class PimStore {
 			: undefined;
 	}
 
-	/** Records activity in a session; `title` names it only if it has no name yet. */
+	/**
+	 * Records activity in a session; `title` names it only if it has no name yet.
+	 * A deleted session that gets a message (the root, which API clients use by default) is listed again.
+	 */
 	touchSession(id: string, title?: string): void {
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT INTO pim_sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET updated_at = excluded.updated_at, title = COALESCE(pim_sessions.title, excluded.title)",
+			"INSERT INTO pim_sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET updated_at = excluded.updated_at, title = COALESCE(pim_sessions.title, excluded.title), deleted_at = NULL",
 			id,
 			title ?? null,
 			now,
 			now,
+		);
+	}
+
+	/** pi cannot delete a conversation, so a deleted session is only hidden: from the list and from the API. */
+	deleteSession(id: string): void {
+		const now = Date.now();
+		this.#sql.exec(
+			"INSERT INTO pim_sessions (id, title, created_at, updated_at, deleted_at) VALUES (?, NULL, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET deleted_at = excluded.deleted_at",
+			id,
+			now,
+			now,
+			now,
+		);
+	}
+
+	deletedSessions(): Set<string> {
+		return new Set(
+			this.#sql
+				.exec("SELECT id FROM pim_sessions WHERE deleted_at IS NOT NULL")
+				.toArray()
+				.map((row) => String(row.id)),
 		);
 	}
 

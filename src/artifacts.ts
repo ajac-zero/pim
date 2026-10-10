@@ -344,11 +344,12 @@ export class ArtifactStore {
 
 	/** Deletes an artifact and every version of it. */
 	delete(id: string): boolean {
+		if (!this.get(id)) return false;
+		// The fence first, then the deletion, with nothing awaited between: if the fence can't be written, nothing is deleted.
+		this.#sql.exec("INSERT OR IGNORE INTO pim_artifact_deleted (id, deleted_at) VALUES (?, ?)", id, Date.now());
 		this.#sql.exec("DELETE FROM pim_artifact_versions WHERE artifact = ?", id);
-		const deleted = this.#sql.exec("DELETE FROM pim_artifacts WHERE id = ?", id).rowsWritten > 0;
-		// In the same step as the deletion, so no replay can come between.
-		if (deleted) this.#sql.exec("INSERT OR IGNORE INTO pim_artifact_deleted (id, deleted_at) VALUES (?, ?)", id, Date.now());
-		return deleted;
+		this.#sql.exec("DELETE FROM pim_artifacts WHERE id = ?", id);
+		return true;
 	}
 
 	/** Every artifact with every version, for the owner's export. */

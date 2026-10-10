@@ -199,6 +199,26 @@ describe("artifacts", () => {
 		expect((await callTool("artifact_read", { id: made.id })).isError).toBe(true);
 	});
 
+	it("are left whole when the record of their deletion can't be written", async () => {
+		const outcome = await runInDurableObject(agent(), async (instance: Pim, state) => {
+			const made = await instance.artifacts.create({ id: crypto.randomUUID(), title: "Whole", kind: "html", content: "<p>kept</p>", session: null });
+			state.storage.sql.exec("ALTER TABLE pim_artifact_deleted RENAME TO pim_artifact_deleted_away");
+			const failed = (() => {
+				try {
+					instance.artifacts.delete(made.artifact);
+					return false;
+				} catch {
+					return true;
+				}
+			})();
+			const left = instance.artifacts.version(made.artifact, 1)?.content;
+			state.storage.sql.exec("ALTER TABLE pim_artifact_deleted_away RENAME TO pim_artifact_deleted");
+			instance.artifacts.delete(made.artifact);
+			return { failed, left };
+		});
+		expect(outcome).toEqual({ failed: true, left: "<p>kept</p>" });
+	});
+
 	it("are not brought back by a replayed create after they were deleted", async () => {
 		const outcome = await runInDurableObject(agent(), async (instance: Pim, state) => {
 			const id = crypto.randomUUID();

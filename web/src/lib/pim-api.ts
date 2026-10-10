@@ -31,8 +31,57 @@ export type Approval = {
   decidedAt: number | null;
   /** The tool call that filed it. */
   callId: string | null;
-  /** When it is approved automatically if still pending. */
+  /** When the timeout decides it, if still pending. */
   expiresAt: number | null;
+  /** What the timeout decides: approve (the auto policy) or deny (explicit). Missing from older Pims, which approve. */
+  onTimeout?: "approve" | "deny";
+  /** Who decided: the user, the timeout, or "always approve". */
+  decidedBy?: "user" | "timeout" | "always" | null;
+};
+
+export type ApprovalPolicy = "auto" | "explicit";
+
+export type PimSettings = {
+  timeZone: string;
+  approvalPolicy: ApprovalPolicy;
+  approvalTimeoutSeconds: number;
+  notifyWebhook: string | null;
+};
+
+export type Limits = {
+  dailyTokens: number | null;
+  dailyModelRequests: number | null;
+  dailyRuns: number | null;
+  sessions: number | null;
+  schedules: number | null;
+  apps: number | null;
+  storageBytes: number | null;
+};
+
+export type DayUsage = {
+  day: string;
+  tokens: number;
+  planTokens: number;
+  modelRequests: number;
+  runs: number;
+};
+
+export type UsageReport = {
+  limits: Limits;
+  today: DayUsage;
+  history: DayUsage[];
+  storageBytes: number;
+};
+
+/** A hosted Pimling's account. */
+export type Account = {
+  username: string;
+  ownerId: string;
+  status: "active" | "pending" | "suspended";
+  createdAt: number;
+  url: string;
+  usage: UsageReport;
+  recoveryCodesLeft: number;
 };
 
 /** A tool whose calls are approved without asking. */
@@ -72,6 +121,16 @@ export type ServerMessage =
   | { type: "result"; id: string; result: unknown }
   | { type: "error"; id?: string; message: string };
 
+/** An API answer that isn't a success, with its status. */
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 /** The Access sign-in lapsed: the page must reload to sign in again. */
 export class SignInRequired extends Error {
   constructor() {
@@ -93,7 +152,10 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
     | (T & { error?: string })
     | null;
   if (!response.ok) {
-    throw new Error(body?.error ?? `Pim answered ${response.status}`);
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Pim answered ${response.status}`,
+    );
   }
   return body as T;
 }
@@ -175,4 +237,26 @@ export const pim = {
       body: JSON.stringify({ url }),
     }),
   chatgptLogout: () => call<ChatGPTStatus>("/chatgpt", { method: "DELETE" }),
+  settings: () => call<PimSettings>("/settings"),
+  updateSettings: (
+    update: Partial<Omit<PimSettings, "approvalTimeoutSeconds">>,
+  ) =>
+    call<PimSettings>("/settings", {
+      method: "PUT",
+      body: JSON.stringify(update),
+    }),
+  /** Pimling only: a self-hosted Pim has no account and answers 404, so this is null. */
+  account: () =>
+    call<Account>("/account").catch((error) => {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }),
+  deleteAccount: (username: string) =>
+    call<{ deleted: boolean }>("/account", {
+      method: "DELETE",
+      body: JSON.stringify({ confirm: username }),
+    }),
 };
+
+/** Where the browser downloads the account's export. */
+export const EXPORT_URL = "/api/account/export";

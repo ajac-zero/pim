@@ -152,6 +152,8 @@ const translations = {
     artifactDeleteConfirm:
       'Delete "{title}" and all {versions} of its versions? Chats where Pim made it still show what it wrote there until you delete those chats.',
     artifactDeleted: "This artifact was deleted.",
+    artifactVersionMissing: "This artifact has no version {version}.",
+    artifactLatest: "Open the latest, version {version}",
     artifactDeletedToast: "Artifact deleted",
     artifactCaution:
       "Made by Pim. It runs in a sandbox, apart from your account, but it could still send what it shows, or what you type into it, to another site. Don't enter passwords or codes.",
@@ -460,6 +462,8 @@ const translations = {
     artifactDeleteConfirm:
       '¿Borrar "{title}" y sus {versions} versiones? Los chats donde Pim lo hizo siguen mostrando lo que escribió allí hasta que borres esos chats.',
     artifactDeleted: "Este artefacto se borró.",
+    artifactVersionMissing: "Este artefacto no tiene la versión {version}.",
+    artifactLatest: "Abrir la última, versión {version}",
     artifactDeletedToast: "Artefacto borrado",
     artifactCaution:
       "Hecho por Pim. Se ejecuta en un espacio aislado, separado de tu cuenta, pero aun así podría enviar lo que muestra, o lo que escribas en él, a otro sitio. No escribas contraseñas ni códigos.",

@@ -9,6 +9,7 @@ import { Input } from "~/components/ui/input";
 import {
   auth,
   cancelled,
+  deviceCode,
   forgetSetupCode,
   type PimAuthSession,
   setupCode,
@@ -32,11 +33,15 @@ export function SignIn({ session }: { session: PimAuthSession }) {
   const queryClient = useQueryClient();
   const router = useRouter();
   const [setup, setSetup] = useState(setupCode);
+  const [device, setDevice] = useState(deviceCode);
   const [recovering, setRecovering] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // A link pasted into this tab changes only the hash; nothing reloads.
   useEffect(() => {
-    const update = () => setSetup(setupCode());
+    const update = () => {
+      setSetup(setupCode());
+      setDevice(deviceCode());
+    };
     window.addEventListener("hashchange", update);
     return () => window.removeEventListener("hashchange", update);
   }, []);
@@ -56,7 +61,9 @@ export function SignIn({ session }: { session: PimAuthSession }) {
   });
   const create = useMutation({
     mutationFn: (recovery?: string) =>
-      auth.addPasskey(recovery ? { recovery } : setup ? { setup } : {}),
+      auth.addPasskey(
+        recovery ? { recovery } : device ? { device } : setup ? { setup } : {},
+      ),
     onMutate: () => setError(null),
     onSuccess: () => {
       forgetSetupCode();
@@ -72,7 +79,28 @@ export function SignIn({ session }: { session: PimAuthSession }) {
     <main className="flex min-h-svh flex-col items-center justify-center px-6 py-12">
       <div className="w-full max-w-sm">
         <PimMark className="mb-6 size-10" />
-        {!setup && !hasPasskeys && canClaim ? (
+        {device ? (
+          <>
+            <h1 className="font-semibold text-2xl">
+              {t("addThisDeviceTitle")}
+            </h1>
+            <p className="mt-2 text-muted-foreground text-sm">
+              {t("addThisDeviceBody")}
+            </p>
+            <Button
+              className="mt-6 w-full"
+              size="lg"
+              onClick={() => create.mutate(undefined)}
+              disabled={pending}
+            >
+              {icon}
+              {t("createPasskey")}
+            </Button>
+            <p className="mt-4 text-muted-foreground text-xs">
+              {t("addThisDeviceNote")}
+            </p>
+          </>
+        ) : !setup && !hasPasskeys && canClaim ? (
           <>
             <h1 className="font-semibold text-2xl">{t("setUpTitle")}</h1>
             <p className="mt-2 text-muted-foreground text-sm">
@@ -134,6 +162,11 @@ export function SignIn({ session }: { session: PimAuthSession }) {
             >
               {t("lostPasskey")}
             </Button>
+            {/* The commonest snag: a passkey made on another device that this one doesn't have. */}
+            <div className="mt-6 rounded-lg border px-4 py-3 text-sm">
+              <p className="font-medium">{t("newDeviceTitle")}</p>
+              <p className="mt-1 text-muted-foreground">{t("newDeviceBody")}</p>
+            </div>
           </>
         ) : codes ? (
           <RecoveryCodeSteps

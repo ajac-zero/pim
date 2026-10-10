@@ -7,9 +7,11 @@ import { useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {
+  alreadyRegistered,
   auth,
   cancelled,
   deviceCode,
+  forgetDeviceCode,
   forgetSetupCode,
   type PimAuthSession,
   setupCode,
@@ -52,7 +54,13 @@ export function SignIn({ session }: { session: PimAuthSession }) {
     await router.invalidate();
   };
   const onError = (failure: Error) =>
-    setError(cancelled(failure) ? null : failure.message);
+    setError(
+      cancelled(failure)
+        ? null
+        : alreadyRegistered(failure)
+          ? t("passkeyAlreadyHere")
+          : failure.message,
+    );
   const signIn = useMutation({
     mutationFn: auth.signIn,
     onMutate: () => setError(null),
@@ -67,6 +75,7 @@ export function SignIn({ session }: { session: PimAuthSession }) {
     onMutate: () => setError(null),
     onSuccess: () => {
       forgetSetupCode();
+      forgetDeviceCode();
       return onSuccess();
     },
     onError,
@@ -84,7 +93,15 @@ export function SignIn({ session }: { session: PimAuthSession }) {
             <h1 className="font-semibold text-2xl">
               {t("addThisDeviceTitle")}
             </h1>
-            <p className="mt-2 text-muted-foreground text-sm">
+            {/* Whose Pimling this adds the device to: check it before making a passkey for it. */}
+            <p className="mt-3 rounded-lg border bg-muted/40 px-3 py-2 text-sm">
+              <span className="text-muted-foreground">{t("addingTo")} </span>
+              {/* Breaks only after a dot, so no part of the name is split. */}
+              <span className="font-medium font-mono">
+                {(session.host ?? location.host).replaceAll(".", ".\u200b")}
+              </span>
+            </p>
+            <p className="mt-3 text-muted-foreground text-sm">
               {t("addThisDeviceBody")}
             </p>
             <Button
@@ -99,6 +116,17 @@ export function SignIn({ session }: { session: PimAuthSession }) {
             <p className="mt-4 text-muted-foreground text-xs">
               {t("addThisDeviceNote")}
             </p>
+            <Button
+              variant="ghost"
+              className="mt-2 w-full text-muted-foreground"
+              onClick={() => {
+                forgetDeviceCode();
+                setDevice(null);
+                setError(null);
+              }}
+            >
+              {t("notMyPimling")}
+            </Button>
           </>
         ) : !setup && !hasPasskeys && canClaim ? (
           <>

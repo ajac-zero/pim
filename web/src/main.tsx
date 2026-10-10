@@ -8,10 +8,14 @@ import { createRouter, RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { RouteError } from "~/components/route-error";
+import { deviceCode } from "~/lib/auth";
 import { SignInRequired } from "~/lib/pim-api";
 import { registerServiceWorker } from "~/lib/push";
 import { routeTree } from "~/routeTree.gen";
 import "~/styles/app.css";
+
+// A device link's code leaves the address bar before the app makes any request.
+deviceCode();
 
 /** Sessions expire: asking again shows the sign-in screen in place of the app. */
 function onError(error: Error) {

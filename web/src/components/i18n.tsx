@@ -250,6 +250,10 @@ const translations = {
     deleteForever: "Delete forever",
     deleteAccountButton: "Delete my account…",
     addThisDeviceTitle: "Add this device",
+    addingTo: "Adding this device to",
+    notMyPimling: "This isn't my Pimling",
+    passkeyAlreadyHere:
+      "This device already has a passkey for this Pimling. Go back and sign in with it instead.",
     addThisDeviceBody:
       "Your Pimling sent this link from a device where you're signed in. Create a passkey here, and this device can sign in on its own from now on.",
     addThisDeviceNote:
@@ -528,6 +532,10 @@ const translations = {
     deleteForever: "Eliminar para siempre",
     deleteAccountButton: "Eliminar mi cuenta…",
     addThisDeviceTitle: "Agrega este dispositivo",
+    addingTo: "Agregando este dispositivo a",
+    notMyPimling: "Este no es mi Pimling",
+    passkeyAlreadyHere:
+      "Este dispositivo ya tiene una llave de acceso para este Pimling. Vuelve e inicia sesión con ella.",
     addThisDeviceBody:
       "Tu Pimling envió este enlace desde un dispositivo donde tienes sesión iniciada. Crea aquí una llave de acceso y este dispositivo podrá iniciar sesión por su cuenta desde ahora.",
     addThisDeviceNote:

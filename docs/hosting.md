@@ -34,6 +34,7 @@ This is Phase 1: a personal assistant service. It runs no code that people or th
 1. **Workers Paid plan.** It covers Durable Objects at this scale, rate limiting and Workers Logs.
 2. **A zone** for the service, such as `pimling.com`, on Cloudflare with full DNS setup.
    - Add a proxied wildcard record `*` (and the apex) pointing anywhere, such as `AAAA 100::`. Universal SSL covers the apex and `*.pimling.com`, one label deep, which is all Pimling serves. Deeper names are not served.
+   - **Under a subdomain of a zone** (such as `pimling.example.com`), tenants are two levels deep, and Universal SSL doesn't cover them. Make the service domain a Workers Custom Domain (`{ "pattern": "pimling.example.com", "custom_domain": true }`): its certificate also covers `*.pimling.example.com`, at no charge. Route tenants with `*.pimling.example.com/*` and a proxied wildcard record. [`wrangler.ajac-zero.jsonc`](../wrangler.ajac-zero.jsonc) and [its deployment notes](deployments/ajac-zero.md) are a worked example. Otherwise you need Advanced Certificate Manager (paid).
    - Passkeys belong to each person's own hostname, so adding the zone to the Public Suffix List later won't break them. Keep untrusted content from later phases on a separate domain.
 3. **Edit `wrangler.hosted.jsonc`:**
    - `routes`: replace `pimling.com` with your zone (both the apex and `*.` patterns).

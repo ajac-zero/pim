@@ -149,6 +149,23 @@ describe("registration", () => {
 		});
 	});
 
+	it("gives the username back at once when the Pimling can't be set up", async () => {
+		const agents = env.Pim as unknown as { idFromName: (name: string) => DurableObjectId };
+		const real = agents.idFromName.bind(agents);
+		agents.idFromName = () => {
+			throw new Error("Durable Objects are down");
+		};
+		try {
+			const failed = await register("ursula");
+			expect(failed.status).toBe(500);
+			expect(failed.body.error).toBe("Your Pimling couldn't be set up. Try again in a moment.");
+		} finally {
+			agents.idFromName = real;
+		}
+		expect((await new Browser(FRONT).json("/auth/username?name=ursula")).body).toEqual({ available: true });
+		expect((await register("ursula")).status).toBe(201);
+	});
+
 	it("gives a username back when nobody made a passkey within a day, to a new owner", async () => {
 		const lapsed = await runInDurableObject(directory(), (instance: Directory) =>
 			instance.register({

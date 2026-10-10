@@ -233,13 +233,25 @@ async function register(request: Request, env: HostedEnv): Promise<Response> {
 	const now = Date.now();
 	const url = pimUrl(request, env, username);
 	const auth = authOf(env, account.ownerId);
-	const [{ code, expiresAt }, recoveryCodes] = await Promise.all([auth.issueSetupCode(now, PENDING_MS), auth.newRecoveryCodes(now)]);
-	const agent = await agentOf(env, account.ownerId);
-	await agent.provision({ ownerId: account.ownerId, username, publicUrl: url });
-	if (typeof body?.timeZone === "string") {
-		// The browser's zone, a good first guess; a bad one is just not applied.
-		await agent.applySettings({ timeZone: body.timeZone }).catch(() => undefined);
+	let setup: { code: string; expiresAt: number };
+	let recoveryCodes: string[];
+	try {
+		[setup, recoveryCodes] = await Promise.all([auth.issueSetupCode(now, PENDING_MS), auth.newRecoveryCodes(now)]);
+		const agent = await agentOf(env, account.ownerId);
+		await agent.provision({ ownerId: account.ownerId, username, publicUrl: url });
+		if (typeof body?.timeZone === "string") {
+			// The browser's zone, a good first guess; a bad one is just not applied.
+			await agent.applySettings({ timeZone: body.timeZone }).catch(() => undefined);
+		}
+	} catch (error) {
+		// Half a registration helps nobody: give the username back now, not in a day.
+		await directory(env).abandon(account.ownerId);
+		forget(username);
+		await auth.deleteEverything().catch(() => undefined);
+		console.error(JSON.stringify({ event: "pimling.registration_failed", owner: account.ownerId, username, error: String(error) }));
+		return fail(500, "Your Pimling couldn't be set up. Try again in a moment.");
 	}
+	const { code, expiresAt } = setup;
 	log("registered", { owner: account.ownerId, username, mode: policy.mode });
 	return json(
 		{

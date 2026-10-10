@@ -488,17 +488,27 @@ export class Pim extends Agent<Env> {
 		from: "user" | "pim" | "approval",
 	): Promise<PiReceipt> {
 		if (this.status() !== "active") throw new HttpError(403, "This Pim is suspended");
+		// Checked and counted before the first await, so concurrent submissions can't all pass the same check.
+		let run: string | undefined;
 		if (from !== "approval") {
-			const refusal = this.usage.runRefusal() ?? this.#storageRefusal();
-			if (refusal) {
-				console.warn(JSON.stringify({ event: "pim.limit", limit: "run", owner: this.name, from, reason: refusal }));
-				throw new HttpError(429, refusal);
+			const storage = this.#storageRefusal();
+			const reserved = storage === null ? this.usage.reserveRun() : ({ ok: false, refusal: storage } as const);
+			if (!reserved.ok) {
+				console.warn(JSON.stringify({ event: "pim.limit", limit: "run", owner: this.name, from, reason: reserved.refusal }));
+				throw new HttpError(429, reserved.refusal);
 			}
+			run = reserved.reservation;
 		}
 		this.store.touchSession(session, from === "user" ? titleFrom(content) : undefined);
-		const receipt = await this.harness.submit(content, { session, ...options });
-		// A retried submission (the same operation id) is not accepted again, so it is one run, not two.
-		if (from !== "approval" && receipt.accepted) this.usage.recordRun();
+		let receipt: PiReceipt;
+		try {
+			receipt = await this.harness.submit(content, { session, ...options });
+		} catch (error) {
+			if (run !== undefined) this.usage.releaseRun(run);
+			throw error;
+		}
+		// A retried submission (the same operation id) is not accepted again: one run, not two.
+		if (run !== undefined && !receipt.accepted) this.usage.releaseRun(run);
 		return receipt;
 	}
 

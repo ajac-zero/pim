@@ -1,8 +1,16 @@
+import {
+	type Api,
+	type AssistantMessage,
+	type AssistantMessageEventStream,
+	createAssistantMessageEventStream,
+	type Model,
+} from "@earendil-works/pi-ai";
+import type { Models } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { AGENT_NAME } from "../src/agent";
-import type { Limits } from "../src/usage";
+import { type Limits, UNLIMITED, UsageMeter } from "../src/usage";
 import { exports } from "cloudflare:workers";
 import { api, apiUrl, post, say, TOKEN, url } from "./helpers";
 import { faux, type Pim } from "./worker";
@@ -45,6 +53,115 @@ describe("usage", () => {
 		await runInDurableObject(agent(), (instance: Pim) => {
 			expect(instance.usage.modelRefusal("faux")).toMatch(/quota exceeded/);
 			expect(instance.usage.modelRefusal("openai")).toBeNull();
+		});
+	});
+});
+
+const MODEL = { provider: "faux", id: "faux-model", api: "faux" } as unknown as Model<Api>;
+
+function answered(input: number, output: number): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "ok" }],
+		api: "faux",
+		provider: "faux",
+		model: "faux-model",
+		usage: { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
+
+/** A catalog whose requests stay open until the test ends them. */
+function heldCatalog() {
+	const open: AssistantMessageEventStream[] = [];
+	const catalog = {
+		stream: () => {
+			const events = createAssistantMessageEventStream();
+			open.push(events);
+			return events;
+		},
+	} as unknown as Models;
+	const finish = (events: AssistantMessageEventStream, message: AssistantMessage) => {
+		events.push({ type: "done", reason: "stop", message });
+		events.end(message);
+	};
+	return { catalog, open, finish };
+}
+
+describe("metering under concurrency", () => {
+	it("counts a model request when it is sent, so two at once can't both take the last one", async () => {
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			const before = instance.usage.today();
+			await instance.setLimits({ dailyModelRequests: before.modelRequests + 1 });
+			const { catalog, open, finish } = heldCatalog();
+			const metered = instance.usage.meter(catalog);
+			const first = metered.stream(MODEL, { messages: [] });
+			const second = metered.stream(MODEL, { messages: [] });
+			// Only the first reached the provider; the second was refused before it was sent.
+			expect(open).toHaveLength(1);
+			expect((await second.result()).errorMessage).toMatch(/quota exceeded: today's \d+ model requests are used up/);
+			expect(instance.usage.today().modelRequests).toBe(before.modelRequests + 1);
+
+			finish(open[0]!, answered(30, 12));
+			await first.result();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			// Its tokens are added once, and it is still one request.
+			const after = instance.usage.today();
+			expect(after.modelRequests).toBe(before.modelRequests + 1);
+			expect(after.tokens).toBe(before.tokens + 42);
+		});
+	});
+
+	it("doesn't count a request the provider never received", async () => {
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			const before = instance.usage.today().modelRequests;
+			const throwing = { stream: () => { throw new Error("no provider"); } } as unknown as Models;
+			expect(() => instance.usage.meter(throwing).stream(MODEL, { messages: [] })).toThrow("no provider");
+			expect(instance.usage.today().modelRequests).toBe(before);
+		});
+	});
+
+	it("adds a request's tokens to the day it was sent, even when it ends after midnight", async () => {
+		await runInDurableObject(agent(), async (_instance: Pim, state) => {
+			let now = Date.UTC(2020, 0, 1, 23, 59, 59);
+			const meter = new UsageMeter({ sql: state.storage.sql, limits: () => UNLIMITED, planProviders: [], now: () => now });
+			const { catalog, open, finish } = heldCatalog();
+			const request = meter.meter(catalog).stream(MODEL, { messages: [] });
+			now += 60_000;
+			finish(open[0]!, answered(5, 5));
+			await request.result();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(meter.day("2020-01-01")).toMatchObject({ modelRequests: 1, tokens: 10 });
+			expect(meter.day("2020-01-02")).toMatchObject({ modelRequests: 0, tokens: 0 });
+		});
+	});
+
+	it("counts a run before the first await, so two at once can't both take the last one", async () => {
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			const before = instance.usage.today().runs;
+			await instance.setLimits({ dailyRuns: before + 1 });
+			faux.setResponses([fauxAssistantMessage("Only one.")]);
+			const [first, second] = await Promise.allSettled([
+				instance.submitTo("1", "First", {}, "user"),
+				instance.submitTo("1", "Second", {}, "user"),
+			]);
+			expect(first.status).toBe("fulfilled");
+			expect(second).toMatchObject({ status: "rejected", reason: { status: 429 } });
+			await instance.harness.wait((first as PromiseFulfilledResult<{ operationId: string }>).value.operationId, { session: "1" });
+			expect(instance.usage.today().runs).toBe(before + 1);
+		});
+	});
+
+	it("gives a run back when its submission repeats one already accepted", async () => {
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			const before = instance.usage.today().runs;
+			faux.setResponses([fauxAssistantMessage("Once.")]);
+			const first = await instance.submitTo("1", "Same", { operationId: "repeat-1" }, "user");
+			const again = await instance.submitTo("1", "Same", { operationId: "repeat-1" }, "user");
+			expect([first.accepted, again.accepted]).toEqual([true, false]);
+			await instance.harness.wait(first.operationId, { session: "1" });
+			expect(instance.usage.today().runs).toBe(before + 1);
 		});
 	});
 });

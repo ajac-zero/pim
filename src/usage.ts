@@ -111,6 +111,12 @@ export const utcDay = (now: number) => new Date(now).toISOString().slice(0, 10);
 /** Wording pi-ai classifies as a non-retryable quota error, so a run stops at once instead of retrying. */
 export const QUOTA_MESSAGE = "Pim usage quota exceeded";
 
+/** A model request, counted on the UTC day it was sent; its tokens are added to that day when it ends. */
+export type ModelReservation = { readonly day: string; readonly provider: string; readonly model: string };
+
+/** A reservation, or why there is none. */
+export type Reserved<T> = { readonly ok: true; readonly reservation: T } | { readonly ok: false; readonly refusal: string };
+
 export class UsageMeter {
 	readonly #sql: SqlStorage;
 	readonly #limits: () => Limits;
@@ -138,14 +144,16 @@ export class UsageMeter {
 		return day;
 	}
 
-	recordModel(provider: string, model: string, usage: ModelUsage | undefined): void {
+	/** Counts a request on `day`, with whatever usage it already has. */
+	#addModel(day: string, provider: string, model: string, requests: number, usage: ModelUsage | undefined): void {
 		this.#sql.exec(
-			`INSERT INTO pim_usage_models (day, provider, model, requests, input, output, cache_read, cache_write) VALUES (?, ?, ?, 1, ?, ?, ?, ?)
-			ON CONFLICT (day, provider, model) DO UPDATE SET requests = requests + 1, input = input + excluded.input, output = output + excluded.output,
-				cache_read = cache_read + excluded.cache_read, cache_write = cache_write + excluded.cache_write`,
-			this.#today(),
+			`INSERT INTO pim_usage_models (day, provider, model, requests, input, output, cache_read, cache_write) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (day, provider, model) DO UPDATE SET requests = requests + excluded.requests, input = input + excluded.input,
+				output = output + excluded.output, cache_read = cache_read + excluded.cache_read, cache_write = cache_write + excluded.cache_write`,
+			day,
 			provider,
 			model,
+			requests,
 			usage?.input ?? 0,
 			usage?.output ?? 0,
 			usage?.cacheRead ?? 0,
@@ -153,11 +161,54 @@ export class UsageMeter {
 		);
 	}
 
-	recordRun(): void {
+	/** Records a finished request outright, with no limit checked. */
+	recordModel(provider: string, model: string, usage: ModelUsage | undefined): void {
+		this.#addModel(this.#today(), provider, model, 1, usage);
+	}
+
+	/**
+	 * Checks the limits and counts the request in one synchronous step, before
+	 * it is sent, so concurrent requests can't all pass the same check. The
+	 * count is in the database, so it survives a restart mid-request; a
+	 * request retried after one is a new request and counts again.
+	 */
+	reserveModel(provider: string, model: string): Reserved<ModelReservation> {
+		const day = this.#today();
+		const refusal = this.#modelRefusal(day, provider);
+		if (refusal !== null) return { ok: false, refusal };
+		this.#addModel(day, provider, model, 1, undefined);
+		return { ok: true, reservation: { day, provider, model } };
+	}
+
+	/** Adds a request's tokens to the day it was reserved on, even if it ended after midnight. Call once per reservation. */
+	settleModel(reservation: ModelReservation, usage: ModelUsage | undefined): void {
+		if (usage) this.#addModel(reservation.day, reservation.provider, reservation.model, 0, usage);
+	}
+
+	/** Gives back a reservation for a request that never reached the provider. */
+	releaseModel({ day, provider, model }: ModelReservation): void {
 		this.#sql.exec(
-			"INSERT INTO pim_usage_runs (day, runs) VALUES (?, 1) ON CONFLICT (day) DO UPDATE SET runs = runs + 1",
-			this.#today(),
+			"UPDATE pim_usage_models SET requests = requests - 1 WHERE day = ? AND provider = ? AND model = ? AND requests > 0",
+			day,
+			provider,
+			model,
 		);
+	}
+
+	/** Checks the run limit and counts the run in one synchronous step; returns the day it counts on. */
+	reserveRun(): Reserved<string> {
+		const day = this.#today();
+		const { dailyRuns } = this.#limits();
+		if (dailyRuns !== null && this.day(day).runs >= dailyRuns) {
+			return { ok: false, refusal: `${QUOTA_MESSAGE}: today's ${dailyRuns} runs are used up. It resets at midnight UTC.` };
+		}
+		this.#sql.exec("INSERT INTO pim_usage_runs (day, runs) VALUES (?, 1) ON CONFLICT (day) DO UPDATE SET runs = runs + 1", day);
+		return { ok: true, reservation: day };
+	}
+
+	/** Gives back a run that did not start: its submission failed, or repeated one already accepted. */
+	releaseRun(day: string): void {
+		this.#sql.exec("UPDATE pim_usage_runs SET runs = runs - 1 WHERE day = ? AND runs > 0", day);
 	}
 
 	day(day: string): DayUsage {
@@ -203,9 +254,18 @@ export class UsageMeter {
 
 	/** Why a request to `provider` may not run now, or null. */
 	modelRefusal(provider: string): string | null {
+		return this.#modelRefusal(this.#today(), provider);
+	}
+
+	/**
+	 * Requests are counted when sent, so their limit is exact. Tokens are
+	 * known only once a request ends, so requests already under way can take
+	 * the day past its token limit; the next request is refused.
+	 */
+	#modelRefusal(day: string, provider: string): string | null {
 		const limits = this.#limits();
 		if (limits.dailyTokens === null && limits.dailyModelRequests === null) return null;
-		const today = this.today();
+		const today = this.day(day);
 		if (limits.dailyModelRequests !== null && today.modelRequests >= limits.dailyModelRequests) {
 			return `${QUOTA_MESSAGE}: today's ${limits.dailyModelRequests} model requests are used up. It resets at midnight UTC.`;
 		}
@@ -215,16 +275,10 @@ export class UsageMeter {
 		return null;
 	}
 
-	/** Why another run may not start today, or null. */
-	runRefusal(): string | null {
-		const { dailyRuns } = this.#limits();
-		if (dailyRuns === null || this.today().runs < dailyRuns) return null;
-		return `${QUOTA_MESSAGE}: today's ${dailyRuns} runs are used up. It resets at midnight UTC.`;
-	}
-
 	/**
-	 * The catalog with every request metered: refused with an error response
-	 * once a limit is reached, and its usage recorded once it ends.
+	 * The catalog with every request metered: counted when it is sent,
+	 * refused with an error response once a limit is reached, and its tokens
+	 * added once it ends.
 	 */
 	meter(models: Models): Models {
 		const failed = (model: Model<Api>, reason: string): AssistantMessage => ({
@@ -241,19 +295,27 @@ export class UsageMeter {
 		const metered =
 			(stream: StreamFn): StreamFn =>
 			(model, context, options) => {
-				const refusal = this.modelRefusal(model.provider);
-				if (refusal !== null) {
-					console.warn(JSON.stringify({ event: "pim.limit", limit: "model", provider: model.provider, reason: refusal }));
+				const reserved = this.reserveModel(model.provider, model.id);
+				if (!reserved.ok) {
+					console.warn(JSON.stringify({ event: "pim.limit", limit: "model", provider: model.provider, reason: reserved.refusal }));
 					const events = createAssistantMessageEventStream();
-					const message = failed(model, refusal);
+					const message = failed(model, reserved.refusal);
 					events.push({ type: "error", reason: "error", error: message });
 					events.end(message);
 					return events;
 				}
-				const events = stream(model, context, options);
+				let events: AssistantMessageEventStream;
+				try {
+					events = stream(model, context, options);
+				} catch (error) {
+					// Never sent: it doesn't count.
+					this.releaseModel(reserved.reservation);
+					throw error;
+				}
+				// The stream settles once; a failed or aborted request keeps its count, with whatever tokens it reported.
 				events.result().then(
-					(message) => this.recordModel(model.provider, model.id, message.usage),
-					() => this.recordModel(model.provider, model.id, undefined),
+					(message) => this.settleModel(reserved.reservation, message.usage),
+					() => undefined,
 				);
 				return events;
 			};

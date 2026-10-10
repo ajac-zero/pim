@@ -243,6 +243,35 @@ const translations = {
     typeUsernameToConfirm: "Type {username} to confirm",
     deleteForever: "Delete forever",
     deleteAccountButton: "Delete my account…",
+    addThisDeviceTitle: "Add this device",
+    addThisDeviceBody:
+      "Your Pimling sent this link from a device where you're signed in. Create a passkey here, and this device can sign in on its own from now on.",
+    addThisDeviceNote:
+      "The link works once, for 10 minutes. Your other devices and passkeys stay as they are.",
+    newDeviceTitle: "Signed up on another device?",
+    newDeviceBody:
+      "A passkey lives on the device that made it, unless your password manager syncs it here. On a device where you're signed in, open Settings → Passkeys → Add another device and scan the code. No other device? Use a recovery code.",
+    addDeviceTitle: "Add another device",
+    addDeviceBody:
+      "Sign in on your phone or another computer: it makes its own passkey from a one-time link.",
+    addDeviceButton: "Add another device",
+    addDeviceQr: "QR code with a link that adds another device",
+    addDeviceStepScan:
+      "On the other device, scan this code with the camera, or open the link.",
+    addDeviceStepPasskey: "Tap Create passkey there.",
+    addDeviceExpires:
+      "Works once, until {time}. Anyone with this link can add a device, so only open it yourself.",
+    addDeviceExpired: "That link expired. Make a new one.",
+    copyLink: "Copy link",
+    done: "Done",
+    havePimling: "Already have a Pimling?",
+    signInToIt: "Sign in",
+    needPimling: "Don't have one yet?",
+    createOne: "Create one",
+    findPimlingTitle: "Sign in to your Pimling",
+    findPimlingBody:
+      "Enter your username to go to your Pimling, then sign in with your passkey.",
+    goToMyPimling: "Go to my Pimling",
     accountClosedTitle: "Your account is closed",
     accountClosedBody:
       "Nobody can use it anymore, but erasing its data hasn't finished yet. Pimling keeps retrying until everything is erased; you don't need to do anything.",
@@ -485,6 +514,35 @@ const translations = {
     typeUsernameToConfirm: "Escribe {username} para confirmar",
     deleteForever: "Eliminar para siempre",
     deleteAccountButton: "Eliminar mi cuenta…",
+    addThisDeviceTitle: "Agrega este dispositivo",
+    addThisDeviceBody:
+      "Tu Pimling envió este enlace desde un dispositivo donde tienes sesión iniciada. Crea aquí una llave de acceso y este dispositivo podrá iniciar sesión por su cuenta desde ahora.",
+    addThisDeviceNote:
+      "El enlace funciona una vez, durante 10 minutos. Tus otros dispositivos y llaves de acceso no cambian.",
+    newDeviceTitle: "¿Te registraste en otro dispositivo?",
+    newDeviceBody:
+      "Una llave de acceso vive en el dispositivo que la creó, a menos que tu gestor de contraseñas la sincronice aquí. En un dispositivo con sesión iniciada, abre Configuración → Llaves de acceso → Agregar otro dispositivo y escanea el código. ¿No tienes otro dispositivo? Usa un código de recuperación.",
+    addDeviceTitle: "Agregar otro dispositivo",
+    addDeviceBody:
+      "Inicia sesión en tu teléfono u otra computadora: crea su propia llave de acceso con un enlace de un solo uso.",
+    addDeviceButton: "Agregar otro dispositivo",
+    addDeviceQr: "Código QR con un enlace que agrega otro dispositivo",
+    addDeviceStepScan:
+      "En el otro dispositivo, escanea este código con la cámara o abre el enlace.",
+    addDeviceStepPasskey: "Toca Crear llave de acceso allí.",
+    addDeviceExpires:
+      "Funciona una vez, hasta las {time}. Cualquiera con este enlace puede agregar un dispositivo, así que ábrelo solo tú.",
+    addDeviceExpired: "Ese enlace venció. Crea uno nuevo.",
+    copyLink: "Copiar enlace",
+    done: "Listo",
+    havePimling: "¿Ya tienes un Pimling?",
+    signInToIt: "Inicia sesión",
+    needPimling: "¿Aún no tienes uno?",
+    createOne: "Crea uno",
+    findPimlingTitle: "Inicia sesión en tu Pimling",
+    findPimlingBody:
+      "Escribe tu nombre de usuario para ir a tu Pimling y luego inicia sesión con tu llave de acceso.",
+    goToMyPimling: "Ir a mi Pimling",
     accountClosedTitle: "Tu cuenta está cerrada",
     accountClosedBody:
       "Ya nadie puede usarla, pero el borrado de sus datos aún no terminó. Pimling lo sigue intentando hasta borrarlo todo; no tienes que hacer nada.",

@@ -18,6 +18,7 @@ import {
   PreferencesSection,
   TokensSection,
 } from "~/components/account-settings";
+import { AddDevice } from "~/components/add-device";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
 import { Page } from "~/components/page";
@@ -438,6 +439,7 @@ function PasskeysSection() {
       <p className="px-1 text-muted-foreground text-xs">
         {t("passkeysDescription")}
       </p>
+      <AddDevice />
       {passkeys && passkeys.length > 0 && (
         <ul className="divide-y rounded-xl border" aria-label={t("passkeys")}>
           {passkeys.map((passkey) => (

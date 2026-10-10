@@ -173,7 +173,9 @@ export const auth = {
    * Needs a setup link's code or a recovery code unless this browser is
    * signed in, or Pim can be claimed.
    */
-  async addPasskey(allowedBy: { setup?: string; recovery?: string } = {}) {
+  async addPasskey(
+    allowedBy: { setup?: string; recovery?: string; device?: string } = {},
+  ) {
     const options = await post<CreationOptions>("/passkeys/options", allowedBy);
     const credential = (await navigator.credentials.create({
       publicKey: {
@@ -210,6 +212,13 @@ export const auth = {
 
   signOut: () => post("/sign-out"),
 
+  /** A link that adds another device (a phone) to this Pim, once, for ten minutes. */
+  deviceLink: () => post<{ url: string; expiresAt: string }>("/device-link"),
+
+  /** Pimling's front door: the address of an existing Pimling. */
+  findPimling: (name: string) =>
+    call<{ url: string }>(`/pimling?name=${encodeURIComponent(name)}`),
+
   /** Pimling: how many recovery codes are left, and a new set. */
   recoveryCodesLeft: () =>
     call<{ left: number }>("/recovery-codes").then((body) => body.left),
@@ -241,7 +250,12 @@ export function setupCode(): string | null {
   return new URLSearchParams(location.hash.slice(1)).get("setup");
 }
 
-/** Drops a used setup code from the address bar and history. */
+/** The code in a link that adds another device (`/#device=…`). */
+export function deviceCode(): string | null {
+  return new URLSearchParams(location.hash.slice(1)).get("device");
+}
+
+/** Drops a used setup code or device link from the address bar and history. */
 export function forgetSetupCode() {
   history.replaceState(history.state, "", location.pathname + location.search);
 }

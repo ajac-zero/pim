@@ -116,7 +116,7 @@ const translations = {
     chatGPTStepPaste:
       "Paste it below, here in your own Pim, within 15 minutes. It holds a one-time code that finishes the sign-in, so don't paste it anywhere else.",
     chatGPTAfterPaste:
-      "After this, Pim keeps the connection going on its own. You won't need to do this again unless you disconnect.",
+      "After this, Pim normally keeps the connection going on its own. If access expires or is revoked in ChatGPT, connect again the same way.",
     connect: "Connect",
     connectForMoreModels:
       "Connect your ChatGPT plan to choose OpenAI's models.",
@@ -360,7 +360,7 @@ const translations = {
     chatGPTStepPaste:
       "Pégala abajo, aquí en tu propio Pim, antes de 15 minutos. Contiene un código de un solo uso que completa el inicio de sesión, así que no la pegues en ningún otro lugar.",
     chatGPTAfterPaste:
-      "Después, Pim mantiene la conexión por su cuenta. No tendrás que repetirlo a menos que te desconectes.",
+      "Después, Pim normalmente mantiene la conexión por su cuenta. Si el acceso vence o se revoca en ChatGPT, vuelve a conectarte de la misma forma.",
     connect: "Conectar",
     connectForMoreModels:
       "Conecta tu plan de ChatGPT para elegir los modelos de OpenAI.",

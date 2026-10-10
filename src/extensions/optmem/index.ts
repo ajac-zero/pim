@@ -29,8 +29,8 @@ export { OptMemStore } from "./store";
  */
 export type OptMemOptions = {
 	readonly sql: SqlStorage;
-	/** IANA time zone memories are dated in. */
-	readonly timeZone: string;
+	/** IANA time zone memories are dated in; a function follows the person's setting as it changes. */
+	readonly timeZone: string | (() => string);
 	/** Lines in the memory view. Default 96 (about 8k tokens). */
 	readonly viewLines?: number;
 	/**
@@ -88,6 +88,7 @@ export function summaryLine(answer: string): string {
 export function createOptMem(options: OptMemOptions) {
 	const store = new OptMemStore(options.sql);
 	const viewLines = options.viewLines ?? DEFAULT_VIEW_LINES;
+	const zone = () => (typeof options.timeZone === "function" ? options.timeZone() : options.timeZone);
 	const sinceLines = options.sinceLines ?? Math.max(4, Math.floor(viewLines / 8));
 
 	/** The memory as the model sees it. */
@@ -265,7 +266,7 @@ export function createOptMem(options: OptMemOptions) {
 			}
 			// The key is memoized, so a call replayed after an eviction saves the memory once.
 			const key = await api.memo("note", crypto.randomUUID(), context);
-			const entry = store.append(line, today(options.timeZone), { key, source: String(api.conversationId) });
+			const entry = store.append(line, today(zone()), { key, source: String(api.conversationId) });
 			await startNap({
 				getTask: (id) => api.getTask(id, context),
 				createTask: () =>
@@ -349,7 +350,7 @@ export function createOptMem(options: OptMemOptions) {
 		],
 	});
 
-	return { store, extension, NapTask, view, startNap, today: () => today(options.timeZone) };
+	return { store, extension, NapTask, view, startNap, today: () => today(zone()) };
 }
 
 export type OptMem = ReturnType<typeof createOptMem>;

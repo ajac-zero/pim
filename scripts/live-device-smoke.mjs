@@ -8,10 +8,12 @@
 // as a phone's camera would. Each profile gets its own virtual passkey authenticator.
 //
 // It never prints the invite, setup or device codes, or the admin token. The disposable account is
-// deleted at the end, and the script tries to delete it when a check fails or the script throws:
-// with the desktop's passkey session, which exists only once the desktop has made its passkey; and,
-// with --admin-token-file, with the admin API, which also deletes an account that never got a
-// passkey. Without that file, a failure between registration and the first passkey leaves a pending
+// deleted at the end, and the script tries to delete it when a check fails or the script throws
+// (including when registration's answer is lost, since the account may exist anyway): with the
+// desktop's passkey session, at the Pimling's own host, which works once the desktop has made its
+// passkey; and, with --admin-token-file, with the admin API, which also deletes an account that never
+// got a passkey. 200, 202 (closed, still being erased) and 410 (already gone) all count as closed.
+// Without the token file, a failure between registration and the first passkey leaves a pending
 // account (it lapses in a day, giving its username back). Whenever the account may be left behind,
 // the script says so and exits with status 2. Run it from a network that hasn't used up the
 // deployment's per-address registration limit for the day.
@@ -196,8 +198,23 @@ async function adminDelete() {
 }
 let desktop;
 let phone;
+// Whether the account may exist: set before asking to register, since a lost response can hide one
+// the server made. Cleared only by a definite refusal.
 let registered = false;
+// Whether it's closed: deleted (200), being erased (202), or already gone (410).
 let deleted = false;
+
+/** A deletion answer that means the account is closed for good. */
+const closed = (status) => status === 200 || status === 202 || status === 410;
+/**
+ * Deletes the account with a tab's passkey session. That cookie is the Pimling host's own, and the
+ * host refuses requests from other origins, so the tab goes there first if it's elsewhere (such as
+ * still on the front door).
+ */
+async function deleteAccount(tab) {
+	if (new URL(await tab.evaluate("location.href")).origin !== HOST) await tab.go(`${HOST}/`);
+	return tab.api(`${HOST}/api/account`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirm: USER }) });
+}
 
 try {
 	desktop = await tab(Number(args["desktop-port"]), false);
@@ -206,13 +223,15 @@ try {
 	await desktop.go(`${FRONT}/`);
 	check("front door is up", (await desktop.api("/health")).status === 200);
 	check("front door offers signing in again", await desktop.has("Already have a Pimling?"));
+	registered = true;
 	const registration = await desktop.evaluate(
 		`fetch("/auth/register", ${JSON.stringify(json({ username: USER, invite: INVITE }))}).then(async (r) => ({ status: r.status, body: await r.json() }))`,
 	);
 	if (!check("disposable account registered", registration.status === 201, registration.status === 201 ? "" : `HTTP ${registration.status}: ${registration.body?.error}`)) {
+		// A definite refusal made nothing; anything else might have.
+		if (registration.status >= 400 && registration.status < 500) registered = false;
 		throw new Error("registration failed");
 	}
-	registered = true;
 	const recoveryCodes = registration.body.recoveryCodes.length;
 	const lookup = await desktop.api(`/auth/pimling?name=${USER}`);
 	check("lookup finds it", lookup.status === 200);
@@ -278,10 +297,14 @@ try {
 	const left = await desktop.evaluate(`fetch("/auth/recovery-codes").then((r) => r.json()).then((b) => b.left)`);
 	check("recovery codes untouched", left === recoveryCodes, `${left} of ${recoveryCodes}`);
 
+	// Control: the phone can write while the account exists, so a refusal after deletion means something.
+	const before = await phone.api("/api/memory/log", json({ text: "written before deletion" }));
+	check("phone can write before deletion", before.status === 201, `HTTP ${before.status} ${before.error ?? ""}`.trim());
+
 	// Deletion, with the phone still signed in.
-	const deletion = await desktop.api("/api/account", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirm: USER }) });
-	deleted = deletion.status === 200;
-	check("deleted from the desktop", deleted, `HTTP ${deletion.status}`);
+	const deletion = await deleteAccount(desktop);
+	deleted = closed(deletion.status);
+	check("deleted from the desktop", deletion.status === 200, `HTTP ${deletion.status}`);
 
 	// At once, the phone's session opens nothing: whichever Worker answers, it refuses.
 	const now = await phone.api("/api/sessions");
@@ -304,14 +327,15 @@ try {
 	if (registered && !deleted) {
 		// The desktop's own session: works once its passkey exists.
 		const own = await Promise.resolve()
-			.then(() => desktop.api("/api/account", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirm: USER }) }))
+			.then(() => deleteAccount(desktop))
 			.catch((error) => ({ status: 0, error: error instanceof Error ? error.message : String(error) }));
-		deleted = own.status === 200;
+		deleted = closed(own.status);
 		check("cleanup with the desktop's session", deleted, `HTTP ${own.status} ${own.error ?? ""}`.trim());
 		// The admin API: works without any session, from this process, not the browser.
 		if (!deleted && ADMIN_TOKEN) {
 			const operator = await adminDelete().catch((error) => ({ status: 0, body: { error: error instanceof Error ? error.message : String(error) } }));
-			deleted = operator.status === 200 && operator.body?.deleted === true;
+			// 200 erased, 202 closed and being erased; 404 means registration never made it.
+			deleted = closed(operator.status) || operator.status === 404;
 			check("cleanup with the admin API", deleted, `HTTP ${operator.status} ${JSON.stringify(operator.body)}`);
 		}
 		if (!deleted) {

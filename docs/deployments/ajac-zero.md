@@ -85,7 +85,8 @@ Invite-only; at most 25 accounts and 3 registrations per address a day. Per pers
   - records exact statuses;
   - checks refusal at once and `410` after the cache window separately;
   - bounds every browser operation (`--cdp-timeout-ms`, default 30 s), so cleanup still runs when a browser hangs;
-  - on a failure, tries to delete the disposable account with the desktop's session. That session exists only after the desktop's first passkey. With `--admin-token-file`, it falls back to the admin API, which also deletes an account that never got a passkey. Without that file, a failure before the first passkey leaves a pending account (it lapses in a day).
+  - writes once before deleting (expecting `201`), so the refusal afterwards (`401`, `403` or `410` only) means something;
+  - on a failure, including a registration whose answer was lost, tries to delete the disposable account with the desktop's session, at the Pimling's own host. That session exists only after the desktop's first passkey. With `--admin-token-file`, it falls back to the admin API, which also deletes an account that never got a passkey. `200`, `202` and `410` all count as closed. Without that file, a failure before the first passkey leaves a pending account (it lapses in a day).
   - says `CLEANUP NEEDED` and exits `2` whenever the account may be left behind. It never prints the token or any code.
 
   Run it from a network that hasn't used up the registration limit:

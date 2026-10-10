@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "vite dev --port 3000",
     "build": "vite build",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsr generate && tsc --noEmit",
     "test": "vitest run",
     "lint": "biome check .",
     "format": "biome format --write ."
@@ -34,6 +34,7 @@
     "@earendil-works/pi-ai": "1.1.0",
     "@earendil-works/pi-durable": "1.1.0",
     "@tailwindcss/vite": "^4.3.2",
+    "@tanstack/router-cli": "^1.167.40",
     "@tanstack/router-plugin": "^1.168.42",
     "@types/node": "^24.19.1",
     "@types/react": "^19.2.7",

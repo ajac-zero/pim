@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { AlertCircle, Clock } from "lucide-react";
 import { Fragment, memo, useMemo } from "react";
 import { PimMark } from "~/components/app-sidebar";
@@ -14,7 +15,7 @@ import {
   UserMessage,
 } from "~/components/chat/items";
 import { CHATGPT_USAGE_URL } from "~/components/chatgpt-logo";
-import { useI18n } from "~/components/i18n";
+import { type TranslationKey, useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
 import {
   Conversation,
@@ -28,11 +29,21 @@ import type {
   ReasoningItem,
 } from "~/lib/openresponses";
 import type { Approval } from "~/lib/pim-api";
-import { type SessionView, type ThreadEntry } from "~/lib/pim-view";
+import type { ModelProblem, SessionView, ThreadEntry } from "~/lib/pim-view";
 import { approvalsQuery } from "~/lib/queries";
 
 /** Tools whose answer names an artifact version, shown as the artifact itself. */
 const ARTIFACT_TOOLS = new Set(["artifact_create", "artifact_update"]);
+
+/** What each model problem tells the person; never the provider's own text. */
+const PROBLEM_TEXT: Record<ModelProblem, TranslationKey> = {
+  usage_limit: "modelUsageLimit",
+  quota: "modelQuota",
+  sign_in: "modelSignIn",
+  too_long: "modelTooLong",
+  busy: "modelBusy",
+  other: "modelOther",
+};
 
 /* Insets clearing the floating header and composer (see the chat route). */
 const DEFAULT_COMPOSER_INSET = 160;
@@ -219,7 +230,7 @@ export const Thread = memo(function Thread({
         {view.retry && (
           <div className="flex items-center gap-2 text-muted-foreground text-sm">
             <Clock className="size-4 shrink-0" />
-            {t("retryingAfterError", { error: view.retry.error })}
+            {t("retryingAfterError")}
           </div>
         )}
 
@@ -233,16 +244,35 @@ export const Thread = memo(function Thread({
           <div className="flex items-start gap-3 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
             <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
             <div className="flex-1 space-y-2">
-              <p>{view.error}</p>
-              {/* The ChatGPT plan's usage limit: OpenAI's settings show and lift it. */}
-              {/chatgpt\.com\/settings\/usage|subscription_sharing_usage/.test(
-                view.error,
-              ) && (
-                <Button asChild size="sm" variant="outline">
-                  <a href={CHATGPT_USAGE_URL} target="_blank" rel="noreferrer">
-                    {t("manageUsage")}
-                  </a>
-                </Button>
+              {"problem" in view.error ? (
+                <>
+                  <p>{t(PROBLEM_TEXT[view.error.problem])}</p>
+                  {(view.error.problem === "usage_limit" ||
+                    view.error.problem === "sign_in" ||
+                    view.error.problem === "other") && (
+                    <div className="flex flex-wrap gap-2">
+                      {/* OpenAI's settings show the plan's usage and Pim's App limit, and raise it. */}
+                      {view.error.problem === "usage_limit" && (
+                        <Button asChild size="sm" variant="outline">
+                          <a
+                            href={CHATGPT_USAGE_URL}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {t("manageUsage")}
+                          </a>
+                        </Button>
+                      )}
+                      <Button asChild size="sm" variant="outline">
+                        <Link to="/settings">{t("settings")}</Link>
+                      </Button>
+                    </div>
+                  )}
+                </>
+              ) : "taskFailed" in view.error ? (
+                <p>{t("taskFailed")}</p>
+              ) : (
+                <p>{t("notAnswered", { reason: view.error.reason })}</p>
               )}
             </div>
           </div>

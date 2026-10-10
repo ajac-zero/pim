@@ -2,6 +2,8 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vitest";
+import { Auth } from "../../src/auth";
+import { type PimSite, toAgent } from "../../src/gateway";
 import type { Directory, RegistrationPolicy } from "../../src/hosted/directory";
 import { faux, Pim } from "../worker";
 import { Authenticator } from "../webauthn";
@@ -502,6 +504,88 @@ describe("the account", () => {
 		await runDurableObjectAlarm(directory());
 		expect((await holdings(uma.ownerId)).remaining).toEqual([]);
 		expect((await directory().account(uma.ownerId))?.status).toBe("deleted");
+	});
+
+	it("refuses a request authorized before the deletion that reaches the agent after it", async () => {
+		const rex = await person("reviewrace");
+		const token = (await rex.browser.json("/auth/tokens", { method: "POST", json: { name: "CLI" } })).body.token as string;
+		// Hold the first valid token check after it says yes, until the deletion is done.
+		const prototype = Auth.prototype as Auth;
+		const original = prototype.checkToken;
+		let entered!: () => void;
+		const gateEntered = new Promise<void>((resolve) => (entered = resolve));
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => (release = resolve));
+		let held = false;
+		prototype.checkToken = async function (this: Auth, ...args: Parameters<Auth["checkToken"]>) {
+			const valid = await original.apply(this, args);
+			if (valid && !held) {
+				held = true;
+				entered();
+				await gate;
+			}
+			return valid;
+		};
+		try {
+			const late = new Browser(hostOf("reviewrace")).json("/api/memory/log", {
+				method: "POST",
+				json: { text: "Written AFTER deletion" },
+				headers: { Authorization: `Bearer ${token}` },
+			});
+			await gateEntered;
+			expect((await rex.browser.json("/api/account", { method: "DELETE", json: { confirm: "reviewrace" } })).body).toEqual({ deleted: true });
+			await new Promise((resolve) => setTimeout(resolve, 500));
+			release();
+			const write = await late;
+			expect(write.status).toBe(410);
+		} finally {
+			prototype.checkToken = original;
+		}
+		expect(await holdings(rex.ownerId)).toMatchObject({ remaining: [], memories: 0 });
+		expect((await directory().account(rex.ownerId))?.status).toBe("deleted");
+	});
+
+	it("refuses a stale gateway, sockets and background work once an agent is erased", async () => {
+		const sol = await person("sol");
+		// A socket open across the deletion.
+		const upgrade = await sol.browser.fetch("/api/ws?session=1", { headers: { Upgrade: "websocket", origin: hostOf("sol") } });
+		expect(upgrade.status).toBe(101);
+		const socket = upgrade.webSocket!;
+		const closed = new Promise<number>((resolve) => socket.addEventListener("close", (event) => resolve(event.code)));
+		socket.accept();
+		// Background work due right after.
+		await runInDurableObject(env.Pim.getByName(sol.ownerId), async (instance: Pim) => {
+			await instance.schedule(new Date(Date.now() + 200), "runScheduledTask", { session: "1", instruction: "Write something" });
+		});
+		expect((await sol.browser.json("/api/account", { method: "DELETE", json: { confirm: "sol" } })).body).toEqual({ deleted: true });
+		expect(await closed).toBeGreaterThan(0);
+
+		// Another Worker that still has the account cached as active, with a request it already authorized.
+		const stale: PimSite = {
+			owner: sol.ownerId,
+			agent: sol.ownerId,
+			store: env.Auth.getByName(sol.ownerId),
+			mode: "hosted",
+			user: { id: "x", name: "sol", displayName: "sol" },
+		};
+		const write = new Request(`${hostOf("sol")}/api/memory/log`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ text: "Written by a stale gateway" }),
+		});
+		expect((await toAgent(write, env, stale, "/memory/log", true)).status).toBe(410);
+		const socketAgain = new Request(`${hostOf("sol")}/api/ws?session=1`, { headers: { Upgrade: "websocket" } });
+		expect((await toAgent(socketAgain, env, stale, "/ws", true)).status).toBe(410);
+		// Nor can the hosting service write to it.
+		await expect(
+			runInDurableObject(env.Pim.getByName(sol.ownerId), (instance: Pim) =>
+				instance.provision({ ownerId: sol.ownerId, username: "sol", publicUrl: hostOf("sol") }),
+			),
+		).rejects.toThrow(/erased/);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		await runDurableObjectAlarm(env.Pim.getByName(sol.ownerId));
+		expect(await holdings(sol.ownerId)).toMatchObject({ remaining: [], memories: 0 });
+		expect(await runInDurableObject(env.Pim.getByName(sol.ownerId), (instance: Pim) => instance.erasure())).toEqual({ sealed: true, remaining: [] });
 	});
 
 	it("counts a deletion done only when the agent is checked empty, whatever its call said", async () => {

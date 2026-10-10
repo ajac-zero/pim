@@ -117,6 +117,8 @@ function watchOf(row: Row): AppWatch {
 	};
 }
 
+const ERASED_SCHEMA = "CREATE TABLE IF NOT EXISTS pim_erased (erased_at INTEGER NOT NULL)";
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS pim_goals (
 	id TEXT PRIMARY KEY,
@@ -256,6 +258,22 @@ export class PimStore {
 	readonly #sql: SqlStorage;
 
 	/**
+	 * When this agent was erased, or null. The mark is written right after
+	 * the wipe and is the only thing an erased agent keeps: it refuses every
+	 * request from then on, so nothing can be written to it again.
+	 */
+	erasedAt(): number | null {
+		const row = this.#sql.exec("SELECT erased_at FROM pim_erased LIMIT 1").toArray()[0];
+		return row ? Number(row.erased_at) : null;
+	}
+
+	/** Marks the agent erased; after `deleteAll`, so it makes its own table. */
+	markErased(now: number): void {
+		this.#sql.exec(ERASED_SCHEMA);
+		this.#sql.exec("INSERT INTO pim_erased (erased_at) VALUES (?)", now);
+	}
+
+	/**
 	 * Which kinds of the person's data this database still holds, by table:
 	 * none once the agent is erased. Conversations are pi's (`pi_entries`).
 	 */
@@ -286,6 +304,7 @@ export class PimStore {
 	constructor(sql: SqlStorage) {
 		this.#sql = sql;
 		this.#sql.exec(SCHEMA);
+		this.#sql.exec(ERASED_SCHEMA);
 		// Approvals made before these columns existed have neither.
 		const columns = this.#sql.exec("PRAGMA table_info(pim_approvals)").toArray().map((row) => String(row.name));
 		if (!columns.includes("call_id")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN call_id TEXT");

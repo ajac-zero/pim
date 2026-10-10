@@ -487,6 +487,7 @@ export class Pim extends Agent<Env> {
 		options: { operationId?: string; whenBusy?: "followUp" | "steer" },
 		from: "user" | "pim" | "approval",
 	): Promise<PiReceipt> {
+		this.#assertOpen();
 		if (this.status() !== "active") throw new HttpError(403, "This Pim is suspended");
 		// Checked and counted before the first await, so concurrent submissions can't all pass the same check.
 		let run: string | undefined;
@@ -722,12 +723,31 @@ export class Pim extends Agent<Env> {
 
 	// Hosting: what the Worker in front tells the agent about its owner.
 
+	/** Set while `deleteEverything` runs: the agent takes nothing new. */
+	#erasing = false;
+
+	/**
+	 * Whether the agent is erased, or being erased. An erased agent keeps
+	 * only its mark and refuses everything: requests, sockets, alarms and the
+	 * hosting service's writes. The check is here, in the one object every
+	 * request reaches, so a request a Worker authorized before the deletion
+	 * (or with an account it had cached) can't write after it.
+	 */
+	#closed(): boolean {
+		return this.#erasing || this.store.erasedAt() !== null;
+	}
+
+	#assertOpen(): void {
+		if (this.#closed()) throw new HttpError(410, "This Pim was erased");
+	}
+
 	/** Every request comes through the Worker, which names the owner it resolved: it must be this agent's. */
 	override async fetch(request: Request): Promise<Response> {
 		if (request.headers.get(OWNER_HEADER) !== this.name) {
 			console.error(JSON.stringify({ event: "pim.misrouted", agent: this.name }));
 			return Response.json({ error: "This request is not for this Pim" }, { status: 421 });
 		}
+		if (this.#closed()) return Response.json({ error: "This Pim was erased" }, { status: 410 });
 		if (this.status() !== "active") return Response.json({ error: "This Pim is suspended" }, { status: 403 });
 		return super.fetch(request);
 	}
@@ -736,8 +756,15 @@ export class Pim extends Agent<Env> {
 		return this.store.meta(STATUS_KEY) === "suspended" ? "suspended" : "active";
 	}
 
+	/** An erased agent runs no scheduled work: none should be left, and none may start. */
+	override async alarm(): Promise<void> {
+		if (this.#closed()) return;
+		return super.alarm();
+	}
+
 	/** Records who owns this agent and where it is served, so callbacks and pushes use that address. */
 	async provision(profile: OwnerProfile): Promise<void> {
+		this.#assertOpen();
 		if (profile.ownerId !== this.name) throw new Error(`Owner ${profile.ownerId} is not this agent's (${this.name})`);
 		this.store.setMeta(PROFILE_KEY, JSON.stringify(profile));
 		this.store.setMeta("public_origin", new URL(profile.publicUrl).origin);
@@ -750,6 +777,7 @@ export class Pim extends Agent<Env> {
 
 	/** Changes the person's settings, as `PUT /settings` does; a hosted service sets their time zone at registration. */
 	async applySettings(update: Record<string, unknown>): Promise<Settings> {
+		this.#assertOpen();
 		const before = this.settings().approvalPolicy;
 		const settings = updateSettings(this.store, this.env, update);
 		// The approval tools say how a request is decided: they must say it the new way.
@@ -759,6 +787,7 @@ export class Pim extends Agent<Env> {
 
 	/** Suspends or restores the agent. Suspending stops its runs and closes its sockets; its data stays. */
 	async setStatus(status: OwnerStatus): Promise<void> {
+		this.#assertOpen();
 		if (status === "active") this.store.deleteMeta(STATUS_KEY);
 		else this.store.setMeta(STATUS_KEY, status);
 		if (status === "suspended") {
@@ -769,6 +798,7 @@ export class Pim extends Agent<Env> {
 
 	/** This agent's own limits, over the deployment's; null goes back to the deployment's. */
 	async setLimits(limits: Partial<Limits> | null): Promise<Limits> {
+		this.#assertOpen();
 		if (limits === null) this.store.deleteMeta(LIMITS_KEY);
 		else this.store.setMeta(LIMITS_KEY, JSON.stringify(parseLimits(limits)));
 		return this.limits();
@@ -839,13 +869,32 @@ export class Pim extends Agent<Env> {
 		return remaining;
 	}
 
-	/** Deletes the agent and everything in it: runs, schedules, apps' subscriptions, memories, credentials. */
+	/** Whether the agent is erased, and what of the person's data it still holds; a finished deletion is both. */
+	async erasure(): Promise<{ sealed: boolean; remaining: string[] }> {
+		return { sealed: this.store.erasedAt() !== null, remaining: await this.remainingData() };
+	}
+
+	/**
+	 * Erases the agent: stops its runs, ends apps' event subscriptions,
+	 * closes its sockets, wipes its storage (alarms included), then marks it
+	 * erased, flushes the mark, and ends this instance, so nothing that was
+	 * under way here can write afterwards. Later instances find the mark and
+	 * refuse everything. The call that asked usually sees the instance end:
+	 * check `erasure()` afterwards. Running it again on an erased agent wipes
+	 * anything a request slipped in before the mark, and marks it again.
+	 */
 	async deleteEverything(): Promise<void> {
-		for (const session of await this.harness.sessions.list()) await this.harness.session(session.id).abort();
+		this.#erasing = true;
+		for (const session of await this.harness.sessions.list().catch(() => [])) {
+			await this.harness.session(session.id).abort().catch(() => undefined);
+		}
 		// Apps stop sending events to an agent that is gone.
 		for (const watch of this.store.watches()) await this.appEvents.stop(watch.id).catch(() => undefined);
 		for (const connection of this.getConnections()) connection.close(4010, "Deleted");
-		await this.destroy();
+		await this.ctx.storage.deleteAll();
+		this.store.markErased(Date.now());
+		await this.ctx.storage.sync();
+		this.ctx.abort("This Pim was erased");
 	}
 
 	// HTTP API

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AGENT_NAME } from "../src/agent";
 import { MAX_ARTIFACT_STORAGE_BYTES } from "../src/artifacts";
 import type { Limits } from "../src/usage";
-import { api, apiUrl, post, say, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, connect, post, say, TOKEN, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 const agent = () => env.Pim.getByName(AGENT_NAME);
@@ -93,9 +93,12 @@ describe("artifacts", () => {
 		expect(body.slice(PAGE.length)).toMatch(/^<script>.*pim:artifact-height.*<\/script>$/);
 	});
 
-	it("download as attachments with safe names and the same sandbox", async () => {
+	it("download as plain-text attachments with safe names and the same sandbox", async () => {
 		const made = await makePage(PAGE, 'Q3 "plan"\r\nX-Evil: 1 / ünïcode');
 		const response = await raw(`/artifacts/${made.id}/versions/1/download`);
+		// Even HTML: a browser that shows it anyway shows its source.
+		expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+		expect(response.headers.get("x-content-type-options")).toBe("nosniff");
 		const disposition = response.headers.get("content-disposition")!;
 		expect(disposition).toMatch(/^attachment; filename="[^"\r\n]*-v1\.html"; filename\*=UTF-8''/);
 		expect(disposition).not.toMatch(/[\r\n]/);
@@ -114,11 +117,15 @@ describe("artifacts", () => {
 		expect((await raw(`/artifacts/${id}/versions/1/frame`)).status).toBe(404);
 	});
 
-	it("refuse an API token in the address", async () => {
+	it("refuse an API token in the address, which WebSockets still use", async () => {
 		const made = await makePage();
-		const response = await exports.default.fetch(new Request(apiUrl(`/artifacts/${made.id}/versions/1/frame?token=${TOKEN}`)));
-		expect(response.status).toBe(400);
-		expect(response.headers.get("content-type")).toContain("application/json");
+		for (const path of [`/artifacts/${made.id}/versions/1/frame`, `/artifacts/${made.id}/versions/1/download`, `/artifacts/${made.id}/versions/1`, "/artifacts"]) {
+			const response = await exports.default.fetch(new Request(apiUrl(`${path}?token=${TOKEN}`)));
+			expect(response.status).toBe(400);
+			expect(response.headers.get("content-type")).toContain("application/json");
+		}
+		const { socket } = await connect();
+		socket.close();
 	});
 
 	it("get new versions only from the latest, with edits that match once", async () => {

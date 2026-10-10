@@ -1,10 +1,14 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { McpServer } from "@modelcontextprotocol/server";
+import { createMcpHandler } from "agents/mcp/server";
+import { createExecutionContext, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Auth } from "../../src/auth";
 import { type PimSite, toAgent } from "../../src/gateway";
 import type { Directory, RegistrationPolicy } from "../../src/hosted/directory";
+import { z } from "zod";
+import { toolUse } from "../helpers";
 import { faux, Pim } from "../worker";
 import { Authenticator } from "../webauthn";
 
@@ -353,6 +357,48 @@ describe("isolation between people", () => {
 		expect(joHost).not.toBe(ianHost);
 	});
 
+	it("connected apps, schedules and settings stay with their owner", async () => {
+		const gus = await person("gus");
+		const hal = await person("hal");
+		const notes = () => {
+			const server = new McpServer({ name: "notes", version: "1.0.0" });
+			server.registerTool(
+				"search",
+				{ description: "Search notes.", inputSchema: { query: z.string() }, annotations: { readOnlyHint: true } },
+				async ({ query }) => ({ content: [{ type: "text", text: `No notes match ${query}.` }] }),
+			);
+			return server;
+		};
+		const realFetch = globalThis.fetch;
+		const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			if (!request.url.startsWith("https://notes.example.test/mcp")) return realFetch(input, init);
+			return createMcpHandler(notes)(request, {}, createExecutionContext());
+		});
+		try {
+			const connected = await gus.browser.json("/api/mcp", { method: "POST", json: { name: "Notes", url: "https://notes.example.test/mcp" } });
+			expect(connected).toMatchObject({ status: 201, body: { state: "ready" } });
+		} finally {
+			spy.mockRestore();
+		}
+		const toolNames = async (browser: Browser) =>
+			((await browser.json("/api/")).body.tools as { name: string }[]).map((tool) => tool.name);
+		expect((await gus.browser.json("/api/mcp")).body.servers).toEqual([expect.objectContaining({ id: "notes" })]);
+		expect(await toolNames(gus.browser)).toContain("notes_search");
+		expect((await hal.browser.json("/api/mcp")).body.servers).toEqual([]);
+		expect(await toolNames(hal.browser)).not.toContain("notes_search");
+
+		await runInDurableObject(env.Pim.getByName(gus.ownerId), async (instance: Pim) => {
+			await instance.schedule(new Date(Date.now() + 60 * 60_000), "runScheduledTask", { session: "1", instruction: "Water the plants" });
+		});
+		expect((await gus.browser.json("/api/schedules")).body.schedules).toHaveLength(1);
+		expect((await hal.browser.json("/api/schedules")).body.schedules).toEqual([]);
+
+		await gus.browser.json("/api/settings", { method: "PUT", json: { timeZone: "Asia/Tokyo", approvalPolicy: "auto" } });
+		expect((await gus.browser.json("/api/settings")).body).toMatchObject({ timeZone: "Asia/Tokyo", approvalPolicy: "auto" });
+		expect((await hal.browser.json("/api/settings")).body).toMatchObject({ timeZone: "UTC", approvalPolicy: "explicit" });
+	});
+
 	it("the hostname alone opens nothing", async () => {
 		await person("kim");
 		expect((await new Browser(hostOf("kim")).json("/api/sessions")).status).toBe(401);
@@ -545,49 +591,6 @@ describe("the account", () => {
 		expect((await directory().account(rex.ownerId))?.status).toBe("deleted");
 	});
 
-	it("refuses a stale gateway, sockets and background work once an agent is erased", async () => {
-		const sol = await person("sol");
-		// A socket open across the deletion.
-		const upgrade = await sol.browser.fetch("/api/ws?session=1", { headers: { Upgrade: "websocket", origin: hostOf("sol") } });
-		expect(upgrade.status).toBe(101);
-		const socket = upgrade.webSocket!;
-		const closed = new Promise<number>((resolve) => socket.addEventListener("close", (event) => resolve(event.code)));
-		socket.accept();
-		// Background work due right after.
-		await runInDurableObject(env.Pim.getByName(sol.ownerId), async (instance: Pim) => {
-			await instance.schedule(new Date(Date.now() + 200), "runScheduledTask", { session: "1", instruction: "Write something" });
-		});
-		expect((await sol.browser.json("/api/account", { method: "DELETE", json: { confirm: "sol" } })).body).toEqual({ deleted: true });
-		expect(await closed).toBeGreaterThan(0);
-
-		// Another Worker that still has the account cached as active, with a request it already authorized.
-		const stale: PimSite = {
-			owner: sol.ownerId,
-			agent: sol.ownerId,
-			store: env.Auth.getByName(sol.ownerId),
-			mode: "hosted",
-			user: { id: "x", name: "sol", displayName: "sol" },
-		};
-		const write = new Request(`${hostOf("sol")}/api/memory/log`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ text: "Written by a stale gateway" }),
-		});
-		expect((await toAgent(write, env, stale, "/memory/log", true)).status).toBe(410);
-		const socketAgain = new Request(`${hostOf("sol")}/api/ws?session=1`, { headers: { Upgrade: "websocket" } });
-		expect((await toAgent(socketAgain, env, stale, "/ws", true)).status).toBe(410);
-		// Nor can the hosting service write to it.
-		await expect(
-			runInDurableObject(env.Pim.getByName(sol.ownerId), (instance: Pim) =>
-				instance.provision({ ownerId: sol.ownerId, username: "sol", publicUrl: hostOf("sol") }),
-			),
-		).rejects.toThrow(/erased/);
-		await new Promise((resolve) => setTimeout(resolve, 300));
-		await runDurableObjectAlarm(env.Pim.getByName(sol.ownerId));
-		expect(await holdings(sol.ownerId)).toMatchObject({ remaining: [], memories: 0 });
-		expect(await runInDurableObject(env.Pim.getByName(sol.ownerId), (instance: Pim) => instance.erasure())).toEqual({ sealed: true, remaining: [] });
-	});
-
 	it("counts a deletion done only when the agent is checked empty, whatever its call said", async () => {
 		// The call that erases the agent can end abruptly after erasing it: that is done.
 		const sam = await person("sam");
@@ -656,5 +659,179 @@ describe("the operator", () => {
 		expect((await admin("/admin/accounts/quinn/limits", { method: "PUT", json: { limits: { dailyRuns: "lots" } } })).status).toBe(400);
 		await admin("/admin/accounts/quinn/limits", { method: "PUT", json: { limits: null } });
 		expect((await quinn.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: 300 });
+	});
+});
+
+/**
+ * What erasing an agent must stop, case by case: everything that could
+ * still write to it, or act for its owner, once the Directory says it's gone.
+ */
+describe("erasure boundaries", () => {
+	/**
+	 * A gate a test holds work on inside an agent, and a flag that the work
+	 * reached it. Only plain flags cross between the test and the agent, each
+	 * polled with its own timers: a promise made in the test and awaited in an
+	 * agent that then ends would hang the test runner itself.
+	 */
+	function gate() {
+		const state = { reached: false, open: false };
+		return {
+			/** Called by the held work, in the agent. */
+			hold: async () => {
+				state.reached = true;
+				while (!state.open) await new Promise((resolve) => setTimeout(resolve, 10));
+			},
+			/** Awaited by the test. */
+			reached: () => vi.waitFor(() => expect(state.reached).toBe(true), { timeout: 5_000 }),
+			release: () => {
+				state.open = true;
+			},
+		};
+	}
+
+	async function expectErased(ownerId: string) {
+		expect(await holdings(ownerId)).toEqual({ remaining: [], memories: 0, credentials: [], passkeys: 0, tokens: 0 });
+		expect(await runInDurableObject(env.Pim.getByName(ownerId), (instance: Pim) => instance.erasure())).toEqual({ sealed: true, remaining: [] });
+		expect((await directory().account(ownerId))?.status).toBe("deleted");
+	}
+
+	const deleteAccount = async (browser: Browser, username: string) =>
+		(await browser.json("/api/account", { method: "DELETE", json: { confirm: username } })).body;
+
+	it("closes a socket that was open across the deletion, and takes nothing from it", async () => {
+		const ana = await person("eb-socket");
+		const upgrade = await ana.browser.fetch("/api/ws?session=1", { headers: { Upgrade: "websocket", origin: hostOf("eb-socket") } });
+		expect(upgrade.status).toBe(101);
+		const socket = upgrade.webSocket!;
+		const closed = new Promise<number>((resolve) => socket.addEventListener("close", (event) => resolve(event.code)));
+		const hello = new Promise<void>((resolve) => socket.addEventListener("message", () => resolve(), { once: true }));
+		socket.accept();
+		await hello;
+		expect(await deleteAccount(ana.browser, "eb-socket")).toEqual({ deleted: true });
+		expect(await closed).toBe(4010);
+		// A submit sent on it afterwards goes nowhere.
+		try {
+			socket.send(JSON.stringify({ type: "submit", id: "late", content: "Sent on an old socket" }));
+		} catch {
+			// Closed: the send itself fails.
+		}
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		await expectErased(ana.ownerId);
+	});
+
+	it("refuses the write of a request that was already inside the agent when the deletion began", async () => {
+		const ben = await person("eb-inflight");
+		const held = gate();
+		const prototype = Pim.prototype as Pim;
+		const original = prototype.submitTo;
+		prototype.submitTo = async function (this: Pim, ...args: Parameters<Pim["submitTo"]>) {
+			await held.hold();
+			return original.apply(this, args);
+		};
+		try {
+			// Past the Worker and the agent's own check, waiting just before it writes.
+			const late = ben.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Written after deletion" } });
+			await held.reached();
+			expect(await deleteAccount(ben.browser, "eb-inflight")).toEqual({ deleted: true });
+			held.release();
+			// The instance it was in ended: it gets "try again", and trying again gets "gone".
+			expect(await late).toMatchObject({ status: 503 });
+			const retry = await ben.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Written after deletion" } });
+			expect(retry.status).toBe(410);
+		} finally {
+			prototype.submitTo = original;
+		}
+		await expectErased(ben.ownerId);
+	});
+
+	it("keeps a model request under way from writing its answer", async () => {
+		const cy = await person("eb-model");
+		const held = gate();
+		faux.setResponses([
+			async () => {
+				await held.hold();
+				return fauxAssistantMessage("Written after deletion");
+			},
+		]);
+		expect((await cy.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Think slowly" } })).status).toBe(202);
+		await held.reached();
+		expect(await deleteAccount(cy.browser, "eb-model")).toEqual({ deleted: true });
+		held.release();
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		await expectErased(cy.ownerId);
+	});
+
+	it("never runs an action whose approval timer outlives the agent", async () => {
+		const dot = await person("eb-approval");
+		// Auto-approve after the timeout: the dangerous case.
+		expect((await dot.browser.json("/api/settings", { method: "PUT", json: { approvalPolicy: "auto" } })).body).toMatchObject({ approvalPolicy: "auto" });
+		const realFetch = globalThis.fetch;
+		const hook = vi.fn();
+		const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			if (!request.url.startsWith("https://hooks.example.test/")) return realFetch(input, init);
+			hook(request.url);
+			return new Response("sent", { status: 201 });
+		});
+		try {
+			faux.setResponses([toolUse("http_request", { method: "POST", url: "https://hooks.example.test/after-deletion" })]);
+			await dot.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Send it" } });
+			await vi.waitFor(async () => {
+				const pending = await runInDurableObject(env.Pim.getByName(dot.ownerId), (instance: Pim) => instance.store.approvals("pending"));
+				expect(pending).toHaveLength(1);
+			});
+			expect(await deleteAccount(dot.browser, "eb-approval")).toEqual({ deleted: true });
+			// Past the test agent's 1.5-second timeout, which would have approved and sent it.
+			await new Promise((resolve) => setTimeout(resolve, 2_500));
+			expect(hook).not.toHaveBeenCalled();
+		} finally {
+			spy.mockRestore();
+		}
+		await expectErased(dot.ownerId);
+	});
+
+	it("runs no scheduled work that comes due after the deletion", async () => {
+		const eve = await person("eb-schedule");
+		await runInDurableObject(env.Pim.getByName(eve.ownerId), async (instance: Pim) => {
+			await instance.schedule(new Date(Date.now() + 200), "runScheduledTask", { session: "1", instruction: "Write something" });
+		});
+		expect(await deleteAccount(eve.browser, "eb-schedule")).toEqual({ deleted: true });
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		// Wiping cleared the alarm; firing one anyway does nothing.
+		await runDurableObjectAlarm(env.Pim.getByName(eve.ownerId));
+		await expectErased(eve.ownerId);
+	});
+
+	it("refuses a Worker that still has the account cached, and the hosting service's own writes", async () => {
+		const fay = await person("eb-stale");
+		expect(await deleteAccount(fay.browser, "eb-stale")).toEqual({ deleted: true });
+		// Another Worker that still has the account cached as active, with requests it already authorized.
+		const stale: PimSite = {
+			owner: fay.ownerId,
+			agent: fay.ownerId,
+			store: env.Auth.getByName(fay.ownerId),
+			mode: "hosted",
+			user: { id: "x", name: "eb-stale", displayName: "eb-stale" },
+		};
+		const write = new Request(`${hostOf("eb-stale")}/api/memory/log`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ text: "Written by a stale gateway" }),
+		});
+		expect((await toAgent(write, env, stale, "/memory/log", true)).status).toBe(410);
+		const socket = new Request(`${hostOf("eb-stale")}/api/ws?session=1`, { headers: { Upgrade: "websocket" } });
+		expect((await toAgent(socket, env, stale, "/ws", true)).status).toBe(410);
+		const callback = new Request(`${hostOf("eb-stale")}/mcp/events/watch-1`, { method: "POST", body: "{}" });
+		expect((await toAgent(callback, env, stale, "/mcp/events/watch-1", false)).status).toBe(410);
+		const writes: ((instance: Pim) => Promise<unknown>)[] = [
+			(instance) => instance.provision({ ownerId: fay.ownerId, username: "eb-stale", publicUrl: hostOf("eb-stale") }),
+			(instance) => instance.applySettings({ timeZone: "Asia/Tokyo" }),
+			(instance) => instance.setLimits({ dailyRuns: 1 }),
+			(instance) => instance.submitTo("1", "Hello", {}, "pim"),
+		];
+		for (const write of writes) {
+			await expect(runInDurableObject(env.Pim.getByName(fay.ownerId), write)).rejects.toThrow(/erased/);
+		}
+		await expectErased(fay.ownerId);
 	});
 });

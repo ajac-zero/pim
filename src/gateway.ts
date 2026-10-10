@@ -91,7 +91,15 @@ export async function toAgent(request: Request, env: Env, site: PimSite, path: s
 	if (authorized) forwarded.headers.set(AUTHORIZED_HEADER, "1");
 	// The agent checks it is the one this owner's requests are for.
 	forwarded.headers.set(OWNER_HEADER, site.agent);
-	return agent.fetch(forwarded);
+	try {
+		return await agent.fetch(forwarded);
+	} catch (error) {
+		// The agent's instance ended under the request (a restart, or an erasure, after which a retry gets 410).
+		if ((error as { durableObjectReset?: boolean })?.durableObjectReset) {
+			return Response.json({ error: "Pim restarted while answering. Try again." }, { status: 503 });
+		}
+		throw error;
+	}
 }
 
 /** Paths of the API a hosting service answers itself, before the agent: an authorized request for `path` under `/api`. */

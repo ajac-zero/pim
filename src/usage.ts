@@ -33,6 +33,14 @@ export type Limits = {
 	readonly apps: number | null;
 	/** The agent's database, in bytes. */
 	readonly storageBytes: number | null;
+	/** Artifacts kept. */
+	readonly artifacts: number | null;
+	/** Versions one artifact keeps. */
+	readonly artifactVersions: number | null;
+	/** One version's size, in UTF-8 bytes (at most 1,000,000 whatever this says). */
+	readonly artifactBytes: number | null;
+	/** Every version of every artifact, in bytes (at most 10,000,000 whatever this says). */
+	readonly artifactStorageBytes: number | null;
 };
 
 export const LIMIT_NAMES = [
@@ -43,6 +51,10 @@ export const LIMIT_NAMES = [
 	"schedules",
 	"apps",
 	"storageBytes",
+	"artifacts",
+	"artifactVersions",
+	"artifactBytes",
+	"artifactStorageBytes",
 ] as const satisfies readonly (keyof Limits)[];
 
 export const UNLIMITED: Limits = Object.fromEntries(LIMIT_NAMES.map((name) => [name, null])) as unknown as Limits;

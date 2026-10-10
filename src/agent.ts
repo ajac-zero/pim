@@ -13,12 +13,14 @@ import {
 import { Agent, type Connection, type ConnectionContext, type Schedule, type WSMessage } from "agents";
 import { type PiModel, PiHarness, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
+import { ArtifactStore, artifactHeaders, downloadName, RESIZE_SCRIPT } from "./artifacts";
 import { CHATGPT_PROVIDER, ChatGPT, chatgptCredentials } from "./chatgpt";
 import { SqlCredentialStore } from "./credentials";
 import { AppCatalog } from "./extensions/app-catalog";
 import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
 import { skillTools } from "./extensions/app-skills";
 import { approvalsExtension, describeWait, type GatedAction, httpRequest } from "./extensions/approvals";
+import { artifactsExtension } from "./extensions/artifacts";
 import { goalsExtension } from "./extensions/goals";
 import {
 	MCP_APPROVALS,
@@ -96,6 +98,13 @@ export const AUTHORIZED_HEADER = "x-pim-authorized";
 const ANY_RESULT = { "~standard": { version: 1, vendor: "pim", validate: (value: unknown) => ({ value }) } };
 
 const SESSION_ID = /^[1-9][0-9]{0,15}$/;
+const ARTIFACT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const VERSION = /^[1-9][0-9]{0,8}$/;
+
+/** An artifact API answer the browser must never keep: what it shows can be deleted, or the sign-in end. */
+function noStore(value: unknown, status = 200): Response {
+	return Response.json(value, { status, headers: { "cache-control": "no-store, private", "x-content-type-options": "nosniff" } });
+}
 const GOAL_STATUSES: readonly GoalStatus[] = ["active", "paused", "done", "abandoned"];
 
 type SocketState = { readonly session: string };
@@ -132,6 +141,13 @@ function errorMessage(error: unknown): string {
  */
 export class Pim extends Agent<Env> {
 	readonly store = new PimStore(this.ctx.storage.sql);
+	/** What the agent made for its owner, with every version. */
+	readonly artifacts = new ArtifactStore(this.ctx.storage.sql, () => this.limits(), {
+		storageRoom: () => {
+			const { storageBytes } = this.limits();
+			return storageBytes === null ? null : storageBytes - this.ctx.storage.sql.databaseSize;
+		},
+	});
 	readonly ai = createAI({ binding: this.env.AI });
 	/** Model credentials (the ChatGPT plan's tokens), refreshed by pi-ai. */
 	readonly credentials = new SqlCredentialStore(this.store);
@@ -214,6 +230,7 @@ export class Pim extends Agent<Env> {
 			this.registry.install(notifyExtension(services));
 			this.registry.install(approvalsExtension(services, this.actions));
 			this.registry.install(webExtension({ ai: this.env.AI, searchProvider: this.env.PIM_WEB_SEARCH }));
+			this.registry.install(artifactsExtension({ artifacts: this.artifacts, assertOpen: () => this.#assertOpen() }));
 			// Restored connections reconnect in the background after a wake; give them a moment.
 			await this.mcp.waitForConnections({ timeout: 5_000 });
 			const apps = mcpExtensions(this.apps, services, this.#appExtras(services));
@@ -860,6 +877,7 @@ export class Pim extends Agent<Env> {
 			notifications: this.store.notifications({ unread: false }),
 			apps: this.apps.servers().map(({ id, name, url, approval }) => ({ id, name, url, approval })),
 			watches: this.appEvents.list(),
+			artifacts: this.artifacts.export(),
 			usage: this.usage.history(90),
 		});
 	}
@@ -934,6 +952,29 @@ export class Pim extends Agent<Env> {
 			throw new HttpError(404, `No session ${id}`);
 		}
 		return id;
+	}
+
+	/**
+	 * Answers an artifact request. A token in the address is refused: the API
+	 * takes one there only for WebSockets, and an address with a token in it
+	 * can be passed on, logged or kept in history.
+	 */
+	#artifactRequest(url: URL, answer: () => Response | Promise<Response>): Response | Promise<Response> {
+		if (url.searchParams.has("token")) throw new HttpError(400, "Send the API token in the Authorization header, not the address");
+		return answer();
+	}
+
+	#artifact(id: string) {
+		const artifact = ARTIFACT_ID.test(id) ? this.artifacts.get(id) : undefined;
+		if (!artifact) throw new HttpError(404, `No artifact ${id}`);
+		return artifact;
+	}
+
+	#artifactVersion(id: string, version: string) {
+		const artifact = this.#artifact(id);
+		const found = VERSION.test(version) ? this.artifacts.version(artifact.id, Number(version)) : undefined;
+		if (!found) throw new HttpError(404, `No version ${version} of artifact ${id}`);
+		return { artifact, found };
 	}
 
 	readonly #routes: readonly Route[] = [
@@ -1172,6 +1213,77 @@ export class Pim extends Agent<Env> {
 			},
 		],
 		["GET", "/usage", () => this.usageReport()],
+
+		// Artifacts: what the agent made, every version kept. Their bytes are never kept by the browser,
+		// and HTML in them runs only sandboxed (see ./artifacts.ts).
+		["GET", "/artifacts", (_params, _request, url) => this.#artifactRequest(url, () => noStore({ artifacts: this.artifacts.list(), bytes: this.artifacts.totalBytes() }))],
+		[
+			"GET",
+			"/artifacts/:id",
+			({ id }, _request, url) =>
+				this.#artifactRequest(url, () => {
+					const artifact = this.#artifact(id!);
+					return noStore({ ...artifact, history: this.artifacts.versions(artifact.id) });
+				}),
+		],
+		[
+			"DELETE",
+			"/artifacts/:id",
+			({ id }, _request, url) =>
+				this.#artifactRequest(url, () => {
+					this.#assertOpen();
+					const artifact = this.#artifact(id!);
+					this.artifacts.delete(artifact.id);
+					return noStore({ deleted: true });
+				}),
+		],
+		[
+			"POST",
+			"/artifacts/:id/restore",
+			({ id }, request, url) =>
+				this.#artifactRequest(url, async () => {
+					const artifact = this.#artifact(id!);
+					const { version, baseVersion } = await readJson<{ version: number; baseVersion: number }>(request);
+					if (!Number.isSafeInteger(version) || !Number.isSafeInteger(baseVersion)) {
+						throw new HttpError(400, "version and baseVersion must be version numbers");
+					}
+					this.#assertOpen();
+					const restored = await this.artifacts.restore(artifact.id, version!, baseVersion!);
+					return noStore({ ...this.artifacts.get(artifact.id), restored: restored.version }, 201);
+				}),
+		],
+		[
+			"GET",
+			"/artifacts/:id/versions/:version",
+			({ id, version }, _request, url) =>
+				this.#artifactRequest(url, () => {
+					const { artifact, found } = this.#artifactVersion(id!, version!);
+					return noStore({ id: artifact.id, title: artifact.title, kind: artifact.kind, latest: artifact.version, ...found });
+				}),
+		],
+		[
+			"GET",
+			"/artifacts/:id/versions/:version/frame",
+			({ id, version }, _request, url) =>
+				this.#artifactRequest(url, () => {
+					const { artifact, found } = this.#artifactVersion(id!, version!);
+					if (artifact.kind !== "html") throw new HttpError(404, "Only HTML artifacts are shown in a frame");
+					return new Response(found.content + RESIZE_SCRIPT, { headers: artifactHeaders(url.origin, "text/html; charset=utf-8") });
+				}),
+		],
+		[
+			"GET",
+			"/artifacts/:id/versions/:version/download",
+			({ id, version }, _request, url) =>
+				this.#artifactRequest(url, () => {
+					const { artifact, found } = this.#artifactVersion(id!, version!);
+					// Markdown downloads as plain text: nothing here is ever served as a script.
+					const headers = artifactHeaders(url.origin, artifact.kind === "html" ? "text/html; charset=utf-8" : "text/plain; charset=utf-8");
+					const { ascii, utf8 } = downloadName(artifact.title, found.version, artifact.kind);
+					headers.set("content-disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(utf8)}`);
+					return new Response(found.content, { headers });
+				}),
+		],
 		[
 			"GET",
 			"/export",

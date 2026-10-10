@@ -24,15 +24,41 @@ import { cn } from "~/lib/utils";
  * plugin is intentionally not installed, so there's a single source of
  * truth for code highlighting.
  */
+/** Links an untrusted text may keep: web and mail addresses, and places on the same page. */
+function safeLink(href: string | undefined): boolean {
+  return href !== undefined && /^(https?:|mailto:|#)/i.test(href);
+}
+
+/** Only inline images: one from elsewhere would be fetched, and could carry what the text knows. */
+const untrustedComponents = {
+  img: (props: object) => {
+    const { src, alt } = props as { src?: unknown; alt?: unknown };
+    const label = typeof alt === "string" ? alt : "";
+    return typeof src === "string" &&
+      /^data:image\/(png|jpe?g|gif|webp);/i.test(src) ? (
+      <img src={src} alt={label} className="my-3 max-w-full rounded-md" />
+    ) : (
+      <span className="text-muted-foreground">[{label || "image"}]</span>
+    );
+  },
+};
+
 export const Markdown = memo(function Markdown({
   text,
   className,
   streaming,
+  untrusted,
 }: {
   text: string;
   className?: string;
   /** Disables copy affordances and incomplete-code-fence hooks while true. */
   streaming?: boolean;
+  /**
+   * For text kept and shown again, such as a Markdown artifact: raw HTML is
+   * dropped, images are shown only when they're inline (`data:`), so showing
+   * it loads nothing from elsewhere, and links only go to web or mail addresses.
+   */
+  untrusted?: boolean;
 }) {
   return (
     <div
@@ -44,7 +70,9 @@ export const Markdown = memo(function Markdown({
     >
       <Streamdown
         isAnimating={streaming}
+        skipHtml={untrusted}
         components={{
+          ...(untrusted ? untrustedComponents : {}),
           h1: ({ children }) => (
             <h1 className="mt-6 mb-3 font-semibold text-2xl">{children}</h1>
           ),
@@ -71,16 +99,19 @@ export const Markdown = memo(function Markdown({
             </blockquote>
           ),
           hr: () => <hr className="my-6 border-border" />,
-          a: ({ href, children }) => (
-            <a
-              href={href}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="font-medium text-foreground underline decoration-muted-foreground/50 underline-offset-2 transition-colors hover:decoration-foreground"
-            >
-              {children}
-            </a>
-          ),
+          a: ({ href, children }) =>
+            untrusted && !safeLink(href) ? (
+              <span>{children}</span>
+            ) : (
+              <a
+                href={href}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="font-medium text-foreground underline decoration-muted-foreground/50 underline-offset-2 transition-colors hover:decoration-foreground"
+              >
+                {children}
+              </a>
+            ),
           table: ({ children }) => (
             <div className="my-4 overflow-x-auto rounded-lg border scrollbar-thin">
               <table className="w-full border-collapse text-sm">

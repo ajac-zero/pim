@@ -107,10 +107,16 @@ const translations = {
     yesterday: "Yesterday",
     cancel: "Cancel",
     chatGPTPlanPitch:
-      "Run Pim on OpenAI's models, such as GPT-6.1 Sol, with usage included in your ChatGPT Plus or Pro plan. Workers AI stays free and is used when you're not connected.",
-    chatGPTStepApprove: "Sign in in the new tab and approve Pim.",
+      "Run Pim on OpenAI's models, such as GPT-6.1 Sol, with usage included in your ChatGPT Plus or Pro plan. When you're not connected, Pim uses its default model on Workers AI.",
+    chatGPTWhyPaste:
+      "OpenAI's sign-in for open-source apps can only send you back to an address on your own device (127.0.0.1), which Pim can't receive from the internet. So you carry that address over to Pim yourself, this once.",
+    chatGPTStepApprove: "In the new tab, sign in to ChatGPT and approve Pim.",
     chatGPTStepCopy:
-      "The tab ends on a page at 127.0.0.1 that doesn't load. That's expected: copy the whole address from its address bar and paste it here.",
+      "The tab ends on a 127.0.0.1 page that doesn't load. That's expected. Copy the whole address from its address bar.",
+    chatGPTStepPaste:
+      "Paste it below, here in your own Pim, within 15 minutes. It holds a one-time code that finishes the sign-in, so don't paste it anywhere else.",
+    chatGPTAfterPaste:
+      "After this, Pim keeps the connection going on its own. You won't need to do this again unless you disconnect.",
     connect: "Connect",
     connectForMoreModels:
       "Connect your ChatGPT plan to choose OpenAI's models.",
@@ -124,7 +130,7 @@ const translations = {
     model: "Model",
     modelChanged: "Pim now uses {model}",
     pasteAddress: "Address the browser landed on",
-    runsOnWorkersAI: "Workers AI, on your Cloudflare account",
+    runsOnWorkersAI: "Runs on Workers AI",
     settings: "Settings",
     settingsDescription: "The model Pim runs on, and the accounts it uses.",
     useYourChatGPTPlan: "Use your ChatGPT plan",
@@ -344,10 +350,17 @@ const translations = {
     yesterday: "Ayer",
     cancel: "Cancelar",
     chatGPTPlanPitch:
-      "Usa los modelos de OpenAI, como GPT-6.1 Sol, con el uso incluido en tu plan ChatGPT Plus o Pro. Workers AI sigue siendo gratis y se usa cuando no estás conectado.",
-    chatGPTStepApprove: "Inicia sesión en la nueva pestaña y aprueba a Pim.",
+      "Usa los modelos de OpenAI, como GPT-6.1 Sol, con el uso incluido en tu plan ChatGPT Plus o Pro. Cuando no estás conectado, Pim usa su modelo predeterminado en Workers AI.",
+    chatGPTWhyPaste:
+      "El inicio de sesión de OpenAI para apps de código abierto solo puede devolverte a una dirección en tu propio dispositivo (127.0.0.1), que Pim no puede recibir desde internet. Por eso llevas tú esa dirección a Pim, esta única vez.",
+    chatGPTStepApprove:
+      "En la nueva pestaña, inicia sesión en ChatGPT y aprueba a Pim.",
     chatGPTStepCopy:
-      "La pestaña termina en una página de 127.0.0.1 que no carga. Es normal: copia la dirección completa de la barra de direcciones y pégala aquí.",
+      "La pestaña termina en una página de 127.0.0.1 que no carga. Es normal. Copia la dirección completa de la barra de direcciones.",
+    chatGPTStepPaste:
+      "Pégala abajo, aquí en tu propio Pim, antes de 15 minutos. Contiene un código de un solo uso que completa el inicio de sesión, así que no la pegues en ningún otro lugar.",
+    chatGPTAfterPaste:
+      "Después, Pim mantiene la conexión por su cuenta. No tendrás que repetirlo a menos que te desconectes.",
     connect: "Conectar",
     connectForMoreModels:
       "Conecta tu plan de ChatGPT para elegir los modelos de OpenAI.",
@@ -361,7 +374,7 @@ const translations = {
     model: "Modelo",
     modelChanged: "Pim ahora usa {model}",
     pasteAddress: "Dirección a la que llegó el navegador",
-    runsOnWorkersAI: "Workers AI, en tu cuenta de Cloudflare",
+    runsOnWorkersAI: "Funciona con Workers AI",
     settings: "Configuración",
     settingsDescription:
       "El modelo con el que funciona Pim y las cuentas que usa.",

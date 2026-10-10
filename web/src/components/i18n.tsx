@@ -253,7 +253,10 @@ const translations = {
     addingTo: "Adding this device to",
     notMyPimling: "This isn't my Pimling",
     passkeyAlreadyHere:
-      "This device already has a passkey for this Pimling. Go back and sign in with it instead.",
+      "This device already has a passkey for this Pimling, so it doesn't need another. Sign in with it instead.",
+    signInWithThisPasskey: "Sign in with my passkey",
+    addDeviceCancelFailed:
+      "Couldn't end the link ({error}), so it may still work until it expires. Try again.",
     addThisDeviceBody:
       "Your Pimling sent this link from a device where you're signed in. Create a passkey here, and this device can sign in on its own from now on.",
     addThisDeviceNote:
@@ -535,7 +538,10 @@ const translations = {
     addingTo: "Agregando este dispositivo a",
     notMyPimling: "Este no es mi Pimling",
     passkeyAlreadyHere:
-      "Este dispositivo ya tiene una llave de acceso para este Pimling. Vuelve e inicia sesión con ella.",
+      "Este dispositivo ya tiene una llave de acceso para este Pimling, así que no necesita otra. Inicia sesión con ella.",
+    signInWithThisPasskey: "Iniciar sesión con mi llave de acceso",
+    addDeviceCancelFailed:
+      "No se pudo terminar el enlace ({error}), así que podría seguir funcionando hasta que venza. Inténtalo de nuevo.",
     addThisDeviceBody:
       "Tu Pimling envió este enlace desde un dispositivo donde tienes sesión iniciada. Crea aquí una llave de acceso y este dispositivo podrá iniciar sesión por su cuenta desde ahora.",
     addThisDeviceNote:

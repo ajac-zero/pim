@@ -1,6 +1,6 @@
-import { useMutation } from "@tanstack/react-query";
-import { Check, Copy, Loader2, Smartphone } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { AlertCircle, Check, Copy, Loader2, Smartphone } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { renderSVG } from "uqr";
 import { useI18n } from "~/components/i18n";
@@ -15,6 +15,12 @@ import { auth } from "~/lib/auth";
  */
 export function AddDevice() {
   const { t, formatDate } = useI18n();
+  const queryClient = useQueryClient();
+  // The other device's new passkey shows up in the list when this card is dismissed.
+  const refreshPasskeys = useCallback(
+    () => queryClient.invalidateQueries({ queryKey: ["auth", "passkeys"] }),
+    [queryClient],
+  );
   const [link, setLink] = useState<{ url: string; expiresAt: string } | null>(
     null,
   );
@@ -28,13 +34,25 @@ export function AddDevice() {
     },
     onError: (error) => toast.error(error.message),
   });
+  // Hidden only once the server confirms the link no longer works: a failure leaves it shown, with a retry.
+  const cancel = useMutation({
+    mutationFn: auth.cancelDeviceLink,
+    onSuccess: () => {
+      setLink(null);
+      return refreshPasskeys();
+    },
+  });
   const expired = link !== null && Date.parse(link.expiresAt) <= now;
-  // Ticks while a link is shown, so it says when it's no longer good.
+  // Ticks while a link is shown, so it says when it's no longer good, and so the
+  // other device's passkey appears in the list once it's made.
   useEffect(() => {
     if (!link) return;
-    const timer = setInterval(() => setNow(Date.now()), 5_000);
+    const timer = setInterval(() => {
+      setNow(Date.now());
+      void refreshPasskeys();
+    }, 5_000);
     return () => clearInterval(timer);
-  }, [link]);
+  }, [link, refreshPasskeys]);
   // The QR code is drawn here, from the link: nothing leaves the browser to make it.
   const qr = useMemo(
     () =>
@@ -93,14 +111,22 @@ export function AddDevice() {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => {
-                  setLink(null);
-                  void auth.cancelDeviceLink().catch(() => undefined);
-                }}
+                onClick={() => cancel.mutate()}
+                disabled={cancel.isPending}
               >
-                {t("done")}
+                {cancel.isPending && <Loader2 className="animate-spin" />}
+                {cancel.isError ? t("tryAgain") : t("done")}
               </Button>
             </div>
+            {cancel.isError && (
+              <p
+                role="alert"
+                className="flex items-start gap-1.5 text-destructive text-xs"
+              >
+                <AlertCircle className="mt-px size-3.5 shrink-0" />
+                {t("addDeviceCancelFailed", { error: cancel.error.message })}
+              </p>
+            )}
           </div>
         </div>
       ) : (

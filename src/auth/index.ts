@@ -232,6 +232,8 @@ export async function handleAuth(request: Request, env: Env, site: AuthSite, now
 			// How someone without a passkey gets one: a setup link from the logs, or a recovery code.
 			recovery: hosted ? "codes" : "logs",
 			account: session && site.account ? site.account : null,
+			// Whose Pim this is, for screens shown before signing in: the hostname says it already.
+			host: url.host,
 		});
 	}
 
@@ -377,6 +379,14 @@ export async function handleAuth(request: Request, env: Env, site: AuthSite, now
 		console.log(JSON.stringify({ event: "pim.device_link_issued", owner: site.owner }));
 		// The code goes in the fragment, so it never reaches a server's logs or a Referer header.
 		return json({ url: `${ceremonySite.origin}/#device=${code}`, expiresAt: new Date(expiresAt).toISOString() }, 201);
+	}
+
+	if (route === "DELETE /device-link") {
+		// Done or changed one's mind: the link this browser made stops working now, not in ten minutes.
+		const session = await signedIn();
+		if (!session) return fail(401, "Sign in to Pim");
+		await store.voidDeviceLinks(session.passkey);
+		return json({ ok: true });
 	}
 
 	if (path === "/recovery-codes" && hosted) {

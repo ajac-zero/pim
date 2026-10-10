@@ -535,6 +535,42 @@ describe("adding another device", () => {
 		expect(finish.status).toBe(401);
 	});
 
+	it("stops working when its browser cancels it, and only that browser's link", async () => {
+		const ivo = await person("dl-cancel");
+		const { code } = await deviceLink(ivo.browser);
+		expect((await new Browser(hostOf("dl-cancel")).json("/auth/device-link", { method: "DELETE" })).status).toBe(401);
+		expect((await ivo.browser.json("/auth/device-link", { method: "DELETE" })).body).toEqual({ ok: true });
+		expect(await addPasskey(new Browser(hostOf("dl-cancel")), await phoneKey("dl-cancel"), { device: code })).toBe(401);
+	});
+
+	it("checks expiry again when the passkey is finished, not only when it's started", async () => {
+		const jo = await person("dl-late");
+		const { code } = await deviceLink(jo.browser);
+		const phone = new Browser(hostOf("dl-late"));
+		const options = await phone.json("/auth/passkeys/options", { method: "POST", json: { device: code } });
+		expect(options.status).toBe(200);
+		// The link runs out while the phone is still asking for a fingerprint.
+		await runInDurableObject(env.Auth.getByName(jo.ownerId), (_instance: Auth, state) => {
+			state.storage.sql.exec("UPDATE auth_device_links SET expires_at = ?", Date.now() - 1);
+		});
+		const finish = await phone.fetch("/auth/passkeys", { method: "POST", json: await (await phoneKey("dl-late")).register(options.body) });
+		expect(finish.status).toBe(401);
+	});
+
+	it("keeps setup codes and device links apart", async () => {
+		const kai = await person("dl-apart");
+		const site = { rpId: `dl-apart.${DOMAIN}`, origin: hostOf("dl-apart") };
+		const { body } = await admin("/admin/accounts/dl-apart/setup-link", { method: "POST" });
+		const setup = new URL(body.setupUrl).hash.replace("#setup=", "");
+		const { code } = await deviceLink(kai.browser);
+		// Neither works as the other.
+		expect(await addPasskey(new Browser(hostOf("dl-apart")), await Authenticator.make("ES256", site), { setup: code })).toBe(401);
+		expect(await addPasskey(new Browser(hostOf("dl-apart")), await Authenticator.make("ES256", site), { device: setup })).toBe(401);
+		// Using one leaves the other working.
+		expect(await addPasskey(new Browser(hostOf("dl-apart")), await Authenticator.make("ES256", site), { setup })).toBe(200);
+		expect(await addPasskey(new Browser(hostOf("dl-apart")), await Authenticator.make("ES256", site), { device: code })).toBe(200);
+	});
+
 	it("can't add a device to a suspended or deleted Pimling", async () => {
 		const hal = await person("dl-hal");
 		const suspended = await deviceLink(hal.browser);
@@ -555,7 +591,7 @@ describe("finding your Pimling", () => {
 		expect((await front.json("/auth/pimling?name=find-me")).body).toEqual({ url: hostOf("find-me") });
 		// Typed loosely.
 		expect((await front.json("/auth/pimling?name=%20Find-Me%20")).body).toEqual({ url: hostOf("find-me") });
-		for (const name of ["nobody-here", "evil.example.com", "a/b", "find-me.evil.com", "x", "admin"]) {
+		for (const name of ["nobody-here", "evil.example.com", "a/b", "find-me.evil.com", "x", "admin", "x@evil.com#", "find-me@evil.com", "find-me:443", "//evil.com", "find-me\\evil"]) {
 			expect((await front.json(`/auth/pimling?name=${encodeURIComponent(name)}`)).status, name).toBe(404);
 		}
 		// A deleted one is gone.
@@ -587,6 +623,28 @@ describe("recovery", () => {
 		expect(fresh).toHaveLength(10);
 		expect(await addPasskey(new Browser(hostOf("lee")), await Authenticator.make("ES256", site), { recovery: lee.registered.recoveryCodes[1]! })).toBe(401);
 		expect((await new Browser(hostOf("lee")).json("/auth/recovery-codes", { method: "POST" })).status).toBe(401);
+	});
+
+	it("voids the registration's setup link once the first passkey is made another way", async () => {
+		const registered = await register("rv-first");
+		expect(registered.status).toBe(201);
+		const setup = new URL(registered.body.setupUrl).hash.replace("#setup=", "");
+		const site = { rpId: `rv-first.${DOMAIN}`, origin: hostOf("rv-first") };
+		// Activated with a recovery code instead of the link.
+		expect(await addPasskey(new Browser(hostOf("rv-first")), await Authenticator.make("ES256", site), { recovery: registered.body.recoveryCodes[0]! })).toBe(200);
+		// The link from registration, still within its day, makes nothing now.
+		expect(await addPasskey(new Browser(hostOf("rv-first")), await Authenticator.make("ES256", site), { setup })).toBe(401);
+	});
+
+	it("leaves an operator's setup link working when another device is linked meanwhile", async () => {
+		const ola = await person("rv-operator");
+		const site = { rpId: `rv-operator.${DOMAIN}`, origin: hostOf("rv-operator") };
+		const { body } = await admin("/admin/accounts/rv-operator/setup-link", { method: "POST" });
+		const setup = new URL(body.setupUrl).hash.replace("#setup=", "");
+		// Another device is added with a device link: the operator's link is a separate record.
+		const { code } = await deviceLink(ola.browser);
+		expect(await addPasskey(new Browser(hostOf("rv-operator")), await Authenticator.make("ES256", site), { device: code })).toBe(200);
+		expect(await addPasskey(new Browser(hostOf("rv-operator")), await Authenticator.make("ES256", site), { setup })).toBe(200);
 	});
 
 	it("the operator can issue a setup link, for someone who lost everything", async () => {

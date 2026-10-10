@@ -1277,8 +1277,9 @@ export class Pim extends Agent<Env> {
 			({ id, version }, _request, url) =>
 				this.#artifactRequest(url, () => {
 					const { artifact, found } = this.#artifactVersion(id!, version!);
-					// Markdown downloads as plain text: nothing here is ever served as a script.
-					const headers = artifactHeaders(url.origin, artifact.kind === "html" ? "text/html; charset=utf-8" : "text/plain; charset=utf-8");
+					// Plain text, whatever the kind: the file is for saving, and a browser that shows it
+					// anyway shows its source, still under the sandbox. Its name keeps the extension.
+					const headers = artifactHeaders(url.origin, "text/plain; charset=utf-8");
 					const { ascii, utf8 } = downloadName(artifact.title, found.version, artifact.kind);
 					headers.set("content-disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(utf8)}`);
 					return new Response(found.content, { headers });

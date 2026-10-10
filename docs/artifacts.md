@@ -23,7 +23,7 @@ Artifacts are documents and small interactive pages the agent makes for its owne
 
 ## The API
 
-Under `/api`, with the owner's passkey session or an API token in the `Authorization` header. A `?token=` in the address is refused with `400` on every artifact path.
+Under `/api`, with the owner's passkey session or an API token in the `Authorization` header. A `?token=` in the address is refused with `400` on every artifact path: an address with a token in it can be passed on, logged or kept in history. WebSockets, which can't send the header, still take `?token=`.
 
 | Method | Path | Returns |
 | --- | --- | --- |
@@ -31,18 +31,18 @@ Under `/api`, with the owner's passkey session or an API token in the `Authoriza
 | GET | `/artifacts/:id` | The artifact and its `history`, newest first, without content |
 | GET | `/artifacts/:id/versions/:v` | One version with its `content`, as JSON |
 | GET | `/artifacts/:id/versions/:v/frame` | An HTML version as a page, for the sandboxed frame |
-| GET | `/artifacts/:id/versions/:v/download` | The version's exact bytes as an attachment: `.html`, or `.md` as `text/plain` |
+| GET | `/artifacts/:id/versions/:v/download` | The version's exact bytes as an attachment named `.html` or `.md`, served as `text/plain` |
 | POST | `/artifacts/:id/restore` | `{ version, baseVersion }`: `201` with the new latest version; `409` if `baseVersion` isn't the latest |
 | DELETE | `/artifacts/:id` | Deletes it and every version |
 
-Every artifact response has `Cache-Control: no-store, private`. A browser keeps no copy that could outlive signing out, deleting the artifact, or deleting the account.
+Every artifact response has `Cache-Control: no-store, private`, so every look is a fresh request, checked again: after signing out or losing the passkey a session was made with it gets `401`, while the Pimling is suspended `403`, after the account is deleted `410`, and after the artifact is deleted `404`. When the app finds itself signed out, the sign-in screen takes its place, which unmounts every artifact frame, and it drops what it read of artifacts. That revokes nothing already delivered: a frame still on another screen, a page in the browser's back-forward cache, or a saved download stays as it was.
 
 ## How an HTML artifact runs
 
 The artifact runs on the owner's host, so the sandbox is what keeps it apart from the owner's account:
 
 - **Its own response makes it opaque.** The frame and download responses carry `Content-Security-Policy: sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors <owner's origin>`, plus `nosniff`, `no-referrer` and a `Permissions-Policy` that turns off the camera, microphone, location and passkeys. The page gets an opaque origin, even when it's opened directly in a tab. It can't read the owner's cookies or storage, call the API, or reach `/auth`.
-- **The frame is sandboxed too.** The app shows it in `<iframe sandbox="allow-scripts">` loaded from that URL. It never uses `srcdoc`, `blob:` or `data:` URLs, or `window.open`. There is no `allow-same-origin`, top navigation, popups, forms, modals or downloads.
+- **The frame is sandboxed too.** The app shows it in `<iframe sandbox="allow-scripts">` loaded from that URL, with no `allow-same-origin`, top navigation, popups, forms, modals or downloads. The app never makes artifact HTML into a document itself: a `blob:` URL would run with the app's own origin, and `srcdoc` would too unless sandboxed (a `data:` document gets an opaque origin, but isn't needed either). It never opens one with `window.open`, and downloads come from the server.
 - **One message, and only one way.** After the artifact's own markup, the frame page adds a script that reports its height. The app takes messages only from that frame's window (`event.source`, since the origin is always `"null"`). It accepts only `{ type: "pim:artifact-height", height }`, clamps the height, and takes at most 20 messages a second. The app sends the frame nothing. There is no bridge to the owner's data or the agent's tools.
 - **Leaving is noticed.** The frame's second `load` is the page navigating itself away. The app then takes the frame down and says so.
 
@@ -78,15 +78,15 @@ The ajac-zero deployment sets 100 artifacts, 50 versions, 500,000 bytes per vers
 | Requirement | Checked by |
 | --- | --- |
 | Created by the model, answered with a reference; read returns the requested source, in parts | `test/artifacts.test.ts`: "are made by the model…" |
-| Frame and download headers: `sandbox allow-scripts`, no unsafe sandbox flags, `connect-src 'none'`, `frame-ancestors` the owner's origin, `no-store`, `nosniff`, `no-referrer` | "are shown only in an opaque sandbox…", "download as attachments…" |
-| Download names can't inject headers; Markdown never served as anything that runs | "download as attachments…" |
-| `?token=` refused | "refuse an API token in the address" |
+| Frame and download headers: `sandbox allow-scripts`, no unsafe sandbox flags, `connect-src 'none'`, `frame-ancestors` the owner's origin, `no-store`, `nosniff`, `no-referrer` | "are shown only in an opaque sandbox…", "download as plain-text attachments…" |
+| Downloads are plain-text attachments with names that can't inject headers, sandboxed and `nosniff` | "download as plain-text attachments…" |
+| `?token=` refused on artifact paths; WebSockets still take it | "refuse an API token in the address, which WebSockets still use" |
 | Stale base version refused, edits match exactly once, unchanged content makes no version | "get new versions only from the latest…" |
 | Restore is append-only and needs the latest base | "restore an older version as a new one…" |
 | Delete removes every version; export has every version | "are deleted with every version…" |
 | Per-version, version-count, artifact-count, total and storage limits, checked before writing | "stay within their limits…" |
 | Export near the total cap, and the cap holding with no limits set | "export in full near their total cap…" |
 | Another owner's host returns `404` for the artifact; stolen cookies `401`; anonymous `401` | `test/hosted/hosted.test.ts`: "are shown only to their owner…" |
-| Signed out `401`, suspended `403`, deleted `410` on frame, download and metadata; account export has every version; erased | "stop showing when the browser signs out…" |
+| Fresh requests refused: signed out `401`, passkey removed `401`, suspended `403`, deleted `410` on frame, download and metadata; account export has every version; erased | "stop showing when the browser signs out, its passkey is removed…" |
 | A tool call or a restore under way during the erasure leaves nothing | "keeps an artifact the model asks for during the erasure…", "refuses an artifact restore in the agent's handler…" |
-| In a real browser: the card and viewer render on desktop and a 390 px phone; the page's own script runs; a hostile artifact can't read cookies or storage, reach the parent, the API or the network, open windows, submit forms or load remote images; leaving is noticed; restore and delete work; Markdown loads nothing remote | Browser acceptance against the local preview, recorded in the pull request |
+| In a real browser: the card and viewer render on desktop and a 390 px phone; the page's own script runs; a hostile artifact can't read cookies or storage, reach the parent, the API or the network, open windows, submit forms or load remote images; leaving is noticed; restore and delete work; Markdown loads nothing remote; signing out unmounts every frame | Browser acceptance against the local preview, recorded in the pull request |

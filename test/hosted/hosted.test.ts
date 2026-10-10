@@ -862,7 +862,7 @@ describe("artifacts", () => {
 		expect((await new Browser(FRONT).fetch(`/api/artifacts/${id}/versions/1/frame`)).status).not.toBe(200);
 	});
 
-	it("stop showing when the browser signs out, the Pimling is suspended, or it is deleted", async () => {
+	it("stop showing when the browser signs out, its passkey is removed, the Pimling is suspended, or it is deleted", async () => {
 		const cy = await person("art-cy");
 		const id = await makeArtifact(cy.browser, "<p>Cy's page</p>");
 		const frame = `/api/artifacts/${id}/versions/1/frame`;
@@ -872,6 +872,17 @@ describe("artifacts", () => {
 		expect((await other.fetch(frame)).status).toBe(200);
 		expect((await other.json("/auth/sign-out", { method: "POST" })).status).toBe(200);
 		expect((await other.fetch(frame)).status).toBe(401);
+		// Its passkey removed from another browser: the next load is refused.
+		const phone = new Browser(hostOf("art-cy"));
+		const phoneKey = await Authenticator.make("ES256", { rpId: `art-cy.${DOMAIN}`, origin: hostOf("art-cy") });
+		expect(await addPasskey(phone, phoneKey, { recovery: cy.registered.recoveryCodes[0]! })).toBe(200);
+		expect((await phone.fetch(frame)).status).toBe(200);
+		const { passkeys } = (await cy.browser.json("/auth/passkeys")).body as { passkeys: { id: string }[] };
+		const mine = (await phone.json("/auth/session")).body.passkey as string;
+		expect(passkeys.map((passkey) => passkey.id)).toContain(mine);
+		expect((await cy.browser.fetch(`/auth/passkeys/${encodeURIComponent(mine)}`, { method: "DELETE" })).status).toBe(200);
+		expect((await phone.fetch(frame)).status).toBe(401);
+		expect((await cy.browser.fetch(frame)).status).toBe(200);
 		// Suspended.
 		await admin("/admin/accounts/art-cy/suspend", { method: "POST", json: { reason: "test" } });
 		expect((await cy.browser.fetch(frame)).status).toBe(403);

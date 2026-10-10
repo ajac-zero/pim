@@ -56,11 +56,15 @@ function Root() {
  */
 function SignedIn({ children }: { children: ReactNode }) {
   const { data, error, refetch } = useQuery(authSessionQuery());
+  const queryClient = useQueryClient();
   const signedOut = data?.site !== "accounts" && data?.signedIn === false;
-  // An open socket would keep streaming after signing out.
+  // An open socket would keep streaming after signing out. The sign-in screen takes the
+  // app's place, which unmounts every artifact frame; what was read of artifacts goes too.
   useEffect(() => {
-    if (signedOut) pimClient.close();
-  }, [signedOut]);
+    if (!signedOut) return;
+    pimClient.close();
+    queryClient.removeQueries({ queryKey: ["artifacts"] });
+  }, [signedOut, queryClient]);
   if (error) {
     return (
       <div className="flex h-svh">

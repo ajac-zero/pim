@@ -337,8 +337,10 @@ try {
 		// The admin API: works without any session, from this process, not the browser.
 		if (!deleted && ADMIN_TOKEN) {
 			const operator = await adminDelete().catch((error) => ({ status: 0, body: { error: error instanceof Error ? error.message : String(error) } }));
-			// 200 erased, 202 closed and being erased; 404 means registration never made it.
-			deleted = closed(operator.status) || operator.status === 404;
+			// 200 erased, 202 closed and being erased. A 404 counts only when it says there's no such account
+			// (registration never made it): a plain "Not found" can mean the admin API is off or the route wrong.
+			const absent = operator.status === 404 && operator.body?.error === `No account ${USER}`;
+			deleted = closed(operator.status) || absent;
 			check("cleanup with the admin API", deleted, `HTTP ${operator.status} ${JSON.stringify(operator.body)}`);
 		}
 		if (!deleted) {

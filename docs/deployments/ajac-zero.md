@@ -20,9 +20,9 @@ Cloudflare renews the certificate along with the custom domain. If the custom do
 
 | | |
 | --- | --- |
-| Serving | `ce9b2eae-0edc-4dc9-9b85-97ca8dbbcd75` (100%), deployed 2026-10-10 09:15 UTC from `main` at [`b2df73f`](https://github.com/ajac-zero/pim/commit/b2df73fb0393d0a553caafe65c2afd0a7f1d4d4a) (merge of #6) |
-| Rollback target | `096158e7-b612-40dc-a667-dced2a1fe6fc` (#5 at `8fc824c`, serving until the #6 deploy) |
-| Route `*.pimling.ajac-zero.com/*` | `527b24a6091b429d966537aa01ac254d`; wrangler recreates it on each deploy, with a new ID and the same pattern and script |
+| Serving | `6bc8cb75-45d0-4184-9a07-52a257e343e1` (100%), deployed 2026-10-10 18:57 UTC from `main` at [`359394a`](https://github.com/ajac-zero/pim/commit/359394ac21883021ceaeae025cd00c7c7524ddca) (merge of #8, M2a private artifacts) |
+| Rollback target | `ce9b2eae-0edc-4dc9-9b85-97ca8dbbcd75` (#6 at `b2df73f`, serving until the #8 deploy); see [Rollback](#rollback) for what it leaves behind |
+| Route `*.pimling.ajac-zero.com/*` | `6ab992d4ad234156b61375bf704349b3`; wrangler recreates it on each deploy, with a new ID and the same pattern and script |
 | Accounts | the owner's, plus `deleted` tombstones of test accounts |
 
 ## History
@@ -33,6 +33,7 @@ Cloudflare renews the certificate along with the custom domain. If the custom do
 | `d88a37fc-99f9-4dbf-85b5-76a420c47b08` | 2026-10-10 06:38 | the same bundle | `PIMLING_ADMIN_TOKEN` set |
 | `096158e7-b612-40dc-a667-dced2a1fe6fc` | 2026-10-10 07:58 | `main` `8fc824c` (#5) | Add another device, front-door sign-in, #4's copy |
 | `ce9b2eae-0edc-4dc9-9b85-97ca8dbbcd75` | 2026-10-10 09:15 | `main` `b2df73f` (#6) | Add another device: Done waits for revocation, passkey list refreshes, a device with a passkey can sign in; the live smoke script's cleanup and checks |
+| `6bc8cb75-45d0-4184-9a07-52a257e343e1` | 2026-10-10 18:57 | `main` `359394a` (#8) | M2a private artifacts ([artifacts.md](../artifacts.md)); `PIM_LIMITS` gains the four artifact keys |
 
 ## What was changed (2026-10-10)
 
@@ -42,11 +43,11 @@ Cloudflare renews the certificate along with the custom domain. If the custom do
 | Custom domain `pimling.ajac-zero.com` → `pimling` | `e188214063dbb191c911b164ae6189cea32d4dc7` | wrangler (`custom_domain: true`) |
 | DNS `AAAA pimling.ajac-zero.com` (proxied) | `19fe94b9ae5bbfd5055cde0d7b76ae09` | Created with the custom domain |
 | Certificate pack for `pimling` and `*.pimling` | `fbaf98c3-32fe-4a27-872d-34a24e4f5ab1` | Created with the custom domain |
-| Route `*.pimling.ajac-zero.com/*` → `pimling` | `2e20f82bce114f189580235400c048fe` at first; `21daa95d2ba14a6ab3f2ff4c496cb0bf` from the #5 deploy; `527b24a6091b429d966537aa01ac254d` since the #6 deploy (wrangler recreates it) | wrangler (`routes`) |
+| Route `*.pimling.ajac-zero.com/*` → `pimling` | `2e20f82bce114f189580235400c048fe` at first; `21daa95d2ba14a6ab3f2ff4c496cb0bf` from the #5 deploy; `527b24a6091b429d966537aa01ac254d` from the #6 deploy; `6ab992d4ad234156b61375bf704349b3` since the #8 deploy (wrangler recreates it) | wrangler (`routes`) |
 | DNS `AAAA *.pimling.ajac-zero.com` → `100::` (proxied) | `16774988657fb34e6ee8d4b8eb02ef3b` | API, by hand (not in the config) |
 | Secret `PIMLING_ADMIN_TOKEN` | Serving version `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (the same bundle, with the secret) | `wrangler secret put` |
 
-Nothing else in the zone changed. All 26 DNS records, the `packages.ajac-zero.com/*` route, and the other 10 custom domains are as they were.
+At the initial deployment nothing else in the zone changed: all 26 DNS records that existed then, the `packages.ajac-zero.com/*` route, and the other 10 custom domains stayed as they were. Later deploys are recorded in their own acceptance sections.
 
 ## Setup for the owner
 
@@ -63,17 +64,37 @@ Nothing else in the zone changed. All 26 DNS records, the `packages.ajac-zero.co
 
 ## Limits here
 
-Invite-only; at most 25 accounts and 3 registrations per address a day. Per person, each day: 300,000 tokens, 300 model requests and 100 runs; at most 100 chats, 20 schedules, 10 apps and 200 MB. Rate limits: 20 sign-in, recovery and registration attempts a minute per address, and 300 API requests a minute per person. Approvals are explicit: unanswered ones are denied after 5 minutes.
+Invite-only; at most 25 accounts and 3 registrations per address a day. Per person, each day: 300,000 tokens, 300 model requests and 100 runs; at most 100 chats, 20 schedules, 10 apps and 200 MB. Artifacts (since #8): at most 100, 50 versions each, 500,000 bytes a version and 10,000,000 bytes in all (`artifacts`, `artifactVersions`, `artifactBytes`, `artifactStorageBytes`). Rate limits: 20 sign-in, recovery and registration attempts a minute per address, and 300 API requests a minute per person. Approvals are explicit: unanswered ones are denied after 5 minutes.
 
 ## Rollback
 
-- **To an earlier version:** `pnpm wrangler rollback 096158e7-b612-40dc-a667-dced2a1fe6fc --name pimling --message "…"` (the version before #6; #6 changed only the web app and the smoke script, with no new Durable Object migration), `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (before #5), or `pnpm wrangler versions list --name pimling` for others. A rollback changes code only: Durable Object data, the route, the custom domain and the secret stay as they are. Devices added with #5 keep their passkeys, which work with any version.
+- **To an earlier version:** `pnpm wrangler rollback ce9b2eae-0edc-4dc9-9b85-97ca8dbbcd75 --config wrangler.ajac-zero.jsonc --message "…"` (the version before #8). Other targets: `096158e7-b612-40dc-a667-dced2a1fe6fc` (before #6) and `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (before #5); `pnpm wrangler versions list --config wrangler.ajac-zero.jsonc` lists the rest. A rollback changes code and that version's own variables: Durable Object data, the route, the custom domain and the secret stay as they are. Devices added with #5 keep their passkeys, which work with any version.
+- **Rolling back past #8 leaves artifacts behind.** #8 added no Durable Object migration: each Pim makes its `pim_artifacts` and `pim_artifact_versions` tables itself, and they stay after a rollback. The older version has no artifact tools, routes or screens, so artifacts can't be seen, downloaded or deleted. They still count toward `storageBytes`, and its export leaves them out. Deleting an account still erases them, since erasure wipes all of a Pim's storage. Rolling forward again shows them as they were.
+- **Roll back with `wrangler rollback`, not by deploying older code with today's config.** A version keeps the variables it was deployed with, so `ce9b2eae` comes back with its own `PIM_LIMITS`. Code from before #8 doesn't know the artifact keys now in `wrangler.ajac-zero.jsonc`, and refuses a `PIM_LIMITS` it can't parse by failing closed: no model requests and no runs.
 - **To remove the deployment entirely,** which erases every Pimling's data:
-  1. `pnpm wrangler delete --name pimling`. This removes the Worker, its route and custom domain, and its Durable Objects with all their data.
+  1. `pnpm wrangler delete --config wrangler.ajac-zero.jsonc`. This removes the Worker, its route and custom domain, and its Durable Objects with all their data.
   2. Delete DNS record `16774988657fb34e6ee8d4b8eb02ef3b` (`*.pimling.ajac-zero.com`).
   3. Delete DNS record `19fe94b9ae5bbfd5055cde0d7b76ae09` (`pimling.ajac-zero.com`) if the custom domain didn't take it.
 
   The certificate pack goes with the custom domain.
+
+## Acceptance of version `6bc8cb75` (2026-10-10, M2a)
+
+- **Merge:** #8 merged at its reviewed head [`9e4e32e`](https://github.com/ajac-zero/pim/commit/9e4e32e668761ac46e0e70fec67968dc8e77b026) as [`359394a`](https://github.com/ajac-zero/pim/commit/359394ac21883021ceaeae025cd00c7c7524ddca), with the merge guarded by that head; both have tree `e401193b9262f974497775a7cb25f57ab84f609b`. Deployed from a clean checkout of that commit.
+- **Reviewed before merging:** an independent reviewer and the root reviewer each checked the exact head. Both ran typecheck, 193 Worker tests, 21 web tests and lint (only the existing warnings); the root reviewer also ran the build and dry runs for this config, the self-hosted one and the hosted one. The independent reviewer's mutation checks covered racing writes, refused-write invariants, the Markdown allowlist and the model-facing wording. `9e4e32e` changed only tests and docs from the previously reviewed `3c86f0c`; their built Worker bundle and web assets were identical.
+- **Acceptance, local:** in Chrome with virtual passkeys against the local preview and a scripted model, 28 of 28 checks at `3c86f0c` (see #8): the chat card, viewer, history and restore, the sandbox (a hostile probe blocked on every vector; opened directly, an opaque origin), plain-text downloads, `?token=` refused, leaving noticed, session loss unmounting frames, deletion, and another owner's host answering `404`. A hostile Markdown corpus rendered with no loading elements or attributes and no outbound requests. No live account was made for this deploy.
+- **Live, read-only, after deploying:**
+  - version `6bc8cb75` at 100%;
+  - `/health`, the front door and the owner's app shell: `200`;
+  - lookup: `200` for the owner, `404` for an unknown name and for `x@evil.com#`;
+  - `/admin/stats`: `401` with no token and with a wrong one;
+  - an unknown tenant `404`, the deleted `smoke-dev3` `410`;
+  - anonymous on the owner's host: `/api/sessions`, `/api/chatgpt` and the artifact list, frame and download all `401`, a bogus `?token=` `401` as well; an artifact path on the front door `404`;
+  - the live bundle matches the local build (`assets/index-CA62s4Uu.js`), and the artifact frame and ChatGPT-plan chunks are served;
+  - the tenant certificate still covers `*.pimling.ajac-zero.com`, until 2027-01-08.
+- **Configuration:** `PIM_LIMITS` gained `"artifacts": 100, "artifactVersions": 50, "artifactBytes": 500000, "artifactStorageBytes": 10000000`. Its other seven limits are as in `ce9b2eae`. The self-hosted config wasn't deployed.
+- **Cloudflare, compared before and after:** only the tenant route was recreated (new ID above). The `packages.ajac-zero.com/*` route, the other 10 custom domains, all 28 DNS records, the certificate and the one secret (`PIMLING_ADMIN_TOKEN`) are unchanged.
+- **Accounts:** 1 active (the owner's), 0 pending, 0 deleting, 4 deleted, 2 unused invites, no cleanup queued or failing, before and after. No owner data or credentials were read or changed.
 
 ## Acceptance of version `ce9b2eae` (2026-10-10)
 

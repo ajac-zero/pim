@@ -39,6 +39,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 | Capability | Tools | How |
 | --- | --- | --- |
 | Long-term memory | `note`, `recall`, `zoom`, `forget` | OptMem-style: an append-only log, compressed in the background into a tree of summaries. Every conversation sees a fixed-size view of it. See [Memory](#memory). |
+| Artifacts | `artifact_create`, `artifact_update`, `artifact_read`, `artifact_list` | Documents and small HTML pages the agent makes for you, with every version kept. They show in the chat and in Artifacts, run in a sandbox apart from your account, and can be restored or downloaded. See [docs/artifacts.md](docs/artifacts.md). |
 | Goals and plans | `create_goal`, `update_goal`, `list_goals` | Goals have step-by-step plans and progress notes. Active goals are always in the prompt. |
 | Background work | `schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task` | Delays, dates, or cron. When a task fires, the agent receives a `[Scheduled task]` message in the session that scheduled it. |
 | Reaching you | `notify_user` | Stored, pushed to connected sockets, sent as Web Push to browsers that turned it on in Settings (even with the app closed), and POSTed to an optional webhook. |
@@ -126,6 +127,11 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | DELETE | `/memory/log/:id` | | Forgets one memory and rebuilds the summaries over it |
 | GET | `/memory/tree/:block` | a block such as `0-15` | Its summary and its two halves |
 | DELETE | `/memory/tree/:block` | | Drops a bad summary and those built on it; they are rebuilt |
+| GET | `/artifacts`, `/artifacts/:id` | | Artifacts, and one with its version history. See [docs/artifacts.md](docs/artifacts.md) |
+| GET | `/artifacts/:id/versions/:v` | | One version with its content |
+| GET | `/artifacts/:id/versions/:v/frame`, `…/download` | | An HTML version as a sandboxed page, or any version as a file |
+| POST | `/artifacts/:id/restore` | `{ version, baseVersion }` | Restores a version as the new latest; `409` if `baseVersion` isn't the latest |
+| DELETE | `/artifacts/:id` | | Deletes it with every version |
 | GET | `/goals`, `/goals/:id` | `?status=active\|paused\|done\|abandoned` | Goals with steps and notes |
 | DELETE | `/goals/:id` | | |
 | GET | `/schedules` | | Pending scheduled tasks |
@@ -256,6 +262,7 @@ To add a tool, write a pi extension in `src/extensions/` and install it in `Pim`
 ## Not built yet
 
 - Falling back to `PIM_MODEL` when the ChatGPT plan's usage limit is reached. Until then, a run that hits the limit fails with OpenAI's error.
+- Publishing artifacts, JSX artifacts, and artifacts that keep their own state.
 - A sandboxed computer and browser for the agent: Cloudflare Containers or Browser Rendering.
 - Extensions beyond MCP: Agent Skills, and full pi extensions that Pim builds into itself by redeploying its own Worker.
 - Secret placeholders, so approved requests can use credentials the model never sees.

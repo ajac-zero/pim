@@ -23,3 +23,21 @@ export const settingsQuery = () =>
 
 export const accountQuery = () =>
   queryOptions({ queryKey: ["account"], queryFn: pim.account });
+
+export const artifactsQuery = () =>
+  queryOptions({ queryKey: ["artifacts"], queryFn: pim.artifacts });
+
+export const artifactQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["artifacts", id],
+    queryFn: () => pim.artifact(id),
+    // A deleted artifact answers 404: that's the answer, not a failure to retry.
+    retry: false,
+  });
+
+export const artifactVersionQuery = (id: string, version: number) =>
+  queryOptions({
+    queryKey: ["artifacts", id, "versions", version],
+    queryFn: () => pim.artifactVersion(id, version),
+    retry: false,
+  });

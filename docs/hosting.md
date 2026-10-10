@@ -2,7 +2,7 @@
 
 Pimling runs Pim for many people from one Cloudflare account. Each person gets their own Pim at `<username>.<domain>`, with its own conversations, memories, goals, schedules, connected apps, ChatGPT sign-in, passkeys and API tokens. Self-hosting is unchanged: `wrangler.jsonc` still deploys one Pim for one person.
 
-This is Phase 1: a personal assistant service. It runs no code that people or their agents write. Artifacts, coding sandboxes, app hosting and self-extension are later phases.
+This is Phase 1, a personal assistant service, plus private artifacts (M2a): pages the agent makes run only in each person's browser, in a sandbox apart from their account (see [artifacts.md](artifacts.md)). The service runs no code that people or their agents write. Publishing artifacts, coding sandboxes, app hosting and self-extension are later phases.
 
 ## How it works
 
@@ -106,7 +106,7 @@ The admin API is on the front door, with `Authorization: Bearer $PIMLING_ADMIN_T
 | `pim.passkey_created`, `pim.recovery_codes_replaced` | A passkey made from a setup link or recovery code; codes replaced |
 | `pim.misrouted` | A request reached the wrong agent. This should never happen: investigate |
 
-**Abuse and limits.** Per address: `AUTH_LIMITER` (30 sign-in, recovery and registration attempts a minute) and `PIMLING_REGISTRATIONS_PER_ADDRESS` (3 a day). Per person: `API_LIMITER` (600 requests a minute), `PIM_LIMITS` (tokens, model requests, runs, chats, schedules, apps, storage), and `PIM_MODELS`, so only models you pay for can be chosen. Paid `web_search` stays off.
+**Abuse and limits.** Per address: `AUTH_LIMITER` (30 sign-in, recovery and registration attempts a minute) and `PIMLING_REGISTRATIONS_PER_ADDRESS` (3 a day). Per person: `API_LIMITER` (600 requests a minute), `PIM_LIMITS` (tokens, model requests, runs, chats, schedules, apps, storage, artifacts), and `PIM_MODELS`, so only models you pay for can be chosen. Paid `web_search` stays off.
 
 **Deleting an account** makes it `deleting` in the Directory first, so its hostname stops working at once (`410`), and queues a cleanup job there. The job wipes the agent (runs aborted, app event subscriptions stopped, sockets closed, storage and alarms deleted, schedules and credentials with them), writes an erased mark into the empty storage, flushes it, and ends the agent's instance so nothing under way there can write afterwards. Every later instance finds the mark and refuses everything: requests (`410`), sockets, alarms and the service's own writes. That makes the agent itself the fence: a request a Worker authorized just before the deletion, or with an account it still had cached, can't write after it. The job then checks a fresh instance is marked and holds nothing, and wipes and checks the Auth object. Only then is the account `deleted`; a request that slipped in before the mark makes the check fail, and the retry wipes it.
 

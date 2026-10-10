@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { AlertCircle, Clock } from "lucide-react";
 import { Fragment, memo, useMemo } from "react";
 import { PimMark } from "~/components/app-sidebar";
+import { ArtifactCard, artifactReference } from "~/components/artifact";
 import {
   ApprovalBlock,
   AssistantMessage,
@@ -29,6 +30,9 @@ import type {
 import type { Approval } from "~/lib/pim-api";
 import { type SessionView, type ThreadEntry } from "~/lib/pim-view";
 import { approvalsQuery } from "~/lib/queries";
+
+/** Tools whose answer names an artifact version, shown as the artifact itself. */
+const ARTIFACT_TOOLS = new Set(["artifact_create", "artifact_update"]);
 
 /* Insets clearing the floating header and composer (see the chat route). */
 const DEFAULT_COMPOSER_INSET = 160;
@@ -172,6 +176,13 @@ export const Thread = memo(function Thread({
               return <ApprovalBlock key={entry.key} approval={approval} />;
             }
             const running = runningTools.get(call.call_id);
+            const output = outputs.get(call.call_id);
+            const artifact = ARTIFACT_TOOLS.has(call.name)
+              ? artifactReference(output?.output)
+              : null;
+            if (artifact) {
+              return <ArtifactCard key={entry.key} reference={artifact} />;
+            }
             return (
               <ToolCallBlock
                 key={entry.key}

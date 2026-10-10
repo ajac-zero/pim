@@ -1,6 +1,6 @@
-import { useMutation } from "@tanstack/react-query";
-import { Check, Copy, Loader2, Smartphone } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { AlertCircle, Check, Copy, Loader2, Smartphone } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { renderSVG } from "uqr";
 import { useI18n } from "~/components/i18n";
@@ -15,26 +15,49 @@ import { auth } from "~/lib/auth";
  */
 export function AddDevice() {
   const { t, formatDate } = useI18n();
+  const queryClient = useQueryClient();
+  // The other device's new passkey shows up in the list when this card is dismissed.
+  const refreshPasskeys = useCallback(
+    () => queryClient.invalidateQueries({ queryKey: ["auth", "passkeys"] }),
+    [queryClient],
+  );
   const [link, setLink] = useState<{ url: string; expiresAt: string } | null>(
     null,
   );
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  // Hidden only once the server confirms the link no longer works: a failure leaves it shown, with a retry.
+  // It ends whichever link this browser made last, so it hides only the link it was asked about: one
+  // made while it was under way is newer, and is left alone (and left working).
+  const cancel = useMutation({
+    mutationFn: async (_shown: string) => auth.cancelDeviceLink(),
+    onSuccess: (_result, shown) => {
+      setLink((current) => (current?.url === shown ? null : current));
+      return refreshPasskeys();
+    },
+  });
   const make = useMutation({
     mutationFn: auth.deviceLink,
     onSuccess: (made) => {
       setLink(made);
       setCopied(false);
+      // A failure from ending an older link isn't about this one.
+      cancel.reset();
     },
     onError: (error) => toast.error(error.message),
   });
   const expired = link !== null && Date.parse(link.expiresAt) <= now;
-  // Ticks while a link is shown, so it says when it's no longer good.
+  // Ticks while a link is shown, so it says when it's no longer good, and so the
+  // other device's passkey appears in the list once it's made.
+  // Stops once the link has expired: nothing can be added with it after that.
   useEffect(() => {
-    if (!link) return;
-    const timer = setInterval(() => setNow(Date.now()), 5_000);
+    if (!link || expired) return;
+    const timer = setInterval(() => {
+      setNow(Date.now());
+      void refreshPasskeys();
+    }, 5_000);
     return () => clearInterval(timer);
-  }, [link]);
+  }, [link, expired, refreshPasskeys]);
   // The QR code is drawn here, from the link: nothing leaves the browser to make it.
   const qr = useMemo(
     () =>
@@ -93,14 +116,22 @@ export function AddDevice() {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => {
-                  setLink(null);
-                  void auth.cancelDeviceLink().catch(() => undefined);
-                }}
+                onClick={() => cancel.mutate(link.url)}
+                disabled={cancel.isPending}
               >
-                {t("done")}
+                {cancel.isPending && <Loader2 className="animate-spin" />}
+                {cancel.isError ? t("tryAgain") : t("done")}
               </Button>
             </div>
+            {cancel.isError && (
+              <p
+                role="alert"
+                className="flex items-start gap-1.5 text-destructive text-xs"
+              >
+                <AlertCircle className="mt-px size-3.5 shrink-0" />
+                {t("addDeviceCancelFailed", { error: cancel.error.message })}
+              </p>
+            )}
           </div>
         </div>
       ) : (
@@ -110,10 +141,11 @@ export function AddDevice() {
               {t("addDeviceExpired")}
             </p>
           )}
+          {/* Not while an older link is still being ended: that request would end this one too. */}
           <Button
             variant="outline"
             onClick={() => make.mutate()}
-            disabled={make.isPending}
+            disabled={make.isPending || cancel.isPending}
           >
             {make.isPending ? (
               <Loader2 className="animate-spin" />

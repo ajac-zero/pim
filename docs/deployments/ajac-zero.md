@@ -16,6 +16,23 @@ Making `pimling.ajac-zero.com` a Workers Custom Domain gave it an advanced certi
 
 Cloudflare renews the certificate along with the custom domain. If the custom domain is removed, the tenant certificate goes with it. The fallback is Advanced Certificate Manager on the zone, which is paid (check the current price in the dashboard before buying).
 
+## Current state
+
+| | |
+| --- | --- |
+| Serving | `096158e7-b612-40dc-a667-dced2a1fe6fc` (100%), deployed 2026-10-10 07:58 UTC from `main` at [`8fc824c`](https://github.com/ajac-zero/pim/commit/8fc824c0f6f163d647674d2864411135afef7e1d) (merge of #5) |
+| Rollback target | `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (#2 at `9c0a423` plus the admin secret, serving until the #5 deploy) |
+| Route `*.pimling.ajac-zero.com/*` | `21daa95d2ba14a6ab3f2ff4c496cb0bf`; wrangler recreates it on each deploy, with a new ID and the same pattern and script |
+| Accounts | the owner's, plus `deleted` tombstones of test accounts |
+
+## History
+
+| Version | Deployed | From | Notes |
+| --- | --- | --- | --- |
+| `0e8a60a3-0bf5-4f9f-9e2a-25712ec656b6` | 2026-10-10 06:37 | `main` `9c0a423` (#2) | First upload |
+| `d88a37fc-99f9-4dbf-85b5-76a420c47b08` | 2026-10-10 06:38 | the same bundle | `PIMLING_ADMIN_TOKEN` set |
+| `096158e7-b612-40dc-a667-dced2a1fe6fc` | 2026-10-10 07:58 | `main` `8fc824c` (#5) | Add another device, front-door sign-in, #4's copy |
+
 ## What was changed (2026-10-10)
 
 | Change | ID | Made by |
@@ -24,7 +41,7 @@ Cloudflare renews the certificate along with the custom domain. If the custom do
 | Custom domain `pimling.ajac-zero.com` → `pimling` | `e188214063dbb191c911b164ae6189cea32d4dc7` | wrangler (`custom_domain: true`) |
 | DNS `AAAA pimling.ajac-zero.com` (proxied) | `19fe94b9ae5bbfd5055cde0d7b76ae09` | Created with the custom domain |
 | Certificate pack for `pimling` and `*.pimling` | `fbaf98c3-32fe-4a27-872d-34a24e4f5ab1` | Created with the custom domain |
-| Route `*.pimling.ajac-zero.com/*` → `pimling` | `2e20f82bce114f189580235400c048fe` | wrangler (`routes`) |
+| Route `*.pimling.ajac-zero.com/*` → `pimling` | `2e20f82bce114f189580235400c048fe` at first; `21daa95d2ba14a6ab3f2ff4c496cb0bf` since the #5 deploy (wrangler recreates it) | wrangler (`routes`) |
 | DNS `AAAA *.pimling.ajac-zero.com` → `100::` (proxied) | `16774988657fb34e6ee8d4b8eb02ef3b` | API, by hand (not in the config) |
 | Secret `PIMLING_ADMIN_TOKEN` | Serving version `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (the same bundle, with the secret) | `wrangler secret put` |
 
@@ -49,13 +66,36 @@ Invite-only; at most 25 accounts and 3 registrations per address a day. Per pers
 
 ## Rollback
 
-- **To an earlier version:** `pnpm wrangler rollback --name pimling` (or `pnpm wrangler versions list --name pimling` and roll back to a version ID).
+- **To an earlier version:** `pnpm wrangler rollback d88a37fc-99f9-4dbf-85b5-76a420c47b08 --name pimling --message "…"` (the version before #5), or `pnpm wrangler versions list --name pimling` for others. A rollback changes code only: Durable Object data, the route, the custom domain and the secret stay as they are. Devices added with #5 keep their passkeys, which work with any version.
 - **To remove the deployment entirely,** which erases every Pimling's data:
   1. `pnpm wrangler delete --name pimling`. This removes the Worker, its route and custom domain, and its Durable Objects with all their data.
   2. Delete DNS record `16774988657fb34e6ee8d4b8eb02ef3b` (`*.pimling.ajac-zero.com`).
   3. Delete DNS record `19fe94b9ae5bbfd5055cde0d7b76ae09` (`pimling.ajac-zero.com`) if the custom domain didn't take it.
 
   The certificate pack goes with the custom domain.
+
+## Acceptance of version `096158e7` (2026-10-10)
+
+- **Owner, on real devices:** memory, scheduling, approvals, and signing in on a phone with Add another device all work.
+- **Scripted, over real HTTPS, from a second orb** (the first had used up its daily registration limit): 29 of 30 checks with the disposable account `smoke-dev3`, which was deleted.
+  - **What passed:** lookup; the desktop passkey; the QR code (decoded from a screenshot); the phone naming the Pimling, the code cleared from the address bar and never sent in a URL; the phone's own passkey and signing in with it alone; replay refused; the desktop, its passkey and all 10 recovery codes untouched; deletion, then `410`.
+  - **The one failure** was the last check, "phone's session is gone too". The phone had already signed out by then, and its request didn't get `410` at that moment; 20 seconds later it did. That fits the gateway's 30-second account cache: an anonymous request served from a cache that still thinks the account is active gets `401`, not `410`. A signed-in request is refused by the agent either way.
+- **[`scripts/live-device-smoke.mjs`](../../scripts/live-device-smoke.mjs)** now:
+  - keeps the phone signed in through the deletion;
+  - records exact statuses;
+  - checks refusal at once and `410` after the cache window separately;
+  - bounds every browser operation (`--cdp-timeout-ms`, default 30 s), so cleanup still runs when a browser hangs;
+  - writes once before deleting (expecting `201`), so the refusal afterwards (`401`, `403` or `410` only) means something;
+  - on a failure, including a registration whose answer was lost, tries to delete the disposable account with the desktop's session, at the Pimling's own host. That session exists only after the desktop's first passkey. With `--admin-token-file`, it falls back to the admin API, which also deletes an account that never got a passkey. For cleanup, `200`, `202` and `410` all count as closed; the run's own deletion must answer `200` or `202` (closed, still being erased). The admin API's `404` counts only as `No account <username>`; a plain `Not found` (admin API off, wrong route) doesn't. Without that file, a failure before the first passkey leaves a pending account (it lapses in a day).
+  - says `CLEANUP NEEDED` and exits `2` whenever the account may be left behind. It never prints the token or any code.
+
+  Run it from a network that hasn't used up the registration limit:
+
+  ```sh
+  node scripts/live-device-smoke.mjs --domain pimling.ajac-zero.com --username smoke-devN \
+    --invite-file ./invite --admin-token-file ~/pimling-deploy/admin-token \
+    --desktop-port 9351 --phone-port 9352
+  ```
 
 ## Smoke test (2026-10-10, version `d88a37fc`)
 

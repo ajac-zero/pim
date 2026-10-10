@@ -20,9 +20,9 @@ Cloudflare renews the certificate along with the custom domain. If the custom do
 
 | | |
 | --- | --- |
-| Serving | `096158e7-b612-40dc-a667-dced2a1fe6fc` (100%), deployed 2026-10-10 07:58 UTC from `main` at [`8fc824c`](https://github.com/ajac-zero/pim/commit/8fc824c0f6f163d647674d2864411135afef7e1d) (merge of #5) |
-| Rollback target | `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (#2 at `9c0a423` plus the admin secret, serving until the #5 deploy) |
-| Route `*.pimling.ajac-zero.com/*` | `21daa95d2ba14a6ab3f2ff4c496cb0bf`; wrangler recreates it on each deploy, with a new ID and the same pattern and script |
+| Serving | `ce9b2eae-0edc-4dc9-9b85-97ca8dbbcd75` (100%), deployed 2026-10-10 09:15 UTC from `main` at [`b2df73f`](https://github.com/ajac-zero/pim/commit/b2df73fb0393d0a553caafe65c2afd0a7f1d4d4a) (merge of #6) |
+| Rollback target | `096158e7-b612-40dc-a667-dced2a1fe6fc` (#5 at `8fc824c`, serving until the #6 deploy) |
+| Route `*.pimling.ajac-zero.com/*` | `527b24a6091b429d966537aa01ac254d`; wrangler recreates it on each deploy, with a new ID and the same pattern and script |
 | Accounts | the owner's, plus `deleted` tombstones of test accounts |
 
 ## History
@@ -32,6 +32,7 @@ Cloudflare renews the certificate along with the custom domain. If the custom do
 | `0e8a60a3-0bf5-4f9f-9e2a-25712ec656b6` | 2026-10-10 06:37 | `main` `9c0a423` (#2) | First upload |
 | `d88a37fc-99f9-4dbf-85b5-76a420c47b08` | 2026-10-10 06:38 | the same bundle | `PIMLING_ADMIN_TOKEN` set |
 | `096158e7-b612-40dc-a667-dced2a1fe6fc` | 2026-10-10 07:58 | `main` `8fc824c` (#5) | Add another device, front-door sign-in, #4's copy |
+| `ce9b2eae-0edc-4dc9-9b85-97ca8dbbcd75` | 2026-10-10 09:15 | `main` `b2df73f` (#6) | Add another device: Done waits for revocation, passkey list refreshes, a device with a passkey can sign in; the live smoke script's cleanup and checks |
 
 ## What was changed (2026-10-10)
 
@@ -41,7 +42,7 @@ Cloudflare renews the certificate along with the custom domain. If the custom do
 | Custom domain `pimling.ajac-zero.com` → `pimling` | `e188214063dbb191c911b164ae6189cea32d4dc7` | wrangler (`custom_domain: true`) |
 | DNS `AAAA pimling.ajac-zero.com` (proxied) | `19fe94b9ae5bbfd5055cde0d7b76ae09` | Created with the custom domain |
 | Certificate pack for `pimling` and `*.pimling` | `fbaf98c3-32fe-4a27-872d-34a24e4f5ab1` | Created with the custom domain |
-| Route `*.pimling.ajac-zero.com/*` → `pimling` | `2e20f82bce114f189580235400c048fe` at first; `21daa95d2ba14a6ab3f2ff4c496cb0bf` since the #5 deploy (wrangler recreates it) | wrangler (`routes`) |
+| Route `*.pimling.ajac-zero.com/*` → `pimling` | `2e20f82bce114f189580235400c048fe` at first; `21daa95d2ba14a6ab3f2ff4c496cb0bf` from the #5 deploy; `527b24a6091b429d966537aa01ac254d` since the #6 deploy (wrangler recreates it) | wrangler (`routes`) |
 | DNS `AAAA *.pimling.ajac-zero.com` → `100::` (proxied) | `16774988657fb34e6ee8d4b8eb02ef3b` | API, by hand (not in the config) |
 | Secret `PIMLING_ADMIN_TOKEN` | Serving version `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (the same bundle, with the secret) | `wrangler secret put` |
 
@@ -66,13 +67,21 @@ Invite-only; at most 25 accounts and 3 registrations per address a day. Per pers
 
 ## Rollback
 
-- **To an earlier version:** `pnpm wrangler rollback d88a37fc-99f9-4dbf-85b5-76a420c47b08 --name pimling --message "…"` (the version before #5), or `pnpm wrangler versions list --name pimling` for others. A rollback changes code only: Durable Object data, the route, the custom domain and the secret stay as they are. Devices added with #5 keep their passkeys, which work with any version.
+- **To an earlier version:** `pnpm wrangler rollback 096158e7-b612-40dc-a667-dced2a1fe6fc --name pimling --message "…"` (the version before #6; #6 changed only the web app and the smoke script, with no new Durable Object migration), `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (before #5), or `pnpm wrangler versions list --name pimling` for others. A rollback changes code only: Durable Object data, the route, the custom domain and the secret stay as they are. Devices added with #5 keep their passkeys, which work with any version.
 - **To remove the deployment entirely,** which erases every Pimling's data:
   1. `pnpm wrangler delete --name pimling`. This removes the Worker, its route and custom domain, and its Durable Objects with all their data.
   2. Delete DNS record `16774988657fb34e6ee8d4b8eb02ef3b` (`*.pimling.ajac-zero.com`).
   3. Delete DNS record `19fe94b9ae5bbfd5055cde0d7b76ae09` (`pimling.ajac-zero.com`) if the custom domain didn't take it.
 
   The certificate pack goes with the custom domain.
+
+## Acceptance of version `ce9b2eae` (2026-10-10)
+
+- **Merge:** #6 merged at its reviewed head [`27d1d87`](https://github.com/ajac-zero/pim/commit/27d1d87e35831be2ef8b7e9787f2761aefae61ff) as [`b2df73f`](https://github.com/ajac-zero/pim/commit/b2df73fb0393d0a553caafe65c2afd0a7f1d4d4a); both have tree `71177dabfdb1f714aaf37b885f17705bee097fdd`. Deployed from a clean checkout of that commit, with the config, secret and limits unchanged.
+- **Before merging, on the reviewed head** (independently repeated by the reviewers): typecheck; 177 Worker tests and 15 web tests; web build; web lint with only the existing warnings; `wrangler deploy --dry-run` for this config and the self-hosted one; `node --check scripts/live-device-smoke.mjs`. On a local preview, the smoke script passed 30 of 30 and its error paths were checked by mutation: a `202` deletion accepted; a `500` deletion failed; `410` accepted only for cleanup; an admin `404` accepted only as `No account <username>`, while a plain `Not found` gives `CLEANUP NEEDED` and exit `2`.
+- **Live, read-only, after deploying:** `/health` `200`; the front door `200`; front-door lookup `200` for the owner's username and `404` for an unknown name and for `x@evil.com#`; `/admin/stats` `401` with no token and with a wrong one; an unknown tenant `404`; the deleted `smoke-dev3` `410`; the owner's host serves the app (`200`) and refuses an anonymous API request (`401`); the live bundle matches the local build (`assets/index-DvLwDMRG.js`); the tenant certificate covers `ajac-zero.com`, `pimling.ajac-zero.com` and `*.pimling.ajac-zero.com`, until 2027-01-08.
+- **No disposable live run:** #6 changed only web flows and the smoke script, covered above, so no invite or account was made. Admin stats afterwards: 1 active account (the owner's), 0 pending, 0 deleting, 4 deleted, 2 unused invites, no cleanup queued or failing. The owner's account wasn't touched.
+- **Cloudflare:** only the tenant route was recreated (new ID above). The `packages.ajac-zero.com/*` route and the 12 other custom domains in the account were present after the deploy.
 
 ## Acceptance of version `096158e7` (2026-10-10)
 

@@ -246,6 +246,7 @@ pnpm test        # Vitest in workerd (self-hosted and Pimling Workers), with pi-
 pnpm test:live   # live checks against real MCP servers (Hugging Face's); needs the network
 pnpm typecheck   # also generates the web app's route tree, so it works on a fresh checkout
 pnpm types       # regenerate worker-configuration.d.ts after editing wrangler.jsonc
+pnpm preview:hosted  # Pimling, locally, at http://pimling.localhost:8787 (see docs/hosting.md)
 ```
 
 The web app is in [`web/`](web), with its own README. Passkey sign-in is in [`src/auth/`](src/auth).

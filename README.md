@@ -244,7 +244,7 @@ MCP servers expose tools, prompts and resources; pim uses their tools, instructi
 ```sh
 pnpm test        # Vitest in workerd (self-hosted and Pimling Workers), with pi-ai's faux model, then the web app's tests; no Cloudflare account needed
 pnpm test:live   # live checks against real MCP servers (Hugging Face's); needs the network
-pnpm typecheck
+pnpm typecheck   # also generates the web app's route tree, so it works on a fresh checkout
 pnpm types       # regenerate worker-configuration.d.ts after editing wrangler.jsonc
 ```
 

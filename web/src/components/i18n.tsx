@@ -83,7 +83,7 @@ const translations = {
     reload: "Reload",
     rename: "Rename",
     result: "Result",
-    retryingAfterError: "Retrying after an error: {error}",
+    retryingAfterError: "Retrying after a model error…",
     review: "Review",
     running: "Running",
     saveName: "Save name",
@@ -127,6 +127,19 @@ const translations = {
     disconnect: "Disconnect",
     gotIt: "Got it",
     manageUsage: "Manage usage",
+    modelUsageLimit:
+      "Pim has used up its ChatGPT allowance, so it couldn't answer. That's either your plan's usage limit or Pim's own limit under App limits, which you can raise. Both reset on their own; ChatGPT's usage page shows when. Until then, you can switch Pim to its Workers AI model in Settings.",
+    modelQuota:
+      "Pim's daily usage quota is used up, so it couldn't answer. It resets at midnight UTC.",
+    modelSignIn:
+      "Pim couldn't use your ChatGPT connection, so it couldn't answer. Connect ChatGPT again in Settings.",
+    modelTooLong:
+      "This chat is too long for the model, so Pim couldn't answer. Start a new chat.",
+    modelBusy:
+      "The model provider is busy or unreachable, so Pim couldn't answer. Try again in a moment.",
+    modelOther:
+      "The model couldn't answer. Try again, or switch models in Settings.",
+    notAnswered: "Not answered: {reason}",
     model: "Model",
     modelChanged: "Pim now uses {model}",
     pasteAddress: "Address the browser landed on",
@@ -392,7 +405,7 @@ const translations = {
     reload: "Recargar",
     rename: "Cambiar nombre",
     result: "Resultado",
-    retryingAfterError: "Reintentando tras un error: {error}",
+    retryingAfterError: "Reintentando tras un error del modelo…",
     review: "Revisar",
     running: "En ejecución",
     saveName: "Guardar nombre",
@@ -437,6 +450,19 @@ const translations = {
     disconnect: "Desconectar",
     gotIt: "Entendido",
     manageUsage: "Administrar uso",
+    modelUsageLimit:
+      "Pim agotó su asignación de ChatGPT, así que no pudo responder. Es el límite de uso de tu plan o el límite propio de Pim en Límites de apps, que puedes aumentar. Ambos se restablecen solos; la página de uso de ChatGPT muestra cuándo. Mientras tanto, puedes cambiar Pim a su modelo de Workers AI en Configuración.",
+    modelQuota:
+      "La cuota diaria de uso de Pim se agotó, así que no pudo responder. Se restablece a medianoche UTC.",
+    modelSignIn:
+      "Pim no pudo usar tu conexión con ChatGPT, así que no pudo responder. Vuelve a conectar ChatGPT en Configuración.",
+    modelTooLong:
+      "Este chat es demasiado largo para el modelo, así que Pim no pudo responder. Empieza un chat nuevo.",
+    modelBusy:
+      "El proveedor del modelo está ocupado o no responde, así que Pim no pudo responder. Inténtalo de nuevo en un momento.",
+    modelOther:
+      "El modelo no pudo responder. Inténtalo de nuevo o cambia de modelo en Configuración.",
+    notAnswered: "Sin respuesta: {reason}",
     model: "Modelo",
     modelChanged: "Pim ahora usa {model}",
     pasteAddress: "Dirección a la que llegó el navegador",
@@ -637,7 +663,7 @@ const translations = {
   },
 } as const;
 
-type TranslationKey = keyof (typeof translations)["en"];
+export type TranslationKey = keyof (typeof translations)["en"];
 type Variables = Record<string, string | number>;
 
 function supportedLocale(value: string | null | undefined): Locale | null {

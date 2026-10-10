@@ -46,9 +46,53 @@ export type SessionView = {
   tools: readonly RunningTool[];
   /** Messages queued behind the running work. */
   queued: number;
-  retry: { at: number; error: string } | null;
-  error: string | null;
+  retry: { at: number } | null;
+  error: ViewError | null;
 };
+
+/**
+ * Why a model request failed, read from its error text. The text itself is
+ * never shown: it is the provider's response, which can echo the request.
+ */
+export type ModelProblem =
+  | "usage_limit"
+  | "quota"
+  | "sign_in"
+  | "too_long"
+  | "busy"
+  | "other";
+
+export type ViewError =
+  /** A failed or faulted model request. */
+  | { problem: ModelProblem }
+  /** pi's code for any other unanswered input. */
+  | { reason: string };
+
+/** First match wins. */
+const MODEL_PROBLEMS: ReadonlyArray<[ModelProblem, RegExp]> = [
+  // Sign in with ChatGPT: the plan's usage, or Pim's own App limit, is used up.
+  ["usage_limit", /subscription_sharing_usage_limit_exceeded/],
+  // Pim's own daily limits (QUOTA_MESSAGE in src/usage.ts).
+  ["quota", /^Pim usage quota exceeded\b/],
+  [
+    "sign_in",
+    /OpenAI token request failed|refresh response|Sign in to ChatGPT|invalid_grant|\b401\b|unauthori[sz]ed/i,
+  ],
+  [
+    "too_long",
+    /context.?(length|window)|maximum context|too many tokens|prompt is too long/i,
+  ],
+  [
+    "busy",
+    /rate.?limit|too many requests|\b429\b|overloaded|capacity|\b50[0234]\b|unavailable|timed? ?out|network|fetch failed|connection/i,
+  ],
+];
+
+export function modelProblem(text: string): ModelProblem {
+  return (
+    MODEL_PROBLEMS.find(([, pattern]) => pattern.test(text))?.[0] ?? "other"
+  );
+}
 
 export const EMPTY_VIEW: SessionView = {
   entries: [],
@@ -311,7 +355,9 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
               output: slot.output ?? "",
             })),
           queued: event.inbox.length,
-          retry: event.generation?.retry ?? null,
+          retry: event.generation?.retry
+            ? { at: event.generation.retry.at }
+            : null,
           error: null,
         },
       };
@@ -383,12 +429,16 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
     case "auto_retry_start":
       return {
         ...state,
-        view: { ...view, retry: { at: event.at, error: event.errorMessage } },
+        view: { ...view, retry: { at: event.at } },
       };
     case "auto_retry_end":
       return { ...state, view: { ...view, retry: null } };
     case "task_failed":
-      return { ...state, view: { ...view, error: event.message } };
+      // A fault's message can be a provider's or OpenAI's raw response.
+      return {
+        ...state,
+        view: { ...view, error: { problem: modelProblem(event.message) } },
+      };
     case "submission": {
       const record = event.record;
       if (
@@ -396,10 +446,16 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
         record.reason !== "aborted" &&
         record.reason !== "withdrawn"
       ) {
-        return {
-          ...state,
-          view: { ...view, error: `Not answered: ${record.reason}` },
-        };
+        // A model error's detail is the provider's error text.
+        const error: ViewError =
+          record.reason === "model_error"
+            ? {
+                problem: modelProblem(
+                  typeof record.detail === "string" ? record.detail : "",
+                ),
+              }
+            : { reason: record.reason };
+        return { ...state, view: { ...view, error } };
       }
       return state;
     }

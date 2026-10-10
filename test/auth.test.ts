@@ -373,6 +373,18 @@ describe("the agent behind a passkey session", () => {
 	});
 });
 
+describe("finishing setup", () => {
+	it("voids a setup link from the logs once the first passkey is made another way", async () => {
+		// A link was written to the logs, and then the owner claimed the Pim right after a deploy instead.
+		const code = await setupLink();
+		const owner = new Browser(deployed(60 * 1000));
+		await addPasskey(owner, await Authenticator.make());
+		expect(await owner.signedIn()).toBe(true);
+		const late = await new Browser().fetch("/auth/passkeys/options", { method: "POST", json: { setup: code } });
+		expect(late.status).toBe(401);
+	});
+});
+
 describe("adding another device", () => {
 	it("lets a browser signed in with a passkey link another device, once, and nobody else", async () => {
 		const { browser } = await signedInBrowser();

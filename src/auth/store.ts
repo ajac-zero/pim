@@ -152,6 +152,10 @@ export class Auth extends DurableObject<Env> {
 	}
 
 	addPasskey(id: string, key: PublicKey, name: string, now: number): Passkey {
+		// The first passkey ever, however it was made (setup link, recovery code, claim), ends setting up:
+		// the setup code from registration, or a self-hosted log link, must not make a second one later.
+		// An operator's setup link is issued only after this, so it's unaffected.
+		if (!this.claimed()) this.#setMeta("setup_code", null);
 		this.#setMeta("claimed", String(now));
 		this.ctx.storage.sql.exec(
 			"INSERT INTO auth_passkeys (id, spki, algorithm, name, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)",

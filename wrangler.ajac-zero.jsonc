@@ -56,7 +56,7 @@
     "PIM_MEMORY_LINES": "",
     "PIM_PUBLIC_URL": "",
     // Small on purpose: a private test. The admin API raises one person's.
-    "PIM_LIMITS": "{\"dailyTokens\": 300000, \"dailyModelRequests\": 300, \"dailyRuns\": 100, \"sessions\": 100, \"schedules\": 20, \"apps\": 10, \"storageBytes\": 200000000}"
+    "PIM_LIMITS": "{\"dailyTokens\": 300000, \"dailyModelRequests\": 300, \"dailyRuns\": 100, \"sessions\": 100, \"schedules\": 20, \"apps\": 10, \"storageBytes\": 200000000, \"artifacts\": 100, \"artifactVersions\": 50, \"artifactBytes\": 500000, \"artifactStorageBytes\": 10000000}"
   },
   // Secret: PIMLING_ADMIN_TOKEN (wrangler secret put PIMLING_ADMIN_TOKEN --config wrangler.ajac-zero.jsonc).
   // Never PIM_API_TOKEN or PIM_NOTIFY_WEBHOOK.

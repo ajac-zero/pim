@@ -63,7 +63,7 @@
     // Each person's agent learns its own address when it is provisioned.
     "PIM_PUBLIC_URL": "",
     // Everyone's limits; the admin API changes one person's. See src/usage.ts.
-    "PIM_LIMITS": "{\"dailyTokens\": 2000000, \"dailyModelRequests\": 1500, \"dailyRuns\": 300, \"sessions\": 500, \"schedules\": 50, \"apps\": 20, \"storageBytes\": 1000000000}"
+    "PIM_LIMITS": "{\"dailyTokens\": 2000000, \"dailyModelRequests\": 1500, \"dailyRuns\": 300, \"sessions\": 500, \"schedules\": 50, \"apps\": 20, \"storageBytes\": 1000000000, \"artifacts\": 200, \"artifactVersions\": 100, \"artifactBytes\": 1000000, \"artifactStorageBytes\": 10000000}"
   },
   // Secrets (wrangler secret put --config wrangler.hosted.jsonc):
   //   PIMLING_ADMIN_TOKEN   the operator's admin API token; without it the admin API is off

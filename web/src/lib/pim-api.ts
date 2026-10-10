@@ -56,7 +56,68 @@ export type Limits = {
   schedules: number | null;
   apps: number | null;
   storageBytes: number | null;
+  artifacts: number | null;
+  artifactVersions: number | null;
+  artifactBytes: number | null;
+  artifactStorageBytes: number | null;
 };
+
+export type ArtifactKind = "html" | "markdown";
+
+/** An artifact, as its latest version. */
+export type Artifact = {
+  id: string;
+  title: string;
+  kind: ArtifactKind;
+  session: string | null;
+  version: number;
+  versions: number;
+  size: number;
+  sha256: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type ArtifactVersionInfo = {
+  version: number;
+  sha256: string;
+  size: number;
+  /** "restore": the person restored `restoredFrom`. */
+  source: "agent" | "restore";
+  restoredFrom: number | null;
+  createdAt: number;
+};
+
+export type ArtifactDetail = Artifact & { history: ArtifactVersionInfo[] };
+
+export type ArtifactVersion = ArtifactVersionInfo & {
+  id: string;
+  title: string;
+  kind: ArtifactKind;
+  latest: number;
+  content: string;
+};
+
+/** What an artifact tool answers: a reference to the version it made, never its content. */
+export type ArtifactReference = {
+  id: string;
+  title: string;
+  kind: ArtifactKind;
+  version: number;
+  sha256: string;
+  size: number;
+};
+
+const artifactPath = (id: string, version: number) =>
+  `/api/artifacts/${encodeURIComponent(id)}/versions/${version}`;
+
+/** The sandboxed page an HTML artifact's version is shown in. */
+export const artifactFrameUrl = (id: string, version: number) =>
+  `${artifactPath(id, version)}/frame`;
+
+/** Where the browser downloads a version, as a file. */
+export const artifactDownloadUrl = (id: string, version: number) =>
+  `${artifactPath(id, version)}/download`;
 
 export type DayUsage = {
   day: string;
@@ -244,6 +305,22 @@ export const pim = {
     call<PimSettings>("/settings", {
       method: "PUT",
       body: JSON.stringify(update),
+    }),
+  artifacts: () => call<{ artifacts: Artifact[]; bytes: number }>("/artifacts"),
+  artifact: (id: string) =>
+    call<ArtifactDetail>(`/artifacts/${encodeURIComponent(id)}`),
+  artifactVersion: (id: string, version: number) =>
+    call<ArtifactVersion>(
+      `/artifacts/${encodeURIComponent(id)}/versions/${version}`,
+    ),
+  restoreArtifact: (id: string, version: number, baseVersion: number) =>
+    call<Artifact & { restored: number }>(
+      `/artifacts/${encodeURIComponent(id)}/restore`,
+      { method: "POST", body: JSON.stringify({ version, baseVersion }) },
+    ),
+  deleteArtifact: (id: string) =>
+    call<{ deleted: boolean }>(`/artifacts/${encodeURIComponent(id)}`, {
+      method: "DELETE",
     }),
   /** Pimling only: a self-hosted Pim has no account and answers 404, so this is null. */
   account: () =>

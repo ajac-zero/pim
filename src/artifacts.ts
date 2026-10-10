@@ -250,11 +250,12 @@ export class ArtifactStore {
 
 	/** Makes an artifact with its first version. Run again with the same id, it returns what the first run made. */
 	async create(input: { id: string; title: string; kind: ArtifactKind; content: string; session: string | null }): Promise<ArtifactVersion> {
+		const hash = await sha256(input.content);
+		// Nothing awaits from here on: the checks and the write are one step, which no other write can come between.
 		const existing = this.version(input.id, 1);
 		if (existing) return existing;
 		const size = utf8Bytes(input.content);
 		this.#checkRoom(size, null);
-		const hash = await sha256(input.content);
 		const now = Date.now();
 		this.#sql.exec(
 			"INSERT INTO pim_artifacts (id, title, kind, session, head, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
@@ -285,6 +286,8 @@ export class ArtifactStore {
 		id: string,
 		input: { baseVersion: number; content: string; source: ArtifactSource; restoredFrom?: number; callId?: string; title?: string },
 	): Promise<{ version: ArtifactVersion; changed: boolean }> {
+		const hash = await sha256(input.content);
+		// Nothing awaits from here on: the checks and the write are one step, which no other write can come between.
 		const summary = this.get(id);
 		if (!summary) throw new HttpError(404, `No artifact ${id}`);
 		if (input.callId !== undefined) {
@@ -296,13 +299,14 @@ export class ArtifactStore {
 		}
 		const latest = this.version(id)!;
 		const now = Date.now();
-		if (input.title !== undefined && input.title !== summary.title) {
-			this.#sql.exec("UPDATE pim_artifacts SET title = ?, updated_at = ? WHERE id = ?", input.title, now, id);
+		const title = input.title ?? summary.title;
+		if (input.content === latest.content && input.source === "agent") {
+			if (title !== summary.title) this.#sql.exec("UPDATE pim_artifacts SET title = ?, updated_at = ? WHERE id = ?", title, now, id);
+			return { version: latest, changed: false };
 		}
-		if (input.content === latest.content && input.source === "agent") return { version: latest, changed: false };
+		// A version that is refused renames nothing.
 		const size = utf8Bytes(input.content);
 		this.#checkRoom(size, id);
-		const hash = await sha256(input.content);
 		const next = summary.version + 1;
 		this.#sql.exec(
 			"INSERT INTO pim_artifact_versions (artifact, version, content, sha256, size, source, restored_from, call_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -316,7 +320,7 @@ export class ArtifactStore {
 			input.callId ?? null,
 			now,
 		);
-		this.#sql.exec("UPDATE pim_artifacts SET head = ?, updated_at = ? WHERE id = ?", next, now, id);
+		this.#sql.exec("UPDATE pim_artifacts SET head = ?, title = ?, updated_at = ? WHERE id = ?", next, title, now, id);
 		return { version: this.version(id, next)!, changed: true };
 	}
 

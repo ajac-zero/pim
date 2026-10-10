@@ -18,7 +18,7 @@ const HOW_IT_RUNS =
 	"An HTML artifact is one self-contained document: put its CSS in <style> and its JavaScript in <script>, and any data inline. " +
 	"It runs in a sandbox with no network: external scripts, stylesheets, fonts, images, fetch and forms don't work, and neither do cookies, localStorage or alert(). " +
 	"Images must be inline (data: URLs or SVG). It shows in the chat and on a full screen, including on phones, so make it responsive. " +
-	"Markdown artifacts are documents; remote images and raw HTML in them aren't shown. " +
+	"Markdown artifacts are documents; images and raw HTML in them aren't rendered. " +
 	"Don't put passwords, codes or personal details in an artifact unless the user asks: what it shows could still be sent elsewhere.";
 
 /** A tool's answer about a version: a reference the app shows as the artifact, never its content. */

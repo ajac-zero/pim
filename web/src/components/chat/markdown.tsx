@@ -1,6 +1,6 @@
 import { memo } from "react";
 import type { BundledLanguage } from "shiki";
-import { Streamdown } from "streamdown";
+import { defaultRehypePlugins, Streamdown } from "streamdown";
 import {
   CodeBlock,
   CodeBlockCopyButton,
@@ -29,16 +29,23 @@ function safeLink(href: string | undefined): boolean {
   return href !== undefined && /^(https?:|mailto:|#)/i.test(href);
 }
 
-/** Only inline images: one from elsewhere would be fetched, and could carry what the text knows. */
+/**
+ * For untrusted text, Streamdown's own plugins without `raw`: raw HTML in the
+ * text is dropped, not parsed. Its sanitizer and link hardening still run.
+ */
+const untrustedRehypePlugins = [
+  defaultRehypePlugins.sanitize,
+  defaultRehypePlugins.harden,
+].filter((plugin) => plugin !== undefined);
+
+/** No images: one from elsewhere would be fetched, and could carry what the text knows. Its alt text stands in. */
 const untrustedComponents = {
   img: (props: object) => {
-    const { src, alt } = props as { src?: unknown; alt?: unknown };
-    const label = typeof alt === "string" ? alt : "";
-    return typeof src === "string" &&
-      /^data:image\/(png|jpe?g|gif|webp);/i.test(src) ? (
-      <img src={src} alt={label} className="my-3 max-w-full rounded-md" />
-    ) : (
-      <span className="text-muted-foreground">[{label || "image"}]</span>
+    const { alt } = props as { alt?: unknown };
+    return (
+      <span className="text-muted-foreground">
+        [{typeof alt === "string" && alt !== "" ? alt : "image"}]
+      </span>
     );
   },
 };
@@ -55,8 +62,8 @@ export const Markdown = memo(function Markdown({
   streaming?: boolean;
   /**
    * For text kept and shown again, such as a Markdown artifact: raw HTML is
-   * dropped, images are shown only when they're inline (`data:`), so showing
-   * it loads nothing from elsewhere, and links only go to web or mail addresses.
+   * dropped, images are replaced by their alt text, so showing it loads
+   * nothing from elsewhere, and links only go to web or mail addresses.
    */
   untrusted?: boolean;
 }) {
@@ -71,6 +78,7 @@ export const Markdown = memo(function Markdown({
       <Streamdown
         isAnimating={streaming}
         skipHtml={untrusted}
+        {...(untrusted ? { rehypePlugins: untrustedRehypePlugins } : {})}
         components={{
           ...(untrusted ? untrustedComponents : {}),
           h1: ({ children }) => (

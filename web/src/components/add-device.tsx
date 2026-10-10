@@ -49,14 +49,15 @@ export function AddDevice() {
   const expired = link !== null && Date.parse(link.expiresAt) <= now;
   // Ticks while a link is shown, so it says when it's no longer good, and so the
   // other device's passkey appears in the list once it's made.
+  // Stops once the link has expired: nothing can be added with it after that.
   useEffect(() => {
-    if (!link) return;
+    if (!link || expired) return;
     const timer = setInterval(() => {
       setNow(Date.now());
       void refreshPasskeys();
     }, 5_000);
     return () => clearInterval(timer);
-  }, [link, refreshPasskeys]);
+  }, [link, expired, refreshPasskeys]);
   // The QR code is drawn here, from the link: nothing leaves the browser to make it.
   const qr = useMemo(
     () =>

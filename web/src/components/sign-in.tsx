@@ -38,8 +38,10 @@ export function SignIn({ session }: { session: PimAuthSession }) {
   const [device, setDevice] = useState(deviceCode);
   const [recovering, setRecovering] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // This device already has a passkey for this Pim: offer to sign in with it instead.
+  // While adding this device with a link: it already has a passkey for this Pim, so offer to sign
+  // in with it instead. Other screens show the same news as an ordinary error.
   const [hasPasskeyHere, setHasPasskeyHere] = useState(false);
+  const enrolling = device !== null;
   // A link pasted into this tab changes only the hash; nothing reloads.
   useEffect(() => {
     const update = () => {
@@ -56,7 +58,7 @@ export function SignIn({ session }: { session: PimAuthSession }) {
     await router.invalidate();
   };
   const onError = (failure: Error) => {
-    if (alreadyRegistered(failure)) setHasPasskeyHere(true);
+    if (alreadyRegistered(failure) && enrolling) setHasPasskeyHere(true);
     setError(
       cancelled(failure)
         ? null
@@ -249,7 +251,7 @@ export function SignIn({ session }: { session: PimAuthSession }) {
           />
         )}
 
-        {error && !hasPasskeyHere && (
+        {error && !(enrolling && hasPasskeyHere) && (
           <p role="alert" className="mt-4 text-destructive text-sm">
             {error}
           </p>

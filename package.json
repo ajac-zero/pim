@@ -13,7 +13,7 @@
     "deploy": "wrangler deploy",
     "deploy:hosted": "wrangler deploy --config wrangler.hosted.jsonc",
     "dev:hosted": "wrangler dev --config wrangler.hosted.jsonc",
-    "preview:hosted": "pnpm build && wrangler dev --config wrangler.preview.jsonc --persist-to .wrangler/state-preview",
+    "preview:hosted": "pnpm build && wrangler dev --local --config wrangler.preview.jsonc --persist-to .wrangler/state-preview",
     "types": "wrangler types",
     "typecheck": "tsc --noEmit && pnpm --filter pim-web typecheck",
     "test": "vitest run && pnpm --filter pim-web test",

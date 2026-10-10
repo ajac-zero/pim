@@ -55,7 +55,7 @@ pnpm run deploy:hosted   # builds web/, then deploys the "pimling" Worker
 
 ## Preview locally
 
-`pnpm preview:hosted` builds the web app and serves Pimling at <http://pimling.localhost:8787> from `wrangler.preview.jsonc`. Browsers send every `*.localhost` name to your machine, so `alice.pimling.localhost:8787` works without DNS. The preview uses no remote bindings, so it touches no Cloudflare account, even when `wrangler` is logged in. Its state is kept in `.wrangler/state-preview`.
+`pnpm preview:hosted` builds the web app and serves Pimling at <http://pimling.localhost:8787> from `wrangler.preview.jsonc`. Browsers send every `*.localhost` name to your machine, so `alice.pimling.localhost:8787` works without DNS. It runs `wrangler dev --local` with no remote bindings, so it stays on your machine and touches no Cloudflare account, even when `wrangler` is logged in. It is never deployed: there is no deploy script for it. Its state is kept in `.wrangler/state-preview`.
 
 - **Passkeys.** Chrome, Safari and Edge on a laptop or phone use their own. On a machine without one (a Linux desktop, a headless browser), start Chrome with `--remote-debugging-port=9222` and run `node scripts/virtual-authenticator.mjs 9222`: it gives every tab a virtual passkey that answers at once. Or use DevTools → More tools → WebAuthn.
 - **Models.** Workers AI needs an account, so the preview binds a stand-in. Chats on the platform model end with "Not answered: model_error". Connect a ChatGPT plan in Settings to chat for real.
@@ -113,7 +113,7 @@ What the fence stops, each covered by a test in `test/hosted/hosted.test.ts` ("e
 
 - **Open sockets** are closed (code `4010`), and nothing sent on them afterwards is taken.
 - **A request already inside the agent** when erasure starts can't write. If its handler goes on while the erasure runs, the handler checks the fence again and refuses (`410`). If it is still waiting when the instance ends, it never goes on: the request gets `503`, and a retry gets `410`.
-- **A model request under way** can't write its answer, and can't hold up the deletion: stopping runs and ending apps' subscriptions get 3 seconds before the wipe goes ahead regardless.
+- **A model request under way** can't write its answer, whether the answer arrives during the erasure or never does, and can't hold up the deletion: stopping runs and ending apps' subscriptions get 3 seconds before the wipe goes ahead regardless.
 - **Approval timers** that outlive the agent decide nothing: under `auto`, an approval due after the deletion never runs its action.
 - **Scheduled work** due afterwards never runs: the wipe clears the alarm, and an alarm that fires anyway does nothing.
 - **A Worker with the account still cached**, its already-authorized requests and sockets, app event callbacks, and the service's own writes (`provision`, settings, limits, runs) all get `410`. Destroying an agent ends the call that asked for it, so that call's result is never trusted either way: the check decides. A failed attempt is retried on the Directory's alarm after 1, 5 and 30 minutes, 2 hours, then every 6 hours, and the person is told the account is closed and still being erased (`202`). The username stays taken.

@@ -91,7 +91,14 @@ CREATE TABLE IF NOT EXISTS pim_artifact_versions (
 	created_at INTEGER NOT NULL,
 	PRIMARY KEY (artifact, version)
 );
+-- Ids of deleted artifacts, and when: no title, content or hash. A replayed create of one must not bring it back.
+CREATE TABLE IF NOT EXISTS pim_artifact_deleted (
+	id TEXT PRIMARY KEY,
+	deleted_at INTEGER NOT NULL
+);
 `;
+/** How many deleted ids are remembered; the oldest go first. A replay comes soon after its call, long before this many deletions. */
+const MAX_DELETED_IDS = 1000;
 
 type Row = Record<string, SqlStorageValue>;
 
@@ -248,12 +255,15 @@ export class ArtifactStore {
 		if (room !== null && size > room) throw new HttpError(429, `Pim storage quota exceeded: there is room for ${Math.max(0, room)} more bytes.`);
 	}
 
-	/** Makes an artifact with its first version. Run again with the same id, it returns what the first run made. */
+	/** Makes an artifact with its first version. Run again with the same id, it returns what the first run made, or is refused (410) if that was deleted since. */
 	async create(input: { id: string; title: string; kind: ArtifactKind; content: string; session: string | null }): Promise<ArtifactVersion> {
 		const hash = await sha256(input.content);
 		// Nothing awaits from here on: the checks and the write are one step, which no other write can come between.
 		const existing = this.version(input.id, 1);
 		if (existing) return existing;
+		if (this.#sql.exec("SELECT 1 FROM pim_artifact_deleted WHERE id = ?", input.id).toArray().length > 0) {
+			throw new HttpError(410, "This artifact was deleted, so this create, run again, made nothing. Make a new artifact if the user still wants it.");
+		}
 		const size = utf8Bytes(input.content);
 		this.#checkRoom(size, null);
 		const now = Date.now();
@@ -334,7 +344,15 @@ export class ArtifactStore {
 	/** Deletes an artifact and every version of it. */
 	delete(id: string): boolean {
 		this.#sql.exec("DELETE FROM pim_artifact_versions WHERE artifact = ?", id);
-		return this.#sql.exec("DELETE FROM pim_artifacts WHERE id = ?", id).rowsWritten > 0;
+		const deleted = this.#sql.exec("DELETE FROM pim_artifacts WHERE id = ?", id).rowsWritten > 0;
+		if (deleted) {
+			this.#sql.exec("INSERT OR REPLACE INTO pim_artifact_deleted (id, deleted_at) VALUES (?, ?)", id, Date.now());
+			this.#sql.exec(
+				"DELETE FROM pim_artifact_deleted WHERE rowid NOT IN (SELECT rowid FROM pim_artifact_deleted ORDER BY deleted_at DESC, rowid DESC LIMIT ?)",
+				MAX_DELETED_IDS,
+			);
+		}
+		return deleted;
 	}
 
 	/** Every artifact with every version, for the owner's export. */

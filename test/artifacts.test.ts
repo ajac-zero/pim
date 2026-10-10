@@ -199,6 +199,23 @@ describe("artifacts", () => {
 		expect((await callTool("artifact_read", { id: made.id })).isError).toBe(true);
 	});
 
+	it("are not brought back by a replayed create after they were deleted", async () => {
+		const outcome = await runInDurableObject(agent(), async (instance: Pim, state) => {
+			const id = crypto.randomUUID();
+			const input = { id, title: "Replayed", kind: "html" as const, content: "<p>secret</p>", session: null };
+			await instance.artifacts.create(input);
+			// Before deletion a replay returns the version it made.
+			const replayed = (await instance.artifacts.create(input)).version;
+			instance.artifacts.delete(id);
+			const afterDelete = await instance.artifacts.create(input).then(() => "created", (error: { status?: number }) => error.status);
+			const fresh = await instance.artifacts.create({ ...input, id: crypto.randomUUID() });
+			const kept = state.storage.sql.exec("SELECT * FROM pim_artifact_deleted WHERE id = ?", id).toArray();
+			instance.artifacts.delete(fresh.artifact);
+			return { replayed, afterDelete, listed: instance.artifacts.get(id), fresh: fresh.version, kept: kept.map((row) => Object.keys(row).sort()) };
+		});
+		expect(outcome).toEqual({ replayed: 1, afterDelete: 410, listed: undefined, fresh: 1, kept: [["deleted_at", "id"]] });
+	});
+
 	it("export in full near their total cap, which holds whatever the limits say", async () => {
 		// Ten versions of nearly 1 MB each, made straight in the store: about the most artifacts can hold.
 		const ids = await runInDurableObject(agent(), async (instance: Pim) => {

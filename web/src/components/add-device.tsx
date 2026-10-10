@@ -26,21 +26,25 @@ export function AddDevice() {
   );
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  // Hidden only once the server confirms the link no longer works: a failure leaves it shown, with a retry.
+  // It ends whichever link this browser made last, so it hides only the link it was asked about: one
+  // made while it was under way is newer, and is left alone (and left working).
+  const cancel = useMutation({
+    mutationFn: async (_shown: string) => auth.cancelDeviceLink(),
+    onSuccess: (_result, shown) => {
+      setLink((current) => (current?.url === shown ? null : current));
+      return refreshPasskeys();
+    },
+  });
   const make = useMutation({
     mutationFn: auth.deviceLink,
     onSuccess: (made) => {
       setLink(made);
       setCopied(false);
+      // A failure from ending an older link isn't about this one.
+      cancel.reset();
     },
     onError: (error) => toast.error(error.message),
-  });
-  // Hidden only once the server confirms the link no longer works: a failure leaves it shown, with a retry.
-  const cancel = useMutation({
-    mutationFn: auth.cancelDeviceLink,
-    onSuccess: () => {
-      setLink(null);
-      return refreshPasskeys();
-    },
   });
   const expired = link !== null && Date.parse(link.expiresAt) <= now;
   // Ticks while a link is shown, so it says when it's no longer good, and so the
@@ -111,7 +115,7 @@ export function AddDevice() {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => cancel.mutate()}
+                onClick={() => cancel.mutate(link.url)}
                 disabled={cancel.isPending}
               >
                 {cancel.isPending && <Loader2 className="animate-spin" />}
@@ -136,10 +140,11 @@ export function AddDevice() {
               {t("addDeviceExpired")}
             </p>
           )}
+          {/* Not while an older link is still being ended: that request would end this one too. */}
           <Button
             variant="outline"
             onClick={() => make.mutate()}
-            disabled={make.isPending}
+            disabled={make.isPending || cancel.isPending}
           >
             {make.isPending ? (
               <Loader2 className="animate-spin" />

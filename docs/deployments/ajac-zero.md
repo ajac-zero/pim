@@ -84,13 +84,16 @@ Invite-only; at most 25 accounts and 3 registrations per address a day. Per pers
   - keeps the phone signed in through the deletion;
   - records exact statuses;
   - checks refusal at once and `410` after the cache window separately;
-  - deletes the disposable account even when a check fails or the script throws (it exits `2` if that cleanup fails).
+  - bounds every browser operation (`--cdp-timeout-ms`, default 30 s), so cleanup still runs when a browser hangs;
+  - on a failure, tries to delete the disposable account with the desktop's session. That session exists only after the desktop's first passkey. With `--admin-token-file`, it falls back to the admin API, which also deletes an account that never got a passkey. Without that file, a failure before the first passkey leaves a pending account (it lapses in a day).
+  - says `CLEANUP NEEDED` and exits `2` whenever the account may be left behind. It never prints the token or any code.
 
   Run it from a network that hasn't used up the registration limit:
 
   ```sh
   node scripts/live-device-smoke.mjs --domain pimling.ajac-zero.com --username smoke-devN \
-    --invite-file ./invite --desktop-port 9351 --phone-port 9352
+    --invite-file ./invite --admin-token-file ~/pimling-deploy/admin-token \
+    --desktop-port 9351 --phone-port 9352
   ```
 
 ## Smoke test (2026-10-10, version `d88a37fc`)

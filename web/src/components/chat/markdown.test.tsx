@@ -18,13 +18,23 @@ const HOSTILE = [
   '<a href="https://evil.example/raw">raw link</a> <script>alert(1)</script>',
   "",
   "[map](https://maps.example.com) [mail](mailto:a@example.com) [bad](javascript:alert(1)) [data](data:text/html,hi)",
+  "",
+  "| Day | City |",
+  "| --- | --- |",
+  "| 1 | Porto |",
+  "",
+  "```js",
+  "const train = 'Porto';",
+  "```",
 ].join("\n");
 
 describe("untrusted Markdown", () => {
   const html = renderToStaticMarkup(<Markdown text={HOSTILE} untrusted />);
 
-  it("keeps the text and safe links", () => {
+  it("keeps the text, tables, code and safe links", () => {
     expect(html).toContain("passport");
+    expect(html).toMatch(/<table[\s\S]*Porto[\s\S]*<\/table>/);
+    expect(html).toContain("const train");
     expect(html).toContain('href="https://maps.example.com/"');
     expect(html).toContain('href="mailto:a@example.com"');
   });
@@ -34,11 +44,13 @@ describe("untrusted Markdown", () => {
     expect(html).not.toMatch(
       /<(img|picture|source|script|iframe|video|audio)\b/,
     );
-    expect(html).not.toMatch(/\s(src|srcset|style)="/);
-    expect(html).not.toMatch(/href="https:\/\/evil/);
+    expect(html).not.toMatch(/\s(src|srcset)="/);
+    // No attribute anywhere names a remote resource from the text (the raw HTML's are only text).
+    expect(html).not.toMatch(/="[^"]*evil\.example/);
     // The raw HTML is there only as text.
     expect(html).toContain("&lt;picture&gt;");
-    expect(html).toContain("[tracker]");
+    // An image is only its alt text.
+    expect(html).toContain("tracker");
   });
 
   it("keeps no link that isn't to the web or mail", () => {

@@ -70,7 +70,14 @@ describe("artifacts", () => {
 		expect(part.text).not.toContain("<!doctype");
 	});
 
-	it("are shown only in an opaque sandbox that loads nothing, and never cached", async () => {
+	it("are described to the model without promising they can't send data out", async () => {
+		const { tools } = (await api<{ tools: { name: string; description: string }[] }>("/")).body;
+		const create = tools.find((tool) => tool.name === "artifact_create")!;
+		expect(create.description).not.toMatch(/no network/i);
+		expect(create.description).toContain("navigate itself away");
+	});
+
+	it("are shown only in an opaque sandbox that loads no resources, and never cached", async () => {
 		const made = await makePage();
 		const response = await raw(`/artifacts/${made.id}/versions/1/frame`);
 		expect(response.status).toBe(200);
@@ -208,6 +215,22 @@ describe("artifacts", () => {
 		try {
 		expect(ids.length).toBeGreaterThanOrEqual(9);
 		// Even with no limits set, the cap holds.
+		// Two writes racing for the room left, each fitting alone: one is refused, and the hard cap holds.
+		const race = await runInDurableObject(agent(), async (instance: Pim) => {
+			const room = MAX_ARTIFACT_STORAGE_BYTES - instance.artifacts.totalBytes();
+			const size = Math.floor(room * 0.6);
+			const made: string[] = [];
+			const settle = (id: string) =>
+				instance.artifacts.create({ id, title: "Racing for room", kind: "html", content: "q".repeat(size), session: null }).then(
+					() => (made.push(id), "ok"),
+					(error: { status?: number }) => error.status,
+				);
+			const outcomes = await Promise.all([settle(crypto.randomUUID()), settle(crypto.randomUUID())]);
+			const total = instance.artifacts.totalBytes();
+			for (const id of made) instance.artifacts.delete(id);
+			return { outcomes: outcomes.sort(), withinCap: total <= MAX_ARTIFACT_STORAGE_BYTES };
+		});
+		expect(race).toEqual({ outcomes: [429, "ok"], withinCap: true });
 		const left = MAX_ARTIFACT_STORAGE_BYTES - (await api("/artifacts")).body.bytes;
 		expect(left).toBeLessThan(950_000);
 		// In a chat of its own: what it sends stays out of the others' context.
@@ -246,14 +269,17 @@ describe("artifacts", () => {
 			const created = await Promise.all([big(1), big(2)]);
 			const total = instance.artifacts.totalBytes();
 			const limit = instance.limits().artifactStorageBytes!;
-			// A refused version renames nothing.
+			// A refused version changes nothing: not the title, the latest version or its content.
+			const before = JSON.stringify({ ...instance.artifacts.get(id)!, content: instance.artifacts.version(id)!.content });
 			await instance.setLimits({ artifactBytes: 10 });
 			const renamed = await settle(instance.artifacts.append(id, { baseVersion: 2, content: "x".repeat(11), source: "agent", title: "Renamed" }));
-			const title = instance.artifacts.get(id)!.title;
+			const after = instance.artifacts.get(id)!;
+			const title = after.title;
+			const unchanged = JSON.stringify({ ...after, content: instance.artifacts.version(id)!.content }) === before;
 			for (const artifact of instance.artifacts.list()) if (artifact.title === "Race" || artifact.title.startsWith("Racer")) instance.artifacts.delete(artifact.id);
-			return { raced: raced.sort(), created: created.sort(), withinLimit: total <= limit, renamed, title };
+			return { raced: raced.sort(), created: created.sort(), withinLimit: total <= limit, renamed, title, unchanged };
 		});
-		expect(outcome).toEqual({ raced: [409, "ok"], created: [429, "ok"], withinLimit: true, renamed: 413, title: "Race" });
+		expect(outcome).toEqual({ raced: [409, "ok"], created: [429, "ok"], withinLimit: true, renamed: 413, title: "Race", unchanged: true });
 	});
 
 	it("stay within their limits, checked before anything is written", async () => {

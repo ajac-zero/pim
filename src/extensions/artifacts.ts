@@ -16,10 +16,11 @@ const READ_CHARS = 60_000;
 
 const HOW_IT_RUNS =
 	"An HTML artifact is one self-contained document: put its CSS in <style> and its JavaScript in <script>, and any data inline. " +
-	"It runs in a sandbox with no network: external scripts, stylesheets, fonts, images, fetch and forms don't work, and neither do cookies, localStorage or alert(). " +
+	"It runs in a sandbox: fetch, forms, and external scripts, stylesheets, fonts and images are blocked, and so are cookies, localStorage and alert(). " +
+	"That doesn't stop it sending data out: it can still navigate itself away, so treat what it contains, and what the user types into it, as possibly visible to others. " +
+	"Don't put passwords, codes or personal details in an artifact unless the user asks. " +
 	"Images must be inline (data: URLs or SVG). It shows in the chat and on a full screen, including on phones, so make it responsive. " +
-	"Markdown artifacts are documents; images and raw HTML in them aren't rendered. " +
-	"Don't put passwords, codes or personal details in an artifact unless the user asks: what it shows could still be sent elsewhere.";
+	"Markdown artifacts are documents; images and raw HTML in them aren't rendered.";
 
 /** A tool's answer about a version: a reference the app shows as the artifact, never its content. */
 function reference(version: ArtifactVersion, title: string, kind: string, note: string) {

@@ -835,6 +835,45 @@ describe("erasure boundaries", () => {
 		await expectErased(cy.ownerId);
 	});
 
+	it("keeps a model answer that arrives during the erasure from being written", async () => {
+		const ivy = await person("eb-model-during");
+		const held = gate();
+		const answered = { during: false };
+		faux.setResponses([
+			async () => {
+				await held.hold();
+				answered.during = true;
+				return fauxAssistantMessage("Written during erasure");
+			},
+		]);
+		// Let the answer arrive from inside the erasure: after it has begun, before the wipe.
+		await withAgentMethod(
+			"deleteEverything",
+			(original) =>
+				async function (this: Pim) {
+					const storage = this.ctx.storage as { deleteAll: DurableObjectStorage["deleteAll"] };
+					const wipe = storage.deleteAll.bind(this.ctx.storage);
+					storage.deleteAll = async (...args) => {
+						held.release();
+						await new Promise((resolve) => setTimeout(resolve, 100));
+						return wipe(...args);
+					};
+					return original.call(this);
+				},
+			async () => {
+				expect((await ivy.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Think slowly" } })).status).toBe(202);
+				await held.reached();
+				const started = Date.now();
+				expect(await deleteAccount(ivy.browser, "eb-model-during")).toEqual({ deleted: true });
+				// A run that ignores its abort can't hold the deletion past the courtesy wait.
+				expect(Date.now() - started).toBeLessThan(10_000);
+				// The model did answer, mid-erasure; the answer was not kept.
+				expect(answered.during).toBe(true);
+			},
+		);
+		await expectErased(ivy.ownerId);
+	});
+
 	it("never runs an action whose approval timer outlives the agent", async () => {
 		const dot = await person("eb-approval");
 		// Auto-approve after the timeout: the dangerous case.

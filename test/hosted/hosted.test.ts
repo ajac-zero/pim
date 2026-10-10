@@ -891,6 +891,11 @@ describe("artifacts", () => {
 		// In the export, every version.
 		const exported = JSON.parse(await (await cy.browser.fetch("/api/account/export")).text());
 		expect(exported.pim.artifacts).toEqual([expect.objectContaining({ id, versions: [expect.objectContaining({ version: 1, content: "<p>Cy's page</p>" })] })]);
+		// A deleted artifact leaves its id behind, not in the export; erasing the account takes that too.
+		const gone = await makeArtifact(cy.browser, "<p>Cy's other page</p>");
+		expect((await cy.browser.json(`/api/artifacts/${gone}`, { method: "DELETE" })).body).toEqual({ deleted: true });
+		expect((await holdings(cy.ownerId)).remaining).toContain("deleted artifact ids");
+		expect(JSON.stringify(JSON.parse(await (await cy.browser.fetch("/api/account/export")).text()).pim.artifacts)).not.toContain(gone);
 		// Deleted: gone, and the agent holds nothing.
 		expect((await cy.browser.json("/api/account", { method: "DELETE", json: { confirm: "art-cy" } })).body).toEqual({ deleted: true });
 		for (const path of [frame, `/api/artifacts/${id}/versions/1/download`, `/api/artifacts/${id}`]) {

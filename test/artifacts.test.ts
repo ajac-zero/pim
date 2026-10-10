@@ -199,6 +199,48 @@ describe("artifacts", () => {
 		expect((await callTool("artifact_read", { id: made.id })).isError).toBe(true);
 	});
 
+	it("are left whole when the record of their deletion can't be written", async () => {
+		const outcome = await runInDurableObject(agent(), async (instance: Pim, state) => {
+			const made = await instance.artifacts.create({ id: crypto.randomUUID(), title: "Whole", kind: "html", content: "<p>kept</p>", session: null });
+			state.storage.sql.exec("ALTER TABLE pim_artifact_deleted RENAME TO pim_artifact_deleted_away");
+			const failed = (() => {
+				try {
+					instance.artifacts.delete(made.artifact);
+					return false;
+				} catch {
+					return true;
+				}
+			})();
+			const left = instance.artifacts.version(made.artifact, 1)?.content;
+			state.storage.sql.exec("ALTER TABLE pim_artifact_deleted_away RENAME TO pim_artifact_deleted");
+			instance.artifacts.delete(made.artifact);
+			return { failed, left };
+		});
+		expect(outcome).toEqual({ failed: true, left: "<p>kept</p>" });
+	});
+
+	it("are not brought back by a replayed create after they were deleted", async () => {
+		const outcome = await runInDurableObject(agent(), async (instance: Pim, state) => {
+			const id = crypto.randomUUID();
+			const input = { id, title: "Replayed", kind: "html" as const, content: "<p>secret</p>", session: null };
+			await instance.artifacts.create(input);
+			// Before deletion a replay returns the version it made.
+			const replayed = (await instance.artifacts.create(input)).version;
+			instance.artifacts.delete(id);
+			const afterDelete = await instance.artifacts.create(input).then(() => "created", (error: { status?: number }) => error.status);
+			const fresh = await instance.artifacts.create({ ...input, id: crypto.randomUUID() });
+			// Deleting what never existed remembers nothing; the export lists only what exists.
+			const never = crypto.randomUUID();
+			instance.artifacts.delete(never);
+			const tombstones = Number(state.storage.sql.exec("SELECT COUNT(*) AS n FROM pim_artifact_deleted WHERE id = ?", never).one().n);
+			const exported = instance.artifacts.export().some((artifact) => artifact.id === id);
+			const kept = state.storage.sql.exec("SELECT * FROM pim_artifact_deleted WHERE id = ?", id).toArray();
+			instance.artifacts.delete(fresh.artifact);
+			return { replayed, afterDelete, listed: instance.artifacts.get(id), tombstones, exported, fresh: fresh.version, kept: kept.map((row) => Object.keys(row).sort()) };
+		});
+		expect(outcome).toEqual({ replayed: 1, afterDelete: 410, listed: undefined, tombstones: 0, exported: false, fresh: 1, kept: [["deleted_at", "id"]] });
+	});
+
 	it("export in full near their total cap, which holds whatever the limits say", async () => {
 		// Ten versions of nearly 1 MB each, made straight in the store: about the most artifacts can hold.
 		const ids = await runInDurableObject(agent(), async (instance: Pim) => {

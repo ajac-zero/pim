@@ -26,18 +26,111 @@ function useDebounced<T>(value: T, ms: number): T {
  * first passkey.
  */
 export function Register({ session }: { session: AccountsSession }) {
+  const { t } = useI18n();
   const [registered, setRegistered] = useState<Registered | null>(null);
+  // People who already have a Pimling come here too: send them to it.
+  const [returning, setReturning] = useState(session.registration === "closed");
   return (
     <main className="flex min-h-svh flex-col items-center justify-center px-6 py-12">
       <div className="w-full max-w-sm">
         <PimMark className="mb-6 size-10" />
         {registered ? (
           <RecoveryCodes registered={registered} />
+        ) : returning ? (
+          <FindPimling session={session} />
         ) : (
           <RegistrationForm session={session} onRegistered={setRegistered} />
         )}
+        {!registered && (
+          <p className="mt-6 border-t pt-4 text-center text-muted-foreground text-sm">
+            {returning && session.registration !== "closed" ? (
+              <>
+                {t("needPimling")}{" "}
+                <button
+                  type="button"
+                  className="font-medium text-foreground underline-offset-2 hover:underline"
+                  onClick={() => setReturning(false)}
+                >
+                  {t("createOne")}
+                </button>
+              </>
+            ) : !returning ? (
+              <>
+                {t("havePimling")}{" "}
+                <button
+                  type="button"
+                  className="font-medium text-foreground underline-offset-2 hover:underline"
+                  onClick={() => setReturning(true)}
+                >
+                  {t("signInToIt")}
+                </button>
+              </>
+            ) : null}
+          </p>
+        )}
       </div>
     </main>
+  );
+}
+
+/** Signing in again: the username leads to the person's own Pimling, where their passkey works. */
+function FindPimling({ session }: { session: AccountsSession }) {
+  const { t } = useI18n();
+  const id = useId();
+  const [username, setUsername] = useState("");
+  const find = useMutation({
+    mutationFn: () => auth.findPimling(normalize(username)),
+    // Only an address the service gave, on its own domain, is followed.
+    onSuccess: ({ url }) => {
+      const target = new URL(url);
+      if (target.hostname.endsWith(`.${session.domain}`))
+        window.location.assign(target.origin);
+    },
+  });
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (normalize(username)) find.mutate();
+      }}
+    >
+      <h1 className="font-semibold text-2xl">{t("findPimlingTitle")}</h1>
+      <p className="mt-2 text-muted-foreground text-sm">
+        {t("findPimlingBody")}
+      </p>
+      <label htmlFor={id} className="mt-6 block font-medium text-sm">
+        {t("username")}
+      </label>
+      <div className="mt-1.5 flex h-10 items-center rounded-md border bg-transparent pr-3 shadow-xs focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50">
+        <input
+          id={id}
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
+          autoComplete="username"
+          autoCapitalize="none"
+          spellCheck={false}
+          maxLength={32}
+          className="h-full min-w-0 flex-1 bg-transparent px-3 text-sm outline-none"
+        />
+        <span className="shrink-0 text-muted-foreground text-sm">
+          .{session.domain}
+        </span>
+      </div>
+      <Button
+        type="submit"
+        size="lg"
+        className="mt-6 w-full"
+        disabled={!normalize(username) || find.isPending}
+      >
+        {find.isPending && <Loader2 className="animate-spin" />}
+        {t("goToMyPimling")}
+      </Button>
+      {find.isError && (
+        <p role="alert" className="mt-4 text-destructive text-sm">
+          {find.error.message}
+        </p>
+      )}
+    </form>
   );
 }
 

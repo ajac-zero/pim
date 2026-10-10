@@ -24,6 +24,8 @@ export type PimAuthSession = {
   recovery?: "logs" | "codes";
   /** Pimling: whose Pimling this is, once signed in. */
   account?: { username: string } | null;
+  /** This Pim's address, such as `ana.pimling.example.com`, shown before signing in. */
+  host?: string;
 };
 
 /** Pimling's front door, where people register instead of signing in. */
@@ -173,7 +175,9 @@ export const auth = {
    * Needs a setup link's code or a recovery code unless this browser is
    * signed in, or Pim can be claimed.
    */
-  async addPasskey(allowedBy: { setup?: string; recovery?: string } = {}) {
+  async addPasskey(
+    allowedBy: { setup?: string; recovery?: string; device?: string } = {},
+  ) {
     const options = await post<CreationOptions>("/passkeys/options", allowedBy);
     const credential = (await navigator.credentials.create({
       publicKey: {
@@ -210,6 +214,15 @@ export const auth = {
 
   signOut: () => post("/sign-out"),
 
+  /** A link that adds another device (a phone) to this Pim, once, for ten minutes. */
+  deviceLink: () => post<{ url: string; expiresAt: string }>("/device-link"),
+  /** Stops the link this browser made from working. */
+  cancelDeviceLink: () => call("/device-link", { method: "DELETE" }),
+
+  /** Pimling's front door: the address of an existing Pimling. */
+  findPimling: (name: string) =>
+    call<{ url: string }>(`/pimling?name=${encodeURIComponent(name)}`),
+
   /** Pimling: how many recovery codes are left, and a new set. */
   recoveryCodesLeft: () =>
     call<{ left: number }>("/recovery-codes").then((body) => body.left),
@@ -241,9 +254,38 @@ export function setupCode(): string | null {
   return new URLSearchParams(location.hash.slice(1)).get("setup");
 }
 
-/** Drops a used setup code from the address bar and history. */
+/**
+ * The code in a link that adds another device (`/#device=…`). It is taken out
+ * of the address bar as soon as the page reads it, before any request, so it
+ * isn't left in history, bookmarks or a shared screenshot of the page.
+ */
+let pendingDeviceCode: string | null | undefined;
+export function deviceCode(): string | null {
+  const fresh = new URLSearchParams(location.hash.slice(1)).get("device");
+  if (fresh) {
+    pendingDeviceCode = fresh;
+    history.replaceState(
+      history.state,
+      "",
+      location.pathname + location.search,
+    );
+  }
+  return pendingDeviceCode ?? null;
+}
+
+/** Forgets a device-link code once it's used, or found not to work. */
+export function forgetDeviceCode() {
+  pendingDeviceCode = null;
+}
+
+/** Drops a used setup code or device link from the address bar and history. */
 export function forgetSetupCode() {
   history.replaceState(history.state, "", location.pathname + location.search);
+}
+
+/** The browser refused because this device already has a passkey for this Pim. */
+export function alreadyRegistered(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "InvalidStateError";
 }
 
 /** The browser's "you cancelled" or "timed out" isn't worth an error. */

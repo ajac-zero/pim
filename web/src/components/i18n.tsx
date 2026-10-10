@@ -107,10 +107,16 @@ const translations = {
     yesterday: "Yesterday",
     cancel: "Cancel",
     chatGPTPlanPitch:
-      "Run Pim on OpenAI's models, such as GPT-6.1 Sol, with usage included in your ChatGPT Plus or Pro plan. Workers AI stays free and is used when you're not connected.",
-    chatGPTStepApprove: "Sign in in the new tab and approve Pim.",
+      "Run Pim on OpenAI's models, such as GPT-6.1 Sol, with usage included in your ChatGPT Plus or Pro plan. When you're not connected, Pim uses its default model on Workers AI.",
+    chatGPTWhyPaste:
+      "OpenAI's sign-in for open-source apps can only send you back to an address on your own device (127.0.0.1), which Pim can't receive from the internet. So you carry that address over to Pim yourself, this once.",
+    chatGPTStepApprove: "In the new tab, sign in to ChatGPT and approve Pim.",
     chatGPTStepCopy:
-      "The tab ends on a page at 127.0.0.1 that doesn't load. That's expected: copy the whole address from its address bar and paste it here.",
+      "The tab ends on a 127.0.0.1 page that doesn't load. That's expected. Copy the whole address from its address bar.",
+    chatGPTStepPaste:
+      "Paste it below, here in your own Pim, within 15 minutes. It holds a one-time code that finishes the sign-in, so don't paste it anywhere else.",
+    chatGPTAfterPaste:
+      "After this, Pim normally keeps the connection going on its own. If access expires or is revoked in ChatGPT, connect again the same way.",
     connect: "Connect",
     connectForMoreModels:
       "Connect your ChatGPT plan to choose OpenAI's models.",
@@ -124,7 +130,7 @@ const translations = {
     model: "Model",
     modelChanged: "Pim now uses {model}",
     pasteAddress: "Address the browser landed on",
-    runsOnWorkersAI: "Workers AI, on your Cloudflare account",
+    runsOnWorkersAI: "Runs on Workers AI",
     settings: "Settings",
     settingsDescription: "The model Pim runs on, and the accounts it uses.",
     useYourChatGPTPlan: "Use your ChatGPT plan",
@@ -243,6 +249,39 @@ const translations = {
     typeUsernameToConfirm: "Type {username} to confirm",
     deleteForever: "Delete forever",
     deleteAccountButton: "Delete my account…",
+    addThisDeviceTitle: "Add this device",
+    addingTo: "Adding this device to",
+    notMyPimling: "This isn't my Pimling",
+    passkeyAlreadyHere:
+      "This device already has a passkey for this Pimling. Go back and sign in with it instead.",
+    addThisDeviceBody:
+      "Your Pimling sent this link from a device where you're signed in. Create a passkey here, and this device can sign in on its own from now on.",
+    addThisDeviceNote:
+      "The link works once, for 10 minutes. Your other devices and passkeys stay as they are.",
+    newDeviceTitle: "Signed up on another device?",
+    newDeviceBody:
+      "A passkey lives on the device that made it, unless your password manager syncs it here. On a device where you're signed in, open Settings → Passkeys → Add another device and scan the code. No other device? Use a recovery code.",
+    addDeviceTitle: "Add another device",
+    addDeviceBody:
+      "Sign in on your phone or another computer: it makes its own passkey from a one-time link.",
+    addDeviceButton: "Add another device",
+    addDeviceQr: "QR code with a link that adds another device",
+    addDeviceStepScan:
+      "On the other device, scan this code with the camera, or open the link.",
+    addDeviceStepPasskey: "Tap Create passkey there.",
+    addDeviceExpires:
+      "Works once, until {time}. Anyone with this link can add a device, so only open it yourself.",
+    addDeviceExpired: "That link expired. Make a new one.",
+    copyLink: "Copy link",
+    done: "Done",
+    havePimling: "Already have a Pimling?",
+    signInToIt: "Sign in",
+    needPimling: "Don't have one yet?",
+    createOne: "Create one",
+    findPimlingTitle: "Sign in to your Pimling",
+    findPimlingBody:
+      "Enter your username to go to your Pimling, then sign in with your passkey.",
+    goToMyPimling: "Go to my Pimling",
     accountClosedTitle: "Your account is closed",
     accountClosedBody:
       "Nobody can use it anymore, but erasing its data hasn't finished yet. Pimling keeps retrying until everything is erased; you don't need to do anything.",
@@ -344,10 +383,17 @@ const translations = {
     yesterday: "Ayer",
     cancel: "Cancelar",
     chatGPTPlanPitch:
-      "Usa los modelos de OpenAI, como GPT-6.1 Sol, con el uso incluido en tu plan ChatGPT Plus o Pro. Workers AI sigue siendo gratis y se usa cuando no estás conectado.",
-    chatGPTStepApprove: "Inicia sesión en la nueva pestaña y aprueba a Pim.",
+      "Usa los modelos de OpenAI, como GPT-6.1 Sol, con el uso incluido en tu plan ChatGPT Plus o Pro. Cuando no estás conectado, Pim usa su modelo predeterminado en Workers AI.",
+    chatGPTWhyPaste:
+      "El inicio de sesión de OpenAI para apps de código abierto solo puede devolverte a una dirección en tu propio dispositivo (127.0.0.1), que Pim no puede recibir desde internet. Por eso llevas tú esa dirección a Pim, esta única vez.",
+    chatGPTStepApprove:
+      "En la nueva pestaña, inicia sesión en ChatGPT y aprueba a Pim.",
     chatGPTStepCopy:
-      "La pestaña termina en una página de 127.0.0.1 que no carga. Es normal: copia la dirección completa de la barra de direcciones y pégala aquí.",
+      "La pestaña termina en una página de 127.0.0.1 que no carga. Es normal. Copia la dirección completa de la barra de direcciones.",
+    chatGPTStepPaste:
+      "Pégala abajo, aquí en tu propio Pim, antes de 15 minutos. Contiene un código de un solo uso que completa el inicio de sesión, así que no la pegues en ningún otro lugar.",
+    chatGPTAfterPaste:
+      "Después, Pim normalmente mantiene la conexión por su cuenta. Si el acceso vence o se revoca en ChatGPT, vuelve a conectarte de la misma forma.",
     connect: "Conectar",
     connectForMoreModels:
       "Conecta tu plan de ChatGPT para elegir los modelos de OpenAI.",
@@ -361,7 +407,7 @@ const translations = {
     model: "Modelo",
     modelChanged: "Pim ahora usa {model}",
     pasteAddress: "Dirección a la que llegó el navegador",
-    runsOnWorkersAI: "Workers AI, en tu cuenta de Cloudflare",
+    runsOnWorkersAI: "Funciona con Workers AI",
     settings: "Configuración",
     settingsDescription:
       "El modelo con el que funciona Pim y las cuentas que usa.",
@@ -485,6 +531,39 @@ const translations = {
     typeUsernameToConfirm: "Escribe {username} para confirmar",
     deleteForever: "Eliminar para siempre",
     deleteAccountButton: "Eliminar mi cuenta…",
+    addThisDeviceTitle: "Agrega este dispositivo",
+    addingTo: "Agregando este dispositivo a",
+    notMyPimling: "Este no es mi Pimling",
+    passkeyAlreadyHere:
+      "Este dispositivo ya tiene una llave de acceso para este Pimling. Vuelve e inicia sesión con ella.",
+    addThisDeviceBody:
+      "Tu Pimling envió este enlace desde un dispositivo donde tienes sesión iniciada. Crea aquí una llave de acceso y este dispositivo podrá iniciar sesión por su cuenta desde ahora.",
+    addThisDeviceNote:
+      "El enlace funciona una vez, durante 10 minutos. Tus otros dispositivos y llaves de acceso no cambian.",
+    newDeviceTitle: "¿Te registraste en otro dispositivo?",
+    newDeviceBody:
+      "Una llave de acceso vive en el dispositivo que la creó, a menos que tu gestor de contraseñas la sincronice aquí. En un dispositivo con sesión iniciada, abre Configuración → Llaves de acceso → Agregar otro dispositivo y escanea el código. ¿No tienes otro dispositivo? Usa un código de recuperación.",
+    addDeviceTitle: "Agregar otro dispositivo",
+    addDeviceBody:
+      "Inicia sesión en tu teléfono u otra computadora: crea su propia llave de acceso con un enlace de un solo uso.",
+    addDeviceButton: "Agregar otro dispositivo",
+    addDeviceQr: "Código QR con un enlace que agrega otro dispositivo",
+    addDeviceStepScan:
+      "En el otro dispositivo, escanea este código con la cámara o abre el enlace.",
+    addDeviceStepPasskey: "Toca Crear llave de acceso allí.",
+    addDeviceExpires:
+      "Funciona una vez, hasta las {time}. Cualquiera con este enlace puede agregar un dispositivo, así que ábrelo solo tú.",
+    addDeviceExpired: "Ese enlace venció. Crea uno nuevo.",
+    copyLink: "Copiar enlace",
+    done: "Listo",
+    havePimling: "¿Ya tienes un Pimling?",
+    signInToIt: "Inicia sesión",
+    needPimling: "¿Aún no tienes uno?",
+    createOne: "Crea uno",
+    findPimlingTitle: "Inicia sesión en tu Pimling",
+    findPimlingBody:
+      "Escribe tu nombre de usuario para ir a tu Pimling y luego inicia sesión con tu llave de acceso.",
+    goToMyPimling: "Ir a mi Pimling",
     accountClosedTitle: "Tu cuenta está cerrada",
     accountClosedBody:
       "Ya nadie puede usarla, pero el borrado de sus datos aún no terminó. Pimling lo sigue intentando hasta borrarlo todo; no tienes que hacer nada.",

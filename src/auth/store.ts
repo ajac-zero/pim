@@ -27,6 +27,12 @@ export type ApiToken = { readonly id: string; readonly name: string; readonly cr
 /** How many recovery codes a set has. */
 export const RECOVERY_CODES = 10;
 
+/** How long a link that adds another device works. */
+export const DEVICE_LINK_MS = 10 * 60 * 1000;
+
+/** A link to add another device, made by a signed-in browser: it makes one passkey, once, before it expires. */
+export type DeviceLink = { readonly code: string; readonly expiresAt: number };
+
 /** How long a setup link works. */
 export const SETUP_CODE_MS = 60 * 60 * 1000;
 
@@ -54,6 +60,12 @@ CREATE TABLE IF NOT EXISTS auth_recovery_codes (
 	hash TEXT PRIMARY KEY,
 	created_at INTEGER NOT NULL,
 	used_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS auth_device_links (
+	hash TEXT PRIMARY KEY,
+	passkey TEXT NOT NULL,
+	created_at INTEGER NOT NULL,
+	expires_at INTEGER NOT NULL
 );
 `;
 
@@ -140,6 +152,10 @@ export class Auth extends DurableObject<Env> {
 	}
 
 	addPasskey(id: string, key: PublicKey, name: string, now: number): Passkey {
+		// The first passkey ever, however it was made (setup link, recovery code, claim), ends setting up:
+		// the setup code from registration, or a self-hosted log link, must not make a second one later.
+		// An operator's setup link is issued only after this, so it's unaffected.
+		if (!this.claimed()) this.#setMeta("setup_code", null);
 		this.#setMeta("claimed", String(now));
 		this.ctx.storage.sql.exec(
 			"INSERT INTO auth_passkeys (id, spki, algorithm, name, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -159,6 +175,8 @@ export class Auth extends DurableObject<Env> {
 
 	removePasskey(id: string) {
 		this.ctx.storage.sql.exec("DELETE FROM auth_passkeys WHERE id = ?", id);
+		// Links that passkey's browser issued go with it.
+		this.ctx.storage.sql.exec("DELETE FROM auth_device_links WHERE passkey = ?", id);
 	}
 
 	#activeSetupCode(now: number): SetupCode | null {
@@ -204,6 +222,65 @@ export class Auth extends DurableObject<Env> {
 		if (this.#activeSetupCode(now)?.code !== active.code) return false;
 		this.#setMeta("setup_code", null);
 		return true;
+	}
+
+	// Device links: a signed-in browser hands one to the person's other device.
+
+	/**
+	 * A new link to add a device, issued for the passkey that signed in the
+	 * browser asking. It works once, for `DEVICE_LINK_MS`, and only while that
+	 * passkey is still one of this Pim's: removing the passkey, or signing out
+	 * everywhere by removing it, voids the links it issued. Making a new link
+	 * voids that passkey's older ones, so only the latest is live. Only its
+	 * digest is kept. It is separate from the setup code, so issuing one never
+	 * replaces a link registration or the operator gave out.
+	 */
+	async newDeviceLink(passkey: string, now: number): Promise<DeviceLink> {
+		const code = randomCode();
+		const hash = await digestHex(code);
+		const expiresAt = now + DEVICE_LINK_MS;
+		this.ctx.storage.transactionSync(() => {
+			this.ctx.storage.sql.exec("DELETE FROM auth_device_links WHERE expires_at <= ? OR passkey = ?", now, passkey);
+			this.ctx.storage.sql.exec(
+				"INSERT INTO auth_device_links (hash, passkey, created_at, expires_at) VALUES (?, ?, ?, ?)",
+				hash,
+				passkey,
+				now,
+				expiresAt,
+			);
+		});
+		return { code, expiresAt };
+	}
+
+	/** Voids the links a passkey's browser issued, when it signs out. */
+	voidDeviceLinks(passkey: string): void {
+		this.ctx.storage.sql.exec("DELETE FROM auth_device_links WHERE passkey = ?", passkey);
+	}
+
+	/** Whether `code` is a live device link: unexpired, unused, and its issuing passkey still here. */
+	async isDeviceLink(code: string, now: number): Promise<boolean> {
+		const hash = await digestHex(code);
+		return this.#liveDeviceLink(hash, now);
+	}
+
+	#liveDeviceLink(hash: string, now: number): boolean {
+		return (
+			this.ctx.storage.sql
+				.exec(
+					"SELECT 1 FROM auth_device_links l JOIN auth_passkeys p ON p.id = l.passkey WHERE l.hash = ? AND l.expires_at > ?",
+					hash,
+					now,
+				)
+				.toArray().length > 0
+		);
+	}
+
+	/** Uses up a device link: true for one caller only. */
+	async useDeviceLink(code: string, now: number): Promise<boolean> {
+		const hash = await digestHex(code);
+		// Checked and deleted with no await in between, so two tabs can't both use it.
+		if (!this.#liveDeviceLink(hash, now)) return false;
+		return this.ctx.storage.sql.exec("DELETE FROM auth_device_links WHERE hash = ?", hash).rowsWritten > 0;
 	}
 
 	// Recovery codes: each makes one passkey once, for someone who lost theirs.

@@ -7,8 +7,11 @@ import { useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {
+  alreadyRegistered,
   auth,
   cancelled,
+  deviceCode,
+  forgetDeviceCode,
   forgetSetupCode,
   type PimAuthSession,
   setupCode,
@@ -32,11 +35,15 @@ export function SignIn({ session }: { session: PimAuthSession }) {
   const queryClient = useQueryClient();
   const router = useRouter();
   const [setup, setSetup] = useState(setupCode);
+  const [device, setDevice] = useState(deviceCode);
   const [recovering, setRecovering] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // A link pasted into this tab changes only the hash; nothing reloads.
   useEffect(() => {
-    const update = () => setSetup(setupCode());
+    const update = () => {
+      setSetup(setupCode());
+      setDevice(deviceCode());
+    };
     window.addEventListener("hashchange", update);
     return () => window.removeEventListener("hashchange", update);
   }, []);
@@ -47,7 +54,13 @@ export function SignIn({ session }: { session: PimAuthSession }) {
     await router.invalidate();
   };
   const onError = (failure: Error) =>
-    setError(cancelled(failure) ? null : failure.message);
+    setError(
+      cancelled(failure)
+        ? null
+        : alreadyRegistered(failure)
+          ? t("passkeyAlreadyHere")
+          : failure.message,
+    );
   const signIn = useMutation({
     mutationFn: auth.signIn,
     onMutate: () => setError(null),
@@ -56,10 +69,13 @@ export function SignIn({ session }: { session: PimAuthSession }) {
   });
   const create = useMutation({
     mutationFn: (recovery?: string) =>
-      auth.addPasskey(recovery ? { recovery } : setup ? { setup } : {}),
+      auth.addPasskey(
+        recovery ? { recovery } : device ? { device } : setup ? { setup } : {},
+      ),
     onMutate: () => setError(null),
     onSuccess: () => {
       forgetSetupCode();
+      forgetDeviceCode();
       return onSuccess();
     },
     onError,
@@ -72,7 +88,47 @@ export function SignIn({ session }: { session: PimAuthSession }) {
     <main className="flex min-h-svh flex-col items-center justify-center px-6 py-12">
       <div className="w-full max-w-sm">
         <PimMark className="mb-6 size-10" />
-        {!setup && !hasPasskeys && canClaim ? (
+        {device ? (
+          <>
+            <h1 className="font-semibold text-2xl">
+              {t("addThisDeviceTitle")}
+            </h1>
+            {/* Whose Pimling this adds the device to: check it before making a passkey for it. */}
+            <p className="mt-3 rounded-lg border bg-muted/40 px-3 py-2 text-sm">
+              <span className="text-muted-foreground">{t("addingTo")} </span>
+              {/* Breaks only after a dot, so no part of the name is split. */}
+              <span className="font-medium font-mono">
+                {(session.host ?? location.host).replaceAll(".", ".\u200b")}
+              </span>
+            </p>
+            <p className="mt-3 text-muted-foreground text-sm">
+              {t("addThisDeviceBody")}
+            </p>
+            <Button
+              className="mt-6 w-full"
+              size="lg"
+              onClick={() => create.mutate(undefined)}
+              disabled={pending}
+            >
+              {icon}
+              {t("createPasskey")}
+            </Button>
+            <p className="mt-4 text-muted-foreground text-xs">
+              {t("addThisDeviceNote")}
+            </p>
+            <Button
+              variant="ghost"
+              className="mt-2 w-full text-muted-foreground"
+              onClick={() => {
+                forgetDeviceCode();
+                setDevice(null);
+                setError(null);
+              }}
+            >
+              {t("notMyPimling")}
+            </Button>
+          </>
+        ) : !setup && !hasPasskeys && canClaim ? (
           <>
             <h1 className="font-semibold text-2xl">{t("setUpTitle")}</h1>
             <p className="mt-2 text-muted-foreground text-sm">
@@ -134,6 +190,11 @@ export function SignIn({ session }: { session: PimAuthSession }) {
             >
               {t("lostPasskey")}
             </Button>
+            {/* The commonest snag: a passkey made on another device that this one doesn't have. */}
+            <div className="mt-6 rounded-lg border px-4 py-3 text-sm">
+              <p className="font-medium">{t("newDeviceTitle")}</p>
+              <p className="mt-1 text-muted-foreground">{t("newDeviceBody")}</p>
+            </div>
           </>
         ) : codes ? (
           <RecoveryCodeSteps

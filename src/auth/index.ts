@@ -14,7 +14,9 @@
  * - self-hosted only, the claim window: in the first minutes after a deploy,
  *   a Pim that has never had a passkey lets whoever opens it create the
  *   first one, so a fresh deploy needs nothing but a click;
- * - hosted only, a recovery code: the person got ten when they registered.
+ * - hosted only, a recovery code: the person got ten when they registered;
+ * - a device link: a browser signed in with a passkey makes one, to open on
+ *   the person's other device (a phone), which then makes its own passkey.
  */
 
 import { base64UrlDecode, base64UrlEncode } from "./encoding";
@@ -72,6 +74,8 @@ type Sealed = {
 		setup?: string;
 		/** The digest of the recovery code that allowed this passkey, if one did. */
 		recovery?: string;
+		/** The device link that allowed this passkey, if one did. */
+		device?: string;
 		/** Set when the claim window allowed this passkey. */
 		claim?: true;
 	};
@@ -190,7 +194,7 @@ async function claimOpen(env: Env, site: AuthSite, now: number): Promise<boolean
 	return !(await site.store.claimed());
 }
 
-type AllowedBy = { setup?: string; recovery?: string; claim?: true };
+type AllowedBy = { setup?: string; recovery?: string; device?: string; claim?: true };
 
 async function challengeCookie(site: AuthSite, ceremony: "create" | "get", now: number, allowedBy: AllowedBy = {}) {
 	const challenge = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
@@ -228,6 +232,8 @@ export async function handleAuth(request: Request, env: Env, site: AuthSite, now
 			// How someone without a passkey gets one: a setup link from the logs, or a recovery code.
 			recovery: hosted ? "codes" : "logs",
 			account: session && site.account ? site.account : null,
+			// Whose Pim this is, for screens shown before signing in: the hostname says it already.
+			host: url.host,
 		});
 	}
 
@@ -263,21 +269,27 @@ export async function handleAuth(request: Request, env: Env, site: AuthSite, now
 	}
 
 	if (route === "POST /sign-out") {
+		// A link this browser made for another device dies with its session.
+		const session = await currentSession(request, site, now);
+		if (session) await store.voidDeviceLinks(session.passkey);
 		return json({ ok: true }, 200, [clearCookie(SESSION_COOKIE)]);
 	}
 
 	if (route === "POST /passkeys/options") {
-		const body = (await request.json().catch(() => null)) as { setup?: unknown; recovery?: unknown } | null;
+		const body = (await request.json().catch(() => null)) as { setup?: unknown; recovery?: unknown; device?: unknown } | null;
 		const signedIn = (await currentSession(request, site, now)) !== null;
 		let allowedBy: AllowedBy = {};
 		if (!signedIn) {
 			const setup = typeof body?.setup === "string" ? body.setup : undefined;
 			const recovery = hosted && typeof body?.recovery === "string" ? await digestHex(normalizeRecoveryCode(body.recovery)) : undefined;
+			const device = typeof body?.device === "string" ? body.device : undefined;
 			if (setup && (await store.isSetupCode(setup, now))) allowedBy = { setup };
 			else if (recovery && (await store.isRecoveryCode(recovery))) allowedBy = { recovery };
-			else if (!setup && !recovery && (await claimOpen(env, site, now))) allowedBy = { claim: true };
+			else if (device && (await store.isDeviceLink(device, now))) allowedBy = { device };
+			else if (!setup && !recovery && !device && (await claimOpen(env, site, now))) allowedBy = { claim: true };
 			else if (setup) return fail(401, "This setup link has expired or was already used. Get a new one from the sign-in screen.");
 			else if (recovery) return fail(401, "That recovery code isn't valid, or it was already used.");
+			else if (device) return fail(401, "This link has expired or was already used. Make a new one on a device that's signed in.");
 			else return fail(401, "Sign in to add a passkey.");
 		}
 		const { challenge, cookie } = await challengeCookie(site, "create", now, allowedBy);
@@ -320,6 +332,9 @@ export async function handleAuth(request: Request, env: Env, site: AuthSite, now
 		if (pending.recovery && !(await store.useRecoveryCode(pending.recovery, now))) {
 			return fail(401, "That recovery code was already used.");
 		}
+		if (pending.device && !(await store.useDeviceLink(pending.device, now))) {
+			return fail(401, "This link has expired or was already used. Make a new one on a device that's signed in.");
+		}
 		const name = registration.name.trim().slice(0, 64) || "Passkey";
 		let passkey: Passkey | null;
 		if (pending.claim) {
@@ -330,10 +345,9 @@ export async function handleAuth(request: Request, env: Env, site: AuthSite, now
 		} else {
 			passkey = await store.addPasskey(registration.id, key, name, now);
 		}
-		if (pending.setup || pending.recovery || pending.claim) {
-			console.log(
-				JSON.stringify({ event: "pim.passkey_created", owner: site.owner, by: pending.recovery ? "recovery" : pending.claim ? "claim" : "setup" }),
-			);
+		if (pending.setup || pending.recovery || pending.device || pending.claim) {
+			const by = pending.recovery ? "recovery" : pending.device ? "device_link" : pending.claim ? "claim" : "setup";
+			console.log(JSON.stringify({ event: "pim.passkey_created", owner: site.owner, by }));
 			await site.onPasskeyCreated?.();
 		}
 		// A browser already signed in with a passkey stays on its own.
@@ -355,6 +369,24 @@ export async function handleAuth(request: Request, env: Env, site: AuthSite, now
 			await store.removePasskey(id);
 			return json({ ok: true }, 200, session.passkey === id ? [clearCookie(SESSION_COOKIE)] : []);
 		}
+	}
+
+	if (route === "POST /device-link") {
+		// A passkey session only: an API token can't hand out sign-in to a new device.
+		const session = await signedIn();
+		if (!session) return fail(401, "Sign in to Pim");
+		const { code, expiresAt } = await store.newDeviceLink(session.passkey, now);
+		console.log(JSON.stringify({ event: "pim.device_link_issued", owner: site.owner }));
+		// The code goes in the fragment, so it never reaches a server's logs or a Referer header.
+		return json({ url: `${ceremonySite.origin}/#device=${code}`, expiresAt: new Date(expiresAt).toISOString() }, 201);
+	}
+
+	if (route === "DELETE /device-link") {
+		// Done or changed one's mind: the link this browser made stops working now, not in ten minutes.
+		const session = await signedIn();
+		if (!session) return fail(401, "Sign in to Pim");
+		await store.voidDeviceLinks(session.passkey);
+		return json({ ok: true });
 	}
 
 	if (path === "/recovery-codes" && hosted) {

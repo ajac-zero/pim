@@ -1,0 +1,65 @@
+{
+  // The owner's private test deployment of Pimling, at https://pimling.ajac-zero.com, with each
+  // person at https://<username>.pimling.ajac-zero.com. Invite-only, with small limits.
+  // Deploy: pnpm run deploy:ajac-zero. Setup, DNS and rollback: docs/deployments/ajac-zero.md.
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "pimling",
+  "main": "src/hosted/index.ts",
+  "compatibility_date": "2026-09-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    // A Workers Custom Domain: its certificate covers pimling.ajac-zero.com and
+    // *.pimling.ajac-zero.com, which Universal SSL (one level deep) does not.
+    { "pattern": "pimling.ajac-zero.com", "custom_domain": true },
+    // Every person's host. Needs the proxied DNS record *.pimling.ajac-zero.com (not managed here).
+    { "pattern": "*.pimling.ajac-zero.com/*", "zone_name": "ajac-zero.com" }
+  ],
+  "build": { "command": "pnpm --filter pim-web build", "watch_dir": "web/src" },
+  "assets": {
+    "directory": "./web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api", "/api/*", "/auth/*", "/admin/*", "/health", "/mcp/callback", "/mcp/events/*"]
+  },
+  "ai": { "binding": "AI", "remote": true },
+  "durable_objects": {
+    "bindings": [
+      { "name": "Pim", "class_name": "Pim" },
+      { "name": "Auth", "class_name": "Auth" },
+      { "name": "Directory", "class_name": "Directory" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Pim"] },
+    { "tag": "v2", "new_sqlite_classes": ["Auth"] },
+    { "tag": "v3", "new_sqlite_classes": ["Directory"] }
+  ],
+  // Namespace IDs unique to this deployment in the account, so no other Worker shares the counters.
+  "ratelimits": [
+    { "name": "AUTH_LIMITER", "namespace_id": "71420101", "simple": { "limit": 20, "period": 60 } },
+    { "name": "API_LIMITER", "namespace_id": "71420102", "simple": { "limit": 300, "period": 60 } }
+  ],
+  "vars": {
+    "PIMLING_DOMAIN": "pimling.ajac-zero.com",
+    // Invite codes from POST /admin/invites.
+    "PIMLING_REGISTRATION": "invite",
+    "PIMLING_MAX_ACCOUNTS": "25",
+    "PIMLING_REGISTRATIONS_PER_ADDRESS": "3",
+    "PIM_MODEL": "@cf/zai-org/glm-4.7-flash",
+    "PIM_TIME_ZONE": "UTC",
+    "PIM_APPROVAL_POLICY": "explicit",
+    "PIM_MODELS": "@cf/zai-org/glm-4.7-flash",
+    "PIM_WEB_SEARCH": "",
+    "PIM_MEMORY_MODEL": "",
+    "PIM_MEMORY_LINES": "",
+    "PIM_PUBLIC_URL": "",
+    // Small on purpose: a private test. The admin API raises one person's.
+    "PIM_LIMITS": "{\"dailyTokens\": 300000, \"dailyModelRequests\": 300, \"dailyRuns\": 100, \"sessions\": 100, \"schedules\": 20, \"apps\": 10, \"storageBytes\": 200000000}"
+  },
+  // Secret: PIMLING_ADMIN_TOKEN (wrangler secret put PIMLING_ADMIN_TOKEN --config wrangler.ajac-zero.jsonc).
+  // Never PIM_API_TOKEN or PIM_NOTIFY_WEBHOOK.
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+  "observability": { "enabled": true }
+}

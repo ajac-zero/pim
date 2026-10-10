@@ -7,10 +7,14 @@
 // 22+ for WebSocket, and Python with zxing-cpp and pillow to decode the QR code from a screenshot,
 // as a phone's camera would. Each profile gets its own virtual passkey authenticator.
 //
-// It never prints the invite, setup or device codes. The disposable account is deleted at the end,
-// and also when a check fails or the script throws; if that cleanup fails too, it says so and exits
-// with status 2. Run it from a network that hasn't used up the deployment's per-address
-// registration limit for the day.
+// It never prints the invite, setup or device codes, or the admin token. The disposable account is
+// deleted at the end, and the script tries to delete it when a check fails or the script throws:
+// with the desktop's passkey session, which exists only once the desktop has made its passkey; and,
+// with --admin-token-file, with the admin API, which also deletes an account that never got a
+// passkey. Without that file, a failure between registration and the first passkey leaves a pending
+// account (it lapses in a day, giving its username back). Whenever the account may be left behind,
+// the script says so and exits with status 2. Run it from a network that hasn't used up the
+// deployment's per-address registration limit for the day.
 
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -22,6 +26,10 @@ const { values: args } = parseArgs({
 		domain: { type: "string" },
 		username: { type: "string" },
 		"invite-file": { type: "string" },
+		// Optional: the operator's admin token, for cleanup that can't fail on a missing session.
+		"admin-token-file": { type: "string" },
+		// Every browser operation gives up after this long, so cleanup still runs when Chrome hangs.
+		"cdp-timeout-ms": { type: "string", default: "30000" },
 		"desktop-port": { type: "string", default: "9351" },
 		"phone-port": { type: "string", default: "9352" },
 		artifacts: { type: "string", default: "./artifacts" },
@@ -30,6 +38,9 @@ const { values: args } = parseArgs({
 		// For a local preview: "http" and a port, such as --scheme http --port 8787.
 		scheme: { type: "string", default: "https" },
 		port: { type: "string" },
+		// For a local preview, where Node can't resolve *.localhost: "127.0.0.1" sends this script's own
+		// requests (the admin cleanup) there, with the Host header kept. Browsers resolve it themselves.
+		resolve: { type: "string" },
 	},
 });
 for (const required of ["domain", "username", "invite-file"]) {
@@ -44,6 +55,8 @@ const SUFFIX = args.port ? `:${args.port}` : "";
 const FRONT = `${args.scheme}://${DOMAIN}${SUFFIX}`;
 const HOST = `${args.scheme}://${USER}.${DOMAIN}${SUFFIX}`;
 const INVITE = readFileSync(args["invite-file"], "utf8").trim();
+const ADMIN_TOKEN = args["admin-token-file"] ? readFileSync(args["admin-token-file"], "utf8").trim() : null;
+const CDP_TIMEOUT_MS = Number(args["cdp-timeout-ms"]);
 mkdirSync(args.artifacts, { recursive: true });
 
 const results = [];
@@ -56,8 +69,11 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A tab in a Chrome profile, with its own virtual passkey authenticator. */
 async function tab(port, mobile) {
-	const { webSocketDebuggerUrl } = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" })).json();
+	const { webSocketDebuggerUrl } = await (
+		await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT", signal: AbortSignal.timeout(CDP_TIMEOUT_MS) })
+	).json();
 	const ws = new WebSocket(webSocketDebuggerUrl);
+	ws.addEventListener("error", () => undefined);
 	let id = 0;
 	const pending = new Map();
 	ws.addEventListener("message", (event) => {
@@ -69,11 +85,28 @@ async function tab(port, mobile) {
 			else resolve(message.result);
 		}
 	});
-	await new Promise((resolve) => ws.addEventListener("open", resolve, { once: true }));
+	await new Promise((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error(`Chrome on port ${port} didn't answer`)), CDP_TIMEOUT_MS);
+		ws.addEventListener("open", () => (clearTimeout(timer), resolve()), { once: true });
+	});
+	// Each operation is bounded: a browser that stops answering fails the run, and cleanup still runs.
 	const send = (method, params = {}) =>
 		new Promise((resolve, reject) => {
 			const n = ++id;
-			pending.set(n, { resolve, reject });
+			const timer = setTimeout(() => {
+				pending.delete(n);
+				reject(new Error(`${method} timed out after ${CDP_TIMEOUT_MS} ms`));
+			}, CDP_TIMEOUT_MS);
+			pending.set(n, {
+				resolve: (value) => {
+					clearTimeout(timer);
+					resolve(value);
+				},
+				reject: (error) => {
+					clearTimeout(timer);
+					reject(error);
+				},
+			});
 			ws.send(JSON.stringify({ id: n, method, params }));
 		});
 	await send("Page.enable");
@@ -86,7 +119,14 @@ async function tab(port, mobile) {
 		"Emulation.setDeviceMetricsOverride",
 		mobile ? { width: 390, height: 844, deviceScaleFactor: 3, mobile: true } : { width: 1280, height: 900, deviceScaleFactor: 2, mobile: false },
 	);
-	const evaluate = async (expression) => (await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true })).result.value;
+	// A script that throws in the page (or a promise that rejects) fails here, instead of reading as undefined.
+	const evaluate = async (expression) => {
+		const { result, exceptionDetails } = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+		if (exceptionDetails) {
+			throw new Error(`in the page: ${exceptionDetails.exception?.description ?? exceptionDetails.text}`.split("\n")[0]);
+		}
+		return result.value;
+	};
 	const until = async (expression, ms = 15_000) => {
 		for (let elapsed = 0; elapsed < ms; elapsed += 250) {
 			if (await evaluate(expression).catch(() => false)) return true;
@@ -122,12 +162,46 @@ async function tab(port, mobile) {
 }
 
 const json = (body) => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-const desktop = await tab(Number(args["desktop-port"]), false);
-const phone = await tab(Number(args["phone-port"]), true);
+
+/** Deletes the disposable account with the admin API, from this process. The token is never printed. */
+async function adminDelete() {
+	const url = new URL(`${FRONT}/admin/accounts/${encodeURIComponent(USER)}`);
+	const body = JSON.stringify({ reason: "live smoke cleanup" });
+	const headers = { Authorization: `Bearer ${ADMIN_TOKEN}`, "content-type": "application/json" };
+	if (!args.resolve) {
+		const response = await fetch(url, { method: "DELETE", headers, body, signal: AbortSignal.timeout(CDP_TIMEOUT_MS) });
+		return { status: response.status, body: await response.json().catch(() => null) };
+	}
+	// fetch won't send another Host header, so a local preview gets a plain request to the address given.
+	const { request } = await import(url.protocol === "https:" ? "node:https" : "node:http");
+	return new Promise((resolve, reject) => {
+		const req = request(
+			{ host: args.resolve, port: url.port, path: url.pathname, method: "DELETE", headers: { ...headers, host: url.host }, timeout: CDP_TIMEOUT_MS },
+			(res) => {
+				let text = "";
+				res.on("data", (chunk) => (text += chunk));
+				res.on("end", () => {
+					let parsed = null;
+					try {
+						parsed = JSON.parse(text);
+					} catch {}
+					resolve({ status: res.statusCode, body: parsed });
+				});
+			},
+		);
+		req.on("timeout", () => req.destroy(new Error("timed out")));
+		req.on("error", reject);
+		req.end(body);
+	});
+}
+let desktop;
+let phone;
 let registered = false;
 let deleted = false;
 
 try {
+	desktop = await tab(Number(args["desktop-port"]), false);
+	phone = await tab(Number(args["phone-port"]), true);
 	// The front door, and a disposable account from a single-use invite.
 	await desktop.go(`${FRONT}/`);
 	check("front door is up", (await desktop.api("/health")).status === 200);
@@ -212,8 +286,10 @@ try {
 	// At once, the phone's session opens nothing: whichever Worker answers, it refuses.
 	const now = await phone.api("/api/sessions");
 	check("phone's session is refused at once", now.status === 401 || now.status === 403 || now.status === 410, `HTTP ${now.status} ${now.error ?? ""}`.trim());
+	// Refused as unauthorized (a Worker whose cached account is stale) or as deleted: anything else,
+	// such as a 500, doesn't show the write was refused for the right reason.
 	const write = await phone.api("/api/memory/log", json({ text: "written after deletion" }));
-	check("phone can't write at once", write.status >= 400, `HTTP ${write.status} ${write.error ?? ""}`.trim());
+	check("phone can't write at once", [401, 403, 410].includes(write.status), `HTTP ${write.status} ${write.error ?? ""}`.trim());
 
 	// Once every Worker's account cache has expired, every request gets 410.
 	await wait(Number(args["cache-wait-ms"]));
@@ -224,17 +300,28 @@ try {
 } catch (error) {
 	check("ran to the end", false, error instanceof Error ? error.message : String(error));
 } finally {
-	// Whatever happened, the disposable account doesn't outlive the run.
+	// Try to make sure the disposable account doesn't outlive the run.
 	if (registered && !deleted) {
-		const cleanup = await desktop
-			.api("/api/account", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirm: USER }) })
-			.catch((error) => ({ status: 0, error: String(error) }));
-		deleted = cleanup.status === 200;
-		check("cleanup deleted the disposable account", deleted, `HTTP ${cleanup.status} ${cleanup.error ?? ""}`.trim());
-		if (!deleted) console.error(`CLEANUP NEEDED: delete ${USER} with the admin API (DELETE /admin/accounts/${USER}).`);
+		// The desktop's own session: works once its passkey exists.
+		const own = await Promise.resolve()
+			.then(() => desktop.api("/api/account", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirm: USER }) }))
+			.catch((error) => ({ status: 0, error: error instanceof Error ? error.message : String(error) }));
+		deleted = own.status === 200;
+		check("cleanup with the desktop's session", deleted, `HTTP ${own.status} ${own.error ?? ""}`.trim());
+		// The admin API: works without any session, from this process, not the browser.
+		if (!deleted && ADMIN_TOKEN) {
+			const operator = await adminDelete().catch((error) => ({ status: 0, body: { error: error instanceof Error ? error.message : String(error) } }));
+			deleted = operator.status === 200 && operator.body?.deleted === true;
+			check("cleanup with the admin API", deleted, `HTTP ${operator.status} ${JSON.stringify(operator.body)}`);
+		}
+		if (!deleted) {
+			console.error(
+				`CLEANUP NEEDED: ${USER} may still exist. Delete it with the admin API (DELETE /admin/accounts/${USER}); a pending one also lapses in a day.`,
+			);
+		}
 	}
-	desktop.close();
-	phone.close();
+	desktop?.close();
+	phone?.close();
 }
 
 const failed = results.filter((r) => !r.ok);

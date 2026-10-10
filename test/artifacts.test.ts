@@ -225,6 +225,37 @@ describe("artifacts", () => {
 		}
 	});
 
+	it("take one of two writes racing on the same version, and keep to their limits when writes race", async () => {
+		const outcome = await runInDurableObject(agent(), async (instance: Pim) => {
+			const settle = (work: Promise<unknown>) =>
+				work.then(
+					() => "ok",
+					(error: { status?: number; message?: string }) => error.status ?? error.message,
+				);
+			const id = crypto.randomUUID();
+			await instance.artifacts.create({ id, title: "Race", kind: "html", content: "<p>1</p>", session: null });
+			// The agent's edit and the person's restore, both based on version 1.
+			const raced = await Promise.all([
+				settle(instance.artifacts.append(id, { baseVersion: 1, content: "<p>2</p>", source: "agent" })),
+				settle(instance.artifacts.restore(id, 1, 1)),
+			]);
+			// Two new artifacts that each fit, but not both.
+			await instance.setLimits({ artifactStorageBytes: instance.artifacts.totalBytes() + 1_500 });
+			const big = (index: number) =>
+				settle(instance.artifacts.create({ id: crypto.randomUUID(), title: `Racer ${index}`, kind: "html", content: "r".repeat(1_000), session: null }));
+			const created = await Promise.all([big(1), big(2)]);
+			const total = instance.artifacts.totalBytes();
+			const limit = instance.limits().artifactStorageBytes!;
+			// A refused version renames nothing.
+			await instance.setLimits({ artifactBytes: 10 });
+			const renamed = await settle(instance.artifacts.append(id, { baseVersion: 2, content: "x".repeat(11), source: "agent", title: "Renamed" }));
+			const title = instance.artifacts.get(id)!.title;
+			for (const artifact of instance.artifacts.list()) if (artifact.title === "Race" || artifact.title.startsWith("Racer")) instance.artifacts.delete(artifact.id);
+			return { raced: raced.sort(), created: created.sort(), withinLimit: total <= limit, renamed, title };
+		});
+		expect(outcome).toEqual({ raced: [409, "ok"], created: [429, "ok"], withinLimit: true, renamed: 413, title: "Race" });
+	});
+
 	it("stay within their limits, checked before anything is written", async () => {
 		// One version's size.
 		await setLimits({ artifactBytes: 100 });

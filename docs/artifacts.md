@@ -7,7 +7,7 @@ Artifacts are documents and small interactive pages the agent makes for its owne
 - **Kinds.** `html` is one self-contained document, with its CSS and JavaScript inline. `markdown` is a document.
 - **Where they live.** In the owner's Pim Durable Object, in `pim_artifacts` and `pim_artifact_versions` ([`src/artifacts.ts`](../src/artifacts.ts)). Every request for one goes through the owner's gateway and agent, like the rest of the API. Nothing is cached outside the agent, and there is no index across owners.
 - **Versions are append-only.** Each change adds a version, and nothing rewrites one, so a version number and its `sha256` always name the same bytes. Restoring an older version adds a new one with the old content (`source: "restore"`, `restoredFrom`).
-- **Every write names its base version.** The agent (`base_version`) and the person (`baseVersion`) both say which version they changed. If it's no longer the latest, the write is refused with `409`, so neither overwrites the other unseen.
+- **Every write names its base version.** The agent (`base_version`) and the person (`baseVersion`) both say which version they changed. If it's no longer the latest, the write is refused with `409`, so neither overwrites the other unseen. A write hashes its content first, then checks and stores it with nothing awaited in between, so two writes that race can't both pass a check meant for one.
 - **Owner-wide.** An artifact records the chat it was made in, but deleting that chat doesn't delete the artifact.
 
 ## The agent's tools
@@ -50,7 +50,7 @@ The artifact runs on the owner's host, so the sandbox is what keeps it apart fro
 
 ## Markdown
 
-Markdown artifacts are shown in the app itself, with raw HTML dropped. Only inline images (`data:image/png|jpeg|gif|webp`) are shown; any other image is replaced by its alt text, so showing an artifact fetches nothing. Links are kept only for `http(s):`, `mailto:` and `#` addresses, and open with `noopener noreferrer`. Downloads are `text/plain`. Chat messages are rendered as before.
+Markdown artifacts are shown in the app itself, with Streamdown's sanitizer and link hardening but without its raw-HTML plugin: raw HTML in an artifact shows as plain text, never as elements. No image is shown, inline or not; its alt text stands in. So showing an artifact fetches nothing. Links are kept only for `http(s):`, `mailto:` and `#` addresses, and open with `noopener noreferrer`. Downloads are `text/plain`. Chat messages are rendered as before. A render test ([`markdown.test.tsx`](../web/src/components/chat/markdown.test.tsx)) pins this, and fails if the raw-HTML plugin comes back.
 
 ## Limits
 
@@ -85,6 +85,8 @@ The ajac-zero deployment sets 100 artifacts, 50 versions, 500,000 bytes per vers
 | Restore is append-only and needs the latest base | "restore an older version as a new one…" |
 | Delete removes every version; export has every version | "are deleted with every version…" |
 | Per-version, version-count, artifact-count, total and storage limits, checked before writing | "stay within their limits…" |
+| Racing writes: an edit and a restore on the same base give one version and a `409`; two creates that don't both fit give one and a `429`; a refused version renames nothing | "take one of two writes racing on the same version…" |
+| Markdown: raw HTML only as text, no images, no `javascript:` or `data:` links | `web/src/components/chat/markdown.test.tsx` |
 | Export near the total cap, and the cap holding with no limits set | "export in full near their total cap…" |
 | Another owner's host returns `404` for the artifact; stolen cookies `401`; anonymous `401` | `test/hosted/hosted.test.ts`: "are shown only to their owner…" |
 | Fresh requests refused: signed out `401`, passkey removed `401`, suspended `403`, deleted `410` on frame, download and metadata; account export has every version; erased | "stop showing when the browser signs out, its passkey is removed…" |

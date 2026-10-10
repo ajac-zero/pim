@@ -78,10 +78,16 @@ Invite-only; at most 25 accounts and 3 registrations per address a day. Per pers
 ## Acceptance of version `ce9b2eae` (2026-10-10)
 
 - **Merge:** #6 merged at its reviewed head [`27d1d87`](https://github.com/ajac-zero/pim/commit/27d1d87e35831be2ef8b7e9787f2761aefae61ff) as [`b2df73f`](https://github.com/ajac-zero/pim/commit/b2df73fb0393d0a553caafe65c2afd0a7f1d4d4a); both have tree `71177dabfdb1f714aaf37b885f17705bee097fdd`. Deployed from a clean checkout of that commit, with the config, secret and limits unchanged.
-- **Before merging, on the reviewed head** (independently repeated by the reviewers): typecheck; 177 Worker tests and 15 web tests; web build; web lint with only the existing warnings; `wrangler deploy --dry-run` for this config and the self-hosted one; `node --check scripts/live-device-smoke.mjs`. On a local preview, the smoke script passed 30 of 30 and its error paths were checked by mutation: a `202` deletion accepted; a `500` deletion failed; `410` accepted only for cleanup; an admin `404` accepted only as `No account <username>`, while a plain `Not found` gives `CLEANUP NEEDED` and exit `2`.
+- **Before merging, on the reviewed head** (independently repeated by the reviewers): typecheck; 177 Worker tests and 15 web tests; web build; web lint with only the existing warnings; `wrangler deploy --dry-run` for this config and the self-hosted one; `node --check scripts/live-device-smoke.mjs`. On a local preview, the smoke script passed 30 of 30, and its error paths were checked with temporary server mutations:
+  - deletion forced to answer `202`: accepted (the script before #6's last round failed it);
+  - deletion answering `500` (a malformed version of that mutation): failed;
+  - the write before deletion forced to `500`, and the write after it forced to `201`: each failed;
+  - registration forced to `500`, then admin cleanup: a `404` naming `No account <username>` counted as cleaned, while a plain `Not found` (admin API off) gave `CLEANUP NEEDED` and exit `2`.
+
+  Separately, cleaning up an account already deleted elsewhere got `410`, which counted as closed.
 - **Live, read-only, after deploying:** `/health` `200`; the front door `200`; front-door lookup `200` for the owner's username and `404` for an unknown name and for `x@evil.com#`; `/admin/stats` `401` with no token and with a wrong one; an unknown tenant `404`; the deleted `smoke-dev3` `410`; the owner's host serves the app (`200`) and refuses an anonymous API request (`401`); the live bundle matches the local build (`assets/index-DvLwDMRG.js`); the tenant certificate covers `ajac-zero.com`, `pimling.ajac-zero.com` and `*.pimling.ajac-zero.com`, until 2027-01-08.
 - **No disposable live run:** #6 changed only web flows and the smoke script, covered above, so no invite or account was made. Admin stats afterwards: 1 active account (the owner's), 0 pending, 0 deleting, 4 deleted, 2 unused invites, no cleanup queued or failing. The owner's account wasn't touched.
-- **Cloudflare:** only the tenant route was recreated (new ID above). The `packages.ajac-zero.com/*` route and the 12 other custom domains in the account were present after the deploy.
+- **Cloudflare:** only the tenant route was recreated (new ID above). The `packages.ajac-zero.com/*` route and the other 10 custom domains were present after the deploy.
 
 ## Acceptance of version `096158e7` (2026-10-10)
 

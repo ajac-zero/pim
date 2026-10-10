@@ -4,7 +4,7 @@ import { base64UrlEncode } from "../auth/encoding";
 import { type ApiExtension, type PimSite, servePim, withCors } from "../gateway";
 import { HttpError } from "../http";
 import { parseLimits } from "../usage";
-import { type Account, type AccountStatus, type Directory, PENDING_MS, type RegistrationPolicy } from "./directory";
+import { type Account, type AccountStatus, type CleanupResult, type Directory, PENDING_MS, type RegistrationPolicy } from "./directory";
 import { usernameProblem } from "./usernames";
 
 export { Pim } from "../agent";
@@ -111,22 +111,33 @@ function siteFor(env: HostedEnv, account: Account): PimSite {
 }
 
 /**
- * Deletes an account: the username stops working first, then the agent and
- * its sign-in are wiped. Safe to run again on an account already deleted, to
- * finish a deletion that was interrupted.
+ * Deletes an account: its hostname stops answering at once, then the
+ * Directory erases the agent and its sign-in, now if it can and on its alarm
+ * until it has. Done only once both were checked empty. Safe to run again,
+ * to retry a deletion that hasn't finished.
  */
-async function deleteAccount(env: HostedEnv, account: Account, by: string): Promise<void> {
-	await directory(env).markDeleted(account.ownerId, by);
+async function deleteAccount(env: HostedEnv, account: Account, by: string): Promise<CleanupResult> {
+	const dir = directory(env);
+	await dir.requestDeletion(account.ownerId, by);
 	forget(account.username);
-	try {
-		await (await agentOf(env, account.ownerId)).deleteEverything();
-	} catch (error) {
-		// Destroying an agent ends its isolate, which can cut off the call that asked; its storage is already gone.
-		console.warn(JSON.stringify({ event: "pimling.delete_agent_ended", owner: account.ownerId, error: String(error) }));
-	}
-	await authOf(env, account.ownerId).deleteEverything();
-	forgetSigningKey(account.ownerId);
-	log("deleted", { owner: account.ownerId, username: account.username, by });
+	const result = await dir.runCleanup(account.ownerId);
+	if (result.done) forgetSigningKey(account.ownerId);
+	return result;
+}
+
+/** What a deletion's caller is told: erased, or closed and still being erased. */
+function deletionResponse(result: CleanupResult, headers?: HeadersInit): Response {
+	if (result.done) return json({ deleted: true }, 200, headers);
+	return json(
+		{
+			deleted: false,
+			status: "deleting",
+			message: "The account is closed and can't be used. Erasing its data didn't finish yet; it is retried automatically.",
+			nextAttemptAt: new Date(result.nextAttemptAt).toISOString(),
+		},
+		202,
+		headers,
+	);
 }
 
 /** `/api/account`: the person's account, answered here because the agent doesn't know about accounts. */
@@ -168,8 +179,8 @@ function accountApi(env: HostedEnv, account: Account, site: AuthSite, request: R
 			if (!(await currentSession(request, site))) return fail(403, "Deleting your account needs you signed in with a passkey.");
 			const body = (await request.json().catch(() => null)) as { confirm?: unknown } | null;
 			if (body?.confirm !== account.username) return fail(400, `To delete your account, send { "confirm": "${account.username}" }.`);
-			await deleteAccount(env, account, "owner");
-			return json({ deleted: true }, 200, { "set-cookie": "__Host-pim-session=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0" });
+			const result = await deleteAccount(env, account, "owner");
+			return deletionResponse(result, { "set-cookie": "__Host-pim-session=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0" });
 		}
 		return fail(404, "Not found");
 	};
@@ -180,7 +191,7 @@ async function servePerson(request: Request, env: HostedEnv, username: string): 
 	const { pathname } = new URL(request.url);
 	const account = usernameProblem(username) === null ? await resolveAccount(env, username) : null;
 	const forApi = pathname.startsWith("/api") || pathname.startsWith("/auth") || pathname.startsWith("/mcp/");
-	if (!account || account.status === "deleted") {
+	if (!account || account.status === "deleted" || account.status === "deleting") {
 		const status = account ? 410 : 404;
 		const message = account ? "This Pimling was deleted." : "There's no Pimling here.";
 		if (forApi) return withCors(fail(status, message));
@@ -223,13 +234,8 @@ async function register(request: Request, env: HostedEnv): Promise<Response> {
 		log("registration_refused", { username, status: result.status, error: result.error });
 		return fail(result.status, result.error);
 	}
-	const { account, released } = result;
+	const { account } = result;
 	forget(username);
-	if (released) {
-		// A registration nobody finished: its sign-in can go. Its agent never ran.
-		await authOf(env, released).deleteEverything();
-		forgetSigningKey(released);
-	}
 	const now = Date.now();
 	const url = pimUrl(request, env, username);
 	const auth = authOf(env, account.ownerId);
@@ -244,10 +250,9 @@ async function register(request: Request, env: HostedEnv): Promise<Response> {
 			await agent.applySettings({ timeZone: body.timeZone }).catch(() => undefined);
 		}
 	} catch (error) {
-		// Half a registration helps nobody: give the username back now, not in a day.
+		// Half a registration helps nobody: give the username and invite back now, not in a day. The Directory erases what was made.
 		await directory(env).abandon(account.ownerId);
 		forget(username);
-		await auth.deleteEverything().catch(() => undefined);
 		console.error(JSON.stringify({ event: "pimling.registration_failed", owner: account.ownerId, username, error: String(error) }));
 		return fail(500, "Your Pimling couldn't be set up. Try again in a moment.");
 	}
@@ -308,11 +313,12 @@ async function admin(request: Request, env: HostedEnv, path: string): Promise<Re
 		const body = async () => ((await request.json().catch(() => ({}))) ?? {}) as Record<string, unknown>;
 
 		if (route === `GET /accounts/${match[1]}`) {
-			const usage = account.status === "deleted" ? null : await (await agent()).usageReport();
-			return json({ account, usage });
+			const gone = account.status === "deleted" || account.status === "deleting";
+			const usage = gone ? null : await (await agent()).usageReport();
+			return json({ account, usage, cleanup: await dir.cleanup(account.ownerId) });
 		}
 		if (route === `POST /accounts/${match[1]}/suspend` || route === `POST /accounts/${match[1]}/unsuspend`) {
-			if (account.status === "deleted" || account.status === "pending") return fail(409, `${username} is ${account.status}`);
+			if (account.status !== "active" && account.status !== "suspended") return fail(409, `${username} is ${account.status}`);
 			const status = action === "/suspend" ? "suspended" : "active";
 			const reason = (await body()).reason;
 			const updated = await dir.setStatus(account.ownerId, status, typeof reason === "string" ? reason : null);
@@ -323,6 +329,7 @@ async function admin(request: Request, env: HostedEnv, path: string): Promise<Re
 			return json({ account: updated });
 		}
 		if (route === `PUT /accounts/${match[1]}/limits`) {
+			if (account.status === "deleted" || account.status === "deleting") return fail(409, `${username} is ${account.status}`);
 			const { limits } = await body();
 			const parsed = limits === null ? null : parseLimits(limits);
 			const applied = await (await agent()).setLimits(parsed);
@@ -331,15 +338,14 @@ async function admin(request: Request, env: HostedEnv, path: string): Promise<Re
 		}
 		if (route === `POST /accounts/${match[1]}/setup-link`) {
 			// For someone who lost every passkey and recovery code, after the operator checked who they are.
-			if (account.status === "deleted") return fail(409, `${username} is deleted`);
+			if (account.status === "deleted" || account.status === "deleting") return fail(409, `${username} is ${account.status}`);
 			const { code, expiresAt } = await authOf(env, account.ownerId).issueSetupCode(Date.now(), 60 * 60 * 1000);
 			log("setup_link_issued", { owner: account.ownerId, username });
 			return json({ setupUrl: `${pimUrl(request, env, username)}/#setup=${code}`, expiresAt: new Date(expiresAt).toISOString() });
 		}
 		if (route === `DELETE /accounts/${match[1]}`) {
 			const reason = (await body()).reason;
-			await deleteAccount(env, account, typeof reason === "string" ? `operator: ${reason}` : "operator");
-			return json({ deleted: true });
+			return deletionResponse(await deleteAccount(env, account, typeof reason === "string" ? `operator: ${reason}` : "operator"));
 		}
 		return fail(404, "Not found");
 	} catch (error) {

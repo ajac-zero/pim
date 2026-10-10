@@ -1,9 +1,9 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { env, runInDurableObject } from "cloudflare:test";
+import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Directory } from "../../src/hosted/directory";
-import { faux, type Pim } from "../worker";
+import type { Directory, RegistrationPolicy } from "../../src/hosted/directory";
+import { faux, Pim } from "../worker";
 import { Authenticator } from "../webauthn";
 
 const DOMAIN = "pimling.test";
@@ -83,6 +83,39 @@ async function person(username: string) {
 }
 
 const directory = () => env.Directory!.getByName("directory");
+/** A Directory of its own, for tests that need an empty one. */
+const freshDirectory = () => env.Directory!.getByName(`fresh-${crypto.randomUUID()}`);
+const OPEN: RegistrationPolicy = { mode: "open", maxAccounts: null, perAddressPerDay: 100 };
+
+/** Everything that holds the person's data, so a test can tell it was kept or erased. */
+async function holdings(ownerId: string) {
+	const agent = await runInDurableObject(env.Pim.getByName(ownerId), async (instance: Pim) => ({
+		remaining: await instance.remainingData(),
+		memories: instance.memory.store.count(),
+		credentials: instance.store.credentialProviders(),
+	}));
+	const auth = env.Auth.getByName(ownerId);
+	return { ...agent, passkeys: (await auth.passkeys()).length, tokens: (await auth.tokens()).length };
+}
+
+/** Makes the Directory's queued cleanup for `ownerId` due now, as if its wait had passed. */
+async function makeDue(stub: DurableObjectStub<Directory>, ownerId: string) {
+	await runInDurableObject(stub, (_instance: Directory, state) => {
+		state.storage.sql.exec("UPDATE cleanups SET next_attempt_at = ? WHERE owner_id = ?", Date.now() - 1, ownerId);
+	});
+}
+
+/** Swaps a method of the test Pim for the length of `run`. */
+async function withAgentMethod<K extends "deleteEverything">(name: K, replacement: (original: Pim[K]) => Pim[K], run: () => Promise<void>) {
+	const prototype = Pim.prototype as Pim;
+	const original = prototype[name];
+	prototype[name] = replacement(original);
+	try {
+		await run();
+	} finally {
+		prototype[name] = original;
+	}
+}
 const admin = (path: string, init: RequestInit & { json?: unknown } = {}) =>
 	new Browser(FRONT).json(path, { ...init, headers: { Authorization: "Bearer admin-token", ...init.headers } });
 
@@ -164,6 +197,82 @@ describe("registration", () => {
 		}
 		expect((await new Browser(FRONT).json("/auth/username?name=ursula")).body).toEqual({ available: true });
 		expect((await register("ursula")).status).toBe(201);
+	});
+
+	it("gives an invite back with the username when the Pimling can't be set up", async () => {
+		const registration = env as unknown as { PIMLING_REGISTRATION: string };
+		const agents = env.Pim as unknown as { idFromName: (name: string) => DurableObjectId };
+		const real = agents.idFromName.bind(agents);
+		registration.PIMLING_REGISTRATION = "invite";
+		try {
+			const [code] = (await admin("/admin/invites", { method: "POST", json: { count: 1 } })).body.codes as string[];
+			agents.idFromName = () => {
+				throw new Error("Durable Objects are down");
+			};
+			try {
+				expect((await register("vera", { invite: code })).status).toBe(500);
+			} finally {
+				agents.idFromName = real;
+			}
+			// "Try again" works: the same invite takes the same username.
+			expect((await register("vera", { invite: code })).status).toBe(201);
+			// Still single-use.
+			expect((await register("vero", { invite: code })).status).toBe(403);
+		} finally {
+			agents.idFromName = real;
+			registration.PIMLING_REGISTRATION = "open";
+		}
+	});
+
+	it("keeps invites single-use, giving one back only with the registration that used it", async () => {
+		const stub = freshDirectory();
+		const policy: RegistrationPolicy = { ...OPEN, mode: "invite" };
+		const [code, other] = await stub.createInvites(2, null);
+		const first = await stub.register({ username: "wade", ip: "1", policy, invite: code! });
+		expect(first.ok).toBe(true);
+		// Someone else's abandoned registration gives nothing back.
+		const second = await stub.register({ username: "wynn", ip: "1", policy, invite: other! });
+		await stub.abandon(second.ok ? second.account.ownerId : "");
+		expect(await stub.register({ username: "wyatt", ip: "1", policy, invite: code! })).toMatchObject({ ok: false, status: 403 });
+		// Its own does, once.
+		await stub.abandon(first.ok ? first.account.ownerId : "");
+		expect(await stub.register({ username: "wade", ip: "1", policy, invite: code! })).toMatchObject({ ok: true });
+		expect(await stub.register({ username: "wade2", ip: "1", policy, invite: code! })).toMatchObject({ ok: false, status: 403 });
+		// An active account's invite is never given back.
+		const active = await stub.register({ username: "wren", ip: "1", policy, invite: other! });
+		expect(active.ok).toBe(true);
+		if (active.ok) {
+			await stub.activate(active.account.ownerId);
+			await stub.abandon(active.account.ownerId);
+		}
+		expect(await stub.register({ username: "wrex", ip: "1", policy, invite: other! })).toMatchObject({ ok: false, status: 403 });
+	});
+
+	it("frees a lapsed registration's place, username and invite, and erases what it made", async () => {
+		const stub = freshDirectory();
+		const policy: RegistrationPolicy = { mode: "invite", maxAccounts: 1, perAddressPerDay: 100 };
+		const [code] = await stub.createInvites(1, null);
+		// Registered 25 hours ago, and never set up. (Real times: the Directory's alarm runs on the clock.)
+		const later = Date.now();
+		const lapsed = await stub.register({ username: "expired", ip: "1", policy, invite: code!, now: later - 25 * 60 * 60 * 1000 });
+		expect(lapsed.ok).toBe(true);
+		expect(await stub.resolve("expired", later)).toBeNull();
+		// Its place under maxAccounts and its invite are free again.
+		const again = await stub.register({ username: "expired", ip: "2", policy, invite: code!, now: later });
+		expect(again).toMatchObject({ ok: true });
+		expect(await stub.register({ username: "another", ip: "3", policy: { ...OPEN, maxAccounts: 1 }, now: later })).toMatchObject({
+			ok: false,
+			status: 503,
+		});
+		// A lapsed registration can't be activated late.
+		const oldOwner = lapsed.ok ? lapsed.account.ownerId : "";
+		expect(await stub.activate(oldOwner, later)).toBeNull();
+		// Its sign-in is erased by a queued cleanup.
+		expect(await stub.cleanup(oldOwner)).toMatchObject({ kind: "release" });
+		await env.Auth.getByName(oldOwner).newRecoveryCodes(Date.now());
+		expect(await runDurableObjectAlarm(stub)).toBe(true);
+		expect(await stub.cleanup(oldOwner)).toBeNull();
+		expect(await env.Auth.getByName(oldOwner).recoveryCodesLeft()).toBe(0);
 	});
 
 	it("gives a username back when nobody made a passkey within a day, to a new owner", async () => {
@@ -329,6 +438,104 @@ describe("the account", () => {
 		const memories = await runInDurableObject(env.Pim.getByName(olga.ownerId), (instance: Pim) => instance.memory.store.count());
 		expect(memories).toBe(0);
 		expect(await env.Auth.getByName(olga.ownerId).passkeys()).toEqual([]);
+	});
+
+	it("keeps a deletion that failed before erasing anything, closed and queued, and finishes it on retry", async () => {
+		const rita = await person("rita");
+		await rita.browser.json("/api/memory/log", { method: "POST", json: { text: "Rita's bank is in Porto" } });
+		await rita.browser.json("/auth/tokens", { method: "POST", json: { name: "CLI" } });
+		await runInDurableObject(env.Pim.getByName(rita.ownerId), async (instance: Pim) => {
+			instance.store.putCredential("openai", JSON.stringify({ type: "oauth", access: "rita-access", refresh: "rita-refresh" }));
+			await instance.schedule(new Date(Date.now() + 60 * 60_000), "runScheduledTask", { session: "1", instruction: "Call the bank" });
+		});
+		expect((await holdings(rita.ownerId)).remaining).toEqual(expect.arrayContaining(["credentials", "memories", "schedules", "owner profile"]));
+
+		// The agent can't be reached: nothing is erased, and nothing says it was.
+		await withAgentMethod(
+			"deleteEverything",
+			() => async () => {
+				throw new Error("Network connection lost");
+			},
+			async () => {
+				const response = await rita.browser.json("/api/account", { method: "DELETE", json: { confirm: "rita" } });
+				expect(response.status).toBe(202);
+				expect(response.body).toMatchObject({ deleted: false, status: "deleting" });
+			},
+		);
+		// Closed at once, though: the hostname answers nothing, and the username stays taken.
+		expect((await rita.browser.json("/api/sessions")).status).toBe(410);
+		expect((await register("rita")).status).toBe(409);
+		const queued = await directory().cleanup(rita.ownerId);
+		expect(queued).toMatchObject({ kind: "deletion", attempts: 1, lastError: expect.stringContaining("still holds") });
+		expect((await directory().account(rita.ownerId))?.status).toBe("deleting");
+		const kept = await holdings(rita.ownerId);
+		expect(kept.memories).toBe(1);
+		expect(kept.passkeys).toBe(1);
+		expect(await runInDurableObject(directory(), (_instance: Directory, state) => state.storage.getAlarm())).not.toBeNull();
+
+		// The retry, on the Directory's alarm, erases everything and only then says so.
+		await makeDue(directory(), rita.ownerId);
+		expect(await runDurableObjectAlarm(directory())).toBe(true);
+		expect((await directory().account(rita.ownerId))?.status).toBe("deleted");
+		expect(await directory().cleanup(rita.ownerId)).toBeNull();
+		expect(await holdings(rita.ownerId)).toEqual({ remaining: [], memories: 0, credentials: [], passkeys: 0, tokens: 0 });
+	});
+
+	it("doesn't report a deletion done when the agent can't even be addressed", async () => {
+		const uma = await person("uma");
+		await uma.browser.json("/api/memory/log", { method: "POST", json: { text: "Uma's diary" } });
+		const agents = env.Pim as unknown as { idFromName: (name: string) => DurableObjectId };
+		const real = agents.idFromName.bind(agents);
+		agents.idFromName = () => {
+			throw new Error("Durable Objects are down");
+		};
+		try {
+			const response = await uma.browser.json("/api/account", { method: "DELETE", json: { confirm: "uma" } });
+			expect(response.status).toBe(202);
+			expect(response.body.deleted).toBe(false);
+		} finally {
+			agents.idFromName = real;
+		}
+		expect((await holdings(uma.ownerId)).memories).toBe(1);
+		expect(await directory().cleanup(uma.ownerId)).toMatchObject({ kind: "deletion", lastError: "Durable Objects are down" });
+		await makeDue(directory(), uma.ownerId);
+		await runDurableObjectAlarm(directory());
+		expect((await holdings(uma.ownerId)).remaining).toEqual([]);
+		expect((await directory().account(uma.ownerId))?.status).toBe("deleted");
+	});
+
+	it("counts a deletion done only when the agent is checked empty, whatever its call said", async () => {
+		// The call that erases the agent can end abruptly after erasing it: that is done.
+		const sam = await person("sam");
+		await sam.browser.json("/api/memory/log", { method: "POST", json: { text: "Sam" } });
+		await withAgentMethod(
+			"deleteEverything",
+			(original) =>
+				async function (this: Pim) {
+					await original.call(this);
+					throw new Error("Durable Object reset");
+				},
+			async () => {
+				expect((await sam.browser.json("/api/account", { method: "DELETE", json: { confirm: "sam" } })).body).toEqual({ deleted: true });
+			},
+		);
+		expect((await holdings(sam.ownerId)).remaining).toEqual([]);
+
+		// A call that returns without erasing anything is not.
+		const tia = await person("tia");
+		await tia.browser.json("/api/memory/log", { method: "POST", json: { text: "Tia" } });
+		await withAgentMethod(
+			"deleteEverything",
+			() => async () => undefined,
+			async () => {
+				expect((await tia.browser.json("/api/account", { method: "DELETE", json: { confirm: "tia" } })).status).toBe(202);
+			},
+		);
+		expect((await holdings(tia.ownerId)).memories).toBe(1);
+		// The operator can retry it at once.
+		expect((await admin("/admin/accounts/tia", { method: "DELETE" })).body).toEqual({ deleted: true });
+		expect((await holdings(tia.ownerId)).remaining).toEqual([]);
+		expect((await admin("/admin/accounts/tia")).body).toMatchObject({ account: { status: "deleted" }, cleanup: null });
 	});
 });
 

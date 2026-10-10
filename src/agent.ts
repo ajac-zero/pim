@@ -825,6 +825,20 @@ export class Pim extends Agent<Env> {
 		});
 	}
 
+	/**
+	 * What of the person's data this agent still holds; nothing once
+	 * `deleteEverything` has run. A deletion counts as done only when this
+	 * says so, since destroying the agent ends the call that asked for it.
+	 */
+	async remainingData(): Promise<string[]> {
+		const remaining = this.store.remainingData();
+		if (this.memory.store.count() > 0) remaining.push("memories");
+		const own = new Set([SCHEDULED_TASK_CALLBACK, WATCH_REFRESH_CALLBACK]);
+		if ((await this.listSchedules()).some((schedule) => own.has(schedule.callback))) remaining.push("schedules");
+		if (Object.keys(this.getMcpServers().servers).length > 0) remaining.push("app connections");
+		return remaining;
+	}
+
 	/** Deletes the agent and everything in it: runs, schedules, apps' subscriptions, memories, credentials. */
 	async deleteEverything(): Promise<void> {
 		for (const session of await this.harness.sessions.list()) await this.harness.session(session.id).abort();

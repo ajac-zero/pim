@@ -255,6 +255,34 @@ function notificationOf(row: Row): Notification {
 export class PimStore {
 	readonly #sql: SqlStorage;
 
+	/**
+	 * Which kinds of the person's data this database still holds, by table:
+	 * none once the agent is erased. Conversations are pi's (`pi_entries`).
+	 */
+	remainingData(): string[] {
+		const remaining: string[] = [];
+		const tables: Record<string, string> = {
+			pim_goals: "goals",
+			pim_approvals: "approvals",
+			pim_always_approved: "always-approved tools",
+			pim_mcp_servers: "apps",
+			pim_app_watches: "watches",
+			pim_sessions: "chats",
+			pim_credentials: "credentials",
+			pim_notifications: "notifications",
+			pim_push_subscriptions: "push subscriptions",
+			pi_entries: "conversations",
+		};
+		const existing = new Set(
+			this.#sql.exec("SELECT name FROM sqlite_master WHERE type = 'table'").toArray().map((row) => String(row.name)),
+		);
+		for (const [table, kind] of Object.entries(tables)) {
+			if (existing.has(table) && this.#sql.exec(`SELECT 1 FROM ${table} LIMIT 1`).toArray().length > 0) remaining.push(kind);
+		}
+		if (this.meta("owner") !== undefined) remaining.push("owner profile");
+		return remaining;
+	}
+
 	constructor(sql: SqlStorage) {
 		this.#sql = sql;
 		this.#sql.exec(SCHEMA);

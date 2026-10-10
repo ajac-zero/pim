@@ -11,6 +11,8 @@
     "dev:web": "pnpm --filter pim-web dev",
     "build": "pnpm --filter pim-web build",
     "deploy": "wrangler deploy",
+    "deploy:hosted": "wrangler deploy --config wrangler.hosted.jsonc",
+    "dev:hosted": "wrangler dev --config wrangler.hosted.jsonc",
     "types": "wrangler types",
     "typecheck": "tsc --noEmit && pnpm --filter pim-web typecheck",
     "test": "vitest run && pnpm --filter pim-web test",

@@ -1,0 +1,73 @@
+{
+  // Pimling: the hosted, multi-person service. Self-hosting uses wrangler.jsonc instead.
+  // Deploy with `pnpm run deploy:hosted` once the prerequisites in docs/hosting.md are done.
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "pimling",
+  "main": "src/hosted/index.ts",
+  "compatibility_date": "2026-09-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  // The front door and every person's Pimling, one label deep. Replace pimling.com with your
+  // zone; the zone needs a proxied wildcard DNS record (*.pimling.com), which Universal SSL covers.
+  "routes": [
+    { "pattern": "pimling.com/*", "zone_name": "pimling.com" },
+    { "pattern": "*.pimling.com/*", "zone_name": "pimling.com" }
+  ],
+  "build": { "command": "pnpm --filter pim-web build", "watch_dir": "web/src" },
+  "assets": {
+    "directory": "./web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api", "/api/*", "/auth/*", "/admin/*", "/health", "/mcp/callback", "/mcp/events/*"]
+  },
+  "ai": { "binding": "AI", "remote": true },
+  "durable_objects": {
+    "bindings": [
+      // One per person, named by their owner ID.
+      { "name": "Pim", "class_name": "Pim" },
+      { "name": "Auth", "class_name": "Auth" },
+      // One for the service: usernames, owner IDs, account status.
+      { "name": "Directory", "class_name": "Directory" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Pim"] },
+    { "tag": "v2", "new_sqlite_classes": ["Auth"] },
+    { "tag": "v3", "new_sqlite_classes": ["Directory"] }
+  ],
+  // Per-address sign-in and registration attempts, and per-person API requests.
+  "ratelimits": [
+    { "name": "AUTH_LIMITER", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } },
+    { "name": "API_LIMITER", "namespace_id": "1002", "simple": { "limit": 600, "period": 60 } }
+  ],
+  "vars": {
+    "PIMLING_DOMAIN": "pimling.com",
+    // "open", "invite" (codes from POST /admin/invites) or "closed".
+    "PIMLING_REGISTRATION": "invite",
+    // Accounts allowed in all; empty for no cap.
+    "PIMLING_MAX_ACCOUNTS": "",
+    // Registrations one IP address may make in a day.
+    "PIMLING_REGISTRATIONS_PER_ADDRESS": "3",
+    "PIM_MODEL": "@cf/zai-org/glm-4.7-flash",
+    // Everyone's default; each person sets their own in Settings.
+    "PIM_TIME_ZONE": "UTC",
+    // Unanswered approvals are denied: nothing acts on someone's behalf without a yes.
+    "PIM_APPROVAL_POLICY": "explicit",
+    // Only the default model on the platform's bill; people bring more with their ChatGPT plan.
+    "PIM_MODELS": "@cf/zai-org/glm-4.7-flash",
+    // web_search is billed per query to the platform; off.
+    "PIM_WEB_SEARCH": "",
+    "PIM_MEMORY_MODEL": "",
+    "PIM_MEMORY_LINES": "",
+    // Each person's agent learns its own address when it is provisioned.
+    "PIM_PUBLIC_URL": "",
+    // Everyone's limits; the admin API changes one person's. See src/usage.ts.
+    "PIM_LIMITS": "{\"dailyTokens\": 2000000, \"dailyModelRequests\": 1500, \"dailyRuns\": 300, \"sessions\": 500, \"schedules\": 50, \"apps\": 20, \"storageBytes\": 1000000000}"
+  },
+  // Secrets (wrangler secret put --config wrangler.hosted.jsonc):
+  //   PIMLING_ADMIN_TOKEN   the operator's admin API token; without it the admin API is off
+  // Never set PIM_API_TOKEN or PIM_NOTIFY_WEBHOOK here: they would be every person's.
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+  "observability": { "enabled": true }
+}

@@ -738,6 +738,15 @@ export class Pim extends Agent<Env> {
 		return json === undefined ? null : (JSON.parse(json) as OwnerProfile);
 	}
 
+	/** Changes the person's settings, as `PUT /settings` does; a hosted service sets their time zone at registration. */
+	async applySettings(update: Record<string, unknown>): Promise<Settings> {
+		const before = this.settings().approvalPolicy;
+		const settings = updateSettings(this.store, this.env, update);
+		// The approval tools say how a request is decided: they must say it the new way.
+		if (settings.approvalPolicy !== before) this.#reinstallApprovals();
+		return settings;
+	}
+
 	/** Suspends or restores the agent. Suspending stops its runs and closes its sockets; its data stays. */
 	async setStatus(status: OwnerStatus): Promise<void> {
 		if (status === "active") this.store.deleteMeta(STATUS_KEY);
@@ -1070,10 +1079,7 @@ export class Pim extends Agent<Env> {
 			"PUT",
 			"/settings",
 			async (_params, request) => {
-				const before = this.settings().approvalPolicy;
-				const settings = updateSettings(this.store, this.env, await readJson<Record<string, unknown>>(request));
-				// The approval tools say how a request is decided: they must say it the new way.
-				if (settings.approvalPolicy !== before) this.#reinstallApprovals();
+				await this.applySettings(await readJson<Record<string, unknown>>(request));
 				return this.#describeSettings();
 			},
 		],

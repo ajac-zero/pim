@@ -1,0 +1,352 @@
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { env, runInDurableObject } from "cloudflare:test";
+import { exports } from "cloudflare:workers";
+import { afterEach, describe, expect, it } from "vitest";
+import type { Directory } from "../../src/hosted/directory";
+import { faux, type Pim } from "../worker";
+import { Authenticator } from "../webauthn";
+
+const DOMAIN = "pimling.test";
+const FRONT = `https://${DOMAIN}`;
+const hostOf = (username: string) => `https://${username}.${DOMAIN}`;
+
+afterEach(() => {
+	// Every scripted model response was used.
+	expect(faux.getPendingResponseCount()).toBe(0);
+});
+
+let browsers = 0;
+
+/** One browser on one origin, from its own address: keeps the cookies the Worker sets, sends them back. */
+class Browser {
+	cookies = new Map<string, string>();
+
+	constructor(
+		readonly origin: string,
+		readonly ip = `203.0.${Math.floor(++browsers / 250)}.${browsers % 250}`,
+	) {}
+
+	async fetch(path: string, init: RequestInit & { json?: unknown } = {}) {
+		const headers = new Headers(init.headers);
+		if (!headers.has("origin") && init.method && init.method !== "GET") headers.set("origin", this.origin);
+		if (this.cookies.size > 0) headers.set("cookie", [...this.cookies].map(([k, v]) => `${k}=${v}`).join("; "));
+		if (init.json !== undefined) headers.set("content-type", "application/json");
+		headers.set("CF-Connecting-IP", this.ip);
+		const response = await exports.default.fetch(
+			new Request(`${this.origin}${path}`, { ...init, headers, body: init.json === undefined ? init.body : JSON.stringify(init.json) }),
+		);
+		for (const cookie of response.headers.getSetCookie()) {
+			const [pair = "", ...attributes] = cookie.split("; ");
+			const [name = "", ...value] = pair.split("=");
+			if (attributes.includes("Max-Age=0")) this.cookies.delete(name);
+			else this.cookies.set(name, value.join("="));
+		}
+		return response;
+	}
+
+	async json<T = any>(path: string, init: RequestInit & { json?: unknown } = {}): Promise<{ status: number; body: T }> {
+		const response = await this.fetch(path, init);
+		return { status: response.status, body: (await response.json()) as T };
+	}
+}
+
+type Registered = { username: string; url: string; setupUrl: string; recoveryCodes: string[] };
+
+let addresses = 0;
+/** Registers from a fresh address, so the per-address limit is only met where a test means to. */
+async function register(username: string, extra: Record<string, unknown> = {}) {
+	const front = new Browser(FRONT, `198.51.100.${++addresses}`);
+	return front.json<Registered & { error?: string }>("/auth/register", { method: "POST", json: { username, ...extra } });
+}
+
+async function addPasskey(browser: Browser, authenticator: Authenticator, allowedBy: { setup?: string; recovery?: string } = {}) {
+	const options = await browser.json("/auth/passkeys/options", { method: "POST", json: allowedBy });
+	if (options.status !== 200) return options.status;
+	return (await browser.fetch("/auth/passkeys", { method: "POST", json: await authenticator.register(options.body) })).status;
+}
+
+async function signIn(browser: Browser, authenticator: Authenticator) {
+	const options = await browser.json("/auth/sign-in/options", { method: "POST" });
+	return (await browser.fetch("/auth/sign-in", { method: "POST", json: await authenticator.sign(options.body) })).status;
+}
+
+/** A registered, set-up Pimling, and a browser signed in to it. */
+async function person(username: string) {
+	const registered = await register(username);
+	expect(registered.status).toBe(201);
+	const browser = new Browser(hostOf(username));
+	const passkey = await Authenticator.make("ES256", { rpId: `${username}.${DOMAIN}`, origin: hostOf(username) });
+	const setup = new URL(registered.body.setupUrl).hash.replace("#setup=", "");
+	expect(await addPasskey(browser, passkey, { setup })).toBe(200);
+	const account = (await browser.json("/api/account")).body as { ownerId: string };
+	return { browser, passkey, registered: registered.body, setup, ownerId: account.ownerId };
+}
+
+const directory = () => env.Directory!.getByName("directory");
+const admin = (path: string, init: RequestInit & { json?: unknown } = {}) =>
+	new Browser(FRONT).json(path, { ...init, headers: { Authorization: "Bearer admin-token", ...init.headers } });
+
+describe("registration", () => {
+	it("gives a username its own Pim, set up with a one-time link, and recovery codes", async () => {
+		const { status, body } = await register("alice", { timeZone: "Europe/Lisbon" });
+		expect(status).toBe(201);
+		expect(body.url).toBe(hostOf("alice"));
+		expect(body.setupUrl).toMatch(new RegExp(`^${hostOf("alice")}/#setup=[\\w-]+$`));
+		expect(body.recoveryCodes).toHaveLength(10);
+
+		const browser = new Browser(hostOf("alice"));
+		expect((await browser.json("/auth/session")).body).toMatchObject({ signedIn: false, hasPasskeys: false, canClaim: false, recovery: "codes" });
+		// Nobody gets in by finding the address first: there is no claim window.
+		const passkey = await Authenticator.make("ES256", { rpId: `alice.${DOMAIN}`, origin: hostOf("alice") });
+		expect(await addPasskey(browser, passkey)).toBe(401);
+		const setup = new URL(body.setupUrl).hash.replace("#setup=", "");
+		expect(await addPasskey(browser, passkey, { setup })).toBe(200);
+
+		const account = await browser.json("/api/account");
+		expect(account.body).toMatchObject({ username: "alice", status: "active", ownerId: expect.stringMatching(/^o_[0-9a-z]{26}$/) });
+		expect((await browser.json("/api/settings")).body).toMatchObject({ timeZone: "Europe/Lisbon", approvalPolicy: "explicit" });
+		// The link works once.
+		expect(await addPasskey(new Browser(hostOf("alice")), await Authenticator.make("ES256", { rpId: `alice.${DOMAIN}`, origin: hostOf("alice") }), { setup })).toBe(401);
+	});
+
+	it("refuses taken, reserved and malformed usernames", async () => {
+		await register("carol");
+		expect((await register("carol")).status).toBe(409);
+		expect((await register("admin")).body.error).toBe("That username is reserved.");
+		for (const bad of ["ab", "bad_name", "a--b", "-lead", "trail-", "x".repeat(33)]) {
+			expect((await register(bad)).status, bad).toBe(400);
+		}
+		const front = new Browser(FRONT);
+		expect((await front.json("/auth/username?name=carol")).body).toEqual({ available: false, reason: "That username is taken." });
+		expect((await front.json("/auth/username?name=dave")).body).toEqual({ available: true });
+	});
+
+	it("comes only from the front door's own pages", async () => {
+		const response = await new Browser(FRONT).fetch("/auth/register", {
+			method: "POST",
+			json: { username: "mallory" },
+			headers: { origin: "https://evil.example" },
+		});
+		expect(response.status).toBe(403);
+	});
+
+	it("limits registrations from one address in a day", async () => {
+		const front = new Browser(FRONT, "192.0.2.77");
+		for (const name of ["dee1", "dee2", "dee3"]) {
+			expect((await front.json("/auth/register", { method: "POST", json: { username: name } })).status).toBe(201);
+		}
+		const refused = await front.json("/auth/register", { method: "POST", json: { username: "dee4" } });
+		expect(refused.status).toBe(429);
+	});
+
+	it("takes invite codes once, when registration needs them", async () => {
+		const policy = { mode: "invite" as const, maxAccounts: null, perAddressPerDay: 100 };
+		const [code] = (await admin("/admin/invites", { method: "POST", json: { count: 1 } })).body.codes as string[];
+		await runInDurableObject(directory(), async (instance: Directory) => {
+			expect(await instance.register({ username: "ivy", ip: "1", policy })).toMatchObject({ ok: false, status: 403 });
+			expect(await instance.register({ username: "ivy", ip: "1", policy, invite: code! })).toMatchObject({ ok: true });
+			expect(await instance.register({ username: "ivo", ip: "1", policy, invite: code! })).toMatchObject({ ok: false, status: 403 });
+		});
+	});
+
+	it("gives a username back when nobody made a passkey within a day, to a new owner", async () => {
+		const lapsed = await runInDurableObject(directory(), (instance: Directory) =>
+			instance.register({
+				username: "gone",
+				ip: "lapsed",
+				policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 },
+				now: Date.now() - 25 * 60 * 60 * 1000,
+			}),
+		);
+		expect(lapsed.ok).toBe(true);
+		expect((await new Browser(FRONT).json("/auth/username?name=gone")).body).toEqual({ available: true });
+		expect((await register("gone")).status).toBe(201);
+		const now = await runInDurableObject(directory(), (instance: Directory) => instance.resolve("gone"));
+		expect(now?.ownerId).not.toBe(lapsed.ok && lapsed.account.ownerId);
+	});
+});
+
+describe("isolation between people", () => {
+	it("a session opens only the Pim it was made for", async () => {
+		const erin = await person("erin");
+		const frank = await person("frank");
+		expect((await erin.browser.json("/api/sessions")).status).toBe(200);
+		// Erin's cookies, taken to Frank's address, open nothing there.
+		const stolen = new Browser(hostOf("frank"));
+		stolen.cookies = new Map(erin.browser.cookies);
+		expect((await stolen.json("/api/sessions")).status).toBe(401);
+		expect((await stolen.json("/auth/session")).body).toMatchObject({ signedIn: false });
+		// Nor does Erin's passkey.
+		expect(await signIn(new Browser(hostOf("frank")), erin.passkey)).toBe(401);
+		expect(erin.ownerId).not.toBe(frank.ownerId);
+	});
+
+	it("an API token opens only its owner's Pim, and the deployment's token opens none", async () => {
+		const gina = await person("gina");
+		await person("hank");
+		const made = await gina.browser.json("/auth/tokens", { method: "POST", json: { name: "Phone" } });
+		expect(made.status).toBe(201);
+		const bearer = (token: string) => ({ headers: { Authorization: `Bearer ${token}` } });
+		expect((await new Browser(hostOf("gina")).json("/api/sessions", bearer(made.body.token))).status).toBe(200);
+		expect((await new Browser(hostOf("hank")).json("/api/sessions", bearer(made.body.token))).status).toBe(401);
+		// PIM_API_TOKEN is set in this deployment, and must be no one's.
+		expect((await new Browser(hostOf("gina")).json("/api/sessions", bearer("env-token"))).status).toBe(401);
+		// Tokens can't be made or listed with a token.
+		expect((await new Browser(hostOf("gina")).json("/auth/tokens", bearer(made.body.token))).status).toBe(401);
+		expect((await gina.browser.json("/auth/tokens")).body.tokens).toEqual([expect.objectContaining({ name: "Phone", id: made.body.id })]);
+		expect(JSON.stringify((await gina.browser.json("/auth/tokens")).body)).not.toContain(made.body.token);
+		expect((await gina.browser.json(`/auth/tokens/${made.body.id}`, { method: "DELETE" })).status).toBe(200);
+		expect((await new Browser(hostOf("gina")).json("/api/sessions", bearer(made.body.token))).status).toBe(401);
+	});
+
+	it("conversations, memories and ChatGPT sign-ins stay with their owner", async () => {
+		const ian = await person("ian");
+		const jo = await person("joy");
+		const noted = await ian.browser.json("/api/memory/log", { method: "POST", json: { text: "Ian's passport expires in May" } });
+		expect(noted.body).toMatchObject({ text: expect.stringContaining("passport") });
+		faux.setResponses([fauxAssistantMessage("Noted, Ian.")]);
+		expect((await ian.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Hi, I'm Ian", wait: true } })).body).toMatchObject({
+			status: "done",
+		});
+		await runInDurableObject(env.Pim.getByName(ian.ownerId), (instance: Pim) => {
+			instance.store.putCredential("openai", JSON.stringify({ type: "oauth", access: "ian-access", refresh: "ian-refresh", email: "ian@example.com" }));
+		});
+
+		const joMemory = (await jo.browser.json("/api/memory/log")).body;
+		expect(JSON.stringify(joMemory)).not.toContain("passport");
+		expect((await jo.browser.json("/api/sessions/1/messages")).body.messages).toEqual([]);
+		expect((await jo.browser.json("/api/chatgpt")).body).toEqual({ connected: false, email: null });
+		expect((await ian.browser.json("/api/chatgpt")).body).toEqual({ connected: true, email: "ian@example.com" });
+		// Each Pimling is its own agent host to OpenAI.
+		const hostId = async (browser: Browser) =>
+			new URL((await browser.json("/api/chatgpt/login", { method: "POST" })).body.url).searchParams.get("ext_agent_host_id");
+		const [ianHost, joHost] = [await hostId(ian.browser), await hostId(jo.browser)];
+		expect(ianHost).toMatch(/^urn:uuid:/);
+		expect(joHost).not.toBe(ianHost);
+	});
+
+	it("the hostname alone opens nothing", async () => {
+		await person("kim");
+		expect((await new Browser(hostOf("kim")).json("/api/sessions")).status).toBe(401);
+		expect((await new Browser(hostOf("nobody-here")).json("/api/sessions")).status).toBe(404);
+		expect((await new Browser(`https://deeper.kim.${DOMAIN}`).json("/api/sessions")).status).toBe(404);
+		expect((await new Browser("https://kim.elsewhere.test").json("/api/sessions")).status).toBe(404);
+		// Self-hosting's ways in are closed: no setup links in the logs.
+		expect((await new Browser(hostOf("kim")).json("/auth/setup-link", { method: "POST" })).status).toBe(404);
+	});
+
+	it("slows down guessing from one address", async () => {
+		await person("lars");
+		const guesser = new Browser(hostOf("lars"));
+		const statuses: number[] = [];
+		for (let attempt = 0; attempt < 31; attempt++) {
+			statuses.push((await guesser.fetch("/auth/passkeys/options", { method: "POST", json: { recovery: `guess-${attempt}` } })).status);
+		}
+		// AUTH_LIMITER allows 30 a minute.
+		expect(statuses.slice(0, 30).every((status) => status === 401)).toBe(true);
+		expect(statuses[30]).toBe(429);
+	});
+});
+
+describe("recovery", () => {
+	it("a recovery code makes one new passkey, once", async () => {
+		const lee = await person("lee");
+		const site = { rpId: `lee.${DOMAIN}`, origin: hostOf("lee") };
+		const lost = new Browser(hostOf("lee"));
+		const replacement = await Authenticator.make("ES256", site);
+		const code = lee.registered.recoveryCodes[0]!;
+		expect(await addPasskey(lost, replacement, { recovery: "wrong-code-12345" })).toBe(401);
+		// Typed loosely: upper case, no dashes.
+		expect(await addPasskey(lost, replacement, { recovery: code.replaceAll("-", "").toUpperCase() })).toBe(200);
+		expect((await lost.json("/api/sessions")).status).toBe(200);
+		expect(await addPasskey(new Browser(hostOf("lee")), await Authenticator.make("ES256", site), { recovery: code })).toBe(401);
+		expect((await lost.json("/auth/recovery-codes")).body).toEqual({ left: 9 });
+
+		// A new set replaces the old one.
+		const fresh = (await lost.json("/auth/recovery-codes", { method: "POST" })).body.codes as string[];
+		expect(fresh).toHaveLength(10);
+		expect(await addPasskey(new Browser(hostOf("lee")), await Authenticator.make("ES256", site), { recovery: lee.registered.recoveryCodes[1]! })).toBe(401);
+		expect((await new Browser(hostOf("lee")).json("/auth/recovery-codes", { method: "POST" })).status).toBe(401);
+	});
+
+	it("the operator can issue a setup link, for someone who lost everything", async () => {
+		await person("max");
+		const { body } = await admin("/admin/accounts/max/setup-link", { method: "POST" });
+		const setup = new URL(body.setupUrl).hash.replace("#setup=", "");
+		const browser = new Browser(hostOf("max"));
+		expect(await addPasskey(browser, await Authenticator.make("ES256", { rpId: `max.${DOMAIN}`, origin: hostOf("max") }), { setup })).toBe(200);
+		expect((await browser.json("/api/sessions")).status).toBe(200);
+	});
+});
+
+describe("the account", () => {
+	it("exports the person's data without secrets", async () => {
+		const nia = await person("nia");
+		await nia.browser.json("/api/memory/log", { method: "POST", json: { text: "Nia plays the cello" } });
+		const token = (await nia.browser.json("/auth/tokens", { method: "POST", json: { name: "CLI" } })).body.token as string;
+		const response = await nia.browser.fetch("/api/account/export");
+		expect(response.headers.get("content-disposition")).toMatch(/^attachment; filename="pimling-nia-/);
+		const text = await response.text();
+		const data = JSON.parse(text);
+		expect(data).toMatchObject({ account: { username: "nia" }, pim: { format: "pim-export" }, tokens: [{ name: "CLI" }] });
+		expect(text).toContain("Nia plays the cello");
+		expect(text).not.toContain(token);
+		for (const code of nia.registered.recoveryCodes) expect(text).not.toContain(code);
+	});
+
+	it("is deleted only by its owner, signed in with a passkey, and then is gone for good", async () => {
+		const olga = await person("olga");
+		await olga.browser.json("/api/memory/log", { method: "POST", json: { text: "Olga's secret recipe" } });
+		const token = (await olga.browser.json("/auth/tokens", { method: "POST", json: { name: "CLI" } })).body.token as string;
+		const withToken = new Browser(hostOf("olga"));
+		const tokenDelete = await withToken.json("/api/account", { method: "DELETE", json: { confirm: "olga" }, headers: { Authorization: `Bearer ${token}` } });
+		expect(tokenDelete.status).toBe(403);
+		expect((await olga.browser.json("/api/account", { method: "DELETE", json: { confirm: "olgaa" } })).status).toBe(400);
+
+		expect((await olga.browser.json("/api/account", { method: "DELETE", json: { confirm: "olga" } })).body).toEqual({ deleted: true });
+		expect((await olga.browser.json("/api/sessions")).status).toBe(410);
+		expect((await new Browser(hostOf("olga")).json("/api/sessions", { headers: { Authorization: `Bearer ${token}` } })).status).toBe(410);
+		// The username is never someone else's: apps and sign-ins were sent to its address.
+		expect((await register("olga")).status).toBe(409);
+		// Its agent and sign-in hold nothing.
+		const memories = await runInDurableObject(env.Pim.getByName(olga.ownerId), (instance: Pim) => instance.memory.store.count());
+		expect(memories).toBe(0);
+		expect(await env.Auth.getByName(olga.ownerId).passkeys()).toEqual([]);
+	});
+});
+
+describe("the operator", () => {
+	it("needs the admin token", async () => {
+		expect((await new Browser(FRONT).json("/admin/stats")).status).toBe(401);
+		expect((await admin("/admin/stats", { headers: { Authorization: "Bearer wrong" } })).status).toBe(401);
+		const stats = await admin("/admin/stats");
+		expect(stats.status).toBe(200);
+		expect(stats.body.accounts.active).toBeGreaterThan(0);
+	});
+
+	it("suspends a Pimling at once, and restores it", async () => {
+		const pat = await person("pat");
+		expect((await admin("/admin/accounts/pat/suspend", { method: "POST", json: { reason: "spam" } })).body.account).toMatchObject({
+			status: "suspended",
+			statusReason: "spam",
+		});
+		expect((await pat.browser.json("/api/sessions")).status).toBe(403);
+		// The agent refuses too, whatever a Worker has cached.
+		const agent = await runInDurableObject(env.Pim.getByName(pat.ownerId), (instance: Pim) => instance.status());
+		expect(agent).toBe("suspended");
+		await admin("/admin/accounts/pat/unsuspend", { method: "POST" });
+		expect((await pat.browser.json("/api/sessions")).status).toBe(200);
+	});
+
+	it("sets one person's limits over everyone's", async () => {
+		const quinn = await person("quinn");
+		expect((await quinn.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: 300, sessions: 500 });
+		await admin("/admin/accounts/quinn/limits", { method: "PUT", json: { limits: { dailyRuns: 0 } } });
+		expect((await quinn.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: 0, sessions: 500 });
+		const refused = await quinn.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Hello" } });
+		expect(refused.status).toBe(429);
+		expect((await admin("/admin/accounts/quinn/limits", { method: "PUT", json: { limits: { dailyRuns: "lots" } } })).status).toBe(400);
+		await admin("/admin/accounts/quinn/limits", { method: "PUT", json: { limits: null } });
+		expect((await quinn.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: 300 });
+	});
+});

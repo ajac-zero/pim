@@ -18,6 +18,7 @@ import {
   PreferencesSection,
   TokensSection,
 } from "~/components/account-settings";
+import { AddDevice } from "~/components/add-device";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
 import { Page } from "~/components/page";
@@ -248,9 +249,13 @@ function ChatGPTCard({ settings }: { settings: ModelSettings }) {
             if (address.trim()) finish.mutate();
           }}
         >
+          <p className="text-muted-foreground text-sm">
+            {t("chatGPTWhyPaste")}
+          </p>
           <ol className="list-decimal space-y-1 pl-5 text-sm">
             <li>{t("chatGPTStepApprove")}</li>
             <li>{t("chatGPTStepCopy")}</li>
+            <li>{t("chatGPTStepPaste")}</li>
           </ol>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Input
@@ -283,6 +288,9 @@ function ChatGPTCard({ settings }: { settings: ModelSettings }) {
               </Button>
             </div>
           </div>
+          <p className="text-muted-foreground text-xs">
+            {t("chatGPTAfterPaste")}
+          </p>
         </form>
       ) : (
         <Button
@@ -438,6 +446,7 @@ function PasskeysSection() {
       <p className="px-1 text-muted-foreground text-xs">
         {t("passkeysDescription")}
       </p>
+      <AddDevice />
       {passkeys && passkeys.length > 0 && (
         <ul className="divide-y rounded-xl border" aria-label={t("passkeys")}>
           {passkeys.map((passkey) => (

@@ -92,13 +92,14 @@ CREATE TABLE IF NOT EXISTS pim_artifact_versions (
 	PRIMARY KEY (artifact, version)
 );
 -- Ids of deleted artifacts, and when: no title, content or hash. A replayed create of one must not bring it back.
+-- Never pruned, since any id may still be replayed. One row (about 100 bytes) exists per artifact that was made and
+-- then deleted, and each is made by a model request: the daily request limit caps the rate, and the rows count
+-- in the database size the storage quota refuses new artifacts against. (A deletion needs no room.)
 CREATE TABLE IF NOT EXISTS pim_artifact_deleted (
 	id TEXT PRIMARY KEY,
 	deleted_at INTEGER NOT NULL
 );
 `;
-/** How many deleted ids are remembered; the oldest go first. A replay comes soon after its call, long before this many deletions. */
-const MAX_DELETED_IDS = 1000;
 
 type Row = Record<string, SqlStorageValue>;
 
@@ -345,13 +346,8 @@ export class ArtifactStore {
 	delete(id: string): boolean {
 		this.#sql.exec("DELETE FROM pim_artifact_versions WHERE artifact = ?", id);
 		const deleted = this.#sql.exec("DELETE FROM pim_artifacts WHERE id = ?", id).rowsWritten > 0;
-		if (deleted) {
-			this.#sql.exec("INSERT OR REPLACE INTO pim_artifact_deleted (id, deleted_at) VALUES (?, ?)", id, Date.now());
-			this.#sql.exec(
-				"DELETE FROM pim_artifact_deleted WHERE rowid NOT IN (SELECT rowid FROM pim_artifact_deleted ORDER BY deleted_at DESC, rowid DESC LIMIT ?)",
-				MAX_DELETED_IDS,
-			);
-		}
+		// In the same step as the deletion, so no replay can come between.
+		if (deleted) this.#sql.exec("INSERT OR IGNORE INTO pim_artifact_deleted (id, deleted_at) VALUES (?, ?)", id, Date.now());
 		return deleted;
 	}
 

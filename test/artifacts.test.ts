@@ -209,11 +209,16 @@ describe("artifacts", () => {
 			instance.artifacts.delete(id);
 			const afterDelete = await instance.artifacts.create(input).then(() => "created", (error: { status?: number }) => error.status);
 			const fresh = await instance.artifacts.create({ ...input, id: crypto.randomUUID() });
+			// Deleting what never existed remembers nothing; the export lists only what exists.
+			const never = crypto.randomUUID();
+			instance.artifacts.delete(never);
+			const tombstones = Number(state.storage.sql.exec("SELECT COUNT(*) AS n FROM pim_artifact_deleted WHERE id = ?", never).one().n);
+			const exported = instance.artifacts.export().some((artifact) => artifact.id === id);
 			const kept = state.storage.sql.exec("SELECT * FROM pim_artifact_deleted WHERE id = ?", id).toArray();
 			instance.artifacts.delete(fresh.artifact);
-			return { replayed, afterDelete, listed: instance.artifacts.get(id), fresh: fresh.version, kept: kept.map((row) => Object.keys(row).sort()) };
+			return { replayed, afterDelete, listed: instance.artifacts.get(id), tombstones, exported, fresh: fresh.version, kept: kept.map((row) => Object.keys(row).sort()) };
 		});
-		expect(outcome).toEqual({ replayed: 1, afterDelete: 410, listed: undefined, fresh: 1, kept: [["deleted_at", "id"]] });
+		expect(outcome).toEqual({ replayed: 1, afterDelete: 410, listed: undefined, tombstones: 0, exported: false, fresh: 1, kept: [["deleted_at", "id"]] });
 	});
 
 	it("export in full near their total cap, which holds whatever the limits say", async () => {

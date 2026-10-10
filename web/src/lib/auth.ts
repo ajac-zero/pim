@@ -7,7 +7,8 @@ import { SignInRequired } from "~/lib/pim-api";
  * and hands their results over as base64url.
  */
 
-export type AuthSession = {
+export type PimAuthSession = {
+  site?: "pim";
   signedIn: boolean;
   /** `dev` is the dev server, which signs every request in itself. */
   method: "passkey" | "dev" | null;
@@ -16,6 +17,39 @@ export type AuthSession = {
   hasPasskeys: boolean;
   /** Right after a deploy, a Pim that never had a passkey takes the first one with no link. */
   canClaim: boolean;
+  /**
+   * How someone without a passkey gets one: a setup link the Worker writes
+   * to its logs (self-hosted), or one of their recovery codes (Pimling).
+   */
+  recovery?: "logs" | "codes";
+  /** Pimling: whose Pimling this is, once signed in. */
+  account?: { username: string } | null;
+};
+
+/** Pimling's front door, where people register instead of signing in. */
+export type AccountsSession = {
+  site: "accounts";
+  /** Pimlings live at `<username>.<domain>`. */
+  domain: string;
+  registration: "open" | "invite" | "closed";
+};
+
+export type AuthSession = PimAuthSession | AccountsSession;
+
+export type ApiToken = {
+  id: string;
+  name: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+};
+
+export type Registered = {
+  username: string;
+  url: string;
+  /** Opens the new Pimling and makes its first passkey; works once. */
+  setupUrl: string;
+  setupExpiresAt: string;
+  recoveryCodes: string[];
 };
 
 export type Passkey = {
@@ -135,12 +169,12 @@ export const auth = {
     });
   },
 
-  /** Needs a setup link's code unless this browser is signed in, or Pim can be claimed. */
-  async addPasskey(setup?: string) {
-    const options = await post<CreationOptions>(
-      "/passkeys/options",
-      setup ? { setup } : {},
-    );
+  /**
+   * Needs a setup link's code or a recovery code unless this browser is
+   * signed in, or Pim can be claimed.
+   */
+  async addPasskey(allowedBy: { setup?: string; recovery?: string } = {}) {
+    const options = await post<CreationOptions>("/passkeys/options", allowedBy);
     const credential = (await navigator.credentials.create({
       publicKey: {
         ...options,
@@ -175,10 +209,34 @@ export const auth = {
     call(`/passkeys/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   signOut: () => post("/sign-out"),
+
+  /** Pimling: how many recovery codes are left, and a new set. */
+  recoveryCodesLeft: () =>
+    call<{ left: number }>("/recovery-codes").then((body) => body.left),
+  newRecoveryCodes: () =>
+    post<{ codes: string[] }>("/recovery-codes").then((body) => body.codes),
+
+  /** API tokens, for clients other than this app. */
+  tokens: () =>
+    call<{ tokens: ApiToken[] }>("/tokens").then((body) => body.tokens),
+  createToken: (name: string) =>
+    post<ApiToken & { token: string }>("/tokens", { name }),
+  revokeToken: (id: string) =>
+    call(`/tokens/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  /** Pimling's front door. */
+  usernameAvailable: (name: string) =>
+    call<{ available: boolean; reason?: string }>(
+      `/username?name=${encodeURIComponent(name)}`,
+    ),
+  register: (input: { username: string; invite?: string; timeZone?: string }) =>
+    post<Registered>("/register", input),
 };
 
-/** The browser's "you cancelled" or "timed out" isn't worth an error. */
-/** The code in a setup link (`/#setup=…`), from the Worker's logs. */
+export const tokensQuery = () =>
+  queryOptions({ queryKey: ["auth", "tokens"], queryFn: auth.tokens });
+
+/** The code in a setup link (`/#setup=…`), from the Worker's logs or from registering. */
 export function setupCode(): string | null {
   return new URLSearchParams(location.hash.slice(1)).get("setup");
 }
@@ -188,6 +246,7 @@ export function forgetSetupCode() {
   history.replaceState(history.state, "", location.pathname + location.search);
 }
 
+/** The browser's "you cancelled" or "timed out" isn't worth an error. */
 export function cancelled(error: unknown): boolean {
   return error instanceof DOMException && error.name === "NotAllowedError";
 }

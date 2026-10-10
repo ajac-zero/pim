@@ -334,8 +334,12 @@ export const ApprovalBlock = memo(function ApprovalBlock({
         {pending
           ? t("approvalRequested")
           : approved
-            ? t("approved")
-            : t("denied")}
+            ? t(
+                approval.decidedBy === "timeout"
+                  ? "approvedNoAnswer"
+                  : "approved",
+              )
+            : t(approval.decidedBy === "timeout" ? "deniedNoAnswer" : "denied")}
       </div>
       <p
         className="mt-1.5 line-clamp-3 font-medium text-sm [overflow-wrap:anywhere]"
@@ -367,13 +371,22 @@ export const ApprovalBlock = memo(function ApprovalBlock({
           )}
       {pending && (
         <div className="mt-3 flex gap-2">
+          {/* The countdown sits on the button the timeout will press. */}
           <Button
             variant="outline"
             onClick={() => decide.mutate("deny")}
             disabled={decide.isPending}
             className="flex-1"
           >
-            <X className="size-4" /> {t("deny")}
+            {approval.expiresAt !== null && approval.onTimeout === "deny" ? (
+              <CountdownRing
+                from={approval.createdAt}
+                until={approval.expiresAt}
+              />
+            ) : (
+              <X className="size-4" />
+            )}{" "}
+            {t("deny")}
           </Button>
           {/* Approve, with "always" one step away in its menu rather than a button of its own. */}
           <div className="flex flex-1">
@@ -385,7 +398,7 @@ export const ApprovalBlock = memo(function ApprovalBlock({
                 approval.tool !== null && "rounded-r-none",
               )}
             >
-              {approval.expiresAt !== null ? (
+              {approval.expiresAt !== null && approval.onTimeout !== "deny" ? (
                 <CountdownRing
                   from={approval.createdAt}
                   until={approval.expiresAt}
@@ -424,7 +437,7 @@ export const ApprovalBlock = memo(function ApprovalBlock({
   );
 });
 
-/** A ring that empties as `until` nears, with the seconds left inside. */
+/** A ring that empties as `until` nears, with the seconds left inside (minutes, above 99 seconds). */
 function CountdownRing({ from, until }: { from: number; until: number }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -432,6 +445,10 @@ function CountdownRing({ from, until }: { from: number; until: number }) {
     return () => clearInterval(timer);
   }, []);
   const left = Math.max(0, until - now);
+  const shown =
+    left > 99_000
+      ? `${Math.ceil(left / 60_000)}m`
+      : `${Math.ceil(left / 1000)}`;
   const radius = 12;
   const circumference = 2 * Math.PI * radius;
   return (
@@ -439,7 +456,7 @@ function CountdownRing({ from, until }: { from: number; until: number }) {
       viewBox="0 0 32 32"
       className="size-8 shrink-0 -rotate-90"
       role="img"
-      aria-label={`${Math.ceil(left / 1000)}`}
+      aria-label={shown}
     >
       <circle
         cx="16"
@@ -473,7 +490,7 @@ function CountdownRing({ from, until }: { from: number; until: number }) {
         fontWeight="500"
         style={{ fontVariantNumeric: "tabular-nums" }}
       >
-        {Math.ceil(left / 1000)}
+        {shown}
       </text>
     </svg>
   );

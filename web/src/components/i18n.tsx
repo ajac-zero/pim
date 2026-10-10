@@ -172,6 +172,77 @@ const translations = {
       "Find the log that starts with “Pim setup link” and open its link on the device you want to sign in with.",
     writeLinkAgain: "Write the link again",
     writingSetupLink: "Writing a setup link to the logs…",
+    approvedNoAnswer: "Approved: no answer in time",
+    deniedNoAnswer: "Denied: no answer in time",
+    finishSetUpTitle: "Finish setting up",
+    finishSetUpBody:
+      "Open the setup link from when you registered, or enter one of your recovery codes to create your passkey.",
+    recoveryCodeTitle: "Use a recovery code",
+    recoveryCodeBody:
+      "Enter one of the recovery codes you saved when you registered. It adds a passkey on this device, and works once.",
+    recoveryCode: "Recovery code",
+    registerTitle: "Get your own Pimling",
+    registerBody:
+      "A personal agent that remembers what matters to you, keeps working while you're away, and asks before acting. It lives at your own address.",
+    registrationClosed: "Registration is closed for now. Check back soon.",
+    username: "Username",
+    usernameHint: "Lowercase letters, digits, and hyphens.",
+    usernameAvailable: "{host} is available",
+    inviteCode: "Invite code",
+    createMyPimling: "Create my Pimling",
+    registerFootnote:
+      "Next you'll save recovery codes, then create a passkey on your new Pimling. There's no password.",
+    recoveryCodesFileHeader:
+      "Recovery codes for {host}. Each adds a passkey once.",
+    saveRecoveryCodesTitle: "Save your recovery codes",
+    saveRecoveryCodesBody:
+      "If you lose your passkey, one of these gets you back in. Each works once, and they won't be shown again.",
+    recoveryCodes: "Recovery codes",
+    download: "Download",
+    savedRecoveryCodes: "I saved my recovery codes somewhere safe.",
+    continueTo: "Continue to {host}",
+    setupLinkLasts:
+      "There you'll create your passkey. The setup link works once, for a day.",
+    exportData: "Export my data",
+    accountUsageToday:
+      "What your Pimling used today. Limits reset at midnight UTC.",
+    usageTokens: "Tokens",
+    usageRuns: "Runs",
+    usageModelRequests: "Model requests",
+    usedOf: "{used} of {limit}",
+    planTokensToday:
+      "Plus {tokens} tokens on your ChatGPT plan, which don't count here.",
+    recoveryCodesLeft: "Recovery codes left: {count}",
+    newRecoveryCodes: "New recovery codes",
+    newRecoveryCodesBody:
+      "Your old codes no longer work. Save these now: they won't be shown again.",
+    settingsSaved: "Saved",
+    timeZone: "Time zone",
+    approvalPolicy: "When you don't answer",
+    approvalPolicyDescription:
+      "When Pim asks before acting and you don't answer in time:",
+    approvalExplicit: "Deny it",
+    approvalExplicitBody:
+      "Pim waits 5 minutes, then doesn't act. Nothing happens without a yes.",
+    approvalAuto: "Approve it",
+    approvalAutoBody:
+      "Pim waits 30 seconds, then acts, so background work never stalls.",
+    apiTokens: "API tokens",
+    apiTokensDescription:
+      "Tokens let apps and scripts use Pim's API. Each one can do anything you can, except manage sign-in.",
+    tokenDates: "Created {created} · Last used {used}",
+    never: "never",
+    revokeToken: "Revoke {name}",
+    tokenShownOnce: "Copy your new token now. It won't be shown again.",
+    tokenName: "Token name",
+    tokenNamePlaceholder: "What will use it, such as “Phone”",
+    createToken: "Create token",
+    deleteAccount: "Delete account",
+    deleteAccountBody:
+      "Deletes {username}'s Pimling: conversations, memories, goals, connected apps, and passkeys. It can't be undone, and the username won't be available again.",
+    typeUsernameToConfirm: "Type {username} to confirm",
+    deleteForever: "Delete forever",
+    deleteAccountButton: "Delete my account…",
   },
   es: {
     approvalRequested: "Pim necesita tu aprobación",
@@ -338,6 +409,78 @@ const translations = {
     writeLinkAgain: "Escribir el enlace otra vez",
     writingSetupLink:
       "Escribiendo un enlace de configuración en los registros…",
+    approvedNoAnswer: "Aprobada: sin respuesta a tiempo",
+    deniedNoAnswer: "Rechazada: sin respuesta a tiempo",
+    finishSetUpTitle: "Termina la configuración",
+    finishSetUpBody:
+      "Abre el enlace de configuración de tu registro o escribe uno de tus códigos de recuperación para crear tu clave de acceso.",
+    recoveryCodeTitle: "Usa un código de recuperación",
+    recoveryCodeBody:
+      "Escribe uno de los códigos de recuperación que guardaste al registrarte. Añade una clave de acceso en este dispositivo y funciona una sola vez.",
+    recoveryCode: "Código de recuperación",
+    registerTitle: "Consigue tu propio Pimling",
+    registerBody:
+      "Un agente personal que recuerda lo que te importa, sigue trabajando cuando no estás y pregunta antes de actuar. Vive en tu propia dirección.",
+    registrationClosed: "El registro está cerrado por ahora. Vuelve pronto.",
+    username: "Nombre de usuario",
+    usernameHint: "Letras minúsculas, dígitos y guiones.",
+    usernameAvailable: "{host} está disponible",
+    inviteCode: "Código de invitación",
+    createMyPimling: "Crear mi Pimling",
+    registerFootnote:
+      "Después guardarás tus códigos de recuperación y crearás una clave de acceso en tu nuevo Pimling. No hay contraseña.",
+    recoveryCodesFileHeader:
+      "Códigos de recuperación de {host}. Cada uno añade una clave de acceso una vez.",
+    saveRecoveryCodesTitle: "Guarda tus códigos de recuperación",
+    saveRecoveryCodesBody:
+      "Si pierdes tu clave de acceso, uno de estos te deja volver a entrar. Cada uno funciona una vez y no se mostrarán de nuevo.",
+    recoveryCodes: "Códigos de recuperación",
+    download: "Descargar",
+    savedRecoveryCodes:
+      "Guardé mis códigos de recuperación en un lugar seguro.",
+    continueTo: "Continuar a {host}",
+    setupLinkLasts:
+      "Allí crearás tu clave de acceso. El enlace de configuración funciona una vez, durante un día.",
+    exportData: "Exportar mis datos",
+    accountUsageToday:
+      "Lo que tu Pimling usó hoy. Los límites se reinician a medianoche UTC.",
+    usageTokens: "Tokens",
+    usageRuns: "Ejecuciones",
+    usageModelRequests: "Solicitudes al modelo",
+    usedOf: "{used} de {limit}",
+    planTokensToday:
+      "Más {tokens} tokens de tu plan de ChatGPT, que no cuentan aquí.",
+    recoveryCodesLeft: "Códigos de recuperación restantes: {count}",
+    newRecoveryCodes: "Nuevos códigos de recuperación",
+    newRecoveryCodesBody:
+      "Tus códigos anteriores ya no funcionan. Guarda estos ahora: no se mostrarán de nuevo.",
+    settingsSaved: "Guardado",
+    timeZone: "Zona horaria",
+    approvalPolicy: "Cuando no respondes",
+    approvalPolicyDescription:
+      "Cuando Pim pregunta antes de actuar y no respondes a tiempo:",
+    approvalExplicit: "Rechazarlo",
+    approvalExplicitBody:
+      "Pim espera 5 minutos y luego no actúa. Nada pasa sin un sí.",
+    approvalAuto: "Aprobarlo",
+    approvalAutoBody:
+      "Pim espera 30 segundos y luego actúa, para que el trabajo en segundo plano nunca se detenga.",
+    apiTokens: "Tokens de API",
+    apiTokensDescription:
+      "Los tokens permiten que apps y scripts usen la API de Pim. Cada uno puede hacer todo lo que tú puedes, salvo gestionar el inicio de sesión.",
+    tokenDates: "Creado {created} · Último uso {used}",
+    never: "nunca",
+    revokeToken: "Revocar {name}",
+    tokenShownOnce: "Copia tu nuevo token ahora. No se mostrará de nuevo.",
+    tokenName: "Nombre del token",
+    tokenNamePlaceholder: "Qué lo usará, como “Teléfono”",
+    createToken: "Crear token",
+    deleteAccount: "Eliminar cuenta",
+    deleteAccountBody:
+      "Elimina el Pimling de {username}: conversaciones, memorias, metas, apps conectadas y claves de acceso. No se puede deshacer y el nombre de usuario no volverá a estar disponible.",
+    typeUsernameToConfirm: "Escribe {username} para confirmar",
+    deleteForever: "Eliminar para siempre",
+    deleteAccountButton: "Eliminar mi cuenta…",
   },
 } as const;
 

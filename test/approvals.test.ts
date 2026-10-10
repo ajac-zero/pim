@@ -133,6 +133,42 @@ describe("approvals", () => {
 		expect(await turn).toMatchObject({ status: "done", text: "Done." });
 		expect(hook).toHaveBeenCalledOnce();
 		expect(seen).toContain("did not respond within 1.5 seconds, so it was approved automatically");
-		expect((await api<Approval>(`/approvals/${approval.id}`)).body.status).toBe("approved");
+		expect((await api<Approval>(`/approvals/${approval.id}`)).body).toMatchObject({ status: "approved", decidedBy: "timeout" });
+	});
+
+	it("denies on its own under the explicit policy, and never runs the action", async () => {
+		const hook = mockHook();
+		const policy = (approvalPolicy: string | null) =>
+			api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy }) });
+		expect((await policy("explicit")).body).toMatchObject({ approvalPolicy: "explicit" });
+		try {
+			// The model is told how an unanswered request ends before it makes one.
+			const tools = (await api<{ tools: { name: string; description: string }[] }>("/")).body.tools;
+			expect(tools.find((tool) => tool.name === "http_request")?.description).toContain("with no answer it is denied");
+
+			let seen = "";
+			faux.setResponses([
+				toolUse("http_request", { method: "POST", url: "https://hooks.example.test/explicit" }),
+				(context) => {
+					seen = toolResult(context.messages);
+					return fauxAssistantMessage("I didn't send it.");
+				},
+			]);
+			const turn = say("Go.");
+			const approval = await pendingApproval();
+			expect(approval.onTimeout).toBe("deny");
+			expect(await turn).toMatchObject({ status: "done", text: "I didn't send it." });
+			expect(hook).not.toHaveBeenCalled();
+			expect(seen).toContain("did not respond within 1.5 seconds, so it was denied: POST https://hooks.example.test/explicit");
+			expect(seen).toContain("Do not perform this action.");
+			expect((await api<Approval>(`/approvals/${approval.id}`)).body).toMatchObject({
+				status: "denied",
+				decidedBy: "timeout",
+				result: null,
+			});
+		} finally {
+			// Back to the deployment's policy for the tests after this one.
+			expect((await policy(null)).body).toMatchObject({ approvalPolicy: "auto" });
+		}
 	});
 });

@@ -42,7 +42,15 @@
     // Lines of long-term memory in every prompt; empty is 96 (about 8k tokens).
     "PIM_MEMORY_LINES": "",
     // This deployment's public URL, for app event callbacks; empty learns it from API requests.
-    "PIM_PUBLIC_URL": ""
+    "PIM_PUBLIC_URL": "",
+    // What an approval nobody answers becomes: "auto" approves it after 30 seconds; "explicit"
+    // denies it after 5 minutes. The owner can change it in Settings.
+    "PIM_APPROVAL_POLICY": "auto",
+    // Platform models sessions may use besides PIM_MODEL, comma-separated; empty allows any.
+    "PIM_MODELS": "",
+    // Usage limits as JSON, such as {"dailyTokens": 2000000, "dailyRuns": 500}; empty is none.
+    // See src/usage.ts for every limit.
+    "PIM_LIMITS": ""
   },
   // Secrets (set with `wrangler secret put`):
   //   PIM_API_TOKEN          optional bearer token for clients other than the web app

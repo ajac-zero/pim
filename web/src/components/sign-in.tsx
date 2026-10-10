@@ -5,7 +5,14 @@ import { useEffect, useState } from "react";
 import { PimMark } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
-import { auth, cancelled, forgetSetupCode, setupCode } from "~/lib/auth";
+import { Input } from "~/components/ui/input";
+import {
+  auth,
+  cancelled,
+  forgetSetupCode,
+  type PimAuthSession,
+  setupCode,
+} from "~/lib/auth";
 
 /** Where Workers Logs live; the dashboard picks the account. */
 const DASHBOARD_URL =
@@ -14,16 +21,13 @@ const DASHBOARD_URL =
 /**
  * Shown instead of the app until a passkey signs this browser in. A fresh
  * deploy creates its first passkey right here. Otherwise, without a passkey,
- * it has the Worker write a setup link to its logs, which only the Cloudflare
- * account's owner can read; opening that link creates a passkey.
+ * a self-hosted Pim has the Worker write a setup link to its logs, which only
+ * the Cloudflare account's owner can read; opening that link creates a
+ * passkey. A Pimling takes one of the recovery codes its owner saved instead.
  */
-export function SignIn({
-  hasPasskeys,
-  canClaim,
-}: {
-  hasPasskeys: boolean;
-  canClaim: boolean;
-}) {
+export function SignIn({ session }: { session: PimAuthSession }) {
+  const { hasPasskeys, canClaim } = session;
+  const codes = session.recovery === "codes";
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const router = useRouter();
@@ -51,7 +55,8 @@ export function SignIn({
     onError,
   });
   const create = useMutation({
-    mutationFn: () => auth.addPasskey(setup ?? undefined),
+    mutationFn: (recovery?: string) =>
+      auth.addPasskey(recovery ? { recovery } : setup ? { setup } : {}),
     onMutate: () => setError(null),
     onSuccess: () => {
       forgetSetupCode();
@@ -130,6 +135,20 @@ export function SignIn({
               {t("lostPasskey")}
             </Button>
           </>
+        ) : codes ? (
+          <RecoveryCodeSteps
+            firstPasskey={!hasPasskeys}
+            pending={pending}
+            onSubmit={(code) => create.mutate(code)}
+            onBack={
+              hasPasskeys
+                ? () => {
+                    setRecovering(false);
+                    setError(null);
+                  }
+                : undefined
+            }
+          />
         ) : (
           <SetupLinkSteps
             firstPasskey={!hasPasskeys}
@@ -144,6 +163,66 @@ export function SignIn({
         )}
       </div>
     </main>
+  );
+}
+
+/** Pimling: a recovery code from registration adds a passkey, once. */
+function RecoveryCodeSteps({
+  firstPasskey,
+  pending,
+  onSubmit,
+  onBack,
+}: {
+  firstPasskey: boolean;
+  pending: boolean;
+  onSubmit: (code: string) => void;
+  onBack?: () => void;
+}) {
+  const { t } = useI18n();
+  const [code, setCode] = useState("");
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (code.trim()) onSubmit(code.trim());
+      }}
+    >
+      <h1 className="font-semibold text-2xl">
+        {firstPasskey ? t("finishSetUpTitle") : t("recoveryCodeTitle")}
+      </h1>
+      <p className="mt-2 text-muted-foreground text-sm">
+        {firstPasskey ? t("finishSetUpBody") : t("recoveryCodeBody")}
+      </p>
+      <Input
+        value={code}
+        onChange={(event) => setCode(event.target.value)}
+        placeholder="xxxxx-xxxxx-xxxxx"
+        aria-label={t("recoveryCode")}
+        autoComplete="one-time-code"
+        spellCheck={false}
+        className="mt-6 h-10 font-mono"
+        autoFocus
+      />
+      <Button
+        type="submit"
+        className="mt-3 w-full"
+        size="lg"
+        disabled={pending || !code.trim()}
+      >
+        {pending ? <Loader2 className="animate-spin" /> : <KeyRound />}
+        {t("createPasskey")}
+      </Button>
+      {onBack && (
+        <Button
+          type="button"
+          variant="ghost"
+          className="mt-3 w-full text-muted-foreground"
+          onClick={onBack}
+        >
+          {t("backToSignIn")}
+        </Button>
+      )}
+    </form>
   );
 }
 

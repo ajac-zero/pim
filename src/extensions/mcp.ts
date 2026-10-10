@@ -2,7 +2,7 @@ import { type ImageContent, type TextContent, type TSchema, Type } from "@earend
 import { defineExtension, defineTool, section, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { AppCatalog } from "./app-catalog";
 import { describeCandidates, searchRegistry } from "./app-directory";
-import { APPROVAL_NOTE, defineGatedAction, fileApproval, type GatedAction } from "./approvals";
+import { approvalNote, defineGatedAction, fileApproval, type GatedAction } from "./approvals";
 import { json, type PimServices, text } from "./services";
 
 /**
@@ -208,7 +208,7 @@ export function mcpExtensions(
 		tools.push(
 			defineTool({
 				name,
-				description: gated ? `${description} ${APPROVAL_NOTE}` : description,
+				description: gated ? `${description} ${approvalNote(services)}` : description,
 				// MCP input schemas are JSON Schema, which pi validates as given.
 				parameters: { type: "object", ...tool.inputSchema } as unknown as TSchema,
 				// Filing an approval is replay-safe; a direct call is only if the app says it is read-only.

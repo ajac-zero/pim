@@ -1,8 +1,8 @@
 /**
  * Pim's own state, in the Durable Object's SQLite database next to pi's
  * tables (pi's are prefixed `pi_`, the SDK's `cf_`, long-term memory's
- * `optmem_`). A deployment has one
- * agent, so everything here belongs to the person who deployed it.
+ * `optmem_`). Each agent has its own database, so everything here belongs
+ * to its one owner.
  */
 
 import type { PushSubscription } from "./push";
@@ -44,9 +44,15 @@ export type Approval = {
 	readonly decidedAt: number | null;
 	/** The tool call that filed it, so a client can show the two as one. */
 	readonly callId: string | null;
-	/** When it is approved automatically if still pending. */
+	/** When the timeout decides it, if still pending. */
 	readonly expiresAt: number | null;
+	/** What the timeout decides: `approve` (the `auto` policy, and approvals filed before policies) or `deny` (`explicit`). */
+	readonly onTimeout: "approve" | "deny";
+	/** Who decided: the user, the timeout, or the user's "always approve"; null while pending and for older approvals. */
+	readonly decidedBy: ApprovalDecider | null;
 };
+
+export type ApprovalDecider = "user" | "timeout" | "always";
 
 export type Notification = {
 	readonly id: string;
@@ -111,6 +117,8 @@ function watchOf(row: Row): AppWatch {
 	};
 }
 
+const ERASED_SCHEMA = "CREATE TABLE IF NOT EXISTS pim_erased (erased_at INTEGER NOT NULL)";
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS pim_goals (
 	id TEXT PRIMARY KEY,
@@ -135,7 +143,9 @@ CREATE TABLE IF NOT EXISTS pim_approvals (
 	decided_at INTEGER,
 	call_id TEXT,
 	expires_at INTEGER,
-	tool TEXT
+	tool TEXT,
+	on_timeout TEXT,
+	decided_by TEXT
 );
 CREATE TABLE IF NOT EXISTS pim_always_approved (
 	tool TEXT PRIMARY KEY,
@@ -228,6 +238,8 @@ function approvalOf(row: Row): Approval {
 		decidedAt: row.decided_at === null ? null : Number(row.decided_at),
 		callId: row.call_id === null ? null : String(row.call_id),
 		expiresAt: row.expires_at === null ? null : Number(row.expires_at),
+		onTimeout: row.on_timeout === "deny" ? "deny" : "approve",
+		decidedBy: row.decided_by === null || row.decided_by === undefined ? null : (String(row.decided_by) as ApprovalDecider),
 	};
 }
 
@@ -245,14 +257,61 @@ function notificationOf(row: Row): Notification {
 export class PimStore {
 	readonly #sql: SqlStorage;
 
+	/**
+	 * When this agent was erased, or null. The mark is written right after
+	 * the wipe and is the only thing an erased agent keeps: it refuses every
+	 * request from then on, so nothing can be written to it again.
+	 */
+	erasedAt(): number | null {
+		const row = this.#sql.exec("SELECT erased_at FROM pim_erased LIMIT 1").toArray()[0];
+		return row ? Number(row.erased_at) : null;
+	}
+
+	/** Marks the agent erased; after `deleteAll`, so it makes its own table. */
+	markErased(now: number): void {
+		this.#sql.exec(ERASED_SCHEMA);
+		this.#sql.exec("INSERT INTO pim_erased (erased_at) VALUES (?)", now);
+	}
+
+	/**
+	 * Which kinds of the person's data this database still holds, by table:
+	 * none once the agent is erased. Conversations are pi's (`pi_entries`).
+	 */
+	remainingData(): string[] {
+		const remaining: string[] = [];
+		const tables: Record<string, string> = {
+			pim_goals: "goals",
+			pim_approvals: "approvals",
+			pim_always_approved: "always-approved tools",
+			pim_mcp_servers: "apps",
+			pim_app_watches: "watches",
+			pim_sessions: "chats",
+			pim_credentials: "credentials",
+			pim_notifications: "notifications",
+			pim_push_subscriptions: "push subscriptions",
+			pi_entries: "conversations",
+		};
+		const existing = new Set(
+			this.#sql.exec("SELECT name FROM sqlite_master WHERE type = 'table'").toArray().map((row) => String(row.name)),
+		);
+		for (const [table, kind] of Object.entries(tables)) {
+			if (existing.has(table) && this.#sql.exec(`SELECT 1 FROM ${table} LIMIT 1`).toArray().length > 0) remaining.push(kind);
+		}
+		if (this.meta("owner") !== undefined) remaining.push("owner profile");
+		return remaining;
+	}
+
 	constructor(sql: SqlStorage) {
 		this.#sql = sql;
 		this.#sql.exec(SCHEMA);
+		this.#sql.exec(ERASED_SCHEMA);
 		// Approvals made before these columns existed have neither.
 		const columns = this.#sql.exec("PRAGMA table_info(pim_approvals)").toArray().map((row) => String(row.name));
 		if (!columns.includes("call_id")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN call_id TEXT");
 		if (!columns.includes("expires_at")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN expires_at INTEGER");
 		if (!columns.includes("tool")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN tool TEXT");
+		if (!columns.includes("on_timeout")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN on_timeout TEXT");
+		if (!columns.includes("decided_by")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN decided_by TEXT");
 		const sessionColumns = this.#sql.exec("PRAGMA table_info(pim_sessions)").toArray().map((row) => String(row.name));
 		if (!sessionColumns.includes("deleted_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN deleted_at INTEGER");
 	}
@@ -333,19 +392,22 @@ export class PimStore {
 		args: unknown;
 		summary: string;
 		callId: string;
+		createdAt: number;
 		expiresAt: number;
+		onTimeout: "approve" | "deny";
 	}): Approval {
 		this.#sql.exec(
-			"INSERT OR IGNORE INTO pim_approvals (id, session, action, tool, args, summary, status, created_at, call_id, expires_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+			"INSERT OR IGNORE INTO pim_approvals (id, session, action, tool, args, summary, status, created_at, call_id, expires_at, on_timeout) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
 			input.id,
 			input.session,
 			input.action,
 			input.tool,
 			JSON.stringify(input.args),
 			input.summary,
-			Date.now(),
+			input.createdAt,
 			input.callId,
 			input.expiresAt,
+			input.onTimeout,
 		);
 		return this.approval(input.id)!;
 	}
@@ -364,13 +426,14 @@ export class PimStore {
 	}
 
 	/** Moves a pending approval to its decision. False when it was not pending. */
-	decideApproval(id: string, status: "approved" | "denied", note: string | null): boolean {
+	decideApproval(id: string, status: "approved" | "denied", note: string | null, decidedBy: ApprovalDecider = "user"): boolean {
 		return (
 			this.#sql.exec(
-				"UPDATE pim_approvals SET status = ?, note = ?, decided_at = ? WHERE id = ? AND status = 'pending'",
+				"UPDATE pim_approvals SET status = ?, note = ?, decided_at = ?, decided_by = ? WHERE id = ? AND status = 'pending'",
 				status,
 				note,
 				Date.now(),
+				decidedBy,
 				id,
 			).rowsWritten > 0
 		);

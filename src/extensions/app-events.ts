@@ -2,7 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { AppWatch, PimStore } from "../store";
 import type { AppCatalog } from "./app-catalog";
-import { APPROVAL_NOTE, defineGatedAction, fileApproval, type GatedAction } from "./approvals";
+import { approvalNote, defineGatedAction, fileApproval, type GatedAction } from "./approvals";
 import type { McpBridge } from "./mcp";
 import { json, type PimServices, text } from "./services";
 
@@ -300,7 +300,7 @@ export function eventTools(bridge: McpBridge, catalog: AppCatalog, events: AppEv
 
 	const watchEvent = defineTool({
 		name: "watch_app_event",
-		description: `Have a connected app notify you whenever an event happens (see list_app_events), and say what to do each time. Each event arrives as a message starting with "[App event]". ${APPROVAL_NOTE}`,
+		description: `Have a connected app notify you whenever an event happens (see list_app_events), and say what to do each time. Each event arrives as a message starting with "[App event]". ${approvalNote(services)}`,
 		parameters: Type.Object({
 			app: Type.String(),
 			event: Type.String(),

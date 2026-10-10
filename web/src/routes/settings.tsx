@@ -12,6 +12,12 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
+import {
+  AccountSection,
+  DeleteAccountSection,
+  PreferencesSection,
+  TokensSection,
+} from "~/components/account-settings";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
 import { Page } from "~/components/page";
@@ -54,6 +60,7 @@ function SettingsPage() {
   if (!data) return null;
   return (
     <Page title={t("settings")} description={t("settingsDescription")}>
+      <AccountSection />
       <ChatGPTCard settings={data} />
       <section className="mt-10 space-y-3">
         <h2 className="font-medium text-muted-foreground text-sm">
@@ -61,9 +68,12 @@ function SettingsPage() {
         </h2>
         <ModelChoices settings={data} />
       </section>
+      <PreferencesSection />
       <AlwaysApprovedSection />
       <PushSection />
       <PasskeysSection />
+      <TokensSection />
+      <DeleteAccountSection />
     </Page>
   );
 }
@@ -391,7 +401,8 @@ function PushSection() {
 function PasskeysSection() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const { data: session } = useQuery(authSessionQuery());
+  const { data } = useQuery(authSessionQuery());
+  const session = data?.site === "accounts" ? undefined : data;
   // The dev server signs you in itself; there are no passkeys to manage.
   const enabled = session?.method === "passkey";
   const { data: passkeys } = useQuery({ ...passkeysQuery(), enabled });

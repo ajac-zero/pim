@@ -47,7 +47,7 @@ Cloudflare renews the certificate along with the custom domain. If the custom do
 | DNS `AAAA *.pimling.ajac-zero.com` → `100::` (proxied) | `16774988657fb34e6ee8d4b8eb02ef3b` | API, by hand (not in the config) |
 | Secret `PIMLING_ADMIN_TOKEN` | Serving version `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (the same bundle, with the secret) | `wrangler secret put` |
 
-Nothing else in the zone changed. All 26 DNS records, the `packages.ajac-zero.com/*` route, and the other 10 custom domains are as they were.
+At the initial deployment nothing else in the zone changed: all 26 DNS records that existed then, the `packages.ajac-zero.com/*` route, and the other 10 custom domains stayed as they were. Later deploys are recorded in their own acceptance sections.
 
 ## Setup for the owner
 
@@ -68,11 +68,11 @@ Invite-only; at most 25 accounts and 3 registrations per address a day. Per pers
 
 ## Rollback
 
-- **To an earlier version:** `pnpm wrangler rollback ce9b2eae-0edc-4dc9-9b85-97ca8dbbcd75 --name pimling --message "…"` (the version before #8), `096158e7-b612-40dc-a667-dced2a1fe6fc` (before #6), `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (before #5), or `pnpm wrangler versions list --name pimling` for others. A rollback changes code and that version's own variables: Durable Object data, the route, the custom domain and the secret stay as they are. Devices added with #5 keep their passkeys, which work with any version.
+- **To an earlier version:** `pnpm wrangler rollback ce9b2eae-0edc-4dc9-9b85-97ca8dbbcd75 --config wrangler.ajac-zero.jsonc --message "…"` (the version before #8). Other targets: `096158e7-b612-40dc-a667-dced2a1fe6fc` (before #6) and `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (before #5); `pnpm wrangler versions list --config wrangler.ajac-zero.jsonc` lists the rest. A rollback changes code and that version's own variables: Durable Object data, the route, the custom domain and the secret stay as they are. Devices added with #5 keep their passkeys, which work with any version.
 - **Rolling back past #8 leaves artifacts behind.** #8 added no Durable Object migration: each Pim makes its `pim_artifacts` and `pim_artifact_versions` tables itself, and they stay after a rollback. The older version has no artifact tools, routes or screens, so artifacts can't be seen, downloaded or deleted. They still count toward `storageBytes`, and its export leaves them out. Deleting an account still erases them, since erasure wipes all of a Pim's storage. Rolling forward again shows them as they were.
 - **Roll back with `wrangler rollback`, not by deploying older code with today's config.** A version keeps the variables it was deployed with, so `ce9b2eae` comes back with its own `PIM_LIMITS`. Code from before #8 doesn't know the artifact keys now in `wrangler.ajac-zero.jsonc`, and refuses a `PIM_LIMITS` it can't parse by failing closed: no model requests and no runs.
 - **To remove the deployment entirely,** which erases every Pimling's data:
-  1. `pnpm wrangler delete --name pimling`. This removes the Worker, its route and custom domain, and its Durable Objects with all their data.
+  1. `pnpm wrangler delete --config wrangler.ajac-zero.jsonc`. This removes the Worker, its route and custom domain, and its Durable Objects with all their data.
   2. Delete DNS record `16774988657fb34e6ee8d4b8eb02ef3b` (`*.pimling.ajac-zero.com`).
   3. Delete DNS record `19fe94b9ae5bbfd5055cde0d7b76ae09` (`pimling.ajac-zero.com`) if the custom domain didn't take it.
 

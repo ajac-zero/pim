@@ -1,6 +1,14 @@
 import { memo } from "react";
 import type { BundledLanguage } from "shiki";
-import { Streamdown } from "streamdown";
+import {
+  defaultRehypePlugins,
+  Streamdown,
+  type StreamdownProps,
+} from "streamdown";
+
+type PluggableList = NonNullable<StreamdownProps["rehypePlugins"]>;
+type Pluggable = PluggableList[number];
+
 import {
   CodeBlock,
   CodeBlockCopyButton,
@@ -24,15 +32,117 @@ import { cn } from "~/lib/utils";
  * plugin is intentionally not installed, so there's a single source of
  * truth for code highlighting.
  */
+/** Links an untrusted text may keep: web and mail addresses, and places on the same page. */
+function safeLink(href: string | undefined): boolean {
+  return href !== undefined && /^(https?:|mailto:|#)/i.test(href);
+}
+
+/** Streamdown's sanitizer (rehype-sanitize), run here with a schema of Pim's own. */
+const sanitize = (defaultRehypePlugins.sanitize as [Pluggable, unknown])[0];
+
+/**
+ * What untrusted Markdown may become, and nothing else: text formatting,
+ * lists, tables, code, and links to web and mail addresses. No raw HTML is
+ * parsed (Streamdown's `raw` plugin isn't run), and this allowlist drops
+ * every element and attribute that could load or run something: images keep
+ * only their alt text, and there are no `picture`, `source`, media, frames,
+ * forms, styles or event handlers.
+ */
+export const UNTRUSTED_SCHEMA = {
+  tagNames: [
+    "a",
+    "b",
+    "blockquote",
+    "br",
+    "code",
+    "del",
+    "em",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "hr",
+    "i",
+    "img",
+    "input",
+    "li",
+    "ol",
+    "p",
+    "pre",
+    "s",
+    "span",
+    "strong",
+    "sub",
+    "sup",
+    "table",
+    "tbody",
+    "td",
+    "th",
+    "thead",
+    "tr",
+    "ul",
+  ],
+  attributes: {
+    a: ["href"],
+    code: [["className", /^language-[\w-]+$/]],
+    img: ["alt"],
+    input: [["type", "checkbox"], ["disabled", true], "checked"],
+    li: [["className", "task-list-item"]],
+    ol: ["start", ["className", "contains-task-list"]],
+    ul: [["className", "contains-task-list"]],
+    td: ["align"],
+    th: ["align"],
+  },
+  required: { input: { type: "checkbox", disabled: true } },
+  protocols: { href: ["http", "https", "mailto"] },
+  ancestors: {
+    tbody: ["table"],
+    td: ["table"],
+    th: ["table"],
+    thead: ["table"],
+    tr: ["table"],
+  },
+  strip: ["script", "style"],
+  clobber: [],
+  clobberPrefix: "",
+};
+
+const untrustedRehypePlugins: PluggableList = [
+  [sanitize, UNTRUSTED_SCHEMA] as Pluggable,
+  // Link hardening as well, behind the schema.
+  ...(defaultRehypePlugins.harden ? [defaultRehypePlugins.harden] : []),
+];
+
+/** No images: one from elsewhere would be fetched, and could carry what the text knows. Its alt text stands in. */
+const untrustedComponents = {
+  img: (props: object) => {
+    const { alt } = props as { alt?: unknown };
+    return (
+      <span className="text-muted-foreground">
+        [{typeof alt === "string" && alt !== "" ? alt : "image"}]
+      </span>
+    );
+  },
+};
+
 export const Markdown = memo(function Markdown({
   text,
   className,
   streaming,
+  untrusted,
 }: {
   text: string;
   className?: string;
   /** Disables copy affordances and incomplete-code-fence hooks while true. */
   streaming?: boolean;
+  /**
+   * For text kept and shown again, such as a Markdown artifact: raw HTML is
+   * dropped, images are replaced by their alt text, so showing it loads
+   * nothing from elsewhere, and links only go to web or mail addresses.
+   */
+  untrusted?: boolean;
 }) {
   return (
     <div
@@ -44,7 +154,10 @@ export const Markdown = memo(function Markdown({
     >
       <Streamdown
         isAnimating={streaming}
+        skipHtml={untrusted}
+        {...(untrusted ? { rehypePlugins: untrustedRehypePlugins } : {})}
         components={{
+          ...(untrusted ? untrustedComponents : {}),
           h1: ({ children }) => (
             <h1 className="mt-6 mb-3 font-semibold text-2xl">{children}</h1>
           ),
@@ -71,16 +184,19 @@ export const Markdown = memo(function Markdown({
             </blockquote>
           ),
           hr: () => <hr className="my-6 border-border" />,
-          a: ({ href, children }) => (
-            <a
-              href={href}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="font-medium text-foreground underline decoration-muted-foreground/50 underline-offset-2 transition-colors hover:decoration-foreground"
-            >
-              {children}
-            </a>
-          ),
+          a: ({ href, children }) =>
+            untrusted && !safeLink(href) ? (
+              <span>{children}</span>
+            ) : (
+              <a
+                href={href}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="font-medium text-foreground underline decoration-muted-foreground/50 underline-offset-2 transition-colors hover:decoration-foreground"
+              >
+                {children}
+              </a>
+            ),
           table: ({ children }) => (
             <div className="my-4 overflow-x-auto rounded-lg border scrollbar-thin">
               <table className="w-full border-collapse text-sm">

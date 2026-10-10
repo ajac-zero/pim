@@ -830,6 +830,76 @@ describe("the account", () => {
 	});
 });
 
+/** Has the person's Pim make an HTML artifact, as its model would, and returns its id. */
+async function makeArtifact(browser: Browser, content: string) {
+	faux.setResponses([toolUse("artifact_create", { title: "Page", kind: "html", content }), fauxAssistantMessage("Made it.")]);
+	expect((await browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Make a page", wait: true } })).status).toBe(200);
+	const { artifacts } = (await browser.json("/api/artifacts")).body as { artifacts: { id: string; title: string }[] };
+	return artifacts[0]!.id;
+}
+
+describe("artifacts", () => {
+	it("are shown only to their owner, at their owner's host", async () => {
+		const ada = await person("art-ada");
+		const bo = await person("art-bo");
+		const id = await makeArtifact(ada.browser, "<p>Ada's plans</p>");
+		const frame = await ada.browser.fetch(`/api/artifacts/${id}/versions/1/frame`);
+		expect(frame.status).toBe(200);
+		expect(frame.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
+		expect(frame.headers.get("content-security-policy")).toContain(`frame-ancestors ${hostOf("art-ada")}`);
+		expect(await frame.text()).toContain("Ada's plans");
+		// Bo's Pim has no such artifact, signed in or not, whatever path is asked.
+		for (const path of [`/api/artifacts/${id}`, `/api/artifacts/${id}/versions/1`, `/api/artifacts/${id}/versions/1/frame`, `/api/artifacts/${id}/versions/1/download`]) {
+			expect((await bo.browser.fetch(path)).status).toBe(404);
+		}
+		expect((await bo.browser.json("/api/artifacts")).body.artifacts).toEqual([]);
+		// Ada's cookies at Bo's host, and Ada's artifact anonymously at her own, open nothing.
+		const stolen = new Browser(hostOf("art-bo"));
+		stolen.cookies = new Map(ada.browser.cookies);
+		expect((await stolen.fetch(`/api/artifacts/${id}/versions/1/frame`)).status).toBe(401);
+		expect((await new Browser(hostOf("art-ada")).fetch(`/api/artifacts/${id}/versions/1/frame`)).status).toBe(401);
+		// The front door has no artifacts.
+		expect((await new Browser(FRONT).fetch(`/api/artifacts/${id}/versions/1/frame`)).status).not.toBe(200);
+	});
+
+	it("stop showing when the browser signs out, its passkey is removed, the Pimling is suspended, or it is deleted", async () => {
+		const cy = await person("art-cy");
+		const id = await makeArtifact(cy.browser, "<p>Cy's page</p>");
+		const frame = `/api/artifacts/${id}/versions/1/frame`;
+		// Signed out: the next load is refused (nothing was cached to show instead).
+		const other = new Browser(hostOf("art-cy"));
+		expect(await signIn(other, cy.passkey)).toBe(200);
+		expect((await other.fetch(frame)).status).toBe(200);
+		expect((await other.json("/auth/sign-out", { method: "POST" })).status).toBe(200);
+		expect((await other.fetch(frame)).status).toBe(401);
+		// Its passkey removed from another browser: the next load is refused.
+		const phone = new Browser(hostOf("art-cy"));
+		const phoneKey = await Authenticator.make("ES256", { rpId: `art-cy.${DOMAIN}`, origin: hostOf("art-cy") });
+		expect(await addPasskey(phone, phoneKey, { recovery: cy.registered.recoveryCodes[0]! })).toBe(200);
+		expect((await phone.fetch(frame)).status).toBe(200);
+		const { passkeys } = (await cy.browser.json("/auth/passkeys")).body as { passkeys: { id: string }[] };
+		const mine = (await phone.json("/auth/session")).body.passkey as string;
+		expect(passkeys.map((passkey) => passkey.id)).toContain(mine);
+		expect((await cy.browser.fetch(`/auth/passkeys/${encodeURIComponent(mine)}`, { method: "DELETE" })).status).toBe(200);
+		expect((await phone.fetch(frame)).status).toBe(401);
+		expect((await cy.browser.fetch(frame)).status).toBe(200);
+		// Suspended.
+		await admin("/admin/accounts/art-cy/suspend", { method: "POST", json: { reason: "test" } });
+		expect((await cy.browser.fetch(frame)).status).toBe(403);
+		await admin("/admin/accounts/art-cy/unsuspend", { method: "POST" });
+		expect((await cy.browser.fetch(frame)).status).toBe(200);
+		// In the export, every version.
+		const exported = JSON.parse(await (await cy.browser.fetch("/api/account/export")).text());
+		expect(exported.pim.artifacts).toEqual([expect.objectContaining({ id, versions: [expect.objectContaining({ version: 1, content: "<p>Cy's page</p>" })] })]);
+		// Deleted: gone, and the agent holds nothing.
+		expect((await cy.browser.json("/api/account", { method: "DELETE", json: { confirm: "art-cy" } })).body).toEqual({ deleted: true });
+		for (const path of [frame, `/api/artifacts/${id}/versions/1/download`, `/api/artifacts/${id}`]) {
+			expect((await cy.browser.fetch(path)).status).toBe(410);
+		}
+		expect(await holdings(cy.ownerId)).toMatchObject({ remaining: [] });
+	});
+});
+
 describe("the operator", () => {
 	it("needs the admin token", async () => {
 		expect((await new Browser(FRONT).json("/admin/stats")).status).toBe(401);
@@ -955,13 +1025,14 @@ describe("erasure boundaries", () => {
 	 * person registers. `duringErasure` lets the request go on from inside
 	 * the erasure itself, between its start and the wipe.
 	 */
-	function holdMemoryWrite(held: ReturnType<typeof gate>, options: { duringErasure: boolean }) {
+	function holdMemoryWrite(held: ReturnType<typeof gate>, options: { duringErasure: boolean; path?: RegExp }) {
 		const prototype = Pim.prototype as Pim;
 		const original = prototype.onRequest;
 		const seen = { outcome: "never resumed" };
 		let taken = false;
+		const path = options.path ?? /^\/memory\/log$/;
 		prototype.onRequest = async function (this: Pim, request: Request) {
-			if (taken || request.method !== "POST" || new URL(request.url).pathname !== "/memory/log") return original.call(this, request);
+			if (taken || request.method !== "POST" || !path.test(new URL(request.url).pathname)) return original.call(this, request);
 			taken = true;
 			if (options.duringErasure) {
 				const storage = this.ctx.storage as { deleteAll: DurableObjectStorage["deleteAll"] };
@@ -1003,6 +1074,23 @@ describe("erasure boundaries", () => {
 		}
 	});
 
+	it("refuses an artifact restore in the agent's handler that goes on while the erasure runs", async () => {
+		const held = gate();
+		const hook = holdMemoryWrite(held, { duringErasure: true, path: /^\/artifacts\/[^/]+\/restore$/ });
+		try {
+			const jo = await person("eb-artifact-handler");
+			const id = await makeArtifact(jo.browser, "<p>Jo's page</p>");
+			const late = jo.browser.json(`/api/artifacts/${id}/restore`, { method: "POST", json: { version: 1, baseVersion: 1 } });
+			await held.reached();
+			expect(await deleteAccount(jo.browser, "eb-artifact-handler")).toEqual({ deleted: true });
+			expect(hook.seen.outcome).toBe("answered 410");
+			expect((await late).status).toBe(410);
+			await expectErased(jo.ownerId);
+		} finally {
+			hook.restore();
+		}
+	});
+
 	it("drops a write held in the agent's handler until the instance has ended", async () => {
 		const held = gate();
 		const hook = holdMemoryWrite(held, { duringErasure: false });
@@ -1037,6 +1125,45 @@ describe("erasure boundaries", () => {
 		held.release();
 		await new Promise((resolve) => setTimeout(resolve, 300));
 		await expectErased(cy.ownerId);
+	});
+
+	it("keeps an artifact the model asks for during the erasure from being written", async () => {
+		const di = await person("eb-artifact");
+		const held = gate();
+		faux.setResponses([
+			async () => {
+				await held.hold();
+				return toolUse("artifact_create", { title: "Late", kind: "html", content: "<p>Made during erasure</p>" });
+			},
+		]);
+		await withAgentMethod(
+			"deleteEverything",
+			(original) =>
+				async function (this: Pim) {
+					const storage = this.ctx.storage as { deleteAll: DurableObjectStorage["deleteAll"] };
+					const wipe = storage.deleteAll.bind(this.ctx.storage);
+					storage.deleteAll = async (...args) => {
+						// The model asks for the artifact once the erasure has begun, before the wipe.
+						held.release();
+						await new Promise((resolve) => setTimeout(resolve, 100));
+						return wipe(...args);
+					};
+					return original.call(this);
+				},
+			async () => {
+				expect((await di.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Make a page" } })).status).toBe(202);
+				await held.reached();
+				expect(await deleteAccount(di.browser, "eb-artifact")).toEqual({ deleted: true });
+			},
+		);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		await expectErased(di.ownerId);
+		const rows = await runInDurableObject(env.Pim.getByName(di.ownerId), (_instance: Pim, state) =>
+			state.storage.sql.exec("SELECT COUNT(*) AS count FROM sqlite_master WHERE name = 'pim_artifact_versions'").one().count === 0
+				? 0
+				: state.storage.sql.exec("SELECT COUNT(*) AS count FROM pim_artifact_versions").one().count,
+		);
+		expect(rows).toBe(0);
 	});
 
 	it("keeps a model answer that arrives during the erasure from being written", async () => {

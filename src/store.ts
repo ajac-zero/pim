@@ -289,6 +289,8 @@ export class PimStore {
 			pim_credentials: "credentials",
 			pim_notifications: "notifications",
 			pim_push_subscriptions: "push subscriptions",
+			pim_artifacts: "artifacts",
+			pim_artifact_versions: "artifact versions",
 			pi_entries: "conversations",
 		};
 		const existing = new Set(

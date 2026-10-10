@@ -12,6 +12,7 @@ import {
   Pencil,
   Search,
   Settings,
+  Shapes,
   ShieldCheck,
   SlidersHorizontal,
   SquarePen,
@@ -209,6 +210,13 @@ export function AppSidebar({
             )}
           </SidebarItem>
           <SidebarNavItem
+            to="/artifacts"
+            icon={<Shapes className="size-4.5 shrink-0" />}
+            label={t("artifacts")}
+            collapsed={collapsed}
+            onNavigate={onNavigate}
+          />
+          <SidebarNavItem
             to="/notifications"
             icon={<Bell className="size-4.5 shrink-0" />}
             label={t("notifications")}
@@ -367,7 +375,7 @@ function SidebarNavItem({
   onNavigate,
   ...props
 }: {
-  to: "/notifications" | "/settings";
+  to: "/artifacts" | "/notifications" | "/settings";
   icon: ReactNode;
   label: string;
   count?: number;

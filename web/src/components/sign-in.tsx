@@ -38,6 +38,8 @@ export function SignIn({ session }: { session: PimAuthSession }) {
   const [device, setDevice] = useState(deviceCode);
   const [recovering, setRecovering] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // This device already has a passkey for this Pim: offer to sign in with it instead.
+  const [hasPasskeyHere, setHasPasskeyHere] = useState(false);
   // A link pasted into this tab changes only the hash; nothing reloads.
   useEffect(() => {
     const update = () => {
@@ -53,7 +55,8 @@ export function SignIn({ session }: { session: PimAuthSession }) {
     await queryClient.invalidateQueries();
     await router.invalidate();
   };
-  const onError = (failure: Error) =>
+  const onError = (failure: Error) => {
+    if (alreadyRegistered(failure)) setHasPasskeyHere(true);
     setError(
       cancelled(failure)
         ? null
@@ -61,12 +64,25 @@ export function SignIn({ session }: { session: PimAuthSession }) {
           ? t("passkeyAlreadyHere")
           : failure.message,
     );
+  };
   const signIn = useMutation({
     mutationFn: auth.signIn,
     onMutate: () => setError(null),
     onSuccess,
     onError,
   });
+  /**
+   * Leaves the enrollment for a plain sign-in with the passkey this device
+   * already has. The device code is dropped first, so it's never sent again
+   * from this page; the link itself stays good until it's used or expires, or
+   * the device that made it cancels it.
+   */
+  const signInInstead = () => {
+    forgetDeviceCode();
+    setDevice(null);
+    setHasPasskeyHere(false);
+    signIn.mutate();
+  };
   const create = useMutation({
     mutationFn: (recovery?: string) =>
       auth.addPasskey(
@@ -101,18 +117,33 @@ export function SignIn({ session }: { session: PimAuthSession }) {
                 {(session.host ?? location.host).replaceAll(".", ".\u200b")}
               </span>
             </p>
+            {/* Said here, where the choice is, instead of as an error below everything. */}
             <p className="mt-3 text-muted-foreground text-sm">
-              {t("addThisDeviceBody")}
+              {hasPasskeyHere
+                ? t("passkeyAlreadyHere")
+                : t("addThisDeviceBody")}
             </p>
-            <Button
-              className="mt-6 w-full"
-              size="lg"
-              onClick={() => create.mutate(undefined)}
-              disabled={pending}
-            >
-              {icon}
-              {t("createPasskey")}
-            </Button>
+            {hasPasskeyHere ? (
+              <Button
+                className="mt-6 w-full"
+                size="lg"
+                onClick={signInInstead}
+                disabled={pending}
+              >
+                {icon}
+                {t("signInWithThisPasskey")}
+              </Button>
+            ) : (
+              <Button
+                className="mt-6 w-full"
+                size="lg"
+                onClick={() => create.mutate(undefined)}
+                disabled={pending}
+              >
+                {icon}
+                {t("createPasskey")}
+              </Button>
+            )}
             <p className="mt-4 text-muted-foreground text-xs">
               {t("addThisDeviceNote")}
             </p>
@@ -122,6 +153,7 @@ export function SignIn({ session }: { session: PimAuthSession }) {
               onClick={() => {
                 forgetDeviceCode();
                 setDevice(null);
+                setHasPasskeyHere(false);
                 setError(null);
               }}
             >
@@ -217,7 +249,7 @@ export function SignIn({ session }: { session: PimAuthSession }) {
           />
         )}
 
-        {error && (
+        {error && !hasPasskeyHere && (
           <p role="alert" className="mt-4 text-destructive text-sm">
             {error}
           </p>

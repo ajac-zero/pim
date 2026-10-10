@@ -178,6 +178,11 @@ export class Directory extends DurableObject<Env> {
 		return { ok: true, account: this.account(ownerId)!, released };
 	}
 
+	/** Gives back a registration that could not be set up, so its username isn't held for a day. */
+	abandon(ownerId: string): void {
+		this.#sql("DELETE FROM accounts WHERE owner_id = ? AND status = 'pending'", ownerId);
+	}
+
 	/** The account's first passkey was made: it is the owner's now, for good. */
 	activate(ownerId: string, now = Date.now()): Account | null {
 		this.#sql(

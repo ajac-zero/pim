@@ -36,18 +36,25 @@ function ArtifactPage() {
     error,
     refetch,
   } = useQuery(artifactQuery(artifactId));
-  // A version the cached history lacks may be one made since (the agent works on): ask once before calling it missing.
-  const [askedFor, setAskedFor] = useState<number>();
-  const listed = artifact?.history.some((entry) => entry.version === v);
   const version = v ?? artifact?.version;
+  const listed = artifact?.history.some((entry) => entry.version === version);
+  // A version the cached history lacks may be one made since (the agent works on): ask once, for this artifact
+  // and version, before calling it missing. An answer to an earlier artifact or version counts for nothing.
+  const wanted = `${artifactId}:${version}`;
+  const [askedFor, setAskedFor] = useState<string>();
   useEffect(() => {
-    if (v !== undefined && listed === false && askedFor !== v) {
-      void refetch().finally(() => setAskedFor(v));
-    }
-  }, [v, listed, askedFor, refetch]);
+    if (listed !== false || askedFor === wanted) return;
+    let current = true;
+    void refetch().finally(() => {
+      if (current) setAskedFor(wanted);
+    });
+    return () => {
+      current = false;
+    };
+  }, [listed, askedFor, wanted, refetch]);
   const source = useQuery({
     ...artifactVersionQuery(artifactId, version ?? 0),
-    enabled: view === "source" && version !== undefined,
+    enabled: view === "source" && listed === true,
   });
 
   const restore = useMutation({
@@ -100,7 +107,7 @@ function ArtifactPage() {
   if (!artifact || version === undefined) return null;
   const current = artifact.history.find((entry) => entry.version === version);
   if (!current) {
-    if (askedFor !== version) return null;
+    if (askedFor !== wanted) return null;
     return (
       <main className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
         <p className="text-muted-foreground">

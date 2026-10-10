@@ -112,7 +112,7 @@ The admin API is on the front door, with `Authorization: Bearer $PIMLING_ADMIN_T
 What the fence stops, each covered by a test in `test/hosted/hosted.test.ts` ("erasure boundaries"):
 
 - **Open sockets** are closed (code `4010`), and nothing sent on them afterwards is taken.
-- **A request already inside the agent** when erasure starts ends with the instance: it gets `503`, a retry gets `410`, and its write never lands.
+- **A request already inside the agent** when erasure starts can't write. If its handler goes on while the erasure runs, the handler checks the fence again and refuses (`410`). If it is still waiting when the instance ends, it never goes on: the request gets `503`, and a retry gets `410`.
 - **A model request under way** can't write its answer, and can't hold up the deletion: stopping runs and ending apps' subscriptions get 3 seconds before the wipe goes ahead regardless.
 - **Approval timers** that outlive the agent decide nothing: under `auto`, an approval due after the deletion never runs its action.
 - **Scheduled work** due afterwards never runs: the wipe clears the alarm, and an alarm that fires anyway does nothing.

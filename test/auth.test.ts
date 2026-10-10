@@ -81,8 +81,8 @@ async function setupLink(): Promise<string> {
 	}
 }
 
-async function addPasskey(browser: Browser, authenticator: Authenticator, setup?: string) {
-	const options = await browser.fetch("/auth/passkeys/options", { method: "POST", json: setup ? { setup } : {} });
+async function addPasskey(browser: Browser, authenticator: Authenticator, setup?: string, allowedBy?: { device: string }) {
+	const options = await browser.fetch("/auth/passkeys/options", { method: "POST", json: allowedBy ?? (setup ? { setup } : {}) });
 	expect(options.status).toBe(200);
 	const response = await browser.fetch("/auth/passkeys", { method: "POST", json: await authenticator.register(await options.json()) });
 	expect(response.status).toBe(200);
@@ -370,6 +370,26 @@ describe("the agent behind a passkey session", () => {
 		expect(await browser.signedIn()).toBe(true);
 		const origin = await runInDurableObject(env.Pim.getByName(AGENT_NAME), async (instance: Pim) => instance.store.meta("public_origin"));
 		expect(origin).toBe(ORIGIN);
+	});
+});
+
+describe("adding another device", () => {
+	it("lets a browser signed in with a passkey link another device, once, and nobody else", async () => {
+		const { browser } = await signedInBrowser();
+		const made = await browser.fetch("/auth/device-link", { method: "POST" });
+		expect(made.status).toBe(201);
+		const { url: link } = (await made.json()) as { url: string };
+		expect(link).toMatch(/^https:\/\/pim\.test\/#device=[\w-]+$/);
+		const code = link.split("#device=")[1]!;
+
+		const phone = new Browser();
+		await addPasskey(phone, await Authenticator.make(), undefined, { device: code });
+		expect(await phone.signedIn()).toBe(true);
+		const again = await new Browser().fetch("/auth/passkeys/options", { method: "POST", json: { device: code } });
+		expect(again.status).toBe(401);
+		// The API token can't make one: it can't hand out sign-in.
+		const withToken = await new Browser().fetch("/auth/device-link", { method: "POST", headers: { Authorization: `Bearer ${TOKEN}` } });
+		expect(withToken.status).toBe(401);
 	});
 });
 

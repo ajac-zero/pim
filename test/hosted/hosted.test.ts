@@ -65,7 +65,7 @@ async function register(username: string, extra: Record<string, unknown> = {}) {
 	return front.json<Registered & { error?: string }>("/auth/register", { method: "POST", json: { username, ...extra } });
 }
 
-async function addPasskey(browser: Browser, authenticator: Authenticator, allowedBy: { setup?: string; recovery?: string } = {}) {
+async function addPasskey(browser: Browser, authenticator: Authenticator, allowedBy: { setup?: string; recovery?: string; device?: string } = {}) {
 	const options = await browser.json("/auth/passkeys/options", { method: "POST", json: allowedBy });
 	if (options.status !== 200) return options.status;
 	return (await browser.fetch("/auth/passkeys", { method: "POST", json: await authenticator.register(options.body) })).status;
@@ -419,6 +419,152 @@ describe("isolation between people", () => {
 		// AUTH_LIMITER allows 30 a minute.
 		expect(statuses.slice(0, 30).every((status) => status === 401)).toBe(true);
 		expect(statuses[30]).toBe(429);
+	});
+});
+
+/** A software passkey for `username`'s host, as a phone would make one. */
+const phoneKey = (username: string) => Authenticator.make("ES256", { rpId: `${username}.${DOMAIN}`, origin: hostOf(username) });
+
+/** A device link made by a signed-in browser, and its code. */
+async function deviceLink(browser: Browser) {
+	const made = await browser.json("/auth/device-link", { method: "POST" });
+	expect(made.status).toBe(201);
+	return { ...made.body, code: new URL(made.body.url).hash.replace("#device=", "") } as { url: string; expiresAt: string; code: string };
+}
+
+describe("adding another device", () => {
+	it("lets a signed-in browser link a phone, which makes its own passkey, once", async () => {
+		const ada = await person("dl-ada");
+		const before = (await ada.browser.json("/auth/passkeys")).body.passkeys;
+		const codesBefore = (await ada.browser.json("/auth/recovery-codes")).body.left;
+		const link = await deviceLink(ada.browser);
+		// On the owner's own host, with the code in the fragment, for ten minutes.
+		expect(link.url).toMatch(new RegExp(`^${hostOf("dl-ada")}/#device=[\\w-]{40,}$`));
+		expect(Date.parse(link.expiresAt) - Date.now()).toBeGreaterThan(9 * 60_000);
+		expect(Date.parse(link.expiresAt) - Date.now()).toBeLessThanOrEqual(10 * 60_000);
+
+		const phone = new Browser(hostOf("dl-ada"));
+		const phonePasskey = await phoneKey("dl-ada");
+		expect((await phone.json("/api/sessions")).status).toBe(401);
+		expect(await addPasskey(phone, phonePasskey, { device: link.code })).toBe(200);
+		expect((await phone.json("/api/sessions")).status).toBe(200);
+		// Later, the phone signs in with its own passkey.
+		expect(await signIn(new Browser(hostOf("dl-ada")), phonePasskey)).toBe(200);
+		// A second passkey: the first one, its session and the recovery codes are untouched.
+		const after = (await ada.browser.json("/auth/passkeys")).body.passkeys;
+		expect(after).toHaveLength(before.length + 1);
+		expect(after.map((p: { id: string }) => p.id)).toEqual(expect.arrayContaining(before.map((p: { id: string }) => p.id)));
+		expect((await ada.browser.json("/api/sessions")).status).toBe(200);
+		expect((await ada.browser.json("/auth/recovery-codes")).body.left).toBe(codesBefore);
+		// Once only, even from another tab.
+		expect(await addPasskey(new Browser(hostOf("dl-ada")), await phoneKey("dl-ada"), { device: link.code })).toBe(401);
+	});
+
+	it("lets only one of two tabs that opened the same link finish", async () => {
+		const bo = await person("dl-race");
+		const { code } = await deviceLink(bo.browser);
+		const [one, two] = [new Browser(hostOf("dl-race")), new Browser(hostOf("dl-race"))];
+		const [k1, k2] = [await phoneKey("dl-race"), await phoneKey("dl-race")];
+		const o1 = await one.json("/auth/passkeys/options", { method: "POST", json: { device: code } });
+		const o2 = await two.json("/auth/passkeys/options", { method: "POST", json: { device: code } });
+		expect([o1.status, o2.status]).toEqual([200, 200]);
+		const results = await Promise.all([
+			one.fetch("/auth/passkeys", { method: "POST", json: await k1.register(o1.body) }),
+			two.fetch("/auth/passkeys", { method: "POST", json: await k2.register(o2.body) }),
+		]);
+		expect(results.map((r) => r.status).sort()).toEqual([200, 401]);
+	});
+
+	it("is issued only to a browser signed in with a passkey", async () => {
+		const cy = await person("dl-issue");
+		const token = (await cy.browser.json("/auth/tokens", { method: "POST", json: { name: "CLI" } })).body.token as string;
+		// Not to an API token, not to nobody, and not from another site.
+		expect((await new Browser(hostOf("dl-issue")).json("/auth/device-link", { method: "POST", headers: { Authorization: `Bearer ${token}` } })).status).toBe(401);
+		expect((await new Browser(hostOf("dl-issue")).json("/auth/device-link", { method: "POST" })).status).toBe(401);
+		expect((await cy.browser.json("/auth/device-link", { method: "POST", headers: { origin: "https://evil.example" } })).status).toBe(403);
+		// It grants a passkey and nothing else: no API token, no admin, no recovery codes.
+		const { code } = await deviceLink(cy.browser);
+		const bearer = (value: string) => ({ headers: { Authorization: `Bearer ${value}` } });
+		expect((await new Browser(hostOf("dl-issue")).json("/api/sessions", bearer(code))).status).toBe(401);
+		expect((await new Browser(FRONT).json("/admin/stats", bearer(code))).status).toBe(401);
+		expect(await addPasskey(new Browser(hostOf("dl-issue")), await phoneKey("dl-issue"), { recovery: code })).toBe(401);
+	});
+
+	it("works only at the host of the person who made it", async () => {
+		const dee = await person("dl-dee");
+		await person("dl-eve");
+		const { code } = await deviceLink(dee.browser);
+		expect(await addPasskey(new Browser(hostOf("dl-eve")), await phoneKey("dl-eve"), { device: code })).toBe(401);
+		// Still good for its own host afterwards.
+		expect(await addPasskey(new Browser(hostOf("dl-dee")), await phoneKey("dl-dee"), { device: code })).toBe(200);
+	});
+
+	it("stops working when it expires, when a newer one is made, or when its browser signs out", async () => {
+		const fin = await person("dl-fin");
+		// Expired.
+		const old = await deviceLink(fin.browser);
+		await runInDurableObject(env.Auth.getByName(fin.ownerId), (_instance: Auth, state) => {
+			state.storage.sql.exec("UPDATE auth_device_links SET expires_at = ?", Date.now() - 1);
+		});
+		expect(await addPasskey(new Browser(hostOf("dl-fin")), await phoneKey("dl-fin"), { device: old.code })).toBe(401);
+		// Replaced by a newer one.
+		const first = await deviceLink(fin.browser);
+		const second = await deviceLink(fin.browser);
+		expect(await addPasskey(new Browser(hostOf("dl-fin")), await phoneKey("dl-fin"), { device: first.code })).toBe(401);
+		// Its browser signs out.
+		expect((await fin.browser.json("/auth/sign-out", { method: "POST" })).status).toBe(200);
+		expect(await addPasskey(new Browser(hostOf("dl-fin")), await phoneKey("dl-fin"), { device: second.code })).toBe(401);
+	});
+
+	it("stops working when the passkey that made it is removed, even after the options were given", async () => {
+		const gus = await person("dl-gus");
+		const extra = new Browser(hostOf("dl-gus"));
+		const { code: second } = await deviceLink(gus.browser);
+		expect(await addPasskey(extra, await phoneKey("dl-gus"), { device: second })).toBe(200);
+		// The original browser makes a link, and someone starts using it.
+		const { code } = await deviceLink(gus.browser);
+		const phone = new Browser(hostOf("dl-gus"));
+		const options = await phone.json("/auth/passkeys/options", { method: "POST", json: { device: code } });
+		expect(options.status).toBe(200);
+		// Meanwhile the owner removes the original passkey from the other device.
+		const passkeys = (await extra.json("/auth/passkeys")).body.passkeys as { id: string }[];
+		const own = (await extra.json("/auth/session")).body.passkey as string;
+		const original = passkeys.find((p) => p.id !== own)!;
+		expect((await extra.json(`/auth/passkeys/${encodeURIComponent(original.id)}`, { method: "DELETE" })).status).toBe(200);
+		const finish = await phone.fetch("/auth/passkeys", { method: "POST", json: await (await phoneKey("dl-gus")).register(options.body) });
+		expect(finish.status).toBe(401);
+	});
+
+	it("can't add a device to a suspended or deleted Pimling", async () => {
+		const hal = await person("dl-hal");
+		const suspended = await deviceLink(hal.browser);
+		await admin("/admin/accounts/dl-hal/suspend", { method: "POST" });
+		expect(await addPasskey(new Browser(hostOf("dl-hal")), await phoneKey("dl-hal"), { device: suspended.code })).toBe(403);
+		await admin("/admin/accounts/dl-hal/unsuspend", { method: "POST" });
+		const { code } = await deviceLink(hal.browser);
+		expect((await hal.browser.json("/api/account", { method: "DELETE", json: { confirm: "dl-hal" } })).body).toEqual({ deleted: true });
+		expect(await addPasskey(new Browser(hostOf("dl-hal")), await phoneKey("dl-hal"), { device: code })).toBe(410);
+		expect(await env.Auth.getByName(hal.ownerId).passkeys()).toEqual([]);
+	});
+});
+
+describe("finding your Pimling", () => {
+	it("gives the address of an existing Pimling, and nothing for others", async () => {
+		await person("find-me");
+		const front = new Browser(FRONT);
+		expect((await front.json("/auth/pimling?name=find-me")).body).toEqual({ url: hostOf("find-me") });
+		// Typed loosely.
+		expect((await front.json("/auth/pimling?name=%20Find-Me%20")).body).toEqual({ url: hostOf("find-me") });
+		for (const name of ["nobody-here", "evil.example.com", "a/b", "find-me.evil.com", "x", "admin"]) {
+			expect((await front.json(`/auth/pimling?name=${encodeURIComponent(name)}`)).status, name).toBe(404);
+		}
+		// A deleted one is gone.
+		await register("find-gone");
+		await runInDurableObject(directory(), async (instance: Directory) => {
+			const account = instance.resolve("find-gone")!;
+			await instance.requestDeletion(account.ownerId, "test");
+		});
+		expect((await front.json("/auth/pimling?name=find-gone")).status).toBe(404);
 	});
 });
 

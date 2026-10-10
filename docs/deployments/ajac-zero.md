@@ -26,7 +26,7 @@ Cloudflare renews the certificate along with the custom domain. If the custom do
 | Certificate pack for `pimling` and `*.pimling` | `fbaf98c3-32fe-4a27-872d-34a24e4f5ab1` | Created with the custom domain |
 | Route `*.pimling.ajac-zero.com/*` → `pimling` | `2e20f82bce114f189580235400c048fe` | wrangler (`routes`) |
 | DNS `AAAA *.pimling.ajac-zero.com` → `100::` (proxied) | `16774988657fb34e6ee8d4b8eb02ef3b` | API, by hand (not in the config) |
-| Secret `PIMLING_ADMIN_TOKEN` | — | `wrangler secret put` |
+| Secret `PIMLING_ADMIN_TOKEN` | Serving version `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (the same bundle, with the secret) | `wrangler secret put` |
 
 Nothing else in the zone changed. All 26 DNS records, the `packages.ajac-zero.com/*` route, and the other 10 custom domains are as they were.
 
@@ -57,7 +57,7 @@ Invite-only; at most 25 accounts and 3 registrations per address a day. Per pers
 
   The certificate pack goes with the custom domain.
 
-## Smoke test (2026-10-10, version `0e8a60a3`)
+## Smoke test (2026-10-10, version `d88a37fc`)
 
 Over real HTTPS, with disposable accounts `smoke-a1`, `smoke-b1` and `smoke-browser`, which were all deleted afterwards (29 of 29 scripted checks, plus a browser run):
 

@@ -269,6 +269,8 @@ export const Thread = memo(function Thread({
                     </div>
                   )}
                 </>
+              ) : "taskFailed" in view.error ? (
+                <p>{t("taskFailed")}</p>
               ) : (
                 <p>{t("notAnswered", { reason: view.error.reason })}</p>
               )}

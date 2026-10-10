@@ -393,12 +393,57 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
     }
   });
 
+  it("reads a fault as a model problem only for model tasks", () => {
+    const fault = (kind: string, message: string) =>
+      event({ type: "task_failed", taskId: "t", kind, message });
+    const unauthorized =
+      "Request failed (401): Bearer sk-secret-token for alice@example.com at https://tools.example.com/x";
+    for (const kind of ["pi.tool", "pim.schedule"]) {
+      const state = run([snapshot(), fault(kind, unauthorized)]);
+      expect(state.view.error).toEqual({ taskFailed: true });
+      expect(JSON.stringify(state.view)).not.toContain("sk-secret-token");
+    }
+    expect(
+      run([snapshot(), fault("pi.generation", unauthorized)]).view.error,
+    ).toEqual({ problem: "sign_in" });
+    expect(
+      run([
+        snapshot(),
+        fault("pi.compaction", "subscription_sharing_usage_limit_exceeded"),
+      ]).view.error,
+    ).toEqual({ problem: "usage_limit" });
+  });
+
+  it("keeps a fault's problem over the input's later reason, but not over its model error", () => {
+    const settle = (reason: string, detail?: string) =>
+      event({
+        type: "submission",
+        record: { id: "s1", status: "unanswered", reason, detail },
+      });
+    const fault = (kind: string, message: string) =>
+      event({ type: "task_failed", taskId: "t", kind, message });
+    expect(
+      run([
+        snapshot(),
+        fault("pi.generation", "OpenAI API error (401): unauthorized"),
+        settle("faulted"),
+      ]).view.error,
+    ).toEqual({ problem: "sign_in" });
+    expect(
+      run([
+        snapshot(),
+        fault("pi.tool", "boom"),
+        settle("model_error", "subscription_sharing_usage_limit_exceeded"),
+      ]).view.error,
+    ).toEqual({ problem: "usage_limit" });
+  });
+
   it("clears the error when the next run starts", () => {
     const state = run([
       snapshot(),
       event({ type: "task_failed", taskId: "t", kind: "run", message: "boom" }),
     ]);
-    expect(state.view.error).toEqual({ problem: "other" });
+    expect(state.view.error).toEqual({ taskFailed: true });
     expect(
       run([event({ type: "run_start", inputs: [] })], state).view.error,
     ).toBeNull();

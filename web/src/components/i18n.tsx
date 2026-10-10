@@ -140,6 +140,7 @@ const translations = {
     modelOther:
       "The model couldn't answer. Try again, or switch models in Settings.",
     notAnswered: "Not answered: {reason}",
+    taskFailed: "Something went wrong, so Pim couldn't finish. Try again.",
     model: "Model",
     modelChanged: "Pim now uses {model}",
     pasteAddress: "Address the browser landed on",
@@ -463,6 +464,8 @@ const translations = {
     modelOther:
       "El modelo no pudo responder. Inténtalo de nuevo o cambia de modelo en Configuración.",
     notAnswered: "Sin respuesta: {reason}",
+    taskFailed:
+      "Algo salió mal, así que Pim no pudo terminar. Inténtalo de nuevo.",
     model: "Modelo",
     modelChanged: "Pim ahora usa {model}",
     pasteAddress: "Dirección a la que llegó el navegador",

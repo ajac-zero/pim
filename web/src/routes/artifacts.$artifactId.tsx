@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, Download, History, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
   ArtifactCaution,
@@ -31,8 +31,20 @@ function ArtifactPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [view, setView] = useState<"preview" | "source">("preview");
-  const { data: artifact, error } = useQuery(artifactQuery(artifactId));
+  const {
+    data: artifact,
+    error,
+    refetch,
+  } = useQuery(artifactQuery(artifactId));
+  // A version the cached history lacks may be one made since (the agent works on): ask once before calling it missing.
+  const [askedFor, setAskedFor] = useState<number>();
+  const listed = artifact?.history.some((entry) => entry.version === v);
   const version = v ?? artifact?.version;
+  useEffect(() => {
+    if (v !== undefined && listed === false && askedFor !== v) {
+      void refetch().finally(() => setAskedFor(v));
+    }
+  }, [v, listed, askedFor, refetch]);
   const source = useQuery({
     ...artifactVersionQuery(artifactId, version ?? 0),
     enabled: view === "source" && version !== undefined,
@@ -41,12 +53,13 @@ function ArtifactPage() {
   const restore = useMutation({
     mutationFn: ({ from, base }: { from: number; base: number }) =>
       pim.restoreArtifact(artifactId, from, base),
-    onSuccess: (restored, { from }) => {
+    onSuccess: async (restored, { from }) => {
       toast.success(
         t("artifactRestored", { from, version: restored.restored }),
       );
-      void queryClient.invalidateQueries({ queryKey: ["artifacts"] });
-      void navigate({
+      // The new version must be in the history before the page shows it.
+      await queryClient.invalidateQueries({ queryKey: ["artifacts"] });
+      await navigate({
         to: "/artifacts/$artifactId",
         params: { artifactId },
         search: { v: restored.restored },
@@ -86,6 +99,25 @@ function ArtifactPage() {
   }
   if (!artifact || version === undefined) return null;
   const current = artifact.history.find((entry) => entry.version === version);
+  if (!current) {
+    if (askedFor !== version) return null;
+    return (
+      <main className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
+        <p className="text-muted-foreground">
+          {t("artifactVersionMissing", { version })}
+        </p>
+        <Button asChild variant="outline">
+          <Link
+            to="/artifacts/$artifactId"
+            params={{ artifactId }}
+            search={{ v: artifact.version }}
+          >
+            {t("artifactLatest", { version: artifact.version })}
+          </Link>
+        </Button>
+      </main>
+    );
+  }
   const isLatest = version === artifact.version;
 
   return (
@@ -216,13 +248,12 @@ function ArtifactPage() {
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
           <ArtifactCaution />
           <p className="text-muted-foreground text-xs">
-            {current &&
-              t("artifactVersionDetails", {
-                version,
-                latest: artifact.version,
-                size: formatBytes(current.size, formatNumber),
-                sha: current.sha256.slice(0, 12),
-              })}
+            {t("artifactVersionDetails", {
+              version,
+              latest: artifact.version,
+              size: formatBytes(current.size, formatNumber),
+              sha: current.sha256.slice(0, 12),
+            })}
             {artifact.session && (
               <>
                 {" · "}

@@ -3,7 +3,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { TranscriptMessage } from "../src/transcript";
-import { api, apiUrl, connect, post, say, TOKEN, textOf, url } from "./helpers";
+import { api, apiUrl, connect, post, say, TOKEN, textOf, toolUse, url } from "./helpers";
 import { AGENT_NAME } from "../src/agent";
 import { faux, type Pim } from "./worker";
 
@@ -138,6 +138,39 @@ describe("conversation", () => {
 		expect(renamed.body).toMatchObject({ id: first, title: "Lisbon", createdAt: expect.any(Number), updatedAt: expect.any(Number) });
 		expect((await api(`/sessions/${first}`, { method: "PUT", body: JSON.stringify({ title: " " }) })).status).toBe(400);
 		expect((await api("/sessions/999", { method: "PUT", body: JSON.stringify({ title: "x" }) })).status).toBe(404);
+	});
+
+	it("deletes a chat: it leaves the list and the API, and its scheduled tasks stop", async () => {
+		const kept = (await post("/sessions")).body.id;
+		const doomed = (await post("/sessions")).body.id;
+		for (const [session, instruction] of [
+			[doomed, "Remind me about the doomed chat."],
+			[kept, "Remind me about the kept chat."],
+		]) {
+			faux.setResponses([toolUse("schedule_task", { instruction, delay_seconds: 3600 }), fauxAssistantMessage("Will do.")]);
+			await say(instruction!, session);
+		}
+		const listed = async () => ((await api("/sessions")).body.sessions as { id: string }[]).map((s) => s.id);
+		const scheduledFor = async () => ((await api("/schedules")).body.schedules as { session: string }[]).map((s) => s.session);
+		expect(await scheduledFor()).toEqual(expect.arrayContaining([doomed, kept]));
+
+		expect(await api(`/sessions/${doomed}`, { method: "DELETE" })).toEqual({ status: 200, body: { deleted: true } });
+		expect(await listed()).not.toContain(doomed);
+		expect(await listed()).toContain(kept);
+		expect((await api(`/sessions/${doomed}/messages`)).status).toBe(404);
+		expect((await post(`/sessions/${doomed}/messages`, { content: "still there?" })).status).toBe(404);
+		expect((await api(`/sessions/${doomed}`, { method: "DELETE" })).status).toBe(404);
+		expect(await scheduledFor()).not.toContain(doomed);
+		expect(await scheduledFor()).toContain(kept);
+
+		// The root is where API clients talk by default: deleting hides it until it gets a message.
+		faux.setResponses([fauxAssistantMessage("Hi.")]);
+		await say("hello root");
+		expect((await api("/sessions/1", { method: "DELETE" })).status).toBe(200);
+		expect(await listed()).not.toContain("1");
+		faux.setResponses([fauxAssistantMessage("Back.")]);
+		expect((await say("hello again")).text).toBe("Back.");
+		expect(await listed()).toContain("1");
 	});
 
 	it("returns a receipt without waiting, and the operation settles later", async () => {

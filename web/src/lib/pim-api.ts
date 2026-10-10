@@ -111,6 +111,8 @@ export const pim = {
       method: "PUT",
       body: JSON.stringify({ title }),
     }),
+  deleteSession: (id: string) =>
+    call<{ deleted: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
   send: (session: string, content: string) =>
     call<{ operationId: string; accepted: boolean }>(
       `/sessions/${session}/messages`,

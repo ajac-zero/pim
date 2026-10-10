@@ -10,12 +10,13 @@ import { type PimServices, text } from "./services";
 
 /**
  * An action with effects outside the conversation. The model can only ask
- * for it: calling the tool files an approval request and waits a short time
- * for the user. The agent runs `run` once the user approves, or when the wait
- * runs out so autonomous work is never blocked, and the tool returns the
- * outcome within the same turn. Calls to a tool the user chose to always
- * approve are approved at once. A call interrupted by an eviction replays,
- * finds its request, and waits again.
+ * for it: calling the tool files an approval request and waits for the user.
+ * The agent runs `run` once the user approves. When nobody answers, the
+ * approval policy decides: `auto` approves it so autonomous work is never
+ * blocked, `explicit` denies it. Either way the tool returns the outcome
+ * within the same turn. Calls to a tool the user chose to always approve are
+ * approved at once. A call interrupted by an eviction replays, finds its
+ * request, and waits again.
  */
 export type GatedAction<P extends TSchema = TSchema> = {
 	readonly name: string;
@@ -33,9 +34,21 @@ export function defineGatedAction<P extends TSchema>(action: GatedAction<P>): Ga
 	return action;
 }
 
+/** How long an approval waits, as the model and the user read it. */
+export function describeWait(ms: number): string {
+	if (ms < 120_000) return `${ms / 1000} seconds`;
+	return `${Math.round(ms / 60_000)} minutes`;
+}
+
 /** Appended to the description of every tool that only files an approval request. */
-export const APPROVAL_NOTE =
-	'Requires the user\'s approval: calling this waits up to 30 seconds for the user, who may approve or deny; with no answer it is approved automatically. The result of the action is the result of this call.';
+export function approvalNote(services: PimServices): string {
+	const wait = describeWait(services.approvalTimeoutMs);
+	const timeout =
+		services.approvalPolicy === "explicit"
+			? "with no answer it is denied and the action does not happen"
+			: "with no answer it is approved automatically";
+	return `Requires the user's approval: calling this waits up to ${wait} for the user, who may approve or deny; ${timeout}. The result of the action is the result of this call.`;
+}
 
 /**
  * Files an approval request for the gated action `action` from inside a tool
@@ -49,11 +62,15 @@ export async function fileApproval(
 ): Promise<ToolExecutionResult> {
 	const id = await api.memo("approval", crypto.randomUUID(), context);
 	const known = services.store.approval(id);
+	const { approvalTimeoutMs, approvalPolicy } = services;
+	const now = Date.now();
 	const approval = services.store.requestApproval({
 		id,
 		session: String(api.conversationId),
 		callId: api.callId,
-		expiresAt: Date.now() + services.approvalTimeoutMs,
+		createdAt: now,
+		expiresAt: now + approvalTimeoutMs,
+		onTimeout: approvalPolicy === "explicit" ? "deny" : "approve",
 		...request,
 	});
 	// A tool the user always approves is approved without asking.
@@ -64,7 +81,7 @@ export async function fileApproval(
 function gatedTool(action: GatedAction, services: PimServices) {
 	return defineTool({
 		name: action.name,
-		description: `${action.description} ${APPROVAL_NOTE}`,
+		description: `${action.description} ${approvalNote(services)}`,
 		parameters: action.parameters,
 		replay: "safe",
 		async execute(args, api, context) {

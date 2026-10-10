@@ -17,3 +17,9 @@ export const notificationsQuery = () =>
 
 export const modelQuery = () =>
   queryOptions({ queryKey: ["model"], queryFn: pim.model });
+
+export const settingsQuery = () =>
+  queryOptions({ queryKey: ["settings"], queryFn: pim.settings });
+
+export const accountQuery = () =>
+  queryOptions({ queryKey: ["account"], queryFn: pim.account });

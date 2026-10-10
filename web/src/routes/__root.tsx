@@ -15,6 +15,7 @@ import { toast } from "sonner";
 import { AppSidebar, sessionTitle } from "~/components/app-sidebar";
 import { I18nProvider, useI18n } from "~/components/i18n";
 import { ShowReasoningProvider } from "~/components/reasoning-preference";
+import { Register } from "~/components/register";
 import { RouteError } from "~/components/route-error";
 import { SignIn } from "~/components/sign-in";
 import { ThemeProvider } from "~/components/theme";
@@ -49,10 +50,13 @@ function Root() {
   );
 }
 
-/** The app once this browser is signed in; the sign-in screen until then. */
+/**
+ * The app once this browser is signed in; the sign-in screen until then.
+ * Pimling's front door has no Pim of its own: it shows registration.
+ */
 function SignedIn({ children }: { children: ReactNode }) {
   const { data, error, refetch } = useQuery(authSessionQuery());
-  const signedOut = data?.signedIn === false;
+  const signedOut = data?.site !== "accounts" && data?.signedIn === false;
   // An open socket would keep streaming after signing out.
   useEffect(() => {
     if (signedOut) pimClient.close();
@@ -65,9 +69,8 @@ function SignedIn({ children }: { children: ReactNode }) {
     );
   }
   if (!data) return null;
-  if (!data.signedIn) {
-    return <SignIn hasPasskeys={data.hasPasskeys} canClaim={data.canClaim} />;
-  }
+  if (data.site === "accounts") return <Register session={data} />;
+  if (!data.signedIn) return <SignIn session={data} />;
   return children;
 }
 

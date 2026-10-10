@@ -251,8 +251,9 @@ export const pim = {
       if (error instanceof ApiError && error.status === 404) return null;
       throw error;
     }),
+  /** `deleted: false`: the account is closed, and erasing its data is still being retried. */
   deleteAccount: (username: string) =>
-    call<{ deleted: boolean }>("/account", {
+    call<{ deleted: boolean; nextAttemptAt?: string }>("/account", {
       method: "DELETE",
       body: JSON.stringify({ confirm: username }),
     }),

@@ -243,6 +243,10 @@ const translations = {
     typeUsernameToConfirm: "Type {username} to confirm",
     deleteForever: "Delete forever",
     deleteAccountButton: "Delete my account…",
+    accountClosedTitle: "Your account is closed",
+    accountClosedBody:
+      "Nobody can use it anymore, but erasing its data hasn't finished yet. Pimling keeps retrying until everything is erased; you don't need to do anything.",
+    leavePimling: "Leave",
   },
   es: {
     approvalRequested: "Pim necesita tu aprobación",
@@ -481,6 +485,10 @@ const translations = {
     typeUsernameToConfirm: "Escribe {username} para confirmar",
     deleteForever: "Eliminar para siempre",
     deleteAccountButton: "Eliminar mi cuenta…",
+    accountClosedTitle: "Tu cuenta está cerrada",
+    accountClosedBody:
+      "Ya nadie puede usarla, pero el borrado de sus datos aún no terminó. Pimling lo sigue intentando hasta borrarlo todo; no tienes que hacer nada.",
+    leavePimling: "Salir",
   },
 } as const;
 

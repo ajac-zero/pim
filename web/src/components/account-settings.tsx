@@ -395,24 +395,50 @@ export function TokensSection() {
   );
 }
 
+/** Pimling's front door, from a Pimling's own address. */
+function frontDoor(url: string): string {
+  const host = new URL(url).host;
+  return `${location.protocol}//${host.slice(host.indexOf(".") + 1)}`;
+}
+
 /** Pimling: deleting the account, after typing its username. */
 export function DeleteAccountSection() {
   const { t } = useI18n();
   const { data: account } = useQuery(accountQuery());
   const [confirming, setConfirming] = useState(false);
   const [typed, setTyped] = useState("");
+  // Set when the account is closed but erasing its data hasn't finished.
+  const [stillErasing, setStillErasing] = useState(false);
   const remove = useMutation({
     mutationFn: ({ username }: Account) => pim.deleteAccount(username),
-    onSuccess: (_deleted, { url }) => {
-      // Back to the front door: everything here is gone.
-      const host = new URL(url).host;
-      window.location.assign(
-        `${location.protocol}//${host.slice(host.indexOf(".") + 1)}`,
-      );
+    onSuccess: (result, { url }) => {
+      if (!result.deleted) {
+        setStillErasing(true);
+        return;
+      }
+      window.location.assign(frontDoor(url));
     },
     onError: (error) => toast.error(error.message),
   });
   if (!account) return null;
+  if (stillErasing) {
+    return (
+      <Section title={t("deleteAccount")}>
+        <div
+          role="status"
+          className="space-y-3 rounded-xl border border-destructive/30 px-4 py-3"
+        >
+          <p className="font-medium text-sm">{t("accountClosedTitle")}</p>
+          <p className="text-muted-foreground text-sm">
+            {t("accountClosedBody")}
+          </p>
+          <Button variant="outline" asChild>
+            <a href={frontDoor(account.url)}>{t("leavePimling")}</a>
+          </Button>
+        </div>
+      </Section>
+    );
+  }
   return (
     <Section title={t("deleteAccount")}>
       <div className="space-y-3 rounded-xl border border-destructive/30 px-4 py-3">

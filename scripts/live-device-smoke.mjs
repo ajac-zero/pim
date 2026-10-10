@@ -204,8 +204,10 @@ let registered = false;
 // Whether it's closed: deleted (200), being erased (202), or already gone (410).
 let deleted = false;
 
-/** A deletion answer that means the account is closed for good. */
-const closed = (status) => status === 200 || status === 202 || status === 410;
+/** An answer to this run's own deletion that means it worked: erased (200), or closed and still being erased (202). */
+const deletionAccepted = (status) => status === 200 || status === 202;
+/** For cleanup: closed for good, including already gone (410). */
+const closed = (status) => deletionAccepted(status) || status === 410;
 /**
  * Deletes the account with a tab's passkey session. That cookie is the Pimling host's own, and the
  * host refuses requests from other origins, so the tab goes there first if it's elsewhere (such as
@@ -303,8 +305,9 @@ try {
 
 	// Deletion, with the phone still signed in.
 	const deletion = await deleteAccount(desktop);
+	// A 410 here means something else already deleted it: closed, so no cleanup, but not this run's deletion.
 	deleted = closed(deletion.status);
-	check("deleted from the desktop", deletion.status === 200, `HTTP ${deletion.status}`);
+	check("deleted from the desktop", deletionAccepted(deletion.status), `HTTP ${deletion.status}`);
 
 	// At once, the phone's session opens nothing: whichever Worker answers, it refuses.
 	const now = await phone.api("/api/sessions");

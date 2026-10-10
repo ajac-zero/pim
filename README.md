@@ -2,7 +2,7 @@
 
 An open-source personal agent you deploy to your own Cloudflare account. Inspired by Meta's [Muse](https://ai.meta.com/muse/): it remembers what matters to you, turns goals into plans, keeps working in the background, and asks before acting on the world.
 
-Each deployment is one agent, for the one person who deployed it. There is no hosted, multi-user pim: if you want one, you deploy your own, and your conversations and memories stay in your Cloudflare account.
+Each deployment is one agent, for the one person who deployed it: your conversations and memories stay in your Cloudflare account. The same code also runs **Pimling**, a hosted service where each person gets their own Pim at `<username>.<domain>` (see [Hosting Pimling](docs/hosting.md)). Nothing about hosting is needed to self-host.
 
 This repository is the agent, its API, and its web app ([`web/`](web)): chat, approvals, notifications and settings, signed in with a passkey. One Worker serves all of it. Mobile apps and messaging bridges can use the same API with an API token.
 
@@ -42,7 +42,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 | Goals and plans | `create_goal`, `update_goal`, `list_goals` | Goals have step-by-step plans and progress notes. Active goals are always in the prompt. |
 | Background work | `schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task` | Delays, dates, or cron. When a task fires, the agent receives a `[Scheduled task]` message in the session that scheduled it. |
 | Reaching you | `notify_user` | Stored, pushed to connected sockets, sent as Web Push to browsers that turned it on in Settings (even with the app closed), and POSTed to an optional webhook. |
-| Asking first | `http_request` | Gated: the call files an approval request. The action runs when you approve, or automatically after 30 seconds without an answer so autonomous jobs never block; deny to stop it. The call waits for your answer, and the result comes back within the same turn. Choose **Always approve** and later calls to that tool run without asking; Settings lists those tools and takes them back. |
+| Asking first | `http_request` | Gated: the call files an approval request. The action runs when you approve; deny to stop it. Without an answer, the approval policy decides: `auto` approves after 30 seconds so autonomous jobs never block, `explicit` denies after 5 minutes so nothing happens without a yes. The call waits for your answer, and the result comes back within the same turn. Choose **Always approve** and later calls to that tool run without asking; Settings lists those tools and takes them back. |
 | Connected apps | `connect_app` (gated), `list_apps`, plus each app's tools | Remote MCP servers, with OAuth sign-in. Tools that don't declare themselves read-only need approval. See [Connected apps](#connected-apps). |
 | App skills | `read_skill`, `read_skill_file` | Instructions apps publish over the MCP Skills extension, checked against the app's digests. |
 | App events | `list_app_events`, `watch_app_event` (gated), `list_watches`, `stop_watch` | Apps notify Pim when something happens (draft MCP Events, webhooks); each event starts a run with the watch's instruction. |
@@ -61,7 +61,7 @@ The button copies this repository to your GitHub account and deploys it to your 
 - **More passkeys** (your phone, another browser) come from Settings.
 - **Missed the 15 minutes, or lost every passkey?** The sign-in screen has the Worker write a one-time setup link to its logs, which only someone signed in to your Cloudflare account can read. In the dashboard, open Workers & Pages, then `pim`, then Observability, and open the link in the log that starts with "Pim setup link". It works once, for an hour.
 
-Sessions last 30 days, and removing a passkey signs out the browsers it signed in. Passkeys belong to the hostname the app is served from, so moving Pim to another domain means creating new ones.
+Sessions last 30 days, and removing a passkey signs out the browsers it signed in. API tokens for other clients are made in Settings (`POST /auth/tokens` with a passkey session) and revoked there. Passkeys belong to the hostname the app is served from, so moving Pim to another domain means creating new ones.
 
 Or from a checkout:
 
@@ -85,12 +85,17 @@ Configuration lives in `vars` in `wrangler.jsonc`:
 | `PIM_MEMORY_MODEL` | empty | Model that compresses memories; empty uses `PIM_MODEL`, never the ChatGPT plan |
 | `PIM_MEMORY_LINES` | `96` | Lines of long-term memory in every prompt (about 8k tokens) |
 | `PIM_PUBLIC_URL` | empty | Public URL apps deliver events to; empty uses the origin of your API requests |
+| `PIM_APPROVAL_POLICY` | `auto` | What an unanswered approval becomes: `auto` approves it after 30 seconds, `explicit` denies it after 5 minutes. You can change it in Settings |
+| `PIM_MODELS` | empty | Workers AI or AI Gateway models sessions may use besides `PIM_MODEL`, comma-separated; empty allows any |
+| `PIM_LIMITS` | empty | Usage limits as JSON, such as `{"dailyTokens": 2000000, "dailyRuns": 500}`; empty is none. Every limit is in [`src/usage.ts`](src/usage.ts) |
+
+`PIM_TIME_ZONE` and `PIM_APPROVAL_POLICY` are defaults: your own choices in Settings (`PUT /settings`) take their place.
 
 For local development, copy `.dev.vars.example` to `.dev.vars` and run `pnpm dev`: the Worker and the built web app at `http://localhost:8787`. Its first 15 minutes count as just deployed, and setup links show up in the terminal. For the web app with hot reload, also run `PIM_API_TOKEN=... pnpm dev:web` (port 3000), which signs in with the token. The `AI` binding is remote, so `wrangler dev` needs a Cloudflare login, and model calls bill that account.
 
 ## API
 
-The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out the prefix. The web app calls it with its passkey session. Other clients send `Authorization: Bearer <PIM_API_TOKEN>`, which works only once you set that secret; WebSockets from clients that can't set headers pass `?token=<PIM_API_TOKEN>` instead. Only the two paths connected apps call stay at the root, without the prefix: `/mcp/callback` and `/mcp/events/:watch`. Sessions are separate conversations. The root session is `1`.
+The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out the prefix. The web app calls it with its passkey session. Other clients send `Authorization: Bearer <token>`: a token made in Settings (API tokens), or `PIM_API_TOKEN` once you set that secret. WebSockets from clients that can't set headers pass `?token=<token>` instead. Only the two paths connected apps call stay at the root, without the prefix: `/mcp/callback` and `/mcp/events/:watch`. Sessions are separate conversations. The root session is `1`.
 
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
@@ -105,6 +110,10 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | POST | `/sessions/:s/abort` | `{ operationId? }` | Withdraws one operation, or stops everything |
 | POST | `/sessions/:s/reset` | `{ handoff? }` | Starts a fresh context; history stays stored |
 | PUT | `/sessions/:s/model` | `{ model }` | Changes one session's model: a Workers AI or AI Gateway id |
+| GET | `/settings` | | `{ timeZone, approvalPolicy, approvalTimeoutSeconds, notifyWebhook }` |
+| PUT | `/settings` | Any of `{ timeZone, approvalPolicy, notifyWebhook }`; `null` goes back to the deployment's | The settings |
+| GET | `/usage` | | `{ limits, today, history, storageBytes }`: model requests, tokens (the ChatGPT plan's apart) and runs by UTC day |
+| GET | `/export` | | Everything as one JSON download, without credentials |
 | GET | `/model` | | `{ model, default, choices, chatgpt: { connected, email, error } }`: the model every session uses, and the ones you can choose |
 | PUT | `/model` | `{ provider, id }`, one of `choices` | Moves every session, and new ones, to that model |
 | GET | `/chatgpt` | | `{ connected, email }` |
@@ -121,7 +130,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | DELETE | `/goals/:id` | | |
 | GET | `/schedules` | | Pending scheduled tasks |
 | DELETE | `/schedules/:id` | | Cancel one |
-| GET | `/approvals`, `/approvals/:id` | `?status=pending\|approved\|denied` | Approval requests |
+| GET | `/approvals`, `/approvals/:id` | `?status=pending\|approved\|denied` | Approval requests; each says what its timeout decides (`onTimeout`) and who decided it (`decidedBy`: `user`, `timeout` or `always`) |
 | POST | `/approvals/:id/approve`, `/approvals/:id/deny` | `{ note? }` | The decided approval; `409` if already decided |
 | POST | `/approvals/:id/approve` | `{ note?, always: true }` | Also approves every later call to the same tool (the approval's `tool`), and other pending calls to it |
 | GET | `/always-approved` | | `{ tools: [{ tool, createdAt }] }`: tools whose calls are approved without asking |
@@ -233,7 +242,7 @@ MCP servers expose tools, prompts and resources; pim uses their tools, instructi
 ## Develop
 
 ```sh
-pnpm test        # Vitest in workerd, with pi-ai's faux model, then the web app's tests; no Cloudflare account needed
+pnpm test        # Vitest in workerd (self-hosted and Pimling Workers), with pi-ai's faux model, then the web app's tests; no Cloudflare account needed
 pnpm test:live   # live checks against real MCP servers (Hugging Face's); needs the network
 pnpm typecheck
 pnpm types       # regenerate worker-configuration.d.ts after editing wrangler.jsonc

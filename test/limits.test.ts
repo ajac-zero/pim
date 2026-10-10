@@ -3,7 +3,8 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { AGENT_NAME } from "../src/agent";
 import type { Limits } from "../src/usage";
-import { api, post, say, url } from "./helpers";
+import { exports } from "cloudflare:workers";
+import { api, apiUrl, post, say, TOKEN, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 const agent = () => env.Pim.getByName(AGENT_NAME);
@@ -119,6 +120,10 @@ describe("export", () => {
 			instance.store.putCredential("openai", JSON.stringify({ type: "oauth", access: "SECRET-ACCESS-TOKEN", refresh: "SECRET-REFRESH" }));
 			return instance.exportData();
 		});
+		// The API serves the same export as a download.
+		const download = await exports.default.fetch(new Request(apiUrl("/export"), { headers: { Authorization: `Bearer ${TOKEN}` } }));
+		expect(download.headers.get("content-disposition")).toMatch(/^attachment; filename="pim-export-/);
+		expect(await download.text()).not.toContain("SECRET-");
 		const data = JSON.parse(exported);
 		expect(data).toMatchObject({ format: "pim-export", version: 1, settings: { timeZone: "America/New_York" } });
 		expect(JSON.stringify(data.memory)).toContain("Likes window seats");

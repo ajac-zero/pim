@@ -370,6 +370,15 @@ async function serveFrontDoor(request: Request, env: HostedEnv): Promise<Respons
 		const taken = (await directory(env).resolve(name)) !== null;
 		return json(taken ? { available: false, reason: "That username is taken." } : { available: true });
 	}
+	if (route === "GET /auth/pimling") {
+		// Signing in again: the address of an existing Pimling, built here from a valid username only.
+		const name = (url.searchParams.get("name") ?? "").trim().toLowerCase();
+		const account = usernameProblem(name) === null ? await directory(env).resolve(name) : null;
+		if (!account || account.status === "deleted" || account.status === "deleting") {
+			return fail(404, "There's no Pimling with that username.");
+		}
+		return json({ url: pimUrl(request, env, account.username) });
+	}
 	if (route === "POST /auth/register") return register(request, env);
 	if (url.pathname.startsWith("/auth/") || url.pathname.startsWith("/api/")) return fail(404, "Not found");
 	return env.ASSETS.fetch(request);

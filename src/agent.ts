@@ -913,6 +913,8 @@ export class Pim extends Agent<Env> {
 	// HTTP API
 
 	async onRequest(request: Request): Promise<Response> {
+		// Checked again here, not only in `fetch`: erasure may have begun while the request was on its way in.
+		if (this.#closed()) return Response.json({ error: "This Pim was erased" }, { status: 410 });
 		// Apps deliver events to callback URLs on this origin, so remember the one the owner uses.
 		if (request.headers.get(AUTHORIZED_HEADER) === "1") {
 			const origin = new URL(request.url).origin;

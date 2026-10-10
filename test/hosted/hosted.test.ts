@@ -744,6 +744,80 @@ describe("erasure boundaries", () => {
 		await expectErased(ben.ownerId);
 	});
 
+	/**
+	 * Holds the first `POST /memory/log` inside the agent's request handler,
+	 * past the Worker and the agent's `fetch`, and records how it ended. The
+	 * SDK binds `onRequest` when an agent is made, so this goes in before the
+	 * person registers. `duringErasure` lets the request go on from inside
+	 * the erasure itself, between its start and the wipe.
+	 */
+	function holdMemoryWrite(held: ReturnType<typeof gate>, options: { duringErasure: boolean }) {
+		const prototype = Pim.prototype as Pim;
+		const original = prototype.onRequest;
+		const seen = { outcome: "never resumed" };
+		let taken = false;
+		prototype.onRequest = async function (this: Pim, request: Request) {
+			if (taken || request.method !== "POST" || new URL(request.url).pathname !== "/memory/log") return original.call(this, request);
+			taken = true;
+			if (options.duringErasure) {
+				const storage = this.ctx.storage as { deleteAll: DurableObjectStorage["deleteAll"] };
+				const wipe = storage.deleteAll.bind(this.ctx.storage);
+				storage.deleteAll = async (...args) => {
+					held.release();
+					// Long enough for the held request to go on before the wipe.
+					await new Promise((resolve) => setTimeout(resolve, 100));
+					return wipe(...args);
+				};
+			}
+			await held.hold();
+			try {
+				const response = await original.call(this, request);
+				seen.outcome = `answered ${response.status}`;
+				return response;
+			} catch (error) {
+				seen.outcome = `threw ${error instanceof Error ? error.message : String(error)}`;
+				throw error;
+			}
+		};
+		return { seen, restore: () => (prototype.onRequest = original) };
+	}
+
+	it("refuses a write in the agent's handler that goes on while the erasure runs", async () => {
+		const held = gate();
+		const hook = holdMemoryWrite(held, { duringErasure: true });
+		try {
+			const gil = await person("eb-handler-during");
+			const late = gil.browser.json("/api/memory/log", { method: "POST", json: { text: "Written during erasure" } });
+			await held.reached();
+			expect(await deleteAccount(gil.browser, "eb-handler-during")).toEqual({ deleted: true });
+			// It went on before the wipe, and the agent, already erasing, refused it.
+			expect(hook.seen.outcome).toBe("answered 410");
+			expect((await late).status).toBe(410);
+			await expectErased(gil.ownerId);
+		} finally {
+			hook.restore();
+		}
+	});
+
+	it("drops a write held in the agent's handler until the instance has ended", async () => {
+		const held = gate();
+		const hook = holdMemoryWrite(held, { duringErasure: false });
+		try {
+			const hal = await person("eb-handler-after");
+			const late = hal.browser.json("/api/memory/log", { method: "POST", json: { text: "Written after deletion" } });
+			await held.reached();
+			expect(await deleteAccount(hal.browser, "eb-handler-after")).toEqual({ deleted: true });
+			held.release();
+			// The instance it was in ended with the erasure: the request gets "try again", and its handler never goes on.
+			expect((await late).status).toBe(503);
+			await new Promise((resolve) => setTimeout(resolve, 200));
+			expect(hook.seen.outcome).toBe("never resumed");
+			await expectErased(hal.ownerId);
+		} finally {
+			hook.restore();
+		}
+	});
+
 	it("keeps a model request under way from writing its answer", async () => {
 		const cy = await person("eb-model");
 		const held = gate();

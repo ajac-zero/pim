@@ -17,8 +17,9 @@ import { digestHex } from "../auth/store";
  *
  * Erasing an owner's agent and sign-in is a cleanup job kept here, so it
  * survives failures: it is tried at once, retried on this object's alarm
- * until it succeeds, and counts as done only when both objects are checked
- * empty. An account being deleted is `deleting` until then, and its
+ * until it succeeds, and counts as done only when the agent is marked
+ * erased (it then refuses every request, however late) and both objects are
+ * checked empty. An account being deleted is `deleting` until then, and its
  * hostname already answers nothing.
  */
 
@@ -370,10 +371,11 @@ export class Directory extends DurableObject<Env> {
 		} catch (error) {
 			ended = error;
 		}
-		const remaining = await this.#remainingData(ownerId);
-		if (remaining.length > 0) {
+		const { sealed, remaining } = await this.#erasure(ownerId);
+		if (!sealed || remaining.length > 0) {
 			const why = ended instanceof Error ? ended.message : ended === undefined ? "" : String(ended);
-			throw new Error(`The agent still holds ${remaining.join(", ")}${why ? ` (${why})` : ""}`);
+			const what = remaining.length > 0 ? `still holds ${remaining.join(", ")}` : "is not marked erased";
+			throw new Error(`The agent ${what}${why ? ` (${why})` : ""}`);
 		}
 		const auth = this.env.Auth.getByName(ownerId);
 		await auth.deleteEverything();
@@ -382,14 +384,15 @@ export class Directory extends DurableObject<Env> {
 	}
 
 	/**
-	 * What the agent still holds, asked of a fresh instance. A destroyed agent
-	 * takes a moment to go: calls reaching it meanwhile fail, so they are
-	 * retried briefly before the attempt counts as failed.
+	 * Whether the agent is marked erased and what it still holds, asked of a
+	 * fresh instance. An erased agent's instance takes a moment to go: calls
+	 * reaching it meanwhile fail, so they are retried briefly before the
+	 * attempt counts as failed.
 	 */
-	async #remainingData(ownerId: string): Promise<string[]> {
+	async #erasure(ownerId: string): Promise<{ sealed: boolean; remaining: string[] }> {
 		for (let attempt = 1; ; attempt++) {
 			try {
-				return await (await getAgentByName(this.env.Pim, ownerId)).remainingData();
+				return await (await getAgentByName(this.env.Pim, ownerId)).erasure();
 			} catch (error) {
 				if (attempt === 5) throw error;
 				await new Promise((resolve) => setTimeout(resolve, attempt * 100));

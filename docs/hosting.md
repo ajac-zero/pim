@@ -51,7 +51,16 @@ pnpm wrangler login
 pnpm run deploy:hosted   # builds web/, then deploys the "pimling" Worker
 ```
 
-`pnpm wrangler deploy --dry-run --config wrangler.hosted.jsonc` checks the bundle without touching your account. Locally, `pnpm dev:hosted` serves it, but passkeys need real hostnames: use a test zone, or run the tests.
+`pnpm wrangler deploy --dry-run --config wrangler.hosted.jsonc` checks the bundle without touching your account.
+
+## Preview locally
+
+`pnpm preview:hosted` builds the web app and serves Pimling at <http://pimling.localhost:8787> from `wrangler.preview.jsonc`. Browsers send every `*.localhost` name to your machine, so `alice.pimling.localhost:8787` works without DNS. The preview uses no remote bindings, so it touches no Cloudflare account, even when `wrangler` is logged in. Its state is kept in `.wrangler/state-preview`.
+
+- **Passkeys.** Chrome, Safari and Edge on a laptop or phone use their own. On a machine without one (a Linux desktop, a headless browser), start Chrome with `--remote-debugging-port=9222` and run `node scripts/virtual-authenticator.mjs 9222`: it gives every tab a virtual passkey that answers at once. Or use DevTools → More tools → WebAuthn.
+- **Models.** Workers AI needs an account, so the preview binds a stand-in. Chats on the platform model end with "Not answered: model_error". Connect a ChatGPT plan in Settings to chat for real.
+- **Operator.** The admin API answers `Authorization: Bearer preview-admin`, for example `curl -H "Authorization: Bearer preview-admin" http://pimling.localhost:8787/admin/stats`.
+- **Never deploy `wrangler.preview.jsonc`.** It has no routes, but also open registration and a known admin token.
 
 The first deploy creates the `Pim`, `Auth` and `Directory` classes (migrations `v1` to `v3`). The `pimling` Worker is separate from any self-hosted `pim` Worker and shares no data with it.
 
@@ -98,7 +107,27 @@ The admin API is on the front door, with `Authorization: Bearer $PIMLING_ADMIN_T
 
 **Abuse and limits.** Per address: `AUTH_LIMITER` (30 sign-in, recovery and registration attempts a minute) and `PIMLING_REGISTRATIONS_PER_ADDRESS` (3 a day). Per person: `API_LIMITER` (600 requests a minute), `PIM_LIMITS` (tokens, model requests, runs, chats, schedules, apps, storage), and `PIM_MODELS`, so only models you pay for can be chosen. Paid `web_search` stays off.
 
-**Deleting an account** makes it `deleting` in the Directory first, so its hostname stops working at once (`410`), and queues a cleanup job there. The job wipes the agent (runs aborted, app event subscriptions stopped, sockets closed, storage and alarms deleted, schedules and credentials with them), writes an erased mark into the empty storage, flushes it, and ends the agent's instance so nothing under way there can write afterwards. Every later instance finds the mark and refuses everything: requests (`410`), sockets, alarms and the service's own writes. That makes the agent itself the fence: a request a Worker authorized just before the deletion, or with an account it still had cached, can't write after it. The job then checks a fresh instance is marked and holds nothing, and wipes and checks the Auth object. Only then is the account `deleted`; a request that slipped in before the mark makes the check fail, and the retry wipes it. Destroying an agent ends the call that asked for it, so that call's result is never trusted either way: the check decides. A failed attempt is retried on the Directory's alarm after 1, 5 and 30 minutes, 2 hours, then every 6 hours, and the person is told the account is closed and still being erased (`202`). The username stays taken.
+**Deleting an account** makes it `deleting` in the Directory first, so its hostname stops working at once (`410`), and queues a cleanup job there. The job wipes the agent (runs aborted, app event subscriptions stopped, sockets closed, storage and alarms deleted, schedules and credentials with them), writes an erased mark into the empty storage, flushes it, and ends the agent's instance so nothing under way there can write afterwards. Every later instance finds the mark and refuses everything: requests (`410`), sockets, alarms and the service's own writes. That makes the agent itself the fence: a request a Worker authorized just before the deletion, or with an account it still had cached, can't write after it. The job then checks a fresh instance is marked and holds nothing, and wipes and checks the Auth object. Only then is the account `deleted`; a request that slipped in before the mark makes the check fail, and the retry wipes it.
+
+What the fence stops, each covered by a test in `test/hosted/hosted.test.ts` ("erasure boundaries"):
+
+- **Open sockets** are closed (code `4010`), and nothing sent on them afterwards is taken.
+- **A request already inside the agent** when erasure starts ends with the instance: it gets `503`, a retry gets `410`, and its write never lands.
+- **A model request under way** can't write its answer, and can't hold up the deletion: stopping runs and ending apps' subscriptions get 3 seconds before the wipe goes ahead regardless.
+- **Approval timers** that outlive the agent decide nothing: under `auto`, an approval due after the deletion never runs its action.
+- **Scheduled work** due afterwards never runs: the wipe clears the alarm, and an alarm that fires anyway does nothing.
+- **A Worker with the account still cached**, its already-authorized requests and sockets, app event callbacks, and the service's own writes (`provision`, settings, limits, runs) all get `410`. Destroying an agent ends the call that asked for it, so that call's result is never trusted either way: the check decides. A failed attempt is retried on the Directory's alarm after 1, 5 and 30 minutes, 2 hours, then every 6 hours, and the person is told the account is closed and still being erased (`202`). The username stays taken.
+
+## Before launch
+
+The code is ready for review; these are not code, and are needed before real people use it:
+
+1. **Cloudflare:** Workers Paid; the zone with a proxied wildcard record; `routes` and `PIMLING_DOMAIN` edited; rate-limit namespace IDs; the `PIMLING_ADMIN_TOKEN` secret.
+2. **OpenAI:** confirm the hosted service may use ChatGPT-plan sign-in (OpenAI asks paid or remotely hosted apps to fill in its interest form), or turn that card off before launch.
+3. **Data residency:** decide on a Durable Object jurisdiction before the first registration; objects can't move later.
+4. **Passkeys on the real domain:** create, sign in and recover on real devices (iOS, Android, macOS, Windows) over HTTPS. The tests and the preview use software and virtual authenticators on `*.localhost`.
+5. **Policy:** registration mode, invites and `PIM_LIMITS` for the expected cost, terms of service, privacy policy, and an abuse contact.
+6. **Monitoring:** alerts in Workers Logs on `pimling.cleanup_failed` (with rising `attempts`) and `pim.misrouted` (which should never happen), and a watch on `pim.limit` and `pimling.rate_limited`.
 
 ## Known limits of Phase 1
 

@@ -319,18 +319,123 @@ describe("entries", () => {
 });
 
 describe("errors", () => {
+  const unanswered = (reason: string, detail?: string) =>
+    run([
+      snapshot(),
+      event({
+        type: "submission",
+        record: { id: "s1", status: "unanswered", reason, detail },
+      }),
+    ]);
+
   it("reports unanswered submissions, except ones the user stopped", () => {
-    const unanswered = (reason: string) =>
+    expect(unanswered("no_model").view.error).toEqual({ reason: "no_model" });
+    expect(unanswered("aborted").view.error).toBeNull();
+    expect(unanswered("withdrawn").view.error).toBeNull();
+  });
+
+  it("names the ChatGPT usage limit, though it arrives as a 429", () => {
+    const detail = `OpenAI API error (429): {"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"The ChatGPT user has reached their Subscription Sharing usage limit."}}
+Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
+    expect(unanswered("model_error", detail).view.error).toEqual({
+      problem: "usage_limit",
+    });
+    expect(
+      unanswered(
+        "model_error",
+        "Pim usage quota exceeded: today's 300 model requests are used up. It resets at midnight UTC.",
+      ).view.error,
+    ).toEqual({ problem: "quota" });
+    expect(
+      unanswered(
+        "model_error",
+        "OpenAI API error (503): upstream connect error",
+      ).view.error,
+    ).toEqual({ problem: "busy" });
+  });
+
+  it("keeps no provider text, which can echo the request", () => {
+    const leaky = `OpenAI API error (400): Invalid input near "alice@example.com"; Authorization: Bearer sk-secret-token; see https://api.openai.com/v1/responses?key=abc`;
+    const failed = unanswered("model_error", leaky);
+    const faulted = run([
+      snapshot(),
+      event({
+        type: "task_failed",
+        taskId: "t",
+        kind: "pi.generation",
+        message: leaky,
+      }),
+    ]);
+    expect(failed.view.error).toEqual({ problem: "other" });
+    expect(faulted.view.error).toEqual({ problem: "other" });
+    const states = [
+      failed,
+      faulted,
+      run([
+        snapshot({
+          generation: { attempt: 1, retry: { at: 5, error: leaky } },
+        }),
+      ]),
       run([
         snapshot(),
-        event({
-          type: "submission",
-          record: { id: "s1", status: "unanswered", reason },
-        }),
-      ]).view.error;
-    expect(unanswered("failed")).toBe("Not answered: failed");
-    expect(unanswered("aborted")).toBeNull();
-    expect(unanswered("withdrawn")).toBeNull();
+        event({ type: "auto_retry_start", at: 5, errorMessage: leaky }),
+      ]),
+    ];
+    for (const state of states) {
+      const shown = JSON.stringify(state.view);
+      for (const secret of [
+        "alice@example.com",
+        "sk-secret-token",
+        "https://",
+      ]) {
+        expect(shown).not.toContain(secret);
+      }
+    }
+  });
+
+  it("reads a fault as a model problem only for model tasks", () => {
+    const fault = (kind: string, message: string) =>
+      event({ type: "task_failed", taskId: "t", kind, message });
+    const unauthorized =
+      "Request failed (401): Bearer sk-secret-token for alice@example.com at https://tools.example.com/x";
+    for (const kind of ["pi.tool", "pim.schedule"]) {
+      const state = run([snapshot(), fault(kind, unauthorized)]);
+      expect(state.view.error).toEqual({ taskFailed: true });
+      expect(JSON.stringify(state.view)).not.toContain("sk-secret-token");
+    }
+    expect(
+      run([snapshot(), fault("pi.generation", unauthorized)]).view.error,
+    ).toEqual({ problem: "sign_in" });
+    expect(
+      run([
+        snapshot(),
+        fault("pi.compaction", "subscription_sharing_usage_limit_exceeded"),
+      ]).view.error,
+    ).toEqual({ problem: "usage_limit" });
+  });
+
+  it("keeps a fault's problem over the input's later reason, but not over its model error", () => {
+    const settle = (reason: string, detail?: string) =>
+      event({
+        type: "submission",
+        record: { id: "s1", status: "unanswered", reason, detail },
+      });
+    const fault = (kind: string, message: string) =>
+      event({ type: "task_failed", taskId: "t", kind, message });
+    expect(
+      run([
+        snapshot(),
+        fault("pi.generation", "OpenAI API error (401): unauthorized"),
+        settle("faulted"),
+      ]).view.error,
+    ).toEqual({ problem: "sign_in" });
+    expect(
+      run([
+        snapshot(),
+        fault("pi.tool", "boom"),
+        settle("model_error", "subscription_sharing_usage_limit_exceeded"),
+      ]).view.error,
+    ).toEqual({ problem: "usage_limit" });
   });
 
   it("clears the error when the next run starts", () => {
@@ -338,7 +443,7 @@ describe("errors", () => {
       snapshot(),
       event({ type: "task_failed", taskId: "t", kind: "run", message: "boom" }),
     ]);
-    expect(state.view.error).toBe("boom");
+    expect(state.view.error).toEqual({ taskFailed: true });
     expect(
       run([event({ type: "run_start", inputs: [] })], state).view.error,
     ).toBeNull();

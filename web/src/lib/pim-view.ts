@@ -46,9 +46,58 @@ export type SessionView = {
   tools: readonly RunningTool[];
   /** Messages queued behind the running work. */
   queued: number;
-  retry: { at: number; error: string } | null;
-  error: string | null;
+  retry: { at: number } | null;
+  error: ViewError | null;
 };
+
+/**
+ * Why a model request failed, read from its error text. The text itself is
+ * never shown: it is the provider's response, which can echo the request.
+ */
+export type ModelProblem =
+  | "usage_limit"
+  | "quota"
+  | "sign_in"
+  | "too_long"
+  | "busy"
+  | "other";
+
+export type ViewError =
+  /** A failed or faulted model request. */
+  | { problem: ModelProblem }
+  /** Any other faulted task, such as a tool's. Its message is never shown. */
+  | { taskFailed: true }
+  /** pi's code for any other unanswered input. */
+  | { reason: string };
+
+/** The task kinds whose work is a model request. */
+const MODEL_TASKS = new Set(["pi.generation", "pi.compaction"]);
+
+/** First match wins. */
+const MODEL_PROBLEMS: ReadonlyArray<[ModelProblem, RegExp]> = [
+  // Sign in with ChatGPT: the plan's usage, or Pim's own App limit, is used up.
+  ["usage_limit", /subscription_sharing_usage_limit_exceeded/],
+  // Pim's own daily limits (QUOTA_MESSAGE in src/usage.ts).
+  ["quota", /^Pim usage quota exceeded\b/],
+  [
+    "sign_in",
+    /OpenAI token request failed|refresh response|Sign in to ChatGPT|invalid_grant|\b401\b|unauthori[sz]ed/i,
+  ],
+  [
+    "too_long",
+    /context.?(length|window)|maximum context|too many tokens|prompt is too long/i,
+  ],
+  [
+    "busy",
+    /rate.?limit|too many requests|\b429\b|overloaded|capacity|\b50[0234]\b|unavailable|timed? ?out|network|fetch failed|connection/i,
+  ],
+];
+
+export function modelProblem(text: string): ModelProblem {
+  return (
+    MODEL_PROBLEMS.find(([, pattern]) => pattern.test(text))?.[0] ?? "other"
+  );
+}
 
 export const EMPTY_VIEW: SessionView = {
   entries: [],
@@ -311,7 +360,9 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
               output: slot.output ?? "",
             })),
           queued: event.inbox.length,
-          retry: event.generation?.retry ?? null,
+          retry: event.generation?.retry
+            ? { at: event.generation.retry.at }
+            : null,
           error: null,
         },
       };
@@ -383,12 +434,17 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
     case "auto_retry_start":
       return {
         ...state,
-        view: { ...view, retry: { at: event.at, error: event.errorMessage } },
+        view: { ...view, retry: { at: event.at } },
       };
     case "auto_retry_end":
       return { ...state, view: { ...view, retry: null } };
-    case "task_failed":
-      return { ...state, view: { ...view, error: event.message } };
+    case "task_failed": {
+      // A fault's message can be a provider's or OpenAI's raw response.
+      const error: ViewError = MODEL_TASKS.has(event.kind)
+        ? { problem: modelProblem(event.message) }
+        : { taskFailed: true };
+      return { ...state, view: { ...view, error } };
+    }
     case "submission": {
       const record = event.record;
       if (
@@ -396,9 +452,21 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
         record.reason !== "aborted" &&
         record.reason !== "withdrawn"
       ) {
+        // A model error's detail is the provider's error text, and says
+        // what happened to this input.
+        if (record.reason === "model_error") {
+          const detail = typeof record.detail === "string" ? record.detail : "";
+          return {
+            ...state,
+            view: { ...view, error: { problem: modelProblem(detail) } },
+          };
+        }
+        // Another reason, such as "faulted", follows the task_failed of the
+        // same commit, which already said more.
+        if (view.error !== null) return state;
         return {
           ...state,
-          view: { ...view, error: `Not answered: ${record.reason}` },
+          view: { ...view, error: { reason: record.reason } },
         };
       }
       return state;

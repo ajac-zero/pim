@@ -54,10 +54,10 @@ Markdown artifacts are shown in the app itself, through an allowlist of Pim's ow
 
 - **No raw HTML is parsed.** Streamdown's raw-HTML plugin isn't run, so raw HTML in an artifact shows as plain text, never as elements.
 - **Only text elements survive:** formatting, headings, lists and task lists, tables, code, and links. There are no `picture`, `source`, media, frames, forms, `style` attributes or event handlers.
-- **No image is shown, inline or not.** The schema keeps only an image's alt text, and the app's image component never renders a `src`, so showing a Markdown artifact requests nothing.
-- **Links** keep only `http(s):`, `mailto:` and `#` addresses, and open with `noopener noreferrer`. Streamdown's link hardening runs as well, after the schema.
+- **No image is shown, inline or not.** The schema keeps only an image's alt text, shown as "[Image blocked: alt text]", and the app's image component never renders a `src`. Showing a Markdown artifact requests nothing.
+- **Links** keep only `http(s):`, `mailto:` and `#` addresses, and open with `noopener noreferrer`. Any other link, including `javascript:`, `data:`, relative and protocol-relative ones, shows as its text only. Streamdown's link hardening runs as well, after the schema.
 
-Downloads are `text/plain`. Chat messages are rendered as before. A render test ([`markdown.test.tsx`](../web/src/components/chat/markdown.test.tsx)) pins this. It fails if the raw-HTML plugin comes back, and checks that no attribute names a resource from the text and no `javascript:` or `data:` link survives.
+Downloads are `text/plain`. Chat messages are rendered as before. A render test ([`markdown.test.tsx`](../web/src/components/chat/markdown.test.tsx)) pins this with a hostile corpus: `picture`/`source` and `img` with `src` and `srcset`, `video` with `poster`, `audio`, `iframe`, `object`, `embed`, `link`, `style` elements and inline `style` with `url()`, event handlers, `form` with `input type=image` and `formaction`, and `javascript:`, `data:`, relative and protocol-relative links and images. It checks that no element or attribute that could load, run, submit or send anything survives, that the only links are the allowed ones, and that raw HTML and images show only as text. It fails if the raw-HTML plugin comes back, if Streamdown's default schema replaces Pim's, or if the link filter is removed.
 
 ## Limits
 
@@ -92,8 +92,9 @@ The ajac-zero deployment sets 100 artifacts, 50 versions, 500,000 bytes per vers
 | Restore is append-only and needs the latest base | "restore an older version as a new one…" |
 | Delete removes every version; export has every version | "are deleted with every version…" |
 | Per-version, version-count, artifact-count, total and storage limits, checked before writing | "stay within their limits…" |
-| Racing writes: an edit and a restore on the same base give one version and a `409`; two creates that don't both fit give one and a `429`, under a limit and under the hard cap; a refused version leaves the title, latest version and content as they were | "take one of two writes racing on the same version…", "export in full near their total cap…" |
-| Markdown: raw HTML only as text, no images, no attribute naming a resource from the text, no `javascript:` or `data:` links; tables and code still render | `web/src/components/chat/markdown.test.tsx` |
+| A refused write (`413` too big, `429` too many versions or too much in all, `409` stale base, for an edit or a restore) leaves the title, time, latest version, history and content as they were | "change nothing on a refused write…" |
+| Racing writes: an edit and a restore on the same base give one version and a `409`; two creates that don't both fit give one and a `429`, under a limit and under the hard cap | "take one of two writes racing on the same version…", "export in full near their total cap…" |
+| Markdown: the hostile corpus above leaves no loading, running or submitting element or attribute; only `http(s)`, `mailto` and `#` links; raw HTML and images only as text; task lists, tables and code still render | `web/src/components/chat/markdown.test.tsx` |
 | Export near the total cap, and the cap holding with no limits set | "export in full near their total cap…" |
 | Another owner's host returns `404` for the artifact; stolen cookies `401`; anonymous `401` | `test/hosted/hosted.test.ts`: "are shown only to their owner…" |
 | Fresh requests refused: signed out `401`, passkey removed `401`, suspended `403`, deleted `410` on frame, download and metadata; account export has every version; erased | "stop showing when the browser signs out, its passkey is removed…" |

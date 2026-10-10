@@ -248,6 +248,44 @@ describe("artifacts", () => {
 		}
 	});
 
+	it("change nothing on a refused write: not the title, time, latest version, history or content", async () => {
+		const refusals = await runInDurableObject(agent(), async (instance: Pim) => {
+			const id = crypto.randomUUID();
+			await instance.artifacts.create({ id, title: "Kept", kind: "html", content: "<p>1</p>", session: null });
+			await instance.artifacts.append(id, { baseVersion: 1, content: "<p>2</p>", source: "agent" });
+			const snapshot = () =>
+				JSON.stringify({ artifact: instance.artifacts.get(id), history: instance.artifacts.versions(id), content: instance.artifacts.version(id)!.content });
+			const before = snapshot();
+			const attempt = async (limits: Partial<Limits> | null, baseVersion: number, content: string) => {
+				await instance.setLimits(limits);
+				const status = await instance.artifacts.append(id, { baseVersion, content, source: "agent", title: "Renamed" }).then(
+					() => "written",
+					(error: { status?: number }) => error.status,
+				);
+				return { status, unchanged: snapshot() === before };
+			};
+			const results = {
+				tooBig: await attempt({ artifactBytes: 10 }, 2, "x".repeat(11)),
+				tooManyVersions: await attempt({ artifactVersions: 2 }, 2, "<p>3</p>"),
+				tooMuchInAll: await attempt({ artifactStorageBytes: instance.artifacts.totalBytes() + 5 }, 2, "x".repeat(6)),
+				stale: await attempt(null, 1, "<p>3</p>"),
+				restoreStale: await instance.artifacts.restore(id, 1, 1).then(() => "written", (error: { status?: number }) => error.status),
+			};
+			const afterRestore = snapshot() === before;
+			await instance.setLimits(null);
+			instance.artifacts.delete(id);
+			return { ...results, afterRestore };
+		});
+		expect(refusals).toEqual({
+			tooBig: { status: 413, unchanged: true },
+			tooManyVersions: { status: 429, unchanged: true },
+			tooMuchInAll: { status: 429, unchanged: true },
+			stale: { status: 409, unchanged: true },
+			restoreStale: 409,
+			afterRestore: true,
+		});
+	});
+
 	it("take one of two writes racing on the same version, and keep to their limits when writes race", async () => {
 		const outcome = await runInDurableObject(agent(), async (instance: Pim) => {
 			const settle = (work: Promise<unknown>) =>

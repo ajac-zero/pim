@@ -7,7 +7,7 @@ Artifacts are documents and small interactive pages the agent makes for its owne
 - **Kinds.** `html` is one self-contained document, with its CSS and JavaScript inline. `markdown` is a document.
 - **Where they live.** In the owner's Pim Durable Object, in `pim_artifacts` and `pim_artifact_versions` ([`src/artifacts.ts`](../src/artifacts.ts)). Every request for one goes through the owner's gateway and agent, like the rest of the API. Nothing is cached outside the agent, and there is no index across owners.
 - **Versions are append-only.** Each change adds a version, and nothing rewrites one, so a version number and its `sha256` always name the same bytes. Restoring an older version adds a new one with the old content (`source: "restore"`, `restoredFrom`).
-- **Every write names its base version.** The agent (`base_version`) and the person (`baseVersion`) both say which version they changed. If it's no longer the latest, the write is refused with `409`, so neither overwrites the other unseen. A write hashes its content first, then checks and stores it with nothing awaited in between, so two writes that race can't both pass a check meant for one.
+- **Every write names its base version.** The agent (`base_version`) and the person (`baseVersion`) both say which version they changed. If it's no longer the latest, the write is refused with `409`, so neither overwrites the other unseen. A write hashes its content first, then rechecks the latest version and every limit and stores it with nothing awaited in between, so two writes that race can't both pass a check meant for one, and the caps can't be overshot. A refused write changes nothing, not even the title.
 - **Owner-wide.** An artifact records the chat it was made in, but deleting that chat doesn't delete the artifact.
 
 ## The agent's tools
@@ -50,7 +50,14 @@ The artifact runs on the owner's host, so the sandbox is what keeps it apart fro
 
 ## Markdown
 
-Markdown artifacts are shown in the app itself, with Streamdown's sanitizer and link hardening but without its raw-HTML plugin: raw HTML in an artifact shows as plain text, never as elements. No image is shown, inline or not; its alt text stands in. So showing an artifact fetches nothing. Links are kept only for `http(s):`, `mailto:` and `#` addresses, and open with `noopener noreferrer`. Downloads are `text/plain`. Chat messages are rendered as before. A render test ([`markdown.test.tsx`](../web/src/components/chat/markdown.test.tsx)) pins this, and fails if the raw-HTML plugin comes back.
+Markdown artifacts are shown in the app itself, through an allowlist of Pim's own (`UNTRUSTED_SCHEMA` in [`markdown.tsx`](../web/src/components/chat/markdown.tsx)), not Streamdown's defaults:
+
+- **No raw HTML is parsed.** Streamdown's raw-HTML plugin isn't run, so raw HTML in an artifact shows as plain text, never as elements.
+- **Only text elements survive:** formatting, headings, lists and task lists, tables, code, and links. There are no `picture`, `source`, media, frames, forms, `style` attributes or event handlers.
+- **No image is shown, inline or not.** The schema keeps only an image's alt text, and the app's image component never renders a `src`, so showing a Markdown artifact requests nothing.
+- **Links** keep only `http(s):`, `mailto:` and `#` addresses, and open with `noopener noreferrer`. Streamdown's link hardening runs as well, after the schema.
+
+Downloads are `text/plain`. Chat messages are rendered as before. A render test ([`markdown.test.tsx`](../web/src/components/chat/markdown.test.tsx)) pins this. It fails if the raw-HTML plugin comes back, and checks that no attribute names a resource from the text and no `javascript:` or `data:` link survives.
 
 ## Limits
 
@@ -85,10 +92,10 @@ The ajac-zero deployment sets 100 artifacts, 50 versions, 500,000 bytes per vers
 | Restore is append-only and needs the latest base | "restore an older version as a new one…" |
 | Delete removes every version; export has every version | "are deleted with every version…" |
 | Per-version, version-count, artifact-count, total and storage limits, checked before writing | "stay within their limits…" |
-| Racing writes: an edit and a restore on the same base give one version and a `409`; two creates that don't both fit give one and a `429`; a refused version renames nothing | "take one of two writes racing on the same version…" |
-| Markdown: raw HTML only as text, no images, no `javascript:` or `data:` links | `web/src/components/chat/markdown.test.tsx` |
+| Racing writes: an edit and a restore on the same base give one version and a `409`; two creates that don't both fit give one and a `429`, under a limit and under the hard cap; a refused version leaves the title, latest version and content as they were | "take one of two writes racing on the same version…", "export in full near their total cap…" |
+| Markdown: raw HTML only as text, no images, no attribute naming a resource from the text, no `javascript:` or `data:` links; tables and code still render | `web/src/components/chat/markdown.test.tsx` |
 | Export near the total cap, and the cap holding with no limits set | "export in full near their total cap…" |
 | Another owner's host returns `404` for the artifact; stolen cookies `401`; anonymous `401` | `test/hosted/hosted.test.ts`: "are shown only to their owner…" |
 | Fresh requests refused: signed out `401`, passkey removed `401`, suspended `403`, deleted `410` on frame, download and metadata; account export has every version; erased | "stop showing when the browser signs out, its passkey is removed…" |
 | A tool call or a restore under way during the erasure leaves nothing | "keeps an artifact the model asks for during the erasure…", "refuses an artifact restore in the agent's handler…" |
-| In a real browser: the card and viewer render on desktop and a 390 px phone; the page's own script runs; a hostile artifact can't read cookies or storage, reach the parent, the API or the network, open windows, submit forms or load remote images; leaving is noticed; restore and delete work; Markdown loads nothing remote; signing out unmounts every frame | Browser acceptance against the local preview, recorded in the pull request |
+| In a real browser: the card and viewer render on desktop and a 390 px phone; the page's own script runs; a hostile artifact can't read cookies or storage, reach the parent or the API, fetch or load remote resources, open windows or submit forms (it can still navigate itself away, which the app notices); leaving is noticed; restore and delete work; Markdown loads nothing remote; signing out unmounts every frame | Browser acceptance against the local preview, recorded in the pull request |

@@ -9,8 +9,8 @@ import type { PimStore } from "./store";
 
 /**
  * What a pending approval becomes when nobody answers: `auto` approves it
- * after 30 seconds, so autonomous jobs never block; `explicit` waits longer
- * and then denies it, so nothing acts on the world without a yes.
+ * after 30 seconds, so autonomous jobs never stall; `explicit` waits for an
+ * answer however long, so nothing acts on the world without a yes.
  */
 export type ApprovalPolicy = "auto" | "explicit";
 

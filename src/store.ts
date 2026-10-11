@@ -46,7 +46,7 @@ export type Approval = {
 	readonly callId: string | null;
 	/** When the timeout decides it, if still pending. */
 	readonly expiresAt: number | null;
-	/** What the timeout decides: `approve` (the `auto` policy, and approvals filed before policies) or `deny` (`explicit`). */
+	/** What the timeout decides: `approve` (the `auto` policy, and approvals filed before policies) or `deny` (a guest's, after a day). */
 	readonly onTimeout: "approve" | "deny";
 	/** Who decided: the user, the timeout, or the user's "always approve"; null while pending and for older approvals. */
 	readonly decidedBy: ApprovalDecider | null;
@@ -459,7 +459,8 @@ export class PimStore {
 		summary: string;
 		callId: string;
 		createdAt: number;
-		expiresAt: number;
+		/** Null: it waits for an answer however long. */
+		expiresAt: number | null;
 		onTimeout: "approve" | "deny";
 		requestedBy?: ApprovalRequester;
 	}): Approval {

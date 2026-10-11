@@ -1,5 +1,6 @@
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { Type } from "@earendil-works/pi-ai";
+import { type Persona, personaInstructions } from "../personas";
 import { type PimServices, json } from "./services";
 
 const PREAMBLE = `You are Pim, a personal AI agent. You don't just answer questions: you get things done for the person you work for, keep track of their goals, and follow up on your own.
@@ -19,7 +20,8 @@ How you work:
 - Be honest about what you can and cannot do. Never claim an action happened unless a tool result says so.
 - Times: call \`current_time\` when the time matters. Cron schedules run in UTC.`;
 
-export function personaExtension(services: PimServices) {
+/** The agent's own habits, and the Pim each chat talks as (`pimOf` its session). */
+export function personaExtension(services: PimServices, pimOf: (session: string) => Persona) {
 	const currentTime = defineTool({
 		name: "current_time",
 		description: "The current date and time, in UTC and in the user's time zone.",
@@ -40,6 +42,8 @@ export function personaExtension(services: PimServices) {
 		sections: [
 			section("preamble", () => PREAMBLE, { tag: false }),
 			section("user_time_zone", () => services.timeZone),
+			// Rendered at each request, so a chat follows its Pim's edits from the next one.
+			section("pim", ({ conversationId }) => personaInstructions(pimOf(String(conversationId)))),
 		],
 		tools: [currentTime],
 	});

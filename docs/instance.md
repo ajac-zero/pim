@@ -39,7 +39,7 @@ People on the same Pim can share with each other: circles let others message you
 
 - **The admin.** While a Pim has no admin, the only way to make an account is to claim it, and that account is the admin's. Anyone who opens the Pim in the 15 minutes after a deploy can, so open it right after deploying. After that, the sign-in screen asks the Worker to write a setup link to its logs (`#claim=<code>`, one hour), which only someone signed in to the Cloudflare account can read. If the admin's registration lapses without a passkey, or the admin deletes their account, the Pim can be claimed again the same ways.
 - **Everyone else** joins as `PIM_REGISTRATION` says: `invite` (the default) takes a single-use invite link the admin makes in Settings (`#invite=<code>`), `open` takes anyone, `closed` nobody. Registrations are limited per address per day (`PIM_REGISTRATIONS_PER_ADDRESS`, default 3) and, optionally, in total (`PIM_MAX_ACCOUNTS`).
-- **Registering** (`POST /auth/register`) provisions the person's agent, sets its time zone from the browser, and returns ten recovery codes and a one-time setup code (good for a day). The web app shows the codes, then makes the first passkey with the setup code, which activates the account.
+- **Registering** (`POST /auth/register`) provisions the person's agent, gives it a copy of the Pim the admin chose for everyone as its default Pim (see [Your Pims](../README.md#your-pims)), sets its time zone from the browser, and returns ten recovery codes and a one-time setup code (good for a day). The web app shows the codes, then makes the first passkey with the setup code, which activates the account.
 - **Recovery.** A recovery code, with its username, makes one passkey, once. People can replace their codes in Settings. The admin can make anyone a one-hour setup link from Settings, after checking who they are some other way, and gets one for themselves from the logs.
 - **Approvals** default to `PIM_APPROVAL_POLICY`; each person can change theirs.
 - **Usage and limits.** Every model request goes through a metered model catalog. Requests and runs are checked and counted in one step before they start, so concurrent ones can't all take the last slot. Tokens are known only when a request ends, so requests already under way can take a day past `dailyTokens`; the next one is refused. Tokens are counted by the day the request was sent, and by provider. Tokens on someone's own ChatGPT plan are counted apart and never use up the deployment's allowance. `PIM_LIMITS` sets members' limits; the admin has none. The admin can set one person's in the admin API. Running out stops the model request with a non-retryable "quota exceeded" error, refuses new runs with `429`, and skips scheduled tasks with one notification a day. Usage is recorded, not charged.
@@ -62,6 +62,7 @@ The admin manages the Pim in Settings → People on this Pim: invite someone, ma
 | POST | `/api/admin/accounts/:username/setup-link` | | A one-hour link that adds a passkey, for recovery |
 | DELETE | `/api/admin/accounts/:username` | `{ reason? }` | Deletes it as the owner would: `200` once erased, `202` while the cleanup is still queued. Run it again to retry at once |
 | DELETE | `/api/admin/templates/:id` | | Takes a published Pim out of Discover |
+| GET, PUT, DELETE | `/api/admin/default-pim` | PUT: `{ pim }`, one of the admin's Pims | The Pim everyone who joins starts with a copy of (`{ pim }`, null for a plain one). PUT copies the admin's Pim as it is now; choosing again replaces it. DELETE goes back to a plain one |
 | POST | `/api/admin/invites` | `{ count?, note? }` | Single-use invite codes and links (up to 100) |
 
 The admin can't suspend or delete their own account from here; deleting it from Settings leaves the Pim to be claimed again.
@@ -81,6 +82,7 @@ The admin can't suspend or delete their own account from here; deleting it from 
 | `pim.passkey_created`, `pim.device_link_issued`, `pim.recovery_codes_replaced` | A passkey made from a setup link, recovery code or device link; a device link made; codes replaced |
 | `pim.circle_member_added` | Someone put another person in a circle |
 | `pim.template_published`, `pim.template_used`, `pim.template_removed` | A Pim published (or updated), made someone's own, or taken down by the admin |
+| `pim.default_pim_set` | The admin chose the Pim everyone starts with (`pim`), or went back to a plain one (`pim: null`) |
 | `pim.misrouted` | A request reached the wrong agent. This should never happen: investigate |
 
 **Abuse and limits.** Per address: `AUTH_LIMITER` (30 sign-in, recovery and registration attempts a minute in `wrangler.jsonc`) and `PIM_REGISTRATIONS_PER_ADDRESS`. Per person: `API_LIMITER` (600 requests a minute), `PIM_LIMITS` (tokens, model requests, runs, chats, schedules, apps, storage, artifacts), and `PIM_MODELS`, so only models you pay for can be chosen. Paid `web_search` stays off unless `PIM_WEB_SEARCH` names a provider.

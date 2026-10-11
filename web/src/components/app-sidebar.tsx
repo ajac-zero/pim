@@ -5,6 +5,7 @@ import {
   Bot,
   Brain,
   Check,
+  ChevronDown,
   Compass,
   MessageCircle,
   Monitor,
@@ -12,6 +13,7 @@ import {
   MoreHorizontal,
   PanelLeft,
   Pencil,
+  Plus,
   Search,
   Settings,
   Shapes,
@@ -47,12 +49,13 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
-import { pim, type Session, type Visit } from "~/lib/pim-api";
+import { type Persona, pim, type Session, type Visit } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import {
   accountQuery,
   approvalsQuery,
   notificationsQuery,
+  personasQuery,
   sessionsQuery,
   visitsQuery,
 } from "~/lib/queries";
@@ -60,21 +63,8 @@ import { cn } from "~/lib/utils";
 
 type T = ReturnType<typeof useI18n>["t"];
 
-function groupLabel(time: number | null, t: T): string {
-  if (time === null) return t("older");
-  const date = new Date(time);
-  const now = new Date();
-  const startOfDay = (d: Date) =>
-    new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const diffDays = Math.floor(
-    (startOfDay(now) - startOfDay(date)) / 86_400_000,
-  );
-  if (diffDays <= 0) return t("today");
-  if (diffDays === 1) return t("yesterday");
-  if (diffDays < 7) return t("previous7Days");
-  if (diffDays < 30) return t("previous30Days");
-  return t("older");
-}
+/** One of your Pims in the sidebar, with its chats, most recent first. */
+type PimSection = { pim: Persona; list: Session[] };
 
 export function sessionTitle(session: Pick<Session, "title">, t: T) {
   return session.title ?? t("newChat");
@@ -104,6 +94,7 @@ export function AppSidebar({
   const { t } = useI18n();
   const [search, setSearch] = useState("");
   const { data: sessions } = useQuery(sessionsQuery());
+  const { data: personas } = useQuery(personasQuery());
   const { data: approvals } = useQuery(approvalsQuery());
   const { data: notifications } = useQuery(notificationsQuery());
   // Sharing and Discover are with the other people on this Pim.
@@ -138,36 +129,32 @@ export function AppSidebar({
     notifications?.filter((notification) => notification.readAt === null)
       .length ?? 0;
 
-  const sessionGroups = useMemo(() => {
-    const map = new Map<string, Session[]>();
+  // A section for each of your Pims, the default one first, holding the chats with it.
+  const sections = useMemo((): PimSection[] => {
+    const all = (personas ?? []).map((pim) => ({
+      pim,
+      list: [] as Session[],
+    }));
     for (const session of sessions ?? []) {
       // Conversations with others' Pims are listed under Shared with you.
       if (session.visit) continue;
-      const label = groupLabel(session.updatedAt, t);
-      const list = map.get(label) ?? [];
-      list.push(session);
-      map.set(label, list);
+      const section =
+        all.find((candidate) => candidate.pim.id === session.persona?.id) ??
+        all.find((candidate) => candidate.pim.default);
+      section?.list.push(session);
     }
-    return [
-      t("today"),
-      t("yesterday"),
-      t("previous7Days"),
-      t("previous30Days"),
-      t("older"),
-    ].flatMap((label) => {
-      const list = map.get(label);
-      return list ? [{ label, list }] : [];
-    });
-  }, [sessions, t]);
-  const groups = useMemo(
+    return all;
+  }, [personas, sessions]);
+  const shownSections = useMemo(
     () =>
-      sessionGroups.flatMap((group) => {
-        const list = group.list.filter((session) =>
+      sections.flatMap((section) => {
+        if (!search) return [section];
+        const list = section.list.filter((session) =>
           sessionTitle(session, t).toLowerCase().includes(search.toLowerCase()),
         );
-        return list.length > 0 ? [{ ...group, list }] : [];
+        return list.length > 0 ? [{ ...section, list }] : [];
       }),
-    [sessionGroups, search, t],
+    [sections, search, t],
   );
 
   return (
@@ -287,7 +274,7 @@ export function AppSidebar({
             )}
           >
             <CollapsedChatsMenu
-              groups={sessionGroups}
+              sections={sections}
               activeId={activeId}
               awaitingApproval={awaitingApproval}
               onNavigate={onNavigate}
@@ -340,28 +327,21 @@ export function AppSidebar({
                 </ul>
               </div>
             )}
-            {sessions && groups.length === 0 && shownVisits.length === 0 && (
-              <p className="px-2 py-6 text-center text-muted-foreground text-sm">
-                {search ? t("noChatsMatch") : t("noChatsYet")}
-              </p>
-            )}
-            {groups.map((group) => (
-              <div key={group.label} className="mb-3">
-                <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
-                  {group.label}
-                </div>
-                <ul className="space-y-px">
-                  {group.list.map((session) => (
-                    <SessionRow
-                      key={session.id}
-                      session={session}
-                      active={session.id === activeId}
-                      awaitingApproval={awaitingApproval.has(session.id)}
-                      onNavigate={onNavigate}
-                    />
-                  ))}
-                </ul>
-              </div>
+            {search &&
+              shownSections.length === 0 &&
+              shownVisits.length === 0 && (
+                <p className="px-2 py-6 text-center text-muted-foreground text-sm">
+                  {t("noChatsMatch")}
+                </p>
+              )}
+            {shownSections.map((section) => (
+              <PimSectionList
+                key={section.pim.id}
+                section={section}
+                activeId={activeId}
+                awaitingApproval={awaitingApproval}
+                onNavigate={onNavigate}
+              />
             ))}
           </nav>
         </div>
@@ -471,13 +451,93 @@ function SidebarNavItem({
   );
 }
 
-function CollapsedChatsMenu({
-  groups,
+/** A Pim's section: its name, a button for a new chat with it, and its chats. */
+function PimSectionList({
+  section: { pim: persona, list },
   activeId,
   awaitingApproval,
   onNavigate,
 }: {
-  groups: Array<{ label: string; list: Session[] }>;
+  section: PimSection;
+  activeId?: string;
+  awaitingApproval: ReadonlySet<string>;
+  onNavigate?: () => void;
+}) {
+  const { t } = useI18n();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(true);
+  return (
+    <section className="mb-3" aria-label={persona.name}>
+      <div className="group/section flex items-center gap-1 pr-1">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-1 rounded-md px-2 py-1.5 text-left font-medium text-muted-foreground text-xs hover:text-foreground"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+        >
+          <span className="truncate">{persona.name}</span>
+          <ChevronDown
+            className={cn(
+              "size-3.5 shrink-0 transition-transform",
+              !open && "-rotate-90",
+            )}
+          />
+        </button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              className="rounded-md p-1 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+              onClick={() => {
+                navigate({
+                  to: "/new",
+                  search: persona.default ? {} : { pim: persona.id },
+                });
+                onNavigate?.();
+              }}
+              aria-label={t("newChatWith", { name: persona.name })}
+            >
+              <Plus className="size-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent
+            side="right"
+            showArrow={false}
+            className={SIDEBAR_TOOLTIP_CLASS}
+          >
+            {t("newChatWith", { name: persona.name })}
+          </TooltipContent>
+        </Tooltip>
+      </div>
+      {open &&
+        (list.length === 0 ? (
+          <p className="px-2 py-1 text-muted-foreground text-xs">
+            {t("noChatsYet")}
+          </p>
+        ) : (
+          <ul className="space-y-px">
+            {list.map((session) => (
+              <SessionRow
+                key={session.id}
+                session={session}
+                active={session.id === activeId}
+                awaitingApproval={awaitingApproval.has(session.id)}
+                onNavigate={onNavigate}
+              />
+            ))}
+          </ul>
+        ))}
+    </section>
+  );
+}
+
+function CollapsedChatsMenu({
+  sections,
+  activeId,
+  awaitingApproval,
+  onNavigate,
+}: {
+  sections: PimSection[];
   activeId?: string;
   awaitingApproval: ReadonlySet<string>;
   onNavigate?: () => void;
@@ -517,15 +577,15 @@ function CollapsedChatsMenu({
         side="right"
         className="max-h-[min(28rem,var(--radix-dropdown-menu-content-available-height))] w-64"
       >
-        {groups.length === 0 ? (
+        {sections.every((section) => section.list.length === 0) ? (
           <DropdownMenuItem disabled>{t("noChatsYet")}</DropdownMenuItem>
         ) : (
-          groups.map((group) => (
-            <DropdownMenuGroup key={group.label}>
-              <DropdownMenuLabel className="text-muted-foreground text-xs">
-                {group.label}
+          sections.map((section) => (
+            <DropdownMenuGroup key={section.pim.id}>
+              <DropdownMenuLabel className="truncate text-muted-foreground text-xs">
+                {section.pim.name}
               </DropdownMenuLabel>
-              {group.list.map((session) => (
+              {section.list.map((session) => (
                 <DropdownMenuItem
                   key={session.id}
                   className={cn(

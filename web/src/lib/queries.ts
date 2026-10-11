@@ -62,6 +62,10 @@ export const artifactVersionQuery = (id: string, version: number) =>
 export const personasQuery = () =>
   queryOptions({ queryKey: ["personas"], queryFn: pim.personas });
 
+/** The Pim everyone who joins starts with: the admin's view. */
+export const defaultPimQuery = () =>
+  queryOptions({ queryKey: ["default-pim"], queryFn: admin.defaultPim });
+
 export const profileQuery = () =>
   queryOptions({ queryKey: ["profile"], queryFn: pim.profile });
 

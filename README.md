@@ -159,10 +159,10 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | POST | `/approvals/:id/approve` | `{ note?, always: true }` | Also sets the approval's tool to `on`, so later calls run without asking, and approves other pending calls to it |
 | GET | `/permissions` | `?circle=` | `{ tools: [{ app, appName, tool, name, description, readOnly, permission, default, chosen, changed, choices }] }`: Pim's own tools that ask first (`app: null`) and every connected app's tools, or with `circle`, that circle's (memory, and the apps' tools). `permission` is what applies: `off`, `ask` or `on`. `chosen` is yours, or null for the default |
 | PUT | `/permissions` | `{ circle?, app, tool, permission }`: `app` null for Pim's own tools, `tool` the app's own name for it, `permission` null for the default | That tool's entry; `404` for an unknown tool or circle |
-| GET | `/personas` | | `{ personas: [{ id, name, description, instructions, apps, source, published, createdAt, updatedAt }] }`: your Pims (see [Your Pims](#your-pims)) |
-| POST | `/personas` | `{ name, description?, instructions, apps?: [{ name, url }] }` | A new Pim |
-| GET, PUT, DELETE | `/personas/:id` | PUT: any of the fields | The Pim; editing reaches its chats from their next request, deleting leaves them as plain chats |
-| POST | `/sessions` | `{ title?, persona? }` | A new session, with that Pim's instructions when `persona` is given; sessions list their `persona` |
+| GET | `/personas` | | `{ personas: [{ id, name, description, instructions, apps, source, published, default, createdAt, updatedAt }] }`: your Pims, the default one first (see [Your Pims](#your-pims)) |
+| POST | `/personas` | `{ name, description?, instructions?, apps?: [{ name, url }] }` | A new Pim |
+| GET, PUT, DELETE | `/personas/:id` | PUT: any of the fields | The Pim; editing reaches its chats from their next request, deleting moves them to the default Pim. The default Pim can't be deleted (`400`) |
+| POST | `/sessions` | `{ title?, persona? }` | A new session with that Pim, or the default one; sessions list their `persona` (null in a visit) |
 | GET | `/account` | | `{ username, ownerId, role, status, createdAt, usage, recoveryCodesLeft }` |
 | GET | `/account/export` | | Your account and everything in your Pim, as one JSON download, without credentials |
 | DELETE | `/account` | `{ confirm: username }` | Deletes your account and erases your Pim; a passkey session only. `202` while erasing is still being retried |
@@ -313,7 +313,9 @@ Settings → Tool permissions lists every tool that acts on the world or comes f
 
 ## Your Pims
 
-Your Pims are named agents inside your Pim, each with its own instructions: a marathon coach, a trip planner, a code reviewer. A chat started with one (Your Pims → Chat) gets its instructions on top of Pim's own; everything else is the same Pim's: memory, apps, approvals, schedules. Edit a Pim and its chats follow from their next request; delete it and they stay, as plain chats. A Pim can list apps it works with, by MCP server URL, so whoever uses it can connect them with their own accounts.
+Your Pims are named agents, each with its own instructions: a marathon coach, a trip planner, a code reviewer. Every account has a default one, which talks in every chat not started with another; it can be edited, not deleted. Joining ends with naming it. The sidebar has a section for each Pim, named after it, with its chats, most recent first. A chat started with another (Your Pims → Chat) talks with that one. A chat's Pim adds its name and instructions to the agent's own habits; everything else is shared by all of them: memory, apps, approvals, schedules. Edit a Pim and its chats follow from their next request; delete it and they go on with the default one. A Pim can list apps it works with, by MCP server URL, so whoever uses it can connect them with their own accounts.
+
+**The Pim everyone starts with.** The admin can make one of their Pims everyone's default (Your Pims → Make everyone's default). Each person who joins after that gets a copy as their default Pim: its name, description, instructions and suggested apps, theirs to change. Copies don't follow later edits to the admin's Pim, and people who joined before keep the default Pim they have. Until the admin chooses one, people start with a plain Pim, named Pim, with no instructions of its own.
 
 A Pim can be **published** to the others on your Pim: Discover lists published Pims, and anyone on it can read one in full and **make it their own**, which copies its name, description, instructions and suggested apps into their own Pims. Nothing else of the author's goes with it: no memory, chats or credentials. The copy is theirs to change; publishing again updates what others see, not their copies. Unpublishing, deleting the Pim, or deleting the account takes it out of Discover. Each person has a profile (a name and a line about them), shown on their page and next to what they publish.
 

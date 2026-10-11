@@ -8,7 +8,7 @@ import { pim } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import { personasQuery } from "~/lib/queries";
 
-/** An empty draft chat, with Pim or one of your Pims. No session exists until the first message is sent. */
+/** An empty draft chat, with your default Pim or another of yours. No session exists until the first message is sent. */
 export const Route = createFileRoute("/new")({
   validateSearch: (search: Record<string, unknown>): { pim?: string } =>
     typeof search.pim === "string" ? { pim: search.pim } : {},
@@ -20,11 +20,10 @@ function NewChatPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { pim: personaId } = Route.useSearch();
-  const { data: personas } = useQuery({
-    ...personasQuery(),
-    enabled: personaId !== undefined,
-  });
-  const persona = personas?.find((candidate) => candidate.id === personaId);
+  const { data: personas } = useQuery(personasQuery());
+  const persona = personas?.find((candidate) =>
+    personaId === undefined ? candidate.default : candidate.id === personaId,
+  );
   const [creating, setCreating] = useState(false);
 
   const send = async (text: string) => {

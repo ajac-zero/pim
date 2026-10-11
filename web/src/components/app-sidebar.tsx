@@ -106,7 +106,7 @@ export function AppSidebar({
   const { data: sessions } = useQuery(sessionsQuery());
   const { data: approvals } = useQuery(approvalsQuery());
   const { data: notifications } = useQuery(notificationsQuery());
-  // Sharing is between Pimling accounts; a self-hosted Pim has none.
+  // Sharing and Discover are with the other people on this Pim.
   const { data: account } = useQuery(accountQuery());
   const { data: visits } = useQuery({ ...visitsQuery(), enabled: !!account });
   const params = useParams({ strict: false }) as { sessionId?: string };

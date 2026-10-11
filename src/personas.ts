@@ -5,7 +5,7 @@ import { HttpError } from "./http";
  * instructions, such as "Marathon coach" or "Trip planner". A chat started
  * with one gets its instructions on top of Pim's own; memory, apps and
  * approvals are the same Pim's. One can be published as a template others
- * make their own (on Pimling, see ./hosted/gallery.ts); a copy made from a
+ * make their own (see ./gallery.ts); a copy made from a
  * template remembers where it came from.
  */
 

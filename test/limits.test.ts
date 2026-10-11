@@ -9,13 +9,12 @@ import type { Models } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
-import { AGENT_NAME } from "../src/agent";
 import { type Limits, UNLIMITED, UsageMeter } from "../src/usage";
 import { exports } from "cloudflare:workers";
-import { api, apiUrl, post, say, TOKEN, url } from "./helpers";
+import { api, apiUrl, OWNER, post, say, TOKEN, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
-const agent = () => env.Pim.getByName(AGENT_NAME);
+const agent = () => env.Pim.getByName(OWNER);
 
 function setLimits(limits: Partial<Limits> | null) {
 	return runInDurableObject(agent(), (instance: Pim) => instance.setLimits(limits));

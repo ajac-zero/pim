@@ -20,6 +20,7 @@ import {
 import { AddDevice } from "~/components/add-device";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
+import { MembersSection } from "~/components/members";
 import { Page } from "~/components/page";
 import { ToolPermissionList } from "~/components/tool-permissions";
 import { Button } from "~/components/ui/button";
@@ -62,6 +63,7 @@ function SettingsPage() {
   return (
     <Page title={t("settings")} description={t("settingsDescription")}>
       <AccountSection />
+      <MembersSection />
       <ProfileSection />
       <ChatGPTCard settings={data} />
       <section className="mt-10 space-y-3">
@@ -307,7 +309,7 @@ function ChatGPTCard({ settings }: { settings: ModelSettings }) {
   );
 }
 
-/** How others on Pimling see you: on your page, and next to what you publish. Pimling only. */
+/** How others on this Pim see you: on your page, and next to what you publish. */
 function ProfileSection() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
@@ -441,8 +443,7 @@ function PushSection() {
 function PasskeysSection() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const { data } = useQuery(authSessionQuery());
-  const session = data?.site === "accounts" ? undefined : data;
+  const { data: session } = useQuery(authSessionQuery());
   // The dev server signs you in itself; there are no passkeys to manage.
   const enabled = session?.method === "passkey";
   const { data: passkeys } = useQuery({ ...passkeysQuery(), enabled });

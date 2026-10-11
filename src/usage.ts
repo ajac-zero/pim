@@ -10,9 +10,9 @@ import type { Models } from "@earendil-works/pi-ai/models";
 import { HttpError } from "./http";
 
 /**
- * What this agent has used, by UTC day, and the limits on it. A self-hosted
- * Pim has no limits unless `PIM_LIMITS` sets some; a hosted service sets them
- * for everyone, and its operator can change one person's.
+ * What this agent has used, by UTC day, and the limits on it. Members have
+ * the limits `PIM_LIMITS` sets, if any; the admin has none, and can change
+ * anyone's.
  *
  * Model usage is counted where every request goes through, the model catalog,
  * so conversations, compactions and memory compression all count.

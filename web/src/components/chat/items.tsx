@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Mail,
   RotateCcw,
   ShieldCheck,
   X,
@@ -154,6 +155,34 @@ export const AssistantMessage = memo(function AssistantMessage({
         </Actions>
       )}
     </div>
+  );
+});
+
+/* ------------------------------ sent by email ----------------------------- */
+
+/** A message Pim sent to the person's inbox: its subject, and the message on demand. */
+export const EmailedMessage = memo(function EmailedMessage({
+  subject,
+  text,
+}: {
+  subject: string;
+  text: string;
+}) {
+  const { t } = useI18n();
+  return (
+    <Collapsible className="w-full rounded-xl border bg-card px-4 py-3">
+      <CollapsibleTrigger className="group flex w-full min-w-0 items-center gap-2 text-left text-sm">
+        <Mail className="size-4 shrink-0 text-muted-foreground" />
+        <span className="shrink-0 text-muted-foreground">
+          {t("emailedYou")}
+        </span>
+        <span className="min-w-0 flex-1 truncate font-medium">{subject}</span>
+        <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mt-2 border-t pt-2">
+        <Markdown text={text} />
+      </CollapsibleContent>
+    </Collapsible>
   );
 });
 

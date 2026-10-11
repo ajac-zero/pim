@@ -118,5 +118,5 @@ What the fence stops, each covered by a test in `test/people.test.ts` ("erasure 
 - **Data residency**: agents are created without a jurisdiction (see above).
 - **Account cache**: each Worker isolate trusts what it read about an account for up to 30 seconds. Suspensions reach the agent at once regardless. Deletions wipe credentials, so a stale cache can't open a deleted account.
 - **Directory**: one Durable Object holds every account and runs every cleanup. That is plenty for a household or a team, since lookups are cached.
-- **Email**: there is none. Recovery is codes, or the admin's setup link.
+- **Email** is optional, and only for Pim's messages to each person (see the README's Email section). Accounts have no email: recovery is codes, or the admin's setup link.
 - **One admin.** More admins, or handing the role over, aren't built.

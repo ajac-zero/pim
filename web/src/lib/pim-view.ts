@@ -516,7 +516,13 @@ export function reduceAll(
 export const SEND_TO_USER = "send_to_user";
 
 /** What a `send_to_user` call sends; partial while it streams. */
-export type Sent = { message: string; notify: boolean; title: string | null };
+export type Sent = {
+  message: string;
+  /** Where it went: this conversation, or the person's inbox. */
+  channel: "chat" | "email";
+  notify: boolean;
+  title: string | null;
+};
 
 export function sentOf(call: FunctionCallItem): Sent | null {
   if (call.name !== SEND_TO_USER) return null;
@@ -528,6 +534,7 @@ export function sentOf(call: FunctionCallItem): Sent | null {
   }
   return {
     message: typeof args.message === "string" ? args.message : "",
+    channel: args.channel === "email" ? "email" : "chat",
     notify: args.notify === true,
     title: typeof args.title === "string" ? args.title : null,
   };

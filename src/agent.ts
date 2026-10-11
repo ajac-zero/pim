@@ -14,6 +14,7 @@ import { Agent, type Connection, type ConnectionContext, getAgentByName, type Sc
 import { type PiModel, PiHarness, type PiOperationResult, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
 import { ArtifactStore, artifactHeaders, downloadName, RESIZE_SCRIPT } from "./artifacts";
+import { Email, type Mailer, mailerFrom } from "./email";
 import {
 	type Circle,
 	CircleStore,
@@ -212,6 +213,8 @@ export class Pim extends Agent<Env> {
 		},
 	});
 	readonly ai = createAI({ binding: this.env.AI });
+	/** The person's email address, and emailing them there. */
+	readonly email = new Email(this.store, () => this.mailer());
 	/** Model credentials (the ChatGPT plan's tokens), refreshed by pi-ai. */
 	readonly credentials = new SqlCredentialStore(this.store);
 	readonly chatgpt = new ChatGPT(this.store, chatgptCredentials(this.credentials));
@@ -467,6 +470,11 @@ export class Pim extends Agent<Env> {
 		return list.length === 0 ? null : list;
 	}
 
+	/** How this deployment sends email (`EMAIL` and `PIM_EMAIL_FROM`); null when it can't. */
+	protected mailer(): Mailer | null {
+		return mailerFrom(this.env);
+	}
+
 	/** The deployment's model (`PIM_MODEL`), used whenever no other is chosen. */
 	protected defaultModel(): PiModel {
 		return this.ai(this.env.PIM_MODEL);
@@ -553,6 +561,14 @@ export class Pim extends Agent<Env> {
 				return this.cancelSchedule(id);
 			},
 			notify: (notification) => this.deliverNotification(notification),
+			get emailEnabled() {
+				return pim.mailer() !== null;
+			},
+			sendEmail: (mail) => {
+				const origin = this.env.PIM_PUBLIC_URL || this.store.meta("public_origin");
+				const link = origin ? `\n\n—\nFrom your Pim: ${new URL(`/chat/${mail.session}`, origin)}` : "";
+				return this.email.send({ ...mail, text: `${mail.text}${link}` });
+			},
 			approvalFiled: (approval, isNew) => this.#approvalFiled(approval, isNew),
 			permission: (approval) => this.#approvalPermission(approval),
 		};
@@ -632,18 +648,20 @@ export class Pim extends Agent<Env> {
 		const conversation = await this.harness.conversation(result.session);
 		const record = await (await this.harness.storage()).submissionByRequest(conversation.id, result.operationId, BACKGROUND_CONTEXT);
 		const replies: string[] = [];
+		let sent = false;
 		if (record?.type === "input" && record.status === "done") {
 			for (const entry of await this.harness.session(result.session).messages()) {
 				const message = entry.model?.[0];
 				if (entry.id <= record.entry || entry.id > record.answer || message?.role !== "assistant") continue;
 				for (const part of message.content) {
-					if (part.type === "toolCall" && part.name === SEND_TO_USER && typeof part.arguments.message === "string") {
-						replies.push(part.arguments.message);
-					}
+					if (part.type !== "toolCall" || part.name !== SEND_TO_USER) continue;
+					sent = true;
+					// What went to their inbox is not a reply here.
+					if (typeof part.arguments.message === "string" && part.arguments.channel !== "email") replies.push(part.arguments.message);
 				}
 			}
 		}
-		const fallback = replies.length === 0 && result.text && !PIM_OPERATION.test(result.operationId);
+		const fallback = !sent && result.text && !PIM_OPERATION.test(result.operationId);
 		return { ...result, replies: fallback ? [result.text!] : replies };
 	}
 
@@ -1833,6 +1851,11 @@ export class Pim extends Agent<Env> {
 				return { model: describeModel(await this.chooseModel(model)) };
 			},
 		],
+		// The address Pim emails the person at, confirmed with a code it sends there.
+		["GET", "/email", () => this.email.state()],
+		["PUT", "/email", async (_params, request) => this.email.start((await readJson<{ address: unknown }>(request)).address)],
+		["POST", "/email/confirm", async (_params, request) => this.email.confirm((await readJson<{ code: unknown }>(request)).code)],
+		["DELETE", "/email", () => this.email.remove()],
 		// The person's settings, and what they used.
 		["GET", "/settings", () => this.#describeSettings()],
 		[

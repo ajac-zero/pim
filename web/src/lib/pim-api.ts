@@ -140,6 +140,16 @@ export type Visit = {
 
 export type ApprovalPolicy = "auto" | "explicit";
 
+/** The address Pim emails you at. */
+export type EmailState = {
+  /** This Pim can send email at all. */
+  available: boolean;
+  /** The confirmed address, or null. */
+  address: string | null;
+  /** An address waiting for the code Pim emailed it, or null. */
+  pending: string | null;
+};
+
 export type PimSettings = {
   timeZone: string;
   approvalPolicy: ApprovalPolicy;
@@ -511,6 +521,18 @@ export const pim = {
       body: JSON.stringify({ url }),
     }),
   chatgptLogout: () => call<ChatGPTStatus>("/chatgpt", { method: "DELETE" }),
+  email: () => call<EmailState>("/email"),
+  startEmail: (address: string) =>
+    call<EmailState>("/email", {
+      method: "PUT",
+      body: JSON.stringify({ address }),
+    }),
+  confirmEmail: (code: string) =>
+    call<EmailState>("/email/confirm", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    }),
+  removeEmail: () => call<EmailState>("/email", { method: "DELETE" }),
   settings: () => call<PimSettings>("/settings"),
   updateSettings: (
     update: Partial<Omit<PimSettings, "approvalTimeoutSeconds">>,

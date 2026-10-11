@@ -22,6 +22,13 @@ export type PimServices = {
 	cancelSchedule(id: string): Promise<boolean>;
 	/** Deliver a stored notification to the user's connected clients and webhook. */
 	notify(notification: Notification): Promise<void>;
+	/** This deployment can send email; each person must also confirm an address. */
+	readonly emailEnabled: boolean;
+	/**
+	 * Emails the person at their confirmed address a message from `session`;
+	 * the same `id` again sends nothing. Says where it went, or why it can't.
+	 */
+	sendEmail(mail: { id: string; session: string; subject: string; text: string }): Promise<{ to: string } | { error: string }>;
 	/**
 	 * How long an approval waits before it is approved automatically (the
 	 * `auto` policy); null when it waits for the user however long (`explicit`).

@@ -8,6 +8,7 @@ import { ActivityGroup } from "~/components/chat/activity";
 import {
   ApprovalBlock,
   AssistantMessage,
+  EmailedMessage,
   EventNotice,
   ThinkingDot,
   UnknownItemBlock,
@@ -173,6 +174,17 @@ export const Thread = memo(function Thread({
         }}
       >
         {rows.map((row, index) => {
+          if (row.kind === "sent" && row.sent.channel === "email") {
+            return (
+              <EmailedMessage
+                key={row.key}
+                subject={
+                  row.sent.title ?? row.sent.message.split("\n")[0] ?? ""
+                }
+                text={row.sent.message}
+              />
+            );
+          }
           if (row.kind === "sent") {
             return (
               <AssistantMessage

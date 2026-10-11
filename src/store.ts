@@ -152,6 +152,12 @@ function watchOf(row: Row): AppWatch {
 const ERASED_SCHEMA = "CREATE TABLE IF NOT EXISTS pim_erased (erased_at INTEGER NOT NULL)";
 
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS pim_emails (
+	id TEXT PRIMARY KEY,
+	session TEXT,
+	subject TEXT NOT NULL,
+	sent_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS pim_goals (
 	id TEXT PRIMARY KEY,
 	title TEXT NOT NULL,
@@ -350,6 +356,7 @@ export class PimStore {
 			pim_sessions: "chats",
 			pim_credentials: "credentials",
 			pim_notifications: "notifications",
+			pim_emails: "emails sent",
 			pim_push_subscriptions: "push subscriptions",
 			pim_artifacts: "artifacts",
 			pim_artifact_versions: "artifact versions",
@@ -760,6 +767,30 @@ export class PimStore {
 
 	deleteMeta(key: string): void {
 		this.#sql.exec("DELETE FROM pim_meta WHERE key = ?", key);
+	}
+
+	// Emails Pim sent: its messages (by session), and confirmation codes (no session)
+
+	emailSent(id: string): boolean {
+		return this.#sql.exec("SELECT 1 FROM pim_emails WHERE id = ?", id).toArray().length > 0;
+	}
+
+	recordEmail(input: { id: string; session: string | null; subject: string }): void {
+		this.#sql.exec(
+			"INSERT OR IGNORE INTO pim_emails (id, session, subject, sent_at) VALUES (?, ?, ?, ?)",
+			input.id,
+			input.session,
+			input.subject,
+			Date.now(),
+		);
+	}
+
+	/** Emails sent since `since` (ms): Pim's messages, or confirmation codes. */
+	emailsSince(since: number, kind: "messages" | "codes"): number {
+		const [row] = this.#sql
+			.exec(`SELECT COUNT(*) AS count FROM pim_emails WHERE sent_at >= ? AND session IS ${kind === "codes" ? "" : "NOT "}NULL`, since)
+			.toArray();
+		return Number(row?.count ?? 0);
 	}
 
 	// Web Push subscriptions, one per browser that turned notifications on

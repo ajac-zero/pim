@@ -7,6 +7,7 @@ import {
   KeyRound,
   Loader2,
   LogOut,
+  Mail,
   Trash2,
 } from "lucide-react";
 import { type FormEvent, useState } from "react";
@@ -35,6 +36,7 @@ import {
 } from "~/lib/auth";
 import {
   CHATGPT_PROVIDER,
+  type EmailState,
   type ModelInfo,
   type ModelSettings,
   pim,
@@ -45,7 +47,12 @@ import {
   pushEnabled,
   pushSupported,
 } from "~/lib/push";
-import { accountQuery, modelQuery, profileQuery } from "~/lib/queries";
+import {
+  accountQuery,
+  emailQuery,
+  modelQuery,
+  profileQuery,
+} from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 export const Route = createFileRoute("/settings")({
@@ -74,6 +81,7 @@ function SettingsPage() {
       </section>
       <PreferencesSection />
       <ToolPermissionsSection />
+      <EmailSection />
       <PushSection />
       <PasskeysSection />
       <TokensSection />
@@ -402,6 +410,114 @@ function ToolPermissionsSection() {
 }
 
 /** Whether this browser gets Pim's notifications as pushes. */
+/** The address Pim emails you at, confirmed with a code it sends there. Only where this Pim can send email. */
+function EmailSection() {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const { data: email } = useQuery(emailQuery());
+  const [address, setAddress] = useState("");
+  const [code, setCode] = useState("");
+  const onError = (error: Error) => toast.error(error.message);
+  const onSuccess = (next: EmailState) => {
+    queryClient.setQueryData(["email"], next);
+    setCode("");
+  };
+  const start = useMutation({ mutationFn: pim.startEmail, onSuccess, onError });
+  const confirm = useMutation({
+    mutationFn: pim.confirmEmail,
+    onSuccess,
+    onError,
+  });
+  const remove = useMutation({
+    mutationFn: pim.removeEmail,
+    onSuccess,
+    onError,
+  });
+  if (!email?.available) return null;
+  const busy = start.isPending || confirm.isPending || remove.isPending;
+
+  return (
+    <section className="mt-10 space-y-3">
+      <h2 className="font-medium text-muted-foreground text-sm">
+        {t("emailTitle")}
+      </h2>
+      <p className="px-1 text-muted-foreground text-xs">
+        {t("emailDescription")}
+      </p>
+      {email.address && !email.pending ? (
+        <div className="flex items-center gap-3 rounded-xl border px-4 py-3">
+          <Mail className="size-4 shrink-0 text-muted-foreground" />
+          <p className="min-w-0 flex-1 truncate text-sm">
+            {t("emailConfirmed", { address: email.address })}
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy}
+            onClick={() => remove.mutate()}
+          >
+            {t("emailRemove")}
+          </Button>
+        </div>
+      ) : email.pending ? (
+        <form
+          className="space-y-2 rounded-xl border px-4 py-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            confirm.mutate(code);
+          }}
+        >
+          <p className="text-sm">
+            {t("emailCodeSent", { address: email.pending })}
+          </p>
+          <div className="flex gap-2">
+            <Input
+              value={code}
+              onChange={(event) => setCode(event.target.value)}
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              placeholder="123456"
+              aria-label={t("emailCodeLabel")}
+              className="max-w-40"
+            />
+            <Button type="submit" disabled={busy || code.trim() === ""}>
+              {t("emailConfirm")}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => remove.mutate()}
+            >
+              {t("emailUseAnother")}
+            </Button>
+          </div>
+        </form>
+      ) : (
+        <form
+          className="flex gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            start.mutate(address);
+          }}
+        >
+          <Input
+            type="email"
+            value={address}
+            onChange={(event) => setAddress(event.target.value)}
+            autoComplete="email"
+            placeholder="you@example.com"
+            aria-label={t("emailAddressLabel")}
+          />
+          <Button type="submit" disabled={busy || address.trim() === ""}>
+            {t("emailSendCode")}
+          </Button>
+        </form>
+      )}
+    </section>
+  );
+}
+
 function PushSection() {
   const { t } = useI18n();
   const queryClient = useQueryClient();

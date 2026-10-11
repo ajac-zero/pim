@@ -78,6 +78,8 @@ export type Persona = {
   source: { template: string; author: string } | null;
   /** Its template in the gallery, while published. */
   published: string | null;
+  /** When its icon was set, or null without one. */
+  icon: number | null;
   /** The one that talks in every chat not started with another. It can't be deleted. */
   default: boolean;
   createdAt: number;
@@ -434,6 +436,24 @@ export const pim = {
       method: "PUT",
       body: JSON.stringify(input),
     }),
+  setPersonaIcon: async (id: string, icon: Blob) => {
+    const response = await fetch(`/api/personas/${id}/icon`, {
+      method: "PUT",
+      headers: { "content-type": icon.type },
+      body: icon,
+    });
+    const body = (await response.json().catch(() => null)) as {
+      error?: string;
+    } | null;
+    if (!response.ok) {
+      throw new ApiError(
+        response.status,
+        body?.error ?? `Pim answered ${response.status}`,
+      );
+    }
+  },
+  removePersonaIcon: (id: string) =>
+    call<Persona>(`/personas/${id}/icon`, { method: "DELETE" }),
   deletePersona: (id: string) =>
     call<{ deleted: boolean }>(`/personas/${id}`, { method: "DELETE" }),
   publishPersona: (id: string) =>

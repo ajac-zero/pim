@@ -4,6 +4,7 @@ import {
   Bot,
   Globe,
   MessageCircle,
+  ImagePlus,
   Pencil,
   Plug,
   Plus,
@@ -11,9 +12,10 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useI18n } from "~/components/i18n";
+import { iconFromFile, PimIcon } from "~/components/pim-icon";
 import { EmptyState, Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -124,6 +126,18 @@ function PersonaCard({ persona }: { persona: Persona }) {
     onSuccess: refresh,
     onError: (error) => toast.error(error.message),
   });
+  const fileInput = useRef<HTMLInputElement>(null);
+  const setIcon = useMutation({
+    mutationFn: async (file: File) =>
+      pim.setPersonaIcon(persona.id, await iconFromFile(file)),
+    onSuccess: refresh,
+    onError: (error) => toast.error(error.message),
+  });
+  const removeIcon = useMutation({
+    mutationFn: () => pim.removePersonaIcon(persona.id),
+    onSuccess: refresh,
+    onError: (error) => toast.error(error.message),
+  });
   const publish = useMutation({
     mutationFn: async (on: boolean) => {
       if (on) await pim.publishPersona(persona.id);
@@ -150,8 +164,11 @@ function PersonaCard({ persona }: { persona: Persona }) {
   return (
     <article className="rounded-xl border px-4 py-3" aria-label={persona.name}>
       <div className="flex items-start gap-3">
-        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-          <Bot className="size-4.5" />
+        <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-primary/10 text-primary">
+          <PimIcon
+            persona={persona}
+            className={persona.icon === null ? "size-4.5" : "size-8 rounded-none"}
+          />
         </span>
         <div className="min-w-0 flex-1">
           <h2 className="flex items-center gap-2 font-medium">
@@ -234,6 +251,36 @@ function PersonaCard({ persona }: { persona: Persona }) {
         <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
           <Pencil /> {t("edit")}
         </Button>
+        <input
+          ref={fileInput}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          aria-label={t("uploadIcon")}
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (file) setIcon.mutate(file);
+          }}
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => fileInput.current?.click()}
+          disabled={setIcon.isPending}
+        >
+          <ImagePlus /> {t("uploadIcon")}
+        </Button>
+        {persona.icon !== null && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => removeIcon.mutate()}
+            disabled={removeIcon.isPending}
+          >
+            {t("removeIcon")}
+          </Button>
+        )}
         {account && (
           <Button
             size="sm"

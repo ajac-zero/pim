@@ -355,13 +355,15 @@ export const ApprovalBlock = memo(function ApprovalBlock({
     : approved
       ? t(approval.decidedBy === "timeout" ? "approvedNoAnswer" : "approved")
       : t(approval.decidedBy === "timeout" ? "deniedNoAnswer" : "denied");
-  // Someone in a circle asked: who, and through which circle.
+  // Someone in a circle asked: who, and through which circle. Or a member of this Pim's team.
   const asker = approval.requestedBy
     ? t("guestAsked", {
         username: approval.requestedBy.username,
         circle: approval.requestedBy.circleName,
       })
-    : null;
+    : approval.member
+      ? t("memberAsked", { member: approval.member.name })
+      : null;
   const heading =
     asker === null ? status : pending ? asker : `${asker} · ${status}`;
   const view = useMemo(() => approvalView(approval), [approval]);

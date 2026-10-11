@@ -52,7 +52,16 @@ export type Approval = {
 	readonly decidedBy: ApprovalDecider | null;
 	/** A guest who asked, from their own Pim, through one of the owner's circles; null when Pim asked for the owner. */
 	readonly requestedBy: ApprovalRequester | null;
+	/**
+	 * A member of a Pim's team asked: its `session` is then the member's own
+	 * conversation, where the decision goes, and the person sees the request
+	 * in the chat it works for.
+	 */
+	readonly member: ApprovalMember | null;
 };
+
+/** The team member whose call filed an approval, and the chat it was working for. */
+export type ApprovalMember = { readonly name: string; readonly session: string };
 
 /** A guest whose call filed an approval. Its `session` is then the guest's conversation, in the guest's Pim. */
 export type ApprovalRequester = {
@@ -184,7 +193,8 @@ CREATE TABLE IF NOT EXISTS pim_approvals (
 	tool TEXT,
 	on_timeout TEXT,
 	decided_by TEXT,
-	requested_by TEXT
+	requested_by TEXT,
+	member TEXT
 );
 CREATE TABLE IF NOT EXISTS pim_always_approved (
 	tool TEXT PRIMARY KEY,
@@ -289,6 +299,7 @@ function approvalOf(row: Row): Approval {
 		onTimeout: row.on_timeout === "deny" ? "deny" : "approve",
 		decidedBy: row.decided_by === null || row.decided_by === undefined ? null : (String(row.decided_by) as ApprovalDecider),
 		requestedBy: row.requested_by ? (JSON.parse(String(row.requested_by)) as ApprovalRequester) : null,
+		member: row.member ? (JSON.parse(String(row.member)) as ApprovalMember) : null,
 	};
 }
 
@@ -349,6 +360,7 @@ export class PimStore {
 			pim_guest_activity: "guest activity",
 			pim_guest_calls: "guest calls",
 			pim_personas: "Pims",
+			pim_team_runs: "Pims' team work",
 			pim_persona_sessions: "Pims' chats",
 			pim_shares: "Pims shared with them",
 			pim_mcp_servers: "apps",
@@ -385,6 +397,7 @@ export class PimStore {
 		if (!columns.includes("on_timeout")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN on_timeout TEXT");
 		if (!columns.includes("decided_by")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN decided_by TEXT");
 		if (!columns.includes("requested_by")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN requested_by TEXT");
+		if (!columns.includes("member")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN member TEXT");
 		const sessionColumns = this.#sql.exec("PRAGMA table_info(pim_sessions)").toArray().map((row) => String(row.name));
 		if (!sessionColumns.includes("deleted_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN deleted_at INTEGER");
 	}
@@ -470,9 +483,10 @@ export class PimStore {
 		expiresAt: number | null;
 		onTimeout: "approve" | "deny";
 		requestedBy?: ApprovalRequester;
+		member?: ApprovalMember | null;
 	}): Approval {
 		this.#sql.exec(
-			"INSERT OR IGNORE INTO pim_approvals (id, session, action, tool, args, summary, status, created_at, call_id, expires_at, on_timeout, requested_by) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+			"INSERT OR IGNORE INTO pim_approvals (id, session, action, tool, args, summary, status, created_at, call_id, expires_at, on_timeout, requested_by, member) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
 			input.id,
 			input.session,
 			input.action,
@@ -484,6 +498,7 @@ export class PimStore {
 			input.expiresAt,
 			input.onTimeout,
 			input.requestedBy === undefined ? null : JSON.stringify(input.requestedBy),
+			input.member ? JSON.stringify(input.member) : null,
 		);
 		return this.approval(input.id)!;
 	}

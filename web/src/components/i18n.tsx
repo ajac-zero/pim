@@ -179,6 +179,28 @@ const translations = {
     noChatsMatch: "No chats match your search.",
     noChatsYet: "No chats yet.",
     newChatWith: "New chat with {name}",
+    team: "Team",
+    teamHint:
+      "Members your Pim hands tasks to. They work at the same time, each with its own instructions, and answer your Pim, never you.",
+    memberName: "Member's name",
+    memberNamePlaceholder: "Researcher",
+    memberInstructions: "Its instructions",
+    memberInstructionsPlaceholder:
+      "What it does and how, such as: find facts and say where each came from.",
+    memberTools: "Tools it may use",
+    memberToolsHint:
+      "Tool names, separated by commas. Leave it empty for all of your Pim's tools a member can have.",
+    addMember: "Add member",
+    removeTeamMember: "Remove member",
+    teamOf: "{name}'s team",
+    teamWorking: "{count} working",
+    teamRunning: "Working",
+    teamDone: "Done",
+    teamFailed: "Didn't finish",
+    teamReadOnly:
+      "{member} works for {pim} and answers it, not you. This is what it did.",
+    usedTool: "Used {tool}",
+    memberAsked: "{member} asked",
     namePimTitle: "Name your Pim",
     namePimBody:
       "Your Pim is the agent you'll talk with here. It remembers what matters to you, keeps working while you're away, and asks before acting. What should it be called?",
@@ -660,6 +682,28 @@ const translations = {
     noChatsMatch: "Ningún chat coincide con la búsqueda.",
     noChatsYet: "Aún no hay chats.",
     newChatWith: "Nuevo chat con {name}",
+    team: "Equipo",
+    teamHint:
+      "Miembros a los que tu Pim da tareas. Trabajan a la vez, cada uno con sus propias instrucciones, y le responden a tu Pim, nunca a ti.",
+    memberName: "Nombre del miembro",
+    memberNamePlaceholder: "Investigador",
+    memberInstructions: "Sus instrucciones",
+    memberInstructionsPlaceholder:
+      "Qué hace y cómo, por ejemplo: busca datos y di de dónde sale cada uno.",
+    memberTools: "Herramientas que puede usar",
+    memberToolsHint:
+      "Nombres de herramientas, separados por comas. Déjalo vacío para todas las herramientas de tu Pim que un miembro puede tener.",
+    addMember: "Añadir miembro",
+    removeTeamMember: "Quitar miembro",
+    teamOf: "Equipo de {name}",
+    teamWorking: "{count} trabajando",
+    teamRunning: "Trabajando",
+    teamDone: "Listo",
+    teamFailed: "No terminó",
+    teamReadOnly:
+      "{member} trabaja para {pim} y le responde a él, no a ti. Esto es lo que hizo.",
+    usedTool: "Usó {tool}",
+    memberAsked: "{member} pidió",
     namePimTitle: "Ponle nombre a tu Pim",
     namePimBody:
       "Tu Pim es el agente con el que hablarás aquí. Recuerda lo que te importa, sigue trabajando mientras no estás y pregunta antes de actuar. ¿Cómo se llamará?",

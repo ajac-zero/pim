@@ -16,6 +16,8 @@ export function describeSchedule(schedule: Schedule<ScheduledTaskPayload>) {
 	};
 }
 
+export const SCHEDULE_EXTENSION = "pim.schedule";
+
 export function scheduleExtension(services: PimServices) {
 	const scheduleTask = defineTool({
 		name: "schedule_task",
@@ -78,5 +80,5 @@ export function scheduleExtension(services: PimServices) {
 		},
 	});
 
-	return defineExtension({ name: "pim.schedule", tools: [scheduleTask, listScheduled, cancelScheduled] });
+	return defineExtension({ name: SCHEDULE_EXTENSION, tools: [scheduleTask, listScheduled, cancelScheduled] });
 }

@@ -113,7 +113,7 @@ export function AppSidebar({
             (approval) =>
               approval.status === "pending" && !approval.requestedBy,
           )
-          .map((approval) => approval.session),
+          .map((approval) => approval.member?.session ?? approval.session),
       ),
     [approvals],
   );

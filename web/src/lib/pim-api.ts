@@ -21,6 +21,48 @@ export type Session = {
 /** An app a Pim suggests connecting, by its MCP server URL. */
 export type SuggestedApp = { name: string; url: string };
 
+/** One of a Pim's team: it does tasks the Pim hands it, and answers the Pim, never you. */
+export type TeamMember = {
+  name: string;
+  instructions: string;
+  /** The tools it may use, by name; null for all the Pim's tools a member can have. */
+  tools: string[] | null;
+};
+
+/** A conversation's message, as the REST API projects it. */
+export type TranscriptMessage = {
+  id: string;
+  role: "user" | "assistant" | "tool" | "notice";
+  parts: (
+    | { type: "text" | "thinking"; text: string }
+    | { type: "tool-call"; id: string; name: string; arguments: unknown }
+    | {
+        type: "tool-result";
+        id: string;
+        name: string;
+        content: { type: string; text?: string }[];
+        error: boolean;
+      }
+    | { type: "image" }
+  )[];
+  timestamp: number;
+  error?: string;
+};
+
+/** A task a Pim handed a member of its team, in the member's own conversation. */
+export type TeamRun = {
+  conversation: string;
+  /** Tasks handed out together share it. */
+  call: string;
+  session: string;
+  persona: string;
+  member: string;
+  task: string;
+  status: "running" | "done" | "failed";
+  createdAt: number;
+  updatedAt: number;
+};
+
 /** How long a Pim's name may be. */
 export const MAX_PIM_NAME = 60;
 
@@ -31,6 +73,7 @@ export type Persona = {
   description: string;
   instructions: string;
   apps: SuggestedApp[];
+  team: TeamMember[];
   /** The template it was made from. */
   source: { template: string; author: string } | null;
   /** Its template in the gallery, while published. */
@@ -46,6 +89,7 @@ export type PersonaInput = {
   description: string;
   instructions: string;
   apps: SuggestedApp[];
+  team: TeamMember[];
 };
 
 /** A Pim someone published for others to make their own. */
@@ -57,6 +101,7 @@ export type Template = {
   description: string;
   instructions: string;
   apps: SuggestedApp[];
+  team: TeamMember[];
   publishedAt: number;
   uses: number;
 };
@@ -110,6 +155,8 @@ export type Approval = {
     circle: string;
     circleName: string;
   } | null;
+  /** A member of a Pim's team asked, working for the chat `session` names; the approval's own `session` is the member's. */
+  member?: { name: string; session: string } | null;
 };
 
 /** One of your circles: people who may message your Pim, and what they may use. */
@@ -393,6 +440,16 @@ export const pim = {
     call<Template>(`/personas/${id}/publish`, { method: "POST" }),
   unpublishPersona: (id: string) =>
     call<{ deleted: boolean }>(`/personas/${id}/publish`, { method: "DELETE" }),
+  /** What a chat's Pim handed its team, newest first. */
+  teamRuns: (session: string) =>
+    call<{ runs: TeamRun[] }>(`/sessions/${session}/team`).then(
+      (body) => body.runs,
+    ),
+  /** A team member's conversation, read-only. */
+  teamRun: (session: string, conversation: string) =>
+    call<TeamRun & { messages: TranscriptMessage[] }>(
+      `/sessions/${session}/team/${conversation}`,
+    ),
   profile: () => call<Profile>("/profile"),
   setProfile: (change: { displayName: string | null; bio: string | null }) =>
     call<Profile>("/profile", { method: "PUT", body: JSON.stringify(change) }),

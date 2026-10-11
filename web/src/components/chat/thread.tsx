@@ -113,8 +113,11 @@ export const Thread = memo(function Thread({
   const approvalsByCall = useMemo(
     () =>
       new Map(
+        // A team member's call ids are its own conversation's, not this one's.
         (approvals ?? []).flatMap((approval) =>
-          approval.callId ? [[approval.callId, approval] as const] : [],
+          approval.callId && !approval.member
+            ? [[approval.callId, approval] as const]
+            : [],
         ),
       ),
     [approvals],
@@ -128,7 +131,8 @@ export const Thread = memo(function Thread({
     return (approvals ?? [])
       .filter(
         (approval) =>
-          approval.session === sessionId &&
+          // A team member's request shows in the chat it works for.
+          (approval.member?.session ?? approval.session) === sessionId &&
           approval.status === "pending" &&
           !placed.has(approval.id),
       )

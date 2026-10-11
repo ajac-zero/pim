@@ -159,10 +159,12 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | POST | `/approvals/:id/approve` | `{ note?, always: true }` | Also sets the approval's tool to `on`, so later calls run without asking, and approves other pending calls to it |
 | GET | `/permissions` | `?circle=` | `{ tools: [{ app, appName, tool, name, description, readOnly, permission, default, chosen, changed, choices }] }`: Pim's own tools that ask first (`app: null`) and every connected app's tools, or with `circle`, that circle's (memory, and the apps' tools). `permission` is what applies: `off`, `ask` or `on`. `chosen` is yours, or null for the default |
 | PUT | `/permissions` | `{ circle?, app, tool, permission }`: `app` null for Pim's own tools, `tool` the app's own name for it, `permission` null for the default | That tool's entry; `404` for an unknown tool or circle |
-| GET | `/personas` | | `{ personas: [{ id, name, description, instructions, apps, source, published, default, createdAt, updatedAt }] }`: your Pims, the default one first (see [Your Pims](#your-pims)) |
-| POST | `/personas` | `{ name, description?, instructions?, apps?: [{ name, url }] }` | A new Pim |
+| GET | `/personas` | | `{ personas: [{ id, name, description, instructions, apps, team, source, published, default, createdAt, updatedAt }] }`: your Pims, the default one first (see [Your Pims](#your-pims)) |
+| POST | `/personas` | `{ name, description?, instructions?, apps?: [{ name, url }], team?: [{ name, instructions, tools? }] }` | A new Pim. `tools` lists the tool names a team member may use; null or missing for all a member can have (see [Teams](#teams)) |
 | GET, PUT, DELETE | `/personas/:id` | PUT: any of the fields | The Pim; editing reaches its chats from their next request, deleting moves them to the default Pim. The default Pim can't be deleted (`400`) |
 | POST | `/sessions` | `{ title?, persona? }` | A new session with that Pim, or the default one; sessions list their `persona` (null in a visit) |
+| GET | `/sessions/:id/team` | | `{ runs: [{ conversation, call, member, task, status, createdAt, updatedAt }] }`: the tasks the chat's Pim handed its team, newest first; `status` is `running`, `done` or `failed` |
+| GET | `/sessions/:id/team/:conversation` | | One of them, with the member's conversation as `messages`, read-only |
 | GET | `/account` | | `{ username, ownerId, role, status, createdAt, usage, recoveryCodesLeft }` |
 | GET | `/account/export` | | Your account and everything in your Pim, as one JSON download, without credentials |
 | DELETE | `/account` | `{ confirm: username }` | Deletes your account and erases your Pim; a passkey session only. `202` while erasing is still being retried |
@@ -320,6 +322,15 @@ Your Pims are named agents, each with its own instructions: a marathon coach, a 
 A Pim can be **published** to the others on your Pim: Discover lists published Pims, and anyone on it can read one in full and **make it their own**, which copies its name, description, instructions and suggested apps into their own Pims. Nothing else of the author's goes with it: no memory, chats or credentials. The copy is theirs to change; publishing again updates what others see, not their copies. Unpublishing, deleting the Pim, or deleting the account takes it out of Discover. Each person has a profile (a name and a line about them), shown on their page and next to what they publish.
 
 A published Pim's instructions are someone else's words running with your tools, so read them before you take one: your copy still asks before acting wherever your tool permissions say it should.
+
+### Teams
+
+A Pim can have a team: up to eight members, each with a name, its own instructions and, optionally, the tools it may use. You still talk to one Pim. It hands members tasks with its `delegate` tool, they work at the same time, each in a conversation of its own, and it gets all their answers back to combine. A coding Pim, for example, can be a planner that hands parts of the change to a few coders.
+
+- **Members answer the Pim, never you.** They don't get `send_to_user`, scheduling, watching apps' events, or `delegate`. Given a list of tools, a member gets only those.
+- **The chat shows the team at work**, above the composer: who has the latest tasks and whether each is working, done or didn't finish. A member opens read-only, with its task and what it did. Members' conversations aren't chats in the sidebar.
+- **Approvals.** A member's tools ask before acting, as the Pim's do. The request shows in the chat the member works for, labeled with its name. The decision goes to the member, and what it answers then comes to the Pim's chat as a message starting with "[Team".
+- **Copies.** Publishing a Pim, making one your own, and the Pim everyone starts with copy its team.
 
 ## Sharing
 

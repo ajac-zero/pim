@@ -341,6 +341,7 @@ export class PimStore {
 			pim_circles: "circles",
 			pim_circle_members: "circle members",
 			pim_guest_activity: "guest activity",
+			pim_guest_calls: "guest calls",
 			pim_shares: "Pims shared with them",
 			pim_mcp_servers: "apps",
 			pim_app_watches: "watches",

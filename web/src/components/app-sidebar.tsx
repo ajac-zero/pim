@@ -18,6 +18,7 @@ import {
   SquarePen,
   Sun,
   Trash2,
+  Users,
   X,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -44,12 +45,14 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
-import { pim, type Session } from "~/lib/pim-api";
+import { pim, type Session, type Visit } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import {
+  accountQuery,
   approvalsQuery,
   notificationsQuery,
   sessionsQuery,
+  visitsQuery,
 } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
@@ -101,6 +104,9 @@ export function AppSidebar({
   const { data: sessions } = useQuery(sessionsQuery());
   const { data: approvals } = useQuery(approvalsQuery());
   const { data: notifications } = useQuery(notificationsQuery());
+  // Sharing is between Pimling accounts; a self-hosted Pim has none.
+  const { data: account } = useQuery(accountQuery());
+  const { data: visits } = useQuery({ ...visitsQuery(), enabled: !!account });
   const params = useParams({ strict: false }) as { sessionId?: string };
   const activeId = params.sessionId;
   const newChat = useNewChat(onNavigate);
@@ -110,10 +116,21 @@ export function AppSidebar({
     () =>
       new Set(
         approvals
-          ?.filter((approval) => approval.status === "pending")
+          ?.filter(
+            (approval) =>
+              approval.status === "pending" && !approval.requestedBy,
+          )
           .map((approval) => approval.session),
       ),
     [approvals],
+  );
+  /* Requests from people in your circles, waiting on the Sharing page. */
+  const guestRequests =
+    approvals?.filter(
+      (approval) => approval.status === "pending" && approval.requestedBy,
+    ).length ?? 0;
+  const shownVisits = (visits ?? []).filter((visit) =>
+    visit.username.toLowerCase().includes(search.toLowerCase()),
   );
   const unreadNotifications =
     notifications?.filter((notification) => notification.readAt === null)
@@ -122,6 +139,8 @@ export function AppSidebar({
   const sessionGroups = useMemo(() => {
     const map = new Map<string, Session[]>();
     for (const session of sessions ?? []) {
+      // Conversations with others' Pims are listed under Shared with you.
+      if (session.visit) continue;
       const label = groupLabel(session.updatedAt, t);
       const list = map.get(label) ?? [];
       list.push(session);
@@ -224,6 +243,16 @@ export function AppSidebar({
             collapsed={collapsed}
             onNavigate={onNavigate}
           />
+          {account && (
+            <SidebarNavItem
+              to="/sharing"
+              icon={<Users className="size-4.5 shrink-0" />}
+              label={t("sharing")}
+              count={guestRequests}
+              collapsed={collapsed}
+              onNavigate={onNavigate}
+            />
+          )}
           <SidebarNavItem
             to="/settings"
             icon={<Settings className="size-4.5 shrink-0" />}
@@ -274,7 +303,26 @@ export function AppSidebar({
           )}
         >
           <nav className="h-full overflow-y-auto px-3 pb-2 scrollbar-thin">
-            {sessions && groups.length === 0 && (
+            {shownVisits.length > 0 && (
+              <div className="mb-3">
+                <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
+                  {t("sharedWithYou")}
+                </div>
+                <ul className="space-y-px" aria-label={t("sharedWithYou")}>
+                  {shownVisits.map((visit) => (
+                    <VisitRow
+                      key={visit.ownerId}
+                      visit={visit}
+                      active={
+                        visit.session !== null && visit.session === activeId
+                      }
+                      onNavigate={onNavigate}
+                    />
+                  ))}
+                </ul>
+              </div>
+            )}
+            {sessions && groups.length === 0 && shownVisits.length === 0 && (
               <p className="px-2 py-6 text-center text-muted-foreground text-sm">
                 {search ? t("noChatsMatch") : t("noChatsYet")}
               </p>
@@ -375,7 +423,7 @@ function SidebarNavItem({
   onNavigate,
   ...props
 }: {
-  to: "/artifacts" | "/notifications" | "/settings";
+  to: "/artifacts" | "/notifications" | "/sharing" | "/settings";
   icon: ReactNode;
   label: string;
   count?: number;
@@ -545,6 +593,59 @@ function SidebarLogoToggle({
         {t("expandSidebar")}
       </TooltipContent>
     </Tooltip>
+  );
+}
+
+/** Someone else's Pim, shared with you: opens your conversation with it, started on first use. */
+function VisitRow({
+  visit,
+  active,
+  onNavigate,
+}: {
+  visit: Visit;
+  active: boolean;
+  onNavigate?: () => void;
+}) {
+  const { t } = useI18n();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const open = useMutation({
+    mutationFn: async () =>
+      visit.session ?? (await pim.startVisit(visit.username)).session,
+    onSuccess: async (session) => {
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["visits"] });
+      navigate({ to: "/chat/$sessionId", params: { sessionId: session } });
+      onNavigate?.();
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  // Taken back: the conversation stays readable; there's nothing to start.
+  const disabled = open.isPending || (!visit.available && !visit.session);
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={() => open.mutate()}
+        disabled={disabled}
+        className={cn(
+          "flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-sm transition-colors hover:bg-sidebar-accent disabled:opacity-60",
+          active && "bg-sidebar-accent",
+        )}
+      >
+        <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 font-medium text-[11px] text-primary uppercase">
+          {visit.username.slice(0, 1)}
+        </span>
+        <span className="min-w-0 flex-1 truncate">
+          {t("visitPim", { username: visit.username })}
+        </span>
+        {!visit.available && (
+          <span className="shrink-0 text-muted-foreground text-xs">
+            {t("visitUnavailable")}
+          </span>
+        )}
+      </button>
+    </li>
   );
 }
 

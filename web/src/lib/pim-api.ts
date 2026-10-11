@@ -12,6 +12,8 @@ export type Session = {
   busy: boolean;
   createdAt: number | null;
   updatedAt: number | null;
+  /** A conversation with someone else's Pim, shared with you; null for your own chats. */
+  visit?: { username: string; available: boolean } | null;
 };
 
 export type ApprovalStatus = "pending" | "approved" | "denied";
@@ -37,6 +39,44 @@ export type Approval = {
   onTimeout?: "approve" | "deny";
   /** Who decided: the user, the timeout, or "always approve". */
   decidedBy?: "user" | "timeout" | "always" | null;
+  /** Someone in one of your circles asked, from their own Pim; null when your Pim asked. */
+  requestedBy?: {
+    ownerId: string;
+    username: string;
+    circle: string;
+    circleName: string;
+  } | null;
+};
+
+/** One of your circles: people who may message your Pim, and what they may use. */
+export type Circle = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  createdAt: number;
+  members: { ownerId: string; username: string; addedAt: number }[];
+};
+
+/** A tool call from someone in your circles. */
+export type GuestActivity = {
+  id: number;
+  at: number;
+  username: string;
+  circle: string;
+  tool: string;
+  outcome: "ran" | "asked" | "refused";
+  summary: string;
+};
+
+/** Someone else's Pim, shared with you. */
+export type Visit = {
+  ownerId: string;
+  username: string;
+  sharedAt: number;
+  /** False once they took it back. */
+  available: boolean;
+  /** Your conversation with it, once started. */
+  session: string | null;
 };
 
 export type ApprovalPolicy = "auto" | "explicit";
@@ -164,8 +204,10 @@ export type ToolPermissionInfo = {
   /** What applies when you haven't chosen. */
   default: ToolPermission;
   chosen: ToolPermission | null;
-  /** The app changed the tool since you chose On, so Pim asks again. */
+  /** The app changed the tool since you chose to let it run: Pim asks again, and circles lose it. */
   changed: boolean;
+  /** The permissions it can have. */
+  choices: ToolPermission[];
 };
 
 export type PimNotification = {
@@ -199,6 +241,7 @@ export type ServerMessage =
   | { type: "events"; session: string; events: AgentEvent[] }
   | { type: "notification"; notification: PimNotification }
   | { type: "approval"; approval: Approval }
+  | { type: "visits" }
   | { type: "result"; id: string; result: unknown }
   | { type: "error"; id?: string; message: string };
 
@@ -274,18 +317,54 @@ export const pim = {
       method: "POST",
       body: JSON.stringify(always ? { always } : {}),
     }),
-  permissions: () =>
-    call<{ tools: ToolPermissionInfo[] }>("/permissions").then(
-      (body) => body.tools,
-    ),
+  /** Your own tools' permissions, or a circle's. */
+  permissions: (circle?: string) =>
+    call<{ tools: ToolPermissionInfo[] }>(
+      `/permissions${circle ? `?circle=${encodeURIComponent(circle)}` : ""}`,
+    ).then((body) => body.tools),
   setPermission: (
+    circle: string | null,
     app: string | null,
     tool: string,
     permission: ToolPermission | null,
   ) =>
     call<ToolPermissionInfo>("/permissions", {
       method: "PUT",
-      body: JSON.stringify({ app, tool, permission }),
+      body: JSON.stringify({ circle, app, tool, permission }),
+    }),
+  circles: () =>
+    call<{ circles: Circle[] }>("/circles").then((body) => body.circles),
+  createCircle: (name: string) =>
+    call<Circle>("/circles", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  updateCircle: (id: string, change: { name?: string; enabled?: boolean }) =>
+    call<Circle>(`/circles/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(change),
+    }),
+  deleteCircle: (id: string) =>
+    call<{ deleted: boolean }>(`/circles/${id}`, { method: "DELETE" }),
+  addMember: (circle: string, username: string) =>
+    call<unknown>(`/circles/${circle}/members`, {
+      method: "POST",
+      body: JSON.stringify({ username }),
+    }),
+  removeMember: (circle: string, ownerId: string) =>
+    call<{ deleted: boolean }>(`/circles/${circle}/members/${ownerId}`, {
+      method: "DELETE",
+    }),
+  guestActivity: () =>
+    call<{ activity: GuestActivity[] }>("/circles/activity").then(
+      (body) => body.activity,
+    ),
+  visits: () =>
+    call<{ visits: Visit[] }>("/visits").then((body) => body.visits),
+  /** Your conversation with a Pim shared with you, started if new. */
+  startVisit: (username: string) =>
+    call<{ session: string }>(`/visits/${encodeURIComponent(username)}`, {
+      method: "POST",
     }),
   notifications: () =>
     call<{ notifications: PimNotification[] }>("/notifications").then(

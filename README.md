@@ -139,8 +139,17 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | GET | `/approvals`, `/approvals/:id` | `?status=pending\|approved\|denied` | Approval requests; each says what its timeout decides (`onTimeout`) and who decided it (`decidedBy`: `user`, `timeout` or `always`) |
 | POST | `/approvals/:id/approve`, `/approvals/:id/deny` | `{ note? }` | The decided approval; `409` if already decided |
 | POST | `/approvals/:id/approve` | `{ note?, always: true }` | Also sets the approval's tool to `on`, so later calls run without asking, and approves other pending calls to it |
-| GET | `/permissions` | | `{ tools: [{ app, appName, tool, name, description, readOnly, permission, default, chosen, changed }] }`: Pim's own tools that ask first (`app: null`) and every connected app's tools. `permission` is what applies: `off`, `ask` or `on`. `chosen` is yours, or null for the default |
-| PUT | `/permissions` | `{ app, tool, permission }`: `app` null for Pim's own tools, `tool` the app's own name for it, `permission` null for the default | That tool's entry; `404` for an unknown tool |
+| GET | `/permissions` | `?circle=` | `{ tools: [{ app, appName, tool, name, description, readOnly, permission, default, chosen, changed, choices }] }`: Pim's own tools that ask first (`app: null`) and every connected app's tools, or with `circle`, that circle's (memory, and the apps' tools). `permission` is what applies: `off`, `ask` or `on`. `chosen` is yours, or null for the default |
+| PUT | `/permissions` | `{ circle?, app, tool, permission }`: `app` null for Pim's own tools, `tool` the app's own name for it, `permission` null for the default | That tool's entry; `404` for an unknown tool or circle |
+| GET | `/circles` | | `{ circles: [{ id, name, enabled, createdAt, members: [{ ownerId, username, addedAt }] }] }` (Pimling; see [Sharing](#sharing)) |
+| POST | `/circles` | `{ name }` | A new circle, with nothing allowed |
+| PUT | `/circles/:id` | `{ name?, enabled? }` | The circle; `enabled: false` pauses everyone in it |
+| DELETE | `/circles/:id` | | Deletes it; its people's Pims are told |
+| POST | `/circles/:id/members` | `{ username }` | Puts that Pimling's owner in the circle (moving them from another), and tells their Pim; `404` for an unknown username |
+| DELETE | `/circles/:id/members/:ownerId` | | Takes them out; their Pim is told |
+| GET | `/circles/activity` | | `{ activity: [{ id, at, username, circle, tool, outcome, summary }] }`: guests' tool calls, newest first; `outcome` is `ran`, `asked` or `refused` |
+| GET | `/visits` | | `{ visits: [{ ownerId, username, sharedAt, available, session }] }`: Pims shared with you, and your conversation with each |
+| POST | `/visits/:username` | | `{ session }`: your conversation with that Pim, started if new. Messages to it go through `/sessions/:s/messages` like any other |
 | GET | `/mcp` | | Connected apps, their state, sign-in link, approval policy and tools (with their `permission`) |
 | POST | `/mcp` | `{ name, url, headers?, approval? }` | Connects an app; `201` with `{ id, state, authUrl? }` (`authUrl`: send the user there to sign in) |
 | PUT | `/mcp/:id` | `{ approval: "writes" \| "all" \| "none" }` | Which of its tools need approval, unless you set a tool's permission |
@@ -252,6 +261,18 @@ Settings → Tool permissions lists every tool that acts on the world or comes f
 - **Tied to the tool you saw.** An app tool set to On is held to its definition at the time: description, input schema and annotations. If the app changes any of them, Pim asks before each call again and Settings says so until you choose again.
 - **Checked at each call.** An app tool's permission is checked again when the model calls it, so a tool turned off or changed since the tool list was built is refused or asked about.
 - **Removing an app** forgets its tools' permissions. Tools chosen with Always approve before permissions existed become On the first time Pim sees them.
+
+## Sharing
+
+On Pimling, you can let other people message your Pim from their own. Sharing → Circles: make a circle (Family, Close friends, Acquaintances), add people by their Pimling username, and choose what the circle can use: each connected app's tools (Off, Ask or On, as in [Tool permissions](#tool-permissions)) and your memory (read-only). Everything starts off.
+
+- **Their conversation runs in their Pim.** Someone you share with finds your Pim under Shared with you. Their conversation with it (a visit) is a chat in their own Pim, on their own model and usage: whoever sends the messages pays for them. It sees a brief your Pim sends before each of their turns: what their circle may use, your memory if allowed, and your time zone. Nothing of their own Pim (its tools, memory or apps) is in that conversation, and nothing of yours is in their other chats.
+- **The boundary is in your Pim, at every call.** Each tool in a visit is a call into your Pim (`guestCall`), which checks again that they're in a circle, that the circle is on, and that the tool is allowed for it now. A tool turned off, an app that changed a tool since you allowed it, or a person you removed is refused, whatever their Pim was told before.
+- **Ask means you decide.** A call to a tool set to Ask files an approval that names who asked and through which circle, and notifies you. Their conversation goes on; your decision arrives in it later as a message. Unanswered, it is denied after a day: a guest's request is never approved by a timeout. **Always approve for Family** sets the tool to On for that circle.
+- **Limits.** Up to 20 circles and 200 people in them. Each guest can make 200 calls into your Pim a day, so your apps' own limits stay yours. Sharing → Recent activity lists what guests used, asked for, or were refused.
+- **Taking it back.** Remove someone, or turn a circle off, and their next turn is refused. Deleting a circle forgets its permissions.
+
+Self-hosted Pims have no one to share with, so they have no Sharing page.
 
 ## Develop
 

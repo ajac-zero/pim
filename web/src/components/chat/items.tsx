@@ -312,6 +312,20 @@ export const ApprovalBlock = memo(function ApprovalBlock({
   const pending = approval.status === "pending";
   const approved = approval.status === "approved";
   const StatusIcon = pending ? ShieldCheck : approved ? Check : X;
+  const status = pending
+    ? t("approvalRequested")
+    : approved
+      ? t(approval.decidedBy === "timeout" ? "approvedNoAnswer" : "approved")
+      : t(approval.decidedBy === "timeout" ? "deniedNoAnswer" : "denied");
+  // Someone in a circle asked: who, and through which circle.
+  const asker = approval.requestedBy
+    ? t("guestAsked", {
+        username: approval.requestedBy.username,
+        circle: approval.requestedBy.circleName,
+      })
+    : null;
+  const heading =
+    asker === null ? status : pending ? asker : `${asker} · ${status}`;
   const view = useMemo(() => approvalView(approval), [approval]);
   const hasDetails = view.fields.length > 0 || approval.result !== null;
 
@@ -331,15 +345,7 @@ export const ApprovalBlock = memo(function ApprovalBlock({
         )}
       >
         <StatusIcon className="size-3.5 shrink-0" />
-        {pending
-          ? t("approvalRequested")
-          : approved
-            ? t(
-                approval.decidedBy === "timeout"
-                  ? "approvedNoAnswer"
-                  : "approved",
-              )
-            : t(approval.decidedBy === "timeout" ? "deniedNoAnswer" : "denied")}
+        {heading}
       </div>
       <p
         className="mt-1.5 line-clamp-3 font-medium text-sm [overflow-wrap:anywhere]"
@@ -378,7 +384,10 @@ export const ApprovalBlock = memo(function ApprovalBlock({
             disabled={decide.isPending}
             className="flex-1"
           >
-            {approval.expiresAt !== null && approval.onTimeout === "deny" ? (
+            {/* A guest's request waits a day: no countdown for that. */}
+            {approval.expiresAt !== null &&
+            approval.onTimeout === "deny" &&
+            !approval.requestedBy ? (
               <CountdownRing
                 from={approval.createdAt}
                 until={approval.expiresAt}
@@ -425,7 +434,12 @@ export const ApprovalBlock = memo(function ApprovalBlock({
                     className="cursor-pointer"
                     onSelect={() => decide.mutate("always")}
                   >
-                    <CheckCheck /> {t("alwaysApprove")}
+                    <CheckCheck />{" "}
+                    {approval.requestedBy
+                      ? t("alwaysApproveForCircle", {
+                          circle: approval.requestedBy.circleName,
+                        })
+                      : t("alwaysApprove")}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>

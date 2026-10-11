@@ -17,6 +17,50 @@ const translations = {
     approve: "Approve",
     alwaysApprove: "Always approve",
     moreApprovalOptions: "More approval options",
+    sharing: "Sharing",
+    sharingDescription:
+      "Put people in circles to let them message your Pim from their own Pimling. They can use only what you give their circle, and their messages count against their own usage, not yours.",
+    sharingNeedsPimling:
+      "Sharing works between Pimling accounts. This Pim is self-hosted.",
+    waitingForYou: "Waiting for you",
+    circles: "Circles",
+    noCircles:
+      "No circles yet. Make one, like Family or Close friends, then add people by their Pimling username.",
+    circleNamePlaceholder: "Family, Close friends…",
+    newCircle: "New circle",
+    circleMembers: "People: {count}",
+    circlePaused: "Paused: nobody in it can message your Pim",
+    shareWithCircle: "Share with {circle}",
+    deleteCircle: "Delete",
+    deleteCircleNamed: "Delete {circle}",
+    membersOf: "People in {circle}",
+    removeMember: "Remove {username} from {circle}",
+    usernamePlaceholder: "Pimling username",
+    addTo: "Add someone to {circle}",
+    add: "Add",
+    whatCircleCanUse: "What {circle} can use",
+    circlePermissionsDescription:
+      "Everything starts off. Ask: you approve each request. On: they use it without asking you. These tools act on your accounts.",
+    recentActivity: "Recent activity",
+    activityRan: "used",
+    activityAsked: "asked you",
+    activityRefused: "refused",
+    guestAsked: "{username} ({circle}) asks",
+    alwaysApproveForCircle: "Always approve for {circle}",
+    memoryTool: "Memory",
+    memoryToolDescription:
+      "What your Pim remembers about you: they can read and search it, never change it.",
+    toolChangedCircle:
+      "Changed by the app since you allowed it, so it's off for this circle until you choose again.",
+    sharedWithYou: "Shared with you",
+    visitEmptyTitle: "Message {username}'s Pim",
+    visitEmptyHint:
+      "It answers for {username}, with what they share with you. Anything they want to approve goes to them first.",
+    messageVisit: "Message {username}'s Pim…",
+    visitPim: "{username}'s Pim",
+    visitUnavailable: "No longer shared",
+    visitBanner:
+      "You're messaging {username}'s Pim. It acts for {username}, within what they allow you. Your messages use your own usage.",
     toolPermissions: "Tool permissions",
     toolPermissionsDescription:
       "What Pim may do with each tool. Off: Pim can't use it. Ask: Pim waits for your approval. On: Pim uses it without asking.",
@@ -346,6 +390,50 @@ const translations = {
     approve: "Aprobar",
     alwaysApprove: "Aprobar siempre",
     moreApprovalOptions: "Más opciones de aprobación",
+    sharing: "Compartir",
+    sharingDescription:
+      "Pon a personas en círculos para que escriban a tu Pim desde su propio Pimling. Solo pueden usar lo que le des a su círculo, y sus mensajes cuentan contra su propio uso, no el tuyo.",
+    sharingNeedsPimling:
+      "Compartir funciona entre cuentas de Pimling. Este Pim está autoalojado.",
+    waitingForYou: "Esperan tu respuesta",
+    circles: "Círculos",
+    noCircles:
+      "Aún no hay círculos. Crea uno, como Familia o Amigos cercanos, y añade personas por su usuario de Pimling.",
+    circleNamePlaceholder: "Familia, Amigos cercanos…",
+    newCircle: "Nuevo círculo",
+    circleMembers: "Personas: {count}",
+    circlePaused: "En pausa: nadie en él puede escribir a tu Pim",
+    shareWithCircle: "Compartir con {circle}",
+    deleteCircle: "Eliminar",
+    deleteCircleNamed: "Eliminar {circle}",
+    membersOf: "Personas en {circle}",
+    removeMember: "Quitar a {username} de {circle}",
+    usernamePlaceholder: "Usuario de Pimling",
+    addTo: "Añadir a alguien a {circle}",
+    add: "Añadir",
+    whatCircleCanUse: "Lo que {circle} puede usar",
+    circlePermissionsDescription:
+      "Todo empieza desactivado. Preguntar: apruebas cada solicitud. Activada: la usan sin preguntarte. Estas herramientas actúan en tus cuentas.",
+    recentActivity: "Actividad reciente",
+    activityRan: "usó",
+    activityAsked: "te preguntó",
+    activityRefused: "rechazado",
+    guestAsked: "{username} ({circle}) pregunta",
+    alwaysApproveForCircle: "Aprobar siempre para {circle}",
+    memoryTool: "Memoria",
+    memoryToolDescription:
+      "Lo que tu Pim recuerda de ti: pueden leerlo y buscar en ello, nunca cambiarlo.",
+    toolChangedCircle:
+      "La app la cambió desde que la permitiste, así que está desactivada para este círculo hasta que elijas de nuevo.",
+    sharedWithYou: "Compartidos contigo",
+    visitEmptyTitle: "Escribe al Pim de {username}",
+    visitEmptyHint:
+      "Responde por {username}, con lo que te comparte. Lo que quiera aprobar le llega primero.",
+    messageVisit: "Escribe al Pim de {username}…",
+    visitPim: "Pim de {username}",
+    visitUnavailable: "Ya no se comparte",
+    visitBanner:
+      "Estás escribiendo al Pim de {username}. Actúa para {username}, dentro de lo que te permite. Tus mensajes usan tu propio uso.",
     toolPermissions: "Permisos de herramientas",
     toolPermissionsDescription:
       "Lo que Pim puede hacer con cada herramienta. Desactivada: Pim no puede usarla. Preguntar: Pim espera tu aprobación. Activada: Pim la usa sin preguntar.",

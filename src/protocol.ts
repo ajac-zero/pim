@@ -43,5 +43,7 @@ export type ServerMessage =
 	| { readonly type: "notification"; readonly notification: Notification }
 	/** An approval was requested or decided. */
 	| { readonly type: "approval"; readonly approval: Approval }
+	/** Pims shared with this one's owner changed: one was shared, or taken back. */
+	| { readonly type: "visits" }
 	| { readonly type: "result"; readonly id: string; readonly result: JsonValue }
 	| { readonly type: "error"; readonly id?: string; readonly message: string };

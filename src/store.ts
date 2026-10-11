@@ -50,6 +50,16 @@ export type Approval = {
 	readonly onTimeout: "approve" | "deny";
 	/** Who decided: the user, the timeout, or the user's "always approve"; null while pending and for older approvals. */
 	readonly decidedBy: ApprovalDecider | null;
+	/** A guest who asked, from their own Pim, through one of the owner's circles; null when Pim asked for the owner. */
+	readonly requestedBy: ApprovalRequester | null;
+};
+
+/** A guest whose call filed an approval. Its `session` is then the guest's conversation, in the guest's Pim. */
+export type ApprovalRequester = {
+	readonly ownerId: string;
+	readonly username: string;
+	readonly circle: string;
+	readonly circleName: string;
 };
 
 export type ApprovalDecider = "user" | "timeout" | "always";
@@ -59,8 +69,13 @@ export type ToolPermission = "off" | "ask" | "on";
 
 export const TOOL_PERMISSIONS: readonly ToolPermission[] = ["off", "ask", "on"];
 
+/** Whose permissions: the owner's (`OWNER`), or a circle's, by its id. */
+export const OWNER = "";
+
 /** A permission the user set for one tool. */
 export type ToolPermissionChoice = {
+	/** `OWNER`, or the id of the circle the permission is for. */
+	readonly audience: string;
 	/** The connected app's id; empty for Pim's own tools. */
 	readonly app: string;
 	/** The tool's own name: the app's name for it, not the `<app>_<tool>` name the model sees. */
@@ -162,19 +177,21 @@ CREATE TABLE IF NOT EXISTS pim_approvals (
 	expires_at INTEGER,
 	tool TEXT,
 	on_timeout TEXT,
-	decided_by TEXT
+	decided_by TEXT,
+	requested_by TEXT
 );
 CREATE TABLE IF NOT EXISTS pim_always_approved (
 	tool TEXT PRIMARY KEY,
 	created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pim_tool_permissions (
+	audience TEXT NOT NULL,
 	app TEXT NOT NULL,
 	tool TEXT NOT NULL,
 	permission TEXT NOT NULL,
 	definition TEXT,
 	updated_at INTEGER NOT NULL,
-	PRIMARY KEY (app, tool)
+	PRIMARY KEY (audience, app, tool)
 );
 CREATE TABLE IF NOT EXISTS pim_mcp_servers (
 	id TEXT PRIMARY KEY,
@@ -265,11 +282,13 @@ function approvalOf(row: Row): Approval {
 		expiresAt: row.expires_at === null ? null : Number(row.expires_at),
 		onTimeout: row.on_timeout === "deny" ? "deny" : "approve",
 		decidedBy: row.decided_by === null || row.decided_by === undefined ? null : (String(row.decided_by) as ApprovalDecider),
+		requestedBy: row.requested_by ? (JSON.parse(String(row.requested_by)) as ApprovalRequester) : null,
 	};
 }
 
 function toolPermissionOf(row: Row): ToolPermissionChoice {
 	return {
+		audience: String(row.audience),
 		app: String(row.app),
 		tool: String(row.tool),
 		permission: String(row.permission) as ToolPermission,
@@ -319,6 +338,10 @@ export class PimStore {
 			pim_approvals: "approvals",
 			pim_always_approved: "always-approved tools",
 			pim_tool_permissions: "tool permissions",
+			pim_circles: "circles",
+			pim_circle_members: "circle members",
+			pim_guest_activity: "guest activity",
+			pim_shares: "Pims shared with them",
 			pim_mcp_servers: "apps",
 			pim_app_watches: "watches",
 			pim_sessions: "chats",
@@ -351,6 +374,7 @@ export class PimStore {
 		if (!columns.includes("tool")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN tool TEXT");
 		if (!columns.includes("on_timeout")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN on_timeout TEXT");
 		if (!columns.includes("decided_by")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN decided_by TEXT");
+		if (!columns.includes("requested_by")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN requested_by TEXT");
 		const sessionColumns = this.#sql.exec("PRAGMA table_info(pim_sessions)").toArray().map((row) => String(row.name));
 		if (!sessionColumns.includes("deleted_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN deleted_at INTEGER");
 	}
@@ -434,9 +458,10 @@ export class PimStore {
 		createdAt: number;
 		expiresAt: number;
 		onTimeout: "approve" | "deny";
+		requestedBy?: ApprovalRequester;
 	}): Approval {
 		this.#sql.exec(
-			"INSERT OR IGNORE INTO pim_approvals (id, session, action, tool, args, summary, status, created_at, call_id, expires_at, on_timeout) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+			"INSERT OR IGNORE INTO pim_approvals (id, session, action, tool, args, summary, status, created_at, call_id, expires_at, on_timeout, requested_by) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
 			input.id,
 			input.session,
 			input.action,
@@ -447,6 +472,7 @@ export class PimStore {
 			input.callId,
 			input.expiresAt,
 			input.onTimeout,
+			input.requestedBy === undefined ? null : JSON.stringify(input.requestedBy),
 		);
 		return this.approval(input.id)!;
 	}
@@ -484,18 +510,26 @@ export class PimStore {
 
 	// Tool permissions the user set. A tool without one follows its default.
 
-	toolPermission(app: string, tool: string): ToolPermissionChoice | undefined {
-		const [row] = this.#sql.exec("SELECT * FROM pim_tool_permissions WHERE app = ? AND tool = ?", app, tool).toArray();
+	toolPermission(audience: string, app: string, tool: string): ToolPermissionChoice | undefined {
+		const [row] = this.#sql
+			.exec("SELECT * FROM pim_tool_permissions WHERE audience = ? AND app = ? AND tool = ?", audience, app, tool)
+			.toArray();
 		return row ? toolPermissionOf(row) : undefined;
 	}
 
-	toolPermissions(): ToolPermissionChoice[] {
-		return this.#sql.exec("SELECT * FROM pim_tool_permissions ORDER BY app, tool").toArray().map(toolPermissionOf);
+	/** One audience's permissions, or every audience's. */
+	toolPermissions(audience?: string): ToolPermissionChoice[] {
+		const rows =
+			audience === undefined
+				? this.#sql.exec("SELECT * FROM pim_tool_permissions ORDER BY audience, app, tool")
+				: this.#sql.exec("SELECT * FROM pim_tool_permissions WHERE audience = ? ORDER BY app, tool", audience);
+		return rows.toArray().map(toolPermissionOf);
 	}
 
-	setToolPermission(app: string, tool: string, permission: ToolPermission, definition: string | null): void {
+	setToolPermission(audience: string, app: string, tool: string, permission: ToolPermission, definition: string | null): void {
 		this.#sql.exec(
-			"INSERT INTO pim_tool_permissions (app, tool, permission, definition, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (app, tool) DO UPDATE SET permission = excluded.permission, definition = excluded.definition, updated_at = excluded.updated_at",
+			"INSERT INTO pim_tool_permissions (audience, app, tool, permission, definition, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (audience, app, tool) DO UPDATE SET permission = excluded.permission, definition = excluded.definition, updated_at = excluded.updated_at",
+			audience,
 			app,
 			tool,
 			permission,
@@ -505,8 +539,16 @@ export class PimStore {
 	}
 
 	/** Back to the tool's default. False when the user had not set one. */
-	clearToolPermission(app: string, tool: string): boolean {
-		return this.#sql.exec("DELETE FROM pim_tool_permissions WHERE app = ? AND tool = ?", app, tool).rowsWritten > 0;
+	clearToolPermission(audience: string, app: string, tool: string): boolean {
+		return (
+			this.#sql.exec("DELETE FROM pim_tool_permissions WHERE audience = ? AND app = ? AND tool = ?", audience, app, tool)
+				.rowsWritten > 0
+		);
+	}
+
+	/** Forgets one audience's permissions: a circle that is gone. */
+	clearAudience(audience: string): void {
+		this.#sql.exec("DELETE FROM pim_tool_permissions WHERE audience = ?", audience);
 	}
 
 	/**

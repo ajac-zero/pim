@@ -276,6 +276,21 @@ export function createOptMem(options: OptMemOptions) {
 		},
 	});
 
+	/** `recall`'s answer: the newest memories matching a case-insensitive regular expression. */
+	function search(pattern: string): { text: string; isError: boolean } {
+		let regex: RegExp;
+		try {
+			regex = new RegExp(pattern, "i");
+		} catch (error) {
+			return { text: `Invalid pattern: ${error instanceof Error ? error.message : String(error)}`, isError: true };
+		}
+		const { matches, total } = store.search(regex, RECALL_LIMIT);
+		if (total === 0) return { text: "No match.", isError: false };
+		const lines = matches.map(entryLine).reverse();
+		const footer = total > matches.length ? `Newest ${matches.length} of ${total} matches. Narrow the pattern.` : `${total} matches.`;
+		return { text: [...lines, footer].join("\n"), isError: false };
+	}
+
 	const recall = defineTool({
 		name: "recall",
 		description:
@@ -283,17 +298,8 @@ export function createOptMem(options: OptMemOptions) {
 		parameters: Type.Object({ pattern: Type.String({ minLength: 1 }) }),
 		replay: "safe",
 		async execute({ pattern }) {
-			let regex: RegExp;
-			try {
-				regex = new RegExp(pattern, "i");
-			} catch (error) {
-				return text(`Invalid pattern: ${error instanceof Error ? error.message : String(error)}`, true);
-			}
-			const { matches, total } = store.search(regex, RECALL_LIMIT);
-			if (total === 0) return text("No match.");
-			const lines = matches.map(entryLine).reverse();
-			const footer = total > matches.length ? `Newest ${matches.length} of ${total} matches. Narrow the pattern.` : `${total} matches.`;
-			return text([...lines, footer].join("\n"));
+			const found = search(pattern);
+			return text(found.text, found.isError);
 		},
 	});
 
@@ -350,7 +356,7 @@ export function createOptMem(options: OptMemOptions) {
 		],
 	});
 
-	return { store, extension, NapTask, view, startNap, today: () => today(zone()) };
+	return { store, extension, NapTask, view, search, startNap, today: () => today(zone()) };
 }
 
 export type OptMem = ReturnType<typeof createOptMem>;

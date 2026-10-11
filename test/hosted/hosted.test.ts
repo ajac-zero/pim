@@ -1284,3 +1284,155 @@ describe("erasure boundaries", () => {
 		await expectErased(fay.ownerId);
 	});
 });
+
+describe("circles and visits", () => {
+	const created: { title: string; day: string }[] = [];
+	const calendar = () => {
+		const server = new McpServer({ name: "calendar", version: "1.0.0" });
+		server.registerTool(
+			"find_events",
+			{ description: "Find events on a day.", inputSchema: { day: z.string() }, annotations: { readOnlyHint: true } },
+			async ({ day }) => ({ content: [{ type: "text", text: `Events on ${day}: dentist at 9.` }] }),
+		);
+		server.registerTool(
+			"create_event",
+			{ description: "Create an event.", inputSchema: { title: z.string(), day: z.string() } },
+			async ({ title, day }) => {
+				created.push({ title, day });
+				return { content: [{ type: "text", text: `Created "${title}" on ${day}.` }] };
+			},
+		);
+		return server;
+	};
+	const withCalendar = () => {
+		const realFetch = globalThis.fetch;
+		return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			if (!request.url.startsWith("https://calendar.example.test/mcp")) return realFetch(input, init);
+			return createMcpHandler(calendar)(request, {}, createExecutionContext());
+		});
+	};
+	const say = async (browser: Browser, session: string, content: string) =>
+		browser.json(`/api/sessions/${session}/messages`, { method: "POST", json: { content, wait: true } });
+	const transcript = async (browser: Browser, session: string) =>
+		JSON.stringify((await browser.json(`/api/sessions/${session}/messages`)).body.messages);
+	const setPermission = (browser: Browser, circle: string, app: string | null, tool: string, permission: string | null) =>
+		browser.json("/api/permissions", { method: "PUT", json: { circle, app, tool, permission } });
+
+	it("lets someone in a circle message the owner's Pim from their own, with only what the circle was given", async () => {
+		const spy = withCalendar();
+		try {
+			const ana = await person("ana");
+			const ben = await person("ben");
+			const cyd = await person("cyd");
+			expect((await ana.browser.json("/api/mcp", { method: "POST", json: { name: "Calendar", url: "https://calendar.example.test/mcp" } })).status).toBe(201);
+			await ana.browser.json("/api/memory/log", { method: "POST", json: { text: "Ana's favourite restaurant is Tasca do Chico." } });
+
+			// Ana puts Ben in a circle; Ben's Pim hears of it.
+			const family = (await ana.browser.json("/api/circles", { method: "POST", json: { name: "Family" } })).body;
+			expect((await ana.browser.json(`/api/circles/${family.id}/members`, { method: "POST", json: { username: "nobody-here" } })).status).toBe(404);
+			expect((await ana.browser.json(`/api/circles/${family.id}/members`, { method: "POST", json: { username: "ana" } })).status).toBe(400);
+			expect((await ana.browser.json(`/api/circles/${family.id}/members`, { method: "POST", json: { username: "@Ben" } })).status).toBe(201);
+			expect((await ben.browser.json("/api/visits")).body.visits).toEqual([
+				{ ownerId: ana.ownerId, username: "ana", sharedAt: expect.any(Number), available: true, session: null },
+			]);
+			expect((await ben.browser.json("/api/notifications")).body.notifications[0]).toMatchObject({ title: "ana shared their Pim with you" });
+
+			// A circle starts with nothing: every tool off, memory off.
+			const circleTools = (await ana.browser.json(`/api/permissions?circle=${family.id}`)).body.tools;
+			expect(circleTools.map((info: { name: string; permission: string }) => [info.name, info.permission])).toEqual([
+				["memory", "off"],
+				["calendar_find_events", "off"],
+				["calendar_create_event", "off"],
+			]);
+			expect((await setPermission(ana.browser, family.id, null, "memory", "ask")).status).toBe(400);
+			expect((await setPermission(ana.browser, family.id, null, "memory", "on")).body).toMatchObject({ permission: "on" });
+			await setPermission(ana.browser, family.id, "calendar", "find_events", "on");
+			await setPermission(ana.browser, family.id, "calendar", "create_event", "ask");
+
+			// Ben's visit runs in Ben's Pim, on Ben's usage, with Ana's tools and memory and nothing of Ben's own.
+			const session = (await ben.browser.json("/api/visits/ana", { method: "POST" })).body.session as string;
+			let system = "";
+			let offered: string[] = [];
+			faux.setResponses([
+				(context) => {
+					system = JSON.stringify(context.messages.filter((message) => message.role === "system"));
+					offered = context.messages.flatMap((message) =>
+						message.role === "system" ? (message.toolsAdded ?? []).map((tool) => tool.name) : [],
+					);
+					return toolUse("calendar_find_events", { day: "monday" });
+				},
+				fauxAssistantMessage("Ana sees the dentist at 9 on Monday."),
+			]);
+			expect((await say(ben.browser, session, "Is Ana free Monday morning?")).body).toMatchObject({ status: "done" });
+			expect(system).toContain("You are ana's Pim");
+			expect(system).toContain("Tasca do Chico");
+			expect(offered.sort()).toEqual(["calendar_create_event", "calendar_find_events", "current_time", "recall"]);
+			expect(await transcript(ben.browser, session)).toContain("Events on monday: dentist at 9.");
+			const usage = async (browser: Browser) => (await browser.json("/api/usage")).body.today;
+			expect(await usage(ben.browser)).toMatchObject({ runs: 1, modelRequests: 2 });
+			expect(await usage(ana.browser)).toMatchObject({ runs: 0, modelRequests: 0 });
+			// Ben's own chats don't get Ana's tools, or her instructions.
+			expect(((await ben.browser.json("/api/")).body.tools as { name: string }[]).map((tool) => tool.name)).not.toContain("calendar_find_events");
+			let own = "";
+			let ownTools: string[] = [];
+			faux.setResponses([
+				(context) => {
+					own = JSON.stringify(context.messages.filter((message) => message.role === "system"));
+					ownTools = context.messages.flatMap((message) =>
+						message.role === "system" ? (message.toolsAdded ?? []).map((tool) => tool.name) : [],
+					);
+					return fauxAssistantMessage("Hi Ben.");
+				},
+			]);
+			await say(ben.browser, "1", "Hi");
+			expect(ownTools).toContain("note");
+			expect(ownTools).not.toContain("calendar_find_events");
+			expect(own).not.toContain("ana's Pim");
+			expect((await ben.browser.json("/api/sessions")).body.sessions.find((info: { id: string }) => info.id === session)).toMatchObject({
+				visit: { username: "ana", available: true },
+			});
+
+			// A tool that asks: Ana gets the request, with who asked; her answer continues Ben's visit.
+			faux.setResponses([toolUse("calendar_create_event", { title: "Lunch with Ben", day: "friday" }), fauxAssistantMessage("I've asked Ana.")]);
+			expect((await say(ben.browser, session, "Put lunch with me on Ana's calendar Friday.")).body).toMatchObject({ status: "done" });
+			expect(created).toEqual([]);
+			const [asked] = (await ana.browser.json("/api/approvals?status=pending")).body.approvals;
+			expect(asked).toMatchObject({
+				summary: 'Calendar: create_event {"title":"Lunch with Ben","day":"friday"}',
+				requestedBy: { ownerId: ben.ownerId, username: "ben", circle: family.id, circleName: "Family" },
+				onTimeout: "deny",
+			});
+			expect((await ana.browser.json("/api/notifications")).body.notifications[0]).toMatchObject({ title: "ben asked your Pim" });
+			faux.setResponses([fauxAssistantMessage("Ana said yes: lunch is on her calendar.")]);
+			expect((await ana.browser.json(`/api/approvals/${asked.id}/approve`, { method: "POST", json: {} })).body).toMatchObject({ status: "approved" });
+			expect(created).toEqual([{ title: "Lunch with Ben", day: "friday" }]);
+			await vi.waitFor(async () => expect(await transcript(ben.browser, session)).toContain("Ana said yes: lunch is on her calendar."));
+			expect(await transcript(ben.browser, session)).toContain("[ana's answer to approval");
+			expect(await usage(ana.browser)).toMatchObject({ runs: 0, modelRequests: 0 });
+			expect((await ana.browser.json("/api/circles/activity")).body.activity.map((entry: { tool: string; outcome: string }) => [entry.tool, entry.outcome])).toEqual([
+				["calendar_create_event", "asked"],
+				["calendar_find_events", "ran"],
+			]);
+
+			// The boundary is in Ana's Pim, at each call: a tool turned off is refused even to a Pim that was told of it, and nobody outside the circle gets anything.
+			await setPermission(ana.browser, family.id, "calendar", "find_events", "off");
+			const call = (guest: { ownerId: string; username: string }) =>
+				runInDurableObject(env.Pim.getByName(ana.ownerId), (instance: Pim) =>
+					instance.guestCall(guest, { tool: "calendar_find_events", args: { day: "tuesday" }, session, callId: "c1" }),
+				);
+			expect(await call({ ownerId: ben.ownerId, username: "ben" })).toEqual({ text: "ana doesn't let you use calendar_find_events.", isError: true });
+			expect(await call({ ownerId: cyd.ownerId, username: "cyd" })).toEqual({ text: "ana doesn't share their Pim with you.", isError: true });
+			await ana.browser.json(`/api/circles/${family.id}`, { method: "PUT", json: { enabled: false } });
+			expect((await say(ben.browser, session, "Still there?")).status).toBe(403);
+
+			// Taken out of the circle, Ben's Pim knows, and the visit can't go on.
+			await ana.browser.json(`/api/circles/${family.id}`, { method: "PUT", json: { enabled: true } });
+			expect((await ana.browser.json(`/api/circles/${family.id}/members/${ben.ownerId}`, { method: "DELETE" })).status).toBe(200);
+			expect((await ben.browser.json("/api/visits")).body.visits[0]).toMatchObject({ available: false, session });
+			expect((await say(ben.browser, session, "Hello?")).status).toBe(403);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+});

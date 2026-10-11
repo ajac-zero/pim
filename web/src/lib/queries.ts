@@ -1,5 +1,5 @@
 import { queryOptions } from "@tanstack/react-query";
-import { pim } from "~/lib/pim-api";
+import { admin, pim } from "~/lib/pim-api";
 
 /** Pim's lists. Live changes arrive on the socket and invalidate these. */
 
@@ -36,6 +36,10 @@ export const settingsQuery = () =>
 
 export const accountQuery = () =>
   queryOptions({ queryKey: ["account"], queryFn: pim.account });
+
+/** Everyone on this Pim: the admin's view. */
+export const membersQuery = () =>
+  queryOptions({ queryKey: ["members"], queryFn: admin.members });
 
 export const artifactsQuery = () =>
   queryOptions({ queryKey: ["artifacts"], queryFn: pim.artifacts });

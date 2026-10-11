@@ -46,7 +46,7 @@ const translations = {
     unpublish: "Unpublish",
     published: "Published",
     pimPublished:
-      "Published: anyone on Pimling can find it and make it their own.",
+      "Published: anyone on this Pim can find it and make it their own.",
     pimUnpublished: "Unpublished.",
     deletePim: "Delete",
     deletePimNamed: "Delete {name}",
@@ -58,8 +58,6 @@ const translations = {
     discover: "Discover",
     discoverDescription:
       "Pims people published. Make one your own: you get a copy of its name and instructions, never anything of theirs.",
-    discoverNeedsPimling:
-      "Discover shows Pims published on Pimling. This Pim is self-hosted.",
     searchPims: "Search Pims and people",
     noPimsMatch: "No Pims match.",
     noPimsPublished: "Nobody has published a Pim yet.",
@@ -77,19 +75,17 @@ const translations = {
     messageTheirPim: "Message {username}'s Pim",
     profile: "Profile",
     profileDescription:
-      "How others on Pimling see you: on your page, and next to the Pims you publish.",
+      "How others on this Pim see you: on your page, and next to the Pims you publish.",
     displayName: "Name",
     bio: "About you",
     bioPlaceholder: "Runner, cook, always planning the next trip",
     sharing: "Sharing",
     sharingDescription:
-      "Put people in circles to let them message your Pim from their own Pimling. They can use only what you give their circle, and their messages count against their own usage, not yours.",
-    sharingNeedsPimling:
-      "Sharing works between Pimling accounts. This Pim is self-hosted.",
+      "Put people in circles to let them message your Pim from their own. They can use only what you give their circle, and their messages count against their own usage, not yours.",
     waitingForYou: "Waiting for you",
     circles: "Circles",
     noCircles:
-      "No circles yet. Make one, like Family or Close friends, then add people by their Pimling username.",
+      "No circles yet. Make one, like Family or Close friends, then add people by their username.",
     circleNamePlaceholder: "Family, Close friends…",
     newCircle: "New circle",
     circleMembers: "People: {count}",
@@ -99,7 +95,7 @@ const translations = {
     deleteCircleNamed: "Delete {circle}",
     membersOf: "People in {circle}",
     removeMember: "Remove {username} from {circle}",
-    usernamePlaceholder: "Pimling username",
+    usernamePlaceholder: "Their username",
     addTo: "Add someone to {circle}",
     add: "Add",
     whatCircleCanUse: "What {circle} can use",
@@ -315,20 +311,18 @@ const translations = {
     signOut: "Sign out",
     thisBrowser: "This browser",
     createPasskeyBody:
-      "This setup link adds a passkey to your Pim, once. Your device will ask for your face, fingerprint, or PIN.",
+      "This setup link adds a passkey to your account, once. Your device will ask for your face, fingerprint, or PIN.",
     createPasskeyTitle: "Create your passkey",
     backToSignIn: "Back to sign in",
     getSetupLinkBody:
-      "A setup link adds a new passkey. Pim just wrote one to its logs in your Cloudflare account, where only you can read it.",
+      "A setup link adds a passkey to the account of whoever runs this Pim. Pim just wrote one to its logs in your Cloudflare account, where only you can read it.",
     getSetupLinkTitle: "Get a setup link",
     lostPasskey: "Lost your passkey?",
     openCloudflareDashboard: "Open the Cloudflare dashboard",
     setUpBody:
-      "Pim signs you in with a passkey. This page makes the first one by itself only in the 15 minutes after deploying, so now it takes a setup link. Pim just wrote one to its logs in your Cloudflare account, where only you can read it.",
+      "Nobody has set up this Pim yet. Anyone can do it from this page only in the 15 minutes after deploying, so now it takes a setup link. Pim just wrote one to its logs in your Cloudflare account, where only you can read it.",
     claimBody:
-      "Pim signs you in with a passkey: your face, fingerprint, or PIN on this device. Create the one you'll use.",
-    claimNote:
-      "Only Pim's first passkey is made this way, in the 15 minutes after deploying. Add more later from Settings.",
+      "You're the first one here, so you'll run this Pim: you invite others, and help them back in if they lose every passkey. Pick your username, then create a passkey on this device.",
     setUpTitle: "Set up Pim",
     setupLinkWritten: "Link written to the logs. It works once, for an hour.",
     setupStepDashboard:
@@ -339,38 +333,30 @@ const translations = {
     writingSetupLink: "Writing a setup link to the logs…",
     approvedNoAnswer: "Approved: no answer in time",
     deniedNoAnswer: "Denied: no answer in time",
-    finishSetUpTitle: "Finish setting up",
-    finishSetUpBody:
-      "Open the setup link from when you registered, or enter one of your recovery codes to create your passkey.",
     recoveryCodeTitle: "Use a recovery code",
     recoveryCodeBody:
-      "Enter one of the recovery codes you saved when you registered. It adds a passkey on this device, and works once.",
+      "Enter your username and one of the recovery codes you saved when you joined. It adds a passkey on this device, and works once.",
     recoveryCode: "Recovery code",
-    registerTitle: "Get your own Pimling",
+    registerTitle: "Join this Pim",
     registerBody:
-      "A personal agent that remembers what matters to you, keeps working while you're away, and asks before acting. It lives at your own address.",
-    registrationClosed: "Registration is closed for now. Check back soon.",
+      "A personal agent that remembers what matters to you, keeps working while you're away, and asks before acting. Pick the username others here will know you by.",
+    registrationClosed: "This Pim isn't taking new people right now.",
     username: "Username",
     usernameHint: "Lowercase letters, digits, and hyphens.",
-    usernameAvailable: "{host} is available",
+    usernameAvailable: "{username} is available",
     inviteCode: "Invite code",
-    createMyPimling: "Create my Pimling",
     registerFootnote:
-      "Next you'll save recovery codes, then create a passkey on your new Pimling. There's no password.",
+      "Next you'll save recovery codes, then create a passkey on this device. There's no password.",
     recoveryCodesFileHeader:
-      "Recovery codes for {host}. Each adds a passkey once.",
+      "Recovery codes for {username} on {host}. Each adds a passkey once.",
     saveRecoveryCodesTitle: "Save your recovery codes",
     saveRecoveryCodesBody:
       "If you lose your passkey, one of these gets you back in. Each works once, and they won't be shown again.",
     recoveryCodes: "Recovery codes",
     download: "Download",
     savedRecoveryCodes: "I saved my recovery codes somewhere safe.",
-    continueTo: "Continue to {host}",
-    setupLinkLasts:
-      "There you'll create your passkey. The setup link works once, for a day.",
     exportData: "Export my data",
-    accountUsageToday:
-      "What your Pimling used today. Limits reset at midnight UTC.",
+    accountUsageToday: "What you used today. Limits reset at midnight UTC.",
     usageTokens: "Tokens",
     usageRuns: "Runs",
     usageModelRequests: "Model requests",
@@ -404,20 +390,19 @@ const translations = {
     createToken: "Create token",
     deleteAccount: "Delete account",
     deleteAccountBody:
-      "Deletes {username}'s Pimling: conversations, memories, goals, connected apps, and passkeys. It can't be undone, and the username won't be available again.",
+      "Deletes {username}'s Pim: conversations, memories, goals, connected apps, and passkeys. It can't be undone, and the username won't be available again.",
     typeUsernameToConfirm: "Type {username} to confirm",
     deleteForever: "Delete forever",
     deleteAccountButton: "Delete my account…",
     addThisDeviceTitle: "Add this device",
     addingTo: "Adding this device to",
-    notMyPimling: "This isn't my Pimling",
     passkeyAlreadyHere:
-      "This device already has a passkey for this Pimling, so it doesn't need another. Sign in with it instead.",
+      "This device already has a passkey for this Pim, so it doesn't need another. Sign in with it instead.",
     signInWithThisPasskey: "Sign in with my passkey",
     addDeviceCancelFailed:
       "Couldn't end the link ({error}), so it may still work until it expires. Try again.",
     addThisDeviceBody:
-      "Your Pimling sent this link from a device where you're signed in. Create a passkey here, and this device can sign in on its own from now on.",
+      "Your Pim sent this link from a device where you're signed in. Create a passkey here, and this device can sign in on its own from now on.",
     addThisDeviceNote:
       "The link works once, for 10 minutes. Your other devices and passkeys stay as they are.",
     newDeviceTitle: "Signed up on another device?",
@@ -436,18 +421,36 @@ const translations = {
     addDeviceExpired: "That link expired. Make a new one.",
     copyLink: "Copy link",
     done: "Done",
-    havePimling: "Already have a Pimling?",
-    signInToIt: "Sign in",
-    needPimling: "Don't have one yet?",
-    createOne: "Create one",
-    findPimlingTitle: "Sign in to your Pimling",
-    findPimlingBody:
-      "Enter your username to go to your Pimling, then sign in with your passkey.",
-    goToMyPimling: "Go to my Pimling",
     accountClosedTitle: "Your account is closed",
     accountClosedBody:
-      "Nobody can use it anymore, but erasing its data hasn't finished yet. Pimling keeps retrying until everything is erased; you don't need to do anything.",
-    leavePimling: "Leave",
+      "Nobody can use it anymore, but erasing its data hasn't finished yet. Pim keeps retrying until everything is erased; you don't need to do anything.",
+    adminBadge: "Admin",
+    you: "you",
+    leave: "Leave",
+    members: "People on this Pim",
+    membersDescription:
+      "Everyone who joined. Invite someone with a link that works once. For someone who lost every passkey and recovery code, make a setup link.",
+    inviteSomeone: "Invite someone",
+    inviteLinkNote:
+      "Works once. Anyone with it can join, so send it only to the person you mean.",
+    setupLinkFor:
+      "Adds a passkey to @{username}'s account, once, within an hour. Send it only to them.",
+    setupLinkAction: "Setup link for @{username}",
+    memberPending: "Hasn't made a passkey yet",
+    memberSuspended: "Suspended",
+    memberDeleting: "Being erased",
+    suspendMember: "Suspend @{username}",
+    restoreMember: "Restore @{username}",
+    deleteMember: "Delete @{username}",
+    becomeAdmin: "Set up this Pim",
+    createAccount: "Create my account",
+    firstPasskeyNote:
+      "Your device will ask for your face, fingerprint, or PIN. Add your other devices later, from Settings.",
+    notMyPim: "This isn't my Pim",
+    newHere: "New here?",
+    joinByInvite: "New here? Ask whoever runs this Pim for an invite link.",
+    adminLostPasskey: "Run this Pim and lost every passkey?",
+    getSetupLinkFromLogs: "Get a setup link from the logs",
   },
   es: {
     approvalRequested: "Pim necesita tu aprobación",
@@ -483,7 +486,7 @@ const translations = {
     unpublish: "Dejar de publicar",
     published: "Publicado",
     pimPublished:
-      "Publicado: cualquiera en Pimling puede encontrarlo y hacerlo suyo.",
+      "Publicado: cualquiera en este Pim puede encontrarlo y hacerlo suyo.",
     pimUnpublished: "Ya no está publicado.",
     deletePim: "Eliminar",
     deletePimNamed: "Eliminar {name}",
@@ -495,8 +498,6 @@ const translations = {
     discover: "Descubrir",
     discoverDescription:
       "Pims que otros publicaron. Haz uno tuyo: recibes una copia de su nombre e instrucciones, nunca nada suyo.",
-    discoverNeedsPimling:
-      "Descubrir muestra Pims publicados en Pimling. Este Pim está autoalojado.",
     searchPims: "Busca Pims y personas",
     noPimsMatch: "Ningún Pim coincide.",
     noPimsPublished: "Nadie ha publicado un Pim todavía.",
@@ -514,19 +515,17 @@ const translations = {
     messageTheirPim: "Escribir al Pim de {username}",
     profile: "Perfil",
     profileDescription:
-      "Cómo te ven otros en Pimling: en tu página y junto a los Pims que publicas.",
+      "Cómo te ven otros en este Pim: en tu página y junto a los Pims que publicas.",
     displayName: "Nombre",
     bio: "Sobre ti",
     bioPlaceholder: "Corredora, cocinera, siempre planeando el próximo viaje",
     sharing: "Compartir",
     sharingDescription:
-      "Pon a personas en círculos para que escriban a tu Pim desde su propio Pimling. Solo pueden usar lo que le des a su círculo, y sus mensajes cuentan contra su propio uso, no el tuyo.",
-    sharingNeedsPimling:
-      "Compartir funciona entre cuentas de Pimling. Este Pim está autoalojado.",
+      "Pon a personas en círculos para que escriban a tu Pim desde el suyo. Solo pueden usar lo que le des a su círculo, y sus mensajes cuentan contra su propio uso, no el tuyo.",
     waitingForYou: "Esperan tu respuesta",
     circles: "Círculos",
     noCircles:
-      "Aún no hay círculos. Crea uno, como Familia o Amigos cercanos, y añade personas por su usuario de Pimling.",
+      "Aún no hay círculos. Crea uno, como Familia o Amigos cercanos, y añade personas por su nombre de usuario.",
     circleNamePlaceholder: "Familia, Amigos cercanos…",
     newCircle: "Nuevo círculo",
     circleMembers: "Personas: {count}",
@@ -536,7 +535,7 @@ const translations = {
     deleteCircleNamed: "Eliminar {circle}",
     membersOf: "Personas en {circle}",
     removeMember: "Quitar a {username} de {circle}",
-    usernamePlaceholder: "Usuario de Pimling",
+    usernamePlaceholder: "Su nombre de usuario",
     addTo: "Añadir a alguien a {circle}",
     add: "Añadir",
     whatCircleCanUse: "Lo que {circle} puede usar",
@@ -757,20 +756,18 @@ const translations = {
     signOut: "Cerrar sesión",
     thisBrowser: "Este navegador",
     createPasskeyBody:
-      "Este enlace de configuración agrega una llave de acceso a tu Pim, una sola vez. Tu dispositivo te pedirá tu rostro, huella o PIN.",
+      "Este enlace de configuración añade una llave de acceso a tu cuenta, una sola vez. Tu dispositivo te pedirá tu cara, huella o PIN.",
     createPasskeyTitle: "Crea tu llave de acceso",
     backToSignIn: "Volver a iniciar sesión",
     getSetupLinkBody:
-      "Un enlace de configuración agrega una nueva llave de acceso. Pim acaba de escribir uno en sus registros de tu cuenta de Cloudflare, donde solo tú puedes leerlo.",
+      "Un enlace de configuración añade una llave de acceso a la cuenta de quien administra este Pim. Pim acaba de escribir uno en sus registros de tu cuenta de Cloudflare, donde solo tú puedes leerlo.",
     getSetupLinkTitle: "Obtén un enlace de configuración",
     lostPasskey: "¿Perdiste tu llave de acceso?",
     openCloudflareDashboard: "Abrir el panel de Cloudflare",
     setUpBody:
-      "Pim inicia tu sesión con una llave de acceso. Esta página crea la primera por sí sola solo en los 15 minutos después de desplegar, así que ahora hace falta un enlace de configuración. Pim acaba de escribir uno en sus registros de tu cuenta de Cloudflare, donde solo tú puedes leerlo.",
+      "Nadie ha configurado este Pim todavía. Cualquiera puede hacerlo desde esta página solo en los 15 minutos después de desplegarlo, así que ahora hace falta un enlace de configuración. Pim acaba de escribir uno en sus registros de tu cuenta de Cloudflare, donde solo tú puedes leerlo.",
     claimBody:
-      "Pim inicia tu sesión con una llave de acceso: tu rostro, huella o PIN en este dispositivo. Crea la que vas a usar.",
-    claimNote:
-      "Solo la primera llave de acceso de Pim se crea así, en los 15 minutos después de desplegar. Agrega más luego desde Configuración.",
+      "Eres la primera persona aquí, así que tú administrarás este Pim: invitas a otros y los ayudas a volver si pierden todas sus llaves de acceso. Elige tu nombre de usuario y luego crea una llave de acceso en este dispositivo.",
     setUpTitle: "Configura Pim",
     setupLinkWritten:
       "Enlace escrito en los registros. Funciona una vez, durante una hora.",
@@ -783,26 +780,22 @@ const translations = {
       "Escribiendo un enlace de configuración en los registros…",
     approvedNoAnswer: "Aprobada: sin respuesta a tiempo",
     deniedNoAnswer: "Rechazada: sin respuesta a tiempo",
-    finishSetUpTitle: "Termina la configuración",
-    finishSetUpBody:
-      "Abre el enlace de configuración de tu registro o escribe uno de tus códigos de recuperación para crear tu clave de acceso.",
     recoveryCodeTitle: "Usa un código de recuperación",
     recoveryCodeBody:
-      "Escribe uno de los códigos de recuperación que guardaste al registrarte. Añade una clave de acceso en este dispositivo y funciona una sola vez.",
+      "Escribe tu nombre de usuario y uno de los códigos de recuperación que guardaste al unirte. Añade una llave de acceso en este dispositivo y funciona una sola vez.",
     recoveryCode: "Código de recuperación",
-    registerTitle: "Consigue tu propio Pimling",
+    registerTitle: "Únete a este Pim",
     registerBody:
-      "Un agente personal que recuerda lo que te importa, sigue trabajando cuando no estás y pregunta antes de actuar. Vive en tu propia dirección.",
-    registrationClosed: "El registro está cerrado por ahora. Vuelve pronto.",
+      "Un agente personal que recuerda lo que te importa, sigue trabajando mientras no estás y pregunta antes de actuar. Elige el nombre de usuario con el que te conocerán aquí.",
+    registrationClosed: "Este Pim no está aceptando personas nuevas por ahora.",
     username: "Nombre de usuario",
     usernameHint: "Letras minúsculas, dígitos y guiones.",
-    usernameAvailable: "{host} está disponible",
+    usernameAvailable: "{username} está disponible",
     inviteCode: "Código de invitación",
-    createMyPimling: "Crear mi Pimling",
     registerFootnote:
-      "Después guardarás tus códigos de recuperación y crearás una clave de acceso en tu nuevo Pimling. No hay contraseña.",
+      "Después guardarás tus códigos de recuperación y crearás una llave de acceso en este dispositivo. No hay contraseña.",
     recoveryCodesFileHeader:
-      "Códigos de recuperación de {host}. Cada uno añade una clave de acceso una vez.",
+      "Códigos de recuperación de {username} en {host}. Cada uno añade una llave de acceso una vez.",
     saveRecoveryCodesTitle: "Guarda tus códigos de recuperación",
     saveRecoveryCodesBody:
       "Si pierdes tu clave de acceso, uno de estos te deja volver a entrar. Cada uno funciona una vez y no se mostrarán de nuevo.",
@@ -810,12 +803,9 @@ const translations = {
     download: "Descargar",
     savedRecoveryCodes:
       "Guardé mis códigos de recuperación en un lugar seguro.",
-    continueTo: "Continuar a {host}",
-    setupLinkLasts:
-      "Allí crearás tu clave de acceso. El enlace de configuración funciona una vez, durante un día.",
     exportData: "Exportar mis datos",
     accountUsageToday:
-      "Lo que tu Pimling usó hoy. Los límites se reinician a medianoche UTC.",
+      "Lo que usaste hoy. Los límites se reinician a medianoche UTC.",
     usageTokens: "Tokens",
     usageRuns: "Ejecuciones",
     usageModelRequests: "Solicitudes al modelo",
@@ -849,20 +839,19 @@ const translations = {
     createToken: "Crear token",
     deleteAccount: "Eliminar cuenta",
     deleteAccountBody:
-      "Elimina el Pimling de {username}: conversaciones, memorias, metas, apps conectadas y claves de acceso. No se puede deshacer y el nombre de usuario no volverá a estar disponible.",
+      "Elimina el Pim de {username}: conversaciones, memorias, metas, apps conectadas y llaves de acceso. No se puede deshacer y el nombre de usuario no volverá a estar disponible.",
     typeUsernameToConfirm: "Escribe {username} para confirmar",
     deleteForever: "Eliminar para siempre",
     deleteAccountButton: "Eliminar mi cuenta…",
     addThisDeviceTitle: "Agrega este dispositivo",
     addingTo: "Agregando este dispositivo a",
-    notMyPimling: "Este no es mi Pimling",
     passkeyAlreadyHere:
-      "Este dispositivo ya tiene una llave de acceso para este Pimling, así que no necesita otra. Inicia sesión con ella.",
+      "Este dispositivo ya tiene una llave de acceso para este Pim, así que no necesita otra. Inicia sesión con ella.",
     signInWithThisPasskey: "Iniciar sesión con mi llave de acceso",
     addDeviceCancelFailed:
       "No se pudo terminar el enlace ({error}), así que podría seguir funcionando hasta que venza. Inténtalo de nuevo.",
     addThisDeviceBody:
-      "Tu Pimling envió este enlace desde un dispositivo donde tienes sesión iniciada. Crea aquí una llave de acceso y este dispositivo podrá iniciar sesión por su cuenta desde ahora.",
+      "Tu Pim envió este enlace desde un dispositivo donde tienes sesión iniciada. Crea aquí una llave de acceso y este dispositivo podrá iniciar sesión por su cuenta desde ahora.",
     addThisDeviceNote:
       "El enlace funciona una vez, durante 10 minutos. Tus otros dispositivos y llaves de acceso no cambian.",
     newDeviceTitle: "¿Te registraste en otro dispositivo?",
@@ -881,18 +870,38 @@ const translations = {
     addDeviceExpired: "Ese enlace venció. Crea uno nuevo.",
     copyLink: "Copiar enlace",
     done: "Listo",
-    havePimling: "¿Ya tienes un Pimling?",
-    signInToIt: "Inicia sesión",
-    needPimling: "¿Aún no tienes uno?",
-    createOne: "Crea uno",
-    findPimlingTitle: "Inicia sesión en tu Pimling",
-    findPimlingBody:
-      "Escribe tu nombre de usuario para ir a tu Pimling y luego inicia sesión con tu llave de acceso.",
-    goToMyPimling: "Ir a mi Pimling",
     accountClosedTitle: "Tu cuenta está cerrada",
     accountClosedBody:
-      "Ya nadie puede usarla, pero el borrado de sus datos aún no terminó. Pimling lo sigue intentando hasta borrarlo todo; no tienes que hacer nada.",
-    leavePimling: "Salir",
+      "Ya nadie puede usarla, pero el borrado de sus datos aún no terminó. Pim lo sigue intentando hasta borrarlo todo; no tienes que hacer nada.",
+    adminBadge: "Admin",
+    you: "tú",
+    leave: "Salir",
+    members: "Personas en este Pim",
+    membersDescription:
+      "Todas las personas que se unieron. Invita a alguien con un enlace que funciona una vez. Para quien perdió todas sus llaves de acceso y códigos de recuperación, crea un enlace de configuración.",
+    inviteSomeone: "Invitar a alguien",
+    inviteLinkNote:
+      "Funciona una vez. Cualquiera que lo tenga puede unirse, así que envíalo solo a esa persona.",
+    setupLinkFor:
+      "Añade una llave de acceso a la cuenta de @{username}, una vez, dentro de una hora. Envíalo solo a esa persona.",
+    setupLinkAction: "Enlace de configuración para @{username}",
+    memberPending: "Aún no crea una llave de acceso",
+    memberSuspended: "Suspendida",
+    memberDeleting: "Borrándose",
+    suspendMember: "Suspender a @{username}",
+    restoreMember: "Restaurar a @{username}",
+    deleteMember: "Eliminar a @{username}",
+    becomeAdmin: "Configurar este Pim",
+    createAccount: "Crear mi cuenta",
+    firstPasskeyNote:
+      "Tu dispositivo te pedirá tu cara, huella o PIN. Añade tus otros dispositivos después, desde Ajustes.",
+    notMyPim: "Este no es mi Pim",
+    newHere: "¿Eres nuevo aquí?",
+    joinByInvite:
+      "¿Eres nuevo aquí? Pide un enlace de invitación a quien administra este Pim.",
+    adminLostPasskey:
+      "¿Administras este Pim y perdiste todas tus llaves de acceso?",
+    getSetupLinkFromLogs: "Obtén un enlace de configuración de los registros",
   },
 } as const;
 

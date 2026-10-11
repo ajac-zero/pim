@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { Bot, Globe, Search } from "lucide-react";
+import { Bot, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useI18n } from "~/components/i18n";
 import { EmptyState, Page } from "~/components/page";
@@ -15,7 +15,7 @@ export const Route = createFileRoute("/discover")({
 /** Pims people published for anyone to make their own. */
 function DiscoverPage() {
   const { t } = useI18n();
-  const { data: account, isPending } = useQuery(accountQuery());
+  const { data: account } = useQuery(accountQuery());
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   // Asks once typing pauses, not at every key.
@@ -30,12 +30,7 @@ function DiscoverPage() {
 
   return (
     <Page title={t("discover")} description={t("discoverDescription")}>
-      {isPending ? null : !account ? (
-        <EmptyState
-          icon={<Globe className="size-5" />}
-          text={t("discoverNeedsPimling")}
-        />
-      ) : (
+      {account && (
         <div className="space-y-4">
           <div className="relative">
             <Search className="-translate-y-1/2 absolute top-1/2 left-3 size-4 text-muted-foreground" />

@@ -1436,3 +1436,90 @@ describe("circles and visits", () => {
 		}
 	});
 });
+
+describe("profiles and published Pims", () => {
+	it("lets people publish a Pim, others find it and make it their own, and takes it all down with the account", async () => {
+		const dee = await person("dee");
+		const eli = await person("eli");
+
+		expect((await dee.browser.json("/api/profile", { method: "PUT", json: { displayName: "x".repeat(51) } })).status).toBe(400);
+		expect((await dee.browser.json("/api/profile", { method: "PUT", json: { displayName: "Dee Rivers", bio: "Runs, cooks." } })).body).toEqual({
+			username: "dee",
+			displayName: "Dee Rivers",
+			bio: "Runs, cooks.",
+		});
+
+		const coach = (
+			await dee.browser.json("/api/personas", {
+				method: "POST",
+				json: {
+					name: "Marathon coach",
+					description: "Plans training weeks.",
+					instructions: "Plan one week at a time.",
+					apps: [{ name: "Strava", url: "https://mcp.strava.example/mcp" }],
+				},
+			})
+		).body;
+		const published = await dee.browser.json(`/api/personas/${coach.id}/publish`, { method: "POST" });
+		expect(published).toMatchObject({ status: 201, body: { author: "dee", authorName: "Dee Rivers", name: "Marathon coach", uses: 0 } });
+		const templateId = published.body.id as string;
+		expect((await dee.browser.json(`/api/personas/${coach.id}`)).body.published).toBe(templateId);
+		// Publishing again replaces it, under the same id.
+		await dee.browser.json(`/api/personas/${coach.id}`, { method: "PUT", json: { instructions: "Plan two weeks at a time." } });
+		expect((await dee.browser.json(`/api/personas/${coach.id}/publish`, { method: "POST" })).body).toMatchObject({ id: templateId });
+
+		// Eli finds it, by search or on Dee's page, and reads it in full: a copy of the Pim, never Dee's data.
+		const found = (await eli.browser.json("/api/templates?q=marathon")).body.templates;
+		expect(found).toEqual([expect.objectContaining({ id: templateId, author: "dee", name: "Marathon coach" })]);
+		expect(found[0]).not.toHaveProperty("instructions");
+		expect((await eli.browser.json("/api/templates?q=nothing-like-it")).body.templates).toEqual([]);
+		expect((await eli.browser.json("/api/people/dee")).body).toMatchObject({
+			username: "dee",
+			displayName: "Dee Rivers",
+			bio: "Runs, cooks.",
+			templates: [expect.objectContaining({ id: templateId })],
+		});
+		expect((await eli.browser.json(`/api/templates/${templateId}`)).body).toMatchObject({ instructions: "Plan two weeks at a time." });
+
+		// Made his own: a copy in Eli's Pim, his to change; Dee's is untouched, and counts the use.
+		const mine = await eli.browser.json(`/api/templates/${templateId}/use`, { method: "POST" });
+		expect(mine).toMatchObject({
+			status: 201,
+			body: {
+				name: "Marathon coach",
+				instructions: "Plan two weeks at a time.",
+				apps: [{ name: "Strava", url: "https://mcp.strava.example/mcp" }],
+				source: { template: templateId, author: "dee" },
+				published: null,
+			},
+		});
+		await eli.browser.json(`/api/personas/${mine.body.id}`, { method: "PUT", json: { instructions: "Plan my week around work." } });
+		expect((await dee.browser.json(`/api/personas/${coach.id}`)).body.instructions).toBe("Plan two weeks at a time.");
+		expect((await eli.browser.json(`/api/templates/${templateId}`)).body.uses).toBe(1);
+
+		// Unpublished, it's gone from the gallery; Eli keeps his copy.
+		expect((await dee.browser.json(`/api/personas/${coach.id}/publish`, { method: "DELETE" })).status).toBe(200);
+		expect((await eli.browser.json(`/api/templates/${templateId}`)).status).toBe(404);
+		expect((await eli.browser.json("/api/personas")).body.personas).toHaveLength(1);
+
+		// Deleting a published Pim unpublishes it; deleting the account takes the profile and everything published.
+		const again = (await dee.browser.json(`/api/personas/${coach.id}/publish`, { method: "POST" })).body.id;
+		await dee.browser.json(`/api/personas/${coach.id}`, { method: "DELETE" });
+		expect((await eli.browser.json(`/api/templates/${again}`)).status).toBe(404);
+		const other = (await dee.browser.json("/api/personas", { method: "POST", json: { name: "Cook", instructions: "Suggest dinners." } })).body;
+		await dee.browser.json(`/api/personas/${other.id}/publish`, { method: "POST" });
+		expect((await eli.browser.json("/api/templates?q=cook")).body.templates).toHaveLength(1);
+		expect((await dee.browser.json("/api/account", { method: "DELETE", json: { confirm: "dee" } })).status).toBe(200);
+		expect((await eli.browser.json("/api/templates?q=cook")).body.templates).toEqual([]);
+		expect(await env.Gallery!.getByName("gallery").holds(dee.ownerId)).toBe(false);
+		expect((await eli.browser.json("/api/people/dee")).status).toBe(404);
+	});
+
+	it("lets the operator take a template down", async () => {
+		const fin = await person("fin");
+		const pim = (await fin.browser.json("/api/personas", { method: "POST", json: { name: "Spam", instructions: "Buy now." } })).body;
+		const template = (await fin.browser.json(`/api/personas/${pim.id}/publish`, { method: "POST" })).body.id;
+		expect((await admin(`/admin/templates/${template}`, { method: "DELETE" })).status).toBe(200);
+		expect((await fin.browser.json(`/api/templates/${template}`)).status).toBe(404);
+	});
+});

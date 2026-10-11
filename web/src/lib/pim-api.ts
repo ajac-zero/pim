@@ -14,6 +14,65 @@ export type Session = {
   updatedAt: number | null;
   /** A conversation with someone else's Pim, shared with you; null for your own chats. */
   visit?: { username: string; available: boolean } | null;
+  /** The Pim of yours it was started with; null for Pim itself. */
+  persona?: { id: string; name: string } | null;
+};
+
+/** An app a Pim suggests connecting, by its MCP server URL. */
+export type SuggestedApp = { name: string; url: string };
+
+/** One of your Pims: a named agent with its own instructions. */
+export type Persona = {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string;
+  apps: SuggestedApp[];
+  /** The template it was made from. */
+  source: { template: string; author: string } | null;
+  /** Its template in the gallery, while published. */
+  published: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type PersonaInput = {
+  name: string;
+  description: string;
+  instructions: string;
+  apps: SuggestedApp[];
+};
+
+/** A Pim someone published for others to make their own. */
+export type Template = {
+  id: string;
+  author: string;
+  authorName: string | null;
+  name: string;
+  description: string;
+  instructions: string;
+  apps: SuggestedApp[];
+  publishedAt: number;
+  uses: number;
+};
+
+export type TemplateSummary = Omit<Template, "instructions">;
+
+export type Profile = {
+  username: string;
+  displayName: string | null;
+  bio: string | null;
+};
+
+/** Someone on Pimling, and what they published. */
+export type Person = Profile & { templates: TemplateSummary[] };
+
+/** A connected app, as Pim lists them. */
+export type ConnectedApp = {
+  id: string;
+  name: string;
+  url: string;
+  state: string;
 };
 
 export type ApprovalStatus = "pending" | "approved" | "denied";
@@ -287,10 +346,48 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const pim = {
   sessions: () =>
     call<{ sessions: Session[] }>("/sessions").then((body) => body.sessions),
-  createSession: (title?: string) =>
+  createSession: (options: { title?: string; persona?: string } = {}) =>
     call<Session>("/sessions", {
       method: "POST",
-      body: JSON.stringify(title ? { title } : {}),
+      body: JSON.stringify(options),
+    }),
+  personas: () =>
+    call<{ personas: Persona[] }>("/personas").then((body) => body.personas),
+  createPersona: (input: PersonaInput) =>
+    call<Persona>("/personas", { method: "POST", body: JSON.stringify(input) }),
+  updatePersona: (id: string, input: Partial<PersonaInput>) =>
+    call<Persona>(`/personas/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+  deletePersona: (id: string) =>
+    call<{ deleted: boolean }>(`/personas/${id}`, { method: "DELETE" }),
+  publishPersona: (id: string) =>
+    call<Template>(`/personas/${id}/publish`, { method: "POST" }),
+  unpublishPersona: (id: string) =>
+    call<{ deleted: boolean }>(`/personas/${id}/publish`, { method: "DELETE" }),
+  profile: () => call<Profile>("/profile"),
+  setProfile: (change: { displayName: string | null; bio: string | null }) =>
+    call<Profile>("/profile", { method: "PUT", body: JSON.stringify(change) }),
+  person: (username: string) =>
+    call<Person>(`/people/${encodeURIComponent(username)}`),
+  templates: (query: string) =>
+    call<{ templates: TemplateSummary[] }>(
+      `/templates${query ? `?q=${encodeURIComponent(query)}` : ""}`,
+    ).then((body) => body.templates),
+  template: (id: string) =>
+    call<Template>(`/templates/${encodeURIComponent(id)}`),
+  /** Makes a published Pim one of yours: a copy, yours to change. */
+  adoptTemplate: (id: string) =>
+    call<Persona>(`/templates/${encodeURIComponent(id)}/use`, {
+      method: "POST",
+    }),
+  apps: () =>
+    call<{ servers: ConnectedApp[] }>("/mcp").then((body) => body.servers),
+  connectApp: (app: SuggestedApp) =>
+    call<{ id: string; state: string; authUrl?: string }>("/mcp", {
+      method: "POST",
+      body: JSON.stringify(app),
     }),
   renameSession: (id: string, title: string) =>
     call<Session>(`/sessions/${id}`, {

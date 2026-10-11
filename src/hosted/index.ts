@@ -5,11 +5,13 @@ import { type ApiExtension, type PimSite, servePim, withCors } from "../gateway"
 import { HttpError } from "../http";
 import { parseLimits } from "../usage";
 import { type Account, type AccountStatus, type CleanupResult, type Directory, PENDING_MS, type RegistrationPolicy } from "./directory";
+import type { Gallery } from "./gallery";
 import { usernameProblem } from "./usernames";
 
 export { Pim } from "../agent";
 export { Auth } from "../auth";
 export { Directory } from "./directory";
+export { Gallery } from "./gallery";
 
 /**
  * Pimling: hosted Pims, one per person, each at `<username>.<PIMLING_DOMAIN>`.
@@ -28,6 +30,7 @@ export { Directory } from "./directory";
 
 type HostedEnv = Env & {
 	readonly Directory: DurableObjectNamespace<Directory>;
+	readonly Gallery: DurableObjectNamespace<Gallery>;
 	readonly PIMLING_DOMAIN: string;
 };
 
@@ -36,6 +39,7 @@ const ACCOUNT_CACHE_MS = 30_000;
 const accounts = new Map<string, { account: Account | null; at: number }>();
 
 const directory = (env: HostedEnv) => env.Directory.getByName("directory");
+const gallery = (env: HostedEnv) => env.Gallery.getByName("gallery");
 
 async function resolveAccount(env: HostedEnv, username: string): Promise<Account | null> {
 	const cached = accounts.get(username);
@@ -186,30 +190,92 @@ function accountApi(env: HostedEnv, account: Account, site: AuthSite, request: R
 	};
 }
 
+/** An error a Durable Object threw across RPC, as the API answers it: its message, with the status its words imply. */
+function rpcFailure(error: unknown): Response {
+	const message = error instanceof Error ? error.message : String(error);
+	const status = /^No (circle|Pim|template)/.test(message) ? 404 : /up to \d+/.test(message) ? 429 : 400;
+	return fail(status, message);
+}
+
 /**
- * `POST /api/circles/:circle/members`: puts someone in one of the person's
- * circles by their username, answered here because only the Directory knows
- * whose Pim a username is. The agent does the rest, and tells theirs.
+ * The parts of a person's API that need the whole service, answered here:
+ * adding someone to a circle by username (only the Directory knows whose
+ * Pim a username is), their profile, other people's, and the gallery of
+ * published Pims. Everything else is their own Pim's.
  */
-function circlesApi(env: HostedEnv, account: Account, request: Request): ApiExtension {
+function socialApi(env: HostedEnv, account: Account, request: Request): ApiExtension {
 	return async (path) => {
-		const match = /^\/circles\/([^/]+)\/members$/.exec(path);
-		if (!match || request.method !== "POST") return undefined;
-		const body = (await request.json().catch(() => null)) as { username?: unknown } | null;
-		const username = typeof body?.username === "string" ? body.username.trim().toLowerCase().replace(/^@/, "") : "";
-		const guest = usernameProblem(username) === null ? await resolveAccount(env, username) : null;
-		if (!guest || guest.status !== "active") return fail(404, `There's no Pimling called ${username || "that"}.`);
-		if (guest.ownerId === account.ownerId) return fail(400, "You can't add yourself to a circle.");
+		const route = `${request.method} ${path}`;
+		const body = async () => ((await request.json().catch(() => null)) ?? {}) as Record<string, unknown>;
+		const agent = () => agentOf(env, account.ownerId);
 		try {
-			const agent = await agentOf(env, account.ownerId);
-			const member = await agent.addCircleMember(decodeURIComponent(match[1]!), { ownerId: guest.ownerId, username: guest.username });
-			log("circle_member_added", { owner: account.ownerId, member: guest.ownerId });
-			return json(member, 201);
+			const member = /^\/circles\/([^/]+)\/members$/.exec(path);
+			if (member && request.method === "POST") {
+				const given = (await body()).username;
+				const username = typeof given === "string" ? given.trim().toLowerCase().replace(/^@/, "") : "";
+				const guest = usernameProblem(username) === null ? await resolveAccount(env, username) : null;
+				if (!guest || guest.status !== "active") return fail(404, `There's no Pimling called ${username || "that"}.`);
+				if (guest.ownerId === account.ownerId) return fail(400, "You can't add yourself to a circle.");
+				const added = await (await agent()).addCircleMember(decodeURIComponent(member[1]!), { ownerId: guest.ownerId, username: guest.username });
+				log("circle_member_added", { owner: account.ownerId, member: guest.ownerId });
+				return json(added, 201);
+			}
+
+			if (route === "GET /profile") return json(await gallery(env).profile(account.username));
+			if (route === "PUT /profile") return json(await gallery(env).setProfile(account.ownerId, account.username, await body()));
+
+			const person = /^\/people\/([^/]+)$/.exec(path);
+			if (person && request.method === "GET") {
+				const username = decodeURIComponent(person[1]!).toLowerCase();
+				const found = usernameProblem(username) === null ? await resolveAccount(env, username) : null;
+				if (!found || found.status !== "active") return fail(404, `There's no Pimling called ${username}.`);
+				const [profile, templates] = await Promise.all([gallery(env).profile(username), gallery(env).templates({ author: username })]);
+				return json({ ...profile, templates });
+			}
+
+			if (route === "GET /templates") {
+				const url = new URL(request.url);
+				return json({ templates: await gallery(env).templates({ query: url.searchParams.get("q") ?? undefined }) });
+			}
+			const template = /^\/templates\/([^/]+)(\/use)?$/.exec(path);
+			if (template) {
+				const found = await gallery(env).template(decodeURIComponent(template[1]!));
+				if (!found) return fail(404, "No such template. It may have been unpublished.");
+				if (!template[2] && request.method === "GET") return json(found);
+				if (template[2] && request.method === "POST") {
+					const persona = await (await agent()).adoptTemplate(found);
+					if (found.author !== account.username) await gallery(env).used(found.id);
+					log("template_used", { owner: account.ownerId, template: found.id });
+					return json(persona, 201);
+				}
+				return undefined;
+			}
+
+			const publish = /^\/personas\/([^/]+)\/publish$/.exec(path);
+			if (publish) {
+				const id = decodeURIComponent(publish[1]!);
+				const persona = await (await agent()).personaToPublish(id);
+				if (!persona) return fail(404, `No Pim ${id}`);
+				if (request.method === "POST") {
+					const published = await gallery(env).publish(account.ownerId, account.username, persona);
+					await (await agent()).setPersonaPublished(id, published.id);
+					log("template_published", { owner: account.ownerId, template: published.id });
+					return json(published, 201);
+				}
+				if (request.method === "DELETE") {
+					await gallery(env).unpublish(account.ownerId, id);
+					await (await agent()).setPersonaPublished(id, null);
+					return json({ deleted: true });
+				}
+				return undefined;
+			}
+			// A deleted Pim leaves the gallery too; the agent deletes it after.
+			const deleted = /^\/personas\/([^/]+)$/.exec(path);
+			if (deleted && request.method === "DELETE") await gallery(env).unpublish(account.ownerId, decodeURIComponent(deleted[1]!));
 		} catch (error) {
-			// The agent's own refusals (no such circle) arrive as plain errors across RPC.
-			const message = error instanceof Error ? error.message : String(error);
-			return fail(/No circle/.test(message) ? 404 : 400, message);
+			return rpcFailure(error);
 		}
+		return undefined;
 	};
 }
 
@@ -240,8 +306,8 @@ async function servePerson(request: Request, env: HostedEnv, username: string): 
 	}
 	const site = siteFor(env, account);
 	const accountRoutes = accountApi(env, account, site, request);
-	const circleRoutes = circlesApi(env, account, request);
-	return servePim(request, env, site, async (path, forwarded) => (await accountRoutes(path, forwarded)) ?? circleRoutes(path, forwarded));
+	const socialRoutes = socialApi(env, account, request);
+	return servePim(request, env, site, async (path, forwarded) => (await accountRoutes(path, forwarded)) ?? socialRoutes(path, forwarded));
 }
 
 /** The domain itself: registration. */
@@ -324,6 +390,13 @@ async function admin(request: Request, env: HostedEnv, path: string): Promise<Re
 					limit: Number(url.searchParams.get("limit")) || 100,
 				}),
 			});
+		}
+		const template = /^\/templates\/([^/]+)$/.exec(path);
+		if (template && request.method === "DELETE") {
+			const removed = await gallery(env).remove(decodeURIComponent(template[1]!));
+			if (!removed) return fail(404, "No such template");
+			log("template_removed", { template: template[1] });
+			return json({ deleted: true });
 		}
 		if (route === "POST /invites") {
 			const body = (await request.json().catch(() => ({}))) as { count?: unknown; note?: unknown };
@@ -416,7 +489,9 @@ async function serveFrontDoor(request: Request, env: HostedEnv): Promise<Respons
 export default {
 	async fetch(request, env): Promise<Response> {
 		const hosted = env as HostedEnv;
-		if (!hosted.PIMLING_DOMAIN || !hosted.Directory) return fail(500, "PIMLING_DOMAIN and the Directory binding must be configured");
+		if (!hosted.PIMLING_DOMAIN || !hosted.Directory || !hosted.Gallery) {
+			return fail(500, "PIMLING_DOMAIN and the Directory and Gallery bindings must be configured");
+		}
 		// Deployment-wide, it would send every person's notifications to one address.
 		if (env.PIM_NOTIFY_WEBHOOK) return fail(500, "PIM_NOTIFY_WEBHOOK must not be set for Pimling: each person sets their own in Settings");
 		const host = new URL(request.url).hostname.toLowerCase();

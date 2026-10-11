@@ -28,6 +28,7 @@ This is Phase 1, a personal assistant service, plus private artifacts (M2a): pag
 - **Approvals** default to `explicit`: a request nobody answers is denied after 5 minutes. People can switch to `auto` (approved after 30 seconds) in Settings.
 - **Usage and limits.** Every model request goes through a metered model catalog. Requests and runs are checked and counted in one step before they start, so concurrent ones can't all take the last slot. Tokens are known only when a request ends, so requests already under way can take a day past `dailyTokens`; the next one is refused. Tokens are counted by the day the request was sent, and by provider. Tokens on someone's own ChatGPT plan are counted apart and never use up the platform's allowance. `PIM_LIMITS` sets everyone's limits; the admin API sets one person's. Running out stops the model request with a non-retryable "quota exceeded" error, refuses new runs with `429`, and skips scheduled tasks with one notification a day. Billing is out of scope: usage is recorded, not charged.
 - **Sharing.** Adding someone to a circle is the one request the Worker answers itself (`POST /api/circles/:id/members`), because only the Directory knows whose Pim a username is. Everything after is between the two Pims, by Durable Object RPC: the owner's tells the guest's it is shared (`shareReceived`), the guest's asks for a brief before each turn (`guestBrief`) and makes every tool call through `guestCall`, which checks the circle and the tool's permission each time, and the owner's sends decisions back (`visitAnswer`). A guest's conversation runs in their own Pim, so it is metered against their own limits. Each guest has 200 calls a day into one Pim; a circle can hold up to 200 people.
+- **Profiles and published Pims** live in the Gallery Durable Object (one for the service, apart from the Directory), answered by the Worker: profiles, Discover's search, someone's page, publishing a Pim (a copy of its name, description, instructions and suggested apps) and making one your own. Deleting an account forgets its profile and everything it published, in the same cleanup job that erases its agent; the job is done only once the Gallery holds nothing of it. The operator takes a published Pim down with the admin API.
 - **ChatGPT plan.** Each person signs in with ChatGPT in their own Settings. Their tokens, refreshes and agent host ID live in their own Pim. OpenAI's [token-sharing docs](https://developers.openai.com/siwc/token-sharing-open-source) cover open-source and locally hosted apps, and ask paid or remotely hosted apps to fill in an interest form. Check your eligibility with OpenAI before offering this in a hosted service.
 
 ## Prerequisites
@@ -64,7 +65,7 @@ pnpm run deploy:hosted   # builds web/, then deploys the "pimling" Worker
 - **Operator.** The admin API answers `Authorization: Bearer preview-admin`, for example `curl -H "Authorization: Bearer preview-admin" http://pimling.localhost:8787/admin/stats`.
 - **Never deploy `wrangler.preview.jsonc`.** It has no routes, but also open registration and a known admin token.
 
-The first deploy creates the `Pim`, `Auth` and `Directory` classes (migrations `v1` to `v3`). The `pimling` Worker is separate from any self-hosted `pim` Worker and shares no data with it.
+The first deploy creates the `Pim`, `Auth`, `Directory` and `Gallery` classes (migrations `v1` to `v4`); an existing deployment gets `Gallery` from `v4`. The `pimling` Worker is separate from any self-hosted `pim` Worker and shares no data with it.
 
 ## Migrating a self-hosted Pim
 
@@ -90,6 +91,7 @@ The admin API is on the front door, with `Authorization: Bearer $PIMLING_ADMIN_T
 | PUT | `/admin/accounts/:username/limits` | `{ limits }` or `{ limits: null }` | One person's limits over `PIM_LIMITS` |
 | POST | `/admin/accounts/:username/setup-link` | | A one-hour link that adds a passkey, for recovery |
 | DELETE | `/admin/accounts/:username` | `{ reason? }` | Deletes it as the owner would: `200` once erased, `202` while the cleanup is still queued. Run it again to retry at once |
+| DELETE | `/admin/templates/:id` | | Takes a published Pim out of Discover |
 | POST | `/admin/invites` | `{ count?, note? }` | Single-use invite codes (up to 100) |
 
 **Monitoring.** Workers Logs has one JSON line per event. Filter on `event`:
@@ -106,6 +108,7 @@ The admin API is on the front door, with `Authorization: Bearer $PIMLING_ADMIN_T
 | `pim.limit` | A person hit a limit: `limit` is `model` or `run` |
 | `pim.passkey_created`, `pim.recovery_codes_replaced` | A passkey made from a setup link or recovery code; codes replaced |
 | `pimling.circle_member_added` | Someone put another person in a circle |
+| `pimling.template_published`, `pimling.template_used`, `pimling.template_removed` | A Pim published (or updated), made someone's own, or taken down by the operator |
 | `pim.misrouted` | A request reached the wrong agent. This should never happen: investigate |
 
 **Abuse and limits.** Per address: `AUTH_LIMITER` (30 sign-in, recovery and registration attempts a minute) and `PIMLING_REGISTRATIONS_PER_ADDRESS` (3 a day). Per person: `API_LIMITER` (600 requests a minute), `PIM_LIMITS` (tokens, model requests, runs, chats, schedules, apps, storage, artifacts), and `PIM_MODELS`, so only models you pay for can be chosen. Paid `web_search` stays off.

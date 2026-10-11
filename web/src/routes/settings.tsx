@@ -9,7 +9,7 @@ import {
   LogOut,
   Trash2,
 } from "lucide-react";
-import { useState } from "react";
+import { type FormEvent, useState } from "react";
 import { toast } from "sonner";
 import {
   AccountSection,
@@ -44,7 +44,7 @@ import {
   pushEnabled,
   pushSupported,
 } from "~/lib/push";
-import { modelQuery } from "~/lib/queries";
+import { accountQuery, modelQuery, profileQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 export const Route = createFileRoute("/settings")({
@@ -62,6 +62,7 @@ function SettingsPage() {
   return (
     <Page title={t("settings")} description={t("settingsDescription")}>
       <AccountSection />
+      <ProfileSection />
       <ChatGPTCard settings={data} />
       <section className="mt-10 space-y-3">
         <h2 className="font-medium text-muted-foreground text-sm">
@@ -302,6 +303,78 @@ function ChatGPTCard({ settings }: { settings: ModelSettings }) {
           {t("continueWithChatGPT")}
         </Button>
       )}
+    </section>
+  );
+}
+
+/** How others on Pimling see you: on your page, and next to what you publish. Pimling only. */
+function ProfileSection() {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const { data: account } = useQuery(accountQuery());
+  const { data: profile } = useQuery({ ...profileQuery(), enabled: !!account });
+  const [draft, setDraft] = useState<{
+    displayName: string;
+    bio: string;
+  } | null>(null);
+  const save = useMutation({
+    mutationFn: pim.setProfile,
+    onSuccess: (next) => {
+      queryClient.setQueryData(["profile"], next);
+      setDraft(null);
+      toast.success(t("settingsSaved"));
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  if (!account || !profile) return null;
+  const value = draft ?? {
+    displayName: profile.displayName ?? "",
+    bio: profile.bio ?? "",
+  };
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    save.mutate({
+      displayName: value.displayName.trim() || null,
+      bio: value.bio.trim() || null,
+    });
+  };
+  return (
+    <section className="mt-10 space-y-3">
+      <h2 className="font-medium text-muted-foreground text-sm">
+        {t("profile")}
+      </h2>
+      <p className="px-1 text-muted-foreground text-xs">
+        {t("profileDescription")}
+      </p>
+      <form onSubmit={submit} className="space-y-3 rounded-xl border px-4 py-4">
+        <label className="block space-y-1">
+          <span className="font-medium text-sm">{t("displayName")}</span>
+          <Input
+            value={value.displayName}
+            onChange={(event) =>
+              setDraft({ ...value, displayName: event.target.value })
+            }
+            placeholder={`@${account.username}`}
+            maxLength={50}
+          />
+        </label>
+        <label className="block space-y-1">
+          <span className="font-medium text-sm">{t("bio")}</span>
+          <Input
+            value={value.bio}
+            onChange={(event) =>
+              setDraft({ ...value, bio: event.target.value })
+            }
+            placeholder={t("bioPlaceholder")}
+            maxLength={280}
+          />
+        </label>
+        <div className="flex justify-end">
+          <Button type="submit" disabled={draft === null || save.isPending}>
+            {t("save")}
+          </Button>
+        </div>
+      </form>
     </section>
   );
 }

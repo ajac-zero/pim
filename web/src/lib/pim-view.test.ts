@@ -1,7 +1,9 @@
 import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
+import type { FunctionCallItem } from "~/lib/openresponses";
 import {
   EMPTY_STREAM,
+  layoutThread,
   noticeOf,
   reduceAll,
   type StreamState,
@@ -238,6 +240,151 @@ describe("streaming", () => {
       "7 user: and another thing",
     ]);
     expect(describeEntries(state.view.live)).toEqual(["live:0 assistant: Wor"]);
+  });
+});
+
+describe("streaming a message Pim sends", () => {
+  it("grows send_to_user's message as its arguments stream", () => {
+    const state = run([
+      snapshot({ entries: [user(1, "hi")] }),
+      event({ type: "run_start", inputs: ["s1"] }),
+      event({
+        type: "message_start",
+        message: { role: "assistant", content: [] },
+      }),
+      event({
+        type: "message_update",
+        changes: [
+          {
+            type: "toolcall_start",
+            contentIndex: 0,
+            block: {
+              type: "toolCall",
+              id: "c1",
+              name: "send_to_user",
+              arguments: { notify: true, message: "Hel" },
+            },
+          },
+          {
+            type: "toolcall_delta",
+            contentIndex: 0,
+            path: ["message"],
+            delta: "lo ",
+          },
+        ],
+      }),
+      event({
+        type: "message_update",
+        changes: [
+          {
+            type: "toolcall_delta",
+            contentIndex: 0,
+            path: ["message"],
+            delta: "there",
+          },
+        ],
+      }),
+    ]);
+    expect(describeEntries(state.view.live)).toEqual([
+      'live:0 call c1 send_to_user({"notify":true,"message":"Hello there"})',
+    ]);
+  });
+});
+
+/** Rows as compact strings: the entries each holds, by key. */
+function describeRows(rows: ReturnType<typeof layoutThread>): string[] {
+  return rows.map((row) =>
+    row.kind === "activity"
+      ? `activity ${row.entries.map((entry) => entry.key).join(",")}`
+      : row.kind === "sent"
+        ? `sent ${row.key}: ${row.sent.message}`
+        : `${row.kind} ${row.key}`,
+  );
+}
+
+const layout = (
+  entries: EntryRecord[],
+  running = false,
+  shown: (call: FunctionCallItem) => boolean = () => false,
+) =>
+  describeRows(
+    layoutThread(run([snapshot({ entries })]).view.entries, { running, shown }),
+  );
+
+describe("layoutThread", () => {
+  const search = {
+    type: "toolCall",
+    id: "s",
+    name: "web_search",
+    arguments: {},
+  };
+  const send = (id: string, message: string) => ({
+    type: "toolCall",
+    id,
+    name: "send_to_user",
+    arguments: { message },
+  });
+
+  it("shows what Pim sent, and folds its notes and tools into activity", () => {
+    expect(
+      layout([
+        user(1, "Weather?"),
+        assistant(2, [{ type: "text", text: "Let me look." }, search]),
+        toolResult(3, "s", "sunny"),
+        assistant(4, [send("m", "It's sunny.")]),
+        toolResult(5, "m", "Sent."),
+        assistant(6, [{ type: "text", text: "Told them." }]),
+      ]),
+    ).toEqual([
+      "entry 1",
+      "activity 2:0,2:1",
+      "sent 4:0: It's sunny.",
+      "activity 6:0",
+    ]);
+  });
+
+  it("answers with the run's last text when Pim sent nothing back, once the run is over", () => {
+    const entries = [
+      user(1, "Weather?"),
+      assistant(2, [{ type: "text", text: "Looking." }, search]),
+      toolResult(3, "s", "sunny"),
+      assistant(4, [{ type: "text", text: "Sunny." }]),
+    ];
+    expect(layout(entries)).toEqual([
+      "entry 1",
+      "activity 2:0,2:1",
+      "reply 4:0",
+    ]);
+    // Still running, the last text may be notes before more work.
+    expect(layout(entries, true)).toEqual(["entry 1", "activity 2:0,2:1,4:0"]);
+  });
+
+  it("lets work Pim gave itself stay silent", () => {
+    expect(
+      layout([
+        user(1, "Watch the price."),
+        assistant(2, [send("m", "Will do.")]),
+        toolResult(3, "m", "Sent."),
+        user(4, "[Scheduled task] Check the price."),
+        assistant(5, [{ type: "text", text: "Unchanged; nothing to say." }]),
+      ]),
+    ).toEqual(["entry 1", "sent 2:0: Will do.", "entry 4", "activity 5:0"]);
+  });
+
+  it("gives tool calls that stand on their own a row, splitting the work around them", () => {
+    const gated = {
+      type: "toolCall",
+      id: "h",
+      name: "http_request",
+      arguments: {},
+    };
+    expect(
+      layout(
+        [user(1, "Order a pizza."), assistant(2, [search, gated, search])],
+        true,
+        (call) => call.name === "http_request",
+      ),
+    ).toEqual(["entry 1", "activity 2:0", "entry 2:1", "activity 2:2"]);
   });
 });
 

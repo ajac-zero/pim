@@ -114,9 +114,12 @@ export const UserMessage = memo(function UserMessage({
 export const AssistantMessage = memo(function AssistantMessage({
   item,
   streaming,
+  notified,
 }: {
   item: MessageItem;
   streaming?: boolean;
+  /** Pim also alerted the person's devices with it. */
+  notified?: boolean;
 }) {
   const { t } = useI18n();
   const text = messageText(item);
@@ -127,6 +130,12 @@ export const AssistantMessage = memo(function AssistantMessage({
       <Markdown text={text} streaming={streaming} />
       {streaming && (
         <span className="ml-0.5 inline-block h-4 w-2 animate-pulse rounded-sm bg-foreground/70 align-text-bottom" />
+      )}
+      {notified && !streaming && (
+        <p className="mt-1.5 flex items-center gap-1.5 text-muted-foreground text-xs">
+          <Bell className="size-3.5 shrink-0" />
+          {t("alsoNotified")}
+        </p>
       )}
       {!streaming && (
         <Actions className="mt-1.5 gap-0.5 opacity-0 transition-opacity group-hover/assistant:opacity-100">

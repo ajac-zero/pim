@@ -272,6 +272,24 @@ function emptyAssistant(): AssistantMessage {
   } as AssistantMessage;
 }
 
+/** `value` with `delta` appended to the string at `path`, copying only what changes. */
+function appendAt(
+  value: unknown,
+  path: readonly (string | number)[],
+  delta: string,
+): unknown {
+  if (path.length === 0)
+    return (typeof value === "string" ? value : "") + delta;
+  const [key, ...rest] = path as [string | number, ...(string | number)[]];
+  if (Array.isArray(value)) {
+    const copy = [...value];
+    copy[key as number] = appendAt(copy[key as number], rest, delta);
+    return copy;
+  }
+  const object = (value ?? {}) as Record<string, unknown>;
+  return { ...object, [key]: appendAt(object[key], rest, delta) };
+}
+
 /** Applies streamed changes to the message being generated. */
 export function applyChanges(
   message: AssistantMessage | null,
@@ -309,7 +327,18 @@ export function applyChanges(
         };
         break;
       case "toolcall_delta":
-        // Partial argument JSON; the call shows once its block completes.
+        // Text appended to one string in the call's arguments, such as the
+        // message `send_to_user` is writing.
+        if (previous?.type === "toolCall") {
+          content[change.contentIndex] = {
+            ...previous,
+            arguments: appendAt(
+              previous.arguments,
+              change.path,
+              change.delta,
+            ) as typeof previous.arguments,
+          };
+        }
         break;
     }
     current = { ...base, content };
@@ -481,4 +510,136 @@ export function reduceAll(
   events: readonly AgentEvent[],
 ): StreamState {
   return events.reduce(reduce, state);
+}
+
+/** The tool Pim speaks with: its calls are the messages the person reads. */
+export const SEND_TO_USER = "send_to_user";
+
+/** What a `send_to_user` call sends; partial while it streams. */
+export type Sent = { message: string; notify: boolean; title: string | null };
+
+export function sentOf(call: FunctionCallItem): Sent | null {
+  if (call.name !== SEND_TO_USER) return null;
+  let args: Record<string, unknown> = {};
+  try {
+    args = JSON.parse(call.arguments || "{}") as Record<string, unknown>;
+  } catch {
+    // Not whole yet.
+  }
+  return {
+    message: typeof args.message === "string" ? args.message : "",
+    notify: args.notify === true,
+    title: typeof args.title === "string" ? args.title : null,
+  };
+}
+
+/** One row of the chat as the person reads it. */
+export type ThreadRow =
+  /** Something they said, a notice, or a tool call that stands on its own. */
+  | { kind: "entry"; key: string; entry: ThreadEntry }
+  /** A message Pim sent them. */
+  | { kind: "sent"; key: string; call: FunctionCallItem; sent: Sent }
+  /** Pim's last notes, standing in for a reply it never sent. */
+  | { kind: "reply"; key: string; item: MessageItem }
+  /** Pim's work between: thinking, notes and tool calls, folded together. */
+  | { kind: "activity"; key: string; entries: ThreadEntry[] };
+
+/**
+ * Lays the thread out as the person reads it: what they said, what Pim sent
+ * them, and Pim's work in between, folded into activity rows. `shown` picks
+ * the other tool calls that stand on their own, such as approvals.
+ *
+ * Text Pim writes is notes, with one exception: a message from the person
+ * that got nothing sent back, as with a model that forgot to, is answered by
+ * the last text of its run, once the run is over. Inputs Pim gave itself
+ * (notices) may stay silent.
+ */
+export function layoutThread(
+  entries: readonly ThreadEntry[],
+  options: { running: boolean; shown: (call: FunctionCallItem) => boolean },
+): ThreadRow[] {
+  const replies = new Set<string>();
+  let fromUser = false;
+  let sent = false;
+  let lastText: string | null = null;
+  const close = (over: boolean) => {
+    if (fromUser && !sent && lastText !== null && over) replies.add(lastText);
+    sent = false;
+    lastText = null;
+  };
+  for (const entry of entries) {
+    if (entry.kind === "notice") {
+      close(true);
+      fromUser = false;
+      continue;
+    }
+    const { item } = entry;
+    if (item.type === "message" && (item as MessageItem).role === "user") {
+      close(true);
+      fromUser = true;
+    } else if (item.type === "message") {
+      lastText = entry.key;
+    } else if (
+      item.type === "function_call" &&
+      (item as FunctionCallItem).name === SEND_TO_USER
+    ) {
+      sent = true;
+    }
+  }
+  close(!options.running);
+
+  const rows: ThreadRow[] = [];
+  let activity: ThreadEntry[] = [];
+  const flush = () => {
+    const [first] = activity;
+    if (!first) return;
+    rows.push({ kind: "activity", key: first.key, entries: activity });
+    activity = [];
+  };
+  const own = (entry: ThreadEntry) => {
+    flush();
+    rows.push({ kind: "entry", key: entry.key, entry });
+  };
+  for (const entry of entries) {
+    if (entry.kind === "notice") {
+      own(entry);
+      continue;
+    }
+    const { item } = entry;
+    switch (item.type) {
+      case "message":
+        if ((item as MessageItem).role === "user") own(entry);
+        else if (replies.has(entry.key)) {
+          flush();
+          rows.push({
+            kind: "reply",
+            key: entry.key,
+            item: item as MessageItem,
+          });
+        } else activity.push(entry);
+        break;
+      case "reasoning":
+        activity.push(entry);
+        break;
+      case "function_call": {
+        const call = item as FunctionCallItem;
+        const message = sentOf(call);
+        if (message) {
+          // Nothing to read until its message starts streaming.
+          if (message.message === "") break;
+          flush();
+          rows.push({ kind: "sent", key: entry.key, call, sent: message });
+        } else if (options.shown(call)) own(entry);
+        else activity.push(entry);
+        break;
+      }
+      case "function_call_output":
+        // Shown with its call.
+        break;
+      default:
+        own(entry);
+    }
+  }
+  flush();
+  return rows;
 }

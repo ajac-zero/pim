@@ -8,6 +8,7 @@ import {
   Plug,
   Plus,
   Trash2,
+  Users,
   X,
 } from "lucide-react";
 import { type FormEvent, useState } from "react";
@@ -17,12 +18,18 @@ import { EmptyState, Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {
+  admin,
   type Persona,
   type PersonaInput,
   pim,
   type SuggestedApp,
 } from "~/lib/pim-api";
-import { accountQuery, appsQuery, personasQuery } from "~/lib/queries";
+import {
+  accountQuery,
+  appsQuery,
+  defaultPimQuery,
+  personasQuery,
+} from "~/lib/queries";
 
 export const Route = createFileRoute("/pims")({
   loader: ({ context }) => context.queryClient.ensureQueryData(personasQuery()),
@@ -36,7 +43,7 @@ const EMPTY: PersonaInput = {
   apps: [],
 };
 
-/** Your Pims: named agents with their own instructions, inside your one Pim. */
+/** Your Pims: named agents with their own instructions, your default one first. */
 function PimsPage() {
   const { t } = useI18n();
   const { data: personas = [] } = useQuery(personasQuery());
@@ -90,6 +97,24 @@ function PersonaCard({ persona }: { persona: Persona }) {
   const { data: account } = useQuery(accountQuery());
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const isAdmin = account?.role === "admin";
+  const { data: everyones } = useQuery({
+    ...defaultPimQuery(),
+    enabled: isAdmin,
+  });
+  const forEveryone = everyones?.personaId === persona.id;
+  const choose = useMutation({
+    mutationFn: (on: boolean) => admin.setDefaultPim(on ? persona.id : null),
+    onSuccess: (chosen) => {
+      queryClient.setQueryData(defaultPimQuery().queryKey, chosen);
+      toast.success(
+        chosen
+          ? t("everyonesDefaultSet", { name: persona.name })
+          : t("everyonesDefaultCleared"),
+      );
+    },
+    onError: (error) => toast.error(error.message),
+  });
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: ["personas"] });
   const remove = useMutation({
@@ -127,7 +152,14 @@ function PersonaCard({ persona }: { persona: Persona }) {
           <Bot className="size-4.5" />
         </span>
         <div className="min-w-0 flex-1">
-          <h2 className="truncate font-medium">{persona.name}</h2>
+          <h2 className="flex items-center gap-2 font-medium">
+            <span className="truncate">{persona.name}</span>
+            {persona.default && (
+              <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
+                {t("defaultPim")}
+              </span>
+            )}
+          </h2>
           {persona.description && (
             <p className="text-muted-foreground text-sm">
               {persona.description}
@@ -151,12 +183,27 @@ function PersonaCard({ persona }: { persona: Persona }) {
                 <Globe className="size-3" /> {t("published")}
               </span>
             )}
+            {forEveryone && (
+              <span className="flex items-center gap-1 text-primary">
+                <Users className="size-3" /> {t("everyonesDefault")}
+                <button
+                  type="button"
+                  className="underline underline-offset-2 hover:text-foreground"
+                  onClick={() => choose.mutate(false)}
+                  disabled={choose.isPending}
+                >
+                  {t("stopEveryonesDefault")}
+                </button>
+              </span>
+            )}
           </p>
         </div>
       </div>
-      <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-sm">
-        {persona.instructions}
-      </p>
+      {persona.instructions && (
+        <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-sm">
+          {persona.instructions}
+        </p>
+      )}
       {persona.apps.length > 0 && <SuggestedApps apps={persona.apps} />}
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <Button
@@ -188,8 +235,18 @@ function PersonaCard({ persona }: { persona: Persona }) {
             {t("unpublish")}
           </Button>
         )}
+        {isAdmin && everyones !== undefined && !forEveryone && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => choose.mutate(true)}
+            disabled={choose.isPending}
+          >
+            <Users /> {t("makeEveryonesDefault")}
+          </Button>
+        )}
         <span className="ml-auto">
-          {confirming ? (
+          {persona.default ? null : confirming ? (
             <span className="flex items-center gap-1">
               <Button
                 size="sm"
@@ -360,7 +417,6 @@ function PersonaForm({
           }
           placeholder={t("pimInstructionsPlaceholder")}
           maxLength={8000}
-          required
           rows={6}
           className="w-full rounded-md border bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
         />

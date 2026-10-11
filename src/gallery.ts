@@ -10,6 +10,9 @@ import type { SuggestedApp } from "./personas";
  * A template is a copy of one of its author's Pims when they published it:
  * its name, description, instructions and suggested apps, never their
  * memory, conversations or credentials. Publishing again replaces it.
+ *
+ * The admin also chooses the Pim everyone starts with: a copy of one of
+ * theirs, which becomes each new account's default Pim.
  */
 
 export type Profile = {
@@ -30,6 +33,19 @@ export type Template = {
 	readonly publishedAt: number;
 	/** How many people made it their own. */
 	readonly uses: number;
+};
+
+/** The Pim everyone starts with, as the admin chose it. */
+export type DefaultPim = {
+	/** The admin's username. */
+	readonly author: string;
+	/** Which of the admin's Pims it is a copy of. */
+	readonly personaId: string;
+	readonly name: string;
+	readonly description: string;
+	readonly instructions: string;
+	readonly apps: readonly SuggestedApp[];
+	readonly updatedAt: number;
 };
 
 /** A template in a list: everything but its instructions. */
@@ -61,6 +77,17 @@ CREATE TABLE IF NOT EXISTS templates (
 	UNIQUE (owner_id, persona_id)
 );
 CREATE INDEX IF NOT EXISTS templates_by_author ON templates (username, published_at);
+CREATE TABLE IF NOT EXISTS default_pim (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	owner_id TEXT NOT NULL,
+	username TEXT NOT NULL,
+	persona_id TEXT NOT NULL,
+	name TEXT NOT NULL,
+	description TEXT NOT NULL,
+	instructions TEXT NOT NULL,
+	apps TEXT NOT NULL,
+	updated_at INTEGER NOT NULL
+);
 `;
 
 type Row = Record<string, SqlStorageValue>;
@@ -206,17 +233,64 @@ export class Gallery extends DurableObject<Env> {
 		return this.#sql("DELETE FROM templates WHERE id = ?", id).rowsWritten > 0;
 	}
 
-	/** Forgets a person: their profile and everything they published. Run when their account is deleted. */
+	/** The Pim everyone starts with; null when the admin chose none, and people start with a plain one. */
+	defaultPim(): DefaultPim | null {
+		const [row] = this.#sql("SELECT * FROM default_pim WHERE id = 1").toArray();
+		if (!row) return null;
+		return {
+			author: String(row.username),
+			personaId: String(row.persona_id),
+			name: String(row.name),
+			description: String(row.description),
+			instructions: String(row.instructions),
+			apps: JSON.parse(String(row.apps)) as SuggestedApp[],
+			updatedAt: Number(row.updated_at),
+		};
+	}
+
+	/** The admin makes a copy of one of their Pims the one everyone starts with. Choosing again replaces it. */
+	setDefaultPim(
+		ownerId: string,
+		username: string,
+		persona: { id: string; name: string; description: string; instructions: string; apps: readonly SuggestedApp[] },
+	): DefaultPim {
+		this.#sql(
+			`INSERT INTO default_pim (id, owner_id, username, persona_id, name, description, instructions, apps, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (id) DO UPDATE SET owner_id = excluded.owner_id, username = excluded.username, persona_id = excluded.persona_id, name = excluded.name,
+			description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, updated_at = excluded.updated_at`,
+			ownerId,
+			username,
+			persona.id,
+			persona.name,
+			persona.description,
+			persona.instructions,
+			JSON.stringify(persona.apps),
+			Date.now(),
+		);
+		return this.defaultPim()!;
+	}
+
+	/** Back to a plain Pim for everyone who joins. False when none was chosen. */
+	clearDefaultPim(): boolean {
+		return this.#sql("DELETE FROM default_pim").rowsWritten > 0;
+	}
+
+	/** Forgets a person: their profile, everything they published, and the Pim everyone starts with if it was theirs. Run when their account is deleted. */
 	forgetOwner(ownerId: string): void {
 		this.#sql("DELETE FROM templates WHERE owner_id = ?", ownerId);
 		this.#sql("DELETE FROM profiles WHERE owner_id = ?", ownerId);
+		this.#sql("DELETE FROM default_pim WHERE owner_id = ?", ownerId);
 	}
 
 	/** Whether anything of the owner is left: a deletion is done only once nothing is. */
 	holds(ownerId: string): boolean {
 		return (
-			this.#sql("SELECT 1 FROM profiles WHERE owner_id = ? UNION SELECT 1 FROM templates WHERE owner_id = ? LIMIT 1", ownerId, ownerId).toArray()
-				.length > 0
+			this.#sql(
+				"SELECT 1 FROM profiles WHERE owner_id = ? UNION SELECT 1 FROM templates WHERE owner_id = ? UNION SELECT 1 FROM default_pim WHERE owner_id = ? LIMIT 1",
+				ownerId,
+				ownerId,
+				ownerId,
+			).toArray().length > 0
 		);
 	}
 }

@@ -221,6 +221,12 @@ async function register(request: Request, env: Env, now: number): Promise<Respon
 		await agent.provision({ ownerId: account.ownerId, username, publicUrl: origin(request, env) });
 		// The deployment's limits are for members: the admin pays for the deployment.
 		if (account.role === "admin") await agent.setLimits(UNLIMITED);
+		// Everyone starts with a copy of the Pim the admin chose, or a plain one when they chose none.
+		const everyone = await gallery(env).defaultPim();
+		if (everyone) {
+			const { author, name, description, instructions, apps } = everyone;
+			await agent.adoptDefaultPim({ author, name, description, instructions, apps });
+		}
 		if (typeof body?.timeZone === "string") {
 			// The browser's zone, a good first guess; a bad one is just not applied.
 			await agent.applySettings({ timeZone: body.timeZone }).catch(() => undefined);
@@ -408,6 +414,21 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 						limit: Number(url.searchParams.get("limit")) || 100,
 					}),
 				});
+			}
+			if (route === "GET /default-pim") return json({ pim: await gallery(env).defaultPim() });
+			if (route === "PUT /default-pim") {
+				const id = (await body()).pim;
+				if (typeof id !== "string") return fail(400, "pim must be the id of one of your Pims");
+				const persona = await (await agentOf(env, admin.ownerId)).personaToPublish(id);
+				if (!persona) return fail(404, `No Pim ${id}`);
+				const chosen = await gallery(env).setDefaultPim(admin.ownerId, admin.username, persona);
+				log("default_pim_set", { by: admin.ownerId, pim: id });
+				return json({ pim: chosen });
+			}
+			if (route === "DELETE /default-pim") {
+				await gallery(env).clearDefaultPim();
+				log("default_pim_set", { by: admin.ownerId, pim: null });
+				return json({ pim: null });
 			}
 			const template = /^\/admin\/templates\/([^/]+)$/.exec(path);
 			if (template && request.method === "DELETE") {

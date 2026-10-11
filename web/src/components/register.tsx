@@ -12,6 +12,8 @@ import {
   forgetSetupCode,
   type Registered,
 } from "~/lib/auth";
+import { MAX_PIM_NAME, pim } from "~/lib/pim-api";
+import { personasQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 /** The username as typed, the way the Worker will read it. */
@@ -27,8 +29,8 @@ function useDebounced<T>(value: T, ms: number): T {
 }
 
 /**
- * Joining this Pim: pick a username, save the recovery codes, then make the
- * first passkey, right here. `claim` is for the first person on a Pim with no
+ * Joining this Pim: pick a username, save the recovery codes, make the
+ * first passkey, right here, then name your Pim. `claim` is for the first person on a Pim with no
  * admin, who becomes it: in the minutes after a deploy (no code), or with
  * the link from the Worker's logs.
  */
@@ -44,8 +46,14 @@ export function Join({
   onBack?: () => void;
 }) {
   const [registered, setRegistered] = useState<Registered | null>(null);
-  return registered ? (
-    <RecoveryCodes registered={registered} />
+  const [signedIn, setSignedIn] = useState(false);
+  return signedIn ? (
+    <NamePim />
+  ) : registered ? (
+    <RecoveryCodes
+      registered={registered}
+      onSignedIn={() => setSignedIn(true)}
+    />
   ) : (
     <RegistrationForm
       mode={mode}
@@ -205,10 +213,14 @@ function RegistrationForm({
 }
 
 /** Shown once: the codes that get the person back in without a passkey, then their first passkey. */
-function RecoveryCodes({ registered }: { registered: Registered }) {
+function RecoveryCodes({
+  registered,
+  onSignedIn,
+}: {
+  registered: Registered;
+  onSignedIn: () => void;
+}) {
   const { t } = useI18n();
-  const queryClient = useQueryClient();
-  const router = useRouter();
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
   const text = `${t("recoveryCodesFileHeader", { username: registered.username, host: location.host })}\n\n${registered.recoveryCodes.join("\n")}\n`;
@@ -222,10 +234,7 @@ function RecoveryCodes({ registered }: { registered: Registered }) {
   // The setup code works for a day, so a cancelled prompt can be tried again.
   const create = useMutation({
     mutationFn: () => auth.addPasskey({ setup: registered.setup }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries();
-      await router.invalidate();
-    },
+    onSuccess: onSignedIn,
   });
   const error =
     create.error && !cancelled(create.error)
@@ -292,5 +301,79 @@ function RecoveryCodes({ registered }: { registered: Registered }) {
         </p>
       )}
     </>
+  );
+}
+
+/**
+ * Last, signed in: name the Pim you'll talk with. It starts as the one the
+ * admin chose for everyone (or a plain one), and you can change it later in
+ * Your Pims. Leaving the page here keeps the name it came with.
+ */
+function NamePim() {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const router = useRouter();
+  const nameId = useId();
+  const { data: personas } = useQuery(personasQuery());
+  const mine = personas?.find((candidate) => candidate.default);
+  const [name, setName] = useState<string | null>(null);
+  const shown = name ?? mine?.name ?? "";
+  const start = useMutation({
+    mutationFn: async () => {
+      if (mine && shown.trim() !== mine.name) {
+        await pim.updatePersona(mine.id, { name: shown.trim() });
+      }
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries();
+      await router.invalidate();
+    },
+  });
+
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        start.mutate();
+      }}
+    >
+      <h1 className="font-semibold text-2xl">{t("namePimTitle")}</h1>
+      <p className="mt-2 text-muted-foreground text-sm">{t("namePimBody")}</p>
+      {mine?.source && (
+        <div className="mt-6 rounded-xl border bg-card px-4 py-3 text-sm">
+          <p className="text-muted-foreground text-xs">
+            {t("namePimTemplate", { author: mine.source.author })}
+          </p>
+          {mine.description && <p className="mt-1">{mine.description}</p>}
+        </div>
+      )}
+      <label htmlFor={nameId} className="mt-6 block font-medium text-sm">
+        {t("namePimLabel")}
+      </label>
+      <Input
+        id={nameId}
+        value={shown}
+        onChange={(event) => setName(event.target.value)}
+        maxLength={MAX_PIM_NAME}
+        className="mt-1.5 h-10"
+        disabled={!mine}
+        required
+        autoFocus
+      />
+      <Button
+        type="submit"
+        size="lg"
+        className="mt-6 w-full"
+        disabled={!mine || shown.trim() === "" || start.isPending}
+      >
+        {start.isPending && <Loader2 className="animate-spin" />}
+        {t("namePimStart")}
+      </Button>
+      {start.isError && (
+        <p role="alert" className="mt-4 text-destructive text-sm">
+          {start.error.message}
+        </p>
+      )}
+    </form>
   );
 }

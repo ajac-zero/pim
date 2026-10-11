@@ -1515,7 +1515,7 @@ describe("profiles and published Pims", () => {
 		// Unpublished, it's gone from the gallery; Eli keeps his copy.
 		expect((await dee.browser.json(`/api/personas/${coach.id}/publish`, { method: "DELETE" })).status).toBe(200);
 		expect((await eli.browser.json(`/api/templates/${templateId}`)).status).toBe(404);
-		expect((await eli.browser.json("/api/personas")).body.personas).toHaveLength(1);
+		expect((await eli.browser.json("/api/personas")).body.personas.map((pim: { name: string }) => pim.name)).toEqual(["Pim", "Marathon coach"]);
 
 		// Deleting a published Pim unpublishes it; deleting the account takes the profile and everything published.
 		const again = (await dee.browser.json(`/api/personas/${coach.id}/publish`, { method: "POST" })).body.id;
@@ -1528,6 +1528,50 @@ describe("profiles and published Pims", () => {
 		expect((await eli.browser.json("/api/templates?q=cook")).body.templates).toEqual([]);
 		expect(await env.Gallery!.getByName("gallery").holds(dee.ownerId)).toBe(false);
 		expect((await eli.browser.json("/api/people/dee")).status).toBe(404);
+	});
+
+	it("gives everyone who joins a copy of the Pim the admin chose, theirs to change", async () => {
+		const before = await person("nell");
+		const helper = (
+			await admin("/api/personas", {
+				method: "POST",
+				json: { name: "Household helper", description: "Keeps the house running.", instructions: "Check the family calendar first." },
+			})
+		).body;
+		expect((await before.browser.json("/api/admin/default-pim", { method: "PUT", json: { pim: helper.id } })).status).toBe(403);
+		expect((await admin("/api/admin/default-pim", { method: "PUT", json: { pim: "p_nope" } })).status).toBe(404);
+		expect((await admin("/api/admin/default-pim", { method: "PUT", json: { pim: helper.id } })).body.pim).toMatchObject({
+			author: "boss",
+			personaId: helper.id,
+			name: "Household helper",
+		});
+
+		// A newcomer's default Pim is a copy; whoever joined before keeps theirs.
+		const otto = await person("otto");
+		const [copy] = (await otto.browser.json("/api/personas")).body.personas;
+		expect(copy).toMatchObject({
+			name: "Household helper",
+			description: "Keeps the house running.",
+			instructions: "Check the family calendar first.",
+			default: true,
+			source: { template: "default", author: "boss" },
+		});
+		expect((await before.browser.json("/api/personas")).body.personas).toEqual([expect.objectContaining({ name: "Pim", default: true })]);
+
+		// The copy is Otto's: the admin's later edits don't reach it, and his don't reach theirs.
+		await admin(`/api/personas/${helper.id}`, { method: "PUT", json: { instructions: "Ask before buying anything." } });
+		await otto.browser.json(`/api/personas/${copy.id}`, { method: "PUT", json: { name: "Otto's helper" } });
+		expect((await otto.browser.json("/api/personas")).body.personas[0]).toMatchObject({
+			name: "Otto's helper",
+			instructions: "Check the family calendar first.",
+		});
+		expect((await admin(`/api/personas/${helper.id}`)).body.name).toBe("Household helper");
+
+		// Taken back, people join with a plain Pim again.
+		expect((await admin("/api/admin/default-pim", { method: "DELETE" })).body).toEqual({ pim: null });
+		expect((await (await person("pia")).browser.json("/api/personas")).body.personas).toEqual([
+			expect.objectContaining({ name: "Pim", instructions: "", default: true }),
+		]);
 	});
 
 	it("lets the operator take a template down", async () => {

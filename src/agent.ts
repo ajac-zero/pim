@@ -3,6 +3,7 @@ import type { JsonValue } from "@earendil-works/pi-ai";
 import { createModels, type Models } from "@earendil-works/pi-ai/models";
 import {
 	type AgentEventStream,
+	type ConversationId,
 	type UserInput,
 	createRegistry,
 	Harness,
@@ -79,7 +80,7 @@ import {
 	TOOL_PERMISSIONS,
 	type ToolPermission,
 } from "./store";
-import { type Persona, PersonaStore, personaInput, personaInstructions } from "./personas";
+import { type Persona, type PersonaInput, PersonaStore, personaInput } from "./personas";
 import { projectEntries } from "./transcript";
 import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
@@ -148,6 +149,8 @@ const MODEL_KEY = "model";
 const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
+/** Set once chats' Pims come from the prompt's `pim` section, not from instructions stored in each chat. */
+const PIM_SECTION_KEY = "pim_section";
 /** The day the person was last told a limit stopped background work. */
 const LIMIT_NOTICE_KEY = "limit_notice";
 /** Set by the Worker on requests that carried the API token. */
@@ -203,7 +206,7 @@ export class Pim extends Agent<Env> {
 	readonly circles = new CircleStore(this.ctx.storage.sql);
 	/** Pims shared with this Pim's owner, and their conversations with them. */
 	readonly visits = new VisitStore(this.ctx.storage.sql);
-	/** The owner's Pims: named agents with their own instructions, inside this one. */
+	/** The owner's Pims: named agents with their own instructions, the default one first. */
 	readonly personas = new PersonaStore(this.ctx.storage.sql);
 	/** What the agent made for its owner, with every version. */
 	readonly artifacts = new ArtifactStore(this.ctx.storage.sql, () => this.limits(), {
@@ -292,7 +295,7 @@ export class Pim extends Agent<Env> {
 		harness: async ({ storage, context }) => {
 			const services = this.services();
 			this.#migrateAlwaysApproved();
-			this.registry.install(personaExtension(services));
+			this.registry.install(personaExtension(services, (session) => this.personas.ofSession(session)));
 			this.registry.install(goalsExtension(services));
 			this.registry.install(scheduleExtension(services));
 			this.registry.install(messagingExtension(services));
@@ -313,7 +316,7 @@ export class Pim extends Agent<Env> {
 				const brief = this.visits.brief(share.ownerId);
 				if (visitor && brief && !share.revoked) this.#installVisit(brief, visitor);
 			}
-			return Harness.open(
+			const harness = await Harness.open(
 				storage,
 				{
 					models: this.modelCatalog(),
@@ -323,6 +326,14 @@ export class Pim extends Agent<Env> {
 				},
 				context,
 			);
+			// Chats started with a Pim used to store its instructions; the `pim` section gives them now.
+			if (this.store.meta(PIM_SECTION_KEY) === undefined) {
+				for (const session of this.personas.startedSessions()) {
+					await (await harness.conversation(Number(session) as ConversationId, context))?.configure({ instructions: null }, context);
+				}
+				this.store.setMeta(PIM_SECTION_KEY, "1");
+			}
+			return harness;
 		},
 		defaults: { model: this.defaultModel(), thinkingLevel: "low" },
 	});
@@ -1249,18 +1260,11 @@ export class Pim extends Agent<Env> {
 		return persona;
 	}
 
+	/** The Pim a chat talks with; none in a visit, which talks with someone else's. */
 	#personaRef(session: string): { id: string; name: string } | null {
+		if (this.visits.bySession(session)) return null;
 		const persona = this.personas.ofSession(session);
-		return persona ? { id: persona.id, name: persona.name } : null;
-	}
-
-	/** Gives chats a Pim's instructions, as it is now; null takes them away. Each chat sees them from its next request. */
-	async #applyPersona(sessions: readonly string[], persona: Persona | null): Promise<void> {
-		const instructions = persona === null ? null : personaInstructions(persona);
-		for (const session of sessions) {
-			if (this.store.deletedSessions().has(session)) continue;
-			await (await this.harness.conversation(session)).configure({ instructions }, BACKGROUND_CONTEXT);
-		}
+		return { id: persona.id, name: persona.name };
 	}
 
 	/** One of the owner's Pims, for the Worker to publish to the gallery. */
@@ -1287,6 +1291,13 @@ export class Pim extends Agent<Env> {
 		this.#assertOpen();
 		const input = personaInput({ ...template });
 		return this.personas.create(input, { template: template.id, author: template.author });
+	}
+
+	/** At registration: makes the default Pim a copy of the one the admin chose for everyone. */
+	async adoptDefaultPim(pim: PersonaInput & { author: string }): Promise<Persona> {
+		this.#assertOpen();
+		const { author, ...input } = pim;
+		return this.personas.replaceDefault(personaInput({ ...input }), { template: "default", author });
 	}
 
 	// Visits: Pims shared with this one's owner, and their conversations with them.
@@ -1664,10 +1675,8 @@ export class Pim extends Agent<Env> {
 				}
 				const { id } = await this.harness.sessions.create();
 				await this.harness.session(id).setModel(this.chosenModel());
-				if (persona) {
-					this.personas.setSession(id, persona.id);
-					await this.#applyPersona([id], persona);
-				}
+				// A chat with the default Pim isn't tied to it: it stays with whichever is the default.
+				if (persona && !persona.default) this.personas.setSession(id, persona.id);
 				this.store.touchSession(id, typeof title === "string" && title.trim() !== "" ? clipTitle(title) : undefined);
 				return { id, ...this.store.sessionInfo(id), persona: this.#personaRef(id) };
 			},
@@ -2161,7 +2170,7 @@ export class Pim extends Agent<Env> {
 			},
 		],
 
-		// The owner's Pims: named agents with their own instructions.
+		// The owner's Pims: named agents with their own instructions, the default one first.
 		["GET", "/personas", () => ({ personas: this.personas.list() })],
 		["GET", "/personas/:persona", ({ persona }) => this.#persona(persona!)],
 		[
@@ -2176,9 +2185,7 @@ export class Pim extends Agent<Env> {
 			"PUT",
 			"/personas/:persona",
 			async ({ persona: id }, request) => {
-				const persona = this.personas.update(id!, personaInput(await readJson<Record<string, unknown>>(request), this.#persona(id!)));
-				await this.#applyPersona(this.personas.sessions(persona.id), persona);
-				return persona;
+				return this.personas.update(id!, personaInput(await readJson<Record<string, unknown>>(request), this.#persona(id!)));
 			},
 		],
 		[
@@ -2186,7 +2193,7 @@ export class Pim extends Agent<Env> {
 			"/personas/:persona",
 			async ({ persona: id }) => {
 				this.#persona(id!);
-				await this.#applyPersona(this.personas.delete(id!), null);
+				this.personas.delete(id!);
 				return { deleted: true };
 			},
 		],

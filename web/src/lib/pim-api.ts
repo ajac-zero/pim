@@ -14,12 +14,15 @@ export type Session = {
   updatedAt: number | null;
   /** A conversation with someone else's Pim, shared with you; null for your own chats. */
   visit?: { username: string; available: boolean } | null;
-  /** The Pim of yours it was started with; null for Pim itself. */
+  /** The Pim of yours it talks with: the one it was started with, or your default one. Null in a visit. */
   persona?: { id: string; name: string } | null;
 };
 
 /** An app a Pim suggests connecting, by its MCP server URL. */
 export type SuggestedApp = { name: string; url: string };
+
+/** How long a Pim's name may be. */
+export const MAX_PIM_NAME = 60;
 
 /** One of your Pims: a named agent with its own instructions. */
 export type Persona = {
@@ -32,6 +35,8 @@ export type Persona = {
   source: { template: string; author: string } | null;
   /** Its template in the gallery, while published. */
   published: string | null;
+  /** The one that talks in every chat not started with another. It can't be deleted. */
+  default: boolean;
   createdAt: number;
   updatedAt: number;
 };
@@ -599,6 +604,28 @@ export const admin = {
       method: "DELETE",
       body: "{}",
     }),
+  /** The Pim everyone who joins starts with a copy of; null for a plain one. */
+  defaultPim: () =>
+    call<{ pim: DefaultPim | null }>("/admin/default-pim").then(
+      (body) => body.pim,
+    ),
+  /** Makes a copy of one of the admin's Pims the one everyone who joins starts with; null goes back to a plain one. */
+  setDefaultPim: (id: string | null) =>
+    call<{ pim: DefaultPim | null }>(
+      "/admin/default-pim",
+      id === null
+        ? { method: "DELETE", body: "{}" }
+        : { method: "PUT", body: JSON.stringify({ pim: id }) },
+    ).then((body) => body.pim),
+};
+
+/** The Pim everyone who joins starts with, as the admin chose it. */
+export type DefaultPim = {
+  author: string;
+  /** Which of the admin's Pims it is a copy of. */
+  personaId: string;
+  name: string;
+  updatedAt: number;
 };
 
 /** Where the browser downloads the account's export. */

@@ -1,7 +1,7 @@
 /**
- * Usernames name a person's Pimling, as `<username>.<domain>`. They are one
- * DNS label, lowercase, and never reused: a username's hostname is where its
- * owner's apps send sign-ins and events.
+ * Usernames name people on a Pim: in circles, on profiles and published
+ * Pims, and at `/people/<username>`. They are lowercase, and never reused, so
+ * nobody inherits what others knew by a name.
  */
 
 export const USERNAME_MIN = 3;

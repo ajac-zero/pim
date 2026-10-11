@@ -2,22 +2,23 @@
 
 An open-source personal agent you deploy to your own Cloudflare account. Inspired by Meta's [Muse](https://ai.meta.com/muse/): it remembers what matters to you, turns goals into plans, keeps working in the background, and asks before acting on the world.
 
-Each deployment is one agent, for the one person who deployed it: your conversations and memories stay in your Cloudflare account. The same code also runs **Pimling**, a hosted service where each person gets their own Pim at `<username>.<domain>` (see [Hosting Pimling](docs/hosting.md)). Nothing about hosting is needed to self-host.
+A deployment is a Pim for you and the people you invite: family, friends, a small team. Each person gets their own agent, with their own conversations, memories and connected apps, and can share it with the others. You run it, and everything stays in your Cloudflare account. The name is [pi](https://github.com/earendil-works/pi), the harness it runs on, plus **m** for multiplayer.
 
-This repository is the agent, its API, and its web app ([`web/`](web)): chat, approvals, notifications and settings, signed in with a passkey. One Worker serves all of it. Mobile apps and messaging bridges can use the same API with an API token.
+This repository is the agent, its API, and its web app ([`web/`](web)): chat, approvals, notifications and settings, signed in with a passkey. One Worker serves all of it, for everyone, at one address. Mobile apps and messaging bridges can use the same API with an API token.
 
 ## How it works
 
 ```
  Browser, bot, app                        Cloudflare
 ┌─────────────────────┐   HTTPS / WS   ┌──────────────────────────────────────────────┐
-│ web app, or REST +  │───────────────▶│ Worker (src/index.ts)                        │
+│ web app, or REST +  │───────────────▶│ Worker (src/index.ts, src/gateway.ts)        │
 │ WebSocket at /api   │                │  ├ /*       the web app (web/, static files) │
-└─────────────────────┘                │  ├ /auth/*  passkeys (Durable Object "Auth") │
-                                       │  └ /api/*   passkey session or API token     │
-                                       │   │                                          │
+└─────────────────────┘                │  ├ /auth/*  joining, passkeys                │
+                                       │  └ /api/*   whoever the session or token     │
+                                       │   │         names                            │
                                        │   ▼                                          │
-                                       │ Durable Object "Pim" (src/agent.ts), just one│
+                                       │ Durable Object "Pim" (src/agent.ts), one per │
+                                       │ person, named by their owner ID              │
                                        │  ├ PiHarness ── pi-durable runs, tasks, inbox│
                                        │  ├ Extensions: optmem, goals, schedule,      │
                                        │  │   notify, approvals, web                  │
@@ -26,11 +27,14 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
                                        │        │                                     │
                                        │        ▼                                     │
                                        │ Workers AI / AI Gateway (env.AI)             │
+                                       │                                              │
+                                       │ "Auth", one per person: passkeys, tokens     │
+                                       │ "Directory": accounts, the admin, invites    │
+                                       │ "Gallery": profiles, published Pims          │
                                        └──────────────────────────────────────────────┘
 ```
-
 - **[pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable)** runs the agent. Every model turn and tool call is a durable task committed to the Durable Object's SQLite before anything is shown. If the object is evicted mid-run, the `agents` SDK's `PiHarness` alarm wakes it, and pi resumes where it stopped.
-- **One agent per deployment.** The Worker sends every request to a single Durable Object, which holds the whole agent in its SQLite database.
+- **One agent per person.** The Worker reads whose request it is from the passkey session or the API token, and sends it to that person's Durable Object, which holds their whole agent in its SQLite database. A URL never chooses whose agent answers. See [docs/instance.md](docs/instance.md).
 - **Workers AI** is the default model (`@cf/zai-org/glm-4.7-flash`), so no vendor API keys are needed. Any AI Gateway catalog model works too, such as `anthropic/claude-opus-4.8`.
 - **Your ChatGPT plan**, optionally. Sign in with ChatGPT (Plus or Pro) and Pim runs on OpenAI's models, such as GPT-6.1 Sol, using the plan's included usage. See [ChatGPT plan](#chatgpt-plan).
 
@@ -56,11 +60,12 @@ On the Workers free plan, SQLite-backed Durable Objects and Workers AI's daily f
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ajac-zero/pim)
 
-The button copies this repository to your GitHub account and deploys it to your Cloudflare account. It asks for nothing. Then open the Worker's URL and create your passkey: your face, fingerprint, or PIN. That's the whole setup.
+The button copies this repository to your GitHub account and deploys it to your Cloudflare account. It asks for nothing. Then open the Worker's URL, pick a username, save your recovery codes and create your passkey: your face, fingerprint, or PIN. You're the admin of this Pim. That's the whole setup.
 
-- **The first passkey** can be made that way for 15 minutes after a deploy, and only if this Pim has never had one. Until you create it, whoever opens the URL first could, so open it right after deploying. If someone else gets there first, you'll see the sign-in screen instead of setup. Get a setup link from the logs (below), then remove the passkey you didn't make in Settings. The Worker logs when the first passkey was made.
+- **The first account** can be made that way for 15 minutes after a deploy, and it is the admin's. Until you make it, whoever opens the URL first could, so open it right after deploying. Missed the 15 minutes? The sign-in screen has the Worker write a one-time setup link to its logs, which only someone signed in to your Cloudflare account can read. In the dashboard, open Workers & Pages, then `pim`, then Observability, and open the link in the log that starts with "Pim setup link". It works once, for an hour.
+- **Inviting people.** Settings → People on this Pim → Invite someone makes a link that lets one person join. With `PIM_REGISTRATION` set to `open`, anyone who finds the address can; `closed` lets nobody in.
 - **More passkeys** (your phone, another browser) come from Settings.
-- **Missed the 15 minutes, or lost every passkey?** The sign-in screen has the Worker write a one-time setup link to its logs, which only someone signed in to your Cloudflare account can read. In the dashboard, open Workers & Pages, then `pim`, then Observability, and open the link in the log that starts with "Pim setup link". It works once, for an hour.
+- **Lost every passkey?** Each person got ten recovery codes when they joined; one, with their username, adds a new passkey. The admin can make anyone a setup link in Settings, and gets one for themselves from the logs, as above.
 
 Sessions last 30 days, and removing a passkey signs out the browsers it signed in. API tokens for other clients are made in Settings (`POST /auth/tokens` with a passkey session) and revoked there. Passkeys belong to the hostname the app is served from, so moving Pim to another domain means creating new ones.
 
@@ -69,34 +74,37 @@ Or from a checkout:
 ```sh
 pnpm install
 pnpm wrangler login
-pnpm wrangler secret put PIM_API_TOKEN      # optional: for clients other than the web app
-pnpm wrangler secret put PIM_NOTIFY_WEBHOOK # optional
-pnpm run deploy                             # builds web/ first
+pnpm run deploy        # builds web/ first
 ```
 
-Open the URL `wrangler deploy` prints to create your passkey. With the CLI, `pnpm wrangler tail` shows setup links as the sign-in screen asks for them.
+Open the URL `wrangler deploy` prints to set it up. With the CLI, `pnpm wrangler tail` shows setup links as the sign-in screen asks for them.
 
 Configuration lives in `vars` in `wrangler.jsonc`:
 
 | Var | Default | Meaning |
 | --- | --- | --- |
 | `PIM_MODEL` | `@cf/zai-org/glm-4.7-flash` | Model for new sessions: a Workers AI id or an AI Gateway catalog id |
-| `PIM_TIME_ZONE` | `UTC` | The person's IANA time zone |
+| `PIM_TIME_ZONE` | `UTC` | IANA time zone for anyone who hasn't set theirs; joining sets the browser's |
 | `PIM_WEB_SEARCH` | empty | `exa`, `ceramic`, or `linkup` enables `web_search` |
 | `PIM_MEMORY_MODEL` | empty | Model that compresses memories; empty uses `PIM_MODEL`, never the ChatGPT plan |
 | `PIM_MEMORY_LINES` | `96` | Lines of long-term memory in every prompt (about 8k tokens) |
-| `PIM_PUBLIC_URL` | empty | Public URL apps deliver events to; empty uses the origin of your API requests |
-| `PIM_APPROVAL_POLICY` | `auto` | What an unanswered approval becomes: `auto` approves it after 30 seconds, `explicit` denies it after 5 minutes. You can change it in Settings |
+| `PIM_PUBLIC_URL` | empty | This Pim's public URL, for apps' callbacks and the links it makes; empty uses the address requests come to |
+| `PIM_APPROVAL_POLICY` | `auto` | What an unanswered approval becomes: `auto` approves it after 30 seconds, `explicit` denies it after 5 minutes. Each person can change theirs in Settings |
 | `PIM_MODELS` | empty | Workers AI or AI Gateway models sessions may use besides `PIM_MODEL`, comma-separated; empty allows any |
-| `PIM_LIMITS` | empty | Usage limits as JSON, such as `{"dailyTokens": 2000000, "dailyRuns": 500}`; empty is none. Every limit is in [`src/usage.ts`](src/usage.ts) |
+| `PIM_LIMITS` | empty | Usage limits for members as JSON, such as `{"dailyTokens": 2000000, "dailyRuns": 500}`; empty is none. The admin has none. Every limit is in [`src/usage.ts`](src/usage.ts) |
+| `PIM_REGISTRATION` | `invite` | How people join once there is an admin: `invite` (links the admin makes), `open` or `closed` |
+| `PIM_MAX_ACCOUNTS` | empty | Accounts allowed in all; empty for no cap |
+| `PIM_REGISTRATIONS_PER_ADDRESS` | `3` | Accounts one IP address may make in a day |
 
-`PIM_TIME_ZONE` and `PIM_APPROVAL_POLICY` are defaults: your own choices in Settings (`PUT /settings`) take their place.
+`ratelimits` in `wrangler.jsonc` slow down sign-in attempts from one address and API requests from one person; leave them out and nothing is slowed down. Their namespace IDs must be unique in your Cloudflare account.
 
-For local development, copy `.dev.vars.example` to `.dev.vars` and run `pnpm dev`: the Worker and the built web app at `http://localhost:8787`. Its first 15 minutes count as just deployed, and setup links show up in the terminal. For the web app with hot reload, also run `PIM_API_TOKEN=... pnpm dev:web` (port 3000), which signs in with the token. The `AI` binding is remote, so `wrangler dev` needs a Cloudflare login, and model calls bill that account.
+`PIM_TIME_ZONE` and `PIM_APPROVAL_POLICY` are defaults: each person's own choices in Settings (`PUT /settings`) take their place.
+
+For local development, run `pnpm dev`: the Worker and the built web app at `http://localhost:8787` (use `localhost`: passkeys don't work on an IP address). Its first 15 minutes count as just deployed, so the first account you make is the admin, and setup links show up in the terminal. For the web app with hot reload, make an API token in Settings and run `PIM_API_TOKEN=... pnpm dev:web` (port 3000), which signs in with it. The `AI` binding is remote, so `wrangler dev` needs a Cloudflare login, and model calls bill that account. `pnpm preview` runs the same Pim with no Cloudflare login and a stand-in model, at the same address.
 
 ## API
 
-The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out the prefix. The web app calls it with its passkey session. Other clients send `Authorization: Bearer <token>`: a token made in Settings (API tokens), or `PIM_API_TOKEN` once you set that secret. WebSockets from clients that can't set headers pass `?token=<token>` instead. Only the two paths connected apps call stay at the root, without the prefix: `/mcp/callback` and `/mcp/events/:watch`. Sessions are separate conversations. The root session is `1`.
+The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out the prefix. It is the signed-in person's own Pim. The web app calls it with its passkey session. Other clients send `Authorization: Bearer <token>`, with a token made in Settings (API tokens), which names its owner (`pim_<owner>_…`). WebSockets from clients that can't set headers pass `?token=<token>` instead. Only the two paths connected apps call stay at the root, without the prefix, and name whose agent they are for: `/mcp/callback/:owner` and `/mcp/events/:owner/:watch`. Sessions are separate conversations. The root session is `1`.
 
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
@@ -145,17 +153,20 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | POST | `/personas` | `{ name, description?, instructions, apps?: [{ name, url }] }` | A new Pim |
 | GET, PUT, DELETE | `/personas/:id` | PUT: any of the fields | The Pim; editing reaches its chats from their next request, deleting leaves them as plain chats |
 | POST | `/sessions` | `{ title?, persona? }` | A new session, with that Pim's instructions when `persona` is given; sessions list their `persona` |
-| GET, PUT | `/profile` | PUT: `{ displayName, bio }` | How others on Pimling see you (Pimling only, as are the rows below) |
+| GET | `/account` | | `{ username, ownerId, role, status, createdAt, usage, recoveryCodesLeft }` |
+| GET | `/account/export` | | Your account and everything in your Pim, as one JSON download, without credentials |
+| DELETE | `/account` | `{ confirm: username }` | Deletes your account and erases your Pim; a passkey session only. `202` while erasing is still being retried |
+| GET, PUT | `/profile` | PUT: `{ displayName, bio }` | How others on this Pim see you |
 | GET | `/people/:username` | | `{ username, displayName, bio, templates }`: someone, and the Pims they published |
 | GET | `/templates` | `?q=` | `{ templates }`: published Pims, most used first, without their instructions |
 | GET | `/templates/:id` | | A published Pim in full |
 | POST | `/templates/:id/use` | | Makes it one of your Pims: a copy, with `source` saying where it came from |
 | POST, DELETE | `/personas/:id/publish` | | Publishes your Pim (again, to update it), or takes it down |
-| GET | `/circles` | | `{ circles: [{ id, name, enabled, createdAt, members: [{ ownerId, username, addedAt }] }] }` (Pimling; see [Sharing](#sharing)) |
+| GET | `/circles` | | `{ circles: [{ id, name, enabled, createdAt, members: [{ ownerId, username, addedAt }] }] }` (see [Sharing](#sharing)) |
 | POST | `/circles` | `{ name }` | A new circle, with nothing allowed |
 | PUT | `/circles/:id` | `{ name?, enabled? }` | The circle; `enabled: false` pauses everyone in it |
 | DELETE | `/circles/:id` | | Deletes it; its people's Pims are told |
-| POST | `/circles/:id/members` | `{ username }` | Puts that Pimling's owner in the circle (moving them from another), and tells their Pim; `404` for an unknown username |
+| POST | `/circles/:id/members` | `{ username }` | Puts that person in the circle (moving them from another), and tells their Pim; `404` for an unknown username |
 | DELETE | `/circles/:id/members/:ownerId` | | Takes them out; their Pim is told |
 | GET | `/circles/activity` | | `{ activity: [{ id, at, username, circle, tool, outcome, summary }] }`: guests' tool calls, newest first; `outcome` is `ran`, `asked` or `refused` |
 | GET | `/visits` | | `{ visits: [{ ownerId, username, sharedAt, available, session }] }`: Pims shared with you, and your conversation with each |
@@ -164,11 +175,11 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | POST | `/mcp` | `{ name, url, headers?, approval? }` | Connects an app; `201` with `{ id, state, authUrl? }` (`authUrl`: send the user there to sign in) |
 | PUT | `/mcp/:id` | `{ approval: "writes" \| "all" \| "none" }` | Which of its tools need approval, unless you set a tool's permission |
 | DELETE | `/mcp/:id` | | Disconnects it |
-| GET | `/mcp/callback` (root, no `/api`) | | Where an app's sign-in returns; no token needed |
+| GET | `/mcp/callback/:owner` (root, no `/api`) | | Where an app's sign-in returns; no token needed |
 | GET | `/mcp/:id/skills`, `/mcp/:id/events` | | The skills and watchable events an app offers |
 | GET | `/watches` | | Event watches: app, event, instruction, state, next renewal |
 | DELETE | `/watches/:id` | | Stops a watch and unsubscribes |
-| POST | `/mcp/events/:watch` (root, no `/api`) | Standard Webhooks-signed event | Where apps deliver events; no token needed, the signature is checked |
+| POST | `/mcp/events/:owner/:watch` (root, no `/api`) | Standard Webhooks-signed event | Where apps deliver events; no token needed, the signature is checked |
 | GET | `/notifications` | `?unread=true` | Notifications |
 | POST | `/notifications/:id/read` | | Marks one read |
 | GET | `/push/key` | | The VAPID public key browsers subscribe with (made on first use) |
@@ -176,6 +187,20 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | DELETE | `/push/subscription` | `{ endpoint }` | Unsubscribes it |
 
 Submissions are idempotent by `operationId`. Retrying with the same id returns the same receipt and never starts a second run.
+
+The admin runs the Pim under `/admin`, with a passkey session only: an API token can't. See [docs/instance.md](docs/instance.md#running-it).
+
+| Method | Path | Body / query | Returns |
+| --- | --- | --- | --- |
+| GET | `/admin/stats` | | Accounts by status, registrations in the last day, unused invites, queued and failing cleanups |
+| GET | `/admin/accounts` | `?status=&after=&limit=` | Accounts, by username |
+| GET | `/admin/accounts/:username` | | The account, its usage, and its cleanup job if one is queued |
+| POST | `/admin/accounts/:username/suspend`, `…/unsuspend` | `{ reason? }` | Stops the account at once, or restores it; not your own |
+| PUT | `/admin/accounts/:username/limits` | `{ limits }` or `{ limits: null }` | One person's limits over `PIM_LIMITS` |
+| POST | `/admin/accounts/:username/setup-link` | | `{ setupUrl, expiresAt }`: adds a passkey once, within an hour |
+| DELETE | `/admin/accounts/:username` | `{ reason? }` | Deletes it as its owner would; not your own |
+| POST | `/admin/invites` | `{ count?, note? }` | `{ codes, links }`: single-use invite links, up to 100 |
+| DELETE | `/admin/templates/:id` | | Takes a published Pim out of Discover |
 
 ### WebSocket
 
@@ -239,7 +264,7 @@ Pim registers with OpenAI as one agent host (a `urn:uuid:` ID it keeps) and refr
 
 Apps connect through remote [MCP](https://modelcontextprotocol.io) servers: the vendor's own (many apps publish one), or one you deploy as another Worker. The `agents` SDK's MCP client handles the connection, OAuth sign-in (with dynamic client registration), token storage in the agent's database, and reconnecting after a wake.
 
-- **Connecting.** `POST /mcp` with a name and URL, or ask Pim: its `connect_app` tool files an approval, and the connection is made when you approve. If the app needs sign-in, the response (or Pim) gives you a link; the app sends you back to `/mcp/callback`.
+- **Connecting.** `POST /mcp` with a name and URL, or ask Pim: its `connect_app` tool files an approval, and the connection is made when you approve. If the app needs sign-in, the response (or Pim) gives you a link; the app sends you back to `/mcp/callback/<you>`.
 - **Finding the server.** Say "connect my Linear" and Pim's `find_app` tool looks the app up in the official [MCP Registry](https://registry.modelcontextprotocol.io). The registry verifies publishers (`app.linear/...` only by whoever controls linear.app), so Pim ranks first the server whose publisher's domain names the app and that runs on that domain, like `https://mcp.linear.app/mcp`. Gateways that relay the app through someone else's server come after, labeled as third parties, and Pim says who runs one before offering it. Remotes that need a URL template or an API key header are left out.
 - **Tools.** Each MCP tool becomes a pi tool named `<app>_<tool>`. pi picks up added and removed tools from the next request, without a restart. The app's instructions go in the `connected_apps` prompt section.
 - **Approvals.** With the default `writes` policy, tools that do not declare `readOnlyHint` file an approval like `http_request`, and the call is made when you approve. `all` gates every tool; `none` trusts the app. The read-only hint comes from the app itself, so only connect apps you trust. A tool's own [permission](#tool-permissions) takes the policy's place.
@@ -257,7 +282,7 @@ Apps that implement the [MCP Skills extension](https://modelcontextprotocol.io/e
 
 Apps that implement the draft [MCP Events](https://github.com/modelcontextprotocol/experimental-ext-triggers-events) extension can tell Pim when something happens: a price changed, a message arrived. pim supports webhook delivery, the same slice ChatGPT implements.
 
-- **Watching.** Ask Pim ("tell me when the JFK–Lisbon price drops below $500"); `watch_app_event` files an approval naming the app, the event and the instruction. Once approved, pim calls `events/subscribe` with a callback URL (`/mcp/events/<watch>`) and a fresh signing secret, and renews the subscription before the app's grant runs out.
+- **Watching.** Ask Pim ("tell me when the JFK–Lisbon price drops below $500"); `watch_app_event` files an approval naming the app, the event and the instruction. Once approved, pim calls `events/subscribe` with a callback URL (`/mcp/events/<owner>/<watch>`) and a fresh signing secret, and renews the subscription before the app's grant runs out.
 - **Receiving.** Each delivery must carry a valid Standard Webhooks signature from the last five minutes. The event becomes a message to the conversation that created the watch, with the instruction and the event data marked as untrusted. The event id is its idempotency key, so a delivery the app retries starts one run, not two.
 - **Ending.** `stop_watch` or `DELETE /watches/:id` unsubscribes. A watch the app terminates, or refuses to renew, ends with a notification. Removing an app stops its watches.
 - **Draft.** The extension is not ratified. Today's MCP SDKs drop its `events` capability from the handshake, so pim also asks an app for `events/list` when it declares nothing.
@@ -276,13 +301,13 @@ Settings → Tool permissions lists every tool that acts on the world or comes f
 
 Your Pims are named agents inside your Pim, each with its own instructions: a marathon coach, a trip planner, a code reviewer. A chat started with one (Your Pims → Chat) gets its instructions on top of Pim's own; everything else is the same Pim's: memory, apps, approvals, schedules. Edit a Pim and its chats follow from their next request; delete it and they stay, as plain chats. A Pim can list apps it works with, by MCP server URL, so whoever uses it can connect them with their own accounts.
 
-On Pimling, a Pim can be **published**: Discover lists published Pims, and anyone can read one in full and **make it their own**, which copies its name, description, instructions and suggested apps into their own Pims. Nothing else of the author's goes with it: no memory, chats or credentials. The copy is theirs to change; publishing again updates what others see, not their copies. Unpublishing, deleting the Pim, or deleting the account takes it out of Discover. Each person has a profile (a name and a line about them), shown on their page and next to what they publish.
+A Pim can be **published** to the others on your Pim: Discover lists published Pims, and anyone on it can read one in full and **make it their own**, which copies its name, description, instructions and suggested apps into their own Pims. Nothing else of the author's goes with it: no memory, chats or credentials. The copy is theirs to change; publishing again updates what others see, not their copies. Unpublishing, deleting the Pim, or deleting the account takes it out of Discover. Each person has a profile (a name and a line about them), shown on their page and next to what they publish.
 
 A published Pim's instructions are someone else's words running with your tools, so read them before you take one: your copy still asks before acting wherever your tool permissions say it should.
 
 ## Sharing
 
-On Pimling, you can let other people message your Pim from their own. Sharing → Circles: make a circle (Family, Close friends, Acquaintances), add people by their Pimling username, and choose what the circle can use: each connected app's tools (Off, Ask or On, as in [Tool permissions](#tool-permissions)) and your memory (read-only). Everything starts off.
+You can let others on your Pim message your agent from their own. Sharing → Circles: make a circle (Family, Close friends, Acquaintances), add people by their username, and choose what the circle can use: each connected app's tools (Off, Ask or On, as in [Tool permissions](#tool-permissions)) and your memory (read-only). Everything starts off.
 
 - **Their conversation runs in their Pim.** Someone you share with finds your Pim under Shared with you. Their conversation with it (a visit) is a chat in their own Pim, on their own model and usage: whoever sends the messages pays for them. It sees a brief your Pim sends before each of their turns: what their circle may use, your memory if allowed, and your time zone. Nothing of their own Pim (its tools, memory or apps) is in that conversation, and nothing of yours is in their other chats.
 - **The boundary is in your Pim, at every call.** Each tool in a visit is a call into your Pim (`guestCall`), which checks again that they're in a circle, that the circle is on, and that the tool is allowed for it now. A tool turned off, an app that changed a tool since you allowed it, or a person you removed is refused, whatever their Pim was told before.
@@ -290,16 +315,14 @@ On Pimling, you can let other people message your Pim from their own. Sharing �
 - **Limits.** Up to 20 circles and 200 people in them. Each guest can make 200 calls into your Pim a day, so your apps' own limits stay yours. Sharing → Recent activity lists what guests used, asked for, or were refused.
 - **Taking it back.** Remove someone, or turn a circle off, and their next turn is refused. Deleting a circle forgets its permissions.
 
-Self-hosted Pims have no one to share with, so they have no Sharing page.
-
 ## Develop
 
 ```sh
-pnpm test        # Vitest in workerd (self-hosted and Pimling Workers), with pi-ai's faux model, then the web app's tests; no Cloudflare account needed
+pnpm test        # Vitest in workerd, with pi-ai's faux model, then the web app's tests; no Cloudflare account needed
 pnpm test:live   # live checks against real MCP servers (Hugging Face's); needs the network
 pnpm typecheck   # also generates the web app's route tree, so it works on a fresh checkout
 pnpm types       # regenerate worker-configuration.d.ts after editing wrangler.jsonc
-pnpm preview:hosted  # Pimling, locally, at http://pimling.localhost:8787 (see docs/hosting.md)
+pnpm preview     # a Pim with a stand-in model, at http://localhost:8787, with no Cloudflare login (see docs/instance.md)
 ```
 
 The web app is in [`web/`](web), with its own README. Passkey sign-in is in [`src/auth/`](src/auth).

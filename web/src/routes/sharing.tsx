@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { ChevronDown, Plus, Trash2, Users, X } from "lucide-react";
+import { ChevronDown, Plus, Trash2, X } from "lucide-react";
 import { type FormEvent, useState } from "react";
 import { toast } from "sonner";
 import { ApprovalBlock } from "~/components/chat/items";
 import { useI18n } from "~/components/i18n";
-import { EmptyState, Page } from "~/components/page";
+import { Page } from "~/components/page";
 import { ToolPermissionList } from "~/components/tool-permissions";
 import { Button } from "~/components/ui/button";
 import {
@@ -34,20 +34,15 @@ export const Route = createFileRoute("/sharing")({
  */
 function SharingPage() {
   const { t } = useI18n();
-  const { data: account, isPending } = useQuery(accountQuery());
+  const { data: account } = useQuery(accountQuery());
   return (
     <Page title={t("sharing")} description={t("sharingDescription")}>
-      {isPending ? null : account ? (
+      {account && (
         <>
           <RequestsSection />
           <CirclesSection />
           <ActivitySection />
         </>
-      ) : (
-        <EmptyState
-          icon={<Users className="size-5" />}
-          text={t("sharingNeedsPimling")}
-        />
       )}
     </Page>
   );

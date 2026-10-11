@@ -1,14 +1,20 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { Check, Copy, Download, Loader2, X } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRouter } from "@tanstack/react-router";
+import { Check, Copy, Download, KeyRound, Loader2, X } from "lucide-react";
 import { useEffect, useId, useState } from "react";
-import { PimMark } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
-import { type AccountsSession, auth, type Registered } from "~/lib/auth";
+import {
+  alreadyRegistered,
+  auth,
+  cancelled,
+  forgetSetupCode,
+  type Registered,
+} from "~/lib/auth";
 import { cn } from "~/lib/utils";
 
-/** The username as typed, the way the service will read it. */
+/** The username as typed, the way the Worker will read it. */
 const normalize = (name: string) => name.trim().toLowerCase();
 
 function useDebounced<T>(value: T, ms: number): T {
@@ -21,131 +27,58 @@ function useDebounced<T>(value: T, ms: number): T {
 }
 
 /**
- * Pimling's front door: pick a username, get a Pimling at
- * `<username>.<domain>`, save the recovery codes, then go there to make the
- * first passkey.
+ * Joining this Pim: pick a username, save the recovery codes, then make the
+ * first passkey, right here. `claim` is for the first person on a Pim with no
+ * admin, who becomes it: in the minutes after a deploy (no code), or with
+ * the link from the Worker's logs.
  */
-export function Register({ session }: { session: AccountsSession }) {
-  const { t } = useI18n();
+export function Join({
+  mode,
+  claim,
+  invite,
+  onBack,
+}: {
+  mode: "claim" | "invite" | "open";
+  claim?: string | null;
+  invite?: string | null;
+  onBack?: () => void;
+}) {
   const [registered, setRegistered] = useState<Registered | null>(null);
-  // People who already have a Pimling come here too: send them to it.
-  const [returning, setReturning] = useState(session.registration === "closed");
-  return (
-    <main className="flex min-h-svh flex-col items-center justify-center px-6 py-12">
-      <div className="w-full max-w-sm">
-        <PimMark className="mb-6 size-10" />
-        {registered ? (
-          <RecoveryCodes registered={registered} />
-        ) : returning ? (
-          <FindPimling session={session} />
-        ) : (
-          <RegistrationForm session={session} onRegistered={setRegistered} />
-        )}
-        {!registered && (
-          <p className="mt-6 border-t pt-4 text-center text-muted-foreground text-sm">
-            {returning && session.registration !== "closed" ? (
-              <>
-                {t("needPimling")}{" "}
-                <button
-                  type="button"
-                  className="font-medium text-foreground underline-offset-2 hover:underline"
-                  onClick={() => setReturning(false)}
-                >
-                  {t("createOne")}
-                </button>
-              </>
-            ) : !returning ? (
-              <>
-                {t("havePimling")}{" "}
-                <button
-                  type="button"
-                  className="font-medium text-foreground underline-offset-2 hover:underline"
-                  onClick={() => setReturning(true)}
-                >
-                  {t("signInToIt")}
-                </button>
-              </>
-            ) : null}
-          </p>
-        )}
-      </div>
-    </main>
-  );
-}
-
-/** Signing in again: the username leads to the person's own Pimling, where their passkey works. */
-function FindPimling({ session }: { session: AccountsSession }) {
-  const { t } = useI18n();
-  const id = useId();
-  const [username, setUsername] = useState("");
-  const find = useMutation({
-    mutationFn: () => auth.findPimling(normalize(username)),
-    // Only an address the service gave, on its own domain, is followed.
-    onSuccess: ({ url }) => {
-      const target = new URL(url);
-      if (target.hostname.endsWith(`.${session.domain}`))
-        window.location.assign(target.origin);
-    },
-  });
-  return (
-    <form
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (normalize(username)) find.mutate();
+  return registered ? (
+    <RecoveryCodes registered={registered} />
+  ) : (
+    <RegistrationForm
+      mode={mode}
+      claim={claim}
+      invite={invite}
+      onRegistered={(fresh) => {
+        // The claim or invite is used: keep it out of the address bar and history.
+        forgetSetupCode();
+        setRegistered(fresh);
       }}
-    >
-      <h1 className="font-semibold text-2xl">{t("findPimlingTitle")}</h1>
-      <p className="mt-2 text-muted-foreground text-sm">
-        {t("findPimlingBody")}
-      </p>
-      <label htmlFor={id} className="mt-6 block font-medium text-sm">
-        {t("username")}
-      </label>
-      <div className="mt-1.5 flex h-10 items-center rounded-md border bg-transparent pr-3 shadow-xs focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50">
-        <input
-          id={id}
-          value={username}
-          onChange={(event) => setUsername(event.target.value)}
-          autoComplete="username"
-          autoCapitalize="none"
-          spellCheck={false}
-          maxLength={32}
-          className="h-full min-w-0 flex-1 bg-transparent px-3 text-sm outline-none"
-        />
-        <span className="shrink-0 text-muted-foreground text-sm">
-          .{session.domain}
-        </span>
-      </div>
-      <Button
-        type="submit"
-        size="lg"
-        className="mt-6 w-full"
-        disabled={!normalize(username) || find.isPending}
-      >
-        {find.isPending && <Loader2 className="animate-spin" />}
-        {t("goToMyPimling")}
-      </Button>
-      {find.isError && (
-        <p role="alert" className="mt-4 text-destructive text-sm">
-          {find.error.message}
-        </p>
-      )}
-    </form>
+      onBack={onBack}
+    />
   );
 }
 
 function RegistrationForm({
-  session,
+  mode,
+  claim,
+  invite: given,
   onRegistered,
+  onBack,
 }: {
-  session: AccountsSession;
+  mode: "claim" | "invite" | "open";
+  claim?: string | null;
+  invite?: string | null;
   onRegistered: (registered: Registered) => void;
+  onBack?: () => void;
 }) {
   const { t } = useI18n();
   const usernameId = useId();
   const inviteId = useId();
   const [username, setUsername] = useState("");
-  const [invite, setInvite] = useState("");
+  const [invite, setInvite] = useState(given ?? "");
   const name = useDebounced(normalize(username), 300);
   const availability = useQuery({
     queryKey: ["username", name],
@@ -157,27 +90,16 @@ function RegistrationForm({
     mutationFn: () =>
       auth.register({
         username: normalize(username),
-        ...(session.registration === "invite" ? { invite: invite.trim() } : {}),
+        ...(mode === "invite" ? { invite: invite.trim() } : {}),
+        ...(mode === "claim" && claim ? { claim } : {}),
         timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       }),
     onSuccess: onRegistered,
   });
 
-  if (session.registration === "closed") {
-    return (
-      <>
-        <h1 className="font-semibold text-2xl">{t("registerTitle")}</h1>
-        <p className="mt-2 text-muted-foreground text-sm">
-          {t("registrationClosed")}
-        </p>
-      </>
-    );
-  }
-
   const current = name === normalize(username) ? availability.data : undefined;
   const ready =
-    current?.available === true &&
-    (session.registration !== "invite" || invite.trim() !== "");
+    current?.available === true && (mode !== "invite" || invite.trim() !== "");
 
   return (
     <form
@@ -186,28 +108,28 @@ function RegistrationForm({
         if (ready) register.mutate();
       }}
     >
-      <h1 className="font-semibold text-2xl">{t("registerTitle")}</h1>
-      <p className="mt-2 text-muted-foreground text-sm">{t("registerBody")}</p>
+      <h1 className="font-semibold text-2xl">
+        {mode === "claim" ? t("setUpTitle") : t("registerTitle")}
+      </h1>
+      <p className="mt-2 text-muted-foreground text-sm">
+        {mode === "claim" ? t("claimBody") : t("registerBody")}
+      </p>
 
       <label htmlFor={usernameId} className="mt-6 block font-medium text-sm">
         {t("username")}
       </label>
-      <div className="mt-1.5 flex h-10 items-center rounded-md border bg-transparent pr-3 shadow-xs focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50">
-        <input
-          id={usernameId}
-          value={username}
-          onChange={(event) => setUsername(event.target.value)}
-          autoComplete="username"
-          autoCapitalize="none"
-          spellCheck={false}
-          maxLength={32}
-          className="h-full min-w-0 flex-1 bg-transparent px-3 text-sm outline-none"
-          aria-describedby={`${usernameId}-hint`}
-        />
-        <span className="shrink-0 text-muted-foreground text-sm">
-          .{session.domain}
-        </span>
-      </div>
+      <Input
+        id={usernameId}
+        value={username}
+        onChange={(event) => setUsername(event.target.value)}
+        autoComplete="username"
+        autoCapitalize="none"
+        spellCheck={false}
+        maxLength={32}
+        className="mt-1.5 h-10"
+        aria-describedby={`${usernameId}-hint`}
+        autoFocus
+      />
       <p
         id={`${usernameId}-hint`}
         className={cn(
@@ -225,7 +147,7 @@ function RegistrationForm({
         ) : current.available ? (
           <>
             <Check className="size-3.5 text-primary" />
-            {t("usernameAvailable", { host: `${name}.${session.domain}` })}
+            {t("usernameAvailable", { username: name })}
           </>
         ) : (
           <>
@@ -235,7 +157,8 @@ function RegistrationForm({
         )}
       </p>
 
-      {session.registration === "invite" && (
+      {/* An invite link fills it in; typed only when someone sent the code alone. */}
+      {mode === "invite" && !given && (
         <>
           <label htmlFor={inviteId} className="mt-4 block font-medium text-sm">
             {t("inviteCode")}
@@ -257,7 +180,7 @@ function RegistrationForm({
         disabled={!ready || register.isPending}
       >
         {register.isPending && <Loader2 className="animate-spin" />}
-        {t("createMyPimling")}
+        {mode === "claim" ? t("becomeAdmin") : t("createAccount")}
       </Button>
       {register.isError && (
         <p role="alert" className="mt-4 text-destructive text-sm">
@@ -267,23 +190,49 @@ function RegistrationForm({
       <p className="mt-6 text-muted-foreground text-xs">
         {t("registerFootnote")}
       </p>
+      {onBack && (
+        <Button
+          type="button"
+          variant="ghost"
+          className="mt-3 w-full text-muted-foreground"
+          onClick={onBack}
+        >
+          {t("backToSignIn")}
+        </Button>
+      )}
     </form>
   );
 }
 
-/** Shown once: the codes that get the person back in without a passkey. */
+/** Shown once: the codes that get the person back in without a passkey, then their first passkey. */
 function RecoveryCodes({ registered }: { registered: Registered }) {
   const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const router = useRouter();
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
-  const text = `${t("recoveryCodesFileHeader", { host: new URL(registered.url).host })}\n\n${registered.recoveryCodes.join("\n")}\n`;
+  const text = `${t("recoveryCodesFileHeader", { username: registered.username, host: location.host })}\n\n${registered.recoveryCodes.join("\n")}\n`;
   const download = () => {
     const link = document.createElement("a");
     link.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
-    link.download = `pimling-${registered.username}-recovery-codes.txt`;
+    link.download = `pim-${registered.username}-recovery-codes.txt`;
     link.click();
     URL.revokeObjectURL(link.href);
   };
+  // The setup code works for a day, so a cancelled prompt can be tried again.
+  const create = useMutation({
+    mutationFn: () => auth.addPasskey({ setup: registered.setup }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries();
+      await router.invalidate();
+    },
+  });
+  const error =
+    create.error && !cancelled(create.error)
+      ? alreadyRegistered(create.error)
+        ? t("passkeyAlreadyHere")
+        : create.error.message
+      : null;
 
   return (
     <>
@@ -328,14 +277,20 @@ function RecoveryCodes({ registered }: { registered: Registered }) {
       <Button
         size="lg"
         className="mt-4 w-full"
-        disabled={!saved}
-        onClick={() => window.location.assign(registered.setupUrl)}
+        disabled={!saved || create.isPending}
+        onClick={() => create.mutate()}
       >
-        {t("continueTo", { host: new URL(registered.url).host })}
+        {create.isPending ? <Loader2 className="animate-spin" /> : <KeyRound />}
+        {t("createPasskey")}
       </Button>
       <p className="mt-4 text-muted-foreground text-xs">
-        {t("setupLinkLasts")}
+        {t("firstPasskeyNote")}
       </p>
+      {error && (
+        <p role="alert" className="mt-4 text-destructive text-sm">
+          {error}
+        </p>
+      )}
     </>
   );
 }

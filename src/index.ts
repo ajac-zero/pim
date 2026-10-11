@@ -1,15 +1,17 @@
-import { selfHostedSite, servePim } from "./gateway";
+import { serve } from "./gateway";
 
 export { Pim } from "./agent";
 export { Auth } from "./auth";
+export { Directory } from "./directory";
+export { Gallery } from "./gallery";
 
 /**
- * A self-hosted Pim: one Worker, one person. Every request is for the same
- * owner, whose agent and sign-in keep the Durable Object names they have
- * always had. The hosted service's entry is ./hosted/index.ts.
+ * A Pim: one Worker for everyone on it, each with their own agent. The
+ * first account is the admin's; see ./gateway.ts for how a request finds
+ * whose it is.
  */
 export default {
 	fetch(request, env): Promise<Response> {
-		return servePim(request, env, selfHostedSite(env));
+		return serve(request, env);
 	},
 } satisfies ExportedHandler<Env>;

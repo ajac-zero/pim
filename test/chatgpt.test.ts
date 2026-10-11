@@ -1,9 +1,8 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { AGENT_NAME } from "../src/agent";
 import { type ChatGPTCredential, verifyIdToken } from "../src/chatgpt";
-import { api, post, say } from "./helpers";
+import { api, OWNER, post, say } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /*
@@ -138,7 +137,7 @@ function landing(params: URLSearchParams, extra: Record<string, string> = {}) {
 }
 
 async function credential(): Promise<ChatGPTCredential | undefined> {
-	return runInDurableObject(env.Pim.getByName(AGENT_NAME), async (instance: Pim) =>
+	return runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) =>
 		(await instance.credentials.read("openai")) as ChatGPTCredential | undefined,
 	);
 }
@@ -267,7 +266,7 @@ describe("Sign in with ChatGPT", () => {
 	});
 
 	it("refreshes an expired token once, however many sessions need it at the same time", async () => {
-		await runInDurableObject(env.Pim.getByName(AGENT_NAME), async (instance: Pim) => {
+		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
 			await instance.credentials.modify("openai", async (current) => ({ ...current!, expires: Date.now() - 1 }) as ChatGPTCredential);
 		});
 		tokenAnswer = async () => ({ access_token: "access-2", refresh_token: "refresh-2", expires_in: 3600, scope: PLAN_SCOPES });

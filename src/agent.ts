@@ -85,21 +85,15 @@ import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, 
 
 const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 /**
- * The name of a self-hosted deployment's one agent. A hosted service names
- * each person's agent by their owner ID instead (see ./gateway.ts). (Not
- * exported from the entry module: workerd reads its named exports as
- * entrypoints and refuses a string.)
- */
-export const AGENT_NAME = "pim";
-/**
  * Set by the Worker on every request it forwards: the owner it resolved,
  * which must be the agent's own name. A request routed to the wrong agent is
  * refused rather than served.
  */
 export const OWNER_HEADER = "x-pim-owner";
 
+/** Where apps' sign-ins return, as `/mcp/callback/<owner>`, so the Worker knows whose agent the callback is for. */
 export const MCP_CALLBACK_PATH = "/mcp/callback";
-/** Where apps deliver event webhooks, as `/mcp/events/<watch id>`; signed, so served without the API token. */
+/** Where apps deliver event webhooks, as `/mcp/events/<owner>/<watch id>`; signed, so served without the API token. The agent sees `/mcp/events/<watch id>`. */
 export const MCP_EVENTS_PATH = "/mcp/events/";
 const WATCH_REFRESH_CALLBACK = "refreshAppWatch";
 /** How long a tool call waits for the user under the `auto` policy before the approval is granted, so no task is blocked indefinitely. */
@@ -142,13 +136,13 @@ export type ToolPermissionInfo = ResolvedPermission & {
 /** Whether the agent works: a suspended one answers nothing and runs nothing until its operator lifts it. */
 export type OwnerStatus = "active" | "suspended";
 
-/** What a hosted service tells an agent about its owner when it provisions it. */
+/** What registration tells an agent about its owner when it provisions it. */
 export type OwnerProfile = { readonly ownerId: string; readonly username: string; readonly publicUrl: string };
 /** How long an erasure waits for runs to stop and apps to unsubscribe before wiping anyway. */
 const ERASE_COURTESY_MS = 3_000;
 /** `pim_meta` key of the model chosen through the API. */
 const MODEL_KEY = "model";
-/** `pim_meta` keys a hosting service sets: the owner's profile, a suspension, the agent's own limits. */
+/** `pim_meta` keys the Worker sets: the owner's profile, a suspension, the agent's own limits. */
 const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
@@ -274,6 +268,7 @@ export class Pim extends Agent<Env> {
 		store: this.store,
 		catalog: this.catalog,
 		publicUrl: () => this.env.PIM_PUBLIC_URL || this.store.meta("public_origin"),
+		owner: () => this.name,
 		scheduleRefresh: (id, at) => this.#scheduleWatchRefresh(id, at),
 		submit: async (session, content, operationId) => {
 			await this.submitTo(session, content, { operationId }, "pim");
@@ -372,7 +367,8 @@ export class Pim extends Agent<Env> {
 		try {
 			const result = await this.addMcpServer(name, url, {
 				id,
-				callbackPath: MCP_CALLBACK_PATH,
+				// The owner in the path tells the Worker whose agent the sign-in returns to.
+				callbackPath: `${MCP_CALLBACK_PATH}/${this.name}`,
 				...(options.headers ? { transport: { headers: options.headers } } : {}),
 			});
 			if (result.state === "ready") {
@@ -463,7 +459,7 @@ export class Pim extends Agent<Env> {
 	/**
 	 * Platform models besides the default that sessions may use: `PIM_MODELS`,
 	 * comma-separated. Empty allows any Workers AI or AI Gateway model, as a
-	 * self-hosted Pim always has; a hosted service lists the ones it pays for.
+	 * deployment that doesn't mind the cost; one with members lists the ones it pays for.
 	 */
 	#allowedModels(): string[] | null {
 		const list = (this.env.PIM_MODELS ?? "").split(",").map((id) => id.trim()).filter(Boolean);
@@ -977,7 +973,7 @@ export class Pim extends Agent<Env> {
 
 	// Circles: people the owner lets message this Pim, from their own Pims.
 
-	/** This Pim's owner, as guests know them; null for a self-hosted Pim, which has no one to share with. */
+	/** This Pim's owner, as guests know them; null before registration provisioned it. */
 	#me(): Guest | null {
 		const profile = this.profile();
 		return profile === null ? null : { ownerId: this.name, username: profile.username };
@@ -990,14 +986,14 @@ export class Pim extends Agent<Env> {
 
 	/**
 	 * Puts someone in a circle, moving them from any other, and tells their
-	 * Pim it may visit this one. The hosting service calls it, having resolved
+	 * Pim it may visit this one. The Worker calls it, having resolved
 	 * their username.
 	 */
 	async addCircleMember(circleId: string, guest: Guest): Promise<Member> {
 		this.#assertOpen();
 		this.#circle(circleId);
 		const me = this.#me();
-		if (me === null) throw new HttpError(400, "Only a hosted Pim can be shared");
+		if (me === null) throw new HttpError(400, "This Pim has no owner to share it yet");
 		if (guest.ownerId === this.name) throw new HttpError(400, "You can't add yourself to a circle");
 		const known = this.circles.member(guest.ownerId);
 		if (!known && this.circles.members().length >= MAX_MEMBERS) {
@@ -1029,8 +1025,8 @@ export class Pim extends Agent<Env> {
 	/** Whether a guest may use this Pim now, and through which circle; or why not. */
 	#guestAccess(guest: Guest): { ok: true; circle: Circle; member: Member } | { ok: false; reason: string } {
 		const host = this.profile()?.username ?? "This person";
-		if (this.#closed()) return { ok: false, reason: `${host}'s Pimling was deleted.` };
-		if (this.status() !== "active") return { ok: false, reason: `${host}'s Pimling is suspended.` };
+		if (this.#closed()) return { ok: false, reason: `${host}'s account was deleted.` };
+		if (this.status() !== "active") return { ok: false, reason: `${host}'s account is suspended.` };
 		const member = this.circles.member(guest.ownerId);
 		if (!member) return { ok: false, reason: `${host} doesn't share their Pim with you.` };
 		const circle = this.circles.circle(member.circle);
@@ -1218,7 +1214,7 @@ export class Pim extends Agent<Env> {
 		}
 	}
 
-	/** One of the owner's Pims, for the hosting service to publish. */
+	/** One of the owner's Pims, for the Worker to publish to the gallery. */
 	async personaToPublish(id: string): Promise<Persona | null> {
 		this.#assertOpen();
 		return this.personas.get(id) ?? null;
@@ -1343,7 +1339,7 @@ export class Pim extends Agent<Env> {
 	/**
 	 * Whether the agent is erased, or being erased. An erased agent keeps
 	 * only its mark and refuses everything: requests, sockets, alarms and the
-	 * hosting service's writes. The check is here, in the one object every
+	 * Worker's own writes. The check is here, in the one object every
 	 * request reaches, so a request a Worker authorized before the deletion
 	 * (or with an account it had cached) can't write after it.
 	 */
@@ -1389,7 +1385,7 @@ export class Pim extends Agent<Env> {
 		return json === undefined ? null : (JSON.parse(json) as OwnerProfile);
 	}
 
-	/** Changes the person's settings, as `PUT /settings` does; a hosted service sets their time zone at registration. */
+	/** Changes the person's settings, as `PUT /settings` does; registration sets their time zone. */
 	async applySettings(update: Record<string, unknown>): Promise<Settings> {
 		this.#assertOpen();
 		const before = this.settings().approvalPolicy;

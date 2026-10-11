@@ -1,30 +1,23 @@
 import { getAgentByName } from "agents";
-import { AGENT_NAME, AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_EVENTS_PATH, OWNER_HEADER } from "./agent";
-import { type AuthSite, currentSession, fromAnotherSite, handleAuth, ownerToken, SELF_HOSTED_USER } from "./auth";
+import { accountApi, adminApi, clientIp, handleRegistration, limited, resolveAccount, siteFor, sites, socialApi } from "./accounts";
+import { AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_EVENTS_PATH, OWNER_HEADER } from "./agent";
+import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
+import type { Account } from "./directory";
 
 /**
- * Serves one owner's Pim: its web app, sign-in, API and app callbacks.
+ * Serves a Pim: everyone's web app, sign-in, API and app callbacks, on one
+ * hostname.
  *
- * - `/api/*`: the agent's API. Browsers sign in with a passkey (a session
- *   cookie); other clients send an API token.
- * - `/auth/*`: passkey sign-in, recovery, and API tokens (./auth).
- * - `/mcp/callback`, `/mcp/events/*`: public, for connected apps.
+ * - `/api/*`: the signed-in person's own Pim. The request names its owner:
+ *   browsers by their passkey session's cookie, other clients by their API
+ *   token, which is `pim_<owner>_<secret>`. Either is checked against that
+ *   owner's own sign-in before anything else.
+ * - `/auth/*`: registration (./accounts.ts) and passkey sign-in (./auth).
+ * - `/mcp/callback/<owner>`, `/mcp/events/<owner>/<watch>`: public, for
+ *   connected apps. Each is checked another way: the OAuth state, and the
+ *   watch's signing secret.
  * - Everything else: the web app (`web/`, built to `web/dist`).
- *
- * The entry module decides whose Pim a request is for (self-hosted: always
- * the one; hosted: the account the hostname names) and passes it as `site`.
  */
-
-/** One owner's Pim, as the Worker resolved it. */
-export type PimSite = AuthSite & {
-	/** The name of the owner's Pim Durable Object. */
-	readonly agent: string;
-};
-
-/** A self-hosted Pim's one owner, whose agent and sign-in keep the Durable Object names they have always had. */
-export function selfHostedSite(env: Env): PimSite {
-	return { owner: AGENT_NAME, agent: AGENT_NAME, store: env.Auth.getByName("auth"), mode: "self-hosted", user: SELF_HOSTED_USER };
-}
 
 const CORS_HEADERS: Record<string, string> = {
 	"Access-Control-Allow-Origin": "*",
@@ -41,9 +34,7 @@ export function withCors(response: Response): Response {
 	return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
-async function digest(value: string): Promise<ArrayBuffer> {
-	return crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-}
+const fail = (status: number, error: string) => Response.json({ error }, { status });
 
 /** The token a request carries, as a bearer token or, for WebSockets from clients that cannot set headers, a `token` query parameter. */
 function givenToken(request: Request): string | null {
@@ -51,37 +42,45 @@ function givenToken(request: Request): string | null {
 	return header?.startsWith("Bearer ") ? header.slice(7) : new URL(request.url).searchParams.get("token");
 }
 
-/**
- * Whether the request carries a token for this owner: one they made in
- * Settings, or, self-hosted only, `PIM_API_TOKEN`. A hosted service never
- * reads that variable: it would open every owner's Pim.
- */
-async function hasToken(request: Request, env: Env, site: PimSite): Promise<boolean> {
-	const given = givenToken(request);
-	if (!given) return false;
-	if (site.mode === "self-hosted" && env.PIM_API_TOKEN) {
-		// Hashing first makes the comparison constant-time regardless of length.
-		if (crypto.subtle.timingSafeEqual(await digest(given), await digest(env.PIM_API_TOKEN))) return true;
-	}
-	return ownerToken(site, given);
+/** Whose request this is, and whether it came with a passkey session (some things an API token can't do). */
+type Caller = { readonly account: Account; readonly viaSession: boolean };
+
+/** Why an account opens nothing, if it doesn't. */
+function closed(account: Account): Response | undefined {
+	if (account.status === "deleted" || account.status === "deleting") return fail(410, "This account was deleted.");
+	if (account.status === "suspended") return fail(403, "This account is suspended.");
+	if (account.status !== "active") return fail(401, "Unauthorized");
+	return undefined;
 }
 
-/** Who may call the API: a token holder, or a browser signed in to this owner's Pim. */
-async function authorize(request: Request, env: Env, site: PimSite): Promise<Response | undefined> {
-	if (await hasToken(request, env, site)) return undefined;
-	if (await currentSession(request, site)) {
-		// A cookie rides along on requests other sites trigger; a token can't.
-		if (fromAnotherSite(request)) return Response.json({ error: "Requests must come from this app" }, { status: 403 });
-		return undefined;
+/** Who may call the API: a token holder, or a browser signed in with a passkey. */
+async function authorize(request: Request, env: Env): Promise<Caller | Response> {
+	const token = givenToken(request);
+	const tokenAccount = token && tokenOwner(token) ? await resolveAccount(env, tokenOwner(token)!) : null;
+	if (token && tokenAccount) {
+		const refused = closed(tokenAccount);
+		if (refused) return refused;
+		if (await siteFor(env, tokenAccount).store.checkToken(token, Date.now())) return { account: tokenAccount, viaSession: false };
 	}
-	return Response.json({ error: "Unauthorized" }, { status: 401 });
+	const claim = await sessionClaim(request, env);
+	const account = claim ? await resolveAccount(env, claim.owner) : null;
+	if (account) {
+		const refused = closed(account);
+		if (refused) return refused;
+		if (await currentSession(request, env, siteFor(env, account))) {
+			// A cookie rides along on requests other sites trigger; a token can't.
+			if (fromAnotherSite(request)) return fail(403, "Requests must come from this app");
+			return { account, viaSession: true };
+		}
+	}
+	return fail(401, "Unauthorized");
 }
 
 const under = (pathname: string, prefix: string) => pathname === prefix || pathname.startsWith(`${prefix}/`);
 
-/** Hands a request to the owner's agent, `path` being its path in the agent's API. */
-export async function toAgent(request: Request, env: Env, site: PimSite, path: string, authorized: boolean): Promise<Response> {
-	const agent = await getAgentByName(env.Pim, site.agent);
+/** Hands a request to an owner's agent, `path` being its path in the agent's API. */
+export async function toAgent(request: Request, env: Env, owner: string, path: string, authorized: boolean): Promise<Response> {
+	const agent = await getAgentByName(env.Pim, owner);
 	const url = new URL(request.url);
 	url.pathname = path;
 	// Bodies are small JSON; buffering them lets the agent answer without reading one.
@@ -90,7 +89,7 @@ export async function toAgent(request: Request, env: Env, site: PimSite, path: s
 	forwarded.headers.delete(AUTHORIZED_HEADER);
 	if (authorized) forwarded.headers.set(AUTHORIZED_HEADER, "1");
 	// The agent checks it is the one this owner's requests are for.
-	forwarded.headers.set(OWNER_HEADER, site.agent);
+	forwarded.headers.set(OWNER_HEADER, owner);
 	try {
 		return await agent.fetch(forwarded);
 	} catch (error) {
@@ -102,35 +101,72 @@ export async function toAgent(request: Request, env: Env, site: PimSite, path: s
 	}
 }
 
-/** Paths of the API a hosting service answers itself, before the agent: an authorized request for `path` under `/api`. */
+/** Paths of the API answered before the agent: an authorized request for `path` under `/api`. */
 export type ApiExtension = (path: string, request: Request) => Promise<Response | undefined>;
 
-export async function servePim(request: Request, env: Env, site: PimSite, extension?: ApiExtension): Promise<Response> {
+/**
+ * An app's callback or event delivery: `/mcp/callback/<owner>` (GET, the
+ * OAuth sign-in's redirect, which the agent matches against the callback URL
+ * it gave) or `/mcp/events/<owner>/<watch>` (POST, which the agent answers as
+ * `/mcp/events/<watch>`).
+ */
+async function serveApp(request: Request, env: Env, pathname: string): Promise<Response | undefined> {
+	const callback = new RegExp(`^${MCP_CALLBACK_PATH}/([^/]+)$`).exec(pathname);
+	const events = new RegExp(`^${MCP_EVENTS_PATH}([^/]+)/([^/]+)$`).exec(pathname);
+	if (!callback && !events) return undefined;
+	const method = callback ? "GET" : "POST";
+	if (request.method !== method) return fail(405, `${pathname} takes ${method}`);
+	const account = await resolveAccount(env, decodeURIComponent((callback ?? events)![1]!));
+	if (!account) return fail(404, "Not found");
+	const refused = closed(account);
+	if (refused) return refused;
+	return toAgent(request, env, account.ownerId, callback ? pathname : `${MCP_EVENTS_PATH}${events![2]}`, false);
+}
+
+export async function serve(request: Request, env: Env): Promise<Response> {
 	const { pathname } = new URL(request.url);
 	if (pathname === "/health") return withCors(Response.json({ name: "pim", ok: true }));
-	if (under(pathname, "/auth")) return handleAuth(request, env, site);
 
-	// Two paths are public, each checked another way: an app's sign-in page redirects the
-	// user's browser to the callback (the MCP client checks the OAuth state), and apps deliver
-	// event webhooks (checked against the watch's signing secret).
-	const publicMethod = pathname === MCP_CALLBACK_PATH ? "GET" : pathname.startsWith(MCP_EVENTS_PATH) ? "POST" : null;
-	if (publicMethod) {
-		if (request.method !== publicMethod) return withCors(Response.json({ error: `${pathname} takes ${publicMethod}` }, { status: 405 }));
-		return withCors(await toAgent(request, env, site, pathname, false));
+	if (under(pathname, "/auth")) {
+		// Guessing at passkeys, recovery codes and tokens is slowed down per address.
+		if (request.method !== "GET" && (await limited(env.AUTH_LIMITER, clientIp(request)))) {
+			console.log(JSON.stringify({ event: "pim.rate_limited", limit: "auth" }));
+			return fail(429, "Too many attempts. Wait a minute and try again.");
+		}
+		return (await handleRegistration(request, env)) ?? handleAuth(request, env, sites(env));
+	}
+
+	if (under(pathname, "/mcp")) {
+		const app = await serveApp(request, env, pathname);
+		if (app) return withCors(app);
 	}
 
 	if (!under(pathname, "/api")) return env.ASSETS.fetch(request);
 	if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
 	const path = pathname.slice("/api".length) || "/";
 	if (path === "/health") return withCors(Response.json({ name: "pim", ok: true }));
-	const denied = await authorize(request, env, site);
-	if (denied) return withCors(denied);
-	const extended = await extension?.(path, request);
-	if (extended) return withCors(extended);
+	const caller = await authorize(request, env);
+	if (caller instanceof Response) return withCors(caller);
+	const { account, viaSession } = caller;
+	// Heavy use is slowed down per person.
+	if (await limited(env.API_LIMITER, account.ownerId)) {
+		console.log(JSON.stringify({ event: "pim.rate_limited", limit: "api", owner: account.ownerId }));
+		return withCors(fail(429, "Too many requests. Slow down a little."));
+	}
+	const site = siteFor(env, account);
+	const extensions = [
+		accountApi(env, account, site, request, viaSession),
+		adminApi(env, account, request, viaSession),
+		socialApi(env, account, request),
+	];
+	for (const extension of extensions) {
+		const answered = await extension(path, request);
+		if (answered) return withCors(answered);
+	}
 	// The agent accepts sockets on any path; keep them on one.
 	const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
 	if (upgrade !== (path === "/ws")) {
-		return withCors(Response.json({ error: upgrade ? "WebSockets connect at /api/ws" : "/api/ws expects a WebSocket upgrade" }, { status: upgrade ? 404 : 426 }));
+		return withCors(fail(upgrade ? 404 : 426, upgrade ? "WebSockets connect at /api/ws" : "/api/ws expects a WebSocket upgrade"));
 	}
-	return withCors(await toAgent(request, env, site, path, true));
+	return withCors(await toAgent(request, env, account.ownerId, path, true));
 }

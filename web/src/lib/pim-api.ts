@@ -64,7 +64,7 @@ export type Profile = {
   bio: string | null;
 };
 
-/** Someone on Pimling, and what they published. */
+/** Someone on this Pim, and what they published. */
 export type Person = Profile & { templates: TemplateSummary[] };
 
 /** A connected app, as Pim lists them. */
@@ -233,15 +233,26 @@ export type UsageReport = {
   storageBytes: number;
 };
 
-/** A hosted Pimling's account. */
+/** Your account on this Pim. */
 export type Account = {
   username: string;
   ownerId: string;
+  role: "admin" | "member";
   status: "active" | "pending" | "suspended";
   createdAt: number;
-  url: string;
   usage: UsageReport;
   recoveryCodesLeft: number;
+};
+
+/** Someone's account, as the admin sees it. */
+export type Member = {
+  ownerId: string;
+  username: string;
+  role: "admin" | "member";
+  status: "pending" | "active" | "suspended" | "deleting" | "deleted";
+  createdAt: number;
+  activatedAt: number | null;
+  statusReason: string | null;
 };
 
 /** Whether Pim may use a tool: not at all, after asking you, or without asking. */
@@ -523,17 +534,47 @@ export const pim = {
     call<{ deleted: boolean }>(`/artifacts/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
-  /** Pimling only: a self-hosted Pim has no account and answers 404, so this is null. */
-  account: () =>
-    call<Account>("/account").catch((error) => {
-      if (error instanceof ApiError && error.status === 404) return null;
-      throw error;
-    }),
+  account: () => call<Account>("/account"),
   /** `deleted: false`: the account is closed, and erasing its data is still being retried. */
   deleteAccount: (username: string) =>
     call<{ deleted: boolean; nextAttemptAt?: string }>("/account", {
       method: "DELETE",
       body: JSON.stringify({ confirm: username }),
+    }),
+};
+
+const path = (username: string) =>
+  `/admin/accounts/${encodeURIComponent(username)}`;
+
+/** Running this Pim: only the admin, signed in with a passkey, may. */
+export const admin = {
+  members: () =>
+    call<{ accounts: Member[] }>("/admin/accounts?limit=500").then(
+      (body) => body.accounts,
+    ),
+  /** A link that lets one person join, once. */
+  invite: () =>
+    call<{ links: [string] }>("/admin/invites", {
+      method: "POST",
+      body: JSON.stringify({ count: 1 }),
+    }).then((body) => body.links[0]),
+  suspend: (username: string) =>
+    call(`${path(username)}/suspend`, { method: "POST", body: "{}" }),
+  unsuspend: (username: string) =>
+    call(`${path(username)}/unsuspend`, { method: "POST", body: "{}" }),
+  /** A link that adds a passkey to someone's account, for an hour: for someone who lost every passkey and recovery code. */
+  setupLink: (username: string) =>
+    call<{ setupUrl: string; expiresAt: string }>(
+      `${path(username)}/setup-link`,
+      {
+        method: "POST",
+        body: "{}",
+      },
+    ),
+  remove: (username: string) =>
+    call<{ deleted: boolean }>(path(username), {
+      method: "DELETE",
+      body: "{}",
     }),
 };
 

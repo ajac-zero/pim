@@ -1,174 +1,48 @@
-# Pimling at pimling.ajac-zero.com
+# Pim at pim.ajac-zero.com
 
-The owner's private test deployment of Pimling: invite-only, with small limits. Not a public launch.
+The owner's Pim: invite-only, with small limits for members. The owner is its admin.
 
-- **Front door:** <https://pimling.ajac-zero.com>
-- **Each person:** `https://<username>.pimling.ajac-zero.com`
-- **Worker:** `pimling` in the account `50fc740fb96dd3b4d9aeacd257575377`, zone `ajac-zero.com` (`17127fc4b18698c7c9a609d4ca36a628`, Free plan)
+- **Address:** <https://pim.ajac-zero.com>
+- **Worker:** `pim` in the account `50fc740fb96dd3b4d9aeacd257575377`, zone `ajac-zero.com` (`17127fc4b18698c7c9a609d4ca36a628`, Free plan)
 - **Config:** [`wrangler.ajac-zero.jsonc`](../../wrangler.ajac-zero.jsonc); deploy with `pnpm run deploy:ajac-zero`
-- **Separate from** the self-hosted Pim at `pim.ajac-zero.com` (Worker `pim`), which this deployment doesn't touch.
+- **TLS:** `pim.ajac-zero.com` is a Workers Custom Domain, so Cloudflare issues and renews its certificate. One hostname serves everyone, so no wildcard record or certificate is needed.
 
-## TLS for `*.pimling.ajac-zero.com`
+## Before
 
-Universal SSL covers `ajac-zero.com` and `*.ajac-zero.com`, one level deep: the front door, but not the tenants. The zone has no Advanced Certificate Manager quota (`allocated: 0`) and no SSL for SaaS, and Total TLS is off.
+Before this, the account ran two test deployments. This one replaces both, and their data wasn't kept, as the owner asked:
 
-Making `pimling.ajac-zero.com` a Workers Custom Domain gave it an advanced certificate, at no charge, for `ajac-zero.com`, `pimling.ajac-zero.com` and `*.pimling.ajac-zero.com` (pack `fbaf98c3-32fe-4a27-872d-34a24e4f5ab1`, Google Trust Services, TXT validation that Cloudflare manages). Every other custom domain in the zone has the same shape. Tenants are then routed by `*.pimling.ajac-zero.com/*` with a proxied wildcard record. Names two labels under `pimling` have no certificate and are not served.
+- the single-person Pim at `pim.ajac-zero.com` (Worker `pim`), with its agent and sign-in in the Durable Objects named `pim` and `auth`;
+- hosted Pimling at `pimling.ajac-zero.com` (Worker `pimling`), with a person per subdomain, the owner's account and the tombstones of test accounts, and the `PIMLING_ADMIN_TOKEN` secret.
 
-Cloudflare renews the certificate along with the custom domain. If the custom domain is removed, the tenant certificate goes with it. The fallback is Advanced Certificate Manager on the zone, which is paid (check the current price in the dashboard before buying).
+Their history, with every deploy and acceptance, is in this file as it was at [`f77583c`](https://github.com/ajac-zero/pim/blob/f77583c1eda80eddc8178c5210e548eac2ce64a3/docs/deployments/ajac-zero.md).
 
 ## Current state
 
 | | |
 | --- | --- |
-| Serving | `7b0eb6b5-344c-4f55-a265-d3ca2bde68a5` (100%), deployed 2026-10-11 04:38 UTC from `main` at [`68f4465`](https://github.com/ajac-zero/pim/commit/68f4465) (tool permissions, circles and visits, Your Pims, profiles and published Pims) |
-| Rollback target | `09e271c2-acc2-4799-8ab4-cf81eae54df0` (#11 at `c1dfee1`, serving until this deploy); see [Rollback](#rollback) |
-| Route `*.pimling.ajac-zero.com/*` | `0ff92856b912488eb183b7ac99871080`; wrangler recreates it on each deploy, with a new ID and the same pattern and script |
-| Accounts | the owner's, plus `deleted` tombstones of test accounts |
+| Serving | `b8bd9714-6687-4d65-af74-5dc74a4bf65b` (100%), deployed 2026-10-11 07:43 UTC from branch `multiplayer` at [`c9781f5`](https://github.com/ajac-zero/pim/commit/c9781f5) (one Pim for several people) |
+| Custom domain `pim.ajac-zero.com` | `936379e175647dd9c83f50a4ef5010cd7e11966e`, with DNS record `327d910050f4a2b3fd9eb711e651be20` (`AAAA 100::`, proxied), both made by wrangler |
+| Durable Object namespaces | `Pim` `1ec6ba0dd84b4c0f941ff5ee3846e894`, `Auth` `5ade5dd299084d47af5bcb21f5bd2da8`, `Directory` `876c4e51b412464c80d5f3718bf5c069`, `Gallery` `931c10f09aad431487bba687aef3b745` (migrations v1 to v4, all new) |
+| Secrets | none |
+| Accounts | none until the owner claims it |
 
-## History
+## The deploy of 2026-10-11
 
-| Version | Deployed | From | Notes |
-| --- | --- | --- | --- |
-| `0e8a60a3-0bf5-4f9f-9e2a-25712ec656b6` | 2026-10-10 06:37 | `main` `9c0a423` (#2) | First upload |
-| `d88a37fc-99f9-4dbf-85b5-76a420c47b08` | 2026-10-10 06:38 | the same bundle | `PIMLING_ADMIN_TOKEN` set |
-| `096158e7-b612-40dc-a667-dced2a1fe6fc` | 2026-10-10 07:58 | `main` `8fc824c` (#5) | Add another device, front-door sign-in, #4's copy |
-| `ce9b2eae-0edc-4dc9-9b85-97ca8dbbcd75` | 2026-10-10 09:15 | `main` `b2df73f` (#6) | Add another device: Done waits for revocation, passkey list refreshes, a device with a passkey can sign in; the live smoke script's cleanup and checks |
-| `6bc8cb75-45d0-4184-9a07-52a257e343e1` | 2026-10-10 18:57 | `main` `359394a` (#8) | M2a private artifacts ([artifacts.md](../artifacts.md)); `PIM_LIMITS` gains the four artifact keys |
-| `faceeb51-9e87-43fe-ba5e-289f53181c5e` | 2026-10-10 23:36 | `main` `4b074d5` (#10) | Artifact reliability. Recorded afterwards from the #11 deploy: created 36 seconds after #10 merged, and its live bundle had #10's strings and none of #11's |
-| `09e271c2-acc2-4799-8ab4-cf81eae54df0` | 2026-10-10 23:56 | `main` `c1dfee1` (#11) | Chat explains model errors (ChatGPT usage limit and others) without showing the provider's text; config unchanged |
-| `7b0eb6b5-344c-4f55-a265-d3ca2bde68a5` | 2026-10-11 04:38 | `main` `68f4465` | Tool permissions (Off/Ask/On per tool); Sharing: circles, guests messaging from their own Pimling, guest approvals; Your Pims; profiles; Discover and published Pims. Adds the `Gallery` Durable Object (migration v4) |
-
-## What was changed (2026-10-10)
-
-| Change | ID | Made by |
-| --- | --- | --- |
-| Worker `pimling` with Durable Objects `Pim`, `Auth`, `Directory` (migrations v1–v3), rate limits `71420101`, `71420102` | First version `0e8a60a3-0bf5-4f9f-9e2a-25712ec656b6` | `pnpm run deploy:ajac-zero` |
-| Custom domain `pimling.ajac-zero.com` → `pimling` | `e188214063dbb191c911b164ae6189cea32d4dc7` | wrangler (`custom_domain: true`) |
-| DNS `AAAA pimling.ajac-zero.com` (proxied) | `19fe94b9ae5bbfd5055cde0d7b76ae09` | Created with the custom domain |
-| Certificate pack for `pimling` and `*.pimling` | `fbaf98c3-32fe-4a27-872d-34a24e4f5ab1` | Created with the custom domain |
-| Route `*.pimling.ajac-zero.com/*` → `pimling` | `2e20f82bce114f189580235400c048fe` at first; `21daa95d2ba14a6ab3f2ff4c496cb0bf` from the #5 deploy; `527b24a6091b429d966537aa01ac254d` from the #6 deploy; `6ab992d4ad234156b61375bf704349b3` from the #8 deploy; `2c2750d49e2449b8900f4cce98e959e4` from the #10 deploy; `6a2c705127fc412eb3c3ba1c2049178a` since the #11 deploy (wrangler recreates it) | wrangler (`routes`) |
-| DNS `AAAA *.pimling.ajac-zero.com` → `100::` (proxied) | `16774988657fb34e6ee8d4b8eb02ef3b` | API, by hand (not in the config) |
-| Secret `PIMLING_ADMIN_TOKEN` | Serving version `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (the same bundle, with the secret) | `wrangler secret put` |
-
-At the initial deployment nothing else in the zone changed: all 26 DNS records that existed then, the `packages.ajac-zero.com/*` route, and the other 10 custom domains stayed as they were. Later deploys are recorded in their own acceptance sections.
+- **Removed first,** with `wrangler delete --force`: the Worker `pimling` (its custom domain `pimling.ajac-zero.com`, its route `*.pimling.ajac-zero.com/*`, its secret and its four Durable Object namespaces with all their data) and the Worker `pim` (its custom domains `pim.ajac-zero.com` and `api.pim.ajac-zero.com`, which wasn't in any config, and its two Durable Object namespaces with all their data). The DNS records of those custom domains went with them. The wildcard record `*.pimling.ajac-zero.com` (`16774988657fb34e6ee8d4b8eb02ef3b`), made by hand, was deleted through the API. Nothing else in the zone was touched: the `packages.ajac-zero.com/*` route and the other custom domains are as they were.
+- **Checked before deploying,** at `c9781f5`: typecheck, 204 Worker tests and 25 web tests, the web build, and `wrangler deploy --dry-run` with this config. In Chrome with virtual passkeys against the local preview: claiming, recovery codes and the first passkey, inviting and joining, signing out and in, suspending, recovery and the logs' setup link.
+- **Live, read-only, after deploying:** `/health`, the app shell and `/settings` `200`; `/auth/session` says not claimed, claimable, invite-only; anonymous `/api/sessions` and `/api/admin/stats` `401`; a made-up token `401`; app callbacks for an unknown owner `404`; the certificate covers the hostname until 2026-12-31. No account was made: the first one is the owner's.
 
 ## Setup for the owner
 
-1. **The admin token** is in the orb that deployed this, at `~/pimling-deploy/admin-token` (mode 600). Copy it somewhere safe, such as a password manager. To replace it, run `pnpm wrangler secret put PIMLING_ADMIN_TOKEN --config wrangler.ajac-zero.jsonc` with a new random value. Never paste it into a chat, an issue or a commit.
-2. **Invite someone** (codes are single-use):
-   ```sh
-   curl -X POST https://pimling.ajac-zero.com/admin/invites \
-     -H "Authorization: Bearer $PIMLING_ADMIN_TOKEN" -H "content-type: application/json" \
-     -d '{"count": 1, "note": "for …"}'
-   ```
-3. **Register** at <https://pimling.ajac-zero.com> with a username and the invite. Save the recovery codes, then continue to the new Pimling and create a passkey on your device.
-4. **Models.** Chats run on Workers AI (`@cf/zai-org/glm-4.7-flash`), billed to this account and capped by `PIM_LIMITS`. Settings → "Use your ChatGPT plan" connects a person's own plan. OpenAI's token-sharing docs ask remotely hosted apps to fill in its interest form; this test deployment keeps the feature on, as the owner asked.
-5. **Operate** with the admin API in [hosting.md](../hosting.md#operating-it): stats, accounts, suspend, limits, setup links, delete. Watch Workers Logs for the events listed there.
+1. **Claim it.** Open <https://pim.ajac-zero.com> within 15 minutes of the deploy, pick a username, save the recovery codes and create a passkey. Missed the window: the sign-in screen has the Worker write a setup link to its logs; in the dashboard, open Workers & Pages, then `pim`, then Observability, and open the link in the log that starts with "Pim setup link".
+2. **Invite someone:** Settings → People on this Pim → Invite someone, and send them the link. It works once.
+3. **Models.** Chats run on Workers AI (`@cf/zai-org/glm-4.7-flash`), billed to this account; members are capped by `PIM_LIMITS`, the admin isn't. Settings → "Use your ChatGPT plan" connects a person's own plan.
+4. **Run it** from Settings, or with the admin API in [instance.md](../instance.md#running-it). Watch Workers Logs for the events listed there.
 
 ## Limits here
 
-Invite-only; at most 25 accounts and 3 registrations per address a day. Per person, each day: 300,000 tokens, 300 model requests and 100 runs; at most 100 chats, 20 schedules, 10 apps and 200 MB. Artifacts (since #8): at most 100, 50 versions each, 500,000 bytes a version and 10,000,000 bytes in all (`artifacts`, `artifactVersions`, `artifactBytes`, `artifactStorageBytes`). Rate limits: 20 sign-in, recovery and registration attempts a minute per address, and 300 API requests a minute per person. Approvals are explicit: unanswered ones are denied after 5 minutes.
+Invite-only; at most 25 accounts and 3 registrations per address a day. Per member, each day: 300,000 tokens, 300 model requests and 100 runs; at most 100 chats, 20 schedules, 10 apps and 200 MB; at most 100 artifacts, 50 versions each, 500,000 bytes a version and 10,000,000 bytes in all. The admin has no limits. Rate limits: 20 sign-in, recovery and registration attempts a minute per address, and 300 API requests a minute per person. Approvals default to explicit: unanswered ones are denied after 5 minutes.
 
-## Rollback
+## Removing it
 
-- **To an earlier version:** `pnpm wrangler rollback faceeb51-9e87-43fe-ba5e-289f53181c5e --config wrangler.ajac-zero.jsonc --message "…"` (the version before #11; #11 changed only the web app, so this brings back the old `Not answered: model_error` banner and nothing else). Other targets: `6bc8cb75-45d0-4184-9a07-52a257e343e1` (before #10), `ce9b2eae-0edc-4dc9-9b85-97ca8dbbcd75` (before #8), `096158e7-b612-40dc-a667-dced2a1fe6fc` (before #6) and `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (before #5); `pnpm wrangler versions list --config wrangler.ajac-zero.jsonc` lists the rest. A rollback changes code and that version's own variables: Durable Object data, the route, the custom domain and the secret stay as they are. Devices added with #5 keep their passkeys, which work with any version.
-- **Rolling back past `7b0eb6b5` (the sharing deploy)** may be refused: that version added the `Gallery` class (migration v4), and an older version doesn't export it. If `wrangler rollback` refuses, deploy a revert of the change from `main` instead. Rolled back or reverted, Pims keep their new tables (tool permissions, circles, visits, Your Pims), which older code ignores; tools set to Off would be offered again, and always-approved tools would ask again.
-- **Rolling back past #8 leaves artifacts behind.** #8 added no Durable Object migration: each Pim makes its `pim_artifacts` and `pim_artifact_versions` tables itself, and they stay after a rollback. The older version has no artifact tools, routes or screens, so artifacts can't be seen, downloaded or deleted. They still count toward `storageBytes`, and its export leaves them out. Deleting an account still erases them, since erasure wipes all of a Pim's storage. Rolling forward again shows them as they were.
-- **Roll back with `wrangler rollback`, not by deploying older code with today's config.** A version keeps the variables it was deployed with, so `ce9b2eae` comes back with its own `PIM_LIMITS`. Code from before #8 doesn't know the artifact keys now in `wrangler.ajac-zero.jsonc`, and refuses a `PIM_LIMITS` it can't parse by failing closed: no model requests and no runs.
-- **To remove the deployment entirely,** which erases every Pimling's data:
-  1. `pnpm wrangler delete --config wrangler.ajac-zero.jsonc`. This removes the Worker, its route and custom domain, and its Durable Objects with all their data.
-  2. Delete DNS record `16774988657fb34e6ee8d4b8eb02ef3b` (`*.pimling.ajac-zero.com`).
-  3. Delete DNS record `19fe94b9ae5bbfd5055cde0d7b76ae09` (`pimling.ajac-zero.com`) if the custom domain didn't take it.
-
-  The certificate pack goes with the custom domain.
-
-## Acceptance of version `09e271c2` (2026-10-10, #11)
-
-- **Merge:** #11 merged at its reviewed head [`f991581`](https://github.com/ajac-zero/pim/commit/f99158134bf42ff7385aaf14a6a949964d8b01bf) as [`c1dfee1`](https://github.com/ajac-zero/pim/commit/c1dfee17b29d8078aa4a68d16bd18efd3a17d51a), with the merge guarded by that head; both have tree `367c1140626d54952471494385860b1cd5e5e822`. Deployed from a clean checkout of that commit.
-- **Reviewed before merging:** the root reviewer and an independent reviewer each checked the exact head on base `4b074d5`. Checks: typecheck, 195 Worker tests, 25 web tests, build, Biome (one existing warning), and dry runs for this config, the self-hosted one and the hosted one. The independent reviewer also ran mutation checks and a Pixel 7 coarse-pointer browser acceptance. Local acceptance on the preview: Playwright on a Pixel 7 profile, dark mode, a virtual passkey. The ChatGPT usage-limit banner was triggered by a temporary, uncommitted server patch; the preview's own model failure showed the generic message without its raw text.
-- **Live, read-only, after deploying:**
-  - version `09e271c2` at 100%;
-  - `/health`, the front door and the owner's app shell: `200`;
-  - lookup: `200` for the owner, `404` for an unknown name and for `x@evil.com#`;
-  - `/admin/stats`: `401` with no token and with a wrong one;
-  - an unknown tenant `404`, the deleted `smoke-dev3` `410`;
-  - anonymous on the owner's host: `/api/sessions`, `/api/chatgpt` and the artifact list, frame and download all `401`, a bogus `?token=` `401` as well; an artifact path on the front door `404`;
-  - the live entry bundle matches the local build (`assets/index-DNwlgk9N.js`); the chunk with the new messages (`pim-api-CQxmJAOt.js`) is byte-identical to the local build; the live code has the new messages and #10's strings, and no longer has `Retrying after an error: {error}`;
-  - the tenant certificate still covers `*.pimling.ajac-zero.com`, until 2027-01-08.
-- **Configuration:** unchanged. The 22 bindings of `09e271c2` have the same names and types as `faceeb51`'s, and its 13 variables the same values. The self-hosted config wasn't deployed.
-- **Cloudflare, compared before and after:** only the tenant route was recreated (new ID above). The `packages.ajac-zero.com/*` route, the 11 custom domains, the 28 DNS records, the 13 certificate packs (including `fbaf98c3-32fe-4a27-872d-34a24e4f5ab1`, active) and the one secret (`PIMLING_ADMIN_TOKEN`) are unchanged.
-- **Accounts:** not counted. The orb that deployed #11 has no admin token, so `/admin/stats` was checked only for refusal. No owner data or credentials were read or changed, and no live account was made.
-
-## Acceptance of version `6bc8cb75` (2026-10-10, M2a)
-
-- **Merge:** #8 merged at its reviewed head [`9e4e32e`](https://github.com/ajac-zero/pim/commit/9e4e32e668761ac46e0e70fec67968dc8e77b026) as [`359394a`](https://github.com/ajac-zero/pim/commit/359394ac21883021ceaeae025cd00c7c7524ddca), with the merge guarded by that head; both have tree `e401193b9262f974497775a7cb25f57ab84f609b`. Deployed from a clean checkout of that commit.
-- **Reviewed before merging:** an independent reviewer and the root reviewer each checked the exact head. Both ran typecheck, 193 Worker tests, 21 web tests and lint (only the existing warnings); the root reviewer also ran the build and dry runs for this config, the self-hosted one and the hosted one. The independent reviewer's mutation checks covered racing writes, refused-write invariants, the Markdown allowlist and the model-facing wording. `9e4e32e` changed only tests and docs from the previously reviewed `3c86f0c`; their built Worker bundle and web assets were identical.
-- **Acceptance, local:** in Chrome with virtual passkeys against the local preview and a scripted model, 28 of 28 checks at `3c86f0c` (see #8): the chat card, viewer, history and restore, the sandbox (a hostile probe blocked on every vector; opened directly, an opaque origin), plain-text downloads, `?token=` refused, leaving noticed, session loss unmounting frames, deletion, and another owner's host answering `404`. A hostile Markdown corpus rendered with no loading elements or attributes and no outbound requests. No live account was made for this deploy.
-- **Live, read-only, after deploying:**
-  - version `6bc8cb75` at 100%;
-  - `/health`, the front door and the owner's app shell: `200`;
-  - lookup: `200` for the owner, `404` for an unknown name and for `x@evil.com#`;
-  - `/admin/stats`: `401` with no token and with a wrong one;
-  - an unknown tenant `404`, the deleted `smoke-dev3` `410`;
-  - anonymous on the owner's host: `/api/sessions`, `/api/chatgpt` and the artifact list, frame and download all `401`, a bogus `?token=` `401` as well; an artifact path on the front door `404`;
-  - the live bundle matches the local build (`assets/index-CA62s4Uu.js`), and the artifact frame and ChatGPT-plan chunks are served;
-  - the tenant certificate still covers `*.pimling.ajac-zero.com`, until 2027-01-08.
-- **Configuration:** `PIM_LIMITS` gained `"artifacts": 100, "artifactVersions": 50, "artifactBytes": 500000, "artifactStorageBytes": 10000000`. Its other seven limits are as in `ce9b2eae`. The self-hosted config wasn't deployed.
-- **Cloudflare, compared before and after:** only the tenant route was recreated (new ID above). The `packages.ajac-zero.com/*` route, the other 10 custom domains, all 28 DNS records, the certificate and the one secret (`PIMLING_ADMIN_TOKEN`) are unchanged.
-- **Accounts:** 1 active (the owner's), 0 pending, 0 deleting, 4 deleted, 2 unused invites, no cleanup queued or failing, before and after. No owner data or credentials were read or changed.
-
-## Acceptance of version `ce9b2eae` (2026-10-10)
-
-- **Merge:** #6 merged at its reviewed head [`27d1d87`](https://github.com/ajac-zero/pim/commit/27d1d87e35831be2ef8b7e9787f2761aefae61ff) as [`b2df73f`](https://github.com/ajac-zero/pim/commit/b2df73fb0393d0a553caafe65c2afd0a7f1d4d4a); both have tree `71177dabfdb1f714aaf37b885f17705bee097fdd`. Deployed from a clean checkout of that commit, with the config, secret and limits unchanged.
-- **Before merging, on the reviewed head** (independently repeated by the reviewers): typecheck; 177 Worker tests and 15 web tests; web build; web lint with only the existing warnings; `wrangler deploy --dry-run` for this config and the self-hosted one; `node --check scripts/live-device-smoke.mjs`. On a local preview, the smoke script passed 30 of 30, and its error paths were checked with temporary server mutations:
-  - deletion forced to answer `202`: accepted (the script before #6's last round failed it);
-  - deletion answering `500` (a malformed version of that mutation): failed;
-  - the write before deletion forced to `500`, and the write after it forced to `201`: each failed;
-  - registration forced to `500`, then admin cleanup: a `404` naming `No account <username>` counted as cleaned, while a plain `Not found` (admin API off) gave `CLEANUP NEEDED` and exit `2`.
-
-  Separately, cleaning up an account already deleted elsewhere got `410`, which counted as closed.
-- **Live, read-only, after deploying:** `/health` `200`; the front door `200`; front-door lookup `200` for the owner's username and `404` for an unknown name and for `x@evil.com#`; `/admin/stats` `401` with no token and with a wrong one; an unknown tenant `404`; the deleted `smoke-dev3` `410`; the owner's host serves the app (`200`) and refuses an anonymous API request (`401`); the live bundle matches the local build (`assets/index-DvLwDMRG.js`); the tenant certificate covers `ajac-zero.com`, `pimling.ajac-zero.com` and `*.pimling.ajac-zero.com`, until 2027-01-08.
-- **No disposable live run:** #6 changed only web flows and the smoke script, covered above, so no invite or account was made. Admin stats afterwards: 1 active account (the owner's), 0 pending, 0 deleting, 4 deleted, 2 unused invites, no cleanup queued or failing. The owner's account wasn't touched.
-- **Cloudflare:** only the tenant route was recreated (new ID above). The `packages.ajac-zero.com/*` route and the other 10 custom domains were present after the deploy.
-
-## Acceptance of version `096158e7` (2026-10-10)
-
-- **Owner, on real devices:** memory, scheduling, approvals, and signing in on a phone with Add another device all work.
-- **Scripted, over real HTTPS, from a second orb** (the first had used up its daily registration limit): 29 of 30 checks with the disposable account `smoke-dev3`, which was deleted.
-  - **What passed:** lookup; the desktop passkey; the QR code (decoded from a screenshot); the phone naming the Pimling, the code cleared from the address bar and never sent in a URL; the phone's own passkey and signing in with it alone; replay refused; the desktop, its passkey and all 10 recovery codes untouched; deletion, then `410`.
-  - **The one failure** was the last check, "phone's session is gone too". The phone had already signed out by then, and its request didn't get `410` at that moment; 20 seconds later it did. That fits the gateway's 30-second account cache: an anonymous request served from a cache that still thinks the account is active gets `401`, not `410`. A signed-in request is refused by the agent either way.
-- **[`scripts/live-device-smoke.mjs`](../../scripts/live-device-smoke.mjs)** now:
-  - keeps the phone signed in through the deletion;
-  - records exact statuses;
-  - checks refusal at once and `410` after the cache window separately;
-  - bounds every browser operation (`--cdp-timeout-ms`, default 30 s), so cleanup still runs when a browser hangs;
-  - writes once before deleting (expecting `201`), so the refusal afterwards (`401`, `403` or `410` only) means something;
-  - on a failure, including a registration whose answer was lost, tries to delete the disposable account with the desktop's session, at the Pimling's own host. That session exists only after the desktop's first passkey. With `--admin-token-file`, it falls back to the admin API, which also deletes an account that never got a passkey. For cleanup, `200`, `202` and `410` all count as closed; the run's own deletion must answer `200` or `202` (closed, still being erased). The admin API's `404` counts only as `No account <username>`; a plain `Not found` (admin API off, wrong route) doesn't. Without that file, a failure before the first passkey leaves a pending account (it lapses in a day).
-  - says `CLEANUP NEEDED` and exits `2` whenever the account may be left behind. It never prints the token or any code.
-
-  Run it from a network that hasn't used up the registration limit:
-
-  ```sh
-  node scripts/live-device-smoke.mjs --domain pimling.ajac-zero.com --username smoke-devN \
-    --invite-file ./invite --admin-token-file ~/pimling-deploy/admin-token \
-    --desktop-port 9351 --phone-port 9352
-  ```
-
-## Smoke test (2026-10-10, version `d88a37fc`)
-
-Over real HTTPS, with disposable accounts `smoke-a1`, `smoke-b1` and `smoke-browser`, which were all deleted afterwards (29 of 29 scripted checks, plus a browser run):
-
-- **Front door and TLS:** the front door serves the Universal SSL certificate; tenant hosts serve the `*.pimling.ajac-zero.com` certificate; an unknown tenant gets `404`.
-- **Registration:** refused without an invite; each invite works once; a passkey is made from the setup link; the account becomes active with a distinct owner ID.
-- **Isolation:**
-  - a session cookie and an API token each open nothing at another person's host;
-  - a hostname alone opens nothing;
-  - memories don't cross between people;
-  - ChatGPT-plan sign-in starts per person, with distinct agent host IDs.
-- **Settings and limits:** the time zone comes from registration, approvals are explicit, and the limits above apply.
-- **Model path:** a Workers AI answer in 2.7 s, metered (1 request, 3,284 tokens).
-- **Recovery:** a recovery code makes a passkey once.
-- **Deletion:** `200 { deleted: true }`, then the host answers `410`, admin shows `deleted` with no cleanup left, and the account's token stops working.
-- **In Chrome**, with a virtual authenticator: registration, a real WebAuthn passkey on the tenant host, a chat answered by the model, and deletion from Settings.
-
-Deleted usernames stay reserved by design. The three test usernames remain as `deleted` tombstones, with no data in them.
+`pnpm wrangler delete --config wrangler.ajac-zero.jsonc` removes the Worker, its custom domain and its Durable Objects with all their data. The certificate goes with the custom domain.

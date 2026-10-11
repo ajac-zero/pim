@@ -11,6 +11,8 @@ export type Tamper = {
 	rpId?: string;
 	flags?: number;
 	credentialId?: Uint8Array;
+	/** The user handle a sign-in hands back, instead of the passkey's own. */
+	userHandle?: string;
 };
 
 export const encoder = new TextEncoder();
@@ -43,6 +45,8 @@ export function rawToDer(raw: Uint8Array): Uint8Array {
 /** A software passkey, standing in for a phone or a security key. */
 export class Authenticator {
 	id = crypto.getRandomValues(new Uint8Array(16));
+	/** The user the passkey was made for, as the relying party named them; a sign-in hands it back. */
+	userHandle: string | undefined;
 	constructor(
 		readonly algorithm: "ES256" | "Ed25519",
 		readonly keys: CryptoKeyPair,
@@ -84,7 +88,8 @@ export class Authenticator {
 		return encoder.encode(JSON.stringify({ type, challenge, origin }));
 	}
 
-	async register(options: { challenge: string }, tamper: Tamper = {}) {
+	async register(options: { challenge: string; user?: { id: string } }, tamper: Tamper = {}) {
+		this.userHandle = options.user?.id;
 		const data = await this.#data(
 			tamper.rpId ?? this.site.rpId,
 			tamper.flags ?? 0x45,
@@ -138,6 +143,9 @@ export class Authenticator {
 			signature: base64UrlEncode(
 				signer.algorithm === "ES256" ? rawToDer(signature) : signature,
 			),
+			...(tamper.userHandle !== undefined || this.userHandle !== undefined
+				? { userHandle: tamper.userHandle ?? this.userHandle }
+				: {}),
 		};
 	}
 }

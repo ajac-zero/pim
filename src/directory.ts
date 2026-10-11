@@ -1,33 +1,42 @@
 import { getAgentByName } from "agents";
 import { DurableObject } from "cloudflare:workers";
-import { base64UrlEncode } from "../auth/encoding";
-import { digestHex } from "../auth/store";
+import { base64UrlEncode } from "./auth/encoding";
+import { digestHex } from "./auth/store";
 
 /**
- * Pimling's accounts: which owner each username belongs to, and whether the
- * account works. One Durable Object for the whole service, so a username is
- * taken exactly once and registration limits are exact.
+ * The accounts on this Pim: which owner each username belongs to, who the
+ * admin is, and whether each account works. One Durable Object for the
+ * instance, so a username is taken exactly once, there is one admin, and
+ * registration limits are exact. It also keeps the key that seals sign-in
+ * cookies, and the setup code that lets the instance be claimed from its logs.
+ *
+ * The first account is the admin's. It is made by whoever opens the Pim in
+ * the minutes after a deploy, or with a link from the Worker's logs, which
+ * only someone signed in to the Cloudflare account can read. Everyone else
+ * joins with an invite the admin makes, unless registration is open.
  *
  * An owner ID is random and never changes; the person's agent and sign-in
  * are named after it, never after the username. A username is never reused
- * once its account is active, even after deletion: apps and sign-ins were
- * sent to its hostname, and a new owner must not receive them. Only a
- * registration that never made a passkey gives its username back: when
- * setting it up fails, or a day later.
+ * once its account is active, even after deletion, so nobody inherits what
+ * others knew by that name. Only a registration that never made a passkey
+ * gives its username back: when setting it up fails, or a day later.
  *
  * Erasing an owner's agent and sign-in is a cleanup job kept here, so it
  * survives failures: it is tried at once, retried on this object's alarm
  * until it succeeds, and counts as done only when the agent is marked
  * erased (it then refuses every request, however late) and both objects are
- * checked empty. An account being deleted is `deleting` until then, and its
- * hostname already answers nothing.
+ * checked empty. An account being deleted is `deleting` until then, and
+ * already opens nothing.
  */
 
 export type AccountStatus = "pending" | "active" | "suspended" | "deleting" | "deleted";
 
+export type Role = "admin" | "member";
+
 export type Account = {
 	readonly ownerId: string;
 	readonly username: string;
+	readonly role: Role;
 	readonly status: AccountStatus;
 	readonly createdAt: number;
 	/** When the first passkey was made. */
@@ -43,12 +52,22 @@ export type Registration =
 	| { readonly ok: false; readonly status: number; readonly error: string };
 
 export type RegistrationPolicy = {
+	/** How members join once there is an admin. */
 	readonly mode: "open" | "invite" | "closed";
 	/** Accounts allowed in all, deleted ones not counted; null for no cap. */
 	readonly maxAccounts: number | null;
 	/** Registrations one IP address may make in a day. */
 	readonly perAddressPerDay: number;
 };
+
+/** How someone may claim a Pim that has no admin: in the window after a deploy, or with the setup code from the logs. */
+export type Claim = { readonly window: boolean; readonly code?: string };
+
+/** The setup code that claims a Pim with no admin, as the Worker writes it to its logs. */
+export type ClaimCode = { readonly code: string; readonly expiresAt: number };
+
+/** How long a claim link from the logs works. */
+const CLAIM_CODE_MS = 60 * 60 * 1000;
 
 /** A job that erases an owner's agent and sign-in: of a deleted account, or of a registration that never finished. */
 export type Cleanup = {
@@ -74,6 +93,7 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS accounts (
 	owner_id TEXT PRIMARY KEY,
 	username TEXT NOT NULL UNIQUE,
+	role TEXT NOT NULL DEFAULT 'member',
 	status TEXT NOT NULL,
 	created_at INTEGER NOT NULL,
 	activated_at INTEGER,
@@ -116,6 +136,7 @@ function accountOf(row: Row): Account {
 	return {
 		ownerId: String(row.owner_id),
 		username: String(row.username),
+		role: row.role === "admin" ? "admin" : "member",
 		status: String(row.status) as AccountStatus,
 		createdAt: Number(row.created_at),
 		activatedAt: optionalNumber(row.activated_at),
@@ -136,14 +157,14 @@ function cleanupOf(row: Row): Cleanup {
 	};
 }
 
-/** A lowercase random ID, safe in hostnames, paths and object names: `o_` and 26 base32 characters (130 bits). */
+/** A lowercase random ID, safe in paths, tokens and object names: `o_` and 26 base32 characters (130 bits). */
 function newOwnerId(): string {
 	const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
 	return `o_${[...crypto.getRandomValues(new Uint8Array(26))].map((byte) => alphabet[byte & 31]).join("")}`;
 }
 
 function log(event: string, fields: Record<string, unknown>): void {
-	console.log(JSON.stringify({ event: `pimling.${event}`, ...fields }));
+	console.log(JSON.stringify({ event: `pim.${event}`, ...fields }));
 }
 
 export class Directory extends DurableObject<Env> {
@@ -157,6 +178,54 @@ export class Directory extends DurableObject<Env> {
 
 	#sql(query: string, ...bindings: unknown[]) {
 		return this.ctx.storage.sql.exec(query, ...bindings);
+	}
+
+	#meta(key: string): string | null {
+		const row = this.#sql("SELECT value FROM directory_meta WHERE key = ?", key).toArray()[0];
+		return row ? String(row.value) : null;
+	}
+
+	#setMeta(key: string, value: string | null): void {
+		if (value === null) this.#sql("DELETE FROM directory_meta WHERE key = ?", key);
+		else this.#sql("INSERT OR REPLACE INTO directory_meta (key, value) VALUES (?, ?)", key, value);
+	}
+
+	/** The HMAC key that seals sign-in cookies for everyone on this Pim, made on first use. */
+	cookieKey(): string {
+		let key = this.#meta("cookie_key");
+		if (!key) this.#setMeta("cookie_key", (key = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)))));
+		return key;
+	}
+
+	/** The admin's account, unless there is none yet: a claim that lapsed or an admin who deleted their account leaves the Pim to be claimed again. */
+	admin(now = Date.now()): Account | null {
+		const row = this.#sql(
+			"SELECT * FROM accounts WHERE role = 'admin' AND (status IN ('active', 'suspended') OR (status = 'pending' AND pending_until > ?))",
+			now,
+		).toArray()[0];
+		return row ? accountOf(row) : null;
+	}
+
+	/**
+	 * The setup code that claims this Pim while it has no admin, made when none
+	 * is active. Asking again returns the same one until it expires or is used,
+	 * so asking can't replace the one the operator is about to open.
+	 */
+	claimCode(now = Date.now()): ClaimCode {
+		const stored = this.#meta("claim_code");
+		const active = stored ? (JSON.parse(stored) as ClaimCode) : null;
+		if (active && active.expiresAt > now) return active;
+		const fresh = { code: base64UrlEncode(crypto.getRandomValues(new Uint8Array(32))), expiresAt: now + CLAIM_CODE_MS };
+		this.#setMeta("claim_code", JSON.stringify(fresh));
+		return fresh;
+	}
+
+	async #isClaimCode(code: string, now: number): Promise<boolean> {
+		const stored = this.#meta("claim_code");
+		const active = stored ? (JSON.parse(stored) as ClaimCode) : null;
+		if (!active || active.expiresAt <= now) return false;
+		const digest = (text: string) => crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+		return crypto.subtle.timingSafeEqual(await digest(code), await digest(active.code));
 	}
 
 	/** Addresses are kept only as salted digests, and only for a day. */
@@ -206,47 +275,70 @@ export class Directory extends DurableObject<Env> {
 		for (const row of lapsed) this.#release(String(row.owner_id), now, "lapsed");
 	}
 
-	/** Takes `username` for a new owner, if the policy and the address's recent registrations allow it. */
-	async register(input: { username: string; ip: string; invite?: string; policy: RegistrationPolicy; now?: number }): Promise<Registration> {
+	/**
+	 * Takes `username` for a new owner. While the Pim has no admin, only a
+	 * claim makes an account, and it is the admin's. After that, members join
+	 * as the policy says, within the address's recent registrations.
+	 */
+	async register(input: {
+		username: string;
+		ip: string;
+		invite?: string;
+		claim?: Claim;
+		policy: RegistrationPolicy;
+		now?: number;
+	}): Promise<Registration> {
 		const now = input.now ?? Date.now();
-		const { policy } = input;
-		if (policy.mode === "closed") return { ok: false, status: 403, error: "Registration is closed." };
 		const address = await this.#address(input.ip);
-		const invite = policy.mode === "invite" && input.invite ? await digestHex(input.invite.trim()) : null;
-		// No awaits from here on: checking and taking the username, the invite and a place is one step.
-		const result = this.#takeUsername(input.username, address, invite, policy, now);
+		const invite = input.policy.mode === "invite" && input.invite ? await digestHex(input.invite.trim()) : null;
+		const claimCode = input.claim?.code ? await this.#isClaimCode(input.claim.code, now) : false;
+		// No awaits from here on: checking and taking the username, the invite, the admin's place and a place is one step.
+		const result = this.#takeUsername(input.username, address, invite, Boolean(input.claim?.window) || claimCode, input.policy, now);
+		if (result.ok && result.account.role === "admin" && claimCode) this.#setMeta("claim_code", null);
 		await this.#scheduleAlarm();
 		return result;
 	}
 
-	#takeUsername(username: string, address: string, invite: string | null, policy: RegistrationPolicy, now: number): Registration {
+	#takeUsername(username: string, address: string, invite: string | null, claim: boolean, policy: RegistrationPolicy, now: number): Registration {
 		this.#sql("DELETE FROM registrations WHERE at < ?", now - DAY_MS);
 		const recent = Number(this.#sql("SELECT COUNT(*) AS n FROM registrations WHERE address = ?", address).one().n);
 		if (recent >= policy.perAddressPerDay) {
 			return { ok: false, status: 429, error: "Too many registrations from this network today. Try again tomorrow." };
 		}
-		// Lapsed registrations hold no username, place or invite.
+		// Lapsed registrations hold no username, place, invite or claim.
 		this.#releaseLapsed(now);
-		if (policy.mode === "invite") {
-			const unused = invite && this.#sql("SELECT 1 FROM invites WHERE hash = ? AND used_at IS NULL", invite).toArray().length > 0;
-			if (!unused) return { ok: false, status: 403, error: "Registration needs an invite code, and that one isn't valid." };
+		const role: Role = this.admin(now) === null ? "admin" : "member";
+		if (role === "admin" && !claim) {
+			return {
+				ok: false,
+				status: 403,
+				error: "This Pim isn't set up yet. Open it within 15 minutes of deploying it, or use the setup link from the Worker's logs.",
+			};
 		}
-		if (policy.maxAccounts !== null) {
-			const live = Number(this.#sql("SELECT COUNT(*) AS n FROM accounts WHERE status != 'deleted'").one().n);
-			if (live >= policy.maxAccounts) return { ok: false, status: 503, error: "Pimling is full for now. Try again later." };
+		if (role === "member") {
+			if (policy.mode === "closed") return { ok: false, status: 403, error: "Registration is closed." };
+			if (policy.mode === "invite") {
+				const unused = invite && this.#sql("SELECT 1 FROM invites WHERE hash = ? AND used_at IS NULL", invite).toArray().length > 0;
+				if (!unused) return { ok: false, status: 403, error: "Joining needs an invite, and that one isn't valid." };
+			}
+			if (policy.maxAccounts !== null) {
+				const live = Number(this.#sql("SELECT COUNT(*) AS n FROM accounts WHERE status != 'deleted'").one().n);
+				if (live >= policy.maxAccounts) return { ok: false, status: 503, error: "This Pim is full for now. Ask the person who runs it." };
+			}
 		}
 		if (this.#byUsername(username)) return { ok: false, status: 409, error: "That username is taken." };
 		const ownerId = newOwnerId();
 		this.#sql(
-			"INSERT INTO accounts (owner_id, username, status, created_at, pending_until, status_changed_at) VALUES (?, ?, 'pending', ?, ?, ?)",
+			"INSERT INTO accounts (owner_id, username, role, status, created_at, pending_until, status_changed_at) VALUES (?, ?, ?, 'pending', ?, ?, ?)",
 			ownerId,
 			username,
+			role,
 			now,
 			now + PENDING_MS,
 			now,
 		);
 		this.#sql("INSERT INTO registrations (address, at) VALUES (?, ?)", address, now);
-		if (invite) this.#sql("UPDATE invites SET used_by = ?, used_at = ? WHERE hash = ?", ownerId, now, invite);
+		if (role === "member" && invite) this.#sql("UPDATE invites SET used_by = ?, used_at = ? WHERE hash = ?", ownerId, now, invite);
 		return { ok: true, account: this.account(ownerId)! };
 	}
 
@@ -298,7 +390,7 @@ export class Directory extends DurableObject<Env> {
 	}
 
 	/**
-	 * Starts deleting an account: its hostname stops answering, and a cleanup
+	 * Starts deleting an account: it stops opening anything, and a cleanup
 	 * job will erase it. The username stays taken. Run `runCleanup` to try now.
 	 */
 	async requestDeletion(ownerId: string, by: string, now = Date.now()): Promise<Account | null> {
@@ -345,7 +437,7 @@ export class Directory extends DurableObject<Env> {
 				message,
 				ownerId,
 			);
-			console.error(JSON.stringify({ event: "pimling.cleanup_failed", owner: ownerId, kind: job.kind, attempts, error: message }));
+			console.error(JSON.stringify({ event: "pim.cleanup_failed", owner: ownerId, kind: job.kind, attempts, error: message }));
 			await this.#scheduleAlarm();
 			return { done: false, error: message, nextAttemptAt };
 		}

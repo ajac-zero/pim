@@ -69,7 +69,7 @@ function PimsPage() {
   );
 }
 
-/** Pimling's gallery, where others' Pims are; a self-hosted Pim has none. */
+/** The gallery, where Pims others on this Pim published are. */
 function DiscoverLink() {
   const { t } = useI18n();
   const { data: account } = useQuery(accountQuery());

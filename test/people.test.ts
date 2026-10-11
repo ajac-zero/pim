@@ -1472,6 +1472,7 @@ describe("profiles and published Pims", () => {
 					description: "Plans training weeks.",
 					instructions: "Plan one week at a time.",
 					apps: [{ name: "Strava", url: "https://mcp.strava.example/mcp" }],
+					team: [{ name: "Physio", instructions: "Check every plan for injury risk." }],
 				},
 			})
 		).body;
@@ -1504,6 +1505,7 @@ describe("profiles and published Pims", () => {
 				name: "Marathon coach",
 				instructions: "Plan two weeks at a time.",
 				apps: [{ name: "Strava", url: "https://mcp.strava.example/mcp" }],
+				team: [{ name: "Physio", instructions: "Check every plan for injury risk.", tools: null }],
 				source: { template: templateId, author: "dee" },
 				published: null,
 			},

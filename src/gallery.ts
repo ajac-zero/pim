@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { HttpError } from "./http";
-import type { SuggestedApp } from "./personas";
+import type { SuggestedApp, TeamMember } from "./personas";
 
 /**
  * What the people on a Pim show each other: profiles, and the Pims they
@@ -8,7 +8,7 @@ import type { SuggestedApp } from "./personas";
  * the instance, apart from the Directory, so browsing never touches accounts.
  *
  * A template is a copy of one of its author's Pims when they published it:
- * its name, description, instructions and suggested apps, never their
+ * its name, description, instructions, suggested apps and team, never their
  * memory, conversations or credentials. Publishing again replaces it.
  *
  * The admin also chooses the Pim everyone starts with: a copy of one of
@@ -30,6 +30,7 @@ export type Template = {
 	readonly description: string;
 	readonly instructions: string;
 	readonly apps: readonly SuggestedApp[];
+	readonly team: readonly TeamMember[];
 	readonly publishedAt: number;
 	/** How many people made it their own. */
 	readonly uses: number;
@@ -45,6 +46,7 @@ export type DefaultPim = {
 	readonly description: string;
 	readonly instructions: string;
 	readonly apps: readonly SuggestedApp[];
+	readonly team: readonly TeamMember[];
 	readonly updatedAt: number;
 };
 
@@ -103,6 +105,7 @@ function templateOf(row: Row): Template {
 		description: String(row.description),
 		instructions: String(row.instructions),
 		apps: JSON.parse(String(row.apps)) as SuggestedApp[],
+		team: JSON.parse(String(row.team ?? "[]")) as TeamMember[],
 		publishedAt: Number(row.published_at),
 		uses: Number(row.uses),
 	};
@@ -127,6 +130,10 @@ export class Gallery extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		ctx.storage.sql.exec(SCHEMA);
+		for (const table of ["templates", "default_pim"]) {
+			const columns = ctx.storage.sql.exec(`PRAGMA table_info(${table})`).toArray().map((row) => String(row.name));
+			if (!columns.includes("team")) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN team TEXT NOT NULL DEFAULT '[]'`);
+		}
 	}
 
 	#sql(query: string, ...bindings: unknown[]) {
@@ -164,7 +171,14 @@ export class Gallery extends DurableObject<Env> {
 	publish(
 		ownerId: string,
 		username: string,
-		persona: { id: string; name: string; description: string; instructions: string; apps: readonly SuggestedApp[] },
+		persona: {
+			id: string;
+			name: string;
+			description: string;
+			instructions: string;
+			apps: readonly SuggestedApp[];
+			team: readonly TeamMember[];
+		},
 	): Template {
 		const [known] = this.#sql("SELECT id FROM templates WHERE owner_id = ? AND persona_id = ?", ownerId, persona.id).toArray();
 		if (!known) {
@@ -173,8 +187,8 @@ export class Gallery extends DurableObject<Env> {
 		}
 		const id = known ? String(known.id) : `t_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 		this.#sql(
-			`INSERT INTO templates (id, owner_id, username, persona_id, name, description, instructions, apps, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (id) DO UPDATE SET name = excluded.name, description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, published_at = excluded.published_at`,
+			`INSERT INTO templates (id, owner_id, username, persona_id, name, description, instructions, apps, team, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (id) DO UPDATE SET name = excluded.name, description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, published_at = excluded.published_at`,
 			id,
 			ownerId,
 			username,
@@ -183,6 +197,7 @@ export class Gallery extends DurableObject<Env> {
 			persona.description,
 			persona.instructions,
 			JSON.stringify(persona.apps),
+			JSON.stringify(persona.team),
 			Date.now(),
 		);
 		return this.template(id)!;
@@ -244,6 +259,7 @@ export class Gallery extends DurableObject<Env> {
 			description: String(row.description),
 			instructions: String(row.instructions),
 			apps: JSON.parse(String(row.apps)) as SuggestedApp[],
+			team: JSON.parse(String(row.team ?? "[]")) as TeamMember[],
 			updatedAt: Number(row.updated_at),
 		};
 	}
@@ -252,12 +268,19 @@ export class Gallery extends DurableObject<Env> {
 	setDefaultPim(
 		ownerId: string,
 		username: string,
-		persona: { id: string; name: string; description: string; instructions: string; apps: readonly SuggestedApp[] },
+		persona: {
+			id: string;
+			name: string;
+			description: string;
+			instructions: string;
+			apps: readonly SuggestedApp[];
+			team: readonly TeamMember[];
+		},
 	): DefaultPim {
 		this.#sql(
-			`INSERT INTO default_pim (id, owner_id, username, persona_id, name, description, instructions, apps, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO default_pim (id, owner_id, username, persona_id, name, description, instructions, apps, team, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET owner_id = excluded.owner_id, username = excluded.username, persona_id = excluded.persona_id, name = excluded.name,
-			description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, updated_at = excluded.updated_at`,
+			description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, updated_at = excluded.updated_at`,
 			ownerId,
 			username,
 			persona.id,
@@ -265,6 +288,7 @@ export class Gallery extends DurableObject<Env> {
 			persona.description,
 			persona.instructions,
 			JSON.stringify(persona.apps),
+			JSON.stringify(persona.team),
 			Date.now(),
 		);
 		return this.defaultPim()!;

@@ -23,6 +23,7 @@ import {
   type PersonaInput,
   pim,
   type SuggestedApp,
+  type TeamMember,
 } from "~/lib/pim-api";
 import {
   accountQuery,
@@ -41,6 +42,7 @@ const EMPTY: PersonaInput = {
   description: "",
   instructions: "",
   apps: [],
+  team: [],
 };
 
 /** Your Pims: named agents with their own instructions, your default one first. */
@@ -205,6 +207,23 @@ function PersonaCard({ persona }: { persona: Persona }) {
         </p>
       )}
       {persona.apps.length > 0 && <SuggestedApps apps={persona.apps} />}
+      {persona.team.length > 0 && (
+        <ul
+          className="mt-2 flex flex-wrap gap-1.5"
+          aria-label={t("teamOf", { name: persona.name })}
+        >
+          {persona.team.map((member) => (
+            <li
+              key={member.name}
+              className="flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-0.5 text-xs"
+              title={member.instructions}
+            >
+              <Bot className="size-3 text-muted-foreground" />
+              {member.name}
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <Button
           size="sm"
@@ -345,20 +364,35 @@ function PersonaForm({
 }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  // Each app row keeps a key of its own while edited, so removing one doesn't shift the others' inputs.
+  // Each app and member row keeps a key of its own while edited, so removing one doesn't shift the others' inputs.
   const [value, setValue] = useState<
-    Omit<PersonaInput, "apps"> & { apps: (SuggestedApp & { key: string })[] }
+    Omit<PersonaInput, "apps" | "team"> & {
+      apps: (SuggestedApp & { key: string })[];
+      team: (Omit<TeamMember, "tools"> & { tools: string; key: string })[];
+    }
   >({
     name: initial.name,
     description: initial.description,
     instructions: initial.instructions,
     apps: initial.apps.map((app) => ({ ...app, key: crypto.randomUUID() })),
+    team: initial.team.map((member) => ({
+      ...member,
+      tools: member.tools?.join(", ") ?? "",
+      key: crypto.randomUUID(),
+    })),
   });
   const save = useMutation({
     mutationFn: () => {
       const input: PersonaInput = {
         ...value,
         apps: value.apps.map(({ name, url }) => ({ name, url })),
+        team: value.team.map(({ name, instructions, tools }) => {
+          const names = tools
+            .split(",")
+            .map((tool) => tool.trim())
+            .filter(Boolean);
+          return { name, instructions, tools: names.length > 0 ? names : null };
+        }),
       };
       return id ? pim.updatePersona(id, input) : pim.createPersona(input);
     },
@@ -373,6 +407,16 @@ function PersonaForm({
     event.preventDefault();
     save.mutate();
   };
+  const setMember = (
+    key: string,
+    member: Partial<{ name: string; instructions: string; tools: string }>,
+  ) =>
+    setValue({
+      ...value,
+      team: value.team.map((current) =>
+        current.key === key ? { ...current, ...member } : current,
+      ),
+    });
   const setApp = (key: string, app: Partial<SuggestedApp>) =>
     setValue({
       ...value,
@@ -475,6 +519,91 @@ function PersonaForm({
             }
           >
             <Plus /> {t("addApp")}
+          </Button>
+        )}
+      </fieldset>
+      <fieldset className="space-y-2">
+        <legend className="font-medium text-sm">{t("team")}</legend>
+        <p className="text-muted-foreground text-xs">{t("teamHint")}</p>
+        {value.team.map((member) => (
+          <div key={member.key} className="space-y-2 rounded-lg border p-3">
+            <div className="flex gap-2">
+              <Input
+                value={member.name}
+                onChange={(event) =>
+                  setMember(member.key, { name: event.target.value })
+                }
+                placeholder={t("memberNamePlaceholder")}
+                aria-label={t("memberName")}
+                maxLength={40}
+                required
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label={t("removeTeamMember")}
+                onClick={() =>
+                  setValue({
+                    ...value,
+                    team: value.team.filter(
+                      (other) => other.key !== member.key,
+                    ),
+                  })
+                }
+              >
+                <X />
+              </Button>
+            </div>
+            <textarea
+              value={member.instructions}
+              onChange={(event) =>
+                setMember(member.key, { instructions: event.target.value })
+              }
+              placeholder={t("memberInstructionsPlaceholder")}
+              aria-label={t("memberInstructions")}
+              maxLength={8000}
+              required
+              rows={3}
+              className="w-full rounded-md border bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            />
+            <Input
+              value={member.tools}
+              onChange={(event) =>
+                setMember(member.key, { tools: event.target.value })
+              }
+              placeholder={t("memberTools")}
+              aria-label={t("memberTools")}
+              title={t("memberToolsHint")}
+            />
+          </div>
+        ))}
+        {value.team.length > 0 && (
+          <p className="text-muted-foreground text-xs">
+            {t("memberToolsHint")}
+          </p>
+        )}
+        {value.team.length < 8 && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              setValue({
+                ...value,
+                team: [
+                  ...value.team,
+                  {
+                    name: "",
+                    instructions: "",
+                    tools: "",
+                    key: crypto.randomUUID(),
+                  },
+                ],
+              })
+            }
+          >
+            <Plus /> {t("addMember")}
           </Button>
         )}
       </fieldset>

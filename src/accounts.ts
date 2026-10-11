@@ -224,8 +224,8 @@ async function register(request: Request, env: Env, now: number): Promise<Respon
 		// Everyone starts with a copy of the Pim the admin chose, or a plain one when they chose none.
 		const everyone = await gallery(env).defaultPim();
 		if (everyone) {
-			const { author, name, description, instructions, apps } = everyone;
-			await agent.adoptDefaultPim({ author, name, description, instructions, apps });
+			const { author, name, description, instructions, apps, team } = everyone;
+			await agent.adoptDefaultPim({ author, name, description, instructions, apps, team });
 		}
 		if (typeof body?.timeZone === "string") {
 			// The browser's zone, a good first guess; a bad one is just not applied.

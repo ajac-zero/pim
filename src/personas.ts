@@ -9,10 +9,22 @@ import { HttpError } from "./http";
  * approvals are shared by all of them. One can be published as a template
  * others make their own (see ./gallery.ts); a copy made from a template
  * remembers where it came from.
+ *
+ * A Pim can have a team: named members with instructions of their own,
+ * which it hands tasks to and which work in parallel (see ./team.ts). The
+ * person talks only with the Pim.
  */
 
 /** An app a template suggests connecting: by its MCP server URL, never with credentials. */
 export type SuggestedApp = { readonly name: string; readonly url: string };
+
+/** One of a Pim's team: it does tasks the Pim hands it, and answers the Pim, never the person. */
+export type TeamMember = {
+	readonly name: string;
+	readonly instructions: string;
+	/** The tools it may use, by name; null for all the Pim's tools a member can have. */
+	readonly tools: readonly string[] | null;
+};
 
 export type Persona = {
 	readonly id: string;
@@ -20,6 +32,7 @@ export type Persona = {
 	readonly description: string;
 	readonly instructions: string;
 	readonly apps: readonly SuggestedApp[];
+	readonly team: readonly TeamMember[];
 	/** The template it was made from. */
 	readonly source: { readonly template: string; readonly author: string } | null;
 	/** Its published template, if the owner published it. */
@@ -35,6 +48,7 @@ export type PersonaInput = {
 	readonly description: string;
 	readonly instructions: string;
 	readonly apps: readonly SuggestedApp[];
+	readonly team: readonly TeamMember[];
 };
 
 export const MAX_PERSONAS = 20;
@@ -42,9 +56,12 @@ export const MAX_NAME = 60;
 export const MAX_DESCRIPTION = 280;
 export const MAX_INSTRUCTIONS = 8000;
 export const MAX_APPS = 10;
+export const MAX_TEAM = 8;
+export const MAX_MEMBER_NAME = 40;
+export const MAX_MEMBER_TOOLS = 50;
 
 /** The default Pim of an account that has no other: the agent's own habits, nothing on top. */
-export const PLAIN_PIM: PersonaInput = { name: "Pim", description: "", instructions: "", apps: [] };
+export const PLAIN_PIM: PersonaInput = { name: "Pim", description: "", instructions: "", apps: [], team: [] };
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS pim_personas (
@@ -57,7 +74,8 @@ CREATE TABLE IF NOT EXISTS pim_personas (
 	published TEXT,
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
-	is_default INTEGER NOT NULL DEFAULT 0
+	is_default INTEGER NOT NULL DEFAULT 0,
+	team TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS pim_persona_sessions (
 	session TEXT PRIMARY KEY,
@@ -73,6 +91,7 @@ const personaOf = (row: Row): Persona => ({
 	description: String(row.description),
 	instructions: String(row.instructions),
 	apps: JSON.parse(String(row.apps)) as SuggestedApp[],
+	team: JSON.parse(String(row.team)) as TeamMember[],
 	source: row.source ? (JSON.parse(String(row.source)) as Persona["source"]) : null,
 	published: row.published === null ? null : String(row.published),
 	default: Number(row.is_default) === 1,
@@ -108,7 +127,30 @@ export function personaInput(body: Record<string, unknown>, partial?: Persona): 
 			}
 			return { name: text(name, "app name", 40, true), url };
 		}),
+		team: body.team === undefined ? (partial?.team ?? []) : teamInput(body.team),
 	};
+}
+
+/** A team as given: up to `MAX_TEAM` members with distinct names, each with instructions. */
+function teamInput(value: unknown): TeamMember[] {
+	if (!Array.isArray(value) || value.length > MAX_TEAM) throw new HttpError(400, `team must be a list of up to ${MAX_TEAM} members`);
+	const names = new Set<string>();
+	return value.map((member) => {
+		const { name: given, instructions, tools } = (member ?? {}) as { name?: unknown; instructions?: unknown; tools?: unknown };
+		const name = text(given, "a team member's name", MAX_MEMBER_NAME, true);
+		if (names.has(name.toLowerCase())) throw new HttpError(400, `Two team members are called ${name}`);
+		names.add(name.toLowerCase());
+		if (tools !== undefined && tools !== null) {
+			if (!Array.isArray(tools) || tools.length > MAX_MEMBER_TOOLS || tools.some((tool) => typeof tool !== "string" || !/^[\w.-]{1,128}$/.test(tool))) {
+				throw new HttpError(400, `A team member's tools must be a list of up to ${MAX_MEMBER_TOOLS} tool names`);
+			}
+		}
+		return {
+			name,
+			instructions: text(instructions, `${name}'s instructions`, MAX_INSTRUCTIONS, true),
+			tools: tools === undefined || tools === null ? null : [...new Set(tools as string[])],
+		};
+	});
 }
 
 /** What a chat's Pim adds to the agent's own habits: who it is, and its instructions. */
@@ -126,6 +168,7 @@ export class PersonaStore {
 		this.#sql.exec(SCHEMA);
 		const columns = this.#sql.exec("PRAGMA table_info(pim_personas)").toArray().map((row) => String(row.name));
 		if (!columns.includes("is_default")) this.#sql.exec("ALTER TABLE pim_personas ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0");
+		if (!columns.includes("team")) this.#sql.exec("ALTER TABLE pim_personas ADD COLUMN team TEXT NOT NULL DEFAULT '[]'");
 	}
 
 	/** The default one first, then the others as they were made. */
@@ -162,12 +205,13 @@ export class PersonaStore {
 		const id = `p_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT INTO pim_personas (id, name, description, instructions, apps, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+			"INSERT INTO pim_personas (id, name, description, instructions, apps, team, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
 			id,
 			input.name,
 			input.description,
 			input.instructions,
 			JSON.stringify(input.apps),
+			JSON.stringify(input.team),
 			source === null ? null : JSON.stringify(source),
 			now,
 			now,
@@ -178,11 +222,12 @@ export class PersonaStore {
 
 	update(id: string, input: PersonaInput): Persona {
 		this.#sql.exec(
-			"UPDATE pim_personas SET name = ?, description = ?, instructions = ?, apps = ?, updated_at = ? WHERE id = ?",
+			"UPDATE pim_personas SET name = ?, description = ?, instructions = ?, apps = ?, team = ?, updated_at = ? WHERE id = ?",
 			input.name,
 			input.description,
 			input.instructions,
 			JSON.stringify(input.apps),
+			JSON.stringify(input.team),
 			Date.now(),
 			id,
 		);

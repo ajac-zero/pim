@@ -1,6 +1,6 @@
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { Schedule } from "agents";
-import type { Approval, Notification, PimStore, ToolPermission } from "../store";
+import type { Approval, ApprovalMember, Notification, PimStore, ToolPermission } from "../store";
 
 /** Payload of a schedule created by `schedule_task`. */
 export type ScheduledTaskPayload = {
@@ -43,6 +43,8 @@ export type PimServices = {
 	approvalFiled(approval: Approval, isNew: boolean): Promise<string>;
 	/** The user's permission for the tool that filed the approval: `on` approves it without asking. */
 	permission(approval: Approval): ToolPermission;
+	/** The team member a conversation is, and the chat it works for; null for a chat of the person's. */
+	teamMember(session: string): ApprovalMember | null;
 };
 
 export function text(value: string, isError = false): ToolExecutionResult {

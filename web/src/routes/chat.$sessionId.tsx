@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { toast } from "sonner";
 import { sessionTitle, useNewChat } from "~/components/app-sidebar";
 import { Composer } from "~/components/chat/composer";
+import { TeamPanel } from "~/components/chat/team";
 import { Thread } from "~/components/chat/thread";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
@@ -118,6 +119,13 @@ function ChatPage() {
             ref={composerCardRef}
             className="pointer-events-auto w-full max-w-3xl"
           >
+            {session?.persona && (
+              <TeamPanel
+                sessionId={sessionId}
+                pimName={session.persona.name}
+                running={ready && view.running}
+              />
+            )}
             <Composer
               key={sessionId}
               onSend={send}

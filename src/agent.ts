@@ -2,6 +2,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/pi-ai";
 import { createModels, type Models } from "@earendil-works/pi-ai/models";
 import {
+	type AgentChange,
 	type AgentEventStream,
 	type ConversationId,
 	type UserInput,
@@ -64,7 +65,7 @@ import { createOptMem } from "./extensions/optmem";
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
 import { byteLength, ENTRY_BYTES, entryLine } from "./extensions/optmem/store";
 import { personaExtension } from "./extensions/persona";
-import { describeSchedule, scheduleExtension } from "./extensions/schedule";
+import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import { dispatch, HttpError, readJson, type Route } from "./http";
@@ -80,7 +81,8 @@ import {
 	TOOL_PERMISSIONS,
 	type ToolPermission,
 } from "./store";
-import { type Persona, type PersonaInput, PersonaStore, personaInput } from "./personas";
+import { type Persona, type PersonaInput, PersonaStore, personaInput, type TeamMember } from "./personas";
+import { type Role, TEAM_EXTENSION, type TeamRun, TeamStore, teamExtension } from "./team";
 import { projectEntries } from "./transcript";
 import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
@@ -149,6 +151,8 @@ const MODEL_KEY = "model";
 const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
+/** Tools of the Pim the person talks with that its team members don't get, though their extensions stay. */
+const LEAD_ONLY_TOOLS = new Set(["watch_app_event"]);
 /** Set once chats' Pims come from the prompt's `pim` section, not from instructions stored in each chat. */
 const PIM_SECTION_KEY = "pim_section";
 /** The day the person was last told a limit stopped background work. */
@@ -208,6 +212,8 @@ export class Pim extends Agent<Env> {
 	readonly visits = new VisitStore(this.ctx.storage.sql);
 	/** The owner's Pims: named agents with their own instructions, the default one first. */
 	readonly personas = new PersonaStore(this.ctx.storage.sql);
+	/** The tasks the Pims' teams were given, each in a conversation of its own. */
+	readonly team = new TeamStore(this.ctx.storage.sql);
 	/** What the agent made for its owner, with every version. */
 	readonly artifacts = new ArtifactStore(this.ctx.storage.sql, () => this.limits(), {
 		storageRoom: () => {
@@ -295,10 +301,18 @@ export class Pim extends Agent<Env> {
 		harness: async ({ storage, context }) => {
 			const services = this.services();
 			this.#migrateAlwaysApproved();
-			this.registry.install(personaExtension(services, (session) => this.personas.ofSession(session)));
+			this.registry.install(personaExtension(services, (session) => this.#roleOf(session)));
 			this.registry.install(goalsExtension(services));
 			this.registry.install(scheduleExtension(services));
 			this.registry.install(messagingExtension(services));
+			this.registry.install(
+				teamExtension({
+					roleOf: (session) => this.#roleOf(session),
+					runs: this.team,
+					memberAgent: (member) => this.#memberAgent(member),
+					ask: (conversation, task, operation) => this.#askMember(conversation, task, operation),
+				}),
+			);
 			this.registry.install(approvalsExtension(services, this.actions));
 			this.registry.install(webExtension({ ai: this.env.AI, searchProvider: this.env.PIM_WEB_SEARCH }));
 			this.registry.install(artifactsExtension({ artifacts: this.artifacts, assertOpen: () => this.#assertOpen() }));
@@ -582,6 +596,10 @@ export class Pim extends Agent<Env> {
 			},
 			approvalFiled: (approval, isNew) => this.#approvalFiled(approval, isNew),
 			permission: (approval) => this.#approvalPermission(approval),
+			teamMember: (session) => {
+				const run = this.team.run(session);
+				return run ? { name: run.member, session: run.session } : null;
+			},
 		};
 	}
 
@@ -599,6 +617,8 @@ export class Pim extends Agent<Env> {
 		for (const connection of this.getConnections<SocketState>()) {
 			if (connection.state?.session) await this.#watch(connection, connection.state.session);
 		}
+		// Members' answers after an approval that an eviction kept from their chats.
+		for (const { run, operation } of this.team.reports()) void this.#report(run, operation);
 	}
 
 	/**
@@ -781,7 +801,8 @@ export class Pim extends Agent<Env> {
 			this.broadcastMessage({ type: "approval", approval });
 			const notification = this.store.addNotification({
 				id: crypto.randomUUID(),
-				session: approval.session,
+				// A team member's request shows in the chat it works for.
+				session: approval.member?.session ?? approval.session,
 				title: "Pim needs your approval",
 				body: approval.summary,
 			});
@@ -864,7 +885,15 @@ export class Pim extends Agent<Env> {
 			return decided;
 		}
 		if (!options.inTurn) {
-			await this.submitTo(approval.session, this.#outcome(decided), { operationId: `approval:${id}`, whenBusy: "steer" }, "approval");
+			const operation = `approval:${id}`;
+			await this.submitTo(approval.session, this.#outcome(decided), { operationId: operation, whenBusy: "steer" }, "approval");
+			// A member whose task already ended answers its Pim's chat once it has gone on; one still at work answers the task.
+			const run = this.team.run(approval.session);
+			if (run && run.status !== "running") {
+				this.team.setStatus(run.conversation, "running");
+				this.team.setReport(run.conversation, operation);
+				void this.#report(run, operation);
+			}
 		}
 		return decided;
 	}
@@ -1252,7 +1281,67 @@ export class Pim extends Agent<Env> {
 		await this.expireApproval(payload);
 	}
 
-	// The owner's Pims.
+	// The owner's Pims, and their teams.
+
+	/** The Pim a conversation talks as, and the team member it is, if it is one. */
+	#roleOf(session: string): Role {
+		const run = this.team.run(session);
+		if (!run) return { pim: this.personas.ofSession(session), member: null };
+		const pim = this.personas.get(run.persona) ?? this.personas.default();
+		// A member taken off the team since keeps working on what it was given, with no instructions of its own.
+		const member = pim.team.find((candidate) => candidate.name === run.member) ?? { name: run.member, instructions: "", tools: null };
+		return { pim, member };
+	}
+
+	/**
+	 * A member's conversation leaves out what only the Pim the person talks
+	 * with does: talking to them, scheduling work and watching apps' events
+	 * (both come back to the conversation that asked), and handing out tasks.
+	 * A member with a list of tools gets only those.
+	 */
+	#memberAgent(member: TeamMember): AgentChange {
+		const snapshot = this.registry.snapshot();
+		const removed = [MESSAGING_EXTENSION, SCHEDULE_EXTENSION, TEAM_EXTENSION].flatMap((name) => snapshot.extension(name) ?? []);
+		const kept = snapshot.tools().filter(({ extension, tool }) => !removed.includes(extension) && !LEAD_ONLY_TOOLS.has(tool.name));
+		if (member.tools) return { extensions: { remove: removed }, tools: kept.filter(({ tool }) => member.tools!.includes(tool.name)).map(({ tool }) => tool) };
+		const leadOnly = snapshot.tools().filter(({ tool }) => LEAD_ONLY_TOOLS.has(tool.name));
+		return { extensions: { remove: removed }, ...(leadOnly.length > 0 ? { tools: { remove: leadOnly.map(({ tool }) => tool) } } : {}) };
+	}
+
+	/** Gives a member its task and waits for its answer. */
+	async #askMember(conversation: string, task: string, operation: string): Promise<{ ok: boolean; text: string }> {
+		await this.harness.submit(task, { session: conversation, operationId: operation });
+		return this.#memberAnswer(conversation, operation);
+	}
+
+	/** Passes a member's answer after an approval's decision to the chat it works for, once. */
+	async #report(run: TeamRun, operation: string): Promise<void> {
+		try {
+			await this.keepAliveWhile(async () => {
+				const { ok, text } = await this.#memberAnswer(run.conversation, operation);
+				this.team.setStatus(run.conversation, ok ? "done" : "failed");
+				if (!this.store.deletedSessions().has(run.session)) {
+					await this.submitTo(
+						run.session,
+						`[Team: ${run.member}] After the person's decision, ${run.member} answered:\n${text}`,
+						{ operationId: `team-report:${run.conversation}:${operation}`, whenBusy: "followUp" },
+						"pim",
+					);
+				}
+				this.team.setReport(run.conversation, null);
+			});
+		} catch (error) {
+			console.warn(`passing on ${run.member}'s answer failed`, error);
+		}
+	}
+
+	/** What a member answered to an operation, once it settles. */
+	async #memberAnswer(conversation: string, operation: string): Promise<{ ok: boolean; text: string }> {
+		const result = await this.harness.wait(operation, { session: conversation });
+		return result.status === "done"
+			? { ok: true, text: result.text?.trim() || "(It gave no answer.)" }
+			: { ok: false, text: `It didn't finish: ${result.reason ?? "unanswered"}.` };
+	}
 
 	#persona(id: string): Persona {
 		const persona = this.personas.get(id);
@@ -1287,6 +1376,7 @@ export class Pim extends Agent<Env> {
 		description: string;
 		instructions: string;
 		apps: readonly { name: string; url: string }[];
+		team: readonly TeamMember[];
 	}): Promise<Persona> {
 		this.#assertOpen();
 		const input = personaInput({ ...template });
@@ -1591,12 +1681,17 @@ export class Pim extends Agent<Env> {
 		return dispatch(this.#routes, request, new URL(request.url).pathname);
 	}
 
+	/** Conversations that aren't the person's chats: deleted ones, and team members' at work. */
+	#hiddenSessions(): Set<string> {
+		return new Set([...this.store.deletedSessions(), ...this.team.conversations()]);
+	}
+
 	async #session(id: string): Promise<string> {
 		// The root stays reachable when deleted: it is where API clients talk by default.
 		if (id === ROOT_SESSION) return id;
 		if (
 			!SESSION_ID.test(id) ||
-			this.store.deletedSessions().has(id) ||
+			this.#hiddenSessions().has(id) ||
 			!(await this.harness.sessions.list()).some((session) => session.id === id)
 		) {
 			throw new HttpError(404, `No session ${id}`);
@@ -1644,8 +1739,8 @@ export class Pim extends Agent<Env> {
 			"GET",
 			"/sessions",
 			async () => {
-				const deleted = this.store.deletedSessions();
-				const sessions = (await this.harness.sessions.list()).filter((session) => !deleted.has(session.id)).map((session) => {
+				const hidden = this.#hiddenSessions();
+				const sessions = (await this.harness.sessions.list()).filter((session) => !hidden.has(session.id)).map((session) => {
 					const info = this.store.sessionInfo(session.id);
 					const visit = this.visits.bySession(session.id);
 					return {
@@ -1669,8 +1764,8 @@ export class Pim extends Agent<Env> {
 				const persona = personaId === undefined ? undefined : this.#persona(personaId);
 				const { sessions } = this.limits();
 				if (sessions !== null) {
-					const deleted = this.store.deletedSessions();
-					const open = (await this.harness.sessions.list()).filter((session) => !deleted.has(session.id)).length;
+					const hidden = this.#hiddenSessions();
+					const open = (await this.harness.sessions.list()).filter((session) => !hidden.has(session.id)).length;
 					if (open >= sessions) throw new HttpError(429, `You can have up to ${sessions} chats. Delete one first.`);
 				}
 				const { id } = await this.harness.sessions.create();
@@ -1769,6 +1864,21 @@ export class Pim extends Agent<Env> {
 					if (signal.aborted) return { operationId: operation, session: id, status: "pending" };
 					throw error;
 				}
+			},
+		],
+		// What a chat's Pim handed its team, and each member's conversation, read-only.
+		[
+			"GET",
+			"/sessions/:session/team",
+			async ({ session }) => ({ runs: this.team.ofSession(await this.#session(session!)) }),
+		],
+		[
+			"GET",
+			"/sessions/:session/team/:conversation",
+			async ({ session, conversation }) => {
+				const run = this.team.run(conversation!);
+				if (!run || run.session !== (await this.#session(session!))) throw new HttpError(404, `No team task ${conversation}`);
+				return { ...run, messages: projectEntries(await this.harness.session(run.conversation).messages()) };
 			},
 		],
 		[

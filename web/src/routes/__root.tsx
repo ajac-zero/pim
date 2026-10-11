@@ -121,8 +121,9 @@ function usePimEvents() {
           );
           return;
         }
-        // The open chat shows it inline; elsewhere, point to its chat.
-        if (approval.status !== "pending" || approval.session === sessionId) {
+        // The open chat shows it inline; elsewhere, point to its chat (for a team member, the chat it works for).
+        const chat = approval.member?.session ?? approval.session;
+        if (approval.status !== "pending" || chat === sessionId) {
           return;
         }
         toast(t("approvalRequested"), {
@@ -132,7 +133,7 @@ function usePimEvents() {
             onClick: () =>
               navigate({
                 to: "/chat/$sessionId",
-                params: { sessionId: approval.session },
+                params: { sessionId: chat },
               }),
           },
         });

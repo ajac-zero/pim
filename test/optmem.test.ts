@@ -4,8 +4,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { cover } from "../src/extensions/optmem/cover";
-import { AGENT_NAME } from "../src/agent";
-import { api, lastUserText, post, say, toolUse } from "./helpers";
+import { api, lastUserText, OWNER, post, say, toolUse } from "./helpers";
 import { faux, napper, type Pim } from "./worker";
 
 /**
@@ -242,7 +241,7 @@ describe("long-term memory", () => {
 		await settled();
 
 		faux.setResponses([fauxAssistantMessage("The user said one, then asked to remember something.")]);
-		await runInDurableObject(env.Pim.getByName(AGENT_NAME), async (instance: Pim) => {
+		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
 			const pi = await instance.harness.pi();
 			const conversation = (await pi.conversation(Number(session) as never, BACKGROUND_CONTEXT))!;
 			const task = await pi.waitForTask(await conversation.compact(undefined, BACKGROUND_CONTEXT), BACKGROUND_CONTEXT);

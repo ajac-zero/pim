@@ -3,12 +3,11 @@ import { base64UrlEncode } from "./encoding";
 import type { PublicKey } from "./webauthn";
 
 /**
- * Who may use one Pim: its passkeys, whether it has ever had one (so the
- * first can be claimed only once), the one-time setup code that creates a
- * passkey without one, recovery codes, API tokens, and the key that signs
- * session cookies. It lives in its own Durable Object, apart from the agent,
- * so signing in never wakes the agent. One object also makes "use the setup
- * code once" a single step. A hosted service has one per owner.
+ * Who may use one person's Pim: their passkeys, whether they ever had one,
+ * the one-time setup code that creates a passkey without one, recovery
+ * codes, device links and API tokens. It lives in its own Durable Object,
+ * one per owner and apart from the agent, so signing in never wakes the
+ * agent. One object also makes "use the setup code once" a single step.
  */
 
 export type Passkey = {
@@ -113,13 +112,6 @@ export class Auth extends DurableObject<Env> {
 		else this.ctx.storage.sql.exec("INSERT OR REPLACE INTO auth_meta (key, value) VALUES (?, ?)", key, value);
 	}
 
-	/** The HMAC key for session cookies, made on first use. */
-	cookieKey(): string {
-		let key = this.#meta("cookie_key");
-		if (!key) this.#setMeta("cookie_key", (key = randomCode()));
-		return key;
-	}
-
 	publicKey(id: string): PublicKey | null {
 		const row = this.ctx.storage.sql.exec("SELECT spki, algorithm FROM auth_passkeys WHERE id = ?", id).toArray()[0];
 		return row ? { spki: String(row.spki), algorithm: Number(row.algorithm) } : null;
@@ -141,20 +133,15 @@ export class Auth extends DurableObject<Env> {
 			}));
 	}
 
-	/** Whether this Pim has ever had a passkey, even if all were removed since. */
+	/** Whether this person has ever had a passkey, even if all were removed since. */
 	claimed(): boolean {
 		return this.#meta("claimed") !== null;
 	}
 
-	/** Adds the first passkey ever, or nothing if this Pim was claimed already. */
-	claim(id: string, key: PublicKey, name: string, now: number): Passkey | null {
-		return this.claimed() ? null : this.addPasskey(id, key, name, now);
-	}
-
 	addPasskey(id: string, key: PublicKey, name: string, now: number): Passkey {
-		// The first passkey ever, however it was made (setup link, recovery code, claim), ends setting up:
-		// the setup code from registration, or a self-hosted log link, must not make a second one later.
-		// An operator's setup link is issued only after this, so it's unaffected.
+		// The first passkey ever, however it was made (setup link, recovery code), ends setting up:
+		// the setup code from registration must not make a second one later.
+		// An admin's setup link is issued only after this, so it's unaffected.
 		if (!this.claimed()) this.#setMeta("setup_code", null);
 		this.#setMeta("claimed", String(now));
 		this.ctx.storage.sql.exec(
@@ -187,8 +174,8 @@ export class Auth extends DurableObject<Env> {
 
 	/**
 	 * A new setup code that replaces any active one, for whoever was trusted to
-	 * hand it out: a hosted service's registration, or its operator helping a
-	 * person who lost every passkey and recovery code.
+	 * hand it out: registration, or the admin helping a person who lost every
+	 * passkey and recovery code.
 	 */
 	issueSetupCode(now: number, ttlMs: number): SetupCode {
 		const fresh = { code: randomCode(), expiresAt: now + ttlMs };
@@ -311,10 +298,10 @@ export class Auth extends DurableObject<Env> {
 
 	// API tokens, for clients other than the web app.
 
-	/** A new token; its secret is returned only here. */
-	async createToken(name: string, now: number): Promise<ApiToken & { token: string }> {
+	/** A new token for `owner`, whose Auth this is; its secret is returned only here. It names its owner, so the Worker knows whose Auth to ask. */
+	async createToken(owner: string, name: string, now: number): Promise<ApiToken & { token: string }> {
 		const id = base64UrlEncode(crypto.getRandomValues(new Uint8Array(9)));
-		const token = `pim_${randomCode()}`;
+		const token = `pim_${owner}_${randomCode()}`;
 		this.ctx.storage.sql.exec(
 			"INSERT INTO auth_tokens (id, name, hash, created_at) VALUES (?, ?, ?, ?)",
 			id,
@@ -353,9 +340,9 @@ export class Auth extends DurableObject<Env> {
 	}
 
 	/**
-	 * Forgets everything: passkeys, codes, tokens and the cookie key, so no
-	 * session or token works again. What is left is an empty Auth that can't
-	 * be claimed without a setup code.
+	 * Forgets everything: passkeys, codes and tokens, so no session or token
+	 * works again. What is left is an empty Auth that takes a passkey only
+	 * with a setup code.
 	 */
 	async deleteEverything(): Promise<void> {
 		await this.ctx.storage.deleteAll();

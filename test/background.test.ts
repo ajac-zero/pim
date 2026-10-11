@@ -1,8 +1,7 @@
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
-import { AGENT_NAME } from "../src/agent";
-import { api, connect, lastUserText, post, say, toolUse } from "./helpers";
+import { api, connect, lastUserText, OWNER, post, say, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 describe("scheduled tasks", () => {
@@ -33,7 +32,7 @@ describe("scheduled tasks", () => {
 				return fauxAssistantMessage("Same price.");
 			},
 		]);
-		const operation = await runInDurableObject(env.Pim.getByName(AGENT_NAME), async (instance: Pim) => {
+		const operation = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
 			const [due] = await instance.listSchedules();
 			await instance.runScheduledTask(due!.payload as never, due as never);
 			return `schedule:${due!.id}:${due!.time}`;
@@ -141,7 +140,7 @@ describe("web push", () => {
 	}
 
 	const deliver = (title: string, body: string) =>
-		runInDurableObject(env.Pim.get(env.Pim.idFromName(AGENT_NAME)) as unknown as DurableObjectStub<Pim>, (agent) =>
+		runInDurableObject(env.Pim.get(env.Pim.idFromName(OWNER)) as unknown as DurableObjectStub<Pim>, (agent) =>
 			agent.deliverNotification(agent.store.addNotification({ id: crypto.randomUUID(), session: "1", title, body })),
 		);
 

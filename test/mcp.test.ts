@@ -6,9 +6,8 @@ import { createExecutionContext, env, runInDurableObject } from "cloudflare:test
 import { exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { AGENT_NAME } from "../src/agent";
 import type { Approval } from "../src/store";
-import { api, apiUrl, lastUserText, pendingApproval, post, say, toolUse, url } from "./helpers";
+import { api, apiUrl, lastUserText, OWNER, pendingApproval, post, say, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /**
@@ -172,7 +171,7 @@ describe("connected apps (MCP)", () => {
 		expect((await api("/approvals")).body.approvals).toHaveLength(approvals);
 
 		// The app changes the tool after the user let it run: Pim asks again, even with the tools already built.
-		await runInDurableObject(env.Pim.getByName(AGENT_NAME), (instance: Pim) =>
+		await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) =>
 			instance.store.setToolPermission("", "calendar", "create_event", "on", '{"description":"Create a draft."}'),
 		);
 		const permissions = (await api("/permissions")).body.tools;
@@ -196,7 +195,7 @@ describe("connected apps (MCP)", () => {
 	});
 
 	it("keeps an app tool the user always approved before tool permissions", async () => {
-		await runInDurableObject(env.Pim.getByName(AGENT_NAME), (_instance: Pim, state) => {
+		await runInDurableObject(env.Pim.getByName(OWNER), (_instance: Pim, state) => {
 			state.storage.sql.exec("INSERT INTO pim_always_approved (tool, created_at) VALUES ('calendar_create_event', 1)");
 		});
 		// Rebuilding the apps' tools moves it over.
@@ -275,10 +274,20 @@ describe("connected apps (MCP)", () => {
 		]);
 	});
 
+	it("gives apps a sign-in callback that names this Pim's owner, so it comes back to this agent", async () => {
+		const callbacks = await runInDurableObject(env.Pim.getByName(OWNER), (_instance: Pim, state) =>
+			state.storage.sql.exec("SELECT callback_url FROM cf_agents_mcp_servers").toArray().map((row) => row.callback_url),
+		);
+		expect(callbacks.length).toBeGreaterThan(0);
+		for (const callback of callbacks) expect(callback).toBe(`https://pim.test/mcp/callback/${OWNER}`);
+	});
+
 	it("lets the sign-in callback through without the API token, and nothing else", async () => {
-		const callback = await exports.default.fetch(url("/mcp/callback?state=forged&code=x"));
+		const callback = await exports.default.fetch(url(`/mcp/callback/${OWNER}?state=forged&code=x`));
 		expect(callback.status).not.toBe(401);
-		expect((await exports.default.fetch(url("/mcp/callback"), { method: "POST" })).status).toBe(405);
+		expect((await exports.default.fetch(url(`/mcp/callback/${OWNER}`), { method: "POST" })).status).toBe(405);
+		// Nobody's callback: there's no agent to hand it to.
+		expect((await exports.default.fetch(url("/mcp/callback/o_nobody?state=forged&code=x"))).status).toBe(404);
 		expect((await exports.default.fetch(apiUrl("/mcp"))).status).toBe(401);
 	});
 });

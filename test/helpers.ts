@@ -1,16 +1,37 @@
 import type { JsonValue, Message } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { getAgentByName } from "agents";
+import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
-import { afterEach, expect, vi } from "vitest";
+import { afterEach, beforeAll, expect, vi } from "vitest";
 import type { Approval } from "../src/store";
 import type { TranscriptMessage } from "../src/transcript";
 import { faux } from "./worker";
 
 /**
  * Each test file gets its own storage, so each file starts with a fresh
- * agent; tests within a file share it.
+ * Pim; tests within a file share it. Before they run, the file's Pim gets
+ * its admin, whose agent the tests talk to with an API token: `OWNER` names
+ * that agent, and `TOKEN` opens it.
  */
-export const TOKEN = "test-token";
+export let OWNER = "";
+export let TOKEN = "";
+
+beforeAll(async () => {
+	const directory = env.Directory.getByName("directory");
+	const registered = await directory.register({
+		username: "tester",
+		ip: "192.0.2.1",
+		claim: { window: true },
+		policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 },
+	});
+	if (!registered.ok) throw new Error(registered.error);
+	OWNER = registered.account.ownerId;
+	await directory.activate(OWNER);
+	const agent = await getAgentByName(env.Pim, OWNER);
+	await agent.provision({ ownerId: OWNER, username: "tester", publicUrl: "https://pim.test" });
+	TOKEN = (await env.Auth.getByName(OWNER).createToken(OWNER, "tests", Date.now())).token;
+});
 
 export function url(path: string) {
 	return `https://pim.test${path}`;

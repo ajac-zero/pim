@@ -2,9 +2,9 @@ import { HttpError } from "./http";
 import type { PimStore } from "./store";
 
 /**
- * The person's own settings, kept in their agent's database. Each falls back
- * to the deployment's variable, so a self-hosted Pim configured in
- * `wrangler.jsonc` behaves as before until its owner changes something.
+ * The person's own settings, kept in their agent's database. The time zone
+ * and approval policy fall back to the deployment's variables until the
+ * person changes them.
  */
 
 /**
@@ -40,7 +40,7 @@ function defaults(env: Env): Settings {
 	return {
 		timeZone: env.PIM_TIME_ZONE && validTimeZone(env.PIM_TIME_ZONE) ? env.PIM_TIME_ZONE : "UTC",
 		approvalPolicy: policy === "explicit" ? "explicit" : "auto",
-		notifyWebhook: env.PIM_NOTIFY_WEBHOOK || null,
+		notifyWebhook: null,
 	};
 }
 

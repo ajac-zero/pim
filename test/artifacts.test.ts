@@ -3,13 +3,12 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vitest";
-import { AGENT_NAME } from "../src/agent";
 import { MAX_ARTIFACT_STORAGE_BYTES } from "../src/artifacts";
 import type { Limits } from "../src/usage";
-import { api, apiUrl, connect, post, say, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, connect, OWNER, post, say, TOKEN, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
 
-const agent = () => env.Pim.getByName(AGENT_NAME);
+const agent = () => env.Pim.getByName(OWNER);
 const setLimits = (limits: Partial<Limits> | null) => runInDurableObject(agent(), (instance: Pim) => instance.setLimits(limits));
 
 afterEach(async () => {

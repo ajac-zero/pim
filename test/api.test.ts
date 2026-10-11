@@ -3,8 +3,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { TranscriptMessage } from "../src/transcript";
-import { api, apiUrl, connect, post, say, TOKEN, textOf, toolUse, url } from "./helpers";
-import { AGENT_NAME } from "../src/agent";
+import { api, apiUrl, connect, OWNER, post, say, textOf, TOKEN, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 describe("auth", () => {
@@ -120,7 +119,7 @@ describe("conversation", () => {
 		faux.setResponses([fauxAssistantMessage("Ok.")]);
 		await say("Milk and eggs", second);
 		// A message Pim sends itself (a scheduled task, an event) does not name a session.
-		await runInDurableObject(env.Pim.getByName(AGENT_NAME), async (instance: Pim) => {
+		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
 			faux.setResponses([fauxAssistantMessage("Reminder sent.")]);
 			const receipt = await instance.submitTo(third, "[Scheduled task] remind", {}, "pim");
 			await instance.harness.wait(receipt.operationId, { session: third });

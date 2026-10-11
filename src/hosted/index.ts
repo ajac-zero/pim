@@ -186,6 +186,33 @@ function accountApi(env: HostedEnv, account: Account, site: AuthSite, request: R
 	};
 }
 
+/**
+ * `POST /api/circles/:circle/members`: puts someone in one of the person's
+ * circles by their username, answered here because only the Directory knows
+ * whose Pim a username is. The agent does the rest, and tells theirs.
+ */
+function circlesApi(env: HostedEnv, account: Account, request: Request): ApiExtension {
+	return async (path) => {
+		const match = /^\/circles\/([^/]+)\/members$/.exec(path);
+		if (!match || request.method !== "POST") return undefined;
+		const body = (await request.json().catch(() => null)) as { username?: unknown } | null;
+		const username = typeof body?.username === "string" ? body.username.trim().toLowerCase().replace(/^@/, "") : "";
+		const guest = usernameProblem(username) === null ? await resolveAccount(env, username) : null;
+		if (!guest || guest.status !== "active") return fail(404, `There's no Pimling called ${username || "that"}.`);
+		if (guest.ownerId === account.ownerId) return fail(400, "You can't add yourself to a circle.");
+		try {
+			const agent = await agentOf(env, account.ownerId);
+			const member = await agent.addCircleMember(decodeURIComponent(match[1]!), { ownerId: guest.ownerId, username: guest.username });
+			log("circle_member_added", { owner: account.ownerId, member: guest.ownerId });
+			return json(member, 201);
+		} catch (error) {
+			// The agent's own refusals (no such circle) arrive as plain errors across RPC.
+			const message = error instanceof Error ? error.message : String(error);
+			return fail(/No circle/.test(message) ? 404 : 400, message);
+		}
+	};
+}
+
 /** `<username>.<domain>`: one person's Pim. */
 async function servePerson(request: Request, env: HostedEnv, username: string): Promise<Response> {
 	const { pathname } = new URL(request.url);
@@ -212,7 +239,9 @@ async function servePerson(request: Request, env: HostedEnv, username: string): 
 		return withCors(fail(429, "Too many requests. Slow down a little."));
 	}
 	const site = siteFor(env, account);
-	return servePim(request, env, site, accountApi(env, account, site, request));
+	const accountRoutes = accountApi(env, account, site, request);
+	const circleRoutes = circlesApi(env, account, request);
+	return servePim(request, env, site, async (path, forwarded) => (await accountRoutes(path, forwarded)) ?? circleRoutes(path, forwarded));
 }
 
 /** The domain itself: registration. */

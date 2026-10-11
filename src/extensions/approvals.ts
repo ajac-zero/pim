@@ -6,7 +6,7 @@ import {
 	type ToolExecutionApi,
 	type ToolExecutionResult,
 } from "@earendil-works/pi-durable";
-import type { PimStore, ToolPermission } from "../store";
+import { OWNER, type PimStore, type ToolPermission } from "../store";
 import { type PimServices, text } from "./services";
 
 /** A tool's permission as it applies now. */
@@ -16,33 +16,40 @@ export type ResolvedPermission = {
 	readonly default: ToolPermission;
 	/** What the user chose, if anything. */
 	readonly chosen: ToolPermission | null;
-	/** The app changed the tool since the user chose `on`, so Pim asks again until they choose anew. */
+	/**
+	 * The app changed the tool since the user chose to let it run: the owner's
+	 * Pim asks again, and a circle's guests lose it, until they choose anew.
+	 */
 	readonly changed: boolean;
 };
 
 /**
- * The user's choice for a tool, or `fallback` without one. A choice is tied
- * to the tool's `definition` when it was made: an app that changes a tool
- * the user let run without asking (its description, inputs, or claims about
- * itself) gets it asked about again, so a tool can't turn into something
- * else under a permission given to what it was.
+ * The user's choice for a tool, for the owner (`OWNER`) or a circle, or
+ * `fallback` without one. A choice is tied to the tool's `definition` when it
+ * was made: an app that changes a tool the user let run (its description,
+ * inputs, or claims about itself) gets it asked about again in the owner's
+ * Pim, and taken from guests, so a tool can't turn into something else under
+ * a permission given to what it was.
  */
 export function resolvePermission(
 	store: PimStore,
+	audience: string,
 	app: string,
 	tool: string,
 	fallback: ToolPermission,
 	definition: string | null,
 ): ResolvedPermission {
-	const choice = store.toolPermission(app, tool);
+	const choice = store.toolPermission(audience, app, tool);
 	if (!choice) return { permission: fallback, default: fallback, chosen: null, changed: false };
-	const changed = choice.permission === "on" && choice.definition !== definition;
-	return { permission: changed ? "ask" : choice.permission, default: fallback, chosen: choice.permission, changed };
+	const owner = audience === OWNER;
+	const changed = (owner ? choice.permission === "on" : choice.permission !== "off") && choice.definition !== definition;
+	const permission = changed ? (owner ? "ask" : "off") : choice.permission;
+	return { permission, default: fallback, chosen: choice.permission, changed };
 }
 
 /** The permission of one of Pim's own tools that ask first: they ask unless the user chose otherwise. */
 export function ownToolPermission(store: PimStore, name: string): ResolvedPermission {
-	return resolvePermission(store, "", name, "ask", null);
+	return resolvePermission(store, OWNER, "", name, "ask", null);
 }
 
 /**

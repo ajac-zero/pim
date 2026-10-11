@@ -10,10 +10,11 @@ import {
 	type ModelRef,
 	ROOT_CONVERSATION_ID,
 } from "@earendil-works/pi-durable";
-import { Agent, type Connection, type ConnectionContext, type Schedule, type WSMessage } from "agents";
+import { Agent, type Connection, type ConnectionContext, getAgentByName, type Schedule, type WSMessage } from "agents";
 import { type PiModel, PiHarness, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
 import { ArtifactStore, artifactHeaders, downloadName, RESIZE_SCRIPT } from "./artifacts";
+import { type Circle, CircleStore, type Guest, MAX_CIRCLE_NAME, MAX_CIRCLES, type Member } from "./circles";
 import { CHATGPT_PROVIDER, ChatGPT, chatgptCredentials } from "./chatgpt";
 import { SqlCredentialStore } from "./credentials";
 import { AppCatalog } from "./extensions/app-catalog";
@@ -26,6 +27,7 @@ import {
 	httpRequest,
 	ownToolPermission,
 	type ResolvedPermission,
+	resolvePermission,
 } from "./extensions/approvals";
 import { artifactsExtension } from "./extensions/artifacts";
 import { goalsExtension } from "./extensions/goals";
@@ -36,11 +38,15 @@ import {
 	type McpBridge,
 	type McpCapabilities,
 	type McpResourceContent,
+	type McpServerInfo,
+	type McpToolInfo,
 	mcpActions,
 	mcpExtensions,
 	slug,
+	summarizeCall,
 	toolDefinition,
 	toolName,
+	toText,
 } from "./extensions/mcp";
 import { notifyExtension } from "./extensions/notify";
 import { createOptMem } from "./extensions/optmem";
@@ -58,12 +64,14 @@ import {
 	type Approval,
 	type GoalStatus,
 	type Notification,
+	OWNER,
 	PimStore,
 	TOOL_PERMISSIONS,
 	type ToolPermission,
 } from "./store";
 import { projectEntries } from "./transcript";
 import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage";
+import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
 
 const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 /**
@@ -89,6 +97,19 @@ const APPROVAL_TIMEOUT_MS = 30_000;
 /** How long a tool call waits under the `explicit` policy before the approval is denied. */
 const EXPLICIT_APPROVAL_TIMEOUT_MS = 5 * 60_000;
 
+/** A circle's permission row for reading the owner's memory. */
+const MEMORY_TOOL = "memory";
+/** How long a guest's request waits for the owner before it is denied. */
+const GUEST_APPROVAL_MS = 24 * 60 * 60 * 1000;
+const GUEST_APPROVAL_EXPIRY_CALLBACK = "expireGuestApproval";
+
+/** A circle's name as given: trimmed, not empty, not long. */
+function circleName(name: unknown): string {
+	if (typeof name !== "string" || name.trim() === "") throw new HttpError(400, "name must be a non-empty string");
+	if (name.trim().length > MAX_CIRCLE_NAME) throw new HttpError(400, `name must be at most ${MAX_CIRCLE_NAME} characters`);
+	return name.trim();
+}
+
 /** Why an approval was decided without the user deciding: it timed out, or the user always approves its tool. */
 type AutoApproval = "timeout" | "always";
 
@@ -104,6 +125,8 @@ export type ToolPermissionInfo = ResolvedPermission & {
 	readonly description: string | null;
 	/** The app says the tool only reads. */
 	readonly readOnly: boolean;
+	/** The permissions it can have. */
+	readonly choices: readonly ToolPermission[];
 };
 
 /** Whether the agent works: a suspended one answers nothing and runs nothing until its operator lifts it. */
@@ -170,6 +193,10 @@ function errorMessage(error: unknown): string {
  */
 export class Pim extends Agent<Env> {
 	readonly store = new PimStore(this.ctx.storage.sql);
+	/** People this Pim's owner shares it with, in circles. */
+	readonly circles = new CircleStore(this.ctx.storage.sql);
+	/** Pims shared with this Pim's owner, and their conversations with them. */
+	readonly visits = new VisitStore(this.ctx.storage.sql);
 	/** What the agent made for its owner, with every version. */
 	readonly artifacts = new ArtifactStore(this.ctx.storage.sql, () => this.limits(), {
 		storageRoom: () => {
@@ -269,6 +296,12 @@ export class Pim extends Agent<Env> {
 			this.registry.install(this.memory.extension);
 			// Last: the apps' tools come and go, and pi only appends cheaply at the end.
 			this.registry.install(apps.tools);
+			// Visits' tools, as their hosts last allowed, so a visit's run resumes with them; each turn asks again.
+			const visitor = this.profile()?.username;
+			for (const share of this.visits.shares()) {
+				const brief = this.visits.brief(share.ownerId);
+				if (visitor && brief && !share.revoked) this.#installVisit(brief, visitor);
+			}
 			return Harness.open(
 				storage,
 				{
@@ -377,7 +410,12 @@ export class Pim extends Agent<Env> {
 
 	/** pi's run policy, shared by every session. */
 	protected harnessSettings(): HarnessSettings {
+		const registry = this.registry;
 		return {
+			// Every extension but visits': only a visit's own conversation selects its extension.
+			get extensions() {
+				return registry.snapshot().installed().filter((extension) => !extension.name.startsWith(VISIT_PREFIX));
+			},
 			// 1, 2, 4, 8, 16 s: about 30 s for a rate-limited model to recover.
 			retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
 			// Fewer storage writes while streaming; a crash loses at most this window.
@@ -556,8 +594,16 @@ export class Pim extends Agent<Env> {
 			}
 			run = reserved.reservation;
 		}
-		this.store.touchSession(session, from === "user" ? titleFrom(content) : undefined);
 		let receipt: PiReceipt;
+		try {
+			// A visit goes on only as its host allows now: what it may use is asked anew before each turn.
+			const visit = this.visits.bySession(session);
+			if (visit) await this.#refreshVisit(visit.ownerId);
+		} catch (error) {
+			if (run !== undefined) this.usage.releaseRun(run);
+			throw error;
+		}
+		this.store.touchSession(session, from === "user" && !this.visits.bySession(session) ? titleFrom(content) : undefined);
 		try {
 			receipt = await this.harness.submit(content, { session, ...options });
 		} catch (error) {
@@ -739,28 +785,45 @@ export class Pim extends Agent<Env> {
 			this.store.recordApprovalResult(id, result);
 		}
 		const decided = this.store.approval(id)!;
+		this.broadcastMessage({ type: "approval", approval: decided });
+		if (decided.requestedBy) {
+			// A guest asked: the outcome continues their visit, in their own Pim, on their own usage.
+			try {
+				await (await this.#pimOf(decided.requestedBy.ownerId)).visitAnswer(
+					this.name,
+					decided.session,
+					this.#guestOutcome(decided),
+					`approval:${this.name}:${id}`,
+				);
+			} catch (error) {
+				console.warn(`telling ${decided.requestedBy.username} about approval ${id} failed`, error);
+			}
+			return decided;
+		}
 		const message = this.#outcome(decided);
 		const waiter = this.#approvalWaiters.get(id);
 		if (waiter) waiter(message);
 		else await this.submitTo(approval.session, message, { operationId: `approval:${id}` }, "approval");
-		this.broadcastMessage({ type: "approval", approval: decided });
 		return decided;
 	}
 
 	/**
-	 * Approves `id`, and lets its tool run without asking from now on. Other
-	 * calls to that tool still waiting for the user are approved too.
+	 * Approves `id`, and lets its tool run without asking from now on: for
+	 * the owner, or, when a guest asked, for the guest's circle. Other calls to
+	 * that tool from the same side still waiting are approved too.
 	 */
 	async alwaysApprove(id: string, note?: string): Promise<Approval> {
 		const approval = this.store.approval(id);
 		if (!approval) throw new HttpError(404, `No approval ${id}`);
 		if (approval.status !== "pending") throw new HttpError(409, `Approval ${id} is already ${approval.status}`);
 		const { app, tool } = this.#approvalTool(approval);
+		const audience = approval.requestedBy?.circle ?? OWNER;
 		// Remembered first, so calls filed while this action runs are not asked about.
-		this.setToolPermission(app, tool, "on");
+		this.setToolPermission(audience, app, tool, "on");
 		for (const pending of this.store.approvals("pending")) {
 			const other = this.#approvalTool(pending);
 			if (pending.id === id || other.app !== app || other.tool !== tool) continue;
+			if ((pending.requestedBy?.circle ?? OWNER) !== audience) continue;
 			void this.decideApproval(pending.id, "approve", undefined, "always").catch((error) =>
 				console.warn(`approving ${pending.id} failed`, error),
 			);
@@ -768,7 +831,8 @@ export class Pim extends Agent<Env> {
 		return this.decideApproval(id, "approve", note);
 	}
 
-	// Tool permissions: whether Pim may use each tool that acts on the world or comes from an app.
+	// Tool permissions: whether Pim may use each tool that acts on the world or comes from an app,
+	// for its owner and for each circle.
 
 	/** Pim's own tools that ask first unless the user chooses otherwise; `mcp_call` is filed by the apps' tools. */
 	#ownGatedActions(): GatedAction[] {
@@ -784,26 +848,52 @@ export class Pim extends Agent<Env> {
 		return { app: "", tool: approval.action };
 	}
 
-	/** The permission of the tool that filed an approval; `ask` for an app tool that is gone. */
+	/** The permission of the tool that filed an approval, for whoever asked; `ask` for an app tool that is gone. */
 	#approvalPermission(approval: Approval): ToolPermission {
 		const { app, tool } = this.#approvalTool(approval);
 		if (app === "") return ownToolPermission(this.store, tool).permission;
 		const server = this.apps.servers().find((candidate) => candidate.id === app);
 		const info = this.apps.tools().find((candidate) => candidate.serverId === app && candidate.name === tool);
-		return server && info ? appToolPermission(this.store, server, info).permission : "ask";
+		return server && info ? appToolPermission(this.store, server, info, approval.requestedBy?.circle ?? OWNER).permission : "ask";
 	}
 
-	/** Every tool a permission can be set for, with the permission that applies. */
-	toolPermissions(): ToolPermissionInfo[] {
-		const own = this.#ownGatedActions().map((action) => ({
-			app: null,
-			appName: null,
-			tool: action.name,
-			name: action.name,
-			description: action.description,
-			readOnly: false,
-			...ownToolPermission(this.store, action.name),
-		}));
+	/** A circle, or 404. */
+	#circle(id: string): Circle {
+		const circle = this.circles.circle(id);
+		if (!circle) throw new HttpError(404, `No circle ${id}`);
+		return circle;
+	}
+
+	/**
+	 * Every tool a permission can be set for, for the owner (`OWNER`) or a
+	 * circle, with the permission that applies. A circle has its own row for
+	 * memory, and none for Pim's tools that change its setup.
+	 */
+	toolPermissions(audience: string = OWNER): ToolPermissionInfo[] {
+		const own: ToolPermissionInfo[] =
+			audience === OWNER
+				? this.#ownGatedActions().map((action) => ({
+						app: null,
+						appName: null,
+						tool: action.name,
+						name: action.name,
+						description: action.description,
+						readOnly: false,
+						choices: TOOL_PERMISSIONS,
+						...ownToolPermission(this.store, action.name),
+					}))
+				: [
+						{
+							app: null,
+							appName: null,
+							tool: MEMORY_TOOL,
+							name: MEMORY_TOOL,
+							description: "Read what Pim remembers about you: its memory view, and searching every memory.",
+							readOnly: true,
+							choices: ["off", "on"],
+							...resolvePermission(this.store, audience, "", MEMORY_TOOL, "off", null),
+						},
+					];
 		const servers = new Map(this.apps.servers().map((server) => [server.id, server]));
 		const apps = this.apps.tools().flatMap((tool) => {
 			const server = servers.get(tool.serverId);
@@ -816,7 +906,8 @@ export class Pim extends Agent<Env> {
 					name: toolName(server.id, tool.name),
 					description: tool.description ?? tool.annotations?.title ?? null,
 					readOnly: tool.annotations?.readOnlyHint === true,
-					...appToolPermission(this.store, server, tool),
+					choices: TOOL_PERMISSIONS,
+					...appToolPermission(this.store, server, tool, audience),
 				},
 			];
 		});
@@ -824,23 +915,27 @@ export class Pim extends Agent<Env> {
 	}
 
 	/**
-	 * Sets the permission of one of Pim's own tools (`app` empty) or an app's
-	 * tool; null goes back to its default. An app tool's choice is tied to its
-	 * definition now. The model sees the change from its next request.
+	 * Sets the permission of a tool for the owner (`OWNER`) or a circle: one of
+	 * Pim's own (`app` empty) or an app's; null goes back to its default. An app
+	 * tool's choice is tied to its definition now. The model sees the change
+	 * from its next request; a guest, from their next call.
 	 */
-	setToolPermission(app: string, tool: string, permission: ToolPermission | null): ToolPermissionInfo {
+	setToolPermission(audience: string, app: string, tool: string, permission: ToolPermission | null): ToolPermissionInfo {
+		if (audience !== OWNER) this.#circle(audience);
 		let definition: string | null = null;
 		if (app === "") {
-			if (!this.#ownGatedActions().some((action) => action.name === tool)) throw new HttpError(404, `No tool ${tool}`);
+			const known = audience === OWNER ? this.#ownGatedActions().some((action) => action.name === tool) : tool === MEMORY_TOOL;
+			if (!known) throw new HttpError(404, `No tool ${tool}`);
+			if (tool === MEMORY_TOOL && permission === "ask") throw new HttpError(400, "Memory is either on or off");
 		} else {
 			const info = this.apps.tools().find((candidate) => candidate.serverId === app && candidate.name === tool);
 			if (!info) throw new HttpError(404, `No tool ${tool} in the app ${app}`);
 			definition = toolDefinition(info);
 		}
-		if (permission === null) this.store.clearToolPermission(app, tool);
-		else this.store.setToolPermission(app, tool, permission, definition);
-		this.#reinstallApprovals();
-		return this.toolPermissions().find((info) => (info.app ?? "") === app && info.tool === tool)!;
+		if (permission === null) this.store.clearToolPermission(audience, app, tool);
+		else this.store.setToolPermission(audience, app, tool, permission, definition);
+		if (audience === OWNER) this.#reinstallApprovals();
+		return this.toolPermissions(audience).find((info) => (info.app ?? "") === app && info.tool === tool)!;
 	}
 
 	/**
@@ -863,9 +958,305 @@ export class Pim extends Agent<Env> {
 				tool = info.name;
 				definition = toolDefinition(info);
 			}
-			if (!this.store.toolPermission(app, tool)) this.store.setToolPermission(app, tool, "on", definition);
+			if (!this.store.toolPermission(OWNER, app, tool)) this.store.setToolPermission(OWNER, app, tool, "on", definition);
 			this.store.forgetLegacyAlwaysApproved(name);
 		}
+	}
+
+	// Circles: people the owner lets message this Pim, from their own Pims.
+
+	/** This Pim's owner, as guests know them; null for a self-hosted Pim, which has no one to share with. */
+	#me(): Guest | null {
+		const profile = this.profile();
+		return profile === null ? null : { ownerId: this.name, username: profile.username };
+	}
+
+	/** Another person's Pim, to call. */
+	#pimOf(ownerId: string) {
+		return getAgentByName(this.env.Pim, ownerId);
+	}
+
+	/**
+	 * Puts someone in a circle, moving them from any other, and tells their
+	 * Pim it may visit this one. The hosting service calls it, having resolved
+	 * their username.
+	 */
+	async addCircleMember(circleId: string, guest: Guest): Promise<Member> {
+		this.#assertOpen();
+		this.#circle(circleId);
+		const me = this.#me();
+		if (me === null) throw new HttpError(400, "Only a hosted Pim can be shared");
+		if (guest.ownerId === this.name) throw new HttpError(400, "You can't add yourself to a circle");
+		const known = this.circles.member(guest.ownerId);
+		// Told first: someone in a circle whose Pim doesn't know of it couldn't use it.
+		if (!known) await (await this.#pimOf(guest.ownerId)).shareReceived(me);
+		return this.circles.addMember(circleId, guest);
+	}
+
+	/** Takes someone out of the circles; their Pim is told, and their next call is refused either way. */
+	async removeCircleMember(ownerId: string): Promise<boolean> {
+		this.#assertOpen();
+		if (!this.circles.removeMember(ownerId)) return false;
+		await this.#tellRevoked([ownerId]);
+		return true;
+	}
+
+	async #tellRevoked(ownerIds: readonly string[]): Promise<void> {
+		for (const ownerId of ownerIds) {
+			try {
+				await (await this.#pimOf(ownerId)).shareRevoked(this.name);
+			} catch (error) {
+				console.warn(`telling ${ownerId} the share ended failed`, error);
+			}
+		}
+	}
+
+	/** Whether a guest may use this Pim now, and through which circle; or why not. */
+	#guestAccess(guest: Guest): { ok: true; circle: Circle; member: Member } | { ok: false; reason: string } {
+		const host = this.profile()?.username ?? "This person";
+		if (this.#closed()) return { ok: false, reason: `${host}'s Pimling was deleted.` };
+		if (this.status() !== "active") return { ok: false, reason: `${host}'s Pimling is suspended.` };
+		const member = this.circles.member(guest.ownerId);
+		if (!member) return { ok: false, reason: `${host} doesn't share their Pim with you.` };
+		const circle = this.circles.circle(member.circle);
+		if (!circle) return { ok: false, reason: `${host} doesn't share their Pim with you.` };
+		if (!circle.enabled) return { ok: false, reason: `${host} has paused sharing their Pim with their "${circle.name}" circle.` };
+		return { ok: true, circle, member };
+	}
+
+	/** The app tools a circle may use now, with the permission each has. */
+	#guestTools(circle: string) {
+		const servers = new Map(this.apps.servers().map((server) => [server.id, server]));
+		return this.apps.tools().flatMap((tool) => {
+			const server = servers.get(tool.serverId);
+			if (!server || server.state !== "ready") return [];
+			const { permission } = appToolPermission(this.store, server, tool, circle);
+			return permission === "off" ? [] : [{ server, tool, permission, name: toolName(server.id, tool.name) }];
+		});
+	}
+
+	/**
+	 * What a guest's Pim may know of this one and use: called by the guest's
+	 * own Pim before each of their turns. Nothing but what the guest's circle
+	 * was given.
+	 */
+	async guestBrief(guest: Guest): Promise<BriefResult> {
+		const access = this.#guestAccess(guest);
+		if (!access.ok) return access;
+		const me = this.#me()!;
+		const memory = resolvePermission(this.store, access.circle.id, "", MEMORY_TOOL, "off", null).permission === "on";
+		const lines = memory ? this.memory.view() : [];
+		return {
+			ok: true,
+			brief: {
+				host: me,
+				circle: access.circle.name,
+				timeZone: this.settings().timeZone,
+				memory: memory
+					? `<memory>\n${lines.length === 0 ? `${me.username}'s Pim remembers nothing yet.` : `What ${me.username}'s Pim remembers, oldest first; later memories override earlier ones:\n${lines.join("\n")}`}\n</memory>`
+					: null,
+				tools: this.#guestTools(access.circle.id).map(({ server, tool, permission, name }) => ({
+					name,
+					appName: server.name,
+					description: tool.description ?? tool.annotations?.title ?? tool.name,
+					inputSchema: tool.inputSchema,
+					readOnly: tool.annotations?.readOnlyHint === true,
+					asks: permission === "ask",
+				})),
+			},
+		};
+	}
+
+	/**
+	 * A guest's tool call, from their own Pim: the hard boundary. The guest's
+	 * circle and the tool's permission are checked here at every call, as
+	 * they are now, whatever the guest's Pim was told before. `on` runs it,
+	 * `ask` files an approval for the owner and answers at once (the decision
+	 * goes to the guest's conversation later), anything else is refused.
+	 */
+	async guestCall(
+		guest: Guest,
+		call: { tool: string; args: Record<string, unknown>; session: string; callId: string },
+	): Promise<GuestCallResult> {
+		const access = this.#guestAccess(guest);
+		if (!access.ok) return { text: access.reason, isError: true };
+		const { circle } = access;
+		const host = this.#me()!.username;
+		const log = (outcome: "ran" | "asked" | "refused", summary: string) =>
+			this.circles.logActivity({ username: guest.username, circle: circle.id, tool: call.tool, outcome, summary });
+
+		if (call.tool === "recall") {
+			if (resolvePermission(this.store, circle.id, "", MEMORY_TOOL, "off", null).permission !== "on") {
+				log("refused", "recall");
+				return { text: `${host} doesn't let you read their Pim's memory.`, isError: true };
+			}
+			const pattern = typeof call.args.pattern === "string" ? call.args.pattern : "";
+			log("ran", `recall ${JSON.stringify(pattern)}`);
+			return this.memory.search(pattern);
+		}
+
+		const found = this.#guestTools(circle.id).find((candidate) => candidate.name === call.tool);
+		const summary = found ? summarizeCall(found.server.name, found.tool.name, call.args) : call.tool;
+		if (!found) {
+			log("refused", summary);
+			return { text: `${host} doesn't let you use ${call.tool}.`, isError: true };
+		}
+		if (found.permission === "on") {
+			log("ran", summary);
+			const result = await this.apps.call(found.server.id, found.tool.name, call.args);
+			return { text: toText(result), ...(result.isError ? { isError: true } : {}) };
+		}
+		return this.#askForGuest(guest, circle, found, call, summary, () => log("asked", summary));
+	}
+
+	/**
+	 * Files an approval for a guest's call. The owner is notified; it is denied
+	 * if they don't answer within a day, never approved by a timeout. The same
+	 * call again (a replay in the guest's Pim) finds the request it filed.
+	 */
+	async #askForGuest(
+		guest: Guest,
+		circle: Circle,
+		found: { server: McpServerInfo; tool: McpToolInfo; name: string },
+		call: { args: Record<string, unknown>; session: string; callId: string },
+		summary: string,
+		logged: () => void,
+	): Promise<GuestCallResult> {
+		const host = this.#me()!.username;
+		const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${guest.ownerId}\n${call.session}\n${call.callId}`));
+		const id = `g-${[...new Uint8Array(digest)].slice(0, 16).map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+		const known = this.store.approval(id);
+		if (known && known.status !== "pending") return { text: this.#guestOutcome(known) };
+		const now = Date.now();
+		const approval = this.store.requestApproval({
+			id,
+			session: call.session,
+			callId: call.callId,
+			action: "mcp_call",
+			tool: found.name,
+			args: { server: found.server.id, tool: found.tool.name, arguments: call.args },
+			summary,
+			createdAt: now,
+			expiresAt: now + GUEST_APPROVAL_MS,
+			onTimeout: "deny",
+			requestedBy: { ownerId: guest.ownerId, username: guest.username, circle: circle.id, circleName: circle.name },
+		});
+		if (!known) {
+			logged();
+			await this.schedule(new Date(approval.expiresAt!), GUEST_APPROVAL_EXPIRY_CALLBACK, { id });
+			this.broadcastMessage({ type: "approval", approval });
+			const notification = this.store.addNotification({
+				id: crypto.randomUUID(),
+				session: null,
+				title: `${guest.username} asked your Pim`,
+				body: `${guest.username} (${circle.name}) wants: ${summary}`,
+			});
+			await this.deliverNotification(notification);
+		}
+		return {
+			text: `${host} asks before this runs. The request is with ${host} now (approval ${id}); their answer will arrive in this conversation as a message starting with "[${host}'s answer". Tell ${guest.username} it was asked, and don't call it again.`,
+		};
+	}
+
+	/** A guest approval's outcome, as the guest's Pim reads it. */
+	#guestOutcome(approval: Approval): string {
+		const host = this.#me()?.username ?? "The owner";
+		const note = approval.note ? `\n${host}'s note: ${approval.note}` : "";
+		const head = `[${host}'s answer to approval ${approval.id}]`;
+		if (approval.status === "denied") {
+			const why = approval.decidedBy === "timeout" ? `${host} didn't answer within a day, so it was not done` : `${host} said no`;
+			return `${head} ${why}: ${approval.summary}${note}`;
+		}
+		return `${head} ${host} approved: ${approval.summary}${note}\nResult:\n${approval.result ?? ""}`;
+	}
+
+	/** Fired a day after a guest's approval was filed: unanswered, it is denied. */
+	async expireGuestApproval(payload: { id: string }): Promise<void> {
+		if (this.#closed()) return;
+		if (this.store.approval(payload.id)?.status !== "pending") return;
+		await this.decideApproval(payload.id, "deny", undefined, "timeout");
+	}
+
+	// Visits: Pims shared with this one's owner, and their conversations with them.
+
+	/** From a host's Pim: its owner put this Pim's owner in a circle. */
+	async shareReceived(host: Guest): Promise<void> {
+		this.#assertOpen();
+		if (this.status() !== "active") throw new Error("This Pim is suspended");
+		if (!this.visits.shared(host)) return;
+		const notification = this.store.addNotification({
+			id: crypto.randomUUID(),
+			session: null,
+			title: `${host.username} shared their Pim with you`,
+			body: `You can message ${host.username}'s Pim now. Find it under Shared with you.`,
+		});
+		await this.deliverNotification(notification);
+		this.broadcastMessage({ type: "visits" });
+	}
+
+	/** From a host's Pim: this Pim's owner is no longer in its circles. */
+	async shareRevoked(hostOwnerId: string): Promise<void> {
+		if (this.#closed()) return;
+		this.visits.revoked(hostOwnerId);
+		this.registry.uninstall({ name: visitExtensionName(hostOwnerId) });
+		this.broadcastMessage({ type: "visits" });
+	}
+
+	/** From a host's Pim: the owner decided on something this Pim's owner asked for; it continues the visit. */
+	async visitAnswer(hostOwnerId: string, session: string, message: string, operationId: string): Promise<void> {
+		this.#assertOpen();
+		const share = this.visits.share(hostOwnerId);
+		// Only into the visit with that host: a host can't write into any other conversation.
+		if (!share || share.session !== session) return;
+		await this.submitTo(session, message, { operationId }, "pim");
+	}
+
+	/** A visit's conversation, started on first use. */
+	async startVisit(username: string): Promise<string> {
+		const share = this.visits.byUsername(username);
+		if (!share) throw new HttpError(404, `${username} doesn't share their Pim with you`);
+		if (share.revoked) throw new HttpError(403, `${username} no longer shares their Pim with you`);
+		if (share.session !== null && !this.store.deletedSessions().has(share.session)) return share.session;
+		const { id } = await this.harness.sessions.create();
+		await this.harness.session(id).setModel(this.chosenModel());
+		this.store.touchSession(id, `${username}'s Pim`);
+		this.visits.setSession(share.ownerId, id);
+		await this.#refreshVisit(share.ownerId);
+		return id;
+	}
+
+	/**
+	 * Asks the host's Pim what this visit may use now, and gives the visit's
+	 * conversation exactly that: its own extension, and nothing of the
+	 * owner's. Refused, the visit can't go on.
+	 */
+	async #refreshVisit(hostOwnerId: string): Promise<void> {
+		const share = this.visits.share(hostOwnerId);
+		const me = this.#me();
+		if (!share || share.session === null || me === null) throw new HttpError(404, "No such visit");
+		if (share.revoked) throw new HttpError(403, `${share.username} no longer shares their Pim with you`);
+		const result = (await (await this.#pimOf(hostOwnerId)).guestBrief(me)) as BriefResult;
+		if (!result.ok) {
+			this.visits.setBrief(hostOwnerId, null);
+			throw new HttpError(403, result.reason);
+		}
+		this.visits.setBrief(hostOwnerId, result.brief);
+		const extension = this.#installVisit(result.brief, me.username);
+		const conversation = await this.harness.conversation(share.session);
+		await conversation.configure({ extensions: [extension] }, BACKGROUND_CONTEXT);
+	}
+
+	/** Installs (or replaces) a visit's extension; its tools call the host's Pim. */
+	#installVisit(brief: GuestBrief, visitor: string) {
+		const host = brief.host.ownerId;
+		const extension = visitExtension(brief, visitor, async (tool, args, session, callId) => {
+			this.#assertOpen();
+			const me = this.#me();
+			if (me === null) return { text: "This Pim can't visit others.", isError: true };
+			return (await this.#pimOf(host)).guestCall(me, { tool, args, session, callId });
+		});
+		this.registry.install(extension);
+		return extension;
 	}
 
 	tools(): ToolInfo[] {
@@ -873,6 +1264,7 @@ export class Pim extends Agent<Env> {
 		return this.registry
 			.snapshot()
 			.tools()
+			.filter(({ extension }) => !extension.name.startsWith(VISIT_PREFIX))
 			.map(({ tool }) => ({ name: tool.name, description: tool.description, requiresApproval: gated.has(tool.name) }));
 	}
 
@@ -1003,6 +1395,9 @@ export class Pim extends Agent<Env> {
 			schedules: (await this.services().listSchedules()).map(describeSchedule),
 			approvals: this.store.approvals(),
 			permissions: this.store.toolPermissions(),
+			circles: this.#describeCircles(),
+			guestActivity: this.circles.activity(500),
+			sharedWithMe: this.visits.shares().map(({ ownerId, username, sharedAt, revoked }) => ({ ownerId, username, sharedAt, revoked })),
 			notifications: this.store.notifications({ unread: false }),
 			apps: this.apps.servers().map(({ id, name, url, approval }) => ({ id, name, url, approval })),
 			watches: this.appEvents.list(),
@@ -1126,11 +1521,13 @@ export class Pim extends Agent<Env> {
 				const deleted = this.store.deletedSessions();
 				const sessions = (await this.harness.sessions.list()).filter((session) => !deleted.has(session.id)).map((session) => {
 					const info = this.store.sessionInfo(session.id);
+					const visit = this.visits.bySession(session.id);
 					return {
 						...session,
 						title: info?.title ?? null,
 						createdAt: info?.createdAt ?? null,
 						updatedAt: info?.updatedAt ?? null,
+						visit: visit ? { username: visit.username, available: !visit.revoked } : null,
 					};
 				});
 				// Most recently active first; sessions never used last.
@@ -1171,6 +1568,8 @@ export class Pim extends Agent<Env> {
 			async ({ session }) => {
 				const id = await this.#session(session!);
 				this.store.deleteSession(id);
+				const visit = this.visits.bySession(id);
+				if (visit) this.visits.setSession(visit.ownerId, null);
 				// Nothing keeps working in a chat the user can no longer see.
 				await this.harness.session(id).abort();
 				const services = this.services();
@@ -1605,14 +2004,26 @@ export class Pim extends Agent<Env> {
 			},
 		],
 		// Tool permissions: which tools Pim may use, and which ask first.
-		["GET", "/permissions", () => ({ tools: this.toolPermissions() })],
+		[
+			"GET",
+			"/permissions",
+			(_params, _request, url) => {
+				const circle = url.searchParams.get("circle");
+				if (circle !== null) this.#circle(circle);
+				return { tools: this.toolPermissions(circle ?? OWNER) };
+			},
+		],
 		[
 			"PUT",
 			"/permissions",
 			async (_params, request) => {
-				const { app, tool, permission } = await readJson<{ app: string | null; tool: string; permission: ToolPermission | null }>(
-					request,
-				);
+				const { circle, app, tool, permission } = await readJson<{
+					circle: string | null;
+					app: string | null;
+					tool: string;
+					permission: ToolPermission | null;
+				}>(request);
+				if (circle !== null && circle !== undefined && typeof circle !== "string") throw new HttpError(400, "circle must be a circle's id");
 				if (app !== null && app !== undefined && (typeof app !== "string" || app === "")) {
 					throw new HttpError(400, "app must be an app's id, or null for Pim's own tools");
 				}
@@ -1620,9 +2031,71 @@ export class Pim extends Agent<Env> {
 				if (permission === undefined || (permission !== null && !TOOL_PERMISSIONS.includes(permission))) {
 					throw new HttpError(400, `permission must be one of ${TOOL_PERMISSIONS.join(", ")}, or null for the default`);
 				}
-				return this.setToolPermission(app ?? "", tool, permission);
+				return this.setToolPermission(circle ?? OWNER, app ?? "", tool, permission);
 			},
 		],
+
+		// Circles: who may message this Pim from their own, and what each circle may use.
+		["GET", "/circles", () => ({ circles: this.#describeCircles() })],
+		[
+			"POST",
+			"/circles",
+			async (_params, request) => {
+				const name = circleName((await readJson<{ name: string }>(request)).name);
+				if (this.circles.circles().length >= MAX_CIRCLES) throw new HttpError(429, `You can have up to ${MAX_CIRCLES} circles.`);
+				const circle = this.circles.createCircle(name);
+				return Response.json(this.#describeCircles().find((candidate) => candidate.id === circle.id), { status: 201 });
+			},
+		],
+		[
+			"PUT",
+			"/circles/:circle",
+			async ({ circle }, request) => {
+				this.#circle(circle!);
+				const { name, enabled } = await readJson<{ name: string; enabled: boolean }>(request);
+				if (enabled !== undefined && typeof enabled !== "boolean") throw new HttpError(400, "enabled must be true or false");
+				this.circles.updateCircle(circle!, { ...(name !== undefined ? { name: circleName(name) } : {}), ...(enabled !== undefined ? { enabled } : {}) });
+				return this.#describeCircles().find((candidate) => candidate.id === circle);
+			},
+		],
+		[
+			"DELETE",
+			"/circles/:circle",
+			async ({ circle }) => {
+				this.#circle(circle!);
+				const members = this.circles.deleteCircle(circle!);
+				this.store.clearAudience(circle!);
+				await this.#tellRevoked(members.map((member) => member.ownerId));
+				return { deleted: true };
+			},
+		],
+		[
+			"DELETE",
+			"/circles/:circle/members/:member",
+			async ({ circle, member }) => {
+				this.#circle(circle!);
+				if (this.circles.member(member!)?.circle !== circle) throw new HttpError(404, `No member ${member} in circle ${circle}`);
+				await this.removeCircleMember(member!);
+				return { deleted: true };
+			},
+		],
+		["GET", "/circles/activity", () => ({ activity: this.circles.activity() })],
+
+		// Visits: Pims shared with this one's owner.
+		[
+			"GET",
+			"/visits",
+			() => ({
+				visits: this.visits.shares().map((share) => ({
+					ownerId: share.ownerId,
+					username: share.username,
+					sharedAt: share.sharedAt,
+					available: !share.revoked,
+					session: share.session !== null && !this.store.deletedSessions().has(share.session) ? share.session : null,
+				})),
+			}),
+		],
+		["POST", "/visits/:username", async ({ username }) => ({ session: await this.startVisit(username!) })],
 
 		// Connected apps (remote MCP servers).
 		["GET", "/mcp", () => ({ servers: this.#describeApps() })],
@@ -1759,6 +2232,14 @@ export class Pim extends Agent<Env> {
 		if (!this.registry.snapshot().extension("pim.approvals")) return;
 		this.registry.install(approvalsExtension(this.services(), this.actions));
 		this.#installApps();
+	}
+
+	#describeCircles() {
+		const members = this.circles.members();
+		return this.circles.circles().map((circle) => ({
+			...circle,
+			members: members.filter((member) => member.circle === circle.id).map(({ ownerId, username, addedAt }) => ({ ownerId, username, addedAt })),
+		}));
 	}
 
 	#describeApps() {

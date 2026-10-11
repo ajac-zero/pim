@@ -173,7 +173,7 @@ describe("connected apps (MCP)", () => {
 
 		// The app changes the tool after the user let it run: Pim asks again, even with the tools already built.
 		await runInDurableObject(env.Pim.getByName(AGENT_NAME), (instance: Pim) =>
-			instance.store.setToolPermission("calendar", "create_event", "on", '{"description":"Create a draft."}'),
+			instance.store.setToolPermission("", "calendar", "create_event", "on", '{"description":"Create a draft."}'),
 		);
 		const permissions = (await api("/permissions")).body.tools;
 		expect(permissions.find((info: { name: string }) => info.name === "calendar_create_event")).toMatchObject({

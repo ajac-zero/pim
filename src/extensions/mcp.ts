@@ -1,6 +1,6 @@
 import { type ImageContent, type TextContent, type TSchema, Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section, type ToolRegistration } from "@earendil-works/pi-durable";
-import type { PimStore, ToolPermission } from "../store";
+import { OWNER, type PimStore, type ToolPermission } from "../store";
 import type { AppCatalog } from "./app-catalog";
 import { describeCandidates, searchRegistry } from "./app-directory";
 import {
@@ -134,9 +134,19 @@ export function toolDefinition(tool: McpToolInfo): string {
 	});
 }
 
-/** An app tool's permission: the user's choice, or else the app's approval policy (`writes`: read-only tools run, others ask). */
-export function appToolPermission(store: PimStore, server: McpServerInfo, tool: McpToolInfo): ResolvedPermission {
-	return resolvePermission(store, server.id, tool.name, needsApproval(tool, server.approval) ? "ask" : "on", toolDefinition(tool));
+/**
+ * An app tool's permission for the owner (`OWNER`) or a circle: the user's
+ * choice, or else, for the owner, the app's approval policy (`writes`:
+ * read-only tools run, others ask), and for a circle, off.
+ */
+export function appToolPermission(
+	store: PimStore,
+	server: McpServerInfo,
+	tool: McpToolInfo,
+	audience: string = OWNER,
+): ResolvedPermission {
+	const fallback = audience !== OWNER ? "off" : needsApproval(tool, server.approval) ? "ask" : "on";
+	return resolvePermission(store, audience, server.id, tool.name, fallback, toolDefinition(tool));
 }
 
 /** An app tool's permission as the app and the user's choice are now; undefined while its app doesn't offer it. */
@@ -174,7 +184,7 @@ export function toText(result: McpCallResult): string {
 	return result.isError ? `The tool reported an error:\n${body}` : body;
 }
 
-function summarizeCall(server: string, tool: string, args: Record<string, unknown>): string {
+export function summarizeCall(server: string, tool: string, args: Record<string, unknown>): string {
 	const shown = JSON.stringify(args);
 	return `${server}: ${tool} ${shown.length > 300 ? `${shown.slice(0, 300)}…` : shown}`;
 }

@@ -20,9 +20,9 @@ Cloudflare renews the certificate along with the custom domain. If the custom do
 
 | | |
 | --- | --- |
-| Serving | `09e271c2-acc2-4799-8ab4-cf81eae54df0` (100%), deployed 2026-10-10 23:56 UTC from `main` at [`c1dfee1`](https://github.com/ajac-zero/pim/commit/c1dfee17b29d8078aa4a68d16bd18efd3a17d51a) (merge of #11, model error messages) |
-| Rollback target | `faceeb51-9e87-43fe-ba5e-289f53181c5e` (#10 at `4b074d5`, serving until the #11 deploy); see [Rollback](#rollback) |
-| Route `*.pimling.ajac-zero.com/*` | `6a2c705127fc412eb3c3ba1c2049178a`; wrangler recreates it on each deploy, with a new ID and the same pattern and script |
+| Serving | `7b0eb6b5-344c-4f55-a265-d3ca2bde68a5` (100%), deployed 2026-10-11 04:38 UTC from `main` at [`68f4465`](https://github.com/ajac-zero/pim/commit/68f4465) (tool permissions, circles and visits, Your Pims, profiles and published Pims) |
+| Rollback target | `09e271c2-acc2-4799-8ab4-cf81eae54df0` (#11 at `c1dfee1`, serving until this deploy); see [Rollback](#rollback) |
+| Route `*.pimling.ajac-zero.com/*` | `0ff92856b912488eb183b7ac99871080`; wrangler recreates it on each deploy, with a new ID and the same pattern and script |
 | Accounts | the owner's, plus `deleted` tombstones of test accounts |
 
 ## History
@@ -36,6 +36,7 @@ Cloudflare renews the certificate along with the custom domain. If the custom do
 | `6bc8cb75-45d0-4184-9a07-52a257e343e1` | 2026-10-10 18:57 | `main` `359394a` (#8) | M2a private artifacts ([artifacts.md](../artifacts.md)); `PIM_LIMITS` gains the four artifact keys |
 | `faceeb51-9e87-43fe-ba5e-289f53181c5e` | 2026-10-10 23:36 | `main` `4b074d5` (#10) | Artifact reliability. Recorded afterwards from the #11 deploy: created 36 seconds after #10 merged, and its live bundle had #10's strings and none of #11's |
 | `09e271c2-acc2-4799-8ab4-cf81eae54df0` | 2026-10-10 23:56 | `main` `c1dfee1` (#11) | Chat explains model errors (ChatGPT usage limit and others) without showing the provider's text; config unchanged |
+| `7b0eb6b5-344c-4f55-a265-d3ca2bde68a5` | 2026-10-11 04:38 | `main` `68f4465` | Tool permissions (Off/Ask/On per tool); Sharing: circles, guests messaging from their own Pimling, guest approvals; Your Pims; profiles; Discover and published Pims. Adds the `Gallery` Durable Object (migration v4) |
 
 ## What was changed (2026-10-10)
 
@@ -71,6 +72,7 @@ Invite-only; at most 25 accounts and 3 registrations per address a day. Per pers
 ## Rollback
 
 - **To an earlier version:** `pnpm wrangler rollback faceeb51-9e87-43fe-ba5e-289f53181c5e --config wrangler.ajac-zero.jsonc --message "…"` (the version before #11; #11 changed only the web app, so this brings back the old `Not answered: model_error` banner and nothing else). Other targets: `6bc8cb75-45d0-4184-9a07-52a257e343e1` (before #10), `ce9b2eae-0edc-4dc9-9b85-97ca8dbbcd75` (before #8), `096158e7-b612-40dc-a667-dced2a1fe6fc` (before #6) and `d88a37fc-99f9-4dbf-85b5-76a420c47b08` (before #5); `pnpm wrangler versions list --config wrangler.ajac-zero.jsonc` lists the rest. A rollback changes code and that version's own variables: Durable Object data, the route, the custom domain and the secret stay as they are. Devices added with #5 keep their passkeys, which work with any version.
+- **Rolling back past `7b0eb6b5` (the sharing deploy)** may be refused: that version added the `Gallery` class (migration v4), and an older version doesn't export it. If `wrangler rollback` refuses, deploy a revert of the change from `main` instead. Rolled back or reverted, Pims keep their new tables (tool permissions, circles, visits, Your Pims), which older code ignores; tools set to Off would be offered again, and always-approved tools would ask again.
 - **Rolling back past #8 leaves artifacts behind.** #8 added no Durable Object migration: each Pim makes its `pim_artifacts` and `pim_artifact_versions` tables itself, and they stay after a rollback. The older version has no artifact tools, routes or screens, so artifacts can't be seen, downloaded or deleted. They still count toward `storageBytes`, and its export leaves them out. Deleting an account still erases them, since erasure wipes all of a Pim's storage. Rolling forward again shows them as they were.
 - **Roll back with `wrangler rollback`, not by deploying older code with today's config.** A version keeps the variables it was deployed with, so `ce9b2eae` comes back with its own `PIM_LIMITS`. Code from before #8 doesn't know the artifact keys now in `wrangler.ajac-zero.jsonc`, and refuses a `PIM_LIMITS` it can't parse by failing closed: no model requests and no runs.
 - **To remove the deployment entirely,** which erases every Pimling's data:

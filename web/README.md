@@ -16,8 +16,9 @@ Run Pim with `pnpm dev` at the repository's root, then, in another terminal:
 PIM_API_TOKEN=... pnpm dev:web
 ```
 
-The dev server (port 3000) proxies `/api` to the Worker with that token and
-signs you in, so there are no passkeys here. To try passkeys, use the Worker's
+with an API token you made in Settings. The dev server (port 3000) proxies
+`/api` to the Worker with that token and signs you in as its owner, so there
+are no passkeys here. To try passkeys, use the Worker's
 own address, `http://localhost:8787`. `PIM_API_URL` points the proxy at
 another Pim; both variables can live in `web/.env.local`.
 

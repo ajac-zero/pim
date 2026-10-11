@@ -2,7 +2,7 @@
 
 Pimling runs Pim for many people from one Cloudflare account. Each person gets their own Pim at `<username>.<domain>`, with its own conversations, memories, goals, schedules, connected apps, ChatGPT sign-in, passkeys and API tokens. Self-hosting is unchanged: `wrangler.jsonc` still deploys one Pim for one person.
 
-This is Phase 1, a personal assistant service, plus private artifacts (M2a): pages the agent makes run only in each person's browser, in a sandbox apart from their account (see [artifacts.md](artifacts.md)). The service runs no code that people or their agents write. Publishing artifacts, coding sandboxes, app hosting and self-extension are later phases.
+This is Phase 1, a personal assistant service, plus private artifacts (M2a): pages the agent makes run only in each person's browser, in a sandbox apart from their account (see [artifacts.md](artifacts.md)), and sharing: people put others in circles who can then message their Pim from their own (see [Sharing](../README.md#sharing)). The service runs no code that people or their agents write. Publishing artifacts, public Pims, coding sandboxes, app hosting and self-extension are later phases.
 
 ## How it works
 
@@ -27,6 +27,7 @@ This is Phase 1, a personal assistant service, plus private artifacts (M2a): pag
 - **Recovery.** A recovery code creates one passkey, once. People can replace their codes in Settings. An operator can issue a one-hour setup link with the admin API after verifying the person some other way.
 - **Approvals** default to `explicit`: a request nobody answers is denied after 5 minutes. People can switch to `auto` (approved after 30 seconds) in Settings.
 - **Usage and limits.** Every model request goes through a metered model catalog. Requests and runs are checked and counted in one step before they start, so concurrent ones can't all take the last slot. Tokens are known only when a request ends, so requests already under way can take a day past `dailyTokens`; the next one is refused. Tokens are counted by the day the request was sent, and by provider. Tokens on someone's own ChatGPT plan are counted apart and never use up the platform's allowance. `PIM_LIMITS` sets everyone's limits; the admin API sets one person's. Running out stops the model request with a non-retryable "quota exceeded" error, refuses new runs with `429`, and skips scheduled tasks with one notification a day. Billing is out of scope: usage is recorded, not charged.
+- **Sharing.** Adding someone to a circle is the one request the Worker answers itself (`POST /api/circles/:id/members`), because only the Directory knows whose Pim a username is. Everything after is between the two Pims, by Durable Object RPC: the owner's tells the guest's it is shared (`shareReceived`), the guest's asks for a brief before each turn (`guestBrief`) and makes every tool call through `guestCall`, which checks the circle and the tool's permission each time, and the owner's sends decisions back (`visitAnswer`). A guest's conversation runs in their own Pim, so it is metered against their own limits. Each guest has 200 calls a day into one Pim; a circle can hold up to 200 people.
 - **ChatGPT plan.** Each person signs in with ChatGPT in their own Settings. Their tokens, refreshes and agent host ID live in their own Pim. OpenAI's [token-sharing docs](https://developers.openai.com/siwc/token-sharing-open-source) cover open-source and locally hosted apps, and ask paid or remotely hosted apps to fill in an interest form. Check your eligibility with OpenAI before offering this in a hosted service.
 
 ## Prerequisites
@@ -104,6 +105,7 @@ The admin API is on the front door, with `Authorization: Bearer $PIMLING_ADMIN_T
 | `pimling.registration_released`, `pimling.released` | A registration given back (`why`: setup failed or lapsed), and its objects erased |
 | `pim.limit` | A person hit a limit: `limit` is `model` or `run` |
 | `pim.passkey_created`, `pim.recovery_codes_replaced` | A passkey made from a setup link or recovery code; codes replaced |
+| `pimling.circle_member_added` | Someone put another person in a circle |
 | `pim.misrouted` | A request reached the wrong agent. This should never happen: investigate |
 
 **Abuse and limits.** Per address: `AUTH_LIMITER` (30 sign-in, recovery and registration attempts a minute) and `PIMLING_REGISTRATIONS_PER_ADDRESS` (3 a day). Per person: `API_LIMITER` (600 requests a minute), `PIM_LIMITS` (tokens, model requests, runs, chats, schedules, apps, storage, artifacts), and `PIM_MODELS`, so only models you pay for can be chosen. Paid `web_search` stays off.

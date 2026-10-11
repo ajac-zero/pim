@@ -100,8 +100,32 @@ function usePimEvents() {
           },
         });
       },
+      onVisits: () => {
+        queryClient.invalidateQueries({ queryKey: ["visits"] });
+        queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      },
       onApproval: (approval) => {
         queryClient.invalidateQueries({ queryKey: ["approvals"] });
+        if (approval.requestedBy) {
+          // Someone in a circle asked: their request waits on the Sharing page.
+          queryClient.invalidateQueries({ queryKey: ["guest-activity"] });
+          queryClient.invalidateQueries({ queryKey: ["notifications"] });
+          if (approval.status !== "pending") return;
+          toast(
+            t("guestAsked", {
+              username: approval.requestedBy.username,
+              circle: approval.requestedBy.circleName,
+            }),
+            {
+              description: approval.summary,
+              action: {
+                label: t("review"),
+                onClick: () => navigate({ to: "/sharing" }),
+              },
+            },
+          );
+          return;
+        }
         // The open chat shows it inline; elsewhere, point to its chat.
         if (approval.status !== "pending" || approval.session === sessionId) {
           return;

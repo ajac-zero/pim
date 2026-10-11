@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, notFound } from "@tanstack/react-router";
+import { Users } from "lucide-react";
 import { useEffect } from "react";
 import { toast } from "sonner";
 import { sessionTitle, useNewChat } from "~/components/app-sidebar";
@@ -79,6 +80,7 @@ function ChatPage() {
         {ready && (
           <Thread
             sessionId={sessionId}
+            visit={session?.visit?.username}
             view={view}
             pendingText={pendingText}
             composerHeight={composerHeight}
@@ -113,11 +115,21 @@ function ChatPage() {
             <Composer
               key={sessionId}
               onSend={send}
+              placeholder={
+                session?.visit
+                  ? t("messageVisit", { username: session.visit.username })
+                  : undefined
+              }
               onStop={stop}
               busy={ready && view.running}
               disabled={!ready}
               disclaimer={
-                onPlan ? (
+                session?.visit ? (
+                  <>
+                    <Users className="size-3.5 shrink-0" />
+                    {t("visitBanner", { username: session.visit.username })}
+                  </>
+                ) : onPlan ? (
                   <>
                     <ChatGPTLogo className="size-3.5" />
                     {t("usingChatGPTPlan")} ·

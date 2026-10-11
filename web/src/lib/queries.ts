@@ -9,8 +9,21 @@ export const sessionsQuery = () =>
 export const approvalsQuery = () =>
   queryOptions({ queryKey: ["approvals"], queryFn: () => pim.approvals() });
 
-export const permissionsQuery = () =>
-  queryOptions({ queryKey: ["permissions"], queryFn: pim.permissions });
+/** Your own tools' permissions, or a circle's. */
+export const permissionsQuery = (circle?: string) =>
+  queryOptions({
+    queryKey: ["permissions", circle ?? null],
+    queryFn: () => pim.permissions(circle),
+  });
+
+export const circlesQuery = () =>
+  queryOptions({ queryKey: ["circles"], queryFn: pim.circles });
+
+export const guestActivityQuery = () =>
+  queryOptions({ queryKey: ["guest-activity"], queryFn: pim.guestActivity });
+
+export const visitsQuery = () =>
+  queryOptions({ queryKey: ["visits"], queryFn: pim.visits });
 
 export const notificationsQuery = () =>
   queryOptions({ queryKey: ["notifications"], queryFn: pim.notifications });

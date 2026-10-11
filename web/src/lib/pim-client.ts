@@ -31,6 +31,8 @@ export type ClientState = {
 export type ClientHandlers = {
   onNotification?: (notification: PimNotification) => void;
   onApproval?: (approval: Approval) => void;
+  /** Someone shared their Pim with you, or took it back. */
+  onVisits?: () => void;
   /** A run started or ended, so lists (titles, order) may have changed. */
   onActivity?: (session: string) => void;
 };
@@ -141,6 +143,9 @@ class PimClient {
         return;
       case "approval":
         this.handlers.onApproval?.(message.approval);
+        return;
+      case "visits":
+        this.handlers.onVisits?.();
         return;
       default:
         return;

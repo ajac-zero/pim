@@ -29,6 +29,7 @@ export type Member = {
 
 /** A guest's tool call, as the owner sees it afterwards. */
 export type GuestActivity = {
+	readonly id: number;
 	readonly at: number;
 	readonly username: string;
 	readonly circle: string;
@@ -55,6 +56,12 @@ CREATE TABLE IF NOT EXISTS pim_circle_members (
 	circle_id TEXT NOT NULL,
 	added_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pim_guest_calls (
+	owner_id TEXT NOT NULL,
+	day TEXT NOT NULL,
+	calls INTEGER NOT NULL,
+	PRIMARY KEY (owner_id, day)
+);
 CREATE TABLE IF NOT EXISTS pim_guest_activity (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	at INTEGER NOT NULL,
@@ -69,6 +76,10 @@ CREATE TABLE IF NOT EXISTS pim_guest_activity (
 /** Guest calls the activity log keeps, newest first. */
 const ACTIVITY_KEPT = 500;
 export const MAX_CIRCLES = 20;
+/** People in all circles together. */
+export const MAX_MEMBERS = 200;
+/** Tool calls one guest may make in a UTC day: their model is theirs, but the owner's apps and their limits are the owner's. */
+export const GUEST_CALLS_PER_DAY = 200;
 export const MAX_CIRCLE_NAME = 40;
 
 type Row = Record<string, SqlStorageValue>;
@@ -154,7 +165,24 @@ export class CircleStore {
 		return this.#sql.exec("DELETE FROM pim_circle_members WHERE owner_id = ?", ownerId).rowsWritten > 0;
 	}
 
-	logActivity(entry: Omit<GuestActivity, "at">): void {
+	/**
+	 * Counts a guest's call against today's allowance, in one synchronous
+	 * step; false, and not counted, once it is used up.
+	 */
+	countCall(ownerId: string, now = Date.now()): boolean {
+		const day = new Date(now).toISOString().slice(0, 10);
+		const [row] = this.#sql.exec("SELECT calls FROM pim_guest_calls WHERE owner_id = ? AND day = ?", ownerId, day).toArray();
+		if (Number(row?.calls ?? 0) >= GUEST_CALLS_PER_DAY) return false;
+		this.#sql.exec(
+			"INSERT INTO pim_guest_calls (owner_id, day, calls) VALUES (?, ?, 1) ON CONFLICT (owner_id, day) DO UPDATE SET calls = calls + 1",
+			ownerId,
+			day,
+		);
+		this.#sql.exec("DELETE FROM pim_guest_calls WHERE day < ?", new Date(now - 7 * 86_400_000).toISOString().slice(0, 10));
+		return true;
+	}
+
+	logActivity(entry: Omit<GuestActivity, "id" | "at">): void {
 		this.#sql.exec(
 			"INSERT INTO pim_guest_activity (at, username, circle_id, tool, outcome, summary) VALUES (?, ?, ?, ?, ?, ?)",
 			Date.now(),
@@ -175,6 +203,7 @@ export class CircleStore {
 			.exec("SELECT * FROM pim_guest_activity ORDER BY id DESC LIMIT ?", limit)
 			.toArray()
 			.map((row) => ({
+				id: Number(row.id),
 				at: Number(row.at),
 				username: String(row.username),
 				circle: String(row.circle_id),

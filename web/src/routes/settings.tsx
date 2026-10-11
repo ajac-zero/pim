@@ -3,12 +3,10 @@ import { createFileRoute } from "@tanstack/react-router";
 import {
   AlertCircle,
   Check,
-  ChevronDown,
   ExternalLink,
   KeyRound,
   Loader2,
   LogOut,
-  RotateCcw,
   Trash2,
 } from "lucide-react";
 import { useState } from "react";
@@ -23,12 +21,8 @@ import { AddDevice } from "~/components/add-device";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
 import { Page } from "~/components/page";
+import { ToolPermissionList } from "~/components/tool-permissions";
 import { Button } from "~/components/ui/button";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "~/components/ui/collapsible";
 import { Input } from "~/components/ui/input";
 import { Switch } from "~/components/ui/switch";
 import {
@@ -43,8 +37,6 @@ import {
   type ModelInfo,
   type ModelSettings,
   pim,
-  type ToolPermission,
-  type ToolPermissionInfo,
 } from "~/lib/pim-api";
 import {
   disablePush,
@@ -52,7 +44,7 @@ import {
   pushEnabled,
   pushSupported,
 } from "~/lib/push";
-import { modelQuery, permissionsQuery } from "~/lib/queries";
+import { modelQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 export const Route = createFileRoute("/settings")({
@@ -314,42 +306,9 @@ function ChatGPTCard({ settings }: { settings: ModelSettings }) {
   );
 }
 
-/**
- * What Pim may do with each tool that acts on the world or comes from an
- * app: off, ask first, or on. Grouped by app, Pim's own first.
- */
+/** What Pim may do with each tool that acts on the world or comes from an app. */
 function ToolPermissionsSection() {
   const { t } = useI18n();
-  const queryClient = useQueryClient();
-  const { data: tools } = useQuery(permissionsQuery());
-  const set = useMutation({
-    mutationFn: ({
-      info,
-      permission,
-    }: {
-      info: ToolPermissionInfo;
-      permission: ToolPermission | null;
-    }) => pim.setPermission(info.app, info.tool, permission),
-    onSuccess: (next) =>
-      queryClient.setQueryData<ToolPermissionInfo[]>(["permissions"], (all) =>
-        all?.map((info) =>
-          info.app === next.app && info.tool === next.tool ? next : info,
-        ),
-      ),
-    onError: (error) => toast.error(error.message),
-  });
-
-  if (!tools) return null;
-  const groups = new Map<string, ToolPermissionInfo[]>();
-  for (const info of tools) {
-    const key = info.app ?? "";
-    groups.set(key, [...(groups.get(key) ?? []), info]);
-  }
-  const busy = (info: ToolPermissionInfo) =>
-    set.isPending &&
-    set.variables?.info.app === info.app &&
-    set.variables.info.tool === info.tool;
-
   return (
     <section className="mt-10 space-y-3">
       <h2 className="font-medium text-muted-foreground text-sm">
@@ -358,128 +317,8 @@ function ToolPermissionsSection() {
       <p className="px-1 text-muted-foreground text-xs">
         {t("toolPermissionsDescription")}
       </p>
-      {[...groups.entries()].map(([app, infos]) => (
-        <Collapsible
-          key={app}
-          defaultOpen={infos.length <= 10}
-          className="rounded-xl border"
-        >
-          <CollapsibleTrigger className="group flex w-full items-center gap-2 px-4 py-3 text-left">
-            <span className="min-w-0 flex-1 truncate font-medium text-sm">
-              {infos[0]?.appName ?? t("pimTools")}
-            </span>
-            <span className="text-muted-foreground text-xs">
-              {t("toolCount", { count: infos.length })}
-            </span>
-            <ChevronDown className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
-          </CollapsibleTrigger>
-          <CollapsibleContent>
-            <ul
-              className="divide-y border-t"
-              aria-label={infos[0]?.appName ?? t("pimTools")}
-            >
-              {infos.map((info) => (
-                <ToolPermissionRow
-                  key={info.tool}
-                  info={info}
-                  pending={busy(info)}
-                  onChoose={(permission) => set.mutate({ info, permission })}
-                />
-              ))}
-            </ul>
-          </CollapsibleContent>
-        </Collapsible>
-      ))}
+      <ToolPermissionList />
     </section>
-  );
-}
-
-function ToolPermissionRow({
-  info,
-  pending,
-  onChoose,
-}: {
-  info: ToolPermissionInfo;
-  pending: boolean;
-  onChoose: (permission: ToolPermission | null) => void;
-}) {
-  const { t } = useI18n();
-  const choices: { value: ToolPermission; label: string }[] = [
-    { value: "off", label: t("permissionOff") },
-    { value: "ask", label: t("permissionAsk") },
-    { value: "on", label: t("permissionOn") },
-  ];
-  return (
-    <li className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
-      <span className="min-w-0 flex-1 basis-48">
-        <span className="flex items-center gap-2">
-          <span className="truncate font-mono text-sm">{info.tool}</span>
-          {info.readOnly && (
-            <span className="shrink-0 rounded border px-1 text-[10px] text-muted-foreground">
-              {t("readOnlyTool")}
-            </span>
-          )}
-        </span>
-        {info.description && (
-          <span
-            className="block truncate text-muted-foreground text-xs"
-            title={info.description}
-          >
-            {info.description}
-          </span>
-        )}
-        {info.changed && (
-          <span className="mt-1 flex items-start gap-1.5 text-amber-600 text-xs dark:text-amber-400">
-            <AlertCircle className="mt-px size-3.5 shrink-0" />
-            {t("toolChanged")}
-          </span>
-        )}
-      </span>
-      <span className="flex items-center gap-1">
-        {info.chosen !== null && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="text-muted-foreground"
-            aria-label={t("useDefaultPermission", { tool: info.tool })}
-            title={t("useDefaultPermission", { tool: info.tool })}
-            onClick={() => onChoose(null)}
-            disabled={pending}
-          >
-            <RotateCcw />
-          </Button>
-        )}
-        <span
-          role="group"
-          aria-label={t("permissionFor", { tool: info.tool })}
-          className="inline-flex rounded-lg border p-0.5"
-        >
-          {choices.map((choice) => {
-            const selected = info.permission === choice.value;
-            return (
-              <button
-                key={choice.value}
-                type="button"
-                aria-pressed={selected}
-                disabled={pending}
-                onClick={() =>
-                  // Choosing the setting already shown confirms it: after a change, it trusts the new version.
-                  (!selected || info.changed) && onChoose(choice.value)
-                }
-                className={cn(
-                  "rounded-md px-2.5 py-1 text-xs transition-colors disabled:opacity-60",
-                  selected
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:bg-accent hover:text-foreground",
-                )}
-              >
-                {choice.label}
-              </button>
-            );
-          })}
-        </span>
-      </span>
-    </li>
   );
 }
 

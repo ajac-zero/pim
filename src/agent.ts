@@ -14,7 +14,16 @@ import { Agent, type Connection, type ConnectionContext, getAgentByName, type Sc
 import { type PiModel, PiHarness, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
 import { ArtifactStore, artifactHeaders, downloadName, RESIZE_SCRIPT } from "./artifacts";
-import { type Circle, CircleStore, type Guest, MAX_CIRCLE_NAME, MAX_CIRCLES, type Member } from "./circles";
+import {
+	type Circle,
+	CircleStore,
+	GUEST_CALLS_PER_DAY,
+	type Guest,
+	MAX_CIRCLE_NAME,
+	MAX_CIRCLES,
+	MAX_MEMBERS,
+	type Member,
+} from "./circles";
 import { CHATGPT_PROVIDER, ChatGPT, chatgptCredentials } from "./chatgpt";
 import { SqlCredentialStore } from "./credentials";
 import { AppCatalog } from "./extensions/app-catalog";
@@ -653,9 +662,9 @@ export class Pim extends Agent<Env> {
 		await this.deliverNotification(notification);
 	}
 
-	async deliverNotification(notification: Notification): Promise<void> {
+	async deliverNotification(notification: Notification, options: { sockets?: boolean } = {}): Promise<void> {
 		if (this.#closed()) return;
-		this.broadcastMessage({ type: "notification", notification });
+		if (options.sockets !== false) this.broadcastMessage({ type: "notification", notification });
 		await Promise.all([this.#pushNotification(notification), this.#postWebhook(notification)]);
 	}
 
@@ -988,6 +997,9 @@ export class Pim extends Agent<Env> {
 		if (me === null) throw new HttpError(400, "Only a hosted Pim can be shared");
 		if (guest.ownerId === this.name) throw new HttpError(400, "You can't add yourself to a circle");
 		const known = this.circles.member(guest.ownerId);
+		if (!known && this.circles.members().length >= MAX_MEMBERS) {
+			throw new HttpError(429, `Your circles can hold up to ${MAX_MEMBERS} people.`);
+		}
 		// Told first: someone in a circle whose Pim doesn't know of it couldn't use it.
 		if (!known) await (await this.#pimOf(guest.ownerId)).shareReceived(me);
 		return this.circles.addMember(circleId, guest);
@@ -1084,6 +1096,9 @@ export class Pim extends Agent<Env> {
 		const host = this.#me()!.username;
 		const log = (outcome: "ran" | "asked" | "refused", summary: string) =>
 			this.circles.logActivity({ username: guest.username, circle: circle.id, tool: call.tool, outcome, summary });
+		if (!this.circles.countCall(guest.ownerId)) {
+			return { text: `${guest.username} has used today's ${GUEST_CALLS_PER_DAY} calls to ${host}'s Pim. It resets at midnight UTC.`, isError: true };
+		}
 
 		if (call.tool === "recall") {
 			if (resolvePermission(this.store, circle.id, "", MEMORY_TOOL, "off", null).permission !== "on") {
@@ -1151,7 +1166,8 @@ export class Pim extends Agent<Env> {
 				title: `${guest.username} asked your Pim`,
 				body: `${guest.username} (${circle.name}) wants: ${summary}`,
 			});
-			await this.deliverNotification(notification);
+			// Open apps show the request itself, from the approval just broadcast; this reaches the others.
+			await this.deliverNotification(notification, { sockets: false });
 		}
 		return {
 			text: `${host} asks before this runs. The request is with ${host} now (approval ${id}); their answer will arrive in this conversation as a message starting with "[${host}'s answer". Tell ${guest.username} it was asked, and don't call it again.`,

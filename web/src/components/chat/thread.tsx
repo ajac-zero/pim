@@ -54,12 +54,15 @@ const HEADER_INSET = 52;
 
 export const Thread = memo(function Thread({
   sessionId,
+  visit,
   view,
   pendingText,
   composerHeight,
   composerCardHeight,
 }: {
   sessionId: string;
+  /** The username whose Pim this conversation is with, when it's someone else's. */
+  visit?: string;
   view: SessionView;
   /** A message sent but not yet in the transcript, shown right away. */
   pendingText: string | null;
@@ -97,7 +100,12 @@ export const Thread = memo(function Thread({
     return map;
   }, [entries]);
   /* A gated tool call renders as the approval it filed. */
-  const { data: approvals } = useQuery(approvalsQuery());
+  const { data: allApprovals } = useQuery(approvalsQuery());
+  // Requests from people in your circles belong to their conversations, not yours.
+  const approvals = useMemo(
+    () => allApprovals?.filter((approval) => !approval.requestedBy),
+    [allApprovals],
+  );
   const approvalsByCall = useMemo(
     () =>
       new Map(
@@ -218,9 +226,15 @@ export const Thread = memo(function Thread({
         {empty && (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 py-16 text-center">
             <PimMark className="size-10" />
-            <p className="font-medium text-xl">{t("emptyChatTitle")}</p>
+            <p className="font-medium text-xl">
+              {visit
+                ? t("visitEmptyTitle", { username: visit })
+                : t("emptyChatTitle")}
+            </p>
             <p className="max-w-sm text-muted-foreground text-sm">
-              {t("emptyChatHint")}
+              {visit
+                ? t("visitEmptyHint", { username: visit })
+                : t("emptyChatHint")}
             </p>
           </div>
         )}

@@ -28,13 +28,16 @@
       { "name": "Pim", "class_name": "Pim" },
       { "name": "Auth", "class_name": "Auth" },
       // One for the service: usernames, owner IDs, account status.
-      { "name": "Directory", "class_name": "Directory" }
+      { "name": "Directory", "class_name": "Directory" },
+      // One for the service: profiles, and Pims published for others to make their own.
+      { "name": "Gallery", "class_name": "Gallery" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Pim"] },
     { "tag": "v2", "new_sqlite_classes": ["Auth"] },
-    { "tag": "v3", "new_sqlite_classes": ["Directory"] }
+    { "tag": "v3", "new_sqlite_classes": ["Directory"] },
+    { "tag": "v4", "new_sqlite_classes": ["Gallery"] }
   ],
   // Per-address sign-in and registration attempts, and per-person API requests.
   "ratelimits": [

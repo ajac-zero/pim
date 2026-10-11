@@ -377,6 +377,12 @@ export class Directory extends DurableObject<Env> {
 			const what = remaining.length > 0 ? `still holds ${remaining.join(", ")}` : "is not marked erased";
 			throw new Error(`The agent ${what}${why ? ` (${why})` : ""}`);
 		}
+		// What they showed others: their profile and published Pims.
+		const gallery = this.env.Gallery?.getByName("gallery");
+		if (gallery) {
+			await gallery.forgetOwner(ownerId);
+			if (await gallery.holds(ownerId)) throw new Error("The gallery still holds their profile or published Pims");
+		}
 		const auth = this.env.Auth.getByName(ownerId);
 		await auth.deleteEverything();
 		const [passkeys, tokens, codes] = await Promise.all([auth.passkeys(), auth.tokens(), auth.recoveryCodesLeft()]);

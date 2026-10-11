@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -6,20 +6,33 @@ import { Composer } from "~/components/chat/composer";
 import { useI18n } from "~/components/i18n";
 import { pim } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
+import { personasQuery } from "~/lib/queries";
 
-/** An empty draft chat. No session exists until the first message is sent. */
-export const Route = createFileRoute("/new")({ component: NewChatPage });
+/** An empty draft chat, with Pim or one of your Pims. No session exists until the first message is sent. */
+export const Route = createFileRoute("/new")({
+  validateSearch: (search: Record<string, unknown>): { pim?: string } =>
+    typeof search.pim === "string" ? { pim: search.pim } : {},
+  component: NewChatPage,
+});
 
 function NewChatPage() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const { pim: personaId } = Route.useSearch();
+  const { data: personas } = useQuery({
+    ...personasQuery(),
+    enabled: personaId !== undefined,
+  });
+  const persona = personas?.find((candidate) => candidate.id === personaId);
   const [creating, setCreating] = useState(false);
 
   const send = async (text: string) => {
     setCreating(true);
     try {
-      const session = await pim.createSession();
+      const session = await pim.createSession(
+        persona ? { persona: persona.id } : {},
+      );
       await queryClient.invalidateQueries({ queryKey: ["sessions"] });
       pimClient.open(session.id);
       await navigate({
@@ -37,9 +50,19 @@ function NewChatPage() {
     <main className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center px-4">
       <div className="w-full max-w-3xl">
         <p className="mb-4 text-center text-muted-foreground">
-          {t("startNewChat")}
+          {persona
+            ? t("startChatWith", { name: persona.name })
+            : t("startNewChat")}
         </p>
-        <Composer onSend={send} busy={false} disabled={creating} autoFocus />
+        <Composer
+          onSend={send}
+          busy={false}
+          disabled={creating || (personaId !== undefined && !personas)}
+          placeholder={
+            persona ? t("messagePersona", { name: persona.name }) : undefined
+          }
+          autoFocus
+        />
       </div>
     </main>
   );

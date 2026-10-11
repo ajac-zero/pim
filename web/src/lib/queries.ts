@@ -54,3 +54,32 @@ export const artifactVersionQuery = (id: string, version: number) =>
     queryFn: () => pim.artifactVersion(id, version),
     retry: false,
   });
+
+export const personasQuery = () =>
+  queryOptions({ queryKey: ["personas"], queryFn: pim.personas });
+
+export const profileQuery = () =>
+  queryOptions({ queryKey: ["profile"], queryFn: pim.profile });
+
+export const appsQuery = () =>
+  queryOptions({ queryKey: ["apps"], queryFn: pim.apps });
+
+export const templatesQuery = (query: string) =>
+  queryOptions({
+    queryKey: ["templates", query],
+    queryFn: () => pim.templates(query),
+  });
+
+export const templateQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["templates", "one", id],
+    queryFn: () => pim.template(id),
+    retry: false,
+  });
+
+export const personQuery = (username: string) =>
+  queryOptions({
+    queryKey: ["people", username],
+    queryFn: () => pim.person(username),
+    retry: false,
+  });

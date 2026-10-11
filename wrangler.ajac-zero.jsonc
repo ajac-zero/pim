@@ -28,13 +28,16 @@
     "bindings": [
       { "name": "Pim", "class_name": "Pim" },
       { "name": "Auth", "class_name": "Auth" },
-      { "name": "Directory", "class_name": "Directory" }
+      { "name": "Directory", "class_name": "Directory" },
+      // One for the service: profiles, and Pims published for others to make their own.
+      { "name": "Gallery", "class_name": "Gallery" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Pim"] },
     { "tag": "v2", "new_sqlite_classes": ["Auth"] },
-    { "tag": "v3", "new_sqlite_classes": ["Directory"] }
+    { "tag": "v3", "new_sqlite_classes": ["Directory"] },
+    { "tag": "v4", "new_sqlite_classes": ["Gallery"] }
   ],
   // Namespace IDs unique to this deployment in the account, so no other Worker shares the counters.
   "ratelimits": [

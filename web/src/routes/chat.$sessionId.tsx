@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, notFound } from "@tanstack/react-router";
-import { Users } from "lucide-react";
+import { Bot, Users } from "lucide-react";
 import { useEffect } from "react";
 import { toast } from "sonner";
 import { sessionTitle, useNewChat } from "~/components/app-sidebar";
@@ -94,6 +94,12 @@ function ChatPage() {
             <span className="pointer-events-auto max-w-[min(32rem,70%)] truncate rounded-full border bg-background px-3 py-1 font-medium text-sm shadow-sm">
               {session ? sessionTitle(session, t) : "\u00a0"}
             </span>
+            {session?.persona && (
+              <span className="pointer-events-auto flex items-center gap-1.5 rounded-full border bg-background px-2.5 py-1 text-muted-foreground text-xs shadow-sm">
+                <Bot className="size-3.5" />
+                {session.persona.name}
+              </span>
+            )}
             {ready && connection !== "open" && (
               <span className="pointer-events-auto rounded-full border bg-background px-2.5 py-1 text-muted-foreground text-xs shadow-sm">
                 {t("connecting")}
@@ -118,7 +124,9 @@ function ChatPage() {
               placeholder={
                 session?.visit
                   ? t("messageVisit", { username: session.visit.username })
-                  : undefined
+                  : session?.persona
+                    ? t("messagePersona", { name: session.persona.name })
+                    : undefined
               }
               onStop={stop}
               busy={ready && view.running}

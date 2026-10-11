@@ -14,6 +14,8 @@ interface PimSecrets {
 interface PimlingBindings {
 	/** Accounts: usernames, owner IDs and their status (src/hosted/directory.ts). */
 	Directory?: DurableObjectNamespace<import("./hosted/directory").Directory>;
+	/** Profiles, and Pims published for others to make their own (src/hosted/gallery.ts). */
+	Gallery?: DurableObjectNamespace<import("./hosted/gallery").Gallery>;
 	/** The domain Pimlings are served under: `<username>.<PIMLING_DOMAIN>`. */
 	PIMLING_DOMAIN?: string;
 	/** `open`, `invite` (the default) or `closed`. */

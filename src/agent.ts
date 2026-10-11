@@ -78,6 +78,7 @@ import {
 	TOOL_PERMISSIONS,
 	type ToolPermission,
 } from "./store";
+import { type Persona, PersonaStore, personaInput, personaInstructions } from "./personas";
 import { projectEntries } from "./transcript";
 import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
@@ -206,6 +207,8 @@ export class Pim extends Agent<Env> {
 	readonly circles = new CircleStore(this.ctx.storage.sql);
 	/** Pims shared with this Pim's owner, and their conversations with them. */
 	readonly visits = new VisitStore(this.ctx.storage.sql);
+	/** The owner's Pims: named agents with their own instructions, inside this one. */
+	readonly personas = new PersonaStore(this.ctx.storage.sql);
 	/** What the agent made for its owner, with every version. */
 	readonly artifacts = new ArtifactStore(this.ctx.storage.sql, () => this.limits(), {
 		storageRoom: () => {
@@ -1193,6 +1196,54 @@ export class Pim extends Agent<Env> {
 		await this.decideApproval(payload.id, "deny", undefined, "timeout");
 	}
 
+	// The owner's Pims.
+
+	#persona(id: string): Persona {
+		const persona = this.personas.get(id);
+		if (!persona) throw new HttpError(404, `No Pim ${id}`);
+		return persona;
+	}
+
+	#personaRef(session: string): { id: string; name: string } | null {
+		const persona = this.personas.ofSession(session);
+		return persona ? { id: persona.id, name: persona.name } : null;
+	}
+
+	/** Gives chats a Pim's instructions, as it is now; null takes them away. Each chat sees them from its next request. */
+	async #applyPersona(sessions: readonly string[], persona: Persona | null): Promise<void> {
+		const instructions = persona === null ? null : personaInstructions(persona);
+		for (const session of sessions) {
+			if (this.store.deletedSessions().has(session)) continue;
+			await (await this.harness.conversation(session)).configure({ instructions }, BACKGROUND_CONTEXT);
+		}
+	}
+
+	/** One of the owner's Pims, for the hosting service to publish. */
+	async personaToPublish(id: string): Promise<Persona | null> {
+		this.#assertOpen();
+		return this.personas.get(id) ?? null;
+	}
+
+	/** Records which template a Pim is published as; null once unpublished. */
+	async setPersonaPublished(id: string, template: string | null): Promise<void> {
+		this.#assertOpen();
+		if (this.personas.get(id)) this.personas.setPublished(id, template);
+	}
+
+	/** Makes a published template one of the owner's Pims: a copy of it, theirs to change. */
+	async adoptTemplate(template: {
+		id: string;
+		author: string;
+		name: string;
+		description: string;
+		instructions: string;
+		apps: readonly { name: string; url: string }[];
+	}): Promise<Persona> {
+		this.#assertOpen();
+		const input = personaInput({ ...template });
+		return this.personas.create(input, { template: template.id, author: template.author });
+	}
+
 	// Visits: Pims shared with this one's owner, and their conversations with them.
 
 	/** From a host's Pim: its owner put this Pim's owner in a circle. */
@@ -1412,6 +1463,7 @@ export class Pim extends Agent<Env> {
 			approvals: this.store.approvals(),
 			permissions: this.store.toolPermissions(),
 			circles: this.#describeCircles(),
+			personas: this.personas.list(),
 			guestActivity: this.circles.activity(500),
 			sharedWithMe: this.visits.shares().map(({ ownerId, username, sharedAt, revoked }) => ({ ownerId, username, sharedAt, revoked })),
 			notifications: this.store.notifications({ unread: false }),
@@ -1544,6 +1596,7 @@ export class Pim extends Agent<Env> {
 						createdAt: info?.createdAt ?? null,
 						updatedAt: info?.updatedAt ?? null,
 						visit: visit ? { username: visit.username, available: !visit.revoked } : null,
+						persona: this.#personaRef(session.id),
 					};
 				});
 				// Most recently active first; sessions never used last.
@@ -1554,7 +1607,8 @@ export class Pim extends Agent<Env> {
 			"POST",
 			"/sessions",
 			async (_params, request) => {
-				const { title } = await readJson<{ title: string }>(request);
+				const { title, persona: personaId } = await readJson<{ title: string; persona: string }>(request);
+				const persona = personaId === undefined ? undefined : this.#persona(personaId);
 				const { sessions } = this.limits();
 				if (sessions !== null) {
 					const deleted = this.store.deletedSessions();
@@ -1563,8 +1617,12 @@ export class Pim extends Agent<Env> {
 				}
 				const { id } = await this.harness.sessions.create();
 				await this.harness.session(id).setModel(this.chosenModel());
+				if (persona) {
+					this.personas.setSession(id, persona.id);
+					await this.#applyPersona([id], persona);
+				}
 				this.store.touchSession(id, typeof title === "string" && title.trim() !== "" ? clipTitle(title) : undefined);
-				return { id, ...this.store.sessionInfo(id) };
+				return { id, ...this.store.sessionInfo(id), persona: this.#personaRef(id) };
 			},
 		],
 		[
@@ -2048,6 +2106,36 @@ export class Pim extends Agent<Env> {
 					throw new HttpError(400, `permission must be one of ${TOOL_PERMISSIONS.join(", ")}, or null for the default`);
 				}
 				return this.setToolPermission(circle ?? OWNER, app ?? "", tool, permission);
+			},
+		],
+
+		// The owner's Pims: named agents with their own instructions.
+		["GET", "/personas", () => ({ personas: this.personas.list() })],
+		["GET", "/personas/:persona", ({ persona }) => this.#persona(persona!)],
+		[
+			"POST",
+			"/personas",
+			async (_params, request) => {
+				const persona = this.personas.create(personaInput(await readJson<Record<string, unknown>>(request)));
+				return Response.json(persona, { status: 201 });
+			},
+		],
+		[
+			"PUT",
+			"/personas/:persona",
+			async ({ persona: id }, request) => {
+				const persona = this.personas.update(id!, personaInput(await readJson<Record<string, unknown>>(request), this.#persona(id!)));
+				await this.#applyPersona(this.personas.sessions(persona.id), persona);
+				return persona;
+			},
+		],
+		[
+			"DELETE",
+			"/personas/:persona",
+			async ({ persona: id }) => {
+				this.#persona(id!);
+				await this.#applyPersona(this.personas.delete(id!), null);
+				return { deleted: true };
 			},
 		],
 

@@ -141,6 +141,16 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | POST | `/approvals/:id/approve` | `{ note?, always: true }` | Also sets the approval's tool to `on`, so later calls run without asking, and approves other pending calls to it |
 | GET | `/permissions` | `?circle=` | `{ tools: [{ app, appName, tool, name, description, readOnly, permission, default, chosen, changed, choices }] }`: Pim's own tools that ask first (`app: null`) and every connected app's tools, or with `circle`, that circle's (memory, and the apps' tools). `permission` is what applies: `off`, `ask` or `on`. `chosen` is yours, or null for the default |
 | PUT | `/permissions` | `{ circle?, app, tool, permission }`: `app` null for Pim's own tools, `tool` the app's own name for it, `permission` null for the default | That tool's entry; `404` for an unknown tool or circle |
+| GET | `/personas` | | `{ personas: [{ id, name, description, instructions, apps, source, published, createdAt, updatedAt }] }`: your Pims (see [Your Pims](#your-pims)) |
+| POST | `/personas` | `{ name, description?, instructions, apps?: [{ name, url }] }` | A new Pim |
+| GET, PUT, DELETE | `/personas/:id` | PUT: any of the fields | The Pim; editing reaches its chats from their next request, deleting leaves them as plain chats |
+| POST | `/sessions` | `{ title?, persona? }` | A new session, with that Pim's instructions when `persona` is given; sessions list their `persona` |
+| GET, PUT | `/profile` | PUT: `{ displayName, bio }` | How others on Pimling see you (Pimling only, as are the rows below) |
+| GET | `/people/:username` | | `{ username, displayName, bio, templates }`: someone, and the Pims they published |
+| GET | `/templates` | `?q=` | `{ templates }`: published Pims, most used first, without their instructions |
+| GET | `/templates/:id` | | A published Pim in full |
+| POST | `/templates/:id/use` | | Makes it one of your Pims: a copy, with `source` saying where it came from |
+| POST, DELETE | `/personas/:id/publish` | | Publishes your Pim (again, to update it), or takes it down |
 | GET | `/circles` | | `{ circles: [{ id, name, enabled, createdAt, members: [{ ownerId, username, addedAt }] }] }` (Pimling; see [Sharing](#sharing)) |
 | POST | `/circles` | `{ name }` | A new circle, with nothing allowed |
 | PUT | `/circles/:id` | `{ name?, enabled? }` | The circle; `enabled: false` pauses everyone in it |
@@ -261,6 +271,14 @@ Settings → Tool permissions lists every tool that acts on the world or comes f
 - **Tied to the tool you saw.** An app tool set to On is held to its definition at the time: description, input schema and annotations. If the app changes any of them, Pim asks before each call again and Settings says so until you choose again.
 - **Checked at each call.** An app tool's permission is checked again when the model calls it, so a tool turned off or changed since the tool list was built is refused or asked about.
 - **Removing an app** forgets its tools' permissions. Tools chosen with Always approve before permissions existed become On the first time Pim sees them.
+
+## Your Pims
+
+Your Pims are named agents inside your Pim, each with its own instructions: a marathon coach, a trip planner, a code reviewer. A chat started with one (Your Pims → Chat) gets its instructions on top of Pim's own; everything else is the same Pim's: memory, apps, approvals, schedules. Edit a Pim and its chats follow from their next request; delete it and they stay, as plain chats. A Pim can list apps it works with, by MCP server URL, so whoever uses it can connect them with their own accounts.
+
+On Pimling, a Pim can be **published**: Discover lists published Pims, and anyone can read one in full and **make it their own**, which copies its name, description, instructions and suggested apps into their own Pims. Nothing else of the author's goes with it: no memory, chats or credentials. The copy is theirs to change; publishing again updates what others see, not their copies. Unpublishing, deleting the Pim, or deleting the account takes it out of Discover. Each person has a profile (a name and a line about them), shown on their page and next to what they publish.
+
+A published Pim's instructions are someone else's words running with your tools, so read them before you take one: your copy still asks before acting wherever your tool permissions say it should.
 
 ## Sharing
 

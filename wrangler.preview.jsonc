@@ -24,13 +24,15 @@
     "bindings": [
       { "name": "Pim", "class_name": "Pim" },
       { "name": "Auth", "class_name": "Auth" },
-      { "name": "Directory", "class_name": "Directory" }
+      { "name": "Directory", "class_name": "Directory" },
+      { "name": "Gallery", "class_name": "Gallery" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Pim"] },
     { "tag": "v2", "new_sqlite_classes": ["Auth"] },
-    { "tag": "v3", "new_sqlite_classes": ["Directory"] }
+    { "tag": "v3", "new_sqlite_classes": ["Directory"] },
+    { "tag": "v4", "new_sqlite_classes": ["Gallery"] }
   ],
   "ratelimits": [
     { "name": "AUTH_LIMITER", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } },

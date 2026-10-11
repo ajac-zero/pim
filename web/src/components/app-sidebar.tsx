@@ -2,8 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Bell,
+  Bot,
   Brain,
   Check,
+  Compass,
   MessageCircle,
   Monitor,
   Moon,
@@ -243,6 +245,22 @@ export function AppSidebar({
             collapsed={collapsed}
             onNavigate={onNavigate}
           />
+          <SidebarNavItem
+            to="/pims"
+            icon={<Bot className="size-4.5 shrink-0" />}
+            label={t("yourPims")}
+            collapsed={collapsed}
+            onNavigate={onNavigate}
+          />
+          {account && (
+            <SidebarNavItem
+              to="/discover"
+              icon={<Compass className="size-4.5 shrink-0" />}
+              label={t("discover")}
+              collapsed={collapsed}
+              onNavigate={onNavigate}
+            />
+          )}
           {account && (
             <SidebarNavItem
               to="/sharing"
@@ -423,7 +441,13 @@ function SidebarNavItem({
   onNavigate,
   ...props
 }: {
-  to: "/artifacts" | "/notifications" | "/sharing" | "/settings";
+  to:
+    | "/artifacts"
+    | "/notifications"
+    | "/pims"
+    | "/discover"
+    | "/sharing"
+    | "/settings";
   icon: ReactNode;
   label: string;
   count?: number;

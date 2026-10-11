@@ -4,16 +4,19 @@ import { Check, ExternalLink, KeyRound, Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { PimMark } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
+import { Join } from "~/components/register";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {
+  type AuthSession,
   alreadyRegistered,
   auth,
   cancelled,
+  claimCode,
   deviceCode,
   forgetDeviceCode,
   forgetSetupCode,
-  type PimAuthSession,
+  inviteCode,
   setupCode,
 } from "~/lib/auth";
 
@@ -22,21 +25,34 @@ const DASHBOARD_URL =
   "https://dash.cloudflare.com/?to=/:account/workers-and-pages";
 
 /**
- * Shown instead of the app until a passkey signs this browser in. A fresh
- * deploy creates its first passkey right here. Otherwise, without a passkey,
- * a self-hosted Pim has the Worker write a setup link to its logs, which only
- * the Cloudflare account's owner can read; opening that link creates a
- * passkey. A Pimling takes one of the recovery codes its owner saved instead.
+ * Shown instead of the app until a passkey signs this browser in. Links open
+ * here too: a setup link or a device link makes a passkey, a claim link or
+ * an invite makes an account. A Pim with no admin yet is set up here by
+ * whoever opens it in the minutes after a deploy; after that, by a link the
+ * Worker writes to its logs, which only someone signed in to the Cloudflare
+ * account can read. People who lost their passkey use a recovery code, and
+ * the admin can also get a setup link from the logs.
  */
-export function SignIn({ session }: { session: PimAuthSession }) {
-  const { hasPasskeys, canClaim } = session;
-  const codes = session.recovery === "codes";
+export function SignIn({ session }: { session: AuthSession }) {
+  const { claimed = true, canClaim = false, registration = "invite" } = session;
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const router = useRouter();
   const [setup, setSetup] = useState(setupCode);
   const [device, setDevice] = useState(deviceCode);
-  const [recovering, setRecovering] = useState(false);
+  const [claim, setClaim] = useState(claimCode);
+  const [invite, setInvite] = useState(inviteCode);
+  // Joining stays on screen until it's done: making the account changes the session (this Pim
+  // is claimed now), and the recovery codes and the first passkey come after.
+  const [view, setView] = useState<
+    "signIn" | "claim" | "join" | "recover" | "logs"
+  >(() =>
+    !claimed && (canClaim || claimCode())
+      ? "claim"
+      : inviteCode()
+        ? "join"
+        : "signIn",
+  );
   const [error, setError] = useState<string | null>(null);
   // While adding this device with a link: it already has a passkey for this Pim, so offer to sign
   // in with it instead. Other screens show the same news as an ordinary error.
@@ -47,10 +63,18 @@ export function SignIn({ session }: { session: PimAuthSession }) {
     const update = () => {
       setSetup(setupCode());
       setDevice(deviceCode());
+      setClaim(claimCode());
+      setInvite(inviteCode());
+      if (claimCode()) setView("claim");
+      else if (inviteCode()) setView("join");
     };
     window.addEventListener("hashchange", update);
     return () => window.removeEventListener("hashchange", update);
   }, []);
+  const show = (next: typeof view) => {
+    setView(next);
+    setError(null);
+  };
 
   // Loaders ran while signed out and kept their errors: run them again.
   const onSuccess = async () => {
@@ -86,9 +110,15 @@ export function SignIn({ session }: { session: PimAuthSession }) {
     signIn.mutate();
   };
   const create = useMutation({
-    mutationFn: (recovery?: string) =>
+    mutationFn: (recovery?: { username: string; code: string }) =>
       auth.addPasskey(
-        recovery ? { recovery } : device ? { device } : setup ? { setup } : {},
+        recovery
+          ? { username: recovery.username, recovery: recovery.code }
+          : device
+            ? { device }
+            : setup
+              ? { setup }
+              : {},
       ),
     onMutate: () => setError(null),
     onSuccess: () => {
@@ -111,12 +141,12 @@ export function SignIn({ session }: { session: PimAuthSession }) {
             <h1 className="font-semibold text-2xl">
               {t("addThisDeviceTitle")}
             </h1>
-            {/* Whose Pimling this adds the device to: check it before making a passkey for it. */}
+            {/* Which Pim this adds the device to: check it before making a passkey for it. */}
             <p className="mt-3 rounded-lg border bg-muted/40 px-3 py-2 text-sm">
               <span className="text-muted-foreground">{t("addingTo")} </span>
               {/* Breaks only after a dot, so no part of the name is split. */}
               <span className="font-medium font-mono">
-                {(session.host ?? location.host).replaceAll(".", ".\u200b")}
+                {location.host.replaceAll(".", ".\u200b")}
               </span>
             </p>
             {/* Said here, where the choice is, instead of as an error below everything. */}
@@ -159,27 +189,8 @@ export function SignIn({ session }: { session: PimAuthSession }) {
                 setError(null);
               }}
             >
-              {t("notMyPimling")}
+              {t("notMyPim")}
             </Button>
-          </>
-        ) : !setup && !hasPasskeys && canClaim ? (
-          <>
-            <h1 className="font-semibold text-2xl">{t("setUpTitle")}</h1>
-            <p className="mt-2 text-muted-foreground text-sm">
-              {t("claimBody")}
-            </p>
-            <Button
-              className="mt-6 w-full"
-              size="lg"
-              onClick={() => create.mutate()}
-              disabled={pending}
-            >
-              {icon}
-              {t("createPasskey")}
-            </Button>
-            <p className="mt-4 text-muted-foreground text-xs">
-              {t("claimNote")}
-            </p>
           </>
         ) : setup ? (
           <>
@@ -192,14 +203,37 @@ export function SignIn({ session }: { session: PimAuthSession }) {
             <Button
               className="mt-6 w-full"
               size="lg"
-              onClick={() => create.mutate()}
+              onClick={() => create.mutate(undefined)}
               disabled={pending}
             >
               {icon}
               {t("createPasskey")}
             </Button>
           </>
-        ) : hasPasskeys && !recovering ? (
+        ) : view === "claim" ? (
+          <Join mode="claim" claim={claim} />
+        ) : !claimed ? (
+          <SetupLinkSteps firstPasskey />
+        ) : view === "join" ? (
+          <Join
+            mode={registration === "open" ? "open" : "invite"}
+            invite={invite}
+            onBack={() => {
+              forgetSetupCode();
+              setInvite(null);
+              show("signIn");
+            }}
+          />
+        ) : view === "recover" ? (
+          <RecoveryCodeSteps
+            pending={pending}
+            onSubmit={(username, code) => create.mutate({ username, code })}
+            onLogs={() => show("logs")}
+            onBack={() => show("signIn")}
+          />
+        ) : view === "logs" ? (
+          <SetupLinkSteps firstPasskey={false} onBack={() => show("signIn")} />
+        ) : (
           <>
             <h1 className="font-semibold text-2xl">{t("signInTitle")}</h1>
             <p className="mt-2 text-muted-foreground text-sm">
@@ -217,10 +251,7 @@ export function SignIn({ session }: { session: PimAuthSession }) {
             <Button
               variant="ghost"
               className="mt-3 w-full text-muted-foreground"
-              onClick={() => {
-                setRecovering(true);
-                setError(null);
-              }}
+              onClick={() => show("recover")}
             >
               {t("lostPasskey")}
             </Button>
@@ -229,26 +260,25 @@ export function SignIn({ session }: { session: PimAuthSession }) {
               <p className="font-medium">{t("newDeviceTitle")}</p>
               <p className="mt-1 text-muted-foreground">{t("newDeviceBody")}</p>
             </div>
+            <p className="mt-6 border-t pt-4 text-center text-muted-foreground text-sm">
+              {registration === "open" ? (
+                <>
+                  {t("newHere")}{" "}
+                  <button
+                    type="button"
+                    className="font-medium text-foreground underline-offset-2 hover:underline"
+                    onClick={() => show("join")}
+                  >
+                    {t("createAccount")}
+                  </button>
+                </>
+              ) : registration === "invite" ? (
+                t("joinByInvite")
+              ) : (
+                t("registrationClosed")
+              )}
+            </p>
           </>
-        ) : codes ? (
-          <RecoveryCodeSteps
-            firstPasskey={!hasPasskeys}
-            pending={pending}
-            onSubmit={(code) => create.mutate(code)}
-            onBack={
-              hasPasskeys
-                ? () => {
-                    setRecovering(false);
-                    setError(null);
-                  }
-                : undefined
-            }
-          />
-        ) : (
-          <SetupLinkSteps
-            firstPasskey={!hasPasskeys}
-            onBack={hasPasskeys ? () => setRecovering(false) : undefined}
-          />
         )}
 
         {error && !(enrolling && hasPasskeyHere) && (
@@ -261,33 +291,44 @@ export function SignIn({ session }: { session: PimAuthSession }) {
   );
 }
 
-/** Pimling: a recovery code from registration adds a passkey, once. */
+/** A recovery code from joining adds a passkey, once, with the username it belongs to. */
 function RecoveryCodeSteps({
-  firstPasskey,
   pending,
   onSubmit,
+  onLogs,
   onBack,
 }: {
-  firstPasskey: boolean;
   pending: boolean;
-  onSubmit: (code: string) => void;
-  onBack?: () => void;
+  onSubmit: (username: string, code: string) => void;
+  onLogs: () => void;
+  onBack: () => void;
 }) {
   const { t } = useI18n();
+  const [username, setUsername] = useState("");
   const [code, setCode] = useState("");
+  const ready = username.trim() !== "" && code.trim() !== "";
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault();
-        if (code.trim()) onSubmit(code.trim());
+        if (ready) onSubmit(username.trim(), code.trim());
       }}
     >
-      <h1 className="font-semibold text-2xl">
-        {firstPasskey ? t("finishSetUpTitle") : t("recoveryCodeTitle")}
-      </h1>
+      <h1 className="font-semibold text-2xl">{t("recoveryCodeTitle")}</h1>
       <p className="mt-2 text-muted-foreground text-sm">
-        {firstPasskey ? t("finishSetUpBody") : t("recoveryCodeBody")}
+        {t("recoveryCodeBody")}
       </p>
+      <Input
+        value={username}
+        onChange={(event) => setUsername(event.target.value)}
+        placeholder={t("username")}
+        aria-label={t("username")}
+        autoComplete="username"
+        autoCapitalize="none"
+        spellCheck={false}
+        className="mt-6 h-10"
+        autoFocus
+      />
       <Input
         value={code}
         onChange={(event) => setCode(event.target.value)}
@@ -295,28 +336,35 @@ function RecoveryCodeSteps({
         aria-label={t("recoveryCode")}
         autoComplete="one-time-code"
         spellCheck={false}
-        className="mt-6 h-10 font-mono"
-        autoFocus
+        className="mt-3 h-10 font-mono"
       />
       <Button
         type="submit"
         className="mt-3 w-full"
         size="lg"
-        disabled={pending || !code.trim()}
+        disabled={pending || !ready}
       >
         {pending ? <Loader2 className="animate-spin" /> : <KeyRound />}
         {t("createPasskey")}
       </Button>
-      {onBack && (
-        <Button
+      <p className="mt-6 text-muted-foreground text-xs">
+        {t("adminLostPasskey")}{" "}
+        <button
           type="button"
-          variant="ghost"
-          className="mt-3 w-full text-muted-foreground"
-          onClick={onBack}
+          className="font-medium text-foreground underline-offset-2 hover:underline"
+          onClick={onLogs}
         >
-          {t("backToSignIn")}
-        </Button>
-      )}
+          {t("getSetupLinkFromLogs")}
+        </button>
+      </p>
+      <Button
+        type="button"
+        variant="ghost"
+        className="mt-3 w-full text-muted-foreground"
+        onClick={onBack}
+      >
+        {t("backToSignIn")}
+      </Button>
     </form>
   );
 }

@@ -63,7 +63,7 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-/** Pimling: whose Pimling this is, what it used today, and its recovery codes. */
+/** Who you are on this Pim, what you used today, and your recovery codes. */
 export function AccountSection() {
   const { t, formatNumber } = useI18n();
   const { data: account } = useQuery(accountQuery());
@@ -81,7 +81,14 @@ export function AccountSection() {
   return (
     <section className="mb-10 rounded-xl border bg-card p-5 shadow-xs">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="font-semibold">{new URL(account.url).host}</h2>
+        <h2 className="flex items-center gap-2 font-semibold">
+          @{account.username}
+          {account.role === "admin" && (
+            <span className="rounded-full border px-2 py-0.5 font-normal text-muted-foreground text-xs">
+              {t("adminBadge")}
+            </span>
+          )}
+        </h2>
         <Button variant="outline" size="sm" asChild>
           <a href={EXPORT_URL} download>
             <Download />
@@ -295,8 +302,7 @@ export function TokensSection() {
   const queryClient = useQueryClient();
   const { data: session } = useQuery(authSessionQuery());
   // Tokens are managed with a passkey session: the dev server's token can't make more.
-  const signedIn =
-    session?.site !== "accounts" && session?.method === "passkey";
+  const signedIn = session?.method === "passkey";
   const { data: tokens } = useQuery({ ...tokensQuery(), enabled: signedIn });
   const [name, setName] = useState("");
   const [made, setMade] = useState<string | null>(null);
@@ -395,13 +401,7 @@ export function TokensSection() {
   );
 }
 
-/** Pimling's front door, from a Pimling's own address. */
-function frontDoor(url: string): string {
-  const host = new URL(url).host;
-  return `${location.protocol}//${host.slice(host.indexOf(".") + 1)}`;
-}
-
-/** Pimling: deleting the account, after typing its username. */
+/** Deleting your account, after typing its username. */
 export function DeleteAccountSection() {
   const { t } = useI18n();
   const { data: account } = useQuery(accountQuery());
@@ -411,12 +411,13 @@ export function DeleteAccountSection() {
   const [stillErasing, setStillErasing] = useState(false);
   const remove = useMutation({
     mutationFn: ({ username }: Account) => pim.deleteAccount(username),
-    onSuccess: (result, { url }) => {
+    onSuccess: (result) => {
       if (!result.deleted) {
         setStillErasing(true);
         return;
       }
-      window.location.assign(frontDoor(url));
+      // Signed out: back to the sign-in screen.
+      window.location.assign("/");
     },
     onError: (error) => toast.error(error.message),
   });
@@ -433,7 +434,7 @@ export function DeleteAccountSection() {
             {t("accountClosedBody")}
           </p>
           <Button variant="outline" asChild>
-            <a href={frontDoor(account.url)}>{t("leavePimling")}</a>
+            <a href="/">{t("leave")}</a>
           </Button>
         </div>
       </Section>

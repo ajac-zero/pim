@@ -13,7 +13,7 @@ export const Route = createFileRoute("/people/$username")({
   component: PersonPage,
 });
 
-/** Someone on Pimling: who they say they are, and the Pims they published. */
+/** Someone on this Pim: who they say they are, and the Pims they published. */
 function PersonPage() {
   const { t } = useI18n();
   const { username } = Route.useParams();

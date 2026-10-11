@@ -5,8 +5,8 @@ import { defineConfig, loadEnv } from "vite";
 
 /**
  * In development, `/api` goes to Pim under `wrangler dev` (run `pnpm dev` at
- * the repository's root) with your API token, so you're signed in without a
- * passkey:
+ * the repository's root) with an API token you made in Settings, so you're
+ * signed in as yourself without a passkey:
  *
  *   PIM_API_TOKEN=... pnpm dev:web
  *
@@ -47,8 +47,7 @@ export default defineConfig(({ mode }) => {
                 signedIn: true,
                 method: "dev",
                 passkey: null,
-                hasPasskeys: false,
-                canClaim: false,
+                account: null,
               }),
             );
           });

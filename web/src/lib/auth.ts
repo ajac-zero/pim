@@ -2,41 +2,28 @@ import { queryOptions } from "@tanstack/react-query";
 import { SignInRequired } from "~/lib/pim-api";
 
 /**
- * Signing in with passkeys. The Worker (worker/auth.ts) checks them and keeps
- * the session in a cookie; this side runs the browser's WebAuthn ceremonies
- * and hands their results over as base64url.
+ * Signing in with passkeys. The Worker (src/auth) checks them and keeps the
+ * session in a cookie; this side runs the browser's WebAuthn ceremonies and
+ * hands their results over as base64url.
  */
 
-export type PimAuthSession = {
-  site?: "pim";
+export type Role = "admin" | "member";
+
+export type AuthSession = {
   signedIn: boolean;
   /** `dev` is the dev server, which signs every request in itself. */
   method: "passkey" | "dev" | null;
   /** The passkey this browser signed in with. */
   passkey: string | null;
-  hasPasskeys: boolean;
-  /** Right after a deploy, a Pim that never had a passkey takes the first one with no link. */
-  canClaim: boolean;
-  /**
-   * How someone without a passkey gets one: a setup link the Worker writes
-   * to its logs (self-hosted), or one of their recovery codes (Pimling).
-   */
-  recovery?: "logs" | "codes";
-  /** Pimling: whose Pimling this is, once signed in. */
-  account?: { username: string } | null;
-  /** This Pim's address, such as `ana.pimling.example.com`, shown before signing in. */
-  host?: string;
+  /** Who is signed in. */
+  account: { username: string; role: Role } | null;
+  /** Signed out: whether this Pim has its admin yet. */
+  claimed?: boolean;
+  /** Signed out, with no admin yet: right after a deploy, whoever registers first becomes the admin. */
+  canClaim?: boolean;
+  /** Signed out: how people join once there is an admin. */
+  registration?: "open" | "invite" | "closed";
 };
-
-/** Pimling's front door, where people register instead of signing in. */
-export type AccountsSession = {
-  site: "accounts";
-  /** Pimlings live at `<username>.<domain>`. */
-  domain: string;
-  registration: "open" | "invite" | "closed";
-};
-
-export type AuthSession = PimAuthSession | AccountsSession;
 
 export type ApiToken = {
   id: string;
@@ -47,9 +34,9 @@ export type ApiToken = {
 
 export type Registered = {
   username: string;
-  url: string;
-  /** Opens the new Pimling and makes its first passkey; works once. */
-  setupUrl: string;
+  role: Role;
+  /** Makes the account's first passkey, once, within a day. */
+  setup: string;
   setupExpiresAt: string;
   recoveryCodes: string[];
 };
@@ -163,20 +150,30 @@ export const auth = {
     })) as PublicKeyCredential | null;
     if (!credential) throw new Error("No passkey was chosen.");
     const response = credential.response as AuthenticatorAssertionResponse;
+    // The passkey says whose it is: the account it was made for.
+    if (!response.userHandle) {
+      throw new Error("That passkey doesn't say whose it is. Use another.");
+    }
     await post("/sign-in", {
       id: credential.id,
       clientDataJSON: encode(response.clientDataJSON),
       authenticatorData: encode(response.authenticatorData),
       signature: encode(response.signature),
+      userHandle: encode(response.userHandle),
     });
   },
 
   /**
-   * Needs a setup link's code or a recovery code unless this browser is
-   * signed in, or Pim can be claimed.
+   * Needs a setup link's code, a device link's, or a recovery code with its
+   * username, unless this browser is signed in.
    */
   async addPasskey(
-    allowedBy: { setup?: string; recovery?: string; device?: string } = {},
+    allowedBy: {
+      setup?: string;
+      recovery?: string;
+      username?: string;
+      device?: string;
+    } = {},
   ) {
     const options = await post<CreationOptions>("/passkeys/options", allowedBy);
     const credential = (await navigator.credentials.create({
@@ -206,7 +203,10 @@ export const auth = {
     });
   },
 
-  /** Has the Worker write a setup link to its logs, for the account's owner. */
+  /**
+   * Has the Worker write a setup link to its logs, for whoever runs this Pim:
+   * one that claims it while it has no admin, or adds the admin a passkey.
+   */
   requestSetupLink: () => post<{ expiresAt: string }>("/setup-link"),
 
   removePasskey: (id: string) =>
@@ -219,11 +219,7 @@ export const auth = {
   /** Stops the link this browser made from working. */
   cancelDeviceLink: () => call("/device-link", { method: "DELETE" }),
 
-  /** Pimling's front door: the address of an existing Pimling. */
-  findPimling: (name: string) =>
-    call<{ url: string }>(`/pimling?name=${encodeURIComponent(name)}`),
-
-  /** Pimling: how many recovery codes are left, and a new set. */
+  /** How many recovery codes are left, and a new set. */
   recoveryCodesLeft: () =>
     call<{ left: number }>("/recovery-codes").then((body) => body.left),
   newRecoveryCodes: () =>
@@ -237,22 +233,34 @@ export const auth = {
   revokeToken: (id: string) =>
     call(`/tokens/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
-  /** Pimling's front door. */
+  /** Joining this Pim, or claiming it. */
   usernameAvailable: (name: string) =>
     call<{ available: boolean; reason?: string }>(
       `/username?name=${encodeURIComponent(name)}`,
     ),
-  register: (input: { username: string; invite?: string; timeZone?: string }) =>
-    post<Registered>("/register", input),
+  register: (input: {
+    username: string;
+    invite?: string;
+    claim?: string;
+    timeZone?: string;
+  }) => post<Registered>("/register", input),
 };
 
 export const tokensQuery = () =>
   queryOptions({ queryKey: ["auth", "tokens"], queryFn: auth.tokens });
 
-/** The code in a setup link (`/#setup=…`), from the Worker's logs or from registering. */
-export function setupCode(): string | null {
-  return new URLSearchParams(location.hash.slice(1)).get("setup");
-}
+/** A code a link carries in its fragment, such as `/#setup=…`. */
+const linkCode = (name: string) =>
+  new URLSearchParams(location.hash.slice(1)).get(name);
+
+/** The code in a setup link (`/#setup=…`), from the Worker's logs or from the admin. */
+export const setupCode = () => linkCode("setup");
+
+/** The code in a link from the Worker's logs that claims a Pim with no admin (`/#claim=…`). */
+export const claimCode = () => linkCode("claim");
+
+/** The code in an invite link the admin made (`/#invite=…`). */
+export const inviteCode = () => linkCode("invite");
 
 /**
  * The code in a link that adds another device (`/#device=…`). It is taken out
@@ -278,7 +286,7 @@ export function forgetDeviceCode() {
   pendingDeviceCode = null;
 }
 
-/** Drops a used setup code or device link from the address bar and history. */
+/** Drops a used setup, claim or invite code from the address bar and history. */
 export function forgetSetupCode() {
   history.replaceState(history.state, "", location.pathname + location.search);
 }

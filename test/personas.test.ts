@@ -1,7 +1,8 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "vitest";
-import { api, post, say } from "./helpers";
+import { exports } from "cloudflare:workers";
+import { api, apiUrl, post, say, TOKEN } from "./helpers";
 import { faux } from "./worker";
 
 /** The prompt sections sent last: pi sends the whole prompt once, then only what changed. */
@@ -65,5 +66,23 @@ describe("the owner's Pims", () => {
 		expect(prompts[4]).toContain("Sign off with -S.");
 		expect(prompts[4]).not.toContain("haiku");
 		expect((await api("/personas")).body.personas).toEqual([expect.objectContaining({ id: mine.id, name: "Sam", default: true })]);
+	});
+
+	it("keeps an icon for each Pim, only as a picture", async () => {
+		const pim = (await post("/personas", { name: "Coach" })).body;
+		expect(pim.icon).toBeNull();
+		expect((await api(`/personas/${pim.id}/icon`)).status).toBe(404);
+		const png = new Uint8Array([137, 80, 78, 71, 1, 2, 3]);
+		const upload = (type: string, body: BodyInit) => api(`/personas/${pim.id}/icon`, { method: "PUT", headers: { "content-type": type }, body });
+		expect((await upload("image/svg+xml", "<svg/>")).status).toBe(415);
+		expect((await upload("image/png", new Uint8Array(256 * 1024 + 1))).status).toBe(413);
+		expect((await upload("image/png", png)).body.icon).toEqual(expect.any(Number));
+		const [, listed] = (await api("/personas")).body.personas;
+		expect(listed.icon).toEqual(expect.any(Number));
+		const served = await exports.default.fetch(apiUrl(`/personas/${pim.id}/icon`), { headers: { authorization: `Bearer ${TOKEN}` } });
+		expect(served.headers.get("content-type")).toBe("image/png");
+		expect(new Uint8Array(await served.arrayBuffer())).toEqual(png);
+		expect((await api(`/personas/${pim.id}/icon`, { method: "DELETE" })).body.icon).toBeNull();
+		expect((await api(`/personas/${pim.id}/icon`)).status).toBe(404);
 	});
 });

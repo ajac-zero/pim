@@ -37,6 +37,8 @@ export type Persona = {
 	readonly source: { readonly template: string; readonly author: string } | null;
 	/** Its published template, if the owner published it. */
 	readonly published: string | null;
+	/** When its icon was last set, to fetch it again when it changes; null without one. */
+	readonly icon: number | null;
 	/** The one that talks in every chat not started with another. It can't be deleted. */
 	readonly default: boolean;
 	readonly createdAt: number;
@@ -52,6 +54,8 @@ export type PersonaInput = {
 };
 
 export const MAX_PERSONAS = 20;
+export const MAX_ICON_BYTES = 256 * 1024;
+export const ICON_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 export const MAX_NAME = 60;
 export const MAX_DESCRIPTION = 280;
 export const MAX_INSTRUCTIONS = 8000;
@@ -77,6 +81,12 @@ CREATE TABLE IF NOT EXISTS pim_personas (
 	is_default INTEGER NOT NULL DEFAULT 0,
 	team TEXT NOT NULL DEFAULT '[]'
 );
+CREATE TABLE IF NOT EXISTS pim_persona_icons (
+	persona TEXT PRIMARY KEY,
+	type TEXT NOT NULL,
+	data BLOB NOT NULL,
+	updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS pim_persona_sessions (
 	session TEXT PRIMARY KEY,
 	persona TEXT NOT NULL
@@ -84,6 +94,8 @@ CREATE TABLE IF NOT EXISTS pim_persona_sessions (
 `;
 
 type Row = Record<string, SqlStorageValue>;
+
+const SELECT = "SELECT p.*, (SELECT updated_at FROM pim_persona_icons WHERE persona = p.id) AS icon FROM pim_personas p";
 
 const personaOf = (row: Row): Persona => ({
 	id: String(row.id),
@@ -94,6 +106,7 @@ const personaOf = (row: Row): Persona => ({
 	team: JSON.parse(String(row.team)) as TeamMember[],
 	source: row.source ? (JSON.parse(String(row.source)) as Persona["source"]) : null,
 	published: row.published === null ? null : String(row.published),
+	icon: row.icon === null ? null : Number(row.icon),
 	default: Number(row.is_default) === 1,
 	createdAt: Number(row.created_at),
 	updatedAt: Number(row.updated_at),
@@ -174,12 +187,12 @@ export class PersonaStore {
 	/** The default one first, then the others as they were made. */
 	list(): Persona[] {
 		this.default();
-		return this.#sql.exec("SELECT * FROM pim_personas ORDER BY is_default DESC, created_at, id").toArray().map(personaOf);
+		return this.#sql.exec(`${SELECT} ORDER BY p.is_default DESC, p.created_at, p.id`).toArray().map(personaOf);
 	}
 
 	/** The default Pim, made plain the first time it is asked for. */
 	default(): Persona {
-		const [row] = this.#sql.exec("SELECT * FROM pim_personas WHERE is_default = 1").toArray();
+		const [row] = this.#sql.exec(`${SELECT} WHERE p.is_default = 1`).toArray();
 		return row ? personaOf(row) : this.#insert(PLAIN_PIM, null, true);
 	}
 
@@ -192,7 +205,7 @@ export class PersonaStore {
 	}
 
 	get(id: string): Persona | undefined {
-		const [row] = this.#sql.exec("SELECT * FROM pim_personas WHERE id = ?", id).toArray();
+		const [row] = this.#sql.exec(`${SELECT} WHERE p.id = ?`, id).toArray();
 		return row ? personaOf(row) : undefined;
 	}
 
@@ -242,7 +255,31 @@ export class PersonaStore {
 	delete(id: string): void {
 		if (this.get(id)?.default) throw new HttpError(400, "Your default Pim can't be deleted.");
 		this.#sql.exec("DELETE FROM pim_persona_sessions WHERE persona = ?", id);
+		this.#sql.exec("DELETE FROM pim_persona_icons WHERE persona = ?", id);
 		this.#sql.exec("DELETE FROM pim_personas WHERE id = ?", id);
+	}
+
+	/** Sets its icon, an image of a type browsers show in a picture. */
+	setIcon(id: string, type: string, data: ArrayBuffer): void {
+		if (!ICON_TYPES.includes(type)) throw new HttpError(415, "An icon must be a PNG, JPEG, WebP or GIF image.");
+		if (data.byteLength === 0) throw new HttpError(400, "The icon is empty.");
+		if (data.byteLength > MAX_ICON_BYTES) throw new HttpError(413, `An icon must be at most ${MAX_ICON_BYTES / 1024} KB.`);
+		this.#sql.exec(
+			"INSERT INTO pim_persona_icons (persona, type, data, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (persona) DO UPDATE SET type = excluded.type, data = excluded.data, updated_at = excluded.updated_at",
+			id,
+			type,
+			data,
+			Date.now(),
+		);
+	}
+
+	icon(id: string): { type: string; data: ArrayBuffer } | undefined {
+		const [row] = this.#sql.exec("SELECT type, data FROM pim_persona_icons WHERE persona = ?", id).toArray();
+		return row ? { type: String(row.type), data: row.data as ArrayBuffer } : undefined;
+	}
+
+	removeIcon(id: string): void {
+		this.#sql.exec("DELETE FROM pim_persona_icons WHERE persona = ?", id);
 	}
 
 	setSession(session: string, persona: string): void {
@@ -256,7 +293,7 @@ export class PersonaStore {
 	/** The Pim a chat was started with, or the default one. */
 	ofSession(session: string): Persona {
 		const [row] = this.#sql
-			.exec("SELECT p.* FROM pim_persona_sessions s JOIN pim_personas p ON p.id = s.persona WHERE s.session = ?", session)
+			.exec(`${SELECT} JOIN pim_persona_sessions s ON p.id = s.persona WHERE s.session = ?`, session)
 			.toArray();
 		return row ? personaOf(row) : this.default();
 	}

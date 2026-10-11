@@ -29,6 +29,7 @@ import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { LanguageSelect, useI18n } from "~/components/i18n";
+import { PimIcon } from "~/components/pim-icon";
 import { useShowReasoning } from "~/components/reasoning-preference";
 import { useTheme } from "~/components/theme";
 import { Button } from "~/components/ui/button";
@@ -475,6 +476,7 @@ function PimSectionList({
           onClick={() => setOpen(!open)}
           aria-expanded={open}
         >
+          <PimIcon persona={persona} className="size-4" />
           <span className="truncate">{persona.name}</span>
           <ChevronDown
             className={cn(
@@ -582,7 +584,8 @@ function CollapsedChatsMenu({
         ) : (
           sections.map((section) => (
             <DropdownMenuGroup key={section.pim.id}>
-              <DropdownMenuLabel className="truncate text-muted-foreground text-xs">
+              <DropdownMenuLabel className="flex items-center gap-1.5 truncate text-muted-foreground text-xs">
+                <PimIcon persona={section.pim} className="size-4" />
                 {section.pim.name}
               </DropdownMenuLabel>
               {section.list.map((session) => (

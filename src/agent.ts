@@ -2299,6 +2299,37 @@ export class Pim extends Agent<Env> {
 			},
 		],
 		[
+			"GET",
+			"/personas/:persona/icon",
+			({ persona: id }) => {
+				this.#persona(id!);
+				const icon = this.personas.icon(id!);
+				if (!icon) throw new HttpError(404, "This Pim has no icon");
+				return new Response(icon.data, {
+					headers: { "content-type": icon.type, "x-content-type-options": "nosniff", "cache-control": "private, max-age=31536000, immutable" },
+				});
+			},
+		],
+		[
+			"PUT",
+			"/personas/:persona/icon",
+			async ({ persona: id }, request) => {
+				this.#persona(id!);
+				const type = (request.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+				this.personas.setIcon(id!, type, await request.arrayBuffer());
+				return this.#persona(id!);
+			},
+		],
+		[
+			"DELETE",
+			"/personas/:persona/icon",
+			({ persona: id }) => {
+				this.#persona(id!);
+				this.personas.removeIcon(id!);
+				return this.#persona(id!);
+			},
+		],
+		[
 			"DELETE",
 			"/personas/:persona",
 			async ({ persona: id }) => {

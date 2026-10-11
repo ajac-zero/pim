@@ -145,8 +145,28 @@ export type Account = {
   recoveryCodesLeft: number;
 };
 
-/** A tool whose calls are approved without asking. */
-export type AlwaysApproved = { tool: string; createdAt: number };
+/** Whether Pim may use a tool: not at all, after asking you, or without asking. */
+export type ToolPermission = "off" | "ask" | "on";
+
+/** A tool you can set a permission for, and the permission that applies. */
+export type ToolPermissionInfo = {
+  /** The connected app's id; null for Pim's own tools. */
+  app: string | null;
+  appName: string | null;
+  /** The tool's own name, which its permission is set by. */
+  tool: string;
+  /** The name the model sees. */
+  name: string;
+  description: string | null;
+  /** The app says the tool only reads. */
+  readOnly: boolean;
+  permission: ToolPermission;
+  /** What applies when you haven't chosen. */
+  default: ToolPermission;
+  chosen: ToolPermission | null;
+  /** The app changed the tool since you chose On, so Pim asks again. */
+  changed: boolean;
+};
 
 export type PimNotification = {
   id: string;
@@ -254,13 +274,18 @@ export const pim = {
       method: "POST",
       body: JSON.stringify(always ? { always } : {}),
     }),
-  alwaysApproved: () =>
-    call<{ tools: AlwaysApproved[] }>("/always-approved").then(
+  permissions: () =>
+    call<{ tools: ToolPermissionInfo[] }>("/permissions").then(
       (body) => body.tools,
     ),
-  stopAlwaysApproving: (tool: string) =>
-    call<{ deleted: boolean }>(`/always-approved/${encodeURIComponent(tool)}`, {
-      method: "DELETE",
+  setPermission: (
+    app: string | null,
+    tool: string,
+    permission: ToolPermission | null,
+  ) =>
+    call<ToolPermissionInfo>("/permissions", {
+      method: "PUT",
+      body: JSON.stringify({ app, tool, permission }),
     }),
   notifications: () =>
     call<{ notifications: PimNotification[] }>("/notifications").then(

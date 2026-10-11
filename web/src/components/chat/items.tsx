@@ -304,7 +304,7 @@ export const ApprovalBlock = memo(function ApprovalBlock({
         ),
       );
       if (decision === "always") {
-        queryClient.invalidateQueries({ queryKey: ["always-approved"] });
+        queryClient.invalidateQueries({ queryKey: ["permissions"] });
       }
     },
     onError: (error) => toast.error(error.message),

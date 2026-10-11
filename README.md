@@ -43,7 +43,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 | Goals and plans | `create_goal`, `update_goal`, `list_goals` | Goals have step-by-step plans and progress notes. Active goals are always in the prompt. |
 | Background work | `schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task` | Delays, dates, or cron. When a task fires, the agent receives a `[Scheduled task]` message in the session that scheduled it. |
 | Reaching you | `notify_user` | Stored, pushed to connected sockets, sent as Web Push to browsers that turned it on in Settings (even with the app closed), and POSTed to an optional webhook. |
-| Asking first | `http_request` | Gated: the call files an approval request. The action runs when you approve; deny to stop it. Without an answer, the approval policy decides: `auto` approves after 30 seconds so autonomous jobs never block, `explicit` denies after 5 minutes so nothing happens without a yes. The call waits for your answer, and the result comes back within the same turn. Choose **Always approve** and later calls to that tool run without asking; Settings lists those tools and takes them back. |
+| Asking first | `http_request` | Gated: the call files an approval request. The action runs when you approve; deny to stop it. Without an answer, the approval policy decides: `auto` approves after 30 seconds so autonomous jobs never block, `explicit` denies after 5 minutes so nothing happens without a yes. The call waits for your answer, and the result comes back within the same turn. Choose **Always approve** and later calls to that tool run without asking. Settings → Tool permissions sets each such tool, and each app's tool, to Off, Ask or On (see [Tool permissions](#tool-permissions)). |
 | Connected apps | `connect_app` (gated), `list_apps`, plus each app's tools | Remote MCP servers, with OAuth sign-in. Tools that don't declare themselves read-only need approval. See [Connected apps](#connected-apps). |
 | App skills | `read_skill`, `read_skill_file` | Instructions apps publish over the MCP Skills extension, checked against the app's digests. |
 | App events | `list_app_events`, `watch_app_event` (gated), `list_watches`, `stop_watch` | Apps notify Pim when something happens (draft MCP Events, webhooks); each event starts a run with the watch's instruction. |
@@ -138,12 +138,12 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | DELETE | `/schedules/:id` | | Cancel one |
 | GET | `/approvals`, `/approvals/:id` | `?status=pending\|approved\|denied` | Approval requests; each says what its timeout decides (`onTimeout`) and who decided it (`decidedBy`: `user`, `timeout` or `always`) |
 | POST | `/approvals/:id/approve`, `/approvals/:id/deny` | `{ note? }` | The decided approval; `409` if already decided |
-| POST | `/approvals/:id/approve` | `{ note?, always: true }` | Also approves every later call to the same tool (the approval's `tool`), and other pending calls to it |
-| GET | `/always-approved` | | `{ tools: [{ tool, createdAt }] }`: tools whose calls are approved without asking |
-| DELETE | `/always-approved/:tool` | | Asks before that tool again; `404` if it was not always approved |
-| GET | `/mcp` | | Connected apps, their state, sign-in link, approval policy and tools |
+| POST | `/approvals/:id/approve` | `{ note?, always: true }` | Also sets the approval's tool to `on`, so later calls run without asking, and approves other pending calls to it |
+| GET | `/permissions` | | `{ tools: [{ app, appName, tool, name, description, readOnly, permission, default, chosen, changed }] }`: Pim's own tools that ask first (`app: null`) and every connected app's tools. `permission` is what applies: `off`, `ask` or `on`. `chosen` is yours, or null for the default |
+| PUT | `/permissions` | `{ app, tool, permission }`: `app` null for Pim's own tools, `tool` the app's own name for it, `permission` null for the default | That tool's entry; `404` for an unknown tool |
+| GET | `/mcp` | | Connected apps, their state, sign-in link, approval policy and tools (with their `permission`) |
 | POST | `/mcp` | `{ name, url, headers?, approval? }` | Connects an app; `201` with `{ id, state, authUrl? }` (`authUrl`: send the user there to sign in) |
-| PUT | `/mcp/:id` | `{ approval: "writes" \| "all" \| "none" }` | Which of its tools need approval |
+| PUT | `/mcp/:id` | `{ approval: "writes" \| "all" \| "none" }` | Which of its tools need approval, unless you set a tool's permission |
 | DELETE | `/mcp/:id` | | Disconnects it |
 | GET | `/mcp/callback` (root, no `/api`) | | Where an app's sign-in returns; no token needed |
 | GET | `/mcp/:id/skills`, `/mcp/:id/events` | | The skills and watchable events an app offers |
@@ -223,7 +223,7 @@ Apps connect through remote [MCP](https://modelcontextprotocol.io) servers: the 
 - **Connecting.** `POST /mcp` with a name and URL, or ask Pim: its `connect_app` tool files an approval, and the connection is made when you approve. If the app needs sign-in, the response (or Pim) gives you a link; the app sends you back to `/mcp/callback`.
 - **Finding the server.** Say "connect my Linear" and Pim's `find_app` tool looks the app up in the official [MCP Registry](https://registry.modelcontextprotocol.io). The registry verifies publishers (`app.linear/...` only by whoever controls linear.app), so Pim ranks first the server whose publisher's domain names the app and that runs on that domain, like `https://mcp.linear.app/mcp`. Gateways that relay the app through someone else's server come after, labeled as third parties, and Pim says who runs one before offering it. Remotes that need a URL template or an API key header are left out.
 - **Tools.** Each MCP tool becomes a pi tool named `<app>_<tool>`. pi picks up added and removed tools from the next request, without a restart. The app's instructions go in the `connected_apps` prompt section.
-- **Approvals.** With the default `writes` policy, tools that do not declare `readOnlyHint` file an approval like `http_request`, and the call is made when you approve. `all` gates every tool; `none` trusts the app. The read-only hint comes from the app itself, so only connect apps you trust.
+- **Approvals.** With the default `writes` policy, tools that do not declare `readOnlyHint` file an approval like `http_request`, and the call is made when you approve. `all` gates every tool; `none` trusts the app. The read-only hint comes from the app itself, so only connect apps you trust. A tool's own [permission](#tool-permissions) takes the policy's place.
 - **Prompt cache.** The apps' tools come last in pi's tool list, so a newly connected app's tools are appended to what the provider has cached instead of re-sending every tool. Changing an app's approval policy changes its tools' descriptions, which re-sends the tool list once.
 
 ### Skills from apps
@@ -244,6 +244,14 @@ Apps that implement the draft [MCP Events](https://github.com/modelcontextprotoc
 - **Draft.** The extension is not ratified. Today's MCP SDKs drop its `events` capability from the handshake, so pim also asks an app for `events/list` when it declares nothing.
 
 MCP servers expose tools, prompts and resources; pim uses their tools, instructions and skills. They cannot add hooks or change how pim runs, which is also what keeps them safe to connect.
+
+### Tool permissions
+
+Settings → Tool permissions lists every tool that acts on the world or comes from an app, grouped by app, with Pim's own (`http_request`, `connect_app`, `watch_app_event`) first. Each is **Off** (the model isn't offered it), **Ask** (each call files an approval) or **On** (it runs without asking). A tool you haven't set follows its default: Pim's own ask, and an app's follow its approval policy. **Always approve** on a request sets its tool to On.
+
+- **Tied to the tool you saw.** An app tool set to On is held to its definition at the time: description, input schema and annotations. If the app changes any of them, Pim asks before each call again and Settings says so until you choose again.
+- **Checked at each call.** An app tool's permission is checked again when the model calls it, so a tool turned off or changed since the tool list was built is refused or asked about.
+- **Removing an app** forgets its tools' permissions. Tools chosen with Always approve before permissions existed become On the first time Pim sees them.
 
 ## Develop
 

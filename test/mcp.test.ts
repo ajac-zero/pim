@@ -2,13 +2,14 @@ import type { Message } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
-import { createExecutionContext } from "cloudflare:test";
+import { createExecutionContext, env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { AGENT_NAME } from "../src/agent";
 import type { Approval } from "../src/store";
 import { api, apiUrl, lastUserText, pendingApproval, post, say, toolUse, url } from "./helpers";
-import { faux } from "./worker";
+import { faux, type Pim } from "./worker";
 
 /**
  * Real MCP servers, built with the official server SDK, answering the
@@ -90,8 +91,8 @@ describe("connected apps (MCP)", () => {
 			expect.objectContaining({ id: "calendar", name: "Calendar", state: "ready", approval: "writes" }),
 		]);
 		expect(apps[0].tools).toEqual([
-			{ name: "calendar_find_events", description: "Find events on a day.", requiresApproval: false },
-			{ name: "calendar_create_event", description: "Create an event.", requiresApproval: true },
+			{ name: "calendar_find_events", description: "Find events on a day.", permission: "on", requiresApproval: false },
+			{ name: "calendar_create_event", description: "Create an event.", permission: "ask", requiresApproval: true },
 		]);
 		const tools = new Map((await api("/")).body.tools.map((tool: { name: string }) => [tool.name, tool]));
 		expect(tools.get("calendar_create_event")).toMatchObject({ requiresApproval: true });
@@ -149,6 +150,64 @@ describe("connected apps (MCP)", () => {
 		const strict = await api("/mcp/calendar", { method: "PUT", body: JSON.stringify({ approval: "all" }) });
 		expect(strict.body.tools.map((tool: { requiresApproval: boolean }) => tool.requiresApproval)).toEqual([true, true]);
 		await api("/mcp/calendar", { method: "PUT", body: JSON.stringify({ approval: "writes" }) });
+	});
+
+	it("lets the user turn each tool off, on, or back to asking", async () => {
+		const setPermission = (tool: string, permission: string | null) =>
+			api("/permissions", { method: "PUT", body: JSON.stringify({ app: "calendar", tool, permission }) });
+		const offered = async () => (await api("/")).body.tools.map((tool: { name: string }) => tool.name);
+		expect((await setPermission("create_event", "sometimes")).status).toBe(400);
+		expect((await setPermission("delete_event", "on")).status).toBe(404);
+
+		// Off: the model is no longer offered the tool.
+		expect((await setPermission("find_events", "off")).body).toMatchObject({ permission: "off", chosen: "off", default: "on" });
+		expect(await offered()).not.toContain("calendar_find_events");
+
+		// On: a tool that changes things runs without an approval.
+		expect((await setPermission("create_event", "on")).body).toMatchObject({ permission: "on", changed: false });
+		faux.setResponses([toolUse("calendar_create_event", { title: "Swim", day: "sunday" }), fauxAssistantMessage("Done.")]);
+		const approvals = (await api("/approvals")).body.approvals.length;
+		await say("Add swimming on Sunday.");
+		expect(created.at(-1)).toEqual({ title: "Swim", day: "sunday" });
+		expect((await api("/approvals")).body.approvals).toHaveLength(approvals);
+
+		// The app changes the tool after the user let it run: Pim asks again, even with the tools already built.
+		await runInDurableObject(env.Pim.getByName(AGENT_NAME), (instance: Pim) =>
+			instance.store.setToolPermission("calendar", "create_event", "on", '{"description":"Create a draft."}'),
+		);
+		const permissions = (await api("/permissions")).body.tools;
+		expect(permissions.find((info: { name: string }) => info.name === "calendar_create_event")).toMatchObject({
+			permission: "ask",
+			chosen: "on",
+			changed: true,
+		});
+		faux.setResponses([toolUse("calendar_create_event", { title: "Run", day: "monday" }), fauxAssistantMessage("Asked.")]);
+		const turn = say("Add a run on Monday.");
+		const approval = await pendingApproval();
+		expect(approval.summary).toBe('Calendar: create_event {"title":"Run","day":"monday"}');
+		await post(`/approvals/${approval.id}/deny`);
+		await turn;
+		expect(created.at(-1)).toEqual({ title: "Swim", day: "sunday" });
+
+		// Back to the defaults.
+		expect((await setPermission("find_events", null)).body).toMatchObject({ permission: "on", chosen: null });
+		expect((await setPermission("create_event", null)).body).toMatchObject({ permission: "ask", chosen: null, changed: false });
+		expect(await offered()).toContain("calendar_find_events");
+	});
+
+	it("keeps an app tool the user always approved before tool permissions", async () => {
+		await runInDurableObject(env.Pim.getByName(AGENT_NAME), (_instance: Pim, state) => {
+			state.storage.sql.exec("INSERT INTO pim_always_approved (tool, created_at) VALUES ('calendar_create_event', 1)");
+		});
+		// Rebuilding the apps' tools moves it over.
+		await api("/mcp/calendar", { method: "PUT", body: JSON.stringify({ approval: "writes" }) });
+		const permissions = (await api("/permissions")).body.tools;
+		expect(permissions.find((info: { name: string }) => info.name === "calendar_create_event")).toMatchObject({
+			permission: "on",
+			chosen: "on",
+			changed: false,
+		});
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ app: "calendar", tool: "create_event", permission: null }) });
 	});
 
 	it("adds a new app's tools without re-sending the prompt sent so far", async () => {

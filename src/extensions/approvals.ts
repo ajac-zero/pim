@@ -6,7 +6,44 @@ import {
 	type ToolExecutionApi,
 	type ToolExecutionResult,
 } from "@earendil-works/pi-durable";
+import type { PimStore, ToolPermission } from "../store";
 import { type PimServices, text } from "./services";
+
+/** A tool's permission as it applies now. */
+export type ResolvedPermission = {
+	readonly permission: ToolPermission;
+	/** What applies when the user has not chosen. */
+	readonly default: ToolPermission;
+	/** What the user chose, if anything. */
+	readonly chosen: ToolPermission | null;
+	/** The app changed the tool since the user chose `on`, so Pim asks again until they choose anew. */
+	readonly changed: boolean;
+};
+
+/**
+ * The user's choice for a tool, or `fallback` without one. A choice is tied
+ * to the tool's `definition` when it was made: an app that changes a tool
+ * the user let run without asking (its description, inputs, or claims about
+ * itself) gets it asked about again, so a tool can't turn into something
+ * else under a permission given to what it was.
+ */
+export function resolvePermission(
+	store: PimStore,
+	app: string,
+	tool: string,
+	fallback: ToolPermission,
+	definition: string | null,
+): ResolvedPermission {
+	const choice = store.toolPermission(app, tool);
+	if (!choice) return { permission: fallback, default: fallback, chosen: null, changed: false };
+	const changed = choice.permission === "on" && choice.definition !== definition;
+	return { permission: changed ? "ask" : choice.permission, default: fallback, chosen: choice.permission, changed };
+}
+
+/** The permission of one of Pim's own tools that ask first: they ask unless the user chose otherwise. */
+export function ownToolPermission(store: PimStore, name: string): ResolvedPermission {
+	return resolvePermission(store, "", name, "ask", null);
+}
 
 /**
  * An action with effects outside the conversation. The model can only ask
@@ -73,15 +110,15 @@ export async function fileApproval(
 		onTimeout: approvalPolicy === "explicit" ? "deny" : "approve",
 		...request,
 	});
-	// A tool the user always approves is approved without asking.
-	if (!known && !services.store.alwaysApproves(request.tool)) await services.approvalRequested(approval);
+	// A tool the user lets run without asking is approved without asking.
+	if (!known && services.permission(approval) !== "on") await services.approvalRequested(approval);
 	return text(await services.awaitApproval(approval));
 }
 
-function gatedTool(action: GatedAction, services: PimServices) {
+function gatedTool(action: GatedAction, services: PimServices, permission: ToolPermission) {
 	return defineTool({
 		name: action.name,
-		description: `${action.description} ${approvalNote(services)}`,
+		description: permission === "ask" ? `${action.description} ${approvalNote(services)}` : action.description,
 		parameters: action.parameters,
 		replay: "safe",
 		async execute(args, api, context) {
@@ -90,11 +127,18 @@ function gatedTool(action: GatedAction, services: PimServices) {
 	});
 }
 
-/** Tools for the actions the model calls directly; actions with `internal` set are filed by other tools. */
+/**
+ * Tools for the actions the model calls directly; actions with `internal`
+ * set are filed by other tools. Actions the user turned off are left out.
+ */
 export function approvalsExtension(services: PimServices, actions: readonly GatedAction[]) {
 	return defineExtension({
 		name: "pim.approvals",
-		tools: actions.filter((action) => !action.internal).map((action) => gatedTool(action, services)),
+		tools: actions.flatMap((action) => {
+			if (action.internal) return [];
+			const { permission } = ownToolPermission(services.store, action.name);
+			return permission === "off" ? [] : [gatedTool(action, services, permission)];
+		}),
 	});
 }
 

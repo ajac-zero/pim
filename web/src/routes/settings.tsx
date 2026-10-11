@@ -134,11 +134,7 @@ function ModelChoices({ settings }: { settings: ModelSettings }) {
                     {choice.name}
                   </span>
                   <span className="block truncate text-muted-foreground text-xs">
-                    {plan
-                      ? t("usesChatGPTPlan")
-                      : choice.id.startsWith("@cf/")
-                        ? t("tryItModel")
-                        : t("runsOnWorkersAI")}
+                    {plan ? t("usesChatGPTPlan") : t("runsOnWorkersAI")}
                   </span>
                 </span>
                 {choose.isPending && choose.variables?.id === choice.id ? (

@@ -36,7 +36,7 @@
     { "name": "API_LIMITER", "namespace_id": "71420102", "simple": { "limit": 300, "period": 60 } }
   ],
   "vars": {
-    "PIM_MODEL": "@cf/zai-org/glm-4.7-flash",
+    "PIM_MODEL": "@cf/zai-org/glm-5.3",
     "PIM_TIME_ZONE": "UTC",
     "PIM_WEB_SEARCH": "",
     "PIM_MEMORY_MODEL": "",

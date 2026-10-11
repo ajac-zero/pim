@@ -289,7 +289,6 @@ const translations = {
     modelChanged: "Pim now uses {model}",
     pasteAddress: "Address the browser landed on",
     runsOnWorkersAI: "Runs on Workers AI",
-    tryItModel: "Try-it model: free on Workers AI, not for real use",
     settings: "Settings",
     artifacts: "Artifacts",
     artifactsDescription:
@@ -766,7 +765,6 @@ const translations = {
     modelChanged: "Pim ahora usa {model}",
     pasteAddress: "Dirección a la que llegó el navegador",
     runsOnWorkersAI: "Funciona con Workers AI",
-    tryItModel: "Modelo de prueba: gratis en Workers AI, no para uso real",
     settings: "Configuración",
     artifacts: "Artefactos",
     artifactsDescription:

@@ -54,6 +54,23 @@ export type Approval = {
 
 export type ApprovalDecider = "user" | "timeout" | "always";
 
+/** Whether Pim may use a tool: not at all, after asking the user, or without asking. */
+export type ToolPermission = "off" | "ask" | "on";
+
+export const TOOL_PERMISSIONS: readonly ToolPermission[] = ["off", "ask", "on"];
+
+/** A permission the user set for one tool. */
+export type ToolPermissionChoice = {
+	/** The connected app's id; empty for Pim's own tools. */
+	readonly app: string;
+	/** The tool's own name: the app's name for it, not the `<app>_<tool>` name the model sees. */
+	readonly tool: string;
+	readonly permission: ToolPermission;
+	/** An app tool's definition when the user chose, so a tool the app changes since is noticed; null for Pim's own. */
+	readonly definition: string | null;
+	readonly updatedAt: number;
+};
+
 export type Notification = {
 	readonly id: string;
 	readonly session: string | null;
@@ -151,6 +168,14 @@ CREATE TABLE IF NOT EXISTS pim_always_approved (
 	tool TEXT PRIMARY KEY,
 	created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pim_tool_permissions (
+	app TEXT NOT NULL,
+	tool TEXT NOT NULL,
+	permission TEXT NOT NULL,
+	definition TEXT,
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY (app, tool)
+);
 CREATE TABLE IF NOT EXISTS pim_mcp_servers (
 	id TEXT PRIMARY KEY,
 	approval TEXT NOT NULL
@@ -243,6 +268,16 @@ function approvalOf(row: Row): Approval {
 	};
 }
 
+function toolPermissionOf(row: Row): ToolPermissionChoice {
+	return {
+		app: String(row.app),
+		tool: String(row.tool),
+		permission: String(row.permission) as ToolPermission,
+		definition: row.definition === null ? null : String(row.definition),
+		updatedAt: Number(row.updated_at),
+	};
+}
+
 function notificationOf(row: Row): Notification {
 	return {
 		id: String(row.id),
@@ -283,6 +318,7 @@ export class PimStore {
 			pim_goals: "goals",
 			pim_approvals: "approvals",
 			pim_always_approved: "always-approved tools",
+			pim_tool_permissions: "tool permissions",
 			pim_mcp_servers: "apps",
 			pim_app_watches: "watches",
 			pim_sessions: "chats",
@@ -446,26 +482,47 @@ export class PimStore {
 		this.#sql.exec("UPDATE pim_approvals SET result = ? WHERE id = ?", result, id);
 	}
 
-	// Tools the user always approves: their calls are approved without asking.
+	// Tool permissions the user set. A tool without one follows its default.
 
-	alwaysApproves(tool: string): boolean {
-		return this.#sql.exec("SELECT 1 FROM pim_always_approved WHERE tool = ?", tool).toArray().length > 0;
+	toolPermission(app: string, tool: string): ToolPermissionChoice | undefined {
+		const [row] = this.#sql.exec("SELECT * FROM pim_tool_permissions WHERE app = ? AND tool = ?", app, tool).toArray();
+		return row ? toolPermissionOf(row) : undefined;
 	}
 
-	alwaysApproved(): { tool: string; createdAt: number }[] {
+	toolPermissions(): ToolPermissionChoice[] {
+		return this.#sql.exec("SELECT * FROM pim_tool_permissions ORDER BY app, tool").toArray().map(toolPermissionOf);
+	}
+
+	setToolPermission(app: string, tool: string, permission: ToolPermission, definition: string | null): void {
+		this.#sql.exec(
+			"INSERT INTO pim_tool_permissions (app, tool, permission, definition, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (app, tool) DO UPDATE SET permission = excluded.permission, definition = excluded.definition, updated_at = excluded.updated_at",
+			app,
+			tool,
+			permission,
+			definition,
+			Date.now(),
+		);
+	}
+
+	/** Back to the tool's default. False when the user had not set one. */
+	clearToolPermission(app: string, tool: string): boolean {
+		return this.#sql.exec("DELETE FROM pim_tool_permissions WHERE app = ? AND tool = ?", app, tool).rowsWritten > 0;
+	}
+
+	/**
+	 * Tools the user chose "Always approve" for before tool permissions, by
+	 * the name the model sees. Each becomes an `on` permission once the
+	 * agent can tell which tool the name belongs to.
+	 */
+	legacyAlwaysApproved(): string[] {
 		return this.#sql
-			.exec("SELECT tool, created_at FROM pim_always_approved ORDER BY tool")
+			.exec("SELECT tool FROM pim_always_approved ORDER BY tool")
 			.toArray()
-			.map((row) => ({ tool: String(row.tool), createdAt: Number(row.created_at) }));
+			.map((row) => String(row.tool));
 	}
 
-	alwaysApprove(tool: string): void {
-		this.#sql.exec("INSERT OR IGNORE INTO pim_always_approved (tool, created_at) VALUES (?, ?)", tool, Date.now());
-	}
-
-	/** False when the tool was not always approved. */
-	stopAlwaysApproving(tool: string): boolean {
-		return this.#sql.exec("DELETE FROM pim_always_approved WHERE tool = ?", tool).rowsWritten > 0;
+	forgetLegacyAlwaysApproved(tool: string): void {
+		this.#sql.exec("DELETE FROM pim_always_approved WHERE tool = ?", tool);
 	}
 
 	// Connected apps: the MCP client stores the servers; this is pim's policy for each.
@@ -483,8 +540,10 @@ export class PimStore {
 		);
 	}
 
+	/** Forgets an app's policy and the permissions set for its tools. */
 	deleteMcpApproval(id: string): void {
 		this.#sql.exec("DELETE FROM pim_mcp_servers WHERE id = ?", id);
+		this.#sql.exec("DELETE FROM pim_tool_permissions WHERE app = ?", id);
 	}
 
 	// What connected apps offer beyond tools: skills and event types, cached per app.

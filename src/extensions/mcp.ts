@@ -1,8 +1,16 @@
 import { type ImageContent, type TextContent, type TSchema, Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section, type ToolRegistration } from "@earendil-works/pi-durable";
+import type { PimStore, ToolPermission } from "../store";
 import type { AppCatalog } from "./app-catalog";
 import { describeCandidates, searchRegistry } from "./app-directory";
-import { approvalNote, defineGatedAction, fileApproval, type GatedAction } from "./approvals";
+import {
+	approvalNote,
+	defineGatedAction,
+	fileApproval,
+	type GatedAction,
+	type ResolvedPermission,
+	resolvePermission,
+} from "./approvals";
 import { json, type PimServices, text } from "./services";
 
 /**
@@ -108,6 +116,36 @@ export function needsApproval(tool: McpToolInfo, approval: McpApproval): boolean
 	return tool.annotations?.readOnlyHint !== true;
 }
 
+/** JSON with object keys sorted, so equal values give equal text. */
+function canonicalJson(value: unknown): string {
+	return JSON.stringify(value, (_key, item: unknown) =>
+		item && typeof item === "object" && !Array.isArray(item)
+			? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+			: item,
+	);
+}
+
+/** What a permission is given to: what the model reads about the tool, its inputs, and what it says about itself. */
+export function toolDefinition(tool: McpToolInfo): string {
+	return canonicalJson({
+		description: tool.description ?? null,
+		inputSchema: tool.inputSchema ?? null,
+		annotations: tool.annotations ?? null,
+	});
+}
+
+/** An app tool's permission: the user's choice, or else the app's approval policy (`writes`: read-only tools run, others ask). */
+export function appToolPermission(store: PimStore, server: McpServerInfo, tool: McpToolInfo): ResolvedPermission {
+	return resolvePermission(store, server.id, tool.name, needsApproval(tool, server.approval) ? "ask" : "on", toolDefinition(tool));
+}
+
+/** An app tool's permission as the app and the user's choice are now; undefined while its app doesn't offer it. */
+function currentPermission(bridge: McpBridge, store: PimStore, serverId: string, name: string): ToolPermission | undefined {
+	const server = bridge.servers().find((candidate) => candidate.id === serverId);
+	const tool = bridge.tools().find((candidate) => candidate.serverId === serverId && candidate.name === name);
+	return server && tool ? appToolPermission(store, server, tool).permission : undefined;
+}
+
 function clip(value: string, limit: number): string {
 	return value.length > limit ? `${value.slice(0, limit)}\n[... ${value.length - limit} more characters]` : value;
 }
@@ -202,8 +240,10 @@ export function mcpExtensions(
 	for (const tool of bridge.tools()) {
 		const server = servers.get(tool.serverId);
 		if (!server || server.state !== "ready") continue;
+		const { permission } = appToolPermission(services.store, server, tool);
+		if (permission === "off") continue;
 		const name = toolName(server.id, tool.name);
-		const gated = needsApproval(tool, server.approval);
+		const gated = permission === "ask";
 		const description = `[${server.name}] ${tool.description ?? tool.annotations?.title ?? tool.name}`;
 		tools.push(
 			defineTool({
@@ -215,7 +255,12 @@ export function mcpExtensions(
 				replay: gated || tool.annotations?.readOnlyHint === true ? "safe" : "unsafe",
 				async execute(args, api, context) {
 					const call = { server: server.id, tool: tool.name, arguments: (args ?? {}) as Record<string, unknown> };
-					if (gated) {
+					// Checked again as the app and the user's choice are now: a tool turned off, or changed by its app, since
+					// these tools were built is refused or asked about. Never looser than when built, for replay's sake.
+					const now = currentPermission(bridge, services.store, server.id, tool.name);
+					if (now === undefined) return text(`${server.name} doesn't offer ${tool.name} right now.`, true);
+					if (now === "off") return text(`The user turned off ${name}. Do not try it another way.`, true);
+					if (gated || now === "ask") {
 						return fileApproval(services, api, context, {
 							action: "mcp_call",
 							tool: name,

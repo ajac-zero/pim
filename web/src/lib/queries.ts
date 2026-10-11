@@ -9,8 +9,8 @@ export const sessionsQuery = () =>
 export const approvalsQuery = () =>
   queryOptions({ queryKey: ["approvals"], queryFn: () => pim.approvals() });
 
-export const alwaysApprovedQuery = () =>
-  queryOptions({ queryKey: ["always-approved"], queryFn: pim.alwaysApproved });
+export const permissionsQuery = () =>
+  queryOptions({ queryKey: ["permissions"], queryFn: pim.permissions });
 
 export const notificationsQuery = () =>
   queryOptions({ queryKey: ["notifications"], queryFn: pim.notifications });

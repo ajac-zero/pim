@@ -2,7 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { AppWatch, PimStore } from "../store";
 import type { AppCatalog } from "./app-catalog";
-import { approvalNote, defineGatedAction, fileApproval, type GatedAction } from "./approvals";
+import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";
 import type { McpBridge } from "./mcp";
 import { json, type PimServices, text } from "./services";
 
@@ -298,9 +298,10 @@ export function eventTools(bridge: McpBridge, catalog: AppCatalog, events: AppEv
 		},
 	});
 
+	const watching = ownToolPermission(services.store, "watch_app_event").permission;
 	const watchEvent = defineTool({
 		name: "watch_app_event",
-		description: `Have a connected app notify you whenever an event happens (see list_app_events), and say what to do each time. Each event arrives as a message starting with "[App event]". ${approvalNote(services)}`,
+		description: `Have a connected app notify you whenever an event happens (see list_app_events), and say what to do each time. Each event arrives as a message starting with "[App event]".${watching === "ask" ? ` ${approvalNote(services)}` : ""}`,
 		parameters: Type.Object({
 			app: Type.String(),
 			event: Type.String(),
@@ -344,14 +345,14 @@ export function eventTools(bridge: McpBridge, catalog: AppCatalog, events: AppEv
 		},
 	});
 
-	return [listAppEvents, watchEvent, listWatches, stopWatch] as ToolRegistration[];
+	return (watching === "off" ? [listAppEvents, listWatches, stopWatch] : [listAppEvents, watchEvent, listWatches, stopWatch]) as ToolRegistration[];
 }
 
 /** The approved half of `watch_app_event`: subscribing. */
 export function watchAction(bridge: McpBridge, events: AppEvents): GatedAction {
 	return defineGatedAction({
 		name: "watch_app_event",
-		description: "Watch an app event.",
+		description: "Have a connected app notify Pim whenever an event happens, with what to do each time.",
 		internal: true,
 		parameters: Type.Object({
 			serverId: Type.String(),

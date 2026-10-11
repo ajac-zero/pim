@@ -1,7 +1,7 @@
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { Schedule } from "agents";
 import type { ApprovalPolicy } from "../settings";
-import type { Approval, Notification, PimStore } from "../store";
+import type { Approval, Notification, PimStore, ToolPermission } from "../store";
 
 /** Payload of a schedule created by `schedule_task`. */
 export type ScheduledTaskPayload = {
@@ -35,6 +35,8 @@ export type PimServices = {
 	 * returns the outcome for the model, so the turn that asked can carry on.
 	 */
 	awaitApproval(approval: Approval): Promise<string>;
+	/** The user's permission for the tool that filed the approval: `on` approves it without asking. */
+	permission(approval: Approval): ToolPermission;
 };
 
 export function text(value: string, isError = false): ToolExecutionResult {

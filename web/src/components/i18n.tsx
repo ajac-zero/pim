@@ -17,12 +17,19 @@ const translations = {
     approve: "Approve",
     alwaysApprove: "Always approve",
     moreApprovalOptions: "More approval options",
-    alwaysApproved: "Always approved",
-    alwaysApprovedDescription:
-      "Pim uses these tools without asking first. Remove one to be asked again.",
-    noAlwaysApproved:
-      "None yet. Choose Always approve on a request to stop being asked about that tool.",
-    stopAlwaysApproving: "Ask before {tool} again",
+    toolPermissions: "Tool permissions",
+    toolPermissionsDescription:
+      "What Pim may do with each tool. Off: Pim can't use it. Ask: Pim waits for your approval. On: Pim uses it without asking.",
+    pimTools: "Pim",
+    permissionOff: "Off",
+    permissionAsk: "Ask",
+    permissionOn: "On",
+    permissionFor: "Permission for {tool}",
+    useDefaultPermission: "Back to the default for {tool}",
+    readOnlyTool: "Read-only",
+    toolChanged:
+      "Changed by the app since you chose On, so Pim asks again. Choose again to trust the new version.",
+    toolCount: "Tools: {count}",
     awaitingApproval: "Waiting for your approval",
     approved: "Approved",
     arguments: "Arguments",
@@ -339,12 +346,19 @@ const translations = {
     approve: "Aprobar",
     alwaysApprove: "Aprobar siempre",
     moreApprovalOptions: "Más opciones de aprobación",
-    alwaysApproved: "Aprobadas siempre",
-    alwaysApprovedDescription:
-      "Pim usa estas herramientas sin preguntar antes. Quita una para que vuelva a preguntarte.",
-    noAlwaysApproved:
-      "Ninguna todavía. Elige Aprobar siempre en una solicitud para que no vuelva a preguntarte por esa herramienta.",
-    stopAlwaysApproving: "Volver a preguntar antes de {tool}",
+    toolPermissions: "Permisos de herramientas",
+    toolPermissionsDescription:
+      "Lo que Pim puede hacer con cada herramienta. Desactivada: Pim no puede usarla. Preguntar: Pim espera tu aprobación. Activada: Pim la usa sin preguntar.",
+    pimTools: "Pim",
+    permissionOff: "Desactivada",
+    permissionAsk: "Preguntar",
+    permissionOn: "Activada",
+    permissionFor: "Permiso para {tool}",
+    useDefaultPermission: "Volver al valor predeterminado de {tool}",
+    readOnlyTool: "Solo lectura",
+    toolChanged:
+      "La app la cambió desde que elegiste Activada, así que Pim vuelve a preguntar. Elige de nuevo para confiar en la nueva versión.",
+    toolCount: "Herramientas: {count}",
     awaitingApproval: "Espera tu aprobación",
     approved: "Aprobado",
     arguments: "Argumentos",

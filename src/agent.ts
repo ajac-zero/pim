@@ -19,10 +19,18 @@ import { SqlCredentialStore } from "./credentials";
 import { AppCatalog } from "./extensions/app-catalog";
 import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
 import { skillTools } from "./extensions/app-skills";
-import { approvalsExtension, describeWait, type GatedAction, httpRequest } from "./extensions/approvals";
+import {
+	approvalsExtension,
+	describeWait,
+	type GatedAction,
+	httpRequest,
+	ownToolPermission,
+	type ResolvedPermission,
+} from "./extensions/approvals";
 import { artifactsExtension } from "./extensions/artifacts";
 import { goalsExtension } from "./extensions/goals";
 import {
+	appToolPermission,
 	MCP_APPROVALS,
 	type McpApproval,
 	type McpBridge,
@@ -30,8 +38,8 @@ import {
 	type McpResourceContent,
 	mcpActions,
 	mcpExtensions,
-	needsApproval,
 	slug,
+	toolDefinition,
 	toolName,
 } from "./extensions/mcp";
 import { notifyExtension } from "./extensions/notify";
@@ -46,7 +54,14 @@ import { dispatch, HttpError, readJson, type Route } from "./http";
 import type { ClientMessage, ServerMessage, ToolInfo } from "./protocol";
 import { generateVapidKeys, type PushSubscription, sendPush, validSubscription, type VapidKeys } from "./push";
 import { type ApprovalPolicy, readSettings, type Settings, updateSettings } from "./settings";
-import { type Approval, type GoalStatus, type Notification, PimStore } from "./store";
+import {
+	type Approval,
+	type GoalStatus,
+	type Notification,
+	PimStore,
+	TOOL_PERMISSIONS,
+	type ToolPermission,
+} from "./store";
 import { projectEntries } from "./transcript";
 import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage";
 
@@ -76,6 +91,20 @@ const EXPLICIT_APPROVAL_TIMEOUT_MS = 5 * 60_000;
 
 /** Why an approval was decided without the user deciding: it timed out, or the user always approves its tool. */
 type AutoApproval = "timeout" | "always";
+
+/** A tool a permission can be set for, as the API shows it. */
+export type ToolPermissionInfo = ResolvedPermission & {
+	/** The connected app's id; null for Pim's own tools. */
+	readonly app: string | null;
+	readonly appName: string | null;
+	/** The tool's own name, which its permission is set by. */
+	readonly tool: string;
+	/** The name the model sees. */
+	readonly name: string;
+	readonly description: string | null;
+	/** The app says the tool only reads. */
+	readonly readOnly: boolean;
+};
 
 /** Whether the agent works: a suspended one answers nothing and runs nothing until its operator lifts it. */
 export type OwnerStatus = "active" | "suspended";
@@ -224,6 +253,7 @@ export class Pim extends Agent<Env> {
 	readonly harness = new PiHarness({
 		harness: async ({ storage, context }) => {
 			const services = this.services();
+			this.#migrateAlwaysApproved();
 			this.registry.install(personaExtension(services));
 			this.registry.install(goalsExtension(services));
 			this.registry.install(scheduleExtension(services));
@@ -233,6 +263,7 @@ export class Pim extends Agent<Env> {
 			this.registry.install(artifactsExtension({ artifacts: this.artifacts, assertOpen: () => this.#assertOpen() }));
 			// Restored connections reconnect in the background after a wake; give them a moment.
 			await this.mcp.waitForConnections({ timeout: 5_000 });
+			this.#migrateAlwaysApproved();
 			const apps = mcpExtensions(this.apps, services, this.#appExtras(services));
 			this.registry.install(apps.apps);
 			this.registry.install(this.memory.extension);
@@ -336,6 +367,7 @@ export class Pim extends Agent<Env> {
 	/** Rebuilds the connected apps' extension, once pi's registry has been set up. */
 	#installApps(): void {
 		if (!this.registry.snapshot().extension("pim.mcp")) return;
+		this.#migrateAlwaysApproved();
 		// Same names: each replaces its installed extension in place, keeping the order.
 		const services = this.services();
 		const apps = mcpExtensions(this.apps, services, this.#appExtras(services));
@@ -479,6 +511,7 @@ export class Pim extends Agent<Env> {
 			notify: (notification) => this.deliverNotification(notification),
 			approvalRequested: async (approval) => this.broadcastMessage({ type: "approval", approval }),
 			awaitApproval: (approval) => this.#awaitApproval(approval),
+			permission: (approval) => this.#approvalPermission(approval),
 		};
 	}
 
@@ -638,7 +671,7 @@ export class Pim extends Agent<Env> {
 		if (approval.status !== "pending") return this.#outcome(approval);
 		return this.keepAliveWhile(async () => {
 			const decided = new Promise<string>((resolve) => this.#approvalWaiters.set(approval.id, resolve));
-			const always = approval.tool !== null && this.store.alwaysApproves(approval.tool);
+			const always = this.#approvalPermission(approval) === "on";
 			const onTimeout = always ? "approve" : approval.onTimeout;
 			const timer = setTimeout(
 				() => {
@@ -715,18 +748,19 @@ export class Pim extends Agent<Env> {
 	}
 
 	/**
-	 * Approves `id` and every later call to the same tool. Other calls to that
-	 * tool still waiting for the user are approved too.
+	 * Approves `id`, and lets its tool run without asking from now on. Other
+	 * calls to that tool still waiting for the user are approved too.
 	 */
 	async alwaysApprove(id: string, note?: string): Promise<Approval> {
 		const approval = this.store.approval(id);
 		if (!approval) throw new HttpError(404, `No approval ${id}`);
-		if (approval.tool === null) throw new HttpError(400, `Approval ${id} does not record its tool`);
 		if (approval.status !== "pending") throw new HttpError(409, `Approval ${id} is already ${approval.status}`);
+		const { app, tool } = this.#approvalTool(approval);
 		// Remembered first, so calls filed while this action runs are not asked about.
-		this.store.alwaysApprove(approval.tool);
+		this.setToolPermission(app, tool, "on");
 		for (const pending of this.store.approvals("pending")) {
-			if (pending.tool !== approval.tool || pending.id === id) continue;
+			const other = this.#approvalTool(pending);
+			if (pending.id === id || other.app !== app || other.tool !== tool) continue;
 			void this.decideApproval(pending.id, "approve", undefined, "always").catch((error) =>
 				console.warn(`approving ${pending.id} failed`, error),
 			);
@@ -734,13 +768,108 @@ export class Pim extends Agent<Env> {
 		return this.decideApproval(id, "approve", note);
 	}
 
-	tools(): ToolInfo[] {
-		const gated = new Set(this.actions.map((action) => action.name));
-		const servers = new Map(this.apps.servers().map((server) => [server.id, server]));
-		for (const tool of this.apps.tools()) {
-			const server = servers.get(tool.serverId);
-			if (server && needsApproval(tool, server.approval)) gated.add(toolName(server.id, tool.name));
+	// Tool permissions: whether Pim may use each tool that acts on the world or comes from an app.
+
+	/** Pim's own tools that ask first unless the user chooses otherwise; `mcp_call` is filed by the apps' tools. */
+	#ownGatedActions(): GatedAction[] {
+		return this.actions.filter((action) => action.name !== "mcp_call");
+	}
+
+	/** The tool an approval was filed for, as permissions name it: by its app and the app's own name for it. */
+	#approvalTool(approval: Approval): { app: string; tool: string } {
+		if (approval.action === "mcp_call") {
+			const { server, tool } = approval.args as { server: string; tool: string };
+			return { app: server, tool };
 		}
+		return { app: "", tool: approval.action };
+	}
+
+	/** The permission of the tool that filed an approval; `ask` for an app tool that is gone. */
+	#approvalPermission(approval: Approval): ToolPermission {
+		const { app, tool } = this.#approvalTool(approval);
+		if (app === "") return ownToolPermission(this.store, tool).permission;
+		const server = this.apps.servers().find((candidate) => candidate.id === app);
+		const info = this.apps.tools().find((candidate) => candidate.serverId === app && candidate.name === tool);
+		return server && info ? appToolPermission(this.store, server, info).permission : "ask";
+	}
+
+	/** Every tool a permission can be set for, with the permission that applies. */
+	toolPermissions(): ToolPermissionInfo[] {
+		const own = this.#ownGatedActions().map((action) => ({
+			app: null,
+			appName: null,
+			tool: action.name,
+			name: action.name,
+			description: action.description,
+			readOnly: false,
+			...ownToolPermission(this.store, action.name),
+		}));
+		const servers = new Map(this.apps.servers().map((server) => [server.id, server]));
+		const apps = this.apps.tools().flatMap((tool) => {
+			const server = servers.get(tool.serverId);
+			if (!server) return [];
+			return [
+				{
+					app: server.id,
+					appName: server.name,
+					tool: tool.name,
+					name: toolName(server.id, tool.name),
+					description: tool.description ?? tool.annotations?.title ?? null,
+					readOnly: tool.annotations?.readOnlyHint === true,
+					...appToolPermission(this.store, server, tool),
+				},
+			];
+		});
+		return [...own, ...apps];
+	}
+
+	/**
+	 * Sets the permission of one of Pim's own tools (`app` empty) or an app's
+	 * tool; null goes back to its default. An app tool's choice is tied to its
+	 * definition now. The model sees the change from its next request.
+	 */
+	setToolPermission(app: string, tool: string, permission: ToolPermission | null): ToolPermissionInfo {
+		let definition: string | null = null;
+		if (app === "") {
+			if (!this.#ownGatedActions().some((action) => action.name === tool)) throw new HttpError(404, `No tool ${tool}`);
+		} else {
+			const info = this.apps.tools().find((candidate) => candidate.serverId === app && candidate.name === tool);
+			if (!info) throw new HttpError(404, `No tool ${tool} in the app ${app}`);
+			definition = toolDefinition(info);
+		}
+		if (permission === null) this.store.clearToolPermission(app, tool);
+		else this.store.setToolPermission(app, tool, permission, definition);
+		this.#reinstallApprovals();
+		return this.toolPermissions().find((info) => (info.app ?? "") === app && info.tool === tool)!;
+	}
+
+	/**
+	 * Turns each tool chosen with "Always approve" before tool permissions
+	 * into an `on` permission, once the tool its name belongs to is known (an
+	 * app's tools only once it is connected).
+	 */
+	#migrateAlwaysApproved(): void {
+		for (const name of this.store.legacyAlwaysApproved()) {
+			let app: string | undefined;
+			let tool: string | undefined;
+			let definition: string | null = null;
+			if (this.#ownGatedActions().some((action) => action.name === name)) {
+				app = "";
+				tool = name;
+			} else {
+				const info = this.apps.tools().find((candidate) => toolName(candidate.serverId, candidate.name) === name);
+				if (!info) continue;
+				app = info.serverId;
+				tool = info.name;
+				definition = toolDefinition(info);
+			}
+			if (!this.store.toolPermission(app, tool)) this.store.setToolPermission(app, tool, "on", definition);
+			this.store.forgetLegacyAlwaysApproved(name);
+		}
+	}
+
+	tools(): ToolInfo[] {
+		const gated = new Set(this.toolPermissions().flatMap((info) => (info.permission === "ask" ? [info.name] : [])));
 		return this.registry
 			.snapshot()
 			.tools()
@@ -873,7 +1002,7 @@ export class Pim extends Agent<Env> {
 			goals: this.store.goals(),
 			schedules: (await this.services().listSchedules()).map(describeSchedule),
 			approvals: this.store.approvals(),
-			alwaysApproved: this.store.alwaysApproved(),
+			permissions: this.store.toolPermissions(),
 			notifications: this.store.notifications({ unread: false }),
 			apps: this.apps.servers().map(({ id, name, url, approval }) => ({ id, name, url, approval })),
 			watches: this.appEvents.list(),
@@ -1475,13 +1604,23 @@ export class Pim extends Agent<Env> {
 				return this.decideApproval(id!, "deny", typeof note === "string" ? note : undefined);
 			},
 		],
-		["GET", "/always-approved", () => ({ tools: this.store.alwaysApproved() })],
+		// Tool permissions: which tools Pim may use, and which ask first.
+		["GET", "/permissions", () => ({ tools: this.toolPermissions() })],
 		[
-			"DELETE",
-			"/always-approved/:tool",
-			({ tool }) => {
-				if (!this.store.stopAlwaysApproving(tool!)) throw new HttpError(404, `${tool} is not always approved`);
-				return { deleted: true };
+			"PUT",
+			"/permissions",
+			async (_params, request) => {
+				const { app, tool, permission } = await readJson<{ app: string | null; tool: string; permission: ToolPermission | null }>(
+					request,
+				);
+				if (app !== null && app !== undefined && (typeof app !== "string" || app === "")) {
+					throw new HttpError(400, "app must be an app's id, or null for Pim's own tools");
+				}
+				if (typeof tool !== "string" || tool === "") throw new HttpError(400, "tool is required");
+				if (permission === undefined || (permission !== null && !TOOL_PERMISSIONS.includes(permission))) {
+					throw new HttpError(400, `permission must be one of ${TOOL_PERMISSIONS.join(", ")}, or null for the default`);
+				}
+				return this.setToolPermission(app ?? "", tool, permission);
 			},
 		],
 
@@ -1628,11 +1767,15 @@ export class Pim extends Agent<Env> {
 			...server,
 			tools: catalog
 				.filter((tool) => tool.serverId === server.id)
-				.map((tool) => ({
-					name: toolName(server.id, tool.name),
-					description: tool.description ?? null,
-					requiresApproval: needsApproval(tool, server.approval),
-				})),
+				.map((tool) => {
+					const { permission } = appToolPermission(this.store, server, tool);
+					return {
+						name: toolName(server.id, tool.name),
+						description: tool.description ?? null,
+						permission,
+						requiresApproval: permission === "ask",
+					};
+				}),
 		}));
 	}
 

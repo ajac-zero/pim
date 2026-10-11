@@ -85,9 +85,13 @@ describe("approvals", () => {
 		const decided = await post<Approval>(`/approvals/${asked.id}/approve`, { always: true });
 		expect(decided.body).toMatchObject({ status: "approved", result: "HTTP 201 Created\norder 42 created" });
 		expect(await first).toMatchObject({ status: "done" });
-		expect((await api("/always-approved")).body.tools).toEqual([
-			{ tool: "http_request", createdAt: expect.any(Number) },
-		]);
+		const permissions = (await api("/permissions")).body.tools;
+		expect(permissions.find((info: { tool: string }) => info.tool === "http_request")).toMatchObject({
+			app: null,
+			permission: "on",
+			chosen: "on",
+			default: "ask",
+		});
 
 		// The next call runs at once, not after the timeout.
 		faux.setResponses([
@@ -104,8 +108,11 @@ describe("approvals", () => {
 		expect(second).toMatchObject({ summary: "POST https://hooks.example.test/second", status: "approved" });
 
 		// Taken back, the tool asks again.
-		expect((await api("/always-approved/http_request", { method: "DELETE" })).body).toEqual({ deleted: true });
-		expect((await api("/always-approved/http_request", { method: "DELETE" })).status).toBe(404);
+		const reset = await api("/permissions", {
+			method: "PUT",
+			body: JSON.stringify({ app: null, tool: "http_request", permission: null }),
+		});
+		expect(reset.body).toMatchObject({ tool: "http_request", permission: "ask", chosen: null });
 		faux.setResponses([
 			toolUse("http_request", { method: "POST", url: "https://hooks.example.test/third" }),
 			fauxAssistantMessage("Okay."),

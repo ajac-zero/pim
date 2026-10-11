@@ -392,10 +392,10 @@ const translations = {
     timeZone: "Time zone",
     approvalPolicy: "When you don't answer",
     approvalPolicyDescription:
-      "When Pim asks before acting and you don't answer in time:",
-    approvalExplicit: "Deny it",
+      "When Pim asks before acting and you don't answer right away:",
+    approvalExplicit: "Wait for me",
     approvalExplicitBody:
-      "Pim waits 5 minutes, then doesn't act. Nothing happens without a yes.",
+      "Pim waits for your answer, however long it takes. Nothing happens without a yes.",
     approvalAuto: "Approve it",
     approvalAutoBody:
       "Pim waits 30 seconds, then acts, so background work never stalls.",
@@ -862,10 +862,10 @@ const translations = {
     timeZone: "Zona horaria",
     approvalPolicy: "Cuando no respondes",
     approvalPolicyDescription:
-      "Cuando Pim pregunta antes de actuar y no respondes a tiempo:",
-    approvalExplicit: "Rechazarlo",
+      "Cuando Pim pregunta antes de actuar y no respondes enseguida:",
+    approvalExplicit: "Esperarme",
     approvalExplicitBody:
-      "Pim espera 5 minutos y luego no actúa. Nada pasa sin un sí.",
+      "Pim espera tu respuesta, el tiempo que haga falta. Nada pasa sin un sí.",
     approvalAuto: "Aprobarlo",
     approvalAutoBody:
       "Pim espera 30 segundos y luego actúa, para que el trabajo en segundo plano nunca se detenga.",

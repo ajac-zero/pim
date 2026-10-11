@@ -143,7 +143,8 @@ export type ApprovalPolicy = "auto" | "explicit";
 export type PimSettings = {
   timeZone: string;
   approvalPolicy: ApprovalPolicy;
-  approvalTimeoutSeconds: number;
+  /** Null: approvals wait for an answer however long. */
+  approvalTimeoutSeconds: number | null;
   notifyWebhook: string | null;
 };
 

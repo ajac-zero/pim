@@ -59,7 +59,7 @@
     // This deployment's public URL, for app event callbacks; empty learns it from API requests.
     "PIM_PUBLIC_URL": "",
     // What an approval nobody answers becomes: "auto" approves it after 30 seconds; "explicit"
-    // denies it after 5 minutes. Each person can change theirs in Settings.
+    // waits for an answer however long. Each person can change theirs in Settings.
     "PIM_APPROVAL_POLICY": "auto",
     // Platform models sessions may use besides PIM_MODEL, comma-separated; empty allows any.
     "PIM_MODELS": "",

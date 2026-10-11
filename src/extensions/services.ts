@@ -1,6 +1,5 @@
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { Schedule } from "agents";
-import type { ApprovalPolicy } from "../settings";
 import type { Approval, Notification, PimStore, ToolPermission } from "../store";
 
 /** Payload of a schedule created by `schedule_task`. */
@@ -23,18 +22,18 @@ export type PimServices = {
 	cancelSchedule(id: string): Promise<boolean>;
 	/** Deliver a stored notification to the user's connected clients and webhook. */
 	notify(notification: Notification): Promise<void>;
-	/** What an approval nobody answers becomes: approved (`auto`) or denied (`explicit`). */
-	readonly approvalPolicy: ApprovalPolicy;
-	/** How long an approval waits for the user before the policy decides it. */
-	readonly approvalTimeoutMs: number;
-	/** Tell the user's clients an approval is waiting. */
-	approvalRequested(approval: Approval): Promise<void>;
 	/**
-	 * Waits for the user to decide on the approval, deciding it by its
-	 * `onTimeout` once the timeout passes, runs the action if approved, and
-	 * returns the outcome for the model, so the turn that asked can carry on.
+	 * How long an approval waits before it is approved automatically (the
+	 * `auto` policy); null when it waits for the user however long (`explicit`).
 	 */
-	awaitApproval(approval: Approval): Promise<string>;
+	readonly approvalTimeoutMs: number | null;
+	/**
+	 * Takes a just-filed approval (`isNew`) or one a replayed call found, and
+	 * returns what the model reads: the outcome, when it is decided already
+	 * or the user lets the tool run without asking; else that the user was
+	 * asked, and is told once, with the decision to come as a message.
+	 */
+	approvalFiled(approval: Approval, isNew: boolean): Promise<string>;
 	/** The user's permission for the tool that filed the approval: `on` approves it without asking. */
 	permission(approval: Approval): ToolPermission;
 };

@@ -63,13 +63,19 @@ export async function say(content: string, session = "1") {
 	return body as { status: string; text?: string; reason?: string };
 }
 
-/** The approval a running turn is waiting on: the tool call holds the turn until it is decided. */
+/** The approval waiting for the user. */
 export async function pendingApproval() {
 	return vi.waitFor(async () => {
 		const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
 		expect(approval).toBeDefined();
 		return approval!;
 	});
+}
+
+/** The run an approval's decision started in its conversation, once settled. */
+export async function decisionRun(approval: Approval) {
+	const { body } = await api(`/sessions/${approval.session}/operations/${encodeURIComponent(`approval:${approval.id}`)}`);
+	return body as { status: string; replies: string[]; text?: string };
 }
 
 /** Opens the WebSocket and collects every message the server sends. */

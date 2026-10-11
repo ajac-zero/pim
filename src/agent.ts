@@ -98,16 +98,15 @@ export const MCP_CALLBACK_PATH = "/mcp/callback";
 /** Where apps deliver event webhooks, as `/mcp/events/<owner>/<watch id>`; signed, so served without the API token. The agent sees `/mcp/events/<watch id>`. */
 export const MCP_EVENTS_PATH = "/mcp/events/";
 const WATCH_REFRESH_CALLBACK = "refreshAppWatch";
-/** How long a tool call waits for the user under the `auto` policy before the approval is granted, so no task is blocked indefinitely. */
+/** How long an approval waits for the user under the `auto` policy before it is granted, so background work never stalls. */
 const APPROVAL_TIMEOUT_MS = 30_000;
-/** How long a tool call waits under the `explicit` policy before the approval is denied. */
-const EXPLICIT_APPROVAL_TIMEOUT_MS = 5 * 60_000;
+/** Decides an approval its timeout reached, as it was filed to be decided. */
+const APPROVAL_EXPIRY_CALLBACK = "expireApproval";
 
 /** A circle's permission row for reading the owner's memory. */
 const MEMORY_TOOL = "memory";
 /** How long a guest's request waits for the owner before it is denied. */
 const GUEST_APPROVAL_MS = 24 * 60 * 60 * 1000;
-const GUEST_APPROVAL_EXPIRY_CALLBACK = "expireGuestApproval";
 
 /** A circle's name as given: trimmed, not empty, not long. */
 function circleName(name: unknown): string {
@@ -534,9 +533,6 @@ export class Pim extends Agent<Env> {
 			get timeZone() {
 				return pim.settings().timeZone;
 			},
-			get approvalPolicy() {
-				return pim.settings().approvalPolicy;
-			},
 			get approvalTimeoutMs() {
 				return pim.approvalTimeoutMs();
 			},
@@ -557,8 +553,7 @@ export class Pim extends Agent<Env> {
 				return this.cancelSchedule(id);
 			},
 			notify: (notification) => this.deliverNotification(notification),
-			approvalRequested: async (approval) => this.broadcastMessage({ type: "approval", approval }),
-			awaitApproval: (approval) => this.#awaitApproval(approval),
+			approvalFiled: (approval, isNew) => this.#approvalFiled(approval, isNew),
 			permission: (approval) => this.#approvalPermission(approval),
 		};
 	}
@@ -740,42 +735,38 @@ export class Pim extends Agent<Env> {
 		}
 	}
 
-	/** Tool calls waiting for a decision, by approval id; each resolves with the outcome the model reads. */
-	readonly #approvalWaiters = new Map<string, (outcome: string) => void>();
-
 	/**
-	 * Holds a tool call until the user decides or the approval's timeout
-	 * passes, which decides it as the policy it was filed under says: approved
-	 * (`auto`) or denied (`explicit`). A tool the user always approves is
-	 * approved at once. Returns the outcome, so the turn carries on. A decided
-	 * approval (a replayed call) returns its recorded outcome at once.
+	 * What a gated tool call returns once its approval is filed. A decided
+	 * approval (a replayed call) returns its outcome; a tool the user lets run
+	 * without asking runs now, and the turn goes on with its result. Otherwise
+	 * the user is asked, once: the request goes to their open apps and devices,
+	 * and an `auto` approval's timeout is set. The decision comes back later as
+	 * a message (see `decideApproval`), so the turn need not wait for it.
 	 */
-	async #awaitApproval(approval: Approval): Promise<string> {
+	async #approvalFiled(approval: Approval, isNew: boolean): Promise<string> {
 		if (approval.status !== "pending") return this.#outcome(approval);
-		return this.keepAliveWhile(async () => {
-			const decided = new Promise<string>((resolve) => this.#approvalWaiters.set(approval.id, resolve));
-			const always = this.#approvalPermission(approval) === "on";
-			const onTimeout = always ? "approve" : approval.onTimeout;
-			const timer = setTimeout(
-				() => {
-					this.decideApproval(approval.id, onTimeout, undefined, always ? "always" : "timeout").catch((error) =>
-						console.warn(`deciding ${approval.id} on its timeout failed`, error),
-					);
-				},
-				always ? 0 : Math.max(0, (approval.expiresAt ?? Date.now() + this.approvalTimeoutMs()) - Date.now()),
-			);
-			try {
-				return await decided;
-			} finally {
-				clearTimeout(timer);
-				this.#approvalWaiters.delete(approval.id);
-			}
-		});
+		if (this.#approvalPermission(approval) === "on") {
+			return this.#outcome(await this.decideApproval(approval.id, "approve", undefined, "always", { inTurn: true }));
+		}
+		if (isNew) {
+			this.broadcastMessage({ type: "approval", approval });
+			const notification = this.store.addNotification({
+				id: crypto.randomUUID(),
+				session: approval.session,
+				title: "Pim needs your approval",
+				body: approval.summary,
+			});
+			// Open apps show the request itself, from the approval just broadcast; this reaches the others.
+			await this.deliverNotification(notification, { sockets: false });
+		}
+		// Again on a replay: an approval filed before timeouts were scheduled gets one too. Deciding twice is refused.
+		if (approval.expiresAt !== null) await this.schedule(new Date(approval.expiresAt), APPROVAL_EXPIRY_CALLBACK, { id: approval.id });
+		return `[Approval ${approval.id}] Asked the user: ${approval.summary}. Their decision, with the result, will arrive in this conversation as a message starting with "[Approval ${approval.id}]". Don't call it again; go on with anything that doesn't depend on it.`;
 	}
 
-	/** How long approvals filed under `policy` wait for the user. */
-	protected approvalTimeoutMs(policy: ApprovalPolicy = this.settings().approvalPolicy): number {
-		return policy === "explicit" ? EXPLICIT_APPROVAL_TIMEOUT_MS : APPROVAL_TIMEOUT_MS;
+	/** How long approvals filed under `policy` wait before they are approved; null waits for the user however long. */
+	protected approvalTimeoutMs(policy: ApprovalPolicy = this.settings().approvalPolicy): number | null {
+		return policy === "explicit" ? null : APPROVAL_TIMEOUT_MS;
 	}
 
 	#outcome(approval: Approval): string {
@@ -797,11 +788,17 @@ export class Pim extends Agent<Env> {
 
 	/**
 	 * Applies a decision (made without the user, with `auto`). An approved
-	 * action runs here. The outcome goes to the tool call waiting for it, so
-	 * its turn continues; with no call waiting (it was evicted, or the turn was
-	 * stopped) it goes to the requesting session as a new message instead.
+	 * action runs here. The outcome goes to the requesting conversation as a
+	 * message, joining its run if one is going; decided `inTurn`, the tool
+	 * call that filed it returns the outcome itself.
 	 */
-	async decideApproval(id: string, decision: "approve" | "deny", note?: string, auto?: AutoApproval): Promise<Approval> {
+	async decideApproval(
+		id: string,
+		decision: "approve" | "deny",
+		note?: string,
+		auto?: AutoApproval,
+		options: { inTurn?: boolean } = {},
+	): Promise<Approval> {
 		// An approval's timer can outlive the agent's erasure; its action must not run.
 		this.#assertOpen();
 		const approval = this.store.approval(id);
@@ -837,10 +834,9 @@ export class Pim extends Agent<Env> {
 			}
 			return decided;
 		}
-		const message = this.#outcome(decided);
-		const waiter = this.#approvalWaiters.get(id);
-		if (waiter) waiter(message);
-		else await this.submitTo(approval.session, message, { operationId: `approval:${id}` }, "approval");
+		if (!options.inTurn) {
+			await this.submitTo(approval.session, this.#outcome(decided), { operationId: `approval:${id}`, whenBusy: "steer" }, "approval");
+		}
 		return decided;
 	}
 
@@ -1186,7 +1182,7 @@ export class Pim extends Agent<Env> {
 		});
 		if (!known) {
 			logged();
-			await this.schedule(new Date(approval.expiresAt!), GUEST_APPROVAL_EXPIRY_CALLBACK, { id });
+			await this.schedule(new Date(approval.expiresAt!), APPROVAL_EXPIRY_CALLBACK, { id });
 			this.broadcastMessage({ type: "approval", approval });
 			const notification = this.store.addNotification({
 				id: crypto.randomUUID(),
@@ -1214,11 +1210,17 @@ export class Pim extends Agent<Env> {
 		return `${head} ${host} approved: ${approval.summary}${note}\nResult:\n${approval.result ?? ""}`;
 	}
 
-	/** Fired a day after a guest's approval was filed: unanswered, it is denied. */
-	async expireGuestApproval(payload: { id: string }): Promise<void> {
+	/** Fired when an approval's timeout passes: unanswered, it is decided as it was filed to be. */
+	async expireApproval(payload: { id: string }): Promise<void> {
 		if (this.#closed()) return;
-		if (this.store.approval(payload.id)?.status !== "pending") return;
-		await this.decideApproval(payload.id, "deny", undefined, "timeout");
+		const approval = this.store.approval(payload.id);
+		if (approval?.status !== "pending") return;
+		await this.decideApproval(approval.id, approval.onTimeout, undefined, "timeout");
+	}
+
+	/** Guests' expiries scheduled under their old name. */
+	async expireGuestApproval(payload: { id: string }): Promise<void> {
+		await this.expireApproval(payload);
 	}
 
 	// The owner's Pims.
@@ -2355,7 +2357,8 @@ export class Pim extends Agent<Env> {
 
 	#describeSettings() {
 		const settings = this.settings();
-		return { ...settings, approvalTimeoutSeconds: this.approvalTimeoutMs(settings.approvalPolicy) / 1000 };
+		const timeout = this.approvalTimeoutMs(settings.approvalPolicy);
+		return { ...settings, approvalTimeoutSeconds: timeout === null ? null : timeout / 1000 };
 	}
 
 	/** Rebuilds the extensions whose tools describe the approval policy, once pi's registry has been set up. */

@@ -46,7 +46,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 | Artifacts | `artifact_create`, `artifact_update`, `artifact_read`, `artifact_list` | Documents and small HTML pages the agent makes for you, with every version kept. They show in the chat and in Artifacts, run in a sandbox apart from your account, and can be restored or downloaded. See [docs/artifacts.md](docs/artifacts.md). |
 | Goals and plans | `create_goal`, `update_goal`, `list_goals` | Goals have step-by-step plans and progress notes. Active goals are always in the prompt. |
 | Background work | `schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task` | Delays, dates, or cron. When a task fires, the agent receives a `[Scheduled task]` message in the session that scheduled it. |
-| Talking to you | `send_to_user` | The only way Pim speaks: you see what it sends, and none of its working notes, so background work can stay silent. With `notify`, the message is also stored as a notification, pushed to connected sockets, sent as Web Push to browsers that turned it on in Settings (even with the app closed), and POSTed to an optional webhook. |
+| Talking to you | `send_to_user` | The only way Pim speaks: you see what it sends, and none of its working notes, so background work can stay silent. A message goes to the conversation, or to your email when the deployment can send it (see [Email](#email)). With `notify`, it is also stored as a notification, pushed to connected sockets, sent as Web Push to browsers that turned it on in Settings (even with the app closed), and POSTed to an optional webhook. |
 | Asking first | `http_request` | Gated: the call files an approval request and returns at once; your apps and devices are told. The action runs when you approve; deny to stop it. Either way the decision, with the result, comes back to the conversation as a message, so Pim carries on when you answer, however long you take. Without an answer, the approval policy decides: `auto` approves after 30 seconds so autonomous jobs never stall, `explicit` waits for you, so nothing happens without a yes. Choose **Always approve** and later calls to that tool run without asking. Settings → Tool permissions sets each such tool, and each app's tool, to Off, Ask or On (see [Tool permissions](#tool-permissions)). |
 | Connected apps | `connect_app` (gated), `list_apps`, plus each app's tools | Remote MCP servers, with OAuth sign-in. Tools that don't declare themselves read-only need approval. See [Connected apps](#connected-apps). |
 | App skills | `read_skill`, `read_skill_file` | Instructions apps publish over the MCP Skills extension, checked against the app's digests. |
@@ -98,6 +98,16 @@ Configuration lives in `vars` in `wrangler.jsonc`:
 
 `ratelimits` in `wrangler.jsonc` slow down sign-in attempts from one address and API requests from one person; leave them out and nothing is slowed down. Their namespace IDs must be unique in your Cloudflare account.
 
+### Email
+
+Pim can email each person, when they ask for it or for something worth keeping, such as a report. It's off until you set it up with [Cloudflare Email Service](https://developers.cloudflare.com/email-service/): onboard a domain for Email Sending, then add to `wrangler.jsonc`
+
+```jsonc
+"send_email": [{ "name": "EMAIL" }],
+```
+
+and set `PIM_EMAIL_FROM` in `vars` to an address on that domain, such as `pim@example.com`. Each person then adds their address in Settings and confirms it with a code Pim emails there; Pim only ever emails that one address, at most 50 times a day.
+
 `PIM_TIME_ZONE` and `PIM_APPROVAL_POLICY` are defaults: each person's own choices in Settings (`PUT /settings`) take their place.
 
 For local development, run `pnpm dev`: the Worker and the built web app at `http://localhost:8787` (use `localhost`: passkeys don't work on an IP address). Its first 15 minutes count as just deployed, so the first account you make is the admin, and setup links show up in the terminal. For the web app with hot reload, make an API token in Settings and run `PIM_API_TOKEN=... pnpm dev:web` (port 3000), which signs in with it. The `AI` binding is remote, so `wrangler dev` needs a Cloudflare login, and model calls bill that account. `pnpm preview` runs the same Pim with no Cloudflare login and a stand-in model, at the same address.
@@ -119,7 +129,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | POST | `/sessions/:s/abort` | `{ operationId? }` | Withdraws one operation, or stops everything |
 | POST | `/sessions/:s/reset` | `{ handoff? }` | Starts a fresh context; history stays stored |
 | PUT | `/sessions/:s/model` | `{ model }` | Changes one session's model: a Workers AI or AI Gateway id |
-| GET | `/settings` | | `{ timeZone, approvalPolicy, approvalTimeoutSeconds, notifyWebhook }` |
+| GET | `/settings` | | `{ timeZone, approvalPolicy, approvalTimeoutSeconds, notifyWebhook }`; `approvalTimeoutSeconds` is null when approvals wait however long |
 | PUT | `/settings` | Any of `{ timeZone, approvalPolicy, notifyWebhook }`; `null` goes back to the deployment's | The settings |
 | GET | `/usage` | | `{ limits, today, history, storageBytes }`: model requests, tokens (the ChatGPT plan's apart) and runs by UTC day |
 | GET | `/export` | | Everything as one JSON download, without credentials |
@@ -180,6 +190,10 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | GET | `/watches` | | Event watches: app, event, instruction, state, next renewal |
 | DELETE | `/watches/:id` | | Stops a watch and unsubscribes |
 | POST | `/mcp/events/:owner/:watch` (root, no `/api`) | Standard Webhooks-signed event | Where apps deliver events; no token needed, the signature is checked |
+| GET | `/email` | | `{ available, address, pending }`: whether this Pim can send email, the confirmed address, and one waiting for its code |
+| PUT | `/email` | `{ address }` | Emails a code there; `409` when this Pim can't send email |
+| POST | `/email/confirm` | `{ code }` | Makes the waiting address the one Pim emails |
+| DELETE | `/email` | | Forgets the address |
 | GET | `/notifications` | `?unread=true` | Notifications |
 | POST | `/notifications/:id/read` | | Marks one read |
 | GET | `/push/key` | | The VAPID public key browsers subscribe with (made on first use) |

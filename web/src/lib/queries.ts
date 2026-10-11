@@ -65,6 +65,9 @@ export const personasQuery = () =>
 export const profileQuery = () =>
   queryOptions({ queryKey: ["profile"], queryFn: pim.profile });
 
+export const emailQuery = () =>
+  queryOptions({ queryKey: ["email"], queryFn: pim.email });
+
 export const appsQuery = () =>
   queryOptions({ queryKey: ["apps"], queryFn: pim.apps });
 

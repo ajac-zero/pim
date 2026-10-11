@@ -2,7 +2,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/provid
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { api, connect, lastUserText, OWNER, post, say, toolUse } from "./helpers";
-import { faux, type Pim } from "./worker";
+import { faux, outbox, type Pim } from "./worker";
 
 describe("scheduled tasks", () => {
 	it("schedules work for later and hands it back to the same session when it fires", async () => {
@@ -89,6 +89,50 @@ describe("sending to the person", () => {
 		faux.setResponses([fauxAssistantMessage("Same as before.")]);
 		const forgot = await post("/sessions/1/messages", { content: "And now?", wait: true });
 		expect(forgot.body).toMatchObject({ status: "done", replies: ["Same as before."] });
+	});
+
+	it("emails the person at the address they confirmed, and only there", async () => {
+		const sendEmail = () =>
+			faux.setResponses([
+				toolUse("send_to_user", { channel: "email", title: "Your week", message: "3 workouts, 1 flight booked." }),
+				(context) => {
+					emailed = JSON.stringify(context.messages.at(-1));
+					return fauxAssistantMessage("Emailed the summary.");
+				},
+			]);
+		let emailed = "";
+
+		// No address yet: nothing is sent, and the model is told why.
+		sendEmail();
+		const unsent = await post("/sessions/1/messages", { content: "Email me my week.", wait: true });
+		expect(emailed).toContain("hasn't added an email address");
+		expect(outbox).toEqual([]);
+		// It tried to send something, so its notes are not passed off as a reply.
+		expect(unsent.body).toMatchObject({ status: "done", replies: [] });
+
+		// Confirming an address takes the code Pim emails there.
+		expect((await api("/email")).body).toEqual({ available: true, address: null, pending: null });
+		expect((await api("/email", { method: "PUT", body: JSON.stringify({ address: "not an address" }) })).status).toBe(400);
+		const started = await api("/email", { method: "PUT", body: JSON.stringify({ address: "ada@example.com" }) });
+		expect(started.body).toEqual({ available: true, address: null, pending: "ada@example.com" });
+		const [codeMail] = outbox.splice(0);
+		expect(codeMail).toMatchObject({ to: "ada@example.com" });
+		const code = codeMail!.subject.slice(0, 6);
+		const wrong = code === "000000" ? "000001" : "000000";
+		expect((await post("/email/confirm", { code: wrong })).status).toBe(400);
+		expect((await post("/email/confirm", { code })).body).toEqual({ available: true, address: "ada@example.com", pending: null });
+
+		sendEmail();
+		const sent = await post("/sessions/1/messages", { content: "Email me my week.", wait: true });
+		expect(emailed).toContain("Emailed it to ada@example.com.");
+		expect(outbox).toEqual([
+			{ to: "ada@example.com", subject: "Your week", text: "3 workouts, 1 flight booked.\n\n—\nFrom your Pim: https://pim.test/chat/1" },
+		]);
+		// The chat shows it was emailed; it is not a reply in the conversation.
+		expect(sent.body).toMatchObject({ status: "done", replies: [] });
+		outbox.splice(0);
+
+		expect((await api("/email", { method: "DELETE" })).body).toEqual({ available: true, address: null, pending: null });
 	});
 
 	it("alerts the person's devices with notify, on every connected socket", async () => {

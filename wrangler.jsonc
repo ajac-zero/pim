@@ -71,8 +71,12 @@
     // Accounts allowed in all; empty for no cap.
     "PIM_MAX_ACCOUNTS": "",
     // Registrations one IP address may make in a day; empty is 3.
-    "PIM_REGISTRATIONS_PER_ADDRESS": ""
+    "PIM_REGISTRATIONS_PER_ADDRESS": "",
+    // Email to each person, off until set up: onboard a domain to Cloudflare Email Service,
+    // uncomment `send_email` below, and set this to an address on that domain.
+    "PIM_EMAIL_FROM": ""
   },
+  // "send_email": [{ "name": "EMAIL" }],
   // When this version was deployed: whoever opens a Pim with no admin in the 15 minutes
   // after becomes its admin.
   "version_metadata": { "binding": "CF_VERSION_METADATA" },

@@ -38,7 +38,8 @@ describe("scheduled tasks", () => {
 			return `schedule:${due!.id}:${due!.time}`;
 		});
 		const settled = await api(`/sessions/1/operations/${encodeURIComponent(operation)}`);
-		expect(settled.body).toMatchObject({ status: "done", text: "Same price." });
+		// Work Pim gave itself may stay silent: its final text is notes, not a reply.
+		expect(settled.body).toMatchObject({ status: "done", text: "Same price.", replies: [] });
 		expect(woken).toBe(`[Scheduled task "Flight check" ${schedule.id}] Check whether the flight price dropped.`);
 
 		expect((await api(`/schedules/${schedule.id}`, { method: "DELETE" })).status).toBe(200);
@@ -67,15 +68,37 @@ describe("scheduled tasks", () => {
 	});
 });
 
-describe("notifications", () => {
-	it("stores notifications and pushes them to every connected socket", async () => {
+describe("sending to the person", () => {
+	it("replies with what Pim sent, not with its notes", async () => {
+		faux.setResponses([
+			fauxAssistantMessage(
+				[
+					fauxToolCall("send_to_user", { message: "On it." }),
+					fauxToolCall("send_to_user", { message: "Your flight is **$80** cheaper." }),
+				],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("Checked the price; told them."),
+		]);
+		const { body } = await post("/sessions/1/messages", { content: "How's the flight price?", wait: true });
+		expect(body).toMatchObject({ status: "done", text: "Checked the price; told them.", replies: ["On it.", "Your flight is **$80** cheaper."] });
+		// Without notify, nothing else hears of it.
+		expect((await api("/notifications")).body.notifications).toEqual([]);
+
+		// A model that answers without sending still answers the person.
+		faux.setResponses([fauxAssistantMessage("Same as before.")]);
+		const forgot = await post("/sessions/1/messages", { content: "And now?", wait: true });
+		expect(forgot.body).toMatchObject({ status: "done", replies: ["Same as before."] });
+	});
+
+	it("alerts the person's devices with notify, on every connected socket", async () => {
 		const { body: other } = await post("/sessions");
 		// Sockets on different sessions both receive it.
 		const root = await connect();
 		const elsewhere = await connect(other.id);
 
 		faux.setResponses([
-			toolUse("notify_user", { title: "Price drop", body: "Your flight is $80 cheaper." }),
+			toolUse("send_to_user", { message: "Your flight is $80 cheaper.", notify: true, title: "Price drop" }),
 			fauxAssistantMessage("Told you."),
 		]);
 		await say("Tell me if anything changes.");

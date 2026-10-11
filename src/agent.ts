@@ -11,7 +11,7 @@ import {
 	ROOT_CONVERSATION_ID,
 } from "@earendil-works/pi-durable";
 import { Agent, type Connection, type ConnectionContext, getAgentByName, type Schedule, type WSMessage } from "agents";
-import { type PiModel, PiHarness, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
+import { type PiModel, PiHarness, type PiOperationResult, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
 import { ArtifactStore, artifactHeaders, downloadName, RESIZE_SCRIPT } from "./artifacts";
 import {
@@ -57,7 +57,7 @@ import {
 	toolName,
 	toText,
 } from "./extensions/mcp";
-import { notifyExtension } from "./extensions/notify";
+import { MESSAGING_EXTENSION, messagingExtension, SEND_TO_USER } from "./extensions/messaging";
 import { createOptMem } from "./extensions/optmem";
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
 import { byteLength, ENTRY_BYTES, entryLine } from "./extensions/optmem/store";
@@ -84,6 +84,8 @@ import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage"
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
 
 const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
+/** Operation ids of the inputs Pim gives itself: scheduled tasks, approvals' decisions, apps' events. */
+const PIM_OPERATION = /^(schedule|approval|event):/;
 /**
  * Set by the Worker on every request it forwards: the owner it resolved,
  * which must be the agent's own name. A request routed to the wrong agent is
@@ -291,7 +293,7 @@ export class Pim extends Agent<Env> {
 			this.registry.install(personaExtension(services));
 			this.registry.install(goalsExtension(services));
 			this.registry.install(scheduleExtension(services));
-			this.registry.install(notifyExtension(services));
+			this.registry.install(messagingExtension(services));
 			this.registry.install(approvalsExtension(services, this.actions));
 			this.registry.install(webExtension({ ai: this.env.AI, searchProvider: this.env.PIM_WEB_SEARCH }));
 			this.registry.install(artifactsExtension({ artifacts: this.artifacts, assertOpen: () => this.#assertOpen() }));
@@ -621,6 +623,33 @@ export class Pim extends Agent<Env> {
 		// A retried submission (the same operation id) is not accepted again: one run, not two.
 		if (run !== undefined && !receipt.accepted) this.usage.releaseRun(run);
 		return receipt;
+	}
+
+	/**
+	 * An operation's result with what it sent the person in its conversation:
+	 * the messages of its run's `send_to_user` calls, in order. A message from
+	 * the person that got nothing sent back (a model that forgot to) is
+	 * answered with the run's final text instead; work Pim gave itself may
+	 * stay silent.
+	 */
+	async #withReplies(result: PiOperationResult): Promise<PiOperationResult & { replies: string[] }> {
+		if (result.status !== "done") return { ...result, replies: [] };
+		const conversation = await this.harness.conversation(result.session);
+		const record = await (await this.harness.storage()).submissionByRequest(conversation.id, result.operationId, BACKGROUND_CONTEXT);
+		const replies: string[] = [];
+		if (record?.type === "input" && record.status === "done") {
+			for (const entry of await this.harness.session(result.session).messages()) {
+				const message = entry.model?.[0];
+				if (entry.id <= record.entry || entry.id > record.answer || message?.role !== "assistant") continue;
+				for (const part of message.content) {
+					if (part.type === "toolCall" && part.name === SEND_TO_USER && typeof part.arguments.message === "string") {
+						replies.push(part.arguments.message);
+					}
+				}
+			}
+		}
+		const fallback = replies.length === 0 && result.text && !PIM_OPERATION.test(result.operationId);
+		return { ...result, replies: fallback ? [result.text!] : replies };
 	}
 
 	#storageRefusal(): string | null {
@@ -1306,7 +1335,9 @@ export class Pim extends Agent<Env> {
 		this.visits.setBrief(hostOwnerId, result.brief);
 		const extension = this.#installVisit(result.brief, me.username);
 		const conversation = await this.harness.conversation(share.session);
-		await conversation.configure({ extensions: [extension] }, BACKGROUND_CONTEXT);
+		// The visitor reads what the visit sends them, as in any of their conversations.
+		const messaging = this.registry.snapshot().extension(MESSAGING_EXTENSION)!;
+		await conversation.configure({ extensions: [extension, messaging] }, BACKGROUND_CONTEXT);
 	}
 
 	/** Installs (or replaces) a visit's extension; its tools call the host's Pim. */
@@ -1693,7 +1724,7 @@ export class Pim extends Agent<Env> {
 					"user",
 				);
 				if (!body.wait) return Response.json(receipt, { status: 202 });
-				return this.harness.wait(receipt.operationId, { session: id });
+				return this.#withReplies(await this.harness.wait(receipt.operationId, { session: id }));
 			},
 		],
 		[
@@ -1704,7 +1735,7 @@ export class Pim extends Agent<Env> {
 				const timeout = Math.min(Number(url.searchParams.get("timeout") ?? 25_000) || 25_000, 60_000);
 				const signal = AbortSignal.timeout(timeout);
 				try {
-					return await this.harness.wait(operation!, { session: id, signal });
+					return await this.#withReplies(await this.harness.wait(operation!, { session: id, signal }));
 				} catch (error) {
 					if (signal.aborted) return { operationId: operation, session: id, status: "pending" };
 					throw error;

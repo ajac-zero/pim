@@ -21,7 +21,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
                                        │ person, named by their owner ID              │
                                        │  ├ PiHarness ── pi-durable runs, tasks, inbox│
                                        │  ├ Extensions: optmem, goals, schedule,      │
-                                       │  │   notify, approvals, web                  │
+                                       │  │   messaging, approvals, web               │
                                        │  ├ Scheduler (alarms) ── background wake-ups │
                                        │  └ SQLite: pi's tables + pim_* tables        │
                                        │        │                                     │
@@ -46,7 +46,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 | Artifacts | `artifact_create`, `artifact_update`, `artifact_read`, `artifact_list` | Documents and small HTML pages the agent makes for you, with every version kept. They show in the chat and in Artifacts, run in a sandbox apart from your account, and can be restored or downloaded. See [docs/artifacts.md](docs/artifacts.md). |
 | Goals and plans | `create_goal`, `update_goal`, `list_goals` | Goals have step-by-step plans and progress notes. Active goals are always in the prompt. |
 | Background work | `schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task` | Delays, dates, or cron. When a task fires, the agent receives a `[Scheduled task]` message in the session that scheduled it. |
-| Reaching you | `notify_user` | Stored, pushed to connected sockets, sent as Web Push to browsers that turned it on in Settings (even with the app closed), and POSTed to an optional webhook. |
+| Talking to you | `send_to_user` | The only way Pim speaks: you see what it sends, and none of its working notes, so background work can stay silent. With `notify`, the message is also stored as a notification, pushed to connected sockets, sent as Web Push to browsers that turned it on in Settings (even with the app closed), and POSTed to an optional webhook. |
 | Asking first | `http_request` | Gated: the call files an approval request. The action runs when you approve; deny to stop it. Without an answer, the approval policy decides: `auto` approves after 30 seconds so autonomous jobs never block, `explicit` denies after 5 minutes so nothing happens without a yes. The call waits for your answer, and the result comes back within the same turn. Choose **Always approve** and later calls to that tool run without asking. Settings → Tool permissions sets each such tool, and each app's tool, to Off, Ask or On (see [Tool permissions](#tool-permissions)). |
 | Connected apps | `connect_app` (gated), `list_apps`, plus each app's tools | Remote MCP servers, with OAuth sign-in. Tools that don't declare themselves read-only need approval. See [Connected apps](#connected-apps). |
 | App skills | `read_skill`, `read_skill_file` | Instructions apps publish over the MCP Skills extension, checked against the app's digests. |
@@ -114,7 +114,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | POST | `/sessions` | `{ title? }` | A new session |
 | PUT | `/sessions/:s` | `{ title }` | Renames it |
 | GET | `/sessions/:s/messages` | | `{ busy, pending, messages }`: the transcript as display messages |
-| POST | `/sessions/:s/messages` | `{ content, wait?, whenBusy?: "followUp" \| "steer", operationId? }` | `202` with a receipt `{ operationId, accepted }`, or the result `{ status, text?, reason? }` when `wait` is true |
+| POST | `/sessions/:s/messages` | `{ content, wait?, whenBusy?: "followUp" \| "steer", operationId? }` | `202` with a receipt `{ operationId, accepted }`, or the result `{ status, replies, text?, reason? }` when `wait` is true. `replies` is what Pim sent you, in order; `text` is its final notes, which only stand in as the reply when it sent nothing |
 | GET | `/sessions/:s/operations/:op` | `?timeout=ms` (max 60000) | The result once settled, or `{ status: "pending" }` |
 | POST | `/sessions/:s/abort` | `{ operationId? }` | Withdraws one operation, or stops everything |
 | POST | `/sessions/:s/reset` | `{ handoff? }` | Starts a fresh context; history stays stored |

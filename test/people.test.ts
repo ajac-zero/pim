@@ -1,20 +1,23 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { createExecutionContext, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { Auth } from "../../src/auth";
-import { type PimSite, toAgent } from "../../src/gateway";
-import type { Directory, RegistrationPolicy } from "../../src/hosted/directory";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { Auth } from "../src/auth";
+import type { Directory, RegistrationPolicy } from "../src/directory";
+import { toAgent } from "../src/gateway";
 import { z } from "zod";
-import { toolUse } from "../helpers";
-import { faux, Pim } from "../worker";
-import { Authenticator } from "../webauthn";
+import { faux, Pim } from "./worker";
+import { Authenticator } from "./webauthn";
 
-const DOMAIN = "pimling.test";
-const FRONT = `https://${DOMAIN}`;
-const hostOf = (username: string) => `https://${username}.${DOMAIN}`;
+/**
+ * Several people on one Pim: registering, keeping each person's things
+ * their own, adding devices, recovery, accounts, the admin, erasure, and
+ * what people share with each other.
+ */
+
+const ORIGIN = "https://pim.test";
 
 afterEach(() => {
 	// Every scripted model response was used.
@@ -23,23 +26,20 @@ afterEach(() => {
 
 let browsers = 0;
 
-/** One browser on one origin, from its own address: keeps the cookies the Worker sets, sends them back. */
+/** One browser, from its own address: keeps the cookies the Worker sets, sends them back. */
 class Browser {
 	cookies = new Map<string, string>();
 
-	constructor(
-		readonly origin: string,
-		readonly ip = `203.0.${Math.floor(++browsers / 250)}.${browsers % 250}`,
-	) {}
+	constructor(readonly ip = `203.0.${Math.floor(++browsers / 250)}.${browsers % 250}`) {}
 
 	async fetch(path: string, init: RequestInit & { json?: unknown } = {}) {
 		const headers = new Headers(init.headers);
-		if (!headers.has("origin") && init.method && init.method !== "GET") headers.set("origin", this.origin);
+		if (!headers.has("origin") && init.method && init.method !== "GET") headers.set("origin", ORIGIN);
 		if (this.cookies.size > 0) headers.set("cookie", [...this.cookies].map(([k, v]) => `${k}=${v}`).join("; "));
 		if (init.json !== undefined) headers.set("content-type", "application/json");
 		headers.set("CF-Connecting-IP", this.ip);
 		const response = await exports.default.fetch(
-			new Request(`${this.origin}${path}`, { ...init, headers, body: init.json === undefined ? init.body : JSON.stringify(init.json) }),
+			new Request(`${ORIGIN}${path}`, { ...init, headers, body: init.json === undefined ? init.body : JSON.stringify(init.json) }),
 		);
 		for (const cookie of response.headers.getSetCookie()) {
 			const [pair = "", ...attributes] = cookie.split("; ");
@@ -56,16 +56,16 @@ class Browser {
 	}
 }
 
-type Registered = { username: string; url: string; setupUrl: string; recoveryCodes: string[] };
+type Registered = { username: string; role: string; setup: string; recoveryCodes: string[] };
 
 let addresses = 0;
 /** Registers from a fresh address, so the per-address limit is only met where a test means to. */
 async function register(username: string, extra: Record<string, unknown> = {}) {
-	const front = new Browser(FRONT, `198.51.100.${++addresses}`);
-	return front.json<Registered & { error?: string }>("/auth/register", { method: "POST", json: { username, ...extra } });
+	const browser = new Browser(`198.51.100.${++addresses}`);
+	return browser.json<Registered & { error?: string }>("/auth/register", { method: "POST", json: { username, ...extra } });
 }
 
-async function addPasskey(browser: Browser, authenticator: Authenticator, allowedBy: { setup?: string; recovery?: string; device?: string } = {}) {
+async function addPasskey(browser: Browser, authenticator: Authenticator, allowedBy: Record<string, string> = {}) {
 	const options = await browser.json("/auth/passkeys/options", { method: "POST", json: allowedBy });
 	if (options.status !== 200) return options.status;
 	return (await browser.fetch("/auth/passkeys", { method: "POST", json: await authenticator.register(options.body) })).status;
@@ -76,22 +76,40 @@ async function signIn(browser: Browser, authenticator: Authenticator) {
 	return (await browser.fetch("/auth/sign-in", { method: "POST", json: await authenticator.sign(options.body) })).status;
 }
 
-/** A registered, set-up Pimling, and a browser signed in to it. */
-async function person(username: string) {
-	const registered = await register(username);
+/** A registered, set-up person, and a browser signed in as them. */
+async function person(username: string, extra: Record<string, unknown> = {}) {
+	const registered = await register(username, extra);
 	expect(registered.status).toBe(201);
-	const browser = new Browser(hostOf(username));
-	const passkey = await Authenticator.make("ES256", { rpId: `${username}.${DOMAIN}`, origin: hostOf(username) });
-	const setup = new URL(registered.body.setupUrl).hash.replace("#setup=", "");
+	const browser = new Browser();
+	const passkey = await Authenticator.make();
+	const setup = registered.body.setup;
 	expect(await addPasskey(browser, passkey, { setup })).toBe(200);
 	const account = (await browser.json("/api/account")).body as { ownerId: string };
 	return { browser, passkey, registered: registered.body, setup, ownerId: account.ownerId };
 }
 
-const directory = () => env.Directory!.getByName("directory");
-/** A Directory of its own, for tests that need an empty one. */
-const freshDirectory = () => env.Directory!.getByName(`fresh-${crypto.randomUUID()}`);
+const directory = () => env.Directory.getByName("directory");
 const OPEN: RegistrationPolicy = { mode: "open", maxAccounts: null, perAddressPerDay: 100 };
+/** A Directory of its own, with only its admin, for tests that need an otherwise empty one. */
+async function freshDirectory() {
+	const stub = env.Directory.getByName(`fresh-${crypto.randomUUID()}`);
+	const admin = await stub.register({ username: "keeper", ip: "0", claim: { window: true }, policy: OPEN });
+	if (!admin.ok) throw new Error(admin.error);
+	await stub.activate(admin.account.ownerId);
+	return stub;
+}
+
+/** The person running this Pim: they claimed it with the link from the logs before anyone else registered. */
+let operator: Awaited<ReturnType<typeof person>>;
+
+beforeAll(async () => {
+	const { code } = await directory().claimCode();
+	operator = await person("boss", { claim: code });
+	expect(operator.registered.role).toBe("admin");
+});
+
+/** The admin's API, as the admin's signed-in browser calls it. */
+const admin = (path: string, init: RequestInit & { json?: unknown } = {}) => operator.browser.json(path, init);
 
 /** Everything that holds the person's data, so a test can tell it was kept or erased. */
 async function holdings(ownerId: string) {
@@ -122,30 +140,30 @@ async function withAgentMethod<K extends "deleteEverything">(name: K, replacemen
 		prototype[name] = original;
 	}
 }
-const admin = (path: string, init: RequestInit & { json?: unknown } = {}) =>
-	new Browser(FRONT).json(path, { ...init, headers: { Authorization: "Bearer admin-token", ...init.headers } });
+
+const toolUse = (name: string, args: Record<string, unknown>) =>
+	fauxAssistantMessage(fauxToolCall(name, args as never), { stopReason: "toolUse" });
 
 describe("registration", () => {
 	it("gives a username its own Pim, set up with a one-time link, and recovery codes", async () => {
 		const { status, body } = await register("alice", { timeZone: "Europe/Lisbon" });
 		expect(status).toBe(201);
-		expect(body.url).toBe(hostOf("alice"));
-		expect(body.setupUrl).toMatch(new RegExp(`^${hostOf("alice")}/#setup=[\\w-]+$`));
+		expect(body).toMatchObject({ username: "alice", role: "member", setup: expect.stringMatching(/^o_[0-9a-z]{26}\.[\w-]+$/) });
 		expect(body.recoveryCodes).toHaveLength(10);
 
-		const browser = new Browser(hostOf("alice"));
-		expect((await browser.json("/auth/session")).body).toMatchObject({ signedIn: false, hasPasskeys: false, canClaim: false, recovery: "codes" });
-		// Nobody gets in by finding the address first: there is no claim window.
-		const passkey = await Authenticator.make("ES256", { rpId: `alice.${DOMAIN}`, origin: hostOf("alice") });
+		const browser = new Browser();
+		expect((await browser.json("/auth/session")).body).toMatchObject({ signedIn: false, claimed: true, canClaim: false });
+		// The account opens nothing without its setup link.
+		const passkey = await Authenticator.make();
 		expect(await addPasskey(browser, passkey)).toBe(401);
-		const setup = new URL(body.setupUrl).hash.replace("#setup=", "");
+		const setup = body.setup;
 		expect(await addPasskey(browser, passkey, { setup })).toBe(200);
 
 		const account = await browser.json("/api/account");
-		expect(account.body).toMatchObject({ username: "alice", status: "active", ownerId: expect.stringMatching(/^o_[0-9a-z]{26}$/) });
-		expect((await browser.json("/api/settings")).body).toMatchObject({ timeZone: "Europe/Lisbon", approvalPolicy: "explicit" });
+		expect(account.body).toMatchObject({ username: "alice", role: "member", status: "active", ownerId: expect.stringMatching(/^o_[0-9a-z]{26}$/) });
+		expect((await browser.json("/api/settings")).body).toMatchObject({ timeZone: "Europe/Lisbon", approvalPolicy: "auto" });
 		// The link works once.
-		expect(await addPasskey(new Browser(hostOf("alice")), await Authenticator.make("ES256", { rpId: `alice.${DOMAIN}`, origin: hostOf("alice") }), { setup })).toBe(401);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { setup })).toBe(401);
 	});
 
 	it("refuses taken, reserved and malformed usernames", async () => {
@@ -155,13 +173,13 @@ describe("registration", () => {
 		for (const bad of ["ab", "bad_name", "a--b", "-lead", "trail-", "x".repeat(33)]) {
 			expect((await register(bad)).status, bad).toBe(400);
 		}
-		const front = new Browser(FRONT);
+		const front = new Browser();
 		expect((await front.json("/auth/username?name=carol")).body).toEqual({ available: false, reason: "That username is taken." });
 		expect((await front.json("/auth/username?name=dave")).body).toEqual({ available: true });
 	});
 
-	it("comes only from the front door's own pages", async () => {
-		const response = await new Browser(FRONT).fetch("/auth/register", {
+	it("comes only from this Pim's own pages", async () => {
+		const response = await new Browser().fetch("/auth/register", {
 			method: "POST",
 			json: { username: "mallory" },
 			headers: { origin: "https://evil.example" },
@@ -170,7 +188,7 @@ describe("registration", () => {
 	});
 
 	it("limits registrations from one address in a day", async () => {
-		const front = new Browser(FRONT, "192.0.2.77");
+		const front = new Browser("192.0.2.77");
 		for (const name of ["dee1", "dee2", "dee3"]) {
 			expect((await front.json("/auth/register", { method: "POST", json: { username: name } })).status).toBe(201);
 		}
@@ -180,7 +198,7 @@ describe("registration", () => {
 
 	it("takes invite codes once, when registration needs them", async () => {
 		const policy = { mode: "invite" as const, maxAccounts: null, perAddressPerDay: 100 };
-		const [code] = (await admin("/admin/invites", { method: "POST", json: { count: 1 } })).body.codes as string[];
+		const [code] = (await admin("/api/admin/invites", { method: "POST", json: { count: 1 } })).body.codes as string[];
 		await runInDurableObject(directory(), async (instance: Directory) => {
 			expect(await instance.register({ username: "ivy", ip: "1", policy })).toMatchObject({ ok: false, status: 403 });
 			expect(await instance.register({ username: "ivy", ip: "1", policy, invite: code! })).toMatchObject({ ok: true });
@@ -188,7 +206,7 @@ describe("registration", () => {
 		});
 	});
 
-	it("gives the username back at once when the Pimling can't be set up", async () => {
+	it("gives the username back at once when the account can't be set up", async () => {
 		const agents = env.Pim as unknown as { idFromName: (name: string) => DurableObjectId };
 		const real = agents.idFromName.bind(agents);
 		agents.idFromName = () => {
@@ -197,21 +215,21 @@ describe("registration", () => {
 		try {
 			const failed = await register("ursula");
 			expect(failed.status).toBe(500);
-			expect(failed.body.error).toBe("Your Pimling couldn't be set up. Try again in a moment.");
+			expect(failed.body.error).toBe("Your account couldn't be set up. Try again in a moment.");
 		} finally {
 			agents.idFromName = real;
 		}
-		expect((await new Browser(FRONT).json("/auth/username?name=ursula")).body).toEqual({ available: true });
+		expect((await new Browser().json("/auth/username?name=ursula")).body).toEqual({ available: true });
 		expect((await register("ursula")).status).toBe(201);
 	});
 
-	it("gives an invite back with the username when the Pimling can't be set up", async () => {
-		const registration = env as unknown as { PIMLING_REGISTRATION: string };
+	it("gives an invite back with the username when the account can't be set up", async () => {
+		const registration = env as unknown as { PIM_REGISTRATION: string };
 		const agents = env.Pim as unknown as { idFromName: (name: string) => DurableObjectId };
 		const real = agents.idFromName.bind(agents);
-		registration.PIMLING_REGISTRATION = "invite";
+		registration.PIM_REGISTRATION = "invite";
 		try {
-			const [code] = (await admin("/admin/invites", { method: "POST", json: { count: 1 } })).body.codes as string[];
+			const [code] = (await admin("/api/admin/invites", { method: "POST", json: { count: 1 } })).body.codes as string[];
 			agents.idFromName = () => {
 				throw new Error("Durable Objects are down");
 			};
@@ -226,12 +244,12 @@ describe("registration", () => {
 			expect((await register("vero", { invite: code })).status).toBe(403);
 		} finally {
 			agents.idFromName = real;
-			registration.PIMLING_REGISTRATION = "open";
+			registration.PIM_REGISTRATION = "open";
 		}
 	});
 
 	it("keeps invites single-use, giving one back only with the registration that used it", async () => {
-		const stub = freshDirectory();
+		const stub = await freshDirectory();
 		const policy: RegistrationPolicy = { ...OPEN, mode: "invite" };
 		const [code, other] = await stub.createInvites(2, null);
 		const first = await stub.register({ username: "wade", ip: "1", policy, invite: code! });
@@ -255,8 +273,9 @@ describe("registration", () => {
 	});
 
 	it("frees a lapsed registration's place, username and invite, and erases what it made", async () => {
-		const stub = freshDirectory();
-		const policy: RegistrationPolicy = { mode: "invite", maxAccounts: 1, perAddressPerDay: 100 };
+		const stub = await freshDirectory();
+		// Room for the admin and one more.
+		const policy: RegistrationPolicy = { mode: "invite", maxAccounts: 2, perAddressPerDay: 100 };
 		const [code] = await stub.createInvites(1, null);
 		// Registered 25 hours ago, and never set up. (Real times: the Directory's alarm runs on the clock.)
 		const later = Date.now();
@@ -266,7 +285,7 @@ describe("registration", () => {
 		// Its place under maxAccounts and its invite are free again.
 		const again = await stub.register({ username: "expired", ip: "2", policy, invite: code!, now: later });
 		expect(again).toMatchObject({ ok: true });
-		expect(await stub.register({ username: "another", ip: "3", policy: { ...OPEN, maxAccounts: 1 }, now: later })).toMatchObject({
+		expect(await stub.register({ username: "another", ip: "3", policy: { ...OPEN, maxAccounts: 2 }, now: later })).toMatchObject({
 			ok: false,
 			status: 503,
 		});
@@ -291,7 +310,7 @@ describe("registration", () => {
 			}),
 		);
 		expect(lapsed.ok).toBe(true);
-		expect((await new Browser(FRONT).json("/auth/username?name=gone")).body).toEqual({ available: true });
+		expect((await new Browser().json("/auth/username?name=gone")).body).toEqual({ available: true });
 		expect((await register("gone")).status).toBe(201);
 		const now = await runInDurableObject(directory(), (instance: Directory) => instance.resolve("gone"));
 		expect(now?.ownerId).not.toBe(lapsed.ok && lapsed.account.ownerId);
@@ -299,36 +318,34 @@ describe("registration", () => {
 });
 
 describe("isolation between people", () => {
-	it("a session opens only the Pim it was made for", async () => {
+	it("a session or a passkey opens only its owner's Pim", async () => {
 		const erin = await person("erin");
 		const frank = await person("frank");
-		expect((await erin.browser.json("/api/sessions")).status).toBe(200);
-		// Erin's cookies, taken to Frank's address, open nothing there.
-		const stolen = new Browser(hostOf("frank"));
-		stolen.cookies = new Map(erin.browser.cookies);
-		expect((await stolen.json("/api/sessions")).status).toBe(401);
-		expect((await stolen.json("/auth/session")).body).toMatchObject({ signedIn: false });
-		// Nor does Erin's passkey.
-		expect(await signIn(new Browser(hostOf("frank")), erin.passkey)).toBe(401);
 		expect(erin.ownerId).not.toBe(frank.ownerId);
+		await erin.browser.json("/api/memory/log", { method: "POST", json: { text: "Erin's locker code is 4512" } });
+		expect(JSON.stringify((await frank.browser.json("/api/memory/log")).body)).not.toContain("4512");
+		// Signing in with Erin's passkey anywhere opens Erin's Pim, never Frank's.
+		const elsewhere = new Browser();
+		expect(await signIn(elsewhere, erin.passkey)).toBe(200);
+		expect((await elsewhere.json("/api/account")).body).toMatchObject({ username: "erin" });
+		expect(JSON.stringify((await elsewhere.json("/api/memory/log")).body)).toContain("4512");
 	});
 
-	it("an API token opens only its owner's Pim, and the deployment's token opens none", async () => {
+	it("an API token opens only its owner's Pim, and can't manage tokens", async () => {
 		const gina = await person("gina");
-		await person("hank");
+		const hank = await person("hank");
 		const made = await gina.browser.json("/auth/tokens", { method: "POST", json: { name: "Phone" } });
 		expect(made.status).toBe(201);
 		const bearer = (token: string) => ({ headers: { Authorization: `Bearer ${token}` } });
-		expect((await new Browser(hostOf("gina")).json("/api/sessions", bearer(made.body.token))).status).toBe(200);
-		expect((await new Browser(hostOf("hank")).json("/api/sessions", bearer(made.body.token))).status).toBe(401);
-		// PIM_API_TOKEN is set in this deployment, and must be no one's.
-		expect((await new Browser(hostOf("gina")).json("/api/sessions", bearer("env-token"))).status).toBe(401);
+		expect((await new Browser().json("/api/account", bearer(made.body.token))).body).toMatchObject({ username: "gina" });
+		// Gina's secret under Hank's owner ID opens nothing.
+		expect((await new Browser().json("/api/sessions", bearer(made.body.token.replace(gina.ownerId, hank.ownerId)))).status).toBe(401);
 		// Tokens can't be made or listed with a token.
-		expect((await new Browser(hostOf("gina")).json("/auth/tokens", bearer(made.body.token))).status).toBe(401);
+		expect((await new Browser().json("/auth/tokens", bearer(made.body.token))).status).toBe(401);
 		expect((await gina.browser.json("/auth/tokens")).body.tokens).toEqual([expect.objectContaining({ name: "Phone", id: made.body.id })]);
 		expect(JSON.stringify((await gina.browser.json("/auth/tokens")).body)).not.toContain(made.body.token);
 		expect((await gina.browser.json(`/auth/tokens/${made.body.id}`, { method: "DELETE" })).status).toBe(200);
-		expect((await new Browser(hostOf("gina")).json("/api/sessions", bearer(made.body.token))).status).toBe(401);
+		expect((await new Browser().json("/api/sessions", bearer(made.body.token))).status).toBe(401);
 	});
 
 	it("conversations, memories and ChatGPT sign-ins stay with their owner", async () => {
@@ -349,7 +366,7 @@ describe("isolation between people", () => {
 		expect((await jo.browser.json("/api/sessions/1/messages")).body.messages).toEqual([]);
 		expect((await jo.browser.json("/api/chatgpt")).body).toEqual({ connected: false, email: null });
 		expect((await ian.browser.json("/api/chatgpt")).body).toEqual({ connected: true, email: "ian@example.com" });
-		// Each Pimling is its own agent host to OpenAI.
+		// Each person's Pim is its own agent host to OpenAI.
 		const hostId = async (browser: Browser) =>
 			new URL((await browser.json("/api/chatgpt/login", { method: "POST" })).body.url).searchParams.get("ext_agent_host_id");
 		const [ianHost, joHost] = [await hostId(ian.browser), await hostId(jo.browser)];
@@ -396,25 +413,33 @@ describe("isolation between people", () => {
 
 		await gus.browser.json("/api/settings", { method: "PUT", json: { timeZone: "Asia/Tokyo", approvalPolicy: "auto" } });
 		expect((await gus.browser.json("/api/settings")).body).toMatchObject({ timeZone: "Asia/Tokyo", approvalPolicy: "auto" });
-		expect((await hal.browser.json("/api/settings")).body).toMatchObject({ timeZone: "UTC", approvalPolicy: "explicit" });
+		expect((await hal.browser.json("/api/settings")).body).toMatchObject({ timeZone: "America/New_York", approvalPolicy: "auto" });
 	});
 
-	it("the hostname alone opens nothing", async () => {
-		await person("kim");
-		expect((await new Browser(hostOf("kim")).json("/api/sessions")).status).toBe(401);
-		expect((await new Browser(hostOf("nobody-here")).json("/api/sessions")).status).toBe(404);
-		expect((await new Browser(`https://deeper.kim.${DOMAIN}`).json("/api/sessions")).status).toBe(404);
-		expect((await new Browser("https://kim.elsewhere.test").json("/api/sessions")).status).toBe(404);
-		// Self-hosting's ways in are closed: no setup links in the logs.
-		expect((await new Browser(hostOf("kim")).json("/auth/setup-link", { method: "POST" })).status).toBe(404);
+	it("an owner ID alone opens nothing", async () => {
+		const kim = await person("kim");
+		expect((await new Browser().json("/api/sessions")).status).toBe(401);
+		// Apps' callbacks name the owner, and are checked another way: by the OAuth state, or the watch's signature.
+		expect((await new Browser().fetch(`/mcp/events/${kim.ownerId}/no-such-watch`, { method: "POST", json: {} })).status).toBe(410);
+		expect((await new Browser().fetch("/mcp/events/o_nobody/no-such-watch", { method: "POST", json: {} })).status).toBe(404);
+		// The logs' setup link is the admin's, never a member's.
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			expect((await new Browser().json("/auth/setup-link", { method: "POST" })).status).toBe(200);
+			const line = String(log.mock.calls.findLast((call) => String(call[0]).includes("#setup="))?.[0]);
+			expect(line).toContain(`#setup=${operator.ownerId}.`);
+			expect(line).not.toContain(kim.ownerId);
+		} finally {
+			log.mockRestore();
+		}
 	});
 
 	it("slows down guessing from one address", async () => {
 		await person("lars");
-		const guesser = new Browser(hostOf("lars"));
+		const guesser = new Browser();
 		const statuses: number[] = [];
 		for (let attempt = 0; attempt < 31; attempt++) {
-			statuses.push((await guesser.fetch("/auth/passkeys/options", { method: "POST", json: { recovery: `guess-${attempt}` } })).status);
+			statuses.push((await guesser.fetch("/auth/passkeys/options", { method: "POST", json: { username: "lars", recovery: `guess-${attempt}` } })).status);
 		}
 		// AUTH_LIMITER allows 30 a minute.
 		expect(statuses.slice(0, 30).every((status) => status === 401)).toBe(true);
@@ -422,8 +447,6 @@ describe("isolation between people", () => {
 	});
 });
 
-/** A software passkey for `username`'s host, as a phone would make one. */
-const phoneKey = (username: string) => Authenticator.make("ES256", { rpId: `${username}.${DOMAIN}`, origin: hostOf(username) });
 
 /** A device link made by a signed-in browser, and its code. */
 async function deviceLink(browser: Browser) {
@@ -438,18 +461,18 @@ describe("adding another device", () => {
 		const before = (await ada.browser.json("/auth/passkeys")).body.passkeys;
 		const codesBefore = (await ada.browser.json("/auth/recovery-codes")).body.left;
 		const link = await deviceLink(ada.browser);
-		// On the owner's own host, with the code in the fragment, for ten minutes.
-		expect(link.url).toMatch(new RegExp(`^${hostOf("dl-ada")}/#device=[\\w-]{40,}$`));
+		// Naming its owner, with the code in the fragment, for ten minutes.
+		expect(link.url).toMatch(new RegExp(`^${ORIGIN}/#device=${ada.ownerId}\\.[\\w-]{40,}$`));
 		expect(Date.parse(link.expiresAt) - Date.now()).toBeGreaterThan(9 * 60_000);
 		expect(Date.parse(link.expiresAt) - Date.now()).toBeLessThanOrEqual(10 * 60_000);
 
-		const phone = new Browser(hostOf("dl-ada"));
-		const phonePasskey = await phoneKey("dl-ada");
+		const phone = new Browser();
+		const phonePasskey = await Authenticator.make();
 		expect((await phone.json("/api/sessions")).status).toBe(401);
 		expect(await addPasskey(phone, phonePasskey, { device: link.code })).toBe(200);
 		expect((await phone.json("/api/sessions")).status).toBe(200);
 		// Later, the phone signs in with its own passkey.
-		expect(await signIn(new Browser(hostOf("dl-ada")), phonePasskey)).toBe(200);
+		expect(await signIn(new Browser(), phonePasskey)).toBe(200);
 		// A second passkey: the first one, its session and the recovery codes are untouched.
 		const after = (await ada.browser.json("/auth/passkeys")).body.passkeys;
 		expect(after).toHaveLength(before.length + 1);
@@ -457,14 +480,14 @@ describe("adding another device", () => {
 		expect((await ada.browser.json("/api/sessions")).status).toBe(200);
 		expect((await ada.browser.json("/auth/recovery-codes")).body.left).toBe(codesBefore);
 		// Once only, even from another tab.
-		expect(await addPasskey(new Browser(hostOf("dl-ada")), await phoneKey("dl-ada"), { device: link.code })).toBe(401);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { device: link.code })).toBe(401);
 	});
 
 	it("lets only one of two tabs that opened the same link finish", async () => {
 		const bo = await person("dl-race");
 		const { code } = await deviceLink(bo.browser);
-		const [one, two] = [new Browser(hostOf("dl-race")), new Browser(hostOf("dl-race"))];
-		const [k1, k2] = [await phoneKey("dl-race"), await phoneKey("dl-race")];
+		const [one, two] = [new Browser(), new Browser()];
+		const [k1, k2] = [await Authenticator.make(), await Authenticator.make()];
 		const o1 = await one.json("/auth/passkeys/options", { method: "POST", json: { device: code } });
 		const o2 = await two.json("/auth/passkeys/options", { method: "POST", json: { device: code } });
 		expect([o1.status, o2.status]).toEqual([200, 200]);
@@ -479,24 +502,26 @@ describe("adding another device", () => {
 		const cy = await person("dl-issue");
 		const token = (await cy.browser.json("/auth/tokens", { method: "POST", json: { name: "CLI" } })).body.token as string;
 		// Not to an API token, not to nobody, and not from another site.
-		expect((await new Browser(hostOf("dl-issue")).json("/auth/device-link", { method: "POST", headers: { Authorization: `Bearer ${token}` } })).status).toBe(401);
-		expect((await new Browser(hostOf("dl-issue")).json("/auth/device-link", { method: "POST" })).status).toBe(401);
+		expect((await new Browser().json("/auth/device-link", { method: "POST", headers: { Authorization: `Bearer ${token}` } })).status).toBe(401);
+		expect((await new Browser().json("/auth/device-link", { method: "POST" })).status).toBe(401);
 		expect((await cy.browser.json("/auth/device-link", { method: "POST", headers: { origin: "https://evil.example" } })).status).toBe(403);
 		// It grants a passkey and nothing else: no API token, no admin, no recovery codes.
 		const { code } = await deviceLink(cy.browser);
 		const bearer = (value: string) => ({ headers: { Authorization: `Bearer ${value}` } });
-		expect((await new Browser(hostOf("dl-issue")).json("/api/sessions", bearer(code))).status).toBe(401);
-		expect((await new Browser(FRONT).json("/admin/stats", bearer(code))).status).toBe(401);
-		expect(await addPasskey(new Browser(hostOf("dl-issue")), await phoneKey("dl-issue"), { recovery: code })).toBe(401);
+		expect((await new Browser().json("/api/sessions", bearer(code))).status).toBe(401);
+		expect((await new Browser().json("/api/admin/stats", bearer(code))).status).toBe(401);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { username: "dl-issue", recovery: code })).toBe(401);
 	});
 
-	it("works only at the host of the person who made it", async () => {
+	it("works only for the person who made it", async () => {
 		const dee = await person("dl-dee");
-		await person("dl-eve");
+		const eve = await person("dl-eve");
 		const { code } = await deviceLink(dee.browser);
-		expect(await addPasskey(new Browser(hostOf("dl-eve")), await phoneKey("dl-eve"), { device: code })).toBe(401);
-		// Still good for its own host afterwards.
-		expect(await addPasskey(new Browser(hostOf("dl-dee")), await phoneKey("dl-dee"), { device: code })).toBe(200);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { device: code.replace(dee.ownerId, eve.ownerId) })).toBe(401);
+		// Still good for Dee afterwards.
+		const phone = new Browser();
+		expect(await addPasskey(phone, await Authenticator.make(), { device: code })).toBe(200);
+		expect((await phone.json("/api/account")).body).toMatchObject({ username: "dl-dee" });
 	});
 
 	it("stops working when it expires, when a newer one is made, or when its browser signs out", async () => {
@@ -506,24 +531,24 @@ describe("adding another device", () => {
 		await runInDurableObject(env.Auth.getByName(fin.ownerId), (_instance: Auth, state) => {
 			state.storage.sql.exec("UPDATE auth_device_links SET expires_at = ?", Date.now() - 1);
 		});
-		expect(await addPasskey(new Browser(hostOf("dl-fin")), await phoneKey("dl-fin"), { device: old.code })).toBe(401);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { device: old.code })).toBe(401);
 		// Replaced by a newer one.
 		const first = await deviceLink(fin.browser);
 		const second = await deviceLink(fin.browser);
-		expect(await addPasskey(new Browser(hostOf("dl-fin")), await phoneKey("dl-fin"), { device: first.code })).toBe(401);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { device: first.code })).toBe(401);
 		// Its browser signs out.
 		expect((await fin.browser.json("/auth/sign-out", { method: "POST" })).status).toBe(200);
-		expect(await addPasskey(new Browser(hostOf("dl-fin")), await phoneKey("dl-fin"), { device: second.code })).toBe(401);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { device: second.code })).toBe(401);
 	});
 
 	it("stops working when the passkey that made it is removed, even after the options were given", async () => {
 		const gus = await person("dl-gus");
-		const extra = new Browser(hostOf("dl-gus"));
+		const extra = new Browser();
 		const { code: second } = await deviceLink(gus.browser);
-		expect(await addPasskey(extra, await phoneKey("dl-gus"), { device: second })).toBe(200);
+		expect(await addPasskey(extra, await Authenticator.make(), { device: second })).toBe(200);
 		// The original browser makes a link, and someone starts using it.
 		const { code } = await deviceLink(gus.browser);
-		const phone = new Browser(hostOf("dl-gus"));
+		const phone = new Browser();
 		const options = await phone.json("/auth/passkeys/options", { method: "POST", json: { device: code } });
 		expect(options.status).toBe(200);
 		// Meanwhile the owner removes the original passkey from the other device.
@@ -531,128 +556,104 @@ describe("adding another device", () => {
 		const own = (await extra.json("/auth/session")).body.passkey as string;
 		const original = passkeys.find((p) => p.id !== own)!;
 		expect((await extra.json(`/auth/passkeys/${encodeURIComponent(original.id)}`, { method: "DELETE" })).status).toBe(200);
-		const finish = await phone.fetch("/auth/passkeys", { method: "POST", json: await (await phoneKey("dl-gus")).register(options.body) });
+		const finish = await phone.fetch("/auth/passkeys", { method: "POST", json: await (await Authenticator.make()).register(options.body) });
 		expect(finish.status).toBe(401);
 	});
 
 	it("stops working when its browser cancels it, and only that browser's link", async () => {
 		const ivo = await person("dl-cancel");
 		const { code } = await deviceLink(ivo.browser);
-		expect((await new Browser(hostOf("dl-cancel")).json("/auth/device-link", { method: "DELETE" })).status).toBe(401);
+		expect((await new Browser().json("/auth/device-link", { method: "DELETE" })).status).toBe(401);
 		expect((await ivo.browser.json("/auth/device-link", { method: "DELETE" })).body).toEqual({ ok: true });
-		expect(await addPasskey(new Browser(hostOf("dl-cancel")), await phoneKey("dl-cancel"), { device: code })).toBe(401);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { device: code })).toBe(401);
 	});
 
 	it("checks expiry again when the passkey is finished, not only when it's started", async () => {
 		const jo = await person("dl-late");
 		const { code } = await deviceLink(jo.browser);
-		const phone = new Browser(hostOf("dl-late"));
+		const phone = new Browser();
 		const options = await phone.json("/auth/passkeys/options", { method: "POST", json: { device: code } });
 		expect(options.status).toBe(200);
 		// The link runs out while the phone is still asking for a fingerprint.
 		await runInDurableObject(env.Auth.getByName(jo.ownerId), (_instance: Auth, state) => {
 			state.storage.sql.exec("UPDATE auth_device_links SET expires_at = ?", Date.now() - 1);
 		});
-		const finish = await phone.fetch("/auth/passkeys", { method: "POST", json: await (await phoneKey("dl-late")).register(options.body) });
+		const finish = await phone.fetch("/auth/passkeys", { method: "POST", json: await (await Authenticator.make()).register(options.body) });
 		expect(finish.status).toBe(401);
 	});
 
 	it("keeps setup codes and device links apart", async () => {
 		const kai = await person("dl-apart");
-		const site = { rpId: `dl-apart.${DOMAIN}`, origin: hostOf("dl-apart") };
-		const { body } = await admin("/admin/accounts/dl-apart/setup-link", { method: "POST" });
-		const setup = new URL(body.setupUrl).hash.replace("#setup=", "");
+		const { body } = await admin("/api/admin/accounts/dl-apart/setup-link", { method: "POST" });
+		const setup = body.setupUrl.split("#setup=")[1]!;
 		const { code } = await deviceLink(kai.browser);
 		// Neither works as the other.
-		expect(await addPasskey(new Browser(hostOf("dl-apart")), await Authenticator.make("ES256", site), { setup: code })).toBe(401);
-		expect(await addPasskey(new Browser(hostOf("dl-apart")), await Authenticator.make("ES256", site), { device: setup })).toBe(401);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { setup: code })).toBe(401);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { device: setup })).toBe(401);
 		// Using one leaves the other working.
-		expect(await addPasskey(new Browser(hostOf("dl-apart")), await Authenticator.make("ES256", site), { setup })).toBe(200);
-		expect(await addPasskey(new Browser(hostOf("dl-apart")), await Authenticator.make("ES256", site), { device: code })).toBe(200);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { setup })).toBe(200);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { device: code })).toBe(200);
 	});
 
-	it("can't add a device to a suspended or deleted Pimling", async () => {
+	it("can't add a device to a suspended or deleted account", async () => {
 		const hal = await person("dl-hal");
 		const suspended = await deviceLink(hal.browser);
-		await admin("/admin/accounts/dl-hal/suspend", { method: "POST" });
-		expect(await addPasskey(new Browser(hostOf("dl-hal")), await phoneKey("dl-hal"), { device: suspended.code })).toBe(403);
-		await admin("/admin/accounts/dl-hal/unsuspend", { method: "POST" });
+		await admin("/api/admin/accounts/dl-hal/suspend", { method: "POST" });
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { device: suspended.code })).toBe(401);
+		await admin("/api/admin/accounts/dl-hal/unsuspend", { method: "POST" });
 		const { code } = await deviceLink(hal.browser);
 		expect((await hal.browser.json("/api/account", { method: "DELETE", json: { confirm: "dl-hal" } })).body).toEqual({ deleted: true });
-		expect(await addPasskey(new Browser(hostOf("dl-hal")), await phoneKey("dl-hal"), { device: code })).toBe(410);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { device: code })).toBe(401);
 		expect(await env.Auth.getByName(hal.ownerId).passkeys()).toEqual([]);
-	});
-});
-
-describe("finding your Pimling", () => {
-	it("gives the address of an existing Pimling, and nothing for others", async () => {
-		await person("find-me");
-		const front = new Browser(FRONT);
-		expect((await front.json("/auth/pimling?name=find-me")).body).toEqual({ url: hostOf("find-me") });
-		// Typed loosely.
-		expect((await front.json("/auth/pimling?name=%20Find-Me%20")).body).toEqual({ url: hostOf("find-me") });
-		for (const name of ["nobody-here", "evil.example.com", "a/b", "find-me.evil.com", "x", "admin", "x@evil.com#", "find-me@evil.com", "find-me:443", "//evil.com", "find-me\\evil"]) {
-			expect((await front.json(`/auth/pimling?name=${encodeURIComponent(name)}`)).status, name).toBe(404);
-		}
-		// A deleted one is gone.
-		await register("find-gone");
-		await runInDurableObject(directory(), async (instance: Directory) => {
-			const account = instance.resolve("find-gone")!;
-			await instance.requestDeletion(account.ownerId, "test");
-		});
-		expect((await front.json("/auth/pimling?name=find-gone")).status).toBe(404);
 	});
 });
 
 describe("recovery", () => {
 	it("a recovery code makes one new passkey, once", async () => {
 		const lee = await person("lee");
-		const site = { rpId: `lee.${DOMAIN}`, origin: hostOf("lee") };
-		const lost = new Browser(hostOf("lee"));
-		const replacement = await Authenticator.make("ES256", site);
+		const lost = new Browser();
+		const replacement = await Authenticator.make();
 		const code = lee.registered.recoveryCodes[0]!;
-		expect(await addPasskey(lost, replacement, { recovery: "wrong-code-12345" })).toBe(401);
-		// Typed loosely: upper case, no dashes.
-		expect(await addPasskey(lost, replacement, { recovery: code.replaceAll("-", "").toUpperCase() })).toBe(200);
+		expect(await addPasskey(lost, replacement, { username: "lee", recovery: "wrong-code-12345" })).toBe(401);
+		// Typed loosely: upper case, no dashes, and the username with an @.
+		expect(await addPasskey(lost, replacement, { username: "@Lee", recovery: code.replaceAll("-", "").toUpperCase() })).toBe(200);
 		expect((await lost.json("/api/sessions")).status).toBe(200);
-		expect(await addPasskey(new Browser(hostOf("lee")), await Authenticator.make("ES256", site), { recovery: code })).toBe(401);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { username: "lee", recovery: code })).toBe(401);
 		expect((await lost.json("/auth/recovery-codes")).body).toEqual({ left: 9 });
 
 		// A new set replaces the old one.
 		const fresh = (await lost.json("/auth/recovery-codes", { method: "POST" })).body.codes as string[];
 		expect(fresh).toHaveLength(10);
-		expect(await addPasskey(new Browser(hostOf("lee")), await Authenticator.make("ES256", site), { recovery: lee.registered.recoveryCodes[1]! })).toBe(401);
-		expect((await new Browser(hostOf("lee")).json("/auth/recovery-codes", { method: "POST" })).status).toBe(401);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { username: "lee", recovery: lee.registered.recoveryCodes[1]! })).toBe(401);
+		expect((await new Browser().json("/auth/recovery-codes", { method: "POST" })).status).toBe(401);
 	});
 
 	it("voids the registration's setup link once the first passkey is made another way", async () => {
 		const registered = await register("rv-first");
 		expect(registered.status).toBe(201);
-		const setup = new URL(registered.body.setupUrl).hash.replace("#setup=", "");
-		const site = { rpId: `rv-first.${DOMAIN}`, origin: hostOf("rv-first") };
+		const setup = registered.body.setup;
 		// Activated with a recovery code instead of the link.
-		expect(await addPasskey(new Browser(hostOf("rv-first")), await Authenticator.make("ES256", site), { recovery: registered.body.recoveryCodes[0]! })).toBe(200);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { username: "rv-first", recovery: registered.body.recoveryCodes[0]! })).toBe(200);
 		// The link from registration, still within its day, makes nothing now.
-		expect(await addPasskey(new Browser(hostOf("rv-first")), await Authenticator.make("ES256", site), { setup })).toBe(401);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { setup })).toBe(401);
 	});
 
-	it("leaves an operator's setup link working when another device is linked meanwhile", async () => {
+	it("leaves an admin's setup link working when another device is linked meanwhile", async () => {
 		const ola = await person("rv-operator");
-		const site = { rpId: `rv-operator.${DOMAIN}`, origin: hostOf("rv-operator") };
-		const { body } = await admin("/admin/accounts/rv-operator/setup-link", { method: "POST" });
-		const setup = new URL(body.setupUrl).hash.replace("#setup=", "");
-		// Another device is added with a device link: the operator's link is a separate record.
+		const { body } = await admin("/api/admin/accounts/rv-operator/setup-link", { method: "POST" });
+		const setup = body.setupUrl.split("#setup=")[1]!;
+		// Another device is added with a device link: the admin's link is a separate record.
 		const { code } = await deviceLink(ola.browser);
-		expect(await addPasskey(new Browser(hostOf("rv-operator")), await Authenticator.make("ES256", site), { device: code })).toBe(200);
-		expect(await addPasskey(new Browser(hostOf("rv-operator")), await Authenticator.make("ES256", site), { setup })).toBe(200);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { device: code })).toBe(200);
+		expect(await addPasskey(new Browser(), await Authenticator.make(), { setup })).toBe(200);
 	});
 
-	it("the operator can issue a setup link, for someone who lost everything", async () => {
+	it("the admin can issue a setup link, for someone who lost everything", async () => {
 		await person("max");
-		const { body } = await admin("/admin/accounts/max/setup-link", { method: "POST" });
-		const setup = new URL(body.setupUrl).hash.replace("#setup=", "");
-		const browser = new Browser(hostOf("max"));
-		expect(await addPasskey(browser, await Authenticator.make("ES256", { rpId: `max.${DOMAIN}`, origin: hostOf("max") }), { setup })).toBe(200);
+		const { body } = await admin("/api/admin/accounts/max/setup-link", { method: "POST" });
+		const setup = body.setupUrl.split("#setup=")[1]!;
+		const browser = new Browser();
+		expect(await addPasskey(browser, await Authenticator.make(), { setup })).toBe(200);
 		expect((await browser.json("/api/sessions")).status).toBe(200);
 	});
 });
@@ -663,7 +664,7 @@ describe("the account", () => {
 		await nia.browser.json("/api/memory/log", { method: "POST", json: { text: "Nia plays the cello" } });
 		const token = (await nia.browser.json("/auth/tokens", { method: "POST", json: { name: "CLI" } })).body.token as string;
 		const response = await nia.browser.fetch("/api/account/export");
-		expect(response.headers.get("content-disposition")).toMatch(/^attachment; filename="pimling-nia-/);
+		expect(response.headers.get("content-disposition")).toMatch(/^attachment; filename="pim-nia-/);
 		const text = await response.text();
 		const data = JSON.parse(text);
 		expect(data).toMatchObject({ account: { username: "nia" }, pim: { format: "pim-export" }, tokens: [{ name: "CLI" }] });
@@ -676,15 +677,19 @@ describe("the account", () => {
 		const olga = await person("olga");
 		await olga.browser.json("/api/memory/log", { method: "POST", json: { text: "Olga's secret recipe" } });
 		const token = (await olga.browser.json("/auth/tokens", { method: "POST", json: { name: "CLI" } })).body.token as string;
-		const withToken = new Browser(hostOf("olga"));
+		const withToken = new Browser();
 		const tokenDelete = await withToken.json("/api/account", { method: "DELETE", json: { confirm: "olga" }, headers: { Authorization: `Bearer ${token}` } });
 		expect(tokenDelete.status).toBe(403);
 		expect((await olga.browser.json("/api/account", { method: "DELETE", json: { confirm: "olgaa" } })).status).toBe(400);
 
+		const otherDevice = new Browser();
+		otherDevice.cookies = new Map(olga.browser.cookies);
 		expect((await olga.browser.json("/api/account", { method: "DELETE", json: { confirm: "olga" } })).body).toEqual({ deleted: true });
-		expect((await olga.browser.json("/api/sessions")).status).toBe(410);
-		expect((await new Browser(hostOf("olga")).json("/api/sessions", { headers: { Authorization: `Bearer ${token}` } })).status).toBe(410);
-		// The username is never someone else's: apps and sign-ins were sent to its address.
+		// This browser is signed out; one still holding the session finds the account gone.
+		expect((await olga.browser.json("/api/sessions")).status).toBe(401);
+		expect((await otherDevice.json("/api/sessions")).status).toBe(410);
+		expect((await new Browser().json("/api/sessions", { headers: { Authorization: `Bearer ${token}` } })).status).toBe(410);
+		// The username is never someone else's: others knew Olga by it.
 		expect((await register("olga")).status).toBe(409);
 		// Its agent and sign-in hold nothing.
 		const memories = await runInDurableObject(env.Pim.getByName(olga.ownerId), (instance: Pim) => instance.memory.store.count());
@@ -709,12 +714,15 @@ describe("the account", () => {
 				throw new Error("Network connection lost");
 			},
 			async () => {
+				const before = new Map(rita.browser.cookies);
 				const response = await rita.browser.json("/api/account", { method: "DELETE", json: { confirm: "rita" } });
+				// As another device still holding the session would.
+				rita.browser.cookies = before;
 				expect(response.status).toBe(202);
 				expect(response.body).toMatchObject({ deleted: false, status: "deleting" });
 			},
 		);
-		// Closed at once, though: the hostname answers nothing, and the username stays taken.
+		// Closed at once, though: it opens nothing, and the username stays taken.
 		expect((await rita.browser.json("/api/sessions")).status).toBe(410);
 		expect((await register("rita")).status).toBe(409);
 		const queued = await directory().cleanup(rita.ownerId);
@@ -777,7 +785,7 @@ describe("the account", () => {
 			return valid;
 		};
 		try {
-			const late = new Browser(hostOf("reviewrace")).json("/api/memory/log", {
+			const late = new Browser().json("/api/memory/log", {
 				method: "POST",
 				json: { text: "Written AFTER deletion" },
 				headers: { Authorization: `Bearer ${token}` },
@@ -823,10 +831,10 @@ describe("the account", () => {
 			},
 		);
 		expect((await holdings(tia.ownerId)).memories).toBe(1);
-		// The operator can retry it at once.
-		expect((await admin("/admin/accounts/tia", { method: "DELETE" })).body).toEqual({ deleted: true });
+		// The admin can retry it at once.
+		expect((await admin("/api/admin/accounts/tia", { method: "DELETE" })).body).toEqual({ deleted: true });
 		expect((await holdings(tia.ownerId)).remaining).toEqual([]);
-		expect((await admin("/admin/accounts/tia")).body).toMatchObject({ account: { status: "deleted" }, cleanup: null });
+		expect((await admin("/api/admin/accounts/tia")).body).toMatchObject({ account: { status: "deleted" }, cleanup: null });
 	});
 });
 
@@ -839,43 +847,38 @@ async function makeArtifact(browser: Browser, content: string) {
 }
 
 describe("artifacts", () => {
-	it("are shown only to their owner, at their owner's host", async () => {
+	it("are shown only to their owner", async () => {
 		const ada = await person("art-ada");
 		const bo = await person("art-bo");
 		const id = await makeArtifact(ada.browser, "<p>Ada's plans</p>");
 		const frame = await ada.browser.fetch(`/api/artifacts/${id}/versions/1/frame`);
 		expect(frame.status).toBe(200);
 		expect(frame.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
-		expect(frame.headers.get("content-security-policy")).toContain(`frame-ancestors ${hostOf("art-ada")}`);
+		expect(frame.headers.get("content-security-policy")).toContain(`frame-ancestors ${ORIGIN}`);
 		expect(await frame.text()).toContain("Ada's plans");
 		// Bo's Pim has no such artifact, signed in or not, whatever path is asked.
 		for (const path of [`/api/artifacts/${id}`, `/api/artifacts/${id}/versions/1`, `/api/artifacts/${id}/versions/1/frame`, `/api/artifacts/${id}/versions/1/download`]) {
 			expect((await bo.browser.fetch(path)).status).toBe(404);
 		}
 		expect((await bo.browser.json("/api/artifacts")).body.artifacts).toEqual([]);
-		// Ada's cookies at Bo's host, and Ada's artifact anonymously at her own, open nothing.
-		const stolen = new Browser(hostOf("art-bo"));
-		stolen.cookies = new Map(ada.browser.cookies);
-		expect((await stolen.fetch(`/api/artifacts/${id}/versions/1/frame`)).status).toBe(401);
-		expect((await new Browser(hostOf("art-ada")).fetch(`/api/artifacts/${id}/versions/1/frame`)).status).toBe(401);
-		// The front door has no artifacts.
-		expect((await new Browser(FRONT).fetch(`/api/artifacts/${id}/versions/1/frame`)).status).not.toBe(200);
+		// Nor anyone not signed in.
+		expect((await new Browser().fetch(`/api/artifacts/${id}/versions/1/frame`)).status).toBe(401);
 	});
 
-	it("stop showing when the browser signs out, its passkey is removed, the Pimling is suspended, or it is deleted", async () => {
+	it("stop showing when the browser signs out, its passkey is removed, the account is suspended, or it is deleted", async () => {
 		const cy = await person("art-cy");
 		const id = await makeArtifact(cy.browser, "<p>Cy's page</p>");
 		const frame = `/api/artifacts/${id}/versions/1/frame`;
 		// Signed out: the next load is refused (nothing was cached to show instead).
-		const other = new Browser(hostOf("art-cy"));
+		const other = new Browser();
 		expect(await signIn(other, cy.passkey)).toBe(200);
 		expect((await other.fetch(frame)).status).toBe(200);
 		expect((await other.json("/auth/sign-out", { method: "POST" })).status).toBe(200);
 		expect((await other.fetch(frame)).status).toBe(401);
 		// Its passkey removed from another browser: the next load is refused.
-		const phone = new Browser(hostOf("art-cy"));
-		const phoneKey = await Authenticator.make("ES256", { rpId: `art-cy.${DOMAIN}`, origin: hostOf("art-cy") });
-		expect(await addPasskey(phone, phoneKey, { recovery: cy.registered.recoveryCodes[0]! })).toBe(200);
+		const phone = new Browser();
+		const phoneKey = await Authenticator.make();
+		expect(await addPasskey(phone, phoneKey, { username: "art-cy", recovery: cy.registered.recoveryCodes[0]! })).toBe(200);
 		expect((await phone.fetch(frame)).status).toBe(200);
 		const { passkeys } = (await cy.browser.json("/auth/passkeys")).body as { passkeys: { id: string }[] };
 		const mine = (await phone.json("/auth/session")).body.passkey as string;
@@ -884,9 +887,9 @@ describe("artifacts", () => {
 		expect((await phone.fetch(frame)).status).toBe(401);
 		expect((await cy.browser.fetch(frame)).status).toBe(200);
 		// Suspended.
-		await admin("/admin/accounts/art-cy/suspend", { method: "POST", json: { reason: "test" } });
+		await admin("/api/admin/accounts/art-cy/suspend", { method: "POST", json: { reason: "test" } });
 		expect((await cy.browser.fetch(frame)).status).toBe(403);
-		await admin("/admin/accounts/art-cy/unsuspend", { method: "POST" });
+		await admin("/api/admin/accounts/art-cy/unsuspend", { method: "POST" });
 		expect((await cy.browser.fetch(frame)).status).toBe(200);
 		// In the export, every version.
 		const exported = JSON.parse(await (await cy.browser.fetch("/api/account/export")).text());
@@ -897,7 +900,10 @@ describe("artifacts", () => {
 		expect((await holdings(cy.ownerId)).remaining).toContain("deleted artifact ids");
 		expect(JSON.stringify(JSON.parse(await (await cy.browser.fetch("/api/account/export")).text()).pim.artifacts)).not.toContain(gone);
 		// Deleted: gone, and the agent holds nothing.
+		const before = new Map(cy.browser.cookies);
 		expect((await cy.browser.json("/api/account", { method: "DELETE", json: { confirm: "art-cy" } })).body).toEqual({ deleted: true });
+		// As another device still holding the session would.
+		cy.browser.cookies = before;
 		for (const path of [frame, `/api/artifacts/${id}/versions/1/download`, `/api/artifacts/${id}`]) {
 			expect((await cy.browser.fetch(path)).status).toBe(410);
 		}
@@ -905,18 +911,27 @@ describe("artifacts", () => {
 	});
 });
 
-describe("the operator", () => {
-	it("needs the admin token", async () => {
-		expect((await new Browser(FRONT).json("/admin/stats")).status).toBe(401);
-		expect((await admin("/admin/stats", { headers: { Authorization: "Bearer wrong" } })).status).toBe(401);
-		const stats = await admin("/admin/stats");
+describe("the admin", () => {
+	it("is the one who claimed the Pim, signed in with a passkey", async () => {
+		const ron = await person("ron");
+		expect((await new Browser().json("/api/admin/stats")).status).toBe(401);
+		expect((await ron.browser.json("/api/admin/stats")).status).toBe(403);
+		expect((await ron.browser.json("/api/admin/accounts/ron/suspend", { method: "POST", json: {} })).status).toBe(403);
+		const token = (await operator.browser.json("/auth/tokens", { method: "POST", json: { name: "CLI" } })).body.token as string;
+		expect((await new Browser().json("/api/admin/stats", { headers: { Authorization: `Bearer ${token}` } })).status).toBe(403);
+		const stats = await admin("/api/admin/stats");
 		expect(stats.status).toBe(200);
-		expect(stats.body.accounts.active).toBeGreaterThan(0);
+		expect(stats.body.accounts.active).toBeGreaterThan(1);
+		const listed = (await admin("/api/admin/accounts?limit=500")).body.accounts as { username: string; role: string }[];
+		expect(listed).toEqual(expect.arrayContaining([expect.objectContaining({ username: "boss", role: "admin" }), expect.objectContaining({ username: "ron", role: "member" })]));
+		// The admin can't suspend or delete themself from here.
+		expect((await admin("/api/admin/accounts/boss/suspend", { method: "POST", json: {} })).status).toBe(409);
+		expect((await admin("/api/admin/accounts/boss", { method: "DELETE" })).status).toBe(409);
 	});
 
-	it("suspends a Pimling at once, and restores it", async () => {
+	it("suspends an account at once, and restores it", async () => {
 		const pat = await person("pat");
-		expect((await admin("/admin/accounts/pat/suspend", { method: "POST", json: { reason: "spam" } })).body.account).toMatchObject({
+		expect((await admin("/api/admin/accounts/pat/suspend", { method: "POST", json: { reason: "spam" } })).body.account).toMatchObject({
 			status: "suspended",
 			statusReason: "spam",
 		});
@@ -924,20 +939,20 @@ describe("the operator", () => {
 		// The agent refuses too, whatever a Worker has cached.
 		const agent = await runInDurableObject(env.Pim.getByName(pat.ownerId), (instance: Pim) => instance.status());
 		expect(agent).toBe("suspended");
-		await admin("/admin/accounts/pat/unsuspend", { method: "POST" });
+		await admin("/api/admin/accounts/pat/unsuspend", { method: "POST" });
 		expect((await pat.browser.json("/api/sessions")).status).toBe(200);
 	});
 
 	it("sets one person's limits over everyone's", async () => {
 		const quinn = await person("quinn");
-		expect((await quinn.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: 300, sessions: 500 });
-		await admin("/admin/accounts/quinn/limits", { method: "PUT", json: { limits: { dailyRuns: 0 } } });
-		expect((await quinn.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: 0, sessions: 500 });
+		expect((await quinn.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: null, sessions: null });
+		await admin("/api/admin/accounts/quinn/limits", { method: "PUT", json: { limits: { dailyRuns: 0 } } });
+		expect((await quinn.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: 0, sessions: null });
 		const refused = await quinn.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Hello" } });
 		expect(refused.status).toBe(429);
-		expect((await admin("/admin/accounts/quinn/limits", { method: "PUT", json: { limits: { dailyRuns: "lots" } } })).status).toBe(400);
-		await admin("/admin/accounts/quinn/limits", { method: "PUT", json: { limits: null } });
-		expect((await quinn.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: 300 });
+		expect((await admin("/api/admin/accounts/quinn/limits", { method: "PUT", json: { limits: { dailyRuns: "lots" } } })).status).toBe(400);
+		await admin("/api/admin/accounts/quinn/limits", { method: "PUT", json: { limits: null } });
+		expect((await quinn.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: null });
 	});
 });
 
@@ -974,12 +989,17 @@ describe("erasure boundaries", () => {
 		expect((await directory().account(ownerId))?.status).toBe("deleted");
 	}
 
-	const deleteAccount = async (browser: Browser, username: string) =>
-		(await browser.json("/api/account", { method: "DELETE", json: { confirm: username } })).body;
+	/** Deletes the account from `browser`, which keeps its session cookie, as another of the person's devices would. */
+	const deleteAccount = async (browser: Browser, username: string) => {
+		const before = new Map(browser.cookies);
+		const { body } = await browser.json("/api/account", { method: "DELETE", json: { confirm: username } });
+		browser.cookies = before;
+		return body;
+	};
 
 	it("closes a socket that was open across the deletion, and takes nothing from it", async () => {
 		const ana = await person("eb-socket");
-		const upgrade = await ana.browser.fetch("/api/ws?session=1", { headers: { Upgrade: "websocket", origin: hostOf("eb-socket") } });
+		const upgrade = await ana.browser.fetch("/api/ws?session=1", { headers: { Upgrade: "websocket", origin: ORIGIN } });
 		expect(upgrade.status).toBe(101);
 		const socket = upgrade.webSocket!;
 		const closed = new Promise<number>((resolve) => socket.addEventListener("close", (event) => resolve(event.code)));
@@ -1255,25 +1275,19 @@ describe("erasure boundaries", () => {
 		const fay = await person("eb-stale");
 		expect(await deleteAccount(fay.browser, "eb-stale")).toEqual({ deleted: true });
 		// Another Worker that still has the account cached as active, with requests it already authorized.
-		const stale: PimSite = {
-			owner: fay.ownerId,
-			agent: fay.ownerId,
-			store: env.Auth.getByName(fay.ownerId),
-			mode: "hosted",
-			user: { id: "x", name: "eb-stale", displayName: "eb-stale" },
-		};
-		const write = new Request(`${hostOf("eb-stale")}/api/memory/log`, {
+		const stale = fay.ownerId;
+		const write = new Request(`${ORIGIN}/api/memory/log`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ text: "Written by a stale gateway" }),
 		});
 		expect((await toAgent(write, env, stale, "/memory/log", true)).status).toBe(410);
-		const socket = new Request(`${hostOf("eb-stale")}/api/ws?session=1`, { headers: { Upgrade: "websocket" } });
+		const socket = new Request(`${ORIGIN}/api/ws?session=1`, { headers: { Upgrade: "websocket" } });
 		expect((await toAgent(socket, env, stale, "/ws", true)).status).toBe(410);
-		const callback = new Request(`${hostOf("eb-stale")}/mcp/events/watch-1`, { method: "POST", body: "{}" });
+		const callback = new Request(`${ORIGIN}/mcp/events/watch-1`, { method: "POST", body: "{}" });
 		expect((await toAgent(callback, env, stale, "/mcp/events/watch-1", false)).status).toBe(410);
 		const writes: ((instance: Pim) => Promise<unknown>)[] = [
-			(instance) => instance.provision({ ownerId: fay.ownerId, username: "eb-stale", publicUrl: hostOf("eb-stale") }),
+			(instance) => instance.provision({ ownerId: fay.ownerId, username: "eb-stale", publicUrl: ORIGIN }),
 			(instance) => instance.applySettings({ timeZone: "Asia/Tokyo" }),
 			(instance) => instance.setLimits({ dailyRuns: 1 }),
 			(instance) => instance.submitTo("1", "Hello", {}, "pim"),
@@ -1519,7 +1533,7 @@ describe("profiles and published Pims", () => {
 		const fin = await person("fin");
 		const pim = (await fin.browser.json("/api/personas", { method: "POST", json: { name: "Spam", instructions: "Buy now." } })).body;
 		const template = (await fin.browser.json(`/api/personas/${pim.id}/publish`, { method: "POST" })).body.id;
-		expect((await admin(`/admin/templates/${template}`, { method: "DELETE" })).status).toBe(200);
+		expect((await admin(`/api/admin/templates/${template}`, { method: "DELETE" })).status).toBe(200);
 		expect((await fin.browser.json(`/api/templates/${template}`)).status).toBe(404);
 	});
 });

@@ -1,11 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
-import { HttpError } from "../http";
-import type { SuggestedApp } from "../personas";
+import { HttpError } from "./http";
+import type { SuggestedApp } from "./personas";
 
 /**
- * What Pimling's people show each other: profiles, and the Pims they
+ * What the people on a Pim show each other: profiles, and the Pims they
  * publish as templates for anyone to make their own. One Durable Object for
- * the service, apart from the Directory, so browsing never touches accounts.
+ * the instance, apart from the Directory, so browsing never touches accounts.
  *
  * A template is a copy of one of its author's Pims when they published it:
  * its name, description, instructions and suggested apps, never their

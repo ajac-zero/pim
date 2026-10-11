@@ -4,8 +4,7 @@ import type { HarnessSettings, ModelRef } from "@earendil-works/pi-durable";
 import type { PiModel } from "agents/harness/pi";
 import { Pim as RealPim } from "../src/agent";
 
-export { default } from "../src/index";
-export { Auth } from "../src/auth";
+export { default, Auth, Directory, Gallery } from "../src/index";
 
 /** The scripted model every test agent talks to. Tests set its responses. */
 export const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-model", contextWindow: 200_000 }] });

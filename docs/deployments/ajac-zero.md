@@ -20,7 +20,7 @@ Their history, with every deploy and acceptance, is in this file as it was at [`
 
 | | |
 | --- | --- |
-| Serving | `7038ecfa-d962-4899-8968-b7f6a783da5b` (100%), deployed 2026-10-11 19:03 UTC from `main` at [`9b65ee7`](https://github.com/ajac-zero/pim/commit/9b65ee7) (a default Pim for every account, the admin's Pim for everyone who joins, chats listed by Pim) |
+| Serving | `59ebc2e8-77db-413d-b416-934fec9af480` (100%), deployed 2026-10-11 20:49 UTC from `main` at [`a69740b`](https://github.com/ajac-zero/pim/commit/a69740b) (Pims' teams) |
 | Custom domain `pim.ajac-zero.com` | `936379e175647dd9c83f50a4ef5010cd7e11966e`, with DNS record `327d910050f4a2b3fd9eb711e651be20` (`AAAA 100::`, proxied), both made by wrangler |
 | Durable Object namespaces | `Pim` `1ec6ba0dd84b4c0f941ff5ee3846e894`, `Auth` `5ade5dd299084d47af5bcb21f5bd2da8`, `Directory` `876c4e51b412464c80d5f3718bf5c069`, `Gallery` `931c10f09aad431487bba687aef3b745` (migrations v1 to v4, all new) |
 | Secrets | none |

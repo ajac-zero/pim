@@ -35,7 +35,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 ```
 - **[pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable)** runs the agent. Every model turn and tool call is a durable task committed to the Durable Object's SQLite before anything is shown. If the object is evicted mid-run, the `agents` SDK's `PiHarness` alarm wakes it, and pi resumes where it stopped.
 - **One agent per person.** The Worker reads whose request it is from the passkey session or the API token, and sends it to that person's Durable Object, which holds their whole agent in its SQLite database. A URL never chooses whose agent answers. See [docs/instance.md](docs/instance.md).
-- **Workers AI** is the default model (`@cf/zai-org/glm-4.7-flash`), so no vendor API keys are needed. Any AI Gateway catalog model works too, such as `anthropic/claude-opus-4.8`.
+- **A model that can do the job.** Pim decides what to say and when, and says it with a tool call, so it needs a capable model: any AI Gateway catalog model, such as `anthropic/claude-opus-4.8` (set `PIM_MODEL`), or OpenAI's through your ChatGPT plan. The default, `@cf/zai-org/glm-4.7-flash` on Workers AI, is a **try-it mode**: free and keyless, so a new deploy works at once, but not good enough for real use.
 - **Your ChatGPT plan**, optionally. Sign in with ChatGPT (Plus or Pro) and Pim runs on OpenAI's models, such as GPT-6.1 Sol, using the plan's included usage. See [ChatGPT plan](#chatgpt-plan).
 
 ## What the agent can do
@@ -56,7 +56,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 
 ## Deploy
 
-On the Workers free plan, SQLite-backed Durable Objects and Workers AI's daily free allocation are enough for personal use.
+Pim deploys on the Workers free plan: SQLite-backed Durable Objects are included, and the try-it model runs on Workers AI's daily free allocation. For real use, choose a capable model: set `PIM_MODEL` to an AI Gateway catalog model, billed to your Cloudflare account, or connect a ChatGPT plan in Settings.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ajac-zero/pim)
 
@@ -83,7 +83,7 @@ Configuration lives in `vars` in `wrangler.jsonc`:
 
 | Var | Default | Meaning |
 | --- | --- | --- |
-| `PIM_MODEL` | `@cf/zai-org/glm-4.7-flash` | Model for new sessions: a Workers AI id or an AI Gateway catalog id |
+| `PIM_MODEL` | `@cf/zai-org/glm-4.7-flash` | Model for new sessions: a Workers AI id or an AI Gateway catalog id. The default is the free try-it model; set a capable one for real use |
 | `PIM_TIME_ZONE` | `UTC` | IANA time zone for anyone who hasn't set theirs; joining sets the browser's |
 | `PIM_WEB_SEARCH` | empty | `exa`, `ceramic`, or `linkup` enables `web_search` |
 | `PIM_MEMORY_MODEL` | empty | Model that compresses memories; empty uses `PIM_MODEL`, never the ChatGPT plan |

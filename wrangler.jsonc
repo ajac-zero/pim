@@ -44,7 +44,9 @@
     { "name": "API_LIMITER", "namespace_id": "71420102", "simple": { "limit": 600, "period": 60 } }
   ],
   "vars": {
-    // Any Workers AI id (`@cf/...`) or AI Gateway catalog id (`anthropic/...`).
+    // Any Workers AI id (`@cf/...`) or AI Gateway catalog id (`anthropic/...`). The default is
+    // the free try-it model: fine for a first look, not for real use. Set a capable model here,
+    // or connect a ChatGPT plan in Settings.
     "PIM_MODEL": "@cf/zai-org/glm-4.7-flash",
     // IANA time zone for anyone who hasn't set theirs; registering sets the browser's.
     "PIM_TIME_ZONE": "UTC",

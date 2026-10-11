@@ -4,13 +4,12 @@ import { AlertCircle, Clock } from "lucide-react";
 import { Fragment, memo, useMemo } from "react";
 import { PimMark } from "~/components/app-sidebar";
 import { ArtifactCard, artifactReference } from "~/components/artifact";
+import { ActivityGroup } from "~/components/chat/activity";
 import {
   ApprovalBlock,
   AssistantMessage,
   EventNotice,
-  ReasoningBlock,
   ThinkingDot,
-  ToolCallBlock,
   UnknownItemBlock,
   UserMessage,
 } from "~/components/chat/items";
@@ -26,10 +25,14 @@ import type {
   FunctionCallItem,
   FunctionCallOutputItem,
   MessageItem,
-  ReasoningItem,
 } from "~/lib/openresponses";
 import type { Approval } from "~/lib/pim-api";
-import type { ModelProblem, SessionView, ThreadEntry } from "~/lib/pim-view";
+import {
+  layoutThread,
+  type ModelProblem,
+  type SessionView,
+  type ThreadEntry,
+} from "~/lib/pim-view";
 import { approvalsQuery } from "~/lib/queries";
 
 /** Tools whose answer names an artifact version, shown as the artifact itself. */
@@ -139,8 +142,21 @@ export const Thread = memo(function Thread({
     [view.live],
   );
 
-  const showThinking =
-    view.running && view.live.length === 0 && view.tools.length === 0;
+  /* Approvals and artifacts stand on their own; Pim's other tool calls are its work. */
+  const rows = useMemo(
+    () =>
+      layoutThread(entries, {
+        running: view.running,
+        shown: (call) =>
+          approvalsByCall.has(call.call_id) ||
+          (ARTIFACT_TOOLS.has(call.name) &&
+            artifactReference(outputs.get(call.call_id)?.output) !== null),
+      }),
+    [entries, view.running, approvalsByCall, outputs],
+  );
+
+  // Before Pim's work shows, a dot says it is on it.
+  const showThinking = view.running && rows.at(-1)?.kind !== "activity";
   const empty =
     !view.running &&
     unplaced.length === 0 &&
@@ -156,7 +172,38 @@ export const Thread = memo(function Thread({
             (composerHeight ?? DEFAULT_COMPOSER_INSET) + COMPOSER_INSET_GAP,
         }}
       >
-        {entries.map((entry) => {
+        {rows.map((row, index) => {
+          if (row.kind === "sent") {
+            return (
+              <AssistantMessage
+                key={row.key}
+                item={{
+                  type: "message",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: row.sent.message }],
+                }}
+                streaming={liveKeys.has(row.key)}
+                notified={row.sent.notify}
+              />
+            );
+          }
+          if (row.kind === "reply") {
+            return <AssistantMessage key={row.key} item={row.item} />;
+          }
+          if (row.kind === "activity") {
+            return (
+              <ActivityGroup
+                key={row.key}
+                entries={row.entries}
+                outputs={outputs}
+                runningTools={runningTools}
+                live={view.running && index === rows.length - 1}
+                liveKeys={liveKeys}
+                visit={visit}
+              />
+            );
+          }
+          const { entry } = row;
           if (entry.kind === "notice") {
             // A decision whose approval shows as a card is told by the card.
             if (entry.notice.approval && placed.has(entry.notice.approval)) {
@@ -165,28 +212,8 @@ export const Thread = memo(function Thread({
             return <EventNotice key={entry.key} notice={entry.notice} />;
           }
           const { item } = entry;
-          const streaming = liveKeys.has(entry.key);
-
           if (item.type === "message") {
-            const message = item as MessageItem;
-            return message.role === "user" ? (
-              <UserMessage key={entry.key} item={message} />
-            ) : (
-              <AssistantMessage
-                key={entry.key}
-                item={message}
-                streaming={streaming}
-              />
-            );
-          }
-          if (item.type === "reasoning") {
-            return (
-              <ReasoningBlock
-                key={entry.key}
-                item={item as ReasoningItem}
-                streaming={streaming}
-              />
-            );
+            return <UserMessage key={entry.key} item={item as MessageItem} />;
           }
           if (item.type === "function_call") {
             const call = item as FunctionCallItem;
@@ -194,27 +221,12 @@ export const Thread = memo(function Thread({
             if (approval) {
               return <ApprovalBlock key={entry.key} approval={approval} />;
             }
-            const running = runningTools.get(call.call_id);
-            const output = outputs.get(call.call_id);
-            const artifact = ARTIFACT_TOOLS.has(call.name)
-              ? artifactReference(output?.output)
-              : null;
+            const artifact = artifactReference(
+              outputs.get(call.call_id)?.output,
+            );
             if (artifact) {
               return <ArtifactCard key={entry.key} reference={artifact} />;
             }
-            return (
-              <ToolCallBlock
-                key={entry.key}
-                call={call}
-                output={outputs.get(call.call_id) ?? null}
-                running={running !== undefined}
-                liveOutput={running?.output}
-              />
-            );
-          }
-          if (item.type === "function_call_output") {
-            // Rendered with its call.
-            return <Fragment key={entry.key} />;
           }
           return <UnknownItemBlock key={entry.key} item={item} />;
         })}

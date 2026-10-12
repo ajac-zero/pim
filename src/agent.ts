@@ -8,6 +8,7 @@ import {
 	type UserInput,
 	createRegistry,
 	defineExtension,
+	type Extension,
 	Harness,
 	type HarnessSettings,
 	type ModelRef,
@@ -50,6 +51,7 @@ import { ExtensionDataStore } from "./extensions/data";
 import {
 	type Ability,
 	checkToolNames,
+	type PimApp,
 	type PimConfig,
 	PimExtensions,
 	type ShownWidget,
@@ -59,6 +61,8 @@ import {
 } from "./extensions/define";
 import { goalsExtension, goalsWidgets } from "./extensions/goals";
 import {
+	APP_PREFIX,
+	appExtensionName,
 	appToolPermission,
 	MCP_APPROVALS,
 	type McpApproval,
@@ -69,6 +73,7 @@ import {
 	type McpToolInfo,
 	mcpActions,
 	mcpExtensions,
+	serverFor,
 	slug,
 	summarizeCall,
 	toolDefinition,
@@ -381,7 +386,7 @@ export class Pim extends Agent<Env> {
 			// Restored connections reconnect in the background after a wake; give them a moment.
 			await this.mcp.waitForConnections({ timeout: 5_000 });
 			this.#migrateAlwaysApproved();
-			const apps = mcpExtensions(this.apps, services, this.#appExtras(services));
+			const apps = this.#appExtensions(services);
 			this.registry.install(apps.apps);
 			this.registry.install(this.memory.extension);
 			// No extension's tool may take the name of one of Pim's, or another extension's.
@@ -399,7 +404,7 @@ export class Pim extends Agent<Env> {
 			);
 			this.#installAbilities(services);
 			// Last: the apps' tools come and go, and pi only appends cheaply at the end.
-			this.registry.install(apps.tools);
+			this.#installAppTools(apps.tools);
 			// Visits' tools, as their hosts last allowed, so a visit's run resumes with them; each turn asks again.
 			const visitor = this.profile()?.username;
 			for (const share of this.visits.shares()) {
@@ -510,29 +515,63 @@ export class Pim extends Agent<Env> {
 		await this.appEvents.refresh(payload.id);
 	}
 
-	/** Rebuilds the connected apps' extension, once pi's registry has been set up. */
+	/** Rebuilds the connected apps' extensions, once pi's registry has been set up. */
 	#installApps(): void {
-		if (!this.registry.snapshot().extension("pim.mcp")) return;
+		if (!this.registry.snapshot().extension("pim.apps")) return;
 		this.#migrateAlwaysApproved();
 		// Same names: each replaces its installed extension in place, keeping the order.
-		const services = this.services();
-		const apps = mcpExtensions(this.apps, services, this.#appExtras(services));
+		const apps = this.#appExtensions(this.services());
 		this.registry.install(apps.apps);
-		this.registry.install(apps.tools);
+		this.#installAppTools(apps.tools);
+	}
+
+	#appExtensions(services: PimServices) {
+		return mcpExtensions(this.apps, services, this.#appExtras(services), (session) => this.#appsOf(this.#roleOf(session).pim));
+	}
+
+	/** Installs each ready app's tools as its own extension, and takes out those of apps that no longer are. */
+	#installAppTools(tools: readonly Extension[]): void {
+		const names = new Set(tools.map((extension) => extension.name));
+		for (const extension of this.registry.snapshot().installed()) {
+			if (extension.name.startsWith(APP_PREFIX) && !names.has(extension.name)) this.registry.uninstall(extension);
+		}
+		for (const extension of tools) this.registry.install(extension);
+	}
+
+	/** The apps a Pim works with: those of the extension's Pim it builds on, then its own. */
+	#appsOf(pim: Persona): PimApp[] {
+		const base = pim.base === null ? [] : (this.extensions.pim(pim.base)?.apps ?? []);
+		const apps = new Map<string, PimApp>();
+		for (const app of [...base, ...pim.apps]) if (!apps.has(app.url)) apps.set(app.url, app);
+		return [...apps.values()];
+	}
+
+	/** The extensions of the connected apps a Pim works with. */
+	#appExtensionsOf(pim: Persona): string[] {
+		const servers = this.apps.servers();
+		return this.#appsOf(pim).flatMap((app) => {
+			const server = serverFor(servers, app);
+			return server ? [appExtensionName(server.id)] : [];
+		});
+	}
+
+	/** Extensions only some chats select: abilities, by the Pims that use them, and apps, by the Pims that list them. */
+	#perPim(name: string): boolean {
+		return this.abilities.has(name) || name.startsWith(APP_PREFIX);
 	}
 
 	/** pi's run policy, shared by every session. */
 	protected harnessSettings(): HarnessSettings {
 		const registry = this.registry;
-		const abilities = this.abilities;
+		const perPim = (name: string) => this.#perPim(name);
 		return {
-			// Every extension but visits' and abilities': a visit's own conversation selects its extension,
-			// and the chats of Pims that use an ability select it.
+			// Every extension but visits', abilities' and apps': a visit's own conversation selects its extension,
+			// and the chats of Pims that use an ability or list an app select it.
 			get extensions() {
 				return registry
 					.snapshot()
 					.installed()
-					.filter((extension) => !extension.name.startsWith(VISIT_PREFIX) && !abilities.has(extension.name));
+					.filter((extension) => !extension.name.startsWith(VISIT_PREFIX) && !perPim(extension.name));
 			},
 			// 1, 2, 4, 8, 16 s: about 30 s for a rate-limited model to recover.
 			retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
@@ -1418,13 +1457,13 @@ export class Pim extends Agent<Env> {
 	#memberAgent(member: TeamMember, pim: Persona): AgentChange {
 		const snapshot = this.registry.snapshot();
 		const removed = [MESSAGING_EXTENSION, SCHEDULE_EXTENSION, TEAM_EXTENSION].flatMap((name) => snapshot.extension(name) ?? []);
-		// Members work with their Pim's abilities too.
-		const added = this.extensions.abilitiesOf(pim.base).flatMap((name) => snapshot.extension(name) ?? []);
+		// Members work with their Pim's abilities and apps too.
+		const added = [...this.extensions.abilitiesOf(pim.base), ...this.#appExtensionsOf(pim)].flatMap((name) => snapshot.extension(name) ?? []);
 		const extensions = { add: added, remove: removed };
 		const kept = snapshot
 			.tools()
 			.filter(({ extension, tool }) => !removed.includes(extension) && !LEAD_ONLY_TOOLS.has(tool.name))
-			.filter(({ extension }) => !this.abilities.has(extension.name) || added.includes(extension));
+			.filter(({ extension }) => !this.#perPim(extension.name) || added.includes(extension));
 		if (member.tools) return { extensions, tools: kept.filter(({ tool }) => member.tools!.includes(tool.name)).map(({ tool }) => tool) };
 		const leadOnly = snapshot.tools().filter(({ tool }) => LEAD_ONLY_TOOLS.has(tool.name));
 		return { extensions, ...(leadOnly.length > 0 ? { tools: { remove: leadOnly.map(({ tool }) => tool) } } : {}) };
@@ -1529,14 +1568,16 @@ export class Pim extends Agent<Env> {
 	}
 
 	/**
-	 * Gives a chat the abilities its Pim uses, as they are now, before its next
-	 * run: its Pim, the Pim's base, or the extensions may have changed since.
+	 * Gives a chat the abilities its Pim uses and the apps it lists, as they
+	 * are now, before its next run: its Pim, the Pim's base, the extensions or
+	 * the connected apps may have changed since.
 	 * Visits choose their own extensions, and team members get theirs when
 	 * made. A chat whose selection is unchanged isn't written to.
 	 */
 	async #selectAbilities(session: string): Promise<void> {
 		if (this.visits.bySession(session) || this.team.run(session)) return;
-		const wanted = this.extensions.abilitiesOf(this.personas.ofSession(session).base);
+		const pim = this.personas.ofSession(session);
+		const wanted = [...this.extensions.abilitiesOf(pim.base), ...this.#appExtensionsOf(pim)];
 		const key = wanted.join(" ");
 		if ((this.personas.abilities(session) ?? "") === key) return;
 		const snapshot = this.registry.snapshot();
@@ -2644,7 +2685,12 @@ export class Pim extends Agent<Env> {
 					id: extension.id,
 					name: extension.name,
 					description: extension.description,
-					pims: (extension.pims ?? []).map((pim) => ({ ref: `${extension.id}/${pim.id}`, name: pim.name, description: pim.description })),
+					pims: (extension.pims ?? []).map((pim) => ({
+						ref: `${extension.id}/${pim.id}`,
+						name: pim.name,
+						description: pim.description,
+						apps: pim.apps ?? [],
+					})),
 					widgets: Object.keys(extension.widgets ?? {}).map((widget) => `${extension.id}/${widget}`),
 				})),
 				defaultPim: this.extensions.defaultPim,
@@ -2872,8 +2918,12 @@ export class Pim extends Agent<Env> {
 
 	#describeApps() {
 		const catalog = this.apps.tools();
-		return this.apps.servers().map((server) => ({
+		const servers = this.apps.servers();
+		const pims = this.personas.list().map((pim) => ({ name: pim.name, servers: new Set(this.#appsOf(pim).map((app) => serverFor(servers, app)?.id)) }));
+		return servers.map((server) => ({
 			...server,
+			// The person's Pims that list the app: only their chats get its tools.
+			pims: pims.filter((pim) => pim.servers.has(server.id)).map((pim) => pim.name),
 			tools: catalog
 				.filter((tool) => tool.serverId === server.id)
 				.map((tool) => {

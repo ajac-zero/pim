@@ -121,6 +121,9 @@ export function widgetMarkdown(widget: ShownWidget, locale = "en"): string {
 	return [title, ...lines.map((line) => `- ${line}`)].join("\n");
 }
 
+/** An app a Pim works with: a remote MCP server, by its https URL. */
+export type PimApp = { readonly name: string; readonly url: string };
+
 export type PimDefinition = {
 	/** Unique in its extension: the Pim is named `<extension>/<id>`. */
 	readonly id: string;
@@ -137,6 +140,12 @@ export type PimDefinition = {
 	 * artifacts, apps, the web) are every Pim's.
 	 */
 	readonly abilities?: readonly string[];
+	/**
+	 * Remote MCP servers its chats work with. Each person connects them with
+	 * their own accounts; a chat gets the tools of the apps its Pim lists here
+	 * or in the person's own Pim, and of no other.
+	 */
+	readonly apps?: readonly PimApp[];
 	/** Messages the dashboard offers to start a chat with. */
 	readonly starters?: readonly Text[];
 };
@@ -202,6 +211,13 @@ export class PimExtensions {
 			}
 			for (const id of pim.abilities ?? []) {
 				if (!this.#extensions.get(id)?.ability) throw new Error(`${ref} uses the ability of ${id}, which no installed extension brings`);
+			}
+			const urls = new Set<string>();
+			for (const app of pim.apps ?? []) {
+				if (!app.name.trim() || !/^https:\/\/\S+$/.test(app.url) || urls.has(app.url)) {
+					throw new Error(`${ref} lists an app without a name, an https URL, or with a repeated URL: ${JSON.stringify(app)}`);
+				}
+				urls.add(app.url);
 			}
 		}
 		if (defaultPim !== null && !this.pim(defaultPim)) throw new Error(`The default Pim ${defaultPim} isn't in any installed extension`);

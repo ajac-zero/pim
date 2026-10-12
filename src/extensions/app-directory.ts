@@ -139,6 +139,6 @@ export function describeCandidates(query: string, candidates: readonly AppCandid
 	return [
 		`MCP Registry servers for "${query}", the app's own first:`,
 		...lines,
-		"Connect the app's own server with connect_app. Offer a third-party one only if the app has none, and say who runs it.",
+		"Give the person the app's own server, to add to this Pim's apps in Your Pims. Offer a third-party one only if the app has none, and say who runs it.",
 	].join("\n");
 }

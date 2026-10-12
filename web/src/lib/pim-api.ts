@@ -18,7 +18,7 @@ export type Session = {
   persona?: { id: string; name: string } | null;
 };
 
-/** An app a Pim suggests connecting, by its MCP server URL. */
+/** An app a Pim works with, by its MCP server URL: its chats get only these apps' tools. */
 export type SuggestedApp = { name: string; url: string };
 
 /** One of a Pim's team: it does tasks the Pim hands it, and answers the Pim, never you. */
@@ -155,7 +155,13 @@ export type InstalledExtension = {
   id: string;
   name: string;
   description: string;
-  pims: { ref: string; name: string; description: string }[];
+  pims: {
+    ref: string;
+    name: string;
+    description: string;
+    /** The apps Pims built on it work with, besides their own. */
+    apps: SuggestedApp[];
+  }[];
   widgets: string[];
 };
 
@@ -195,7 +201,14 @@ export type ConnectedApp = {
   id: string;
   name: string;
   url: string;
+  /** `ready`, `authenticating` (waiting for you to sign in), `failed`, or on its way. */
   state: string;
+  error: string | null;
+  /** Where to sign in, while it waits for you to. */
+  authUrl: string | null;
+  /** Your Pims that work with it: only their chats get its tools. */
+  pims: string[];
+  tools: { name: string }[];
 };
 
 export type ApprovalStatus = "pending" | "approved" | "denied";
@@ -586,6 +599,10 @@ export const pim = {
     call<{ id: string; state: string; authUrl?: string }>("/mcp", {
       method: "POST",
       body: JSON.stringify(app),
+    }),
+  removeApp: (id: string) =>
+    call<{ deleted: boolean }>(`/mcp/${encodeURIComponent(id)}`, {
+      method: "DELETE",
     }),
   renameSession: (id: string, title: string) =>
     call<Session>(`/sessions/${id}`, {

@@ -145,6 +145,9 @@ async function watchSecret(id: string): Promise<string> {
 describe("skills from apps (io.modelcontextprotocol/skills)", () => {
 	it("reads an app's skills and event types when it connects", async () => {
 		expect((await post("/mcp", { name: "Travel", url: SERVER_URL })).status).toBe(201);
+		// The default Pim works with it, so its chats get it.
+		const [pim] = (await api("/personas")).body.personas;
+		await api(`/personas/${pim.id}`, { method: "PUT", body: JSON.stringify({ apps: [{ name: "Travel", url: SERVER_URL }] }) });
 		expect((await api("/mcp/travel/skills")).body.skills).toEqual([await skillEntry()].map((entry) => ({
 			uri: entry.uri,
 			name: "trip-planning",

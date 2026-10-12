@@ -7,7 +7,7 @@ import { exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { Approval } from "../src/store";
-import { api, apiUrl, decisionRun, lastUserText, OWNER, pendingApproval, post, say, toolUse, url } from "./helpers";
+import { api, apiUrl, decisionRun, lastUserText, OWNER, pendingApproval, post, say, systemPrompt, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /**
@@ -79,15 +79,35 @@ function toolResults(messages: readonly Message[]): string {
 	return JSON.stringify(messages.filter((message) => message.role === "toolResult"));
 }
 
+/** The tools a request offered the model: every tool its system messages added, less those they removed. */
+function offered(messages: readonly Message[]): string[] {
+	const tools = new Set<string>();
+	for (const message of messages) {
+		if (message.role !== "system") continue;
+		for (const tool of message.toolsAdded ?? []) tools.add(tool.name);
+		for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+	}
+	return [...tools];
+}
+
+/** Sets the apps the person's default Pim works with. */
+async function defaultPimApps(apps: { name: string; url: string }[]) {
+	const [pim] = (await api("/personas")).body.personas;
+	expect((await api(`/personas/${pim.id}`, { method: "PUT", body: JSON.stringify({ apps }) })).status).toBe(200);
+}
+
 describe("connected apps (MCP)", () => {
 	it("connects an app and offers its tools, gating the ones that change things", async () => {
 		const { status, body } = await post("/mcp", { name: "Calendar", url: "https://calendar.example.test/mcp" });
 		expect(status).toBe(201);
 		expect(body).toMatchObject({ id: "calendar", state: "ready" });
 
+		// Connected, but no Pim works with it yet.
+		expect((await api("/mcp")).body.servers).toEqual([expect.objectContaining({ id: "calendar", pims: [] })]);
+		await defaultPimApps([{ name: "Calendar", url: "https://calendar.example.test/mcp" }]);
 		const apps = (await api("/mcp")).body.servers;
 		expect(apps).toEqual([
-			expect.objectContaining({ id: "calendar", name: "Calendar", state: "ready", approval: "writes" }),
+			expect.objectContaining({ id: "calendar", name: "Calendar", state: "ready", approval: "writes", pims: ["Pim"] }),
 		]);
 		expect(apps[0].tools).toEqual([
 			{ name: "calendar_find_events", description: "Find events on a day.", permission: "on", requiresApproval: false },
@@ -210,6 +230,10 @@ describe("connected apps (MCP)", () => {
 	});
 
 	it("adds a new app's tools without re-sending the prompt sent so far", async () => {
+		await defaultPimApps([
+			{ name: "Calendar", url: "https://calendar.example.test/mcp" },
+			{ name: "Notes", url: "https://notes.example.test/mcp" },
+		]);
 		const session = (await post("/sessions")).body.id;
 		const prompts: Message[][] = [];
 		const record = (context: { messages: Message[] }) => {
@@ -239,24 +263,56 @@ describe("connected apps (MCP)", () => {
 		expect((await api("/mcp/notes", { method: "DELETE" })).status).toBe(404);
 	});
 
-	it("lets the model connect an app once the user approves", async () => {
-		let reported = "";
-		faux.setResponses([toolUse("connect_app", { name: "Weather", url: "https://weather.example.test/mcp" }), fauxAssistantMessage("Asked.")]);
-		await say("Connect the weather app.");
-		const approval = await pendingApproval();
-		expect((await api("/mcp")).body.servers).toHaveLength(1);
-		expect(approval.summary).toBe("Connect Weather (https://weather.example.test/mcp) and let me use its tools");
+	it("gives a chat only the apps its Pim lists, and lets the model connect only those", async () => {
+		const weather = "https://weather.example.test/mcp";
+		const books = (await post("/personas", { name: "Books", base: "test.ledger/budget" })).body;
+		const budget = (await post("/sessions", { persona: books.id })).body.id;
 
+		// The default Pim doesn't list Weather: the model can't connect it from there.
+		let refused = "";
+		faux.setResponses([
+			toolUse("connect_app", { app: "Weather" }),
+			(context) => {
+				refused = toolResults(context.messages);
+				return fauxAssistantMessage("I can't.");
+			},
+		]);
+		await say("Connect the weather app.");
+		expect(refused).toContain("This Pim doesn't work with Weather; its apps are Calendar, Notes.");
+		expect((await api("/mcp")).body.servers.map((server: { id: string }) => server.id)).toEqual(["calendar"]);
+
+		// The Budget Pim's definition lists it: connecting it needs no approval, as its Pim already chose it.
+		let connected = "";
+		let system = "";
 		faux.setResponses([
 			(context) => {
-				reported = lastUserText(context.messages);
+				system = systemPrompt(context.messages);
+				return toolUse("connect_app", { app: "weather" });
+			},
+			(context) => {
+				connected = toolResults(context.messages);
 				return fauxAssistantMessage("Connected.");
 			},
 		]);
-		await post(`/approvals/${approval.id}/approve`);
-		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
-		expect(reported).toContain("Connected Weather. Its tools: weather_forecast.");
-		expect((await api("/mcp")).body.servers.map((server: { id: string }) => server.id).sort()).toEqual(["calendar", "weather"]);
+		await say("Connect the weather app.", budget);
+		expect(system).toContain("## Weather\\n(not connected: connect_app connects it)");
+		expect(connected).toContain("Connected Weather. Its tools: weather_forecast.");
+		const servers = (await api("/mcp")).body.servers;
+		expect(servers.find((server: { id: string }) => server.id === "weather")).toMatchObject({ url: weather, pims: ["Books"] });
+
+		// Its tools reach the Budget chat, and no other.
+		const tools: Record<string, string[]> = {};
+		const record = (key: string) => (context: { messages: Message[] }) => {
+			tools[key] = offered(context.messages);
+			return fauxAssistantMessage("ok");
+		};
+		faux.setResponses([record("budget"), record("default")]);
+		await say("Forecast?", budget);
+		await say("Forecast?");
+		expect(tools.budget).toContain("weather_forecast");
+		expect(tools.budget).not.toContain("calendar_find_events");
+		expect(tools.default).toContain("calendar_find_events");
+		expect(tools.default).not.toContain("weather_forecast");
 	});
 
 	it("refuses bad or failing servers and leaves nothing behind", async () => {

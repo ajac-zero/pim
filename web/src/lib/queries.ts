@@ -62,6 +62,14 @@ export const artifactVersionQuery = (id: string, version: number) =>
 export const personasQuery = () =>
   queryOptions({ queryKey: ["personas"], queryFn: pim.personas });
 
+/** The deployment's extensions: they change only with a deploy. */
+export const extensionsQuery = () =>
+  queryOptions({
+    queryKey: ["extensions"],
+    queryFn: pim.extensions,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+
 /** A Pim's dashboard. Refetched when Pim's activity or the Pim itself changes. */
 export const dashboardQuery = (id: string, locale: string) =>
   queryOptions({

@@ -1,3 +1,4 @@
+import { ASSISTANT_PIM } from "./extensions/assistant";
 import { DurableObject } from "cloudflare:workers";
 import { HttpError } from "./http";
 import type { SuggestedApp, TeamMember } from "./personas";
@@ -31,6 +32,8 @@ export type Template = {
 	readonly instructions: string;
 	readonly apps: readonly SuggestedApp[];
 	readonly team: readonly TeamMember[];
+	/** The extension's Pim it builds on, or null for none. */
+	readonly base: string | null;
 	readonly publishedAt: number;
 	/** How many people made it their own. */
 	readonly uses: number;
@@ -47,6 +50,7 @@ export type DefaultPim = {
 	readonly instructions: string;
 	readonly apps: readonly SuggestedApp[];
 	readonly team: readonly TeamMember[];
+	readonly base: string | null;
 	readonly updatedAt: number;
 };
 
@@ -106,6 +110,7 @@ function templateOf(row: Row): Template {
 		instructions: String(row.instructions),
 		apps: JSON.parse(String(row.apps)) as SuggestedApp[],
 		team: JSON.parse(String(row.team ?? "[]")) as TeamMember[],
+		base: optional(row.base),
 		publishedAt: Number(row.published_at),
 		uses: Number(row.uses),
 	};
@@ -133,6 +138,8 @@ export class Gallery extends DurableObject<Env> {
 		for (const table of ["templates", "default_pim"]) {
 			const columns = ctx.storage.sql.exec(`PRAGMA table_info(${table})`).toArray().map((row) => String(row.name));
 			if (!columns.includes("team")) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN team TEXT NOT NULL DEFAULT '[]'`);
+			// Published before extensions, they all built on Pim's own assistant.
+			if (!columns.includes("base")) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN base TEXT DEFAULT '${ASSISTANT_PIM}'`);
 		}
 	}
 
@@ -178,6 +185,7 @@ export class Gallery extends DurableObject<Env> {
 			instructions: string;
 			apps: readonly SuggestedApp[];
 			team: readonly TeamMember[];
+			base: string | null;
 		},
 	): Template {
 		const [known] = this.#sql("SELECT id FROM templates WHERE owner_id = ? AND persona_id = ?", ownerId, persona.id).toArray();
@@ -187,8 +195,8 @@ export class Gallery extends DurableObject<Env> {
 		}
 		const id = known ? String(known.id) : `t_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 		this.#sql(
-			`INSERT INTO templates (id, owner_id, username, persona_id, name, description, instructions, apps, team, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (id) DO UPDATE SET name = excluded.name, description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, published_at = excluded.published_at`,
+			`INSERT INTO templates (id, owner_id, username, persona_id, name, description, instructions, apps, team, base, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (id) DO UPDATE SET name = excluded.name, description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, base = excluded.base, published_at = excluded.published_at`,
 			id,
 			ownerId,
 			username,
@@ -198,6 +206,7 @@ export class Gallery extends DurableObject<Env> {
 			persona.instructions,
 			JSON.stringify(persona.apps),
 			JSON.stringify(persona.team),
+			persona.base,
 			Date.now(),
 		);
 		return this.template(id)!;
@@ -260,6 +269,7 @@ export class Gallery extends DurableObject<Env> {
 			instructions: String(row.instructions),
 			apps: JSON.parse(String(row.apps)) as SuggestedApp[],
 			team: JSON.parse(String(row.team ?? "[]")) as TeamMember[],
+			base: optional(row.base),
 			updatedAt: Number(row.updated_at),
 		};
 	}
@@ -275,12 +285,13 @@ export class Gallery extends DurableObject<Env> {
 			instructions: string;
 			apps: readonly SuggestedApp[];
 			team: readonly TeamMember[];
+			base: string | null;
 		},
 	): DefaultPim {
 		this.#sql(
-			`INSERT INTO default_pim (id, owner_id, username, persona_id, name, description, instructions, apps, team, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO default_pim (id, owner_id, username, persona_id, name, description, instructions, apps, team, base, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET owner_id = excluded.owner_id, username = excluded.username, persona_id = excluded.persona_id, name = excluded.name,
-			description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, updated_at = excluded.updated_at`,
+			description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, base = excluded.base, updated_at = excluded.updated_at`,
 			ownerId,
 			username,
 			persona.id,
@@ -289,6 +300,7 @@ export class Gallery extends DurableObject<Env> {
 			persona.instructions,
 			JSON.stringify(persona.apps),
 			JSON.stringify(persona.team),
+			persona.base,
 			Date.now(),
 		);
 		return this.defaultPim()!;

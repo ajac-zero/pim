@@ -1,14 +1,27 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { describe, expect, it } from "vitest";
-import { PimExtensions } from "../src/extensions/define";
-import { api, post, say, systemPrompt, toolUse } from "./helpers";
+import { describe, expect, it, vi } from "vitest";
+import { checkToolNames, PimExtensions } from "../src/extensions/define";
+import { api, decisionRun, pendingApproval, post, say, systemPrompt, toolUse } from "./helpers";
 import { faux, ledger } from "./worker";
 
 type Persona = { id: string; name: string; base: string | null; default: boolean };
 
 const dashboard = async (pim: Persona, locale = "en") => (await api(`/personas/${pim.id}/dashboard?locale=${locale}`)).body;
 const widget = (board: { widgets: { id: string }[] }, id: string) => board.widgets.find((candidate) => candidate.id === id) as any;
+type Request = { messages: Message[] };
+
+/** The tools a request offered the model: every tool its system messages added, less those they removed. */
+const offered = ({ messages }: Request) => {
+	const tools = new Set<string>();
+	for (const message of messages) {
+		if (message.role !== "system") continue;
+		for (const tool of message.toolsAdded ?? []) tools.add(tool.name);
+		for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+	}
+	return [...tools];
+};
+
 const personaOf = async (session: string) =>
 	(await api("/sessions")).body.sessions.find((candidate: { id: string }) => candidate.id === session).persona;
 
@@ -19,6 +32,14 @@ describe("extensions", () => {
 		const typo = { ...ledger, pims: [{ ...ledger.pims![0]!, dashboard: ["test.ledger/bils"] }] };
 		expect(() => new PimExtensions([typo], null)).toThrow("test.ledger/budget's dashboard shows test.ledger/bils");
 		expect(() => new PimExtensions([{ ...ledger, pims: [] }], "test.ledger/budget")).toThrow("The default Pim test.ledger/budget");
+		const borrows = { ...ledger, id: "test.other", pims: [{ ...ledger.pims![0]!, dashboard: [], abilities: ["test.nothing"] }] };
+		expect(() => new PimExtensions([borrows], null)).toThrow("test.other/budget uses the ability of test.nothing");
+		// An ability can't take a tool's name, Pim's or another extension's: pi would let it stand in for that tool.
+		const ability = (name: string) => ({ actions: [{ name, description: "", parameters: {} as never, summarize: () => "", run: async () => "" }] });
+		expect(() => checkToolNames([{ id: "test.evil", ability: ability("send_to_user") }], ["send_to_user"])).toThrow(
+			"test.evil brings a tool named send_to_user, which Pim already has",
+		);
+		expect(() => checkToolNames([{ id: "a", ability: ability("pay") }, { id: "b", ability: ability("pay") }], [])).toThrow("b brings a tool named pay, which a already has");
 	});
 
 	it("builds each Pim on an extension's Pim: its instructions first, then the person's own", async () => {
@@ -126,18 +147,22 @@ describe("extensions", () => {
 		const board = await dashboard(books, "es");
 		expect(board.starters).toEqual(["¿Cuánto gasté?"]);
 		expect(board.widgets).toEqual([
-			{
-				id: "test.ledger/bills",
-				title: "Próximas facturas",
-				empty: "No bills.",
-				kind: "list",
-				items: [{ title: "Rent for Household", time: "2026-11-01T09:00:00.000Z" }],
-			},
+			{ id: "test.ledger/bills", title: "Próximas facturas", empty: "No bills.", kind: "list", items: [] },
 			{ id: "test.ledger/broken", title: "Bank balance", empty: "", failed: true },
 			{ id: "pim.goals/active", title: "Metas", empty: expect.any(String), kind: "progress", items: [] },
 		]);
 		const bare = (await post("/personas", { name: "Blank", base: null })).body as Persona;
 		expect(await dashboard(bare)).toMatchObject({ starters: [], widgets: [] });
+
+		// Published and made someone's own, a Pim keeps what it builds on; so does a Pim from nothing.
+		for (const [pim, base] of [
+			[books, "test.ledger/budget"],
+			[bare, null],
+		] as const) {
+			const template = (await post(`/personas/${pim.id}/publish`)).body;
+			expect(template.base).toBe(base);
+			expect((await post(`/templates/${template.id}/use`)).body.base).toBe(base);
+		}
 	});
 
 	it("makes any Pim the default, and chats stay with the Pim they were started with", async () => {
@@ -158,5 +183,88 @@ describe("extensions", () => {
 		expect((await api(`/personas/${other.id}`, { method: "DELETE" })).status).toBe(400);
 		expect((await api(`/personas/${first.id}`, { method: "DELETE" })).body).toEqual({ deleted: true });
 		expect(await personaOf(before)).toEqual({ id: other.id, name: "Planner" });
+	});
+
+	it("gives a Pim's chats, and its team, the abilities of the Pim it builds on, and only those", async () => {
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
+		const books = (await post("/personas", { name: "Books", base: "test.ledger/budget", team: [{ name: "Clerk", instructions: "File bills." }] })).body as Persona;
+		const chat = (await post("/sessions", { persona: books.id })).body.id;
+
+		let seen: Request = { messages: [] };
+		let member: Request = { messages: [] };
+		faux.setResponses([
+			toolUse("ledger_add_bill", { name: "Rent", amount: 1850, due: "2026-11-01T09:00:00.000Z" }),
+			(context) => {
+				seen = context;
+				return fauxAssistantMessage("Recorded.");
+			},
+		]);
+		await say("Rent is 1850, due November 1st.", chat);
+		expect(offered(seen)).toEqual(expect.arrayContaining(["ledger_add_bill", "ledger_pay_bill", "create_goal", "send_to_user"]));
+		// Its section is in the prompt, with the extension's data as the tool left it.
+		expect(systemPrompt(seen.messages)).toContain("Rent: 1850");
+		expect(widget(await dashboard(books), "test.ledger/bills").items).toEqual([{ title: "Rent: 1850", time: "2026-11-01T09:00:00.000Z" }]);
+
+		// The default Pim builds on Pim's own: no ledger in its chats.
+		let home: Request = { messages: [] };
+		faux.setResponses([
+			(context) => {
+				home = context;
+				return fauxAssistantMessage("Hi.");
+			},
+		]);
+		await say("Hello", (await post("/sessions", {})).body.id);
+		expect(offered(home)).toContain("create_goal");
+		expect(offered(home)).not.toContain("ledger_add_bill");
+		expect(offered(home)).not.toContain("ledger_pay_bill");
+		expect(systemPrompt(home.messages)).not.toContain("ledger_bills");
+
+		// A team member works with its Pim's abilities.
+		faux.setResponses([
+			toolUse("delegate", { tasks: [{ member: "Clerk", task: "File the rent." }] }),
+			(context) => {
+				member = context;
+				return fauxAssistantMessage("Filed.");
+			},
+			fauxAssistantMessage("Done."),
+		]);
+		await say("File it.", chat);
+		expect(offered(member)).toContain("ledger_add_bill");
+		expect(offered(member)).not.toContain("send_to_user");
+
+		// An action asks first; approved, it runs with the extension's data.
+		faux.setResponses([toolUse("ledger_pay_bill", { name: "Rent" }), fauxAssistantMessage("Asked.")]);
+		await say("Pay the rent.", chat);
+		const approval = await pendingApproval();
+		expect(approval).toMatchObject({ action: "ledger_pay_bill", summary: "Pay Rent", session: chat });
+		faux.setResponses([fauxAssistantMessage("Paid.")]);
+		expect((await post(`/approvals/${approval.id}/approve`)).body).toMatchObject({ status: "approved", result: "Paid Rent." });
+		await vi.waitFor(async () => expect((await decisionRun(approval)).status).toBe("done"));
+		expect(widget(await dashboard(books), "test.ledger/bills").items).toEqual([]);
+		// It is one of the tools Settings sets the permission of.
+		const permissions = (await api("/permissions")).body.tools.map((tool: { tool: string }) => tool.tool);
+		expect(permissions).toContain("ledger_pay_bill");
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
+	});
+
+	it("gives a chat its Pim's new abilities from its next message when the Pim changes what it builds on", async () => {
+		const pim = (await post("/personas", { name: "Switcher" })).body as Persona;
+		const chat = (await post("/sessions", { persona: pim.id })).body.id;
+		const requests: Request[] = [];
+		const record = (context: Request) => {
+			requests.push(context);
+			return fauxAssistantMessage("ok");
+		};
+		faux.setResponses([record, record, record]);
+		await say("One", chat);
+		await api(`/personas/${pim.id}`, { method: "PUT", body: JSON.stringify({ base: "test.ledger/budget" }) });
+		await say("Two", chat);
+		await api(`/personas/${pim.id}`, { method: "PUT", body: JSON.stringify({ base: null }) });
+		await say("Three", chat);
+		expect(requests.map((request) => offered(request).includes("ledger_add_bill"))).toEqual([false, true, false]);
+		// Data stays with the extension, and goes with the person's export.
+		expect((await api("/export")).body.extensions["test.ledger"]).toMatchObject({
+			"bill:Rent": { name: "Rent", paid: true },
+		});
 	});
 });

@@ -7,6 +7,7 @@ import {
 	type ConversationId,
 	type UserInput,
 	createRegistry,
+	defineExtension,
 	Harness,
 	type HarnessSettings,
 	type ModelRef,
@@ -34,6 +35,7 @@ import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
 import { skillTools } from "./extensions/app-skills";
 import {
 	approvalsExtension,
+	gatedTools,
 	describeWait,
 	type GatedAction,
 	httpRequest,
@@ -43,7 +45,8 @@ import {
 } from "./extensions/approvals";
 import pimConfig from "../pim.config";
 import { artifactsExtension, artifactsWidgets } from "./extensions/artifacts";
-import { type PimConfig, PimExtensions, type WidgetContext, localize } from "./extensions/define";
+import { ExtensionDataStore } from "./extensions/data";
+import { type Ability, checkToolNames, type PimConfig, PimExtensions, type WidgetContext, localize } from "./extensions/define";
 import { goalsExtension, goalsWidgets } from "./extensions/goals";
 import {
 	appToolPermission,
@@ -244,6 +247,9 @@ export class Pim extends Agent<Env> {
 	});
 	readonly registry = createRegistry();
 	#extensions: PimExtensions | undefined;
+	/** Extensions' own data, each apart from the others'. */
+	readonly extensionData = new ExtensionDataStore(this.ctx.storage.sql);
+	#abilities: Map<string, Ability> | undefined;
 	/** What this agent has used, and its limits. */
 	readonly usage = new UsageMeter({
 		sql: this.ctx.storage.sql,
@@ -299,11 +305,17 @@ export class Pim extends Agent<Env> {
 			await this.deliverNotification(notification);
 		},
 	});
-	readonly actions: readonly GatedAction[] = [
+	/** Pim's own actions; the extensions' come with their abilities. */
+	readonly #ownActions: readonly GatedAction[] = [
 		httpRequest as GatedAction,
 		...mcpActions(this.apps),
 		watchAction(this.apps, this.appEvents),
 	];
+
+	/** Every action an approval can be for: Pim's own, and the extensions'. */
+	get actions(): readonly GatedAction[] {
+		return [...this.#ownActions, ...[...this.abilities.values()].flatMap((ability) => ability.actions ?? [])];
+	}
 
 	readonly harness = new PiHarness({
 		harness: async ({ storage, context }) => {
@@ -323,11 +335,11 @@ export class Pim extends Agent<Env> {
 				teamExtension({
 					roleOf: (session) => this.#roleOf(session),
 					runs: this.team,
-					memberAgent: (member) => this.#memberAgent(member),
+					memberAgent: (member, pim) => this.#memberAgent(member, pim),
 					ask: (conversation, task, operation) => this.#askMember(conversation, task, operation),
 				}),
 			);
-			this.registry.install(approvalsExtension(services, this.actions));
+			this.registry.install(approvalsExtension(services, this.#ownActions));
 			this.registry.install(webExtension({ ai: this.env.AI, searchProvider: this.env.PIM_WEB_SEARCH }));
 			this.registry.install(artifactsExtension({ artifacts: this.artifacts, assertOpen: () => this.#assertOpen() }));
 			// Restored connections reconnect in the background after a wake; give them a moment.
@@ -336,6 +348,20 @@ export class Pim extends Agent<Env> {
 			const apps = mcpExtensions(this.apps, services, this.#appExtras(services));
 			this.registry.install(apps.apps);
 			this.registry.install(this.memory.extension);
+			// No extension's tool may take the name of one of Pim's, or another extension's.
+			checkToolNames(
+				[...this.abilities].map(([id, ability]) => ({ id, ability })),
+				[
+					...this.registry
+						.snapshot()
+						.tools()
+						// A harness opened again finds the abilities installed already: they don't count against themselves.
+						.filter(({ extension }) => !this.abilities.has(extension.name))
+						.map(({ tool }) => tool.name),
+					...this.#ownActions.map((action) => action.name),
+				],
+			);
+			this.#installAbilities(services);
 			// Last: the apps' tools come and go, and pi only appends cheaply at the end.
 			this.registry.install(apps.tools);
 			// Visits' tools, as their hosts last allowed, so a visit's run resumes with them; each turn asks again.
@@ -462,10 +488,15 @@ export class Pim extends Agent<Env> {
 	/** pi's run policy, shared by every session. */
 	protected harnessSettings(): HarnessSettings {
 		const registry = this.registry;
+		const abilities = this.abilities;
 		return {
-			// Every extension but visits': only a visit's own conversation selects its extension.
+			// Every extension but visits' and abilities': a visit's own conversation selects its extension,
+			// and the chats of Pims that use an ability select it.
 			get extensions() {
-				return registry.snapshot().installed().filter((extension) => !extension.name.startsWith(VISIT_PREFIX));
+				return registry
+					.snapshot()
+					.installed()
+					.filter((extension) => !extension.name.startsWith(VISIT_PREFIX) && !abilities.has(extension.name));
 			},
 			// 1, 2, 4, 8, 16 s: about 30 s for a rate-limited model to recover.
 			retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
@@ -671,6 +702,7 @@ export class Pim extends Agent<Env> {
 		}
 		this.store.touchSession(session, from === "user" && !this.visits.bySession(session) ? titleFrom(content) : undefined);
 		try {
+			await this.#selectAbilities(session);
 			receipt = await this.harness.submit(content, { session, ...options });
 		} catch (error) {
 			if (run !== undefined) this.usage.releaseRun(run);
@@ -1313,13 +1345,19 @@ export class Pim extends Agent<Env> {
 	 * (both come back to the conversation that asked), and handing out tasks.
 	 * A member with a list of tools gets only those.
 	 */
-	#memberAgent(member: TeamMember): AgentChange {
+	#memberAgent(member: TeamMember, pim: Persona): AgentChange {
 		const snapshot = this.registry.snapshot();
 		const removed = [MESSAGING_EXTENSION, SCHEDULE_EXTENSION, TEAM_EXTENSION].flatMap((name) => snapshot.extension(name) ?? []);
-		const kept = snapshot.tools().filter(({ extension, tool }) => !removed.includes(extension) && !LEAD_ONLY_TOOLS.has(tool.name));
-		if (member.tools) return { extensions: { remove: removed }, tools: kept.filter(({ tool }) => member.tools!.includes(tool.name)).map(({ tool }) => tool) };
+		// Members work with their Pim's abilities too.
+		const added = this.extensions.abilitiesOf(pim.base).flatMap((name) => snapshot.extension(name) ?? []);
+		const extensions = { add: added, remove: removed };
+		const kept = snapshot
+			.tools()
+			.filter(({ extension, tool }) => !removed.includes(extension) && !LEAD_ONLY_TOOLS.has(tool.name))
+			.filter(({ extension }) => !this.abilities.has(extension.name) || added.includes(extension));
+		if (member.tools) return { extensions, tools: kept.filter(({ tool }) => member.tools!.includes(tool.name)).map(({ tool }) => tool) };
 		const leadOnly = snapshot.tools().filter(({ tool }) => LEAD_ONLY_TOOLS.has(tool.name));
-		return { extensions: { remove: removed }, ...(leadOnly.length > 0 ? { tools: { remove: leadOnly.map(({ tool }) => tool) } } : {}) };
+		return { extensions, ...(leadOnly.length > 0 ? { tools: { remove: leadOnly.map(({ tool }) => tool) } } : {}) };
 	}
 
 	/** Gives a member its task and waits for its answer. */
@@ -1385,6 +1423,62 @@ export class Pim extends Agent<Env> {
 		return this.#extensions;
 	}
 
+	/** The extensions' abilities, built once for this agent, by extension id. */
+	get abilities(): Map<string, Ability> {
+		if (this.#abilities) return this.#abilities;
+		const pim = this;
+		this.#abilities = new Map(
+			this.extensions.list().flatMap((extension) => {
+				if (!extension.ability) return [];
+				const ability = extension.ability({
+					data: this.extensionData.for(extension.id),
+					get timeZone() {
+						return pim.settings().timeZone;
+					},
+					notify: async (title, body) => {
+						const notification = this.store.addNotification({ id: crypto.randomUUID(), session: null, title, body });
+						await this.deliverNotification(notification);
+					},
+				});
+				return [[extension.id, ability] as const];
+			}),
+		);
+		return this.#abilities;
+	}
+
+	/**
+	 * Installs (or replaces, keeping their place) each ability as a pi
+	 * extension named after its extension: its tools, its actions' tools as
+	 * the person's permissions have them, sections, hooks and tasks.
+	 */
+	#installAbilities(services: PimServices): void {
+		for (const [id, { actions, ...ability }] of this.abilities) {
+			this.registry.install(defineExtension({ ...ability, name: id, tools: [...(ability.tools ?? []), ...gatedTools(services, actions ?? [])] }));
+		}
+	}
+
+	/**
+	 * Gives a chat the abilities its Pim uses, as they are now, before its next
+	 * run: its Pim, the Pim's base, or the extensions may have changed since.
+	 * Visits choose their own extensions, and team members get theirs when
+	 * made. A chat whose selection is unchanged isn't written to.
+	 */
+	async #selectAbilities(session: string): Promise<void> {
+		if (this.visits.bySession(session) || this.team.run(session)) return;
+		const wanted = this.extensions.abilitiesOf(this.personas.ofSession(session).base);
+		const key = wanted.join(" ");
+		if ((this.personas.abilities(session) ?? "") === key) return;
+		const snapshot = this.registry.snapshot();
+		const add = wanted.flatMap((name) => snapshot.extension(name) ?? []);
+		await (await this.harness.conversation(session)).configure({ extensions: add.length > 0 ? { add } : null }, BACKGROUND_CONTEXT);
+		this.personas.setAbilities(session, key);
+	}
+
+	/** A copy's base, if this deployment still has it; else the copy builds on the default Pim. */
+	#installedBase(input: PersonaInput): PersonaInput {
+		return input.base && !this.extensions.pim(input.base) ? { ...input, base: undefined } : input;
+	}
+
 	/** A base given through the API must be a Pim some installed extension brings. */
 	#checkBase(input: PersonaInput): PersonaInput {
 		if (input.base && !this.extensions.pim(input.base)) throw new HttpError(400, `No installed extension brings the Pim ${input.base}`);
@@ -1398,7 +1492,7 @@ export class Pim extends Agent<Env> {
 	async #dashboard(pim: Persona, locale: string) {
 		const base = pim.base === null ? undefined : this.extensions.pim(pim.base);
 		const deleted = this.store.deletedSessions();
-		const context: WidgetContext = {
+		const context: Omit<WidgetContext, "data"> = {
 			pim: { id: pim.id, name: pim.name, default: pim.default },
 			timeZone: this.settings().timeZone,
 			chatOf: (session) => {
@@ -1413,7 +1507,8 @@ export class Pim extends Agent<Env> {
 				const widget = this.extensions.widget(ref)!;
 				const shown = { id: ref, title: localize(widget.title, locale), empty: localize(widget.empty, locale) };
 				try {
-					return { ...shown, ...(await widget.load(context)) };
+					const data = this.extensionData.for(ref.slice(0, ref.indexOf("/")));
+					return { ...shown, ...(await widget.load({ ...context, data })) };
 				} catch (error) {
 					console.warn(`widget ${ref} failed`, error);
 					return { ...shown, failed: true };
@@ -1455,9 +1550,10 @@ export class Pim extends Agent<Env> {
 		instructions: string;
 		apps: readonly { name: string; url: string }[];
 		team: readonly TeamMember[];
+		base: string | null;
 	}): Promise<Persona> {
 		this.#assertOpen();
-		const input = personaInput({ ...template });
+		const input = this.#installedBase(personaInput({ ...template }));
 		return this.personas.create(input, { template: template.id, author: template.author });
 	}
 
@@ -1465,7 +1561,7 @@ export class Pim extends Agent<Env> {
 	async adoptDefaultPim(pim: PersonaInput & { author: string }): Promise<Persona> {
 		this.#assertOpen();
 		const { author, ...input } = pim;
-		return this.personas.replaceDefault(personaInput({ ...input }), { template: "default", author });
+		return this.personas.replaceDefault(this.#installedBase(personaInput({ ...input })), { template: "default", author });
 	}
 
 	// Visits: Pims shared with this one's owner, and their conversations with them.
@@ -1685,6 +1781,7 @@ export class Pim extends Agent<Env> {
 			sessions,
 			memory: { entries: this.memory.store.page(Number.MAX_SAFE_INTEGER) },
 			goals: this.store.goals(),
+			extensions: this.extensionData.export(),
 			schedules: (await this.services().listSchedules()).map(describeSchedule),
 			approvals: this.store.approvals(),
 			permissions: this.store.toolPermissions(),
@@ -2639,7 +2736,9 @@ export class Pim extends Agent<Env> {
 	/** Rebuilds the extensions whose tools describe the approval policy, once pi's registry has been set up. */
 	#reinstallApprovals(): void {
 		if (!this.registry.snapshot().extension("pim.approvals")) return;
-		this.registry.install(approvalsExtension(this.services(), this.actions));
+		const services = this.services();
+		this.registry.install(approvalsExtension(services, this.#ownActions));
+		this.#installAbilities(services);
 		this.#installApps();
 	}
 

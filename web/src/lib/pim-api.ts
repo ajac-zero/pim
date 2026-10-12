@@ -127,6 +127,23 @@ export type PersonaInput = {
   instructions: string;
   apps: SuggestedApp[];
   team: TeamMember[];
+  /** Left out, a new Pim builds on the deployment's default Pim. */
+  base?: string | null;
+};
+
+/** What this deployment installed: the Pims people can build on, and widgets. */
+export type InstalledExtension = {
+  id: string;
+  name: string;
+  description: string;
+  pims: { ref: string; name: string; description: string }[];
+  widgets: string[];
+};
+
+export type Extensions = {
+  extensions: InstalledExtension[];
+  /** What new Pims build on when not told otherwise. */
+  defaultPim: string | null;
 };
 
 /** A Pim someone published for others to make their own. */
@@ -491,6 +508,7 @@ export const pim = {
     call<Persona>(`/personas/${id}/icon`, { method: "DELETE" }),
   deletePersona: (id: string) =>
     call<{ deleted: boolean }>(`/personas/${id}`, { method: "DELETE" }),
+  extensions: () => call<Extensions>("/extensions"),
   /** Makes it the Pim chats started without choosing one talk with. */
   makeDefaultPersona: (id: string) =>
     call<Persona>(`/personas/${id}/default`, { method: "POST" }),

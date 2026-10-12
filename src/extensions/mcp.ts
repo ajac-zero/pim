@@ -11,6 +11,7 @@ import {
 	type ResolvedPermission,
 	resolvePermission,
 } from "./approvals";
+import type { PimApp } from "./define";
 import { json, type PimServices, text } from "./services";
 
 /**
@@ -209,44 +210,39 @@ export function mcpActions(bridge: McpBridge): GatedAction[] {
 		},
 	});
 
-	const connect = defineGatedAction({
-		name: "connect_app",
-		description:
-			"Connect an app through its remote MCP server URL, giving you its tools. Use the URL the app's documentation gives for its MCP server.",
-		parameters: Type.Object({
-			name: Type.String({ minLength: 1, maxLength: 40, description: "Short name, like Calendar or Linear." }),
-			url: Type.String({ pattern: "^https://" }),
-		}),
-		summarize: ({ name, url }) => `Connect ${name} (${url}) and let me use its tools`,
-		async run({ name, url }) {
-			const result = await bridge.connect(name, url);
-			if (result.authUrl) {
-				return `The app needs the user to sign in before it can be used. Give them this link: ${result.authUrl}`;
-			}
-			const tools = bridge.tools().filter((tool) => tool.serverId === result.id);
-			return `Connected ${name}. Its tools: ${tools.map((tool) => toolName(result.id, tool.name)).join(", ") || "none"}.`;
-		},
-	});
+	return [call as GatedAction];
+}
 
-	return [call as GatedAction, connect as GatedAction];
+/** Each connected app's tools are a pi extension of their own; a chat selects those of the apps its Pim works with. */
+export const APP_PREFIX = "pim.app.";
+export const appExtensionName = (serverId: string) => `${APP_PREFIX}${serverId}`;
+
+/** The connected server for an app a Pim lists, matched by URL. */
+export function serverFor(servers: readonly McpServerInfo[], app: PimApp): McpServerInfo | undefined {
+	return servers.find((server) => server.url === app.url);
 }
 
 /**
- * The connected apps, as two pi extensions rebuilt whenever the catalog changes.
+ * The connected apps as pi extensions, rebuilt whenever the catalog changes:
+ * `apps`, which every chat has (the `connected_apps` section and the tools
+ * that find, list and connect apps), and one extension per ready app with its
+ * tools, which only the chats of Pims that list the app select.
  *
  * pi sends tools and sections in registry order and re-sends all of them when
  * one appears out of order, so the parts that come and go must sit at the end:
- * `apps` (always present: the `connected_apps` section and `list_apps`) goes
- * anywhere, `tools` (the apps' own tools, no sections) goes last. A newly
+ * `apps` (always present) goes anywhere, the apps' own tools go last. A newly
  * connected app's tools are then appended to what the provider has cached.
  */
 export function mcpExtensions(
 	bridge: McpBridge,
 	services: PimServices,
 	extras: { catalog: AppCatalog; tools: readonly ToolRegistration[] },
+	/** The apps a conversation's Pim works with: its base's, then the person's own. */
+	appsOf: (session: string) => readonly PimApp[],
 ) {
-	const servers = new Map(bridge.servers().map((server) => [server.id, server]));
-	const tools: ToolRegistration[] = [];
+	const all = bridge.servers();
+	const servers = new Map(all.map((server) => [server.id, server]));
+	const byServer = new Map<string, ToolRegistration[]>();
 	for (const tool of bridge.tools()) {
 		const server = servers.get(tool.serverId);
 		if (!server || server.state !== "ready") continue;
@@ -255,6 +251,8 @@ export function mcpExtensions(
 		const name = toolName(server.id, tool.name);
 		const gated = permission === "ask";
 		const description = `[${server.name}] ${tool.description ?? tool.annotations?.title ?? tool.name}`;
+		const tools = byServer.get(server.id) ?? [];
+		byServer.set(server.id, tools);
 		tools.push(
 			defineTool({
 				name,
@@ -287,26 +285,60 @@ export function mcpExtensions(
 
 	const listApps = defineTool({
 		name: "list_apps",
-		description: "List the apps connected to you, their state, and their tools.",
+		description: "List the apps this Pim works with, whether each is connected, and their tools.",
 		parameters: Type.Object({}),
 		replay: "safe",
-		async execute() {
+		async execute(_args, api) {
 			const catalog = bridge.tools();
 			return json(
-				bridge.servers().map((server) => ({
-					name: server.name,
-					state: server.state,
-					...(server.error ? { error: server.error } : {}),
-					tools: catalog.filter((tool) => tool.serverId === server.id).map((tool) => toolName(server.id, tool.name)),
-				})),
+				appsOf(String(api.conversationId)).map((app) => {
+					const server = serverFor(all, app);
+					return {
+						name: app.name,
+						state: server?.state ?? "not connected",
+						...(server?.error ? { error: server.error } : {}),
+						tools: server ? catalog.filter((tool) => tool.serverId === server.id).map((tool) => toolName(server.id, tool.name)) : [],
+					};
+				}),
 			);
+		},
+	});
+
+	const connectApp = defineTool({
+		name: "connect_app",
+		description:
+			"Connect one of the apps this Pim works with that isn't connected yet, giving you its tools. If the person must sign in first, you get a link to give them. Only the apps listed in connected_apps can be connected.",
+		parameters: Type.Object({ app: Type.String({ description: "The app's name, as connected_apps lists it." }) }),
+		replay: "safe",
+		async execute({ app: wanted }, api) {
+			const mine = appsOf(String(api.conversationId));
+			const app = mine.find((candidate) => candidate.name.toLowerCase() === wanted.trim().toLowerCase());
+			if (!app) {
+				const names = mine.map((candidate) => candidate.name).join(", ");
+				return text(
+					`This Pim doesn't work with ${wanted}${names ? `; its apps are ${names}` : ""}. The person adds apps to this Pim in Your Pims.`,
+					true,
+				);
+			}
+			const existing = serverFor(bridge.servers(), app);
+			if (existing?.state === "ready") return text(`${app.name} is already connected.`);
+			try {
+				const result = await bridge.connect(app.name, app.url);
+				if (result.authUrl) {
+					return text(`${app.name} needs the person to sign in before it can be used. Give them this link: ${result.authUrl}`);
+				}
+				const tools = bridge.tools().filter((tool) => tool.serverId === result.id);
+				return text(`Connected ${app.name}. Its tools: ${tools.map((tool) => toolName(result.id, tool.name)).join(", ") || "none"}.`);
+			} catch (error) {
+				return text(error instanceof Error ? error.message : String(error), true);
+			}
 		},
 	});
 
 	const findApp = defineTool({
 		name: "find_app",
 		description:
-			"Find an app's remote MCP server in the official MCP Registry, to connect it with connect_app. The app's own server comes first; others are third parties that relay the app through their own server.",
+			"Find an app's remote MCP server in the official MCP Registry, so the person can add it to this Pim's apps. The app's own server comes first; others are third parties that relay the app through their own server.",
 		parameters: Type.Object({
 			app: Type.String({ minLength: 2, maxLength: 60, description: "The app's name, like Linear or Notion." }),
 		}),
@@ -322,14 +354,21 @@ export function mcpExtensions(
 
 	const apps = defineExtension({
 		name: "pim.apps",
-		tools: [listApps, findApp, ...extras.tools],
+		tools: [listApps, connectApp, findApp, ...extras.tools],
 		sections: [
 			// Always present, so it never appears out of order (which makes pi re-send every section).
-			section("connected_apps", () => {
-				const ready = [...servers.values()].filter((server) => server.state === "ready");
-				if (ready.length === 0) return "No apps are connected. The user can connect one, or ask you to with connect_app.";
-				return ready
-					.map((server) => {
+			section("connected_apps", ({ conversationId }) => {
+				const mine = appsOf(String(conversationId));
+				if (mine.length === 0) {
+					return "This Pim works with no apps. The person adds them to this Pim in Your Pims; find_app finds an app's server for them.";
+				}
+				return mine
+					.map((app) => {
+						const server = serverFor(all, app);
+						if (server?.state !== "ready") {
+							const why = server?.state === "authenticating" ? "waiting for the person to sign in" : "not connected";
+							return `## ${app.name}\n(${why}: connect_app connects it)`;
+						}
 						const lines = [`## ${server.name}`];
 						if (server.instructions) lines.push(clip(server.instructions, MAX_INSTRUCTION_CHARS));
 						// Skills come from the app and are untrusted like its instructions; they load with read_skill.
@@ -351,5 +390,8 @@ export function mcpExtensions(
 		],
 	});
 
-	return { apps, tools: defineExtension({ name: "pim.mcp", tools }) };
+	return {
+		apps,
+		tools: [...byServer].map(([id, tools]) => defineExtension({ name: appExtensionName(id), tools })),
+	};
 }

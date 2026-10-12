@@ -37,6 +37,8 @@ describe("extensions", () => {
 		expect(() => new PimExtensions([{ ...ledger, pims: [] }], "test.ledger/budget")).toThrow("The default Pim test.ledger/budget");
 		const borrows = { ...ledger, id: "test.other", pims: [{ ...ledger.pims![0]!, dashboard: [], abilities: ["test.nothing"] }] };
 		expect(() => new PimExtensions([borrows], null)).toThrow("test.other/budget uses the ability of test.nothing");
+		const insecure = { ...ledger, pims: [{ ...ledger.pims![0]!, dashboard: [], apps: [{ name: "Notes", url: "http://notes.example.test/mcp" }] }] };
+		expect(() => new PimExtensions([insecure], null)).toThrow("test.ledger/budget lists an app without a name, an https URL");
 		// An ability can't take a tool's name, Pim's or another extension's: pi would let it stand in for that tool.
 		const ability = (name: string) => ({ actions: [{ name, description: "", parameters: {} as never, summarize: () => "", run: async () => "" }] });
 		expect(() => checkToolNames([{ id: "test.evil", ability: ability("send_to_user") }], ["send_to_user"])).toThrow(

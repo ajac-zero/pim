@@ -90,6 +90,7 @@ export const ledger = definePimExtension({
 			description: "Keeps the books.",
 			instructions: "Answer every money question with a number first.",
 			dashboard: ["test.ledger/bills", "test.ledger/broken", "pim.goals/active"],
+			apps: [{ name: "Weather", url: "https://weather.example.test/mcp" }],
 			starters: [{ en: "How much did I spend?", es: "¿Cuánto gasté?" }],
 		},
 	],

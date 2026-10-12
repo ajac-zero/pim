@@ -252,7 +252,7 @@ function PersonaCard({ persona }: { persona: Persona }) {
           {persona.instructions}
         </p>
       )}
-      {persona.apps.length > 0 && <SuggestedApps apps={persona.apps} />}
+      <PimApps persona={persona} />
       {persona.team.length > 0 && (
         <ul
           className="mt-2 flex flex-wrap gap-1.5"
@@ -387,9 +387,20 @@ function PersonaCard({ persona }: { persona: Persona }) {
   );
 }
 
-/** Apps a Pim works with, each connectable from here unless it already is. */
-function SuggestedApps({ apps }: { apps: SuggestedApp[] }) {
+/**
+ * The apps a Pim works with: those of the Pim it builds on, then its own,
+ * each connectable from here unless it already is.
+ */
+function PimApps({ persona }: { persona: Persona }) {
   const { t } = useI18n();
+  const { data: extensions } = useQuery(extensionsQuery());
+  const base = extensions?.extensions
+    .flatMap((extension) => extension.pims)
+    .find((candidate) => candidate.ref === persona.base);
+  const apps = [...(base?.apps ?? []), ...persona.apps].filter(
+    (app, index, all) =>
+      all.findIndex((other) => other.url === app.url) === index,
+  );
   const queryClient = useQueryClient();
   const { data: connected = [] } = useQuery(appsQuery());
   const connect = useMutation({
@@ -402,6 +413,7 @@ function SuggestedApps({ apps }: { apps: SuggestedApp[] }) {
     },
     onError: (error) => toast.error(error.message),
   });
+  if (apps.length === 0) return null;
   return (
     <ul className="mt-2 flex flex-wrap gap-1.5" aria-label={t("suggestedApps")}>
       {apps.map((app) => {

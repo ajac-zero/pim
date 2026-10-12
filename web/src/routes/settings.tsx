@@ -8,6 +8,7 @@ import {
   Loader2,
   LogOut,
   Mail,
+  Plug,
   Trash2,
 } from "lucide-react";
 import { type FormEvent, useState } from "react";
@@ -36,6 +37,7 @@ import {
 } from "~/lib/auth";
 import {
   CHATGPT_PROVIDER,
+  type ConnectedApp,
   type EmailState,
   type ModelInfo,
   type ModelSettings,
@@ -49,6 +51,7 @@ import {
 } from "~/lib/push";
 import {
   accountQuery,
+  appsQuery,
   emailQuery,
   modelQuery,
   profileQuery,
@@ -80,6 +83,7 @@ function SettingsPage() {
         <ModelChoices settings={data} />
       </section>
       <PreferencesSection />
+      <ConnectedAppsSection />
       <ToolPermissionsSection />
       <EmailSection />
       <PushSection />
@@ -386,6 +390,111 @@ function ProfileSection() {
           </Button>
         </div>
       </form>
+    </section>
+  );
+}
+
+/**
+ * The apps you connected, with the Pims that work with each: only their
+ * chats get its tools. An app no Pim lists can only be removed here.
+ */
+function ConnectedAppsSection() {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const { data: apps } = useQuery(appsQuery());
+  const remove = useMutation({
+    mutationFn: (app: ConnectedApp) => pim.removeApp(app.id),
+    onSuccess: (_result, app) => {
+      queryClient.invalidateQueries({ queryKey: ["apps"] });
+      queryClient.invalidateQueries({ queryKey: ["permissions"] });
+      toast.success(t("appRemoved", { name: app.name }));
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  if (!apps) return null;
+  const stateLabel = (app: ConnectedApp) =>
+    app.state === "ready"
+      ? t("appReady")
+      : app.state === "authenticating"
+        ? t("appNeedsSignIn")
+        : app.state === "failed"
+          ? t("appFailed")
+          : t("appConnecting");
+  return (
+    <section className="mt-10 space-y-3">
+      <h2 className="font-medium text-muted-foreground text-sm">
+        {t("connectedApps")}
+      </h2>
+      <p className="px-1 text-muted-foreground text-xs">
+        {t("connectedAppsDescription")}
+      </p>
+      {apps.length === 0 ? (
+        <p className="rounded-xl border px-4 py-3 text-muted-foreground text-sm">
+          {t("noConnectedApps")}
+        </p>
+      ) : (
+        <ul
+          className="divide-y rounded-xl border"
+          aria-label={t("connectedApps")}
+        >
+          {apps.map((app) => (
+            <li key={app.id} className="flex items-center gap-3 px-4 py-3">
+              <Plug className="size-4 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2">
+                  <span className="truncate font-medium text-sm">
+                    {app.name}
+                  </span>
+                  <span
+                    className={cn(
+                      "shrink-0 rounded border px-1 text-[10px]",
+                      app.state === "ready"
+                        ? "text-green-700 dark:text-green-500"
+                        : app.state === "failed"
+                          ? "text-destructive"
+                          : "text-muted-foreground",
+                    )}
+                    title={app.error ?? undefined}
+                  >
+                    {stateLabel(app)}
+                  </span>
+                </span>
+                <span
+                  className="block truncate text-muted-foreground text-xs"
+                  title={app.url}
+                >
+                  {app.url}
+                </span>
+                <span className="block truncate text-muted-foreground text-xs">
+                  {app.pims.length > 0
+                    ? t("appUsedBy", { pims: app.pims.join(", ") })
+                    : t("appUnused")}
+                  {app.state === "ready" &&
+                    ` · ${t("toolCount", { count: app.tools.length })}`}
+                </span>
+              </span>
+              {app.authUrl && app.state === "authenticating" && (
+                <Button variant="outline" size="sm" asChild>
+                  <a href={app.authUrl} target="_blank" rel="noopener">
+                    {t("signIn")} <ExternalLink />
+                  </a>
+                </Button>
+              )}
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-muted-foreground"
+                aria-label={t("removeAppNamed", { name: app.name })}
+                title={t("removeAppNamed", { name: app.name })}
+                disabled={remove.isPending}
+                onClick={() => remove.mutate(app)}
+              >
+                <Trash2 />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

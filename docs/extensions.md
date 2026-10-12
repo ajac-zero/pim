@@ -9,8 +9,8 @@ Pim's own Pim is an extension too, [`pim.assistant`](../src/extensions/assistant
 | Layer | What it is | Where |
 | --- | --- | --- |
 | Core | How every Pim works: talking through `send_to_user`, approvals, honesty, time. No Pim's instructions change it | The `preamble` section in [`src/extensions/persona.ts`](../src/extensions/persona.ts) |
-| Abilities | Tools, prompt sections, hooks and background tasks, plus actions that ask first and widgets. Pim's own (goals, schedules, memory, artifacts, apps, teams, the web) are every Pim's; an extension's go only to the Pims that use it | `src/extensions/`, and extensions' `ability` |
-| Pims | A name, instructions, the abilities it uses, a dashboard and starters, defined by an extension; people's own Pims build on one | Extensions in `pim.config.ts` |
+| Abilities | Tools, prompt sections, hooks and background tasks, plus actions that ask first and widgets. Pim's own (goals, schedules, memory, artifacts, teams, the web) are every Pim's; an extension's go only to the Pims that use it | `src/extensions/`, and extensions' `ability` |
+| Pims | A name, instructions, the abilities it uses, the apps it works with, a dashboard and starters, defined by an extension; people's own Pims build on one | Extensions in `pim.config.ts` |
 
 A person's Pim stores the extension's Pim it builds on as `base`, such as `pim.assistant/pim`; the Pim editor's **Builds on** chooses it. At every request its chats get the core preamble, then a `pim` section with the Pim's name, the base's instructions, and the person's own instructions, which win. They also get the abilities the base uses: its own extension's, and those it lists in `abilities`. Edits to the extension reach every Pim built on it at the next deploy, and a Pim that changes its base gets the new abilities in its chats from their next message: they aren't copies. Publishing a Pim and the Pim everyone starts with keep its base; a copy whose base this deployment doesn't have builds on the default Pim.
 
@@ -75,6 +75,8 @@ export const ledger = definePimExtension({
 			dashboard: ["ledger/bills", "pim.goals/active", "pim.schedule/upcoming"],
 			// Abilities of other extensions it uses; its own extension's always.
 			abilities: [],
+			// Remote MCP servers it works with: each person connects them with their own accounts.
+			apps: [{ name: "Bank", url: "https://mcp.bank.example/mcp" }],
 			starters: [{ en: "How much did I spend?", es: "¿Cuánto gasté?" }],
 		},
 	],
@@ -108,6 +110,10 @@ It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps
 
 - **Checked when an agent starts.** Ids must be lowercase letters, digits, dots and hyphens, and unique. Every dashboard must name a widget some installed extension provides, and `defaultPim` must exist. A mistake fails loudly, with the reason, as soon as anything uses extensions (a chat's prompt, the Pims list, a dashboard), instead of drawing a broken dashboard. Run `pnpm test` after changing `pim.config.ts`: every test uses it.
 - **Text people read** is a string, or one per language with English always there. The dashboard is asked for in the person's language (`?locale=`), and English stands in for a missing translation. Instructions are for the model, so they are one string.
+
+## Apps
+
+A Pim's `apps` are the remote MCP servers its chats work with. Each person connects them with their own accounts, from the Pim's card in Your Pims or by asking the Pim, whose `connect_app` connects only the apps its Pim lists. A chat gets the tools and instructions of the connected apps its Pim lists: the extension's Pim's `apps`, then the person's own Pim's. Apps the person connected for another Pim stay out of it, and the model can't add an app by itself; `find_app` only finds a server's URL for the person to add. URLs must be https, and unique within a Pim.
 
 ## Widgets
 

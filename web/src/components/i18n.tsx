@@ -19,7 +19,7 @@ const translations = {
     moreApprovalOptions: "More approval options",
     yourPims: "Your Pims",
     yourPimsDescription:
-      "Your default Pim talks in the chats you start without choosing one, and its dashboard is your home. Make others for different jobs, like a running coach or a trip planner, and start a chat with one to talk with it. They all share your memory and apps.",
+      "Your default Pim talks in the chats you start without choosing one, and its dashboard is your home. Make others for different jobs, like a running coach or a trip planner, and start a chat with one to talk with it. They all share your memory and connected apps, and each works only with the apps it lists.",
     noPims: "No Pims yet. Make one, or find one others published.",
     newPim: "New Pim",
     editPim: "Edit Pim",
@@ -33,7 +33,7 @@ const translations = {
       "How it should work: what to focus on, how to talk, what to ask before doing.",
     suggestedApps: "Apps it works with",
     suggestedAppsHint:
-      "MCP server URLs. Whoever uses this Pim connects them with their own accounts.",
+      "MCP server URLs. This Pim's chats can use only these apps, and those of the Pim it builds on. Whoever uses it connects them with their own accounts.",
     appName: "App",
     appUrl: "MCP server URL",
     removeApp: "Remove app",
@@ -144,6 +144,20 @@ const translations = {
     visitUnavailable: "No longer shared",
     visitBanner:
       "You're messaging {username}'s Pim. It acts for {username}, within what they allow you. Your messages use your own usage.",
+    connectedApps: "Connected apps",
+    connectedAppsDescription:
+      "The apps you connected. A chat uses an app only when its Pim lists it; add apps to a Pim in Your Pims.",
+    noConnectedApps:
+      "No apps connected. Connect the apps a Pim works with from Your Pims.",
+    appUsedBy: "Used by {pims}",
+    appUnused: "No Pim works with it",
+    appReady: "Connected",
+    appNeedsSignIn: "Waiting for you to sign in",
+    appFailed: "Couldn't connect",
+    appConnecting: "Connecting",
+    signIn: "Sign in",
+    removeAppNamed: "Remove {name}",
+    appRemoved: "Removed {name}.",
     toolPermissions: "Tool permissions",
     toolPermissionsDescription:
       "What Pim may do with each tool. Off: Pim can't use it. Ask: Pim waits for your approval. On: Pim uses it without asking.",
@@ -549,7 +563,7 @@ const translations = {
     moreApprovalOptions: "Más opciones de aprobación",
     yourPims: "Tus Pims",
     yourPimsDescription:
-      "Tu Pim predeterminado habla en los chats que empiezas sin elegir uno, y su panel es tu inicio. Crea otros para distintas tareas, como un entrenador de running o un planificador de viajes, y empieza un chat con uno para hablar con él. Todos comparten tu memoria y tus apps.",
+      "Tu Pim predeterminado habla en los chats que empiezas sin elegir uno, y su panel es tu inicio. Crea otros para distintas tareas, como un entrenador de running o un planificador de viajes, y empieza un chat con uno para hablar con él. Todos comparten tu memoria y tus apps conectadas, y cada uno trabaja solo con las apps que indica.",
     noPims: "Aún no hay Pims. Crea uno, o busca uno que otros publicaron.",
     newPim: "Nuevo Pim",
     editPim: "Editar Pim",
@@ -563,7 +577,7 @@ const translations = {
       "Cómo debe trabajar: en qué enfocarse, cómo hablar, qué preguntar antes de actuar.",
     suggestedApps: "Apps con las que trabaja",
     suggestedAppsHint:
-      "URLs de servidores MCP. Quien use este Pim las conecta con sus propias cuentas.",
+      "URLs de servidores MCP. Los chats de este Pim solo pueden usar estas apps y las del Pim en el que se basa. Quien lo use las conecta con sus propias cuentas.",
     appName: "App",
     appUrl: "URL del servidor MCP",
     removeApp: "Quitar app",
@@ -674,6 +688,20 @@ const translations = {
     visitUnavailable: "Ya no se comparte",
     visitBanner:
       "Estás escribiendo al Pim de {username}. Actúa para {username}, dentro de lo que te permite. Tus mensajes usan tu propio uso.",
+    connectedApps: "Apps conectadas",
+    connectedAppsDescription:
+      "Las apps que conectaste. Un chat usa una app solo si su Pim la indica; agrega apps a un Pim en Tus Pims.",
+    noConnectedApps:
+      "No hay apps conectadas. Conecta las apps con las que trabaja un Pim desde Tus Pims.",
+    appUsedBy: "La usa {pims}",
+    appUnused: "Ningún Pim trabaja con ella",
+    appReady: "Conectada",
+    appNeedsSignIn: "Esperando a que inicies sesión",
+    appFailed: "No se pudo conectar",
+    appConnecting: "Conectando",
+    signIn: "Iniciar sesión",
+    removeAppNamed: "Quitar {name}",
+    appRemoved: "{name} quitada.",
     toolPermissions: "Permisos de herramientas",
     toolPermissionsDescription:
       "Lo que Pim puede hacer con cada herramienta. Desactivada: Pim no puede usarla. Preguntar: Pim espera tu aprobación. Activada: Pim la usa sin preguntar.",

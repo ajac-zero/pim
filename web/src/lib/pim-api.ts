@@ -115,7 +115,10 @@ export type Widget = { id: string; title: string; empty: string } & (
 );
 
 export type Dashboard = {
-  pim: Pick<Persona, "id" | "name" | "description" | "default" | "base">;
+  pim: Pick<
+    Persona,
+    "id" | "name" | "description" | "default" | "base" | "icon"
+  >;
   /** Messages to start a chat with. */
   starters: string[];
   widgets: Widget[];

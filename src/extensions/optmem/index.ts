@@ -9,6 +9,7 @@ import {
 	type TaskId,
 	type TaskRecord,
 } from "@earendil-works/pi-durable";
+import { definePimExtension } from "../define";
 import { text } from "../services";
 import { type Block, blockName, cover, halves, parseBlock, RAW_MAX } from "./cover";
 import { byteLength, ENTRY_BYTES, entryLine, OptMemStore } from "./store";
@@ -360,3 +361,27 @@ export function createOptMem(options: OptMemOptions) {
 }
 
 export type OptMem = ReturnType<typeof createOptMem>;
+
+/** On a dashboard: the newest memories. Memory is shared by every Pim, so every Pim's dashboard shows the same. */
+export function memoryWidgets(store: OptMemStore) {
+	return definePimExtension({
+		id: "pim.memory",
+		name: "Memory",
+		description: "What Pim remembers about you, in every chat.",
+		widgets: {
+			recent: {
+				title: { en: "Remembered lately", es: "Recordado últimamente" },
+				empty: { en: "Nothing remembered yet. Tell your Pim about yourself.", es: "Aún no recuerda nada. Cuéntale a tu Pim sobre ti." },
+				load: () => ({
+					kind: "list",
+					// Forgotten ones keep their place in the log, empty: skip them.
+					items: store
+						.page(25)
+						.filter((entry) => !entry.forgotten)
+						.slice(0, 5)
+						.map((entry) => ({ title: entry.text, detail: entry.date })),
+				}),
+			},
+		},
+	});
+}

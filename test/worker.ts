@@ -4,6 +4,7 @@ import type { HarnessSettings, ModelRef } from "@earendil-works/pi-durable";
 import type { PiModel } from "agents/harness/pi";
 import { Pim as RealPim } from "../src/agent";
 import type { Mail, Mailer } from "../src/email";
+import { definePimExtension, type PimConfig } from "../src/extensions/define";
 
 export { default, Auth, Directory, Gallery } from "../src/index";
 
@@ -16,7 +17,47 @@ export const napper = fauxProvider({ provider: "napper", models: [{ id: "napper-
 /** Every email the test agents sent, in order: tests read it as an inbox. */
 export const outbox: Mail[] = [];
 
+/**
+ * A deployment's own extension, as tests install it: a Pim with a dashboard
+ * mixing its own widgets with Pim's, one of which always fails.
+ */
+export const ledger = definePimExtension({
+	id: "test.ledger",
+	name: "Ledger",
+	description: "Keeps the books.",
+	widgets: {
+		bills: {
+			title: { en: "Upcoming bills", es: "Próximas facturas" },
+			empty: "No bills.",
+			load: ({ pim }) => ({ kind: "list", items: [{ title: `Rent for ${pim.name}`, time: "2026-11-01T09:00:00.000Z" }] }),
+		},
+		broken: {
+			title: "Bank balance",
+			empty: "",
+			load: () => {
+				throw new Error("The bank is unreachable");
+			},
+		},
+	},
+	pims: [
+		{
+			id: "budget",
+			name: "Budget",
+			description: "Keeps the books.",
+			instructions: "Answer every money question with a number first.",
+			dashboard: ["test.ledger/bills", "test.ledger/broken", "pim.goals/active"],
+			starters: [{ en: "How much did I spend?", es: "¿Cuánto gasté?" }],
+		},
+	],
+});
+
 export class Pim extends RealPim {
+	/** The deployment's extensions, and the tests' own. */
+	protected override pimConfig(): PimConfig {
+		const config = super.pimConfig();
+		return { ...config, extensions: [...config.extensions, ledger] };
+	}
+
 	/** Email works in tests, into `outbox`. */
 	protected override mailer(): Mailer {
 		return { send: async (mail) => void outbox.push(mail) };

@@ -62,6 +62,14 @@ export const artifactVersionQuery = (id: string, version: number) =>
 export const personasQuery = () =>
   queryOptions({ queryKey: ["personas"], queryFn: pim.personas });
 
+/** A Pim's dashboard. Refetched when Pim's activity or the Pim itself changes. */
+export const dashboardQuery = (id: string, locale: string) =>
+  queryOptions({
+    queryKey: ["dashboard", id, locale],
+    queryFn: () => pim.dashboard(id, locale),
+    retry: false,
+  });
+
 /** The Pim everyone who joins starts with: the admin's view. */
 export const defaultPimQuery = () =>
   queryOptions({ queryKey: ["default-pim"], queryFn: admin.defaultPim });

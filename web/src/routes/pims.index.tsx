@@ -8,6 +8,7 @@ import {
   Pencil,
   Plug,
   Plus,
+  Puzzle,
   Star,
   Trash2,
   Users,
@@ -21,6 +22,13 @@ import { EmptyState, Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
+import {
   admin,
   type Persona,
   type PersonaInput,
@@ -32,6 +40,7 @@ import {
   accountQuery,
   appsQuery,
   defaultPimQuery,
+  extensionsQuery,
   personasQuery,
 } from "~/lib/queries";
 
@@ -202,6 +211,7 @@ function PersonaCard({ persona }: { persona: Persona }) {
             </p>
           )}
           <p className="mt-1 flex flex-wrap gap-x-3 text-muted-foreground text-xs">
+            <BuildsOn base={persona.base} />
             {persona.source && (
               <span>
                 {t("fromTemplateBy")}{" "}
@@ -425,6 +435,72 @@ function SuggestedApps({ apps }: { apps: SuggestedApp[] }) {
   );
 }
 
+/** The name of the extension's Pim a Pim builds on, from what the deployment installed. */
+function useBaseName(base: string | null | undefined): string | null {
+  const { data } = useQuery(extensionsQuery());
+  if (!base) return null;
+  const pim = data?.extensions
+    .flatMap((extension) => extension.pims)
+    .find((candidate) => candidate.ref === base);
+  return pim?.name ?? base;
+}
+
+function BuildsOn({ base }: { base: string | null }) {
+  const { t } = useI18n();
+  const name = useBaseName(base);
+  return (
+    <span className="flex items-center gap-1">
+      <Puzzle className="size-3" />
+      {name ? t("buildsOnName", { name }) : t("buildsOnNothing")}
+    </span>
+  );
+}
+
+/** Which extension's Pim a Pim builds on: its habits, abilities and dashboard. */
+function BaseSelect({
+  value,
+  onChange,
+}: {
+  value: string | null | undefined;
+  onChange: (base: string | null) => void;
+}) {
+  const { t } = useI18n();
+  const { data } = useQuery(extensionsQuery());
+  if (!data) return null;
+  const chosen = value === undefined ? data.defaultPim : value;
+  return (
+    <label className="block space-y-1">
+      <span className="font-medium text-sm">{t("buildsOn")}</span>
+      <Select
+        value={chosen ?? NOTHING}
+        onValueChange={(next) => onChange(next === NOTHING ? null : next)}
+      >
+        <SelectTrigger className="w-full" aria-label={t("buildsOn")}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {data.extensions.flatMap((extension) =>
+            extension.pims.map((pim) => (
+              <SelectItem key={pim.ref} value={pim.ref}>
+                {pim.name === extension.name
+                  ? pim.name
+                  : `${pim.name} · ${extension.name}`}
+              </SelectItem>
+            )),
+          )}
+          <SelectItem value={NOTHING}>{t("buildsOnNothingOption")}</SelectItem>
+        </SelectContent>
+      </Select>
+      <span className="block text-muted-foreground text-xs">
+        {t("buildsOnHint")}
+      </span>
+    </label>
+  );
+}
+
+/** The select's value for building on nothing: Radix needs a non-empty one. */
+const NOTHING = "-";
+
 function PersonaForm({
   id,
   initial,
@@ -448,6 +524,7 @@ function PersonaForm({
     name: initial.name,
     description: initial.description,
     instructions: initial.instructions,
+    base: initial.base,
     apps: initial.apps.map((app) => ({ ...app, key: crypto.randomUUID() })),
     team: initial.team.map((member) => ({
       ...member,
@@ -457,8 +534,10 @@ function PersonaForm({
   });
   const save = useMutation({
     mutationFn: () => {
+      const { base, ...rest } = value;
       const input: PersonaInput = {
-        ...value,
+        ...rest,
+        ...(base === undefined ? {} : { base }),
         apps: value.apps.map(({ name, url }) => ({ name, url })),
         team: value.team.map(({ name, instructions, tools }) => {
           const names = tools
@@ -526,6 +605,10 @@ function PersonaForm({
           maxLength={280}
         />
       </label>
+      <BaseSelect
+        value={value.base}
+        onChange={(base) => setValue({ ...value, base })}
+      />
       <label className="block space-y-1">
         <span className="font-medium text-sm">{t("pimInstructions")}</span>
         <textarea

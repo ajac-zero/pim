@@ -133,7 +133,7 @@ export type TeamHost = {
 	roleOf(session: string): Role;
 	readonly runs: TeamStore;
 	/** How a member's conversation differs from its Pim's: its tools. */
-	memberAgent(member: TeamMember): AgentChange;
+	memberAgent(member: TeamMember, pim: Persona): AgentChange;
 	/** Gives a member's conversation its task and waits for the answer. */
 	ask(conversation: string, task: string, operation: string): Promise<{ ok: boolean; text: string }>;
 };
@@ -208,7 +208,7 @@ export function teamExtension(host: TeamHost) {
 				const created = [];
 				for (const member of members) {
 					const conversation = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
-					await configure(tx, conversation.id, host.memberAgent(member!));
+					await configure(tx, conversation.id, host.memberAgent(member!, pim));
 					created.push(conversation.id);
 				}
 				return created;

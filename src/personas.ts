@@ -98,6 +98,10 @@ CREATE TABLE IF NOT EXISTS pim_persona_sessions (
 	session TEXT PRIMARY KEY,
 	persona TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pim_session_abilities (
+	session TEXT PRIMARY KEY,
+	abilities TEXT NOT NULL
+);
 `;
 
 type Row = Record<string, SqlStorageValue>;
@@ -340,6 +344,20 @@ export class PersonaStore {
 		for (const session of sessions) {
 			this.#sql.exec("INSERT INTO pim_persona_sessions (session, persona) VALUES (?, ?) ON CONFLICT (session) DO NOTHING", session, id);
 		}
+	}
+
+	/** The abilities a chat was last given, as space-separated extension ids; null if never. */
+	abilities(session: string): string | null {
+		const [row] = this.#sql.exec("SELECT abilities FROM pim_session_abilities WHERE session = ?", session).toArray();
+		return row ? String(row.abilities) : null;
+	}
+
+	setAbilities(session: string, abilities: string): void {
+		this.#sql.exec(
+			"INSERT INTO pim_session_abilities (session, abilities) VALUES (?, ?) ON CONFLICT (session) DO UPDATE SET abilities = excluded.abilities",
+			session,
+			abilities,
+		);
 	}
 
 	/** Chats tied to a Pim. */

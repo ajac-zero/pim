@@ -1,9 +1,16 @@
+import type { Extension } from "@earendil-works/pi-durable";
+import type { GatedAction } from "./approvals";
+
+export { defineGatedAction, type GatedAction } from "./approvals";
+
 /**
  * Pim extensions: what a deployment adds to every person's Pims, chosen in
  * `pim.config.ts`. An extension can bring Pims, named agents with their own
- * instructions, dashboard and conversation starters, and widgets, the cards
- * a dashboard is made of. A person's Pim builds on one extension's Pim (its
- * `base`), and adds their own name and instructions on top.
+ * instructions, dashboard and conversation starters; widgets, the cards a
+ * dashboard is made of; and an ability: tools, prompt sections, hooks and
+ * background tasks, plus actions that ask the person first. A person's Pim
+ * builds on one extension's Pim (its `base`), and adds their own name and
+ * instructions on top; its chats get the abilities that Pim uses.
  *
  * Widgets are declarative: `load` runs in the person's agent and returns
  * data of a known kind, which the web app draws with its own components. No
@@ -40,6 +47,35 @@ export type WidgetContent =
 	| { readonly kind: "list"; readonly items: readonly ListItem[] }
 	| { readonly kind: "progress"; readonly items: readonly ProgressItem[] };
 
+/** An extension's own data in a person's agent: JSON values by key, apart from every other extension's. */
+export type ExtensionData = {
+	get<T = unknown>(key: string): T | undefined;
+	/** `value` must survive JSON. */
+	put(key: string, value: unknown): void;
+	delete(key: string): boolean;
+	/** Every entry whose key starts with `prefix`, by key. */
+	list<T = unknown>(prefix?: string): { key: string; value: T }[];
+};
+
+/** What an ability gets from the person's agent it runs in. */
+export type AbilityContext = {
+	/** The extension's own data. */
+	readonly data: ExtensionData;
+	/** The person's IANA time zone, as it is when read. */
+	readonly timeZone: string;
+	/** Tells the person: a notification in the app, pushed to their devices and webhook. */
+	notify(title: string, body: string): Promise<void>;
+};
+
+/**
+ * What an extension adds to the chats of Pims that use it: a pi extension
+ * (tools, prompt sections, hooks, wraps, background tasks), plus actions
+ * with effects outside the conversation. Each action is a tool that files an
+ * approval and runs only once the person says yes, under Settings → Tool
+ * permissions like Pim's own.
+ */
+export type Ability = Omit<Extension, "name"> & { readonly actions?: readonly GatedAction[] };
+
 export type WidgetContext = {
 	/** The Pim whose dashboard shows the widget. */
 	readonly pim: { readonly id: string; readonly name: string; readonly default: boolean };
@@ -51,6 +87,8 @@ export type WidgetContext = {
 	chatOf(session: string): string | null;
 	/** The person's IANA time zone. */
 	readonly timeZone: string;
+	/** The data of the extension that brings the widget. */
+	readonly data: ExtensionData;
 };
 
 export type Widget = {
@@ -70,6 +108,12 @@ export type PimDefinition = {
 	readonly instructions: string;
 	/** Its dashboard's widgets, in order, each `<extension>/<widget>`. */
 	readonly dashboard: readonly string[];
+	/**
+	 * Other extensions whose abilities its chats get, by id; its own
+	 * extension's always. Pim's own abilities (memory, goals, schedules,
+	 * artifacts, apps, the web) are every Pim's.
+	 */
+	readonly abilities?: readonly string[];
 	/** Messages the dashboard offers to start a chat with. */
 	readonly starters?: readonly Text[];
 };
@@ -81,6 +125,8 @@ export type PimExtension = {
 	readonly description: string;
 	readonly widgets?: Readonly<Record<string, Widget>>;
 	readonly pims?: readonly PimDefinition[];
+	/** Built once in each person's agent. Its tools and actions must be named apart from every other tool. */
+	readonly ability?: (context: AbilityContext) => Ability;
 };
 
 export type PimConfig = {
@@ -131,6 +177,9 @@ export class PimExtensions {
 			for (const widget of pim.dashboard) {
 				if (!this.widget(widget)) throw new Error(`${ref}'s dashboard shows ${widget}, which no installed extension provides`);
 			}
+			for (const id of pim.abilities ?? []) {
+				if (!this.#extensions.get(id)?.ability) throw new Error(`${ref} uses the ability of ${id}, which no installed extension brings`);
+			}
 		}
 		if (defaultPim !== null && !this.pim(defaultPim)) throw new Error(`The default Pim ${defaultPim} isn't in any installed extension`);
 		this.defaultPim = defaultPim;
@@ -150,10 +199,35 @@ export class PimExtensions {
 		return this.#extensions.get(extension)?.pims?.find((pim) => pim.id === id);
 	}
 
+	/** The extensions whose abilities the chats of a Pim built on `ref` get: its own extension's, then the ones it names. */
+	abilitiesOf(ref: string | null): string[] {
+		if (ref === null) return [];
+		const pim = this.pim(ref);
+		if (!pim) return [];
+		const own = split(ref)[0];
+		return [...new Set([...(this.#extensions.get(own)?.ability ? [own] : []), ...(pim.abilities ?? [])])];
+	}
+
 	widget(ref: string): Widget | undefined {
 		const [extension, id] = split(ref);
 		const widgets = this.#extensions.get(extension)?.widgets;
 		return widgets && Object.hasOwn(widgets, id) ? widgets[id] : undefined;
+	}
+}
+
+/**
+ * Refuses abilities whose tools would take another tool's name: pi lets a
+ * later tool replace an earlier one, so an extension could otherwise stand
+ * in for `send_to_user` or a tool that asks first.
+ */
+export function checkToolNames(abilities: readonly { id: string; ability: Ability }[], taken: Iterable<string>): void {
+	const owners = new Map<string, string>([...taken].map((name) => [name, "Pim"]));
+	for (const { id, ability } of abilities) {
+		for (const name of [...(ability.tools ?? []).map((tool) => tool.name), ...(ability.actions ?? []).map((action) => action.name)]) {
+			const owner = owners.get(name);
+			if (owner !== undefined) throw new Error(`${id} brings a tool named ${name}, which ${owner} already has`);
+			owners.set(name, id);
+		}
 	}
 }
 

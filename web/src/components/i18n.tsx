@@ -56,6 +56,12 @@ const translations = {
     everyonesDefault: "Everyone who joins starts with a copy",
     makeEveryonesDefault: "Make everyone's default",
     makeDefault: "Make default",
+    buildsOn: "Builds on",
+    buildsOnName: "Builds on {name}",
+    buildsOnNothing: "Builds on nothing",
+    buildsOnNothingOption: "Nothing: only its own instructions",
+    buildsOnHint:
+      "Its habits, the tools it gets beyond Pim's own, and its dashboard. Your instructions go on top.",
     madeDefault:
       "{name} is your default Pim now. Your chats stay with the Pims they were started with.",
     pimDashboard: "{name}'s dashboard",
@@ -570,6 +576,12 @@ const translations = {
     everyonesDefault: "Quien se une empieza con una copia",
     makeEveryonesDefault: "Hacerlo el de todos",
     makeDefault: "Hacer predeterminado",
+    buildsOn: "Basado en",
+    buildsOnName: "Basado en {name}",
+    buildsOnNothing: "Sin base",
+    buildsOnNothingOption: "Nada: solo sus propias instrucciones",
+    buildsOnHint:
+      "Sus hábitos, las herramientas que recibe además de las de Pim, y su panel. Tus instrucciones van encima.",
     madeDefault:
       "{name} es ahora tu Pim predeterminado. Tus chats siguen con los Pims con que empezaron.",
     pimDashboard: "Panel de {name}",

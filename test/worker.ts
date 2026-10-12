@@ -4,7 +4,9 @@ import type { HarnessSettings, ModelRef } from "@earendil-works/pi-durable";
 import type { PiModel } from "agents/harness/pi";
 import { Pim as RealPim } from "../src/agent";
 import type { Mail, Mailer } from "../src/email";
-import { definePimExtension, type PimConfig } from "../src/extensions/define";
+import { Type } from "@earendil-works/pi-ai";
+import { defineTool, section } from "@earendil-works/pi-durable";
+import { defineGatedAction, definePimExtension, type PimConfig } from "../src/extensions/define";
 
 export { default, Auth, Directory, Gallery } from "../src/index";
 
@@ -17,19 +19,60 @@ export const napper = fauxProvider({ provider: "napper", models: [{ id: "napper-
 /** Every email the test agents sent, in order: tests read it as an inbox. */
 export const outbox: Mail[] = [];
 
+type Bill = { name: string; amount: number; due: string; paid: boolean };
+
 /**
  * A deployment's own extension, as tests install it: a Pim with a dashboard
- * mixing its own widgets with Pim's, one of which always fails.
+ * mixing its own widgets with Pim's, one of which always fails, and an
+ * ability that keeps bills in the extension's data: a tool to add one, an
+ * action that asks before paying one, and a section listing them.
  */
 export const ledger = definePimExtension({
 	id: "test.ledger",
 	name: "Ledger",
 	description: "Keeps the books.",
+	ability: ({ data }) => {
+		const bills = () => data.list<Bill>("bill:").map(({ value }) => value);
+		return {
+			tools: [
+				defineTool({
+					name: "ledger_add_bill",
+					description: "Record a bill to pay.",
+					parameters: Type.Object({ name: Type.String(), amount: Type.Number(), due: Type.String() }),
+					async execute({ name, amount, due }) {
+						data.put(`bill:${name}`, { name, amount, due, paid: false });
+						return { content: [{ type: "text", text: `Recorded ${name}.` }] };
+					},
+				}),
+			],
+			sections: [section("ledger_bills", () => bills().map((bill) => `${bill.name}: ${bill.amount}${bill.paid ? " (paid)" : ""}`).join("\n") || "No bills.")],
+			actions: [
+				defineGatedAction({
+					name: "ledger_pay_bill",
+					description: "Pay a recorded bill.",
+					parameters: Type.Object({ name: Type.String() }),
+					summarize: ({ name }) => `Pay ${name}`,
+					async run({ name }) {
+						const bill = data.get<Bill>(`bill:${name}`);
+						if (!bill) return `No bill called ${name}.`;
+						data.put(`bill:${name}`, { ...bill, paid: true });
+						return `Paid ${name}.`;
+					},
+				}),
+			],
+		};
+	},
 	widgets: {
 		bills: {
 			title: { en: "Upcoming bills", es: "Próximas facturas" },
 			empty: "No bills.",
-			load: ({ pim }) => ({ kind: "list", items: [{ title: `Rent for ${pim.name}`, time: "2026-11-01T09:00:00.000Z" }] }),
+			load: ({ data }) => ({
+				kind: "list",
+				items: data
+					.list<Bill>("bill:")
+					.filter(({ value }) => !value.paid)
+					.map(({ value }) => ({ title: `${value.name}: ${value.amount}`, time: value.due })),
+			}),
 		},
 		broken: {
 			title: "Bank balance",

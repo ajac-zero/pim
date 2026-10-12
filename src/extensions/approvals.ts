@@ -138,15 +138,17 @@ function gatedTool(action: GatedAction, services: PimServices, permission: ToolP
  * Tools for the actions the model calls directly; actions with `internal`
  * set are filed by other tools. Actions the user turned off are left out.
  */
-export function approvalsExtension(services: PimServices, actions: readonly GatedAction[]) {
-	return defineExtension({
-		name: "pim.approvals",
-		tools: actions.flatMap((action) => {
-			if (action.internal) return [];
-			const { permission } = ownToolPermission(services.store, action.name);
-			return permission === "off" ? [] : [gatedTool(action, services, permission)];
-		}),
+export function gatedTools(services: PimServices, actions: readonly GatedAction[]) {
+	return actions.flatMap((action) => {
+		if (action.internal) return [];
+		const { permission } = ownToolPermission(services.store, action.name);
+		return permission === "off" ? [] : [gatedTool(action, services, permission)];
 	});
+}
+
+/** Pim's own actions' tools. Extensions' actions are tools of their abilities, in the chats that use them. */
+export function approvalsExtension(services: PimServices, actions: readonly GatedAction[]) {
+	return defineExtension({ name: "pim.approvals", tools: gatedTools(services, actions) });
 }
 
 const MAX_RESPONSE_CHARS = 8000;

@@ -58,6 +58,8 @@ export const ledger = definePimExtension({
 		bills: {
 			title: { en: "Upcoming bills", es: "Próximas facturas" },
 			empty: "No bills due.",
+			// For the model: lets it show the widget with a message in chat.
+			description: "Bills not paid yet, with when each is due.",
 			load: ({ data }) => ({
 				kind: "list",
 				items: data.list<Bill>("bill:").map(({ value }) => ({ title: value.name, time: value.due })),
@@ -127,10 +129,23 @@ A `link` is `{ chat }` or `{ artifact }`: the item opens it.
 
 A widget that throws shows as failed, with the error logged; the dashboard's other widgets still load. The built-in widgets are `pim.schedule/upcoming`, `pim.goals/active`, `pim.memory/recent` and `pim.artifacts/recent`. Memory is shared by every Pim, so `pim.memory/recent` shows the same everywhere.
 
+### In chat
+
+A widget with a `description` can also go with a message. The model reads a `widgets` section listing the ones the chat can show, each with its description: Pim's own, and those of the extension its Pim builds on and the abilities that Pim uses. It names them in `send_to_user`'s `widgets`, up to four, instead of retyping what they show.
+
+- **Loaded once, when sent.** A message and its widgets always agree, as the person sees it later. The dashboard is where widgets are live.
+- **The model sees what was shown.** The tool's result holds the widgets' content, which the app draws from, so the model knows what the person is looking at.
+- **Mistakes come back to the model.** A widget the chat can't show refuses the whole message, and says which widgets it can show. Nothing reaches the person, and the model tries again within the turn.
+- **Text where they can't be drawn.** An email gets them as Markdown under the message, and so does an API client's `replies`.
+- **Not in visits or team members' conversations**: a guest never sees the host's data in a widget, and members don't talk to the person.
+
+Leave out `description` for a widget that only makes sense on its dashboard.
+
 ## Not built yet
 
 - **Configuration and secrets** per extension: read a deployment's keys with `import { env } from "cloudflare:workers"` for now; per-person settings have no form.
 - **Routes** for an extension's webhooks or sign-in callbacks.
 - **Choosing Pim's own abilities per Pim**: memory, goals and the rest are every Pim's.
 - **Widget actions** beyond opening a chat or an artifact, more kinds, and arranging a dashboard.
+- **Widgets with arguments** in chat, such as one goal, and interfaces the model composes itself from a catalog of components.
 - **Extensions people bring themselves**, sandboxed (see [Dynamic Workers](https://developers.cloudflare.com/dynamic-workers/)); connected MCP apps are how people add tools today.

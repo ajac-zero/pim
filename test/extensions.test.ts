@@ -3,9 +3,12 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it, vi } from "vitest";
 import { checkToolNames, PimExtensions } from "../src/extensions/define";
 import { api, decisionRun, pendingApproval, post, say, systemPrompt, toolUse } from "./helpers";
-import { faux, ledger } from "./worker";
+import { faux, ledger, outbox } from "./worker";
 
 type Persona = { id: string; name: string; base: string | null; default: boolean };
+
+/** A message's result as API clients get it: what Pim sent, in order. */
+const ask = async (content: string, session: string) => (await say(content, session)) as unknown as { replies: string[] };
 
 const dashboard = async (pim: Persona, locale = "en") => (await api(`/personas/${pim.id}/dashboard?locale=${locale}`)).body;
 const widget = (board: { widgets: { id: string }[] }, id: string) => board.widgets.find((candidate) => candidate.id === id) as any;
@@ -266,5 +269,78 @@ describe("extensions", () => {
 		expect((await api("/export")).body.extensions["test.ledger"]).toMatchObject({
 			"bill:Rent": { name: "Rent", paid: true },
 		});
+	});
+
+	it("shows widgets with a message, as they are when sent, and says so to the model and to clients that can't draw them", async () => {
+		const books = (await post("/personas", { name: "Home books", base: "test.ledger/budget" })).body as Persona;
+		const chat = (await post("/sessions", { persona: books.id })).body.id;
+		let prompt = "";
+		let result = "";
+		faux.setResponses([
+			toolUse("ledger_add_bill", { name: "Gas", amount: 40, due: "2026-12-01T09:00:00.000Z" }),
+			(context) => {
+				prompt = systemPrompt(context.messages);
+				return toolUse("send_to_user", { message: "Here's what's due.", widgets: ["test.ledger/bills", "pim.goals/active"] });
+			},
+			(context) => {
+				result = JSON.stringify(context.messages.findLast((message) => message.role === "toolResult")?.content);
+				return fauxAssistantMessage("Shown.");
+			},
+		]);
+		const answer = await ask("Gas is 40, due December 1st. What's due?", chat);
+
+		// The model is offered the widgets that describe themselves, from Pim's own and its Pim's extension.
+		expect(prompt).toContain("- test.ledger/bills: Bills not paid yet, with when each is due.");
+		expect(prompt).toContain("- pim.goals/active:");
+		expect(prompt).not.toContain("test.ledger/broken");
+		// It reads what they showed, as the app draws it from the same result.
+		const shown = JSON.parse(JSON.parse(result)[0].text);
+		expect(shown).toMatchObject({
+			sent: "Sent.",
+			widgets: [
+				{ id: "test.ledger/bills", title: { en: "Upcoming bills" }, kind: "list", items: [{ title: "Gas: 40", time: "2026-12-01T09:00:00.000Z" }] },
+				{ id: "pim.goals/active", kind: "progress", items: [] },
+			],
+		});
+		// A client that can't draw them gets them as text.
+		expect(answer.replies).toEqual([
+			"Here's what's due.\n\n**Upcoming bills**\n- Gas: 40 · 2026-12-01T09:00:00.000Z\n\n**Goals**\nNo goals yet. Ask to start tracking one.",
+		]);
+
+		// A chat whose Pim doesn't use the ledger can't show its widget: nothing is sent, and the model is told what it can show.
+		const plain = (await post("/sessions", {})).body.id;
+		let refused = "";
+		let offered = "";
+		faux.setResponses([
+			(context) => {
+				offered = systemPrompt(context.messages);
+				return toolUse("send_to_user", { message: "Bills:", widgets: ["test.ledger/bills"] });
+			},
+			(context) => {
+				refused = JSON.stringify(context.messages.findLast((message) => message.role === "toolResult"));
+				return toolUse("send_to_user", { message: "No ledger here.", widgets: ["pim.schedule/upcoming"] });
+			},
+			fauxAssistantMessage("Done."),
+		]);
+		const retried = await ask("Show my bills.", plain);
+		expect(offered).not.toContain("test.ledger/bills");
+		expect(refused).toContain("Not sent: test.ledger/bills isn't a widget you can show. The widgets you can show here: pim.goals/active");
+		expect(refused).toContain('"isError":true');
+		expect(retried.replies).toHaveLength(1);
+		expect(retried.replies[0]).toMatch(/^No ledger here\.\n\n\*\*Coming up\*\*/);
+	});
+
+	it("emails widgets as text", async () => {
+		await api("/email", { method: "PUT", body: JSON.stringify({ address: "ada@example.com" }) });
+		const code = outbox.splice(0)[0]!.subject.slice(0, 6);
+		await post("/email/confirm", { code });
+		faux.setResponses([
+			toolUse("create_goal", { title: "Save for a bike", steps: ["Open an account", "Save monthly"] }),
+			toolUse("send_to_user", { message: "Your goals, for your records.", channel: "email", widgets: ["pim.goals/active"] }),
+			fauxAssistantMessage("Emailed."),
+		]);
+		await say("Email me my goals.", (await post("/sessions", {})).body.id);
+		const [mail] = outbox.splice(0);
+		expect(mail!.text).toContain("Your goals, for your records.\n\n**Goals**\n- Save for a bike (0/2) · Open an account");
 	});
 });

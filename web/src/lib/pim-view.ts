@@ -522,6 +522,8 @@ export type Sent = {
   channel: "chat" | "email";
   notify: boolean;
   title: string | null;
+  /** The widgets asked to go with it, by name; what they showed comes in the call's result. */
+  widgets: string[];
 };
 
 export function sentOf(call: FunctionCallItem): Sent | null {
@@ -537,6 +539,9 @@ export function sentOf(call: FunctionCallItem): Sent | null {
     channel: args.channel === "email" ? "email" : "chat",
     notify: args.notify === true,
     title: typeof args.title === "string" ? args.title : null,
+    widgets: Array.isArray(args.widgets)
+      ? args.widgets.filter((ref): ref is string => typeof ref === "string")
+      : [],
   };
 }
 
@@ -563,7 +568,12 @@ export type ThreadRow =
  */
 export function layoutThread(
   entries: readonly ThreadEntry[],
-  options: { running: boolean; shown: (call: FunctionCallItem) => boolean },
+  options: {
+    running: boolean;
+    shown: (call: FunctionCallItem) => boolean;
+    /** A `send_to_user` call the tool refused (an unknown widget, an email that couldn't go): nothing reached the person. */
+    refused?: (call: FunctionCallItem) => boolean;
+  },
 ): ThreadRow[] {
   const replies = new Set<string>();
   let fromUser = false;
@@ -631,7 +641,9 @@ export function layoutThread(
       case "function_call": {
         const call = item as FunctionCallItem;
         const message = sentOf(call);
-        if (message) {
+        // A refused message is part of Pim's work, not something it said.
+        if (message && options.refused?.(call)) activity.push(entry);
+        else if (message) {
           // Nothing to read until its message starts streaming.
           if (message.message === "") break;
           flush();

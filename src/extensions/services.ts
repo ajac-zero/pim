@@ -1,6 +1,7 @@
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { Schedule } from "agents";
 import type { Approval, ApprovalMember, Notification, PimStore, ToolPermission } from "../store";
+import type { ShownWidget } from "./define";
 
 /** Payload of a schedule created by `schedule_task`. */
 export type ScheduledTaskPayload = {
@@ -45,6 +46,14 @@ export type PimServices = {
 	permission(approval: Approval): ToolPermission;
 	/** The team member a conversation is, and the chat it works for; null for a chat of the person's. */
 	teamMember(session: string): ApprovalMember | null;
+	/**
+	 * The widgets a chat can show with its messages: Pim's own, and those of
+	 * the extensions its Pim builds on and uses, that describe themselves to
+	 * the model. None in a visit, which talks with someone else's Pim.
+	 */
+	widgetsFor(session: string): { ref: string; description: string }[];
+	/** Loads one of them for the chat's Pim, as the person will see it with the message. */
+	showWidget(session: string, ref: string): Promise<ShownWidget>;
 };
 
 export function text(value: string, isError = false): ToolExecutionResult {

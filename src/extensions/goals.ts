@@ -93,6 +93,7 @@ export function goalsWidgets(store: PimStore) {
 		widgets: {
 			active: {
 				title: { en: "Goals", es: "Metas" },
+				description: "The active goals of this chat's Pim, each with its progress and next step.",
 				empty: { en: "No goals yet. Ask to start tracking one.", es: "Aún no hay metas. Pide empezar a seguir una." },
 				load: ({ chatOf }) => ({
 					kind: "progress",

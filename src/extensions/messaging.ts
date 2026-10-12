@@ -1,10 +1,14 @@
 import { Type } from "@earendil-works/pi-ai";
-import { defineExtension, defineTool } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
+import { widgetMarkdown } from "./define";
 import { type PimServices, text } from "./services";
 
 /** The tool Pim speaks with: the person sees what it sends, and nothing else it writes. */
 export const SEND_TO_USER = "send_to_user";
 export const MESSAGING_EXTENSION = "pim.messaging";
+
+/** How many widgets one message can carry. */
+export const MAX_WIDGETS = 4;
 
 /** A notification's title when the model gives none: the message's first line. */
 function headline(message: string): string {
@@ -18,6 +22,13 @@ export function messagingExtension(services: PimServices) {
 		notify: Type.Optional(Type.Boolean({ description: "Also alert their devices. Use it sparingly." })),
 		title: Type.Optional(
 			Type.String({ maxLength: 120, description: "A short headline: the email's subject, or the alert's; else the message's first line." }),
+		),
+		widgets: Type.Optional(
+			Type.Array(Type.String(), {
+				maxItems: MAX_WIDGETS,
+				description:
+					"Widgets to show under the message, from the ones your prompt lists, by name. They show the person's data as it is now, drawn by the app: use one instead of retyping what it shows.",
+			}),
 		),
 	};
 	const withEmail = Type.Object({
@@ -40,24 +51,53 @@ export function messagingExtension(services: PimServices) {
 			const { message, channel, notify, title } = args;
 			const session = String(api.conversationId);
 			const headed = title?.trim() || headline(message);
+			// A widget this chat can't show is a mistake the model can fix: say so, and send nothing.
+			const wanted = [...new Set(args.widgets ?? [])];
+			const available = services.widgetsFor(session).map((widget) => widget.ref);
+			const unknown = wanted.filter((ref) => !available.includes(ref));
+			if (unknown.length > 0) {
+				const offer = available.length > 0 ? `The widgets you can show here: ${available.join(", ")}.` : "No widgets can be shown here.";
+				return text(`Not sent: ${unknown.join(", ")} ${unknown.length === 1 ? "isn't a widget" : "aren't widgets"} you can show. ${offer}`, true);
+			}
+			// Loaded once, as sent: the message and what it shows stay together.
+			const shown = await Promise.all(wanted.map((ref) => services.showWidget(session, ref)));
 			let sent = "Sent.";
 			if (channel === "email") {
 				const id = await api.memo("email", crypto.randomUUID(), context);
-				const emailed = await services.sendEmail({ id, session, subject: headed, text: message });
+				// An inbox can't draw widgets: they go as text.
+				const body = [message, ...shown.map((widget) => widgetMarkdown(widget))].join("\n\n");
+				const emailed = await services.sendEmail({ id, session, subject: headed, text: body });
 				if ("error" in emailed) return text(`Not sent: ${emailed.error}`, true);
 				sent = `Emailed it to ${emailed.to}.`;
 			}
 			// The chat moves up the list; a deleted one stays deleted.
 			if (!services.store.deletedSessions().has(session)) services.store.touchSession(session);
-			if (!notify) return text(sent);
-			const id = await api.memo("notification", crypto.randomUUID(), context);
-			const known = services.store.notification(id);
-			const notification = services.store.addNotification({ id, session, title: headed, body: message });
-			// A replayed call stored it already; deliver only once.
-			if (!known) await services.notify(notification);
-			return text(`${sent} Their devices were alerted.`);
+			if (notify) {
+				const id = await api.memo("notification", crypto.randomUUID(), context);
+				const known = services.store.notification(id);
+				const notification = services.store.addNotification({ id, session, title: headed, body: message });
+				// A replayed call stored it already; deliver only once.
+				if (!known) await services.notify(notification);
+				sent = `${sent} Their devices were alerted.`;
+			}
+			// What the widgets showed goes back to the model too, so it knows what the person saw; the app draws it from here.
+			return text(shown.length === 0 ? sent : JSON.stringify({ sent, widgets: shown }));
 		},
 	});
 
-	return defineExtension({ name: MESSAGING_EXTENSION, tools: [sendToUser] });
+	return defineExtension({
+		name: MESSAGING_EXTENSION,
+		tools: [sendToUser],
+		sections: [
+			// Always present, so it never appears later out of order and makes pi re-send every section.
+			section("widgets", ({ conversationId }) => {
+				const widgets = services.widgetsFor(String(conversationId));
+				if (widgets.length === 0) return "No widgets can be shown in this conversation.";
+				return [
+					"Widgets you can show with a message, by name in send_to_user's widgets:",
+					...widgets.map((widget) => `- ${widget.ref}: ${widget.description}`),
+				].join("\n");
+			}),
+		],
+	});
 }

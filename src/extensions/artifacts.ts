@@ -152,6 +152,7 @@ export function artifactsWidgets(artifacts: ArtifactStore) {
 		widgets: {
 			recent: {
 				title: { en: "Recently made", es: "Hecho recientemente" },
+				description: "The artifacts this chat's Pim changed most recently, each opening the artifact.",
 				empty: { en: "Nothing made yet. Ask for a document, a checklist or a small page.", es: "Nada hecho aún. Pide un documento, una lista o una página pequeña." },
 				load: ({ pim, chatOf }) => ({
 					kind: "list",

@@ -371,6 +371,44 @@ describe("layoutThread", () => {
     ).toEqual(["entry 1", "sent 2:0: Will do.", "entry 4", "activity 5:0"]);
   });
 
+  it("keeps a message the tool refused in Pim's work: it never reached the person", () => {
+    const entries = run([
+      snapshot({
+        entries: [
+          user(1, "My bills?"),
+          assistant(2, [send("a", "Bills:")]),
+          toolResult(
+            3,
+            "a",
+            "Not sent: ledger/bills isn't a widget you can show.",
+            true,
+          ),
+          assistant(4, [send("b", "No ledger here.")]),
+          toolResult(5, "b", "Sent."),
+        ],
+      }),
+    ]).view.entries;
+    // As the chat decides it: a call whose result is an error was refused.
+    const failed = new Set(
+      entries.flatMap((entry) =>
+        entry.kind === "item" &&
+        entry.item.type === "function_call_output" &&
+        entry.item.status === "incomplete"
+          ? [entry.item.call_id]
+          : [],
+      ),
+    );
+    expect(
+      describeRows(
+        layoutThread(entries, {
+          running: false,
+          shown: () => false,
+          refused: (call) => failed.has(call.call_id),
+        }),
+      ),
+    ).toEqual(["entry 1", "activity 2:0", "sent 4:0: No ledger here."]);
+  });
+
   it("gives tool calls that stand on their own a row, splitting the work around them", () => {
     const gated = {
       type: "toolCall",

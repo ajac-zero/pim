@@ -2,6 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { ARTIFACT_KINDS, type ArtifactStore, type ArtifactVersion, applyEdits, checkKind, checkTitle } from "../artifacts";
 import { HttpError } from "../http";
+import { definePimExtension } from "./define";
 import { text } from "./services";
 
 /** What the artifact tools need from the agent. */
@@ -140,4 +141,33 @@ export function artifactsExtension({ artifacts, assertOpen }: ArtifactServices) 
 	});
 
 	return defineExtension({ name: "pim.artifacts", tools: [create, update, read, list] });
+}
+
+/** On a dashboard: what the Pim made most recently. Artifacts made outside any chat are the default Pim's. */
+export function artifactsWidgets(artifacts: ArtifactStore) {
+	return definePimExtension({
+		id: "pim.artifacts",
+		name: "Artifacts",
+		description: "Documents and small pages Pim makes, with every version kept.",
+		widgets: {
+			recent: {
+				title: { en: "Recently made", es: "Hecho recientemente" },
+				empty: { en: "Nothing made yet. Ask for a document, a checklist or a small page.", es: "Nada hecho aún. Pide un documento, una lista o una página pequeña." },
+				load: ({ pim, chatOf }) => ({
+					kind: "list",
+					items: artifacts
+						.list()
+						.filter((artifact) => (artifact.session === null ? pim.default : chatOf(artifact.session) !== null))
+						.sort((a, b) => b.updatedAt - a.updatedAt)
+						.slice(0, 5)
+						.map((artifact) => ({
+							title: artifact.title,
+							detail: `${artifact.kind === "html" ? "HTML" : "Markdown"} · v${artifact.version}`,
+							time: new Date(artifact.updatedAt).toISOString(),
+							link: { artifact: artifact.id },
+						})),
+				}),
+			},
+		},
+	});
 }

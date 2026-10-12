@@ -1,6 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import type { Schedule } from "agents";
+import { definePimExtension } from "./define";
 import { type PimServices, type ScheduledTaskPayload, json, text } from "./services";
 
 export function describeSchedule(schedule: Schedule<ScheduledTaskPayload>) {
@@ -81,4 +82,37 @@ export function scheduleExtension(services: PimServices) {
 	});
 
 	return defineExtension({ name: SCHEDULE_EXTENSION, tools: [scheduleTask, listScheduled, cancelScheduled] });
+}
+
+/** On a dashboard: the Pim's scheduled tasks, soonest first. */
+export function scheduleWidgets(listSchedules: PimServices["listSchedules"]) {
+	return definePimExtension({
+		id: SCHEDULE_EXTENSION,
+		name: "Schedules",
+		description: "Work Pim does later, once or on a schedule.",
+		widgets: {
+			upcoming: {
+				title: { en: "Coming up", es: "Próximamente" },
+				empty: { en: "Nothing scheduled. Ask for a reminder or a recurring check-in.", es: "Nada programado. Pide un recordatorio o un seguimiento periódico." },
+				load: async ({ chatOf }) => ({
+					kind: "list",
+					items: (await listSchedules())
+						.sort((a, b) => a.time - b.time)
+						.flatMap((schedule) => {
+							const chat = chatOf(schedule.payload.session);
+							if (chat === null) return [];
+							const title = schedule.payload.label ?? schedule.payload.instruction;
+							return [
+								{
+									title: title.length > 120 ? `${title.slice(0, 119)}…` : title,
+									time: new Date(schedule.time * 1000).toISOString(),
+									link: { chat },
+								},
+							];
+						})
+						.slice(0, 5),
+				}),
+			},
+		},
+	});
 }

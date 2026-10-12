@@ -1,12 +1,12 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { sessionsQuery } from "~/lib/queries";
+import { personasQuery } from "~/lib/queries";
 
-/** Opens the most recent conversation, or opens an empty draft. */
+/** Opens the default Pim's dashboard. */
 export const Route = createFileRoute("/")({
   loader: async ({ context }) => {
-    const sessions = await context.queryClient.fetchQuery(sessionsQuery());
-    const sessionId = sessions[0]?.id;
-    if (sessionId === undefined) throw redirect({ to: "/new" });
-    throw redirect({ to: "/chat/$sessionId", params: { sessionId } });
+    const personas = await context.queryClient.fetchQuery(personasQuery());
+    const pim = personas.find((persona) => persona.default) ?? personas[0];
+    if (pim === undefined) throw redirect({ to: "/new" });
+    throw redirect({ to: "/pims/$pimId", params: { pimId: pim.id } });
   },
 });

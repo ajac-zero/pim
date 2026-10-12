@@ -84,6 +84,8 @@ function usePimEvents() {
     pimClient.handlers = {
       onActivity: () => {
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        // A run may have changed what a dashboard shows: goals, schedules, memories, artifacts.
+        queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       },
       onNotification: (notification) => {
         queryClient.invalidateQueries({ queryKey: ["notifications"] });

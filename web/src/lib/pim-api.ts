@@ -74,16 +74,51 @@ export type Persona = {
   instructions: string;
   apps: SuggestedApp[];
   team: TeamMember[];
+  /** The extension's Pim it builds on, as `<extension>/<pim>`, which brings its dashboard; null for none. */
+  base: string | null;
   /** The template it was made from. */
   source: { template: string; author: string } | null;
   /** Its template in the gallery, while published. */
   published: string | null;
   /** When its icon was set, or null without one. */
   icon: number | null;
-  /** The one that talks in every chat not started with another. It can't be deleted. */
+  /** The one that talks in chats started without choosing a Pim. It can't be deleted while it is. */
   default: boolean;
   createdAt: number;
   updatedAt: number;
+};
+
+/** Where a widget's item leads. */
+export type WidgetLink = { chat: string } | { artifact: string };
+
+export type WidgetListItem = {
+  title: string;
+  detail?: string;
+  /** ISO 8601. */
+  time?: string;
+  link?: WidgetLink;
+};
+
+export type WidgetProgressItem = {
+  title: string;
+  value: number;
+  max: number;
+  detail?: string;
+  link?: WidgetLink;
+};
+
+/** One card of a dashboard, loaded by the extension that brings it, in the kind the app draws. */
+export type Widget = { id: string; title: string; empty: string } & (
+  | { kind: "list"; items: WidgetListItem[] }
+  | { kind: "progress"; items: WidgetProgressItem[] }
+  | { failed: true }
+);
+
+export type Dashboard = {
+  pim: Pick<Persona, "id" | "name" | "description" | "default" | "base">;
+  /** Messages to start a chat with. */
+  starters: string[];
+  widgets: Widget[];
 };
 
 export type PersonaInput = {
@@ -456,6 +491,14 @@ export const pim = {
     call<Persona>(`/personas/${id}/icon`, { method: "DELETE" }),
   deletePersona: (id: string) =>
     call<{ deleted: boolean }>(`/personas/${id}`, { method: "DELETE" }),
+  /** Makes it the Pim chats started without choosing one talk with. */
+  makeDefaultPersona: (id: string) =>
+    call<Persona>(`/personas/${id}/default`, { method: "POST" }),
+  /** A Pim's dashboard, with its text in `locale` where the extensions translated it. */
+  dashboard: (id: string, locale: string) =>
+    call<Dashboard>(
+      `/personas/${id}/dashboard?locale=${encodeURIComponent(locale)}`,
+    ),
   publishPersona: (id: string) =>
     call<Template>(`/personas/${id}/publish`, { method: "POST" }),
   unpublishPersona: (id: string) =>

@@ -41,8 +41,10 @@ import {
 	type ResolvedPermission,
 	resolvePermission,
 } from "./extensions/approvals";
-import { artifactsExtension } from "./extensions/artifacts";
-import { goalsExtension } from "./extensions/goals";
+import pimConfig from "../pim.config";
+import { artifactsExtension, artifactsWidgets } from "./extensions/artifacts";
+import { type PimConfig, PimExtensions, type WidgetContext, localize } from "./extensions/define";
+import { goalsExtension, goalsWidgets } from "./extensions/goals";
 import {
 	appToolPermission,
 	MCP_APPROVALS,
@@ -61,11 +63,11 @@ import {
 	toText,
 } from "./extensions/mcp";
 import { MESSAGING_EXTENSION, messagingExtension, SEND_TO_USER } from "./extensions/messaging";
-import { createOptMem } from "./extensions/optmem";
+import { createOptMem, memoryWidgets } from "./extensions/optmem";
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
 import { byteLength, ENTRY_BYTES, entryLine } from "./extensions/optmem/store";
 import { personaExtension } from "./extensions/persona";
-import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension } from "./extensions/schedule";
+import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import { dispatch, HttpError, readJson, type Route } from "./http";
@@ -211,7 +213,12 @@ export class Pim extends Agent<Env> {
 	/** Pims shared with this Pim's owner, and their conversations with them. */
 	readonly visits = new VisitStore(this.ctx.storage.sql);
 	/** The owner's Pims: named agents with their own instructions, the default one first. */
-	readonly personas = new PersonaStore(this.ctx.storage.sql);
+	readonly personas = new PersonaStore(this.ctx.storage.sql, () => {
+		// An account's first Pim: the deployment's default Pim, or a bare one named Pim.
+		const ref = this.extensions.defaultPim;
+		const base = ref === null ? undefined : this.extensions.pim(ref);
+		return { name: base?.name ?? "Pim", description: base?.description ?? "", instructions: "", apps: [], team: [], base: base ? ref : null };
+	});
 	/** The tasks the Pims' teams were given, each in a conversation of its own. */
 	readonly team = new TeamStore(this.ctx.storage.sql);
 	/** What the agent made for its owner, with every version. */
@@ -236,6 +243,7 @@ export class Pim extends Agent<Env> {
 		compressionModel: () => this.memoryModel(),
 	});
 	readonly registry = createRegistry();
+	#extensions: PimExtensions | undefined;
 	/** What this agent has used, and its limits. */
 	readonly usage = new UsageMeter({
 		sql: this.ctx.storage.sql,
@@ -301,7 +309,13 @@ export class Pim extends Agent<Env> {
 		harness: async ({ storage, context }) => {
 			const services = this.services();
 			this.#migrateAlwaysApproved();
-			this.registry.install(personaExtension(services, (session) => this.#roleOf(session)));
+			this.registry.install(
+				personaExtension(
+					services,
+					(session) => this.#roleOf(session),
+					(pim) => (pim.base === null ? undefined : this.extensions.pim(pim.base)),
+				),
+			);
 			this.registry.install(goalsExtension(services));
 			this.registry.install(scheduleExtension(services));
 			this.registry.install(messagingExtension(services));
@@ -1349,6 +1363,70 @@ export class Pim extends Agent<Env> {
 		return persona;
 	}
 
+	// Extensions: the Pims people build on, and the widgets of their dashboards.
+
+	/** The deployment's extensions (`pim.config.ts`). Tests add their own. */
+	protected pimConfig(): PimConfig {
+		return pimConfig;
+	}
+
+	/** Pim's own abilities' widgets, then the deployment's extensions, checked once. */
+	get extensions(): PimExtensions {
+		this.#extensions ??= new PimExtensions(
+			[
+				goalsWidgets(this.store),
+				scheduleWidgets(() => this.services().listSchedules()),
+				memoryWidgets(this.memory.store),
+				artifactsWidgets(this.artifacts),
+				...this.pimConfig().extensions,
+			],
+			this.pimConfig().defaultPim,
+		);
+		return this.#extensions;
+	}
+
+	/** A base given through the API must be a Pim some installed extension brings. */
+	#checkBase(input: PersonaInput): PersonaInput {
+		if (input.base && !this.extensions.pim(input.base)) throw new HttpError(400, `No installed extension brings the Pim ${input.base}`);
+		return input;
+	}
+
+	/**
+	 * A Pim's dashboard: the widgets of the extension's Pim it builds on, each
+	 * loaded for this Pim. One that fails shows as failed; the others still load.
+	 */
+	async #dashboard(pim: Persona, locale: string) {
+		const base = pim.base === null ? undefined : this.extensions.pim(pim.base);
+		const deleted = this.store.deletedSessions();
+		const context: WidgetContext = {
+			pim: { id: pim.id, name: pim.name, default: pim.default },
+			timeZone: this.settings().timeZone,
+			chatOf: (session) => {
+				// A team member's conversation works for the chat that gave it its task.
+				const chat = this.team.run(session)?.session ?? session;
+				if (deleted.has(chat) || this.visits.bySession(chat)) return null;
+				return this.personas.ofSession(chat).id === pim.id ? chat : null;
+			},
+		};
+		const widgets = await Promise.all(
+			(base?.dashboard ?? []).map(async (ref) => {
+				const widget = this.extensions.widget(ref)!;
+				const shown = { id: ref, title: localize(widget.title, locale), empty: localize(widget.empty, locale) };
+				try {
+					return { ...shown, ...(await widget.load(context)) };
+				} catch (error) {
+					console.warn(`widget ${ref} failed`, error);
+					return { ...shown, failed: true };
+				}
+			}),
+		);
+		return {
+			pim: { id: pim.id, name: pim.name, description: pim.description, default: pim.default, base: pim.base },
+			starters: (base?.starters ?? []).map((starter) => localize(starter, locale)),
+			widgets,
+		};
+	}
+
 	/** The Pim a chat talks with; none in a visit, which talks with someone else's. */
 	#personaRef(session: string): { id: string; name: string } | null {
 		if (this.visits.bySession(session)) return null;
@@ -1770,8 +1848,8 @@ export class Pim extends Agent<Env> {
 				}
 				const { id } = await this.harness.sessions.create();
 				await this.harness.session(id).setModel(this.chosenModel());
-				// A chat with the default Pim isn't tied to it: it stays with whichever is the default.
-				if (persona && !persona.default) this.personas.setSession(id, persona.id);
+				// Tied to its Pim, so it stays with it when another becomes the default.
+				this.personas.setSession(id, (persona ?? this.personas.default()).id);
 				this.store.touchSession(id, typeof title === "string" && title.trim() !== "" ? clipTitle(title) : undefined);
 				return { id, ...this.store.sessionInfo(id), persona: this.#personaRef(id) };
 			},
@@ -2287,7 +2365,7 @@ export class Pim extends Agent<Env> {
 			"POST",
 			"/personas",
 			async (_params, request) => {
-				const persona = this.personas.create(personaInput(await readJson<Record<string, unknown>>(request)));
+				const persona = this.personas.create(this.#checkBase(personaInput(await readJson<Record<string, unknown>>(request))));
 				return Response.json(persona, { status: 201 });
 			},
 		],
@@ -2295,7 +2373,7 @@ export class Pim extends Agent<Env> {
 			"PUT",
 			"/personas/:persona",
 			async ({ persona: id }, request) => {
-				return this.personas.update(id!, personaInput(await readJson<Record<string, unknown>>(request), this.#persona(id!)));
+				return this.personas.update(id!, this.#checkBase(personaInput(await readJson<Record<string, unknown>>(request), this.#persona(id!))));
 			},
 		],
 		[
@@ -2328,6 +2406,32 @@ export class Pim extends Agent<Env> {
 				this.personas.removeIcon(id!);
 				return this.#persona(id!);
 			},
+		],
+		[
+			"POST",
+			"/personas/:persona/default",
+			async ({ persona: id }) => {
+				this.#persona(id!);
+				// Chats tied to no Pim are the current default's: tie them to it first, so they stay with it.
+				this.personas.tieToDefault((await this.harness.sessions.list()).map((session) => session.id));
+				this.personas.setDefault(id!);
+				return this.personas.get(id!);
+			},
+		],
+		["GET", "/personas/:persona/dashboard", ({ persona }, _request, url) => this.#dashboard(this.#persona(persona!), url.searchParams.get("locale") ?? "en")],
+		[
+			"GET",
+			"/extensions",
+			() => ({
+				extensions: this.extensions.list().map((extension) => ({
+					id: extension.id,
+					name: extension.name,
+					description: extension.description,
+					pims: (extension.pims ?? []).map((pim) => ({ ref: `${extension.id}/${pim.id}`, name: pim.name, description: pim.description })),
+					widgets: Object.keys(extension.widgets ?? {}).map((widget) => `${extension.id}/${widget}`),
+				})),
+				defaultPim: this.extensions.defaultPim,
+			}),
 		],
 		[
 			"DELETE",

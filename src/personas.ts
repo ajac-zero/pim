@@ -1,12 +1,16 @@
+import { ASSISTANT_PIM } from "./extensions/assistant";
+import type { PimDefinition } from "./extensions/define";
 import { HttpError } from "./http";
 
 /**
  * The owner's Pims: named agents, each with its own instructions, such as
- * "Marathon coach" or "Trip planner". Every account has a default one, its
- * Pim, which talks in every chat not started with another; a copy of the
- * Pim the admin chose for everyone, or a plain one. A chat's Pim gives it
- * its instructions on top of the agent's own habits; memory, apps and
- * approvals are shared by all of them. One can be published as a template
+ * "Marathon coach" or "Trip planner". Each builds on a Pim an extension
+ * brings (its `base`, see ./extensions/define.ts), usually Pim's own
+ * assistant, and adds the person's name and instructions on top. One of
+ * them is the default, which talks in chats started without choosing one;
+ * any can be made the default. A new account's first Pim is a copy of the
+ * one the admin chose for everyone, or the deployment's default Pim. Memory,
+ * apps and approvals are shared by all of them. One can be published as a template
  * others make their own (see ./gallery.ts); a copy made from a template
  * remembers where it came from.
  *
@@ -33,13 +37,15 @@ export type Persona = {
 	readonly instructions: string;
 	readonly apps: readonly SuggestedApp[];
 	readonly team: readonly TeamMember[];
+	/** The extension's Pim it builds on, as `<extension>/<pim>`; null for none. */
+	readonly base: string | null;
 	/** The template it was made from. */
 	readonly source: { readonly template: string; readonly author: string } | null;
 	/** Its published template, if the owner published it. */
 	readonly published: string | null;
 	/** When its icon was last set, to fetch it again when it changes; null without one. */
 	readonly icon: number | null;
-	/** The one that talks in every chat not started with another. It can't be deleted. */
+	/** The one that talks in chats started without choosing a Pim. It can't be deleted while it is the default. */
 	readonly default: boolean;
 	readonly createdAt: number;
 	readonly updatedAt: number;
@@ -51,6 +57,8 @@ export type PersonaInput = {
 	readonly instructions: string;
 	readonly apps: readonly SuggestedApp[];
 	readonly team: readonly TeamMember[];
+	/** Left out, a new Pim builds on the deployment's default Pim and an edited one keeps its own. */
+	readonly base?: string | null;
 };
 
 export const MAX_PERSONAS = 20;
@@ -64,8 +72,6 @@ export const MAX_TEAM = 8;
 export const MAX_MEMBER_NAME = 40;
 export const MAX_MEMBER_TOOLS = 50;
 
-/** The default Pim of an account that has no other: the agent's own habits, nothing on top. */
-export const PLAIN_PIM: PersonaInput = { name: "Pim", description: "", instructions: "", apps: [], team: [] };
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS pim_personas (
@@ -79,7 +85,8 @@ CREATE TABLE IF NOT EXISTS pim_personas (
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
 	is_default INTEGER NOT NULL DEFAULT 0,
-	team TEXT NOT NULL DEFAULT '[]'
+	team TEXT NOT NULL DEFAULT '[]',
+	base TEXT
 );
 CREATE TABLE IF NOT EXISTS pim_persona_icons (
 	persona TEXT PRIMARY KEY,
@@ -104,6 +111,7 @@ const personaOf = (row: Row): Persona => ({
 	instructions: String(row.instructions),
 	apps: JSON.parse(String(row.apps)) as SuggestedApp[],
 	team: JSON.parse(String(row.team)) as TeamMember[],
+	base: row.base === null ? null : String(row.base),
 	source: row.source ? (JSON.parse(String(row.source)) as Persona["source"]) : null,
 	published: row.published === null ? null : String(row.published),
 	icon: row.icon === null ? null : Number(row.icon),
@@ -141,7 +149,17 @@ export function personaInput(body: Record<string, unknown>, partial?: Persona): 
 			return { name: text(name, "app name", 40, true), url };
 		}),
 		team: body.team === undefined ? (partial?.team ?? []) : teamInput(body.team),
+		...(body.base === undefined ? {} : { base: baseInput(body.base) }),
 	};
+}
+
+/** A base as given: `<extension>/<pim>`, or null. Whether it is installed is the agent's to check. */
+function baseInput(value: unknown): string | null {
+	if (value === null) return null;
+	if (typeof value !== "string" || !/^[a-z0-9][a-z0-9.-]*\/[a-z0-9][a-z0-9.-]*$/.test(value)) {
+		throw new HttpError(400, "base must be an extension's Pim, such as pim.assistant/pim, or null");
+	}
+	return value;
 }
 
 /** A team as given: up to `MAX_TEAM` members with distinct names, each with instructions. */
@@ -166,22 +184,33 @@ function teamInput(value: unknown): TeamMember[] {
 	});
 }
 
-/** What a chat's Pim adds to the agent's own habits: who it is, and its instructions. */
-export function personaInstructions(persona: Persona): string {
+/**
+ * Who a chat's Pim is and how it works: its name, then the instructions of
+ * the extension's Pim it builds on, then the person's own, which win.
+ */
+export function personaInstructions(persona: Persona, base: PimDefinition | undefined): string {
 	const identity = `In this conversation you are "${persona.name}"${persona.description ? `: ${persona.description}` : "."}`;
-	if (persona.instructions === "") return identity;
-	return [identity, "Your instructions, which come before your general habits wherever the two differ:", persona.instructions].join("\n");
+	const own =
+		persona.instructions === ""
+			? []
+			: [`Your instructions, which come before your general habits wherever the two differ:\n${persona.instructions}`];
+	return [identity, ...(base ? [base.instructions] : []), ...own].join("\n\n");
 }
 
 export class PersonaStore {
 	readonly #sql: SqlStorage;
+	readonly #starter: () => PersonaInput;
 
-	constructor(sql: SqlStorage) {
+	/** `starter` is an account's first Pim, made the first time any is asked for: the deployment's default Pim. */
+	constructor(sql: SqlStorage, starter: () => PersonaInput) {
 		this.#sql = sql;
+		this.#starter = starter;
 		this.#sql.exec(SCHEMA);
 		const columns = this.#sql.exec("PRAGMA table_info(pim_personas)").toArray().map((row) => String(row.name));
 		if (!columns.includes("is_default")) this.#sql.exec("ALTER TABLE pim_personas ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0");
 		if (!columns.includes("team")) this.#sql.exec("ALTER TABLE pim_personas ADD COLUMN team TEXT NOT NULL DEFAULT '[]'");
+		// Pims made before extensions all had the assistant's habits, which were the agent's own then.
+		if (!columns.includes("base")) this.#sql.exec(`ALTER TABLE pim_personas ADD COLUMN base TEXT DEFAULT '${ASSISTANT_PIM}'`);
 	}
 
 	/** The default one first, then the others as they were made. */
@@ -190,10 +219,15 @@ export class PersonaStore {
 		return this.#sql.exec(`${SELECT} ORDER BY p.is_default DESC, p.created_at, p.id`).toArray().map(personaOf);
 	}
 
-	/** The default Pim, made plain the first time it is asked for. */
+	/** The default Pim, made from the starter the first time it is asked for. */
 	default(): Persona {
 		const [row] = this.#sql.exec(`${SELECT} WHERE p.is_default = 1`).toArray();
-		return row ? personaOf(row) : this.#insert(PLAIN_PIM, null, true);
+		return row ? personaOf(row) : this.#insert(this.#starter(), null, true);
+	}
+
+	/** Makes another of the owner's Pims the default. */
+	setDefault(id: string): void {
+		this.#sql.exec("UPDATE pim_personas SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END", id);
 	}
 
 	/** Makes the default Pim a copy of `input`: at registration, the one the admin chose for everyone. */
@@ -218,13 +252,14 @@ export class PersonaStore {
 		const id = `p_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT INTO pim_personas (id, name, description, instructions, apps, team, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+			"INSERT INTO pim_personas (id, name, description, instructions, apps, team, base, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
 			id,
 			input.name,
 			input.description,
 			input.instructions,
 			JSON.stringify(input.apps),
 			JSON.stringify(input.team),
+			input.base === undefined ? (this.#starter().base ?? null) : input.base,
 			source === null ? null : JSON.stringify(source),
 			now,
 			now,
@@ -244,6 +279,7 @@ export class PersonaStore {
 			Date.now(),
 			id,
 		);
+		if (input.base !== undefined) this.#sql.exec("UPDATE pim_personas SET base = ? WHERE id = ?", input.base, id);
 		return this.get(id)!;
 	}
 
@@ -253,7 +289,7 @@ export class PersonaStore {
 
 	/** Deletes it; its chats stay, with the default Pim. */
 	delete(id: string): void {
-		if (this.get(id)?.default) throw new HttpError(400, "Your default Pim can't be deleted.");
+		if (this.get(id)?.default) throw new HttpError(400, "Your default Pim can't be deleted. Make another one the default first.");
 		this.#sql.exec("DELETE FROM pim_persona_sessions WHERE persona = ?", id);
 		this.#sql.exec("DELETE FROM pim_persona_icons WHERE persona = ?", id);
 		this.#sql.exec("DELETE FROM pim_personas WHERE id = ?", id);
@@ -290,7 +326,7 @@ export class PersonaStore {
 		);
 	}
 
-	/** The Pim a chat was started with, or the default one. */
+	/** The Pim a chat was started with, or the default one for a chat tied to none. */
 	ofSession(session: string): Persona {
 		const [row] = this.#sql
 			.exec(`${SELECT} JOIN pim_persona_sessions s ON p.id = s.persona WHERE s.session = ?`, session)
@@ -298,7 +334,15 @@ export class PersonaStore {
 		return row ? personaOf(row) : this.default();
 	}
 
-	/** Chats started with a Pim other than the default one. */
+	/** Ties every chat in `sessions` not tied to a Pim yet to the default one, so they stay with it when the default changes. */
+	tieToDefault(sessions: readonly string[]): void {
+		const id = this.default().id;
+		for (const session of sessions) {
+			this.#sql.exec("INSERT INTO pim_persona_sessions (session, persona) VALUES (?, ?) ON CONFLICT (session) DO NOTHING", session, id);
+		}
+	}
+
+	/** Chats tied to a Pim. */
 	startedSessions(): string[] {
 		return this.#sql
 			.exec("SELECT session FROM pim_persona_sessions")

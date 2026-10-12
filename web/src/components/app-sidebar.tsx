@@ -441,6 +441,8 @@ function SidebarNavItem({
         <Link
           to={to}
           onClick={onNavigate}
+          // A Pim's dashboard lives under /pims, but its section in the chat list is what lights up.
+          activeOptions={{ exact: to === "/pims" }}
           activeProps={{ className: "bg-sidebar-accent" }}
           className={ITEM_CLASS(props.collapsed)}
           aria-label={props.label}
@@ -470,21 +472,37 @@ function PimSectionList({
   return (
     <section className="mb-3" aria-label={persona.name}>
       <div className="group/section flex items-center gap-1 pr-1">
-        <button
-          type="button"
-          className="flex min-w-0 flex-1 items-center gap-1 rounded-md px-2 py-1.5 text-left font-medium text-muted-foreground text-xs hover:text-foreground"
-          onClick={() => setOpen(!open)}
-          aria-expanded={open}
-        >
-          <PimIcon persona={persona} className="size-4" />
-          <span className="truncate">{persona.name}</span>
-          <ChevronDown
-            className={cn(
-              "size-3.5 shrink-0 transition-transform",
-              !open && "-rotate-90",
-            )}
-          />
-        </button>
+        <span className="flex min-w-0 flex-1 items-center">
+          <Link
+            to="/pims/$pimId"
+            params={{ pimId: persona.id }}
+            onClick={onNavigate}
+            className="min-w-0 truncate rounded-md px-2 py-1.5 font-medium text-muted-foreground text-xs hover:text-foreground"
+            activeProps={{ className: "bg-sidebar-accent text-foreground" }}
+            title={t("pimDashboard", { name: persona.name })}
+          >
+            <span className="flex items-center gap-1">
+              <PimIcon persona={persona} className="size-4" />
+              <span className="truncate">{persona.name}</span>
+            </span>
+          </Link>
+          <button
+            type="button"
+            className="shrink-0 rounded-md p-1 text-muted-foreground hover:text-foreground"
+            onClick={() => setOpen(!open)}
+            aria-expanded={open}
+            aria-label={t(open ? "hideChatsOf" : "showChatsOf", {
+              name: persona.name,
+            })}
+          >
+            <ChevronDown
+              className={cn(
+                "size-3.5 transition-transform",
+                !open && "-rotate-90",
+              )}
+            />
+          </button>
+        </span>
         <Tooltip>
           <TooltipTrigger asChild>
             <button

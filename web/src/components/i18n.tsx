@@ -19,7 +19,7 @@ const translations = {
     moreApprovalOptions: "More approval options",
     yourPims: "Your Pims",
     yourPimsDescription:
-      "Your default Pim talks in every chat you start. Make others for different jobs, like a running coach or a trip planner, and start a chat with one to talk with it. They all share your memory and apps.",
+      "Your default Pim talks in the chats you start without choosing one, and its dashboard is your home. Make others for different jobs, like a running coach or a trip planner, and start a chat with one to talk with it. They all share your memory and apps.",
     noPims: "No Pims yet. Make one, or find one others published.",
     newPim: "New Pim",
     editPim: "Edit Pim",
@@ -55,6 +55,15 @@ const translations = {
     defaultPim: "Default",
     everyonesDefault: "Everyone who joins starts with a copy",
     makeEveryonesDefault: "Make everyone's default",
+    makeDefault: "Make default",
+    madeDefault:
+      "{name} is your default Pim now. Your chats stay with the Pims they were started with.",
+    pimDashboard: "{name}'s dashboard",
+    showChatsOf: "Show {name}'s chats",
+    hideChatsOf: "Hide {name}'s chats",
+    noDashboard:
+      "This Pim has no dashboard. Pims built on one an extension brings get its dashboard.",
+    widgetFailed: "This couldn't load. Try again later.",
     stopEveryonesDefault: "Stop",
     everyonesDefaultSet: "People who join now start with a copy of {name}.",
     everyonesDefaultCleared: "People who join now start with a plain Pim.",
@@ -524,7 +533,7 @@ const translations = {
     moreApprovalOptions: "Más opciones de aprobación",
     yourPims: "Tus Pims",
     yourPimsDescription:
-      "Tu Pim predeterminado habla en cada chat que empiezas. Crea otros para distintas tareas, como un entrenador de running o un planificador de viajes, y empieza un chat con uno para hablar con él. Todos comparten tu memoria y tus apps.",
+      "Tu Pim predeterminado habla en los chats que empiezas sin elegir uno, y su panel es tu inicio. Crea otros para distintas tareas, como un entrenador de running o un planificador de viajes, y empieza un chat con uno para hablar con él. Todos comparten tu memoria y tus apps.",
     noPims: "Aún no hay Pims. Crea uno, o busca uno que otros publicaron.",
     newPim: "Nuevo Pim",
     editPim: "Editar Pim",
@@ -560,6 +569,15 @@ const translations = {
     defaultPim: "Predeterminado",
     everyonesDefault: "Quien se une empieza con una copia",
     makeEveryonesDefault: "Hacerlo el de todos",
+    makeDefault: "Hacer predeterminado",
+    madeDefault:
+      "{name} es ahora tu Pim predeterminado. Tus chats siguen con los Pims con que empezaron.",
+    pimDashboard: "Panel de {name}",
+    showChatsOf: "Mostrar los chats de {name}",
+    hideChatsOf: "Ocultar los chats de {name}",
+    noDashboard:
+      "Este Pim no tiene panel. Los Pims basados en uno que trae una extensión tienen su panel.",
+    widgetFailed: "No se pudo cargar. Inténtalo más tarde.",
     stopEveryonesDefault: "Quitar",
     everyonesDefaultSet: "Quien se una ahora empezará con una copia de {name}.",
     everyonesDefaultCleared: "Quien se una ahora empezará con un Pim sencillo.",

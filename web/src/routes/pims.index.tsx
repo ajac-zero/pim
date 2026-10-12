@@ -8,6 +8,7 @@ import {
   Pencil,
   Plug,
   Plus,
+  Star,
   Trash2,
   Users,
   X,
@@ -34,7 +35,7 @@ import {
   personasQuery,
 } from "~/lib/queries";
 
-export const Route = createFileRoute("/pims")({
+export const Route = createFileRoute("/pims/")({
   loader: ({ context }) => context.queryClient.ensureQueryData(personasQuery()),
   component: PimsPage,
 });
@@ -121,6 +122,16 @@ function PersonaCard({ persona }: { persona: Persona }) {
   });
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: ["personas"] });
+  const makeDefault = useMutation({
+    mutationFn: () => pim.makeDefaultPersona(persona.id),
+    onSuccess: () => {
+      refresh();
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      toast.success(t("madeDefault", { name: persona.name }));
+    },
+    onError: (error) => toast.error(error.message),
+  });
   const remove = useMutation({
     mutationFn: () => pim.deletePersona(persona.id),
     onSuccess: refresh,
@@ -172,7 +183,13 @@ function PersonaCard({ persona }: { persona: Persona }) {
         </span>
         <div className="min-w-0 flex-1">
           <h2 className="flex items-center gap-2 font-medium">
-            <span className="truncate">{persona.name}</span>
+            <Link
+              to="/pims/$pimId"
+              params={{ pimId: persona.id }}
+              className="truncate underline-offset-2 hover:underline"
+            >
+              {persona.name}
+            </Link>
             {persona.default && (
               <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
                 {t("defaultPim")}
@@ -299,6 +316,16 @@ function PersonaCard({ persona }: { persona: Persona }) {
             disabled={publish.isPending}
           >
             {t("unpublish")}
+          </Button>
+        )}
+        {!persona.default && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => makeDefault.mutate()}
+            disabled={makeDefault.isPending}
+          >
+            <Star /> {t("makeDefault")}
           </Button>
         )}
         {isAdmin && everyones !== undefined && !forEveryone && (

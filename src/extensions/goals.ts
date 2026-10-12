@@ -1,6 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
-import type { Goal } from "../store";
+import type { Goal, PimStore } from "../store";
+import { definePimExtension } from "./define";
 import { type PimServices, json, text } from "./services";
 
 const GoalStatus = Type.Union([
@@ -80,5 +81,40 @@ export function goalsExtension({ store }: PimServices) {
 				return goals.length === 0 ? "No active goals." : goals.map(describeGoal).join("\n");
 			}),
 		],
+	});
+}
+
+/** On a dashboard: the Pim's active goals, newest first, each with its progress and next step. */
+export function goalsWidgets(store: PimStore) {
+	return definePimExtension({
+		id: "pim.goals",
+		name: "Goals",
+		description: "Goals with step-by-step plans that Pim keeps moving.",
+		widgets: {
+			active: {
+				title: { en: "Goals", es: "Metas" },
+				empty: { en: "No goals yet. Ask to start tracking one.", es: "Aún no hay metas. Pide empezar a seguir una." },
+				load: ({ chatOf }) => ({
+					kind: "progress",
+					items: store
+						.goals("active")
+						.flatMap((goal) => {
+							const chat = chatOf(goal.session);
+							if (chat === null) return [];
+							const next = goal.steps.find((step) => !step.done);
+							return [
+								{
+									title: goal.title,
+									value: goal.steps.filter((step) => step.done).length,
+									max: goal.steps.length,
+									...(next ? { detail: next.text } : {}),
+									link: { chat },
+								},
+							];
+						})
+						.slice(0, 5),
+				}),
+			},
+		},
 	});
 }

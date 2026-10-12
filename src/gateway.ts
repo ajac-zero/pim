@@ -123,6 +123,21 @@ async function serveApp(request: Request, env: Env, pathname: string): Promise<R
 	return toAgent(request, env, account.ownerId, callback ? pathname : `${MCP_EVENTS_PATH}${events![2]}`, false);
 }
 
+/**
+ * An image a model provider fetches: `/images/<owner>/<id>?expires=…&signature=…`,
+ * which the agent checks and answers as `/public-images/<id>`.
+ */
+async function serveImage(request: Request, env: Env, pathname: string): Promise<Response> {
+	const match = /^\/images\/([^/]+)\/([\w-]+)$/.exec(pathname);
+	if (!match) return fail(404, "Not found");
+	if (request.method !== "GET") return fail(405, `${pathname} takes GET`);
+	const account = await resolveAccount(env, decodeURIComponent(match[1]!));
+	if (!account) return fail(404, "Not found");
+	const refused = closed(account);
+	if (refused) return refused;
+	return toAgent(request, env, account.ownerId, `/public-images/${match[2]}`, false);
+}
+
 export async function serve(request: Request, env: Env): Promise<Response> {
 	const { pathname } = new URL(request.url);
 	if (pathname === "/health") return withCors(Response.json({ name: "pim", ok: true }));
@@ -135,6 +150,8 @@ export async function serve(request: Request, env: Env): Promise<Response> {
 		}
 		return (await handleRegistration(request, env)) ?? handleAuth(request, env, sites(env));
 	}
+
+	if (under(pathname, "/images")) return serveImage(request, env, pathname);
 
 	if (under(pathname, "/mcp")) {
 		const app = await serveApp(request, env, pathname);

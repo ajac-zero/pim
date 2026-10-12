@@ -1,4 +1,8 @@
-import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessage,
+  Message,
+  UserMessage,
+} from "@earendil-works/pi-ai";
 import type {
   AgentEvent,
   EntryRecord,
@@ -139,6 +143,36 @@ export function noticeOf(text: string): PimNotice | null {
   return null;
 }
 
+/** What the person sent, as an item: its text, then its images. */
+export function userItem(
+  content: UserMessage["content"],
+  id?: string,
+): MessageItem {
+  const parts = typeof content === "string" ? [] : content;
+  return {
+    type: "message",
+    ...(id === undefined ? {} : { id }),
+    role: "user",
+    content: [
+      { type: "input_text", text: textOf(content) },
+      ...parts.flatMap((part) =>
+        part.type === "image"
+          ? [
+              {
+                type: "input_image" as const,
+                // A sent image is kept by URL; one not yet sent is still inline.
+                image_url:
+                  "url" in part && typeof part.url === "string"
+                    ? part.url
+                    : `data:${part.mimeType};base64,${part.data}`,
+              },
+            ]
+          : [],
+      ),
+    ],
+  };
+}
+
 /** One assistant content block as an item. */
 function blockItem(
   block: AssistantMessage["content"][number],
@@ -183,12 +217,7 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
           key,
           kind: "item",
           source: "user",
-          item: {
-            type: "message",
-            id: key,
-            role: "user",
-            content: [{ type: "input_text", text }],
-          } satisfies MessageItem,
+          item: userItem(message.content, key),
         },
       ];
     }

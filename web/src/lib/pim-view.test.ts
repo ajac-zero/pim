@@ -146,6 +146,55 @@ describe("snapshot", () => {
     expect(state.view.queued).toBe(2);
   });
 
+  it("keeps the images the person sent, after their text, by URL once kept", () => {
+    const state = run([
+      snapshot({
+        entries: [
+          {
+            id: 1,
+            kind: "pi.message",
+            model: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "image",
+                    data: "",
+                    mimeType: "image/png",
+                    url: "/api/images/a1",
+                  },
+                  { type: "text", text: "What is this?" },
+                  {
+                    type: "image",
+                    data: "iVBORw0KGgo=",
+                    mimeType: "image/png",
+                  },
+                ],
+                timestamp: 0,
+              },
+            ],
+          } as unknown as EntryRecord,
+        ],
+      }),
+    ]);
+    const [entry] = state.view.entries;
+    expect(entry).toMatchObject({
+      kind: "item",
+      source: "user",
+      item: {
+        role: "user",
+        content: [
+          { type: "input_text", text: "What is this?" },
+          { type: "input_image", image_url: "/api/images/a1" },
+          {
+            type: "input_image",
+            image_url: "data:image/png;base64,iVBORw0KGgo=",
+          },
+        ],
+      },
+    });
+  });
+
   it("replaces everything a previous snapshot showed", () => {
     const first = run([
       snapshot({ entries: [user(1, "old")], run: { inputs: ["s1"] } }),

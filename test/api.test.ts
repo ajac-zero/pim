@@ -1,7 +1,9 @@
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
+import type { StoredImage } from "../src/images";
 import type { TranscriptMessage } from "../src/transcript";
 import { api, apiUrl, connect, OWNER, post, say, textOf, TOKEN, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
@@ -183,6 +185,89 @@ describe("conversation", () => {
 		expect((await post(path, { content: "hi", operationId: "op-1" })).body.accepted).toBe(false);
 		const { body } = await api(`/sessions/${created.id}/operations/op-1`);
 		expect(body).toMatchObject({ status: "done", text: "Later." });
+	});
+
+	it("keeps a message's images in R2 by URL, and gives the model their bytes on every turn", async () => {
+		const { body: created } = await post("/sessions");
+		const path = `/sessions/${created.id}/messages`;
+		const png = "iVBORw0KGgo=";
+		const jpeg = "/9j/4AAQ";
+		const seen: unknown[] = [];
+		faux.setResponses([
+			(context) => {
+				seen.push(context.messages.find((message) => message.role === "user"));
+				return fauxAssistantMessage("A cat and a dog.");
+			},
+			(context) => {
+				seen.push(context.messages.find((message) => message.role === "user"));
+				return fauxAssistantMessage("Yes, the cat.");
+			},
+		]);
+		const content = [
+			{ type: "text", text: "What are these?" },
+			{ type: "image", data: png, mimeType: "image/png" },
+			{ type: "image", data: jpeg, mimeType: "image/jpeg" },
+		];
+		expect((await post(path, { content, wait: true })).status).toBe(200);
+		expect((await post(path, { content: "The first one?", wait: true })).status).toBe(200);
+		// Both turns' requests carry the first message's images inline.
+		expect(seen).toEqual([{ role: "user", content, timestamp: expect.any(Number) }, { role: "user", content, timestamp: expect.any(Number) }]);
+
+		// The transcript holds their URLs, not their bytes, and the URLs serve them.
+		const [user] = (await api(`/sessions/${created.id}/messages`)).body.messages as TranscriptMessage[];
+		const images = user!.parts.filter((part) => part.type === "image") as StoredImage[];
+		expect(images.map(({ data, mimeType }) => ({ data, mimeType }))).toEqual([
+			{ data: "", mimeType: "image/png" },
+			{ data: "", mimeType: "image/jpeg" },
+		]);
+		const served = await exports.default.fetch(url(images[0]!.url), { headers: { Authorization: `Bearer ${TOKEN}` } });
+		expect(served.headers.get("content-type")).toBe("image/png");
+		expect(Buffer.from(await served.arrayBuffer()).toString("base64")).toBe(png);
+
+		// Deleting the chat deletes its images.
+		await api(`/sessions/${created.id}`, { method: "DELETE" });
+		const gone = await exports.default.fetch(url(images[0]!.url), { headers: { Authorization: `Bearer ${TOKEN}` } });
+		expect(gone.status).toBe(404);
+
+		const refused = async (parts: unknown) => (await post("/sessions/1/messages", { content: parts })).status;
+		expect(await refused([{ type: "image", data: "A".repeat(6_666_668), mimeType: "image/png" }])).toBe(413);
+		expect(await refused(Array.from({ length: 5 }, () => ({ type: "image", data: "AAAA", mimeType: "image/png" })))).toBe(400);
+		expect(await refused([{ type: "image", data: "AAAA", mimeType: "image/svg+xml" }])).toBe(415);
+		expect(await refused([{ type: "image", data: "not base64!", mimeType: "image/png" }])).toBe(400);
+		expect(await refused([{ type: "image", url: "https://example.com/cat.png" }])).toBe(400);
+		expect(await refused([{ type: "text", text: "  " }])).toBe(400);
+		expect(await refused("")).toBe(400);
+	});
+
+	it("gives a model whose API fetches images a signed URL instead, which serves the image without the token", async () => {
+		const png = "iVBORw0KGgo=";
+		const { body: created } = await post("/sessions");
+		faux.setResponses([fauxAssistantMessage("Seen.")]);
+		await post(`/sessions/${created.id}/messages`, { content: [{ type: "image", data: png, mimeType: "image/png" }], wait: true });
+		const [user] = (await api(`/sessions/${created.id}/messages`)).body.messages as TranscriptMessage[];
+		// What Anthropic's API, through pi-ai, would be given for the chat.
+		const sent = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			let context: { messages: { content: unknown }[] } | undefined;
+			const models = instance.images.resolving({
+				stream: (_model: unknown, given: typeof context) => {
+					context = given;
+					const events = createAssistantMessageEventStream();
+					events.end(fauxAssistantMessage("Seen."));
+					return events;
+				},
+			} as never);
+			const model = { api: "anthropic-messages", provider: "test", id: "claude", input: ["text", "image"] };
+			await models.stream(model as never, { messages: [{ role: "user", content: user!.parts, timestamp: 0 }] } as never).result();
+			return context!.messages[0]!.content as { type: string; data: string; url: string }[];
+		});
+		expect(sent).toEqual([{ type: "image", data: "", mimeType: "image/png", url: expect.stringMatching(/^https:\/\/pim\.test\/images\//) }]);
+
+		// Anyone holding the URL, a provider, gets the image; a changed signature gets nothing.
+		const fetched = await exports.default.fetch(sent[0]!.url);
+		expect(fetched.status).toBe(200);
+		expect(Buffer.from(await fetched.arrayBuffer()).toString("base64")).toBe(png);
+		const forged = await exports.default.fetch(sent[0]!.url.replace(/signature=[0-9a-f]/, (match) => `${match.slice(0, -1)}${match.endsWith("0") ? "1" : "0"}`));
+		expect(forged.status).toBe(404);
 	});
 
 	it("runs a turn submitted over the socket and streams its events", async () => {

@@ -1,7 +1,10 @@
-import { ArrowUp, Square } from "lucide-react";
-import { type ReactNode, useId, useRef } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { ArrowUp, ImagePlus, Square, X } from "lucide-react";
+import { type ReactNode, useId, useRef, useState } from "react";
+import { toast } from "sonner";
 import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
 import { useI18n } from "~/components/i18n";
+import { Button } from "~/components/ui/button";
 import {
   PromptInput,
   type PromptInputMessage,
@@ -10,10 +13,12 @@ import {
   PromptInputTextarea,
   usePromptInputController,
 } from "~/components/ui/prompt-input";
+import type { UserContent } from "~/lib/pim-api";
+import { modelQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 export interface ComposerProps {
-  onSend: (text: string) => void;
+  onSend: (content: UserContent) => void;
   onStop?: () => void;
   /** Pim is working on this session. Sending still works: Pim queues it. */
   busy: boolean;
@@ -25,10 +30,23 @@ export interface ComposerProps {
   promptSuggestions?: string[];
 }
 
+/** Image types Pim takes, as the server checks them. */
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+const MAX_IMAGES = 4;
+/** What a picked file may be before it's shrunk. */
+const MAX_PICKED_BYTES = 20_000_000;
 /**
- * Text-only composer. `~/components/ui/prompt-input` handles IME-safe
- * Enter-to-send and auto-resize. While Pim is busy, the button is Stop when
- * the box is empty and Send (a queued follow-up) when there is text.
+ * Longest side, and size, an image is sent at. Models see no more detail in
+ * a larger one, and every model request in the chat carries it again.
+ */
+const MAX_EDGE = 1568;
+const MAX_SENT_BYTES = 1_000_000;
+
+/**
+ * Composer for text and images. `~/components/ui/prompt-input` handles
+ * IME-safe Enter-to-send, auto-resize, paste and drop. Images go only to a
+ * model that can see them. While Pim is busy, the button is Stop when the box
+ * is empty and Send (a queued follow-up) when there is something to send.
  */
 export function Composer(props: ComposerProps) {
   return (
@@ -50,22 +68,49 @@ function ComposerInner({
 }: ComposerProps) {
   const { t } = useI18n();
   const controller = usePromptInputController();
+  const { data: model } = useQuery(modelQuery());
+  const seesImages = model?.model.images ?? false;
   const inputId = useId();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [preparing, setPreparing] = useState(false);
   const text = controller.textInput.value;
+  const files = controller.attachments.files;
   const hasText = text.trim().length > 0;
-  const canSend = !disabled && hasText;
-  const showStop = busy && !hasText && Boolean(onStop);
+  const hasContent = hasText || files.length > 0;
+  const canSend = !disabled && !preparing && hasContent;
+  const showStop = busy && !hasContent && Boolean(onStop);
 
-  const handleSubmit = (message: PromptInputMessage) => {
+  const cantSeeImages = () =>
+    toast.info(t("modelCantSeeImages", { model: model?.model.name ?? "" }));
+
+  const handleSubmit = async (message: PromptInputMessage) => {
     // Throwing tells PromptInput not to clear the text, so Enter on a
     // disabled composer doesn't wipe what the user typed.
     if (!canSend) throw new Error("Composer is not ready to send.");
-    onSend(message.text.trim());
+    const typed = message.text.trim();
+    let content: UserContent = typed;
+    if (message.files.length > 0) {
+      setPreparing(true);
+      try {
+        const images = await Promise.all(
+          message.files.map((file) => imageContent(file.url)),
+        );
+        content = [
+          ...(typed ? [{ type: "text" as const, text: typed }] : []),
+          ...images,
+        ];
+      } catch (error) {
+        toast.error(t("couldNotReadImage"));
+        throw error;
+      } finally {
+        setPreparing(false);
+      }
+    }
+    onSend(content);
     queueMicrotask(() => textareaRef.current?.focus());
   };
 
-  const showSuggestions = promptSuggestions.length > 0 && !text && !busy;
+  const showSuggestions = promptSuggestions.length > 0 && !hasContent && !busy;
 
   return (
     <div className="w-full">
@@ -83,12 +128,62 @@ function ComposerInner({
       )}
       <PromptInput
         onSubmit={handleSubmit}
+        accept={IMAGE_TYPES.join(",")}
+        multiple
+        maxFiles={seesImages ? MAX_IMAGES : 0}
+        maxFileSize={MAX_PICKED_BYTES}
+        onError={({ code }) => {
+          if (code === "accept") toast.error(t("imagesOnly"));
+          else if (code === "max_file_size") toast.error(t("imageTooLarge"));
+          else if (seesImages)
+            toast.error(t("tooManyImages", { count: MAX_IMAGES }));
+          else cantSeeImages();
+        }}
         className={cn(
           "relative rounded-[26px] border bg-card shadow-xs transition-shadow",
           "focus-within:border-ring/60 focus-within:shadow-sm",
         )}
       >
-        <div className="flex items-end gap-1.5 p-2.5 pl-4">
+        {files.length > 0 && (
+          <ul className="flex flex-wrap gap-2 px-3 pt-3">
+            {files.map((file) => (
+              <li key={file.id} className="group/image relative">
+                <img
+                  src={file.url}
+                  alt={file.filename}
+                  className="size-16 rounded-xl border object-cover"
+                />
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="secondary"
+                  aria-label={t("removeImage", { name: file.filename })}
+                  onClick={() => controller.attachments.remove(file.id)}
+                  className="-top-1.5 -right-1.5 absolute size-5 rounded-full border shadow-sm"
+                >
+                  <X className="size-3" />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="flex items-end gap-1.5 p-2.5 pl-2.5">
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            aria-label={t("attachImages")}
+            title={t("attachImages")}
+            disabled={disabled}
+            onClick={() =>
+              seesImages
+                ? controller.attachments.openFileDialog()
+                : cantSeeImages()
+            }
+            className="size-9 shrink-0 rounded-full text-muted-foreground"
+          >
+            <ImagePlus className="size-4.5" />
+          </Button>
           <PromptInputTextarea
             ref={textareaRef}
             id={inputId}
@@ -99,13 +194,13 @@ function ComposerInner({
           />
 
           <PromptInputSubmit
-            status={showStop ? "streaming" : "ready"}
+            status={showStop ? "streaming" : preparing ? "submitted" : "ready"}
             onStop={onStop}
             disabled={!showStop && !canSend}
           >
             {showStop ? (
               <Square className="size-4 fill-current" />
-            ) : (
+            ) : preparing ? undefined : (
               <ArrowUp className="size-5" />
             )}
           </PromptInputSubmit>
@@ -119,4 +214,60 @@ function ComposerInner({
       )}
     </div>
   );
+}
+
+/**
+ * A picked image as Pim takes it: as it is when it's small enough, else
+ * shrunk to fit and sent as a JPEG.
+ */
+async function imageContent(
+  url: string,
+): Promise<{ type: "image"; data: string; mimeType: string }> {
+  const blob = await (await fetch(url)).blob();
+  const bitmap = await createImageBitmap(blob);
+  try {
+    let scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+    let sent = blob;
+    if (
+      scale < 1 ||
+      blob.size > MAX_SENT_BYTES ||
+      !IMAGE_TYPES.includes(blob.type)
+    ) {
+      do {
+        sent = await jpeg(bitmap, scale);
+        scale *= 0.75;
+      } while (sent.size > MAX_SENT_BYTES && scale > 0.05);
+    }
+    return { type: "image", data: await base64(sent), mimeType: sent.type };
+  } finally {
+    bitmap.close();
+  }
+}
+
+function jpeg(bitmap: ImageBitmap, scale: number): Promise<Blob> {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  const context = canvas.getContext("2d");
+  if (!context) return Promise.reject(new Error("No canvas"));
+  // JPEG has no transparency: what was clear becomes white, not black.
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  return new Promise((resolve, reject) =>
+    canvas.toBlob(
+      (out) => (out ? resolve(out) : reject(new Error("Could not encode"))),
+      "image/jpeg",
+      0.85,
+    ),
+  );
+}
+
+function base64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
 }

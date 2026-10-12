@@ -13,3 +13,5 @@ minimumReleaseAgeExclude:
   - '@earendil-works/pi-durable@1.1.0'
   - '@earendil-works/pi-telemetry@1.1.0'
   - agents@0.27.0
+patchedDependencies:
+  '@earendil-works/pi-ai@1.1.0': patches/@earendil-works__pi-ai@1.1.0.patch

@@ -14,7 +14,7 @@
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     // Everything else is the app's pages and files.
-    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp/callback/*", "/mcp/events/*"]
+    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp/callback/*", "/mcp/events/*", "/images/*"]
   },
   // Workers AI runs the model; under `wrangler dev` it calls your logged-in account.
   "ai": { "binding": "AI", "remote": true },
@@ -37,6 +37,9 @@
     { "tag": "v3", "new_sqlite_classes": ["Directory"] },
     { "tag": "v4", "new_sqlite_classes": ["Gallery"] }
   ],
+  // Images people send in chats; their messages keep only the images' URLs. Deploying creates the
+  // bucket, once R2 is turned on for the account (Dashboard → R2; it asks for a payment method).
+  "r2_buckets": [{ "binding": "IMAGES" }],
   // Slow down guessing at sign-in from one address, and heavy API use by one person.
   // Namespace IDs are positive integers unique in your Cloudflare account.
   "ratelimits": [

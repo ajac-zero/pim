@@ -14,7 +14,7 @@
     "directory": "./web/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp/callback/*", "/mcp/events/*"]
+    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp/callback/*", "/mcp/events/*", "/images/*"]
   },
   "ai": { "binding": "AI", "remote": true },
   "durable_objects": {
@@ -31,6 +31,7 @@
     { "tag": "v3", "new_sqlite_classes": ["Directory"] },
     { "tag": "v4", "new_sqlite_classes": ["Gallery"] }
   ],
+  "r2_buckets": [{ "binding": "IMAGES", "bucket_name": "pim-images" }],
   "ratelimits": [
     { "name": "AUTH_LIMITER", "namespace_id": "71420101", "simple": { "limit": 20, "period": 60 } },
     { "name": "API_LIMITER", "namespace_id": "71420102", "simple": { "limit": 300, "period": 60 } }

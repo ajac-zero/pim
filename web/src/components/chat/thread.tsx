@@ -28,12 +28,13 @@ import type {
   FunctionCallOutputItem,
   MessageItem,
 } from "~/lib/openresponses";
-import type { Approval } from "~/lib/pim-api";
+import type { Approval, UserContent } from "~/lib/pim-api";
 import {
   layoutThread,
   type ModelProblem,
   type SessionView,
   type ThreadEntry,
+  userItem,
 } from "~/lib/pim-view";
 import { approvalsQuery } from "~/lib/queries";
 
@@ -61,7 +62,7 @@ export const Thread = memo(function Thread({
   sessionId,
   visit,
   view,
-  pendingText,
+  pending,
   composerHeight,
   composerCardHeight,
 }: {
@@ -70,7 +71,7 @@ export const Thread = memo(function Thread({
   visit?: string;
   view: SessionView;
   /** A message sent but not yet in the transcript, shown right away. */
-  pendingText: string | null;
+  pending: UserContent | null;
   composerHeight?: number;
   composerCardHeight?: number;
 }) {
@@ -78,20 +79,16 @@ export const Thread = memo(function Thread({
 
   const entries = useMemo<ThreadEntry[]>(() => {
     const all = [...view.entries];
-    if (pendingText !== null) {
+    if (pending !== null) {
       all.push({
         key: "pending",
         kind: "item",
         source: "user",
-        item: {
-          type: "message",
-          role: "user",
-          content: [{ type: "input_text", text: pendingText }],
-        },
+        item: userItem(pending),
       });
     }
     return [...all, ...view.live];
-  }, [view.entries, view.live, pendingText]);
+  }, [view.entries, view.live, pending]);
 
   /* A tool call renders with its result (call ids are unique per session). */
   const outputs = useMemo(() => {

@@ -371,6 +371,7 @@ export function memoryWidgets(store: OptMemStore) {
 		widgets: {
 			recent: {
 				title: { en: "Remembered lately", es: "Recordado últimamente" },
+				description: "The five newest memories.",
 				empty: { en: "Nothing remembered yet. Tell your Pim about yourself.", es: "Aún no recuerda nada. Cuéntale a tu Pim sobre ti." },
 				load: () => ({
 					kind: "list",

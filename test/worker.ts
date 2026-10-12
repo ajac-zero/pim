@@ -66,6 +66,7 @@ export const ledger = definePimExtension({
 		bills: {
 			title: { en: "Upcoming bills", es: "Próximas facturas" },
 			empty: "No bills.",
+			description: "Bills not paid yet, with when each is due.",
 			load: ({ data }) => ({
 				kind: "list",
 				items: data

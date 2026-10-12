@@ -107,12 +107,28 @@ export type WidgetProgressItem = {
   link?: WidgetLink;
 };
 
-/** One card of a dashboard, loaded by the extension that brings it, in the kind the app draws. */
-export type Widget = { id: string; title: string; empty: string } & (
+/** Text from an extension: one string, or one per language with English always there. */
+export type ExtensionText = string | ({ en: string } & Record<string, string>);
+
+/** What a widget shows, in a kind the app draws, or that it failed to load. */
+export type WidgetContent =
   | { kind: "list"; items: WidgetListItem[] }
   | { kind: "progress"; items: WidgetProgressItem[] }
-  | { failed: true }
-);
+  | { failed: true };
+
+/** A widget as kept with a message: its text in every language the extension gave it. */
+export type ShownWidget = {
+  id: string;
+  title: ExtensionText;
+  empty: ExtensionText;
+} & WidgetContent;
+
+/** One card of a dashboard, loaded by the extension that brings it, in the kind the app draws. */
+export type Widget = {
+  id: string;
+  title: string;
+  empty: string;
+} & WidgetContent;
 
 export type Dashboard = {
   pim: Pick<

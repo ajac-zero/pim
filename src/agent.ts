@@ -46,7 +46,16 @@ import {
 import pimConfig from "../pim.config";
 import { artifactsExtension, artifactsWidgets } from "./extensions/artifacts";
 import { ExtensionDataStore } from "./extensions/data";
-import { type Ability, checkToolNames, type PimConfig, PimExtensions, type WidgetContext, localize } from "./extensions/define";
+import {
+	type Ability,
+	checkToolNames,
+	type PimConfig,
+	PimExtensions,
+	type ShownWidget,
+	type WidgetContext,
+	localize,
+	widgetMarkdown,
+} from "./extensions/define";
 import { goalsExtension, goalsWidgets } from "./extensions/goals";
 import {
 	appToolPermission,
@@ -93,6 +102,19 @@ import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage"
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
 
 const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
+
+/** Pim's own widgets: every chat can show them. */
+const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory", "pim.artifacts"];
+
+/** The widgets a `send_to_user` result says went with the message; none in a plain "Sent." */
+function shownWidgets(result: string): ShownWidget[] {
+	try {
+		const parsed = JSON.parse(result) as { widgets?: unknown };
+		return Array.isArray(parsed.widgets) ? (parsed.widgets as ShownWidget[]) : [];
+	} catch {
+		return [];
+	}
+}
 /** Operation ids of the inputs Pim gives itself: scheduled tasks, approvals' decisions, apps' events. */
 const PIM_OPERATION = /^(schedule|approval|event):/;
 /**
@@ -645,6 +667,8 @@ export class Pim extends Agent<Env> {
 				const run = this.team.run(session);
 				return run ? { name: run.member, session: run.session } : null;
 			},
+			widgetsFor: (session) => this.#chatWidgets(session),
+			showWidget: (session, ref) => this.#loadWidget(this.personas.ofSession(session), ref),
 		};
 	}
 
@@ -727,14 +751,29 @@ export class Pim extends Agent<Env> {
 		const replies: string[] = [];
 		let sent = false;
 		if (record?.type === "input" && record.status === "done") {
-			for (const entry of await this.harness.session(result.session).messages()) {
+			const entries = (await this.harness.session(result.session).messages()).filter((entry) => entry.id > record.entry && entry.id <= record.answer);
+			// Each send_to_user call's result: a refused one sent nothing; a sent one may say what its widgets showed.
+			const results = new Map<string, { text: string; isError: boolean }>();
+			for (const entry of entries) {
 				const message = entry.model?.[0];
-				if (entry.id <= record.entry || entry.id > record.answer || message?.role !== "assistant") continue;
+				if (message?.role !== "toolResult") continue;
+				const text = message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+				results.set(message.toolCallId, { text, isError: message.isError });
+			}
+			for (const entry of entries) {
+				const message = entry.model?.[0];
+				if (message?.role !== "assistant") continue;
 				for (const part of message.content) {
 					if (part.type !== "toolCall" || part.name !== SEND_TO_USER) continue;
+					// It tried to send something: its notes aren't passed off as a reply, even when the send failed.
 					sent = true;
+					const outcome = results.get(part.id);
+					if (outcome?.isError) continue;
 					// What went to their inbox is not a reply here.
-					if (typeof part.arguments.message === "string" && part.arguments.channel !== "email") replies.push(part.arguments.message);
+					if (typeof part.arguments.message !== "string" || part.arguments.channel === "email") continue;
+					// A client that can't draw widgets gets what they showed as text.
+					const widgets = outcome ? shownWidgets(outcome.text) : [];
+					replies.push([part.arguments.message, ...widgets.map((widget) => widgetMarkdown(widget))].join("\n\n"));
 				}
 			}
 		}
@@ -1412,6 +1451,7 @@ export class Pim extends Agent<Env> {
 	get extensions(): PimExtensions {
 		this.#extensions ??= new PimExtensions(
 			[
+				// Pim's own (BUILT_IN_WIDGETS): every chat can show their widgets.
 				goalsWidgets(this.store),
 				scheduleWidgets(() => this.services().listSchedules()),
 				memoryWidgets(this.memory.store),
@@ -1491,8 +1531,19 @@ export class Pim extends Agent<Env> {
 	 */
 	async #dashboard(pim: Persona, locale: string) {
 		const base = pim.base === null ? undefined : this.extensions.pim(pim.base);
+		const widgets = await Promise.all((base?.dashboard ?? []).map((ref) => this.#loadWidget(pim, ref)));
+		return {
+			pim: { id: pim.id, name: pim.name, description: pim.description, default: pim.default, base: pim.base, icon: pim.icon },
+			starters: (base?.starters ?? []).map((starter) => localize(starter, locale)),
+			widgets: widgets.map((widget) => ({ ...widget, title: localize(widget.title, locale), empty: localize(widget.empty, locale) })),
+		};
+	}
+
+	/** Loads an installed widget for one of the owner's Pims. One that throws comes back failed. */
+	async #loadWidget(pim: Persona, ref: string): Promise<ShownWidget> {
+		const widget = this.extensions.widget(ref)!;
 		const deleted = this.store.deletedSessions();
-		const context: Omit<WidgetContext, "data"> = {
+		const context: WidgetContext = {
 			pim: { id: pim.id, name: pim.name, default: pim.default },
 			timeZone: this.settings().timeZone,
 			chatOf: (session) => {
@@ -1501,25 +1552,33 @@ export class Pim extends Agent<Env> {
 				if (deleted.has(chat) || this.visits.bySession(chat)) return null;
 				return this.personas.ofSession(chat).id === pim.id ? chat : null;
 			},
+			data: this.extensionData.for(ref.slice(0, ref.indexOf("/"))),
 		};
-		const widgets = await Promise.all(
-			(base?.dashboard ?? []).map(async (ref) => {
-				const widget = this.extensions.widget(ref)!;
-				const shown = { id: ref, title: localize(widget.title, locale), empty: localize(widget.empty, locale) };
-				try {
-					const data = this.extensionData.for(ref.slice(0, ref.indexOf("/")));
-					return { ...shown, ...(await widget.load({ ...context, data })) };
-				} catch (error) {
-					console.warn(`widget ${ref} failed`, error);
-					return { ...shown, failed: true };
-				}
-			}),
+		const shown = { id: ref, title: widget.title, empty: widget.empty };
+		try {
+			return { ...shown, ...(await widget.load(context)) };
+		} catch (error) {
+			console.warn(`widget ${ref} failed`, error);
+			return { ...shown, failed: true };
+		}
+	}
+
+	/**
+	 * The widgets a chat can show with its messages: Pim's own, and those of
+	 * the extensions its Pim builds on and uses, each with a description for
+	 * the model. None in a visit, or in a team member's conversation.
+	 */
+	#chatWidgets(session: string): { ref: string; description: string }[] {
+		if (this.visits.bySession(session) || this.team.run(session)) return [];
+		const base = this.personas.ofSession(session).base;
+		const extensions = new Set([...BUILT_IN_WIDGETS, ...(base ? [base.slice(0, base.indexOf("/"))] : []), ...this.extensions.abilitiesOf(base)]);
+		return this.extensions.list().flatMap((extension) =>
+			extensions.has(extension.id)
+				? Object.entries(extension.widgets ?? {}).flatMap(([name, widget]) =>
+						widget.description ? [{ ref: `${extension.id}/${name}`, description: widget.description }] : [],
+					)
+				: [],
 		);
-		return {
-			pim: { id: pim.id, name: pim.name, description: pim.description, default: pim.default, base: pim.base, icon: pim.icon },
-			starters: (base?.starters ?? []).map((starter) => localize(starter, locale)),
-			widgets,
-		};
 	}
 
 	/** The Pim a chat talks with; none in a visit, which talks with someone else's. */

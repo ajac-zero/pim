@@ -2,6 +2,8 @@ import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { useI18n } from "~/components/i18n";
 import type {
+  ExtensionText,
+  ShownWidget,
   Widget,
   WidgetLink,
   WidgetListItem,
@@ -110,6 +112,74 @@ function ProgressRow({ item }: { item: WidgetProgressItem }) {
 }
 
 const ROW = "flex items-start gap-3 rounded-lg px-2 py-1.5";
+
+/** Extension text in `locale`, or English when it wasn't translated. */
+function localize(text: ExtensionText, locale: string): string {
+  return typeof text === "string" ? text : (text[locale] ?? text.en);
+}
+
+/**
+ * The widgets a `send_to_user` result says went with the message, or null
+ * when it says none: a plain "Sent.", or not here yet.
+ */
+export function shownWidgets(output: unknown): ShownWidget[] | null {
+  if (typeof output !== "string" || !output.startsWith("{")) return null;
+  try {
+    const { widgets } = JSON.parse(output) as { widgets?: unknown };
+    if (!Array.isArray(widgets)) return null;
+    return widgets.filter(
+      (widget): widget is ShownWidget =>
+        typeof widget === "object" &&
+        widget !== null &&
+        typeof widget.id === "string" &&
+        ("failed" in widget || Array.isArray(widget.items)),
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A message's widgets, as they were when Pim sent it. Until the call's
+ * result arrives, a placeholder for each one asked for.
+ */
+export function SentWidgets({
+  requested,
+  output,
+}: {
+  requested: number;
+  output: unknown;
+}) {
+  const { locale } = useI18n();
+  const widgets = shownWidgets(output);
+  return (
+    <div
+      className={cn(
+        "mt-3 grid gap-3",
+        (widgets?.length ?? requested) > 1 && "sm:grid-cols-2",
+      )}
+    >
+      {widgets
+        ? widgets.map((widget) => (
+            <WidgetCard
+              key={widget.id}
+              widget={{
+                ...widget,
+                title: localize(widget.title, locale),
+                empty: localize(widget.empty, locale),
+              }}
+            />
+          ))
+        : Array.from({ length: requested }, (_, index) => (
+            <div
+              // biome-ignore lint/suspicious/noArrayIndexKey: placeholders have only their place
+              key={index}
+              className="h-24 animate-pulse rounded-xl border bg-muted/40"
+            />
+          ))}
+    </div>
+  );
+}
 
 function ItemLink({
   link,

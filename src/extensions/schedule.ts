@@ -93,6 +93,7 @@ export function scheduleWidgets(listSchedules: PimServices["listSchedules"]) {
 		widgets: {
 			upcoming: {
 				title: { en: "Coming up", es: "Próximamente" },
+				description: "The next scheduled tasks of this chat's Pim, soonest first, with when each runs.",
 				empty: { en: "Nothing scheduled. Ask for a reminder or a recurring check-in.", es: "Nada programado. Pide un recordatorio o un seguimiento periódico." },
 				load: async ({ chatOf }) => ({
 					kind: "list",

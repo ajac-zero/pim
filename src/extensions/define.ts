@@ -95,8 +95,31 @@ export type Widget = {
 	readonly title: Text;
 	/** Shown when it has nothing to show. */
 	readonly empty: Text;
+	/**
+	 * For the model: what it shows. A widget with one can also go with a
+	 * message in chat (`send_to_user`'s `widgets`), as it is when sent.
+	 */
+	readonly description?: string;
 	load(context: WidgetContext): WidgetContent | Promise<WidgetContent>;
 };
+
+/** A widget as loaded for one Pim: on a dashboard, or kept with a message. Its text is in every language it has. */
+export type ShownWidget = { readonly id: string; readonly title: Text; readonly empty: Text } & (WidgetContent | { readonly failed: true });
+
+/**
+ * A shown widget as Markdown, for where it can't be drawn: an email, or an
+ * API client's reply. Times are UTC, in ISO 8601.
+ */
+export function widgetMarkdown(widget: ShownWidget, locale = "en"): string {
+	const title = `**${localize(widget.title, locale)}**`;
+	if ("failed" in widget) return `${title}\n(Couldn't load.)`;
+	if (widget.items.length === 0) return `${title}\n${localize(widget.empty, locale)}`;
+	const lines =
+		widget.kind === "list"
+			? widget.items.map((item) => [item.title, item.detail, item.time].filter(Boolean).join(" · "))
+			: widget.items.map((item) => [`${item.title} (${item.value}/${item.max})`, item.detail].filter(Boolean).join(" · "));
+	return [title, ...lines.map((line) => `- ${line}`)].join("\n");
+}
 
 export type PimDefinition = {
 	/** Unique in its extension: the Pim is named `<extension>/<id>`. */

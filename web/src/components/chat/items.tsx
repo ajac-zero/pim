@@ -12,7 +12,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, type ReactNode, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
@@ -116,11 +116,14 @@ export const AssistantMessage = memo(function AssistantMessage({
   item,
   streaming,
   notified,
+  attachments,
 }: {
   item: MessageItem;
   streaming?: boolean;
   /** Pim also alerted the person's devices with it. */
   notified?: boolean;
+  /** What goes with the message, under its text: its widgets. */
+  attachments?: ReactNode;
 }) {
   const { t } = useI18n();
   const text = messageText(item);
@@ -132,6 +135,7 @@ export const AssistantMessage = memo(function AssistantMessage({
       {streaming && (
         <span className="ml-0.5 inline-block h-4 w-2 animate-pulse rounded-sm bg-foreground/70 align-text-bottom" />
       )}
+      {attachments}
       {notified && !streaming && (
         <p className="mt-1.5 flex items-center gap-1.5 text-muted-foreground text-xs">
           <Bell className="size-3.5 shrink-0" />

@@ -22,6 +22,7 @@ import {
   ConversationContent,
   ConversationScrollButton,
 } from "~/components/ui/conversation";
+import { SentWidgets } from "~/components/widgets";
 import type {
   FunctionCallItem,
   FunctionCallOutputItem,
@@ -156,6 +157,7 @@ export const Thread = memo(function Thread({
           approvalsByCall.has(call.call_id) ||
           (ARTIFACT_TOOLS.has(call.name) &&
             artifactReference(outputs.get(call.call_id)?.output) !== null),
+        refused: (call) => outputs.get(call.call_id)?.status === "incomplete",
       }),
     [entries, view.running, approvalsByCall, outputs],
   );
@@ -200,6 +202,14 @@ export const Thread = memo(function Thread({
                 }}
                 streaming={liveKeys.has(row.key)}
                 notified={row.sent.notify}
+                attachments={
+                  row.sent.widgets.length > 0 ? (
+                    <SentWidgets
+                      requested={row.sent.widgets.length}
+                      output={outputs.get(row.call.call_id)?.output}
+                    />
+                  ) : null
+                }
               />
             );
           }

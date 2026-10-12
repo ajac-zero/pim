@@ -116,7 +116,45 @@ CREATE TABLE IF NOT EXISTS pim_usage_runs (
 /** Days of usage kept: enough for a monthly view. */
 const KEEP_DAYS = 90;
 
-type StreamFn = (model: Model<Api>, context: unknown, options?: unknown) => AssistantMessageEventStream;
+export type StreamFn = (model: Model<Api>, context: unknown, options?: unknown) => AssistantMessageEventStream;
+
+/** A response that never reached the model, with why. */
+export function failedResponse(model: Model<Api>, reason: string, timestamp = Date.now()): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		stopReason: "error",
+		errorMessage: reason,
+		timestamp,
+	};
+}
+
+/** `models` with every request, the one-shot calls included, going through `wrap`. */
+export function wrapStreams(models: Models, wrap: (stream: StreamFn) => StreamFn): Models {
+	const stream = wrap((model, context, options) => models.stream(model, context as never, options as never));
+	const streamSimple = wrap((model, context, options) => models.streamSimple(model, context as never, options as never));
+	// `Models` keeps private state: everything else runs on the original.
+	return new Proxy(models, {
+		get(target, property) {
+			switch (property) {
+				case "stream":
+					return stream;
+				case "streamSimple":
+					return streamSimple;
+				case "complete":
+					return (model: Model<Api>, context: unknown, options?: unknown) => stream(model, context, options).result();
+				case "completeSimple":
+					return (model: Model<Api>, context: unknown, options?: unknown) => streamSimple(model, context, options).result();
+			}
+			const value = Reflect.get(target, property, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+}
 
 export const utcDay = (now: number) => new Date(now).toISOString().slice(0, 10);
 
@@ -293,25 +331,14 @@ export class UsageMeter {
 	 * added once it ends.
 	 */
 	meter(models: Models): Models {
-		const failed = (model: Model<Api>, reason: string): AssistantMessage => ({
-			role: "assistant",
-			content: [],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-			stopReason: "error",
-			errorMessage: reason,
-			timestamp: this.#now(),
-		});
-		const metered =
-			(stream: StreamFn): StreamFn =>
-			(model, context, options) => {
+		return wrapStreams(
+			models,
+			(stream) => (model, context, options) => {
 				const reserved = this.reserveModel(model.provider, model.id);
 				if (!reserved.ok) {
 					console.warn(JSON.stringify({ event: "pim.limit", limit: "model", provider: model.provider, reason: reserved.refusal }));
 					const events = createAssistantMessageEventStream();
-					const message = failed(model, reserved.refusal);
+					const message = failedResponse(model, reserved.refusal, this.#now());
 					events.push({ type: "error", reason: "error", error: message });
 					events.end(message);
 					return events;
@@ -330,25 +357,7 @@ export class UsageMeter {
 					() => undefined,
 				);
 				return events;
-			};
-		const stream = metered((model, context, options) => models.stream(model, context as never, options as never));
-		const streamSimple = metered((model, context, options) => models.streamSimple(model, context as never, options as never));
-		// `Models` keeps private state: everything else runs on the original, and the one-shot calls go through the metered streams.
-		return new Proxy(models, {
-			get(target, property) {
-				switch (property) {
-					case "stream":
-						return stream;
-					case "streamSimple":
-						return streamSimple;
-					case "complete":
-						return (model: Model<Api>, context: unknown, options?: unknown) => stream(model, context, options).result();
-					case "completeSimple":
-						return (model: Model<Api>, context: unknown, options?: unknown) => streamSimple(model, context, options).result();
-				}
-				const value = Reflect.get(target, property, target);
-				return typeof value === "function" ? value.bind(target) : value;
 			},
-		});
+		);
 	}
 }

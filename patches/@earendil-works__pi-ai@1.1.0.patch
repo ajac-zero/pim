@@ -1,0 +1,80 @@
+diff --git a/dist/api/anthropic-messages.js b/dist/api/anthropic-messages.js
+index 38571b31e143e913c2bf59dad73382982e93664a..95db18aaf9d3f2b763423c1b466903896ce9361c 100644
+--- a/dist/api/anthropic-messages.js
++++ b/dist/api/anthropic-messages.js
+@@ -94,11 +94,13 @@ function convertContentBlocks(content) {
+         }
+         return {
+             type: "image",
+-            source: {
+-                type: "base64",
+-                media_type: block.mimeType,
+-                data: block.data,
+-            },
++            source: block.url
++                ? { type: "url", url: block.url }
++                : {
++                    type: "base64",
++                    media_type: block.mimeType,
++                    data: block.data,
++                },
+         };
+     });
+     // If only images (no text), add placeholder text block
+@@ -1063,11 +1065,13 @@ convertToolDefinitions) {
+                     else {
+                         return {
+                             type: "image",
+-                            source: {
+-                                type: "base64",
+-                                media_type: item.mimeType,
+-                                data: item.data,
+-                            },
++                            source: item.url
++                                ? { type: "url", url: item.url }
++                                : {
++                                    type: "base64",
++                                    media_type: item.mimeType,
++                                    data: item.data,
++                                },
+                         };
+                     }
+                 });
+diff --git a/dist/api/openai-responses-shared.js b/dist/api/openai-responses-shared.js
+index f413fe5f2a1abcac39c38bbd4a77b38c349a5918..7c3f4ee30ef711614e8c589b7df5ce3ac462756c 100644
+--- a/dist/api/openai-responses-shared.js
++++ b/dist/api/openai-responses-shared.js
+@@ -52,7 +52,7 @@ function convertToolResultOutput(model, content) {
+         output.push({
+             type: "input_image",
+             detail: "auto",
+-            image_url: `data:${image.mimeType};base64,${image.data}`,
++            image_url: image.url ?? `data:${image.mimeType};base64,${image.data}`,
+         });
+     }
+     return output;
+@@ -155,7 +155,7 @@ export function convertResponsesMessages(model, context, allowedToolCallProvider
+                     return {
+                         type: "input_image",
+                         detail: "auto",
+-                        image_url: `data:${item.mimeType};base64,${item.data}`,
++                        image_url: item.url ?? `data:${item.mimeType};base64,${item.data}`,
+                     };
+                 });
+                 if (content.length === 0)
+diff --git a/dist/types.d.ts b/dist/types.d.ts
+index b01603bff2e8dbaedcd4aa9ef5b2d3d1192697f8..d6a6031c3d4bc77e04bba21229b793805f4c25f3 100644
+--- a/dist/types.d.ts
++++ b/dist/types.d.ts
+@@ -278,6 +278,11 @@ export interface ImageContent {
+     type: "image";
+     data: string;
+     mimeType: string;
++    /**
++     * Where the provider fetches the image, instead of `data`. Only the OpenAI Responses and Anthropic Messages APIs
++     * send it; every other API sends `data`.
++     */
++    url?: string;
+ }
+ export interface ToolCall {
+     type: "toolCall";

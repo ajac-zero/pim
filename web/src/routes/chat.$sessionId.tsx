@@ -11,7 +11,7 @@ import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
 import { useElementHeight } from "~/hooks/use-element-size";
-import { CHATGPT_PROVIDER } from "~/lib/pim-api";
+import { CHATGPT_PROVIDER, type UserContent } from "~/lib/pim-api";
 import { pimClient, usePimClient } from "~/lib/pim-client";
 import { modelQuery, sessionsQuery } from "~/lib/queries";
 
@@ -59,7 +59,7 @@ function ChatPage() {
 
   const followed = usePimClient((state) => state.session);
   const view = usePimClient((state) => state.view);
-  const pendingText = usePimClient((state) => state.pendingText);
+  const pending = usePimClient((state) => state.pending);
   const connection = usePimClient((state) => state.connection);
   const ready = followed === sessionId;
 
@@ -68,8 +68,8 @@ function ChatPage() {
   const { ref: composerCardRef, height: composerCardHeight } =
     useElementHeight<HTMLDivElement>();
 
-  const send = (text: string) => {
-    pimClient.send(text).catch((error: Error) => toast.error(error.message));
+  const send = (content: UserContent) => {
+    pimClient.send(content).catch((error: Error) => toast.error(error.message));
   };
   const stop = () => {
     pimClient.stop().catch((error: Error) => toast.error(error.message));
@@ -83,7 +83,7 @@ function ChatPage() {
             sessionId={sessionId}
             visit={session?.visit?.username}
             view={view}
-            pendingText={pendingText}
+            pending={pending}
             composerHeight={composerHeight}
             composerCardHeight={composerCardHeight}
           />

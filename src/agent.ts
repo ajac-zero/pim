@@ -18,6 +18,7 @@ import { type PiModel, PiHarness, type PiOperationResult, type PiReceipt, ROOT_S
 import { createAI } from "agents/models/pi-ai";
 import { ArtifactStore, artifactHeaders, downloadName, RESIZE_SCRIPT } from "./artifacts";
 import { Email, type Mailer, mailerFrom } from "./email";
+import { ImageStore, userInput } from "./images";
 import {
 	type Circle,
 	CircleStore,
@@ -213,9 +214,14 @@ function titleFrom(content: UserInput): string | undefined {
 	return text.trim() === "" ? undefined : clipTitle(text);
 }
 
-/** A model as the API shows it. */
+/** A model as the API shows it; `images` says whether it can see them. */
 function describeModel(model: PiModel) {
-	return { provider: model.provider, id: model.id, name: "name" in model && typeof model.name === "string" ? model.name : model.id };
+	return {
+		provider: model.provider,
+		id: model.id,
+		name: "name" in model && typeof model.name === "string" ? model.name : model.id,
+		images: "input" in model && Array.isArray(model.input) && model.input.includes("image"),
+	};
 }
 
 function errorMessage(error: unknown): string {
@@ -246,11 +252,19 @@ export class Pim extends Agent<Env> {
 	});
 	/** The tasks the Pims' teams were given, each in a conversation of its own. */
 	readonly team = new TeamStore(this.ctx.storage.sql);
+	/** Images the person sent, in R2; their messages keep their URLs. */
+	readonly images = new ImageStore({
+		sql: this.ctx.storage.sql,
+		bucket: this.env.IMAGES,
+		owner: () => this.name,
+		publicOrigin: () => this.env.PIM_PUBLIC_URL || this.store.meta("public_origin"),
+		meta: { get: (key) => this.store.meta(key), set: (key, value) => this.store.setMeta(key, value) },
+	});
 	/** What the agent made for its owner, with every version. */
 	readonly artifacts = new ArtifactStore(this.ctx.storage.sql, () => this.limits(), {
 		storageRoom: () => {
 			const { storageBytes } = this.limits();
-			return storageBytes === null ? null : storageBytes - this.ctx.storage.sql.databaseSize;
+			return storageBytes === null ? null : storageBytes - this.storedBytes();
 		},
 	});
 	readonly ai = createAI({ binding: this.env.AI });
@@ -535,9 +549,12 @@ export class Pim extends Agent<Env> {
 		return models;
 	}
 
-	/** One catalog for pi and the API, so a token refresh is never run twice at once. Every request through it is metered. */
+	/**
+	 * One catalog for pi and the API, so a token refresh is never run twice at
+	 * once. Every request through it is metered, and gets the chat's images.
+	 */
 	modelCatalog(): Models {
-		this.#modelCatalog ??= this.usage.meter(this.models());
+		this.#modelCatalog ??= this.images.resolving(this.usage.meter(this.models()));
 		return this.#modelCatalog;
 	}
 
@@ -725,15 +742,23 @@ export class Pim extends Agent<Env> {
 			throw error;
 		}
 		this.store.touchSession(session, from === "user" && !this.visits.bySession(session) ? titleFrom(content) : undefined);
+		let kept: string[] = [];
 		try {
 			await this.#selectAbilities(session);
-			receipt = await this.harness.submit(content, { session, ...options });
+			// Images go to R2; the message keeps their URLs.
+			const stored = await this.images.keep(session, content);
+			kept = stored.ids;
+			receipt = await this.harness.submit(stored.content, { session, ...options });
 		} catch (error) {
 			if (run !== undefined) this.usage.releaseRun(run);
+			await this.images.delete(kept);
 			throw error;
 		}
-		// A retried submission (the same operation id) is not accepted again: one run, not two.
-		if (run !== undefined && !receipt.accepted) this.usage.releaseRun(run);
+		// A retried submission (the same operation id) is not accepted again: one run, not two, and its images once.
+		if (!receipt.accepted) {
+			if (run !== undefined) this.usage.releaseRun(run);
+			await this.images.delete(kept);
+		}
 		return receipt;
 	}
 
@@ -781,10 +806,16 @@ export class Pim extends Agent<Env> {
 		return { ...result, replies: fallback ? [result.text!] : replies };
 	}
 
+	/** What this Pim holds: its database, and the images sent to it. */
+	storedBytes(): number {
+		return this.ctx.storage.sql.databaseSize + this.images.bytes();
+	}
+
 	#storageRefusal(): string | null {
 		const { storageBytes } = this.limits();
-		if (storageBytes === null || this.ctx.storage.sql.databaseSize < storageBytes) return null;
-		return `Pim storage quota exceeded: this Pim holds ${this.ctx.storage.sql.databaseSize} bytes, over its ${storageBytes}. Delete chats or memories to make room.`;
+		const stored = this.storedBytes();
+		if (storageBytes === null || stored < storageBytes) return null;
+		return `Pim storage quota exceeded: this Pim holds ${stored} bytes, over its ${storageBytes}. Delete chats or memories to make room.`;
 	}
 
 	// Background work
@@ -1805,7 +1836,7 @@ export class Pim extends Agent<Env> {
 			limits: this.limits(),
 			today: this.usage.today(),
 			history: this.usage.history(days),
-			storageBytes: this.ctx.storage.sql.databaseSize,
+			storageBytes: this.storedBytes(),
 		};
 	}
 
@@ -1867,6 +1898,7 @@ export class Pim extends Agent<Env> {
 		const own = new Set([SCHEDULED_TASK_CALLBACK, WATCH_REFRESH_CALLBACK]);
 		if ((await this.listSchedules()).some((schedule) => own.has(schedule.callback))) remaining.push("schedules");
 		if (Object.keys(this.getMcpServers().servers).length > 0) remaining.push("app connections");
+		if (await this.images.any()) remaining.push("images");
 		return remaining;
 	}
 
@@ -1896,6 +1928,8 @@ export class Pim extends Agent<Env> {
 			await Promise.allSettled(this.store.watches().map((watch) => this.appEvents.stop(watch.id)));
 		};
 		await Promise.race([courtesy().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, ERASE_COURTESY_MS))]);
+		// Images live outside this object's storage, so they go first.
+		await this.images.deleteAll();
 		await this.ctx.storage.deleteAll();
 		this.store.markErased(Date.now());
 		await this.ctx.storage.sync();
@@ -2027,6 +2061,7 @@ export class Pim extends Agent<Env> {
 			async ({ session }) => {
 				const id = await this.#session(session!);
 				this.store.deleteSession(id);
+				await this.images.deleteSession(id);
 				const visit = this.visits.bySession(id);
 				if (visit) this.visits.setSession(visit.ownerId, null);
 				// Nothing keeps working in a chat the user can no longer see.
@@ -2066,15 +2101,13 @@ export class Pim extends Agent<Env> {
 					operationId: string;
 					wait: boolean;
 				}>(request);
-				if (typeof body.content !== "string" || body.content.trim() === "") {
-					throw new HttpError(400, "content must be a non-empty string");
-				}
+				const content = userInput(body.content);
 				if (body.whenBusy !== undefined && body.whenBusy !== "followUp" && body.whenBusy !== "steer") {
 					throw new HttpError(400, "whenBusy must be followUp or steer");
 				}
 				const receipt = await this.submitTo(
 					id,
-					body.content,
+					content,
 					{
 						...(body.whenBusy ? { whenBusy: body.whenBusy } : {}),
 						...(typeof body.operationId === "string" ? { operationId: body.operationId } : {}),
@@ -2532,6 +2565,34 @@ export class Pim extends Agent<Env> {
 				return this.personas.update(id!, this.#checkBase(personaInput(await readJson<Record<string, unknown>>(request), this.#persona(id!))));
 			},
 		],
+		// What a model provider fetches; the signature, not the API token, lets it in.
+		[
+			"GET",
+			"/public-images/:image",
+			async ({ image }, _request, url) => {
+				const found = await this.images.readSigned(image!, url);
+				if (!found) throw new HttpError(404, "No such image");
+				return new Response(found.body, {
+					headers: { "content-type": found.type, "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; sandbox" },
+				});
+			},
+		],
+		[
+			"GET",
+			"/images/:image",
+			async ({ image }) => {
+				const found = await this.images.read(image!);
+				if (!found) throw new HttpError(404, "No such image");
+				return new Response(found.body, {
+					headers: {
+						"content-type": found.type,
+						"x-content-type-options": "nosniff",
+						"content-security-policy": "default-src 'none'; sandbox",
+						"cache-control": "private, max-age=31536000, immutable",
+					},
+				});
+			},
+		],
 		[
 			"GET",
 			"/personas/:persona/icon",
@@ -2885,7 +2946,7 @@ export class Pim extends Agent<Env> {
 			case "submit":
 				return await this.submitTo(
 					session,
-					message.content,
+					userInput(message.content),
 					{
 						...(message.whenBusy ? { whenBusy: message.whenBusy } : {}),
 						...(message.operationId ? { operationId: message.operationId } : {}),

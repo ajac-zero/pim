@@ -704,8 +704,12 @@ describe("the account", () => {
 		await runInDurableObject(env.Pim.getByName(rita.ownerId), async (instance: Pim) => {
 			instance.store.putCredential("openai", JSON.stringify({ type: "oauth", access: "rita-access", refresh: "rita-refresh" }));
 			await instance.schedule(new Date(Date.now() + 60 * 60_000), "runScheduledTask", { session: "1", instruction: "Call the bank" });
+			// Images are kept in R2, outside the agent's storage.
+			await instance.images.keep("1", [{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }]);
 		});
-		expect((await holdings(rita.ownerId)).remaining).toEqual(expect.arrayContaining(["credentials", "memories", "schedules", "owner profile"]));
+		expect((await holdings(rita.ownerId)).remaining).toEqual(
+			expect.arrayContaining(["credentials", "memories", "schedules", "owner profile", "images"]),
+		);
 
 		// The agent can't be reached: nothing is erased, and nothing says it was.
 		await withAgentMethod(

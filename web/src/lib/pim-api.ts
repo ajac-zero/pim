@@ -425,7 +425,21 @@ export type PimNotification = {
   readAt: number | null;
 };
 
-export type ModelInfo = { provider: string; id: string; name: string };
+export type ModelInfo = {
+  provider: string;
+  id: string;
+  name: string;
+  /** It can see images sent with a message. */
+  images: boolean;
+};
+
+/** What a person sends: text, or text and images (base64, with their type). */
+export type UserContent =
+  | string
+  | (
+      | { type: "text"; text: string }
+      | { type: "image"; data: string; mimeType: string }
+    )[];
 
 export type ChatGPTStatus = { connected: boolean; email: string | null };
 
@@ -580,7 +594,7 @@ export const pim = {
     }),
   deleteSession: (id: string) =>
     call<{ deleted: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
-  send: (session: string, content: string) =>
+  send: (session: string, content: UserContent) =>
     call<{ operationId: string; accepted: boolean }>(
       `/sessions/${session}/messages`,
       { method: "POST", body: JSON.stringify({ content }) },

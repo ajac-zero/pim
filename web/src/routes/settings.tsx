@@ -135,6 +135,7 @@ function ModelChoices({ settings }: { settings: ModelSettings }) {
                   </span>
                   <span className="block truncate text-muted-foreground text-xs">
                     {plan ? t("usesChatGPTPlan") : t("runsOnWorkersAI")}
+                    {choice.images && ` · ${t("seesImages")}`}
                   </span>
                 </span>
                 {choose.isPending && choose.variables?.id === choice.id ? (

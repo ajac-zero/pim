@@ -58,6 +58,8 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 
 Pim's Durable Objects run on the Workers free plan, but the default model, GLM-5.3 on Workers AI, needs the Workers Paid plan or prepaid AI Gateway credits. For a free first look, set `PIM_MODEL` to `@cf/zai-org/glm-4.7-flash`, which runs on Workers AI's daily free allocation but is not good enough for real use; or connect a ChatGPT plan in Settings.
 
+Images people send in chats are kept in an R2 bucket, which deploying creates. R2 has to be turned on for the account first: in the dashboard, open Storage & databases, then R2, and add the R2 subscription. Its free tier covers 10 GB, but Cloudflare asks for a payment method.
+
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ajac-zero/pim)
 
 The button copies this repository to your GitHub account and deploys it to your Cloudflare account. It asks for nothing. Then open the Worker's URL, pick a username, save your recovery codes and create your passkey: your face, fingerprint, or PIN. You're the admin of this Pim. That's the whole setup.
@@ -124,7 +126,8 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | POST | `/sessions` | `{ title? }` | A new session |
 | PUT | `/sessions/:s` | `{ title }` | Renames it |
 | GET | `/sessions/:s/messages` | | `{ busy, pending, messages }`: the transcript as display messages |
-| POST | `/sessions/:s/messages` | `{ content, wait?, whenBusy?: "followUp" \| "steer", operationId? }` | `202` with a receipt `{ operationId, accepted }`, or the result `{ status, replies, text?, reason? }` when `wait` is true. `replies` is what Pim sent you, in order; `text` is its final notes, which only stand in as the reply when it sent nothing |
+| POST | `/sessions/:s/messages` | `{ content, wait?, whenBusy?: "followUp" \| "steer", operationId? }`. `content` is text, or an array of `{ type: "text", text }` and `{ type: "image", data, mimeType }` parts: up to 4 PNG, JPEG, WebP or GIF images, base64, at most 5 MB each. Images are kept in R2; the transcript shows each as `{ type: "image", mimeType, url }`. Models on the OpenAI Responses and Anthropic Messages APIs fetch them from a signed URL (`/images/<owner>/<id>`, valid 15 minutes) when Pim has a public HTTPS address; any other model gets them inline | `202` with a receipt `{ operationId, accepted }`, or the result `{ status, replies, text?, reason? }` when `wait` is true. `replies` is what Pim sent you, in order; `text` is its final notes, which only stand in as the reply when it sent nothing |
+| GET | `/images/:id` | | An image sent in a chat, by the `url` its message keeps |
 | GET | `/sessions/:s/operations/:op` | `?timeout=ms` (max 60000) | The result once settled, or `{ status: "pending" }` |
 | POST | `/sessions/:s/abort` | `{ operationId? }` | Withdraws one operation, or stops everything |
 | POST | `/sessions/:s/reset` | `{ handoff? }` | Starts a fresh context; history stays stored |
@@ -133,7 +136,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | PUT | `/settings` | Any of `{ timeZone, approvalPolicy, notifyWebhook }`; `null` goes back to the deployment's | The settings |
 | GET | `/usage` | | `{ limits, today, history, storageBytes }`: model requests, tokens (the ChatGPT plan's apart) and runs by UTC day |
 | GET | `/export` | | Everything as one JSON download, without credentials |
-| GET | `/model` | | `{ model, default, choices, chatgpt: { connected, email, error } }`: the model every session uses, and the ones you can choose |
+| GET | `/model` | | `{ model, default, choices, chatgpt: { connected, email, error } }`: the model every session uses, and the ones you can choose. Each says whether it sees images (`images`); a model that doesn't is told an image was left out |
 | PUT | `/model` | `{ provider, id }`, one of `choices` | Moves every session, and new ones, to that model |
 | GET | `/chatgpt` | | `{ connected, email }` |
 | POST | `/chatgpt/login` | | `{ url }` to open in a browser, to sign in with ChatGPT |

@@ -2,7 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { toast } from "sonner";
-import { pim } from "~/lib/pim-api";
+import { pim, type UserContent } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 
 /**
@@ -15,7 +15,7 @@ export function useStartChat(persona: string | undefined) {
   const navigate = useNavigate();
   const [starting, setStarting] = useState(false);
 
-  const start = async (text: string) => {
+  const start = async (content: UserContent) => {
     setStarting(true);
     try {
       const session = await pim.createSession(persona ? { persona } : {});
@@ -25,7 +25,7 @@ export function useStartChat(persona: string | undefined) {
         to: "/chat/$sessionId",
         params: { sessionId: session.id },
       });
-      await pimClient.send(text);
+      await pimClient.send(content);
     } catch (error) {
       toast.error((error as Error).message);
       setStarting(false);

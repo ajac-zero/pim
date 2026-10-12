@@ -53,6 +53,7 @@ import {
 import {
   type FunctionCallItem,
   type FunctionCallOutputItem,
+  type InputImagePart,
   type MessageItem,
   messageText,
   type ORItem,
@@ -84,9 +85,32 @@ export const UserMessage = memo(function UserMessage({
   const { t } = useI18n();
   const text = messageText(item);
   const { copied, copy } = useCopy(text);
+  const images =
+    typeof item.content === "string"
+      ? []
+      : item.content.flatMap((part) => {
+          const url =
+            part.type === "input_image"
+              ? (part as InputImagePart).image_url
+              : undefined;
+          return url ? [url] : [];
+        });
 
   return (
     <div className="group/user flex w-full flex-col items-end gap-1.5">
+      {images.length > 0 && (
+        <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
+          {images.map((src, index) => (
+            <img
+              // biome-ignore lint/suspicious/noArrayIndexKey: a message's images never reorder.
+              key={index}
+              src={src}
+              alt={t("attachedImage")}
+              className="max-h-60 max-w-full rounded-2xl border object-contain"
+            />
+          ))}
+        </div>
+      )}
       {text.length > 0 && (
         <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-3xl bg-secondary px-4 py-2.5 text-[15px] text-secondary-foreground leading-6">
           {text}

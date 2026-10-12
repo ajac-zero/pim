@@ -4,6 +4,7 @@ import {
   type PimNotification,
   pim,
   type ServerMessage,
+  type UserContent,
 } from "~/lib/pim-api";
 import {
   EMPTY_STREAM,
@@ -25,7 +26,7 @@ export type ClientState = {
   connection: ConnectionState;
   view: SessionView;
   /** A message sent but not yet in the transcript. */
-  pendingText: string | null;
+  pending: UserContent | null;
 };
 
 export type ClientHandlers = {
@@ -44,7 +45,7 @@ class PimClient {
     session: null,
     connection: "closed",
     view: EMPTY_STREAM.view,
-    pendingText: null,
+    pending: null,
   };
   #stream: StreamState = EMPTY_STREAM;
   #socket: WebSocket | null = null;
@@ -75,7 +76,7 @@ class PimClient {
     this.#set({
       session,
       view: EMPTY_STREAM.view,
-      pendingText: null,
+      pending: null,
       connection: "connecting",
     });
     this.#connect();
@@ -129,9 +130,7 @@ class PimClient {
           view.entries.length > before.entries.length || view.running;
         this.#set({
           view,
-          ...(placed && this.#state.pendingText !== null
-            ? { pendingText: null }
-            : {}),
+          ...(placed && this.#state.pending !== null ? { pending: null } : {}),
         });
         if (before.running !== view.running) {
           this.handlers.onActivity?.(message.session);
@@ -153,15 +152,15 @@ class PimClient {
   }
 
   /** Sends a message to the session on screen; it shows at once, until Pim places it. */
-  async send(text: string) {
+  async send(content: UserContent) {
     const session = this.#state.session;
     if (!session) return;
-    this.#set({ pendingText: text });
+    this.#set({ pending: content });
     try {
-      await pim.send(session, text);
+      await pim.send(session, content);
       this.handlers.onActivity?.(session);
     } catch (error) {
-      this.#set({ pendingText: null });
+      this.#set({ pending: null });
       throw error;
     }
   }

@@ -1516,7 +1516,7 @@ export class Pim extends Agent<Env> {
 			}),
 		);
 		return {
-			pim: { id: pim.id, name: pim.name, description: pim.description, default: pim.default, base: pim.base },
+			pim: { id: pim.id, name: pim.name, description: pim.description, default: pim.default, base: pim.base, icon: pim.icon },
 			starters: (base?.starters ?? []).map((starter) => localize(starter, locale)),
 			widgets,
 		};

@@ -3,8 +3,8 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import {
   Bot,
   Globe,
-  MessageCircle,
   ImagePlus,
+  MessageCircle,
   Pencil,
   Plug,
   Plus,
@@ -17,8 +17,8 @@ import {
 import { type FormEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useI18n } from "~/components/i18n";
-import { iconFromFile, PimIcon } from "~/components/pim-icon";
 import { EmptyState, Page } from "~/components/page";
+import { iconFromFile, PimIcon } from "~/components/pim-icon";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {
@@ -187,7 +187,9 @@ function PersonaCard({ persona }: { persona: Persona }) {
         <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-primary/10 text-primary">
           <PimIcon
             persona={persona}
-            className={persona.icon === null ? "size-4.5" : "size-8 rounded-none"}
+            className={
+              persona.icon === null ? "size-4.5" : "size-8 rounded-none"
+            }
           />
         </span>
         <div className="min-w-0 flex-1">

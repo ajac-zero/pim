@@ -50,6 +50,8 @@ const TOOL_STEPS: Record<string, TranslationKey> = {
   watch_app_event: "stepEvents",
   list_watches: "stepEvents",
   stop_watch: "stepEvents",
+  create_pim: "stepPims",
+  update_pim: "stepPims",
 };
 
 type Translate = ReturnType<typeof useI18n>["t"];

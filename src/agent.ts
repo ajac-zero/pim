@@ -84,7 +84,7 @@ import { MESSAGING_EXTENSION, messagingExtension, SEND_TO_USER } from "./extensi
 import { createOptMem, memoryWidgets } from "./extensions/optmem";
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
 import { byteLength, ENTRY_BYTES, entryLine } from "./extensions/optmem/store";
-import { personaExtension } from "./extensions/persona";
+import { CREATE_PIM, personaExtension, UPDATE_PIM, updatePimAction } from "./extensions/persona";
 import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
@@ -185,7 +185,7 @@ const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
 /** Tools of the Pim the person talks with that its team members don't get, though their extensions stay. */
-const LEAD_ONLY_TOOLS = new Set(["watch_app_event"]);
+const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_PIM, UPDATE_PIM]);
 /** Set once chats' Pims come from the prompt's `pim` section, not from instructions stored in each chat. */
 const PIM_SECTION_KEY = "pim_section";
 /** The day the person was last told a limit stopped background work. */
@@ -351,6 +351,7 @@ export class Pim extends Agent<Env> {
 		httpRequest as GatedAction,
 		...mcpActions(this.apps),
 		watchAction(this.apps, this.appEvents),
+		updatePimAction(this.personas),
 	];
 
 	/** Every action an approval can be for: Pim's own, and the extensions'. */
@@ -362,13 +363,7 @@ export class Pim extends Agent<Env> {
 		harness: async ({ storage, context }) => {
 			const services = this.services();
 			this.#migrateAlwaysApproved();
-			this.registry.install(
-				personaExtension(
-					services,
-					(session) => this.#roleOf(session),
-					(pim) => (pim.base === null ? undefined : this.extensions.pim(pim.base)),
-				),
-			);
+			this.registry.install(this.#personaExtension(services));
 			this.registry.install(goalsExtension(services));
 			this.registry.install(scheduleExtension(services));
 			this.registry.install(messagingExtension(services));
@@ -2899,10 +2894,25 @@ export class Pim extends Agent<Env> {
 		return { ...settings, approvalTimeoutSeconds: timeout === null ? null : timeout / 1000 };
 	}
 
+	/** How every Pim works, and the person's Pims: rebuilt when whether `update_pim` asks first changes. */
+	#personaExtension(services: PimServices) {
+		return personaExtension(
+			services,
+			(session) => this.#roleOf(session),
+			(pim) => (pim.base === null ? undefined : this.extensions.pim(pim.base)),
+			{
+				list: () => this.personas.list(),
+				bases: () => this.extensions.pims().map(({ ref, pim }) => ({ ref, name: pim.name, description: pim.description })),
+				create: (input) => this.personas.create(this.#checkBase(personaInput(input))),
+			},
+		);
+	}
+
 	/** Rebuilds the extensions whose tools describe the approval policy, once pi's registry has been set up. */
 	#reinstallApprovals(): void {
 		if (!this.registry.snapshot().extension("pim.approvals")) return;
 		const services = this.services();
+		this.registry.install(this.#personaExtension(services));
 		this.registry.install(approvalsExtension(services, this.#ownActions));
 		this.#installAbilities(services);
 		this.#installApps();

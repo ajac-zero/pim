@@ -316,7 +316,7 @@ export function mcpExtensions(
 			if (!app) {
 				const names = mine.map((candidate) => candidate.name).join(", ");
 				return text(
-					`This Pim doesn't work with ${wanted}${names ? `; its apps are ${names}` : ""}. The person adds apps to this Pim in Your Pims.`,
+					`This Pim doesn't work with ${wanted}${names ? `; its apps are ${names}` : ""}. Add one with update_pim, or the person adds it in Your Pims.`,
 					true,
 				);
 			}

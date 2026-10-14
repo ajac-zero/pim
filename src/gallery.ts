@@ -1,19 +1,19 @@
-import { ASSISTANT_BASE } from "./extensions/assistant";
+import { ASSISTANT_BLUEPRINT } from "./extensions/assistant";
 import { DurableObject } from "cloudflare:workers";
 import { HttpError } from "./http";
-import type { SuggestedApp, TeamMember } from "./personas";
+import type { SuggestedApp, TeamMember } from "./agents";
 
 /**
- * What the people on a Pim show each other: profiles, and the Pims they
+ * What the people on a Pim show each other: profiles, and the agents they
  * publish as templates for anyone to make their own. One Durable Object for
  * the instance, apart from the Directory, so browsing never touches accounts.
  *
- * A template is a copy of one of its author's Pims when they published it:
+ * A template is a copy of one of its author's agents when they published it:
  * its name, description, instructions, suggested apps and team, never their
  * memory, conversations or credentials. Publishing again replaces it.
  *
- * The admin also chooses the Pim everyone starts with: a copy of one of
- * theirs, which becomes each new account's default Pim.
+ * The admin also chooses the agent everyone starts with: a copy of one of
+ * theirs, which becomes each new account's default agent.
  */
 
 export type Profile = {
@@ -32,25 +32,25 @@ export type Template = {
 	readonly instructions: string;
 	readonly apps: readonly SuggestedApp[];
 	readonly team: readonly TeamMember[];
-	/** The extension's Pim it builds on, or null for none. */
-	readonly base: string | null;
+	/** The blueprint it builds on, or null for none. */
+	readonly blueprint: string | null;
 	readonly publishedAt: number;
 	/** How many people made it their own. */
 	readonly uses: number;
 };
 
-/** The Pim everyone starts with, as the admin chose it. */
-export type DefaultPim = {
+/** The agent everyone starts with, as the admin chose it. */
+export type DefaultAgent = {
 	/** The admin's username. */
 	readonly author: string;
-	/** Which of the admin's Pims it is a copy of. */
-	readonly personaId: string;
+	/** Which of the admin's agents it is a copy of. */
+	readonly agentId: string;
 	readonly name: string;
 	readonly description: string;
 	readonly instructions: string;
 	readonly apps: readonly SuggestedApp[];
 	readonly team: readonly TeamMember[];
-	readonly base: string | null;
+	readonly blueprint: string | null;
 	readonly updatedAt: number;
 };
 
@@ -73,21 +73,21 @@ CREATE TABLE IF NOT EXISTS templates (
 	id TEXT PRIMARY KEY,
 	owner_id TEXT NOT NULL,
 	username TEXT NOT NULL,
-	persona_id TEXT NOT NULL,
+	agent_id TEXT NOT NULL,
 	name TEXT NOT NULL,
 	description TEXT NOT NULL,
 	instructions TEXT NOT NULL,
 	apps TEXT NOT NULL,
 	published_at INTEGER NOT NULL,
 	uses INTEGER NOT NULL DEFAULT 0,
-	UNIQUE (owner_id, persona_id)
+	UNIQUE (owner_id, agent_id)
 );
 CREATE INDEX IF NOT EXISTS templates_by_author ON templates (username, published_at);
-CREATE TABLE IF NOT EXISTS default_pim (
+CREATE TABLE IF NOT EXISTS default_agent (
 	id INTEGER PRIMARY KEY CHECK (id = 1),
 	owner_id TEXT NOT NULL,
 	username TEXT NOT NULL,
-	persona_id TEXT NOT NULL,
+	agent_id TEXT NOT NULL,
 	name TEXT NOT NULL,
 	description TEXT NOT NULL,
 	instructions TEXT NOT NULL,
@@ -110,7 +110,7 @@ function templateOf(row: Row): Template {
 		instructions: String(row.instructions),
 		apps: JSON.parse(String(row.apps)) as SuggestedApp[],
 		team: JSON.parse(String(row.team ?? "[]")) as TeamMember[],
-		base: optional(row.base),
+		blueprint: optional(row.blueprint),
 		publishedAt: Number(row.published_at),
 		uses: Number(row.uses),
 	};
@@ -134,12 +134,21 @@ function optionalText(value: unknown, field: string, max: number): string | null
 export class Gallery extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
+		// Agents were once personas, and blueprints bases: renamed in place, keeping the rows.
+		const names = (query: string) => new Set(ctx.storage.sql.exec(query).toArray().map((row) => String(row.name)));
+		const tables = names("SELECT name FROM sqlite_master WHERE type = 'table'");
+		if (tables.has("default_pim") && !tables.has("default_agent")) ctx.storage.sql.exec("ALTER TABLE default_pim RENAME TO default_agent");
+		for (const table of ["templates", "default_agent"]) {
+			const columns = names(`PRAGMA table_info(${table})`);
+			if (columns.has("persona_id")) ctx.storage.sql.exec(`ALTER TABLE ${table} RENAME COLUMN persona_id TO agent_id`);
+			if (columns.has("base") && !columns.has("blueprint")) ctx.storage.sql.exec(`ALTER TABLE ${table} RENAME COLUMN base TO blueprint`);
+		}
 		ctx.storage.sql.exec(SCHEMA);
-		for (const table of ["templates", "default_pim"]) {
+		for (const table of ["templates", "default_agent"]) {
 			const columns = ctx.storage.sql.exec(`PRAGMA table_info(${table})`).toArray().map((row) => String(row.name));
 			if (!columns.includes("team")) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN team TEXT NOT NULL DEFAULT '[]'`);
 			// Published before extensions, they all built on Pim's own assistant.
-			if (!columns.includes("base")) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN base TEXT DEFAULT '${ASSISTANT_BASE}'`);
+			if (!columns.includes("blueprint")) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN blueprint TEXT DEFAULT '${ASSISTANT_BLUEPRINT}'`);
 		}
 	}
 
@@ -174,47 +183,47 @@ export class Gallery extends DurableObject<Env> {
 		return names;
 	}
 
-	/** Publishes one of the author's Pims, or replaces what was published of it. */
+	/** Publishes one of the author's agents, or replaces what was published of it. */
 	publish(
 		ownerId: string,
 		username: string,
-		persona: {
+		agent: {
 			id: string;
 			name: string;
 			description: string;
 			instructions: string;
 			apps: readonly SuggestedApp[];
 			team: readonly TeamMember[];
-			base: string | null;
+			blueprint: string | null;
 		},
 	): Template {
-		const [known] = this.#sql("SELECT id FROM templates WHERE owner_id = ? AND persona_id = ?", ownerId, persona.id).toArray();
+		const [known] = this.#sql("SELECT id FROM templates WHERE owner_id = ? AND agent_id = ?", ownerId, agent.id).toArray();
 		if (!known) {
 			const count = Number(this.#sql("SELECT COUNT(*) AS n FROM templates WHERE owner_id = ?", ownerId).toArray()[0]?.n ?? 0);
-			if (count >= MAX_TEMPLATES) throw new HttpError(429, `You can publish up to ${MAX_TEMPLATES} Pims.`);
+			if (count >= MAX_TEMPLATES) throw new HttpError(429, `You can publish up to ${MAX_TEMPLATES} agents.`);
 		}
 		const id = known ? String(known.id) : `t_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 		this.#sql(
-			`INSERT INTO templates (id, owner_id, username, persona_id, name, description, instructions, apps, team, base, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (id) DO UPDATE SET name = excluded.name, description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, base = excluded.base, published_at = excluded.published_at`,
+			`INSERT INTO templates (id, owner_id, username, agent_id, name, description, instructions, apps, team, blueprint, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (id) DO UPDATE SET name = excluded.name, description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, blueprint = excluded.blueprint, published_at = excluded.published_at`,
 			id,
 			ownerId,
 			username,
-			persona.id,
-			persona.name,
-			persona.description,
-			persona.instructions,
-			JSON.stringify(persona.apps),
-			JSON.stringify(persona.team),
-			persona.base,
+			agent.id,
+			agent.name,
+			agent.description,
+			agent.instructions,
+			JSON.stringify(agent.apps),
+			JSON.stringify(agent.team),
+			agent.blueprint,
 			Date.now(),
 		);
 		return this.template(id)!;
 	}
 
-	/** Takes one of the author's Pims out of the gallery. False when it wasn't published. */
-	unpublish(ownerId: string, personaId: string): boolean {
-		return this.#sql("DELETE FROM templates WHERE owner_id = ? AND persona_id = ?", ownerId, personaId).rowsWritten > 0;
+	/** Takes one of the author's agents out of the gallery. False when it wasn't published. */
+	unpublish(ownerId: string, agentId: string): boolean {
+		return this.#sql("DELETE FROM templates WHERE owner_id = ? AND agent_id = ?", ownerId, agentId).rowsWritten > 0;
 	}
 
 	template(id: string): Template | null {
@@ -257,72 +266,72 @@ export class Gallery extends DurableObject<Env> {
 		return this.#sql("DELETE FROM templates WHERE id = ?", id).rowsWritten > 0;
 	}
 
-	/** The Pim everyone starts with; null when the admin chose none, and people start with a plain one. */
-	defaultPim(): DefaultPim | null {
-		const [row] = this.#sql("SELECT * FROM default_pim WHERE id = 1").toArray();
+	/** The agent everyone starts with; null when the admin chose none, and people start with a plain one. */
+	defaultAgent(): DefaultAgent | null {
+		const [row] = this.#sql("SELECT * FROM default_agent WHERE id = 1").toArray();
 		if (!row) return null;
 		return {
 			author: String(row.username),
-			personaId: String(row.persona_id),
+			agentId: String(row.agent_id),
 			name: String(row.name),
 			description: String(row.description),
 			instructions: String(row.instructions),
 			apps: JSON.parse(String(row.apps)) as SuggestedApp[],
 			team: JSON.parse(String(row.team ?? "[]")) as TeamMember[],
-			base: optional(row.base),
+			blueprint: optional(row.blueprint),
 			updatedAt: Number(row.updated_at),
 		};
 	}
 
-	/** The admin makes a copy of one of their Pims the one everyone starts with. Choosing again replaces it. */
-	setDefaultPim(
+	/** The admin makes a copy of one of their agents the one everyone starts with. Choosing again replaces it. */
+	setDefaultAgent(
 		ownerId: string,
 		username: string,
-		persona: {
+		agent: {
 			id: string;
 			name: string;
 			description: string;
 			instructions: string;
 			apps: readonly SuggestedApp[];
 			team: readonly TeamMember[];
-			base: string | null;
+			blueprint: string | null;
 		},
-	): DefaultPim {
+	): DefaultAgent {
 		this.#sql(
-			`INSERT INTO default_pim (id, owner_id, username, persona_id, name, description, instructions, apps, team, base, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (id) DO UPDATE SET owner_id = excluded.owner_id, username = excluded.username, persona_id = excluded.persona_id, name = excluded.name,
-			description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, base = excluded.base, updated_at = excluded.updated_at`,
+			`INSERT INTO default_agent (id, owner_id, username, agent_id, name, description, instructions, apps, team, blueprint, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (id) DO UPDATE SET owner_id = excluded.owner_id, username = excluded.username, agent_id = excluded.agent_id, name = excluded.name,
+			description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, blueprint = excluded.blueprint, updated_at = excluded.updated_at`,
 			ownerId,
 			username,
-			persona.id,
-			persona.name,
-			persona.description,
-			persona.instructions,
-			JSON.stringify(persona.apps),
-			JSON.stringify(persona.team),
-			persona.base,
+			agent.id,
+			agent.name,
+			agent.description,
+			agent.instructions,
+			JSON.stringify(agent.apps),
+			JSON.stringify(agent.team),
+			agent.blueprint,
 			Date.now(),
 		);
-		return this.defaultPim()!;
+		return this.defaultAgent()!;
 	}
 
-	/** Back to a plain Pim for everyone who joins. False when none was chosen. */
-	clearDefaultPim(): boolean {
-		return this.#sql("DELETE FROM default_pim").rowsWritten > 0;
+	/** Back to a plain agent for everyone who joins. False when none was chosen. */
+	clearDefaultAgent(): boolean {
+		return this.#sql("DELETE FROM default_agent").rowsWritten > 0;
 	}
 
-	/** Forgets a person: their profile, everything they published, and the Pim everyone starts with if it was theirs. Run when their account is deleted. */
+	/** Forgets a person: their profile, everything they published, and the agent everyone starts with if it was theirs. Run when their account is deleted. */
 	forgetOwner(ownerId: string): void {
 		this.#sql("DELETE FROM templates WHERE owner_id = ?", ownerId);
 		this.#sql("DELETE FROM profiles WHERE owner_id = ?", ownerId);
-		this.#sql("DELETE FROM default_pim WHERE owner_id = ?", ownerId);
+		this.#sql("DELETE FROM default_agent WHERE owner_id = ?", ownerId);
 	}
 
 	/** Whether anything of the owner is left: a deletion is done only once nothing is. */
 	holds(ownerId: string): boolean {
 		return (
 			this.#sql(
-				"SELECT 1 FROM profiles WHERE owner_id = ? UNION SELECT 1 FROM templates WHERE owner_id = ? UNION SELECT 1 FROM default_pim WHERE owner_id = ? LIMIT 1",
+				"SELECT 1 FROM profiles WHERE owner_id = ? UNION SELECT 1 FROM templates WHERE owner_id = ? UNION SELECT 1 FROM default_agent WHERE owner_id = ? LIMIT 1",
 				ownerId,
 				ownerId,
 				ownerId,

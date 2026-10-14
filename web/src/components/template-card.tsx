@@ -3,7 +3,7 @@ import { Bot } from "lucide-react";
 import { useI18n } from "~/components/i18n";
 import type { TemplateSummary } from "~/lib/pim-api";
 
-/** A published Pim in a list: its name, what it's for, who made it. */
+/** A published agent in a list: its name, what it's for, who made it. */
 export function TemplateCard({ template }: { template: TemplateSummary }) {
   const { t } = useI18n();
   return (

@@ -2,9 +2,11 @@
 
 An open-source personal agent you deploy to your own Cloudflare account. Inspired by Meta's [Muse](https://ai.meta.com/muse/): it remembers what matters to you, turns goals into plans, keeps working in the background, and asks before acting on the world.
 
-A deployment is a Pim for you and the people you invite: family, friends, a small team. Each person gets their own agent, with their own conversations, memories and connected apps, and can share it with the others. You run it, and everything stays in your Cloudflare account. The name is [pi](https://github.com/earendil-works/pi), the harness it runs on, plus **m** for multiplayer.
+A deployment is a Pim for you and the people you invite: family, friends, a small team. Each person gets their own Pim, with their own agents, conversations, memories and connected apps, and can share it with the others. You run it, and everything stays in your Cloudflare account. The name is [pi](https://github.com/earendil-works/pi), the harness it runs on, plus **m** for multiplayer.
 
 This repository is the agent, its API, and its web app ([`web/`](web)): chat, approvals, notifications and settings, signed in with a passkey. One Worker serves all of it, for everyone, at one address. Mobile apps and messaging bridges can use the same API with an API token.
+
+**Vocabulary:** Pim is the platform and a person's own space; an agent is what you create and chat with; a blueprint is what an extension defines in code for agents to build on; a template is an agent shared through the gallery.
 
 ## How it works
 
@@ -17,7 +19,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
                                        │  └ /api/*   whoever the session or token     │
                                        │   │         names                            │
                                        │   ▼                                          │
-                                       │ Durable Object "Pim" (src/agent.ts), one per │
+                                       │ Durable Object "Pim" (src/pim.ts), one per   │
                                        │ person, named by their owner ID              │
                                        │  ├ PiHarness ── pi-durable runs, tasks, inbox│
                                        │  ├ Extensions: optmem, goals, schedule,      │
@@ -30,11 +32,11 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
                                        │                                              │
                                        │ "Auth", one per person: passkeys, tokens     │
                                        │ "Directory": accounts, the admin, invites    │
-                                       │ "Gallery": profiles, published Pims          │
+                                       │ "Gallery": profiles, published templates     │
                                        └──────────────────────────────────────────────┘
 ```
 - **[pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable)** runs the agent. Every model turn and tool call is a durable task committed to the Durable Object's SQLite before anything is shown. If the object is evicted mid-run, the `agents` SDK's `PiHarness` alarm wakes it, and pi resumes where it stopped.
-- **One agent per person.** The Worker reads whose request it is from the passkey session or the API token, and sends it to that person's Durable Object, which holds their whole agent in its SQLite database. A URL never chooses whose agent answers. See [docs/instance.md](docs/instance.md).
+- **One Pim per person.** The Worker reads whose request it is from the passkey session or the API token, and sends it to that person's Durable Object, which holds their memory, apps and agents in its SQLite database. A URL never chooses whose Pim answers. See [docs/instance.md](docs/instance.md).
 - **A model that can do the job.** Pim decides what to say and when, and says it with a tool call, so it needs a capable model. The default is GLM-5.3 on Workers AI (`@cf/zai-org/glm-5.3`), billed to your Cloudflare account, with no vendor keys. Any AI Gateway catalog model works too, such as `anthropic/claude-opus-4.8` (set `PIM_MODEL`), or OpenAI's through your ChatGPT plan.
 - **Your ChatGPT plan**, optionally. Sign in with ChatGPT (Plus or Pro) and Pim runs on OpenAI's models, such as GPT-6.1 Sol, using the plan's included usage. See [ChatGPT plan](#chatgpt-plan).
 
@@ -44,12 +46,12 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 | --- | --- | --- |
 | Long-term memory | `note`, `recall`, `zoom`, `forget` | OptMem-style: an append-only log, compressed in the background into a tree of summaries. Every conversation sees a fixed-size view of it. See [Memory](#memory). |
 | Artifacts | `artifact_create`, `artifact_update`, `artifact_read`, `artifact_list` | Documents and small HTML pages the agent makes for you, with every version kept. They show in the chat and in Artifacts, run in a sandbox apart from your account, and can be restored or downloaded. See [docs/artifacts.md](docs/artifacts.md). |
-| Your Pims | `create_pim`, `update_pim` (gated) | Every chat's Pim knows your other Pims and points you to the one made for what you ask. When none fits ongoing help you want, such as a coding helper, it makes one, with its instructions, apps and team, without asking; it never makes two with the same name. It can change itself too, its instructions, description, apps and team, but only once you approve, since an edit lasts into every later chat. See [Your Pims](#your-pims). |
+| Your agents | `create_agent`, `update_agent` (gated) | Every chat's agent knows your other agents and points you to the one made for what you ask. When none fits ongoing help you want, such as a coding helper, it makes one, with its instructions, apps and team, without asking; it never makes two with the same name. It can change itself too, its instructions, description, apps and team, but only once you approve, since an edit lasts into every later chat. See [Your agents](#your-agents). |
 | Goals and plans | `create_goal`, `update_goal`, `list_goals` | Goals have step-by-step plans and progress notes. Active goals are always in the prompt. |
 | Background work | `schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task` | Delays, dates, or cron. When a task fires, the agent receives a `[Scheduled task]` message in the session that scheduled it. |
 | Talking to you | `send_to_user` | The only way Pim speaks: you see what it sends, and none of its working notes, so background work can stay silent. A message can carry up to four widgets, such as your goals or what's coming up, drawn by the app from your data as it is when sent; the model names them instead of retyping what they show (see [docs/extensions.md](docs/extensions.md#in-chat)). A message goes to the conversation, or to your email when the deployment can send it (see [Email](#email)). With `notify`, it is also stored as a notification, pushed to connected sockets, sent as Web Push to browsers that turned it on in Settings (even with the app closed), and POSTed to an optional webhook. |
 | Asking first | `http_request` | Gated: the call files an approval request and returns at once; your apps and devices are told. The action runs when you approve; deny to stop it. Either way the decision, with the result, comes back to the conversation as a message, so Pim carries on when you answer, however long you take. Without an answer, the approval policy decides: `auto` approves after 30 seconds so autonomous jobs never stall, `explicit` waits for you, so nothing happens without a yes. Choose **Always approve** and later calls to that tool run without asking. Settings → Tool permissions sets each such tool, and each app's tool, to Off, Ask or On (see [Tool permissions](#tool-permissions)). |
-| Connected apps | `connect_app`, `list_apps`, `find_app`, plus each app's tools | Remote MCP servers, with OAuth sign-in. A chat works only with the apps its Pim lists. Tools that don't declare themselves read-only need approval. See [Connected apps](#connected-apps). |
+| Connected apps | `connect_app`, `list_apps`, `find_app`, plus each app's tools | Remote MCP servers, with OAuth sign-in. A chat works only with the apps its agent lists. Tools that don't declare themselves read-only need approval. See [Connected apps](#connected-apps). |
 | App skills | `read_skill`, `read_skill_file` | Instructions apps publish over the MCP Skills extension, checked against the app's digests. |
 | App events | `list_app_events`, `watch_app_event` (gated), `list_watches`, `stop_watch` | Apps notify Pim when something happens (draft MCP Events, webhooks); each event starts a run with the watch's instruction. |
 | The web | `fetch_url`, `web_search` (opt-in) | `web_search` is billed by AI Gateway, so it is off until `PIM_WEB_SEARCH` names a provider. |
@@ -163,24 +165,24 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | POST | `/approvals/:id/approve` | `{ note?, always: true }` | Also sets the approval's tool to `on`, so later calls run without asking, and approves other pending calls to it |
 | GET | `/permissions` | `?circle=` | `{ tools: [{ app, appName, tool, name, description, readOnly, permission, default, chosen, changed, choices }] }`: Pim's own tools that ask first (`app: null`) and every connected app's tools, or with `circle`, that circle's (memory, and the apps' tools). `permission` is what applies: `off`, `ask` or `on`. `chosen` is yours, or null for the default |
 | PUT | `/permissions` | `{ circle?, app, tool, permission }`: `app` null for Pim's own tools, `tool` the app's own name for it, `permission` null for the default | That tool's entry; `404` for an unknown tool or circle |
-| GET | `/personas` | | `{ personas: [{ id, name, description, instructions, apps, team, base, source, published, default, createdAt, updatedAt }] }`: your Pims, the default one first (see [Your Pims](#your-pims)) |
-| POST | `/personas` | `{ name, description?, instructions?, apps?: [{ name, url }], team?: [{ name, instructions, tools? }], base? }` | A new Pim. `tools` lists the tool names a team member may use; null or missing for all a member can have (see [Teams](#teams)). `base` is the extension's base it builds on, such as `pim.assistant/pim`, or null for none; missing, the deployment's default Pim |
-| GET, PUT, DELETE | `/personas/:id` | PUT: any of the fields | The Pim; editing reaches its chats from their next request, deleting moves them to the default Pim. The default Pim can't be deleted (`400`): make another the default first |
-| POST | `/personas/:id/default` | | Makes it the default Pim. Chats keep the Pim they were started with |
-| GET | `/personas/:id/dashboard` | `?locale=` | `{ pim, starters, widgets: [{ id, title, empty, kind, items } \| { id, title, empty, failed: true }] }`: the dashboard of the base it builds on, loaded for this Pim (see [docs/extensions.md](docs/extensions.md)) |
-| GET | `/extensions` | | `{ extensions: [{ id, name, description, bases: [{ ref, name, description, apps }], widgets }], defaultBase }`: what this deployment installed |
-| POST | `/sessions` | `{ title?, persona? }` | A new session with that Pim, or the default one; sessions list their `persona` (null in a visit) |
+| GET | `/agents` | | `{ agents: [{ id, name, description, instructions, apps, team, blueprint, source, published, default, createdAt, updatedAt }] }`: your agents, the default one first (see [Your agents](#your-agents)) |
+| POST | `/agents` | `{ name, description?, instructions?, apps?: [{ name, url }], team?: [{ name, instructions, tools? }], blueprint? }` | A new agent. `tools` lists the tool names a team member may use; null or missing for all a member can have (see [Teams](#teams)). `blueprint` is what it builds on, such as `pim.assistant/pim`, or null for none; missing means the deployment's default blueprint |
+| GET, PUT, DELETE | `/agents/:id` | PUT: any of the fields | The agent; editing reaches its chats from their next request, deleting moves them to the default agent. The default agent can't be deleted (`400`): make another the default first |
+| POST | `/agents/:id/default` | | Makes it the default agent. Chats keep the agent they were started with |
+| GET | `/agents/:id/dashboard` | `?locale=` | `{ agent, starters, widgets: [{ id, title, empty, kind, items } \| { id, title, empty, failed: true }] }`: the dashboard of the blueprint it builds on, loaded for this agent (see [docs/extensions.md](docs/extensions.md)) |
+| GET | `/extensions` | | `{ extensions: [{ id, name, description, blueprints: [{ ref, name, description, apps }], widgets }], defaultBlueprint }`: what this deployment installed |
+| POST | `/sessions` | `{ title?, agent? }` | A new session with that agent, or the default one; sessions list their `agent` (null in a visit) |
 | GET | `/sessions/:id/team` | | `{ runs: [{ conversation, call, member, task, status, createdAt, updatedAt }] }`: the tasks the chat's Pim handed its team, newest first; `status` is `running`, `done` or `failed` |
 | GET | `/sessions/:id/team/:conversation` | | One of them, with the member's conversation as `messages`, read-only |
 | GET | `/account` | | `{ username, ownerId, role, status, createdAt, usage, recoveryCodesLeft }` |
 | GET | `/account/export` | | Your account and everything in your Pim, as one JSON download, without credentials |
 | DELETE | `/account` | `{ confirm: username }` | Deletes your account and erases your Pim; a passkey session only. `202` while erasing is still being retried |
 | GET, PUT | `/profile` | PUT: `{ displayName, bio }` | How others on this Pim see you |
-| GET | `/people/:username` | | `{ username, displayName, bio, templates }`: someone, and the Pims they published |
-| GET | `/templates` | `?q=` | `{ templates }`: published Pims, most used first, without their instructions |
-| GET | `/templates/:id` | | A published Pim in full |
-| POST | `/templates/:id/use` | | Makes it one of your Pims: a copy, with `source` saying where it came from |
-| POST, DELETE | `/personas/:id/publish` | | Publishes your Pim (again, to update it), or takes it down |
+| GET | `/people/:username` | | `{ username, displayName, bio, templates }`: someone, and the agent templates they published |
+| GET | `/templates` | `?q=` | `{ templates }`: shared agents, most used first, without their instructions |
+| GET | `/templates/:id` | | A published agent template in full |
+| POST | `/templates/:id/use` | | Makes it one of your agents: a copy, with `source` saying where it came from |
+| POST, DELETE | `/agents/:id/publish` | | Publishes your agent (again, to update it), or takes it down |
 | GET | `/circles` | | `{ circles: [{ id, name, enabled, createdAt, members: [{ ownerId, username, addedAt }] }] }` (see [Sharing](#sharing)) |
 | POST | `/circles` | `{ name }` | A new circle, with nothing allowed |
 | PUT | `/circles/:id` | `{ name?, enabled? }` | The circle; `enabled: false` pauses everyone in it |
@@ -190,7 +192,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | GET | `/circles/activity` | | `{ activity: [{ id, at, username, circle, tool, outcome, summary }] }`: guests' tool calls, newest first; `outcome` is `ran`, `asked` or `refused` |
 | GET | `/visits` | | `{ visits: [{ ownerId, username, sharedAt, available, session }] }`: Pims shared with you, and your conversation with each |
 | POST | `/visits/:username` | | `{ session }`: your conversation with that Pim, started if new. Messages to it go through `/sessions/:s/messages` like any other |
-| GET | `/mcp` | | Connected apps, their state, sign-in link, approval policy, tools (with their `permission`), and `pims`: the names of your Pims that work with each |
+| GET | `/mcp` | | Connected apps, their state, sign-in link, approval policy, tools (with their `permission`), and `agents`: the names of your agents that work with each |
 | POST | `/mcp` | `{ name, url, headers?, approval? }` | Connects an app; `201` with `{ id, state, authUrl? }` (`authUrl`: send the user there to sign in) |
 | PUT | `/mcp/:id` | `{ approval: "writes" \| "all" \| "none" }` | Which of its tools need approval, unless you set a tool's permission |
 | DELETE | `/mcp/:id` | | Disconnects it |
@@ -287,9 +289,9 @@ Pim registers with OpenAI as one agent host (a `urn:uuid:` ID it keeps) and refr
 
 Apps connect through remote [MCP](https://modelcontextprotocol.io) servers: the vendor's own (many apps publish one), or one you deploy as another Worker. The `agents` SDK's MCP client handles the connection, OAuth sign-in (with dynamic client registration), token storage in the agent's database, and reconnecting after a wake.
 
-- **Each Pim lists its apps.** An extension's base lists the apps it works with in its definition (`apps` in [`pim.config.ts`'s extensions](docs/extensions.md)), and each of your Pims can add its own (Your Pims → Edit → Apps it works with). A chat gets the tools, instructions, and prompt entry of the apps its Pim lists, and of no other, even when you connected more. Team members work with their Pim's apps.
-- **Connecting.** Connect from a Pim's card in Your Pims, `POST /mcp` with a name and URL, or ask Pim: its `connect_app` tool connects one of the apps the chat's Pim lists, without asking, since the Pim already chose it. It can't connect anything else. If the app needs sign-in, the response (or Pim) gives you a link; the app sends you back to `/mcp/callback/<you>`.
-- **Seeing them.** Settings → Connected apps lists every app you connected, its state, which of your Pims work with it, and a sign-in link while it waits for one. Remove an app there. An app no Pim lists does nothing until one does.
+- **Each agent lists its apps.** An extension's blueprint lists the apps it works with in its definition (`apps` in [`pim.config.ts`'s extensions](docs/extensions.md)), and each of your agents can add its own (Your agents → Edit → Apps it works with). A chat gets the tools, instructions, and prompt entry of the apps its agent lists, and of no other, even when you connected more. Team members work with their agent's apps.
+- **Connecting.** Connect from an agent's card in Your agents, `POST /mcp` with a name and URL, or ask Pim: its `connect_app` tool connects one of the apps the chat's agent lists, without asking, since the agent already chose it. It can't connect anything else. If the app needs sign-in, the response (or Pim) gives you a link; the app sends you back to `/mcp/callback/<you>`.
+- **Seeing them.** Settings → Connected apps lists every app you connected, its state, which of your agents work with it, and a sign-in link while it waits for one. Remove an app there. An app no agent lists does nothing until one does.
 - **Finding the server.** Say "use my Linear" and Pim's `find_app` tool looks the app up in the official [MCP Registry](https://registry.modelcontextprotocol.io). The registry verifies publishers (`app.linear/...` only by whoever controls linear.app), so Pim ranks first the server whose publisher's domain names the app and that runs on that domain, like `https://mcp.linear.app/mcp`. Gateways that relay the app through someone else's server come after, labeled as third parties, and Pim says who runs one before offering it. Remotes that need a URL template or an API key header are left out. Pim gives you the URL to add to the Pim; it can't add it itself.
 - **Tools.** Each MCP tool becomes a pi tool named `<app>_<tool>`. pi picks up added and removed tools from the next request, without a restart. The app's instructions go in the `connected_apps` prompt section.
 - **Approvals.** With the default `writes` policy, tools that do not declare `readOnlyHint` file an approval like `http_request`, and the call is made when you approve. `all` gates every tool; `none` trusts the app. The read-only hint comes from the app itself, so only connect apps you trust. A tool's own [permission](#tool-permissions) takes the policy's place.
@@ -316,32 +318,32 @@ MCP servers expose tools, prompts and resources; pim uses their tools, instructi
 
 ### Tool permissions
 
-Settings → Tool permissions lists every tool that acts on the world or comes from an app, grouped by app, with Pim's own (`http_request`, `watch_app_event`, `update_pim`) first. Each is **Off** (the model isn't offered it), **Ask** (each call files an approval) or **On** (it runs without asking). A tool you haven't set follows its default: Pim's own ask, and an app's follow its approval policy. **Always approve** on a request sets its tool to On.
+Settings → Tool permissions lists every tool that acts on the world or comes from an app, grouped by app, with Pim's own (`http_request`, `watch_app_event`, `update_agent`) first. Each is **Off** (the model isn't offered it), **Ask** (each call files an approval) or **On** (it runs without asking). A tool you haven't set follows its default: Pim's own ask, and an app's follow its approval policy. **Always approve** on a request sets its tool to On.
 
 - **Tied to the tool you saw.** An app tool set to On is held to its definition at the time: description, input schema and annotations. If the app changes any of them, Pim asks before each call again and Settings says so until you choose again.
 - **Checked at each call.** An app tool's permission is checked again when the model calls it, so a tool turned off or changed since the tool list was built is refused or asked about.
 - **Removing an app** forgets its tools' permissions. Tools chosen with Always approve before permissions existed become On the first time Pim sees them.
 
-## Your Pims
+## Your agents
 
-Your Pims are named agents, each with its own instructions: a marathon coach, a trip planner, a code reviewer. Each builds on a base an [extension](docs/extensions.md) brings (Your Pims → Builds on), Pim's own assistant unless you chose another, which gives it its habits, the extension's tools beyond Pim's own, and its dashboard; your name and instructions go on top. One of yours is the default: it talks in chats started without choosing a Pim, and its dashboard is the app's home. Any Pim can be made the default (Your Pims → Make default), and the default can't be deleted until another is; chats stay with the Pim they were started with. Joining ends with naming your first Pim. The sidebar has a section for each Pim, named after it, with its chats, most recent first. A chat started with another (Your Pims → Chat) talks with that one. A chat's Pim adds its name and instructions to the agent's own habits; everything else is shared by all of them: memory, connected apps (each Pim uses the ones it lists), approvals, schedules. Edit a Pim and its chats follow from their next request; delete it and they go on with the default one. A Pim lists the apps it works with, by MCP server URL, besides those of the base it builds on: its chats get only those apps' tools, and whoever uses it connects them with their own accounts.
+Your agents are named assistants, each with its own instructions: a marathon coach, a trip planner, a code reviewer. Each builds on a blueprint an [extension](docs/extensions.md) brings (Your agents → Based on blueprint), Pim's own assistant unless you chose another, which gives it its habits, the extension's tools beyond Pim's own, and its dashboard; your name and instructions go on top. One is the default: it talks in chats started without choosing an agent, and its dashboard is the app's home. Any agent can be made the default (Your agents → Make default), and the default can't be deleted until another is; chats stay with the agent they were started with. Joining ends with naming your first agent. The sidebar has a section for each agent, named after it, with its chats, most recent first. A chat started with another (Your agents → Chat) talks with that one. A chat's agent adds its name and instructions to the model's own habits; everything else is shared by all agents in your Pim: memory, connected apps, approvals, schedules. Edit an agent and its chats follow from their next request; delete it and they go on with the default agent. An agent lists the apps it works with, by MCP server URL, besides those of the blueprint it builds on: its chats get only those apps' tools, and whoever uses it connects them with their own accounts.
 
-**The Pim everyone starts with.** The admin can make one of their Pims everyone's default (Your Pims → Make everyone's default). Each person who joins after that gets a copy as their default Pim: its name, description, instructions and suggested apps, theirs to change. Copies don't follow later edits to the admin's Pim, and people who joined before keep the default Pim they have. Until the admin chooses one, people start with the deployment's default base (`defaultBase` in `pim.config.ts`), named after it, with no instructions of their own.
+**The default agent for new members.** The admin can choose one of their agents as the default for new members. Each person who joins after that gets a copy as their default agent: its name, description, instructions and suggested apps, theirs to change. Copies don't follow later edits to the admin's agent, and people who joined before keep the default agent they have. Until the admin chooses one, people start with the deployment's default blueprint (`defaultBlueprint` in `pim.config.ts`), named after it, with no instructions of their own.
 
-**Dashboards.** Each Pim's name in the sidebar opens its dashboard: a box to start a chat with it, suggested first messages, and widgets from the base it builds on. Pim's own shows what's coming up, the goals being worked on, what it remembered lately, and what it made recently, each from that Pim's chats (memory is shared, so every dashboard shows the same).
+**Dashboards.** Each agent's name in the sidebar opens its dashboard: a box to start a chat with it, suggested first messages, and widgets from the blueprint it builds on. Pim's own dashboard shows what's coming up, the goals being worked on, what it remembered lately, and what it made recently, across that person's agents (memory is shared, so every dashboard shows the same).
 
-A Pim can be **published** to the others on your Pim: Discover lists published Pims, and anyone on it can read one in full and **make it their own**, which copies its name, description, instructions and suggested apps into their own Pims. Nothing else of the author's goes with it: no memory, chats or credentials. The copy is theirs to change; publishing again updates what others see, not their copies. Unpublishing, deleting the Pim, or deleting the account takes it out of Discover. Each person has a profile (a name and a line about them), shown on their page and next to what they publish.
+An agent can be **published** to the others on your Pim: Discover lists published agents, and anyone on it can read one in full and **make it their own**, which copies its name, description, instructions and suggested apps into their own agents. Nothing else of the author's goes with it: no memory, chats or credentials. The copy is theirs to change; publishing again updates what others see, not their copies. Unpublishing, deleting the agent, or deleting the account takes it out of Discover. Each person has a profile (a name and a line about them), shown on their page and next to what they publish.
 
-A published Pim's instructions are someone else's words running with your tools, so read them before you take one: your copy still asks before acting wherever your tool permissions say it should.
+A published agent's instructions are someone else's words running with your tools, so read them before you take one: your copy still asks before acting wherever your tool permissions say it should.
 
 ### Teams
 
-A Pim can have a team: up to eight members, each with a name, its own instructions and, optionally, the tools it may use. You still talk to one Pim. It hands members tasks with its `delegate` tool, they work at the same time, each in a conversation of its own, and it gets all their answers back to combine. A coding Pim, for example, can be a planner that hands parts of the change to a few coders.
+An agent can have a team: up to eight members, each with a name, its own instructions and, optionally, the tools it may use. You still talk to one agent. It hands members tasks with its `delegate` tool, they work at the same time, each in a conversation of its own, and it gets all their answers back to combine. A coding agent, for example, can be a planner that hands parts of the change to a few coders.
 
-- **Members answer the Pim, never you.** They don't get `send_to_user`, scheduling, watching apps' events, or `delegate`. Given a list of tools, a member gets only those.
+- **Members answer the agent, never you.** They don't get `send_to_user`, scheduling, watching apps' events, or `delegate`. Given a list of tools, a member gets only those.
 - **The chat shows the team at work**, above the composer: who has the latest tasks and whether each is working, done or didn't finish. A member opens read-only, with its task and what it did. Members' conversations aren't chats in the sidebar.
-- **Approvals.** A member's tools ask before acting, as the Pim's do. The request shows in the chat the member works for, labeled with its name. The decision goes to the member, and what it answers then comes to the Pim's chat as a message starting with "[Team".
-- **Copies.** Publishing a Pim, making one your own, and the Pim everyone starts with copy its team.
+- **Approvals.** A member's tools ask before acting, as the agent's do. The request shows in the chat the member works for, labeled with its name. The decision goes to the member, and what it answers then comes to the agent's chat as a message starting with "[Team".
+- **Copies.** Publishing an agent, making one your own, and the agent everyone starts with copy its team.
 
 ## Sharing
 
@@ -365,7 +367,7 @@ pnpm preview     # a Pim with a stand-in model, at http://localhost:8787, with n
 
 The web app is in [`web/`](web), with its own README. Passkey sign-in is in [`src/auth/`](src/auth).
 
-To add a Pim, tools only some Pims get, or dashboard widgets, write an extension with a base and list it in `pim.config.ts` (see [docs/extensions.md](docs/extensions.md)). To add a tool, write a pi extension in `src/extensions/` and install it in `Pim`'s harness factory. A tool with effects outside the conversation should be a `GatedAction` (see `src/extensions/approvals.ts`) so it runs only after approval.
+To add a blueprint, tools only some agents get, or dashboard widgets, write an extension with a base and list it in `pim.config.ts` (see [docs/extensions.md](docs/extensions.md)). To add a tool, write a pi extension in `src/extensions/` and install it in `Pim`'s harness factory. A tool with effects outside the conversation should be a `GatedAction` (see `src/extensions/approvals.ts`) so it runs only after approval.
 
 ## Not built yet
 

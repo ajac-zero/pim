@@ -36,7 +36,7 @@ export type AppEventsHost = {
 	readonly catalog: AppCatalog;
 	/** The deployment's public origin, which callback URLs are built on. */
 	publicUrl(): string | undefined;
-	/** Whose agent this is: deliveries go to `/mcp/events/<owner>/<watch id>`. */
+	/** Whose Pim this is: deliveries go to `/mcp/events/<owner>/<watch id>`. */
 	owner(): string;
 	/** Calls `events.refresh(watchId)` at `at`. */
 	scheduleRefresh(watchId: string, at: Date): Promise<void>;
@@ -207,7 +207,7 @@ export class AppEvents {
 		await this.#host.notify(`Stopped watching ${app}`, `The watch for "${watch.event}" ended: ${why}`);
 	}
 
-	/** Handles one webhook delivery to `/mcp/events/<owner>/<id>`, which the agent sees as `/mcp/events/<id>`. */
+	/** Handles one webhook delivery to `/mcp/events/<owner>/<id>`, which the Pim sees as `/mcp/events/<id>`. */
 	async receive(id: string, request: Request): Promise<Response> {
 		const watch = this.#host.store.watch(id);
 		// 410: the app must not retry, and should drop the subscription.

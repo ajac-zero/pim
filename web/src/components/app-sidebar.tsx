@@ -28,8 +28,8 @@ import {
 import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { AgentIcon } from "~/components/agent-icon";
 import { LanguageSelect, useI18n } from "~/components/i18n";
-import { PimIcon } from "~/components/pim-icon";
 import { useShowReasoning } from "~/components/reasoning-preference";
 import { useTheme } from "~/components/theme";
 import { Button } from "~/components/ui/button";
@@ -50,13 +50,13 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
-import { type Persona, pim, type Session, type Visit } from "~/lib/pim-api";
+import { type Agent, pim, type Session, type Visit } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import {
   accountQuery,
+  agentsQuery,
   approvalsQuery,
   notificationsQuery,
-  personasQuery,
   sessionsQuery,
   visitsQuery,
 } from "~/lib/queries";
@@ -64,8 +64,8 @@ import { cn } from "~/lib/utils";
 
 type T = ReturnType<typeof useI18n>["t"];
 
-/** One of your Pims in the sidebar, with its chats, most recent first. */
-type PimSection = { pim: Persona; list: Session[] };
+/** One of your agents in the sidebar, with its chats, most recent first. */
+type AgentSection = { agent: Agent; list: Session[] };
 
 export function sessionTitle(session: Pick<Session, "title">, t: T) {
   return session.title ?? t("newChat");
@@ -95,7 +95,7 @@ export function AppSidebar({
   const { t } = useI18n();
   const [search, setSearch] = useState("");
   const { data: sessions } = useQuery(sessionsQuery());
-  const { data: personas } = useQuery(personasQuery());
+  const { data: agents } = useQuery(agentsQuery());
   const { data: approvals } = useQuery(approvalsQuery());
   const { data: notifications } = useQuery(notificationsQuery());
   // Sharing and Discover are with the other people on this Pim.
@@ -130,22 +130,22 @@ export function AppSidebar({
     notifications?.filter((notification) => notification.readAt === null)
       .length ?? 0;
 
-  // A section for each of your Pims, the default one first, holding the chats with it.
-  const sections = useMemo((): PimSection[] => {
-    const all = (personas ?? []).map((pim) => ({
-      pim,
+  // A section for each of your agents, the default one first, holding the chats with it.
+  const sections = useMemo((): AgentSection[] => {
+    const all = (agents ?? []).map((agent) => ({
+      agent,
       list: [] as Session[],
     }));
     for (const session of sessions ?? []) {
       // Conversations with others' Pims are listed under Shared with you.
       if (session.visit) continue;
       const section =
-        all.find((candidate) => candidate.pim.id === session.persona?.id) ??
-        all.find((candidate) => candidate.pim.default);
+        all.find((candidate) => candidate.agent.id === session.agent?.id) ??
+        all.find((candidate) => candidate.agent.default);
       section?.list.push(session);
     }
     return all;
-  }, [personas, sessions]);
+  }, [agents, sessions]);
   const shownSections = useMemo(
     () =>
       sections.flatMap((section) => {
@@ -234,9 +234,9 @@ export function AppSidebar({
             onNavigate={onNavigate}
           />
           <SidebarNavItem
-            to="/pims"
+            to="/agents"
             icon={<Bot className="size-4.5 shrink-0" />}
-            label={t("yourPims")}
+            label={t("yourAgents")}
             collapsed={collapsed}
             onNavigate={onNavigate}
           />
@@ -336,8 +336,8 @@ export function AppSidebar({
                 </p>
               )}
             {shownSections.map((section) => (
-              <PimSectionList
-                key={section.pim.id}
+              <AgentSectionList
+                key={section.agent.id}
                 section={section}
                 activeId={activeId}
                 awaitingApproval={awaitingApproval}
@@ -425,7 +425,7 @@ function SidebarNavItem({
   to:
     | "/artifacts"
     | "/notifications"
-    | "/pims"
+    | "/agents"
     | "/discover"
     | "/sharing"
     | "/settings";
@@ -441,8 +441,8 @@ function SidebarNavItem({
         <Link
           to={to}
           onClick={onNavigate}
-          // A Pim's dashboard lives under /pims, but its section in the chat list is what lights up.
-          activeOptions={{ exact: to === "/pims" }}
+          // An agent's dashboard lives under /agents, but its section in the chat list is what lights up.
+          activeOptions={{ exact: to === "/agents" }}
           activeProps={{ className: "bg-sidebar-accent" }}
           className={ITEM_CLASS(props.collapsed)}
           aria-label={props.label}
@@ -454,14 +454,14 @@ function SidebarNavItem({
   );
 }
 
-/** A Pim's section: its name, a button for a new chat with it, and its chats. */
-function PimSectionList({
-  section: { pim: persona, list },
+/** An agent's section: its name, a button for a new chat with it, and its chats. */
+function AgentSectionList({
+  section: { agent, list },
   activeId,
   awaitingApproval,
   onNavigate,
 }: {
-  section: PimSection;
+  section: AgentSection;
   activeId?: string;
   awaitingApproval: ReadonlySet<string>;
   onNavigate?: () => void;
@@ -470,20 +470,20 @@ function PimSectionList({
   const navigate = useNavigate();
   const [open, setOpen] = useState(true);
   return (
-    <section className="mb-3" aria-label={persona.name}>
+    <section className="mb-3" aria-label={agent.name}>
       <div className="group/section flex items-center gap-1 pr-1">
         <span className="flex min-w-0 flex-1 items-center">
           <Link
-            to="/pims/$pimId"
-            params={{ pimId: persona.id }}
+            to="/agents/$agentId"
+            params={{ agentId: agent.id }}
             onClick={onNavigate}
             className="min-w-0 truncate rounded-md px-2 py-1.5 font-medium text-muted-foreground text-xs hover:text-foreground"
             activeProps={{ className: "bg-sidebar-accent text-foreground" }}
-            title={t("pimDashboard", { name: persona.name })}
+            title={t("agentDashboard", { name: agent.name })}
           >
             <span className="flex items-center gap-1">
-              <PimIcon persona={persona} className="size-4" />
-              <span className="truncate">{persona.name}</span>
+              <AgentIcon agent={agent} className="size-4" />
+              <span className="truncate">{agent.name}</span>
             </span>
           </Link>
           <button
@@ -492,7 +492,7 @@ function PimSectionList({
             onClick={() => setOpen(!open)}
             aria-expanded={open}
             aria-label={t(open ? "hideChatsOf" : "showChatsOf", {
-              name: persona.name,
+              name: agent.name,
             })}
           >
             <ChevronDown
@@ -511,11 +511,11 @@ function PimSectionList({
               onClick={() => {
                 navigate({
                   to: "/new",
-                  search: persona.default ? {} : { pim: persona.id },
+                  search: agent.default ? {} : { agent: agent.id },
                 });
                 onNavigate?.();
               }}
-              aria-label={t("newChatWith", { name: persona.name })}
+              aria-label={t("newChatWith", { name: agent.name })}
             >
               <Plus className="size-3.5" />
             </button>
@@ -525,7 +525,7 @@ function PimSectionList({
             showArrow={false}
             className={SIDEBAR_TOOLTIP_CLASS}
           >
-            {t("newChatWith", { name: persona.name })}
+            {t("newChatWith", { name: agent.name })}
           </TooltipContent>
         </Tooltip>
       </div>
@@ -557,7 +557,7 @@ function CollapsedChatsMenu({
   awaitingApproval,
   onNavigate,
 }: {
-  sections: PimSection[];
+  sections: AgentSection[];
   activeId?: string;
   awaitingApproval: ReadonlySet<string>;
   onNavigate?: () => void;
@@ -601,10 +601,10 @@ function CollapsedChatsMenu({
           <DropdownMenuItem disabled>{t("noChatsYet")}</DropdownMenuItem>
         ) : (
           sections.map((section) => (
-            <DropdownMenuGroup key={section.pim.id}>
+            <DropdownMenuGroup key={section.agent.id}>
               <DropdownMenuLabel className="flex items-center gap-1.5 truncate text-muted-foreground text-xs">
-                <PimIcon persona={section.pim} className="size-4" />
-                {section.pim.name}
+                <AgentIcon agent={section.agent} className="size-4" />
+                {section.agent.name}
               </DropdownMenuLabel>
               {section.list.map((session) => (
                 <DropdownMenuItem

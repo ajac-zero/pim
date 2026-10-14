@@ -1,15 +1,15 @@
 import { Type } from "@earendil-works/pi-ai";
 import { type AgentChange, configure, defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { text } from "./extensions/services";
-import { MAX_TEAM, type Persona, type TeamMember } from "./personas";
+import { MAX_TEAM, type Agent, type TeamMember } from "./agents";
 
 /**
- * A Pim's team at work. A Pim with a team hands tasks to its members with
+ * An agent's team at work. An agent with a team hands tasks to its members with
  * `delegate`; each task runs in a conversation of its own, owned by the call,
  * and all of them at once. The call returns every member's answer, and the
- * Pim tells the person what came of it: members never talk to the person.
+ * agent tells the person what came of it: members never talk to the person.
  *
- * A member asking for the person's approval files it as Pim does, shown in
+ * A member asking for the person's approval files it as an agent does, shown in
  * the chat it works for (see `ApprovalMember`). The decision goes to the
  * member's own conversation, and what the member answers then comes back to
  * that chat as a message starting with "[Team".
@@ -24,9 +24,9 @@ export type TeamRun = {
 	readonly conversation: string;
 	/** The `delegate` call that gave it: tasks handed out together share it. */
 	readonly call: string;
-	/** The chat whose Pim handed it the task. */
+	/** The chat whose agent handed it the task. */
 	readonly session: string;
-	readonly persona: string;
+	readonly agent: string;
 	readonly member: string;
 	readonly task: string;
 	readonly status: TeamRunStatus;
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS pim_team_runs (
 	call TEXT NOT NULL,
 	position INTEGER NOT NULL,
 	session TEXT NOT NULL,
-	persona TEXT NOT NULL,
+	agent TEXT NOT NULL,
 	member TEXT NOT NULL,
 	task TEXT NOT NULL,
 	status TEXT NOT NULL,
@@ -57,7 +57,7 @@ const runOf = (row: Row): TeamRun => ({
 	conversation: String(row.conversation),
 	call: String(row.call),
 	session: String(row.session),
-	persona: String(row.persona),
+	agent: String(row.agent),
 	member: String(row.member),
 	task: String(row.task),
 	status: String(row.status) as TeamRunStatus,
@@ -71,18 +71,21 @@ export class TeamStore {
 	constructor(sql: SqlStorage) {
 		this.#sql = sql;
 		this.#sql.exec(SCHEMA);
+		// Agents were once called personas: renamed in place, keeping the rows.
+		const columns = this.#sql.exec("PRAGMA table_info(pim_team_runs)").toArray().map((row) => String(row.name));
+		if (columns.includes("persona")) this.#sql.exec("ALTER TABLE pim_team_runs RENAME COLUMN persona TO agent");
 	}
 
 	/** Idempotent on the conversation: a replayed call finds the runs it started. */
-	start(run: { conversation: string; call: string; position: number; session: string; persona: string; member: string; task: string }): void {
+	start(run: { conversation: string; call: string; position: number; session: string; agent: string; member: string; task: string }): void {
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT OR IGNORE INTO pim_team_runs (conversation, call, position, session, persona, member, task, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)",
+			"INSERT OR IGNORE INTO pim_team_runs (conversation, call, position, session, agent, member, task, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)",
 			run.conversation,
 			run.call,
 			run.position,
 			run.session,
-			run.persona,
+			run.agent,
 			run.member,
 			run.task,
 			now,
@@ -125,15 +128,15 @@ export class TeamStore {
 	}
 }
 
-/** What a conversation is: a chat with one of the person's Pims, or a member of its team at work. */
-export type Role = { readonly pim: Persona; readonly member: TeamMember | null };
+/** What a conversation is: a chat with one of the person's agents, or a member of its team at work. */
+export type Role = { readonly agent: Agent; readonly member: TeamMember | null };
 
 /** What the team's tool needs from the agent. */
 export type TeamHost = {
 	roleOf(session: string): Role;
 	readonly runs: TeamStore;
-	/** How a member's conversation differs from its Pim's: its tools. */
-	memberAgent(member: TeamMember, pim: Persona): AgentChange;
+	/** How a member's conversation differs from its agent's: its tools. */
+	memberAgent(member: TeamMember, agent: Agent): AgentChange;
 	/** Gives a member's conversation its task and waits for the answer. */
 	ask(conversation: string, task: string, operation: string): Promise<{ ok: boolean; text: string }>;
 };
@@ -141,19 +144,19 @@ export type TeamHost = {
 export const TEAM_EXTENSION = "pim.team";
 export const DELEGATE = "delegate";
 
-/** The first line of a member's instructions, as the Pim's roster shows it. */
+/** The first line of a member's instructions, as the agent's roster shows it. */
 function gist(instructions: string): string {
 	const line = instructions.trim().split(/\r?\n/)[0] ?? "";
 	return line.length > 200 ? `${line.slice(0, 199)}…` : line;
 }
 
-/** What a member reads before its own instructions, in place of Pim's habits of talking to the person. */
-export function memberPreamble(pim: Persona, member: TeamMember): string {
-	return `You are "${member.name}", a member of the team of "${pim.name}", a personal AI agent working for a person. ${pim.name} hands you a task; do it with your tools, then answer with your result.
+/** What a member reads before its own instructions, in place of an agent's habits of talking to the person. */
+export function memberPreamble(agent: Agent, member: TeamMember): string {
+	return `You are "${member.name}", a member of the team of "${agent.name}", a personal AI agent working for a person. ${agent.name} hands you a task; do it with your tools, then answer with your result.
 
-- Your final answer, as plain text, is all ${pim.name} sees of your work: make it complete and self-contained, with what you found or did and anything left open.
-- You never talk to the person. ${pim.name} does, with what you report.
-- Tools that change things outside this conversation need the person's approval: calling one asks them and returns at once. Don't call it again. If the rest of the task depends on the decision, say in your answer what you are waiting for: the decision arrives later in this conversation as a message starting with "[Approval", and what you answer after it goes to ${pim.name}.
+- Your final answer, as plain text, is all ${agent.name} sees of your work: make it complete and self-contained, with what you found or did and anything left open.
+- You never talk to the person. ${agent.name} does, with what you report.
+- Tools that change things outside this conversation need the person's approval: calling one asks them and returns at once. Don't call it again. If the rest of the task depends on the decision, say in your answer what you are waiting for: the decision arrives later in this conversation as a message starting with "[Approval", and what you answer after it goes to ${agent.name}.
 - Be honest about what you did. Never claim an action happened unless a tool result says so.`;
 }
 
@@ -162,11 +165,11 @@ export function memberInstructions(member: TeamMember): string {
 	return `Your instructions, which come before your general habits wherever the two differ:\n${member.instructions}`;
 }
 
-/** The roster a Pim with a team reads, and how to work with it. */
-function roster(pim: Persona): string {
+/** The roster an agent with a team reads, and how to work with it. */
+function roster(agent: Agent): string {
 	return [
 		`You lead a team. Hand its members tasks with \`${DELEGATE}\`: they work at the same time, each in a conversation of its own, and the call returns all their answers.`,
-		...pim.team.map((member) => `- ${member.name}: ${gist(member.instructions)}`),
+		...agent.team.map((member) => `- ${member.name}: ${gist(member.instructions)}`),
 		"Give them the parts of the work that can go on at once, each with everything it needs: a member knows only its task. Then combine what they bring back. They never talk to the person; you do.",
 		'A member that asks for the person\'s approval answers once it is decided, in a message starting with "[Team".',
 	].join("\n");
@@ -190,15 +193,15 @@ export function teamExtension(host: TeamHost) {
 		replay: "safe",
 		async execute(args, api, context) {
 			const session = String(api.conversationId);
-			const { pim, member: self } = host.roleOf(session);
+			const { agent, member: self } = host.roleOf(session);
 			if (self) return text("Team members can't hand out tasks.", true);
-			if (pim.team.length === 0) return text(`${pim.name} has no team: do the work yourself.`, true);
+			if (agent.team.length === 0) return text(`${agent.name} has no team: do the work yourself.`, true);
 			const members = args.tasks.map(({ member }) =>
-				pim.team.find((candidate) => candidate.name.toLowerCase() === member.trim().toLowerCase()),
+				agent.team.find((candidate) => candidate.name.toLowerCase() === member.trim().toLowerCase()),
 			);
 			const unknown = args.tasks.filter((_, index) => !members[index]).map(({ member }) => member);
 			if (unknown.length > 0) {
-				return text(`No team member called ${unknown.join(", ")}. The team: ${pim.team.map((member) => member.name).join(", ")}.`, true);
+				return text(`No team member called ${unknown.join(", ")}. The team: ${agent.team.map((member) => member.name).join(", ")}.`, true);
 			}
 			const call = String(api.taskId);
 			const conversations = await api.commit(async (tx) => {
@@ -208,7 +211,7 @@ export function teamExtension(host: TeamHost) {
 				const created = [];
 				for (const member of members) {
 					const conversation = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
-					await configure(tx, conversation.id, host.memberAgent(member!, pim));
+					await configure(tx, conversation.id, host.memberAgent(member!, agent));
 					created.push(conversation.id);
 				}
 				return created;
@@ -219,7 +222,7 @@ export function teamExtension(host: TeamHost) {
 					call,
 					position,
 					session,
-					persona: pim.id,
+					agent: agent.id,
 					member: members[position]!.name,
 					task: args.tasks[position]!.task,
 				}),
@@ -239,8 +242,8 @@ export function teamExtension(host: TeamHost) {
 		name: TEAM_EXTENSION,
 		sections: [
 			section("team", ({ conversationId }) => {
-				const { pim, member } = host.roleOf(String(conversationId));
-				return member || pim.team.length === 0 ? undefined : roster(pim);
+				const { agent, member } = host.roleOf(String(conversationId));
+				return member || agent.team.length === 0 ? undefined : roster(agent);
 			}),
 		],
 		tools: [delegate],

@@ -1,6 +1,6 @@
 import { getAgentByName } from "agents";
 import { accountApi, adminApi, clientIp, handleRegistration, limited, resolveAccount, siteFor, sites, socialApi } from "./accounts";
-import { AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_EVENTS_PATH, OWNER_HEADER } from "./agent";
+import { AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_EVENTS_PATH, OWNER_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
 
@@ -78,22 +78,22 @@ async function authorize(request: Request, env: Env): Promise<Caller | Response>
 
 const under = (pathname: string, prefix: string) => pathname === prefix || pathname.startsWith(`${prefix}/`);
 
-/** Hands a request to an owner's agent, `path` being its path in the agent's API. */
+/** Hands a request to an owner's Pim, `path` being its path in the Pim's API. */
 export async function toAgent(request: Request, env: Env, owner: string, path: string, authorized: boolean): Promise<Response> {
 	const agent = await getAgentByName(env.Pim, owner);
 	const url = new URL(request.url);
 	url.pathname = path;
-	// Bodies are small JSON; buffering them lets the agent answer without reading one.
+	// Bodies are small JSON; buffering them lets the Pim answer without reading one.
 	const forwarded = new Request(url, request.body === null ? request : new Request(request, { body: await request.arrayBuffer() }));
-	// Tells the agent the request was authorized, so it can trust details like the origin.
+	// Tells the Pim the request was authorized, so it can trust details like the origin.
 	forwarded.headers.delete(AUTHORIZED_HEADER);
 	if (authorized) forwarded.headers.set(AUTHORIZED_HEADER, "1");
-	// The agent checks it is the one this owner's requests are for.
+	// The Pim checks it is the one this owner's requests are for.
 	forwarded.headers.set(OWNER_HEADER, owner);
 	try {
 		return await agent.fetch(forwarded);
 	} catch (error) {
-		// The agent's instance ended under the request (a restart, or an erasure, after which a retry gets 410).
+		// The Pim's instance ended under the request (a restart, or an erasure, after which a retry gets 410).
 		if ((error as { durableObjectReset?: boolean })?.durableObjectReset) {
 			return Response.json({ error: "Pim restarted while answering. Try again." }, { status: 503 });
 		}
@@ -101,13 +101,13 @@ export async function toAgent(request: Request, env: Env, owner: string, path: s
 	}
 }
 
-/** Paths of the API answered before the agent: an authorized request for `path` under `/api`. */
+/** Paths of the API answered before the Pim: an authorized request for `path` under `/api`. */
 export type ApiExtension = (path: string, request: Request) => Promise<Response | undefined>;
 
 /**
  * An app's callback or event delivery: `/mcp/callback/<owner>` (GET, the
- * OAuth sign-in's redirect, which the agent matches against the callback URL
- * it gave) or `/mcp/events/<owner>/<watch>` (POST, which the agent answers as
+ * OAuth sign-in's redirect, which the Pim matches against the callback URL
+ * it gave) or `/mcp/events/<owner>/<watch>` (POST, which the Pim answers as
  * `/mcp/events/<watch>`).
  */
 async function serveApp(request: Request, env: Env, pathname: string): Promise<Response | undefined> {
@@ -125,7 +125,7 @@ async function serveApp(request: Request, env: Env, pathname: string): Promise<R
 
 /**
  * An image a model provider fetches: `/images/<owner>/<id>?expires=…&signature=…`,
- * which the agent checks and answers as `/public-images/<id>`.
+ * which the Pim checks and answers as `/public-images/<id>`.
  */
 async function serveImage(request: Request, env: Env, pathname: string): Promise<Response> {
 	const match = /^\/images\/([^/]+)\/([\w-]+)$/.exec(pathname);
@@ -180,7 +180,7 @@ export async function serve(request: Request, env: Env): Promise<Response> {
 		const answered = await extension(path, request);
 		if (answered) return withCors(answered);
 	}
-	// The agent accepts sockets on any path; keep them on one.
+	// The Pim accepts sockets on any path; keep them on one.
 	const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
 	if (upgrade !== (path === "/ws")) {
 		return withCors(fail(upgrade ? 404 : 426, upgrade ? "WebSockets connect at /api/ws" : "/api/ws expects a WebSocket upgrade"));

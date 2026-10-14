@@ -2,7 +2,7 @@ import type { PimStore } from "../store";
 import type { McpBridge } from "./mcp";
 
 /**
- * What connected apps offer beyond tools, cached per app in the agent's
+ * What connected apps offer beyond tools, cached per app in the Pim's
  * database so prompts render without a network call:
  * - skills, from the MCP Skills extension (`io.modelcontextprotocol/skills`);
  * - event types, from the draft MCP Events extension (`events` capability).

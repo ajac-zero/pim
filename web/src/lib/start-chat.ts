@@ -6,11 +6,11 @@ import { pim, type UserContent } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 
 /**
- * Starts a chat with a Pim (the default one when `persona` is undefined)
+ * Starts a chat with an agent (the default one when `agent` is undefined)
  * with its first message: the chat is made only when there is something to
  * send, then opened, then sent to.
  */
-export function useStartChat(persona: string | undefined) {
+export function useStartChat(agent: string | undefined) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [starting, setStarting] = useState(false);
@@ -18,7 +18,7 @@ export function useStartChat(persona: string | undefined) {
   const start = async (content: UserContent) => {
     setStarting(true);
     try {
-      const session = await pim.createSession(persona ? { persona } : {});
+      const session = await pim.createSession(agent ? { agent } : {});
       await queryClient.invalidateQueries({ queryKey: ["sessions"] });
       pimClient.open(session.id);
       await navigate({

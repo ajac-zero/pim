@@ -16,18 +16,18 @@ import { cn } from "~/lib/utils";
 const POLL_MS = 2_000;
 
 /**
- * What the chat's Pim handed its team: the members of its latest handoff,
+ * What the chat's agent handed its team: the members of its latest handoff,
  * and any still working, each with its status. A member opens read-only:
- * it answers the Pim, not you.
+ * it answers the agent, not you.
  */
 export function TeamPanel({
   sessionId,
-  pimName,
+  agentName,
   running,
 }: {
   sessionId: string;
-  pimName: string;
-  /** The Pim is at work: its team may be too. */
+  agentName: string;
+  /** The agent is at work: its team may be too. */
   running: boolean;
 }) {
   const { t } = useI18n();
@@ -50,11 +50,11 @@ export function TeamPanel({
       <div
         className="mb-2 flex flex-wrap items-center gap-1.5 text-xs"
         role="group"
-        aria-label={t("teamOf", { name: pimName })}
+        aria-label={t("teamOf", { name: agentName })}
       >
         <span className="flex items-center gap-1 pr-1 text-muted-foreground">
           <Users className="size-3.5" />
-          {t("teamOf", { name: pimName })}
+          {t("teamOf", { name: agentName })}
         </span>
         {shown.map((run) => (
           <button
@@ -81,7 +81,7 @@ export function TeamPanel({
             <MemberTranscript
               sessionId={sessionId}
               run={open}
-              pimName={pimName}
+              agentName={agentName}
             />
           )}
         </SheetContent>
@@ -110,11 +110,11 @@ function RunStatus({ status }: { status: TeamRun["status"] }) {
 function MemberTranscript({
   sessionId,
   run,
-  pimName,
+  agentName,
 }: {
   sessionId: string;
   run: TeamRun;
-  pimName: string;
+  agentName: string;
 }) {
   const { t } = useI18n();
   const { data } = useQuery({
@@ -132,7 +132,7 @@ function MemberTranscript({
           {run.member}
         </SheetTitle>
         <SheetDescription>
-          {t("teamReadOnly", { member: run.member, pim: pimName })}
+          {t("teamReadOnly", { member: run.member, agent: agentName })}
         </SheetDescription>
       </SheetHeader>
       <ol className="flex-1 space-y-3 overflow-y-auto px-4 pb-6 text-sm">

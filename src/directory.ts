@@ -15,15 +15,15 @@ import { digestHex } from "./auth/store";
  * only someone signed in to the Cloudflare account can read. Everyone else
  * joins with an invite the admin makes, unless registration is open.
  *
- * An owner ID is random and never changes; the person's agent and sign-in
+ * An owner ID is random and never changes; the person's Pim and sign-in
  * are named after it, never after the username. A username is never reused
  * once its account is active, even after deletion, so nobody inherits what
  * others knew by that name. Only a registration that never made a passkey
  * gives its username back: when setting it up fails, or a day later.
  *
- * Erasing an owner's agent and sign-in is a cleanup job kept here, so it
+ * Erasing an owner's Pim and sign-in is a cleanup job kept here, so it
  * survives failures: it is tried at once, retried on this object's alarm
- * until it succeeds, and counts as done only when the agent is marked
+ * until it succeeds, and counts as done only when the Pim is marked
  * erased (it then refuses every request, however late) and both objects are
  * checked empty. An account being deleted is `deleting` until then, and
  * already opens nothing.
@@ -69,7 +69,7 @@ export type ClaimCode = { readonly code: string; readonly expiresAt: number };
 /** How long a claim link from the logs works. */
 const CLAIM_CODE_MS = 60 * 60 * 1000;
 
-/** A job that erases an owner's agent and sign-in: of a deleted account, or of a registration that never finished. */
+/** A job that erases an owner's Pim and sign-in: of a deleted account, or of a registration that never finished. */
 export type Cleanup = {
 	readonly ownerId: string;
 	readonly kind: "deletion" | "release";
@@ -372,7 +372,7 @@ export class Directory extends DurableObject<Env> {
 		return this.account(ownerId);
 	}
 
-	// Cleanups: erasing owners' agents and sign-ins, until it is done.
+	// Cleanups: erasing owners' Pims and sign-ins, until it is done.
 
 	#enqueue(ownerId: string, kind: Cleanup["kind"], now: number): void {
 		this.#sql(
@@ -452,8 +452,8 @@ export class Directory extends DurableObject<Env> {
 	}
 
 	/**
-	 * Erases the owner's agent, then their sign-in, and checks each is empty.
-	 * Destroying an agent ends the call that asked, so that call's error says
+	 * Erases the owner's Pim, then their sign-in, and checks each is empty.
+	 * Destroying a Pim ends the call that asked, so that call's error says
 	 * nothing either way: the check afterwards decides.
 	 */
 	async #erase(ownerId: string): Promise<void> {
@@ -469,11 +469,11 @@ export class Directory extends DurableObject<Env> {
 			const what = remaining.length > 0 ? `still holds ${remaining.join(", ")}` : "is not marked erased";
 			throw new Error(`The agent ${what}${why ? ` (${why})` : ""}`);
 		}
-		// What they showed others: their profile and published Pims.
+		// What they showed others: their profile and published agents.
 		const gallery = this.env.Gallery?.getByName("gallery");
 		if (gallery) {
 			await gallery.forgetOwner(ownerId);
-			if (await gallery.holds(ownerId)) throw new Error("The gallery still holds their profile or published Pims");
+			if (await gallery.holds(ownerId)) throw new Error("The gallery still holds their profile or published agents");
 		}
 		const auth = this.env.Auth.getByName(ownerId);
 		await auth.deleteEverything();
@@ -482,8 +482,8 @@ export class Directory extends DurableObject<Env> {
 	}
 
 	/**
-	 * Whether the agent is marked erased and what it still holds, asked of a
-	 * fresh instance. An erased agent's instance takes a moment to go: calls
+	 * Whether the Pim is marked erased and what it still holds, asked of a
+	 * fresh instance. An erased Pim's instance takes a moment to go: calls
 	 * reaching it meanwhile fail, so they are retried briefly before the
 	 * attempt counts as failed.
 	 */

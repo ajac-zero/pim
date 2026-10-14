@@ -10,7 +10,7 @@ type Context = Parameters<FauxResponseFactory>[0];
 const toolResult = (messages: readonly Message[]) =>
 	JSON.stringify(messages.findLast((message) => message.role === "toolResult")?.content);
 
-/** Who a request is from: the Pim, or a member by name, from the preamble its conversation got. */
+/** Who a request is from: the agent, or a member by name, from the preamble its conversation got. */
 const speaker = (context: Context) => /You are \\"([^"\\]+)\\", a member of the team/.exec(systemPrompt(context.messages))?.[1] ?? "lead";
 
 /** Answers each request with the script of whoever asked, in order: members run at once, so their order isn't fixed. */
@@ -33,16 +33,16 @@ const planner = {
 	],
 };
 
-describe("a Pim's team", () => {
-	it("works on the tasks the Pim hands out at the same time, each member with its own instructions and tools", async () => {
-		expect((await post("/personas", { ...planner, team: [planner.team[0], planner.team[0]] })).status).toBe(400);
-		expect((await post("/personas", { ...planner, team: [{ name: "Researcher" }] })).status).toBe(400);
-		const pim = (await post("/personas", planner)).body;
-		expect(pim.team).toEqual([
+describe("an agent's team", () => {
+	it("works on the tasks the agent hands out at the same time, each member with its own instructions and tools", async () => {
+		expect((await post("/agents", { ...planner, team: [planner.team[0], planner.team[0]] })).status).toBe(400);
+		expect((await post("/agents", { ...planner, team: [{ name: "Researcher" }] })).status).toBe(400);
+		const agent = (await post("/agents", planner)).body;
+		expect(agent.team).toEqual([
 			{ name: "Researcher", instructions: "Find facts and cite where they came from.", tools: null },
 			{ name: "Writer", instructions: "Write plans as short lists.", tools: ["current_time"] },
 		]);
-		const session = (await post("/sessions", { persona: pim.id })).body.id;
+		const session = (await post("/sessions", { agent: agent.id })).body.id;
 
 		const seen: Record<string, { prompt: string; tools: string[]; task: string }> = {};
 		const record = (context: Context) => {
@@ -84,7 +84,7 @@ describe("a Pim's team", () => {
 		});
 		expect(await say("Plan Lisbon for me.", session)).toMatchObject({ status: "done", replies: ["Go in May."] });
 
-		// The Pim knows its team; each member knows who it is, its own instructions, and only its tools.
+		// The agent knows its team; each member knows who it is, its own instructions, and only its tools.
 		expect(seen.lead!.prompt).toContain("- Researcher: Find facts and cite where they came from.");
 		expect(seen.lead!.tools).toContain("delegate");
 		expect(seen.Researcher!.prompt).toContain("Find facts and cite where they came from.");
@@ -92,7 +92,7 @@ describe("a Pim's team", () => {
 		expect(seen.Researcher!.prompt).not.toContain("Plan trips in detail.");
 		expect(seen.Researcher!.task).toBe("Find the best month to visit Lisbon.");
 		expect(seen.Researcher!.tools).toContain("current_time");
-		for (const tool of ["send_to_user", "delegate", "schedule_task", "watch_app_event", "create_pim", "update_pim"]) expect(seen.Researcher!.tools).not.toContain(tool);
+		for (const tool of ["send_to_user", "delegate", "schedule_task", "watch_app_event", "create_agent", "update_agent"]) expect(seen.Researcher!.tools).not.toContain(tool);
 		expect(seen.Writer!.tools).toEqual(["current_time"]);
 		// Their answers come back together, by name.
 		expect(results).toContain("## Researcher\\nMay: mild and before the crowds.");
@@ -113,7 +113,7 @@ describe("a Pim's team", () => {
 		expect((await api(`/sessions/${researcher.conversation}/messages`)).status).toBe(404);
 		expect((await api(`/sessions/1/team/${researcher.conversation}`)).status).toBe(404);
 
-		// A Pim without a team is told so.
+		// An agent without a team is told so.
 		scripts({ lead: [() => toolUse("delegate", { tasks: [{ member: "Researcher", task: "x" }] }), (context: Context) => {
 			results = toolResult(context.messages);
 			return fauxAssistantMessage("Fine.");
@@ -122,15 +122,15 @@ describe("a Pim's team", () => {
 		expect(results).toContain("has no team: do the work yourself.");
 	});
 
-	it("shows a member's approval in the Pim's chat, and brings the member's answer after the decision there", async () => {
+	it("shows a member's approval in the agent's chat, and brings the member's answer after the decision there", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
 		const realFetch = globalThis.fetch;
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 			const request = new Request(input, init);
 			return request.url.startsWith("https://hooks.example.test/") ? new Response("booked", { status: 201 }) : realFetch(input, init);
 		});
-		const pim = (await post("/personas", { ...planner, name: "Booker" })).body;
-		const session = (await post("/sessions", { persona: pim.id })).body.id;
+		const agent = (await post("/agents", { ...planner, name: "Booker" })).body;
+		const session = (await post("/sessions", { agent: agent.id })).body.id;
 		scripts({
 			lead: [
 				() => toolUse("delegate", { tasks: [{ member: "Researcher", task: "Book the hotel." }] }),

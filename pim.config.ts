@@ -2,9 +2,9 @@ import { assistant } from "./src/extensions/assistant";
 import { definePimConfig } from "./src/extensions/define";
 
 /**
- * This deployment's extensions: the bases people's Pims build on, and the widgets
+ * This deployment's extensions: the blueprints people's agents build on, and the widgets
  * their dashboards show. Add an extension's import to the list and deploy;
- * take one out and nobody has it anymore. Pims built on a base that's gone
+ * take one out and nobody has it anymore. Agents built on a blueprint that's gone
  * keep their name and the person's own instructions. See docs/extensions.md.
  *
  * Pim's own abilities (goals, schedules, memory, artifacts) are always
@@ -12,6 +12,6 @@ import { definePimConfig } from "./src/extensions/define";
  */
 export default definePimConfig({
 	extensions: [assistant],
-	// The base every new account's first Pim builds on, and new Pims by default: `<extension>/<base>`, or null for none.
-	defaultBase: "pim.assistant/pim",
+	// The blueprint every new account's first agent builds on, and new agents by default: `<extension>/<blueprint>`, or null for none.
+	defaultBlueprint: "pim.assistant/pim",
 });

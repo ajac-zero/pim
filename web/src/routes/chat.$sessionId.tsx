@@ -95,10 +95,10 @@ function ChatPage() {
             <span className="pointer-events-auto max-w-[min(32rem,70%)] truncate rounded-full border bg-background px-3 py-1 font-medium text-sm shadow-sm">
               {session ? sessionTitle(session, t) : "\u00a0"}
             </span>
-            {session?.persona && (
+            {session?.agent && (
               <span className="pointer-events-auto flex items-center gap-1.5 rounded-full border bg-background px-2.5 py-1 text-muted-foreground text-xs shadow-sm">
                 <Bot className="size-3.5" />
-                {session.persona.name}
+                {session.agent.name}
               </span>
             )}
             {ready && connection !== "open" && (
@@ -119,10 +119,10 @@ function ChatPage() {
             ref={composerCardRef}
             className="pointer-events-auto w-full max-w-3xl"
           >
-            {session?.persona && (
+            {session?.agent && (
               <TeamPanel
                 sessionId={sessionId}
-                pimName={session.persona.name}
+                agentName={session.agent.name}
                 running={ready && view.running}
               />
             )}
@@ -132,8 +132,8 @@ function ChatPage() {
               placeholder={
                 session?.visit
                   ? t("messageVisit", { username: session.visit.username })
-                  : session?.persona
-                    ? t("messagePersona", { name: session.persona.name })
+                  : session?.agent
+                    ? t("messageAgent", { name: session.agent.name })
                     : undefined
               }
               onStop={stop}

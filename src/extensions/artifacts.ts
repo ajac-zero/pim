@@ -5,10 +5,10 @@ import { HttpError } from "../http";
 import { definePimExtension } from "./define";
 import { text } from "./services";
 
-/** What the artifact tools need from the agent. */
+/** What the artifact tools need from the Pim. */
 export type ArtifactServices = {
 	readonly artifacts: ArtifactStore;
-	/** Throws once the agent is being erased: work still under way then writes nothing. */
+	/** Throws once the Pim is being erased: work still under way then writes nothing. */
 	assertOpen(): void;
 };
 
@@ -154,11 +154,11 @@ export function artifactsWidgets(artifacts: ArtifactStore) {
 				title: { en: "Recently made", es: "Hecho recientemente" },
 				description: "The artifacts this chat's Pim changed most recently, each opening the artifact.",
 				empty: { en: "Nothing made yet. Ask for a document, a checklist or a small page.", es: "Nada hecho aún. Pide un documento, una lista o una página pequeña." },
-				load: ({ pim, chatOf }) => ({
+				load: ({ agent, chatOf }) => ({
 					kind: "list",
 					items: artifacts
 						.list()
-						.filter((artifact) => (artifact.session === null ? pim.default : chatOf(artifact.session) !== null))
+						.filter((artifact) => (artifact.session === null ? agent.default : chatOf(artifact.session) !== null))
 						.sort((a, b) => b.updatedAt - a.updatedAt)
 						.slice(0, 5)
 						.map((artifact) => ({

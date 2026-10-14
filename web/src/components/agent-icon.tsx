@@ -1,22 +1,22 @@
 import { Bot } from "lucide-react";
-import type { Persona } from "~/lib/pim-api";
+import type { Agent } from "~/lib/pim-api";
 import { cn } from "~/lib/utils";
 
-/** A Pim's icon, or a robot when it has none. `className` sizes it. */
-export function PimIcon({
-  persona,
+/** An agent's icon, or a robot when it has none. `className` sizes it. */
+export function AgentIcon({
+  agent,
   className,
 }: {
-  persona: Pick<Persona, "id" | "icon">;
+  agent: Pick<Agent, "id" | "icon">;
   className?: string;
 }) {
-  if (persona.icon === null) {
+  if (agent.icon === null) {
     return <Bot className={cn("shrink-0", className)} aria-hidden="true" />;
   }
   return (
     <img
       // The version in the URL fetches it again when the icon changes.
-      src={`/api/personas/${persona.id}/icon?v=${persona.icon}`}
+      src={`/api/agents/${agent.id}/icon?v=${agent.icon}`}
       alt=""
       className={cn("shrink-0 rounded-sm object-cover", className)}
     />

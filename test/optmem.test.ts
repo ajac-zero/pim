@@ -8,7 +8,7 @@ import { api, lastUserText, OWNER, post, say, toolUse } from "./helpers";
 import { faux, napper, type Pim } from "./worker";
 
 /**
- * One agent for the whole file: the tests build on each other's memories,
+ * One Pim for the whole file: the tests build on each other's memories,
  * the way a real memory grows.
  */
 

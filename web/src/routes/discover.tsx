@@ -12,7 +12,7 @@ export const Route = createFileRoute("/discover")({
   component: DiscoverPage,
 });
 
-/** Pims people published for anyone to make their own. */
+/** Agents people published for anyone to make their own. */
 function DiscoverPage() {
   const { t } = useI18n();
   const { data: account } = useQuery(accountQuery());
@@ -37,15 +37,15 @@ function DiscoverPage() {
             <Input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder={t("searchPims")}
-              aria-label={t("searchPims")}
+              placeholder={t("searchAgents")}
+              aria-label={t("searchAgents")}
               className="pl-9"
             />
           </div>
           {templates?.length === 0 ? (
             <EmptyState
               icon={<Bot className="size-5" />}
-              text={query ? t("noPimsMatch") : t("noPimsPublished")}
+              text={query ? t("noAgentsMatch") : t("noAgentsPublished")}
             />
           ) : (
             <ul

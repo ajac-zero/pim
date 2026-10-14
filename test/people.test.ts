@@ -704,14 +704,14 @@ describe("the account", () => {
 		await runInDurableObject(env.Pim.getByName(rita.ownerId), async (instance: Pim) => {
 			instance.store.putCredential("openai", JSON.stringify({ type: "oauth", access: "rita-access", refresh: "rita-refresh" }));
 			await instance.schedule(new Date(Date.now() + 60 * 60_000), "runScheduledTask", { session: "1", instruction: "Call the bank" });
-			// Images are kept in R2, outside the agent's storage.
+			// Images are kept in R2, outside the Pim's storage.
 			await instance.images.keep("1", [{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }]);
 		});
 		expect((await holdings(rita.ownerId)).remaining).toEqual(
 			expect.arrayContaining(["credentials", "memories", "schedules", "owner profile", "images"]),
 		);
 
-		// The agent can't be reached: nothing is erased, and nothing says it was.
+		// The Pim can't be reached: nothing is erased, and nothing says it was.
 		await withAgentMethod(
 			"deleteEverything",
 			() => async () => {
@@ -745,7 +745,7 @@ describe("the account", () => {
 		expect(await holdings(rita.ownerId)).toEqual({ remaining: [], memories: 0, credentials: [], passkeys: 0, tokens: 0 });
 	});
 
-	it("doesn't report a deletion done when the agent can't even be addressed", async () => {
+	it("doesn't report a deletion done when the Pim can't even be addressed", async () => {
 		const uma = await person("uma");
 		await uma.browser.json("/api/memory/log", { method: "POST", json: { text: "Uma's diary" } });
 		const agents = env.Pim as unknown as { idFromName: (name: string) => DurableObjectId };
@@ -768,7 +768,7 @@ describe("the account", () => {
 		expect((await directory().account(uma.ownerId))?.status).toBe("deleted");
 	});
 
-	it("refuses a request authorized before the deletion that reaches the agent after it", async () => {
+	it("refuses a request authorized before the deletion that reaches the Pim after it", async () => {
 		const rex = await person("reviewrace");
 		const token = (await rex.browser.json("/auth/tokens", { method: "POST", json: { name: "CLI" } })).body.token as string;
 		// Hold the first valid token check after it says yes, until the deletion is done.
@@ -807,8 +807,8 @@ describe("the account", () => {
 		expect((await directory().account(rex.ownerId))?.status).toBe("deleted");
 	});
 
-	it("counts a deletion done only when the agent is checked empty, whatever its call said", async () => {
-		// The call that erases the agent can end abruptly after erasing it: that is done.
+	it("counts a deletion done only when the Pim is checked empty, whatever its call said", async () => {
+		// The call that erases the Pim can end abruptly after erasing it: that is done.
 		const sam = await person("sam");
 		await sam.browser.json("/api/memory/log", { method: "POST", json: { text: "Sam" } });
 		await withAgentMethod(
@@ -903,7 +903,7 @@ describe("artifacts", () => {
 		expect((await cy.browser.json(`/api/artifacts/${gone}`, { method: "DELETE" })).body).toEqual({ deleted: true });
 		expect((await holdings(cy.ownerId)).remaining).toContain("deleted artifact ids");
 		expect(JSON.stringify(JSON.parse(await (await cy.browser.fetch("/api/account/export")).text()).pim.artifacts)).not.toContain(gone);
-		// Deleted: gone, and the agent holds nothing.
+		// Deleted: gone, and the Pim holds nothing.
 		const before = new Map(cy.browser.cookies);
 		expect((await cy.browser.json("/api/account", { method: "DELETE", json: { confirm: "art-cy" } })).body).toEqual({ deleted: true });
 		// As another device still holding the session would.
@@ -940,7 +940,7 @@ describe("the admin", () => {
 			statusReason: "spam",
 		});
 		expect((await pat.browser.json("/api/sessions")).status).toBe(403);
-		// The agent refuses too, whatever a Worker has cached.
+		// The Pim refuses too, whatever a Worker has cached.
 		const agent = await runInDurableObject(env.Pim.getByName(pat.ownerId), (instance: Pim) => instance.status());
 		expect(agent).toBe("suspended");
 		await admin("/api/admin/accounts/pat/unsuspend", { method: "POST" });
@@ -961,20 +961,20 @@ describe("the admin", () => {
 });
 
 /**
- * What erasing an agent must stop, case by case: everything that could
+ * What erasing a Pim must stop, case by case: everything that could
  * still write to it, or act for its owner, once the Directory says it's gone.
  */
 describe("erasure boundaries", () => {
 	/**
-	 * A gate a test holds work on inside an agent, and a flag that the work
-	 * reached it. Only plain flags cross between the test and the agent, each
+	 * A gate a test holds work on inside a Pim, and a flag that the work
+	 * reached it. Only plain flags cross between the test and the Pim, each
 	 * polled with its own timers: a promise made in the test and awaited in an
 	 * agent that then ends would hang the test runner itself.
 	 */
 	function gate() {
 		const state = { reached: false, open: false };
 		return {
-			/** Called by the held work, in the agent. */
+			/** Called by the held work, in the Pim. */
 			hold: async () => {
 				state.reached = true;
 				while (!state.open) await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1022,7 +1022,7 @@ describe("erasure boundaries", () => {
 		await expectErased(ana.ownerId);
 	});
 
-	it("refuses the write of a request that was already inside the agent when the deletion began", async () => {
+	it("refuses the write of a request that was already inside the Pim when the deletion began", async () => {
 		const ben = await person("eb-inflight");
 		const held = gate();
 		const prototype = Pim.prototype as Pim;
@@ -1032,7 +1032,7 @@ describe("erasure boundaries", () => {
 			return original.apply(this, args);
 		};
 		try {
-			// Past the Worker and the agent's own check, waiting just before it writes.
+			// Past the Worker and the Pim's own check, waiting just before it writes.
 			const late = ben.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Written after deletion" } });
 			await held.reached();
 			expect(await deleteAccount(ben.browser, "eb-inflight")).toEqual({ deleted: true });
@@ -1048,9 +1048,9 @@ describe("erasure boundaries", () => {
 	});
 
 	/**
-	 * Holds the first `POST /memory/log` inside the agent's request handler,
-	 * past the Worker and the agent's `fetch`, and records how it ended. The
-	 * SDK binds `onRequest` when an agent is made, so this goes in before the
+	 * Holds the first `POST /memory/log` inside the Pim's request handler,
+	 * past the Worker and the Pim's `fetch`, and records how it ended. The
+	 * SDK binds `onRequest` when a Pim is made, so this goes in before the
 	 * person registers. `duringErasure` lets the request go on from inside
 	 * the erasure itself, between its start and the wipe.
 	 */
@@ -1086,7 +1086,7 @@ describe("erasure boundaries", () => {
 		return { seen, restore: () => (prototype.onRequest = original) };
 	}
 
-	it("refuses a write in the agent's handler that goes on while the erasure runs", async () => {
+	it("refuses a write in the Pim's handler that goes on while the erasure runs", async () => {
 		const held = gate();
 		const hook = holdMemoryWrite(held, { duringErasure: true });
 		try {
@@ -1094,7 +1094,7 @@ describe("erasure boundaries", () => {
 			const late = gil.browser.json("/api/memory/log", { method: "POST", json: { text: "Written during erasure" } });
 			await held.reached();
 			expect(await deleteAccount(gil.browser, "eb-handler-during")).toEqual({ deleted: true });
-			// It went on before the wipe, and the agent, already erasing, refused it.
+			// It went on before the wipe, and the Pim, already erasing, refused it.
 			expect(hook.seen.outcome).toBe("answered 410");
 			expect((await late).status).toBe(410);
 			await expectErased(gil.ownerId);
@@ -1103,7 +1103,7 @@ describe("erasure boundaries", () => {
 		}
 	});
 
-	it("refuses an artifact restore in the agent's handler that goes on while the erasure runs", async () => {
+	it("refuses an artifact restore in the Pim's handler that goes on while the erasure runs", async () => {
 		const held = gate();
 		const hook = holdMemoryWrite(held, { duringErasure: true, path: /^\/artifacts\/[^/]+\/restore$/ });
 		try {
@@ -1120,7 +1120,7 @@ describe("erasure boundaries", () => {
 		}
 	});
 
-	it("drops a write held in the agent's handler until the instance has ended", async () => {
+	it("drops a write held in the Pim's handler until the instance has ended", async () => {
 		const held = gate();
 		const hook = holdMemoryWrite(held, { duringErasure: false });
 		try {
@@ -1234,7 +1234,7 @@ describe("erasure boundaries", () => {
 		await expectErased(ivy.ownerId);
 	});
 
-	it("never runs an action whose approval timer outlives the agent", async () => {
+	it("never runs an action whose approval timer outlives the Pim", async () => {
 		const dot = await person("eb-approval");
 		// Auto-approve after the timeout: the dangerous case.
 		expect((await dot.browser.json("/api/settings", { method: "PUT", json: { approvalPolicy: "auto" } })).body).toMatchObject({ approvalPolicy: "auto" });
@@ -1456,8 +1456,8 @@ describe("circles and visits", () => {
 	});
 });
 
-describe("profiles and published Pims", () => {
-	it("lets people publish a Pim, others find it and make it their own, and takes it all down with the account", async () => {
+describe("profiles and published agents", () => {
+	it("lets people publish an agent, others find it and make it their own, and takes it all down with the account", async () => {
 		const dee = await person("dee");
 		const eli = await person("eli");
 
@@ -1469,7 +1469,7 @@ describe("profiles and published Pims", () => {
 		});
 
 		const coach = (
-			await dee.browser.json("/api/personas", {
+			await dee.browser.json("/api/agents", {
 				method: "POST",
 				json: {
 					name: "Marathon coach",
@@ -1480,15 +1480,15 @@ describe("profiles and published Pims", () => {
 				},
 			})
 		).body;
-		const published = await dee.browser.json(`/api/personas/${coach.id}/publish`, { method: "POST" });
+		const published = await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "POST" });
 		expect(published).toMatchObject({ status: 201, body: { author: "dee", authorName: "Dee Rivers", name: "Marathon coach", uses: 0 } });
 		const templateId = published.body.id as string;
-		expect((await dee.browser.json(`/api/personas/${coach.id}`)).body.published).toBe(templateId);
+		expect((await dee.browser.json(`/api/agents/${coach.id}`)).body.published).toBe(templateId);
 		// Publishing again replaces it, under the same id.
-		await dee.browser.json(`/api/personas/${coach.id}`, { method: "PUT", json: { instructions: "Plan two weeks at a time." } });
-		expect((await dee.browser.json(`/api/personas/${coach.id}/publish`, { method: "POST" })).body).toMatchObject({ id: templateId });
+		await dee.browser.json(`/api/agents/${coach.id}`, { method: "PUT", json: { instructions: "Plan two weeks at a time." } });
+		expect((await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "POST" })).body).toMatchObject({ id: templateId });
 
-		// Eli finds it, by search or on Dee's page, and reads it in full: a copy of the Pim, never Dee's data.
+		// Eli finds it, by search or on Dee's page, and reads it in full: a copy of the agent, never Dee's data.
 		const found = (await eli.browser.json("/api/templates?q=marathon")).body.templates;
 		expect(found).toEqual([expect.objectContaining({ id: templateId, author: "dee", name: "Marathon coach" })]);
 		expect(found[0]).not.toHaveProperty("instructions");
@@ -1501,7 +1501,7 @@ describe("profiles and published Pims", () => {
 		});
 		expect((await eli.browser.json(`/api/templates/${templateId}`)).body).toMatchObject({ instructions: "Plan two weeks at a time." });
 
-		// Made his own: a copy in Eli's Pim, his to change; Dee's is untouched, and counts the use.
+		// Made his own: a copy in Eli's agents, his to change; Dee's is untouched, and counts the use.
 		const mine = await eli.browser.json(`/api/templates/${templateId}/use`, { method: "POST" });
 		expect(mine).toMatchObject({
 			status: 201,
@@ -1514,21 +1514,21 @@ describe("profiles and published Pims", () => {
 				published: null,
 			},
 		});
-		await eli.browser.json(`/api/personas/${mine.body.id}`, { method: "PUT", json: { instructions: "Plan my week around work." } });
-		expect((await dee.browser.json(`/api/personas/${coach.id}`)).body.instructions).toBe("Plan two weeks at a time.");
+		await eli.browser.json(`/api/agents/${mine.body.id}`, { method: "PUT", json: { instructions: "Plan my week around work." } });
+		expect((await dee.browser.json(`/api/agents/${coach.id}`)).body.instructions).toBe("Plan two weeks at a time.");
 		expect((await eli.browser.json(`/api/templates/${templateId}`)).body.uses).toBe(1);
 
 		// Unpublished, it's gone from the gallery; Eli keeps his copy.
-		expect((await dee.browser.json(`/api/personas/${coach.id}/publish`, { method: "DELETE" })).status).toBe(200);
+		expect((await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "DELETE" })).status).toBe(200);
 		expect((await eli.browser.json(`/api/templates/${templateId}`)).status).toBe(404);
-		expect((await eli.browser.json("/api/personas")).body.personas.map((pim: { name: string }) => pim.name)).toEqual(["Pim", "Marathon coach"]);
+		expect((await eli.browser.json("/api/agents")).body.agents.map((agent: { name: string }) => agent.name)).toEqual(["Pim", "Marathon coach"]);
 
-		// Deleting a published Pim unpublishes it; deleting the account takes the profile and everything published.
-		const again = (await dee.browser.json(`/api/personas/${coach.id}/publish`, { method: "POST" })).body.id;
-		await dee.browser.json(`/api/personas/${coach.id}`, { method: "DELETE" });
+		// Deleting a published agent unpublishes it; deleting the account takes the profile and everything published.
+		const again = (await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "POST" })).body.id;
+		await dee.browser.json(`/api/agents/${coach.id}`, { method: "DELETE" });
 		expect((await eli.browser.json(`/api/templates/${again}`)).status).toBe(404);
-		const other = (await dee.browser.json("/api/personas", { method: "POST", json: { name: "Cook", instructions: "Suggest dinners." } })).body;
-		await dee.browser.json(`/api/personas/${other.id}/publish`, { method: "POST" });
+		const other = (await dee.browser.json("/api/agents", { method: "POST", json: { name: "Cook", instructions: "Suggest dinners." } })).body;
+		await dee.browser.json(`/api/agents/${other.id}/publish`, { method: "POST" });
 		expect((await eli.browser.json("/api/templates?q=cook")).body.templates).toHaveLength(1);
 		expect((await dee.browser.json("/api/account", { method: "DELETE", json: { confirm: "dee" } })).status).toBe(200);
 		expect((await eli.browser.json("/api/templates?q=cook")).body.templates).toEqual([]);
@@ -1536,25 +1536,25 @@ describe("profiles and published Pims", () => {
 		expect((await eli.browser.json("/api/people/dee")).status).toBe(404);
 	});
 
-	it("gives everyone who joins a copy of the Pim the admin chose, theirs to change", async () => {
+	it("gives everyone who joins a copy of the agent the admin chose, theirs to change", async () => {
 		const before = await person("nell");
 		const helper = (
-			await admin("/api/personas", {
+			await admin("/api/agents", {
 				method: "POST",
 				json: { name: "Household helper", description: "Keeps the house running.", instructions: "Check the family calendar first." },
 			})
 		).body;
-		expect((await before.browser.json("/api/admin/default-pim", { method: "PUT", json: { pim: helper.id } })).status).toBe(403);
-		expect((await admin("/api/admin/default-pim", { method: "PUT", json: { pim: "p_nope" } })).status).toBe(404);
-		expect((await admin("/api/admin/default-pim", { method: "PUT", json: { pim: helper.id } })).body.pim).toMatchObject({
+		expect((await before.browser.json("/api/admin/default-agent", { method: "PUT", json: { agent: helper.id } })).status).toBe(403);
+		expect((await admin("/api/admin/default-agent", { method: "PUT", json: { agent: "p_nope" } })).status).toBe(404);
+		expect((await admin("/api/admin/default-agent", { method: "PUT", json: { agent: helper.id } })).body.agent).toMatchObject({
 			author: "boss",
-			personaId: helper.id,
+			agentId: helper.id,
 			name: "Household helper",
 		});
 
-		// A newcomer's default Pim is a copy; whoever joined before keeps theirs.
+		// A newcomer's default agent is a copy; whoever joined before keeps theirs.
 		const otto = await person("otto");
-		const [copy] = (await otto.browser.json("/api/personas")).body.personas;
+		const [copy] = (await otto.browser.json("/api/agents")).body.agents;
 		expect(copy).toMatchObject({
 			name: "Household helper",
 			description: "Keeps the house running.",
@@ -1562,28 +1562,28 @@ describe("profiles and published Pims", () => {
 			default: true,
 			source: { template: "default", author: "boss" },
 		});
-		expect((await before.browser.json("/api/personas")).body.personas).toEqual([expect.objectContaining({ name: "Pim", default: true })]);
+		expect((await before.browser.json("/api/agents")).body.agents).toEqual([expect.objectContaining({ name: "Pim", default: true })]);
 
 		// The copy is Otto's: the admin's later edits don't reach it, and his don't reach theirs.
-		await admin(`/api/personas/${helper.id}`, { method: "PUT", json: { instructions: "Ask before buying anything." } });
-		await otto.browser.json(`/api/personas/${copy.id}`, { method: "PUT", json: { name: "Otto's helper" } });
-		expect((await otto.browser.json("/api/personas")).body.personas[0]).toMatchObject({
+		await admin(`/api/agents/${helper.id}`, { method: "PUT", json: { instructions: "Ask before buying anything." } });
+		await otto.browser.json(`/api/agents/${copy.id}`, { method: "PUT", json: { name: "Otto's helper" } });
+		expect((await otto.browser.json("/api/agents")).body.agents[0]).toMatchObject({
 			name: "Otto's helper",
 			instructions: "Check the family calendar first.",
 		});
-		expect((await admin(`/api/personas/${helper.id}`)).body.name).toBe("Household helper");
+		expect((await admin(`/api/agents/${helper.id}`)).body.name).toBe("Household helper");
 
-		// Taken back, people join with a plain Pim again.
-		expect((await admin("/api/admin/default-pim", { method: "DELETE" })).body).toEqual({ pim: null });
-		expect((await (await person("pia")).browser.json("/api/personas")).body.personas).toEqual([
+		// Taken back, people join with a plain agent again.
+		expect((await admin("/api/admin/default-agent", { method: "DELETE" })).body).toEqual({ agent: null });
+		expect((await (await person("pia")).browser.json("/api/agents")).body.agents).toEqual([
 			expect.objectContaining({ name: "Pim", instructions: "", default: true }),
 		]);
 	});
 
 	it("lets the operator take a template down", async () => {
 		const fin = await person("fin");
-		const pim = (await fin.browser.json("/api/personas", { method: "POST", json: { name: "Spam", instructions: "Buy now." } })).body;
-		const template = (await fin.browser.json(`/api/personas/${pim.id}/publish`, { method: "POST" })).body.id;
+		const agent = (await fin.browser.json("/api/agents", { method: "POST", json: { name: "Spam", instructions: "Buy now." } })).body;
+		const template = (await fin.browser.json(`/api/agents/${agent.id}/publish`, { method: "POST" })).body.id;
 		expect((await admin(`/api/admin/templates/${template}`, { method: "DELETE" })).status).toBe(200);
 		expect((await fin.browser.json(`/api/templates/${template}`)).status).toBe(404);
 	});

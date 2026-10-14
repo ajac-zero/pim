@@ -1,19 +1,21 @@
 # Extensions
 
-An extension is what a deployment adds to everyone's Pims: bases for Pims to build on, abilities (tools, prompt sections, background work, and actions that ask first), and widgets for their dashboards. Its admin chooses them in code, in [`pim.config.ts`](../pim.config.ts), and deploys; the people on the Pim choose among what's there. Nothing is loaded at runtime.
+An extension is what a deployment adds to everyone's Pims: blueprints for agents to build on, abilities (tools, prompt sections, background work, and actions that ask first), and widgets for their dashboards. Its admin chooses them in code, in [`pim.config.ts`](../pim.config.ts), and deploys; people choose among what's there. Nothing is loaded at runtime.
 
-Pim's own base is an extension too, [`pim.assistant`](../src/extensions/assistant.ts), written with the same API. A deployment can leave it out, and a person can make another Pim their default and delete theirs.
+Pim's own blueprint is an extension too, [`pim.assistant`](../src/extensions/assistant.ts), written with the same API. A deployment can leave it out, and a person can make another agent their default and delete theirs.
+
+Pim is the platform and a person's own space; an agent is what they create and chat with; a blueprint is what an extension defines in code for agents to build on; a template is an agent shared through the gallery.
 
 ## Three layers
 
 | Layer | What it is | Where |
 | --- | --- | --- |
-| Core | How every Pim works: talking through `send_to_user`, approvals, honesty, time. No Pim's instructions change it | The `preamble` section in [`src/extensions/persona.ts`](../src/extensions/persona.ts) |
-| Abilities | Tools, prompt sections, hooks and background tasks, plus actions that ask first and widgets. Pim's own (goals, schedules, memory, artifacts, teams, the web) are every Pim's; an extension's go only to the Pims that use it | `src/extensions/`, and extensions' `ability` |
-| Bases | A name, instructions, the abilities it uses, the apps it works with, a dashboard and starters, defined by an extension in code; people's own Pims build on one | Extensions in `pim.config.ts` |
-| Pims | What a person talks with: a name and their own instructions and apps on top of a base. Stored data, made in the app or by the agent | Your Pims |
+| Core | How every Pim works: talking through `send_to_user`, approvals, honesty, time. No Pim's instructions change it | The `preamble` section in [`src/extensions/agents.ts`](../src/extensions/agents.ts) |
+| Abilities | Tools, prompt sections, hooks and background tasks, plus actions that ask first and widgets. Pim's own (goals, schedules, memory, artifacts, teams, the web) are every Pim's; an extension's go only to the agents that use it | `src/extensions/`, and extensions' `ability` |
+| Blueprints | A name, instructions, the abilities it uses, the apps it works with, a dashboard and starters, defined by an extension in code; agents build on one | Extensions in `pim.config.ts` |
+| Agents | What a person talks with: a name and their own instructions and apps on top of a blueprint. Stored data, made in the app or by the agent | Your agents |
 
-A person's Pim stores the base it builds on as `base`, such as `pim.assistant/pim`; the Pim editor's **Builds on** chooses it. At every request its chats get the core preamble, then a `pim` section with the Pim's name, the base's instructions, and the person's own instructions, which win. They also get the abilities the base uses: its own extension's, and those it lists in `abilities`. Edits to the extension reach every Pim built on it at the next deploy, and a Pim that changes its base gets the new abilities in its chats from their next message: they aren't copies. Publishing a Pim and the Pim everyone starts with keep its base; a copy whose base this deployment doesn't have builds on the default Pim.
+A person's Pim stores the blueprint its agents build on as `blueprint`, such as `pim.assistant/pim`; the agent editor's **Based on blueprint** chooses it. At every request its chats get the core preamble, then an `agent` section with the agent's name, the blueprint's instructions, and the person's own instructions, which win. They also get the abilities the blueprint uses: its own extension's, and those it lists in `abilities`. Edits to the extension reach every agent built on it at the next deploy, and an agent that changes its blueprint gets the new abilities in its chats from their next message: they aren't copies. Published agents and the default agent template keep their blueprint; a copy whose blueprint this deployment doesn't have builds on the default blueprint.
 
 ## Writing one
 
@@ -26,7 +28,7 @@ import { defineGatedAction, definePimExtension } from "../src/extensions/define"
 type Bill = { name: string; amount: number; due: string; paid: boolean };
 
 export const ledger = definePimExtension({
-	id: "ledger", // stored in people's Pims and chats: don't rename it
+	id: "ledger", // stored in people's agents and chats: don't rename it
 	name: "Ledger",
 	description: "Budgets and bills.",
 	ability: ({ data, timeZone, notify }) => ({
@@ -67,7 +69,7 @@ export const ledger = definePimExtension({
 			}),
 		},
 	},
-	bases: [
+	blueprints: [
 		{
 			id: "budget",
 			name: "Budget",
@@ -89,11 +91,11 @@ Then add it to `pim.config.ts`:
 ```ts
 export default definePimConfig({
 	extensions: [assistant, ledger],
-	defaultBase: "pim.assistant/pim",
+	defaultBlueprint: "pim.assistant/pim",
 });
 ```
 
-People then make Pims built on it: Your Pims → New Pim → Builds on: Budget, or `POST /api/personas` with `{ "name": "Household", "base": "ledger/budget" }`.
+People then make agents built on it: Your agents → New agent → Based on blueprint: Budget, or `POST /api/agents` with `{ "name": "Household", "blueprint": "ledger/budget" }`.
 
 ## Abilities
 
@@ -109,16 +111,16 @@ It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps
 - **Names are checked.** An ability whose tool or action has the name of one of Pim's tools, or of another extension's, stops the agent with an error. pi would let the later tool replace the earlier one, so an extension could otherwise stand in for `send_to_user` or a tool that asks first. Prefix your tools' names with your extension's.
 - **Code-level trust.** An ability runs in the person's agent, with what the context gives it and whatever its code can reach, such as `fetch`. Install only extensions you would merge into Pim itself.
 
-- **Checked when an agent starts.** Ids must be lowercase letters, digits, dots and hyphens, and unique. Every dashboard must name a widget some installed extension provides, and `defaultBase` must exist. A mistake fails loudly, with the reason, as soon as anything uses extensions (a chat's prompt, the Pims list, a dashboard), instead of drawing a broken dashboard. Run `pnpm test` after changing `pim.config.ts`: every test uses it.
+- **Checked when an agent starts.** Ids must be lowercase letters, digits, dots and hyphens, and unique. Every dashboard must name a widget some installed extension provides, and `defaultBlueprint` must exist. A mistake fails loudly, with the reason, as soon as anything uses extensions (a chat's prompt, the agents list, a dashboard), instead of drawing a broken dashboard. Run `pnpm test` after changing `pim.config.ts`: every test uses it.
 - **Text people read** is a string, or one per language with English always there. The dashboard is asked for in the person's language (`?locale=`), and English stands in for a missing translation. Instructions are for the model, so they are one string.
 
 ## Apps
 
-A Pim's `apps` are the remote MCP servers its chats work with. Each person connects them with their own accounts, from the Pim's card in Your Pims or by asking the Pim, whose `connect_app` connects only the apps its Pim lists. A chat gets the tools and instructions of the connected apps its Pim lists: the base's `apps`, then the person's own Pim's. Apps the person connected for another Pim stay out of it, and the model can't add an app by itself; `find_app` only finds a server's URL for the person to add. URLs must be https, and unique within a Pim.
+An agent's `apps` are the remote MCP servers its chats work with. Each person connects them with their own accounts, from an agent's card in Your agents or by asking the agent, whose `connect_app` connects only the apps that agent lists. A chat gets the tools and instructions of the connected apps its agent lists: the blueprint's `apps`, then the agent's own. Apps connected for another agent stay out of it, and the model can't add an app by itself; `find_app` only finds a server's URL for the person to add. URLs must be https, and unique within an agent.
 
 ## Widgets
 
-A widget is data of a kind the web app knows how to draw. `load` runs in the person's own agent, the Durable Object that holds their Pim, when their dashboard is opened. No extension code runs in the browser.
+A widget is data of a kind the web app knows how to draw. `load` runs in the person's own Pim, the Durable Object that holds their agents, when their dashboard is opened. No extension code runs in the browser.
 
 | Kind | Items | Drawn as |
 | --- | --- | --- |
@@ -129,7 +131,7 @@ A `link` is `{ chat }` or `{ artifact }`: the item opens it.
 
 `load` gets:
 
-- `pim`: the Pim whose dashboard it is (`id`, `name`, `default`).
+- `agent`: the agent whose dashboard it is (`id`, `name`, `default`).
 - `chatOf(session)`: the person's chat that a conversation is, or works for, when that chat is this Pim's; null otherwise. A team member's conversation works for the chat that gave it its task. Use it to show only what belongs to this Pim, and to link to the chat.
 - `timeZone`: the person's.
 - `data`: the data of the extension that brings the widget.
@@ -138,7 +140,7 @@ A widget that throws shows as failed, with the error logged; the dashboard's oth
 
 ### In chat
 
-A widget with a `description` can also go with a message. The model reads a `widgets` section listing the ones the chat can show, each with its description: Pim's own, and those of the base its Pim builds on and the abilities that Pim uses. It names them in `send_to_user`'s `widgets`, up to four, instead of retyping what they show.
+A widget with a `description` can also go with a message. The model reads a `widgets` section listing the ones the chat can show, each with its description: Pim's own, and those of the blueprint the agent builds on and the abilities that agent uses. It names them in `send_to_user`'s `widgets`, up to four, instead of retyping what they show.
 
 - **Loaded once, when sent.** A message and its widgets always agree, as the person sees it later. The dashboard is where widgets are live.
 - **The model sees what was shown.** The tool's result holds the widgets' content, which the app draws from, so the model knows what the person is looking at.

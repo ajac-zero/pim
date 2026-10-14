@@ -17,7 +17,7 @@ import { usernameProblem } from "./usernames";
  * in another's.
  */
 
-/** How long a Worker trusts what it read about an account. Suspensions reach the agent at once regardless. */
+/** How long a Worker trusts what it read about an account. Suspensions reach the Pim at once regardless. */
 const ACCOUNT_CACHE_MS = 30_000;
 const accounts = new Map<string, { account: Account | null; at: number }>();
 
@@ -26,7 +26,7 @@ export const CLAIM_WINDOW_MS = 15 * 60 * 1000;
 
 const directory = (env: Env) => env.Directory.getByName("directory");
 const gallery = (env: Env) => env.Gallery.getByName("gallery");
-const agentOf = (env: Env, ownerId: string) => getAgentByName(env.Pim, ownerId);
+const pimOf = (env: Env, ownerId: string) => getAgentByName(env.Pim, ownerId);
 const authOf = (env: Env, ownerId: string) => env.Auth.getByName(ownerId);
 
 /** An owner's account, cached for a moment. */
@@ -122,7 +122,7 @@ export function sites(env: Env): Sites {
 
 /**
  * Deletes an account: it stops opening anything at once, then the Directory
- * erases the agent and its sign-in, now if it can and on its alarm until it
+ * erases the Pim and its sign-in, now if it can and on its alarm until it
  * has. Done only once both were checked empty. Safe to run again, to retry a
  * deletion that hasn't finished.
  */
@@ -217,19 +217,19 @@ async function register(request: Request, env: Env, now: number): Promise<Respon
 	let recoveryCodes: string[];
 	try {
 		[setup, recoveryCodes] = await Promise.all([auth.issueSetupCode(now, PENDING_MS), auth.newRecoveryCodes(now)]);
-		const agent = await agentOf(env, account.ownerId);
-		await agent.provision({ ownerId: account.ownerId, username, publicUrl: origin(request, env) });
+		const pim = await pimOf(env, account.ownerId);
+		await pim.provision({ ownerId: account.ownerId, username, publicUrl: origin(request, env) });
 		// The deployment's limits are for members: the admin pays for the deployment.
-		if (account.role === "admin") await agent.setLimits(UNLIMITED);
-		// Everyone starts with a copy of the Pim the admin chose, or a plain one when they chose none.
-		const everyone = await gallery(env).defaultPim();
+		if (account.role === "admin") await pim.setLimits(UNLIMITED);
+		// Everyone starts with a copy of the agent the admin chose, or a plain one when they chose none.
+		const everyone = await gallery(env).defaultAgent();
 		if (everyone) {
-			const { author, name, description, instructions, apps, team, base } = everyone;
-			await agent.adoptDefaultPim({ author, name, description, instructions, apps, team, base });
+			const { author, name, description, instructions, apps, team, blueprint } = everyone;
+			await pim.adoptDefaultAgent({ author, name, description, instructions, apps, team, blueprint });
 		}
 		if (typeof body?.timeZone === "string") {
 			// The browser's zone, a good first guess; a bad one is just not applied.
-			await agent.applySettings({ timeZone: body.timeZone }).catch(() => undefined);
+			await pim.applySettings({ timeZone: body.timeZone }).catch(() => undefined);
 		}
 	} catch (error) {
 		// Half a registration helps nobody: give the username and invite back now, not in a day. The Directory erases what was made.
@@ -252,14 +252,14 @@ async function register(request: Request, env: Env, now: number): Promise<Respon
 	);
 }
 
-/** `/api/account`: the person's account, answered here because the agent doesn't know about accounts. */
+/** `/api/account`: the person's account, answered here because the Pim doesn't know about accounts. */
 export function accountApi(env: Env, account: Account, site: AuthSite, request: Request, viaSession: boolean): ApiExtension {
 	return async (path) => {
 		if (path !== "/account" && !path.startsWith("/account/")) return undefined;
 		const route = `${request.method} ${path}`;
 		if (route === "GET /account") {
-			const agent = await agentOf(env, account.ownerId);
-			const [usage, recoveryCodesLeft] = await Promise.all([agent.usageReport(), site.store.recoveryCodesLeft()]);
+			const pim = await pimOf(env, account.ownerId);
+			const [usage, recoveryCodesLeft] = await Promise.all([pim.usageReport(), site.store.recoveryCodesLeft()]);
 			return json({
 				username: account.username,
 				ownerId: account.ownerId,
@@ -271,8 +271,8 @@ export function accountApi(env: Env, account: Account, site: AuthSite, request: 
 			});
 		}
 		if (route === "GET /account/export") {
-			const agent = await agentOf(env, account.ownerId);
-			const [data, passkeys, tokens] = await Promise.all([agent.exportData(), site.store.passkeys(), site.store.tokens()]);
+			const pim = await pimOf(env, account.ownerId);
+			const [data, passkeys, tokens] = await Promise.all([pim.exportData(), site.store.passkeys(), site.store.tokens()]);
 			log("exported", { owner: account.ownerId });
 			const body = JSON.stringify(
 				{ account: { username: account.username, ownerId: account.ownerId, createdAt: account.createdAt }, passkeys, tokens, pim: JSON.parse(data) },
@@ -301,7 +301,7 @@ export function accountApi(env: Env, account: Account, site: AuthSite, request: 
 /** An error a Durable Object threw across RPC, as the API answers it: its message, with the status its words imply. */
 function rpcFailure(error: unknown): Response {
 	const message = error instanceof Error ? error.message : String(error);
-	const status = /^No (circle|Pim|template)/.test(message) ? 404 : /up to \d+/.test(message) ? 429 : 400;
+	const status = /^No (circle|agent|template)/.test(message) ? 404 : /up to \d+/.test(message) ? 429 : 400;
 	return fail(status, message);
 }
 
@@ -309,13 +309,13 @@ function rpcFailure(error: unknown): Response {
  * The parts of a person's API that need the whole instance, answered here:
  * adding someone to a circle by username (only the Directory knows whose
  * Pim a username is), their profile, other people's, and the gallery of
- * published Pims. Everything else is their own Pim's.
+ * published agents. Everything else is their own Pim's.
  */
 export function socialApi(env: Env, account: Account, request: Request): ApiExtension {
 	return async (path) => {
 		const route = `${request.method} ${path}`;
 		const body = async () => ((await request.json().catch(() => null)) ?? {}) as Record<string, unknown>;
-		const agent = () => agentOf(env, account.ownerId);
+		const pim = () => pimOf(env, account.ownerId);
 		const someone = async (username: string) => {
 			const found = usernameProblem(username) === null ? await directory(env).resolve(username) : null;
 			return found?.status === "active" ? found : null;
@@ -328,7 +328,7 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				const guest = await someone(username);
 				if (!guest) return fail(404, `There's nobody called ${username || "that"} on this Pim.`);
 				if (guest.ownerId === account.ownerId) return fail(400, "You can't add yourself to a circle.");
-				const added = await (await agent()).addCircleMember(decodeURIComponent(member[1]!), { ownerId: guest.ownerId, username: guest.username });
+				const added = await (await pim()).addCircleMember(decodeURIComponent(member[1]!), { ownerId: guest.ownerId, username: guest.username });
 				log("circle_member_added", { owner: account.ownerId, member: guest.ownerId });
 				return json(added, 201);
 			}
@@ -354,34 +354,34 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				if (!found) return fail(404, "No such template. It may have been unpublished.");
 				if (!template[2] && request.method === "GET") return json(found);
 				if (template[2] && request.method === "POST") {
-					const persona = await (await agent()).adoptTemplate(found);
+					const agent = await (await pim()).adoptTemplate(found);
 					if (found.author !== account.username) await gallery(env).used(found.id);
 					log("template_used", { owner: account.ownerId, template: found.id });
-					return json(persona, 201);
+					return json(agent, 201);
 				}
 				return undefined;
 			}
 
-			const publish = /^\/personas\/([^/]+)\/publish$/.exec(path);
+			const publish = /^\/agents\/([^/]+)\/publish$/.exec(path);
 			if (publish) {
 				const id = decodeURIComponent(publish[1]!);
-				const persona = await (await agent()).personaToPublish(id);
-				if (!persona) return fail(404, `No Pim ${id}`);
+				const agent = await (await pim()).agentToPublish(id);
+				if (!agent) return fail(404, `No agent ${id}`);
 				if (request.method === "POST") {
-					const published = await gallery(env).publish(account.ownerId, account.username, persona);
-					await (await agent()).setPersonaPublished(id, published.id);
+					const published = await gallery(env).publish(account.ownerId, account.username, agent);
+					await (await pim()).setAgentPublished(id, published.id);
 					log("template_published", { owner: account.ownerId, template: published.id });
 					return json(published, 201);
 				}
 				if (request.method === "DELETE") {
 					await gallery(env).unpublish(account.ownerId, id);
-					await (await agent()).setPersonaPublished(id, null);
+					await (await pim()).setAgentPublished(id, null);
 					return json({ deleted: true });
 				}
 				return undefined;
 			}
-			// A deleted Pim leaves the gallery too; the agent deletes it after.
-			const deleted = /^\/personas\/([^/]+)$/.exec(path);
+			// A deleted agent leaves the gallery too; the Pim deletes it after.
+			const deleted = /^\/agents\/([^/]+)$/.exec(path);
 			if (deleted && request.method === "DELETE") await gallery(env).unpublish(account.ownerId, decodeURIComponent(deleted[1]!));
 		} catch (error) {
 			return rpcFailure(error);
@@ -415,20 +415,20 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 					}),
 				});
 			}
-			if (route === "GET /default-pim") return json({ pim: await gallery(env).defaultPim() });
-			if (route === "PUT /default-pim") {
-				const id = (await body()).pim;
-				if (typeof id !== "string") return fail(400, "pim must be the id of one of your Pims");
-				const persona = await (await agentOf(env, admin.ownerId)).personaToPublish(id);
-				if (!persona) return fail(404, `No Pim ${id}`);
-				const chosen = await gallery(env).setDefaultPim(admin.ownerId, admin.username, persona);
-				log("default_pim_set", { by: admin.ownerId, pim: id });
-				return json({ pim: chosen });
+			if (route === "GET /default-agent") return json({ agent: await gallery(env).defaultAgent() });
+			if (route === "PUT /default-agent") {
+				const id = (await body()).agent;
+				if (typeof id !== "string") return fail(400, "agent must be the id of one of your agents");
+				const agent = await (await pimOf(env, admin.ownerId)).agentToPublish(id);
+				if (!agent) return fail(404, `No agent ${id}`);
+				const chosen = await gallery(env).setDefaultAgent(admin.ownerId, admin.username, agent);
+				log("default_agent_set", { by: admin.ownerId, agent: id });
+				return json({ agent: chosen });
 			}
-			if (route === "DELETE /default-pim") {
-				await gallery(env).clearDefaultPim();
-				log("default_pim_set", { by: admin.ownerId, pim: null });
-				return json({ pim: null });
+			if (route === "DELETE /default-agent") {
+				await gallery(env).clearDefaultAgent();
+				log("default_agent_set", { by: admin.ownerId, agent: null });
+				return json({ agent: null });
 			}
 			const template = /^\/admin\/templates\/([^/]+)$/.exec(path);
 			if (template && request.method === "DELETE") {
@@ -451,12 +451,12 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 			const action = match[2] ?? "";
 			const account = await dir.resolve(username);
 			if (!account) return fail(404, `No account ${username}`);
-			const agent = () => agentOf(env, account.ownerId);
+			const pim = () => pimOf(env, account.ownerId);
 			const gone = account.status === "deleted" || account.status === "deleting";
 			const self = account.ownerId === admin.ownerId;
 
 			if (request.method === "GET" && action === "") {
-				const usage = gone ? null : await (await agent()).usageReport();
+				const usage = gone ? null : await (await pim()).usageReport();
 				return json({ account, usage, cleanup: await dir.cleanup(account.ownerId) });
 			}
 			if (request.method === "POST" && (action === "/suspend" || action === "/unsuspend")) {
@@ -465,8 +465,8 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 				const status = action === "/suspend" ? "suspended" : "active";
 				const reason = (await body()).reason;
 				const updated = await dir.setStatus(account.ownerId, status, typeof reason === "string" ? reason : null);
-				// The agent stops at once, whatever other Workers still have cached.
-				await (await agent()).setStatus(status);
+				// The Pim stops at once, whatever other Workers still have cached.
+				await (await pim()).setStatus(status);
 				forget(account.ownerId);
 				log(status === "suspended" ? "suspended" : "unsuspended", { owner: account.ownerId, username, reason, by: admin.ownerId });
 				return json({ account: updated });
@@ -475,7 +475,7 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 				if (gone) return fail(409, `${username} is ${account.status}`);
 				const { limits } = await body();
 				const parsed = limits === null ? null : parseLimits(limits);
-				const applied = await (await agent()).setLimits(parsed);
+				const applied = await (await pim()).setLimits(parsed);
 				log("limits_changed", { owner: account.ownerId, username, limits: parsed, by: admin.ownerId });
 				return json({ limits: applied });
 			}

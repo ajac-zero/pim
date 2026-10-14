@@ -1,12 +1,12 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { personasQuery } from "~/lib/queries";
+import { agentsQuery } from "~/lib/queries";
 
-/** Opens the default Pim's dashboard. */
+/** Opens the default agent's dashboard. */
 export const Route = createFileRoute("/")({
   loader: async ({ context }) => {
-    const personas = await context.queryClient.fetchQuery(personasQuery());
-    const pim = personas.find((persona) => persona.default) ?? personas[0];
-    if (pim === undefined) throw redirect({ to: "/new" });
-    throw redirect({ to: "/pims/$pimId", params: { pimId: pim.id } });
+    const agents = await context.queryClient.fetchQuery(agentsQuery());
+    const agent = agents.find((agent) => agent.default) ?? agents[0];
+    if (agent === undefined) throw redirect({ to: "/new" });
+    throw redirect({ to: "/agents/$agentId", params: { agentId: agent.id } });
   },
 });

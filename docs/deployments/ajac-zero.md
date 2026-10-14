@@ -11,7 +11,7 @@ The owner's Pim: invite-only, with small limits for members. The owner is its ad
 
 Before this, the account ran two test deployments. This one replaces both, and their data wasn't kept, as the owner asked:
 
-- the single-person Pim at `pim.ajac-zero.com` (Worker `pim`), with its agent and sign-in in the Durable Objects named `pim` and `auth`;
+- the single-person Pim at `pim.ajac-zero.com` (Worker `pim`), with its Pim and sign-in in the Durable Objects named `pim` and `auth`;
 - hosted Pimling at `pimling.ajac-zero.com` (Worker `pimling`), with a person per subdomain, the owner's account and the tombstones of test accounts, and the `PIMLING_ADMIN_TOKEN` secret.
 
 Their history, with every deploy and acceptance, is in this file as it was at [`f77583c`](https://github.com/ajac-zero/pim/blob/f77583c1eda80eddc8178c5210e548eac2ce64a3/docs/deployments/ajac-zero.md).
@@ -20,7 +20,7 @@ Their history, with every deploy and acceptance, is in this file as it was at [`
 
 | | |
 | --- | --- |
-| Serving | `31335bc2-4b28-4288-a0fe-44cecc3e53ba` (100%), deployed 2026-10-12 23:39 UTC from `main` at [`3f6d991`](https://github.com/ajac-zero/pim/commit/3f6d991) (Pims list their apps). No migration: apps connected before stay connected, and no chat uses them until a Pim lists them |
+| Serving | `31335bc2-4b28-4288-a0fe-44cecc3e53ba` (100%), deployed 2026-10-12 23:39 UTC from `main` at [`3f6d991`](https://github.com/ajac-zero/pim/commit/3f6d991) (agents list their apps). No migration: apps connected before stay connected, and no chat uses them until an agent lists them |
 | Custom domain `pim.ajac-zero.com` | `936379e175647dd9c83f50a4ef5010cd7e11966e`, with DNS record `327d910050f4a2b3fd9eb711e651be20` (`AAAA 100::`, proxied), both made by wrangler |
 | Durable Object namespaces | `Pim` `1ec6ba0dd84b4c0f941ff5ee3846e894`, `Auth` `5ade5dd299084d47af5bcb21f5bd2da8`, `Directory` `876c4e51b412464c80d5f3718bf5c069`, `Gallery` `931c10f09aad431487bba687aef3b745` (migrations v1 to v4, all new) |
 | R2 bucket | `pim-images` (binding `IMAGES`), made with `wrangler r2 bucket create` before the deploy of `b2bf345`: the images people send in chats |

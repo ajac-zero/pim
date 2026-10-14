@@ -1,67 +1,67 @@
-import { ASSISTANT_BASE } from "./extensions/assistant";
-import type { BaseDefinition } from "./extensions/define";
+import { ASSISTANT_BLUEPRINT } from "./extensions/assistant";
+import type { BlueprintDefinition } from "./extensions/define";
 import { HttpError } from "./http";
 
 /**
- * The owner's Pims: named agents, each with its own instructions, such as
- * "Marathon coach" or "Trip planner". Each builds on a Pim an extension
- * brings (its `base`, see ./extensions/define.ts), usually Pim's own
+ * The owner's agents: each with its own instructions, such as "Marathon
+ * coach" or "Trip planner". Each builds on a blueprint an extension brings
+ * (its `blueprint`, see ./extensions/define.ts), usually Pim's own
  * assistant, and adds the person's name and instructions on top. One of
  * them is the default, which talks in chats started without choosing one;
- * any can be made the default. A new account's first Pim is a copy of the
- * one the admin chose for everyone, or the deployment's default Pim. Memory,
- * apps and approvals are shared by all of them. One can be published as a template
- * others make their own (see ./gallery.ts); a copy made from a template
- * remembers where it came from.
+ * any can be made the default. An account's first agent is a copy of the
+ * one the admin chose for everyone, or one built on the deployment's
+ * default blueprint. Memory, apps and approvals are shared by all of them.
+ * One can be published as a template others make their own (see
+ * ./gallery.ts); a copy made from a template remembers where it came from.
  *
- * A Pim can have a team: named members with instructions of their own,
+ * An agent can have a team: named members with instructions of their own,
  * which it hands tasks to and which work in parallel (see ./team.ts). The
- * person talks only with the Pim.
+ * person talks only with the agent.
  */
 
 /** An app a template suggests connecting: by its MCP server URL, never with credentials. */
 export type SuggestedApp = { readonly name: string; readonly url: string };
 
-/** One of a Pim's team: it does tasks the Pim hands it, and answers the Pim, never the person. */
+/** One of an agent's team: it does tasks the agent hands it, and answers the agent, never the person. */
 export type TeamMember = {
 	readonly name: string;
 	readonly instructions: string;
-	/** The tools it may use, by name; null for all the Pim's tools a member can have. */
+	/** The tools it may use, by name; null for all the agent's tools a member can have. */
 	readonly tools: readonly string[] | null;
 };
 
-export type Persona = {
+export type Agent = {
 	readonly id: string;
 	readonly name: string;
 	readonly description: string;
 	readonly instructions: string;
 	readonly apps: readonly SuggestedApp[];
 	readonly team: readonly TeamMember[];
-	/** The base it builds on, as `<extension>/<base>`; null for none. */
-	readonly base: string | null;
+	/** The blueprint it builds on, as `<extension>/<blueprint>`; null for none. */
+	readonly blueprint: string | null;
 	/** The template it was made from. */
 	readonly source: { readonly template: string; readonly author: string } | null;
 	/** Its published template, if the owner published it. */
 	readonly published: string | null;
 	/** When its icon was last set, to fetch it again when it changes; null without one. */
 	readonly icon: number | null;
-	/** The one that talks in chats started without choosing a Pim. It can't be deleted while it is the default. */
+	/** The one that talks in chats started without choosing an agent. It can't be deleted while it is the default. */
 	readonly default: boolean;
 	readonly createdAt: number;
 	readonly updatedAt: number;
 };
 
-export type PersonaInput = {
+export type AgentInput = {
 	readonly name: string;
 	readonly description: string;
 	readonly instructions: string;
 	readonly apps: readonly SuggestedApp[];
 	readonly team: readonly TeamMember[];
-	/** Left out, a new Pim builds on the deployment's default Pim and an edited one keeps its own. */
-	readonly base?: string | null;
+	/** Left out, a new agent builds on the deployment's default blueprint and an edited one keeps its own. */
+	readonly blueprint?: string | null;
 };
 
-export const MAX_PERSONAS = 20;
+export const MAX_AGENTS = 20;
 export const MAX_ICON_BYTES = 256 * 1024;
 export const ICON_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 export const MAX_NAME = 60;
@@ -74,7 +74,7 @@ export const MAX_MEMBER_TOOLS = 50;
 
 
 const SCHEMA = `
-CREATE TABLE IF NOT EXISTS pim_personas (
+CREATE TABLE IF NOT EXISTS pim_agents (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
 	description TEXT NOT NULL,
@@ -86,17 +86,17 @@ CREATE TABLE IF NOT EXISTS pim_personas (
 	updated_at INTEGER NOT NULL,
 	is_default INTEGER NOT NULL DEFAULT 0,
 	team TEXT NOT NULL DEFAULT '[]',
-	base TEXT
+	blueprint TEXT
 );
-CREATE TABLE IF NOT EXISTS pim_persona_icons (
-	persona TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS pim_agent_icons (
+	agent TEXT PRIMARY KEY,
 	type TEXT NOT NULL,
 	data BLOB NOT NULL,
 	updated_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS pim_persona_sessions (
+CREATE TABLE IF NOT EXISTS pim_agent_sessions (
 	session TEXT PRIMARY KEY,
-	persona TEXT NOT NULL
+	agent TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pim_session_abilities (
 	session TEXT PRIMARY KEY,
@@ -106,17 +106,35 @@ CREATE TABLE IF NOT EXISTS pim_session_abilities (
 
 type Row = Record<string, SqlStorageValue>;
 
-const SELECT = "SELECT p.*, (SELECT updated_at FROM pim_persona_icons WHERE persona = p.id) AS icon FROM pim_personas p";
+/**
+ * Agents were once called personas: their tables, and a column, are renamed
+ * in place the first time an old database starts, keeping its rows.
+ */
+function renameStorage(sql: SqlStorage): void {
+	const names = (query: string) => new Set(sql.exec(query).toArray().map((row) => String(row.name)));
+	const tables = names("SELECT name FROM sqlite_master WHERE type = 'table'");
+	for (const [from, to] of [["pim_personas", "pim_agents"], ["pim_persona_icons", "pim_agent_icons"], ["pim_persona_sessions", "pim_agent_sessions"]] as const) {
+		if (tables.has(from) && !tables.has(to)) sql.exec(`ALTER TABLE ${from} RENAME TO ${to}`);
+	}
+	for (const table of ["pim_agent_icons", "pim_agent_sessions"]) {
+		if (names(`PRAGMA table_info(${table})`).has("persona")) sql.exec(`ALTER TABLE ${table} RENAME COLUMN persona TO agent`);
+	}
+	// Blueprints were called bases.
+	const agents = names("PRAGMA table_info(pim_agents)");
+	if (agents.has("base") && !agents.has("blueprint")) sql.exec("ALTER TABLE pim_agents RENAME COLUMN base TO blueprint");
+}
 
-const personaOf = (row: Row): Persona => ({
+const SELECT = "SELECT p.*, (SELECT updated_at FROM pim_agent_icons WHERE agent = p.id) AS icon FROM pim_agents p";
+
+const agentOf = (row: Row): Agent => ({
 	id: String(row.id),
 	name: String(row.name),
 	description: String(row.description),
 	instructions: String(row.instructions),
 	apps: JSON.parse(String(row.apps)) as SuggestedApp[],
 	team: JSON.parse(String(row.team)) as TeamMember[],
-	base: row.base === null ? null : String(row.base),
-	source: row.source ? (JSON.parse(String(row.source)) as Persona["source"]) : null,
+	blueprint: row.blueprint === null ? null : String(row.blueprint),
+	source: row.source ? (JSON.parse(String(row.source)) as Agent["source"]) : null,
 	published: row.published === null ? null : String(row.published),
 	icon: row.icon === null ? null : Number(row.icon),
 	default: Number(row.is_default) === 1,
@@ -133,8 +151,8 @@ function text(value: unknown, field: string, max: number, required: boolean): st
 	return trimmed;
 }
 
-/** A Pim as given through the API or a template: checked, trimmed, within limits. */
-export function personaInput(body: Record<string, unknown>, partial?: Persona): PersonaInput {
+/** An agent as given through the API or a template: checked, trimmed, within limits. */
+export function agentInput(body: Record<string, unknown>, partial?: Agent): AgentInput {
 	const apps = body.apps === undefined ? (partial?.apps ?? []) : body.apps;
 	if (!Array.isArray(apps) || apps.length > MAX_APPS) throw new HttpError(400, `apps must be a list of up to ${MAX_APPS}`);
 	return {
@@ -153,15 +171,15 @@ export function personaInput(body: Record<string, unknown>, partial?: Persona): 
 			return { name: text(name, "app name", 40, true), url };
 		}),
 		team: body.team === undefined ? (partial?.team ?? []) : teamInput(body.team),
-		...(body.base === undefined ? {} : { base: baseInput(body.base) }),
+		...(body.blueprint === undefined ? {} : { blueprint: blueprintInput(body.blueprint) }),
 	};
 }
 
-/** A base as given: `<extension>/<pim>`, or null. Whether it is installed is the agent's to check. */
-function baseInput(value: unknown): string | null {
+/** A blueprint as given: `<extension>/<blueprint>`, or null. Whether it is installed is the Pim's to check. */
+function blueprintInput(value: unknown): string | null {
 	if (value === null) return null;
 	if (typeof value !== "string" || !/^[a-z0-9][a-z0-9.-]*\/[a-z0-9][a-z0-9.-]*$/.test(value)) {
-		throw new HttpError(400, "base must be an extension's base, such as pim.assistant/pim, or null");
+		throw new HttpError(400, "blueprint must be an extension's blueprint, such as pim.assistant/pim, or null");
 	}
 	return value;
 }
@@ -189,81 +207,82 @@ function teamInput(value: unknown): TeamMember[] {
 }
 
 /**
- * Who a chat's Pim is and how it works: its name, then the instructions of
- * the base it builds on, then the person's own, which win.
+ * Who a chat's agent is and how it works: its name, then the instructions of
+ * the blueprint it builds on, then the person's own, which win.
  */
-export function personaInstructions(persona: Persona, base: BaseDefinition | undefined): string {
-	const identity = `In this conversation you are "${persona.name}"${persona.description ? `: ${persona.description}` : "."}`;
+export function agentInstructions(agent: Agent, blueprint: BlueprintDefinition | undefined): string {
+	const identity = `In this conversation you are "${agent.name}"${agent.description ? `: ${agent.description}` : "."}`;
 	const own =
-		persona.instructions === ""
+		agent.instructions === ""
 			? []
-			: [`Your instructions, which come before your general habits wherever the two differ:\n${persona.instructions}`];
-	return [identity, ...(base ? [base.instructions] : []), ...own].join("\n\n");
+			: [`Your instructions, which come before your general habits wherever the two differ:\n${agent.instructions}`];
+	return [identity, ...(blueprint ? [blueprint.instructions] : []), ...own].join("\n\n");
 }
 
-export class PersonaStore {
+export class AgentStore {
 	readonly #sql: SqlStorage;
-	readonly #starter: () => PersonaInput;
+	readonly #starter: () => AgentInput;
 
-	/** `starter` is an account's first Pim, made the first time any is asked for: the deployment's default Pim. */
-	constructor(sql: SqlStorage, starter: () => PersonaInput) {
+	/** `starter` is an account's first agent, made the first time any is asked for: one built on the deployment's default blueprint. */
+	constructor(sql: SqlStorage, starter: () => AgentInput) {
 		this.#sql = sql;
 		this.#starter = starter;
+		renameStorage(this.#sql);
 		this.#sql.exec(SCHEMA);
-		const columns = this.#sql.exec("PRAGMA table_info(pim_personas)").toArray().map((row) => String(row.name));
-		if (!columns.includes("is_default")) this.#sql.exec("ALTER TABLE pim_personas ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0");
-		if (!columns.includes("team")) this.#sql.exec("ALTER TABLE pim_personas ADD COLUMN team TEXT NOT NULL DEFAULT '[]'");
-		// Pims made before extensions all had the assistant's habits, which were the agent's own then.
-		if (!columns.includes("base")) this.#sql.exec(`ALTER TABLE pim_personas ADD COLUMN base TEXT DEFAULT '${ASSISTANT_BASE}'`);
+		const columns = this.#sql.exec("PRAGMA table_info(pim_agents)").toArray().map((row) => String(row.name));
+		if (!columns.includes("is_default")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0");
+		if (!columns.includes("team")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN team TEXT NOT NULL DEFAULT '[]'");
+		// Agents made before extensions all had the assistant's habits.
+		if (!columns.includes("blueprint")) this.#sql.exec(`ALTER TABLE pim_agents ADD COLUMN blueprint TEXT DEFAULT '${ASSISTANT_BLUEPRINT}'`);
 	}
 
 	/** The default one first, then the others as they were made. */
-	list(): Persona[] {
+	list(): Agent[] {
 		this.default();
-		return this.#sql.exec(`${SELECT} ORDER BY p.is_default DESC, p.created_at, p.id`).toArray().map(personaOf);
+		return this.#sql.exec(`${SELECT} ORDER BY p.is_default DESC, p.created_at, p.id`).toArray().map(agentOf);
 	}
 
-	/** The default Pim, made from the starter the first time it is asked for. */
-	default(): Persona {
+	/** The default agent, made from the starter the first time it is asked for. */
+	default(): Agent {
 		const [row] = this.#sql.exec(`${SELECT} WHERE p.is_default = 1`).toArray();
-		return row ? personaOf(row) : this.#insert(this.#starter(), null, true);
+		return row ? agentOf(row) : this.#insert(this.#starter(), null, true);
 	}
 
-	/** Makes another of the owner's Pims the default. */
+	/** Makes another of the owner's agents the default. */
 	setDefault(id: string): void {
-		this.#sql.exec("UPDATE pim_personas SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END", id);
+		this.#sql.exec("UPDATE pim_agents SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END", id);
 	}
 
-	/** Makes the default Pim a copy of `input`: at registration, the one the admin chose for everyone. */
-	replaceDefault(input: PersonaInput, source: Persona["source"]): Persona {
+	/** Makes the default agent a copy of `input`: at registration, the one the admin chose for everyone. */
+	replaceDefault(input: AgentInput, source: Agent["source"]): Agent {
 		const current = this.default();
 		this.update(current.id, input);
-		this.#sql.exec("UPDATE pim_personas SET source = ? WHERE id = ?", source === null ? null : JSON.stringify(source), current.id);
+		this.#sql.exec("UPDATE pim_agents SET source = ? WHERE id = ?", source === null ? null : JSON.stringify(source), current.id);
 		return this.get(current.id)!;
 	}
 
-	get(id: string): Persona | undefined {
+	get(id: string): Agent | undefined {
 		const [row] = this.#sql.exec(`${SELECT} WHERE p.id = ?`, id).toArray();
-		return row ? personaOf(row) : undefined;
+		return row ? agentOf(row) : undefined;
 	}
 
-	create(input: PersonaInput, source: Persona["source"] = null): Persona {
-		if (this.list().length >= MAX_PERSONAS) throw new HttpError(429, `You can have up to ${MAX_PERSONAS} Pims.`);
+	create(input: AgentInput, source: Agent["source"] = null): Agent {
+		if (this.list().length >= MAX_AGENTS) throw new HttpError(429, `You can have up to ${MAX_AGENTS} agents.`);
 		return this.#insert(input, source, false);
 	}
 
-	#insert(input: PersonaInput, source: Persona["source"], isDefault: boolean): Persona {
+	#insert(input: AgentInput, source: Agent["source"], isDefault: boolean): Agent {
 		const id = `p_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT INTO pim_personas (id, name, description, instructions, apps, team, base, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+			"INSERT INTO pim_agents (id, name, description, instructions, apps, team, blueprint, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
 			id,
 			input.name,
 			input.description,
 			input.instructions,
 			JSON.stringify(input.apps),
 			JSON.stringify(input.team),
-			input.base === undefined ? (this.#starter().base ?? null) : input.base,
+			input.blueprint === undefined ? (this.#starter().blueprint ?? null) : input.blueprint,
 			source === null ? null : JSON.stringify(source),
 			now,
 			now,
@@ -272,9 +291,9 @@ export class PersonaStore {
 		return this.get(id)!;
 	}
 
-	update(id: string, input: PersonaInput): Persona {
+	update(id: string, input: AgentInput): Agent {
 		this.#sql.exec(
-			"UPDATE pim_personas SET name = ?, description = ?, instructions = ?, apps = ?, team = ?, updated_at = ? WHERE id = ?",
+			"UPDATE pim_agents SET name = ?, description = ?, instructions = ?, apps = ?, team = ?, updated_at = ? WHERE id = ?",
 			input.name,
 			input.description,
 			input.instructions,
@@ -283,20 +302,20 @@ export class PersonaStore {
 			Date.now(),
 			id,
 		);
-		if (input.base !== undefined) this.#sql.exec("UPDATE pim_personas SET base = ? WHERE id = ?", input.base, id);
+		if (input.blueprint !== undefined) this.#sql.exec("UPDATE pim_agents SET blueprint = ? WHERE id = ?", input.blueprint, id);
 		return this.get(id)!;
 	}
 
 	setPublished(id: string, template: string | null): void {
-		this.#sql.exec("UPDATE pim_personas SET published = ? WHERE id = ?", template, id);
+		this.#sql.exec("UPDATE pim_agents SET published = ? WHERE id = ?", template, id);
 	}
 
-	/** Deletes it; its chats stay, with the default Pim. */
+	/** Deletes it; its chats stay, with the default agent. */
 	delete(id: string): void {
-		if (this.get(id)?.default) throw new HttpError(400, "Your default Pim can't be deleted. Make another one the default first.");
-		this.#sql.exec("DELETE FROM pim_persona_sessions WHERE persona = ?", id);
-		this.#sql.exec("DELETE FROM pim_persona_icons WHERE persona = ?", id);
-		this.#sql.exec("DELETE FROM pim_personas WHERE id = ?", id);
+		if (this.get(id)?.default) throw new HttpError(400, "Your default agent can't be deleted. Make another one the default first.");
+		this.#sql.exec("DELETE FROM pim_agent_sessions WHERE agent = ?", id);
+		this.#sql.exec("DELETE FROM pim_agent_icons WHERE agent = ?", id);
+		this.#sql.exec("DELETE FROM pim_agents WHERE id = ?", id);
 	}
 
 	/** Sets its icon, an image of a type browsers show in a picture. */
@@ -305,7 +324,7 @@ export class PersonaStore {
 		if (data.byteLength === 0) throw new HttpError(400, "The icon is empty.");
 		if (data.byteLength > MAX_ICON_BYTES) throw new HttpError(413, `An icon must be at most ${MAX_ICON_BYTES / 1024} KB.`);
 		this.#sql.exec(
-			"INSERT INTO pim_persona_icons (persona, type, data, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (persona) DO UPDATE SET type = excluded.type, data = excluded.data, updated_at = excluded.updated_at",
+			"INSERT INTO pim_agent_icons (agent, type, data, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (agent) DO UPDATE SET type = excluded.type, data = excluded.data, updated_at = excluded.updated_at",
 			id,
 			type,
 			data,
@@ -314,35 +333,35 @@ export class PersonaStore {
 	}
 
 	icon(id: string): { type: string; data: ArrayBuffer } | undefined {
-		const [row] = this.#sql.exec("SELECT type, data FROM pim_persona_icons WHERE persona = ?", id).toArray();
+		const [row] = this.#sql.exec("SELECT type, data FROM pim_agent_icons WHERE agent = ?", id).toArray();
 		return row ? { type: String(row.type), data: row.data as ArrayBuffer } : undefined;
 	}
 
 	removeIcon(id: string): void {
-		this.#sql.exec("DELETE FROM pim_persona_icons WHERE persona = ?", id);
+		this.#sql.exec("DELETE FROM pim_agent_icons WHERE agent = ?", id);
 	}
 
-	setSession(session: string, persona: string): void {
+	setSession(session: string, agent: string): void {
 		this.#sql.exec(
-			"INSERT INTO pim_persona_sessions (session, persona) VALUES (?, ?) ON CONFLICT (session) DO UPDATE SET persona = excluded.persona",
+			"INSERT INTO pim_agent_sessions (session, agent) VALUES (?, ?) ON CONFLICT (session) DO UPDATE SET agent = excluded.agent",
 			session,
-			persona,
+			agent,
 		);
 	}
 
-	/** The Pim a chat was started with, or the default one for a chat tied to none. */
-	ofSession(session: string): Persona {
+	/** The agent a chat was started with, or the default one for a chat tied to none. */
+	ofSession(session: string): Agent {
 		const [row] = this.#sql
-			.exec(`${SELECT} JOIN pim_persona_sessions s ON p.id = s.persona WHERE s.session = ?`, session)
+			.exec(`${SELECT} JOIN pim_agent_sessions s ON p.id = s.agent WHERE s.session = ?`, session)
 			.toArray();
-		return row ? personaOf(row) : this.default();
+		return row ? agentOf(row) : this.default();
 	}
 
-	/** Ties every chat in `sessions` not tied to a Pim yet to the default one, so they stay with it when the default changes. */
+	/** Ties every chat in `sessions` not tied to an agent yet to the default one, so they stay with it when the default changes. */
 	tieToDefault(sessions: readonly string[]): void {
 		const id = this.default().id;
 		for (const session of sessions) {
-			this.#sql.exec("INSERT INTO pim_persona_sessions (session, persona) VALUES (?, ?) ON CONFLICT (session) DO NOTHING", session, id);
+			this.#sql.exec("INSERT INTO pim_agent_sessions (session, agent) VALUES (?, ?) ON CONFLICT (session) DO NOTHING", session, id);
 		}
 	}
 
@@ -360,10 +379,10 @@ export class PersonaStore {
 		);
 	}
 
-	/** Chats tied to a Pim. */
+	/** Chats tied to an agent. */
 	startedSessions(): string[] {
 		return this.#sql
-			.exec("SELECT session FROM pim_persona_sessions")
+			.exec("SELECT session FROM pim_agent_sessions")
 			.toArray()
 			.map((row) => String(row.session));
 	}

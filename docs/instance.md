@@ -1,8 +1,8 @@
 # Running a Pim for several people
 
-A Pim is one Worker for everyone on it. Each person has their own agent, with their own conversations, memories, goals, schedules, connected apps, ChatGPT sign-in, passkeys and API tokens. The person who sets it up is its admin: they invite the others, and help them back in when they lose every passkey. A Pim for one person is the same thing with one account.
+A Pim is one Worker for everyone on it. Each person has their own Pim: one Durable Object holding their memory, apps and agents, plus their own conversations, goals, schedules, ChatGPT sign-in, passkeys and API tokens. The person who sets it up is its admin: they invite the others, and help them back in when they lose every passkey. A Pim for one person is the same thing with one account.
 
-People on the same Pim can share with each other: circles let others message your agent from their own (see [Sharing](../README.md#sharing)), and Discover lists the Pims people published. Nothing crosses from one deployment to another.
+People on the same Pim can share with each other: circles let others message your agent from their own (see [Sharing](../README.md#sharing)), and Discover lists the templates people published. Nothing crosses from one deployment to another.
 
 ## How it works
 
@@ -19,8 +19,8 @@ People on the same Pim can share with each other: circles let others message you
                                           │   erasure jobs, the key that seals cookies         │
                                           │ Auth DO (one per owner): passkeys, recovery codes, │
                                           │   API tokens, setup and device links               │
-                                          │ Pim DO (one per owner): the agent                  │
-                                          │ Gallery DO (one): profiles, published Pims         │
+                                          │ Pim DO (one per owner): their Pim                 │
+                                          │ Gallery DO (one): profiles, published templates    │
                                           └────────────────────────────────────────────────────┘
 ```
 
@@ -39,12 +39,12 @@ People on the same Pim can share with each other: circles let others message you
 
 - **The admin.** While a Pim has no admin, the only way to make an account is to claim it, and that account is the admin's. Anyone who opens the Pim in the 15 minutes after a deploy can, so open it right after deploying. After that, the sign-in screen asks the Worker to write a setup link to its logs (`#claim=<code>`, one hour), which only someone signed in to the Cloudflare account can read. If the admin's registration lapses without a passkey, or the admin deletes their account, the Pim can be claimed again the same ways.
 - **Everyone else** joins as `PIM_REGISTRATION` says: `invite` (the default) takes a single-use invite link the admin makes in Settings (`#invite=<code>`), `open` takes anyone, `closed` nobody. Registrations are limited per address per day (`PIM_REGISTRATIONS_PER_ADDRESS`, default 3) and, optionally, in total (`PIM_MAX_ACCOUNTS`).
-- **Registering** (`POST /auth/register`) provisions the person's agent, gives it a copy of the Pim the admin chose for everyone as its default Pim (see [Your Pims](../README.md#your-pims)), sets its time zone from the browser, and returns ten recovery codes and a one-time setup code (good for a day). The web app shows the codes, then makes the first passkey with the setup code, which activates the account.
+- **Registering** (`POST /auth/register`) provisions the person's Pim, gives them a copy of the agent the admin chose for everyone as their default (see [Your agents](../README.md#your-agents)), sets its time zone from the browser, and returns ten recovery codes and a one-time setup code (good for a day). The web app shows the codes, then makes the first passkey with the setup code, which activates the account.
 - **Recovery.** A recovery code, with its username, makes one passkey, once. People can replace their codes in Settings. The admin can make anyone a one-hour setup link from Settings, after checking who they are some other way, and gets one for themselves from the logs.
 - **Approvals** default to `PIM_APPROVAL_POLICY`; each person can change theirs.
 - **Usage and limits.** Every model request goes through a metered model catalog. Requests and runs are checked and counted in one step before they start, so concurrent ones can't all take the last slot. Tokens are known only when a request ends, so requests already under way can take a day past `dailyTokens`; the next one is refused. Tokens are counted by the day the request was sent, and by provider. Tokens on someone's own ChatGPT plan are counted apart and never use up the deployment's allowance. `PIM_LIMITS` sets members' limits; the admin has none. The admin can set one person's in the admin API. Running out stops the model request with a non-retryable "quota exceeded" error, refuses new runs with `429`, and skips scheduled tasks with one notification a day. Usage is recorded, not charged.
 - **Sharing.** Adding someone to a circle is answered by the Worker (`POST /api/circles/:id/members`), because only the Directory knows whose Pim a username is. Everything after is between the two Pims, by Durable Object RPC: the owner's tells the guest's it is shared (`shareReceived`), the guest's asks for a brief before each turn (`guestBrief`) and makes every tool call through `guestCall`, which checks the circle and the tool's permission each time, and the owner's sends decisions back (`visitAnswer`). A guest's conversation runs in their own Pim, so it is metered against their own limits. Each guest has 200 calls a day into one Pim; a circle can hold up to 200 people.
-- **Profiles and published Pims** live in the Gallery: profiles, Discover's search, someone's page, publishing a Pim (a copy of its name, description, instructions and suggested apps) and making one your own. Deleting an account forgets its profile and everything it published, in the same cleanup job that erases its agent; the job is done only once the Gallery holds nothing of it. The admin can take a published Pim down.
+- **Profiles and templates** live in the Gallery: profiles, Discover's search, someone's page, publishing an agent (a copy of its name, description, instructions and suggested apps) and making one your own. Deleting an account forgets its profile and everything it published, in the same cleanup job that erases its Pim; the job is done only once the Gallery holds nothing of it. The admin can take a published template down.
 - **ChatGPT plan.** Each person signs in with ChatGPT in their own Settings. Their tokens, refreshes and agent host ID live in their own Pim. OpenAI's [token-sharing docs](https://developers.openai.com/siwc/token-sharing-open-source) cover open-source and locally hosted apps, and ask paid or remotely hosted apps to fill in an interest form. If you run a Pim for people outside your household, check with OpenAI first.
 
 ## Running it
@@ -61,8 +61,8 @@ The admin manages the Pim in Settings → People on this Pim: invite someone, ma
 | PUT | `/api/admin/accounts/:username/limits` | `{ limits }` or `{ limits: null }` | One person's limits over `PIM_LIMITS` |
 | POST | `/api/admin/accounts/:username/setup-link` | | A one-hour link that adds a passkey, for recovery |
 | DELETE | `/api/admin/accounts/:username` | `{ reason? }` | Deletes it as the owner would: `200` once erased, `202` while the cleanup is still queued. Run it again to retry at once |
-| DELETE | `/api/admin/templates/:id` | | Takes a published Pim out of Discover |
-| GET, PUT, DELETE | `/api/admin/default-pim` | PUT: `{ pim }`, one of the admin's Pims | The Pim everyone who joins starts with a copy of (`{ pim }`, null for a plain one). PUT copies the admin's Pim as it is now; choosing again replaces it. DELETE goes back to a plain one |
+| DELETE | `/api/admin/templates/:id` | | Takes a published agent out of Discover |
+| GET, PUT, DELETE | `/api/admin/default-agent` | PUT: `{ agent }`, one of the admin's agents | The agent everyone who joins starts with a copy of (`{ agent }`, null for a plain one). PUT copies the admin's agent as it is now; choosing again replaces it. DELETE goes back to a plain one |
 | POST | `/api/admin/invites` | `{ count?, note? }` | Single-use invite codes and links (up to 100) |
 
 The admin can't suspend or delete their own account from here; deleting it from Settings leaves the Pim to be claimed again.
@@ -81,8 +81,8 @@ The admin can't suspend or delete their own account from here; deleting it from 
 | `pim.limit` | A person hit a limit: `limit` is `model` or `run` |
 | `pim.passkey_created`, `pim.device_link_issued`, `pim.recovery_codes_replaced` | A passkey made from a setup link, recovery code or device link; a device link made; codes replaced |
 | `pim.circle_member_added` | Someone put another person in a circle |
-| `pim.template_published`, `pim.template_used`, `pim.template_removed` | A Pim published (or updated), made someone's own, or taken down by the admin |
-| `pim.default_pim_set` | The admin chose the Pim everyone starts with (`pim`), or went back to a plain one (`pim: null`) |
+| `pim.template_published`, `pim.template_used`, `pim.template_removed` | An agent published (or updated), made someone's own, or taken down by the admin |
+| `pim.default_agent_set` | The admin chose the agent everyone starts with (`agent`), or went back to a plain one (`agent: null`) |
 | `pim.misrouted` | A request reached the wrong agent. This should never happen: investigate |
 
 **Abuse and limits.** Per address: `AUTH_LIMITER` (30 sign-in, recovery and registration attempts a minute in `wrangler.jsonc`) and `PIM_REGISTRATIONS_PER_ADDRESS`. Per person: `API_LIMITER` (600 requests a minute), `PIM_LIMITS` (tokens, model requests, runs, chats, schedules, apps, storage, artifacts), and `PIM_MODELS`, so only models you pay for can be chosen. Paid `web_search` stays off unless `PIM_WEB_SEARCH` names a provider.

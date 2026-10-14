@@ -16,9 +16,9 @@ import {
 } from "lucide-react";
 import { type FormEvent, useRef, useState } from "react";
 import { toast } from "sonner";
+import { AgentIcon, iconFromFile } from "~/components/agent-icon";
 import { useI18n } from "~/components/i18n";
 import { EmptyState, Page } from "~/components/page";
-import { iconFromFile, PimIcon } from "~/components/pim-icon";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {
@@ -29,27 +29,27 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import {
+  type Agent,
+  type AgentInput,
   admin,
-  type Persona,
-  type PersonaInput,
   pim,
   type SuggestedApp,
   type TeamMember,
 } from "~/lib/pim-api";
 import {
   accountQuery,
+  agentsQuery,
   appsQuery,
-  defaultPimQuery,
+  defaultAgentQuery,
   extensionsQuery,
-  personasQuery,
 } from "~/lib/queries";
 
-export const Route = createFileRoute("/pims/")({
-  loader: ({ context }) => context.queryClient.ensureQueryData(personasQuery()),
+export const Route = createFileRoute("/agents/")({
+  loader: ({ context }) => context.queryClient.ensureQueryData(agentsQuery()),
   component: PimsPage,
 });
 
-const EMPTY: PersonaInput = {
+const EMPTY: AgentInput = {
   name: "",
   description: "",
   instructions: "",
@@ -57,22 +57,22 @@ const EMPTY: PersonaInput = {
   team: [],
 };
 
-/** Your Pims: named agents with their own instructions, your default one first. */
+/** Your agents: each with its own instructions, your default one first. */
 function PimsPage() {
   const { t } = useI18n();
-  const { data: personas = [] } = useQuery(personasQuery());
+  const { data: agents = [] } = useQuery(agentsQuery());
   const [creating, setCreating] = useState(false);
   return (
-    <Page title={t("yourPims")} description={t("yourPimsDescription")}>
+    <Page title={t("yourAgents")} description={t("yourAgentsDescription")}>
       <div className="space-y-3">
-        {personas.length === 0 && !creating && (
-          <EmptyState icon={<Bot className="size-5" />} text={t("noPims")} />
+        {agents.length === 0 && !creating && (
+          <EmptyState icon={<Bot className="size-5" />} text={t("noAgents")} />
         )}
-        {personas.map((persona) => (
-          <PersonaCard key={persona.id} persona={persona} />
+        {agents.map((agent) => (
+          <AgentCard key={agent.id} agent={agent} />
         ))}
         {creating ? (
-          <PersonaForm
+          <AgentForm
             initial={EMPTY}
             onDone={() => setCreating(false)}
             onCancel={() => setCreating(false)}
@@ -80,7 +80,7 @@ function PimsPage() {
         ) : (
           <div className="flex flex-wrap gap-2">
             <Button onClick={() => setCreating(true)}>
-              <Plus /> {t("newPim")}
+              <Plus /> {t("newAgent")}
             </Button>
             <DiscoverLink />
           </div>
@@ -90,7 +90,7 @@ function PimsPage() {
   );
 }
 
-/** The gallery, where Pims others on this Pim published are. */
+/** The gallery, where agents others on this Pim published are. */
 function DiscoverLink() {
   const { t } = useI18n();
   const { data: account } = useQuery(accountQuery());
@@ -98,13 +98,13 @@ function DiscoverLink() {
   return (
     <Button variant="outline" asChild>
       <Link to="/discover">
-        <Globe /> {t("findPims")}
+        <Globe /> {t("findAgents")}
       </Link>
     </Button>
   );
 }
 
-function PersonaCard({ persona }: { persona: Persona }) {
+function AgentCard({ agent }: { agent: Agent }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -113,120 +113,115 @@ function PersonaCard({ persona }: { persona: Persona }) {
   const [confirming, setConfirming] = useState(false);
   const isAdmin = account?.role === "admin";
   const { data: everyones } = useQuery({
-    ...defaultPimQuery(),
+    ...defaultAgentQuery(),
     enabled: isAdmin,
   });
-  const forEveryone = everyones?.personaId === persona.id;
+  const forEveryone = everyones?.agentId === agent.id;
   const choose = useMutation({
-    mutationFn: (on: boolean) => admin.setDefaultPim(on ? persona.id : null),
+    mutationFn: (on: boolean) => admin.setDefaultAgent(on ? agent.id : null),
     onSuccess: (chosen) => {
-      queryClient.setQueryData(defaultPimQuery().queryKey, chosen);
+      queryClient.setQueryData(defaultAgentQuery().queryKey, chosen);
       toast.success(
         chosen
-          ? t("everyonesDefaultSet", { name: persona.name })
+          ? t("everyonesDefaultSet", { name: agent.name })
           : t("everyonesDefaultCleared"),
       );
     },
     onError: (error) => toast.error(error.message),
   });
-  const refresh = () =>
-    queryClient.invalidateQueries({ queryKey: ["personas"] });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["agents"] });
   const makeDefault = useMutation({
-    mutationFn: () => pim.makeDefaultPersona(persona.id),
+    mutationFn: () => pim.makeDefaultAgent(agent.id),
     onSuccess: () => {
       refresh();
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      toast.success(t("madeDefault", { name: persona.name }));
+      toast.success(t("madeDefault", { name: agent.name }));
     },
     onError: (error) => toast.error(error.message),
   });
   const remove = useMutation({
-    mutationFn: () => pim.deletePersona(persona.id),
+    mutationFn: () => pim.deleteAgent(agent.id),
     onSuccess: refresh,
     onError: (error) => toast.error(error.message),
   });
   const fileInput = useRef<HTMLInputElement>(null);
   const setIcon = useMutation({
     mutationFn: async (file: File) =>
-      pim.setPersonaIcon(persona.id, await iconFromFile(file)),
+      pim.setAgentIcon(agent.id, await iconFromFile(file)),
     onSuccess: refresh,
     onError: (error) => toast.error(error.message),
   });
   const removeIcon = useMutation({
-    mutationFn: () => pim.removePersonaIcon(persona.id),
+    mutationFn: () => pim.removeAgentIcon(agent.id),
     onSuccess: refresh,
     onError: (error) => toast.error(error.message),
   });
   const publish = useMutation({
     mutationFn: async (on: boolean) => {
-      if (on) await pim.publishPersona(persona.id);
-      else await pim.unpublishPersona(persona.id);
+      if (on) await pim.publishAgent(agent.id);
+      else await pim.unpublishAgent(agent.id);
     },
     onSuccess: (_result, on) => {
       refresh();
       queryClient.invalidateQueries({ queryKey: ["templates"] });
-      toast.success(t(on ? "pimPublished" : "pimUnpublished"));
+      toast.success(t(on ? "agentPublished" : "agentUnpublished"));
     },
     onError: (error) => toast.error(error.message),
   });
 
   if (editing) {
     return (
-      <PersonaForm
-        id={persona.id}
-        initial={persona}
+      <AgentForm
+        id={agent.id}
+        initial={agent}
         onDone={() => setEditing(false)}
         onCancel={() => setEditing(false)}
       />
     );
   }
   return (
-    <article className="rounded-xl border px-4 py-3" aria-label={persona.name}>
+    <article className="rounded-xl border px-4 py-3" aria-label={agent.name}>
       <div className="flex items-start gap-3">
         <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-primary/10 text-primary">
-          <PimIcon
-            persona={persona}
-            className={
-              persona.icon === null ? "size-4.5" : "size-8 rounded-none"
-            }
+          <AgentIcon
+            agent={agent}
+            className={agent.icon === null ? "size-4.5" : "size-8 rounded-none"}
           />
         </span>
         <div className="min-w-0 flex-1">
           <h2 className="flex items-center gap-2 font-medium">
             <Link
-              to="/pims/$pimId"
-              params={{ pimId: persona.id }}
+              to="/agents/$agentId"
+              params={{ agentId: agent.id }}
               className="truncate underline-offset-2 hover:underline"
             >
-              {persona.name}
+              {agent.name}
             </Link>
-            {persona.default && (
+            {agent.default && (
               <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
-                {t("defaultPim")}
+                {t("defaultAgent")}
               </span>
             )}
           </h2>
-          {persona.description && (
-            <p className="text-muted-foreground text-sm">
-              {persona.description}
-            </p>
+          {agent.description && (
+            <p className="text-muted-foreground text-sm">{agent.description}</p>
           )}
           <p className="mt-1 flex flex-wrap gap-x-3 text-muted-foreground text-xs">
-            <BuildsOn base={persona.base} />
-            {persona.source && (
+            <BuildsOn blueprint={agent.blueprint} />
+            {agent.source && (
               <span>
                 {t("fromTemplateBy")}{" "}
                 <Link
                   to="/people/$username"
-                  params={{ username: persona.source.author }}
+                  params={{ username: agent.source.author }}
                   className="underline underline-offset-2 hover:text-foreground"
                 >
-                  @{persona.source.author}
+                  @{agent.source.author}
                 </Link>
               </span>
             )}
-            {persona.published && (
+            {agent.published && (
               <span className="flex items-center gap-1 text-green-700 dark:text-green-500">
                 <Globe className="size-3" /> {t("published")}
               </span>
@@ -247,18 +242,18 @@ function PersonaCard({ persona }: { persona: Persona }) {
           </p>
         </div>
       </div>
-      {persona.instructions && (
+      {agent.instructions && (
         <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-sm">
-          {persona.instructions}
+          {agent.instructions}
         </p>
       )}
-      <PimApps persona={persona} />
-      {persona.team.length > 0 && (
+      <PimApps agent={agent} />
+      {agent.team.length > 0 && (
         <ul
           className="mt-2 flex flex-wrap gap-1.5"
-          aria-label={t("teamOf", { name: persona.name })}
+          aria-label={t("teamOf", { name: agent.name })}
         >
-          {persona.team.map((member) => (
+          {agent.team.map((member) => (
             <li
               key={member.name}
               className="flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-0.5 text-xs"
@@ -273,9 +268,9 @@ function PersonaCard({ persona }: { persona: Persona }) {
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <Button
           size="sm"
-          onClick={() => navigate({ to: "/new", search: { pim: persona.id } })}
+          onClick={() => navigate({ to: "/new", search: { agent: agent.id } })}
         >
-          <MessageCircle /> {t("chatWithPim")}
+          <MessageCircle /> {t("chatWithAgent")}
         </Button>
         <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
           <Pencil /> {t("edit")}
@@ -300,7 +295,7 @@ function PersonaCard({ persona }: { persona: Persona }) {
         >
           <ImagePlus /> {t("uploadIcon")}
         </Button>
-        {persona.icon !== null && (
+        {agent.icon !== null && (
           <Button
             size="sm"
             variant="ghost"
@@ -317,10 +312,10 @@ function PersonaCard({ persona }: { persona: Persona }) {
             onClick={() => publish.mutate(true)}
             disabled={publish.isPending}
           >
-            <Globe /> {t(persona.published ? "updatePublished" : "publish")}
+            <Globe /> {t(agent.published ? "updatePublished" : "publish")}
           </Button>
         )}
-        {account && persona.published && (
+        {account && agent.published && (
           <Button
             size="sm"
             variant="ghost"
@@ -330,7 +325,7 @@ function PersonaCard({ persona }: { persona: Persona }) {
             {t("unpublish")}
           </Button>
         )}
-        {!persona.default && (
+        {!agent.default && (
           <Button
             size="sm"
             variant="outline"
@@ -351,7 +346,7 @@ function PersonaCard({ persona }: { persona: Persona }) {
           </Button>
         )}
         <span className="ml-auto">
-          {persona.default ? null : confirming ? (
+          {agent.default ? null : confirming ? (
             <span className="flex items-center gap-1">
               <Button
                 size="sm"
@@ -359,7 +354,7 @@ function PersonaCard({ persona }: { persona: Persona }) {
                 onClick={() => remove.mutate()}
                 disabled={remove.isPending}
               >
-                {t("deletePim")}
+                {t("deleteAgent")}
               </Button>
               <Button
                 size="sm"
@@ -374,8 +369,8 @@ function PersonaCard({ persona }: { persona: Persona }) {
               size="icon-sm"
               variant="ghost"
               className="text-muted-foreground"
-              aria-label={t("deletePimNamed", { name: persona.name })}
-              title={t("deletePimNamed", { name: persona.name })}
+              aria-label={t("deleteAgentNamed", { name: agent.name })}
+              title={t("deleteAgentNamed", { name: agent.name })}
               onClick={() => setConfirming(true)}
             >
               <Trash2 />
@@ -388,16 +383,16 @@ function PersonaCard({ persona }: { persona: Persona }) {
 }
 
 /**
- * The apps a Pim works with: those of the base it builds on, then its own,
+ * The apps an agent works with: those of the blueprint it is based on, then its own,
  * each connectable from here unless it already is.
  */
-function PimApps({ persona }: { persona: Persona }) {
+function PimApps({ agent }: { agent: Agent }) {
   const { t } = useI18n();
   const { data: extensions } = useQuery(extensionsQuery());
-  const base = extensions?.extensions
-    .flatMap((extension) => extension.bases)
-    .find((candidate) => candidate.ref === persona.base);
-  const apps = [...(base?.apps ?? []), ...persona.apps].filter(
+  const blueprint = extensions?.extensions
+    .flatMap((extension) => extension.blueprints)
+    .find((candidate) => candidate.ref === agent.blueprint);
+  const apps = [...(blueprint?.apps ?? []), ...agent.apps].filter(
     (app, index, all) =>
       all.findIndex((other) => other.url === app.url) === index,
   );
@@ -449,64 +444,64 @@ function PimApps({ persona }: { persona: Persona }) {
   );
 }
 
-/** The name of the base a Pim builds on, from what the deployment installed. */
-function useBaseName(base: string | null | undefined): string | null {
+/** The name of the blueprint an agent is based on, from what the deployment installed. */
+function useBaseName(blueprint: string | null | undefined): string | null {
   const { data } = useQuery(extensionsQuery());
-  if (!base) return null;
+  if (!blueprint) return null;
   const found = data?.extensions
-    .flatMap((extension) => extension.bases)
-    .find((candidate) => candidate.ref === base);
-  return found?.name ?? base;
+    .flatMap((extension) => extension.blueprints)
+    .find((candidate) => candidate.ref === blueprint);
+  return found?.name ?? blueprint;
 }
 
-function BuildsOn({ base }: { base: string | null }) {
+function BuildsOn({ blueprint }: { blueprint: string | null }) {
   const { t } = useI18n();
-  const name = useBaseName(base);
+  const name = useBaseName(blueprint);
   return (
     <span className="flex items-center gap-1">
       <Puzzle className="size-3" />
-      {name ? t("buildsOnName", { name }) : t("buildsOnNothing")}
+      {name ? t("basedOnName", { name }) : t("basedOnNothing")}
     </span>
   );
 }
 
-/** Which base a Pim builds on: its habits, abilities and dashboard. */
+/** Which blueprint an agent is based on: its habits, abilities and dashboard. */
 function BaseSelect({
   value,
   onChange,
 }: {
   value: string | null | undefined;
-  onChange: (base: string | null) => void;
+  onChange: (blueprint: string | null) => void;
 }) {
   const { t } = useI18n();
   const { data } = useQuery(extensionsQuery());
   if (!data) return null;
-  const chosen = value === undefined ? data.defaultBase : value;
+  const chosen = value === undefined ? data.defaultBlueprint : value;
   return (
     <label className="block space-y-1">
-      <span className="font-medium text-sm">{t("buildsOn")}</span>
+      <span className="font-medium text-sm">{t("basedOn")}</span>
       <Select
         value={chosen ?? NOTHING}
         onValueChange={(next) => onChange(next === NOTHING ? null : next)}
       >
-        <SelectTrigger className="w-full" aria-label={t("buildsOn")}>
+        <SelectTrigger className="w-full" aria-label={t("basedOn")}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
           {data.extensions.flatMap((extension) =>
-            extension.bases.map((base) => (
-              <SelectItem key={base.ref} value={base.ref}>
-                {base.name === extension.name
-                  ? base.name
-                  : `${base.name} · ${extension.name}`}
+            extension.blueprints.map((blueprint) => (
+              <SelectItem key={blueprint.ref} value={blueprint.ref}>
+                {blueprint.name === extension.name
+                  ? blueprint.name
+                  : `${blueprint.name} · ${extension.name}`}
               </SelectItem>
             )),
           )}
-          <SelectItem value={NOTHING}>{t("buildsOnNothingOption")}</SelectItem>
+          <SelectItem value={NOTHING}>{t("basedOnNothingOption")}</SelectItem>
         </SelectContent>
       </Select>
       <span className="block text-muted-foreground text-xs">
-        {t("buildsOnHint")}
+        {t("basedOnHint")}
       </span>
     </label>
   );
@@ -515,14 +510,14 @@ function BaseSelect({
 /** The select's value for building on nothing: Radix needs a non-empty one. */
 const NOTHING = "-";
 
-function PersonaForm({
+function AgentForm({
   id,
   initial,
   onDone,
   onCancel,
 }: {
   id?: string;
-  initial: PersonaInput;
+  initial: AgentInput;
   onDone: () => void;
   onCancel: () => void;
 }) {
@@ -530,7 +525,7 @@ function PersonaForm({
   const queryClient = useQueryClient();
   // Each app and member row keeps a key of its own while edited, so removing one doesn't shift the others' inputs.
   const [value, setValue] = useState<
-    Omit<PersonaInput, "apps" | "team"> & {
+    Omit<AgentInput, "apps" | "team"> & {
       apps: (SuggestedApp & { key: string })[];
       team: (Omit<TeamMember, "tools"> & { tools: string; key: string })[];
     }
@@ -538,7 +533,7 @@ function PersonaForm({
     name: initial.name,
     description: initial.description,
     instructions: initial.instructions,
-    base: initial.base,
+    blueprint: initial.blueprint,
     apps: initial.apps.map((app) => ({ ...app, key: crypto.randomUUID() })),
     team: initial.team.map((member) => ({
       ...member,
@@ -548,10 +543,10 @@ function PersonaForm({
   });
   const save = useMutation({
     mutationFn: () => {
-      const { base, ...rest } = value;
-      const input: PersonaInput = {
+      const { blueprint, ...rest } = value;
+      const input: AgentInput = {
         ...rest,
-        ...(base === undefined ? {} : { base }),
+        ...(blueprint === undefined ? {} : { blueprint }),
         apps: value.apps.map(({ name, url }) => ({ name, url })),
         team: value.team.map(({ name, instructions, tools }) => {
           const names = tools
@@ -561,10 +556,10 @@ function PersonaForm({
           return { name, instructions, tools: names.length > 0 ? names : null };
         }),
       };
-      return id ? pim.updatePersona(id, input) : pim.createPersona(input);
+      return id ? pim.updateAgent(id, input) : pim.createAgent(input);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["personas"] });
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
       onDone();
     },
@@ -596,41 +591,41 @@ function PersonaForm({
     <form
       onSubmit={submit}
       className="space-y-3 rounded-xl border px-4 py-4"
-      aria-label={id ? t("editPim") : t("newPim")}
+      aria-label={id ? t("editAgent") : t("newAgent")}
     >
       <label className="block space-y-1">
-        <span className="font-medium text-sm">{t("pimName")}</span>
+        <span className="font-medium text-sm">{t("agentName")}</span>
         <Input
           value={value.name}
           onChange={(event) => setValue({ ...value, name: event.target.value })}
-          placeholder={t("pimNamePlaceholder")}
+          placeholder={t("agentNamePlaceholder")}
           maxLength={60}
           required
         />
       </label>
       <label className="block space-y-1">
-        <span className="font-medium text-sm">{t("pimDescription")}</span>
+        <span className="font-medium text-sm">{t("agentDescription")}</span>
         <Input
           value={value.description}
           onChange={(event) =>
             setValue({ ...value, description: event.target.value })
           }
-          placeholder={t("pimDescriptionPlaceholder")}
+          placeholder={t("agentDescriptionPlaceholder")}
           maxLength={280}
         />
       </label>
       <BaseSelect
-        value={value.base}
-        onChange={(base) => setValue({ ...value, base })}
+        value={value.blueprint}
+        onChange={(blueprint) => setValue({ ...value, blueprint })}
       />
       <label className="block space-y-1">
-        <span className="font-medium text-sm">{t("pimInstructions")}</span>
+        <span className="font-medium text-sm">{t("agentInstructions")}</span>
         <textarea
           value={value.instructions}
           onChange={(event) =>
             setValue({ ...value, instructions: event.target.value })
           }
-          placeholder={t("pimInstructionsPlaceholder")}
+          placeholder={t("agentInstructionsPlaceholder")}
           maxLength={8000}
           rows={6}
           className="w-full rounded-md border bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"

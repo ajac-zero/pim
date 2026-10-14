@@ -18,7 +18,7 @@ import { json, type PimServices, text } from "./services";
  * Remote MCP servers as pi tools: the apps the user connects (calendar, mail,
  * notes...). The `agents` SDK's MCP client owns connections, OAuth and
  * reconnecting after a wake; this module turns its catalog into a pi
- * extension, which the agent reinstalls whenever the catalog changes. pi
+ * extension, which the Pim reinstalls whenever the catalog changes. pi
  * picks up the new tools from the next request, as a live reload.
  */
 
@@ -226,7 +226,7 @@ export function serverFor(servers: readonly McpServerInfo[], app: PimApp): McpSe
  * The connected apps as pi extensions, rebuilt whenever the catalog changes:
  * `apps`, which every chat has (the `connected_apps` section and the tools
  * that find, list and connect apps), and one extension per ready app with its
- * tools, which only the chats of Pims that list the app select.
+ * tools, which only the chats of agents that list the app select.
  *
  * pi sends tools and sections in registry order and re-sends all of them when
  * one appears out of order, so the parts that come and go must sit at the end:
@@ -237,7 +237,7 @@ export function mcpExtensions(
 	bridge: McpBridge,
 	services: PimServices,
 	extras: { catalog: AppCatalog; tools: readonly ToolRegistration[] },
-	/** The apps a conversation's Pim works with: its base's, then the person's own. */
+	/** The apps a conversation's Pim works with: its blueprint's, then the person's own. */
 	appsOf: (session: string) => readonly PimApp[],
 ) {
 	const all = bridge.servers();
@@ -316,7 +316,7 @@ export function mcpExtensions(
 			if (!app) {
 				const names = mine.map((candidate) => candidate.name).join(", ");
 				return text(
-					`This Pim doesn't work with ${wanted}${names ? `; its apps are ${names}` : ""}. Add one with update_pim, or the person adds it in Your Pims.`,
+					`This agent doesn't work with ${wanted}${names ? `; its apps are ${names}` : ""}. Add one with update_agent, or the person adds it in Your agents.`,
 					true,
 				);
 			}
@@ -360,7 +360,7 @@ export function mcpExtensions(
 			section("connected_apps", ({ conversationId }) => {
 				const mine = appsOf(String(conversationId));
 				if (mine.length === 0) {
-					return "This Pim works with no apps. The person adds them to this Pim in Your Pims; find_app finds an app's server for them.";
+					return "This agent works with no apps. The person adds them to this agent in Your agents; find_app finds an app's server for them.";
 				}
 				return mine
 					.map((app) => {

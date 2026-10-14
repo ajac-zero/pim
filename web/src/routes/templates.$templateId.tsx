@@ -6,30 +6,28 @@ import { useI18n } from "~/components/i18n";
 import { Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import { pim } from "~/lib/pim-api";
-import { personasQuery, templateQuery } from "~/lib/queries";
+import { agentsQuery, templateQuery } from "~/lib/queries";
 
 export const Route = createFileRoute("/templates/$templateId")({
   component: TemplatePage,
 });
 
-/** A published Pim in full, to read before making it your own. */
+/** A published agent in full, to read before making it your own. */
 function TemplatePage() {
   const { t, formatDate } = useI18n();
   const { templateId } = Route.useParams();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { data: template, error } = useQuery(templateQuery(templateId));
-  const { data: personas } = useQuery(personasQuery());
-  const copy = personas?.find(
-    (persona) => persona.source?.template === templateId,
-  );
+  const { data: agents } = useQuery(agentsQuery());
+  const copy = agents?.find((agent) => agent.source?.template === templateId);
   const use = useMutation({
     mutationFn: () => pim.adoptTemplate(templateId),
-    onSuccess: (persona) => {
-      queryClient.invalidateQueries({ queryKey: ["personas"] });
+    onSuccess: (agent) => {
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
       queryClient.invalidateQueries({ queryKey: ["templates"] });
-      toast.success(t("madeYourOwn", { name: persona.name }));
-      navigate({ to: "/pims" });
+      toast.success(t("madeYourOwn", { name: agent.name }));
+      navigate({ to: "/agents" });
     },
     onError: (failure) => toast.error(failure.message),
   });
@@ -65,7 +63,7 @@ function TemplatePage() {
       </p>
       <section className="space-y-2">
         <h2 className="font-medium text-muted-foreground text-sm">
-          {t("pimInstructions")}
+          {t("agentInstructions")}
         </h2>
         <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-xl border bg-muted/40 px-4 py-3 font-sans text-sm">
           {template.instructions}
@@ -117,7 +115,7 @@ function TemplatePage() {
       {copy && (
         <p className="mt-4 text-sm">
           {t("youHaveACopy")}{" "}
-          <Link to="/pims" className="underline underline-offset-2">
+          <Link to="/agents" className="underline underline-offset-2">
             {copy.name}
           </Link>
         </p>

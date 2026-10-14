@@ -12,8 +12,8 @@ import { faux, type Pim } from "./worker";
 
 /**
  * Real MCP servers, built with the official server SDK, answering the
- * agent's MCP client in-process: requests to their URLs are routed to them.
- * One agent for the file; the tests build on each other's connected apps.
+ * Pim's MCP client in-process: requests to their URLs are routed to them.
+ * One Pim for the file; the tests build on each other's connected apps.
  */
 
 const created: { title: string; day: string }[] = [];
@@ -91,9 +91,9 @@ function offered(messages: readonly Message[]): string[] {
 }
 
 /** Sets the apps the person's default Pim works with. */
-async function defaultPimApps(apps: { name: string; url: string }[]) {
-	const [pim] = (await api("/personas")).body.personas;
-	expect((await api(`/personas/${pim.id}`, { method: "PUT", body: JSON.stringify({ apps }) })).status).toBe(200);
+async function defaultAgentApps(apps: { name: string; url: string }[]) {
+	const [agent] = (await api("/agents")).body.agents;
+	expect((await api(`/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ apps }) })).status).toBe(200);
 }
 
 describe("connected apps (MCP)", () => {
@@ -103,11 +103,11 @@ describe("connected apps (MCP)", () => {
 		expect(body).toMatchObject({ id: "calendar", state: "ready" });
 
 		// Connected, but no Pim works with it yet.
-		expect((await api("/mcp")).body.servers).toEqual([expect.objectContaining({ id: "calendar", pims: [] })]);
-		await defaultPimApps([{ name: "Calendar", url: "https://calendar.example.test/mcp" }]);
+		expect((await api("/mcp")).body.servers).toEqual([expect.objectContaining({ id: "calendar", agents: [] })]);
+		await defaultAgentApps([{ name: "Calendar", url: "https://calendar.example.test/mcp" }]);
 		const apps = (await api("/mcp")).body.servers;
 		expect(apps).toEqual([
-			expect.objectContaining({ id: "calendar", name: "Calendar", state: "ready", approval: "writes", pims: ["Pim"] }),
+			expect.objectContaining({ id: "calendar", name: "Calendar", state: "ready", approval: "writes", agents: ["Pim"] }),
 		]);
 		expect(apps[0].tools).toEqual([
 			{ name: "calendar_find_events", description: "Find events on a day.", permission: "on", requiresApproval: false },
@@ -230,7 +230,7 @@ describe("connected apps (MCP)", () => {
 	});
 
 	it("adds a new app's tools without re-sending the prompt sent so far", async () => {
-		await defaultPimApps([
+		await defaultAgentApps([
 			{ name: "Calendar", url: "https://calendar.example.test/mcp" },
 			{ name: "Notes", url: "https://notes.example.test/mcp" },
 		]);
@@ -265,8 +265,8 @@ describe("connected apps (MCP)", () => {
 
 	it("gives a chat only the apps its Pim lists, and lets the model connect only those", async () => {
 		const weather = "https://weather.example.test/mcp";
-		const books = (await post("/personas", { name: "Books", base: "test.ledger/budget" })).body;
-		const budget = (await post("/sessions", { persona: books.id })).body.id;
+		const books = (await post("/agents", { name: "Books", blueprint: "test.ledger/budget" })).body;
+		const budget = (await post("/sessions", { agent: books.id })).body.id;
 
 		// The default Pim doesn't list Weather: the model can't connect it from there.
 		let refused = "";
@@ -278,7 +278,7 @@ describe("connected apps (MCP)", () => {
 			},
 		]);
 		await say("Connect the weather app.");
-		expect(refused).toContain("This Pim doesn't work with Weather; its apps are Calendar, Notes.");
+		expect(refused).toContain("This agent doesn't work with Weather; its apps are Calendar, Notes.");
 		expect((await api("/mcp")).body.servers.map((server: { id: string }) => server.id)).toEqual(["calendar"]);
 
 		// The Budget Pim's definition lists it: connecting it needs no approval, as its Pim already chose it.
@@ -298,7 +298,7 @@ describe("connected apps (MCP)", () => {
 		expect(system).toContain("## Weather\\n(not connected: connect_app connects it)");
 		expect(connected).toContain("Connected Weather. Its tools: weather_forecast.");
 		const servers = (await api("/mcp")).body.servers;
-		expect(servers.find((server: { id: string }) => server.id === "weather")).toMatchObject({ url: weather, pims: ["Books"] });
+		expect(servers.find((server: { id: string }) => server.id === "weather")).toMatchObject({ url: weather, agents: ["Books"] });
 
 		// Its tools reach the Budget chat, and no other.
 		const tools: Record<string, string[]> = {};
@@ -330,7 +330,7 @@ describe("connected apps (MCP)", () => {
 		]);
 	});
 
-	it("gives apps a sign-in callback that names this Pim's owner, so it comes back to this agent", async () => {
+	it("gives apps a sign-in callback that names this Pim's owner, so it comes back to this Pim", async () => {
 		const callbacks = await runInDurableObject(env.Pim.getByName(OWNER), (_instance: Pim, state) =>
 			state.storage.sql.exec("SELECT callback_url FROM cf_agents_mcp_servers").toArray().map((row) => row.callback_url),
 		);

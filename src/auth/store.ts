@@ -6,7 +6,7 @@ import type { PublicKey } from "./webauthn";
  * Who may use one person's Pim: their passkeys, whether they ever had one,
  * the one-time setup code that creates a passkey without one, recovery
  * codes, device links and API tokens. It lives in its own Durable Object,
- * one per owner and apart from the agent, so signing in never wakes the
+ * one per owner and apart from the Pim, so signing in never wakes the
  * agent. One object also makes "use the setup code once" a single step.
  */
 

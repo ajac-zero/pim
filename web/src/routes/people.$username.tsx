@@ -13,7 +13,7 @@ export const Route = createFileRoute("/people/$username")({
   component: PersonPage,
 });
 
-/** Someone on this Pim: who they say they are, and the Pims they published. */
+/** Someone on this Pim: who they say they are, and the agents they published. */
 function PersonPage() {
   const { t } = useI18n();
   const { username } = Route.useParams();
@@ -56,7 +56,7 @@ function PersonPage() {
       )}
       <section className="space-y-3">
         <h2 className="font-medium text-muted-foreground text-sm">
-          {t("publishedPims")}
+          {t("publishedAgents")}
         </h2>
         {person.templates.length === 0 ? (
           <p className="px-1 text-muted-foreground text-sm">

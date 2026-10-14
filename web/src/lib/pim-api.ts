@@ -14,18 +14,18 @@ export type Session = {
   updatedAt: number | null;
   /** A conversation with someone else's Pim, shared with you; null for your own chats. */
   visit?: { username: string; available: boolean } | null;
-  /** The Pim of yours it talks with: the one it was started with, or your default one. Null in a visit. */
-  persona?: { id: string; name: string } | null;
+  /** The agent of yours it talks with: the one it was started with, or your default one. Null in a visit. */
+  agent?: { id: string; name: string } | null;
 };
 
-/** An app a Pim works with, by its MCP server URL: its chats get only these apps' tools. */
+/** An app an agent works with, by its MCP server URL: its chats get only these apps' tools. */
 export type SuggestedApp = { name: string; url: string };
 
-/** One of a Pim's team: it does tasks the Pim hands it, and answers the Pim, never you. */
+/** One of an agent's team: it does tasks the agent hands it, and answers the agent, never you. */
 export type TeamMember = {
   name: string;
   instructions: string;
-  /** The tools it may use, by name; null for all the Pim's tools a member can have. */
+  /** The tools it may use, by name; null for all the agent's tools a member can have. */
   tools: string[] | null;
 };
 
@@ -49,13 +49,13 @@ export type TranscriptMessage = {
   error?: string;
 };
 
-/** A task a Pim handed a member of its team, in the member's own conversation. */
+/** A task an agent handed a member of its team, in the member's own conversation. */
 export type TeamRun = {
   conversation: string;
   /** Tasks handed out together share it. */
   call: string;
   session: string;
-  persona: string;
+  agent: string;
   member: string;
   task: string;
   status: "running" | "done" | "failed";
@@ -63,26 +63,26 @@ export type TeamRun = {
   updatedAt: number;
 };
 
-/** How long a Pim's name may be. */
+/** How long an agent's name may be. */
 export const MAX_PIM_NAME = 60;
 
-/** One of your Pims: a named agent with its own instructions. */
-export type Persona = {
+/** One of your agents: its own name and instructions, on top of a blueprint. */
+export type Agent = {
   id: string;
   name: string;
   description: string;
   instructions: string;
   apps: SuggestedApp[];
   team: TeamMember[];
-  /** The base it builds on, as `<extension>/<base>`, which brings its dashboard; null for none. */
-  base: string | null;
+  /** The blueprint it builds on, as `<extension>/<blueprint>`, which brings its dashboard; null for none. */
+  blueprint: string | null;
   /** The template it was made from. */
   source: { template: string; author: string } | null;
   /** Its template in the gallery, while published. */
   published: string | null;
   /** When its icon was set, or null without one. */
   icon: number | null;
-  /** The one that talks in chats started without choosing a Pim. It can't be deleted while it is. */
+  /** The one that talks in chats started without choosing an agent. It can't be deleted while it is. */
   default: boolean;
   createdAt: number;
   updatedAt: number;
@@ -131,35 +131,35 @@ export type Widget = {
 } & WidgetContent;
 
 export type Dashboard = {
-  pim: Pick<
-    Persona,
-    "id" | "name" | "description" | "default" | "base" | "icon"
+  agent: Pick<
+    Agent,
+    "id" | "name" | "description" | "default" | "blueprint" | "icon"
   >;
   /** Messages to start a chat with. */
   starters: string[];
   widgets: Widget[];
 };
 
-export type PersonaInput = {
+export type AgentInput = {
   name: string;
   description: string;
   instructions: string;
   apps: SuggestedApp[];
   team: TeamMember[];
-  /** Left out, a new Pim builds on the deployment's default Pim. */
-  base?: string | null;
+  /** Left out, a new agent is based on the deployment's default blueprint. */
+  blueprint?: string | null;
 };
 
-/** What this deployment installed: the bases people's Pims can build on, and widgets. */
+/** What this deployment installed: the blueprints people's agents can be based on, and widgets. */
 export type InstalledExtension = {
   id: string;
   name: string;
   description: string;
-  bases: {
+  blueprints: {
     ref: string;
     name: string;
     description: string;
-    /** The apps Pims built on this base work with, besides their own. */
+    /** The apps agents based on this blueprint work with, besides their own. */
     apps: SuggestedApp[];
   }[];
   widgets: string[];
@@ -167,11 +167,11 @@ export type InstalledExtension = {
 
 export type Extensions = {
   extensions: InstalledExtension[];
-  /** What new Pims build on when not told otherwise. */
-  defaultBase: string | null;
+  /** What new agents are based on when not told otherwise. */
+  defaultBlueprint: string | null;
 };
 
-/** A Pim someone published for others to make their own. */
+/** An agent someone published for others to make their own. */
 export type Template = {
   id: string;
   author: string;
@@ -206,8 +206,8 @@ export type ConnectedApp = {
   error: string | null;
   /** Where to sign in, while it waits for you to. */
   authUrl: string | null;
-  /** Your Pims that work with it: only their chats get its tools. */
-  pims: string[];
+  /** Your agents that work with it: only their chats get its tools. */
+  agents: string[];
   tools: { name: string }[];
 };
 
@@ -241,7 +241,7 @@ export type Approval = {
     circle: string;
     circleName: string;
   } | null;
-  /** A member of a Pim's team asked, working for the chat `session` names; the approval's own `session` is the member's. */
+  /** A member of an agent's team asked, working for the chat `session` names; the approval's own `session` is the member's. */
   member?: { name: string; session: string } | null;
 };
 
@@ -520,22 +520,22 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const pim = {
   sessions: () =>
     call<{ sessions: Session[] }>("/sessions").then((body) => body.sessions),
-  createSession: (options: { title?: string; persona?: string } = {}) =>
+  createSession: (options: { title?: string; agent?: string } = {}) =>
     call<Session>("/sessions", {
       method: "POST",
       body: JSON.stringify(options),
     }),
-  personas: () =>
-    call<{ personas: Persona[] }>("/personas").then((body) => body.personas),
-  createPersona: (input: PersonaInput) =>
-    call<Persona>("/personas", { method: "POST", body: JSON.stringify(input) }),
-  updatePersona: (id: string, input: Partial<PersonaInput>) =>
-    call<Persona>(`/personas/${id}`, {
+  agents: () =>
+    call<{ agents: Agent[] }>("/agents").then((body) => body.agents),
+  createAgent: (input: AgentInput) =>
+    call<Agent>("/agents", { method: "POST", body: JSON.stringify(input) }),
+  updateAgent: (id: string, input: Partial<AgentInput>) =>
+    call<Agent>(`/agents/${id}`, {
       method: "PUT",
       body: JSON.stringify(input),
     }),
-  setPersonaIcon: async (id: string, icon: Blob) => {
-    const response = await fetch(`/api/personas/${id}/icon`, {
+  setAgentIcon: async (id: string, icon: Blob) => {
+    const response = await fetch(`/api/agents/${id}/icon`, {
       method: "PUT",
       headers: { "content-type": icon.type },
       body: icon,
@@ -550,24 +550,24 @@ export const pim = {
       );
     }
   },
-  removePersonaIcon: (id: string) =>
-    call<Persona>(`/personas/${id}/icon`, { method: "DELETE" }),
-  deletePersona: (id: string) =>
-    call<{ deleted: boolean }>(`/personas/${id}`, { method: "DELETE" }),
+  removeAgentIcon: (id: string) =>
+    call<Agent>(`/agents/${id}/icon`, { method: "DELETE" }),
+  deleteAgent: (id: string) =>
+    call<{ deleted: boolean }>(`/agents/${id}`, { method: "DELETE" }),
   extensions: () => call<Extensions>("/extensions"),
-  /** Makes it the Pim chats started without choosing one talk with. */
-  makeDefaultPersona: (id: string) =>
-    call<Persona>(`/personas/${id}/default`, { method: "POST" }),
-  /** A Pim's dashboard, with its text in `locale` where the extensions translated it. */
+  /** Makes it the agent chats started without choosing one talk with. */
+  makeDefaultAgent: (id: string) =>
+    call<Agent>(`/agents/${id}/default`, { method: "POST" }),
+  /** An agent's dashboard, with its text in `locale` where the extensions translated it. */
   dashboard: (id: string, locale: string) =>
     call<Dashboard>(
-      `/personas/${id}/dashboard?locale=${encodeURIComponent(locale)}`,
+      `/agents/${id}/dashboard?locale=${encodeURIComponent(locale)}`,
     ),
-  publishPersona: (id: string) =>
-    call<Template>(`/personas/${id}/publish`, { method: "POST" }),
-  unpublishPersona: (id: string) =>
-    call<{ deleted: boolean }>(`/personas/${id}/publish`, { method: "DELETE" }),
-  /** What a chat's Pim handed its team, newest first. */
+  publishAgent: (id: string) =>
+    call<Template>(`/agents/${id}/publish`, { method: "POST" }),
+  unpublishAgent: (id: string) =>
+    call<{ deleted: boolean }>(`/agents/${id}/publish`, { method: "DELETE" }),
+  /** What a chat's agent handed its team, newest first. */
   teamRuns: (session: string) =>
     call<{ runs: TeamRun[] }>(`/sessions/${session}/team`).then(
       (body) => body.runs,
@@ -588,9 +588,9 @@ export const pim = {
     ).then((body) => body.templates),
   template: (id: string) =>
     call<Template>(`/templates/${encodeURIComponent(id)}`),
-  /** Makes a published Pim one of yours: a copy, yours to change. */
+  /** Makes a published agent one of yours: a copy, yours to change. */
   adoptTemplate: (id: string) =>
-    call<Persona>(`/templates/${encodeURIComponent(id)}/use`, {
+    call<Agent>(`/templates/${encodeURIComponent(id)}/use`, {
       method: "POST",
     }),
   apps: () =>
@@ -792,26 +792,26 @@ export const admin = {
       method: "DELETE",
       body: "{}",
     }),
-  /** The Pim everyone who joins starts with a copy of; null for a plain one. */
-  defaultPim: () =>
-    call<{ pim: DefaultPim | null }>("/admin/default-pim").then(
-      (body) => body.pim,
+  /** The agent everyone who joins starts with a copy of; null for a plain one. */
+  defaultAgent: () =>
+    call<{ agent: DefaultAgent | null }>("/admin/default-agent").then(
+      (body) => body.agent,
     ),
-  /** Makes a copy of one of the admin's Pims the one everyone who joins starts with; null goes back to a plain one. */
-  setDefaultPim: (id: string | null) =>
-    call<{ pim: DefaultPim | null }>(
-      "/admin/default-pim",
+  /** Makes a copy of one of the admin's agents the one everyone who joins starts with; null goes back to a plain one. */
+  setDefaultAgent: (id: string | null) =>
+    call<{ agent: DefaultAgent | null }>(
+      "/admin/default-agent",
       id === null
         ? { method: "DELETE", body: "{}" }
-        : { method: "PUT", body: JSON.stringify({ pim: id }) },
-    ).then((body) => body.pim),
+        : { method: "PUT", body: JSON.stringify({ agent: id }) },
+    ).then((body) => body.agent),
 };
 
-/** The Pim everyone who joins starts with, as the admin chose it. */
-export type DefaultPim = {
+/** The agent everyone who joins starts with, as the admin chose it. */
+export type DefaultAgent = {
   author: string;
-  /** Which of the admin's Pims it is a copy of. */
-  personaId: string;
+  /** Which of the admin's agents it is a copy of. */
+  agentId: string;
   name: string;
   updatedAt: number;
 };

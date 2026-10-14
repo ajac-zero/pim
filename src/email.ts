@@ -66,7 +66,7 @@ function today(): number {
 
 /**
  * The person's confirmed address, a code waiting to confirm another, and
- * sending them email, kept in their agent's database.
+ * sending them email, kept in their Pim's database.
  */
 export class Email {
 	readonly #store: PimStore;

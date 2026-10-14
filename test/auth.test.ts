@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Pim } from "../src/agent";
+import type { Pim } from "../src/pim";
 import { userHandle } from "../src/auth";
 import { base64UrlDecode, base64UrlEncode } from "../src/auth/encoding";
 import { derToRaw } from "../src/auth/webauthn";
@@ -65,7 +65,7 @@ class Browser {
 		return { status: response.status, body: (await response.json()) as T };
 	}
 
-	/** Whether this browser gets into an agent's API, and whose. */
+	/** Whether this browser gets into a Pim's API, and whose. */
 	async signedIn() {
 		return (await this.fetch("/api/sessions")).status === 200;
 	}
@@ -425,7 +425,7 @@ describe("sessions", () => {
 	});
 });
 
-describe("the agent behind a passkey session", () => {
+describe("the Pim behind a passkey session", () => {
 	it("learns the address its owner uses, for apps' callbacks", async () => {
 		const { browser, owner } = await admin();
 		await runInDurableObject(env.Pim.getByName(owner), async (instance: Pim) => instance.store.setMeta("public_origin", "https://old.example"));

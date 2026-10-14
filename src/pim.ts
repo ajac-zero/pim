@@ -14,7 +14,7 @@ import {
 	type ModelRef,
 	ROOT_CONVERSATION_ID,
 } from "@earendil-works/pi-durable";
-import { Agent, type Connection, type ConnectionContext, getAgentByName, type Schedule, type WSMessage } from "agents";
+import { Agent as DurableAgent, type Connection, type ConnectionContext, getAgentByName, type Schedule, type WSMessage } from "agents";
 import { type PiModel, PiHarness, type PiOperationResult, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
 import { ArtifactStore, artifactHeaders, downloadName, RESIZE_SCRIPT } from "./artifacts";
@@ -84,7 +84,7 @@ import { MESSAGING_EXTENSION, messagingExtension, SEND_TO_USER } from "./extensi
 import { createOptMem, memoryWidgets } from "./extensions/optmem";
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
 import { byteLength, ENTRY_BYTES, entryLine } from "./extensions/optmem/store";
-import { CREATE_PIM, personaExtension, UPDATE_PIM, updatePimAction } from "./extensions/persona";
+import { CREATE_AGENT, agentExtension, UPDATE_AGENT, updateAgentAction } from "./extensions/agents";
 import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
@@ -101,7 +101,7 @@ import {
 	TOOL_PERMISSIONS,
 	type ToolPermission,
 } from "./store";
-import { type Persona, type PersonaInput, PersonaStore, personaInput, type TeamMember } from "./personas";
+import { type Agent, type AgentInput, AgentStore, agentInput, type TeamMember } from "./agents";
 import { type Role, TEAM_EXTENSION, type TeamRun, TeamStore, teamExtension } from "./team";
 import { projectEntries } from "./transcript";
 import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage";
@@ -130,9 +130,9 @@ const PIM_OPERATION = /^(schedule|approval|event):/;
  */
 export const OWNER_HEADER = "x-pim-owner";
 
-/** Where apps' sign-ins return, as `/mcp/callback/<owner>`, so the Worker knows whose agent the callback is for. */
+/** Where apps' sign-ins return, as `/mcp/callback/<owner>`, so the Worker knows whose Pim the callback is for. */
 export const MCP_CALLBACK_PATH = "/mcp/callback";
-/** Where apps deliver event webhooks, as `/mcp/events/<owner>/<watch id>`; signed, so served without the API token. The agent sees `/mcp/events/<watch id>`. */
+/** Where apps deliver event webhooks, as `/mcp/events/<owner>/<watch id>`; signed, so served without the API token. The Pim sees `/mcp/events/<watch id>`. */
 export const MCP_EVENTS_PATH = "/mcp/events/";
 const WATCH_REFRESH_CALLBACK = "refreshAppWatch";
 /** How long an approval waits for the user under the `auto` policy before it is granted, so background work never stalls. */
@@ -171,23 +171,23 @@ export type ToolPermissionInfo = ResolvedPermission & {
 	readonly choices: readonly ToolPermission[];
 };
 
-/** Whether the agent works: a suspended one answers nothing and runs nothing until its operator lifts it. */
+/** Whether the Pim works: a suspended one answers nothing and runs nothing until its operator lifts it. */
 export type OwnerStatus = "active" | "suspended";
 
-/** What registration tells an agent about its owner when it provisions it. */
+/** What registration tells a Pim about its owner when it provisions it. */
 export type OwnerProfile = { readonly ownerId: string; readonly username: string; readonly publicUrl: string };
 /** How long an erasure waits for runs to stop and apps to unsubscribe before wiping anyway. */
 const ERASE_COURTESY_MS = 3_000;
 /** `pim_meta` key of the model chosen through the API. */
 const MODEL_KEY = "model";
-/** `pim_meta` keys the Worker sets: the owner's profile, a suspension, the agent's own limits. */
+/** `pim_meta` keys the Worker sets: the owner's profile, a suspension, the Pim's own limits. */
 const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
 /** Tools of the Pim the person talks with that its team members don't get, though their extensions stay. */
-const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_PIM, UPDATE_PIM]);
-/** Set once chats' Pims come from the prompt's `pim` section, not from instructions stored in each chat. */
-const PIM_SECTION_KEY = "pim_section";
+const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT]);
+/** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
+const AGENT_SECTION_KEY = "pim_section";
 /** The day the person was last told a limit stopped background work. */
 const LIMIT_NOTICE_KEY = "limit_notice";
 /** Set by the Worker on requests that carried the API token. */
@@ -234,7 +234,7 @@ function errorMessage(error: unknown): string {
 }
 
 /**
- * The agent. A deployment has exactly one instance, owned by the person who
+ * The Pim. A deployment has exactly one instance, owned by the person who
  * deployed it. Its SQLite database holds pi's conversations, tasks and
  * transcripts, plus Pim's memories, goals, approvals and notifications.
  *
@@ -242,20 +242,20 @@ function errorMessage(error: unknown): string {
  * `PiHarness` lifecycle job wakes the object after an eviction so runs
  * resume where they stopped.
  */
-export class Pim extends Agent<Env> {
+export class Pim extends DurableAgent<Env> {
 	readonly store = new PimStore(this.ctx.storage.sql);
 	/** People this Pim's owner shares it with, in circles. */
 	readonly circles = new CircleStore(this.ctx.storage.sql);
 	/** Pims shared with this Pim's owner, and their conversations with them. */
 	readonly visits = new VisitStore(this.ctx.storage.sql);
-	/** The owner's Pims: named agents with their own instructions, the default one first. */
-	readonly personas = new PersonaStore(this.ctx.storage.sql, () => {
-		// An account's first Pim: the deployment's default base, or a bare one named Pim.
-		const ref = this.extensions.defaultBase;
-		const base = ref === null ? undefined : this.extensions.base(ref);
-		return { name: base?.name ?? "Pim", description: base?.description ?? "", instructions: "", apps: [], team: [], base: base ? ref : null };
+	/** The owner's agents: each with its own instructions, the default one first. */
+	readonly agents = new AgentStore(this.ctx.storage.sql, () => {
+		// An account's first agent: one built on the deployment's default blueprint, or a bare one named Pim.
+		const ref = this.extensions.defaultBlueprint;
+		const blueprint = ref === null ? undefined : this.extensions.blueprint(ref);
+		return { name: blueprint?.name ?? "Pim", description: blueprint?.description ?? "", instructions: "", apps: [], team: [], blueprint: blueprint ? ref : null };
 	});
-	/** The tasks the Pims' teams were given, each in a conversation of its own. */
+	/** The tasks the agents' teams were given, each in a conversation of its own. */
 	readonly team = new TeamStore(this.ctx.storage.sql);
 	/** Images the person sent, in R2; their messages keep their URLs. */
 	readonly images = new ImageStore({
@@ -291,7 +291,7 @@ export class Pim extends Agent<Env> {
 	/** Extensions' own data, each apart from the others'. */
 	readonly extensionData = new ExtensionDataStore(this.ctx.storage.sql);
 	#abilities: Map<string, Ability> | undefined;
-	/** What this agent has used, and its limits. */
+	/** What this Pim has used, and its limits. */
 	readonly usage = new UsageMeter({
 		sql: this.ctx.storage.sql,
 		limits: () => this.limits(),
@@ -314,7 +314,7 @@ export class Pim extends Agent<Env> {
 			})),
 		tools: () => this.mcp.listTools(),
 		call: async (serverId, name, args) => {
-			// Work still under way on an agent being erased acts on nobody's behalf.
+			// Work still under way on a Pim being erased acts on nobody's behalf.
 			this.#assertOpen();
 			return this.mcp.callTool({ serverId, name, arguments: args });
 		},
@@ -351,7 +351,7 @@ export class Pim extends Agent<Env> {
 		httpRequest as GatedAction,
 		...mcpActions(this.apps),
 		watchAction(this.apps, this.appEvents),
-		updatePimAction(this.personas),
+		updateAgentAction(this.agents),
 	];
 
 	/** Every action an approval can be for: Pim's own, and the extensions'. */
@@ -363,7 +363,7 @@ export class Pim extends Agent<Env> {
 		harness: async ({ storage, context }) => {
 			const services = this.services();
 			this.#migrateAlwaysApproved();
-			this.registry.install(this.#personaExtension(services));
+			this.registry.install(this.#agentExtension(services));
 			this.registry.install(goalsExtension(services));
 			this.registry.install(scheduleExtension(services));
 			this.registry.install(messagingExtension(services));
@@ -371,7 +371,7 @@ export class Pim extends Agent<Env> {
 				teamExtension({
 					roleOf: (session) => this.#roleOf(session),
 					runs: this.team,
-					memberAgent: (member, pim) => this.#memberAgent(member, pim),
+					memberAgent: (member, agent) => this.#memberAgent(member, agent),
 					ask: (conversation, task, operation) => this.#askMember(conversation, task, operation),
 				}),
 			);
@@ -416,12 +416,12 @@ export class Pim extends Agent<Env> {
 				},
 				context,
 			);
-			// Chats started with a Pim used to store its instructions; the `pim` section gives them now.
-			if (this.store.meta(PIM_SECTION_KEY) === undefined) {
-				for (const session of this.personas.startedSessions()) {
+			// Chats started with an agent used to store its instructions; the `agent` section gives them now.
+			if (this.store.meta(AGENT_SECTION_KEY) === undefined) {
+				for (const session of this.agents.startedSessions()) {
 					await (await harness.conversation(Number(session) as ConversationId, context))?.configure({ instructions: null }, context);
 				}
-				this.store.setMeta(PIM_SECTION_KEY, "1");
+				this.store.setMeta(AGENT_SECTION_KEY, "1");
 			}
 			return harness;
 		},
@@ -472,7 +472,7 @@ export class Pim extends Agent<Env> {
 		try {
 			const result = await this.addMcpServer(name, url, {
 				id,
-				// The owner in the path tells the Worker whose agent the sign-in returns to.
+				// The owner in the path tells the Worker whose Pim the sign-in returns to.
 				callbackPath: `${MCP_CALLBACK_PATH}/${this.name}`,
 				...(options.headers ? { transport: { headers: options.headers } } : {}),
 			});
@@ -521,7 +521,7 @@ export class Pim extends Agent<Env> {
 	}
 
 	#appExtensions(services: PimServices) {
-		return mcpExtensions(this.apps, services, this.#appExtras(services), (session) => this.#appsOf(this.#roleOf(session).pim));
+		return mcpExtensions(this.apps, services, this.#appExtras(services), (session) => this.#appsOf(this.#roleOf(session).agent));
 	}
 
 	/** Installs each ready app's tools as its own extension, and takes out those of apps that no longer are. */
@@ -533,24 +533,24 @@ export class Pim extends Agent<Env> {
 		for (const extension of tools) this.registry.install(extension);
 	}
 
-	/** The apps a Pim works with: those of the base it builds on, then its own. */
-	#appsOf(pim: Persona): PimApp[] {
-		const base = pim.base === null ? [] : (this.extensions.base(pim.base)?.apps ?? []);
+	/** The apps an agent works with: those of the blueprint it builds on, then its own. */
+	#appsOf(agent: Agent): PimApp[] {
+		const blueprint = agent.blueprint === null ? [] : (this.extensions.blueprint(agent.blueprint)?.apps ?? []);
 		const apps = new Map<string, PimApp>();
-		for (const app of [...base, ...pim.apps]) if (!apps.has(app.url)) apps.set(app.url, app);
+		for (const app of [...blueprint, ...agent.apps]) if (!apps.has(app.url)) apps.set(app.url, app);
 		return [...apps.values()];
 	}
 
-	/** The extensions of the connected apps a Pim works with. */
-	#appExtensionsOf(pim: Persona): string[] {
+	/** The extensions of the connected apps an agent works with. */
+	#appExtensionsOf(agent: Agent): string[] {
 		const servers = this.apps.servers();
-		return this.#appsOf(pim).flatMap((app) => {
+		return this.#appsOf(agent).flatMap((app) => {
 			const server = serverFor(servers, app);
 			return server ? [appExtensionName(server.id)] : [];
 		});
 	}
 
-	/** Extensions only some chats select: abilities, by the Pims that use them, and apps, by the Pims that list them. */
+	/** Extensions only some chats select: abilities, by the agents that use them, and apps, by the agents that list them. */
 	#perPim(name: string): boolean {
 		return this.abilities.has(name) || name.startsWith(APP_PREFIX);
 	}
@@ -561,7 +561,7 @@ export class Pim extends Agent<Env> {
 		const perPim = (name: string) => this.#perPim(name);
 		return {
 			// Every extension but visits', abilities' and apps': a visit's own conversation selects its extension,
-			// and the chats of Pims that use an ability or list an app select it.
+			// and the chats of agents that use an ability or list an app select it.
 			get extensions() {
 				return registry
 					.snapshot()
@@ -597,7 +597,7 @@ export class Pim extends Agent<Env> {
 		return readSettings(this.store, this.env);
 	}
 
-	/** The deployment's limits (`PIM_LIMITS`), with this agent's own where its operator set them. */
+	/** The deployment's limits (`PIM_LIMITS`), with this Pim's own where its operator set them. */
 	limits(): Limits {
 		const own = this.store.meta(LIMITS_KEY);
 		return { ...deploymentLimits(this.env.PIM_LIMITS), ...(own === undefined ? {} : (JSON.parse(own) as Partial<Limits>)) };
@@ -680,7 +680,7 @@ export class Pim extends Agent<Env> {
 		const pim = this;
 		return {
 			store: this.store,
-			// Read at each use: the person can change these while the agent runs.
+			// Read at each use: the person can change these while the Pim runs.
 			get timeZone() {
 				return pim.settings().timeZone;
 			},
@@ -719,7 +719,7 @@ export class Pim extends Agent<Env> {
 				return run ? { name: run.member, session: run.session } : null;
 			},
 			widgetsFor: (session) => this.#chatWidgets(session),
-			showWidget: (session, ref) => this.#loadWidget(this.personas.ofSession(session), ref),
+			showWidget: (session, ref) => this.#loadWidget(this.agents.ofSession(session), ref),
 		};
 	}
 
@@ -999,7 +999,7 @@ export class Pim extends Agent<Env> {
 		auto?: AutoApproval,
 		options: { inTurn?: boolean } = {},
 	): Promise<Approval> {
-		// An approval's timer can outlive the agent's erasure; its action must not run.
+		// An approval's timer can outlive the Pim's erasure; its action must not run.
 		this.#assertOpen();
 		const approval = this.store.approval(id);
 		if (!approval) throw new HttpError(404, `No approval ${id}`);
@@ -1037,7 +1037,7 @@ export class Pim extends Agent<Env> {
 		if (!options.inTurn) {
 			const operation = `approval:${id}`;
 			await this.submitTo(approval.session, this.#outcome(decided), { operationId: operation, whenBusy: "steer" }, "approval");
-			// A member whose task already ended answers its Pim's chat once it has gone on; one still at work answers the task.
+			// A member whose task already ended answers its agent's chat once it has gone on; one still at work answers the task.
 			const run = this.team.run(approval.session);
 			if (run && run.status !== "running") {
 				this.team.setStatus(run.conversation, "running");
@@ -1431,29 +1431,29 @@ export class Pim extends Agent<Env> {
 		await this.expireApproval(payload);
 	}
 
-	// The owner's Pims, and their teams.
+	// The owner's agents, and their teams.
 
-	/** The Pim a conversation talks as, and the team member it is, if it is one. */
+	/** The agent a conversation talks as, and the team member it is, if it is one. */
 	#roleOf(session: string): Role {
 		const run = this.team.run(session);
-		if (!run) return { pim: this.personas.ofSession(session), member: null };
-		const pim = this.personas.get(run.persona) ?? this.personas.default();
+		if (!run) return { agent: this.agents.ofSession(session), member: null };
+		const agent = this.agents.get(run.agent) ?? this.agents.default();
 		// A member taken off the team since keeps working on what it was given, with no instructions of its own.
-		const member = pim.team.find((candidate) => candidate.name === run.member) ?? { name: run.member, instructions: "", tools: null };
-		return { pim, member };
+		const member = agent.team.find((candidate) => candidate.name === run.member) ?? { name: run.member, instructions: "", tools: null };
+		return { agent, member };
 	}
 
 	/**
-	 * A member's conversation leaves out what only the Pim the person talks
+	 * A member's conversation leaves out what only the agent the person talks
 	 * with does: talking to them, scheduling work and watching apps' events
 	 * (both come back to the conversation that asked), and handing out tasks.
 	 * A member with a list of tools gets only those.
 	 */
-	#memberAgent(member: TeamMember, pim: Persona): AgentChange {
+	#memberAgent(member: TeamMember, agent: Agent): AgentChange {
 		const snapshot = this.registry.snapshot();
 		const removed = [MESSAGING_EXTENSION, SCHEDULE_EXTENSION, TEAM_EXTENSION].flatMap((name) => snapshot.extension(name) ?? []);
-		// Members work with their Pim's abilities and apps too.
-		const added = [...this.extensions.abilitiesOf(pim.base), ...this.#appExtensionsOf(pim)].flatMap((name) => snapshot.extension(name) ?? []);
+		// Members work with their agent's abilities and apps too.
+		const added = [...this.extensions.abilitiesOf(agent.blueprint), ...this.#appExtensionsOf(agent)].flatMap((name) => snapshot.extension(name) ?? []);
 		const extensions = { add: added, remove: removed };
 		const kept = snapshot
 			.tools()
@@ -1499,13 +1499,13 @@ export class Pim extends Agent<Env> {
 			: { ok: false, text: `It didn't finish: ${result.reason ?? "unanswered"}.` };
 	}
 
-	#persona(id: string): Persona {
-		const persona = this.personas.get(id);
-		if (!persona) throw new HttpError(404, `No Pim ${id}`);
-		return persona;
+	#agent(id: string): Agent {
+		const agent = this.agents.get(id);
+		if (!agent) throw new HttpError(404, `No agent ${id}`);
+		return agent;
 	}
 
-	// Extensions: the Pims people build on, and the widgets of their dashboards.
+	// Extensions: the blueprints agents build on, and the widgets of their dashboards.
 
 	/** The deployment's extensions (`pim.config.ts`). Tests add their own. */
 	protected pimConfig(): PimConfig {
@@ -1523,12 +1523,12 @@ export class Pim extends Agent<Env> {
 				artifactsWidgets(this.artifacts),
 				...this.pimConfig().extensions,
 			],
-			this.pimConfig().defaultBase,
+			this.pimConfig().defaultBlueprint,
 		);
 		return this.#extensions;
 	}
 
-	/** The extensions' abilities, built once for this agent, by extension id. */
+	/** The extensions' abilities, built once for this Pim, by extension id. */
 	get abilities(): Map<string, Ability> {
 		if (this.#abilities) return this.#abilities;
 		const pim = this;
@@ -1563,61 +1563,61 @@ export class Pim extends Agent<Env> {
 	}
 
 	/**
-	 * Gives a chat the abilities its Pim uses and the apps it lists, as they
-	 * are now, before its next run: its Pim, the Pim's base, the extensions or
+	 * Gives a chat the abilities its agent uses and the apps it lists, as they
+	 * are now, before its next run: its agent, the agent's blueprint, the extensions or
 	 * the connected apps may have changed since.
 	 * Visits choose their own extensions, and team members get theirs when
 	 * made. A chat whose selection is unchanged isn't written to.
 	 */
 	async #selectAbilities(session: string): Promise<void> {
 		if (this.visits.bySession(session) || this.team.run(session)) return;
-		const pim = this.personas.ofSession(session);
-		const wanted = [...this.extensions.abilitiesOf(pim.base), ...this.#appExtensionsOf(pim)];
+		const agent = this.agents.ofSession(session);
+		const wanted = [...this.extensions.abilitiesOf(agent.blueprint), ...this.#appExtensionsOf(agent)];
 		const key = wanted.join(" ");
-		if ((this.personas.abilities(session) ?? "") === key) return;
+		if ((this.agents.abilities(session) ?? "") === key) return;
 		const snapshot = this.registry.snapshot();
 		const add = wanted.flatMap((name) => snapshot.extension(name) ?? []);
 		await (await this.harness.conversation(session)).configure({ extensions: add.length > 0 ? { add } : null }, BACKGROUND_CONTEXT);
-		this.personas.setAbilities(session, key);
+		this.agents.setAbilities(session, key);
 	}
 
-	/** A copy's base, if this deployment still has it; else the copy builds on the default base. */
-	#installedBase(input: PersonaInput): PersonaInput {
-		return input.base && !this.extensions.base(input.base) ? { ...input, base: undefined } : input;
+	/** A copy's blueprint, if this deployment still has it; else the copy builds on the default blueprint. */
+	#installedBlueprint(input: AgentInput): AgentInput {
+		return input.blueprint && !this.extensions.blueprint(input.blueprint) ? { ...input, blueprint: undefined } : input;
 	}
 
-	/** A base given through the API must be a base some installed extension brings. */
-	#checkBase(input: PersonaInput): PersonaInput {
-		if (input.base && !this.extensions.base(input.base)) throw new HttpError(400, `No installed extension brings the base ${input.base}`);
+	/** A blueprint given through the API must be a blueprint some installed extension brings. */
+	#checkBlueprint(input: AgentInput): AgentInput {
+		if (input.blueprint && !this.extensions.blueprint(input.blueprint)) throw new HttpError(400, `No installed extension brings the blueprint ${input.blueprint}`);
 		return input;
 	}
 
 	/**
-	 * A Pim's dashboard: the widgets of the base it builds on, each
-	 * loaded for this Pim. One that fails shows as failed; the others still load.
+	 * An agent's dashboard: the widgets of the blueprint it builds on, each
+	 * loaded for this agent. One that fails shows as failed; the others still load.
 	 */
-	async #dashboard(pim: Persona, locale: string) {
-		const base = pim.base === null ? undefined : this.extensions.base(pim.base);
-		const widgets = await Promise.all((base?.dashboard ?? []).map((ref) => this.#loadWidget(pim, ref)));
+	async #dashboard(agent: Agent, locale: string) {
+		const blueprint = agent.blueprint === null ? undefined : this.extensions.blueprint(agent.blueprint);
+		const widgets = await Promise.all((blueprint?.dashboard ?? []).map((ref) => this.#loadWidget(agent, ref)));
 		return {
-			pim: { id: pim.id, name: pim.name, description: pim.description, default: pim.default, base: pim.base, icon: pim.icon },
-			starters: (base?.starters ?? []).map((starter) => localize(starter, locale)),
+			agent: { id: agent.id, name: agent.name, description: agent.description, default: agent.default, blueprint: agent.blueprint, icon: agent.icon },
+			starters: (blueprint?.starters ?? []).map((starter) => localize(starter, locale)),
 			widgets: widgets.map((widget) => ({ ...widget, title: localize(widget.title, locale), empty: localize(widget.empty, locale) })),
 		};
 	}
 
-	/** Loads an installed widget for one of the owner's Pims. One that throws comes back failed. */
-	async #loadWidget(pim: Persona, ref: string): Promise<ShownWidget> {
+	/** Loads an installed widget for one of the owner's agents. One that throws comes back failed. */
+	async #loadWidget(agent: Agent, ref: string): Promise<ShownWidget> {
 		const widget = this.extensions.widget(ref)!;
 		const deleted = this.store.deletedSessions();
 		const context: WidgetContext = {
-			pim: { id: pim.id, name: pim.name, default: pim.default },
+			agent: { id: agent.id, name: agent.name, default: agent.default },
 			timeZone: this.settings().timeZone,
 			chatOf: (session) => {
 				// A team member's conversation works for the chat that gave it its task.
 				const chat = this.team.run(session)?.session ?? session;
 				if (deleted.has(chat) || this.visits.bySession(chat)) return null;
-				return this.personas.ofSession(chat).id === pim.id ? chat : null;
+				return this.agents.ofSession(chat).id === agent.id ? chat : null;
 			},
 			data: this.extensionData.for(ref.slice(0, ref.indexOf("/"))),
 		};
@@ -1632,13 +1632,13 @@ export class Pim extends Agent<Env> {
 
 	/**
 	 * The widgets a chat can show with its messages: Pim's own, and those of
-	 * the extensions its Pim builds on and uses, each with a description for
+	 * the extensions its agent builds on and uses, each with a description for
 	 * the model. None in a visit, or in a team member's conversation.
 	 */
 	#chatWidgets(session: string): { ref: string; description: string }[] {
 		if (this.visits.bySession(session) || this.team.run(session)) return [];
-		const base = this.personas.ofSession(session).base;
-		const extensions = new Set([...BUILT_IN_WIDGETS, ...(base ? [base.slice(0, base.indexOf("/"))] : []), ...this.extensions.abilitiesOf(base)]);
+		const blueprint = this.agents.ofSession(session).blueprint;
+		const extensions = new Set([...BUILT_IN_WIDGETS, ...(blueprint ? [blueprint.slice(0, blueprint.indexOf("/"))] : []), ...this.extensions.abilitiesOf(blueprint)]);
 		return this.extensions.list().flatMap((extension) =>
 			extensions.has(extension.id)
 				? Object.entries(extension.widgets ?? {}).flatMap(([name, widget]) =>
@@ -1648,26 +1648,26 @@ export class Pim extends Agent<Env> {
 		);
 	}
 
-	/** The Pim a chat talks with; none in a visit, which talks with someone else's. */
-	#personaRef(session: string): { id: string; name: string } | null {
+	/** The agent a chat talks with; none in a visit, which talks with someone else's. */
+	#agentRef(session: string): { id: string; name: string } | null {
 		if (this.visits.bySession(session)) return null;
-		const persona = this.personas.ofSession(session);
-		return { id: persona.id, name: persona.name };
+		const agent = this.agents.ofSession(session);
+		return { id: agent.id, name: agent.name };
 	}
 
-	/** One of the owner's Pims, for the Worker to publish to the gallery. */
-	async personaToPublish(id: string): Promise<Persona | null> {
+	/** One of the owner's agents, for the Worker to publish to the gallery. */
+	async agentToPublish(id: string): Promise<Agent | null> {
 		this.#assertOpen();
-		return this.personas.get(id) ?? null;
+		return this.agents.get(id) ?? null;
 	}
 
-	/** Records which template a Pim is published as; null once unpublished. */
-	async setPersonaPublished(id: string, template: string | null): Promise<void> {
+	/** Records which template an agent is published as; null once unpublished. */
+	async setAgentPublished(id: string, template: string | null): Promise<void> {
 		this.#assertOpen();
-		if (this.personas.get(id)) this.personas.setPublished(id, template);
+		if (this.agents.get(id)) this.agents.setPublished(id, template);
 	}
 
-	/** Makes a published template one of the owner's Pims: a copy of it, theirs to change. */
+	/** Makes a published template one of the owner's agents: a copy of it, theirs to change. */
 	async adoptTemplate(template: {
 		id: string;
 		author: string;
@@ -1676,18 +1676,18 @@ export class Pim extends Agent<Env> {
 		instructions: string;
 		apps: readonly { name: string; url: string }[];
 		team: readonly TeamMember[];
-		base: string | null;
-	}): Promise<Persona> {
+		blueprint: string | null;
+	}): Promise<Agent> {
 		this.#assertOpen();
-		const input = this.#installedBase(personaInput({ ...template }));
-		return this.personas.create(input, { template: template.id, author: template.author });
+		const input = this.#installedBlueprint(agentInput({ ...template }));
+		return this.agents.create(input, { template: template.id, author: template.author });
 	}
 
-	/** At registration: makes the default Pim a copy of the one the admin chose for everyone. */
-	async adoptDefaultPim(pim: PersonaInput & { author: string }): Promise<Persona> {
+	/** At registration: makes the default agent a copy of the one the admin chose for everyone. */
+	async adoptDefaultAgent(agent: AgentInput & { author: string }): Promise<Agent> {
 		this.#assertOpen();
-		const { author, ...input } = pim;
-		return this.personas.replaceDefault(this.#installedBase(personaInput({ ...input })), { template: "default", author });
+		const { author, ...input } = agent;
+		return this.agents.replaceDefault(this.#installedBlueprint(agentInput({ ...input })), { template: "default", author });
 	}
 
 	// Visits: Pims shared with this one's owner, and their conversations with them.
@@ -1783,13 +1783,13 @@ export class Pim extends Agent<Env> {
 			.map(({ tool }) => ({ name: tool.name, description: tool.description, requiresApproval: gated.has(tool.name) }));
 	}
 
-	// Hosting: what the Worker in front tells the agent about its owner.
+	// Hosting: what the Worker in front tells the Pim about its owner.
 
-	/** Set while `deleteEverything` runs: the agent takes nothing new. */
+	/** Set while `deleteEverything` runs: the Pim takes nothing new. */
 	#erasing = false;
 
 	/**
-	 * Whether the agent is erased, or being erased. An erased agent keeps
+	 * Whether the Pim is erased, or being erased. An erased Pim keeps
 	 * only its mark and refuses everything: requests, sockets, alarms and the
 	 * Worker's own writes. The check is here, in the one object every
 	 * request reaches, so a request a Worker authorized before the deletion
@@ -1803,7 +1803,7 @@ export class Pim extends Agent<Env> {
 		if (this.#closed()) throw new HttpError(410, "This Pim was erased");
 	}
 
-	/** Every request comes through the Worker, which names the owner it resolved: it must be this agent's. */
+	/** Every request comes through the Worker, which names the owner it resolved: it must be this Pim's. */
 	override async fetch(request: Request): Promise<Response> {
 		if (request.headers.get(OWNER_HEADER) !== this.name) {
 			console.error(JSON.stringify({ event: "pim.misrouted", agent: this.name }));
@@ -1824,7 +1824,7 @@ export class Pim extends Agent<Env> {
 		return super.alarm();
 	}
 
-	/** Records who owns this agent and where it is served, so callbacks and pushes use that address. */
+	/** Records who owns this Pim and where it is served, so callbacks and pushes use that address. */
 	async provision(profile: OwnerProfile): Promise<void> {
 		this.#assertOpen();
 		if (profile.ownerId !== this.name) throw new Error(`Owner ${profile.ownerId} is not this agent's (${this.name})`);
@@ -1847,7 +1847,7 @@ export class Pim extends Agent<Env> {
 		return settings;
 	}
 
-	/** Suspends or restores the agent. Suspending stops its runs and closes its sockets; its data stays. */
+	/** Suspends or restores the Pim. Suspending stops its runs and closes its sockets; its data stays. */
 	async setStatus(status: OwnerStatus): Promise<void> {
 		this.#assertOpen();
 		if (status === "active") this.store.deleteMeta(STATUS_KEY);
@@ -1858,7 +1858,7 @@ export class Pim extends Agent<Env> {
 		}
 	}
 
-	/** This agent's own limits, over the deployment's; null goes back to the deployment's. */
+	/** This Pim's own limits, over the deployment's; null goes back to the deployment's. */
 	async setLimits(limits: Partial<Limits> | null): Promise<Limits> {
 		this.#assertOpen();
 		if (limits === null) this.store.deleteMeta(LIMITS_KEY);
@@ -1912,7 +1912,7 @@ export class Pim extends Agent<Env> {
 			approvals: this.store.approvals(),
 			permissions: this.store.toolPermissions(),
 			circles: this.#describeCircles(),
-			personas: this.personas.list(),
+			agents: this.agents.list(),
 			guestActivity: this.circles.activity(500),
 			sharedWithMe: this.visits.shares().map(({ ownerId, username, sharedAt, revoked }) => ({ ownerId, username, sharedAt, revoked })),
 			notifications: this.store.notifications({ unread: false }),
@@ -1924,9 +1924,9 @@ export class Pim extends Agent<Env> {
 	}
 
 	/**
-	 * What of the person's data this agent still holds; nothing once
+	 * What of the person's data this Pim still holds; nothing once
 	 * `deleteEverything` has run. A deletion counts as done only when this
-	 * says so, since destroying the agent ends the call that asked for it.
+	 * says so, since destroying the Pim ends the call that asked for it.
 	 */
 	async remainingData(): Promise<string[]> {
 		const remaining = this.store.remainingData();
@@ -1938,13 +1938,13 @@ export class Pim extends Agent<Env> {
 		return remaining;
 	}
 
-	/** Whether the agent is erased, and what of the person's data it still holds; a finished deletion is both. */
+	/** Whether the Pim is erased, and what of the person's data it still holds; a finished deletion is both. */
 	async erasure(): Promise<{ sealed: boolean; remaining: string[] }> {
 		return { sealed: this.store.erasedAt() !== null, remaining: await this.remainingData() };
 	}
 
 	/**
-	 * Erases the agent: stops its runs, ends apps' event subscriptions,
+	 * Erases the Pim: stops its runs, ends apps' event subscriptions,
 	 * closes its sockets, wipes its storage (alarms included), then marks it
 	 * erased, flushes the mark, and ends this instance, so nothing that was
 	 * under way here can write afterwards. Later instances find the mark and
@@ -2053,7 +2053,7 @@ export class Pim extends Agent<Env> {
 						createdAt: info?.createdAt ?? null,
 						updatedAt: info?.updatedAt ?? null,
 						visit: visit ? { username: visit.username, available: !visit.revoked } : null,
-						persona: this.#personaRef(session.id),
+						agent: this.#agentRef(session.id),
 					};
 				});
 				// Most recently active first; sessions never used last.
@@ -2064,8 +2064,8 @@ export class Pim extends Agent<Env> {
 			"POST",
 			"/sessions",
 			async (_params, request) => {
-				const { title, persona: personaId } = await readJson<{ title: string; persona: string }>(request);
-				const persona = personaId === undefined ? undefined : this.#persona(personaId);
+				const { title, agent: agentId } = await readJson<{ title: string; agent: string }>(request);
+				const agent = agentId === undefined ? undefined : this.#agent(agentId);
 				const { sessions } = this.limits();
 				if (sessions !== null) {
 					const hidden = this.#hiddenSessions();
@@ -2074,10 +2074,10 @@ export class Pim extends Agent<Env> {
 				}
 				const { id } = await this.harness.sessions.create();
 				await this.harness.session(id).setModel(this.chosenModel());
-				// Tied to its Pim, so it stays with it when another becomes the default.
-				this.personas.setSession(id, (persona ?? this.personas.default()).id);
+				// Tied to its agent, so it stays with it when another becomes the default.
+				this.agents.setSession(id, (agent ?? this.agents.default()).id);
 				this.store.touchSession(id, typeof title === "string" && title.trim() !== "" ? clipTitle(title) : undefined);
-				return { id, ...this.store.sessionInfo(id), persona: this.#personaRef(id) };
+				return { id, ...this.store.sessionInfo(id), agent: this.#agentRef(id) };
 			},
 		],
 		[
@@ -2169,7 +2169,7 @@ export class Pim extends Agent<Env> {
 				}
 			},
 		],
-		// What a chat's Pim handed its team, and each member's conversation, read-only.
+		// What a chat's agent handed its team, and each member's conversation, read-only.
 		[
 			"GET",
 			"/sessions/:session/team",
@@ -2583,22 +2583,22 @@ export class Pim extends Agent<Env> {
 			},
 		],
 
-		// The owner's Pims: named agents with their own instructions, the default one first.
-		["GET", "/personas", () => ({ personas: this.personas.list() })],
-		["GET", "/personas/:persona", ({ persona }) => this.#persona(persona!)],
+		// The owner's agents, the default one first.
+		["GET", "/agents", () => ({ agents: this.agents.list() })],
+		["GET", "/agents/:agent", ({ agent }) => this.#agent(agent!)],
 		[
 			"POST",
-			"/personas",
+			"/agents",
 			async (_params, request) => {
-				const persona = this.personas.create(this.#checkBase(personaInput(await readJson<Record<string, unknown>>(request))));
-				return Response.json(persona, { status: 201 });
+				const agent = this.agents.create(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request))));
+				return Response.json(agent, { status: 201 });
 			},
 		],
 		[
 			"PUT",
-			"/personas/:persona",
-			async ({ persona: id }, request) => {
-				return this.personas.update(id!, this.#checkBase(personaInput(await readJson<Record<string, unknown>>(request), this.#persona(id!))));
+			"/agents/:agent",
+			async ({ agent: id }, request) => {
+				return this.agents.update(id!, this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request), this.#agent(id!))));
 			},
 		],
 		// What a model provider fetches; the signature, not the API token, lets it in.
@@ -2631,11 +2631,11 @@ export class Pim extends Agent<Env> {
 		],
 		[
 			"GET",
-			"/personas/:persona/icon",
-			({ persona: id }) => {
-				this.#persona(id!);
-				const icon = this.personas.icon(id!);
-				if (!icon) throw new HttpError(404, "This Pim has no icon");
+			"/agents/:agent/icon",
+			({ agent: id }) => {
+				this.#agent(id!);
+				const icon = this.agents.icon(id!);
+				if (!icon) throw new HttpError(404, "This agent has no icon");
 				return new Response(icon.data, {
 					headers: { "content-type": icon.type, "x-content-type-options": "nosniff", "cache-control": "private, max-age=31536000, immutable" },
 				});
@@ -2643,35 +2643,35 @@ export class Pim extends Agent<Env> {
 		],
 		[
 			"PUT",
-			"/personas/:persona/icon",
-			async ({ persona: id }, request) => {
-				this.#persona(id!);
+			"/agents/:agent/icon",
+			async ({ agent: id }, request) => {
+				this.#agent(id!);
 				const type = (request.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
-				this.personas.setIcon(id!, type, await request.arrayBuffer());
-				return this.#persona(id!);
+				this.agents.setIcon(id!, type, await request.arrayBuffer());
+				return this.#agent(id!);
 			},
 		],
 		[
 			"DELETE",
-			"/personas/:persona/icon",
-			({ persona: id }) => {
-				this.#persona(id!);
-				this.personas.removeIcon(id!);
-				return this.#persona(id!);
+			"/agents/:agent/icon",
+			({ agent: id }) => {
+				this.#agent(id!);
+				this.agents.removeIcon(id!);
+				return this.#agent(id!);
 			},
 		],
 		[
 			"POST",
-			"/personas/:persona/default",
-			async ({ persona: id }) => {
-				this.#persona(id!);
-				// Chats tied to no Pim are the current default's: tie them to it first, so they stay with it.
-				this.personas.tieToDefault((await this.harness.sessions.list()).map((session) => session.id));
-				this.personas.setDefault(id!);
-				return this.personas.get(id!);
+			"/agents/:agent/default",
+			async ({ agent: id }) => {
+				this.#agent(id!);
+				// Chats tied to no agent are the current default's: tie them to it first, so they stay with it.
+				this.agents.tieToDefault((await this.harness.sessions.list()).map((session) => session.id));
+				this.agents.setDefault(id!);
+				return this.agents.get(id!);
 			},
 		],
-		["GET", "/personas/:persona/dashboard", ({ persona }, _request, url) => this.#dashboard(this.#persona(persona!), url.searchParams.get("locale") ?? "en")],
+		["GET", "/agents/:agent/dashboard", ({ agent }, _request, url) => this.#dashboard(this.#agent(agent!), url.searchParams.get("locale") ?? "en")],
 		[
 			"GET",
 			"/extensions",
@@ -2680,23 +2680,23 @@ export class Pim extends Agent<Env> {
 					id: extension.id,
 					name: extension.name,
 					description: extension.description,
-					bases: (extension.bases ?? []).map((base) => ({
-						ref: `${extension.id}/${base.id}`,
-						name: base.name,
-						description: base.description,
-						apps: base.apps ?? [],
+					blueprints: (extension.blueprints ?? []).map((blueprint) => ({
+						ref: `${extension.id}/${blueprint.id}`,
+						name: blueprint.name,
+						description: blueprint.description,
+						apps: blueprint.apps ?? [],
 					})),
 					widgets: Object.keys(extension.widgets ?? {}).map((widget) => `${extension.id}/${widget}`),
 				})),
-				defaultBase: this.extensions.defaultBase,
+				defaultBlueprint: this.extensions.defaultBlueprint,
 			}),
 		],
 		[
 			"DELETE",
-			"/personas/:persona",
-			async ({ persona: id }) => {
-				this.#persona(id!);
-				this.personas.delete(id!);
+			"/agents/:agent",
+			async ({ agent: id }) => {
+				this.#agent(id!);
+				this.agents.delete(id!);
 				return { deleted: true };
 			},
 		],
@@ -2894,16 +2894,16 @@ export class Pim extends Agent<Env> {
 		return { ...settings, approvalTimeoutSeconds: timeout === null ? null : timeout / 1000 };
 	}
 
-	/** How every Pim works, and the person's Pims: rebuilt when whether `update_pim` asks first changes. */
-	#personaExtension(services: PimServices) {
-		return personaExtension(
+	/** How every agent works, and the person's agents: rebuilt when whether `update_agent` asks first changes. */
+	#agentExtension(services: PimServices) {
+		return agentExtension(
 			services,
 			(session) => this.#roleOf(session),
-			(pim) => (pim.base === null ? undefined : this.extensions.base(pim.base)),
+			(agent) => (agent.blueprint === null ? undefined : this.extensions.blueprint(agent.blueprint)),
 			{
-				list: () => this.personas.list(),
-				bases: () => this.extensions.bases().map(({ ref, base }) => ({ ref, name: base.name, description: base.description })),
-				create: (input) => this.personas.create(this.#checkBase(personaInput(input))),
+				list: () => this.agents.list(),
+				blueprints: () => this.extensions.blueprints().map(({ ref, blueprint }) => ({ ref, name: blueprint.name, description: blueprint.description })),
+				create: (input) => this.agents.create(this.#checkBlueprint(agentInput(input))),
 			},
 		);
 	}
@@ -2912,7 +2912,7 @@ export class Pim extends Agent<Env> {
 	#reinstallApprovals(): void {
 		if (!this.registry.snapshot().extension("pim.approvals")) return;
 		const services = this.services();
-		this.registry.install(this.#personaExtension(services));
+		this.registry.install(this.#agentExtension(services));
 		this.registry.install(approvalsExtension(services, this.#ownActions));
 		this.#installAbilities(services);
 		this.#installApps();
@@ -2929,11 +2929,11 @@ export class Pim extends Agent<Env> {
 	#describeApps() {
 		const catalog = this.apps.tools();
 		const servers = this.apps.servers();
-		const pims = this.personas.list().map((pim) => ({ name: pim.name, servers: new Set(this.#appsOf(pim).map((app) => serverFor(servers, app)?.id)) }));
+		const agents = this.agents.list().map((agent) => ({ name: agent.name, servers: new Set(this.#appsOf(agent).map((app) => serverFor(servers, app)?.id)) }));
 		return servers.map((server) => ({
 			...server,
-			// The person's Pims that list the app: only their chats get its tools.
-			pims: pims.filter((pim) => pim.servers.has(server.id)).map((pim) => pim.name),
+			// The person's agents that list the app: only their chats get its tools.
+			agents: agents.filter((agent) => agent.servers.has(server.id)).map((agent) => agent.name),
 			tools: catalog
 				.filter((tool) => tool.serverId === server.id)
 				.map((tool) => {

@@ -10,7 +10,7 @@ import type { Models } from "@earendil-works/pi-ai/models";
 import { HttpError } from "./http";
 
 /**
- * What this agent has used, by UTC day, and the limits on it. Members have
+ * What this Pim has used, by UTC day, and the limits on it. Members have
  * the limits `PIM_LIMITS` sets, if any; the admin has none, and can change
  * anyone's.
  *
@@ -31,7 +31,7 @@ export type Limits = {
 	readonly schedules: number | null;
 	/** Connected apps. */
 	readonly apps: number | null;
-	/** The agent's database, in bytes. */
+	/** The Pim's database, in bytes. */
 	readonly storageBytes: number | null;
 	/** Artifacts kept. */
 	readonly artifacts: number | null;

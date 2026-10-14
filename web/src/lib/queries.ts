@@ -59,8 +59,8 @@ export const artifactVersionQuery = (id: string, version: number) =>
     retry: false,
   });
 
-export const personasQuery = () =>
-  queryOptions({ queryKey: ["personas"], queryFn: pim.personas });
+export const agentsQuery = () =>
+  queryOptions({ queryKey: ["agents"], queryFn: pim.agents });
 
 /** The deployment's extensions: they change only with a deploy. */
 export const extensionsQuery = () =>
@@ -70,7 +70,7 @@ export const extensionsQuery = () =>
     staleTime: Number.POSITIVE_INFINITY,
   });
 
-/** A Pim's dashboard. Refetched when Pim's activity or the Pim itself changes. */
+/** An agent's dashboard. Refetched when Pim's activity or the agent itself changes. */
 export const dashboardQuery = (id: string, locale: string) =>
   queryOptions({
     queryKey: ["dashboard", id, locale],
@@ -78,9 +78,9 @@ export const dashboardQuery = (id: string, locale: string) =>
     retry: false,
   });
 
-/** The Pim everyone who joins starts with: the admin's view. */
-export const defaultPimQuery = () =>
-  queryOptions({ queryKey: ["default-pim"], queryFn: admin.defaultPim });
+/** The agent everyone who joins starts with: the admin's view. */
+export const defaultAgentQuery = () =>
+  queryOptions({ queryKey: ["default-agent"], queryFn: admin.defaultAgent });
 
 export const profileQuery = () =>
   queryOptions({ queryKey: ["profile"], queryFn: pim.profile });

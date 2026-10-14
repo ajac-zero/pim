@@ -221,7 +221,7 @@ describe("settings", () => {
 	});
 });
 
-describe("the agent's own checks", () => {
+describe("the Pim's own checks", () => {
 	it("refuses a request the Worker didn't route to it", async () => {
 		const stub = agent();
 		expect((await stub.fetch(url("/sessions"))).status).toBe(421);

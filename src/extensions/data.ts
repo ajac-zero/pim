@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS pim_extension_data (
 const MAX_KEY = 512;
 
 /**
- * Extensions' data in a person's agent: each extension sees only its own
+ * Extensions' data in a person's Pim: each extension sees only its own
  * keys. It goes with the person's export, and with their account.
  */
 export class ExtensionDataStore {

@@ -2,7 +2,7 @@ import { createModels, type Models } from "@earendil-works/pi-ai/models";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import type { HarnessSettings, ModelRef } from "@earendil-works/pi-durable";
 import type { PiModel } from "agents/harness/pi";
-import { Pim as RealPim } from "../src/agent";
+import { Pim as RealPim } from "../src/pim";
 import type { Mail, Mailer } from "../src/email";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, section } from "@earendil-works/pi-durable";
@@ -22,7 +22,7 @@ export const outbox: Mail[] = [];
 type Bill = { name: string; amount: number; due: string; paid: boolean };
 
 /**
- * A deployment's own extension, as tests install it: a base with a dashboard
+ * A deployment's own extension, as tests install it: a blueprint with a dashboard
  * mixing its own widgets with Pim's, one of which always fails, and an
  * ability that keeps bills in the extension's data: a tool to add one, an
  * action that asks before paying one, and a section listing them.
@@ -83,7 +83,7 @@ export const ledger = definePimExtension({
 			},
 		},
 	},
-	bases: [
+	blueprints: [
 		{
 			id: "budget",
 			name: "Budget",

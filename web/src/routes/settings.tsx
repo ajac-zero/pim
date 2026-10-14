@@ -395,8 +395,8 @@ function ProfileSection() {
 }
 
 /**
- * The apps you connected, with the Pims that work with each: only their
- * chats get its tools. An app no Pim lists can only be removed here.
+ * The apps you connected, with the agents that work with each: only their
+ * chats get its tools. An app no agent lists can only be removed here.
  */
 function ConnectedAppsSection() {
   const { t } = useI18n();
@@ -466,8 +466,8 @@ function ConnectedAppsSection() {
                   {app.url}
                 </span>
                 <span className="block truncate text-muted-foreground text-xs">
-                  {app.pims.length > 0
-                    ? t("appUsedBy", { pims: app.pims.join(", ") })
+                  {app.agents.length > 0
+                    ? t("appUsedBy", { agents: app.agents.join(", ") })
                     : t("appUnused")}
                   {app.state === "ready" &&
                     ` · ${t("toolCount", { count: app.tools.length })}`}

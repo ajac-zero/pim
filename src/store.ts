@@ -1,7 +1,7 @@
 /**
  * Pim's own state, in the Durable Object's SQLite database next to pi's
  * tables (pi's are prefixed `pi_`, the SDK's `cf_`, long-term memory's
- * `optmem_`). Each agent has its own database, so everything here belongs
+ * `optmem_`). Each Pim has its own database, so everything here belongs
  * to its one owner.
  */
 
@@ -329,7 +329,7 @@ export class PimStore {
 	readonly #sql: SqlStorage;
 
 	/**
-	 * When this agent was erased, or null. The mark is written right after
+	 * When this Pim was erased, or null. The mark is written right after
 	 * the wipe and is the only thing an erased agent keeps: it refuses every
 	 * request from then on, so nothing can be written to it again.
 	 */
@@ -338,7 +338,7 @@ export class PimStore {
 		return row ? Number(row.erased_at) : null;
 	}
 
-	/** Marks the agent erased; after `deleteAll`, so it makes its own table. */
+	/** Marks the Pim erased; after `deleteAll`, so it makes its own table. */
 	markErased(now: number): void {
 		this.#sql.exec(ERASED_SCHEMA);
 		this.#sql.exec("INSERT INTO pim_erased (erased_at) VALUES (?)", now);
@@ -346,7 +346,7 @@ export class PimStore {
 
 	/**
 	 * Which kinds of the person's data this database still holds, by table:
-	 * none once the agent is erased. Conversations are pi's (`pi_entries`).
+	 * none once the Pim is erased. Conversations are pi's (`pi_entries`).
 	 */
 	remainingData(): string[] {
 		const remaining: string[] = [];
@@ -359,9 +359,9 @@ export class PimStore {
 			pim_circle_members: "circle members",
 			pim_guest_activity: "guest activity",
 			pim_guest_calls: "guest calls",
-			pim_personas: "Pims",
-			pim_team_runs: "Pims' team work",
-			pim_persona_sessions: "Pims' chats",
+			pim_agents: "Agents",
+			pim_team_runs: "Agents' team work",
+			pim_agent_sessions: "Agents' chats",
 			pim_shares: "Pims shared with them",
 			pim_mcp_servers: "apps",
 			pim_app_watches: "watches",

@@ -5,12 +5,12 @@ import { checkToolNames, PimExtensions } from "../src/extensions/define";
 import { api, decisionRun, pendingApproval, post, say, systemPrompt, toolUse } from "./helpers";
 import { faux, ledger, outbox } from "./worker";
 
-type Persona = { id: string; name: string; base: string | null; default: boolean };
+type Agent = { id: string; name: string; blueprint: string | null; default: boolean };
 
 /** A message's result as API clients get it: what Pim sent, in order. */
 const ask = async (content: string, session: string) => (await say(content, session)) as unknown as { replies: string[] };
 
-const dashboard = async (pim: Persona, locale = "en") => (await api(`/personas/${pim.id}/dashboard?locale=${locale}`)).body;
+const dashboard = async (agent: Agent, locale = "en") => (await api(`/agents/${agent.id}/dashboard?locale=${locale}`)).body;
 const widget = (board: { widgets: { id: string }[] }, id: string) => board.widgets.find((candidate) => candidate.id === id) as any;
 type Request = { messages: Message[] };
 
@@ -25,19 +25,19 @@ const offered = ({ messages }: Request) => {
 	return [...tools];
 };
 
-const personaOf = async (session: string) =>
-	(await api("/sessions")).body.sessions.find((candidate: { id: string }) => candidate.id === session).persona;
+const agentOf = async (session: string) =>
+	(await api("/sessions")).body.sessions.find((candidate: { id: string }) => candidate.id === session).agent;
 
 describe("extensions", () => {
 	it("checks a deployment's extensions before anything uses them", () => {
 		expect(() => new PimExtensions([ledger, ledger], null)).toThrow("Two extensions are called test.ledger");
 		// A dashboard naming a widget nobody brings would draw nothing: refused.
-		const typo = { ...ledger, bases: [{ ...ledger.bases![0]!, dashboard: ["test.ledger/bils"] }] };
+		const typo = { ...ledger, blueprints: [{ ...ledger.blueprints![0]!, dashboard: ["test.ledger/bils"] }] };
 		expect(() => new PimExtensions([typo], null)).toThrow("test.ledger/budget's dashboard shows test.ledger/bils");
-		expect(() => new PimExtensions([{ ...ledger, bases: [] }], "test.ledger/budget")).toThrow("The default base test.ledger/budget");
-		const borrows = { ...ledger, id: "test.other", bases: [{ ...ledger.bases![0]!, dashboard: [], abilities: ["test.nothing"] }] };
+		expect(() => new PimExtensions([{ ...ledger, blueprints: [] }], "test.ledger/budget")).toThrow("The default blueprint test.ledger/budget");
+		const borrows = { ...ledger, id: "test.other", blueprints: [{ ...ledger.blueprints![0]!, dashboard: [], abilities: ["test.nothing"] }] };
 		expect(() => new PimExtensions([borrows], null)).toThrow("test.other/budget uses the ability of test.nothing");
-		const insecure = { ...ledger, bases: [{ ...ledger.bases![0]!, dashboard: [], apps: [{ name: "Notes", url: "http://notes.example.test/mcp" }] }] };
+		const insecure = { ...ledger, blueprints: [{ ...ledger.blueprints![0]!, dashboard: [], apps: [{ name: "Notes", url: "http://notes.example.test/mcp" }] }] };
 		expect(() => new PimExtensions([insecure], null)).toThrow("test.ledger/budget lists an app without a name, an https URL");
 		// An ability can't take a tool's name, Pim's or another extension's: pi would let it stand in for that tool.
 		const ability = (name: string) => ({ actions: [{ name, description: "", parameters: {} as never, summarize: () => "", run: async () => "" }] });
@@ -47,21 +47,21 @@ describe("extensions", () => {
 		expect(() => checkToolNames([{ id: "a", ability: ability("pay") }, { id: "b", ability: ability("pay") }], [])).toThrow("b brings a tool named pay, which a already has");
 	});
 
-	it("builds each Pim on an extension's base: its instructions first, then the person's own", async () => {
-		const [mine] = (await api("/personas")).body.personas as Persona[];
-		expect(mine).toMatchObject({ name: "Pim", base: "pim.assistant/pim", default: true });
+	it("builds each agent on an extension's blueprint: its instructions first, then the person's own", async () => {
+		const [mine] = (await api("/agents")).body.agents as Agent[];
+		expect(mine).toMatchObject({ name: "Pim", blueprint: "pim.assistant/pim", default: true });
 		const { extensions } = (await api("/extensions")).body;
-		expect(extensions.flatMap((extension: { bases: { ref: string }[] }) => extension.bases.map((base) => base.ref))).toEqual([
+		expect(extensions.flatMap((extension: { blueprints: { ref: string }[] }) => extension.blueprints.map((blueprint) => blueprint.ref))).toEqual([
 			"pim.assistant/pim",
 			"test.ledger/budget",
 		]);
 
-		expect((await post("/personas", { name: "X", base: "Budget" })).status).toBe(400);
-		expect((await post("/personas", { name: "X", base: "test.ledger/nope" })).status).toBe(400);
-		const budget = (await post("/personas", { name: "Books", base: "test.ledger/budget", instructions: "Use euros." })).body as Persona;
-		const bare = (await post("/personas", { name: "Bare", base: null })).body as Persona;
-		// Left out, a new Pim builds on the deployment's default Pim.
-		expect((await post("/personas", { name: "Coach" })).body.base).toBe("pim.assistant/pim");
+		expect((await post("/agents", { name: "X", blueprint: "Budget" })).status).toBe(400);
+		expect((await post("/agents", { name: "X", blueprint: "test.ledger/nope" })).status).toBe(400);
+		const budget = (await post("/agents", { name: "Books", blueprint: "test.ledger/budget", instructions: "Use euros." })).body as Agent;
+		const bare = (await post("/agents", { name: "Bare", blueprint: null })).body as Agent;
+		// Left out, a new agent builds on the deployment's default blueprint.
+		expect((await post("/agents", { name: "Coach" })).body.blueprint).toBe("pim.assistant/pim");
 
 		const prompts: string[] = [];
 		const record = (context: { messages: Message[] }) => {
@@ -70,27 +70,27 @@ describe("extensions", () => {
 		};
 		faux.setResponses([record, record, record]);
 		await say("Hi", "1");
-		await say("Spent?", (await post("/sessions", { persona: budget.id })).body.id);
-		await say("Hello", (await post("/sessions", { persona: bare.id })).body.id);
+		await say("Spent?", (await post("/sessions", { agent: budget.id })).body.id);
+		await say("Hello", (await post("/sessions", { agent: bare.id })).body.id);
 		const [assistant, books, plain] = prompts as [string, string, string];
 
-		// Every Pim works the same way: the core preamble.
+		// Every agent works the same way: the core preamble.
 		for (const prompt of prompts) expect(prompt).toContain("They see only what you send with `send_to_user`");
-		// Pim's own Pim brings the assistant's habits; the others don't.
+		// Pim's own blueprint brings the assistant's habits; the others don't.
 		expect(assistant).toContain("Turn ambitions into plans.");
 		expect(books).not.toContain("Turn ambitions into plans.");
 		expect(plain).not.toContain("Turn ambitions into plans.");
-		// A Pim built on another: its name, then the extension's instructions, then the person's, which win.
+		// An agent built on another blueprint: its name, then the extension's instructions, then the person's, which win.
 		expect(books).toContain('In this conversation you are \\"Books\\".');
 		expect(books.indexOf("Answer every money question with a number first.")).toBeGreaterThan(books.indexOf('you are \\"Books\\"'));
 		expect(books.indexOf("Use euros.")).toBeGreaterThan(books.indexOf("Answer every money question"));
 		expect(plain).not.toContain("Answer every money question");
 	});
 
-	it("shows each Pim's dashboard, with what belongs to its chats", async () => {
-		const mine = ((await api("/personas")).body.personas as Persona[]).find((pim) => pim.default)!;
-		const coach = (await post("/personas", { name: "Run coach", team: [{ name: "Tracker", instructions: "Track goals." }] })).body as Persona;
-		const chat = (await post("/sessions", { persona: coach.id })).body.id;
+	it("shows each agent's dashboard, with what belongs to its chats", async () => {
+		const mine = ((await api("/agents")).body.agents as Agent[]).find((agent) => agent.default)!;
+		const coach = (await post("/agents", { name: "Run coach", team: [{ name: "Tracker", instructions: "Track goals." }] })).body as Agent;
+		const chat = (await post("/sessions", { agent: coach.id })).body.id;
 
 		faux.setResponses([
 			toolUse("schedule_task", { instruction: "Ask how the long run went.", label: "Long run check-in", delay_seconds: 3600 }),
@@ -111,7 +111,7 @@ describe("extensions", () => {
 		await api(`/memory/log/${forgotten.id}`, { method: "DELETE" });
 
 		const board = await dashboard(coach);
-		expect(board.pim).toMatchObject({ id: coach.id, name: "Run coach", default: false });
+		expect(board.agent).toMatchObject({ id: coach.id, name: "Run coach", default: false });
 		expect(board.starters).toEqual(["What can you do for me?", "Help me plan my week", "Start tracking a goal with me"]);
 		expect(board.widgets.map((shown: { id: string }) => shown.id)).toEqual([
 			"pim.schedule/upcoming",
@@ -129,12 +129,12 @@ describe("extensions", () => {
 			kind: "progress",
 			items: [{ title: "Run a 10k", value: 0, max: 2, detail: "Buy shoes", link: { chat } }],
 		});
-		// Memory is shared by every Pim; a forgotten memory is gone from it.
+		// Memory is shared by every agent; a forgotten memory is gone from it.
 		expect(widget(board, "pim.memory/recent").items.map((item: { title: string }) => item.title)).toEqual(["Prefers morning runs"]);
 		const artifact = widget(board, "pim.artifacts/recent").items;
 		expect(artifact).toMatchObject([{ title: "Training plan", link: { artifact: expect.any(String) } }]);
 
-		// The default Pim's dashboard shows its own chats' things, not the coach's.
+		// The default agent's dashboard shows its own chats' things, not the coach's.
 		const home = await dashboard(mine);
 		expect(widget(home, "pim.goals/active").items.map((item: { title: string }) => item.title)).toEqual(["Learn Portuguese"]);
 		expect(widget(home, "pim.schedule/upcoming").items).toEqual([]);
@@ -148,7 +148,7 @@ describe("extensions", () => {
 	});
 
 	it("draws a deployment extension's dashboard, and one widget failing leaves the rest", async () => {
-		const books = (await post("/personas", { name: "Household", base: "test.ledger/budget" })).body as Persona;
+		const books = (await post("/agents", { name: "Household", blueprint: "test.ledger/budget" })).body as Agent;
 		const board = await dashboard(books, "es");
 		expect(board.starters).toEqual(["¿Cuánto gasté?"]);
 		expect(board.widgets).toEqual([
@@ -156,44 +156,44 @@ describe("extensions", () => {
 			{ id: "test.ledger/broken", title: "Bank balance", empty: "", failed: true },
 			{ id: "pim.goals/active", title: "Metas", empty: expect.any(String), kind: "progress", items: [] },
 		]);
-		const bare = (await post("/personas", { name: "Blank", base: null })).body as Persona;
+		const bare = (await post("/agents", { name: "Blank", blueprint: null })).body as Agent;
 		expect(await dashboard(bare)).toMatchObject({ starters: [], widgets: [] });
 
-		// Published and made someone's own, a Pim keeps what it builds on; so does a Pim from nothing.
-		for (const [pim, base] of [
+		// Published and made someone's own, an agent keeps what it builds on; so does an agent from nothing.
+		for (const [agent, blueprint] of [
 			[books, "test.ledger/budget"],
 			[bare, null],
 		] as const) {
-			const template = (await post(`/personas/${pim.id}/publish`)).body;
-			expect(template.base).toBe(base);
-			expect((await post(`/templates/${template.id}/use`)).body.base).toBe(base);
+			const template = (await post(`/agents/${agent.id}/publish`)).body;
+			expect(template.blueprint).toBe(blueprint);
+			expect((await post(`/templates/${template.id}/use`)).body.blueprint).toBe(blueprint);
 		}
 	});
 
-	it("makes any Pim the default, and chats stay with the Pim they were started with", async () => {
-		const first = ((await api("/personas")).body.personas as Persona[]).find((pim) => pim.default)!;
-		const other = (await post("/personas", { name: "Planner" })).body as Persona;
+	it("makes any agent the default, and chats stay with the agent they were started with", async () => {
+		const first = ((await api("/agents")).body.agents as Agent[]).find((agent) => agent.default)!;
+		const other = (await post("/agents", { name: "Planner" })).body as Agent;
 		const before = (await post("/sessions", {})).body.id;
-		expect(await personaOf(before)).toEqual({ id: first.id, name: first.name });
+		expect(await agentOf(before)).toEqual({ id: first.id, name: first.name });
 
-		expect((await post(`/personas/${other.id}/default`)).body).toMatchObject({ id: other.id, default: true });
-		const personas = (await api("/personas")).body.personas as Persona[];
-		expect(personas.filter((pim) => pim.default).map((pim) => pim.id)).toEqual([other.id]);
+		expect((await post(`/agents/${other.id}/default`)).body).toMatchObject({ id: other.id, default: true });
+		const agents = (await api("/agents")).body.agents as Agent[];
+		expect(agents.filter((agent) => agent.default).map((agent) => agent.id)).toEqual([other.id]);
 		// The main chat and chats started with the old default stay with it; new ones get the new default.
-		expect(await personaOf(before)).toEqual({ id: first.id, name: first.name });
-		expect(await personaOf("1")).toEqual({ id: first.id, name: first.name });
-		expect((await post("/sessions", {})).body.persona).toEqual({ id: other.id, name: "Planner" });
+		expect(await agentOf(before)).toEqual({ id: first.id, name: first.name });
+		expect(await agentOf("1")).toEqual({ id: first.id, name: first.name });
+		expect((await post("/sessions", {})).body.agent).toEqual({ id: other.id, name: "Planner" });
 
-		// No longer the default, Pim's own Pim can be deleted: its chats go to the default.
-		expect((await api(`/personas/${other.id}`, { method: "DELETE" })).status).toBe(400);
-		expect((await api(`/personas/${first.id}`, { method: "DELETE" })).body).toEqual({ deleted: true });
-		expect(await personaOf(before)).toEqual({ id: other.id, name: "Planner" });
+		// No longer the default, Pim's own agent can be deleted: its chats go to the default.
+		expect((await api(`/agents/${other.id}`, { method: "DELETE" })).status).toBe(400);
+		expect((await api(`/agents/${first.id}`, { method: "DELETE" })).body).toEqual({ deleted: true });
+		expect(await agentOf(before)).toEqual({ id: other.id, name: "Planner" });
 	});
 
-	it("gives a Pim's chats, and its team, the abilities of the base it builds on, and only those", async () => {
+	it("gives an agent's chats, and its team, the abilities of the blueprint it builds on, and only those", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
-		const books = (await post("/personas", { name: "Books", base: "test.ledger/budget", team: [{ name: "Clerk", instructions: "File bills." }] })).body as Persona;
-		const chat = (await post("/sessions", { persona: books.id })).body.id;
+		const books = (await post("/agents", { name: "Books", blueprint: "test.ledger/budget", team: [{ name: "Clerk", instructions: "File bills." }] })).body as Agent;
+		const chat = (await post("/sessions", { agent: books.id })).body.id;
 
 		let seen: Request = { messages: [] };
 		let member: Request = { messages: [] };
@@ -210,7 +210,7 @@ describe("extensions", () => {
 		expect(systemPrompt(seen.messages)).toContain("Rent: 1850");
 		expect(widget(await dashboard(books), "test.ledger/bills").items).toEqual([{ title: "Rent: 1850", time: "2026-11-01T09:00:00.000Z" }]);
 
-		// The default Pim builds on Pim's own: no ledger in its chats.
+		// The default agent builds on Pim's own blueprint: no ledger in its chats.
 		let home: Request = { messages: [] };
 		faux.setResponses([
 			(context) => {
@@ -224,7 +224,7 @@ describe("extensions", () => {
 		expect(offered(home)).not.toContain("ledger_pay_bill");
 		expect(systemPrompt(home.messages)).not.toContain("ledger_bills");
 
-		// A team member works with its Pim's abilities.
+		// A team member works with its agent's abilities.
 		faux.setResponses([
 			toolUse("delegate", { tasks: [{ member: "Clerk", task: "File the rent." }] }),
 			(context) => {
@@ -252,9 +252,9 @@ describe("extensions", () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
 	});
 
-	it("gives a chat its Pim's new abilities from its next message when the Pim changes what it builds on", async () => {
-		const pim = (await post("/personas", { name: "Switcher" })).body as Persona;
-		const chat = (await post("/sessions", { persona: pim.id })).body.id;
+	it("gives a chat its agent's new abilities from its next message when the agent changes what it builds on", async () => {
+		const agent = (await post("/agents", { name: "Switcher" })).body as Agent;
+		const chat = (await post("/sessions", { agent: agent.id })).body.id;
 		const requests: Request[] = [];
 		const record = (context: Request) => {
 			requests.push(context);
@@ -262,9 +262,9 @@ describe("extensions", () => {
 		};
 		faux.setResponses([record, record, record]);
 		await say("One", chat);
-		await api(`/personas/${pim.id}`, { method: "PUT", body: JSON.stringify({ base: "test.ledger/budget" }) });
+		await api(`/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ blueprint: "test.ledger/budget" }) });
 		await say("Two", chat);
-		await api(`/personas/${pim.id}`, { method: "PUT", body: JSON.stringify({ base: null }) });
+		await api(`/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ blueprint: null }) });
 		await say("Three", chat);
 		expect(requests.map((request) => offered(request).includes("ledger_add_bill"))).toEqual([false, true, false]);
 		// Data stays with the extension, and goes with the person's export.
@@ -274,8 +274,8 @@ describe("extensions", () => {
 	});
 
 	it("shows widgets with a message, as they are when sent, and says so to the model and to clients that can't draw them", async () => {
-		const books = (await post("/personas", { name: "Home books", base: "test.ledger/budget" })).body as Persona;
-		const chat = (await post("/sessions", { persona: books.id })).body.id;
+		const books = (await post("/agents", { name: "Home books", blueprint: "test.ledger/budget" })).body as Agent;
+		const chat = (await post("/sessions", { agent: books.id })).body.id;
 		let prompt = "";
 		let result = "";
 		faux.setResponses([
@@ -291,7 +291,7 @@ describe("extensions", () => {
 		]);
 		const answer = await ask("Gas is 40, due December 1st. What's due?", chat);
 
-		// The model is offered the widgets that describe themselves, from Pim's own and its Pim's extension.
+		// The model is offered the widgets that describe themselves, from Pim's own and its agent's blueprint.
 		expect(prompt).toContain("- test.ledger/bills: Bills not paid yet, with when each is due.");
 		expect(prompt).toContain("- pim.goals/active:");
 		expect(prompt).not.toContain("test.ledger/broken");
@@ -309,7 +309,7 @@ describe("extensions", () => {
 			"Here's what's due.\n\n**Upcoming bills**\n- Gas: 40 · 2026-12-01T09:00:00.000Z\n\n**Goals**\nNo goals yet. Ask to start tracking one.",
 		]);
 
-		// A chat whose Pim doesn't use the ledger can't show its widget: nothing is sent, and the model is told what it can show.
+		// A chat whose agent doesn't use the ledger can't show its widget: nothing is sent, and the model is told what it can show.
 		const plain = (await post("/sessions", {})).body.id;
 		let refused = "";
 		let offered = "";

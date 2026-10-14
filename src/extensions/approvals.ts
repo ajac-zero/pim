@@ -55,7 +55,7 @@ export function ownToolPermission(store: PimStore, name: string): ResolvedPermis
 /**
  * An action with effects outside the conversation. The model can only ask
  * for it: calling the tool files an approval request and returns at once.
- * The agent runs `run` once the user approves, and the decision, with the
+ * The Pim runs `run` once the user approves, and the decision, with the
  * result, comes back to the conversation as a message, so a request can wait
  * as long as the user takes. Under the `auto` policy an unanswered request is
  * approved after a while, so autonomous work never stalls. Calls to a tool the

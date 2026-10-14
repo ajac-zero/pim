@@ -26,7 +26,7 @@
       { "name": "Auth", "class_name": "Auth" },
       // The accounts: usernames, the admin, invites, and erasing deleted accounts.
       { "name": "Directory", "class_name": "Directory" },
-      // Profiles, and Pims published for others on this Pim to make their own.
+      // Profiles, and agents published for others on this Pim to make their own.
       { "name": "Gallery", "class_name": "Gallery" }
     ]
   },

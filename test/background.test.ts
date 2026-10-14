@@ -166,7 +166,7 @@ describe("web push", () => {
 	const decoder = new TextDecoder();
 	const bytes = (text: string) => new TextEncoder().encode(text);
 
-	/** A browser's side of a push subscription, which can read what the agent sends it. */
+	/** A browser's side of a push subscription, which can read what the Pim sends it. */
 	async function browser(endpoint: string) {
 		const pair = (await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"])) as CryptoKeyPair;
 		const p256dh = new Uint8Array((await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer);

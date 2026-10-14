@@ -1,6 +1,6 @@
 import { serve } from "./gateway";
 
-export { Pim } from "./agent";
+export { Pim } from "./pim";
 export { Auth } from "./auth";
 export { Directory } from "./directory";
 export { Gallery } from "./gallery";

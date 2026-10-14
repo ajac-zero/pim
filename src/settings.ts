@@ -2,7 +2,7 @@ import { HttpError } from "./http";
 import type { PimStore } from "./store";
 
 /**
- * The person's own settings, kept in their agent's database. The time zone
+ * The person's own settings, kept in their Pim's database. The time zone
  * and approval policy fall back to the deployment's variables until the
  * person changes them.
  */

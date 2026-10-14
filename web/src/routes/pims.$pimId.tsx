@@ -11,7 +11,7 @@ import { useStartChat } from "~/lib/start-chat";
 
 /**
  * A Pim's dashboard: start a chat with it, and the widgets of the
- * extension's Pim it builds on, each loaded for this Pim.
+ * base it builds on, each loaded for this Pim.
  */
 export const Route = createFileRoute("/pims/$pimId")({
   component: DashboardPage,

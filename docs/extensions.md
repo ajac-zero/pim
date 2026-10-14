@@ -1,8 +1,8 @@
 # Extensions
 
-An extension is what a deployment adds to everyone's Pims: Pims to build on, abilities (tools, prompt sections, background work, and actions that ask first), and widgets for their dashboards. Its admin chooses them in code, in [`pim.config.ts`](../pim.config.ts), and deploys; the people on the Pim choose among what's there. Nothing is loaded at runtime.
+An extension is what a deployment adds to everyone's Pims: bases for Pims to build on, abilities (tools, prompt sections, background work, and actions that ask first), and widgets for their dashboards. Its admin chooses them in code, in [`pim.config.ts`](../pim.config.ts), and deploys; the people on the Pim choose among what's there. Nothing is loaded at runtime.
 
-Pim's own Pim is an extension too, [`pim.assistant`](../src/extensions/assistant.ts), written with the same API. A deployment can leave it out, and a person can make another Pim their default and delete theirs.
+Pim's own base is an extension too, [`pim.assistant`](../src/extensions/assistant.ts), written with the same API. A deployment can leave it out, and a person can make another Pim their default and delete theirs.
 
 ## Three layers
 
@@ -10,9 +10,10 @@ Pim's own Pim is an extension too, [`pim.assistant`](../src/extensions/assistant
 | --- | --- | --- |
 | Core | How every Pim works: talking through `send_to_user`, approvals, honesty, time. No Pim's instructions change it | The `preamble` section in [`src/extensions/persona.ts`](../src/extensions/persona.ts) |
 | Abilities | Tools, prompt sections, hooks and background tasks, plus actions that ask first and widgets. Pim's own (goals, schedules, memory, artifacts, teams, the web) are every Pim's; an extension's go only to the Pims that use it | `src/extensions/`, and extensions' `ability` |
-| Pims | A name, instructions, the abilities it uses, the apps it works with, a dashboard and starters, defined by an extension; people's own Pims build on one | Extensions in `pim.config.ts` |
+| Bases | A name, instructions, the abilities it uses, the apps it works with, a dashboard and starters, defined by an extension in code; people's own Pims build on one | Extensions in `pim.config.ts` |
+| Pims | What a person talks with: a name and their own instructions and apps on top of a base. Stored data, made in the app or by the agent | Your Pims |
 
-A person's Pim stores the extension's Pim it builds on as `base`, such as `pim.assistant/pim`; the Pim editor's **Builds on** chooses it. At every request its chats get the core preamble, then a `pim` section with the Pim's name, the base's instructions, and the person's own instructions, which win. They also get the abilities the base uses: its own extension's, and those it lists in `abilities`. Edits to the extension reach every Pim built on it at the next deploy, and a Pim that changes its base gets the new abilities in its chats from their next message: they aren't copies. Publishing a Pim and the Pim everyone starts with keep its base; a copy whose base this deployment doesn't have builds on the default Pim.
+A person's Pim stores the base it builds on as `base`, such as `pim.assistant/pim`; the Pim editor's **Builds on** chooses it. At every request its chats get the core preamble, then a `pim` section with the Pim's name, the base's instructions, and the person's own instructions, which win. They also get the abilities the base uses: its own extension's, and those it lists in `abilities`. Edits to the extension reach every Pim built on it at the next deploy, and a Pim that changes its base gets the new abilities in its chats from their next message: they aren't copies. Publishing a Pim and the Pim everyone starts with keep its base; a copy whose base this deployment doesn't have builds on the default Pim.
 
 ## Writing one
 
@@ -66,7 +67,7 @@ export const ledger = definePimExtension({
 			}),
 		},
 	},
-	pims: [
+	bases: [
 		{
 			id: "budget",
 			name: "Budget",
@@ -88,7 +89,7 @@ Then add it to `pim.config.ts`:
 ```ts
 export default definePimConfig({
 	extensions: [assistant, ledger],
-	defaultPim: "pim.assistant/pim",
+	defaultBase: "pim.assistant/pim",
 });
 ```
 
@@ -108,12 +109,12 @@ It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps
 - **Names are checked.** An ability whose tool or action has the name of one of Pim's tools, or of another extension's, stops the agent with an error. pi would let the later tool replace the earlier one, so an extension could otherwise stand in for `send_to_user` or a tool that asks first. Prefix your tools' names with your extension's.
 - **Code-level trust.** An ability runs in the person's agent, with what the context gives it and whatever its code can reach, such as `fetch`. Install only extensions you would merge into Pim itself.
 
-- **Checked when an agent starts.** Ids must be lowercase letters, digits, dots and hyphens, and unique. Every dashboard must name a widget some installed extension provides, and `defaultPim` must exist. A mistake fails loudly, with the reason, as soon as anything uses extensions (a chat's prompt, the Pims list, a dashboard), instead of drawing a broken dashboard. Run `pnpm test` after changing `pim.config.ts`: every test uses it.
+- **Checked when an agent starts.** Ids must be lowercase letters, digits, dots and hyphens, and unique. Every dashboard must name a widget some installed extension provides, and `defaultBase` must exist. A mistake fails loudly, with the reason, as soon as anything uses extensions (a chat's prompt, the Pims list, a dashboard), instead of drawing a broken dashboard. Run `pnpm test` after changing `pim.config.ts`: every test uses it.
 - **Text people read** is a string, or one per language with English always there. The dashboard is asked for in the person's language (`?locale=`), and English stands in for a missing translation. Instructions are for the model, so they are one string.
 
 ## Apps
 
-A Pim's `apps` are the remote MCP servers its chats work with. Each person connects them with their own accounts, from the Pim's card in Your Pims or by asking the Pim, whose `connect_app` connects only the apps its Pim lists. A chat gets the tools and instructions of the connected apps its Pim lists: the extension's Pim's `apps`, then the person's own Pim's. Apps the person connected for another Pim stay out of it, and the model can't add an app by itself; `find_app` only finds a server's URL for the person to add. URLs must be https, and unique within a Pim.
+A Pim's `apps` are the remote MCP servers its chats work with. Each person connects them with their own accounts, from the Pim's card in Your Pims or by asking the Pim, whose `connect_app` connects only the apps its Pim lists. A chat gets the tools and instructions of the connected apps its Pim lists: the base's `apps`, then the person's own Pim's. Apps the person connected for another Pim stay out of it, and the model can't add an app by itself; `find_app` only finds a server's URL for the person to add. URLs must be https, and unique within a Pim.
 
 ## Widgets
 
@@ -137,7 +138,7 @@ A widget that throws shows as failed, with the error logged; the dashboard's oth
 
 ### In chat
 
-A widget with a `description` can also go with a message. The model reads a `widgets` section listing the ones the chat can show, each with its description: Pim's own, and those of the extension its Pim builds on and the abilities that Pim uses. It names them in `send_to_user`'s `widgets`, up to four, instead of retyping what they show.
+A widget with a `description` can also go with a message. The model reads a `widgets` section listing the ones the chat can show, each with its description: Pim's own, and those of the base its Pim builds on and the abilities that Pim uses. It names them in `send_to_user`'s `widgets`, up to four, instead of retyping what they show.
 
 - **Loaded once, when sent.** A message and its widgets always agree, as the person sees it later. The dashboard is where widgets are live.
 - **The model sees what was shown.** The tool's result holds the widgets' content, which the app draws from, so the model knows what the person is looking at.

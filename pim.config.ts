@@ -2,9 +2,9 @@ import { assistant } from "./src/extensions/assistant";
 import { definePimConfig } from "./src/extensions/define";
 
 /**
- * This deployment's extensions: the Pims people can build on, and the widgets
+ * This deployment's extensions: the bases people's Pims build on, and the widgets
  * their dashboards show. Add an extension's import to the list and deploy;
- * take one out and nobody has it anymore. Pims built on a Pim that's gone
+ * take one out and nobody has it anymore. Pims built on a base that's gone
  * keep their name and the person's own instructions. See docs/extensions.md.
  *
  * Pim's own abilities (goals, schedules, memory, artifacts) are always
@@ -12,6 +12,6 @@ import { definePimConfig } from "./src/extensions/define";
  */
 export default definePimConfig({
 	extensions: [assistant],
-	// The Pim every new account starts with, and that new Pims build on: `<extension>/<pim>`, or null for none.
-	defaultPim: "pim.assistant/pim",
+	// The base every new account's first Pim builds on, and new Pims by default: `<extension>/<base>`, or null for none.
+	defaultBase: "pim.assistant/pim",
 });

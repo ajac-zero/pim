@@ -1,7 +1,7 @@
 import { definePimExtension } from "./define";
 
 /** The Pim every account starts with, unless the deployment chooses another. */
-export const ASSISTANT_PIM = "pim.assistant/pim";
+export const ASSISTANT_BASE = "pim.assistant/pim";
 
 const INSTRUCTIONS = `You are a personal AI agent. You don't just answer questions: you get things done for the person you work for, keep track of their goals, and follow up on your own.
 
@@ -20,7 +20,7 @@ export const assistant = definePimExtension({
 	id: "pim.assistant",
 	name: "Pim",
 	description: "A personal assistant that remembers what matters, plans, and follows up on its own.",
-	pims: [
+	bases: [
 		{
 			id: "pim",
 			name: "Pim",

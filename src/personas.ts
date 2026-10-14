@@ -1,5 +1,5 @@
-import { ASSISTANT_PIM } from "./extensions/assistant";
-import type { PimDefinition } from "./extensions/define";
+import { ASSISTANT_BASE } from "./extensions/assistant";
+import type { BaseDefinition } from "./extensions/define";
 import { HttpError } from "./http";
 
 /**
@@ -37,7 +37,7 @@ export type Persona = {
 	readonly instructions: string;
 	readonly apps: readonly SuggestedApp[];
 	readonly team: readonly TeamMember[];
-	/** The extension's Pim it builds on, as `<extension>/<pim>`; null for none. */
+	/** The base it builds on, as `<extension>/<base>`; null for none. */
 	readonly base: string | null;
 	/** The template it was made from. */
 	readonly source: { readonly template: string; readonly author: string } | null;
@@ -161,7 +161,7 @@ export function personaInput(body: Record<string, unknown>, partial?: Persona): 
 function baseInput(value: unknown): string | null {
 	if (value === null) return null;
 	if (typeof value !== "string" || !/^[a-z0-9][a-z0-9.-]*\/[a-z0-9][a-z0-9.-]*$/.test(value)) {
-		throw new HttpError(400, "base must be an extension's Pim, such as pim.assistant/pim, or null");
+		throw new HttpError(400, "base must be an extension's base, such as pim.assistant/pim, or null");
 	}
 	return value;
 }
@@ -190,9 +190,9 @@ function teamInput(value: unknown): TeamMember[] {
 
 /**
  * Who a chat's Pim is and how it works: its name, then the instructions of
- * the extension's Pim it builds on, then the person's own, which win.
+ * the base it builds on, then the person's own, which win.
  */
-export function personaInstructions(persona: Persona, base: PimDefinition | undefined): string {
+export function personaInstructions(persona: Persona, base: BaseDefinition | undefined): string {
 	const identity = `In this conversation you are "${persona.name}"${persona.description ? `: ${persona.description}` : "."}`;
 	const own =
 		persona.instructions === ""
@@ -214,7 +214,7 @@ export class PersonaStore {
 		if (!columns.includes("is_default")) this.#sql.exec("ALTER TABLE pim_personas ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0");
 		if (!columns.includes("team")) this.#sql.exec("ALTER TABLE pim_personas ADD COLUMN team TEXT NOT NULL DEFAULT '[]'");
 		// Pims made before extensions all had the assistant's habits, which were the agent's own then.
-		if (!columns.includes("base")) this.#sql.exec(`ALTER TABLE pim_personas ADD COLUMN base TEXT DEFAULT '${ASSISTANT_PIM}'`);
+		if (!columns.includes("base")) this.#sql.exec(`ALTER TABLE pim_personas ADD COLUMN base TEXT DEFAULT '${ASSISTANT_BASE}'`);
 	}
 
 	/** The default one first, then the others as they were made. */

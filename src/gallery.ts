@@ -1,4 +1,4 @@
-import { ASSISTANT_PIM } from "./extensions/assistant";
+import { ASSISTANT_BASE } from "./extensions/assistant";
 import { DurableObject } from "cloudflare:workers";
 import { HttpError } from "./http";
 import type { SuggestedApp, TeamMember } from "./personas";
@@ -139,7 +139,7 @@ export class Gallery extends DurableObject<Env> {
 			const columns = ctx.storage.sql.exec(`PRAGMA table_info(${table})`).toArray().map((row) => String(row.name));
 			if (!columns.includes("team")) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN team TEXT NOT NULL DEFAULT '[]'`);
 			// Published before extensions, they all built on Pim's own assistant.
-			if (!columns.includes("base")) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN base TEXT DEFAULT '${ASSISTANT_PIM}'`);
+			if (!columns.includes("base")) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN base TEXT DEFAULT '${ASSISTANT_BASE}'`);
 		}
 	}
 

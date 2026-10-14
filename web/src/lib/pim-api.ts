@@ -74,7 +74,7 @@ export type Persona = {
   instructions: string;
   apps: SuggestedApp[];
   team: TeamMember[];
-  /** The extension's Pim it builds on, as `<extension>/<pim>`, which brings its dashboard; null for none. */
+  /** The base it builds on, as `<extension>/<base>`, which brings its dashboard; null for none. */
   base: string | null;
   /** The template it was made from. */
   source: { template: string; author: string } | null;
@@ -150,16 +150,16 @@ export type PersonaInput = {
   base?: string | null;
 };
 
-/** What this deployment installed: the Pims people can build on, and widgets. */
+/** What this deployment installed: the bases people's Pims can build on, and widgets. */
 export type InstalledExtension = {
   id: string;
   name: string;
   description: string;
-  pims: {
+  bases: {
     ref: string;
     name: string;
     description: string;
-    /** The apps Pims built on it work with, besides their own. */
+    /** The apps Pims built on this base work with, besides their own. */
     apps: SuggestedApp[];
   }[];
   widgets: string[];
@@ -168,7 +168,7 @@ export type InstalledExtension = {
 export type Extensions = {
   extensions: InstalledExtension[];
   /** What new Pims build on when not told otherwise. */
-  defaultPim: string | null;
+  defaultBase: string | null;
 };
 
 /** A Pim someone published for others to make their own. */

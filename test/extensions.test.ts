@@ -32,12 +32,12 @@ describe("extensions", () => {
 	it("checks a deployment's extensions before anything uses them", () => {
 		expect(() => new PimExtensions([ledger, ledger], null)).toThrow("Two extensions are called test.ledger");
 		// A dashboard naming a widget nobody brings would draw nothing: refused.
-		const typo = { ...ledger, pims: [{ ...ledger.pims![0]!, dashboard: ["test.ledger/bils"] }] };
+		const typo = { ...ledger, bases: [{ ...ledger.bases![0]!, dashboard: ["test.ledger/bils"] }] };
 		expect(() => new PimExtensions([typo], null)).toThrow("test.ledger/budget's dashboard shows test.ledger/bils");
-		expect(() => new PimExtensions([{ ...ledger, pims: [] }], "test.ledger/budget")).toThrow("The default Pim test.ledger/budget");
-		const borrows = { ...ledger, id: "test.other", pims: [{ ...ledger.pims![0]!, dashboard: [], abilities: ["test.nothing"] }] };
+		expect(() => new PimExtensions([{ ...ledger, bases: [] }], "test.ledger/budget")).toThrow("The default base test.ledger/budget");
+		const borrows = { ...ledger, id: "test.other", bases: [{ ...ledger.bases![0]!, dashboard: [], abilities: ["test.nothing"] }] };
 		expect(() => new PimExtensions([borrows], null)).toThrow("test.other/budget uses the ability of test.nothing");
-		const insecure = { ...ledger, pims: [{ ...ledger.pims![0]!, dashboard: [], apps: [{ name: "Notes", url: "http://notes.example.test/mcp" }] }] };
+		const insecure = { ...ledger, bases: [{ ...ledger.bases![0]!, dashboard: [], apps: [{ name: "Notes", url: "http://notes.example.test/mcp" }] }] };
 		expect(() => new PimExtensions([insecure], null)).toThrow("test.ledger/budget lists an app without a name, an https URL");
 		// An ability can't take a tool's name, Pim's or another extension's: pi would let it stand in for that tool.
 		const ability = (name: string) => ({ actions: [{ name, description: "", parameters: {} as never, summarize: () => "", run: async () => "" }] });
@@ -47,11 +47,11 @@ describe("extensions", () => {
 		expect(() => checkToolNames([{ id: "a", ability: ability("pay") }, { id: "b", ability: ability("pay") }], [])).toThrow("b brings a tool named pay, which a already has");
 	});
 
-	it("builds each Pim on an extension's Pim: its instructions first, then the person's own", async () => {
+	it("builds each Pim on an extension's base: its instructions first, then the person's own", async () => {
 		const [mine] = (await api("/personas")).body.personas as Persona[];
 		expect(mine).toMatchObject({ name: "Pim", base: "pim.assistant/pim", default: true });
 		const { extensions } = (await api("/extensions")).body;
-		expect(extensions.flatMap((extension: { pims: { ref: string }[] }) => extension.pims.map((pim) => pim.ref))).toEqual([
+		expect(extensions.flatMap((extension: { bases: { ref: string }[] }) => extension.bases.map((base) => base.ref))).toEqual([
 			"pim.assistant/pim",
 			"test.ledger/budget",
 		]);
@@ -190,7 +190,7 @@ describe("extensions", () => {
 		expect(await personaOf(before)).toEqual({ id: other.id, name: "Planner" });
 	});
 
-	it("gives a Pim's chats, and its team, the abilities of the Pim it builds on, and only those", async () => {
+	it("gives a Pim's chats, and its team, the abilities of the base it builds on, and only those", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
 		const books = (await post("/personas", { name: "Books", base: "test.ledger/budget", team: [{ name: "Clerk", instructions: "File bills." }] })).body as Persona;
 		const chat = (await post("/sessions", { persona: books.id })).body.id;

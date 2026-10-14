@@ -14,7 +14,7 @@ import {
 } from "../personas";
 import { memberInstructions, memberPreamble, type Role } from "../team";
 import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";
-import type { PimDefinition } from "./define";
+import type { BaseDefinition } from "./define";
 import { type PimServices, json, text } from "./services";
 
 export const CREATE_PIM = "create_pim";
@@ -103,7 +103,7 @@ export function updatePimAction(personas: Pick<PersonaStore, "get" | "update">):
 /** The person's Pims, for a chat's Pim to know them and make new ones. */
 export type PimsHost = {
 	list(): readonly Persona[];
-	/** The extensions' Pims a new one can build on. */
+	/** The bases a new Pim can build on. */
 	bases(): readonly { ref: string; name: string; description: string }[];
 	/** Checked as the API checks a new Pim; throws what it refuses. */
 	create(input: Record<string, unknown>): Persona;
@@ -123,7 +123,7 @@ function pimsSection(self: Persona, host: PimsHost): string {
 		`When the person wants ongoing help of the kind another of these is for, tell them to start a chat with it from the sidebar. When they want ongoing help none of these covers, such as a coding helper or a trip planner, make one with \`${CREATE_PIM}\` without asking first, then tell them it's in the sidebar. Don't make one for a one-off question: answer it yourself.`,
 		...(bases.length > 1
 			? [
-					"A new Pim can build on one of these, which gives it their habits and tools; give it as `base`, or leave it out for the deployment's default:",
+					"A new Pim can build on one of these bases, which gives it their habits and tools; give it as `base`, or leave it out for the deployment's default:",
 					...bases.map((base) => `- ${base.ref}: ${base.name}${base.description ? `, ${base.description}` : ""}`),
 				]
 			: []),
@@ -133,7 +133,7 @@ function pimsSection(self: Persona, host: PimsHost): string {
 /**
  * How every Pim works, whatever it is for: how it talks to the person, and
  * the rules no Pim's instructions change. Who it is and what it is good at
- * come in the `pim` section, from the Pim it builds on and the person's own
+ * come in the `pim` section, from the base it builds on and the person's own
  * instructions.
  */
 const PREAMBLE = `You are a Pim, an AI agent working for one person. Who you are in this conversation, and how you work, is in the \`pim\` section.
@@ -152,12 +152,12 @@ Rules that always hold:
 /**
  * How every Pim works, and the Pim each chat talks as, or the team member it
  * is (`roleOf` its session). A Pim's instructions are those of the
- * extension's Pim it builds on (`baseOf`), then the person's own.
+ * base it builds on (`baseOf`), then the person's own.
  */
 export function personaExtension(
 	services: PimServices,
 	roleOf: (session: string) => Role,
-	baseOf: (pim: Persona) => PimDefinition | undefined,
+	baseOf: (pim: Persona) => BaseDefinition | undefined,
 	pims: PimsHost,
 ) {
 	const createPim = defineTool({
@@ -175,7 +175,7 @@ export function personaExtension(
 					description: "Members it hands parts of its work to with `delegate`, all working at once, such as a planner's researchers.",
 				}),
 			),
-			base: Type.Optional(Type.String({ description: "The extension's Pim it builds on, if not the default." })),
+			base: Type.Optional(Type.String({ description: "The base it builds on, such as pim.assistant/pim; the default base if left out." })),
 		}),
 		// A rerun finds the Pim it made by its name, and makes no other.
 		replay: "safe",

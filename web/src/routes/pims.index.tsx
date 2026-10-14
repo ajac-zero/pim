@@ -388,14 +388,14 @@ function PersonaCard({ persona }: { persona: Persona }) {
 }
 
 /**
- * The apps a Pim works with: those of the Pim it builds on, then its own,
+ * The apps a Pim works with: those of the base it builds on, then its own,
  * each connectable from here unless it already is.
  */
 function PimApps({ persona }: { persona: Persona }) {
   const { t } = useI18n();
   const { data: extensions } = useQuery(extensionsQuery());
   const base = extensions?.extensions
-    .flatMap((extension) => extension.pims)
+    .flatMap((extension) => extension.bases)
     .find((candidate) => candidate.ref === persona.base);
   const apps = [...(base?.apps ?? []), ...persona.apps].filter(
     (app, index, all) =>
@@ -449,14 +449,14 @@ function PimApps({ persona }: { persona: Persona }) {
   );
 }
 
-/** The name of the extension's Pim a Pim builds on, from what the deployment installed. */
+/** The name of the base a Pim builds on, from what the deployment installed. */
 function useBaseName(base: string | null | undefined): string | null {
   const { data } = useQuery(extensionsQuery());
   if (!base) return null;
-  const pim = data?.extensions
-    .flatMap((extension) => extension.pims)
+  const found = data?.extensions
+    .flatMap((extension) => extension.bases)
     .find((candidate) => candidate.ref === base);
-  return pim?.name ?? base;
+  return found?.name ?? base;
 }
 
 function BuildsOn({ base }: { base: string | null }) {
@@ -470,7 +470,7 @@ function BuildsOn({ base }: { base: string | null }) {
   );
 }
 
-/** Which extension's Pim a Pim builds on: its habits, abilities and dashboard. */
+/** Which base a Pim builds on: its habits, abilities and dashboard. */
 function BaseSelect({
   value,
   onChange,
@@ -481,7 +481,7 @@ function BaseSelect({
   const { t } = useI18n();
   const { data } = useQuery(extensionsQuery());
   if (!data) return null;
-  const chosen = value === undefined ? data.defaultPim : value;
+  const chosen = value === undefined ? data.defaultBase : value;
   return (
     <label className="block space-y-1">
       <span className="font-medium text-sm">{t("buildsOn")}</span>
@@ -494,11 +494,11 @@ function BaseSelect({
         </SelectTrigger>
         <SelectContent>
           {data.extensions.flatMap((extension) =>
-            extension.pims.map((pim) => (
-              <SelectItem key={pim.ref} value={pim.ref}>
-                {pim.name === extension.name
-                  ? pim.name
-                  : `${pim.name} · ${extension.name}`}
+            extension.bases.map((base) => (
+              <SelectItem key={base.ref} value={base.ref}>
+                {base.name === extension.name
+                  ? base.name
+                  : `${base.name} · ${extension.name}`}
               </SelectItem>
             )),
           )}

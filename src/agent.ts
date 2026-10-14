@@ -250,9 +250,9 @@ export class Pim extends Agent<Env> {
 	readonly visits = new VisitStore(this.ctx.storage.sql);
 	/** The owner's Pims: named agents with their own instructions, the default one first. */
 	readonly personas = new PersonaStore(this.ctx.storage.sql, () => {
-		// An account's first Pim: the deployment's default Pim, or a bare one named Pim.
-		const ref = this.extensions.defaultPim;
-		const base = ref === null ? undefined : this.extensions.pim(ref);
+		// An account's first Pim: the deployment's default base, or a bare one named Pim.
+		const ref = this.extensions.defaultBase;
+		const base = ref === null ? undefined : this.extensions.base(ref);
 		return { name: base?.name ?? "Pim", description: base?.description ?? "", instructions: "", apps: [], team: [], base: base ? ref : null };
 	});
 	/** The tasks the Pims' teams were given, each in a conversation of its own. */
@@ -533,9 +533,9 @@ export class Pim extends Agent<Env> {
 		for (const extension of tools) this.registry.install(extension);
 	}
 
-	/** The apps a Pim works with: those of the extension's Pim it builds on, then its own. */
+	/** The apps a Pim works with: those of the base it builds on, then its own. */
 	#appsOf(pim: Persona): PimApp[] {
-		const base = pim.base === null ? [] : (this.extensions.pim(pim.base)?.apps ?? []);
+		const base = pim.base === null ? [] : (this.extensions.base(pim.base)?.apps ?? []);
 		const apps = new Map<string, PimApp>();
 		for (const app of [...base, ...pim.apps]) if (!apps.has(app.url)) apps.set(app.url, app);
 		return [...apps.values()];
@@ -1523,7 +1523,7 @@ export class Pim extends Agent<Env> {
 				artifactsWidgets(this.artifacts),
 				...this.pimConfig().extensions,
 			],
-			this.pimConfig().defaultPim,
+			this.pimConfig().defaultBase,
 		);
 		return this.#extensions;
 	}
@@ -1581,23 +1581,23 @@ export class Pim extends Agent<Env> {
 		this.personas.setAbilities(session, key);
 	}
 
-	/** A copy's base, if this deployment still has it; else the copy builds on the default Pim. */
+	/** A copy's base, if this deployment still has it; else the copy builds on the default base. */
 	#installedBase(input: PersonaInput): PersonaInput {
-		return input.base && !this.extensions.pim(input.base) ? { ...input, base: undefined } : input;
+		return input.base && !this.extensions.base(input.base) ? { ...input, base: undefined } : input;
 	}
 
-	/** A base given through the API must be a Pim some installed extension brings. */
+	/** A base given through the API must be a base some installed extension brings. */
 	#checkBase(input: PersonaInput): PersonaInput {
-		if (input.base && !this.extensions.pim(input.base)) throw new HttpError(400, `No installed extension brings the Pim ${input.base}`);
+		if (input.base && !this.extensions.base(input.base)) throw new HttpError(400, `No installed extension brings the base ${input.base}`);
 		return input;
 	}
 
 	/**
-	 * A Pim's dashboard: the widgets of the extension's Pim it builds on, each
+	 * A Pim's dashboard: the widgets of the base it builds on, each
 	 * loaded for this Pim. One that fails shows as failed; the others still load.
 	 */
 	async #dashboard(pim: Persona, locale: string) {
-		const base = pim.base === null ? undefined : this.extensions.pim(pim.base);
+		const base = pim.base === null ? undefined : this.extensions.base(pim.base);
 		const widgets = await Promise.all((base?.dashboard ?? []).map((ref) => this.#loadWidget(pim, ref)));
 		return {
 			pim: { id: pim.id, name: pim.name, description: pim.description, default: pim.default, base: pim.base, icon: pim.icon },
@@ -2680,15 +2680,15 @@ export class Pim extends Agent<Env> {
 					id: extension.id,
 					name: extension.name,
 					description: extension.description,
-					pims: (extension.pims ?? []).map((pim) => ({
-						ref: `${extension.id}/${pim.id}`,
-						name: pim.name,
-						description: pim.description,
-						apps: pim.apps ?? [],
+					bases: (extension.bases ?? []).map((base) => ({
+						ref: `${extension.id}/${base.id}`,
+						name: base.name,
+						description: base.description,
+						apps: base.apps ?? [],
 					})),
 					widgets: Object.keys(extension.widgets ?? {}).map((widget) => `${extension.id}/${widget}`),
 				})),
-				defaultPim: this.extensions.defaultPim,
+				defaultBase: this.extensions.defaultBase,
 			}),
 		],
 		[
@@ -2899,10 +2899,10 @@ export class Pim extends Agent<Env> {
 		return personaExtension(
 			services,
 			(session) => this.#roleOf(session),
-			(pim) => (pim.base === null ? undefined : this.extensions.pim(pim.base)),
+			(pim) => (pim.base === null ? undefined : this.extensions.base(pim.base)),
 			{
 				list: () => this.personas.list(),
-				bases: () => this.extensions.pims().map(({ ref, pim }) => ({ ref, name: pim.name, description: pim.description })),
+				bases: () => this.extensions.bases().map(({ ref, base }) => ({ ref, name: base.name, description: base.description })),
 				create: (input) => this.personas.create(this.#checkBase(personaInput(input))),
 			},
 		);

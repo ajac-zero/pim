@@ -5,18 +5,18 @@ export { defineGatedAction, type GatedAction } from "./approvals";
 
 /**
  * Pim extensions: what a deployment adds to every person's Pims, chosen in
- * `pim.config.ts`. An extension can bring Pims, named agents with their own
- * instructions, dashboard and conversation starters; widgets, the cards a
+ * `pim.config.ts`. An extension can bring bases, the agent definitions people's
+ * Pims build on, each with its own instructions, dashboard and conversation starters; widgets, the cards a
  * dashboard is made of; and an ability: tools, prompt sections, hooks and
  * background tasks, plus actions that ask the person first. A person's Pim
- * builds on one extension's Pim (its `base`), and adds their own name and
- * instructions on top; its chats get the abilities that Pim uses.
+ * builds on one extension's base (its `base`), and adds their own name and
+ * instructions on top; its chats get the abilities that base uses.
  *
  * Widgets are declarative: `load` runs in the person's agent and returns
  * data of a known kind, which the web app draws with its own components. No
  * extension code runs in the browser.
  *
- * Pim's own Pim is an extension too (`./assistant.ts`), and its abilities
+ * Pim's own base is an extension too (`./assistant.ts`), and its abilities
  * (goals, schedules, memory, artifacts) bring their widgets the same way.
  */
 
@@ -124,13 +124,13 @@ export function widgetMarkdown(widget: ShownWidget, locale = "en"): string {
 /** An app a Pim works with: a remote MCP server, by its https URL. */
 export type PimApp = { readonly name: string; readonly url: string };
 
-export type PimDefinition = {
-	/** Unique in its extension: the Pim is named `<extension>/<id>`. */
+export type BaseDefinition = {
+	/** Unique in its extension: the base is named `<extension>/<id>`. */
 	readonly id: string;
-	/** What a person's new Pim built on it is called, until they rename it. */
+	/** What a person's new Pim built on this base is called, until they rename it. */
 	readonly name: string;
 	readonly description: string;
-	/** The model reads these in every chat with a Pim built on this one, before the person's own instructions. */
+	/** The model reads these in every chat with a Pim built on this base, before the person's own instructions. */
 	readonly instructions: string;
 	/** Its dashboard's widgets, in order, each `<extension>/<widget>`. */
 	readonly dashboard: readonly string[];
@@ -156,15 +156,15 @@ export type PimExtension = {
 	readonly name: string;
 	readonly description: string;
 	readonly widgets?: Readonly<Record<string, Widget>>;
-	readonly pims?: readonly PimDefinition[];
+	readonly bases?: readonly BaseDefinition[];
 	/** Built once in each person's agent. Its tools and actions must be named apart from every other tool. */
 	readonly ability?: (context: AbilityContext) => Ability;
 };
 
 export type PimConfig = {
 	readonly extensions: readonly PimExtension[];
-	/** The Pim every new account starts with, and that new Pims build on: `<extension>/<pim>`, or null for none. */
-	readonly defaultPim: string | null;
+	/** The base every new account's first Pim builds on, and new Pims by default: `<extension>/<base>`, or null for none. */
+	readonly defaultBase: string | null;
 };
 
 /** Identity function that types an extension. */
@@ -187,64 +187,64 @@ const ID = /^[a-z0-9][a-z0-9.-]{0,62}$/;
 /**
  * The extensions installed in this deployment, checked once: ids are unique
  * and well formed, every dashboard names a widget some extension provides,
- * and the default Pim exists. A mistake in `pim.config.ts` fails here, loudly,
+ * and the default base exists. A mistake in `pim.config.ts` fails here, loudly,
  * instead of drawing a broken dashboard.
  */
 export class PimExtensions {
 	readonly #extensions = new Map<string, PimExtension>();
-	readonly defaultPim: string | null;
+	readonly defaultBase: string | null;
 
-	constructor(extensions: readonly PimExtension[], defaultPim: string | null) {
+	constructor(extensions: readonly PimExtension[], defaultBase: string | null) {
 		for (const extension of extensions) {
 			if (!ID.test(extension.id)) throw new Error(`Extension id ${JSON.stringify(extension.id)} must be lowercase letters, digits, dots and hyphens`);
 			if (this.#extensions.has(extension.id)) throw new Error(`Two extensions are called ${extension.id}`);
 			this.#extensions.set(extension.id, extension);
-			const pims = new Set<string>();
-			for (const pim of extension.pims ?? []) {
-				if (!ID.test(pim.id) || pims.has(pim.id)) throw new Error(`${extension.id} has a missing, malformed or repeated Pim id ${JSON.stringify(pim.id)}`);
-				pims.add(pim.id);
+			const ids = new Set<string>();
+			for (const base of extension.bases ?? []) {
+				if (!ID.test(base.id) || ids.has(base.id)) throw new Error(`${extension.id} has a missing, malformed or repeated base id ${JSON.stringify(base.id)}`);
+				ids.add(base.id);
 			}
 		}
-		for (const { ref, pim } of this.pims()) {
-			for (const widget of pim.dashboard) {
+		for (const { ref, base } of this.bases()) {
+			for (const widget of base.dashboard) {
 				if (!this.widget(widget)) throw new Error(`${ref}'s dashboard shows ${widget}, which no installed extension provides`);
 			}
-			for (const id of pim.abilities ?? []) {
+			for (const id of base.abilities ?? []) {
 				if (!this.#extensions.get(id)?.ability) throw new Error(`${ref} uses the ability of ${id}, which no installed extension brings`);
 			}
 			const urls = new Set<string>();
-			for (const app of pim.apps ?? []) {
+			for (const app of base.apps ?? []) {
 				if (!app.name.trim() || !/^https:\/\/\S+$/.test(app.url) || urls.has(app.url)) {
 					throw new Error(`${ref} lists an app without a name, an https URL, or with a repeated URL: ${JSON.stringify(app)}`);
 				}
 				urls.add(app.url);
 			}
 		}
-		if (defaultPim !== null && !this.pim(defaultPim)) throw new Error(`The default Pim ${defaultPim} isn't in any installed extension`);
-		this.defaultPim = defaultPim;
+		if (defaultBase !== null && !this.base(defaultBase)) throw new Error(`The default base ${defaultBase} isn't in any installed extension`);
+		this.defaultBase = defaultBase;
 	}
 
 	list(): PimExtension[] {
 		return [...this.#extensions.values()];
 	}
 
-	/** Every extension's Pims, each with its `<extension>/<pim>` name. */
-	pims(): { ref: string; pim: PimDefinition }[] {
-		return this.list().flatMap((extension) => (extension.pims ?? []).map((pim) => ({ ref: `${extension.id}/${pim.id}`, pim })));
+	/** Every extension's bases, each with its `<extension>/<base>` name. */
+	bases(): { ref: string; base: BaseDefinition }[] {
+		return this.list().flatMap((extension) => (extension.bases ?? []).map((base) => ({ ref: `${extension.id}/${base.id}`, base })));
 	}
 
-	pim(ref: string): PimDefinition | undefined {
+	base(ref: string): BaseDefinition | undefined {
 		const [extension, id] = split(ref);
-		return this.#extensions.get(extension)?.pims?.find((pim) => pim.id === id);
+		return this.#extensions.get(extension)?.bases?.find((base) => base.id === id);
 	}
 
 	/** The extensions whose abilities the chats of a Pim built on `ref` get: its own extension's, then the ones it names. */
 	abilitiesOf(ref: string | null): string[] {
 		if (ref === null) return [];
-		const pim = this.pim(ref);
-		if (!pim) return [];
+		const base = this.base(ref);
+		if (!base) return [];
 		const own = split(ref)[0];
-		return [...new Set([...(this.#extensions.get(own)?.ability ? [own] : []), ...(pim.abilities ?? [])])];
+		return [...new Set([...(this.#extensions.get(own)?.ability ? [own] : []), ...(base.abilities ?? [])])];
 	}
 
 	widget(ref: string): Widget | undefined {

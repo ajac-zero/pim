@@ -33,7 +33,7 @@ const translations = {
       "How it should work: what to focus on, how to talk, what to ask before doing.",
     suggestedApps: "Apps it works with",
     suggestedAppsHint:
-      "MCP server URLs. This Pim's chats can use only these apps, and those of the Pim it builds on. Whoever uses it connects them with their own accounts.",
+      "MCP server URLs. This Pim's chats can use only these apps, and those of the base it builds on. Whoever uses it connects them with their own accounts.",
     appName: "App",
     appUrl: "MCP server URL",
     removeApp: "Remove app",
@@ -68,7 +68,7 @@ const translations = {
     showChatsOf: "Show {name}'s chats",
     hideChatsOf: "Hide {name}'s chats",
     noDashboard:
-      "This Pim has no dashboard. Pims built on one an extension brings get its dashboard.",
+      "This Pim has no dashboard. Pims built on a base an extension brings get its dashboard.",
     widgetFailed: "This couldn't load. Try again later.",
     stopEveryonesDefault: "Stop",
     everyonesDefaultSet: "People who join now start with a copy of {name}.",

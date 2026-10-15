@@ -11,7 +11,7 @@
     "dev:web": "pnpm --filter pim-web dev",
     "build": "pnpm --filter pim-web build",
     "deploy": "wrangler deploy",
-    "deploy:ajac-zero": "wrangler deploy --config wrangler.ajac-zero.jsonc",
+    "deploy:prod": "wrangler deploy --config wrangler.prod.jsonc",
     "preview": "pnpm build && wrangler dev --local --config wrangler.preview.jsonc --persist-to .wrangler/state-preview",
     "types": "wrangler types",
     "typecheck": "tsc --noEmit && pnpm --filter pim-web typecheck",

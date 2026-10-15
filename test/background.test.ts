@@ -1,6 +1,7 @@
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
+import { DELIVERY_REMINDER } from "../src/transcript";
 import { api, connect, lastUserText, OWNER, post, say, toolUse } from "./helpers";
 import { faux, outbox, type Pim } from "./worker";
 
@@ -12,7 +13,7 @@ describe("scheduled tasks", () => {
 				label: "Flight check",
 				delay_seconds: 3600,
 			}),
-			fauxAssistantMessage("I'll check in an hour."),
+			toolUse("send_to_user", { message: "I'll check in an hour." }),
 		]);
 		const before = Date.now();
 		await say("Watch the flight price.");
@@ -39,7 +40,8 @@ describe("scheduled tasks", () => {
 		});
 		const settled = await api(`/sessions/1/operations/${encodeURIComponent(operation)}`);
 		// Work Pim gave itself may stay silent: its final text is notes, not a reply.
-		expect(settled.body).toMatchObject({ status: "done", text: "Same price.", replies: [] });
+		expect(settled.body).toMatchObject({ status: "done", replies: [] });
+		expect(settled.body).not.toHaveProperty("text");
 		expect(woken).toBe(`[Scheduled task "Flight check" ${schedule.id}] Check whether the flight price dropped.`);
 
 		expect((await api(`/schedules/${schedule.id}`, { method: "DELETE" })).status).toBe(200);
@@ -58,7 +60,7 @@ describe("scheduled tasks", () => {
 			),
 			(context) => {
 				results = JSON.stringify(context.messages.filter((message) => message.role === "toolResult"));
-				return fauxAssistantMessage("Oops.");
+				return toolUse("send_to_user", { message: "Those times aren't valid." });
 			},
 		]);
 		await say("Remind me.");
@@ -73,42 +75,80 @@ describe("sending to the person", () => {
 		faux.setResponses([
 			fauxAssistantMessage(
 				[
+					{ type: "text", text: "Private working notes." },
 					fauxToolCall("send_to_user", { message: "On it." }),
 					fauxToolCall("send_to_user", { message: "Your flight is **$80** cheaper." }),
 				],
 				{ stopReason: "toolUse" },
 			),
-			fauxAssistantMessage("Checked the price; told them."),
 		]);
 		const { body } = await post("/sessions/1/messages", { content: "How's the flight price?", wait: true });
-		expect(body).toMatchObject({ status: "done", text: "Checked the price; told them.", replies: ["On it.", "Your flight is **$80** cheaper."] });
+		expect(body).toMatchObject({ status: "done", text: "On it.\n\nYour flight is **$80** cheaper.", replies: ["On it.", "Your flight is **$80** cheaper."] });
 		// Without notify, nothing else hears of it.
 		expect((await api("/notifications")).body.notifications).toEqual([]);
 
-		// A model that answers without sending still answers the person.
-		faux.setResponses([fauxAssistantMessage("Same as before.")]);
+		// Private final text prompts an explicit send; it is never passed off as the answer.
+		faux.setResponses([
+			fauxAssistantMessage("Private draft: same as before."),
+			(context) => {
+				expect(lastUserText(context.messages)).toBe(DELIVERY_REMINDER);
+				return toolUse("send_to_user", { message: "Same as before." });
+			},
+		]);
 		const forgot = await post("/sessions/1/messages", { content: "And now?", wait: true });
 		expect(forgot.body).toMatchObject({ status: "done", replies: ["Same as before."] });
+	});
+
+	it("requires a completing send after a progress update, with or without further tools", async () => {
+		for (const work of [[], [toolUse("current_time", {})]]) {
+			faux.setResponses([
+				toolUse("send_to_user", { message: "I'll check.", complete: false }),
+				...work,
+				fauxAssistantMessage("Private draft answer."),
+				toolUse("send_to_user", { message: "Here's the answer." }),
+			]);
+			const answer = await post("/sessions/1/messages", { content: "Check for me.", wait: true });
+			expect(answer.body).toMatchObject({ status: "done", replies: ["I'll check.", "Here's the answer."] });
+		}
+	});
+
+	it("bounds delivery corrections and never exposes private text as a fallback", async () => {
+		faux.setResponses([
+			fauxAssistantMessage("Private first answer."),
+			fauxAssistantMessage("Still private."),
+			fauxAssistantMessage("Private third answer."),
+		]);
+		const failed = await post("/sessions/1/messages", { content: "Answer me.", wait: true });
+		expect(failed.body).toMatchObject({ status: "unanswered", replies: [] });
+		expect(failed.body).not.toHaveProperty("text");
+		// A new user turn gets a fresh correction budget, not the previous turn's reminders.
+		faux.setResponses([
+			fauxAssistantMessage("Another private draft."),
+			toolUse("send_to_user", { message: "A delivered answer." }),
+		]);
+		expect((await post("/sessions/1/messages", { content: "Try again.", wait: true })).body).toMatchObject({ status: "done", replies: ["A delivered answer."] });
 	});
 
 	it("emails the person at the address they confirmed, and only there", async () => {
 		const sendEmail = () =>
 			faux.setResponses([
 				toolUse("send_to_user", { channel: "email", title: "Your week", message: "3 workouts, 1 flight booked." }),
-				(context) => {
-					emailed = JSON.stringify(context.messages.at(-1));
-					return fauxAssistantMessage("Emailed the summary.");
-				},
 			]);
 		let emailed = "";
 
 		// No address yet: nothing is sent, and the model is told why.
 		sendEmail();
+		faux.appendResponses([
+			(context) => {
+				emailed = JSON.stringify(context.messages.at(-1));
+				return toolUse("send_to_user", { message: "Add an email address first." });
+			},
+		]);
 		const unsent = await post("/sessions/1/messages", { content: "Email me my week.", wait: true });
 		expect(emailed).toContain("hasn't added an email address");
 		expect(outbox).toEqual([]);
-		// It tried to send something, so its notes are not passed off as a reply.
-		expect(unsent.body).toMatchObject({ status: "done", replies: [] });
+		// A failed email cannot finish the turn: an explicit chat message explains why.
+		expect(unsent.body).toMatchObject({ status: "done", replies: ["Add an email address first."] });
 
 		// Confirming an address takes the code Pim emails there.
 		expect((await api("/email")).body).toEqual({ available: true, address: null, pending: null });
@@ -124,7 +164,7 @@ describe("sending to the person", () => {
 
 		sendEmail();
 		const sent = await post("/sessions/1/messages", { content: "Email me my week.", wait: true });
-		expect(emailed).toContain("Emailed it to ada@example.com.");
+		expect(JSON.stringify((await api("/sessions/1/messages")).body.messages)).toContain("Emailed it to ada@example.com.");
 		expect(outbox).toEqual([
 			{ to: "ada@example.com", subject: "Your week", text: "3 workouts, 1 flight booked.\n\n—\nFrom your Pim: https://pim.test/chat/1" },
 		]);
@@ -143,7 +183,6 @@ describe("sending to the person", () => {
 
 		faux.setResponses([
 			toolUse("send_to_user", { message: "Your flight is $80 cheaper.", notify: true, title: "Price drop" }),
-			fauxAssistantMessage("Told you."),
 		]);
 		await say("Tell me if anything changes.");
 

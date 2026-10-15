@@ -64,7 +64,7 @@ function systemText(messages: readonly Message[]): string[] {
 function capture(into: { memory: (string | null)[]; since: (string | null)[] }[]) {
 	return (context: { messages: Message[] }) => {
 		into.push({ memory: patches(context.messages, "memory"), since: patches(context.messages, "memory_since") });
-		return fauxAssistantMessage("ok");
+		return toolUse("send_to_user", { message: "ok" });
 	};
 }
 
@@ -74,7 +74,7 @@ async function memoryCount(): Promise<number> {
 
 describe("long-term memory", () => {
 	it("records a note from the conversation", async () => {
-		faux.setResponses([toolUse("note", { text: "Ana is the user's sister." }), fauxAssistantMessage("Noted.")]);
+		faux.setResponses([toolUse("note", { text: "Ana is the user's sister." }), toolUse("send_to_user", { message: "Noted." })]);
 		await say("My sister Ana is visiting.");
 		const { body } = await api("/memory/log");
 		expect(body.entries).toEqual([
@@ -91,7 +91,7 @@ describe("long-term memory", () => {
 			),
 			(context) => {
 				results = JSON.stringify(context.messages.filter((message) => message.role === "toolResult"));
-				return fauxAssistantMessage("Oops.");
+				return toolUse("send_to_user", { message: "Oops." });
 			},
 		]);
 		await say("Remember a lot.");
@@ -168,7 +168,7 @@ describe("long-term memory", () => {
 			},
 			(context) => {
 				results = JSON.stringify(context.messages.filter((message) => message.role === "toolResult"));
-				return fauxAssistantMessage("Ana, of course.");
+				return toolUse("send_to_user", { message: "Ana, of course." });
 			},
 		]);
 		await say("Who is my sister?", (await post("/sessions")).body.id);
@@ -236,7 +236,7 @@ describe("long-term memory", () => {
 		faux.setResponses([capture(seen)]);
 		await say("one", session);
 		const before = seen[0]!.memory[0]!;
-		faux.setResponses([toolUse("note", { text: "Noted before the compaction." }), fauxAssistantMessage("Noted.")]);
+		faux.setResponses([toolUse("note", { text: "Noted before the compaction." }), toolUse("send_to_user", { message: "Noted." })]);
 		await say("Remember this.", session);
 		await settled();
 
@@ -264,11 +264,11 @@ describe("long-term memory", () => {
 
 	it("forgets for good: the memory, its summaries, and the conversation's view", async () => {
 		const session = (await post("/sessions")).body.id;
-		faux.setResponses([fauxAssistantMessage("hi")]);
+		faux.setResponses([toolUse("send_to_user", { message: "hi" })]);
 		await say("hi", session);
 		const before = naps.length;
 
-		faux.setResponses([toolUse("forget", { id: 5 }), fauxAssistantMessage("Forgotten.")]);
+		faux.setResponses([toolUse("forget", { id: 5 }), toolUse("send_to_user", { message: "Forgotten." })]);
 		await say("Forget fact 5.", session);
 		await settled();
 
@@ -287,7 +287,7 @@ describe("long-term memory", () => {
 		faux.setResponses([
 			(context) => {
 				latest = systemText(context.messages).at(-1)!;
-				return fauxAssistantMessage("ok");
+				return toolUse("send_to_user", { message: "ok" });
 			},
 		]);
 		await say("still there?", session);

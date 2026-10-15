@@ -32,7 +32,6 @@ describe("approvals", () => {
 				asked = toolResult(context.messages);
 				return toolUse("send_to_user", { message: "Approve the order and I'll place it." });
 			},
-			fauxAssistantMessage("Waiting for the approval."),
 		]);
 		// The turn ends while the request waits.
 		expect(await say("Order me a pizza.")).toMatchObject({ status: "done", replies: ["Approve the order and I'll place it."] });
@@ -53,7 +52,6 @@ describe("approvals", () => {
 				decision = lastUserText(context.messages);
 				return toolUse("send_to_user", { message: "Your pizza is ordered." });
 			},
-			fauxAssistantMessage("Ordered."),
 		]);
 		const decided = await post<Approval>(`/approvals/${approval.id}/approve`, { note: "extra cheese" });
 		expect(decided.body).toMatchObject({ status: "approved", result: "HTTP 201 Created\norder 42 created" });
@@ -76,12 +74,12 @@ describe("approvals", () => {
 		let seen = "";
 		faux.setResponses([
 			toolUse("http_request", { method: "POST", url: "https://hooks.example.test/first" }),
-			fauxAssistantMessage("Asked."),
+			toolUse("send_to_user", { message: "Asked." }),
 		]);
 		await say("Send the first.");
 		const asked = await pendingApproval();
 		expect(asked.tool).toBe("http_request");
-		faux.setResponses([fauxAssistantMessage("Sent.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Sent." })]);
 		const decided = await post<Approval>(`/approvals/${asked.id}/approve`, { always: true });
 		expect(decided.body).toMatchObject({ status: "approved", result: "HTTP 201 Created\norder 42 created" });
 		expect(await decisionRun(asked)).toMatchObject({ status: "done" });
@@ -98,7 +96,7 @@ describe("approvals", () => {
 			toolUse("http_request", { method: "POST", url: "https://hooks.example.test/second" }),
 			(context) => {
 				seen = toolResult(context.messages);
-				return fauxAssistantMessage("Sent again.");
+				return toolUse("send_to_user", { message: "Sent again." });
 			},
 		]);
 		expect(await say("Send the second.")).toMatchObject({ status: "done", text: "Sent again." });
@@ -116,11 +114,11 @@ describe("approvals", () => {
 		expect(reset.body).toMatchObject({ tool: "http_request", permission: "ask", chosen: null });
 		faux.setResponses([
 			toolUse("http_request", { method: "POST", url: "https://hooks.example.test/third" }),
-			fauxAssistantMessage("Asked."),
+			toolUse("send_to_user", { message: "Asked." }),
 		]);
 		await say("Send the third.");
 		const again = await pendingApproval();
-		faux.setResponses([fauxAssistantMessage("Okay, not sent.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Okay, not sent." })]);
 		await post(`/approvals/${again.id}/deny`);
 		expect(await decisionRun(again)).toMatchObject({ status: "done" });
 		expect(hook).toHaveBeenCalledTimes(2);
@@ -131,7 +129,7 @@ describe("approvals", () => {
 		let decision = "";
 		faux.setResponses([
 			toolUse("http_request", { method: "POST", url: "https://hooks.example.test/auto" }),
-			fauxAssistantMessage("Asked."),
+			toolUse("send_to_user", { message: "Asked." }),
 			(context) => {
 				decision = lastUserText(context.messages);
 				return fauxAssistantMessage("Done.");
@@ -156,7 +154,7 @@ describe("approvals", () => {
 
 			faux.setResponses([
 				toolUse("http_request", { method: "POST", url: "https://hooks.example.test/explicit" }),
-				fauxAssistantMessage("Asked."),
+				toolUse("send_to_user", { message: "Asked." }),
 			]);
 			await say("Go.");
 			const approval = await pendingApproval();
@@ -171,7 +169,6 @@ describe("approvals", () => {
 					decision = lastUserText(context.messages);
 					return toolUse("send_to_user", { message: "Okay, I didn't send it." });
 				},
-				fauxAssistantMessage("Not sent."),
 			]);
 			const denied = await post<Approval>(`/approvals/${approval.id}/deny`);
 			expect(denied.body).toMatchObject({ status: "denied", decidedBy: "user", result: null });

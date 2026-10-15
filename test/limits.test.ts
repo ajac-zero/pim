@@ -6,12 +6,11 @@ import {
 	type Model,
 } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { type Limits, UNLIMITED, UsageMeter } from "../src/usage";
 import { exports } from "cloudflare:workers";
-import { api, apiUrl, OWNER, post, say, TOKEN, url } from "./helpers";
+import { api, apiUrl, OWNER, post, say, TOKEN, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
@@ -29,7 +28,7 @@ afterEach(async () => {
 describe("usage", () => {
 	it("counts runs, model requests and tokens by day", async () => {
 		const before = (await api<Usage>("/usage")).body.today;
-		faux.setResponses([fauxAssistantMessage("Hello!")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Hello!" })]);
 		await say("Hi");
 		const after = (await api<Usage>("/usage")).body;
 		expect(after.today.runs).toBe(before.runs + 1);
@@ -140,7 +139,7 @@ describe("metering under concurrency", () => {
 		await runInDurableObject(agent(), async (instance: Pim) => {
 			const before = instance.usage.today().runs;
 			await instance.setLimits({ dailyRuns: before + 1 });
-			faux.setResponses([fauxAssistantMessage("Only one.")]);
+			faux.setResponses([toolUse("send_to_user", { message: "Only one." })]);
 			const [first, second] = await Promise.allSettled([
 				instance.submitTo("1", "First", {}, "user"),
 				instance.submitTo("1", "Second", {}, "user"),
@@ -155,7 +154,7 @@ describe("metering under concurrency", () => {
 	it("gives a run back when its submission repeats one already accepted", async () => {
 		await runInDurableObject(agent(), async (instance: Pim) => {
 			const before = instance.usage.today().runs;
-			faux.setResponses([fauxAssistantMessage("Once.")]);
+			faux.setResponses([toolUse("send_to_user", { message: "Once." })]);
 			const first = await instance.submitTo("1", "Same", { operationId: "repeat-1" }, "user");
 			const again = await instance.submitTo("1", "Same", { operationId: "repeat-1" }, "user");
 			expect([first.accepted, again.accepted]).toEqual([true, false]);

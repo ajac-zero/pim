@@ -1,5 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
-import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool, GenerationTask, hook, section } from "@earendil-works/pi-durable";
+import { DELIVERY_REMINDER } from "../transcript";
 import { widgetMarkdown } from "./define";
 import { type PimServices, text } from "./services";
 
@@ -19,6 +20,7 @@ function headline(message: string): string {
 export function messagingExtension(services: PimServices) {
 	const fields = {
 		message: Type.String({ minLength: 1, maxLength: 20_000, description: "What they read, in Markdown." }),
+		complete: Type.Optional(Type.Boolean({ description: "Finish this turn (default true). Set false only for a progress update; send the final answer in a separate call with no other tools." })),
 		notify: Type.Optional(Type.Boolean({ description: "Also alert their devices. Use it sparingly." })),
 		title: Type.Optional(
 			Type.String({ maxLength: 120, description: "A short headline: the email's subject, or the alert's; else the message's first line." }),
@@ -81,13 +83,49 @@ export function messagingExtension(services: PimServices) {
 				sent = `${sent} Their devices were alerted.`;
 			}
 			// What the widgets showed goes back to the model too, so it knows what the person saw; the app draws it from here.
-			return text(shown.length === 0 ? sent : JSON.stringify({ sent, widgets: shown }));
+			return { ...text(shown.length === 0 ? sent : JSON.stringify({ sent, widgets: shown })), ...(args.complete === false ? {} : { control: { terminate: true as const } }) };
 		},
 	});
 
 	return defineExtension({
 		name: MESSAGING_EXTENSION,
 		tools: [sendToUser],
+		hooks: [
+			hook(GenerationTask, {
+				async beforeRequest({ messages }, api, context) {
+					let required = false;
+					let reminders = 0;
+					for (const message of messages) {
+						if (message.role === "user") {
+							const input = typeof message.content === "string" ? message.content : message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+							if (input === DELIVERY_REMINDER) {
+								reminders++;
+								continue;
+							}
+							// Background work may deliberately stay silent.
+							required = !/^\[(?:Scheduled task|Approval |App event\]|Team:)/.test(input);
+							reminders = 0;
+						}
+					}
+					await api.memo("delivery", { required, reminders }, context);
+				},
+				async afterResponse(answer, api, context) {
+					const state = await api.memo<{ required: boolean; reminders: number }>("delivery", context);
+					if (!state?.required || state.reminders < 2) return;
+					if (answer.stopReason === "stop" || answer.stopReason === "length" || (answer.stopReason === "toolUse" && !answer.content.some((part) => part.type === "toolCall"))) {
+						// Hook throws are reported and ignored by pi; classify this as a non-retryable failure instead.
+						answer.stopReason = "error";
+						answer.errorMessage = "The agent did not deliver its reply with send_to_user.";
+					}
+				},
+				async onYield(_answer, api, context) {
+					const state = await api.memo<{ required: boolean; reminders: number }>("delivery", context);
+					if (!state?.required) return;
+					// Continuations create new generation tasks: count in the transcript, not a task-local counter.
+					return { continue: DELIVERY_REMINDER };
+				},
+			}),
+		],
 		sections: [
 			// Always present, so it never appears later out of order and makes pi re-send every section.
 			section("widgets", ({ conversationId }) => {

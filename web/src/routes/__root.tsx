@@ -14,7 +14,6 @@ import { type ReactNode, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { AppSidebar, sessionTitle } from "~/components/app-sidebar";
 import { I18nProvider, useI18n } from "~/components/i18n";
-import { ShowReasoningProvider } from "~/components/reasoning-preference";
 import { RouteError } from "~/components/route-error";
 import { SignIn } from "~/components/sign-in";
 import { ThemeProvider } from "~/components/theme";
@@ -38,12 +37,10 @@ function Root() {
   return (
     <I18nProvider>
       <ThemeProvider>
-        <ShowReasoningProvider>
-          <SignedIn>
-            <AppLayout />
-          </SignedIn>
-          <Toaster position="top-center" />
-        </ShowReasoningProvider>
+        <SignedIn>
+          <AppLayout />
+        </SignedIn>
+        <Toaster position="top-center" />
       </ThemeProvider>
     </I18nProvider>
   );

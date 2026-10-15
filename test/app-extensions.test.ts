@@ -169,7 +169,7 @@ describe("skills from apps (io.modelcontextprotocol/skills)", () => {
 		faux.setResponses([
 			(context) => {
 				system = JSON.stringify(context.messages.filter((message) => message.role === "system"));
-				return fauxAssistantMessage("ok");
+				return toolUse("send_to_user", { message: "ok" });
 			},
 		]);
 		await say("hi");
@@ -191,7 +191,7 @@ describe("skills from apps (io.modelcontextprotocol/skills)", () => {
 			),
 			(context) => {
 				results = toolResults(context.messages);
-				return fauxAssistantMessage("Planning.");
+				return toolUse("send_to_user", { message: "Planning." });
 			},
 		]);
 		await say("Plan my trip.");
@@ -211,7 +211,7 @@ describe("skills from apps (io.modelcontextprotocol/skills)", () => {
 			toolUse("read_skill", { app: "Travel", skill: "trip-planning" }),
 			(context) => {
 				results = toolResults(context.messages);
-				return fauxAssistantMessage("ok");
+				return toolUse("send_to_user", { message: "ok" });
 			},
 		]);
 		await say("Plan again.");
@@ -226,7 +226,7 @@ describe("skills from apps (io.modelcontextprotocol/skills)", () => {
 			toolUse("read_skill", { app: "Travel", skill: "trip-planning" }),
 			(context) => {
 				results = toolResults(context.messages);
-				return fauxAssistantMessage("ok");
+				return toolUse("send_to_user", { message: "ok" });
 			},
 		]);
 		await say("Plan once more.");
@@ -248,7 +248,7 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 				arguments: { route: "JFK-LIS" },
 				instruction: "Tell me if it drops below $500.",
 			}),
-			fauxAssistantMessage("Watching."),
+			toolUse("send_to_user", { message: "I've asked to watch it." }),
 		]);
 		const turn = say("Watch JFK to Lisbon prices.");
 		const approval = await pendingApproval();
@@ -292,7 +292,7 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		faux.setResponses([
 			(context) => {
 				woken = lastUserText(context.messages);
-				return fauxAssistantMessage("It's $480 now.");
+				return toolUse("send_to_user", { message: "It's $480 now." });
 			},
 		]);
 		const event = {
@@ -348,7 +348,7 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		const watchOnce = async () => {
 			faux.setResponses([
 				toolUse("watch_app_event", { app: "Travel", event: "flight.price_changed", instruction: "Tell me." }),
-				fauxAssistantMessage("Watching."),
+				toolUse("send_to_user", { message: "I've asked to watch it." }),
 			]);
 			const turn = say("Watch prices.");
 			const approval = await pendingApproval();

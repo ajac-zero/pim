@@ -77,7 +77,6 @@ describe("an agent's team", () => {
 					results = toolResult(context.messages);
 					return toolUse("send_to_user", { message: "Go in May." });
 				},
-				() => fauxAssistantMessage("Done."),
 			],
 			Researcher: [member("May: mild and before the crowds.")],
 			Writer: [member("Day 1: Alfama. Day 2: Belém. Day 3: Sintra.")],
@@ -116,7 +115,7 @@ describe("an agent's team", () => {
 		// An agent without a team is told so.
 		scripts({ lead: [() => toolUse("delegate", { tasks: [{ member: "Researcher", task: "x" }] }), (context: Context) => {
 			results = toolResult(context.messages);
-			return fauxAssistantMessage("Fine.");
+			return toolUse("send_to_user", { message: "Fine." });
 		}] });
 		await say("Ask your team.", "1");
 		expect(results).toContain("has no team: do the work yourself.");
@@ -134,7 +133,7 @@ describe("an agent's team", () => {
 		scripts({
 			lead: [
 				() => toolUse("delegate", { tasks: [{ member: "Researcher", task: "Book the hotel." }] }),
-				() => fauxAssistantMessage("Waiting on your approval for the hotel."),
+				() => toolUse("send_to_user", { message: "Waiting on your approval for the hotel." }),
 			],
 			Researcher: [
 				() => toolUse("http_request", { method: "POST", url: "https://hooks.example.test/hotel" }),

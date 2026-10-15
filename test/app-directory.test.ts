@@ -1,5 +1,4 @@
 import type { Message } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it, vi } from "vitest";
 import { type RegistryEntry, rankCandidates } from "../src/extensions/app-directory";
 import { say, toolUse } from "./helpers";
@@ -98,7 +97,7 @@ describe("find_app", () => {
 			(context) => {
 				const last = context.messages.findLast((message: Message) => message.role === "toolResult");
 				result = last?.role === "toolResult" ? last.content.map((part) => (part.type === "text" ? part.text : "")).join("") : "";
-				return fauxAssistantMessage("Linear's own server is https://mcp.linear.app/mcp.");
+				return toolUse("send_to_user", { message: "Linear's own server is https://mcp.linear.app/mcp." });
 			},
 		]);
 		await say("Connect my Linear.");

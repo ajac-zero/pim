@@ -4,14 +4,12 @@ import { AlertCircle, Clock } from "lucide-react";
 import { Fragment, memo, useMemo } from "react";
 import { PimMark } from "~/components/app-sidebar";
 import { ArtifactCard, artifactReference } from "~/components/artifact";
-import { ActivityGroup } from "~/components/chat/activity";
 import {
   ApprovalBlock,
   AssistantMessage,
   EmailedMessage,
   EventNotice,
   ThinkingDot,
-  UnknownItemBlock,
   UserMessage,
 } from "~/components/chat/items";
 import { CHATGPT_USAGE_URL } from "~/components/chatgpt-logo";
@@ -136,31 +134,24 @@ export const Thread = memo(function Thread({
       )
       .sort((a, b) => a.createdAt - b.createdAt);
   }, [approvals, placed, sessionId]);
-  const runningTools = useMemo(
-    () => new Map(view.tools.map((tool) => [tool.callId, tool])),
-    [view.tools],
-  );
   const liveKeys = useMemo(
     () => new Set(view.live.map((entry) => entry.key)),
     [view.live],
   );
 
-  /* Approvals and artifacts stand on their own; Pim's other tool calls are its work. */
+  /* Only user-facing approvals and artifacts are drawn from tool calls. */
   const rows = useMemo(
     () =>
       layoutThread(entries, {
-        running: view.running,
         shown: (call) =>
           approvalsByCall.has(call.call_id) ||
           (ARTIFACT_TOOLS.has(call.name) &&
             artifactReference(outputs.get(call.call_id)?.output) !== null),
         refused: (call) => outputs.get(call.call_id)?.status === "incomplete",
       }),
-    [entries, view.running, approvalsByCall, outputs],
+    [entries, approvalsByCall, outputs],
   );
 
-  // Before Pim's work shows, a dot says it is on it.
-  const showThinking = view.running && rows.at(-1)?.kind !== "activity";
   const empty =
     !view.running &&
     unplaced.length === 0 &&
@@ -176,7 +167,7 @@ export const Thread = memo(function Thread({
             (composerHeight ?? DEFAULT_COMPOSER_INSET) + COMPOSER_INSET_GAP,
         }}
       >
-        {rows.map((row, index) => {
+        {rows.map((row) => {
           if (row.kind === "sent" && row.sent.channel === "email") {
             return (
               <EmailedMessage
@@ -210,22 +201,6 @@ export const Thread = memo(function Thread({
               />
             );
           }
-          if (row.kind === "reply") {
-            return <AssistantMessage key={row.key} item={row.item} />;
-          }
-          if (row.kind === "activity") {
-            return (
-              <ActivityGroup
-                key={row.key}
-                entries={row.entries}
-                outputs={outputs}
-                runningTools={runningTools}
-                live={view.running && index === rows.length - 1}
-                liveKeys={liveKeys}
-                visit={visit}
-              />
-            );
-          }
           const { entry } = row;
           if (entry.kind === "notice") {
             // A decision whose approval shows as a card is told by the card.
@@ -251,7 +226,7 @@ export const Thread = memo(function Thread({
               return <ArtifactCard key={entry.key} reference={artifact} />;
             }
           }
-          return <UnknownItemBlock key={entry.key} item={item} />;
+          return null;
         })}
 
         {unplaced.map((approval) => (
@@ -274,7 +249,7 @@ export const Thread = memo(function Thread({
           </div>
         )}
 
-        {showThinking && <ThinkingDot />}
+        {view.running && <ThinkingDot />}
 
         {view.retry && (
           <div className="flex items-center gap-2 text-muted-foreground text-sm">

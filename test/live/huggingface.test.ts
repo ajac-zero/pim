@@ -1,5 +1,4 @@
 import type { Message } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "vitest";
 import { api, post, say, toolUse } from "../helpers";
 import { faux } from "../worker";
@@ -43,7 +42,7 @@ describe("Hugging Face MCP server (live)", () => {
 			},
 			(context: { messages: Message[] }) => {
 				results = JSON.stringify(context.messages.filter((message) => message.role === "toolResult"));
-				return fauxAssistantMessage("Loaded.");
+				return toolUse("send_to_user", { message: "Loaded." });
 			},
 		]);
 		await say("How do I download a model with the hf CLI?");

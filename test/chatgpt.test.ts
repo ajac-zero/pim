@@ -1,8 +1,7 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { type ChatGPTCredential, verifyIdToken } from "../src/chatgpt";
-import { api, OWNER, post, say } from "./helpers";
+import { api, OWNER, post, say, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /*
@@ -48,20 +47,21 @@ async function idToken(key: KeyPair, claims: Record<string, unknown>): Promise<s
 	return `${head}.${body}.${b64url(signature)}`;
 }
 
-/** A Responses stream that says `text`. */
+/** A Responses stream that delivers `text` through send_to_user. */
 function responseStream(text: string): Response {
+	const item = { type: "function_call", id: "fc_1", call_id: "call_1", name: "send_to_user", arguments: JSON.stringify({ message: text }), status: "completed" };
 	const events = [
 		{ type: "response.created", response: { id: "resp_1", status: "in_progress" } },
 		{
 			type: "response.output_item.added",
 			output_index: 0,
-			item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+			item: { ...item, arguments: "", status: "in_progress" },
 		},
-		{ type: "response.output_text.delta", output_index: 0, item_id: "msg_1", content_index: 0, delta: text },
+		{ type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_1", delta: item.arguments },
 		{
 			type: "response.output_item.done",
 			output_index: 0,
-			item: { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text }] },
+			item,
 		},
 		{
 			type: "response.completed",
@@ -291,7 +291,7 @@ describe("Sign in with ChatGPT", () => {
 		expect(body).toEqual({ connected: false, email: null });
 		expect((await api("/model")).body.model.id).toBe("faux-model");
 
-		faux.setResponses([fauxAssistantMessage("Back on the default.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Back on the default." })]);
 		expect((await say("Still there?")).text).toBe("Back on the default.");
 		expect(callsTo("/v1/responses")).toHaveLength(0);
 		expect((await api("/model", { method: "PUT", body: JSON.stringify({ provider: "openai", id: "gpt-6.1-sol" }) })).status).toBe(409);

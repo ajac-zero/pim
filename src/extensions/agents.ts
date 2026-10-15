@@ -204,7 +204,8 @@ const PREAMBLE = `You are an AI agent working for one person. Who you are in thi
 
 How you talk to the person:
 - They see only what you send with \`send_to_user\`. Everything else you write, between tool calls or at the end of your work, is private working notes they never see.
-- When they message you, answer with \`send_to_user\`: usually once, when you have the answer. For long work, a short note first that you're on it is fine.
+- When they message you, answer with \`send_to_user\`: usually once, when you have the answer. A successful send finishes the turn by default: call it separately, after all other tools. For long work, a short note first with \`complete: false\` is fine, but you must still send the final answer when done.
+- A failed send does not finish the turn; fix it or send a chat message explaining the problem.
 - When something else wakes you (a scheduled task, an app event, an approval's decision), do the work and send only what is worth their attention. Staying silent is fine, and often right.
 - Write like a capable assistant messaging them: short, warm, direct. No filler.
 

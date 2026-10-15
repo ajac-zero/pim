@@ -186,14 +186,6 @@ export function messageText(item: MessageItem): string {
     .join("");
 }
 
-export function reasoningSummaryText(item: ReasoningItem): string {
-  const fromSummary = (item.summary ?? [])
-    .map((p) => p.text ?? "")
-    .join("\n\n");
-  if (fromSummary.trim().length > 0) return fromSummary;
-  return (item.content ?? []).map((p) => p.text ?? "").join("\n\n");
-}
-
 /** Removes platform-only presentation items from provider replay. */
 export function portableInputItem(item: ORItem): ORItem | null {
   if (

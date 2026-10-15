@@ -16,7 +16,6 @@ import { memo, type ReactNode, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
-import { useShowReasoning } from "~/components/reasoning-preference";
 import { Action, Actions } from "~/components/ui/actions";
 import { Button } from "~/components/ui/button";
 import { CodeBlock } from "~/components/ui/code-block";
@@ -32,33 +31,15 @@ import {
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import {
-  Reasoning,
-  ReasoningContent,
-  ReasoningTrigger,
-} from "~/components/ui/reasoning";
-import {
-  Tool,
-  ToolContent,
-  ToolHeader,
-  ToolInput,
-  ToolOutput,
-  type ToolState,
-} from "~/components/ui/tool";
-import {
   type ApprovalField,
   approvalView,
   type CodeLanguage,
   resultView,
 } from "~/lib/approval-view";
 import {
-  type FunctionCallItem,
-  type FunctionCallOutputItem,
   type InputImagePart,
   type MessageItem,
   messageText,
-  type ORItem,
-  type ReasoningItem,
-  reasoningSummaryText,
 } from "~/lib/openresponses";
 import { type Approval, pim } from "~/lib/pim-api";
 import type { PimNotice } from "~/lib/pim-view";
@@ -97,7 +78,7 @@ export const UserMessage = memo(function UserMessage({
         });
 
   return (
-    <div className="group/user flex w-full flex-col items-end gap-1.5">
+    <div className="group/user relative flex w-full flex-col items-end gap-1.5 pr-9">
       {images.length > 0 && (
         <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
           {images.map((src, index) => (
@@ -116,7 +97,7 @@ export const UserMessage = memo(function UserMessage({
           {text}
         </div>
       )}
-      <Actions className="gap-0.5 opacity-0 transition-opacity group-hover/user:opacity-100">
+      <Actions className="absolute top-2 right-0 gap-0.5 opacity-0 transition-opacity group-focus-within/user:opacity-100 group-hover/user:opacity-100">
         <Action
           size="icon"
           className="size-7 text-muted-foreground"
@@ -154,7 +135,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   const { copied, copy } = useCopy(text);
 
   return (
-    <div className="group/assistant w-full">
+    <div className="group/assistant relative w-full pr-9">
       <Markdown text={text} streaming={streaming} />
       {streaming && (
         <span className="ml-0.5 inline-block h-4 w-2 animate-pulse rounded-sm bg-foreground/70 align-text-bottom" />
@@ -167,7 +148,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         </p>
       )}
       {!streaming && (
-        <Actions className="mt-1.5 gap-0.5 opacity-0 transition-opacity group-hover/assistant:opacity-100">
+        <Actions className="absolute top-0 right-0 gap-0.5 opacity-0 transition-opacity group-focus-within/assistant:opacity-100 group-hover/assistant:opacity-100">
           <Action
             size="icon"
             className="size-7 text-muted-foreground"
@@ -257,91 +238,6 @@ export const EventNotice = memo(function EventNotice({
         </pre>
       )}
     </div>
-  );
-});
-
-/* -------------------------------- reasoning ------------------------------ */
-
-export const ReasoningBlock = memo(function ReasoningBlock({
-  item,
-  streaming,
-}: {
-  item: ReasoningItem;
-  streaming?: boolean;
-}) {
-  const { t } = useI18n();
-  const summary = reasoningSummaryText(item);
-  const { showReasoning } = useShowReasoning();
-
-  if (summary.trim().length === 0) {
-    return (
-      <div className="flex items-center gap-1.5 text-muted-foreground text-sm">
-        {streaming ? (
-          <span className="animate-pulse">{t("thinking")}</span>
-        ) : (
-          t("thoughtProcess")
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <Reasoning
-      className="w-full"
-      isStreaming={streaming}
-      defaultOpen={showReasoning}
-    >
-      <ReasoningTrigger />
-      <ReasoningContent>{summary}</ReasoningContent>
-    </Reasoning>
-  );
-});
-
-/* ------------------------------- tool calls ------------------------------ */
-
-function tryPrettyJson(raw: string): string {
-  try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
-  } catch {
-    return raw;
-  }
-}
-
-export const ToolCallBlock = memo(function ToolCallBlock({
-  call,
-  output,
-  running,
-  liveOutput,
-}: {
-  call: FunctionCallItem;
-  output?: FunctionCallOutputItem | null;
-  /** The call is executing now. */
-  running?: boolean;
-  /** Output streamed so far, while running. */
-  liveOutput?: string;
-}) {
-  const outputText = useMemo(() => {
-    if (!output) return liveOutput || null;
-    if (typeof output.output === "string") return tryPrettyJson(output.output);
-    return JSON.stringify(output.output, null, 2);
-  }, [output, liveOutput]);
-
-  const state: ToolState = output
-    ? output.status === "incomplete"
-      ? "error"
-      : "completed"
-    : running
-      ? "running"
-      : "pending";
-
-  return (
-    <Tool>
-      <ToolHeader title={call.name} state={state} />
-      <ToolContent>
-        <ToolInput input={tryPrettyJson(call.arguments || "{}")} />
-        <ToolOutput output={outputText} />
-      </ToolContent>
-    </Tool>
   );
 });
 
@@ -644,38 +540,6 @@ function ApprovalResult({ result }: { result: string }) {
     </div>
   );
 }
-
-/* ------------------------------ unknown items ---------------------------- */
-
-export const UnknownItemBlock = memo(function UnknownItemBlock({
-  item,
-}: {
-  item: ORItem;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="w-full overflow-hidden rounded-xl border border-dashed bg-card/50">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-3.5 py-2 text-left text-muted-foreground text-sm hover:bg-accent/50"
-      >
-        <span className="font-mono text-xs">{item.type}</span>
-        <ChevronRight
-          className={cn(
-            "ml-auto size-4 transition-transform",
-            open && "rotate-90",
-          )}
-        />
-      </button>
-      {open && (
-        <pre className="max-h-64 overflow-auto border-t bg-muted/50 p-3 font-mono text-xs leading-relaxed scrollbar-thin">
-          {JSON.stringify(item, null, 2)}
-        </pre>
-      )}
-    </div>
-  );
-});
 
 /* ------------------------------- indicators ------------------------------ */
 

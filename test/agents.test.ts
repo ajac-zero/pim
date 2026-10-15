@@ -1,5 +1,4 @@
 import type { JsonValue, Message } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
@@ -39,7 +38,7 @@ describe("the owner's agents", () => {
 		const prompts: string[] = [];
 		const record = (context: { messages: Message[] }) => {
 			prompts.push(system(context.messages));
-			return fauxAssistantMessage("ok");
+			return toolUse("send_to_user", { message: "ok" });
 		};
 		faux.setResponses([record, record]);
 		await say("How far today?", session.id);
@@ -96,7 +95,7 @@ describe("the owner's agents", () => {
 		const seen: { prompt: string; result: string }[] = [];
 		const record = (context: { messages: Message[] }) => {
 			seen.push({ prompt: system(context.messages), result: JSON.stringify(context.messages.findLast((m) => m.role === "toolResult")?.content) });
-			return fauxAssistantMessage("ok");
+			return toolUse("send_to_user", { message: "ok" });
 		};
 		const reviewer = {
 			name: "Code reviewer",
@@ -138,7 +137,7 @@ describe("the owner's agents", () => {
 		const session = (await post("/sessions", { agent: creator.id })).body.id;
 		faux.setResponses([
 			toolUse(CREATE_AGENT, { name: "Draft helper", description: "Writes drafts.", instructions: "Write clearly." }),
-			fauxAssistantMessage("Created."),
+			toolUse("send_to_user", { message: "Created." }),
 		]);
 		await say("Make a writing assistant", session);
 		const target = (await api("/agents")).body.agents.find((agent: { name: string }) => agent.name === "Draft helper");
@@ -146,7 +145,7 @@ describe("the owner's agents", () => {
 
 		faux.setResponses([
 			toolUse(RENAME_AGENT, { agent: target.id, name: "  Quill  " }),
-			fauxAssistantMessage("Waiting for approval."),
+			toolUse("send_to_user", { message: "Waiting for approval." }),
 		]);
 		await say("Rename the assistant you just made to Quill", session);
 		const approval = await pendingApproval();
@@ -154,7 +153,7 @@ describe("the owner's agents", () => {
 		expect((await api(`/agents/${target.id}`)).body.name).toBe("Draft helper");
 		// Approval changes only the name, retaining edits made while it was waiting.
 		await api(`/agents/${target.id}`, { method: "PUT", body: JSON.stringify({ instructions: "Use short paragraphs." }) });
-		faux.setResponses([fauxAssistantMessage("Renamed.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Renamed." })]);
 		await post(`/approvals/${approval.id}/approve`);
 		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
 		expect((await api(`/agents/${target.id}`)).body).toEqual({
@@ -165,7 +164,7 @@ describe("the owner's agents", () => {
 		let prompt = "";
 		faux.setResponses([(context) => {
 			prompt = system(context.messages);
-			return fauxAssistantMessage("Hello.");
+			return toolUse("send_to_user", { message: "Hello." });
 		}]);
 		await say("What is your name?", targetSession);
 		expect(prompt).toContain('you are \\"Quill\\"');
@@ -173,17 +172,17 @@ describe("the owner's agents", () => {
 
 		// The same tool can rename the agent in this chat; denying it leaves the name alone.
 		for (const decision of ["deny", "approve"]) {
-			faux.setResponses([toolUse(RENAME_AGENT, { agent: creator.id, name: "Atlas" }), fauxAssistantMessage("Waiting.")]);
+			faux.setResponses([toolUse(RENAME_AGENT, { agent: creator.id, name: "Atlas" }), toolUse("send_to_user", { message: "Waiting." })]);
 			await say("Call yourself Atlas", session);
 			const request = await pendingApproval();
-			faux.setResponses([fauxAssistantMessage("Understood.")]);
+			faux.setResponses([toolUse("send_to_user", { message: "Understood." })]);
 			await post(`/approvals/${request.id}/${decision}`);
 			expect(await decisionRun(request)).toMatchObject({ status: "done" });
 			expect((await api(`/agents/${creator.id}`)).body.name).toBe(decision === "approve" ? "Atlas" : "Organizer");
 		}
 		// Renaming has its own permission, separate from changing instructions and apps.
 		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: RENAME_AGENT, permission: "on" }) });
-		faux.setResponses([toolUse(RENAME_AGENT, { agent: target.id, name: "Scribe" }), fauxAssistantMessage("Renamed.")]);
+		faux.setResponses([toolUse(RENAME_AGENT, { agent: target.id, name: "Scribe" }), toolUse("send_to_user", { message: "Renamed." })]);
 		await say("Call Quill Scribe instead", session);
 		expect((await api(`/agents/${target.id}`)).body.name).toBe("Scribe");
 		expect((await api("/approvals?status=pending")).body.approvals).toEqual([]);
@@ -192,7 +191,7 @@ describe("the owner's agents", () => {
 		let tools: string[] = [];
 		faux.setResponses([(context) => {
 			tools = context.messages.flatMap((message) => message.role === "system" ? (message.toolsAdded ?? []).map((tool) => tool.name) : []);
-			return fauxAssistantMessage("Hello.");
+			return toolUse("send_to_user", { message: "Hello." });
 		}]);
 		await say("Hi", fresh);
 		expect(tools).not.toContain(RENAME_AGENT);
@@ -218,7 +217,7 @@ describe("the owner's agents", () => {
 		const results: string[] = [];
 		const record = (context: { messages: Message[] }) => {
 			results.push(JSON.stringify(context.messages.findLast((m) => m.role === "toolResult")?.content));
-			return fauxAssistantMessage("ok");
+			return toolUse("send_to_user", { message: "ok" });
 		};
 		const edit: Record<string, JsonValue> = {
 			instructions: "Write long.",
@@ -252,7 +251,7 @@ describe("the owner's agents", () => {
 		faux.setResponses([
 			(context) => {
 				prompt = system(context.messages);
-				return fauxAssistantMessage("Done.");
+				return toolUse("send_to_user", { message: "Done." });
 			},
 		]);
 		await post(`/approvals/${approval.id}/approve`);

@@ -1,6 +1,7 @@
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { type Static, Type } from "@earendil-works/pi-ai";
 import {
+	AGENT_COLORS,
 	MAX_APPS,
 	MAX_DESCRIPTION,
 	MAX_INSTRUCTIONS,
@@ -228,7 +229,7 @@ export function agentExtension(
 	const createAgent = defineTool({
 		name: CREATE_AGENT,
 		description:
-			"Make a new agent for the person: a named agent with its own instructions and the apps it works with, with its own chats in the sidebar. Only when none of their agents already does what they want. Write its instructions as the person would: what it's for, what to focus on, how to answer. Apps are remote MCP servers by https URL, such as ones `find_app` finds; the person connects each the first time they use it.",
+			"Make a new agent for the person: a named agent with its own instructions and the apps it works with, with its own chats in the sidebar. Only when none of their agents already does what they want. Write its instructions as the person would: what it's for, what to focus on, how to answer. Give it an emoji and a color that fit what it's for, so the person tells it apart in the sidebar. Apps are remote MCP servers by https URL, such as ones `find_app` finds; the person connects each the first time they use it.",
 		parameters: Type.Object({
 			name: Type.String({ minLength: 1, maxLength: MAX_NAME }),
 			description: Type.String({ maxLength: MAX_DESCRIPTION, description: "One line, shown under its name." }),
@@ -241,6 +242,8 @@ export function agentExtension(
 				}),
 			),
 			blueprint: Type.Optional(Type.String({ description: "The blueprint it builds on, such as pim.assistant/pim; the default blueprint if left out." })),
+			emoji: Type.Optional(Type.String({ description: "One emoji shown as its icon, such as 🏃 for a running coach." })),
+			color: Type.Optional(Type.Union(AGENT_COLORS.map((color) => Type.Literal(color)), { description: "The color behind its emoji." })),
 		}),
 		// A rerun finds the agent it made by its name, and makes no other.
 		replay: "safe",
@@ -248,7 +251,8 @@ export function agentExtension(
 			const existing = agents.list().find((agent) => agent.name.toLowerCase() === args.name.trim().toLowerCase());
 			if (existing) return json({ exists: true, agent: { id: existing.id, name: existing.name, description: existing.description } });
 			try {
-				const agent = agents.create(args);
+				const { emoji, ...rest } = args;
+				const agent = agents.create({ ...rest, symbol: emoji });
 				return json({
 					created: true,
 					agent: { id: agent.id, name: agent.name, description: agent.description, apps: agent.apps, team: agent.team.map((member) => member.name) },

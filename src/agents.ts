@@ -45,7 +45,7 @@ export type Agent = {
 	readonly published: string | null;
 	/** When its icon was last set, to fetch it again when it changes; null without one. */
 	readonly icon: number | null;
-	/** What shows for it without an uploaded icon: a named icon, such as `rocket`, or one emoji; null for the default. */
+	/** What shows for it without an uploaded icon: one of `AGENT_SHAPES` (or, from before shapes, an icon's name or an emoji); null for the default. */
 	readonly symbol: string | null;
 	/** One of `AGENT_COLORS`, for its symbol; null for the default. */
 	readonly color: string | null;
@@ -71,7 +71,9 @@ export type AgentInput = {
 export const MAX_AGENTS = 20;
 export const MAX_ICON_BYTES = 256 * 1024;
 export const ICON_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
-export const AGENT_COLORS = ["gray", "red", "orange", "amber", "green", "teal", "blue", "indigo", "violet", "pink"];
+export const AGENT_COLORS = ["brown", "gray", "red", "orange", "amber", "green", "teal", "blue", "indigo", "violet", "pink"];
+/** The shapes the app draws an agent as, kept as its symbol. */
+export const AGENT_SHAPES = ["circle", "blob", "square", "pill", "triangle", "hexagon", "cloud", "drop"];
 export const MAX_NAME = 60;
 export const MAX_DESCRIPTION = 280;
 export const MAX_INSTRUCTIONS = 8000;

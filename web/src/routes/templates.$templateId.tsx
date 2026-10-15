@@ -50,8 +50,7 @@ function TemplatePage() {
         <AgentIcon
           agent={template}
           src={templateIconSrc(template)}
-          tile
-          className="size-9 rounded-lg"
+          className="size-9"
         />
       }
       description={template.description || t("noDescription")}

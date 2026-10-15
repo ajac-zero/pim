@@ -26,7 +26,7 @@ import {
 import type { ReactNode } from "react";
 import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { AgentIcon } from "~/components/agent-icon";
+import { AgentIcon, PimMark } from "~/components/agent-icon";
 import { AgentSettingsDialog } from "~/components/agent-settings";
 import { LanguageSelect, useI18n } from "~/components/i18n";
 import { useTheme } from "~/components/theme";
@@ -1018,26 +1018,5 @@ function PreferencesMenu({ collapsed = false }: { collapsed?: boolean }) {
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
-  );
-}
-
-export function PimMark({ className }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 32 32"
-      fill="none"
-      className={className}
-      aria-hidden="true"
-    >
-      <rect width="32" height="32" rx="8" className="fill-primary" />
-      <path
-        d="M11 23V9h6a4.5 4.5 0 0 1 0 9h-6"
-        className="stroke-primary-foreground"
-        strokeWidth="2.25"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <circle cx="21.5" cy="22" r="1.5" className="fill-primary-foreground" />
-    </svg>
   );
 }

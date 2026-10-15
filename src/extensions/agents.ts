@@ -19,6 +19,7 @@ import { type PimServices, json, text } from "./services";
 
 export const CREATE_AGENT = "create_agent";
 export const UPDATE_AGENT = "update_agent";
+export const RENAME_AGENT = "rename_agent";
 
 const App = Type.Object({ name: Type.String(), url: Type.String({ description: "The app's remote MCP server, https." }) });
 const Member = Type.Object({
@@ -100,6 +101,25 @@ export function updateAgentAction(agents: Pick<AgentStore, "get" | "update">): G
 	}) as GatedAction;
 }
 
+/** Renames one of the person's agents without changing its instructions or connections. */
+export function renameAgentAction(agents: Pick<AgentStore, "get" | "update">): GatedAction {
+	return defineGatedAction({
+		name: RENAME_AGENT,
+		description: "Rename one of the person's agents, including yourself, when they ask. Use its id from your_agents. Its chats and settings stay the same.",
+		parameters: Type.Object({
+			agent: Type.String({ description: "The agent's id from your_agents." }),
+			name: Type.String({ minLength: 1, maxLength: MAX_NAME, pattern: "\\S", description: "The new name." }),
+		}),
+		summarize: ({ agent, name }) => `Rename ${JSON.stringify(agents.get(agent)?.name ?? agent)} to ${JSON.stringify(name.trim())}`,
+		async run({ agent: id, name }) {
+			const agent = agents.get(id);
+			if (!agent) return "That agent no longer exists.";
+			const updated = agents.update(id, agentInput({ name }, agent));
+			return `${JSON.stringify(agent.name)} is now named ${JSON.stringify(updated.name)}. Its chats and settings are unchanged.`;
+		},
+	}) as GatedAction;
+}
+
 /** The person's agents, for a chat's agent to know them and make new ones. */
 export type AgentsHost = {
 	list(): readonly Agent[];
@@ -118,7 +138,7 @@ function agentsSection(self: Agent, host: AgentsHost): string {
 			.list()
 			.map(
 				(agent) =>
-					`- ${agent.name}${agent.id === self.id ? " (you)" : ""}${agent.default ? " (default)" : ""}${agent.description ? `: ${agent.description}` : ""}`,
+					`- ${agent.name}${agent.id === self.id ? " (you)" : ""}${agent.default ? " (default)" : ""}${agent.description ? `: ${agent.description}` : ""} [id: ${agent.id}]`,
 			),
 		`When the person wants ongoing help of the kind another of these is for, tell them to start a chat with it from the sidebar. When they want ongoing help none of these covers, such as a coding helper or a trip planner, make one with \`${CREATE_AGENT}\` without asking first, then tell them it's in the sidebar. Don't make one for a one-off question: answer it yourself.`,
 		...(blueprints.length > 1

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { Bot } from "lucide-react";
 import { AgentIcon } from "~/components/agent-icon";
 import { Composer } from "~/components/chat/composer";
@@ -67,12 +67,6 @@ function DashboardPage() {
           <div className="mt-8 flex flex-col items-center gap-2 rounded-xl border border-dashed px-4 py-10 text-center text-muted-foreground text-sm">
             <Bot className="size-5" />
             {t("noDashboard")}
-            <Link
-              to="/agents"
-              className="underline underline-offset-2 hover:text-foreground"
-            >
-              {t("yourAgents")}
-            </Link>
           </div>
         ) : (
           <div className="mt-8 grid gap-3 md:grid-cols-2">

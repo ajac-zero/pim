@@ -27,7 +27,7 @@ function TemplatePage() {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
       queryClient.invalidateQueries({ queryKey: ["templates"] });
       toast.success(t("madeYourOwn", { name: agent.name }));
-      navigate({ to: "/agents" });
+      navigate({ to: "/agents/$agentId", params: { agentId: agent.id } });
     },
     onError: (failure) => toast.error(failure.message),
   });
@@ -115,7 +115,11 @@ function TemplatePage() {
       {copy && (
         <p className="mt-4 text-sm">
           {t("youHaveACopy")}{" "}
-          <Link to="/agents" className="underline underline-offset-2">
+          <Link
+            to="/agents/$agentId"
+            params={{ agentId: copy.id }}
+            className="underline underline-offset-2"
+          >
             {copy.name}
           </Link>
         </p>

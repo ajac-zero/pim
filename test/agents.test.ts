@@ -5,7 +5,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { AgentStore } from "../src/agents";
 import { TeamStore } from "../src/team";
-import { CREATE_AGENT, UPDATE_AGENT } from "../src/extensions/agents";
+import { CREATE_AGENT, RENAME_AGENT, UPDATE_AGENT } from "../src/extensions/agents";
 import { api, apiUrl, decisionRun, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
 import { faux } from "./worker";
 
@@ -130,6 +130,75 @@ describe("the owner's agents", () => {
 		expect(seen[3]!.result).toContain('\\"exists\\": true');
 		expect((await api("/agents")).body.agents.filter((agent: { name: string }) => agent.name === "Code reviewer")).toHaveLength(1);
 		expect(seen[3]!.prompt).toContain("- Code reviewer: Reviews my pull requests.");
+	});
+
+	it("renames another agent or itself in chat only after approval, keeping its identity and settings", async () => {
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
+		const creator = (await post("/agents", { name: "Organizer", instructions: "Organize my work." })).body;
+		const session = (await post("/sessions", { agent: creator.id })).body.id;
+		faux.setResponses([
+			toolUse(CREATE_AGENT, { name: "Draft helper", description: "Writes drafts.", instructions: "Write clearly." }),
+			fauxAssistantMessage("Created."),
+		]);
+		await say("Make a writing assistant", session);
+		const target = (await api("/agents")).body.agents.find((agent: { name: string }) => agent.name === "Draft helper");
+		const targetSession = (await post("/sessions", { agent: target.id })).body.id;
+
+		faux.setResponses([
+			toolUse(RENAME_AGENT, { agent: target.id, name: "  Quill  " }),
+			fauxAssistantMessage("Waiting for approval."),
+		]);
+		await say("Rename the assistant you just made to Quill", session);
+		const approval = await pendingApproval();
+		expect(approval.summary).toBe('Rename "Draft helper" to "Quill"');
+		expect((await api(`/agents/${target.id}`)).body.name).toBe("Draft helper");
+		// Approval changes only the name, retaining edits made while it was waiting.
+		await api(`/agents/${target.id}`, { method: "PUT", body: JSON.stringify({ instructions: "Use short paragraphs." }) });
+		faux.setResponses([fauxAssistantMessage("Renamed.")]);
+		await post(`/approvals/${approval.id}/approve`);
+		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
+		expect((await api(`/agents/${target.id}`)).body).toEqual({
+			...target, name: "Quill", instructions: "Use short paragraphs.", updatedAt: expect.any(Number),
+		});
+		expect((await api(`/agents/${creator.id}`)).body.name).toBe("Organizer");
+		expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === targetSession).agent).toEqual({ id: target.id, name: "Quill" });
+		let prompt = "";
+		faux.setResponses([(context) => {
+			prompt = system(context.messages);
+			return fauxAssistantMessage("Hello.");
+		}]);
+		await say("What is your name?", targetSession);
+		expect(prompt).toContain('you are \\"Quill\\"');
+		expect(prompt).toContain("Use short paragraphs.");
+
+		// The same tool can rename the agent in this chat; denying it leaves the name alone.
+		for (const decision of ["deny", "approve"]) {
+			faux.setResponses([toolUse(RENAME_AGENT, { agent: creator.id, name: "Atlas" }), fauxAssistantMessage("Waiting.")]);
+			await say("Call yourself Atlas", session);
+			const request = await pendingApproval();
+			faux.setResponses([fauxAssistantMessage("Understood.")]);
+			await post(`/approvals/${request.id}/${decision}`);
+			expect(await decisionRun(request)).toMatchObject({ status: "done" });
+			expect((await api(`/agents/${creator.id}`)).body.name).toBe(decision === "approve" ? "Atlas" : "Organizer");
+		}
+		// Renaming has its own permission, separate from changing instructions and apps.
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: RENAME_AGENT, permission: "on" }) });
+		faux.setResponses([toolUse(RENAME_AGENT, { agent: target.id, name: "Scribe" }), fauxAssistantMessage("Renamed.")]);
+		await say("Call Quill Scribe instead", session);
+		expect((await api(`/agents/${target.id}`)).body.name).toBe("Scribe");
+		expect((await api("/approvals?status=pending")).body.approvals).toEqual([]);
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: RENAME_AGENT, permission: "off" }) });
+		const fresh = (await post("/sessions", { agent: creator.id })).body.id;
+		let tools: string[] = [];
+		faux.setResponses([(context) => {
+			tools = context.messages.flatMap((message) => message.role === "system" ? (message.toolsAdded ?? []).map((tool) => tool.name) : []);
+			return fauxAssistantMessage("Hello.");
+		}]);
+		await say("Hi", fresh);
+		expect(tools).not.toContain(RENAME_AGENT);
+		expect(tools).toContain(UPDATE_AGENT);
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: RENAME_AGENT, permission: null }) });
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
 	});
 
 	it("changes itself, its team included, once the person approves", async () => {

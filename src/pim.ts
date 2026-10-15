@@ -84,7 +84,7 @@ import { MESSAGING_EXTENSION, messagingExtension, SEND_TO_USER } from "./extensi
 import { createOptMem, memoryWidgets } from "./extensions/optmem";
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
 import { byteLength, ENTRY_BYTES, entryLine } from "./extensions/optmem/store";
-import { CREATE_AGENT, agentExtension, UPDATE_AGENT, updateAgentAction } from "./extensions/agents";
+import { CREATE_AGENT, agentExtension, RENAME_AGENT, renameAgentAction, UPDATE_AGENT, updateAgentAction } from "./extensions/agents";
 import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
@@ -185,7 +185,7 @@ const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
 /** Tools of the Pim the person talks with that its team members don't get, though their extensions stay. */
-const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT]);
+const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, RENAME_AGENT]);
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
 const AGENT_SECTION_KEY = "pim_section";
 /** The day the person was last told a limit stopped background work. */
@@ -352,6 +352,7 @@ export class Pim extends DurableAgent<Env> {
 		...mcpActions(this.apps),
 		watchAction(this.apps, this.appEvents),
 		updateAgentAction(this.agents),
+		renameAgentAction(this.agents),
 	];
 
 	/** Every action an approval can be for: Pim's own, and the extensions'. */

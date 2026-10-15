@@ -105,6 +105,11 @@ function usePimEvents() {
       },
       onApproval: (approval) => {
         queryClient.invalidateQueries({ queryKey: ["approvals"] });
+        if (approval.action === "rename_agent" && approval.status === "approved") {
+          queryClient.invalidateQueries({ queryKey: ["agents"] });
+          queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+        }
         if (approval.requestedBy) {
           // Someone in a circle asked: their request waits on the Sharing page.
           queryClient.invalidateQueries({ queryKey: ["guest-activity"] });

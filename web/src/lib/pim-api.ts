@@ -217,7 +217,7 @@ export type Approval = {
   id: string;
   session: string;
   action: string;
-  /** The tool the model called; null for approvals filed before it was recorded. */
+  /** The tool "always approve" remembers; null for explicit-only or older requests. */
   tool: string | null;
   args: unknown;
   summary: string;

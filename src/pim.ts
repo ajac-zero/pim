@@ -84,7 +84,7 @@ import { MESSAGING_EXTENSION, messagingExtension, SEND_TO_USER } from "./extensi
 import { createOptMem, memoryWidgets } from "./extensions/optmem";
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
 import { byteLength, ENTRY_BYTES, entryLine } from "./extensions/optmem/store";
-import { CREATE_AGENT, agentExtension, RENAME_AGENT, renameAgentAction, UPDATE_AGENT, updateAgentAction } from "./extensions/agents";
+import { CREATE_AGENT, agentExtension, MANAGE_APPS, manageAppsAction, RENAME_AGENT, renameAgentAction, UPDATE_AGENT, updateAgentAction } from "./extensions/agents";
 import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
@@ -185,7 +185,7 @@ const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
 /** Tools of the Pim the person talks with that its team members don't get, though their extensions stay. */
-const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, RENAME_AGENT]);
+const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, RENAME_AGENT, MANAGE_APPS]);
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
 const AGENT_SECTION_KEY = "pim_section";
 /** The day the person was last told a limit stopped background work. */
@@ -318,7 +318,7 @@ export class Pim extends DurableAgent<Env> {
 			this.#assertOpen();
 			return this.mcp.callTool({ serverId, name, arguments: args });
 		},
-		connect: (name, url) => this.connectApp(name, url),
+		connect: (name, url) => this.connectApp(name, url, { allowDuplicateName: true }),
 		capabilities: (serverId) => this.mcp.mcpConnections[serverId]?.serverCapabilities as McpCapabilities | undefined,
 		request: async (serverId, method, params) => {
 			const connection = this.mcp.mcpConnections[serverId];
@@ -353,6 +353,7 @@ export class Pim extends DurableAgent<Env> {
 		watchAction(this.apps, this.appEvents),
 		updateAgentAction(this.agents),
 		renameAgentAction(this.agents),
+		manageAppsAction(this.agents, this.apps),
 	];
 
 	/** Every action an approval can be for: Pim's own, and the extensions'. */
@@ -454,9 +455,16 @@ export class Pim extends DurableAgent<Env> {
 	async connectApp(
 		name: string,
 		url: string,
-		options: { headers?: Record<string, string>; approval?: McpApproval } = {},
+		options: { headers?: Record<string, string>; approval?: McpApproval; allowDuplicateName?: boolean } = {},
 	): Promise<{ id: string; state: string; authUrl?: string }> {
-		const id = slug(name);
+		let id = slug(name);
+		// Agent app lists identify connections by URL. Replacing one agent's
+		// endpoint must not overwrite a same-named connection other agents use.
+		if (options.allowDuplicateName) {
+			const sameUrl = this.apps.servers().find((server) => server.url === url);
+			if (sameUrl) id = sameUrl.id;
+			else if (this.apps.servers().some((server) => server.id === id)) id = `${id.slice(0, 15)}_${crypto.randomUUID().slice(0, 8)}`;
+		}
 		const existing = this.apps.servers().find((server) => server.id === id);
 		if (existing && existing.state !== "ready") {
 			// A connection that failed, or is still waiting for sign-in (an abandoned or expired one), is not connected: clear it so the user can try again.
@@ -1004,6 +1012,10 @@ export class Pim extends DurableAgent<Env> {
 		this.#assertOpen();
 		const approval = this.store.approval(id);
 		if (!approval) throw new HttpError(404, `No approval ${id}`);
+		if (decision === "approve" && this.actions.find((action) => action.name === approval.action)?.explicitApproval) {
+			if (auto) throw new HttpError(400, "This action requires an explicit decision for each request");
+			if (this.#approvalPermission(approval) === "off") throw new HttpError(403, "This capability is turned off");
+		}
 		if (!this.store.decideApproval(id, decision === "approve" ? "approved" : "denied", note ?? null, auto ?? "user")) {
 			throw new HttpError(409, `Approval ${id} is already ${approval.status}`);
 		}
@@ -1058,6 +1070,9 @@ export class Pim extends DurableAgent<Env> {
 		const approval = this.store.approval(id);
 		if (!approval) throw new HttpError(404, `No approval ${id}`);
 		if (approval.status !== "pending") throw new HttpError(409, `Approval ${id} is already ${approval.status}`);
+		if (this.actions.find((action) => action.name === approval.action)?.explicitApproval) {
+			throw new HttpError(400, "This action requires an explicit decision for each request");
+		}
 		const { app, tool } = this.#approvalTool(approval);
 		const audience = approval.requestedBy?.circle ?? OWNER;
 		// Remembered first, so calls filed while this action runs are not asked about.
@@ -1093,7 +1108,10 @@ export class Pim extends DurableAgent<Env> {
 	/** The permission of the tool that filed an approval, for whoever asked; `ask` for an app tool that is gone. */
 	#approvalPermission(approval: Approval): ToolPermission {
 		const { app, tool } = this.#approvalTool(approval);
-		if (app === "") return ownToolPermission(this.store, tool).permission;
+		if (app === "") {
+			const permission = ownToolPermission(this.store, tool).permission;
+			return permission === "on" && this.actions.find((action) => action.name === tool)?.explicitApproval ? "ask" : permission;
+		}
 		const server = this.apps.servers().find((candidate) => candidate.id === app);
 		const info = this.apps.tools().find((candidate) => candidate.serverId === app && candidate.name === tool);
 		return server && info ? appToolPermission(this.store, server, info, approval.requestedBy?.circle ?? OWNER).permission : "ask";
@@ -1121,7 +1139,7 @@ export class Pim extends DurableAgent<Env> {
 						name: action.name,
 						description: action.description,
 						readOnly: false,
-						choices: TOOL_PERMISSIONS,
+						choices: action.explicitApproval ? ["off", "ask"] : TOOL_PERMISSIONS,
 						...ownToolPermission(this.store, action.name),
 					}))
 				: [
@@ -1169,6 +1187,9 @@ export class Pim extends DurableAgent<Env> {
 			const known = audience === OWNER ? this.#ownGatedActions().some((action) => action.name === tool) : tool === MEMORY_TOOL;
 			if (!known) throw new HttpError(404, `No tool ${tool}`);
 			if (tool === MEMORY_TOOL && permission === "ask") throw new HttpError(400, "Memory is either on or off");
+			if (permission === "on" && this.#ownGatedActions().find((action) => action.name === tool)?.explicitApproval) {
+				throw new HttpError(400, "This tool can only be off or ask: every change requires explicit approval");
+			}
 		} else {
 			const info = this.apps.tools().find((candidate) => candidate.serverId === app && candidate.name === tool);
 			if (!info) throw new HttpError(404, `No tool ${tool} in the app ${app}`);

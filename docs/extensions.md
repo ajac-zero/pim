@@ -116,7 +116,7 @@ It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps
 
 ## Apps
 
-An agent's `apps` are the remote MCP servers its chats work with. Each person connects them with their own accounts, from an agent's card in Your agents or by asking the agent, whose `connect_app` connects only the apps that agent lists. A chat gets the tools and instructions of the connected apps its agent lists: the blueprint's `apps`, then the agent's own. Apps connected for another agent stay out of it, and the model can't add an app by itself; `find_app` only finds a server's URL for the person to add. URLs must be https, and unique within an agent.
+An agent's `apps` are the remote MCP servers its chats work with. Each person connects them with their own accounts, from an agent's card in Your agents or by asking the agent, whose `connect_app` connects only the apps that agent lists. A chat gets the tools and instructions of the connected apps its agent lists: the blueprint's `apps`, then the agent's own. Apps connected for another agent stay out of it. With `manage_apps` enabled (Off / Ask in Tool permissions), an agent can request additions and removals to its own app list using a URL the person gives it or one `find_app` discovers. Each request requires explicit chat approval of its exact URLs, even under the auto approval policy, and approval connects additions automatically. Removal affects only the agent's own list, not blueprint apps or shared connections. `update_agent` cannot change apps. URLs must be https, and unique within an agent.
 
 ## Widgets
 

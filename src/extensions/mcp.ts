@@ -295,6 +295,7 @@ export function mcpExtensions(
 					const server = serverFor(all, app);
 					return {
 						name: app.name,
+						url: app.url,
 						state: server?.state ?? "not connected",
 						...(server?.error ? { error: server.error } : {}),
 						tools: server ? catalog.filter((tool) => tool.serverId === server.id).map((tool) => toolName(server.id, tool.name)) : [],
@@ -316,7 +317,7 @@ export function mcpExtensions(
 			if (!app) {
 				const names = mine.map((candidate) => candidate.name).join(", ");
 				return text(
-					`This agent doesn't work with ${wanted}${names ? `; its apps are ${names}` : ""}. Add one with update_agent, or the person adds it in Your agents.`,
+					`This agent doesn't work with ${wanted}${names ? `; its apps are ${names}` : ""}. If manage_apps is available, request adding its MCP URL there; approval adds and connects it. Otherwise the person can add it in Your agents.`,
 					true,
 				);
 			}
@@ -338,7 +339,7 @@ export function mcpExtensions(
 	const findApp = defineTool({
 		name: "find_app",
 		description:
-			"Find an app's remote MCP server in the official MCP Registry, so the person can add it to this Pim's apps. The app's own server comes first; others are third parties that relay the app through their own server.",
+			"Find an app's remote MCP server in the official MCP Registry, then use manage_apps if available to request adding and connecting it with the person's approval. The app's own server comes first; others are third parties that relay the app through their own server.",
 		parameters: Type.Object({
 			app: Type.String({ minLength: 2, maxLength: 60, description: "The app's name, like Linear or Notion." }),
 		}),
@@ -360,14 +361,14 @@ export function mcpExtensions(
 			section("connected_apps", ({ conversationId }) => {
 				const mine = appsOf(String(conversationId));
 				if (mine.length === 0) {
-					return "This agent works with no apps. The person adds them to this agent in Your agents; find_app finds an app's server for them.";
+					return "This agent works with no apps. Use the person's MCP URL or find_app to find one, then manage_apps if available to request adding and connecting it with their approval. If app management is off, the person can add apps in Your agents.";
 				}
 				return mine
 					.map((app) => {
 						const server = serverFor(all, app);
 						if (server?.state !== "ready") {
 							const why = server?.state === "authenticating" ? "waiting for the person to sign in" : "not connected";
-							return `## ${app.name}\n(${why}: connect_app connects it)`;
+							return `## ${app.name}\n(${why}: connect_app connects it)\nMCP URL: ${app.url}`;
 						}
 						const lines = [`## ${server.name}`];
 						if (server.instructions) lines.push(clip(server.instructions, MAX_INSTRUCTION_CHARS));
@@ -383,6 +384,7 @@ export function mcpExtensions(
 						if (events.length > 0) {
 							lines.push(`Events you can watch (watch_app_event): ${events.map((event) => event.name).join(", ")}`);
 						}
+						lines.push(`MCP URL: ${app.url}`);
 						return lines.join("\n");
 					})
 					.join("\n\n");

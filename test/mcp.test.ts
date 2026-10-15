@@ -7,6 +7,7 @@ import { exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { Approval } from "../src/store";
+import { MANAGE_APPS, UPDATE_AGENT } from "../src/extensions/agents";
 import { api, apiUrl, decisionRun, lastUserText, OWNER, pendingApproval, post, say, systemPrompt, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
@@ -52,6 +53,8 @@ function notes() {
 const SERVERS: Record<string, () => McpServer> = {
 	"https://calendar.example.test/mcp": calendar,
 	"https://notes.example.test/mcp": notes,
+	"https://firecrawl.example.test/mcp": notes,
+	"https://firecrawl-next.example.test/mcp": calendar,
 	"https://weather.example.test/mcp": () => {
 		const server = new McpServer({ name: "weather", version: "1.0.0" });
 		server.registerTool(
@@ -345,5 +348,131 @@ describe("connected apps (MCP)", () => {
 		// Nobody's callback: there's no agent to hand it to.
 		expect((await exports.default.fetch(url("/mcp/callback/o_nobody?state=forged&code=x"))).status).toBe(404);
 		expect((await exports.default.fetch(apiUrl("/mcp"))).status).toBe(401);
+	});
+
+	it("adds and connects an app after explicit chat approval, then continues the original task", async () => {
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "auto" }) });
+		const app = { name: "Firecrawl", url: "https://firecrawl.example.test/mcp" };
+		const agent = (await post("/agents", { name: "Researcher", instructions: "Research carefully." })).body;
+		const session = (await post("/sessions", { agent: agent.id })).body.id;
+		faux.setResponses([toolUse(MANAGE_APPS, { add: [app] }), fauxAssistantMessage("Please approve the connection.")]);
+		await say("Connect Firecrawl and search for turbines", session);
+		const approval = await pendingApproval();
+		expect(approval).toMatchObject({ action: MANAGE_APPS, tool: null, expiresAt: null, onTimeout: "deny", summary: `Researcher: add and connect Firecrawl (${app.url})` });
+		await new Promise((resolve) => setTimeout(resolve, 1_600));
+		expect((await api(`/approvals/${approval.id}`)).body.status).toBe("pending");
+		expect((await api(`/agents/${agent.id}`)).body.apps).toEqual([]);
+		expect((await api("/mcp")).body.servers.some((server: { url: string }) => server.url === app.url)).toBe(false);
+		// Neither "always approve" nor a tool permission can bypass per-change consent.
+		expect((await post(`/approvals/${approval.id}/approve`, { always: true })).status).toBe(400);
+		expect((await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: MANAGE_APPS, permission: "on" }) })).status).toBe(400);
+		const permission = (await api("/permissions")).body.tools.find((info: { tool: string }) => info.tool === MANAGE_APPS);
+		expect(permission).toMatchObject({ permission: "ask", choices: ["off", "ask"] });
+		// A pending edit applies only its app delta, not a stale snapshot of the agent.
+		await api(`/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ instructions: "Cite sources." }) });
+		let tools: string[] = [];
+		let outcome = "";
+		let result = "";
+		faux.setResponses([
+			(context) => {
+				tools = offered(context.messages);
+				outcome = lastUserText(context.messages);
+				return toolUse("firecrawl_search", { query: "turbines" });
+			},
+			(context) => { result = toolResults(context.messages); return fauxAssistantMessage("Searched."); },
+		]);
+		expect((await post(`/approvals/${approval.id}/approve`)).body.result).toContain("Connected Firecrawl.");
+		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
+		expect(tools).toContain("firecrawl_search");
+		expect(outcome).toContain("Connected Firecrawl.");
+		expect(result).toContain("No notes match turbines.");
+		expect((await api(`/agents/${agent.id}`)).body).toMatchObject({ apps: [app], instructions: "Cite sources." });
+		const other = (await post("/agents", { name: "Other researcher", apps: [app] })).body;
+
+		// A new URL with the same app name gets a separate connection, not another agent's old one.
+		const replacement = { ...app, url: "https://firecrawl-next.example.test/mcp" };
+		faux.setResponses([toolUse(MANAGE_APPS, { remove: [app.url], add: [replacement] }), fauxAssistantMessage("Waiting.")]);
+		await say("Use the new Firecrawl endpoint instead", session);
+		const change = await pendingApproval();
+		expect(change.summary).toBe(`Researcher: remove Firecrawl (${app.url}); add and connect Firecrawl (${replacement.url})`);
+		faux.setResponses([fauxAssistantMessage("Replaced.")]);
+		const changed = await post(`/approvals/${change.id}/approve`);
+		expect(changed.body.result).toContain("Connected Firecrawl.");
+		expect(await decisionRun(change)).toMatchObject({ status: "done" });
+		expect((await api(`/agents/${agent.id}`)).body.apps).toEqual([replacement]);
+		const servers = (await api("/mcp")).body.servers;
+		const fresh = servers.find((server: { url: string }) => server.url === replacement.url);
+		expect(fresh).toMatchObject({ state: "ready", approval: "writes", agents: ["Researcher"] });
+		expect(fresh.id).not.toBe("firecrawl");
+		expect(servers.find((server: { url: string }) => server.url === app.url)).toMatchObject({ id: "firecrawl", state: "ready", agents: ["Other researcher"] });
+		faux.setResponses([(context) => { tools = offered(context.messages); return fauxAssistantMessage("ok"); }]);
+		await say("Which tools now?", session);
+		expect(tools).toContain(`${fresh.id}_find_events`);
+		expect(tools).not.toContain("firecrawl_search");
+
+		// Removing it from this agent does not disconnect it or remove it from another agent.
+		faux.setResponses([toolUse(MANAGE_APPS, { remove: [replacement.url] }), fauxAssistantMessage("Waiting.")]);
+		await say("Stop working with Firecrawl", session);
+		const removal = await pendingApproval();
+		expect(removal.summary).toContain(`remove Firecrawl (${replacement.url})`);
+		faux.setResponses([fauxAssistantMessage("Removed.")]);
+		await post(`/approvals/${removal.id}/approve`);
+		expect(await decisionRun(removal)).toMatchObject({ status: "done" });
+		expect((await api(`/agents/${agent.id}`)).body.apps).toEqual([]);
+		expect((await api(`/agents/${other.id}`)).body.apps).toEqual([app]);
+		expect((await api("/mcp")).body.servers.find((server: { url: string }) => server.url === app.url)).toMatchObject({ state: "ready", approval: "writes" });
+		const after: Record<string, string[]> = {};
+		const record = (key: string) => (context: { messages: Message[] }) => { after[key] = offered(context.messages); return fauxAssistantMessage("ok"); };
+		faux.setResponses([record("removed"), record("other")]);
+		await say("Which tools now?", session);
+		const otherSession = (await post("/sessions", { agent: other.id })).body.id;
+		await say("Which tools now?", otherSession);
+		expect(after.removed).not.toContain("firecrawl_search");
+		expect(after.removed).not.toContain(`${fresh.id}_find_events`);
+		expect(after.other).toContain("firecrawl_search");
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
+	});
+
+	it("can disable app management without disabling self-edits, and reports connection failures honestly", async () => {
+		const app = { name: "Unavailable", url: "https://down.example.test/mcp" };
+		const agent = (await post("/agents", { name: "App manager" })).body;
+		const session = (await post("/sessions", { agent: agent.id })).body.id;
+		faux.setResponses([toolUse(MANAGE_APPS, { add: [app] }), fauxAssistantMessage("Waiting.")]);
+		await say("Add this server", session);
+		const approval = await pendingApproval();
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: MANAGE_APPS, permission: "off" }) });
+		expect((await post(`/approvals/${approval.id}/approve`)).status).toBe(403);
+		faux.setResponses([fauxAssistantMessage("Understood.")]);
+		await post(`/approvals/${approval.id}/deny`);
+		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
+		expect((await api(`/agents/${agent.id}`)).body.apps).toEqual([]);
+		let tools: string[] = [];
+		let result = "";
+		faux.setResponses([
+			(context) => {
+				tools = offered(context.messages);
+				return toolUse(UPDATE_AGENT, { add_apps: [app], instructions: "Keep it short." });
+			},
+			fauxAssistantMessage("Waiting."),
+		]);
+		await say("Try the old edit tool", session);
+		expect(tools).not.toContain(MANAGE_APPS);
+		expect(tools).toContain(UPDATE_AGENT);
+		const edit = await pendingApproval();
+		faux.setResponses([fauxAssistantMessage("Edited.")]);
+		await post(`/approvals/${edit.id}/approve`);
+		expect(await decisionRun(edit)).toMatchObject({ status: "done" });
+		expect((await api(`/agents/${agent.id}`)).body).toMatchObject({ apps: [], instructions: "Keep it short." });
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: MANAGE_APPS, permission: null }) });
+		faux.setResponses([toolUse(MANAGE_APPS, { add: [app] }), fauxAssistantMessage("Waiting.")]);
+		await say("Try the unavailable server again", session);
+		const retry = await pendingApproval();
+		faux.setResponses([(context) => { result = lastUserText(context.messages); return fauxAssistantMessage("Connection failed."); }]);
+		await post(`/approvals/${retry.id}/approve`);
+		expect(await decisionRun(retry)).toMatchObject({ status: "done" });
+		expect(result).toContain("was added, but connecting failed");
+		expect(result).toContain("Use connect_app to retry");
+		expect((await api(`/agents/${agent.id}`)).body.apps).toEqual([app]);
+		expect((await api("/mcp")).body.servers.some((server: { url: string }) => server.url === app.url)).toBe(false);
 	});
 });

@@ -45,6 +45,10 @@ export type Agent = {
 	readonly published: string | null;
 	/** When its icon was last set, to fetch it again when it changes; null without one. */
 	readonly icon: number | null;
+	/** What shows for it without an uploaded icon: a named icon, such as `rocket`, or one emoji; null for the default. */
+	readonly symbol: string | null;
+	/** One of `AGENT_COLORS`, for its symbol; null for the default. */
+	readonly color: string | null;
 	/** The one that talks in chats started without choosing an agent. It can't be deleted while it is the default. */
 	readonly default: boolean;
 	readonly createdAt: number;
@@ -59,11 +63,15 @@ export type AgentInput = {
 	readonly team: readonly TeamMember[];
 	/** Left out, a new agent builds on the deployment's default blueprint and an edited one keeps its own. */
 	readonly blueprint?: string | null;
+	/** Left out, a new agent has the default look and an edited one keeps its own. */
+	readonly symbol?: string | null;
+	readonly color?: string | null;
 };
 
 export const MAX_AGENTS = 20;
 export const MAX_ICON_BYTES = 256 * 1024;
 export const ICON_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+export const AGENT_COLORS = ["gray", "red", "orange", "amber", "green", "teal", "blue", "indigo", "violet", "pink"];
 export const MAX_NAME = 60;
 export const MAX_DESCRIPTION = 280;
 export const MAX_INSTRUCTIONS = 8000;
@@ -86,7 +94,9 @@ CREATE TABLE IF NOT EXISTS pim_agents (
 	updated_at INTEGER NOT NULL,
 	is_default INTEGER NOT NULL DEFAULT 0,
 	team TEXT NOT NULL DEFAULT '[]',
-	blueprint TEXT
+	blueprint TEXT,
+	symbol TEXT,
+	color TEXT
 );
 CREATE TABLE IF NOT EXISTS pim_agent_icons (
 	agent TEXT PRIMARY KEY,
@@ -137,6 +147,8 @@ const agentOf = (row: Row): Agent => ({
 	source: row.source ? (JSON.parse(String(row.source)) as Agent["source"]) : null,
 	published: row.published === null ? null : String(row.published),
 	icon: row.icon === null ? null : Number(row.icon),
+	symbol: row.symbol === null ? null : String(row.symbol),
+	color: row.color === null ? null : String(row.color),
 	default: Number(row.is_default) === 1,
 	createdAt: Number(row.created_at),
 	updatedAt: Number(row.updated_at),
@@ -171,6 +183,8 @@ export function agentInput(body: Record<string, unknown>, partial?: Agent): Agen
 			return { name: text(name, "app name", 40, true), url };
 		}),
 		team: body.team === undefined ? (partial?.team ?? []) : teamInput(body.team),
+		...(body.symbol === undefined ? {} : { symbol: symbolInput(body.symbol) }),
+		...(body.color === undefined ? {} : { color: colorInput(body.color) }),
 		...(body.blueprint === undefined ? {} : { blueprint: blueprintInput(body.blueprint) }),
 	};
 }
@@ -181,6 +195,21 @@ function blueprintInput(value: unknown): string | null {
 	if (typeof value !== "string" || !/^[a-z0-9][a-z0-9.-]*\/[a-z0-9][a-z0-9.-]*$/.test(value)) {
 		throw new HttpError(400, "blueprint must be an extension's blueprint, such as pim.assistant/pim, or null");
 	}
+	return value;
+}
+
+/** A symbol as given: a named icon, which the app draws, or a single emoji; or null. */
+function symbolInput(value: unknown): string | null {
+	if (value === null) return null;
+	if (typeof value !== "string" || !(/^[a-z][a-z0-9-]{0,39}$/.test(value) || /^\p{RGI_Emoji}$/v.test(value))) {
+		throw new HttpError(400, "symbol must be an icon's name, such as rocket, or one emoji, or null");
+	}
+	return value;
+}
+
+function colorInput(value: unknown): string | null {
+	if (value === null) return null;
+	if (typeof value !== "string" || !AGENT_COLORS.includes(value)) throw new HttpError(400, `color must be one of ${AGENT_COLORS.join(", ")}, or null`);
 	return value;
 }
 
@@ -234,6 +263,8 @@ export class AgentStore {
 		if (!columns.includes("team")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN team TEXT NOT NULL DEFAULT '[]'");
 		// Agents made before extensions all had the assistant's habits.
 		if (!columns.includes("blueprint")) this.#sql.exec(`ALTER TABLE pim_agents ADD COLUMN blueprint TEXT DEFAULT '${ASSISTANT_BLUEPRINT}'`);
+		if (!columns.includes("symbol")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN symbol TEXT");
+		if (!columns.includes("color")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN color TEXT");
 	}
 
 	/** The default one first, then the others as they were made. */
@@ -275,7 +306,7 @@ export class AgentStore {
 		const id = `p_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT INTO pim_agents (id, name, description, instructions, apps, team, blueprint, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+			"INSERT INTO pim_agents (id, name, description, instructions, apps, team, blueprint, symbol, color, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
 			id,
 			input.name,
 			input.description,
@@ -283,6 +314,8 @@ export class AgentStore {
 			JSON.stringify(input.apps),
 			JSON.stringify(input.team),
 			input.blueprint === undefined ? (this.#starter().blueprint ?? null) : input.blueprint,
+			input.symbol ?? null,
+			input.color ?? null,
 			source === null ? null : JSON.stringify(source),
 			now,
 			now,
@@ -303,6 +336,8 @@ export class AgentStore {
 			id,
 		);
 		if (input.blueprint !== undefined) this.#sql.exec("UPDATE pim_agents SET blueprint = ? WHERE id = ?", input.blueprint, id);
+		if (input.symbol !== undefined) this.#sql.exec("UPDATE pim_agents SET symbol = ? WHERE id = ?", input.symbol, id);
+		if (input.color !== undefined) this.#sql.exec("UPDATE pim_agents SET color = ? WHERE id = ?", input.color, id);
 		return this.get(id)!;
 	}
 

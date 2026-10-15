@@ -1616,7 +1616,7 @@ export class Pim extends DurableAgent<Env> {
 		const blueprint = agent.blueprint === null ? undefined : this.extensions.blueprint(agent.blueprint);
 		const widgets = await Promise.all((blueprint?.dashboard ?? []).map((ref) => this.#loadWidget(agent, ref)));
 		return {
-			agent: { id: agent.id, name: agent.name, description: agent.description, default: agent.default, blueprint: agent.blueprint, icon: agent.icon },
+			agent: { id: agent.id, name: agent.name, description: agent.description, default: agent.default, blueprint: agent.blueprint, icon: agent.icon, symbol: agent.symbol, color: agent.color },
 			starters: (blueprint?.starters ?? []).map((starter) => localize(starter, locale)),
 			widgets: widgets.map((widget) => ({ ...widget, title: localize(widget.title, locale), empty: localize(widget.empty, locale) })),
 		};

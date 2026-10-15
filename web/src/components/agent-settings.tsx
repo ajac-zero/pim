@@ -3,7 +3,6 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Bot,
   Globe,
-  ImagePlus,
   MessageCircle,
   Pencil,
   Plug,
@@ -15,9 +14,13 @@ import {
   X,
 } from "lucide-react";
 import { Dialog } from "radix-ui";
-import { type FormEvent, type ReactNode, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, useState } from "react";
 import { toast } from "sonner";
-import { AgentIcon, iconFromFile } from "~/components/agent-icon";
+import {
+  AgentIcon,
+  AgentLookPicker,
+  type LookChoice,
+} from "~/components/agent-icon";
 import { useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -86,7 +89,6 @@ export function AgentSettingsDialog({
             <AgentCard agent={agent} onClose={() => setOpen(false)} />
           ) : (
             <AgentForm
-              initial={EMPTY}
               onDone={() => setOpen(false)}
               onCancel={() => setOpen(false)}
             />
@@ -150,18 +152,6 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
     },
     onError: (error) => toast.error(error.message),
   });
-  const fileInput = useRef<HTMLInputElement>(null);
-  const setIcon = useMutation({
-    mutationFn: async (file: File) =>
-      pim.setAgentIcon(agent.id, await iconFromFile(file)),
-    onSuccess: refresh,
-    onError: (error) => toast.error(error.message),
-  });
-  const removeIcon = useMutation({
-    mutationFn: () => pim.removeAgentIcon(agent.id),
-    onSuccess: refresh,
-    onError: (error) => toast.error(error.message),
-  });
   const publish = useMutation({
     mutationFn: async (on: boolean) => {
       if (on) await pim.publishAgent(agent.id);
@@ -178,8 +168,7 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
   if (editing) {
     return (
       <AgentForm
-        id={agent.id}
-        initial={agent}
+        agent={agent}
         onDone={() => setEditing(false)}
         onCancel={() => setEditing(false)}
       />
@@ -188,12 +177,7 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
   return (
     <article className="rounded-xl border px-4 py-3" aria-label={agent.name}>
       <div className="flex items-start gap-3">
-        <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-primary/10 text-primary">
-          <AgentIcon
-            agent={agent}
-            className={agent.icon === null ? "size-4.5" : "size-8 rounded-none"}
-          />
-        </span>
+        <AgentIcon agent={agent} tile className="size-8 rounded-lg" />
         <div className="min-w-0 flex-1">
           <h2 className="flex items-center gap-2 font-medium">
             <Link
@@ -284,36 +268,6 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
         <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
           <Pencil /> {t("edit")}
         </Button>
-        <input
-          ref={fileInput}
-          type="file"
-          accept="image/*"
-          className="hidden"
-          aria-label={t("uploadIcon")}
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            event.target.value = "";
-            if (file) setIcon.mutate(file);
-          }}
-        />
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => fileInput.current?.click()}
-          disabled={setIcon.isPending}
-        >
-          <ImagePlus /> {t("uploadIcon")}
-        </Button>
-        {agent.icon !== null && (
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => removeIcon.mutate()}
-            disabled={removeIcon.isPending}
-          >
-            {t("removeIcon")}
-          </Button>
-        )}
         {account && (
           <Button
             size="sm"
@@ -520,18 +474,23 @@ function BaseSelect({
 const NOTHING = "-";
 
 function AgentForm({
-  id,
-  initial,
+  agent,
   onDone,
   onCancel,
 }: {
-  id?: string;
-  initial: AgentInput;
+  /** The agent to edit; left out, the form makes a new one. */
+  agent?: Agent;
   onDone: () => void;
   onCancel: () => void;
 }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
+  const initial = agent ?? EMPTY;
+  const [look, setLook] = useState<LookChoice>({
+    symbol: agent?.symbol ?? null,
+    color: agent?.color ?? null,
+    image: agent?.icon != null ? "saved" : null,
+  });
   // Each app and member row keeps a key of its own while edited, so removing one doesn't shift the others' inputs.
   const [value, setValue] = useState<
     Omit<AgentInput, "apps" | "team"> & {
@@ -551,10 +510,12 @@ function AgentForm({
     })),
   });
   const save = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       const { blueprint, ...rest } = value;
       const input: AgentInput = {
         ...rest,
+        symbol: look.symbol,
+        color: look.color,
         ...(blueprint === undefined ? {} : { blueprint }),
         apps: value.apps.map(({ name, url }) => ({ name, url })),
         team: value.team.map(({ name, instructions, tools }) => {
@@ -565,7 +526,15 @@ function AgentForm({
           return { name, instructions, tools: names.length > 0 ? names : null };
         }),
       };
-      return id ? pim.updateAgent(id, input) : pim.createAgent(input);
+      const saved = agent
+        ? await pim.updateAgent(agent.id, input)
+        : await pim.createAgent(input);
+      // An uploaded image shows in place of the symbol, so it is sent, or taken away, once the agent exists.
+      if (look.image instanceof Blob)
+        await pim.setAgentIcon(saved.id, look.image);
+      else if (look.image === null && saved.icon !== null) {
+        await pim.removeAgentIcon(saved.id);
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
@@ -601,7 +570,7 @@ function AgentForm({
     <form
       onSubmit={submit}
       className="space-y-3 rounded-xl border px-4 py-4"
-      aria-label={id ? t("editAgent") : t("newAgent")}
+      aria-label={agent ? t("editAgent") : t("newAgent")}
     >
       <label className="block space-y-1">
         <span className="font-medium text-sm">{t("agentName")}</span>
@@ -624,6 +593,7 @@ function AgentForm({
           maxLength={280}
         />
       </label>
+      <AgentLookPicker agent={agent} value={look} onChange={setLook} />
       <BaseSelect
         value={value.blueprint}
         onChange={(blueprint) => setValue({ ...value, blueprint })}

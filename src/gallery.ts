@@ -9,8 +9,9 @@ import type { SuggestedApp, TeamMember } from "./agents";
  * the instance, apart from the Directory, so browsing never touches accounts.
  *
  * A template is a copy of one of its author's agents when they published it:
- * its name, description, instructions, suggested apps and team, never their
- * memory, conversations or credentials. Publishing again replaces it.
+ * its name, description, instructions, suggested apps, team and look (its
+ * symbol, color and uploaded icon), never their memory, conversations or
+ * credentials. Publishing again replaces it.
  *
  * The admin also chooses the agent everyone starts with: a copy of one of
  * theirs, which becomes each new account's default agent.
@@ -34,6 +35,11 @@ export type Template = {
 	readonly team: readonly TeamMember[];
 	/** The blueprint it builds on, or null for none. */
 	readonly blueprint: string | null;
+	/** An icon's name or an emoji, as an agent's; null for the default. */
+	readonly symbol: string | null;
+	readonly color: string | null;
+	/** When its uploaded icon was published, to fetch it again when it changes; null without one. */
+	readonly icon: number | null;
 	readonly publishedAt: number;
 	/** How many people made it their own. */
 	readonly uses: number;
@@ -51,7 +57,28 @@ export type DefaultAgent = {
 	readonly apps: readonly SuggestedApp[];
 	readonly team: readonly TeamMember[];
 	readonly blueprint: string | null;
+	readonly symbol: string | null;
+	readonly color: string | null;
+	/** Whether it has an uploaded icon, which each copy gets. */
+	readonly icon: boolean;
 	readonly updatedAt: number;
+};
+
+/** An uploaded icon, as an agent has one. */
+export type AgentIcon = { readonly type: string; readonly data: ArrayBuffer };
+
+/** One of an author's agents as the gallery copies it. */
+export type PublishedAgent = {
+	readonly id: string;
+	readonly name: string;
+	readonly description: string;
+	readonly instructions: string;
+	readonly apps: readonly SuggestedApp[];
+	readonly team: readonly TeamMember[];
+	readonly blueprint: string | null;
+	readonly symbol: string | null;
+	readonly color: string | null;
+	readonly image: AgentIcon | null;
 };
 
 /** A template in a list: everything but its instructions. */
@@ -111,6 +138,9 @@ function templateOf(row: Row): Template {
 		apps: JSON.parse(String(row.apps)) as SuggestedApp[],
 		team: JSON.parse(String(row.team ?? "[]")) as TeamMember[],
 		blueprint: optional(row.blueprint),
+		symbol: optional(row.symbol),
+		color: optional(row.color),
+		icon: Number(row.has_icon) === 1 ? Number(row.published_at) : null,
 		publishedAt: Number(row.published_at),
 		uses: Number(row.uses),
 	};
@@ -121,7 +151,9 @@ const summaryOf = (row: Row): TemplateSummary => {
 	return summary;
 };
 
-const WITH_AUTHOR = "SELECT t.*, p.display_name FROM templates t LEFT JOIN profiles p ON p.owner_id = t.owner_id";
+// Every column but the icon's bytes, which only its own route reads.
+const WITH_AUTHOR =
+	"SELECT t.id, t.owner_id, t.username, t.agent_id, t.name, t.description, t.instructions, t.apps, t.team, t.blueprint, t.symbol, t.color, t.icon_data IS NOT NULL AS has_icon, t.published_at, t.uses, p.display_name FROM templates t LEFT JOIN profiles p ON p.owner_id = t.owner_id";
 
 function optionalText(value: unknown, field: string, max: number): string | null {
 	if (value === null || value === undefined) return null;
@@ -130,6 +162,23 @@ function optionalText(value: unknown, field: string, max: number): string | null
 	if (trimmed.length > max) throw new HttpError(400, `${field} must be at most ${max} characters`);
 	return trimmed === "" ? null : trimmed;
 }
+
+/** What the gallery keeps of an agent, in its columns' order from `name` to `icon_data`. */
+const copyOf = (agent: PublishedAgent) => [
+	agent.name,
+	agent.description,
+	agent.instructions,
+	JSON.stringify(agent.apps),
+	JSON.stringify(agent.team),
+	agent.blueprint,
+	agent.symbol,
+	agent.color,
+	agent.image?.type ?? null,
+	agent.image?.data ?? null,
+];
+
+const iconOf = (row: Row | undefined): AgentIcon | null =>
+	row && row.icon_data !== null ? { type: String(row.icon_type), data: row.icon_data as ArrayBuffer } : null;
 
 export class Gallery extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
@@ -149,6 +198,9 @@ export class Gallery extends DurableObject<Env> {
 			if (!columns.includes("team")) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN team TEXT NOT NULL DEFAULT '[]'`);
 			// Published before extensions, they all built on Pim's own assistant.
 			if (!columns.includes("blueprint")) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN blueprint TEXT DEFAULT '${ASSISTANT_BLUEPRINT}'`);
+			for (const column of ["symbol", "color", "icon_type", "icon_data"]) {
+				if (!columns.includes(column)) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${column === "icon_data" ? "BLOB" : "TEXT"}`);
+			}
 		}
 	}
 
@@ -184,19 +236,7 @@ export class Gallery extends DurableObject<Env> {
 	}
 
 	/** Publishes one of the author's agents, or replaces what was published of it. */
-	publish(
-		ownerId: string,
-		username: string,
-		agent: {
-			id: string;
-			name: string;
-			description: string;
-			instructions: string;
-			apps: readonly SuggestedApp[];
-			team: readonly TeamMember[];
-			blueprint: string | null;
-		},
-	): Template {
+	publish(ownerId: string, username: string, agent: PublishedAgent): Template {
 		const [known] = this.#sql("SELECT id FROM templates WHERE owner_id = ? AND agent_id = ?", ownerId, agent.id).toArray();
 		if (!known) {
 			const count = Number(this.#sql("SELECT COUNT(*) AS n FROM templates WHERE owner_id = ?", ownerId).toArray()[0]?.n ?? 0);
@@ -204,21 +244,22 @@ export class Gallery extends DurableObject<Env> {
 		}
 		const id = known ? String(known.id) : `t_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 		this.#sql(
-			`INSERT INTO templates (id, owner_id, username, agent_id, name, description, instructions, apps, team, blueprint, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (id) DO UPDATE SET name = excluded.name, description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, blueprint = excluded.blueprint, published_at = excluded.published_at`,
+			`INSERT INTO templates (id, owner_id, username, agent_id, name, description, instructions, apps, team, blueprint, symbol, color, icon_type, icon_data, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (id) DO UPDATE SET name = excluded.name, description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, blueprint = excluded.blueprint,
+			symbol = excluded.symbol, color = excluded.color, icon_type = excluded.icon_type, icon_data = excluded.icon_data, published_at = excluded.published_at`,
 			id,
 			ownerId,
 			username,
 			agent.id,
-			agent.name,
-			agent.description,
-			agent.instructions,
-			JSON.stringify(agent.apps),
-			JSON.stringify(agent.team),
-			agent.blueprint,
+			...copyOf(agent),
 			Date.now(),
 		);
 		return this.template(id)!;
+	}
+
+	/** A template's uploaded icon, if it was published with one. */
+	templateIcon(id: string): AgentIcon | null {
+		return iconOf(this.#sql("SELECT icon_type, icon_data FROM templates WHERE id = ?", id).toArray()[0]);
 	}
 
 	/** Takes one of the author's agents out of the gallery. False when it wasn't published. */
@@ -279,40 +320,32 @@ export class Gallery extends DurableObject<Env> {
 			apps: JSON.parse(String(row.apps)) as SuggestedApp[],
 			team: JSON.parse(String(row.team ?? "[]")) as TeamMember[],
 			blueprint: optional(row.blueprint),
+			symbol: optional(row.symbol),
+			color: optional(row.color),
+			icon: row.icon_data !== null,
 			updatedAt: Number(row.updated_at),
 		};
 	}
 
 	/** The admin makes a copy of one of their agents the one everyone starts with. Choosing again replaces it. */
-	setDefaultAgent(
-		ownerId: string,
-		username: string,
-		agent: {
-			id: string;
-			name: string;
-			description: string;
-			instructions: string;
-			apps: readonly SuggestedApp[];
-			team: readonly TeamMember[];
-			blueprint: string | null;
-		},
-	): DefaultAgent {
+	setDefaultAgent(ownerId: string, username: string, agent: PublishedAgent): DefaultAgent {
 		this.#sql(
-			`INSERT INTO default_agent (id, owner_id, username, agent_id, name, description, instructions, apps, team, blueprint, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO default_agent (id, owner_id, username, agent_id, name, description, instructions, apps, team, blueprint, symbol, color, icon_type, icon_data, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET owner_id = excluded.owner_id, username = excluded.username, agent_id = excluded.agent_id, name = excluded.name,
-			description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, blueprint = excluded.blueprint, updated_at = excluded.updated_at`,
+			description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, blueprint = excluded.blueprint,
+			symbol = excluded.symbol, color = excluded.color, icon_type = excluded.icon_type, icon_data = excluded.icon_data, updated_at = excluded.updated_at`,
 			ownerId,
 			username,
 			agent.id,
-			agent.name,
-			agent.description,
-			agent.instructions,
-			JSON.stringify(agent.apps),
-			JSON.stringify(agent.team),
-			agent.blueprint,
+			...copyOf(agent),
 			Date.now(),
 		);
 		return this.defaultAgent()!;
+	}
+
+	/** The uploaded icon of the agent everyone starts with, if it has one. */
+	defaultAgentIcon(): AgentIcon | null {
+		return iconOf(this.#sql("SELECT icon_type, icon_data FROM default_agent WHERE id = 1").toArray()[0]);
 	}
 
 	/** Back to a plain agent for everyone who joins. False when none was chosen. */

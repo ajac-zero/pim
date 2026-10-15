@@ -295,6 +295,12 @@ export function AgentIcon({
   );
 }
 
+/** Where a published template's uploaded icon is, if it has one. */
+export const templateIconSrc = (template: Pick<Look, "id" | "icon">) =>
+  template.icon === null
+    ? undefined
+    : `/api/templates/${template.id}/icon?v=${template.icon}`;
+
 /** What the picker changes: the symbol and color, and an image to upload, the one saved, or none. */
 export type LookChoice = {
   symbol: string | null;

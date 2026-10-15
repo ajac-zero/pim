@@ -18,17 +18,23 @@ export function SessionLink({ session }: { session: string }) {
 /** The frame of the list pages (notifications, settings). */
 export function Page({
   title,
+  icon,
   description,
   children,
 }: {
   title: string;
+  /** Shown before the title. */
+  icon?: ReactNode;
   description: string;
   children: ReactNode;
 }) {
   return (
     <main className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
       <div className="mx-auto w-full max-w-3xl px-4 py-8 md:py-12">
-        <h1 className="font-semibold text-2xl">{title}</h1>
+        <h1 className="flex items-center gap-3 font-semibold text-2xl">
+          {icon}
+          {title}
+        </h1>
         <p className="mt-1 mb-8 text-muted-foreground text-sm">{description}</p>
         {children}
       </div>

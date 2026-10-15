@@ -102,6 +102,7 @@ import {
 	type ToolPermission,
 } from "./store";
 import { type Agent, type AgentInput, AgentStore, agentInput, type TeamMember } from "./agents";
+import type { AgentIcon } from "./gallery";
 import { type Role, TEAM_EXTENSION, type TeamRun, TeamStore, teamExtension } from "./team";
 import { projectEntries } from "./transcript";
 import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage";
@@ -1671,10 +1672,11 @@ export class Pim extends DurableAgent<Env> {
 		return { id: agent.id, name: agent.name };
 	}
 
-	/** One of the owner's agents, for the Worker to publish to the gallery. */
-	async agentToPublish(id: string): Promise<Agent | null> {
+	/** One of the owner's agents, with its uploaded icon, for the Worker to publish to the gallery. */
+	async agentToPublish(id: string): Promise<(Agent & { image: AgentIcon | null }) | null> {
 		this.#assertOpen();
-		return this.agents.get(id) ?? null;
+		const agent = this.agents.get(id);
+		return agent ? { ...agent, image: this.agents.icon(id) ?? null } : null;
 	}
 
 	/** Records which template an agent is published as; null once unpublished. */
@@ -1693,17 +1695,26 @@ export class Pim extends DurableAgent<Env> {
 		apps: readonly { name: string; url: string }[];
 		team: readonly TeamMember[];
 		blueprint: string | null;
+		symbol: string | null;
+		color: string | null;
+		image: AgentIcon | null;
 	}): Promise<Agent> {
 		this.#assertOpen();
-		const input = this.#installedBlueprint(agentInput({ ...template }));
-		return this.agents.create(input, { template: template.id, author: template.author });
+		const { image, ...rest } = template;
+		const input = this.#installedBlueprint(agentInput({ ...rest }));
+		const agent = this.agents.create(input, { template: template.id, author: template.author });
+		if (image) this.agents.setIcon(agent.id, image.type, image.data);
+		return this.agents.get(agent.id)!;
 	}
 
-	/** At registration: makes the default agent a copy of the one the admin chose for everyone. */
-	async adoptDefaultAgent(agent: AgentInput & { author: string }): Promise<Agent> {
+	/** At registration: makes the default agent a copy of the one the admin chose for everyone, its icon too. */
+	async adoptDefaultAgent(agent: AgentInput & { author: string; image: AgentIcon | null }): Promise<Agent> {
 		this.#assertOpen();
-		const { author, ...input } = agent;
-		return this.agents.replaceDefault(this.#installedBlueprint(agentInput({ ...input })), { template: "default", author });
+		const { author, image, ...input } = agent;
+		const copy = this.agents.replaceDefault(this.#installedBlueprint(agentInput({ ...input })), { template: "default", author });
+		if (image) this.agents.setIcon(copy.id, image.type, image.data);
+		else this.agents.removeIcon(copy.id);
+		return this.agents.get(copy.id)!;
 	}
 
 	// Visits: Pims shared with this one's owner, and their conversations with them.

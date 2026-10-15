@@ -182,8 +182,9 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | GET, PUT | `/profile` | PUT: `{ displayName, bio }` | How others on this Pim see you |
 | GET | `/people/:username` | | `{ username, displayName, bio, templates }`: someone, and the agent templates they published |
 | GET | `/templates` | `?q=` | `{ templates }`: shared agents, most used first, without their instructions |
-| GET | `/templates/:id` | | A published agent template in full |
-| POST | `/templates/:id/use` | | Makes it one of your agents: a copy, with `source` saying where it came from |
+| GET | `/templates/:id` | | A published agent template in full, with the `symbol` and `color` it was published with, and `icon`, the version of its uploaded icon or null |
+| GET | `/templates/:id/icon` | | Its uploaded icon; `404` without one |
+| POST | `/templates/:id/use` | | Makes it one of your agents: a copy, its look and icon too, with `source` saying where it came from |
 | POST, DELETE | `/agents/:id/publish` | | Publishes your agent (again, to update it), or takes it down |
 | GET | `/circles` | | `{ circles: [{ id, name, enabled, createdAt, members: [{ ownerId, username, addedAt }] }] }` (see [Sharing](#sharing)) |
 | POST | `/circles` | `{ name }` | A new circle, with nothing allowed |
@@ -338,7 +339,7 @@ Your agents are named assistants, each with its own instructions: a marathon coa
 
 **Dashboards.** Each agent's name in the sidebar opens its dashboard: a box to start a chat with it, suggested first messages, and widgets from the blueprint it builds on. Pim's own dashboard shows what's coming up, the goals being worked on, what it remembered lately, and what it made recently, across that person's agents (memory is shared, so every dashboard shows the same).
 
-An agent can be **published** to the others on your Pim: Discover lists published agents, and anyone on it can read one in full and **make it their own**, which copies its name, description, instructions and suggested apps into their own agents. Nothing else of the author's goes with it: no memory, chats or credentials. The copy is theirs to change; publishing again updates what others see, not their copies. Unpublishing, deleting the agent, or deleting the account takes it out of Discover. Each person has a profile (a name and a line about them), shown on their page and next to what they publish.
+An agent can be **published** to the others on your Pim: Discover lists published agents, and anyone on it can read one in full and **make it their own**, which copies its name, description, instructions, suggested apps and look (its icon or emoji, color, or uploaded image) into their own agents. The agent the admin chooses for everyone who joins is copied the same way. Nothing else of the author's goes with it: no memory, chats or credentials. The copy is theirs to change; publishing again updates what others see, not their copies. Unpublishing, deleting the agent, or deleting the account takes it out of Discover. Each person has a profile (a name and a line about them), shown on their page and next to what they publish.
 
 A published agent's instructions are someone else's words running with your tools, so read them before you take one: your copy still asks before acting wherever your tool permissions say it should.
 

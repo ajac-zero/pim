@@ -1477,11 +1477,18 @@ describe("profiles and published agents", () => {
 					instructions: "Plan one week at a time.",
 					apps: [{ name: "Strava", url: "https://mcp.strava.example/mcp" }],
 					team: [{ name: "Physio", instructions: "Check every plan for injury risk." }],
+					symbol: "🏃",
+					color: "teal",
 				},
 			})
 		).body;
+		const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 7]);
+		await dee.browser.fetch(`/api/agents/${coach.id}/icon`, { method: "PUT", headers: { "content-type": "image/png" }, body: png });
 		const published = await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "POST" });
-		expect(published).toMatchObject({ status: 201, body: { author: "dee", authorName: "Dee Rivers", name: "Marathon coach", uses: 0 } });
+		expect(published).toMatchObject({
+			status: 201,
+			body: { author: "dee", authorName: "Dee Rivers", name: "Marathon coach", symbol: "🏃", color: "teal", icon: expect.any(Number), uses: 0 },
+		});
 		const templateId = published.body.id as string;
 		expect((await dee.browser.json(`/api/agents/${coach.id}`)).body.published).toBe(templateId);
 		// Publishing again replaces it, under the same id.
@@ -1492,6 +1499,10 @@ describe("profiles and published agents", () => {
 		const found = (await eli.browser.json("/api/templates?q=marathon")).body.templates;
 		expect(found).toEqual([expect.objectContaining({ id: templateId, author: "dee", name: "Marathon coach" })]);
 		expect(found[0]).not.toHaveProperty("instructions");
+		expect(found[0]).toMatchObject({ symbol: "🏃", color: "teal", icon: expect.any(Number) });
+		const shown = await eli.browser.fetch(`/api/templates/${templateId}/icon`);
+		expect(shown.headers.get("content-type")).toBe("image/png");
+		expect(new Uint8Array(await shown.arrayBuffer())).toEqual(png);
 		expect((await eli.browser.json("/api/templates?q=nothing-like-it")).body.templates).toEqual([]);
 		expect((await eli.browser.json("/api/people/dee")).body).toMatchObject({
 			username: "dee",
@@ -1510,13 +1521,25 @@ describe("profiles and published agents", () => {
 				instructions: "Plan two weeks at a time.",
 				apps: [{ name: "Strava", url: "https://mcp.strava.example/mcp" }],
 				team: [{ name: "Physio", instructions: "Check every plan for injury risk.", tools: null }],
+				symbol: "🏃",
+				color: "teal",
+				icon: expect.any(Number),
 				source: { template: templateId, author: "dee" },
 				published: null,
 			},
 		});
+		// The copy has its own icon: the picture, kept when the template's changes.
+		const copied = await eli.browser.fetch(`/api/agents/${mine.body.id}/icon`);
+		expect(new Uint8Array(await copied.arrayBuffer())).toEqual(png);
 		await eli.browser.json(`/api/agents/${mine.body.id}`, { method: "PUT", json: { instructions: "Plan my week around work." } });
 		expect((await dee.browser.json(`/api/agents/${coach.id}`)).body.instructions).toBe("Plan two weeks at a time.");
 		expect((await eli.browser.json(`/api/templates/${templateId}`)).body.uses).toBe(1);
+		// Published again without its picture, the template has none; Eli's copy keeps it.
+		await dee.browser.fetch(`/api/agents/${coach.id}/icon`, { method: "DELETE" });
+		await dee.browser.json(`/api/agents/${coach.id}`, { method: "PUT", json: { symbol: "rocket", color: null } });
+		expect((await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "POST" })).body).toMatchObject({ symbol: "rocket", color: null, icon: null });
+		expect((await eli.browser.fetch(`/api/templates/${templateId}/icon`)).status).toBe(404);
+		expect((await eli.browser.fetch(`/api/agents/${mine.body.id}/icon`)).status).toBe(200);
 
 		// Unpublished, it's gone from the gallery; Eli keeps his copy.
 		expect((await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "DELETE" })).status).toBe(200);
@@ -1541,15 +1564,26 @@ describe("profiles and published agents", () => {
 		const helper = (
 			await admin("/api/agents", {
 				method: "POST",
-				json: { name: "Household helper", description: "Keeps the house running.", instructions: "Check the family calendar first." },
+				json: {
+					name: "Household helper",
+					description: "Keeps the house running.",
+					instructions: "Check the family calendar first.",
+					symbol: "house",
+					color: "amber",
+				},
 			})
 		).body;
+		const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 9]);
+		await operator.browser.fetch(`/api/agents/${helper.id}/icon`, { method: "PUT", headers: { "content-type": "image/png" }, body: png });
 		expect((await before.browser.json("/api/admin/default-agent", { method: "PUT", json: { agent: helper.id } })).status).toBe(403);
 		expect((await admin("/api/admin/default-agent", { method: "PUT", json: { agent: "p_nope" } })).status).toBe(404);
 		expect((await admin("/api/admin/default-agent", { method: "PUT", json: { agent: helper.id } })).body.agent).toMatchObject({
 			author: "boss",
 			agentId: helper.id,
 			name: "Household helper",
+			symbol: "house",
+			color: "amber",
+			icon: true,
 		});
 
 		// A newcomer's default agent is a copy; whoever joined before keeps theirs.
@@ -1559,9 +1593,13 @@ describe("profiles and published agents", () => {
 			name: "Household helper",
 			description: "Keeps the house running.",
 			instructions: "Check the family calendar first.",
+			symbol: "house",
+			color: "amber",
+			icon: expect.any(Number),
 			default: true,
 			source: { template: "default", author: "boss" },
 		});
+		expect(new Uint8Array(await (await otto.browser.fetch(`/api/agents/${copy.id}/icon`)).arrayBuffer())).toEqual(png);
 		expect((await before.browser.json("/api/agents")).body.agents).toEqual([expect.objectContaining({ name: "Pim", default: true })]);
 
 		// The copy is Otto's: the admin's later edits don't reach it, and his don't reach theirs.
@@ -1576,7 +1614,7 @@ describe("profiles and published agents", () => {
 		// Taken back, people join with a plain agent again.
 		expect((await admin("/api/admin/default-agent", { method: "DELETE" })).body).toEqual({ agent: null });
 		expect((await (await person("pia")).browser.json("/api/agents")).body.agents).toEqual([
-			expect.objectContaining({ name: "Pim", instructions: "", default: true }),
+			expect.objectContaining({ name: "Pim", instructions: "", symbol: null, color: null, icon: null, default: true }),
 		]);
 	});
 

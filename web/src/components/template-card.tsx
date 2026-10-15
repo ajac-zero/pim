@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { Bot } from "lucide-react";
+import { AgentIcon, templateIconSrc } from "~/components/agent-icon";
 import { useI18n } from "~/components/i18n";
 import type { TemplateSummary } from "~/lib/pim-api";
 
@@ -13,7 +13,13 @@ export function TemplateCard({ template }: { template: TemplateSummary }) {
       className="flex h-full flex-col rounded-xl border px-4 py-3 transition-colors hover:bg-accent/50"
     >
       <span className="flex items-center gap-2">
-        <Bot className="size-4 shrink-0 text-primary" />
+        <span className="text-primary">
+          <AgentIcon
+            agent={template}
+            src={templateIconSrc(template)}
+            className="size-4"
+          />
+        </span>
         <span className="truncate font-medium">{template.name}</span>
       </span>
       {template.description && (

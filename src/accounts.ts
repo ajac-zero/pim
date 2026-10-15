@@ -224,8 +224,9 @@ async function register(request: Request, env: Env, now: number): Promise<Respon
 		// Everyone starts with a copy of the agent the admin chose, or a plain one when they chose none.
 		const everyone = await gallery(env).defaultAgent();
 		if (everyone) {
-			const { author, name, description, instructions, apps, team, blueprint } = everyone;
-			await pim.adoptDefaultAgent({ author, name, description, instructions, apps, team, blueprint });
+			const { author, name, description, instructions, apps, team, blueprint, symbol, color } = everyone;
+			const image = everyone.icon ? await gallery(env).defaultAgentIcon() : null;
+			await pim.adoptDefaultAgent({ author, name, description, instructions, apps, team, blueprint, symbol, color, image });
 		}
 		if (typeof body?.timeZone === "string") {
 			// The browser's zone, a good first guess; a bad one is just not applied.
@@ -348,13 +349,21 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				const url = new URL(request.url);
 				return json({ templates: await gallery(env).templates({ query: url.searchParams.get("q") ?? undefined }) });
 			}
-			const template = /^\/templates\/([^/]+)(\/use)?$/.exec(path);
+			const template = /^\/templates\/([^/]+)(\/use|\/icon)?$/.exec(path);
 			if (template) {
 				const found = await gallery(env).template(decodeURIComponent(template[1]!));
 				if (!found) return fail(404, "No such template. It may have been unpublished.");
 				if (!template[2] && request.method === "GET") return json(found);
-				if (template[2] && request.method === "POST") {
-					const agent = await (await pim()).adoptTemplate(found);
+				if (template[2] === "/icon" && request.method === "GET") {
+					const icon = await gallery(env).templateIcon(found.id);
+					if (!icon) return fail(404, "This template has no icon");
+					return new Response(icon.data, {
+						headers: { "content-type": icon.type, "x-content-type-options": "nosniff", "cache-control": "private, max-age=31536000, immutable" },
+					});
+				}
+				if (template[2] === "/use" && request.method === "POST") {
+					const image = found.icon === null ? null : await gallery(env).templateIcon(found.id);
+					const agent = await (await pim()).adoptTemplate({ ...found, image });
 					if (found.author !== account.username) await gallery(env).used(found.id);
 					log("template_used", { owner: account.ownerId, template: found.id });
 					return json(agent, 201);

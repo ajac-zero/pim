@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { Bot, Copy, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
+import { AgentIcon, templateIconSrc } from "~/components/agent-icon";
 import { useI18n } from "~/components/i18n";
 import { Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
@@ -45,6 +46,14 @@ function TemplatePage() {
   return (
     <Page
       title={template.name}
+      icon={
+        <AgentIcon
+          agent={template}
+          src={templateIconSrc(template)}
+          tile
+          className="size-9 rounded-lg"
+        />
+      }
       description={template.description || t("noDescription")}
     >
       <p className="-mt-6 mb-6 text-muted-foreground text-sm">

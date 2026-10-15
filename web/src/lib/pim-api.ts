@@ -195,6 +195,11 @@ export type Template = {
   instructions: string;
   apps: SuggestedApp[];
   team: TeamMember[];
+  /** Its look, as the agent's was when published. */
+  symbol: string | null;
+  color: string | null;
+  /** When its uploaded icon was published, or null without one. */
+  icon: number | null;
   publishedAt: number;
   uses: number;
 };

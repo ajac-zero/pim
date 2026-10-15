@@ -1,25 +1,561 @@
-import { Bot } from "lucide-react";
+import {
+  Baby,
+  Bike,
+  BookOpen,
+  Bot,
+  Brain,
+  Briefcase,
+  Calendar,
+  Camera,
+  Cat,
+  ChefHat,
+  Code,
+  Coffee,
+  Dog,
+  Dumbbell,
+  Flower2,
+  Footprints,
+  Gamepad2,
+  Globe,
+  GraduationCap,
+  Heart,
+  House,
+  ImagePlus,
+  Leaf,
+  Lightbulb,
+  type LucideIcon,
+  Mail,
+  Map as MapIcon,
+  Music,
+  Palette,
+  PenLine,
+  Plane,
+  Rocket,
+  Shield,
+  ShoppingCart,
+  Smile,
+  Sparkles,
+  Star,
+  Stethoscope,
+  Terminal,
+  Wallet,
+  Wrench,
+  Zap,
+} from "lucide-react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+import { type TranslationKey, useI18n } from "~/components/i18n";
+import { Button } from "~/components/ui/button";
+import { Input } from "~/components/ui/input";
 import type { Agent } from "~/lib/pim-api";
 import { cn } from "~/lib/utils";
 
-/** An agent's icon, or a robot when it has none. `className` sizes it. */
+/** The icons an agent can show, by the name the API keeps. The first is the default. */
+const ICONS: Record<string, LucideIcon> = {
+  bot: Bot,
+  sparkles: Sparkles,
+  rocket: Rocket,
+  brain: Brain,
+  lightbulb: Lightbulb,
+  zap: Zap,
+  star: Star,
+  heart: Heart,
+  smile: Smile,
+  briefcase: Briefcase,
+  calendar: Calendar,
+  mail: Mail,
+  "pen-line": PenLine,
+  "book-open": BookOpen,
+  "graduation-cap": GraduationCap,
+  code: Code,
+  terminal: Terminal,
+  wrench: Wrench,
+  shield: Shield,
+  globe: Globe,
+  plane: Plane,
+  map: MapIcon,
+  house: House,
+  "shopping-cart": ShoppingCart,
+  wallet: Wallet,
+  "chef-hat": ChefHat,
+  coffee: Coffee,
+  dumbbell: Dumbbell,
+  footprints: Footprints,
+  bike: Bike,
+  stethoscope: Stethoscope,
+  leaf: Leaf,
+  "flower-2": Flower2,
+  dog: Dog,
+  cat: Cat,
+  baby: Baby,
+  music: Music,
+  palette: Palette,
+  camera: Camera,
+  "gamepad-2": Gamepad2,
+};
+
+const EMOJIS = [
+  "🤖",
+  "✨",
+  "🚀",
+  "🧠",
+  "💡",
+  "⚡",
+  "⭐",
+  "❤️",
+  "😊",
+  "😎",
+  "🦊",
+  "🐱",
+  "🐶",
+  "🦉",
+  "🐙",
+  "🌱",
+  "🏃",
+  "💪",
+  "🧘",
+  "🍳",
+  "☕",
+  "🍎",
+  "📚",
+  "🎓",
+  "💼",
+  "📅",
+  "✉️",
+  "📝",
+  "💻",
+  "🛠️",
+  "💰",
+  "🛒",
+  "✈️",
+  "🗺️",
+  "🏠",
+  "🎨",
+  "🎵",
+  "📷",
+  "🎮",
+  "🌍",
+];
+
+/** Each color the API accepts, as a tinted tile, a glyph's color and a swatch. */
+const COLORS: Record<
+  string,
+  { tile: string; text: string; swatch: string; label: TranslationKey }
+> = {
+  gray: {
+    tile: "bg-zinc-500/15 text-zinc-600 dark:text-zinc-300",
+    text: "text-zinc-600 dark:text-zinc-300",
+    swatch: "bg-zinc-500",
+    label: "colorGray",
+  },
+  red: {
+    tile: "bg-red-500/15 text-red-600 dark:text-red-400",
+    text: "text-red-600 dark:text-red-400",
+    swatch: "bg-red-500",
+    label: "colorRed",
+  },
+  orange: {
+    tile: "bg-orange-500/15 text-orange-600 dark:text-orange-400",
+    text: "text-orange-600 dark:text-orange-400",
+    swatch: "bg-orange-500",
+    label: "colorOrange",
+  },
+  amber: {
+    tile: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+    text: "text-amber-600 dark:text-amber-400",
+    swatch: "bg-amber-500",
+    label: "colorAmber",
+  },
+  green: {
+    tile: "bg-green-500/15 text-green-600 dark:text-green-400",
+    text: "text-green-600 dark:text-green-400",
+    swatch: "bg-green-500",
+    label: "colorGreen",
+  },
+  teal: {
+    tile: "bg-teal-500/15 text-teal-600 dark:text-teal-400",
+    text: "text-teal-600 dark:text-teal-400",
+    swatch: "bg-teal-500",
+    label: "colorTeal",
+  },
+  blue: {
+    tile: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
+    text: "text-blue-600 dark:text-blue-400",
+    swatch: "bg-blue-500",
+    label: "colorBlue",
+  },
+  indigo: {
+    tile: "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400",
+    text: "text-indigo-600 dark:text-indigo-400",
+    swatch: "bg-indigo-500",
+    label: "colorIndigo",
+  },
+  violet: {
+    tile: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
+    text: "text-violet-600 dark:text-violet-400",
+    swatch: "bg-violet-500",
+    label: "colorViolet",
+  },
+  pink: {
+    tile: "bg-pink-500/15 text-pink-600 dark:text-pink-400",
+    text: "text-pink-600 dark:text-pink-400",
+    swatch: "bg-pink-500",
+    label: "colorPink",
+  },
+};
+
+/** The tile behind an agent's symbol: tinted with its color, or the theme's. */
+export function tileClass(color: string | null): string {
+  return (color && COLORS[color]?.tile) || "bg-primary/10 text-primary";
+}
+
+/** Named icons are lowercase words; anything else the API keeps is an emoji. */
+const isIconName = (symbol: string) => /^[a-z][a-z0-9-]*$/.test(symbol);
+
+type Look = Pick<Agent, "id" | "icon" | "symbol" | "color">;
+
+/** An agent's symbol alone: its emoji, or its icon, or a robot. */
+function Glyph({
+  symbol,
+  className,
+}: {
+  symbol: string | null;
+  className?: string;
+}) {
+  if (symbol && !isIconName(symbol)) {
+    // Drawn in an SVG, an emoji scales with the box like the icons do.
+    return (
+      <svg
+        viewBox="0 0 24 24"
+        className={cn("shrink-0", className)}
+        aria-hidden="true"
+      >
+        <text
+          x="12"
+          y="13"
+          fontSize="19"
+          textAnchor="middle"
+          dominantBaseline="central"
+        >
+          {symbol}
+        </text>
+      </svg>
+    );
+  }
+  const Icon = (symbol && ICONS[symbol]) || Bot;
+  return <Icon className={cn("shrink-0", className)} aria-hidden="true" />;
+}
+
+/**
+ * An agent's icon: its uploaded image, or its chosen icon or emoji in its
+ * color, or a robot. `className` sizes it. As a `tile`, the symbol sits on a
+ * tinted square.
+ */
 export function AgentIcon({
   agent,
   className,
+  tile = false,
+  src,
 }: {
-  agent: Pick<Agent, "id" | "icon">;
+  agent: Look;
   className?: string;
+  tile?: boolean;
+  /** An image to show instead, such as one not uploaded yet. */
+  src?: string;
 }) {
-  if (agent.icon === null) {
-    return <Bot className={cn("shrink-0", className)} aria-hidden="true" />;
+  if (src !== undefined || agent.icon !== null) {
+    return (
+      <img
+        // The version in the URL fetches it again when the icon changes.
+        src={src ?? `/api/agents/${agent.id}/icon?v=${agent.icon}`}
+        alt=""
+        className={cn("shrink-0 rounded-sm object-cover", className)}
+      />
+    );
+  }
+  if (tile) {
+    return (
+      <span
+        className={cn(
+          "flex shrink-0 items-center justify-center rounded-lg",
+          tileClass(agent.color),
+          className,
+        )}
+        aria-hidden="true"
+      >
+        <Glyph symbol={agent.symbol} className="size-[60%]" />
+      </span>
+    );
   }
   return (
-    <img
-      // The version in the URL fetches it again when the icon changes.
-      src={`/api/agents/${agent.id}/icon?v=${agent.icon}`}
-      alt=""
-      className={cn("shrink-0 rounded-sm object-cover", className)}
+    <Glyph
+      symbol={agent.symbol}
+      className={cn(agent.color && COLORS[agent.color]?.text, className)}
     />
+  );
+}
+
+/** What the picker changes: the symbol and color, and an image to upload, the one saved, or none. */
+export type LookChoice = {
+  symbol: string | null;
+  color: string | null;
+  image: Blob | "saved" | null;
+};
+
+// biome-ignore lint/complexity/useRegexLiterals: as a literal, the v flag needs a newer TypeScript target than the app's.
+const emojiPattern = new RegExp("^\\p{RGI_Emoji}$", "v");
+
+/** The last emoji in what was typed or pasted, if any. */
+function lastEmoji(text: string): string | undefined {
+  return [...new Intl.Segmenter().segment(text)]
+    .map((part) => part.segment)
+    .findLast((segment) => emojiPattern.test(segment));
+}
+
+/** Chooses how an agent looks: an icon, an emoji or an uploaded image, and a color for the first two. */
+export function AgentLookPicker({
+  agent,
+  value,
+  onChange,
+}: {
+  agent?: Pick<Agent, "id" | "icon">;
+  value: LookChoice;
+  onChange: (value: LookChoice) => void;
+}) {
+  const { t } = useI18n();
+  const [tab, setTab] = useState<"icon" | "emoji" | "image">(
+    value.image !== null
+      ? "image"
+      : value.symbol && !isIconName(value.symbol)
+        ? "emoji"
+        : "icon",
+  );
+  const [typed, setTyped] = useState("");
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [preview, setPreview] = useState<string>();
+  useEffect(() => {
+    if (!(value.image instanceof Blob)) return setPreview(undefined);
+    const url = URL.createObjectURL(value.image);
+    setPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [value.image]);
+  const shown: Look = {
+    id: agent?.id ?? "",
+    icon: value.image === "saved" ? (agent?.icon ?? null) : null,
+    symbol: value.symbol,
+    color: value.color,
+  };
+  // Choosing an icon or an emoji puts it in place of an image.
+  const choose = (symbol: string | null) =>
+    onChange({ ...value, symbol, image: null });
+
+  return (
+    <fieldset className="space-y-2">
+      <legend className="font-medium text-sm">{t("agentLook")}</legend>
+      <div className="flex gap-3">
+        <AgentIcon
+          agent={shown}
+          tile
+          src={value.image instanceof Blob ? preview : undefined}
+          className="size-14 rounded-xl"
+        />
+        <div className="min-w-0 flex-1 space-y-2">
+          <div
+            role="tablist"
+            aria-label={t("agentLook")}
+            className="inline-flex rounded-lg bg-muted p-0.5"
+          >
+            {(["icon", "emoji", "image"] as const).map((name) => (
+              <button
+                key={name}
+                type="button"
+                role="tab"
+                aria-selected={tab === name}
+                onClick={() => setTab(name)}
+                className={cn(
+                  "rounded-md px-3 py-1 text-sm",
+                  tab === name
+                    ? "bg-background font-medium shadow-xs"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {t(
+                  name === "icon"
+                    ? "lookIcon"
+                    : name === "emoji"
+                      ? "lookEmoji"
+                      : "lookImage",
+                )}
+              </button>
+            ))}
+          </div>
+          {tab === "icon" && (
+            <Choices>
+              {Object.keys(ICONS).map((name) => {
+                // The robot is the default: choosing it chooses no icon.
+                const symbol = name === "bot" ? null : name;
+                return (
+                  <Choice
+                    key={name}
+                    label={name}
+                    selected={
+                      value.image === null && (value.symbol ?? "bot") === name
+                    }
+                    onSelect={() => choose(symbol)}
+                  >
+                    <Glyph symbol={name} className="size-4.5" />
+                  </Choice>
+                );
+              })}
+            </Choices>
+          )}
+          {tab === "emoji" && (
+            <>
+              <Choices>
+                {EMOJIS.map((emoji) => (
+                  <Choice
+                    key={emoji}
+                    label={emoji}
+                    selected={value.image === null && value.symbol === emoji}
+                    onSelect={() => choose(emoji)}
+                  >
+                    <Glyph symbol={emoji} className="size-5" />
+                  </Choice>
+                ))}
+              </Choices>
+              <Input
+                value={typed}
+                onChange={(event) => {
+                  setTyped(event.target.value);
+                  const emoji = lastEmoji(event.target.value);
+                  if (emoji) choose(emoji);
+                }}
+                placeholder={t("anyEmoji")}
+                aria-label={t("anyEmoji")}
+                className="max-w-56"
+              />
+            </>
+          )}
+          {tab === "image" && (
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                ref={fileInput}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                aria-label={t("uploadIcon")}
+                onChange={async (event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (!file) return;
+                  try {
+                    onChange({ ...value, image: await iconFromFile(file) });
+                  } catch {
+                    toast.error(t("notAnImage"));
+                  }
+                }}
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => fileInput.current?.click()}
+              >
+                <ImagePlus /> {t("uploadIcon")}
+              </Button>
+              {value.image !== null && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onChange({ ...value, image: null })}
+                >
+                  {t("removeIcon")}
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+      {value.image === null && (
+        <div
+          role="radiogroup"
+          aria-label={t("agentColor")}
+          className="flex flex-wrap items-center gap-1.5"
+        >
+          <span className="mr-1 text-muted-foreground text-xs">
+            {t("agentColor")}
+          </span>
+          {[
+            {
+              color: null,
+              label: "defaultColor" as const,
+              swatch: "bg-primary",
+            },
+            ...Object.entries(COLORS).map(([color, { label, swatch }]) => ({
+              color,
+              label,
+              swatch,
+            })),
+          ].map(({ color, label, swatch }) => (
+            <button
+              key={color ?? "default"}
+              type="button"
+              role="radio"
+              aria-checked={value.color === color}
+              aria-label={t(label)}
+              title={t(label)}
+              onClick={() => onChange({ ...value, color })}
+              className={cn(
+                "size-6 rounded-full ring-offset-2 ring-offset-background",
+                swatch,
+                value.color === color
+                  ? "ring-2 ring-ring"
+                  : "hover:ring-2 hover:ring-border",
+              )}
+            />
+          ))}
+        </div>
+      )}
+    </fieldset>
+  );
+}
+
+function Choices({ children }: { children: ReactNode }) {
+  return (
+    <div className="grid w-fit grid-cols-8 gap-1 sm:grid-cols-10">
+      {children}
+    </div>
+  );
+}
+
+function Choice({
+  label,
+  selected,
+  onSelect,
+  children,
+}: {
+  label: string;
+  selected: boolean;
+  onSelect: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      aria-pressed={selected}
+      title={label}
+      onClick={onSelect}
+      className={cn(
+        "flex size-9 items-center justify-center rounded-md border",
+        selected
+          ? "border-ring bg-accent ring-2 ring-ring/50"
+          : "border-transparent hover:bg-accent",
+      )}
+    >
+      {children}
+    </button>
   );
 }
 

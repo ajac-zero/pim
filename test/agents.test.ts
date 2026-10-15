@@ -89,6 +89,20 @@ describe("the owner's agents", () => {
 		expect((await api(`/agents/${agent.id}/icon`)).status).toBe(404);
 	});
 
+	it("shows each agent with a chosen icon or emoji, in a chosen color", async () => {
+		const runner = (await post("/agents", { name: "Runner", symbol: "🏃🏽‍♀️", color: "teal" })).body;
+		expect(runner).toMatchObject({ symbol: "🏃🏽‍♀️", color: "teal" });
+		expect((await post("/agents", { name: "Plain" })).body).toMatchObject({ symbol: null, color: null });
+		const put = (body: Record<string, unknown>) => api(`/agents/${runner.id}`, { method: "PUT", body: JSON.stringify(body) });
+		// An edit that leaves them out keeps them.
+		expect((await put({ description: "Runs" })).body).toMatchObject({ symbol: "🏃🏽‍♀️", color: "teal" });
+		expect((await put({ symbol: "rocket" })).body).toMatchObject({ symbol: "rocket", color: "teal" });
+		for (const symbol of ["🏃🏃", "hi there", "a😀", "<svg>", "Rocket"]) expect((await put({ symbol })).status).toBe(400);
+		expect((await put({ color: "#ff0000" })).status).toBe(400);
+		expect((await put({ symbol: null, color: null })).body).toMatchObject({ symbol: null, color: null });
+		expect((await api(`/agents/${runner.id}/dashboard`)).body.agent).toMatchObject({ symbol: null, color: null });
+	});
+
 	it("knows the person's other agents, and makes one none of them covers", async () => {
 		const planner = (await post("/agents", { name: "Trip planner", description: "Plans my trips." })).body;
 		const session = (await post("/sessions", { agent: planner.id })).body.id;

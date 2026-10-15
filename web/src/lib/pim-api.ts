@@ -82,6 +82,10 @@ export type Agent = {
   published: string | null;
   /** When its icon was set, or null without one. */
   icon: number | null;
+  /** What shows without an uploaded icon: a named icon, such as `rocket`, or one emoji; null for the default. */
+  symbol: string | null;
+  /** The color of its symbol, such as `teal`; null for the default. */
+  color: string | null;
   /** The one that talks in chats started without choosing an agent. It can't be deleted while it is. */
   default: boolean;
   createdAt: number;
@@ -133,7 +137,14 @@ export type Widget = {
 export type Dashboard = {
   agent: Pick<
     Agent,
-    "id" | "name" | "description" | "default" | "blueprint" | "icon"
+    | "id"
+    | "name"
+    | "description"
+    | "default"
+    | "blueprint"
+    | "icon"
+    | "symbol"
+    | "color"
   >;
   /** Messages to start a chat with. */
   starters: string[];
@@ -148,6 +159,9 @@ export type AgentInput = {
   team: TeamMember[];
   /** Left out, a new agent is based on the deployment's default blueprint. */
   blueprint?: string | null;
+  /** Left out, a new agent has the default look and an edited one keeps its own. */
+  symbol?: string | null;
+  color?: string | null;
 };
 
 /** What this deployment installed: the blueprints people's agents can be based on, and widgets. */

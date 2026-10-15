@@ -1,6 +1,9 @@
 import type { ImageContent, JsonValue, Message, TextContent } from "@earendil-works/pi-ai";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 
+/** Private harness continuation, never a message from the person. */
+export const DELIVERY_REMINDER = "[Delivery required] Use send_to_user to deliver your answer now. Your ordinary text is private and is not shown to the person. If sending failed, fix the call or explain the problem with a chat message.";
+
 /**
  * A display-ready transcript message, projected from pi's entries for the
  * REST API. Streaming clients receive pi's own agent events instead and fold

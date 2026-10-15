@@ -1,5 +1,6 @@
 import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
+import { DELIVERY_REMINDER } from "../../../src/transcript";
 import type { FunctionCallItem } from "~/lib/openresponses";
 import {
   EMPTY_STREAM,
@@ -91,6 +92,17 @@ const run = (events: AgentEvent[], from: StreamState = EMPTY_STREAM) =>
   reduceAll(from, events);
 
 describe("snapshot", () => {
+  it("hides private delivery corrections without hiding the person's message", () => {
+    const state = run([
+      snapshot({
+        entries: [user(1, "Please answer."), user(2, DELIVERY_REMINDER)],
+      }),
+    ]);
+    expect(describeEntries(state.view.entries)).toEqual([
+      "1 user: Please answer.",
+    ]);
+  });
+
   it("projects the transcript, Pim's own inputs, and in-flight work", () => {
     const state = run([
       snapshot({
@@ -343,21 +355,18 @@ describe("streaming a message Pim sends", () => {
 /** Rows as compact strings: the entries each holds, by key. */
 function describeRows(rows: ReturnType<typeof layoutThread>): string[] {
   return rows.map((row) =>
-    row.kind === "activity"
-      ? `activity ${row.entries.map((entry) => entry.key).join(",")}`
-      : row.kind === "sent"
-        ? `sent ${row.key}: ${row.sent.message}`
-        : `${row.kind} ${row.key}`,
+    row.kind === "sent"
+      ? `sent ${row.key}: ${row.sent.message}`
+      : `${row.kind} ${row.key}`,
   );
 }
 
 const layout = (
   entries: EntryRecord[],
-  running = false,
   shown: (call: FunctionCallItem) => boolean = () => false,
 ) =>
   describeRows(
-    layoutThread(run([snapshot({ entries })]).view.entries, { running, shown }),
+    layoutThread(run([snapshot({ entries })]).view.entries, { shown }),
   );
 
 describe("layoutThread", () => {
@@ -365,7 +374,7 @@ describe("layoutThread", () => {
     type: "toolCall",
     id: "s",
     name: "web_search",
-    arguments: {},
+    arguments: { query: "Private search terms" },
   };
   const send = (id: string, message: string) => ({
     type: "toolCall",
@@ -374,7 +383,7 @@ describe("layoutThread", () => {
     arguments: { message },
   });
 
-  it("shows what Pim sent, and folds its notes and tools into activity", () => {
+  it("shows explicit sends, but never private text, tool calls, or results", () => {
     expect(
       layout([
         user(1, "Weather?"),
@@ -384,28 +393,68 @@ describe("layoutThread", () => {
         toolResult(5, "m", "Sent."),
         assistant(6, [{ type: "text", text: "Told them." }]),
       ]),
-    ).toEqual([
-      "entry 1",
-      "activity 2:0,2:1",
-      "sent 4:0: It's sunny.",
-      "activity 6:0",
-    ]);
+    ).toEqual(["entry 1", "sent 4:0: It's sunny."]);
   });
 
-  it("answers with the run's last text when Pim sent nothing back, once the run is over", () => {
+  it("never uses private text or tool activity as a fallback when no message was sent", () => {
     const entries = [
       user(1, "Weather?"),
-      assistant(2, [{ type: "text", text: "Looking." }, search]),
+      assistant(2, [
+        { type: "thinking", thinking: "Private thought." },
+        { type: "text", text: "Looking." },
+        search,
+      ]),
       toolResult(3, "s", "sunny"),
       assistant(4, [{ type: "text", text: "Sunny." }]),
     ];
-    expect(layout(entries)).toEqual([
-      "entry 1",
-      "activity 2:0,2:1",
-      "reply 4:0",
+    expect(layout(entries)).toEqual(["entry 1"]);
+    const rows = layoutThread(run([snapshot({ entries })]).view.entries, {
+      shown: () => false,
+    });
+    expect(JSON.stringify(rows)).not.toContain("Private thought");
+    expect(JSON.stringify(rows)).not.toContain("Sunny.");
+    expect(JSON.stringify(rows)).not.toContain("Looking.");
+    expect(JSON.stringify(rows)).not.toContain("Private search terms");
+    expect(JSON.stringify(rows)).not.toContain("sunny");
+  });
+
+  it("filters tool activity, private text, and reasoning from a live generation too", () => {
+    const state = run([
+      snapshot({
+        entries: [user(1, "hi")],
+        run: { inputs: ["s1"] },
+        generation: {
+          attempt: 1,
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "Do not expose this." },
+              { type: "text", text: "Nor this." },
+              search,
+            ],
+          },
+        },
+      }),
     ]);
-    // Still running, the last text may be notes before more work.
-    expect(layout(entries, true)).toEqual(["entry 1", "activity 2:0,2:1,4:0"]);
+    expect(
+      describeRows(layoutThread(state.view.live, { shown: () => false })),
+    ).toEqual([]);
+  });
+
+  it("keeps a progress send followed by tool work, but hides the private final answer", () => {
+    expect(
+      layout([
+        user(1, "Find the answer."),
+        assistant(2, [send("m", "I’ll look into it.")]),
+        toolResult(3, "m", "Sent."),
+        assistant(4, [search]),
+        toolResult(5, "s", "Found it."),
+        assistant(6, [
+          { type: "thinking", thinking: "Compose the final." },
+          { type: "text", text: "The answer is 42." },
+        ]),
+      ]),
+    ).toEqual(["entry 1", "sent 2:0: I’ll look into it."]);
   });
 
   it("lets work Pim gave itself stay silent", () => {
@@ -417,10 +466,10 @@ describe("layoutThread", () => {
         user(4, "[Scheduled task] Check the price."),
         assistant(5, [{ type: "text", text: "Unchanged; nothing to say." }]),
       ]),
-    ).toEqual(["entry 1", "sent 2:0: Will do.", "entry 4", "activity 5:0"]);
+    ).toEqual(["entry 1", "sent 2:0: Will do.", "entry 4"]);
   });
 
-  it("keeps a message the tool refused in Pim's work: it never reached the person", () => {
+  it("hides a message the tool refused: it never reached the person", () => {
     const entries = run([
       snapshot({
         entries: [
@@ -450,28 +499,35 @@ describe("layoutThread", () => {
     expect(
       describeRows(
         layoutThread(entries, {
-          running: false,
           shown: () => false,
           refused: (call) => failed.has(call.call_id),
         }),
       ),
-    ).toEqual(["entry 1", "activity 2:0", "sent 4:0: No ledger here."]);
+    ).toEqual(["entry 1", "sent 4:0: No ledger here."]);
   });
 
-  it("gives tool calls that stand on their own a row, splitting the work around them", () => {
+  it("keeps user-facing approval and artifact surfaces without exposing surrounding tool work", () => {
     const gated = {
       type: "toolCall",
       id: "h",
       name: "http_request",
       arguments: {},
     };
+    const artifact = {
+      type: "toolCall",
+      id: "a",
+      name: "artifact_create",
+      arguments: { title: "Dinner plan" },
+    };
     expect(
       layout(
-        [user(1, "Order a pizza."), assistant(2, [search, gated, search])],
-        true,
-        (call) => call.name === "http_request",
+        [
+          user(1, "Plan dinner and order a pizza."),
+          assistant(2, [search, gated, search, artifact]),
+        ],
+        (call) => ["http_request", "artifact_create"].includes(call.name),
       ),
-    ).toEqual(["entry 1", "activity 2:0", "entry 2:1", "activity 2:2"]);
+    ).toEqual(["entry 1", "entry 2:1", "entry 2:3"]);
   });
 });
 

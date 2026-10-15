@@ -66,7 +66,7 @@ describe("extensions", () => {
 		const prompts: string[] = [];
 		const record = (context: { messages: Message[] }) => {
 			prompts.push(systemPrompt(context.messages));
-			return fauxAssistantMessage("ok");
+			return toolUse("send_to_user", { message: "ok" });
 		};
 		faux.setResponses([record, record, record]);
 		await say("Hi", "1");
@@ -95,16 +95,16 @@ describe("extensions", () => {
 		faux.setResponses([
 			toolUse("schedule_task", { instruction: "Ask how the long run went.", label: "Long run check-in", delay_seconds: 3600 }),
 			toolUse("artifact_create", { title: "Training plan", kind: "markdown", content: "# Week 1" }),
-			fauxAssistantMessage("Set."),
+			toolUse("send_to_user", { message: "Set." }),
 			// The goal comes from a team member's conversation: it belongs to the chat the member works for.
 			toolUse("delegate", { tasks: [{ member: "Tracker", task: "Track a 10k goal." }] }),
 			toolUse("create_goal", { title: "Run a 10k", steps: ["Buy shoes", "Run 3x a week"] }),
 			fauxAssistantMessage("Tracking it."),
-			fauxAssistantMessage("Done."),
+			toolUse("send_to_user", { message: "Tracking it." }),
 		]);
 		await say("Plan my training and check in later.", chat);
 		await say("Track my 10k.", chat);
-		faux.setResponses([toolUse("create_goal", { title: "Learn Portuguese", steps: ["Find a tutor"] }), fauxAssistantMessage("ok")]);
+		faux.setResponses([toolUse("create_goal", { title: "Learn Portuguese", steps: ["Find a tutor"] }), toolUse("send_to_user", { message: "ok" })]);
 		await say("I want to learn Portuguese.", "1");
 		await post("/memory/log", { text: "Prefers morning runs" });
 		const forgotten = (await post("/memory/log", { text: "Lives in Lisbon" })).body;
@@ -201,7 +201,7 @@ describe("extensions", () => {
 			toolUse("ledger_add_bill", { name: "Rent", amount: 1850, due: "2026-11-01T09:00:00.000Z" }),
 			(context) => {
 				seen = context;
-				return fauxAssistantMessage("Recorded.");
+				return toolUse("send_to_user", { message: "Recorded." });
 			},
 		]);
 		await say("Rent is 1850, due November 1st.", chat);
@@ -215,7 +215,7 @@ describe("extensions", () => {
 		faux.setResponses([
 			(context) => {
 				home = context;
-				return fauxAssistantMessage("Hi.");
+				return toolUse("send_to_user", { message: "Hi." });
 			},
 		]);
 		await say("Hello", (await post("/sessions", {})).body.id);
@@ -231,14 +231,14 @@ describe("extensions", () => {
 				member = context;
 				return fauxAssistantMessage("Filed.");
 			},
-			fauxAssistantMessage("Done."),
+			toolUse("send_to_user", { message: "Filed." }),
 		]);
 		await say("File it.", chat);
 		expect(offered(member)).toContain("ledger_add_bill");
 		expect(offered(member)).not.toContain("send_to_user");
 
 		// An action asks first; approved, it runs with the extension's data.
-		faux.setResponses([toolUse("ledger_pay_bill", { name: "Rent" }), fauxAssistantMessage("Asked.")]);
+		faux.setResponses([toolUse("ledger_pay_bill", { name: "Rent" }), toolUse("send_to_user", { message: "Asked." })]);
 		await say("Pay the rent.", chat);
 		const approval = await pendingApproval();
 		expect(approval).toMatchObject({ action: "ledger_pay_bill", summary: "Pay Rent", session: chat });
@@ -258,7 +258,7 @@ describe("extensions", () => {
 		const requests: Request[] = [];
 		const record = (context: Request) => {
 			requests.push(context);
-			return fauxAssistantMessage("ok");
+			return toolUse("send_to_user", { message: "ok" });
 		};
 		faux.setResponses([record, record, record]);
 		await say("One", chat);
@@ -282,11 +282,11 @@ describe("extensions", () => {
 			toolUse("ledger_add_bill", { name: "Gas", amount: 40, due: "2026-12-01T09:00:00.000Z" }),
 			(context) => {
 				prompt = systemPrompt(context.messages);
-				return toolUse("send_to_user", { message: "Here's what's due.", widgets: ["test.ledger/bills", "pim.goals/active"] });
+				return toolUse("send_to_user", { message: "Here's what's due.", widgets: ["test.ledger/bills", "pim.goals/active"], complete: false });
 			},
 			(context) => {
 				result = JSON.stringify(context.messages.findLast((message) => message.role === "toolResult")?.content);
-				return fauxAssistantMessage("Shown.");
+				return toolUse("send_to_user", { message: "Shown." });
 			},
 		]);
 		const answer = await ask("Gas is 40, due December 1st. What's due?", chat);
@@ -307,6 +307,7 @@ describe("extensions", () => {
 		// A client that can't draw them gets them as text.
 		expect(answer.replies).toEqual([
 			"Here's what's due.\n\n**Upcoming bills**\n- Gas: 40 · 2026-12-01T09:00:00.000Z\n\n**Goals**\nNo goals yet. Ask to start tracking one.",
+			"Shown.",
 		]);
 
 		// A chat whose agent doesn't use the ledger can't show its widget: nothing is sent, and the model is told what it can show.
@@ -322,7 +323,6 @@ describe("extensions", () => {
 				refused = JSON.stringify(context.messages.findLast((message) => message.role === "toolResult"));
 				return toolUse("send_to_user", { message: "No ledger here.", widgets: ["pim.schedule/upcoming"] });
 			},
-			fauxAssistantMessage("Done."),
 		]);
 		const retried = await ask("Show my bills.", plain);
 		expect(offered).not.toContain("test.ledger/bills");
@@ -339,7 +339,6 @@ describe("extensions", () => {
 		faux.setResponses([
 			toolUse("create_goal", { title: "Save for a bike", steps: ["Open an account", "Save monthly"] }),
 			toolUse("send_to_user", { message: "Your goals, for your records.", channel: "email", widgets: ["pim.goals/active"] }),
-			fauxAssistantMessage("Emailed."),
 		]);
 		await say("Email me my goals.", (await post("/sessions", {})).body.id);
 		const [mail] = outbox.splice(0);

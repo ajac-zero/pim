@@ -3,7 +3,6 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Bell,
   Bot,
-  Brain,
   Check,
   ChevronDown,
   Compass,
@@ -30,7 +29,6 @@ import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { LanguageSelect, useI18n } from "~/components/i18n";
-import { useShowReasoning } from "~/components/reasoning-preference";
 import { useTheme } from "~/components/theme";
 import { Button } from "~/components/ui/button";
 import {
@@ -43,7 +41,6 @@ import {
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import { Input } from "~/components/ui/input";
-import { Switch } from "~/components/ui/switch";
 import {
   Tooltip,
   TooltipContent,
@@ -919,7 +916,6 @@ function SessionRow({
 
 function PreferencesMenu({ collapsed = false }: { collapsed?: boolean }) {
   const { preference, setPreference } = useTheme();
-  const { showReasoning, setShowReasoning } = useShowReasoning();
   const { t } = useI18n();
 
   const trigger = (
@@ -992,12 +988,6 @@ function PreferencesMenu({ collapsed = false }: { collapsed?: boolean }) {
         <div className="px-2 py-1.5">
           <LanguageSelect className="block w-full" />
         </div>
-        <DropdownMenuSeparator />
-        <label className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-sm">
-          <Brain className="size-4 text-muted-foreground" />
-          <span className="flex-1">{t("showReasoning")}</span>
-          <Switch checked={showReasoning} onCheckedChange={setShowReasoning} />
-        </label>
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -1,5 +1,4 @@
 import type { Message } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vitest";
@@ -36,7 +35,7 @@ async function callTool(name: string, args: Record<string, unknown>, session = "
 		toolUse(name, args as never),
 		(context) => {
 			result = lastToolResult(context.messages);
-			return fauxAssistantMessage("Done.");
+			return toolUse("send_to_user", { message: "Done." });
 		},
 	]);
 	await say(`Please use ${name}`, session);

@@ -121,8 +121,6 @@ function shownWidgets(result: string): ShownWidget[] {
 		return [];
 	}
 }
-/** Operation ids of the inputs Pim gives itself: scheduled tasks, approvals' decisions, apps' events. */
-const PIM_OPERATION = /^(schedule|approval|event):/;
 /**
  * Set by the Worker on every request it forwards: the owner it resolved,
  * which must be the agent's own name. A request routed to the wrong agent is
@@ -807,19 +805,16 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * An operation's result with what it sent the person in its conversation:
-	 * the messages of its run's `send_to_user` calls, in order. A message from
-	 * the person that got nothing sent back (a model that forgot to) is
-	 * answered with the run's final text instead; work Pim gave itself may
-	 * stay silent.
+	 * only the messages of its run's successful `send_to_user` calls, in order.
+	 * Final text is private working notes, never a fallback reply.
 	 */
 	async #withReplies(result: PiOperationResult): Promise<PiOperationResult & { replies: string[] }> {
-		if (result.status !== "done") return { ...result, replies: [] };
+		if (result.status !== "done") return { ...result, text: undefined, replies: [] };
 		const conversation = await this.harness.conversation(result.session);
 		const record = await (await this.harness.storage()).submissionByRequest(conversation.id, result.operationId, BACKGROUND_CONTEXT);
 		const replies: string[] = [];
-		let sent = false;
 		if (record?.type === "input" && record.status === "done") {
-			const entries = (await this.harness.session(result.session).messages()).filter((entry) => entry.id > record.entry && entry.id <= record.answer);
+			const entries = (await this.harness.session(result.session).messages()).filter((entry) => entry.id > record.entry);
 			// Each send_to_user call's result: a refused one sent nothing; a sent one may say what its widgets showed.
 			const results = new Map<string, { text: string; isError: boolean }>();
 			for (const entry of entries) {
@@ -829,24 +824,23 @@ export class Pim extends DurableAgent<Env> {
 				results.set(message.toolCallId, { text, isError: message.isError });
 			}
 			for (const entry of entries) {
+				// A terminating send settles at its assistant entry, before its result entries.
+				if (entry.id > record.answer) break;
 				const message = entry.model?.[0];
 				if (message?.role !== "assistant") continue;
 				for (const part of message.content) {
 					if (part.type !== "toolCall" || part.name !== SEND_TO_USER) continue;
-					// It tried to send something: its notes aren't passed off as a reply, even when the send failed.
-					sent = true;
 					const outcome = results.get(part.id);
-					if (outcome?.isError) continue;
+					if (!outcome || outcome.isError) continue;
 					// What went to their inbox is not a reply here.
 					if (typeof part.arguments.message !== "string" || part.arguments.channel === "email") continue;
 					// A client that can't draw widgets gets what they showed as text.
-					const widgets = outcome ? shownWidgets(outcome.text) : [];
+					const widgets = shownWidgets(outcome.text);
 					replies.push([part.arguments.message, ...widgets.map((widget) => widgetMarkdown(widget))].join("\n\n"));
 				}
 			}
 		}
-		const fallback = !sent && result.text && !PIM_OPERATION.test(result.operationId);
-		return { ...result, replies: fallback ? [result.text!] : replies };
+		return { ...result, text: replies.length > 0 ? replies.join("\n\n") : undefined, replies };
 	}
 
 	/** What this Pim holds: its database, and the images sent to it. */

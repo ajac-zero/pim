@@ -1,5 +1,4 @@
 import type { Message } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { createExecutionContext, env, runInDurableObject } from "cloudflare:test";
@@ -131,7 +130,7 @@ describe("connected apps (MCP)", () => {
 			},
 			(context) => {
 				results = toolResults(context.messages);
-				return fauxAssistantMessage("You see the dentist at 9.");
+				return toolUse("send_to_user", { message: "You see the dentist at 9." });
 			},
 		]);
 		await say("What's on Monday?");
@@ -141,7 +140,7 @@ describe("connected apps (MCP)", () => {
 
 	it("runs a tool that changes things once the user approves, and tells the conversation", async () => {
 		let reported = "";
-		faux.setResponses([toolUse("calendar_create_event", { title: "Lunch with Ana", day: "friday" }), fauxAssistantMessage("Asked.")]);
+		faux.setResponses([toolUse("calendar_create_event", { title: "Lunch with Ana", day: "friday" }), toolUse("send_to_user", { message: "Asked." })]);
 		await say("Book lunch with Ana on Friday.");
 		const approval = await pendingApproval();
 		expect(created).toEqual([]);
@@ -150,7 +149,7 @@ describe("connected apps (MCP)", () => {
 		faux.setResponses([
 			(context) => {
 				reported = lastUserText(context.messages);
-				return fauxAssistantMessage("Booked.");
+				return toolUse("send_to_user", { message: "Booked." });
 			},
 		]);
 		const decided = await post<Approval>(`/approvals/${approval.id}/approve`);
@@ -165,7 +164,7 @@ describe("connected apps (MCP)", () => {
 		const updated = await api("/mcp/calendar", { method: "PUT", body: JSON.stringify({ approval: "none" }) });
 		expect(updated.body.tools.map((tool: { requiresApproval: boolean }) => tool.requiresApproval)).toEqual([false, false]);
 
-		faux.setResponses([toolUse("calendar_create_event", { title: "Gym", day: "saturday" }), fauxAssistantMessage("Done.")]);
+		faux.setResponses([toolUse("calendar_create_event", { title: "Gym", day: "saturday" }), toolUse("send_to_user", { message: "Done." })]);
 		await say("Add gym on Saturday.");
 		expect(created.at(-1)).toEqual({ title: "Gym", day: "saturday" });
 
@@ -187,7 +186,7 @@ describe("connected apps (MCP)", () => {
 
 		// On: a tool that changes things runs without an approval.
 		expect((await setPermission("create_event", "on")).body).toMatchObject({ permission: "on", changed: false });
-		faux.setResponses([toolUse("calendar_create_event", { title: "Swim", day: "sunday" }), fauxAssistantMessage("Done.")]);
+		faux.setResponses([toolUse("calendar_create_event", { title: "Swim", day: "sunday" }), toolUse("send_to_user", { message: "Done." })]);
 		const approvals = (await api("/approvals")).body.approvals.length;
 		await say("Add swimming on Sunday.");
 		expect(created.at(-1)).toEqual({ title: "Swim", day: "sunday" });
@@ -203,7 +202,7 @@ describe("connected apps (MCP)", () => {
 			chosen: "on",
 			changed: true,
 		});
-		faux.setResponses([toolUse("calendar_create_event", { title: "Run", day: "monday" }), fauxAssistantMessage("Asked.")]);
+		faux.setResponses([toolUse("calendar_create_event", { title: "Run", day: "monday" }), toolUse("send_to_user", { message: "Asked." })]);
 		const turn = say("Add a run on Monday.");
 		const approval = await pendingApproval();
 		expect(approval.summary).toBe('Calendar: create_event {"title":"Run","day":"monday"}');
@@ -241,7 +240,7 @@ describe("connected apps (MCP)", () => {
 		const prompts: Message[][] = [];
 		const record = (context: { messages: Message[] }) => {
 			prompts.push(context.messages);
-			return fauxAssistantMessage("ok");
+			return toolUse("send_to_user", { message: "ok" });
 		};
 		faux.setResponses([record]);
 		await say("one", session);
@@ -277,7 +276,7 @@ describe("connected apps (MCP)", () => {
 			toolUse("connect_app", { app: "Weather" }),
 			(context) => {
 				refused = toolResults(context.messages);
-				return fauxAssistantMessage("I can't.");
+				return toolUse("send_to_user", { message: "I can't." });
 			},
 		]);
 		await say("Connect the weather app.");
@@ -294,7 +293,7 @@ describe("connected apps (MCP)", () => {
 			},
 			(context) => {
 				connected = toolResults(context.messages);
-				return fauxAssistantMessage("Connected.");
+				return toolUse("send_to_user", { message: "Connected." });
 			},
 		]);
 		await say("Connect the weather app.", budget);
@@ -307,7 +306,7 @@ describe("connected apps (MCP)", () => {
 		const tools: Record<string, string[]> = {};
 		const record = (key: string) => (context: { messages: Message[] }) => {
 			tools[key] = offered(context.messages);
-			return fauxAssistantMessage("ok");
+			return toolUse("send_to_user", { message: "ok" });
 		};
 		faux.setResponses([record("budget"), record("default")]);
 		await say("Forecast?", budget);
@@ -355,7 +354,7 @@ describe("connected apps (MCP)", () => {
 		const app = { name: "Firecrawl", url: "https://firecrawl.example.test/mcp" };
 		const agent = (await post("/agents", { name: "Researcher", instructions: "Research carefully." })).body;
 		const session = (await post("/sessions", { agent: agent.id })).body.id;
-		faux.setResponses([toolUse(MANAGE_APPS, { add: [app] }), fauxAssistantMessage("Please approve the connection.")]);
+		faux.setResponses([toolUse(MANAGE_APPS, { add: [app] }), toolUse("send_to_user", { message: "Please approve the connection." })]);
 		await say("Connect Firecrawl and search for turbines", session);
 		const approval = await pendingApproval();
 		expect(approval).toMatchObject({ action: MANAGE_APPS, tool: null, expiresAt: null, onTimeout: "deny", summary: `Researcher: add and connect Firecrawl (${app.url})` });
@@ -379,7 +378,7 @@ describe("connected apps (MCP)", () => {
 				outcome = lastUserText(context.messages);
 				return toolUse("firecrawl_search", { query: "turbines" });
 			},
-			(context) => { result = toolResults(context.messages); return fauxAssistantMessage("Searched."); },
+			(context) => { result = toolResults(context.messages); return toolUse("send_to_user", { message: "Searched." }); },
 		]);
 		expect((await post(`/approvals/${approval.id}/approve`)).body.result).toContain("Connected Firecrawl.");
 		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
@@ -391,11 +390,11 @@ describe("connected apps (MCP)", () => {
 
 		// A new URL with the same app name gets a separate connection, not another agent's old one.
 		const replacement = { ...app, url: "https://firecrawl-next.example.test/mcp" };
-		faux.setResponses([toolUse(MANAGE_APPS, { remove: [app.url], add: [replacement] }), fauxAssistantMessage("Waiting.")]);
+		faux.setResponses([toolUse(MANAGE_APPS, { remove: [app.url], add: [replacement] }), toolUse("send_to_user", { message: "Waiting." })]);
 		await say("Use the new Firecrawl endpoint instead", session);
 		const change = await pendingApproval();
 		expect(change.summary).toBe(`Researcher: remove Firecrawl (${app.url}); add and connect Firecrawl (${replacement.url})`);
-		faux.setResponses([fauxAssistantMessage("Replaced.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Replaced." })]);
 		const changed = await post(`/approvals/${change.id}/approve`);
 		expect(changed.body.result).toContain("Connected Firecrawl.");
 		expect(await decisionRun(change)).toMatchObject({ status: "done" });
@@ -405,24 +404,24 @@ describe("connected apps (MCP)", () => {
 		expect(fresh).toMatchObject({ state: "ready", approval: "writes", agents: ["Researcher"] });
 		expect(fresh.id).not.toBe("firecrawl");
 		expect(servers.find((server: { url: string }) => server.url === app.url)).toMatchObject({ id: "firecrawl", state: "ready", agents: ["Other researcher"] });
-		faux.setResponses([(context) => { tools = offered(context.messages); return fauxAssistantMessage("ok"); }]);
+		faux.setResponses([(context) => { tools = offered(context.messages); return toolUse("send_to_user", { message: "ok" }); }]);
 		await say("Which tools now?", session);
 		expect(tools).toContain(`${fresh.id}_find_events`);
 		expect(tools).not.toContain("firecrawl_search");
 
 		// Removing it from this agent does not disconnect it or remove it from another agent.
-		faux.setResponses([toolUse(MANAGE_APPS, { remove: [replacement.url] }), fauxAssistantMessage("Waiting.")]);
+		faux.setResponses([toolUse(MANAGE_APPS, { remove: [replacement.url] }), toolUse("send_to_user", { message: "Waiting." })]);
 		await say("Stop working with Firecrawl", session);
 		const removal = await pendingApproval();
 		expect(removal.summary).toContain(`remove Firecrawl (${replacement.url})`);
-		faux.setResponses([fauxAssistantMessage("Removed.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Removed." })]);
 		await post(`/approvals/${removal.id}/approve`);
 		expect(await decisionRun(removal)).toMatchObject({ status: "done" });
 		expect((await api(`/agents/${agent.id}`)).body.apps).toEqual([]);
 		expect((await api(`/agents/${other.id}`)).body.apps).toEqual([app]);
 		expect((await api("/mcp")).body.servers.find((server: { url: string }) => server.url === app.url)).toMatchObject({ state: "ready", approval: "writes" });
 		const after: Record<string, string[]> = {};
-		const record = (key: string) => (context: { messages: Message[] }) => { after[key] = offered(context.messages); return fauxAssistantMessage("ok"); };
+		const record = (key: string) => (context: { messages: Message[] }) => { after[key] = offered(context.messages); return toolUse("send_to_user", { message: "ok" }); };
 		faux.setResponses([record("removed"), record("other")]);
 		await say("Which tools now?", session);
 		const otherSession = (await post("/sessions", { agent: other.id })).body.id;
@@ -437,12 +436,12 @@ describe("connected apps (MCP)", () => {
 		const app = { name: "Unavailable", url: "https://down.example.test/mcp" };
 		const agent = (await post("/agents", { name: "App manager" })).body;
 		const session = (await post("/sessions", { agent: agent.id })).body.id;
-		faux.setResponses([toolUse(MANAGE_APPS, { add: [app] }), fauxAssistantMessage("Waiting.")]);
+		faux.setResponses([toolUse(MANAGE_APPS, { add: [app] }), toolUse("send_to_user", { message: "Waiting." })]);
 		await say("Add this server", session);
 		const approval = await pendingApproval();
 		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: MANAGE_APPS, permission: "off" }) });
 		expect((await post(`/approvals/${approval.id}/approve`)).status).toBe(403);
-		faux.setResponses([fauxAssistantMessage("Understood.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Understood." })]);
 		await post(`/approvals/${approval.id}/deny`);
 		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
 		expect((await api(`/agents/${agent.id}`)).body.apps).toEqual([]);
@@ -453,21 +452,21 @@ describe("connected apps (MCP)", () => {
 				tools = offered(context.messages);
 				return toolUse(UPDATE_AGENT, { add_apps: [app], instructions: "Keep it short." });
 			},
-			fauxAssistantMessage("Waiting."),
+			toolUse("send_to_user", { message: "Waiting." }),
 		]);
 		await say("Try the old edit tool", session);
 		expect(tools).not.toContain(MANAGE_APPS);
 		expect(tools).toContain(UPDATE_AGENT);
 		const edit = await pendingApproval();
-		faux.setResponses([fauxAssistantMessage("Edited.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Edited." })]);
 		await post(`/approvals/${edit.id}/approve`);
 		expect(await decisionRun(edit)).toMatchObject({ status: "done" });
 		expect((await api(`/agents/${agent.id}`)).body).toMatchObject({ apps: [], instructions: "Keep it short." });
 		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: MANAGE_APPS, permission: null }) });
-		faux.setResponses([toolUse(MANAGE_APPS, { add: [app] }), fauxAssistantMessage("Waiting.")]);
+		faux.setResponses([toolUse(MANAGE_APPS, { add: [app] }), toolUse("send_to_user", { message: "Waiting." })]);
 		await say("Try the unavailable server again", session);
 		const retry = await pendingApproval();
-		faux.setResponses([(context) => { result = lastUserText(context.messages); return fauxAssistantMessage("Connection failed."); }]);
+		faux.setResponses([(context) => { result = lastUserText(context.messages); return toolUse("send_to_user", { message: "Connection failed." }); }]);
 		await post(`/approvals/${retry.id}/approve`);
 		expect(await decisionRun(retry)).toMatchObject({ status: "done" });
 		expect(result).toContain("was added, but connecting failed");

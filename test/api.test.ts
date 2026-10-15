@@ -84,7 +84,7 @@ describe("agent", () => {
 
 describe("conversation", () => {
 	it("answers a message and keeps the transcript", async () => {
-		faux.setResponses([fauxAssistantMessage("Paris.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Paris." })]);
 		const answer = await say("What is the capital of France?");
 		expect(answer).toMatchObject({ status: "done", text: "Paris." });
 
@@ -92,17 +92,20 @@ describe("conversation", () => {
 		const messages = body.messages as TranscriptMessage[];
 		expect(messages.map((message) => [message.role, textOf(message)])).toEqual([
 			["user", "What is the capital of France?"],
-			["assistant", "Paris."],
+			["assistant", ""],
+			["tool", ""],
 		]);
+		expect(messages[1]!.parts).toMatchObject([{ type: "tool-call", name: "send_to_user", arguments: { message: "Paris." } }]);
 		expect(body.busy).toBe(false);
 	});
 
 	it("keeps sessions separate", async () => {
 		const { body: created } = await post("/sessions");
-		faux.setResponses([fauxAssistantMessage("In the new session.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "In the new session." })]);
 		expect((await say("hi", created.id)).text).toBe("In the new session.");
 		const { body } = await api(`/sessions/${created.id}/messages`);
-		expect(body.messages.map(textOf)).toEqual(["hi", "In the new session."]);
+		expect(body.messages.map(textOf)).toEqual(["hi", "", ""]);
+		expect(body.messages[1].parts[0].arguments.message).toBe("In the new session.");
 		expect((await api("/sessions/999/messages")).status).toBe(404);
 	});
 
@@ -116,9 +119,9 @@ describe("conversation", () => {
 			);
 		const order = async () => ((await api("/sessions")).body.sessions as { id: string }[]).map((s) => s.id);
 
-		faux.setResponses([fauxAssistantMessage("Sure.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Sure." })]);
 		await say("Plan my trip to Lisbon\nwith lots of detail", first);
-		faux.setResponses([fauxAssistantMessage("Ok.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Ok." })]);
 		await say("Milk and eggs", second);
 		// A message Pim sends itself (a scheduled task, an event) does not name a session.
 		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
@@ -130,7 +133,7 @@ describe("conversation", () => {
 		expect((await order()).slice(0, 3)).toEqual([third, second, first]);
 
 		// Activity moves a session up; later messages do not rename it.
-		faux.setResponses([fauxAssistantMessage("Booked.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Booked." })]);
 		await say("Book the flights", first);
 		expect((await order())[0]).toBe(first);
 		expect((await titles())[first]).toBe("Plan my trip to Lisbon");
@@ -148,7 +151,7 @@ describe("conversation", () => {
 			[doomed, "Remind me about the doomed chat."],
 			[kept, "Remind me about the kept chat."],
 		]) {
-			faux.setResponses([toolUse("schedule_task", { instruction, delay_seconds: 3600 }), fauxAssistantMessage("Will do.")]);
+			faux.setResponses([toolUse("schedule_task", { instruction, delay_seconds: 3600 }), toolUse("send_to_user", { message: "Will do." })]);
 			await say(instruction!, session);
 		}
 		const listed = async () => ((await api("/sessions")).body.sessions as { id: string }[]).map((s) => s.id);
@@ -165,18 +168,18 @@ describe("conversation", () => {
 		expect(await scheduledFor()).toContain(kept);
 
 		// The root is where API clients talk by default: deleting hides it until it gets a message.
-		faux.setResponses([fauxAssistantMessage("Hi.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Hi." })]);
 		await say("hello root");
 		expect((await api("/sessions/1", { method: "DELETE" })).status).toBe(200);
 		expect(await listed()).not.toContain("1");
-		faux.setResponses([fauxAssistantMessage("Back.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Back." })]);
 		expect((await say("hello again")).text).toBe("Back.");
 		expect(await listed()).toContain("1");
 	});
 
 	it("returns a receipt without waiting, and the operation settles later", async () => {
 		const { body: created } = await post("/sessions");
-		faux.setResponses([fauxAssistantMessage("Later.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Later." })]);
 		const path = `/sessions/${created.id}/messages`;
 		const { status, body: receipt } = await post(path, { content: "hi", operationId: "op-1" });
 		expect(status).toBe(202);
@@ -196,11 +199,11 @@ describe("conversation", () => {
 		faux.setResponses([
 			(context) => {
 				seen.push(context.messages.find((message) => message.role === "user"));
-				return fauxAssistantMessage("A cat and a dog.");
+				return toolUse("send_to_user", { message: "A cat and a dog." });
 			},
 			(context) => {
 				seen.push(context.messages.find((message) => message.role === "user"));
-				return fauxAssistantMessage("Yes, the cat.");
+				return toolUse("send_to_user", { message: "Yes, the cat." });
 			},
 		]);
 		const content = [
@@ -242,7 +245,7 @@ describe("conversation", () => {
 	it("gives a model whose API fetches images a signed URL instead, which serves the image without the token", async () => {
 		const png = "iVBORw0KGgo=";
 		const { body: created } = await post("/sessions");
-		faux.setResponses([fauxAssistantMessage("Seen.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Seen." })]);
 		await post(`/sessions/${created.id}/messages`, { content: [{ type: "image", data: png, mimeType: "image/png" }], wait: true });
 		const [user] = (await api(`/sessions/${created.id}/messages`)).body.messages as TranscriptMessage[];
 		// What Anthropic's API, through pi-ai, would be given for the chat.
@@ -277,7 +280,7 @@ describe("conversation", () => {
 		expect(received[0]).toMatchObject({ type: "hello", session: created.id });
 		expect(received[1].events[0].type).toBe("snapshot");
 
-		faux.setResponses([fauxAssistantMessage("Hello over the socket.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Hello over the socket." })]);
 		socket.send(JSON.stringify({ type: "submit", id: "c1", content: "hi" }));
 
 		const events = () => received.filter((message) => message.type === "events").flatMap((message) => message.events);
@@ -287,7 +290,7 @@ describe("conversation", () => {
 			.filter((event) => event.type === "message_end")
 			.map((event) => event.entry.model[0].role)
 			.filter((role) => role !== "system");
-		expect(roles).toEqual(["user", "assistant"]);
+		expect(roles).toEqual(["user", "assistant", "toolResult"]);
 		socket.close();
 	});
 
@@ -296,4 +299,3 @@ describe("conversation", () => {
 		await vi.waitFor(() => expect(received).toEqual([{ type: "error", message: "No session 999" }]));
 	});
 });
-

@@ -353,7 +353,7 @@ describe("isolation between people", () => {
 		const jo = await person("joy");
 		const noted = await ian.browser.json("/api/memory/log", { method: "POST", json: { text: "Ian's passport expires in May" } });
 		expect(noted.body).toMatchObject({ text: expect.stringContaining("passport") });
-		faux.setResponses([fauxAssistantMessage("Noted, Ian.")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Noted, Ian." })]);
 		expect((await ian.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Hi, I'm Ian", wait: true } })).body).toMatchObject({
 			status: "done",
 		});
@@ -844,7 +844,7 @@ describe("the account", () => {
 
 /** Has the person's Pim make an HTML artifact, as its model would, and returns its id. */
 async function makeArtifact(browser: Browser, content: string) {
-	faux.setResponses([toolUse("artifact_create", { title: "Page", kind: "html", content }), fauxAssistantMessage("Made it.")]);
+	faux.setResponses([toolUse("artifact_create", { title: "Page", kind: "html", content }), toolUse("send_to_user", { message: "Made it." })]);
 	expect((await browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Make a page", wait: true } })).status).toBe(200);
 	const { artifacts } = (await browser.json("/api/artifacts")).body as { artifacts: { id: string; title: string }[] };
 	return artifacts[0]!.id;
@@ -1380,7 +1380,7 @@ describe("circles and visits", () => {
 					);
 					return toolUse("calendar_find_events", { day: "monday" });
 				},
-				fauxAssistantMessage("Ana sees the dentist at 9 on Monday."),
+				toolUse("send_to_user", { message: "Ana sees the dentist at 9 on Monday." }),
 			]);
 			expect((await say(ben.browser, session, "Is Ana free Monday morning?")).body).toMatchObject({ status: "done" });
 			expect(system).toContain("You are ana's Pim");
@@ -1401,7 +1401,7 @@ describe("circles and visits", () => {
 					ownTools = context.messages.flatMap((message) =>
 						message.role === "system" ? (message.toolsAdded ?? []).map((tool) => tool.name) : [],
 					);
-					return fauxAssistantMessage("Hi Ben.");
+					return toolUse("send_to_user", { message: "Hi Ben." });
 				},
 			]);
 			await say(ben.browser, "1", "Hi");
@@ -1413,7 +1413,7 @@ describe("circles and visits", () => {
 			});
 
 			// A tool that asks: Ana gets the request, with who asked; her answer continues Ben's visit.
-			faux.setResponses([toolUse("calendar_create_event", { title: "Lunch with Ben", day: "friday" }), fauxAssistantMessage("I've asked Ana.")]);
+			faux.setResponses([toolUse("calendar_create_event", { title: "Lunch with Ben", day: "friday" }), toolUse("send_to_user", { message: "I've asked Ana." })]);
 			expect((await say(ben.browser, session, "Put lunch with me on Ana's calendar Friday.")).body).toMatchObject({ status: "done" });
 			expect(created).toEqual([]);
 			const [asked] = (await ana.browser.json("/api/approvals?status=pending")).body.approvals;
@@ -1423,7 +1423,7 @@ describe("circles and visits", () => {
 				onTimeout: "deny",
 			});
 			expect((await ana.browser.json("/api/notifications")).body.notifications[0]).toMatchObject({ title: "ben asked your Pim" });
-			faux.setResponses([fauxAssistantMessage("Ana said yes: lunch is on her calendar.")]);
+			faux.setResponses([toolUse("send_to_user", { message: "Ana said yes: lunch is on her calendar." })]);
 			expect((await ana.browser.json(`/api/approvals/${asked.id}/approve`, { method: "POST", json: {} })).body).toMatchObject({ status: "approved" });
 			expect(created).toEqual([{ title: "Lunch with Ben", day: "friday" }]);
 			await vi.waitFor(async () => expect(await transcript(ben.browser, session)).toContain("Ana said yes: lunch is on her calendar."));

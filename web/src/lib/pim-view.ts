@@ -8,6 +8,7 @@ import type {
   EntryRecord,
   MessageChange,
 } from "@earendil-works/pi-durable";
+import { DELIVERY_REMINDER } from "../../../src/transcript";
 import type {
   FunctionCallItem,
   FunctionCallOutputItem,
@@ -210,6 +211,7 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
   switch (message.role) {
     case "user": {
       const text = textOf(message.content);
+      if (text === DELIVERY_REMINDER) return [];
       const notice = noticeOf(text);
       if (notice) return [{ key, kind: "notice", notice }];
       return [
@@ -576,74 +578,28 @@ export function sentOf(call: FunctionCallItem): Sent | null {
 
 /** One row of the chat as the person reads it. */
 export type ThreadRow =
-  /** Something they said, a notice, or a tool call that stands on its own. */
+  /** Something they said, a notice, or a user-facing approval or artifact. */
   | { kind: "entry"; key: string; entry: ThreadEntry }
   /** A message Pim sent them. */
-  | { kind: "sent"; key: string; call: FunctionCallItem; sent: Sent }
-  /** Pim's last notes, standing in for a reply it never sent. */
-  | { kind: "reply"; key: string; item: MessageItem }
-  /** Pim's work between: thinking, notes and tool calls, folded together. */
-  | { kind: "activity"; key: string; entries: ThreadEntry[] };
+  | { kind: "sent"; key: string; call: FunctionCallItem; sent: Sent };
 
 /**
- * Lays the thread out as the person reads it: what they said, what Pim sent
- * them, and Pim's work in between, folded into activity rows. `shown` picks
- * the other tool calls that stand on their own, such as approvals.
+ * Lays the thread out as the person reads it: what they said and what Pim sent
+ * them. `shown` picks user-facing approvals and artifacts, never raw tool calls.
  *
- * Text Pim writes is notes, with one exception: a message from the person
- * that got nothing sent back, as with a model that forgot to, is answered by
- * the last text of its run, once the run is over. Inputs Pim gave itself
- * (notices) may stay silent.
+ * Only explicit send_to_user calls are presented as assistant text. Ordinary
+ * assistant text, reasoning, and tool activity are private, even without a send.
  */
 export function layoutThread(
   entries: readonly ThreadEntry[],
   options: {
-    running: boolean;
     shown: (call: FunctionCallItem) => boolean;
     /** A `send_to_user` call the tool refused (an unknown widget, an email that couldn't go): nothing reached the person. */
     refused?: (call: FunctionCallItem) => boolean;
   },
 ): ThreadRow[] {
-  const replies = new Set<string>();
-  let fromUser = false;
-  let sent = false;
-  let lastText: string | null = null;
-  const close = (over: boolean) => {
-    if (fromUser && !sent && lastText !== null && over) replies.add(lastText);
-    sent = false;
-    lastText = null;
-  };
-  for (const entry of entries) {
-    if (entry.kind === "notice") {
-      close(true);
-      fromUser = false;
-      continue;
-    }
-    const { item } = entry;
-    if (item.type === "message" && (item as MessageItem).role === "user") {
-      close(true);
-      fromUser = true;
-    } else if (item.type === "message") {
-      lastText = entry.key;
-    } else if (
-      item.type === "function_call" &&
-      (item as FunctionCallItem).name === SEND_TO_USER
-    ) {
-      sent = true;
-    }
-  }
-  close(!options.running);
-
   const rows: ThreadRow[] = [];
-  let activity: ThreadEntry[] = [];
-  const flush = () => {
-    const [first] = activity;
-    if (!first) return;
-    rows.push({ kind: "activity", key: first.key, entries: activity });
-    activity = [];
-  };
   const own = (entry: ThreadEntry) => {
-    flush();
     rows.push({ kind: "entry", key: entry.key, entry });
   };
   for (const entry of entries) {
@@ -654,40 +610,28 @@ export function layoutThread(
     const { item } = entry;
     switch (item.type) {
       case "message":
-        if ((item as MessageItem).role === "user") own(entry);
-        else if (replies.has(entry.key)) {
-          flush();
-          rows.push({
-            kind: "reply",
-            key: entry.key,
-            item: item as MessageItem,
-          });
-        } else activity.push(entry);
-        break;
       case "reasoning":
-        activity.push(entry);
+        if ((item as MessageItem).role === "user") own(entry);
         break;
       case "function_call": {
         const call = item as FunctionCallItem;
         const message = sentOf(call);
-        // A refused message is part of Pim's work, not something it said.
-        if (message && options.refused?.(call)) activity.push(entry);
-        else if (message) {
+        if (message) {
+          // Failed sends stay private too: nothing reached the person.
+          if (options.refused?.(call)) break;
           // Nothing to read until its message starts streaming.
           if (message.message === "") break;
-          flush();
           rows.push({ kind: "sent", key: entry.key, call, sent: message });
         } else if (options.shown(call)) own(entry);
-        else activity.push(entry);
         break;
       }
       case "function_call_output":
         // Shown with its call.
         break;
       default:
-        own(entry);
+        // Unknown internal items are not a user-facing message either.
+        break;
     }
   }
-  flush();
   return rows;
 }

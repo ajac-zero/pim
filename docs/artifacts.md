@@ -71,8 +71,6 @@ Each limit is checked against the stored versions before anything is written. Th
 | `artifactStorageBytes` | All versions of all artifacts | 10,000,000 (an export holds them all in memory, and the chats that made them hold their text again) |
 | `storageBytes` | The whole Pim: a write is refused if it wouldn't fit | |
 
-The ajac-zero deployment sets 100 artifacts, 50 versions, 500,000 bytes per version and 10,000,000 in all.
-
 ## Export and deletion
 
 - **Export** (`/export`, and `/account/export`) includes every artifact with every version and its content.

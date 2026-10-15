@@ -72,6 +72,8 @@ export type GatedAction<P extends TSchema = TSchema> = {
 	run(args: Static<P>): Promise<string>;
 	/** Not a tool of its own: other tools file approvals for it (such as MCP tool calls). */
 	readonly internal?: boolean;
+	/** Every call needs the person's decision: no timeout or always-approve permission. */
+	readonly explicitApproval?: boolean;
 };
 
 export function defineGatedAction<P extends TSchema>(action: GatedAction<P>): GatedAction<P> {
@@ -85,8 +87,8 @@ export function describeWait(ms: number): string {
 }
 
 /** Appended to the description of every tool that only files an approval request. */
-export function approvalNote(services: PimServices): string {
-	const timeout = services.approvalTimeoutMs;
+export function approvalNote(services: PimServices, explicit = false): string {
+	const timeout = explicit ? null : services.approvalTimeoutMs;
 	const unanswered =
 		timeout === null ? "the request waits for their answer, however long" : `with no answer in ${describeWait(timeout)} it is approved automatically`;
 	return `Requires the user's approval: calling this asks them and returns at once; ${unanswered}. Their decision, with the action's result, arrives later in this conversation as a message starting with "[Approval". Don't call it again meanwhile.`;
@@ -102,11 +104,12 @@ export async function fileApproval(
 	services: PimServices,
 	api: ToolExecutionApi,
 	context: Context,
-	request: { action: string; tool: string; args: unknown; summary: string },
+	request: { action: string; tool: string | null; args: unknown; summary: string },
+	explicit = false,
 ): Promise<ToolExecutionResult> {
 	const id = await api.memo("approval", crypto.randomUUID(), context);
 	const known = services.store.approval(id);
-	const timeout = services.approvalTimeoutMs;
+	const timeout = explicit ? null : services.approvalTimeoutMs;
 	const now = Date.now();
 	const session = String(api.conversationId);
 	const approval = services.store.requestApproval({
@@ -125,11 +128,11 @@ export async function fileApproval(
 function gatedTool(action: GatedAction, services: PimServices, permission: ToolPermission) {
 	return defineTool({
 		name: action.name,
-		description: permission === "ask" ? `${action.description} ${approvalNote(services)}` : action.description,
+		description: permission === "ask" || action.explicitApproval ? `${action.description} ${approvalNote(services, action.explicitApproval)}` : action.description,
 		parameters: action.parameters,
 		replay: "safe",
 		async execute(args, api, context) {
-			return fileApproval(services, api, context, { action: action.name, tool: action.name, args, summary: action.summarize(args) });
+			return fileApproval(services, api, context, { action: action.name, tool: action.explicitApproval ? null : action.name, args, summary: action.summarize(args) }, action.explicitApproval);
 		},
 	});
 }

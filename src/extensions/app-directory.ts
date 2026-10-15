@@ -139,6 +139,6 @@ export function describeCandidates(query: string, candidates: readonly AppCandid
 	return [
 		`MCP Registry servers for "${query}", the app's own first:`,
 		...lines,
-		"Give the person the app's own server, to add to this agent's apps in Your agents. Offer a third-party one only if the app has none, and say who runs it.",
+		"Use manage_apps if available to request adding and connecting the app's own server with the person's approval. If app management is off, explain how they can add it in Your agents. Offer a third-party one only if the app has none, and say who runs it.",
 	].join("\n");
 }

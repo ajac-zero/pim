@@ -15,11 +15,13 @@ import {
 import { memberInstructions, memberPreamble, type Role } from "../team";
 import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";
 import type { BlueprintDefinition } from "./define";
+import { type McpBridge, serverFor } from "./mcp";
 import { type PimServices, json, text } from "./services";
 
 export const CREATE_AGENT = "create_agent";
 export const UPDATE_AGENT = "update_agent";
 export const RENAME_AGENT = "rename_agent";
+export const MANAGE_APPS = "manage_apps";
 
 const App = Type.Object({ name: Type.String(), url: Type.String({ description: "The app's remote MCP server, https." }) });
 const Member = Type.Object({
@@ -28,12 +30,10 @@ const Member = Type.Object({
 	tools: Type.Optional(Type.Array(Type.String(), { description: "The only tools it may use, by name; leave out for all a member can have." })),
 });
 
-/** What `update_agent` changes. Apps and members are added and removed one by one: an agent doesn't see all of its team's instructions. */
+/** What `update_agent` changes. Members are added and removed one by one: an agent doesn't see all of its team's instructions. */
 const Changes = Type.Object({
 	description: Type.Optional(Type.String({ maxLength: MAX_DESCRIPTION })),
 	instructions: Type.Optional(Type.String({ maxLength: MAX_INSTRUCTIONS, description: "Your complete new instructions: they replace the old ones." })),
-	add_apps: Type.Optional(Type.Array(App, { maxItems: MAX_APPS })),
-	remove_apps: Type.Optional(Type.Array(Type.String(), { description: "Names of your apps to stop working with." })),
 	set_members: Type.Optional(Type.Array(Member, { maxItems: MAX_TEAM, description: "Team members to add, or to replace if one has the name." })),
 	remove_members: Type.Optional(Type.Array(Type.String(), { description: "Names of team members to remove." })),
 });
@@ -51,13 +51,10 @@ function changed(agent: Agent, changes: Changes): AgentInput {
 			const given = set.find((candidate) => same(candidate.name, member.name));
 			return given ? { ...given, name: member.name } : member;
 		});
-	const added = changes.add_apps ?? [];
-	const apps = agent.apps.filter((app) => !changes.remove_apps?.some((name) => same(name, app.name)) && !added.some((given) => given.url === app.url));
 	return agentInput(
 		{
 			description: changes.description,
 			instructions: changes.instructions,
-			apps: [...apps, ...added],
 			team: [...team, ...set.filter((given) => !team.some((member) => same(member.name, given.name)))],
 		},
 		agent,
@@ -75,8 +72,6 @@ function describeChanges(agent: Agent, next: AgentInput): string[] {
 	return [
 		...(next.description !== agent.description ? ["changes its description"] : []),
 		...(next.instructions !== agent.instructions ? ["changes its instructions"] : []),
-		...missing(next.apps, agent.apps).map((name) => `adds the app ${name}`),
-		...missing(agent.apps, next.apps).map((name) => `removes the app ${name}`),
 		...missing(next.team, agent.team).map((name) => `adds ${name} to its team`),
 		...names(editedMembers).map((name) => `changes ${name} on its team`),
 		...missing(agent.team, next.team).map((name) => `removes ${name} from its team`),
@@ -87,7 +82,7 @@ function describeChanges(agent: Agent, next: AgentInput): string[] {
 export function updateAgentAction(agents: Pick<AgentStore, "get" | "update">): GatedAction {
 	return defineGatedAction({
 		name: UPDATE_AGENT,
-		description: "An agent changes its own instructions, description, apps or team.",
+		description: "An agent changes its own instructions, description or team.",
 		// Filed by the tool, which names the chat's agent.
 		internal: true,
 		parameters: Type.Object({ agent: Type.String(), ...Changes.properties }),
@@ -97,6 +92,55 @@ export function updateAgentAction(agents: Pick<AgentStore, "get" | "update">): G
 			if (!agent) return "That agent no longer exists.";
 			const updated = agents.update(id, changed(agent, changes));
 			return `${updated.name} is updated. The change applies from its next step.`;
+		},
+	}) as GatedAction;
+}
+
+const AppChanges = Type.Object({
+	add: Type.Optional(Type.Array(App, { maxItems: MAX_APPS, description: "Apps to add and connect after approval." })),
+	remove: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_APPS, description: "Exact MCP URLs to remove from this agent, not shared connections. To replace an endpoint, remove its old URL and add the new one together." })),
+});
+type AppChanges = Static<typeof AppChanges>;
+
+/** Apply only the approved URL additions/removals to the agent as it is now. */
+function changedApps(agent: Agent, changes: AppChanges): AgentInput {
+	const added = agentInput({ apps: changes.add ?? [] }, agent).apps;
+	const apps = agent.apps.filter((app) => !changes.remove?.includes(app.url) && !added.some((given) => given.url === app.url));
+	for (const app of added) {
+		if ([...apps, ...added.filter((other) => other !== app)].some((other) => same(other.name, app.name) && other.url !== app.url)) {
+			throw new Error(`An app named ${app.name} has another URL. Include its old URL in remove to replace it.`);
+		}
+	}
+	return agentInput({ apps: [...apps, ...added] }, agent);
+}
+
+/** Changes this agent's app list and connects additions; never disconnects a shared app. */
+export function manageAppsAction(agents: Pick<AgentStore, "get" | "update">, bridge: Pick<McpBridge, "servers" | "connect">): GatedAction {
+	return defineGatedAction({
+		name: MANAGE_APPS,
+		description: "An agent manages its own apps with explicit approval for every change.",
+		internal: true,
+		explicitApproval: true,
+		parameters: Type.Object({ agent: Type.String(), ...AppChanges.properties }),
+		summarize: ({ agent }) => `Change the apps of ${agent}`,
+		async run({ agent: id, ...changes }) {
+			const agent = agents.get(id);
+			if (!agent) return "That agent no longer exists.";
+			const updated = agents.update(id, changedApps(agent, changes));
+			const results = [`${agent.name}'s apps are updated. Shared connections and their tool permissions are unchanged.`];
+			for (const app of updated.apps.filter((app) => changes.add?.some((given) => given.url === app.url))) {
+				if (serverFor(bridge.servers(), app)?.state === "ready") {
+					results.push(`${app.name} is already connected.`);
+					continue;
+				}
+				try {
+					const result = await bridge.connect(app.name, app.url);
+					results.push(result.authUrl ? `${app.name} needs the person to sign in: ${result.authUrl}` : `Connected ${app.name}.`);
+				} catch (error) {
+					results.push(`${app.name} was added, but connecting failed: ${error instanceof Error ? error.message : String(error)}. Use connect_app to retry.`);
+				}
+			}
+			return results.join("\n");
 		},
 	}) as GatedAction;
 }
@@ -217,7 +261,7 @@ export function agentExtension(
 	const editing = ownToolPermission(services.store, UPDATE_AGENT).permission;
 	const updateAgent = defineTool({
 		name: UPDATE_AGENT,
-		description: `Change yourself, the agent this chat is with: your description, your instructions, the apps you work with, or your team. Do it when the person asks, or when a team would help with work you'll do again. Only the fields you give change.${editing === "ask" ? ` ${approvalNote(services)}` : ""}`,
+		description: `Change yourself, the agent this chat is with: your description, your instructions, or your team. App changes use manage_apps instead. Do it when the person asks, or when a team would help with work you'll do again. Only the fields you give change.${editing === "ask" ? ` ${approvalNote(services)}` : ""}`,
 		parameters: Changes,
 		replay: "safe",
 		async execute(changes, api, context) {
@@ -232,6 +276,29 @@ export function agentExtension(
 			const summary = await api.memo("update_agent", edits.length === 0 ? "" : `${agent.name} ${edits.join(", ")}`, context);
 			if (summary === "") return text("That changes nothing.", true);
 			return fileApproval(services, api, context, { action: UPDATE_AGENT, tool: UPDATE_AGENT, args: { agent: agent.id, ...changes }, summary });
+		},
+	});
+
+	const manageApps = defineTool({
+		name: MANAGE_APPS,
+		description: `Change the apps this agent works with when the person asks: add remote MCP servers, remove them, or replace an endpoint by removing its old URL and adding its new URL. Approval connects additions automatically; continue the original task once the result arrives. Removing an app affects only this agent, not other agents' shared connections. Never put API keys or other secrets in URLs or tool arguments; use the person's sign-in link if needed. Tell them who runs a third-party server. ${approvalNote(services, true)}`,
+		parameters: AppChanges,
+		replay: "safe",
+		async execute(changes, api, context) {
+			if (ownToolPermission(services.store, MANAGE_APPS).permission === "off") return text("The user turned off app management. Do not try it another way.", true);
+			const { agent } = roleOf(String(api.conversationId));
+			let summary: string;
+			try {
+				const next = changedApps(agent, changes);
+				const removed = agent.apps.filter((app) => !next.apps.some((other) => other.url === app.url));
+				const added = next.apps.filter((app) => !agent.apps.some((other) => other.url === app.url && other.name === app.name));
+				summary = removed.length === 0 && added.length === 0 ? "" : `${agent.name}: ${[...removed.map((app) => `remove ${app.name} (${app.url})`), ...added.map((app) => `add and connect ${app.name} (${app.url})`)].join("; ")}`;
+			} catch (error) {
+				return text(error instanceof Error ? error.message : String(error), true);
+			}
+			summary = await api.memo(MANAGE_APPS, summary, context);
+			if (summary === "") return text("That changes no editable apps. Apps inherited from the blueprint cannot be removed here. Use connect_app if an existing app needs connecting.", true);
+			return fileApproval(services, api, context, { action: MANAGE_APPS, tool: null, args: { agent: agent.id, add: changes.add, remove: changes.remove }, summary }, true);
 		},
 	});
 
@@ -272,6 +339,6 @@ export function agentExtension(
 				return member ? undefined : agentsSection(agent, agents);
 			}),
 		],
-		tools: [currentTime, createAgent, ...(editing === "off" ? [] : [updateAgent])],
+		tools: [currentTime, createAgent, ...(editing === "off" ? [] : [updateAgent]), ...(ownToolPermission(services.store, MANAGE_APPS).permission === "off" ? [] : [manageApps])],
 	});
 }

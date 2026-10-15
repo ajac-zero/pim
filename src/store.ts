@@ -32,7 +32,7 @@ export type Approval = {
 	readonly session: string;
 	/** The gated action's name, such as `http_request`. */
 	readonly action: string;
-	/** The tool the model called, which "always approve" remembers; null for approvals filed before it was recorded. */
+	/** The tool "always approve" remembers; null when every call needs explicit approval, or for older requests. */
 	readonly tool: string | null;
 	readonly args: unknown;
 	/** One line the user reads to decide. */
@@ -474,7 +474,7 @@ export class PimStore {
 		id: string;
 		session: string;
 		action: string;
-		tool: string;
+		tool: string | null;
 		args: unknown;
 		summary: string;
 		callId: string;

@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
 import { Check, ExternalLink, KeyRound, Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { PimMark } from "~/components/app-sidebar";
+import { PimMark } from "~/components/agent-icon";
 import { useI18n } from "~/components/i18n";
 import { Join } from "~/components/register";
 import { Button } from "~/components/ui/button";

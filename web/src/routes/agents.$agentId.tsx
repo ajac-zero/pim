@@ -1,14 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Bot } from "lucide-react";
-import { AgentIcon, tileClass } from "~/components/agent-icon";
+import { AgentIcon } from "~/components/agent-icon";
 import { Composer } from "~/components/chat/composer";
 import { useI18n } from "~/components/i18n";
 import { RouteError } from "~/components/route-error";
 import { WidgetCard } from "~/components/widgets";
 import { dashboardQuery } from "~/lib/queries";
 import { useStartChat } from "~/lib/start-chat";
-import { cn } from "~/lib/utils";
 
 /**
  * An agent's dashboard: start a chat with it, and the widgets of the
@@ -33,18 +32,7 @@ function DashboardPage() {
     <main className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
       <div className="mx-auto w-full max-w-4xl px-4 py-8 md:py-12">
         <header className="mb-6 flex items-center gap-3">
-          {agent.icon === null && agent.symbol === null ? (
-            <span
-              className={cn(
-                "flex size-10 shrink-0 items-center justify-center rounded-xl font-semibold text-lg",
-                tileClass(agent.color),
-              )}
-            >
-              {agent.name.slice(0, 1).toUpperCase()}
-            </span>
-          ) : (
-            <AgentIcon agent={agent} tile className="size-10 rounded-xl" />
-          )}
+          <AgentIcon agent={agent} className="size-12" />
           <div className="min-w-0">
             <h1 className="flex items-center gap-2 font-semibold text-2xl">
               <span className="truncate">{agent.name}</span>

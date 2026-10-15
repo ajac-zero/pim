@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { AlertCircle, Clock } from "lucide-react";
 import { Fragment, memo, useMemo } from "react";
-import { PimMark } from "~/components/app-sidebar";
+import { PimMark } from "~/components/agent-icon";
 import { ArtifactCard, artifactReference } from "~/components/artifact";
 import {
   ApprovalBlock,

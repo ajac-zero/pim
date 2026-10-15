@@ -2,7 +2,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Bell,
-  Bot,
   Check,
   ChevronDown,
   Compass,
@@ -25,9 +24,10 @@ import {
   X,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
+import { AgentSettingsDialog } from "~/components/agent-settings";
 import { LanguageSelect, useI18n } from "~/components/i18n";
 import { useTheme } from "~/components/theme";
 import { Button } from "~/components/ui/button";
@@ -230,13 +230,6 @@ export function AppSidebar({
             collapsed={collapsed}
             onNavigate={onNavigate}
           />
-          <SidebarNavItem
-            to="/agents"
-            icon={<Bot className="size-4.5 shrink-0" />}
-            label={t("yourAgents")}
-            collapsed={collapsed}
-            onNavigate={onNavigate}
-          />
           {account && (
             <SidebarNavItem
               to="/discover"
@@ -341,6 +334,14 @@ export function AppSidebar({
                 onNavigate={onNavigate}
               />
             ))}
+            <AgentSettingsDialog>
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-muted-foreground text-xs hover:bg-sidebar-accent hover:text-foreground"
+              >
+                <Plus className="size-3.5" /> {t("newAgent")}
+              </button>
+            </AgentSettingsDialog>
           </nav>
         </div>
 
@@ -419,13 +420,7 @@ function SidebarNavItem({
   onNavigate,
   ...props
 }: {
-  to:
-    | "/artifacts"
-    | "/notifications"
-    | "/agents"
-    | "/discover"
-    | "/sharing"
-    | "/settings";
+  to: "/artifacts" | "/notifications" | "/discover" | "/sharing" | "/settings";
   icon: ReactNode;
   label: string;
   count?: number;
@@ -438,8 +433,6 @@ function SidebarNavItem({
         <Link
           to={to}
           onClick={onNavigate}
-          // An agent's dashboard lives under /agents, but its section in the chat list is what lights up.
-          activeOptions={{ exact: to === "/agents" }}
           activeProps={{ className: "bg-sidebar-accent" }}
           className={ITEM_CLASS(props.collapsed)}
           aria-label={props.label}
@@ -451,7 +444,7 @@ function SidebarNavItem({
   );
 }
 
-/** An agent's section: its name, a button for a new chat with it, and its chats. */
+/** An agent's dashboard, settings, new-chat button, and chats. */
 function AgentSectionList({
   section: { agent, list },
   activeId,
@@ -466,6 +459,8 @@ function AgentSectionList({
   const { t } = useI18n();
   const navigate = useNavigate();
   const [open, setOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const optionsTrigger = useRef<HTMLButtonElement>(null);
   return (
     <section className="mb-3" aria-label={agent.name}>
       <div className="group/section flex items-center gap-1 pr-1">
@@ -500,6 +495,39 @@ function AgentSectionList({
             />
           </button>
         </span>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              ref={optionsTrigger}
+              type="button"
+              className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+              aria-label={t("agentOptions", { name: agent.name })}
+              title={t("agentOptions", { name: agent.name })}
+            >
+              <MoreHorizontal className="size-3.5" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            side="bottom"
+            onCloseAutoFocus={(event) => {
+              if (settingsOpen) event.preventDefault();
+            }}
+          >
+            <DropdownMenuItem onSelect={() => setSettingsOpen(true)}>
+              <Settings className="size-4" /> {t("settings")}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <AgentSettingsDialog
+          agent={agent}
+          open={settingsOpen}
+          onOpenChange={setSettingsOpen}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            optionsTrigger.current?.focus();
+          }}
+        />
         <Tooltip>
           <TooltipTrigger asChild>
             <button
@@ -514,7 +542,7 @@ function AgentSectionList({
               }}
               aria-label={t("newChatWith", { name: agent.name })}
             >
-              <Plus className="size-3.5" />
+              <SquarePen className="size-3.5" />
             </button>
           </TooltipTrigger>
           <TooltipContent

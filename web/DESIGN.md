@@ -40,8 +40,10 @@ Semantic colors, used only for their meaning:
 
 A theme only changes colors, and every theme has a light and a dark mode. People pick the theme and the mode separately under Preferences.
 
-- **Pim** (default): neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles invert with it.
-- **Tokyo Night:** "Night" navy for dark mode and the "Day" palette for light mode, with text darkened for contrast. Its blue is the primary.
+- **Tokyo Night** (default): "Night" navy for dark mode and the "Day" palette for light mode, with text darkened for contrast. Its blue is the primary.
+- **Gronk Bot:** neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles invert with it.
+
+Parody themes like Gronk Bot are playful nods to apps that inspired Pim. Give them a spoof name and the inspiration's general palette, never its real name, logo, or other brand assets.
 
 In every theme the sidebar is one step off the canvas, bubbles and fills are one step from the canvas, and body text on the canvas meets WCAG AA contrast (4.5:1).
 

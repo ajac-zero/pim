@@ -1,6 +1,6 @@
 # Running a Pim for several people
 
-A Pim is one Worker for everyone on it. Each person has their own Pim: one Durable Object holding their memory, apps and agents, plus their own conversations, goals, schedules, ChatGPT sign-in, passkeys and API tokens. The person who sets it up is its admin: they invite the others, and help them back in when they lose every passkey. A Pim for one person is the same thing with one account.
+A Pim is one Worker for everyone on it. Each person has their own Pim: one Durable Object holding their memory, apps and agents, plus their own conversations, goals, schedules, ChatGPT sign-in, passkeys, linked accounts and API tokens. The person who sets it up is its admin: they invite the others, and help them back in when they lose every passkey. A Pim for one person is the same thing with one account.
 
 People on the same Pim can share with each other: circles let others message your agent from their own (see [Sharing](../README.md#sharing)), and Discover lists the templates people published. Nothing crosses from one deployment to another.
 
@@ -10,15 +10,16 @@ People on the same Pim can share with each other: circles let others message you
  Browser, bot, app                          Cloudflare: Worker "pim" (src/index.ts)
 ┌──────────────────────────┐  HTTPS / WS  ┌────────────────────────────────────────────────────┐
 │ pim.example.com          │─────────────▶│ src/gateway.ts: whose request is this?             │
-│  session cookie, or      │              │  session cookie ─▶ owner, passkey                  │
+│  session cookie, or      │              │  session cookie ─▶ owner, passkey or identity      │
 │  API token pim_<owner>_… │              │  API token      ─▶ owner                           │
 └──────────────────────────┘              │  app callback   ─▶ owner in the path               │
                                           │  │                                                 │
                                           │  ▼                                                 │
                                           │ Directory DO (one): accounts, admin, invites,      │
-                                          │   erasure jobs, the key that seals cookies         │
-                                          │ Auth DO (one per owner): passkeys, recovery codes, │
-                                          │   API tokens, setup and device links               │
+                                          │   erasure jobs, the key that seals cookies,        │
+                                          │   sign-in providers, whose each identity is        │
+                                          │ Auth DO (one per owner): passkeys, identities,     │
+                                          │   recovery codes, API tokens, setup/device links   │
                                           │ Pim DO (one per owner): their Pim                 │
                                           │ Gallery DO (one): profiles, published templates    │
                                           └────────────────────────────────────────────────────┘
@@ -26,8 +27,9 @@ People on the same Pim can share with each other: circles let others message you
 
 - **Owners.** Joining gives each person a random, permanent owner ID (`o_` and 26 base32 characters). Their Pim and Auth Durable Objects are named by it, never by the username.
 - **The request names its owner; the owner's own sign-in checks it.** A URL never chooses whose agent answers.
-  - A session cookie is sealed with the instance's key (kept in the Directory) and names the owner and the passkey it was made with. Every request checks that passkey is still one of that owner's, so removing it, or deleting the account, ends the session.
+  - A session cookie is sealed with the instance's key (kept in the Directory) and names the owner and the credential it was made with: a passkey or a linked identity. Every request checks that credential is still one of that owner's, so removing it, or deleting the account, ends the session.
   - Signing in reads the owner from the passkey's user handle, which is the owner ID the passkey was made for, then checks the signature with that owner's passkey. A passkey that names someone else isn't one of theirs.
+  - Signing in with Google, GitHub or a custom OpenID Connect provider finds the owner in the Directory by the provider's issuer and user ID (never the email), then checks that owner's Auth object has that identity. The provider's ID token comes straight from its token endpoint, in exchange for a code and a PKCE verifier only this sign-in knows; its issuer, audience, nonce and expiry are checked. The flow's state rides in a sealed, `SameSite=Lax` cookie, so a sign-in finishes only in the browser that started it.
   - An API token is `pim_<owner>_<secret>`, checked in that owner's Auth object.
   - Setup and device links carry their owner before the code (`#setup=<owner>.<code>`). A recovery code comes with the person's username.
   - Apps' sign-ins return to `/mcp/callback/<owner>`, matched by the agent against the OAuth state; event webhooks go to `/mcp/events/<owner>/<watch>`, checked against the watch's signing secret.
@@ -49,7 +51,7 @@ People on the same Pim can share with each other: circles let others message you
 
 ## Running it
 
-The admin manages the Pim in Settings → People on this Pim: invite someone, make a setup link, suspend or restore an account, delete one. The same is in the API, under `/api/admin`, for the admin signed in with a passkey; an API token can't run the instance:
+The admin manages the Pim in Settings → People on this Pim: invite someone, make a setup link, suspend or restore an account, delete one. Settings → Sign-in methods shows which of Google, GitHub and a custom OpenID Connect provider the deployment's `PIM_<PROVIDER>_*` secrets turn on, and how to set one up (see [Deploy](../README.md#deploy)). The same is in the API, under `/api/admin`, for the admin signed in to the app; an API token can't run the instance:
 
 | Method | Path | Body | Does |
 | --- | --- | --- | --- |
@@ -80,6 +82,7 @@ The admin can't suspend or delete their own account from here; deleting it from 
 | `pim.registration_released`, `pim.released` | A registration given back (`why`: setup failed or lapsed), and its objects erased |
 | `pim.limit` | A person hit a limit: `limit` is `model` or `run` |
 | `pim.passkey_created`, `pim.device_link_issued`, `pim.recovery_codes_replaced` | A passkey made from a setup link, recovery code or device link; a device link made; codes replaced |
+| `pim.identity_linked`, `pim.identity_unlinked` | Someone linked or unlinked an account at a `provider` |
 | `pim.circle_member_added` | Someone put another person in a circle |
 | `pim.template_published`, `pim.template_used`, `pim.template_removed` | An agent published (or updated), made someone's own, or taken down by the admin |
 | `pim.default_agent_set` | The admin chose the agent everyone starts with (`agent`), or went back to a plain one (`agent: null`) |

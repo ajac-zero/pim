@@ -3,11 +3,13 @@ import { useRouter } from "@tanstack/react-router";
 import { Check, Copy, Download, KeyRound, Loader2, X } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import { useI18n } from "~/components/i18n";
+import { ProviderButtons } from "~/components/provider-buttons";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {
   alreadyRegistered,
   auth,
+  authSessionQuery,
   cancelled,
   forgetSetupCode,
   type Registered,
@@ -212,7 +214,7 @@ function RegistrationForm({
   );
 }
 
-/** Shown once: the codes that get the person back in without a passkey, then their first passkey. */
+/** Shown once: the codes that get the person back in without a passkey, then their first passkey, or an account at a provider. */
 function RecoveryCodes({
   registered,
   onSignedIn,
@@ -221,8 +223,10 @@ function RecoveryCodes({
   onSignedIn: () => void;
 }) {
   const { t } = useI18n();
+  const { data: session } = useQuery(authSessionQuery());
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [providerError, setProviderError] = useState<string | null>(null);
   const text = `${t("recoveryCodesFileHeader", { username: registered.username, host: location.host })}\n\n${registered.recoveryCodes.join("\n")}\n`;
   const download = () => {
     const link = document.createElement("a");
@@ -241,7 +245,7 @@ function RecoveryCodes({
       ? alreadyRegistered(create.error)
         ? t("passkeyAlreadyHere")
         : create.error.message
-      : null;
+      : providerError;
 
   return (
     <>
@@ -250,7 +254,7 @@ function RecoveryCodes({
         {t("saveRecoveryCodesBody")}
       </p>
       <ul
-        className="mt-6 grid grid-cols-2 gap-x-4 gap-y-1.5 rounded-xl border bg-card px-4 py-3 font-mono text-sm"
+        className="mt-6 grid grid-cols-[auto_auto] justify-between gap-x-4 gap-y-1.5 rounded-xl border bg-card px-4 py-3 font-mono text-sm"
         aria-label={t("recoveryCodes")}
       >
         {registered.recoveryCodes.map((code) => (
@@ -292,9 +296,12 @@ function RecoveryCodes({
         {create.isPending ? <Loader2 className="animate-spin" /> : <KeyRound />}
         {t("createPasskey")}
       </Button>
-      <p className="mt-4 text-muted-foreground text-xs">
-        {t("firstPasskeyNote")}
-      </p>
+      <ProviderButtons
+        providers={session?.providers}
+        setup={registered.setup}
+        disabled={!saved || create.isPending}
+        onError={(failure) => setProviderError(failure.message)}
+      />
       {error && (
         <p role="alert" className="mt-4 text-destructive text-sm">
           {error}

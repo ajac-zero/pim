@@ -1,31 +1,37 @@
 /**
- * Signing in to the web app with passkeys.
+ * Signing in to the web app with passkeys, or with an account at Google,
+ * GitHub or a single sign-on provider the admin set up (./oauth.ts).
  *
  * Every person on a Pim has their own Auth Durable Object (./store.ts) with
- * their passkeys, recovery codes and API tokens. One hostname serves them
- * all, so a request names its owner itself:
+ * their passkeys, linked identities, recovery codes and API tokens. One
+ * hostname serves them all, so a request names its owner itself:
  *
  * - a session cookie, sealed with the instance's key, names the owner and the
- *   passkey it was made with, and opens nothing once that passkey is gone;
+ *   credential (passkey or linked identity) it was made with, and opens
+ *   nothing once that credential is gone;
  * - a sign-in names its owner in the passkey's user handle, which is the
  *   owner ID the passkey was made for; the passkey must be one of theirs;
+ * - a sign-in with another account finds its owner in the Directory, which
+ *   knows whose each identity is; it must be one of theirs too;
  * - links that make a passkey (setup links, device links) carry their owner
  *   before the code, as `<owner>.<code>`; a recovery code comes with the
  *   person's username.
  *
- * A new passkey takes one of:
+ * A new passkey takes one of the following, and linking an identity one of
+ * the first two:
  *
  * - a signed-in session;
  * - a setup code: the one registration hands out, one an admin issues for a
  *   member, or, for the admin, one the Worker writes to its own logs (reading
  *   those logs takes the Cloudflare account's login);
  * - a recovery code: the person got ten when they registered;
- * - a device link: a browser signed in with a passkey makes one, to open on
+ * - a device link: a signed-in browser makes one, to open on
  *   the person's other device (a phone), which then makes its own passkey.
  */
 
 import { base64UrlDecode, base64UrlEncode } from "./encoding";
 import { type Auth, digestHex, normalizeRecoveryCode, type Passkey } from "./store";
+import { authorizationUrl, exchangeCode, type Identity, isProviderId, type ProviderId, type ProviderSettings, providerName, randomValue } from "./oauth";
 import { ALGORITHMS, type Assertion, type Registration, verifyAssertion, verifyRegistration } from "./webauthn";
 
 export { Auth } from "./store";
@@ -38,14 +44,14 @@ export type AuthSite = {
 	readonly owner: string;
 	/** The owner's Auth Durable Object. */
 	readonly store: DurableObjectStub<Auth>;
-	/** `pending` until the first passkey is made; only setup codes work then. */
+	/** `pending` until the first passkey or identity is added; only setup codes work then. */
 	readonly status: "pending" | "active" | "suspended";
 	/** The WebAuthn user passkeys are made for: its ID is the owner ID, which sign-ins hand back. */
 	readonly user: { readonly id: string; readonly name: string; readonly displayName: string };
 	/** Shown to the web app. */
 	readonly account: { readonly username: string; readonly role: Role };
-	/** Runs after a passkey is made without a session (a setup code or a recovery code): it activates a pending account. */
-	readonly onPasskeyCreated?: () => Promise<void>;
+	/** Runs after a credential is added without a session (a setup code or a recovery code): it activates a pending account. */
+	readonly onCredentialAdded?: () => Promise<void>;
 };
 
 /** How the Worker finds people's sign-ins: deleted accounts have none. */
@@ -54,12 +60,23 @@ export type Sites = {
 	byUsername(username: string): Promise<AuthSite | null>;
 	/** What the sign-in screen needs to know about the instance: whether it is set up, and how people join. */
 	signedOut(request: Request): Promise<Record<string, unknown>>;
+	/** The sign-in providers the admin set up. */
+	providers(): Promise<Partial<Record<ProviderId, ProviderSettings>>>;
+	/** Whose a linked identity is, instance-wide. */
+	identityOwner(identity: Identity): Promise<string | null>;
+	/** Takes an identity for an owner: false when it is someone else's. */
+	claimIdentity(identity: Identity, owner: string): Promise<boolean>;
+	releaseIdentity(identity: Pick<Identity, "issuer" | "subject">, owner: string): Promise<void>;
 };
 
-export type Session = { readonly passkey: string; readonly owner: string };
+/** A browser's sign-in: whose, and the passkey or linked identity it was made with. */
+export type Session = { readonly credential: string; readonly owner: string };
 
 export const SESSION_COOKIE = "__Host-pim-session";
 const CHALLENGE_COOKIE = "__Host-pim-challenge";
+const OAUTH_COOKIE = "__Host-pim-oauth";
+/** How long someone may take at a provider's sign-in page. */
+const OAUTH_SECONDS = 10 * 60;
 const SESSION_SECONDS = 30 * 24 * 60 * 60;
 const CHALLENGE_SECONDS = 5 * 60;
 
@@ -88,7 +105,8 @@ function splitOwnedCode(value: unknown): { owner: string; code: string } | null 
 
 /** What the Worker signs into cookies, by kind. */
 type Sealed = {
-	session: { passkey: string; owner: string };
+	/** `passkey` is what sessions sealed before linked identities named their credential. */
+	session: { credential?: string; passkey?: string; owner: string };
 	challenge: {
 		challenge: string;
 		ceremony: "create" | "get";
@@ -100,6 +118,18 @@ type Sealed = {
 		recovery?: string;
 		/** The device link that allowed this passkey, if one did. */
 		device?: string;
+	};
+	/** A sign-in at a provider, under way; the provider sends the browser back with `state`. */
+	oauth: {
+		provider: ProviderId;
+		state: string;
+		nonce: string;
+		verifier: string;
+		redirectUri: string;
+		/** Linking to a signed-in person's account: the session's credential must still be theirs on return. */
+		link?: { owner: string; credential: string };
+		/** Adding the first credential with a setup code, or one after losing the rest. */
+		setup?: { owner: string; code: string };
 	};
 };
 
@@ -151,8 +181,8 @@ function readCookie(request: Request, name: string): string | null {
 	return null;
 }
 
-function setCookie(name: string, value: string, seconds: number): string {
-	return `${name}=${value}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${seconds}`;
+function setCookie(name: string, value: string, seconds: number, sameSite: "Strict" | "Lax" = "Strict"): string {
+	return `${name}=${value}; Path=/; Secure; HttpOnly; SameSite=${sameSite}; Max-Age=${seconds}`;
 }
 
 export const clearCookie = (name: string) => setCookie(name, "", 0);
@@ -177,17 +207,18 @@ async function readBody<T extends Record<string, unknown>>(
 	return body as T;
 }
 
-/** The owner and passkey a request's session cookie names, if the instance sealed it and it hasn't expired. Not yet checked against their passkeys. */
+/** The owner and credential a request's session cookie names, if the instance sealed it and it hasn't expired. Not yet checked against their credentials. */
 export async function sessionClaim(request: Request, env: Env, now = Date.now()): Promise<Session | null> {
 	const sealed = await unseal(env, "session", readCookie(request, SESSION_COOKIE), now);
-	return sealed && typeof sealed.owner === "string" && typeof sealed.passkey === "string" ? sealed : null;
+	const credential = sealed?.credential ?? sealed?.passkey;
+	return sealed && typeof sealed.owner === "string" && typeof credential === "string" ? { credential, owner: sealed.owner } : null;
 }
 
-/** The passkey session `request` carries for this owner, if it is still good: its passkey must still be one of theirs. */
+/** The session `request` carries for this owner, if it is still good: its passkey or linked identity must still be one of theirs. */
 export async function currentSession(request: Request, env: Env, site: AuthSite, now = Date.now()): Promise<Session | null> {
 	const claim = await sessionClaim(request, env, now);
 	if (!claim || claim.owner !== site.owner) return null;
-	return (await site.store.hasPasskey(claim.passkey)) ? claim : null;
+	return (await site.store.hasCredential(claim.credential)) ? claim : null;
 }
 
 /**
@@ -210,15 +241,27 @@ async function challengeCookie(env: Env, ceremony: "create" | "get", now: number
 	return { challenge, cookie: setCookie(CHALLENGE_COOKIE, sealed, CHALLENGE_SECONDS) };
 }
 
-async function sessionCookie(env: Env, site: AuthSite, passkey: string, now: number) {
-	return setCookie(SESSION_COOKIE, await seal(env, "session", { passkey, owner: site.owner }, SESSION_SECONDS, now), SESSION_SECONDS);
+async function sessionCookie(env: Env, site: AuthSite, credential: string, now: number) {
+	return setCookie(SESSION_COOKIE, await seal(env, "session", { credential, owner: site.owner }, SESSION_SECONDS, now), SESSION_SECONDS);
 }
 
-/** Answers `/auth/*` but registration: sign-in, sign-out, passkeys, device links, recovery codes and API tokens. */
+/** Linked identities' IDs start so; passkeys' are the authenticator's. */
+const isIdentity = (credential: string) => credential.startsWith("idp_");
+
+/** The providers set up, as the web app shows their buttons. */
+async function providerButtons(sites: Sites) {
+	const providers = await sites.providers();
+	return Object.entries(providers).map(([id, settings]) => ({ id, name: providerName(id as ProviderId, settings) }));
+}
+
+/** Answers `/auth/*` but registration: sign-in, sign-out, passkeys, linked identities, device links, recovery codes and API tokens. */
 export async function handleAuth(request: Request, env: Env, sites: Sites, now = Date.now()): Promise<Response> {
-	if (fromAnotherSite(request)) return fail(403, "Requests must come from this app");
 	const url = new URL(request.url);
 	const path = url.pathname.slice("/auth".length);
+	// A provider sends the browser back here from its own site; the sealed state is what makes it this browser's.
+	const callback = /^\/oauth\/([a-z]+)\/callback$/.exec(path);
+	if (callback && request.method === "GET") return finishOAuth(request, env, sites, callback[1]!, now);
+	if (fromAnotherSite(request)) return fail(403, "Requests must come from this app");
 	// Passkeys belong to the hostname the app is served from.
 	const ceremonySite = { rpId: url.hostname, origin: url.origin };
 	const route = `${request.method} ${path}`;
@@ -233,9 +276,20 @@ export async function handleAuth(request: Request, env: Env, sites: Sites, now =
 	};
 
 	if (route === "GET /session") {
-		const current = await signedIn();
-		if (!current) return json({ signedIn: false, method: null, passkey: null, account: null, ...(await sites.signedOut(request)) });
-		return json({ signedIn: true, method: "passkey", passkey: current.session.passkey, account: current.site.account });
+		const [current, providers] = await Promise.all([signedIn(), providerButtons(sites)]);
+		if (!current) {
+			return json({ signedIn: false, method: null, passkey: null, credential: null, account: null, providers, ...(await sites.signedOut(request)) });
+		}
+		const { credential } = current.session;
+		const identity = isIdentity(credential);
+		return json({
+			signedIn: true,
+			method: identity ? "identity" : "passkey",
+			passkey: identity ? null : credential,
+			credential,
+			account: current.site.account,
+			providers,
+		});
 	}
 
 	if (route === "POST /sign-in/options") {
@@ -269,7 +323,7 @@ export async function handleAuth(request: Request, env: Env, sites: Sites, now =
 	if (route === "POST /sign-out") {
 		// A link this browser made for another device dies with its session.
 		const current = await signedIn();
-		if (current) await current.site.store.voidDeviceLinks(current.session.passkey);
+		if (current) await current.site.store.voidDeviceLinks(current.session.credential);
 		return json({ ok: true }, 200, [clearCookie(SESSION_COOKIE)]);
 	}
 
@@ -356,15 +410,50 @@ export async function handleAuth(request: Request, env: Env, sites: Sites, now =
 		if (viaLink) {
 			const by = pending.recovery ? "recovery" : pending.device ? "device_link" : "setup";
 			console.log(JSON.stringify({ event: "pim.passkey_created", owner: site.owner, by }));
-			await site.onPasskeyCreated?.();
+			await site.onCredentialAdded?.();
 		}
-		// A browser already signed in with a passkey stays on its own.
+		// A browser already signed in stays on its own session.
 		const cookies = [clearCookie(CHALLENGE_COOKIE)];
 		if (!session) cookies.push(await sessionCookie(env, site, registration.id, now));
 		return json(passkey, 200, cookies);
 	}
 
-	// Everything below needs a passkey session: an API token can't manage sign-in.
+	const start = /^\/oauth\/([a-z]+)$/.exec(path);
+	if (start && request.method === "POST") {
+		const provider = start[1]!;
+		const settings = isProviderId(provider) ? (await sites.providers())[provider] : undefined;
+		if (!isProviderId(provider) || !settings) return fail(404, "That sign-in method isn't set up on this Pim.");
+		const body = (await request.json().catch(() => null)) as { setup?: unknown } | null;
+		const flow: Sealed["oauth"] = {
+			provider,
+			state: randomValue(),
+			nonce: randomValue(),
+			verifier: randomValue(),
+			redirectUri: `${url.origin}/auth/oauth/${provider}/callback`,
+		};
+		const current = await signedIn();
+		const setup = splitOwnedCode(body?.setup);
+		if (current) {
+			flow.link = { owner: current.site.owner, credential: current.session.credential };
+		} else if (setup) {
+			const site = await sites.byOwner(setup.owner);
+			if (!site || site.status === "suspended" || !(await site.store.isSetupCode(setup.code, now))) {
+				return fail(401, "This setup link has expired or was already used.");
+			}
+			flow.setup = setup;
+		}
+		let location: string;
+		try {
+			location = await authorizationUrl(provider, settings, flow);
+		} catch (error) {
+			return fail(502, error instanceof Error ? error.message : String(error));
+		}
+		// Lax, unlike the others: the provider's redirect back is a navigation from another site, and must bring it.
+		const cookie = setCookie(OAUTH_COOKIE, await seal(env, "oauth", flow, OAUTH_SECONDS, now), OAUTH_SECONDS, "Lax");
+		return json({ url: location }, 200, [cookie]);
+	}
+
+	// Everything below needs a signed-in browser: an API token can't manage sign-in.
 	const current = await signedIn();
 	if (!current) return fail(401, "Sign in to Pim");
 	const { site, session } = current;
@@ -374,11 +463,24 @@ export async function handleAuth(request: Request, env: Env, sites: Sites, now =
 	if (request.method === "DELETE" && path.startsWith("/passkeys/")) {
 		const id = decodeURIComponent(path.slice("/passkeys/".length));
 		await store.removePasskey(id);
-		return json({ ok: true }, 200, session.passkey === id ? [clearCookie(SESSION_COOKIE)] : []);
+		return json({ ok: true }, 200, session.credential === id ? [clearCookie(SESSION_COOKIE)] : []);
+	}
+
+	if (route === "GET /identities") {
+		const identities = (await store.identities()).map(({ id, provider, label, createdAt, lastUsedAt }) => ({ id, provider, label, createdAt, lastUsedAt }));
+		return json({ identities });
+	}
+	if (request.method === "DELETE" && path.startsWith("/identities/")) {
+		const id = decodeURIComponent(path.slice("/identities/".length));
+		const removed = await store.removeIdentity(id);
+		if (!removed) return fail(404, "That account isn't linked.");
+		await sites.releaseIdentity(removed, site.owner);
+		console.log(JSON.stringify({ event: "pim.identity_unlinked", owner: site.owner, provider: removed.provider }));
+		return json({ ok: true }, 200, session.credential === id ? [clearCookie(SESSION_COOKIE)] : []);
 	}
 
 	if (route === "POST /device-link") {
-		const { code, expiresAt } = await store.newDeviceLink(session.passkey, now);
+		const { code, expiresAt } = await store.newDeviceLink(session.credential, now);
 		console.log(JSON.stringify({ event: "pim.device_link_issued", owner: site.owner }));
 		// The code goes in the fragment, so it never reaches a server's logs or a Referer header.
 		return json({ url: `${ceremonySite.origin}/#device=${ownedCode(site.owner, code)}`, expiresAt: new Date(expiresAt).toISOString() }, 201);
@@ -386,7 +488,7 @@ export async function handleAuth(request: Request, env: Env, sites: Sites, now =
 
 	if (route === "DELETE /device-link") {
 		// Done or changed one's mind: the link this browser made stops working now, not in ten minutes.
-		await store.voidDeviceLinks(session.passkey);
+		await store.voidDeviceLinks(session.credential);
 		return json({ ok: true });
 	}
 
@@ -410,6 +512,75 @@ export async function handleAuth(request: Request, env: Env, sites: Sites, now =
 	}
 
 	return fail(404, "Not found");
+}
+
+/**
+ * Where a provider sends the browser back: signs it in, adds the account's
+ * first credential with a setup code, or links the identity to whoever was
+ * signed in when it started. Answers with a redirect into the app, with any
+ * error for it to show in the fragment.
+ */
+async function finishOAuth(request: Request, env: Env, sites: Sites, provider: string, now: number): Promise<Response> {
+	const url = new URL(request.url);
+	const flow = await unseal(env, "oauth", readCookie(request, OAUTH_COOKIE), now);
+	const back = (to: string, error?: string, cookies: string[] = []) => {
+		const response = new Response(null, { status: 302, headers: { location: error ? `${to}#auth-error=${encodeURIComponent(error)}` : to } });
+		for (const cookie of [clearCookie(OAUTH_COOKIE), ...cookies]) response.headers.append("set-cookie", cookie);
+		return response;
+	};
+	if (!flow || flow.provider !== provider || flow.state !== url.searchParams.get("state")) {
+		return back("/", "Signing in took too long, or started in another browser. Try again.");
+	}
+	const to = flow.link ? "/settings" : "/";
+	const settings = (await sites.providers())[flow.provider];
+	const name = providerName(flow.provider, settings);
+	if (!settings) return back(to, `Signing in with ${name} isn't set up on this Pim anymore.`);
+	const refused = url.searchParams.get("error");
+	// Choosing not to sign in there needs no message.
+	if (refused) return back(to, refused === "access_denied" ? undefined : `${name} didn't sign you in: ${url.searchParams.get("error_description") ?? refused}.`);
+	let identity: Identity;
+	try {
+		identity = await exchangeCode(flow.provider, settings, { redirectUri: flow.redirectUri, code: url.searchParams.get("code") ?? "", verifier: flow.verifier, nonce: flow.nonce }, now);
+	} catch (error) {
+		return back(to, error instanceof Error ? error.message : String(error));
+	}
+	const taken = `That ${name} account already signs in to someone else on this Pim.`;
+	const log = (event: string, owner: string) => console.log(JSON.stringify({ event: `pim.${event}`, owner, provider: flow.provider }));
+
+	if (flow.link) {
+		const site = await sites.byOwner(flow.link.owner);
+		// Signed out, or that credential removed, while away at the provider.
+		if (site?.status !== "active" || !(await site.store.hasCredential(flow.link.credential))) return back("/", "Sign in again to link an account.");
+		if (!(await sites.claimIdentity(identity, site.owner))) return back(to, taken);
+		await site.store.linkIdentity(flow.provider, identity.issuer, identity.subject, identity.label, now);
+		log("identity_linked", site.owner);
+		return back(to);
+	}
+
+	if (flow.setup) {
+		const site = await sites.byOwner(flow.setup.owner);
+		if (!site || site.status === "suspended") return back(to, "This account can't sign in.");
+		if (!(await sites.claimIdentity(identity, site.owner))) return back(to, taken);
+		// Two tabs could have started with the same link; only one finishes.
+		if (!(await site.store.useSetupCode(flow.setup.code, now))) {
+			if (!(await site.store.identity(identity.issuer, identity.subject))) await sites.releaseIdentity(identity, site.owner);
+			return back(to, "This setup link has expired or was already used.");
+		}
+		const linked = await site.store.linkIdentity(flow.provider, identity.issuer, identity.subject, identity.label, now);
+		log("identity_linked", site.owner);
+		await site.onCredentialAdded?.();
+		return back(to, undefined, [await sessionCookie(env, site, linked.id, now)]);
+	}
+
+	const owner = await sites.identityOwner(identity);
+	const site = owner ? await sites.byOwner(owner) : null;
+	const linked = site ? await site.store.identity(identity.issuer, identity.subject) : null;
+	if (!site || !linked || site.status === "pending") {
+		return back(to, `Nobody on this Pim signs in with that ${name} account. Sign in another way and link it in Settings, or join first.`);
+	}
+	if (site.status === "suspended") return back(to, "Your account is suspended. Ask the person who runs this Pim.");
+	await site.store.useIdentity(linked.id, identity.label, now);
+	return back(to, undefined, [await sessionCookie(env, site, linked.id, now)]);
 }
 
 /** API tokens one person may have. */

@@ -403,11 +403,36 @@ const translations = {
     removeCurrentPasskey:
       "This browser signed in with it, so removing it signs you out.",
     removePasskey: "Remove {name}",
-    signInBody: "Use the passkey on this device, or one on your phone.",
     signInTitle: "Sign in to Pim",
     signInWithPasskey: "Sign in with a passkey",
     signOut: "Sign out",
     thisBrowser: "This browser",
+    continueWith: "Continue with {provider}",
+    linkedAccounts: "Linked accounts",
+    linkedAccountsDescription:
+      "Sign in with these instead of a passkey. Unlinking one signs out the browsers it signed in.",
+    linkProvider: "Link {provider}",
+    identityDates: "{provider} · Last used {used}",
+    providerTurnedOff: "Its sign-in method is turned off on this Pim",
+    unlinkIdentity: "Unlink {name}",
+    unlinkCurrentIdentity:
+      "This browser signed in with it, so unlinking it signs you out.",
+    signInMethods: "Sign-in methods",
+    signInMethodsDescription:
+      "Besides passkeys, people can sign in with an account they link at Google, GitHub, or your own single sign-on. Each is off until this deployment's secrets turn it on. Signing in with one never makes an account: people join as usual, then link it.",
+    customSignIn: "Single sign-on (OpenID Connect)",
+    signInMethodOn: "On",
+    signInMethodOff: "Off",
+    signInMethodIncomplete: "Off: only some of its secrets are set. {problem}",
+    setUp: "Set up",
+    providerSignInSteps:
+      "Make an OAuth app at {provider} with the callback URL below. Then add its client ID and secret as secrets of this Pim's Worker, in the Cloudflare dashboard (Settings → Variables and Secrets) or with wrangler secret put. They work as soon as they're saved.",
+    customSignInSteps:
+      "Works with any OpenID Connect provider, such as Microsoft, GitLab, Authentik, Keycloak or Pocket ID. Make a client there with the callback URL below. Then add its issuer, client ID and secret as secrets of this Pim's Worker, in the Cloudflare dashboard (Settings → Variables and Secrets) or with wrangler secret put. They work as soon as they're saved.",
+    openProviderConsole: "Open {provider}",
+    callbackUrl: "Callback URL",
+    providerSignInSecrets: "Secrets",
+    customSignInSecrets: "Secrets (add PIM_OIDC_NAME to name its button)",
     createPasskeyBody:
       "This setup link adds a passkey to your account, once. Your device will ask for your face, fingerprint, or PIN.",
     createPasskeyTitle: "Create your passkey",
@@ -542,8 +567,6 @@ const translations = {
     deleteMember: "Delete @{username}",
     becomeAdmin: "Set up this Pim",
     createAccount: "Create my account",
-    firstPasskeyNote:
-      "Your device will ask for your face, fingerprint, or PIN. Add your other devices later, from Settings.",
     notMyPim: "This isn't my Pim",
     newHere: "New here?",
     joinByInvite: "New here? Ask whoever runs this Pim for an invite link.",
@@ -946,12 +969,38 @@ const translations = {
     removeCurrentPasskey:
       "Este navegador inició sesión con ella, así que quitarla cierra tu sesión.",
     removePasskey: "Quitar {name}",
-    signInBody:
-      "Usa la llave de acceso de este dispositivo o la de tu teléfono.",
     signInTitle: "Inicia sesión en Pim",
     signInWithPasskey: "Iniciar sesión con una llave de acceso",
     signOut: "Cerrar sesión",
     thisBrowser: "Este navegador",
+    continueWith: "Continuar con {provider}",
+    linkedAccounts: "Cuentas vinculadas",
+    linkedAccountsDescription:
+      "Inicia sesión con ellas en lugar de una llave de acceso. Desvincular una cierra la sesión de los navegadores que inició.",
+    linkProvider: "Vincular {provider}",
+    identityDates: "{provider} · Último uso {used}",
+    providerTurnedOff:
+      "Su método de inicio de sesión está desactivado en este Pim",
+    unlinkIdentity: "Desvincular {name}",
+    unlinkCurrentIdentity:
+      "Este navegador inició sesión con ella, así que desvincularla cierra tu sesión.",
+    signInMethods: "Métodos de inicio de sesión",
+    signInMethodsDescription:
+      "Además de las llaves de acceso, las personas pueden iniciar sesión con una cuenta que vinculen de Google, GitHub o tu propio inicio de sesión único. Cada uno está desactivado hasta que los secretos de este despliegue lo activen. Iniciar sesión con uno nunca crea una cuenta: las personas se unen como siempre y luego la vinculan.",
+    customSignIn: "Inicio de sesión único (OpenID Connect)",
+    signInMethodOn: "Activado",
+    signInMethodOff: "Desactivado",
+    signInMethodIncomplete:
+      "Desactivado: solo algunos de sus secretos están configurados. {problem}",
+    setUp: "Configurar",
+    providerSignInSteps:
+      "Crea una app OAuth en {provider} con la URL de retorno de abajo. Luego añade su ID de cliente y su secreto como secretos del Worker de este Pim, en el panel de Cloudflare (Settings → Variables and Secrets) o con wrangler secret put. Funcionan en cuanto se guardan.",
+    customSignInSteps:
+      "Funciona con cualquier proveedor OpenID Connect, como Microsoft, GitLab, Authentik, Keycloak o Pocket ID. Crea ahí un cliente con la URL de retorno de abajo. Luego añade su emisor, ID de cliente y secreto como secretos del Worker de este Pim, en el panel de Cloudflare (Settings → Variables and Secrets) o con wrangler secret put. Funcionan en cuanto se guardan.",
+    openProviderConsole: "Abrir {provider}",
+    callbackUrl: "URL de retorno",
+    providerSignInSecrets: "Secretos",
+    customSignInSecrets: "Secretos (añade PIM_OIDC_NAME para nombrar su botón)",
     createPasskeyBody:
       "Este enlace de configuración añade una llave de acceso a tu cuenta, una sola vez. Tu dispositivo te pedirá tu cara, huella o PIN.",
     createPasskeyTitle: "Crea tu llave de acceso",
@@ -1090,8 +1139,6 @@ const translations = {
     deleteMember: "Eliminar a @{username}",
     becomeAdmin: "Configurar este Pim",
     createAccount: "Crear mi cuenta",
-    firstPasskeyNote:
-      "Tu dispositivo te pedirá tu cara, huella o PIN. Añade tus otros dispositivos después, desde Ajustes.",
     notMyPim: "Este no es mi Pim",
     newHere: "¿Eres nuevo aquí?",
     joinByInvite:

@@ -1,4 +1,5 @@
 import { getAgentByName } from "agents";
+import { configuredProviders, PROVIDER_IDS, providerName, providerSecrets } from "./auth/oauth";
 import { type AuthSite, clearCookie, fromAnotherSite, ownedCode, SESSION_COOKIE, type Sites, userHandle } from "./auth";
 import type { ApiExtension } from "./gateway";
 import { HttpError } from "./http";
@@ -90,7 +91,7 @@ export function siteFor(env: Env, account: Account): AuthSite {
 		status: account.status === "pending" || account.status === "suspended" ? account.status : "active",
 		user: { id: userHandle(account.ownerId), name: account.username, displayName: account.username },
 		account: { username: account.username, role: account.role },
-		onPasskeyCreated: async () => {
+		onCredentialAdded: async () => {
 			if (account.status !== "pending") return;
 			await directory(env).activate(account.ownerId);
 			forget(account.ownerId);
@@ -117,6 +118,10 @@ export function sites(env: Env): Sites {
 			const claimed = (await directory(env).admin()) !== null;
 			return { claimed, canClaim: !claimed && claimWindowOpen(env, Date.now()), registration: registrationPolicy(env).mode };
 		},
+		providers: async () => configuredProviders(env).providers,
+		identityOwner: ({ issuer, subject }) => directory(env).identityOwner(issuer, subject),
+		claimIdentity: ({ issuer, subject }, owner) => directory(env).claimIdentity(issuer, subject, owner),
+		releaseIdentity: ({ issuer, subject }, owner) => directory(env).releaseIdentity(issuer, subject, owner),
 	};
 }
 
@@ -273,10 +278,10 @@ export function accountApi(env: Env, account: Account, site: AuthSite, request: 
 		}
 		if (route === "GET /account/export") {
 			const pim = await pimOf(env, account.ownerId);
-			const [data, passkeys, tokens] = await Promise.all([pim.exportData(), site.store.passkeys(), site.store.tokens()]);
+			const [data, passkeys, identities, tokens] = await Promise.all([pim.exportData(), site.store.passkeys(), site.store.identities(), site.store.tokens()]);
 			log("exported", { owner: account.ownerId });
 			const body = JSON.stringify(
-				{ account: { username: account.username, ownerId: account.ownerId, createdAt: account.createdAt }, passkeys, tokens, pim: JSON.parse(data) },
+				{ account: { username: account.username, ownerId: account.ownerId, createdAt: account.createdAt }, passkeys, identities, tokens, pim: JSON.parse(data) },
 				null,
 				2,
 			);
@@ -288,8 +293,8 @@ export function accountApi(env: Env, account: Account, site: AuthSite, request: 
 			});
 		}
 		if (route === "DELETE /account") {
-			// An API token can do a lot, but not this: deleting takes the person, signed in with a passkey.
-			if (!viaSession) return fail(403, "Deleting your account needs you signed in with a passkey.");
+			// An API token can do a lot, but not this: deleting takes the person, signed in.
+			if (!viaSession) return fail(403, "Deleting your account needs you signed in to the app.");
 			const body = (await request.json().catch(() => null)) as { confirm?: unknown } | null;
 			if (body?.confirm !== account.username) return fail(400, `To delete your account, send { "confirm": "${account.username}" }.`);
 			const result = await deleteAccount(env, account, "owner");
@@ -304,6 +309,24 @@ function rpcFailure(error: unknown): Response {
 	const message = error instanceof Error ? error.message : String(error);
 	const status = /^No (circle|agent|template)/.test(message) ? 404 : /up to \d+/.test(message) ? 429 : 400;
 	return fail(status, message);
+}
+
+/**
+ * Every sign-in provider Pim knows, as the admin's settings show it: whether
+ * the deployment's secrets turn it on, which secrets do, and the callback URL
+ * to give the provider. Never the secrets' values.
+ */
+function signInProviders(env: Env, origin: string) {
+	const { providers, problems } = configuredProviders(env);
+	return PROVIDER_IDS.map((id) => ({
+		id,
+		name: providerName(id, providers[id]),
+		enabled: providers[id] !== undefined,
+		// Set only halfway: what's missing.
+		problem: problems[id] ?? null,
+		secrets: providerSecrets(id),
+		callbackUrl: `${origin}/auth/oauth/${id}/callback`,
+	}));
 }
 
 /**
@@ -400,14 +423,14 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 }
 
 /**
- * `/api/admin/*`: the admin's view of everyone, with a passkey session only.
- * An API token can't run the instance.
+ * `/api/admin/*`: the admin's view of everyone, and which sign-in providers
+ * are on, with a signed-in browser only. An API token can't run the instance.
  */
 export function adminApi(env: Env, admin: Account, request: Request, viaSession: boolean): ApiExtension {
 	return async (path) => {
 		if (path !== "/admin" && !path.startsWith("/admin/")) return undefined;
 		if (admin.role !== "admin") return fail(403, "Only the admin can do that.");
-		if (!viaSession) return fail(403, "Running this Pim needs you signed in with a passkey.");
+		if (!viaSession) return fail(403, "Running this Pim needs you signed in to the app.");
 		const url = new URL(request.url);
 		const route = `${request.method} ${path.slice("/admin".length)}`;
 		const dir = directory(env);
@@ -424,6 +447,7 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 					}),
 				});
 			}
+			if (route === "GET /sign-in") return json({ providers: signInProviders(env, url.origin) });
 			if (route === "GET /default-agent") return json({ agent: await gallery(env).defaultAgent() });
 			if (route === "PUT /default-agent") {
 				const id = (await body()).agent;

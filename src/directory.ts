@@ -8,7 +8,9 @@ import { digestHex } from "./auth/store";
  * admin is, and whether each account works. One Durable Object for the
  * instance, so a username is taken exactly once, there is one admin, and
  * registration limits are exact. It also keeps the key that seals sign-in
- * cookies, and the setup code that lets the instance be claimed from its logs.
+ * cookies, the setup code that lets the instance be claimed from its logs,
+ * and whose each linked identity is, so one account at Google or GitHub
+ * signs in to one person here.
  *
  * The first account is the admin's. It is made by whoever opens the Pim in
  * the minutes after a deploy, or with a link from the Worker's logs, which
@@ -122,6 +124,13 @@ CREATE TABLE IF NOT EXISTS cleanups (
 	next_attempt_at INTEGER NOT NULL,
 	last_error TEXT
 );
+CREATE TABLE IF NOT EXISTS identities (
+	issuer TEXT NOT NULL,
+	subject TEXT NOT NULL,
+	owner_id TEXT NOT NULL,
+	PRIMARY KEY (issuer, subject)
+);
+CREATE INDEX IF NOT EXISTS identities_by_owner ON identities (owner_id);
 CREATE TABLE IF NOT EXISTS directory_meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
@@ -197,6 +206,23 @@ export class Directory extends DurableObject<Env> {
 		return key;
 	}
 
+	/** Whose a linked identity is, if anyone's. */
+	identityOwner(issuer: string, subject: string): string | null {
+		const row = this.#sql("SELECT owner_id FROM identities WHERE issuer = ? AND subject = ?", issuer, subject).toArray()[0];
+		return row ? String(row.owner_id) : null;
+	}
+
+	/** Takes an identity for `ownerId`: true unless it is someone else's. */
+	claimIdentity(issuer: string, subject: string, ownerId: string): boolean {
+		this.#sql("INSERT INTO identities (issuer, subject, owner_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", issuer, subject, ownerId);
+		return this.identityOwner(issuer, subject) === ownerId;
+	}
+
+	/** Lets an identity go, if it is `ownerId`'s, so another account may link it. */
+	releaseIdentity(issuer: string, subject: string, ownerId: string): void {
+		this.#sql("DELETE FROM identities WHERE issuer = ? AND subject = ? AND owner_id = ?", issuer, subject, ownerId);
+	}
+
 	/** The admin's account, unless there is none yet: a claim that lapsed or an admin who deleted their account leaves the Pim to be claimed again. */
 	admin(now = Date.now()): Account | null {
 		const row = this.#sql(
@@ -265,6 +291,7 @@ export class Directory extends DurableObject<Env> {
 		const removed = this.#sql("DELETE FROM accounts WHERE owner_id = ? AND status = 'pending'", ownerId).rowsWritten > 0;
 		if (!removed) return;
 		this.#sql("UPDATE invites SET used_by = NULL, used_at = NULL WHERE used_by = ?", ownerId);
+		this.#sql("DELETE FROM identities WHERE owner_id = ?", ownerId);
 		this.#enqueue(ownerId, "release", now);
 		log("registration_released", { owner: ownerId, why });
 	}
@@ -404,6 +431,8 @@ export class Directory extends DurableObject<Env> {
 				ownerId,
 			);
 		}
+		// Its linked identities may sign up again, or be linked to someone else.
+		this.#sql("DELETE FROM identities WHERE owner_id = ?", ownerId);
 		// Asked again for a deleted account, it erases once more: harmless, and it finishes anything left behind.
 		this.#enqueue(ownerId, "deletion", now);
 		log("deletion_requested", { owner: ownerId, username: account.username, by });
@@ -477,8 +506,10 @@ export class Directory extends DurableObject<Env> {
 		}
 		const auth = this.env.Auth.getByName(ownerId);
 		await auth.deleteEverything();
-		const [passkeys, tokens, codes] = await Promise.all([auth.passkeys(), auth.tokens(), auth.recoveryCodesLeft()]);
-		if (passkeys.length + tokens.length + codes > 0) throw new Error("The sign-in still holds passkeys, tokens or recovery codes");
+		const [passkeys, identities, tokens, codes] = await Promise.all([auth.passkeys(), auth.identities(), auth.tokens(), auth.recoveryCodesLeft()]);
+		if (passkeys.length + identities.length + tokens.length + codes > 0) {
+			throw new Error("The sign-in still holds passkeys, linked accounts, tokens or recovery codes");
+		}
 	}
 
 	/**

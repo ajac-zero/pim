@@ -2,19 +2,25 @@ import { queryOptions } from "@tanstack/react-query";
 import { SignInRequired } from "~/lib/pim-api";
 
 /**
- * Signing in with passkeys. The Worker (src/auth) checks them and keeps the
- * session in a cookie; this side runs the browser's WebAuthn ceremonies and
- * hands their results over as base64url.
+ * Signing in with passkeys, or with an account at Google, GitHub or the
+ * single sign-on provider the admin set up. The Worker (src/auth) checks
+ * them and keeps the session in a cookie; this side runs the browser's
+ * WebAuthn ceremonies and hands their results over as base64url, and sends
+ * the browser to a provider's sign-in page, which sends it back to the Worker.
  */
 
 export type Role = "admin" | "member";
 
 export type AuthSession = {
   signedIn: boolean;
-  /** `dev` is the dev server, which signs every request in itself. */
-  method: "passkey" | "dev" | null;
+  /** `identity` is an account at another provider; `dev` is the dev server, which signs every request in itself. */
+  method: "passkey" | "identity" | "dev" | null;
   /** The passkey this browser signed in with. */
   passkey: string | null;
+  /** The passkey or linked identity this browser signed in with. */
+  credential?: string | null;
+  /** The other accounts people can sign in with here, as the admin set them up. */
+  providers?: SignInProvider[];
   /** Who is signed in. */
   account: { username: string; role: Role } | null;
   /** Signed out: whether this Pim has its admin yet. */
@@ -23,6 +29,20 @@ export type AuthSession = {
   canClaim?: boolean;
   /** Signed out: how people join once there is an admin. */
   registration?: "open" | "invite" | "closed";
+};
+
+export type ProviderId = "google" | "github" | "oidc";
+
+export type SignInProvider = { id: ProviderId; name: string };
+
+/** An account at another provider, linked to sign in with. */
+export type LinkedIdentity = {
+  id: string;
+  provider: ProviderId;
+  /** Its email or username there. */
+  label: string;
+  createdAt: number;
+  lastUsedAt: number;
 };
 
 export type ApiToken = {
@@ -141,7 +161,34 @@ export const passkeysQuery = () =>
       call<{ passkeys: Passkey[] }>("/passkeys").then((body) => body.passkeys),
   });
 
+export const identitiesQuery = () =>
+  queryOptions({
+    queryKey: ["auth", "identities"],
+    queryFn: () =>
+      call<{ identities: LinkedIdentity[] }>("/identities").then(
+        (body) => body.identities,
+      ),
+  });
+
 export const auth = {
+  /**
+   * Leaves for a provider's sign-in page, which sends the browser back signed
+   * in. Signed in already, it links that account instead; with a setup
+   * link's code, it adds the account's first way in.
+   */
+  async withProvider(provider: ProviderId, setup?: string) {
+    const { url } = await post<{ url: string }>(
+      `/oauth/${provider}`,
+      setup ? { setup } : {},
+    );
+    location.assign(url);
+    // The page is leaving: stay pending until it does.
+    await new Promise(() => {});
+  },
+
+  unlinkIdentity: (id: string) =>
+    call(`/identities/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
   async signIn() {
     const options = await post<RequestOptions>("/sign-in/options");
     // No allowCredentials: the browser offers whichever passkeys it has.
@@ -284,6 +331,29 @@ export function deviceCode(): string | null {
 /** Forgets a device-link code once it's used, or found not to work. */
 export function forgetDeviceCode() {
   pendingDeviceCode = null;
+}
+
+/**
+ * Why signing in with a provider didn't work, as the Worker sent the browser
+ * back (`#auth-error=…`). It leaves the address bar at once, and is kept
+ * until `forgetAuthError`.
+ */
+let pendingAuthError: string | null = null;
+export function authError(): string | null {
+  const fresh = linkCode("auth-error");
+  if (fresh) {
+    pendingAuthError = fresh;
+    history.replaceState(
+      history.state,
+      "",
+      location.pathname + location.search,
+    );
+  }
+  return pendingAuthError;
+}
+
+export function forgetAuthError() {
+  pendingAuthError = null;
 }
 
 /** Drops a used setup, claim or invite code from the address bar and history. */

@@ -4,7 +4,7 @@ An open-source personal agent you deploy to your own Cloudflare account. Inspire
 
 A deployment is a Pim for you and the people you invite: family, friends, a small team. Each person gets their own Pim, with their own agents, conversations, memories and connected apps, and can share it with the others. You run it, and everything stays in your Cloudflare account. The name is [pi](https://github.com/earendil-works/pi), the harness it runs on, plus **m** for multiplayer.
 
-This repository is the agent, its API, and its web app ([`web/`](web)): chat, approvals, notifications and settings, signed in with a passkey. One Worker serves all of it, for everyone, at one address. Mobile apps and messaging bridges can use the same API with an API token.
+This repository is the agent, its API, and its web app ([`web/`](web)): chat, approvals, notifications and settings, signed in with a passkey, or with Google, GitHub or your own single sign-on when you set those up. One Worker serves all of it, for everyone, at one address. Mobile apps and messaging bridges can use the same API with an API token.
 
 **Vocabulary:** Pim is the platform and a person's own space; an agent is what you create and chat with; a blueprint is what an extension defines in code for agents to build on; a template is an agent shared through the gallery.
 
@@ -15,7 +15,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 ┌─────────────────────┐   HTTPS / WS   ┌──────────────────────────────────────────────┐
 │ web app, or REST +  │───────────────▶│ Worker (src/index.ts, src/gateway.ts)        │
 │ WebSocket at /api   │                │  ├ /*       the web app (web/, static files) │
-└─────────────────────┘                │  ├ /auth/*  joining, passkeys                │
+└─────────────────────┘                │  ├ /auth/*  joining, passkeys, Google/GitHub │
                                        │  └ /api/*   whoever the session or token     │
                                        │   │         names                            │
                                        │   ▼                                          │
@@ -30,13 +30,13 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
                                        │        ▼                                     │
                                        │ Workers AI / AI Gateway (env.AI)             │
                                        │                                              │
-                                       │ "Auth", one per person: passkeys, tokens     │
+                                       │ "Auth", one per person: sign-ins, tokens     │
                                        │ "Directory": accounts, the admin, invites    │
                                        │ "Gallery": profiles, published templates     │
                                        └──────────────────────────────────────────────┘
 ```
 - **[pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable)** runs the agent. Every model turn and tool call is a durable task committed to the Durable Object's SQLite before anything is shown. If the object is evicted mid-run, the `agents` SDK's `PiHarness` alarm wakes it, and pi resumes where it stopped.
-- **One Pim per person.** The Worker reads whose request it is from the passkey session or the API token, and sends it to that person's Durable Object, which holds their memory, apps and agents in its SQLite database. A URL never chooses whose Pim answers. See [docs/instance.md](docs/instance.md).
+- **One Pim per person.** The Worker reads whose request it is from the browser's session or the API token, and sends it to that person's Durable Object, which holds their memory, apps and agents in its SQLite database. A URL never chooses whose Pim answers. See [docs/instance.md](docs/instance.md).
 - **A model that can do the job.** Pim decides what to say and when, and says it with a tool call, so it needs a capable model. The default is GLM-5.3 on Workers AI (`@cf/zai-org/glm-5.3`), billed to your Cloudflare account, with no vendor keys. Any AI Gateway catalog model works too, such as `anthropic/claude-opus-4.8` (set `PIM_MODEL`), or OpenAI's through your ChatGPT plan.
 - **Your ChatGPT plan**, optionally. Sign in with ChatGPT (Plus or Pro) and Pim runs on OpenAI's models, such as GPT-6.1 Sol, using the plan's included usage. See [ChatGPT plan](#chatgpt-plan).
 
@@ -72,9 +72,10 @@ The button copies this repository to your GitHub account and deploys it to your 
 - **The first account** can be made that way for 15 minutes after a deploy, and it is the admin's. Until you make it, whoever opens the URL first could, so open it right after deploying. Missed the 15 minutes? The sign-in screen has the Worker write a one-time setup link to its logs, which only someone signed in to your Cloudflare account can read. In the dashboard, open Workers & Pages, then `pim`, then Observability, and open the link in the log that starts with "Pim setup link". It works once, for an hour.
 - **Inviting people.** Settings → People on this Pim → Invite someone makes a link that lets one person join. With `PIM_REGISTRATION` set to `open`, anyone who finds the address can; `closed` lets nobody in.
 - **More passkeys** (your phone, another browser) come from Settings.
+- **Google, GitHub or single sign-on** (optional). Passkeys always work, and need no setup. To let people also sign in with Google, GitHub, or any OpenID Connect provider (Microsoft, GitLab, Authentik, Keycloak, Pocket ID...), make an OAuth app there and add its client ID and secret as the Worker's secrets: in the dashboard (Workers & Pages → `pim` → Settings → Variables and Secrets) or with `wrangler secret put`. They work once saved, with no redeploy. Google takes `PIM_GOOGLE_CLIENT_ID` and `PIM_GOOGLE_CLIENT_SECRET`; GitHub `PIM_GITHUB_CLIENT_ID` and `PIM_GITHUB_CLIENT_SECRET`; single sign-on `PIM_OIDC_ISSUER`, `PIM_OIDC_CLIENT_ID`, `PIM_OIDC_CLIENT_SECRET`, and optionally `PIM_OIDC_NAME` for its button. Use secrets, not plain variables, even for the IDs: a deploy replaces variables set in the dashboard. The app's callback URL is `https://<your Pim>/auth/oauth/<google|github|oidc>/callback`; Settings → Sign-in methods shows it, and which providers are on. People then link that account in Settings, or use it instead of a passkey when they join. It never makes an account by itself: someone who never joined, or never linked that account, isn't let in. An account at a provider signs in to one person on the Pim, matched by the provider's user ID, not by email.
 - **Lost every passkey?** Each person got ten recovery codes when they joined; one, with their username, adds a new passkey. The admin can make anyone a setup link in Settings, and gets one for themselves from the logs, as above.
 
-Sessions last 30 days, and removing a passkey signs out the browsers it signed in. API tokens for other clients are made in Settings (`POST /auth/tokens` with a passkey session) and revoked there. Passkeys belong to the hostname the app is served from, so moving Pim to another domain means creating new ones.
+Sessions last 30 days, and removing a passkey, or unlinking an account, signs out the browsers it signed in. API tokens for other clients are made in Settings (`POST /auth/tokens` from a signed-in browser) and revoked there. Passkeys belong to the hostname the app is served from, so moving Pim to another domain means creating new ones.
 
 Or from a checkout:
 
@@ -121,7 +122,7 @@ For local development, run `pnpm dev`: the Worker and the built web app at `http
 
 ## API
 
-The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out the prefix. It is the signed-in person's own Pim. The web app calls it with its passkey session. Other clients send `Authorization: Bearer <token>`, with a token made in Settings (API tokens), which names its owner (`pim_<owner>_…`). WebSockets from clients that can't set headers pass `?token=<token>` instead. Only the two paths connected apps call stay at the root, without the prefix, and name whose agent they are for: `/mcp/callback/:owner` and `/mcp/events/:owner/:watch`. Sessions are separate conversations. The root session is `1`.
+The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out the prefix. It is the signed-in person's own Pim. The web app calls it with its session cookie. Other clients send `Authorization: Bearer <token>`, with a token made in Settings (API tokens), which names its owner (`pim_<owner>_…`). WebSockets from clients that can't set headers pass `?token=<token>` instead. Only the two paths connected apps call stay at the root, without the prefix, and name whose agent they are for: `/mcp/callback/:owner` and `/mcp/events/:owner/:watch`. Sessions are separate conversations. The root session is `1`.
 
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
@@ -178,7 +179,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | GET | `/sessions/:id/team/:conversation` | | One of them, with the member's conversation as `messages`, read-only |
 | GET | `/account` | | `{ username, ownerId, role, status, createdAt, usage, recoveryCodesLeft }` |
 | GET | `/account/export` | | Your account and everything in your Pim, as one JSON download, without credentials |
-| DELETE | `/account` | `{ confirm: username }` | Deletes your account and erases your Pim; a passkey session only. `202` while erasing is still being retried |
+| DELETE | `/account` | `{ confirm: username }` | Deletes your account and erases your Pim; a signed-in browser only. `202` while erasing is still being retried |
 | GET, PUT | `/profile` | PUT: `{ displayName, bio }` | How others on this Pim see you |
 | GET | `/people/:username` | | `{ username, displayName, bio, templates }`: someone, and the agent templates they published |
 | GET | `/templates` | `?q=` | `{ templates }`: shared agents, most used first, without their instructions |
@@ -216,7 +217,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 
 Submissions are idempotent by `operationId`. Retrying with the same id returns the same receipt and never starts a second run.
 
-The admin runs the Pim under `/admin`, with a passkey session only: an API token can't. See [docs/instance.md](docs/instance.md#running-it).
+The admin runs the Pim under `/admin`, from a signed-in browser only: an API token can't. See [docs/instance.md](docs/instance.md#running-it).
 
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
@@ -228,6 +229,7 @@ The admin runs the Pim under `/admin`, with a passkey session only: an API token
 | POST | `/admin/accounts/:username/setup-link` | | `{ setupUrl, expiresAt }`: adds a passkey once, within an hour |
 | DELETE | `/admin/accounts/:username` | `{ reason? }` | Deletes it as its owner would; not your own |
 | POST | `/admin/invites` | `{ count?, note? }` | `{ codes, links }`: single-use invite links, up to 100 |
+| GET | `/admin/sign-in` | | `{ providers }`: Google, GitHub and custom OpenID Connect, whether the deployment's secrets turn each on (and which are missing if only some are set), their names, and the callback URL to register; never their values |
 | DELETE | `/admin/templates/:id` | | Takes a published Pim out of Discover |
 
 ### WebSocket
@@ -372,7 +374,7 @@ pnpm types       # regenerate worker-configuration.d.ts after editing wrangler.j
 pnpm preview     # a Pim with a stand-in model, at http://localhost:8787, with no Cloudflare login (see docs/instance.md)
 ```
 
-The web app is in [`web/`](web), with its own README. Passkey sign-in is in [`src/auth/`](src/auth).
+The web app is in [`web/`](web), with its own README. Sign-in, with passkeys and other providers, is in [`src/auth/`](src/auth).
 
 To add a blueprint, tools only some agents get, or dashboard widgets, write an extension with a base and list it in `pim.config.ts` (see [docs/extensions.md](docs/extensions.md)). To add a tool, write a pi extension in `src/extensions/` and install it in `Pim`'s harness factory. A tool with effects outside the conversation should be a `GatedAction` (see `src/extensions/approvals.ts`) so it runs only after approval.
 

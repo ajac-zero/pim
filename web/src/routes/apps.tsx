@@ -201,8 +201,9 @@ function AppsPage() {
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="outline"
+                  size="icon-lg"
                   className={cn(
-                    "relative h-9 shrink-0 rounded-xl max-sm:px-2.5",
+                    "relative shrink-0 rounded-xl",
                     category && "border-foreground/40 bg-accent",
                   )}
                   aria-label={
@@ -212,11 +213,8 @@ function AppsPage() {
                   }
                 >
                   <ListFilter />
-                  <span className="hidden max-w-40 truncate sm:inline">
-                    {category ? label(category) : t("appsFilter")}
-                  </span>
                   {category && (
-                    <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-primary sm:hidden" />
+                    <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-primary" />
                   )}
                 </Button>
               </DropdownMenuTrigger>

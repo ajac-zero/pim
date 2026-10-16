@@ -964,9 +964,36 @@ describe("the admin", () => {
 		const crm = { name: "Acme CRM", description: "Customers and deals.", url: "https://crm.example.test/mcp" };
 		expect((await uma.browser.json("/api/admin/apps", { method: "POST", json: crm })).status).toBe(403);
 		expect((await admin("/api/admin/apps", { method: "POST", json: { ...crm, url: "http://crm.example.test/mcp" } })).status).toBe(400);
-		expect(await admin("/api/admin/apps", { method: "POST", json: crm })).toMatchObject({ status: 201, body: { app: { id: "acme-crm" } } });
+		// Its icon is its site's: the page its home redirects to links a PNG and an SVG, relative to itself, and the SVG is kept.
+		const realSiteFetch = globalThis.fetch;
+		const site = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const url = new Request(input, init).url;
+			if (url === "https://crm.example.test/") {
+				const page = new Response(
+					`<head><link rel="icon" href="/favicon.png" sizes="32x32"><link href="static/logo.svg?v=2&amp;x=1" rel="icon" type="image/svg+xml"></head>`,
+					{ headers: { "content-type": "text/html; charset=utf-8" } },
+				);
+				// Followed a redirect to here.
+				Object.defineProperty(page, "url", { value: "https://www.acme.example.test/crm/" });
+				return page;
+			}
+			if (url === "https://www.acme.example.test/crm/static/logo.svg?v=2&x=1") return new Response("<svg/>", { headers: { "content-type": "image/svg+xml" } });
+			if (url === "https://www.acme.example.test/favicon.png") return new Response("png", { headers: { "content-type": "image/png" } });
+			if (url.includes("example.test")) return new Response("Not found", { status: 404 });
+			return realSiteFetch(input, init);
+		});
+		try {
+			expect(await admin("/api/admin/apps", { method: "POST", json: crm })).toMatchObject({ status: 201, body: { app: { id: "acme-crm" } } });
+		} finally {
+			site.mockRestore();
+		}
 		expect((await admin("/api/admin/apps", { method: "POST", json: { ...crm, name: "Other" } })).status).toBe(400);
-		expect((await uma.browser.json("/api/app-directory")).body.apps).toContainEqual({ ref: "custom/acme-crm", ...crm, custom: true });
+		expect((await uma.browser.json("/api/app-directory")).body.apps).toContainEqual({
+			ref: "custom/acme-crm",
+			...crm,
+			custom: true,
+			icon: "https://www.acme.example.test/crm/static/logo.svg?v=2&x=1",
+		});
 
 		// Two of Uma's agents list it; connecting it once serves both.
 		const sales = (await uma.browser.json("/api/agents", { method: "POST", json: { name: "Sales", apps: ["custom/acme-crm"] } })).body;

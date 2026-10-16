@@ -31,6 +31,8 @@ export type DirectoryApp = {
   url: string | null;
   /** Added by the admin, not brought by an extension. */
   custom: boolean;
+  /** Its logo, an https or `data:` image URL; null for none. */
+  icon: string | null;
 };
 
 /** One of an agent's team: it does tasks the agent hands it, and answers the agent, never you. */

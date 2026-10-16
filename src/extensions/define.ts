@@ -141,6 +141,8 @@ type AppIdentity = {
 	readonly id: string;
 	readonly name: string;
 	readonly description: string;
+	/** Its logo: an https or `data:` image URL, square, shown on a white tile. Without one, its initial. */
+	readonly icon?: string;
 };
 
 /** An app that is a remote MCP server. */

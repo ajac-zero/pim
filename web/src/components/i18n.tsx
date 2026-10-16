@@ -162,7 +162,7 @@ const translations = {
       "You're messaging {username}'s Pim. It acts for {username}, within what they allow you. Your messages use your own usage.",
     connectedApps: "Apps",
     connectedAppsDescription:
-      "The apps this Pim offers. Connect each once with your own account, and every agent of yours that lists it can use it.",
+      "Connect an app once with your own account, and every agent of yours that lists it can use it.",
     appNoLongerOffered: "No longer offered on this Pim",
     createApp: "Create new app",
     createAppHint:
@@ -757,7 +757,7 @@ const translations = {
       "Estás escribiendo al Pim de {username}. Actúa para {username}, dentro de lo que te permite. Tus mensajes usan tu propio uso.",
     connectedApps: "Apps",
     connectedAppsDescription:
-      "Las apps que ofrece este Pim. Conecta cada una una vez con tu propia cuenta, y todos tus agentes que la indiquen podrán usarla.",
+      "Conecta una app una vez con tu propia cuenta y todos tus agentes que la indiquen podrán usarla.",
     appNoLongerOffered: "Este Pim ya no la ofrece",
     createApp: "Crear app nueva",
     createAppHint:

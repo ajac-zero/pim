@@ -3,6 +3,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { Bot, Copy, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
 import { AgentIcon, templateIconSrc } from "~/components/agent-icon";
+import { AppIcon } from "~/components/app-icon";
 import { useI18n } from "~/components/i18n";
 import { Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
@@ -88,13 +89,23 @@ function TemplatePage() {
             {template.apps.map((ref) => {
               const app = directory?.find((candidate) => candidate.ref === ref);
               return (
-                <li key={ref} className="px-4 py-2.5 text-sm">
-                  <span className="font-medium">{app?.name ?? ref}</span>
-                  {app?.description && (
-                    <span className="block truncate text-muted-foreground text-xs">
-                      {app.description}
-                    </span>
-                  )}
+                <li
+                  key={ref}
+                  className="flex items-center gap-3 px-4 py-2.5 text-sm"
+                >
+                  <AppIcon
+                    name={app?.name ?? ref}
+                    icon={app?.icon}
+                    className="size-8 text-sm"
+                  />
+                  <span className="min-w-0">
+                    <span className="font-medium">{app?.name ?? ref}</span>
+                    {app?.description && (
+                      <span className="block truncate text-muted-foreground text-xs">
+                        {app.description}
+                      </span>
+                    )}
+                  </span>
                 </li>
               );
             })}

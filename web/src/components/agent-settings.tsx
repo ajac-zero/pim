@@ -5,7 +5,6 @@ import {
   Globe,
   MessageCircle,
   Pencil,
-  Plug,
   Plus,
   Puzzle,
   Star,
@@ -21,6 +20,7 @@ import {
   AgentLookPicker,
   type LookChoice,
 } from "~/components/agent-icon";
+import { AppIcon } from "~/components/app-icon";
 import { useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -384,7 +384,11 @@ function PimApps({ agent }: { agent: Agent }) {
             className="flex items-center gap-1.5 rounded-full border py-0.5 pr-1 pl-2.5 text-xs"
             title={app.description || app.name}
           >
-            <Plug className="size-3 text-muted-foreground" />
+            <AppIcon
+              name={app.name}
+              icon={app.icon}
+              className="size-4 text-[9px]"
+            />
             {app.name}
             {known ? (
               <span className="px-1.5 text-muted-foreground">
@@ -636,6 +640,11 @@ function AgentForm({
                               : [...value.apps, app.ref],
                           })
                         }
+                      />
+                      <AppIcon
+                        name={app.name}
+                        icon={app.icon}
+                        className="size-6 text-xs"
                       />
                       <div className="min-w-0">
                         <div className="text-sm">{app.name}</div>

@@ -3,6 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import {
   ExternalLink,
   ImageIcon,
+  ListFilter,
   Plus,
   Search,
   Trash2,
@@ -15,6 +16,14 @@ import { toast } from "sonner";
 import { AppIcon } from "~/components/app-icon";
 import { useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "~/components/ui/dropdown-menu";
 import { Input } from "~/components/ui/input";
 import {
   Select,
@@ -65,8 +74,8 @@ type Row = { app: DirectoryApp | null; connection: ConnectedApp | undefined };
  * connected that it no longer offers can only be disconnected here. The
  * admin adds apps of their own, and takes them out.
  *
- * The page fits the window: its search, filters and categories stay put
- * while the cards, grouped by category, scroll beneath them.
+ * The page fits the window: its search and filters stay put while the
+ * cards, grouped by category, scroll beneath them.
  */
 function AppsPage() {
   const { t } = useI18n();
@@ -175,7 +184,7 @@ function AppsPage() {
         <p className="mt-1 text-muted-foreground text-sm">
           {t("connectedAppsDescription")}
         </p>
-        <div className="mt-5 flex items-center gap-2">
+        <div className="mt-5 mb-4 flex items-center gap-2">
           <div className="relative min-w-0 flex-1">
             <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input
@@ -187,6 +196,66 @@ function AppsPage() {
               className="pl-9"
             />
           </div>
+          {offered.length > 1 && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  className={cn(
+                    "relative h-9 shrink-0 rounded-xl max-sm:px-2.5",
+                    category && "border-foreground/40 bg-accent",
+                  )}
+                  aria-label={
+                    category
+                      ? `${t("filterByCategory")}: ${label(category)}`
+                      : t("filterByCategory")
+                  }
+                >
+                  <ListFilter />
+                  <span className="hidden max-w-40 truncate sm:inline">
+                    {category ? label(category) : t("appsFilter")}
+                  </span>
+                  {category && (
+                    <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-primary sm:hidden" />
+                  )}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-64">
+                <DropdownMenuLabel className="text-muted-foreground text-xs">
+                  {t("appsByCategory")}
+                </DropdownMenuLabel>
+                <DropdownMenuRadioGroup
+                  value={category ?? "all"}
+                  onValueChange={(value) =>
+                    setCategory(value === "all" ? null : (value as Category))
+                  }
+                >
+                  {[null, ...offered].map((candidate) => {
+                    const count =
+                      candidate === null
+                        ? found.length
+                        : (counts.get(candidate) ?? 0);
+                    return (
+                      <DropdownMenuRadioItem
+                        key={candidate ?? "all"}
+                        value={candidate ?? "all"}
+                        className={cn(count === 0 && "text-muted-foreground")}
+                      >
+                        <span className="flex-1 truncate">
+                          {candidate === null
+                            ? t("allCategories")
+                            : label(candidate)}
+                        </span>
+                        <span className="text-muted-foreground text-xs tabular-nums">
+                          {count}
+                        </span>
+                      </DropdownMenuRadioItem>
+                    );
+                  })}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
           <fieldset className="flex rounded-xl border p-0.5 text-sm">
             <legend className="sr-only">{t("connectedApps")}</legend>
             {[
@@ -216,40 +285,6 @@ function AppsPage() {
             ))}
           </fieldset>
         </div>
-        {offered.length > 1 && (
-          <nav
-            aria-label={t("appsByCategory")}
-            className="-mx-6 mt-3 flex gap-1.5 overflow-x-auto px-6 pb-3 [mask-image:linear-gradient(to_right,black_calc(100%-3rem),transparent)] [scrollbar-width:none]"
-          >
-            {[null, ...offered].map((candidate) => {
-              const count =
-                candidate === null
-                  ? found.length
-                  : (counts.get(candidate) ?? 0);
-              const selected = category === candidate;
-              return (
-                <button
-                  key={candidate ?? "all"}
-                  type="button"
-                  aria-pressed={selected}
-                  onClick={() => setCategory(candidate)}
-                  className={cn(
-                    "flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1 text-[13px] transition-colors",
-                    selected
-                      ? "border-foreground bg-foreground text-background"
-                      : "text-muted-foreground hover:bg-accent hover:text-foreground",
-                    !selected && count === 0 && "opacity-50",
-                  )}
-                >
-                  {candidate === null ? t("appsShowAll") : label(candidate)}
-                  <span className="text-xs tabular-nums opacity-70">
-                    {count}
-                  </span>
-                </button>
-              );
-            })}
-          </nav>
-        )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto border-t scrollbar-thin">
         <div className="@container mx-auto w-full max-w-6xl px-6 pb-12">

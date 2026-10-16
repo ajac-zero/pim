@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { ArrowUp, Plus, Square, X } from "lucide-react";
-import { type ReactNode, useId, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
 import { useI18n } from "~/components/i18n";
@@ -28,7 +28,12 @@ export interface ComposerProps {
   disclaimer?: ReactNode;
   autoFocus?: boolean;
   promptSuggestions?: string[];
+  /** Keeps unsent text under this key, such as the chat's id, while other chats are open. */
+  draftKey?: string;
 }
+
+/** Unsent text by draft key, for this page's lifetime. */
+const drafts = new Map<string, string>();
 
 /** Image types Pim takes, as the server checks them. */
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
@@ -50,7 +55,9 @@ const MAX_SENT_BYTES = 1_000_000;
  */
 export function Composer(props: ComposerProps) {
   return (
-    <PromptInputProvider>
+    <PromptInputProvider
+      initialInput={props.draftKey ? drafts.get(props.draftKey) : undefined}
+    >
       <ComposerInner {...props} />
     </PromptInputProvider>
   );
@@ -65,15 +72,21 @@ function ComposerInner({
   disclaimer,
   autoFocus,
   promptSuggestions = [],
+  draftKey,
 }: ComposerProps) {
   const { t } = useI18n();
   const controller = usePromptInputController();
+  const text = controller.textInput.value;
+  useEffect(() => {
+    if (!draftKey) return;
+    if (text) drafts.set(draftKey, text);
+    else drafts.delete(draftKey);
+  }, [draftKey, text]);
   const { data: model } = useQuery(modelQuery());
   const seesImages = model?.model.images ?? false;
   const inputId = useId();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [preparing, setPreparing] = useState(false);
-  const text = controller.textInput.value;
   const files = controller.attachments.files;
   const hasText = text.trim().length > 0;
   const hasContent = hasText || files.length > 0;

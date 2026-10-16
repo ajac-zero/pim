@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { AlertCircle, Clock } from "lucide-react";
-import { Fragment, memo, useMemo } from "react";
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo } from "react";
+import { useStickToBottomContext } from "use-stick-to-bottom";
 import { PimMark } from "~/components/app-sidebar";
 import { ArtifactCard, artifactReference } from "~/components/artifact";
 import {
@@ -55,6 +56,15 @@ const COMPOSER_INSET_GAP = 16;
 const DEFAULT_COMPOSER_CARD_HEIGHT = 56;
 const SCROLL_BUTTON_GAP = 16;
 const HEADER_INSET = 24;
+
+/**
+ * Where each chat was scrolled to, by session, for this page's lifetime. A
+ * chat read to the bottom has no entry: it opens at the bottom and follows
+ * new messages.
+ */
+const scrollPositions = new Map<string, number>();
+/** How close to the bottom counts as there, as `use-stick-to-bottom` counts it. */
+const NEAR_BOTTOM = 70;
 
 export const Thread = memo(function Thread({
   sessionId,
@@ -158,7 +168,11 @@ export const Thread = memo(function Thread({
     entries.every((entry) => entry.kind === "notice");
 
   return (
-    <Conversation className="scrollbar-thin">
+    <Conversation
+      className="scrollbar-thin"
+      initial={scrollPositions.has(sessionId) ? false : "smooth"}
+    >
+      <ScrollMemory sessionId={sessionId} loaded={rows.length > 0} />
       <ConversationContent
         className="mx-auto min-h-full w-full max-w-3xl px-4 [&>[data-speaker=assistant]+[data-speaker=assistant]]:-mt-3 [&>[data-speaker=user]+[data-speaker=user]]:-mt-3"
         style={{
@@ -312,3 +326,39 @@ export const Thread = memo(function Thread({
     </Conversation>
   );
 });
+
+/** Remembers where a chat is scrolled to, and goes back there when the chat opens again. */
+function ScrollMemory({
+  sessionId,
+  loaded,
+}: {
+  sessionId: string;
+  /** The transcript has rendered, so there is somewhere to go back to. */
+  loaded: boolean;
+}) {
+  const { scrollRef } = useStickToBottomContext();
+
+  // Only the first render with the transcript restores; `loaded` doesn't turn false again.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the session is fixed for this thread.
+  useLayoutEffect(() => {
+    const top = scrollPositions.get(sessionId);
+    if (loaded && top !== undefined && scrollRef.current) {
+      scrollRef.current.scrollTop = top;
+    }
+  }, [loaded]);
+
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const remember = () => {
+      const fromBottom =
+        scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+      if (fromBottom < NEAR_BOTTOM) scrollPositions.delete(sessionId);
+      else scrollPositions.set(sessionId, scroller.scrollTop);
+    };
+    scroller.addEventListener("scroll", remember, { passive: true });
+    return () => scroller.removeEventListener("scroll", remember);
+  }, [scrollRef, sessionId]);
+
+  return null;
+}

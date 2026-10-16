@@ -27,12 +27,14 @@ afterEach(async () => {
 
 describe("usage", () => {
 	it("counts runs, model requests and tokens by day", async () => {
+		const session = (await post("/sessions")).body.id;
 		const before = (await api<Usage>("/usage")).body.today;
 		faux.setResponses([toolUse("send_to_user", { message: "Hello!" })]);
-		await say("Hi");
+		await say("Hi", session);
 		const after = (await api<Usage>("/usage")).body;
 		expect(after.today.runs).toBe(before.runs + 1);
-		expect(after.today.modelRequests).toBe(before.modelRequests + 1);
+		// The run's request, and the utility model's naming the chat from its first message.
+		expect(after.today.modelRequests).toBe(before.modelRequests + 2);
 		expect(after.today.tokens).toBeGreaterThan(before.tokens);
 		// A self-hosted Pim has no limits unless PIM_LIMITS sets some.
 		expect(after.limits).toMatchObject({ dailyTokens: null, dailyRuns: null, sessions: null });

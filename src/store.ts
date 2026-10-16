@@ -242,7 +242,9 @@ CREATE TABLE IF NOT EXISTS pim_sessions (
 	title TEXT,
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
-	deleted_at INTEGER
+	deleted_at INTEGER,
+	summary TEXT,
+	summary_of TEXT
 );
 CREATE TABLE IF NOT EXISTS pim_meta (
 	key TEXT PRIMARY KEY,
@@ -400,6 +402,8 @@ export class PimStore {
 		if (!columns.includes("member")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN member TEXT");
 		const sessionColumns = this.#sql.exec("PRAGMA table_info(pim_sessions)").toArray().map((row) => String(row.name));
 		if (!sessionColumns.includes("deleted_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN deleted_at INTEGER");
+		if (!sessionColumns.includes("summary")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN summary TEXT");
+		if (!sessionColumns.includes("summary_of")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN summary_of TEXT");
 	}
 
 	// Goals
@@ -734,6 +738,21 @@ export class PimStore {
 				.toArray()
 				.map((row) => String(row.id)),
 		);
+	}
+
+	/** Renames a session only if it is still called `from`, so a rename meanwhile stays; says whether it did. */
+	retitleSession(id: string, from: string, title: string): boolean {
+		return this.#sql.exec("UPDATE pim_sessions SET title = ? WHERE id = ? AND title = ?", title, id, from).rowsWritten > 0;
+	}
+
+	/** A session's last summary, if it summarized the conversation `of` names (a hash of it), so it is still current. */
+	sessionSummary(id: string, of: string): string | undefined {
+		const [row] = this.#sql.exec("SELECT summary FROM pim_sessions WHERE id = ? AND summary_of = ?", id, of).toArray();
+		return row?.summary == null ? undefined : String(row.summary);
+	}
+
+	setSessionSummary(id: string, summary: string, of: string): void {
+		this.#sql.exec("UPDATE pim_sessions SET summary = ?, summary_of = ? WHERE id = ?", summary, of, id);
 	}
 
 	renameSession(id: string, title: string): void {

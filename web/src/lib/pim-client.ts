@@ -36,6 +36,8 @@ export type ClientHandlers = {
   onVisits?: () => void;
   /** A run started or ended, so lists (titles, order) may have changed. */
   onActivity?: (session: string) => void;
+  /** The session list changed outside a run: a chat got its title. */
+  onSessions?: () => void;
 };
 
 const MAX_BACKOFF_MS = 15_000;
@@ -145,6 +147,9 @@ class PimClient {
         return;
       case "visits":
         this.handlers.onVisits?.();
+        return;
+      case "sessions":
+        this.handlers.onSessions?.();
         return;
       default:
         return;

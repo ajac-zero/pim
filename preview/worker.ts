@@ -1,4 +1,4 @@
-import type { Message } from "@earendil-works/pi-ai";
+import type { Api, Message, Model } from "@earendil-works/pi-ai";
 import { createModels, createProvider, type Models } from "@earendil-works/pi-ai/models";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import type { ModelRef } from "@earendil-works/pi-durable";
@@ -17,12 +17,15 @@ export { Auth, Directory, Gallery } from "../src/index";
  * - A stand-in model, so chats answer. It echoes what you say through
  *   `send_to_user`, and calls a tool when told to: `/tool create_goal {"title": "Run a 5k"}`.
  *   After a tool runs, it sends the tool's result. Memory compression gets a short summary.
+ *   The utility model titles a chat with the first words of its last message, appends a
+ *   line to a prompt it improves, and writes a placeholder summary.
  * - `GET /__dev/sign-in/<username>?returnTo=/path` signs the browser in as
  *   that person, making the account if it's new, with a passkey made here.
  */
 
 const PREVIEW_MODEL = "preview-model";
 const MEMORY_MODEL = "preview-memory";
+const UTILITY_MODEL = "preview-utility";
 
 const textOf = (message: Message | undefined): string => {
 	if (!message || message.role === "assistant") return "";
@@ -41,6 +44,23 @@ const answer: FauxResponseFactory = (context, _options, _state, model) => {
 	if (model.id === MEMORY_MODEL) {
 		const block = /Compress memories #(\d+-\d+)/.exec(textOf(last))?.[1] ?? "";
 		return fauxAssistantMessage(`Memories ${block}, summarized by the preview model.`);
+	}
+
+	if (model.id === UTILITY_MODEL) {
+		// Stand-ins for what a real model would write, one per job in src/utility.ts.
+		const input = textOf(last).trim();
+		const job = textOf(context.messages.find((message) => message.role === "system"));
+		if (job.startsWith("You name chats")) {
+			const said = input.split("\n\n").findLast((turn) => turn.startsWith("Person: ")) ?? input;
+			return fauxAssistantMessage(said.replace(/^Person: /, "").split(/\s+/).slice(0, 4).join(" "));
+		}
+		if (job.startsWith("You improve")) {
+			return fauxAssistantMessage(`${input}\n\nPlease be specific, and tell me what you need from me to get it right.`);
+		}
+		const turns = input.split("\n\n").length;
+		return fauxAssistantMessage(
+			`- A preview conversation of ${turns} turns.\n- The preview model can't read it.\n\n## Next steps\n\n- Choose a real utility model to get a real summary.`,
+		);
 	}
 
 	if (last?.role === "toolResult") {
@@ -73,6 +93,7 @@ function previewProvider() {
 		models: [
 			{ id: PREVIEW_MODEL, name: "Preview model", contextWindow: 200_000 },
 			{ id: MEMORY_MODEL, name: "Preview memory model" },
+			{ id: UTILITY_MODEL, name: "Preview utility model" },
 		],
 		tokensPerSecond: 200,
 	});
@@ -111,6 +132,10 @@ export class Pim extends RealPim {
 
 	protected override memoryModel(): ModelRef {
 		return { provider: "preview", modelId: MEMORY_MODEL };
+	}
+
+	protected override defaultUtilityModel(): Model<Api> {
+		return preview.getModel(UTILITY_MODEL)!;
 	}
 }
 

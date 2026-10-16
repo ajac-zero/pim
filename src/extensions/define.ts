@@ -141,7 +141,7 @@ type AppIdentity = {
 	readonly id: string;
 	readonly name: string;
 	readonly description: string;
-	/** Its logo: an https or `data:` image URL, square, shown on a white tile. Without one, its initial. */
+	/** Its logo: an https or `data:` image URL, square, with a transparent background that works on light and dark. Without one, its initial. */
 	readonly icon?: string;
 };
 

@@ -86,6 +86,20 @@ export const ledger = definePimExtension({
 			},
 		},
 	},
+	// The apps tests connect: each test routes its URL to an MCP server of its own, or to none.
+	apps: [
+		{ id: "weather", name: "Weather", description: "Tomorrow's forecast.", url: "https://weather.example.test/mcp" },
+		{ id: "calendar", name: "Calendar", description: "Your events.", url: "https://calendar.example.test/mcp" },
+		{ id: "notes", name: "Notes", description: "Search your notes.", url: "https://notes.example.test/mcp" },
+		{ id: "firecrawl", name: "Firecrawl", description: "Crawls web pages.", url: "https://firecrawl.example.test/mcp" },
+		{ id: "travel", name: "Travel", description: "Trips and flights.", url: "https://travel.example.test/mcp" },
+		{ id: "down", name: "Down", description: "A server that never answers.", url: "https://down.example.test/mcp" },
+		{ id: "strava", name: "Strava", description: "Your runs.", url: "https://mcp.strava.example/mcp" },
+		{ id: "github", name: "GitHub", description: "Code and pull requests.", url: "https://mcp.github.example/mcp" },
+		{ id: "docs", name: "Docs", description: "Documentation.", url: "https://mcp.docs.example/mcp" },
+		// The real one, for `pnpm test:live`.
+		{ id: "hugging-face", name: "Hugging Face", description: "Models, datasets and skills.", url: "https://huggingface.co/mcp" },
+	],
 	blueprints: [
 		{
 			id: "budget",
@@ -93,7 +107,7 @@ export const ledger = definePimExtension({
 			description: "Keeps the books.",
 			instructions: "Answer every money question with a number first.",
 			dashboard: ["test.ledger/bills", "test.ledger/broken", "pim.goals/active"],
-			apps: [{ name: "Weather", url: "https://weather.example.test/mcp" }],
+			apps: ["test.ledger/weather"],
 			starters: [{ en: "How much did I spend?", es: "¿Cuánto gasté?" }],
 		},
 	],

@@ -30,10 +30,11 @@ const translations = {
       "How it should work: what to focus on, how to talk, what to ask before doing.",
     suggestedApps: "Apps it works with",
     suggestedAppsHint:
-      "MCP server URLs. This agent's chats can use only these apps, and those of the blueprint it's based on. Whoever uses it connects them with their own accounts.",
+      "This agent's chats can use only these apps, and those of the blueprint it's based on. You connect each app once, for all your agents.",
+    noAppsOffered:
+      "This Pim offers no apps yet. Its admin can add them in Settings.",
     appName: "App",
     appUrl: "MCP server URL",
-    removeApp: "Remove app",
     uploadIcon: "Upload image",
     removeIcon: "Remove image",
     notAnImage: "That file isn't an image.",
@@ -159,11 +160,18 @@ const translations = {
     visitUnavailable: "No longer shared",
     visitBanner:
       "You're messaging {username}'s Pim. It acts for {username}, within what they allow you. Your messages use your own usage.",
-    connectedApps: "Connected apps",
+    connectedApps: "Apps",
     connectedAppsDescription:
-      "The apps you connected. A chat uses an app only when its agent lists it; add apps to an agent in Your agents.",
-    noConnectedApps:
-      "No apps connected. Connect the apps an agent works with from Your agents.",
+      "The apps this Pim offers. Connect each once with your own account, and every agent of yours that lists it can use it.",
+    appNoLongerOffered: "No longer offered on this Pim",
+    createApp: "Create new app",
+    createAppHint:
+      "Add a remote MCP server everyone on this Pim can connect, each with their own account.",
+    appDescription: "What it does",
+    appDescriptionPlaceholder: "Issues and projects",
+    appAdded: "Added {name}.",
+    unlistAppNamed: "Remove {name} from this Pim",
+    appUnlisted: "{name} is no longer offered.",
     appUsedBy: "Used by {agents}",
     appUnused: "No agent works with it",
     appReady: "Connected",
@@ -171,8 +179,8 @@ const translations = {
     appFailed: "Couldn't connect",
     appConnecting: "Connecting",
     signIn: "Sign in",
-    removeAppNamed: "Remove {name}",
-    appRemoved: "Removed {name}.",
+    removeAppNamed: "Disconnect {name}",
+    appRemoved: "Disconnected {name}.",
     toolPermissions: "Tool permissions",
     toolPermissionsDescription:
       "What Pim may do with each tool. Off: Pim can't use it. Ask: Pim waits for your approval. On: Pim uses it without asking.",
@@ -616,10 +624,11 @@ const translations = {
       "Cómo debe trabajar: en qué enfocarse, cómo hablar, qué preguntar antes de actuar.",
     suggestedApps: "Apps con las que trabaja",
     suggestedAppsHint:
-      "URLs de servidores MCP. Los chats de este agente solo pueden usar estas apps y las del esquema en el que se basa. Quien lo use las conecta con sus propias cuentas.",
+      "Los chats de este agente solo pueden usar estas apps y las del esquema en el que se basa. Conectas cada app una vez, para todos tus agentes.",
+    noAppsOffered:
+      "Este Pim aún no ofrece apps. Su administrador puede agregarlas en Ajustes.",
     appName: "App",
     appUrl: "URL del servidor MCP",
-    removeApp: "Quitar app",
     uploadIcon: "Subir imagen",
     removeIcon: "Quitar imagen",
     notAnImage: "Ese archivo no es una imagen.",
@@ -746,11 +755,18 @@ const translations = {
     visitUnavailable: "Ya no se comparte",
     visitBanner:
       "Estás escribiendo al Pim de {username}. Actúa para {username}, dentro de lo que te permite. Tus mensajes usan tu propio uso.",
-    connectedApps: "Apps conectadas",
+    connectedApps: "Apps",
     connectedAppsDescription:
-      "Las apps que conectaste. Un chat usa una app solo si su agente la indica; agrega apps a un agente en Tus agentes.",
-    noConnectedApps:
-      "No hay apps conectadas. Conecta las apps con las que trabaja un agente desde Tus agentes.",
+      "Las apps que ofrece este Pim. Conecta cada una una vez con tu propia cuenta, y todos tus agentes que la indiquen podrán usarla.",
+    appNoLongerOffered: "Este Pim ya no la ofrece",
+    createApp: "Crear app nueva",
+    createAppHint:
+      "Agrega un servidor MCP remoto que todos en este Pim pueden conectar, cada uno con su propia cuenta.",
+    appDescription: "Qué hace",
+    appDescriptionPlaceholder: "Incidencias y proyectos",
+    appAdded: "Se agregó {name}.",
+    unlistAppNamed: "Quitar {name} de este Pim",
+    appUnlisted: "{name} ya no se ofrece.",
     appUsedBy: "La usa {agents}",
     appUnused: "Ningún agente trabaja con ella",
     appReady: "Conectada",
@@ -758,8 +774,8 @@ const translations = {
     appFailed: "No se pudo conectar",
     appConnecting: "Conectando",
     signIn: "Iniciar sesión",
-    removeAppNamed: "Quitar {name}",
-    appRemoved: "{name} quitada.",
+    removeAppNamed: "Desconectar {name}",
+    appRemoved: "{name} desconectada.",
     toolPermissions: "Permisos de herramientas",
     toolPermissionsDescription:
       "Lo que Pim puede hacer con cada herramienta. Desactivada: Pim no puede usarla. Preguntar: Pim espera tu aprobación. Activada: Pim la usa sin preguntar.",

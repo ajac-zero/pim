@@ -1,7 +1,9 @@
 import { ASSISTANT_BLUEPRINT } from "./extensions/assistant";
 import { DurableObject } from "cloudflare:workers";
+import pimConfig from "../pim.config";
 import { HttpError } from "./http";
-import type { SuggestedApp, TeamMember } from "./agents";
+import type { TeamMember } from "./agents";
+import { appDirectory, type CustomApp, type DirectoryApp, storedApps } from "./extensions/app-directory";
 
 /**
  * What the people on a Pim show each other: profiles, and the agents they
@@ -14,7 +16,8 @@ import type { SuggestedApp, TeamMember } from "./agents";
  * credentials. Publishing again replaces it.
  *
  * The admin also chooses the agent everyone starts with: a copy of one of
- * theirs, which becomes each new account's default agent.
+ * theirs, which becomes each new account's default agent; and adds apps
+ * anyone can connect besides the extensions' (`custom/<app>`).
  */
 
 export type Profile = {
@@ -31,7 +34,7 @@ export type Template = {
 	readonly name: string;
 	readonly description: string;
 	readonly instructions: string;
-	readonly apps: readonly SuggestedApp[];
+	readonly apps: readonly string[];
 	readonly team: readonly TeamMember[];
 	/** The blueprint it builds on, or null for none. */
 	readonly blueprint: string | null;
@@ -54,7 +57,7 @@ export type DefaultAgent = {
 	readonly name: string;
 	readonly description: string;
 	readonly instructions: string;
-	readonly apps: readonly SuggestedApp[];
+	readonly apps: readonly string[];
 	readonly team: readonly TeamMember[];
 	readonly blueprint: string | null;
 	readonly symbol: string | null;
@@ -73,7 +76,7 @@ export type PublishedAgent = {
 	readonly name: string;
 	readonly description: string;
 	readonly instructions: string;
-	readonly apps: readonly SuggestedApp[];
+	readonly apps: readonly string[];
 	readonly team: readonly TeamMember[];
 	readonly blueprint: string | null;
 	readonly symbol: string | null;
@@ -87,6 +90,7 @@ export type TemplateSummary = Omit<Template, "instructions">;
 export const MAX_DISPLAY_NAME = 50;
 export const MAX_BIO = 280;
 export const MAX_TEMPLATES = 20;
+export const MAX_APP_NAME = 40;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS profiles (
@@ -121,13 +125,20 @@ CREATE TABLE IF NOT EXISTS default_agent (
 	apps TEXT NOT NULL,
 	updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS apps (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	description TEXT NOT NULL,
+	url TEXT NOT NULL UNIQUE,
+	created_at INTEGER NOT NULL
+);
 `;
 
 type Row = Record<string, SqlStorageValue>;
 
 const optional = (value: SqlStorageValue | undefined) => (value === null || value === undefined ? null : String(value));
 
-function templateOf(row: Row): Template {
+function templateOf(row: Row, directory: () => readonly DirectoryApp[]): Template {
 	return {
 		id: String(row.id),
 		author: String(row.username),
@@ -135,7 +146,7 @@ function templateOf(row: Row): Template {
 		name: String(row.name),
 		description: String(row.description),
 		instructions: String(row.instructions),
-		apps: JSON.parse(String(row.apps)) as SuggestedApp[],
+		apps: storedApps(JSON.parse(String(row.apps)) as unknown[], directory),
 		team: JSON.parse(String(row.team ?? "[]")) as TeamMember[],
 		blueprint: optional(row.blueprint),
 		symbol: optional(row.symbol),
@@ -146,8 +157,8 @@ function templateOf(row: Row): Template {
 	};
 }
 
-const summaryOf = (row: Row): TemplateSummary => {
-	const { instructions: _instructions, ...summary } = templateOf(row);
+const summaryOf = (row: Row, directory: () => readonly DirectoryApp[]): TemplateSummary => {
+	const { instructions: _instructions, ...summary } = templateOf(row, directory);
 	return summary;
 };
 
@@ -206,6 +217,37 @@ export class Gallery extends DurableObject<Env> {
 
 	#sql(query: string, ...bindings: unknown[]) {
 		return this.ctx.storage.sql.exec(query, ...bindings);
+	}
+
+	/** The deployment's apps, for templates that listed them by URL before the directory. */
+	readonly #directory = () => appDirectory(pimConfig.extensions, this.customApps());
+
+	/** The apps the admin added, as they added them. */
+	customApps(): CustomApp[] {
+		return this.#sql("SELECT id, name, description, url FROM apps ORDER BY created_at, id")
+			.toArray()
+			.map((row) => ({ id: String(row.id), name: String(row.name), description: String(row.description), url: String(row.url) }));
+	}
+
+	/** The admin adds an app anyone on this Pim can connect: a remote MCP server, named `custom/<id>` after its name. */
+	addCustomApp(input: { name?: unknown; description?: unknown; url?: unknown }): CustomApp {
+		const name = optionalText(input.name, "name", MAX_APP_NAME);
+		if (name === null) throw new HttpError(400, "name is required");
+		const description = optionalText(input.description, "description", MAX_BIO) ?? "";
+		const url = typeof input.url === "string" ? input.url.trim() : "";
+		if (!/^https:\/\/\S+$/.test(url) || url.length > 500) throw new HttpError(400, "url must be an https URL");
+		if (this.customApps().some((app) => app.url === url)) throw new HttpError(409, "An app with that URL is already here");
+		const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "app";
+		const taken = new Set(this.customApps().map((app) => app.id));
+		let id = base;
+		for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
+		this.#sql("INSERT INTO apps (id, name, description, url, created_at) VALUES (?, ?, ?, ?, ?)", id, name, description, url, Date.now());
+		return { id, name, description, url };
+	}
+
+	/** Takes an app the admin added out of the directory. People's connections to it stay until they remove them. */
+	removeCustomApp(id: string): boolean {
+		return this.#sql("DELETE FROM apps WHERE id = ?", id).rowsWritten > 0;
 	}
 
 	profile(username: string): Profile {
@@ -269,7 +311,7 @@ export class Gallery extends DurableObject<Env> {
 
 	template(id: string): Template | null {
 		const [row] = this.#sql(`${WITH_AUTHOR} WHERE t.id = ?`, id).toArray();
-		return row ? templateOf(row) : null;
+		return row ? templateOf(row, this.#directory) : null;
 	}
 
 	/** Templates, most used first; matching `query` in their name, description or author, or by one author. */
@@ -278,7 +320,7 @@ export class Gallery extends DurableObject<Env> {
 		if (options.author) {
 			return this.#sql(`${WITH_AUTHOR} WHERE t.username = ? ORDER BY t.published_at DESC LIMIT ?`, options.author, limit)
 				.toArray()
-				.map(summaryOf);
+				.map((row) => summaryOf(row, this.#directory));
 		}
 		const query = options.query?.trim().toLowerCase();
 		if (query) {
@@ -292,9 +334,9 @@ export class Gallery extends DurableObject<Env> {
 				limit,
 			)
 				.toArray()
-				.map(summaryOf);
+				.map((row) => summaryOf(row, this.#directory));
 		}
-		return this.#sql(`${WITH_AUTHOR} ORDER BY t.uses DESC, t.published_at DESC LIMIT ?`, limit).toArray().map(summaryOf);
+		return this.#sql(`${WITH_AUTHOR} ORDER BY t.uses DESC, t.published_at DESC LIMIT ?`, limit).toArray().map((row) => summaryOf(row, this.#directory));
 	}
 
 	/** Someone made a template their own. */
@@ -317,7 +359,7 @@ export class Gallery extends DurableObject<Env> {
 			name: String(row.name),
 			description: String(row.description),
 			instructions: String(row.instructions),
-			apps: JSON.parse(String(row.apps)) as SuggestedApp[],
+			apps: storedApps(JSON.parse(String(row.apps)) as unknown[], this.#directory),
 			team: JSON.parse(String(row.team ?? "[]")) as TeamMember[],
 			blueprint: optional(row.blueprint),
 			symbol: optional(row.symbol),

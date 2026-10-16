@@ -144,10 +144,10 @@ async function watchSecret(id: string): Promise<string> {
 
 describe("skills from apps (io.modelcontextprotocol/skills)", () => {
 	it("reads an app's skills and event types when it connects", async () => {
-		expect((await post("/mcp", { name: "Travel", url: SERVER_URL })).status).toBe(201);
+		expect((await post("/mcp", { app: "test.ledger/travel" })).status).toBe(201);
 		// The default Pim works with it, so its chats get it.
 		const [agent] = (await api("/agents")).body.agents;
-		await api(`/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ apps: [{ name: "Travel", url: SERVER_URL }] }) });
+		await api(`/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ apps: ["test.ledger/travel"] }) });
 		expect((await api("/mcp/travel/skills")).body.skills).toEqual([await skillEntry()].map((entry) => ({
 			uri: entry.uri,
 			name: "trip-planning",
@@ -174,7 +174,7 @@ describe("skills from apps (io.modelcontextprotocol/skills)", () => {
 		]);
 		await say("hi");
 		expect(system).toContain(
-			"## Travel\\nSkills from Travel (load with read_skill):\\n- trip-planning: Plan a trip with the user's preferences\\nEvents you can watch (watch_app_event): flight.price_changed",
+			"## Travel [id: test.ledger/travel]\\nSkills from Travel (load with read_skill):\\n- trip-planning: Plan a trip with the user's preferences\\nEvents you can watch (watch_app_event): flight.price_changed",
 		);
 	});
 

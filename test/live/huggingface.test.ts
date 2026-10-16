@@ -10,11 +10,9 @@ import { faux } from "../worker";
  * catalog may change, so it asserts shapes and behavior, not exact content.
  */
 
-const HF = "https://huggingface.co/mcp";
-
 describe("Hugging Face MCP server (live)", () => {
 	it("connects, with its tools", async () => {
-		const { status, body } = await post("/mcp", { name: "Hugging Face", url: HF });
+		const { status, body } = await post("/mcp", { app: "test.ledger/hugging-face" });
 		expect(status, JSON.stringify(body)).toBe(201);
 		expect(body).toMatchObject({ id: "hugging_face", state: "ready" });
 		const [app] = (await api("/mcp")).body.servers;

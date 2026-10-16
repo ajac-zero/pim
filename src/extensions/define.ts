@@ -126,8 +126,19 @@ export function widgetMarkdown(widget: ShownWidget, locale = "en"): string {
 	return [title, ...lines.map((line) => `- ${line}`)].join("\n");
 }
 
-/** An app a Pim works with: a remote MCP server, by its https URL. */
-export type PimApp = { readonly name: string; readonly url: string };
+/**
+ * An app people connect with their own accounts: a remote MCP server. It is
+ * named `<extension>/<id>`, as blueprints and people's agents list it, and
+ * each person connects it once for all of their agents.
+ */
+export type AppDefinition = {
+	/** Unique in its extension. Stored in people's agents: don't rename it. */
+	readonly id: string;
+	readonly name: string;
+	readonly description: string;
+	/** Its remote MCP server, https. */
+	readonly url: string;
+};
 
 export type BlueprintDefinition = {
 	/** Unique in its extension: the blueprint is named `<extension>/<id>`. */
@@ -146,11 +157,11 @@ export type BlueprintDefinition = {
 	 */
 	readonly abilities?: readonly string[];
 	/**
-	 * Remote MCP servers its chats work with. Each person connects them with
-	 * their own accounts; a chat gets the tools of the apps its Pim lists here
-	 * or in the person's own Pim, and of no other.
+	 * Apps its chats work with, each `<extension>/<app>`. Each person connects
+	 * them with their own accounts; a chat gets the tools of the apps its agent
+	 * lists here or in the person's own agent, and of no other.
 	 */
-	readonly apps?: readonly PimApp[];
+	readonly apps?: readonly string[];
 	/** Messages the dashboard offers to start a chat with. */
 	readonly starters?: readonly Text[];
 };
@@ -164,6 +175,8 @@ export type PimExtension = {
 	readonly blueprints?: readonly BlueprintDefinition[];
 	/** Color themes people can pick for the web app, in Settings → Appearance. See ../themes.ts. */
 	readonly themes?: readonly Theme[];
+	/** Apps people can connect, and blueprints and agents list as `<extension>/<app>`. */
+	readonly apps?: readonly AppDefinition[];
 	/** Built once in each person's Pim. Its tools and actions must be named apart from every other tool. */
 	readonly ability?: (context: AbilityContext) => Ability;
 };
@@ -193,11 +206,14 @@ export function localize(text: Text, locale: string): string {
 
 const ID = /^[a-z0-9][a-z0-9.-]{0,62}$/;
 
+/** Where the apps the admin adds are named: `custom/<app>`. No extension may take the name. */
+export const CUSTOM_APPS = "custom";
+
 /**
  * The extensions installed in this deployment, checked once: ids are unique
  * and well formed, every dashboard names a widget some extension provides,
- * and the default blueprint exists. A mistake in `pim.config.ts` fails here, loudly,
- * instead of drawing a broken dashboard.
+ * every blueprint's apps are installed apps, and the default blueprint exists.
+ * A mistake in `pim.config.ts` fails here, loudly, instead of drawing a broken dashboard.
  */
 export class PimExtensions {
 	readonly #extensions = new Map<string, PimExtension>();
@@ -206,12 +222,19 @@ export class PimExtensions {
 	constructor(extensions: readonly PimExtension[], defaultBlueprint: string | null) {
 		for (const extension of extensions) {
 			if (!ID.test(extension.id)) throw new Error(`Extension id ${JSON.stringify(extension.id)} must be lowercase letters, digits, dots and hyphens`);
+			if (extension.id === CUSTOM_APPS) throw new Error(`No extension may be called ${CUSTOM_APPS}: the admin's apps are`);
 			if (this.#extensions.has(extension.id)) throw new Error(`Two extensions are called ${extension.id}`);
 			this.#extensions.set(extension.id, extension);
 			const ids = new Set<string>();
 			for (const blueprint of extension.blueprints ?? []) {
 				if (!ID.test(blueprint.id) || ids.has(blueprint.id)) throw new Error(`${extension.id} has a missing, malformed or repeated blueprint id ${JSON.stringify(blueprint.id)}`);
 				ids.add(blueprint.id);
+			}
+			const apps = new Set<string>();
+			for (const app of extension.apps ?? []) {
+				if (!ID.test(app.id) || apps.has(app.id)) throw new Error(`${extension.id} has a missing, malformed or repeated app id ${JSON.stringify(app.id)}`);
+				if (!app.name.trim() || !/^https:\/\/\S+$/.test(app.url)) throw new Error(`${extension.id}/${app.id} needs a name and an https URL`);
+				apps.add(app.id);
 			}
 		}
 		for (const { ref, blueprint } of this.blueprints()) {
@@ -221,12 +244,8 @@ export class PimExtensions {
 			for (const id of blueprint.abilities ?? []) {
 				if (!this.#extensions.get(id)?.ability) throw new Error(`${ref} uses the ability of ${id}, which no installed extension brings`);
 			}
-			const urls = new Set<string>();
 			for (const app of blueprint.apps ?? []) {
-				if (!app.name.trim() || !/^https:\/\/\S+$/.test(app.url) || urls.has(app.url)) {
-					throw new Error(`${ref} lists an app without a name, an https URL, or with a repeated URL: ${JSON.stringify(app)}`);
-				}
-				urls.add(app.url);
+				if (!this.app(app)) throw new Error(`${ref} works with the app ${app}, which no installed extension brings`);
 			}
 		}
 		if (defaultBlueprint !== null && !this.blueprint(defaultBlueprint)) throw new Error(`The default blueprint ${defaultBlueprint} isn't in any installed extension`);
@@ -254,6 +273,16 @@ export class PimExtensions {
 		if (!blueprint) return [];
 		const own = split(ref)[0];
 		return [...new Set([...(this.#extensions.get(own)?.ability ? [own] : []), ...(blueprint.abilities ?? [])])];
+	}
+
+	/** Every extension's apps, each with its `<extension>/<app>` name. */
+	apps(): { ref: string; app: AppDefinition }[] {
+		return this.list().flatMap((extension) => (extension.apps ?? []).map((app) => ({ ref: `${extension.id}/${app.id}`, app })));
+	}
+
+	app(ref: string): AppDefinition | undefined {
+		const [extension, id] = split(ref);
+		return this.#extensions.get(extension)?.apps?.find((app) => app.id === id);
 	}
 
 	widget(ref: string): Widget | undefined {

@@ -36,11 +36,11 @@ import {
   type AgentInput,
   admin,
   pim,
-  type SuggestedApp,
   type TeamMember,
 } from "~/lib/pim-api";
 import {
   accountQuery,
+  appDirectoryQuery,
   appsQuery,
   defaultAgentQuery,
   extensionsQuery,
@@ -355,14 +355,14 @@ function PimApps({ agent }: { agent: Agent }) {
   const blueprint = extensions?.extensions
     .flatMap((extension) => extension.blueprints)
     .find((candidate) => candidate.ref === agent.blueprint);
-  const apps = [...(blueprint?.apps ?? []), ...agent.apps].filter(
-    (app, index, all) =>
-      all.findIndex((other) => other.url === app.url) === index,
-  );
+  const { data: directory = [] } = useQuery(appDirectoryQuery());
+  const apps = [
+    ...new Set([...(blueprint?.apps ?? []), ...agent.apps]),
+  ].flatMap((ref) => directory.find((app) => app.ref === ref) ?? []);
   const queryClient = useQueryClient();
   const { data: connected = [] } = useQuery(appsQuery());
   const connect = useMutation({
-    mutationFn: pim.connectApp,
+    mutationFn: (ref: string) => pim.connectApp(ref),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["apps"] });
       queryClient.invalidateQueries({ queryKey: ["permissions"] });
@@ -380,9 +380,9 @@ function PimApps({ agent }: { agent: Agent }) {
         );
         return (
           <li
-            key={app.url}
+            key={app.ref}
             className="flex items-center gap-1.5 rounded-full border py-0.5 pr-1 pl-2.5 text-xs"
-            title={app.url}
+            title={app.description || app.name}
           >
             <Plug className="size-3 text-muted-foreground" />
             {app.name}
@@ -394,7 +394,7 @@ function PimApps({ agent }: { agent: Agent }) {
               <button
                 type="button"
                 className="rounded-full bg-primary px-2 py-0.5 text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
-                onClick={() => connect.mutate(app)}
+                onClick={() => connect.mutate(app.ref)}
                 disabled={connect.isPending}
               >
                 {t("connect")}
@@ -491,10 +491,10 @@ function AgentForm({
     color: agent?.color ?? null,
     image: agent?.icon != null ? "saved" : null,
   });
-  // Each app and member row keeps a key of its own while edited, so removing one doesn't shift the others' inputs.
+  const { data: directory } = useQuery(appDirectoryQuery());
+  // Each member row keeps a key of its own while edited, so removing one doesn't shift the others' inputs.
   const [value, setValue] = useState<
-    Omit<AgentInput, "apps" | "team"> & {
-      apps: (SuggestedApp & { key: string })[];
+    Omit<AgentInput, "team"> & {
       team: (Omit<TeamMember, "tools"> & { tools: string; key: string })[];
     }
   >({
@@ -502,7 +502,7 @@ function AgentForm({
     description: initial.description,
     instructions: initial.instructions,
     blueprint: initial.blueprint,
-    apps: initial.apps.map((app) => ({ ...app, key: crypto.randomUUID() })),
+    apps: initial.apps,
     team: initial.team.map((member) => ({
       ...member,
       tools: member.tools?.join(", ") ?? "",
@@ -517,7 +517,10 @@ function AgentForm({
         symbol: look.symbol,
         color: look.color,
         ...(blueprint === undefined ? {} : { blueprint }),
-        apps: value.apps.map(({ name, url }) => ({ name, url })),
+        // An app this Pim no longer offers can't be saved: it is dropped.
+        apps: directory
+          ? value.apps.filter((ref) => directory.some((app) => app.ref === ref))
+          : value.apps,
         team: value.team.map(({ name, instructions, tools }) => {
           const names = tools
             .split(",")
@@ -556,13 +559,6 @@ function AgentForm({
       ...value,
       team: value.team.map((current) =>
         current.key === key ? { ...current, ...member } : current,
-      ),
-    });
-  const setApp = (key: string, app: Partial<SuggestedApp>) =>
-    setValue({
-      ...value,
-      apps: value.apps.map((current) =>
-        current.key === key ? { ...current, ...app } : current,
       ),
     });
 
@@ -616,56 +612,45 @@ function AgentForm({
         <p className="text-muted-foreground text-xs">
           {t("suggestedAppsHint")}
         </p>
-        {value.apps.map((app) => (
-          <div key={app.key} className="flex gap-2">
-            <Input
-              value={app.name}
-              onChange={(event) =>
-                setApp(app.key, { name: event.target.value })
-              }
-              placeholder={t("appName")}
-              aria-label={t("appName")}
-              className="max-w-40"
-            />
-            <Input
-              value={app.url}
-              onChange={(event) => setApp(app.key, { url: event.target.value })}
-              placeholder="https://…/mcp"
-              aria-label={t("appUrl")}
-            />
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              aria-label={t("removeApp")}
-              onClick={() =>
-                setValue({
-                  ...value,
-                  apps: value.apps.filter((other) => other.key !== app.key),
-                })
-              }
-            >
-              <X />
-            </Button>
-          </div>
-        ))}
-        {value.apps.length < 10 && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() =>
-              setValue({
-                ...value,
-                apps: [
-                  ...value.apps,
-                  { name: "", url: "", key: crypto.randomUUID() },
-                ],
-              })
-            }
-          >
-            <Plus /> {t("addApp")}
-          </Button>
+        {directory?.length === 0 ? (
+          <p className="text-muted-foreground text-xs">{t("noAppsOffered")}</p>
+        ) : (
+          directory && (
+            <ul className="max-h-64 divide-y overflow-y-auto rounded-lg border">
+              {directory.map((app) => {
+                const checked = value.apps.includes(app.ref);
+                return (
+                  <li key={app.ref}>
+                    <label className="flex cursor-pointer items-start gap-3 px-3 py-2 has-disabled:cursor-not-allowed has-disabled:opacity-60">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 size-4 accent-primary"
+                        checked={checked}
+                        // Up to 10 apps an agent.
+                        disabled={!checked && value.apps.length >= 10}
+                        onChange={() =>
+                          setValue({
+                            ...value,
+                            apps: checked
+                              ? value.apps.filter((ref) => ref !== app.ref)
+                              : [...value.apps, app.ref],
+                          })
+                        }
+                      />
+                      <div className="min-w-0">
+                        <div className="text-sm">{app.name}</div>
+                        {app.description && (
+                          <div className="text-muted-foreground text-xs">
+                            {app.description}
+                          </div>
+                        )}
+                      </div>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          )
         )}
       </fieldset>
       <fieldset className="space-y-2">

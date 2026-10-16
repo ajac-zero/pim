@@ -15,6 +15,7 @@ import {
 } from "../agents";
 import { memberInstructions, memberPreamble, type Role } from "../team";
 import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";
+import type { DirectoryApp } from "./app-directory";
 import type { BlueprintDefinition } from "./define";
 import { type McpBridge, serverFor } from "./mcp";
 import { type PimServices, json, text } from "./services";
@@ -24,7 +25,6 @@ export const UPDATE_AGENT = "update_agent";
 export const RENAME_AGENT = "rename_agent";
 export const MANAGE_APPS = "manage_apps";
 
-const App = Type.Object({ name: Type.String(), url: Type.String({ description: "The app's remote MCP server, https." }) });
 const Member = Type.Object({
 	name: Type.String(),
 	instructions: Type.String({ description: "Everything it needs to know: it starts each task knowing only these and the task." }),
@@ -98,25 +98,26 @@ export function updateAgentAction(agents: Pick<AgentStore, "get" | "update">): G
 }
 
 const AppChanges = Type.Object({
-	add: Type.Optional(Type.Array(App, { maxItems: MAX_APPS, description: "Apps to add and connect after approval." })),
-	remove: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_APPS, description: "Exact MCP URLs to remove from this agent, not shared connections. To replace an endpoint, remove its old URL and add the new one together." })),
+	add: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_APPS, description: "Ids of apps to add and connect after approval, as find_app gives them." })),
+	remove: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_APPS, description: "Ids of apps to remove from this agent. The person's connection stays, for their other agents." })),
 });
 type AppChanges = Static<typeof AppChanges>;
 
-/** Apply only the approved URL additions/removals to the agent as it is now. */
-function changedApps(agent: Agent, changes: AppChanges): AgentInput {
-	const added = agentInput({ apps: changes.add ?? [] }, agent).apps;
-	const apps = agent.apps.filter((app) => !changes.remove?.includes(app.url) && !added.some((given) => given.url === app.url));
-	for (const app of added) {
-		if ([...apps, ...added.filter((other) => other !== app)].some((other) => same(other.name, app.name) && other.url !== app.url)) {
-			throw new Error(`An app named ${app.name} has another URL. Include its old URL in remove to replace it.`);
-		}
+/** Applies only the approved additions and removals to the agent as it is now; an app this Pim doesn't offer is refused. */
+function changedApps(agent: Agent, changes: AppChanges, directory: readonly DirectoryApp[]): AgentInput {
+	for (const ref of changes.add ?? []) {
+		if (!directory.some((app) => app.ref === ref)) throw new Error(`This Pim offers no app ${ref}. Use find_app for an app's id.`);
 	}
-	return agentInput({ apps: [...apps, ...added] }, agent);
+	const kept = agent.apps.filter((ref) => !changes.remove?.includes(ref));
+	return agentInput({ apps: [...new Set([...kept, ...(changes.add ?? [])])] }, agent);
 }
 
 /** Changes this agent's app list and connects additions; never disconnects a shared app. */
-export function manageAppsAction(agents: Pick<AgentStore, "get" | "update">, bridge: Pick<McpBridge, "servers" | "connect">): GatedAction {
+export function manageAppsAction(
+	agents: Pick<AgentStore, "get" | "update">,
+	bridge: Pick<McpBridge, "servers" | "connect">,
+	directory: () => readonly DirectoryApp[],
+): GatedAction {
 	return defineGatedAction({
 		name: MANAGE_APPS,
 		description: "An agent manages its own apps with explicit approval for every change.",
@@ -127,9 +128,10 @@ export function manageAppsAction(agents: Pick<AgentStore, "get" | "update">, bri
 		async run({ agent: id, ...changes }) {
 			const agent = agents.get(id);
 			if (!agent) return "That agent no longer exists.";
-			const updated = agents.update(id, changedApps(agent, changes));
+			const apps = directory();
+			const updated = agents.update(id, changedApps(agent, changes, apps));
 			const results = [`${agent.name}'s apps are updated. Shared connections and their tool permissions are unchanged.`];
-			for (const app of updated.apps.filter((app) => changes.add?.some((given) => given.url === app.url))) {
+			for (const app of apps.filter((app) => changes.add?.includes(app.ref) && updated.apps.includes(app.ref))) {
 				if (serverFor(bridge.servers(), app)?.state === "ready") {
 					results.push(`${app.name} is already connected.`);
 					continue;
@@ -170,6 +172,8 @@ export type AgentsHost = {
 	list(): readonly Agent[];
 	/** The blueprints a new agent can build on. */
 	blueprints(): readonly { ref: string; name: string; description: string }[];
+	/** The apps the person can connect. */
+	apps(): readonly DirectoryApp[];
 	/** Checked as the API checks a new agent; throws what it refuses. */
 	create(input: Record<string, unknown>): Agent;
 };
@@ -229,12 +233,12 @@ export function agentExtension(
 	const createAgent = defineTool({
 		name: CREATE_AGENT,
 		description:
-			"Make a new agent for the person: a named agent with its own instructions and the apps it works with, with its own chats in the sidebar. Only when none of their agents already does what they want. Write its instructions as the person would: what it's for, what to focus on, how to answer. Give it an emoji and a color that fit what it's for, so the person tells it apart in the sidebar. Apps are remote MCP servers by https URL, such as ones `find_app` finds; the person connects each the first time they use it.",
+			"Make a new agent for the person: a named agent with its own instructions and the apps it works with, with its own chats in the sidebar. Only when none of their agents already does what they want. Write its instructions as the person would: what it's for, what to focus on, how to answer. Give it an emoji and a color that fit what it's for, so the person tells it apart in the sidebar. Apps are ids of apps this Pim offers, as `find_app` finds them; the person connects each the first time they use it.",
 		parameters: Type.Object({
 			name: Type.String({ minLength: 1, maxLength: MAX_NAME }),
 			description: Type.String({ maxLength: MAX_DESCRIPTION, description: "One line, shown under its name." }),
 			instructions: Type.String({ maxLength: MAX_INSTRUCTIONS }),
-			apps: Type.Optional(Type.Array(App, { maxItems: MAX_APPS })),
+			apps: Type.Optional(Type.Array(Type.String({ description: "An app's id, from find_app." }), { maxItems: MAX_APPS })),
 			team: Type.Optional(
 				Type.Array(Member, {
 					maxItems: MAX_TEAM,
@@ -286,7 +290,7 @@ export function agentExtension(
 
 	const manageApps = defineTool({
 		name: MANAGE_APPS,
-		description: `Change the apps this agent works with when the person asks: add remote MCP servers, remove them, or replace an endpoint by removing its old URL and adding its new URL. Approval connects additions automatically; continue the original task once the result arrives. Removing an app affects only this agent, not other agents' shared connections. Never put API keys or other secrets in URLs or tool arguments; use the person's sign-in link if needed. Tell them who runs a third-party server. ${approvalNote(services, true)}`,
+		description: `Change the apps this agent works with when the person asks: add apps this Pim offers, by their ids from find_app, or remove them. Approval connects additions automatically; continue the original task once the result arrives. Removing an app affects only this agent, not the person's connection, which their other agents share. ${approvalNote(services, true)}`,
 		parameters: AppChanges,
 		replay: "safe",
 		async execute(changes, api, context) {
@@ -294,10 +298,12 @@ export function agentExtension(
 			const { agent } = roleOf(String(api.conversationId));
 			let summary: string;
 			try {
-				const next = changedApps(agent, changes);
-				const removed = agent.apps.filter((app) => !next.apps.some((other) => other.url === app.url));
-				const added = next.apps.filter((app) => !agent.apps.some((other) => other.url === app.url && other.name === app.name));
-				summary = removed.length === 0 && added.length === 0 ? "" : `${agent.name}: ${[...removed.map((app) => `remove ${app.name} (${app.url})`), ...added.map((app) => `add and connect ${app.name} (${app.url})`)].join("; ")}`;
+				const apps = agents.apps();
+				const next = changedApps(agent, changes, apps);
+				const name = (ref: string) => apps.find((app) => app.ref === ref)?.name ?? ref;
+				const removed = agent.apps.filter((ref) => !next.apps.includes(ref));
+				const added = next.apps.filter((ref) => !agent.apps.includes(ref));
+				summary = removed.length === 0 && added.length === 0 ? "" : `${agent.name}: ${[...removed.map((ref) => `remove ${name(ref)}`), ...added.map((ref) => `add and connect ${name(ref)}`)].join("; ")}`;
 			} catch (error) {
 				return text(error instanceof Error ? error.message : String(error), true);
 			}

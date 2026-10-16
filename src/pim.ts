@@ -48,11 +48,11 @@ import {
 } from "./extensions/approvals";
 import pimConfig from "../pim.config";
 import { artifactsExtension, artifactsWidgets } from "./extensions/artifacts";
+import { appDirectory, type CustomApp, type DirectoryApp } from "./extensions/app-directory";
 import { ExtensionDataStore } from "./extensions/data";
 import {
 	type Ability,
 	checkToolNames,
-	type PimApp,
 	type PimConfig,
 	PimExtensions,
 	type ShownWidget,
@@ -189,6 +189,9 @@ const LIMITS_KEY = "limits";
 /** Tools of the Pim the person talks with that its team members don't get, though their extensions stay. */
 const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, RENAME_AGENT, MANAGE_APPS]);
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
+/** The admin's apps, as this Pim last read them from the gallery, and how long before it reads them again. */
+const CUSTOM_APPS_KEY = "custom_apps";
+const CUSTOM_APPS_TTL_MS = 60_000;
 const AGENT_SECTION_KEY = "pim_section";
 /** The day the person was last told a limit stopped background work. */
 const LIMIT_NOTICE_KEY = "limit_notice";
@@ -265,7 +268,7 @@ export class Pim extends DurableAgent<Env> {
 		const ref = this.extensions.defaultBlueprint;
 		const blueprint = ref === null ? undefined : this.extensions.blueprint(ref);
 		return { name: blueprint?.name ?? "Pim", description: blueprint?.description ?? "", instructions: "", apps: [], team: [], blueprint: blueprint ? ref : null };
-	});
+	}, () => this.appDirectory());
 	/** The tasks the agents' teams were given, each in a conversation of its own. */
 	readonly team = new TeamStore(this.ctx.storage.sql);
 	/** Images the person sent, in R2; their messages keep their URLs. */
@@ -329,7 +332,7 @@ export class Pim extends DurableAgent<Env> {
 			this.#assertOpen();
 			return this.mcp.callTool({ serverId, name, arguments: args });
 		},
-		connect: (name, url) => this.connectApp(name, url, { allowDuplicateName: true }),
+		connect: (name, url) => this.connectApp(name, url),
 		capabilities: (serverId) => this.mcp.mcpConnections[serverId]?.serverCapabilities as McpCapabilities | undefined,
 		request: async (serverId, method, params) => {
 			const connection = this.mcp.mcpConnections[serverId];
@@ -364,7 +367,7 @@ export class Pim extends DurableAgent<Env> {
 		watchAction(this.apps, this.appEvents),
 		updateAgentAction(this.agents),
 		renameAgentAction(this.agents),
-		manageAppsAction(this.agents, this.apps),
+		manageAppsAction(this.agents, this.apps, () => this.appDirectory()),
 	];
 
 	/** Every action an approval can be for: Pim's own, and the extensions'. */
@@ -460,22 +463,15 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Connects a remote MCP server under a new name. A failed connection
-	 * leaves nothing behind; `authUrl` is set when the user must sign in.
+	 * Connects one of the directory's apps, by its name and server. A failed
+	 * connection leaves nothing behind; `authUrl` is set when the user must sign in.
 	 */
-	async connectApp(
-		name: string,
-		url: string,
-		options: { headers?: Record<string, string>; approval?: McpApproval; allowDuplicateName?: boolean } = {},
-	): Promise<{ id: string; state: string; authUrl?: string }> {
+	async connectApp(name: string, url: string, options: { approval?: McpApproval } = {}): Promise<{ id: string; state: string; authUrl?: string }> {
+		// A connection is the app's, found by its server: another app with the same name gets one of its own.
 		let id = slug(name);
-		// Agent app lists identify connections by URL. Replacing one agent's
-		// endpoint must not overwrite a same-named connection other agents use.
-		if (options.allowDuplicateName) {
-			const sameUrl = this.apps.servers().find((server) => server.url === url);
-			if (sameUrl) id = sameUrl.id;
-			else if (this.apps.servers().some((server) => server.id === id)) id = `${id.slice(0, 15)}_${crypto.randomUUID().slice(0, 8)}`;
-		}
+		const sameUrl = this.apps.servers().find((server) => server.url === url);
+		if (sameUrl) id = sameUrl.id;
+		else if (this.apps.servers().some((server) => server.id === id)) id = `${id.slice(0, 15)}_${crypto.randomUUID().slice(0, 8)}`;
 		const existing = this.apps.servers().find((server) => server.id === id);
 		if (existing && existing.state !== "ready") {
 			// A connection that failed, or is still waiting for sign-in (an abandoned or expired one), is not connected: clear it so the user can try again.
@@ -494,7 +490,6 @@ export class Pim extends DurableAgent<Env> {
 				id,
 				// The owner in the path tells the Worker whose Pim the sign-in returns to.
 				callbackPath: `${MCP_CALLBACK_PATH}/${this.name}`,
-				...(options.headers ? { transport: { headers: options.headers } } : {}),
 			});
 			if (result.state === "ready") {
 				await this.catalog.refresh(id).catch((error) => console.warn(`reading ${id}'s catalog failed`, error));
@@ -541,7 +536,13 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	#appExtensions(services: PimServices) {
-		return mcpExtensions(this.apps, services, this.#appExtras(services), (session) => this.#appsOf(this.#roleOf(session).agent));
+		return mcpExtensions(
+			this.apps,
+			services,
+			this.#appExtras(services),
+			(session) => this.#appsOf(this.#roleOf(session).agent),
+			() => this.appDirectory(),
+		);
 	}
 
 	/** Installs each ready app's tools as its own extension, and takes out those of apps that no longer are. */
@@ -554,11 +555,38 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/** The apps an agent works with: those of the blueprint it builds on, then its own. */
-	#appsOf(agent: Agent): PimApp[] {
+	#appsOf(agent: Agent): DirectoryApp[] {
 		const blueprint = agent.blueprint === null ? [] : (this.extensions.blueprint(agent.blueprint)?.apps ?? []);
-		const apps = new Map<string, PimApp>();
-		for (const app of [...blueprint, ...agent.apps]) if (!apps.has(app.url)) apps.set(app.url, app);
-		return [...apps.values()];
+		const directory = this.appDirectory();
+		return [...new Set([...blueprint, ...agent.apps])].flatMap((ref) => directory.find((app) => app.ref === ref) ?? []);
+	}
+
+	/** The apps people on this deployment can connect: the extensions', then the admin's, as last read from the gallery. */
+	appDirectory(): DirectoryApp[] {
+		const custom = this.store.meta(CUSTOM_APPS_KEY);
+		return appDirectory(this.extensions.list(), custom === undefined ? [] : (JSON.parse(custom) as CustomApp[]));
+	}
+
+	#customAppsReadAt = 0;
+
+	/** Reads the admin's apps from the gallery again, at most once a minute unless `now`. */
+	async #refreshCustomApps(now = false): Promise<void> {
+		if (!now && Date.now() - this.#customAppsReadAt < CUSTOM_APPS_TTL_MS) return;
+		this.#customAppsReadAt = Date.now();
+		try {
+			const custom = JSON.stringify(await this.env.Gallery.getByName("gallery").customApps());
+			if (custom !== this.store.meta(CUSTOM_APPS_KEY)) this.store.setMeta(CUSTOM_APPS_KEY, custom);
+		} catch (error) {
+			console.warn("reading the admin's apps failed", error);
+		}
+	}
+
+	/** Apps given through the API must be in the directory. */
+	#checkApps<T extends { apps: readonly string[] }>(input: T): T {
+		const directory = this.appDirectory();
+		const missing = input.apps.find((ref) => !directory.some((app) => app.ref === ref));
+		if (missing) throw new HttpError(400, `This Pim offers no app ${missing}`);
+		return input;
 	}
 
 	/** The extensions of the connected apps an agent works with. */
@@ -1748,9 +1776,15 @@ export class Pim extends DurableAgent<Env> {
 		this.agents.setAbilities(session, key);
 	}
 
-	/** A copy's blueprint, if this deployment still has it; else the copy builds on the default blueprint. */
-	#installedBlueprint(input: AgentInput): AgentInput {
-		return input.blueprint && !this.extensions.blueprint(input.blueprint) ? { ...input, blueprint: undefined } : input;
+	/** A copy's blueprint, if this deployment still has it, else the default blueprint; and those of its apps it still offers. */
+	async #installed(input: AgentInput): Promise<AgentInput> {
+		await this.#refreshCustomApps(true);
+		const directory = this.appDirectory();
+		return {
+			...input,
+			apps: input.apps.filter((ref) => directory.some((app) => app.ref === ref)),
+			...(input.blueprint && !this.extensions.blueprint(input.blueprint) ? { blueprint: undefined } : {}),
+		};
 	}
 
 	/** A blueprint given through the API must be a blueprint some installed extension brings. */
@@ -1844,7 +1878,7 @@ export class Pim extends DurableAgent<Env> {
 		name: string;
 		description: string;
 		instructions: string;
-		apps: readonly { name: string; url: string }[];
+		apps: readonly string[];
 		team: readonly TeamMember[];
 		blueprint: string | null;
 		symbol: string | null;
@@ -1853,7 +1887,7 @@ export class Pim extends DurableAgent<Env> {
 	}): Promise<Agent> {
 		this.#assertOpen();
 		const { image, ...rest } = template;
-		const input = this.#installedBlueprint(agentInput({ ...rest }));
+		const input = await this.#installed(agentInput({ ...rest }));
 		const agent = this.agents.create(input, { template: template.id, author: template.author });
 		if (image) this.agents.setIcon(agent.id, image.type, image.data);
 		return this.agents.get(agent.id)!;
@@ -1863,7 +1897,7 @@ export class Pim extends DurableAgent<Env> {
 	async adoptDefaultAgent(agent: AgentInput & { author: string; image: AgentIcon | null }): Promise<Agent> {
 		this.#assertOpen();
 		const { author, image, ...input } = agent;
-		const copy = this.agents.replaceDefault(this.#installedBlueprint(agentInput({ ...input })), { template: "default", author });
+		const copy = this.agents.replaceDefault(await this.#installed(agentInput({ ...input })), { template: "default", author });
 		if (image) this.agents.setIcon(copy.id, image.type, image.data);
 		else this.agents.removeIcon(copy.id);
 		return this.agents.get(copy.id)!;
@@ -1990,6 +2024,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 		if (this.#closed()) return Response.json({ error: "This Pim was erased" }, { status: 410 });
 		if (this.status() !== "active") return Response.json({ error: "This Pim is suspended" }, { status: 403 });
+		await this.#refreshCustomApps();
 		return super.fetch(request);
 	}
 
@@ -2820,7 +2855,7 @@ export class Pim extends DurableAgent<Env> {
 			"POST",
 			"/agents",
 			async (_params, request) => {
-				const agent = this.agents.create(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request))));
+				const agent = this.agents.create(this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request)))));
 				return Response.json(agent, { status: 201 });
 			},
 		],
@@ -2828,7 +2863,7 @@ export class Pim extends DurableAgent<Env> {
 			"PUT",
 			"/agents/:agent",
 			async ({ agent: id }, request) => {
-				return this.agents.update(id!, this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request), this.#agent(id!))));
+				return this.agents.update(id!, this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request), this.#agent(id!)))));
 			},
 		],
 		// What a model provider fetches; the signature, not the API token, lets it in.
@@ -2993,28 +3028,28 @@ export class Pim extends DurableAgent<Env> {
 		],
 		["POST", "/visits/:username", async ({ username }) => ({ session: await this.startVisit(username!) })],
 
-		// Connected apps (remote MCP servers).
+		// The apps people can connect, and the person's connections to them.
+		[
+			"GET",
+			"/app-directory",
+			async () => {
+				await this.#refreshCustomApps(true);
+				return { apps: this.appDirectory() };
+			},
+		],
 		["GET", "/mcp", () => ({ servers: this.#describeApps() })],
 		[
 			"POST",
 			"/mcp",
 			async (_params, request) => {
-				const body = await readJson<{ name: string; url: string; headers: Record<string, string>; approval: McpApproval }>(
-					request,
-				);
-				if (typeof body.name !== "string" || body.name.trim() === "") throw new HttpError(400, "name is required");
-				if (typeof body.url !== "string" || !/^https?:\/\//.test(body.url)) throw new HttpError(400, "url must be http(s)");
+				const body = await readJson<{ app: string; approval: McpApproval }>(request);
 				if (body.approval !== undefined && !MCP_APPROVALS.includes(body.approval)) {
 					throw new HttpError(400, `approval must be one of ${MCP_APPROVALS.join(", ")}`);
 				}
-				const headers = body.headers;
-				if (headers !== undefined && (typeof headers !== "object" || Object.values(headers).some((v) => typeof v !== "string"))) {
-					throw new HttpError(400, "headers must map names to strings");
-				}
-				const result = await this.connectApp(body.name.trim(), body.url, {
-					...(headers ? { headers } : {}),
-					...(body.approval ? { approval: body.approval } : {}),
-				});
+				await this.#refreshCustomApps(true);
+				const app = this.appDirectory().find((candidate) => candidate.ref === body.app);
+				if (!app) throw new HttpError(400, "app must be the id of an app this Pim offers");
+				const result = await this.connectApp(app.name, app.url, body.approval ? { approval: body.approval } : {});
 				return Response.json(result, { status: 201 });
 			},
 		],
@@ -3133,7 +3168,8 @@ export class Pim extends DurableAgent<Env> {
 			{
 				list: () => this.agents.list(),
 				blueprints: () => this.extensions.blueprints().map(({ ref, blueprint }) => ({ ref, name: blueprint.name, description: blueprint.description })),
-				create: (input) => this.agents.create(this.#checkBlueprint(agentInput(input))),
+				apps: () => this.appDirectory(),
+				create: (input) => this.agents.create(this.#checkApps(this.#checkBlueprint(agentInput(input)))),
 			},
 		);
 	}

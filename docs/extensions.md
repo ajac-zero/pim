@@ -69,6 +69,8 @@ export const ledger = definePimExtension({
 			}),
 		},
 	},
+	// Apps people can connect: remote MCP servers, named `ledger/<id>`.
+	apps: [{ id: "bank", name: "Bank", description: "Your accounts and transactions.", url: "https://mcp.bank.example/mcp" }],
 	blueprints: [
 		{
 			id: "budget",
@@ -78,8 +80,8 @@ export const ledger = definePimExtension({
 			dashboard: ["ledger/bills", "pim.goals/active", "pim.schedule/upcoming"],
 			// Abilities of other extensions it uses; its own extension's always.
 			abilities: [],
-			// Remote MCP servers it works with: each person connects them with their own accounts.
-			apps: [{ name: "Bank", url: "https://mcp.bank.example/mcp" }],
+			// Apps it works with, from any extension: each person connects them with their own accounts.
+			apps: ["ledger/bank"],
 			starters: [{ en: "How much did I spend?", es: "¿Cuánto gasté?" }],
 		},
 	],
@@ -117,7 +119,11 @@ It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps
 
 ## Apps
 
-An agent's `apps` are the remote MCP servers its chats work with. Each person connects them with their own accounts, from an agent's card in Your agents or by asking the agent, whose `connect_app` connects only the apps that agent lists. A chat gets the tools and instructions of the connected apps its agent lists: the blueprint's `apps`, then the agent's own. Apps connected for another agent stay out of it. With `manage_apps` enabled (Off / Ask in Tool permissions), an agent can request additions and removals to its own app list using a URL the person gives it or one `find_app` discovers. Each request requires explicit chat approval of its exact URLs, even under the auto approval policy, and approval connects additions automatically. Removal affects only the agent's own list, not blueprint apps or shared connections. `update_agent` cannot change apps. URLs must be https, and unique within an agent.
+An extension's `apps` are what people on the deployment can connect: remote MCP servers, each with an `id`, a `name`, a `description` and an https `url`. Each is named `<extension>/<id>`, and that name is what blueprints, agents and templates list, never the URL. Besides the extensions' apps, the admin can add their own in Settings → Apps (`custom/<id>`; no extension may be called `custom`). Together they are the directory, and nothing outside it can be connected.
+
+Each person connects an app once, with their own account, from Settings → Apps, an agent's card in Your agents, or by asking an agent, whose `connect_app` connects only the apps that agent lists. Every agent of theirs that lists it then works with that one connection. A chat gets the tools and instructions of the connected apps its agent lists: the blueprint's `apps`, then the agent's own. Apps connected for another agent stay out of it. With `manage_apps` enabled (Off / Ask in Tool permissions), an agent can request additions and removals to its own app list, by name, as `find_app` finds them in the directory. Each request requires explicit chat approval, even under the auto approval policy, and approval connects additions automatically. Removal affects only the agent's own list, not blueprint apps or shared connections. `update_agent` cannot change apps.
+
+A blueprint's apps must be installed: one that names an app no extension brings fails when extensions are checked. Don't rename an app's `id`: people's agents store it.
 
 ## Widgets
 
@@ -190,4 +196,5 @@ People pick a theme in Settings → Appearance; the choice is kept in their brow
 - **Widget actions** beyond opening a chat or an artifact, more kinds, and arranging a dashboard.
 - **Themes beyond colors**, such as fonts and radii, and translated theme names.
 - **Widgets with arguments** in chat, such as one goal, and interfaces the model composes itself from a catalog of components.
-- **Extensions people bring themselves**, sandboxed (see [Dynamic Workers](https://developers.cloudflare.com/dynamic-workers/)); connected MCP apps are how people add tools today.
+- **Extensions people bring themselves**, sandboxed (see [Dynamic Workers](https://developers.cloudflare.com/dynamic-workers/)); the directory's MCP apps are how people add tools today.
+- **Apps without an MCP server**, which an extension implements itself with its own sign-in, and widgets for an app's tool results.

@@ -7,7 +7,7 @@ import { useI18n } from "~/components/i18n";
 import { Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import { pim } from "~/lib/pim-api";
-import { agentsQuery, templateQuery } from "~/lib/queries";
+import { agentsQuery, appDirectoryQuery, templateQuery } from "~/lib/queries";
 
 export const Route = createFileRoute("/templates/$templateId")({
   component: TemplatePage,
@@ -21,6 +21,7 @@ function TemplatePage() {
   const navigate = useNavigate();
   const { data: template, error } = useQuery(templateQuery(templateId));
   const { data: agents } = useQuery(agentsQuery());
+  const { data: directory } = useQuery(appDirectoryQuery());
   const copy = agents?.find((agent) => agent.source?.template === templateId);
   const use = useMutation({
     mutationFn: () => pim.adoptTemplate(templateId),
@@ -84,14 +85,19 @@ function TemplatePage() {
             {t("suggestedApps")}
           </h2>
           <ul className="divide-y rounded-xl border">
-            {template.apps.map((app) => (
-              <li key={app.url} className="px-4 py-2.5 text-sm">
-                <span className="font-medium">{app.name}</span>
-                <span className="block truncate font-mono text-muted-foreground text-xs">
-                  {app.url}
-                </span>
-              </li>
-            ))}
+            {template.apps.map((ref) => {
+              const app = directory?.find((candidate) => candidate.ref === ref);
+              return (
+                <li key={ref} className="px-4 py-2.5 text-sm">
+                  <span className="font-medium">{app?.name ?? ref}</span>
+                  {app?.description && (
+                    <span className="block truncate text-muted-foreground text-xs">
+                      {app.description}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </section>
       )}

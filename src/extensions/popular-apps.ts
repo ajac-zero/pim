@@ -23,6 +23,7 @@ export const popularApps = definePimExtension({
 			description: "Search and update records, tables and bases.",
 			url: "https://mcp.airtable.com/mcp",
 			icon: LOGOS["airtable"],
+			category: "productivity",
 		},
 		{
 			id: "atlassian",
@@ -30,6 +31,7 @@ export const popularApps = definePimExtension({
 			description: "Search and update Jira issues and Confluence pages.",
 			url: "https://mcp.atlassian.com/v2/mcp",
 			icon: LOGOS["atlassian"],
+			category: "productivity",
 		},
 		{
 			id: "attio",
@@ -37,6 +39,7 @@ export const popularApps = definePimExtension({
 			description: "Manage contacts, companies, deals, notes and tasks.",
 			url: "https://mcp.attio.com/mcp",
 			icon: LOGOS["attio"],
+			category: "customers",
 		},
 		{
 			id: "cal-com",
@@ -44,6 +47,7 @@ export const popularApps = definePimExtension({
 			description: "Manage bookings, availability and event types.",
 			url: "https://mcp.cal.com/mcp",
 			icon: LOGOS["cal-com"],
+			category: "meetings",
 		},
 		{
 			id: "calendly",
@@ -51,6 +55,7 @@ export const popularApps = definePimExtension({
 			description: "Check availability and book or manage meetings.",
 			url: "https://mcp.calendly.com",
 			icon: LOGOS["calendly"],
+			category: "meetings",
 		},
 		{
 			id: "clickup",
@@ -58,6 +63,7 @@ export const popularApps = definePimExtension({
 			description: "Manage tasks, documents, comments and time entries.",
 			url: "https://mcp.clickup.com/mcp",
 			icon: LOGOS["clickup"],
+			category: "productivity",
 		},
 		{
 			id: "cloudflare",
@@ -65,6 +71,7 @@ export const popularApps = definePimExtension({
 			description: "Manage DNS, Workers, storage and account services.",
 			url: "https://mcp.cloudflare.com/mcp",
 			icon: LOGOS["cloudflare"],
+			category: "development",
 		},
 		// Signed in, so each person uses their own quota rather than the anonymous one.
 		{
@@ -73,6 +80,7 @@ export const popularApps = definePimExtension({
 			description: "Find library documentation and code examples.",
 			url: "https://mcp.context7.com/mcp/oauth",
 			icon: LOGOS["context7"],
+			category: "development",
 		},
 		// Signed in, so each person searches on their own quota rather than the anonymous one.
 		{
@@ -81,6 +89,7 @@ export const popularApps = definePimExtension({
 			description: "Search the web and read pages and code examples.",
 			url: "https://mcp.exa.ai/mcp?login",
 			icon: LOGOS["exa"],
+			category: "research",
 		},
 		{
 			id: "fireflies",
@@ -88,6 +97,7 @@ export const popularApps = definePimExtension({
 			description: "Search meeting transcripts, summaries and notes.",
 			url: "https://api.fireflies.ai/mcp",
 			icon: LOGOS["fireflies"],
+			category: "meetings",
 		},
 		// GitHub's sign-in doesn't let apps register themselves: see above.
 		{
@@ -96,6 +106,7 @@ export const popularApps = definePimExtension({
 			description: "Repositories, issues, pull requests and Actions.",
 			url: "https://api.githubcopilot.com/mcp/",
 			icon: LOGOS["github"],
+			category: "development",
 			client: { id: "GITHUB_CLIENT_ID", secret: "GITHUB_CLIENT_SECRET" },
 		},
 		{
@@ -104,6 +115,7 @@ export const popularApps = definePimExtension({
 			description: "Search meeting notes, transcripts and action items.",
 			url: "https://mcp.granola.ai/mcp",
 			icon: LOGOS["granola"],
+			category: "meetings",
 		},
 		// Team and Enterprise plans, on Hex's shared cloud (not EU, HIPAA or single-tenant hosts).
 		{
@@ -112,6 +124,7 @@ export const popularApps = definePimExtension({
 			description: "Search projects, analyze data and edit notebooks.",
 			url: "https://app.hex.tech/mcp",
 			icon: LOGOS["hex"],
+			category: "data",
 		},
 		{
 			id: "hugging-face",
@@ -119,6 +132,7 @@ export const popularApps = definePimExtension({
 			description: "Search models, datasets, papers and Spaces on the Hub.",
 			url: "https://huggingface.co/mcp",
 			icon: LOGOS["hugging-face"],
+			category: "research",
 		},
 		// US workspaces; EU ones are at mcp.eu.intercom.com, and AU has none.
 		{
@@ -127,6 +141,7 @@ export const popularApps = definePimExtension({
 			description: "Search conversations and customer contacts.",
 			url: "https://mcp.intercom.com/mcp",
 			icon: LOGOS["intercom"],
+			category: "customers",
 		},
 		{
 			id: "jotform",
@@ -134,6 +149,7 @@ export const popularApps = definePimExtension({
 			description: "Create and edit forms and review submissions.",
 			url: "https://mcp.jotform.com/",
 			icon: LOGOS["jotform"],
+			category: "productivity",
 		},
 		{
 			id: "klaviyo",
@@ -141,6 +157,7 @@ export const popularApps = definePimExtension({
 			description: "Manage campaigns, audiences and marketing reports.",
 			url: "https://mcp.klaviyo.com/mcp",
 			icon: LOGOS["klaviyo"],
+			category: "customers",
 		},
 		{
 			id: "linear",
@@ -148,6 +165,7 @@ export const popularApps = definePimExtension({
 			description: "Issues, projects and cycles in your workspace.",
 			url: "https://mcp.linear.app/mcp",
 			icon: LOGOS["linear"],
+			category: "productivity",
 		},
 		{
 			id: "make",
@@ -155,6 +173,7 @@ export const popularApps = definePimExtension({
 			description: "Run scenarios and manage your automations.",
 			url: "https://mcp.make.com",
 			icon: LOGOS["make"],
+			category: "automation",
 		},
 		// Its 401 names no metadata, so sign-in finds it at the server's root.
 		{
@@ -163,6 +182,7 @@ export const popularApps = definePimExtension({
 			description: "Review balances, transactions, cards and recipients.",
 			url: "https://mcp.mercury.com/mcp",
 			icon: LOGOS["mercury"],
+			category: "finance",
 		},
 		{
 			id: "miro",
@@ -170,6 +190,7 @@ export const popularApps = definePimExtension({
 			description: "Search boards and create diagrams and notes.",
 			url: "https://mcp.miro.com/",
 			icon: LOGOS["miro"],
+			category: "productivity",
 		},
 		// Its account admin approves each sign-in's callback first, unless they turned on auto-approval.
 		{
@@ -178,6 +199,7 @@ export const popularApps = definePimExtension({
 			description: "Manage boards, tasks and project updates.",
 			url: "https://mcp.monday.com/mcp",
 			icon: LOGOS["monday"],
+			category: "productivity",
 		},
 		{
 			id: "neon",
@@ -185,6 +207,7 @@ export const popularApps = definePimExtension({
 			description: "Manage Postgres projects, branches and queries.",
 			url: "https://mcp.neon.tech/mcp",
 			icon: LOGOS["neon"],
+			category: "development",
 		},
 		{
 			id: "netlify",
@@ -192,6 +215,7 @@ export const popularApps = definePimExtension({
 			description: "Build, deploy and manage sites and projects.",
 			url: "https://netlify-mcp.netlify.app/mcp",
 			icon: LOGOS["netlify"],
+			category: "development",
 		},
 		{
 			id: "notion",
@@ -199,6 +223,7 @@ export const popularApps = definePimExtension({
 			description: "Search, read and write your pages and databases.",
 			url: "https://mcp.notion.com/mcp",
 			icon: LOGOS["notion"],
+			category: "productivity",
 		},
 		{
 			id: "paypal",
@@ -206,6 +231,7 @@ export const popularApps = definePimExtension({
 			description: "Manage payments, invoices and customer records.",
 			url: "https://mcp.paypal.com/mcp",
 			icon: LOGOS["paypal"],
+			category: "finance",
 		},
 		{
 			id: "posthog",
@@ -213,6 +239,7 @@ export const popularApps = definePimExtension({
 			description: "Query analytics and manage flags and experiments.",
 			url: "https://mcp.posthog.com/mcp",
 			icon: LOGOS["posthog"],
+			category: "data",
 		},
 		{
 			id: "sentry",
@@ -220,6 +247,7 @@ export const popularApps = definePimExtension({
 			description: "Find errors, investigate issues and performance.",
 			url: "https://mcp.sentry.dev/mcp",
 			icon: LOGOS["sentry"],
+			category: "development",
 		},
 		{
 			id: "stripe",
@@ -227,6 +255,7 @@ export const popularApps = definePimExtension({
 			description: "Payments, customers, subscriptions and invoices.",
 			url: "https://mcp.stripe.com",
 			icon: LOGOS["stripe"],
+			category: "finance",
 		},
 		{
 			id: "supabase",
@@ -234,6 +263,7 @@ export const popularApps = definePimExtension({
 			description: "Manage databases, projects and edge functions.",
 			url: "https://mcp.supabase.com/mcp",
 			icon: LOGOS["supabase"],
+			category: "development",
 		},
 		{
 			id: "todoist",
@@ -241,6 +271,7 @@ export const popularApps = definePimExtension({
 			description: "Create, organize and complete tasks and projects.",
 			url: "https://ai.todoist.net/mcp",
 			icon: LOGOS["todoist"],
+			category: "productivity",
 		},
 		{
 			id: "webflow",
@@ -248,6 +279,7 @@ export const popularApps = definePimExtension({
 			description: "Manage site designs, pages and CMS content.",
 			url: "https://mcp.webflow.com/mcp",
 			icon: LOGOS["webflow"],
+			category: "websites",
 		},
 		{
 			id: "wix",
@@ -255,6 +287,7 @@ export const popularApps = definePimExtension({
 			description: "Manage sites, stores, bookings and business data.",
 			url: "https://mcp.wix.com/mcp",
 			icon: LOGOS["wix"],
+			category: "websites",
 		},
 	],
 });

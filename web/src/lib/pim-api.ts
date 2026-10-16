@@ -33,7 +33,24 @@ export type DirectoryApp = {
   custom: boolean;
   /** Its logo, an https or `data:` image URL; null for none. */
   icon: string | null;
+  /** Where the Apps page files it; null for Other. */
+  category: AppCategory | null;
 };
+
+/** The categories apps are filed under, in the order the Apps page shows them (src/extensions/define.ts). */
+export const APP_CATEGORIES = [
+  "productivity",
+  "meetings",
+  "development",
+  "data",
+  "finance",
+  "customers",
+  "websites",
+  "automation",
+  "research",
+  "media",
+] as const;
+export type AppCategory = (typeof APP_CATEGORIES)[number];
 
 /** One of an agent's team: it does tasks the agent hands it, and answers the agent, never you. */
 export type TeamMember = {
@@ -917,6 +934,7 @@ export const admin = {
     description: string;
     url: string;
     icon: string;
+    category: AppCategory | "";
   }) =>
     call<{ app: { id: string } }>("/admin/apps", {
       method: "POST",

@@ -4,6 +4,7 @@ import pimConfig from "../pim.config";
 import { HttpError } from "./http";
 import type { TeamMember } from "./agents";
 import { appDirectory, type CustomApp, type DirectoryApp, findSiteIcon, storedApps } from "./extensions/app-directory";
+import { APP_CATEGORIES, type AppCategory } from "./extensions/define";
 
 /**
  * What the people on a Pim show each other: profiles, and the agents they
@@ -131,6 +132,7 @@ CREATE TABLE IF NOT EXISTS apps (
 	description TEXT NOT NULL,
 	url TEXT NOT NULL UNIQUE,
 	icon TEXT,
+	category TEXT,
 	created_at INTEGER NOT NULL
 );
 `;
@@ -166,6 +168,13 @@ const summaryOf = (row: Row, directory: () => readonly DirectoryApp[]): Template
 // Every column but the icon's bytes, which only its own route reads.
 const WITH_AUTHOR =
 	"SELECT t.id, t.owner_id, t.username, t.agent_id, t.name, t.description, t.instructions, t.apps, t.team, t.blueprint, t.symbol, t.color, t.icon_data IS NOT NULL AS has_icon, t.published_at, t.uses, p.display_name FROM templates t LEFT JOIN profiles p ON p.owner_id = t.owner_id";
+
+/** The category the admin filed an app under, or null for Other. */
+function appCategory(value: unknown): AppCategory | null {
+	if (value === undefined || value === null || value === "") return null;
+	if (!APP_CATEGORIES.includes(value as AppCategory)) throw new HttpError(400, `category must be one of ${APP_CATEGORIES.join(", ")}`);
+	return value as AppCategory;
+}
 
 /** An icon the admin gave: an https image URL, or null for none. */
 function iconUrl(value: unknown): string | null {
@@ -233,19 +242,27 @@ export class Gallery extends DurableObject<Env> {
 
 	/** The apps the admin added, as they added them. */
 	customApps(): CustomApp[] {
-		return this.#sql("SELECT id, name, description, url, icon FROM apps ORDER BY created_at, id")
+		return this.#sql("SELECT id, name, description, url, icon, category FROM apps ORDER BY created_at, id")
 			.toArray()
-			.map((row) => ({ id: String(row.id), name: String(row.name), description: String(row.description), url: String(row.url), icon: optional(row.icon) }));
+			.map((row) => ({
+				id: String(row.id),
+				name: String(row.name),
+				description: String(row.description),
+				url: String(row.url),
+				icon: optional(row.icon),
+				category: optional(row.category) as AppCategory | null,
+			}));
 	}
 
 	/** The admin adds an app anyone on this Pim can connect: a remote MCP server, named `custom/<id>` after its name, with the icon they give or else its site's. */
-	async addCustomApp(input: { name?: unknown; description?: unknown; url?: unknown; icon?: unknown }): Promise<CustomApp> {
+	async addCustomApp(input: { name?: unknown; description?: unknown; url?: unknown; icon?: unknown; category?: unknown }): Promise<CustomApp> {
 		const name = optionalText(input.name, "name", MAX_APP_NAME);
 		if (name === null) throw new HttpError(400, "name is required");
 		const description = optionalText(input.description, "description", MAX_BIO) ?? "";
 		const url = typeof input.url === "string" ? input.url.trim() : "";
 		if (!/^https:\/\/\S+$/.test(url) || url.length > 500) throw new HttpError(400, "url must be an https URL");
 		const given = iconUrl(input.icon);
+		const category = appCategory(input.category);
 		const added = () => this.customApps().some((app) => app.url === url);
 		if (added()) throw new HttpError(409, "An app with that URL is already here");
 		const icon = given ?? (await findSiteIcon(url));
@@ -255,8 +272,17 @@ export class Gallery extends DurableObject<Env> {
 		const taken = new Set(this.customApps().map((app) => app.id));
 		let id = base;
 		for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
-		this.#sql("INSERT INTO apps (id, name, description, url, icon, created_at) VALUES (?, ?, ?, ?, ?, ?)", id, name, description, url, icon, Date.now());
-		return { id, name, description, url, icon };
+		this.#sql(
+			"INSERT INTO apps (id, name, description, url, icon, category, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			id,
+			name,
+			description,
+			url,
+			icon,
+			category,
+			Date.now(),
+		);
+		return { id, name, description, url, icon, category };
 	}
 
 	/** The admin changes an app's icon; with none given, its site's is looked up again. Null when there's no such app. */

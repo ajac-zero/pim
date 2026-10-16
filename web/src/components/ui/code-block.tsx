@@ -28,7 +28,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "~/components/ui/select";
-import { codeThemeLoaders, codeThemes } from "~/lib/themes";
+import { loadCodeThemes } from "~/lib/themes";
 import { cn } from "~/lib/utils";
 
 /**
@@ -134,10 +134,9 @@ const getHighlighter = (
   const cached = highlighterCache.get(language);
   if (cached) return cached;
 
-  const highlighterPromise = createHighlighter({
-    langs: [language],
-    themes: codeThemeLoaders(),
-  });
+  const highlighterPromise = loadCodeThemes().then(({ loaders }) =>
+    createHighlighter({ langs: [language], themes: loaders }),
+  );
 
   highlighterCache.set(language, highlighterPromise);
   return highlighterPromise;
@@ -174,14 +173,14 @@ export const highlightCode = (
     subscribers.get(tokensCacheKey)?.add(callback);
   }
 
-  getHighlighter(language)
-    .then((highlighter) => {
+  Promise.all([getHighlighter(language), loadCodeThemes()])
+    .then(([highlighter, { names }]) => {
       const availableLangs = highlighter.getLoadedLanguages();
       const langToUse = availableLangs.includes(language) ? language : "text";
 
       const result = highlighter.codeToTokens(code, {
         lang: langToUse,
-        themes: codeThemes,
+        themes: names,
         defaultColor: false,
       });
 

@@ -1,8 +1,8 @@
 # Extensions
 
-An extension is what a deployment adds to everyone's Pims: blueprints for agents to build on, abilities (tools, prompt sections, background work, and actions that ask first), and widgets for their dashboards. Its admin chooses them in code, in [`pim.config.ts`](../pim.config.ts), and deploys; people choose among what's there. Nothing is loaded at runtime.
+An extension is what a deployment adds to everyone's Pims: blueprints for agents to build on, abilities (tools, prompt sections, background work, and actions that ask first), widgets for their dashboards, and color themes for the web app. Its admin chooses them in code, in [`pim.config.ts`](../pim.config.ts), and deploys; people choose among what's there. Nothing is loaded at runtime.
 
-Pim's own blueprint is an extension too, [`pim.assistant`](../src/extensions/assistant.ts), written with the same API. A deployment can leave it out, and a person can make another agent their default and delete theirs.
+Pim's own blueprint is an extension too, [`pim.assistant`](../src/extensions/assistant.ts), written with the same API. A deployment can leave it out, and a person can make another agent their default and delete theirs. So are Pim's own color themes, [`pim.themes`](../src/extensions/themes/index.ts), which every deployment has.
 
 Pim is the platform and a person's own space; an agent is what they create and chat with; a blueprint is what an extension defines in code for agents to build on; a template is an agent shared through the gallery.
 
@@ -92,6 +92,7 @@ Then add it to `pim.config.ts`:
 export default definePimConfig({
 	extensions: [assistant, ledger],
 	defaultBlueprint: "pim.assistant/pim",
+	defaultTheme: "tokyo-night",
 });
 ```
 
@@ -150,11 +151,42 @@ A widget with a `description` can also go with a message. The model reads a `wid
 
 Leave out `description` for a widget that only makes sense on its dashboard.
 
+## Themes
+
+A theme is the web app's colors: a value for every color token its components use (see [`web/DESIGN.md`](../web/DESIGN.md#color)), in light and in dark mode, and the Shiki themes that color code in each. Like widgets, themes are data; no extension code runs in the browser.
+
+```ts
+import { nord } from "../src/extensions/themes/nord";
+
+export const brand = definePimExtension({
+	id: "acme.brand",
+	name: "Acme",
+	description: "Acme's colors.",
+	themes: [
+		{
+			id: "acme", // stored in people's browsers: don't rename it
+			name: "Acme",
+			light: { ...nord.light, primary: "#c2410c", ring: "#c2410c" },
+			dark: { ...nord.dark, primary: "#fb923c", ring: "#fb923c" },
+			code: { light: "github-light-default", dark: "github-dark-default" },
+		},
+	],
+});
+```
+
+- **Every token, in each mode.** `light` and `dark` give every token in [`THEME_TOKENS`](../src/themes.ts) a CSS color; `bubble` and `bubble-foreground` are optional and follow the primary. A missing or unknown token fails with the reason, like any mistake in `pim.config.ts`.
+- **Ids are the deployment's.** A theme's id is lowercase letters, digits and hyphens, unique across every extension, Pim's own included. Prefix yours with your extension's name.
+- **Code colors** are a theme Shiki bundles, by name, or one recolored from it: `{ base, background, foreground, colors }`, mapping each of the base's colors to yours. A name Shiki doesn't ship leaves that theme's code uncolored.
+- **The default** is `defaultTheme` in `pim.config.ts`: what people see until they pick another, and when the one they picked is gone.
+
+People pick a theme in Settings → Appearance; the choice is kept in their browser. The Worker serves every theme's tokens as one stylesheet, `/api/themes.css`, which the app loads before it draws, and lists them at `/api/themes`. Both are public, since the sign-in screens use them too.
+
 ## Not built yet
 
 - **Configuration and secrets** per extension: read a deployment's keys with `import { env } from "cloudflare:workers"` for now; per-person settings have no form.
 - **Routes** for an extension's webhooks or sign-in callbacks.
 - **Choosing Pim's own abilities per Pim**: memory, goals and the rest are every Pim's.
 - **Widget actions** beyond opening a chat or an artifact, more kinds, and arranging a dashboard.
+- **Themes beyond colors**, such as fonts and radii, and translated theme names.
 - **Widgets with arguments** in chat, such as one goal, and interfaces the model composes itself from a catalog of components.
 - **Extensions people bring themselves**, sandboxed (see [Dynamic Workers](https://developers.cloudflare.com/dynamic-workers/)); connected MCP apps are how people add tools today.

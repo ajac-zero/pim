@@ -8,10 +8,13 @@ import { definePimConfig } from "./src/extensions/define";
  * keep their name and the person's own instructions. See docs/extensions.md.
  *
  * Pim's own abilities (goals, schedules, memory, artifacts) are always
- * installed, with their widgets: they aren't listed here.
+ * installed, with their widgets, and so are Pim's own color themes: they
+ * aren't listed here.
  */
 export default definePimConfig({
 	extensions: [assistant],
 	// The blueprint every new account's first agent builds on, and new agents by default: `<extension>/<blueprint>`, or null for none.
 	defaultBlueprint: "pim.assistant/pim",
+	// The color theme people see until they pick another: a theme's id, Pim's own (src/extensions/themes) or an extension's.
+	defaultTheme: "tokyo-night",
 });

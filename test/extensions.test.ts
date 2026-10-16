@@ -1,8 +1,12 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it, vi } from "vitest";
+import { exports } from "cloudflare:workers";
 import { checkToolNames, PimExtensions } from "../src/extensions/define";
-import { api, decisionRun, pendingApproval, post, say, systemPrompt, toolUse } from "./helpers";
+import { themes as ownThemes } from "../src/extensions/themes";
+import { nord } from "../src/extensions/themes/nord";
+import { PimThemes } from "../src/themes";
+import { api, apiUrl, decisionRun, pendingApproval, post, say, systemPrompt, toolUse } from "./helpers";
 import { faux, ledger, outbox } from "./worker";
 
 type Agent = { id: string; name: string; blueprint: string | null; default: boolean };
@@ -343,5 +347,41 @@ describe("extensions", () => {
 		await say("Email me my goals.", (await post("/sessions", {})).body.id);
 		const [mail] = outbox.splice(0);
 		expect(mail!.text).toContain("Your goals, for your records.\n\n**Goals**\n- Save for a bike (0/2) · Open an account");
+	});
+
+	it("serves the deployment's color themes before anyone signs in", async () => {
+		const list = await exports.default.fetch(apiUrl("/themes"));
+		expect(list.status).toBe(200);
+		const { default: fallback, themes } = (await list.json()) as { default: string; themes: { id: string; extension: string }[] };
+		expect(fallback).toBe("tokyo-night");
+		expect(themes.map((theme) => theme.id)).toEqual(ownThemes.themes!.map((theme) => theme.id));
+		expect(themes.every((theme) => theme.extension === "pim.themes")).toBe(true);
+
+		const sheet = await exports.default.fetch(apiUrl("/themes.css"));
+		expect(sheet.headers.get("Content-Type")).toContain("text/css");
+		const css = await sheet.text();
+		// The default comes first, on the page itself, so later themes win over it.
+		expect(css.startsWith(':root,\n[data-theme="tokyo-night"] {\n  --background: #e6e7ed;')).toBe(true);
+		expect(css).toContain('.dark,\n[data-theme="tokyo-night"].dark {\n  --background: #1a1b26;');
+		expect(css).toContain('[data-theme="nord"].dark {\n  --background: #2e3440;');
+		expect(css).toContain('[data-theme="nord"].dark .shiki-token {\n  color: var(--shiki-nord-dark);');
+	});
+
+	it("checks the deployment's color themes, and puts its default on the page", () => {
+		const brand = { ...nord, id: "test-brand", name: "Brand", light: { ...nord.light, bubble: "#123456" } };
+		const own = { id: "test.brand", themes: [brand] };
+		const css = new PimThemes([ownThemes, own], "test-brand").stylesheet();
+		expect(css.startsWith(':root,\n[data-theme="test-brand"] {')).toBe(true);
+		expect(css).toContain("--bubble: #123456;");
+		expect(css).not.toContain(':root,\n[data-theme="tokyo-night"]');
+
+		expect(() => new PimThemes([ownThemes, { id: "test.copy", themes: [nord] }], "nord")).toThrow("test.copy brings a theme called nord, which pim.themes already has");
+		expect(() => new PimThemes([{ id: "x", themes: [{ ...brand, id: "Brand" }] }], "Brand")).toThrow('x\'s theme id "Brand" must be');
+		const { ring: _, ...ringless } = nord.dark;
+		expect(() => new PimThemes([{ id: "x", themes: [{ ...brand, dark: ringless as typeof nord.dark }] }], "test-brand")).toThrow("test-brand's dark colors lack ring");
+		expect(() => new PimThemes([{ id: "x", themes: [{ ...brand, light: { ...brand.light, backgound: "#fff" } as typeof nord.light }] }], "test-brand")).toThrow(
+			"test-brand's light colors have an unknown backgound",
+		);
+		expect(() => new PimThemes([ownThemes], "test-brand")).toThrow("The default theme test-brand isn't in any installed extension");
 	});
 });

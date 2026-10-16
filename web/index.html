@@ -11,6 +11,8 @@
     <meta name="theme-color" content="#18181b" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Pim" />
+    <!-- The color themes of Pim and its extensions, served by the Worker. -->
+    <link rel="stylesheet" href="/api/themes.css" />
     <script>
       // Applies the color theme and mode before first paint, so they don't flash.
       (function () {
@@ -21,8 +23,9 @@
             ((!t || t === "system") &&
               window.matchMedia("(prefers-color-scheme: dark)").matches);
           document.documentElement.classList.toggle("dark", d);
-          document.documentElement.dataset.theme =
-            localStorage.getItem("pim-color-theme") || "tokyo-night";
+          // With none picked, the stylesheet's default applies.
+          var c = localStorage.getItem("pim-color-theme");
+          if (c) document.documentElement.dataset.theme = c;
         } catch (e) {}
       })();
     </script>

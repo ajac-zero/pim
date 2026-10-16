@@ -1,8 +1,11 @@
 import { getAgentByName } from "agents";
+import pimConfig from "../pim.config";
 import { accountApi, adminApi, clientIp, handleRegistration, limited, resolveAccount, siteFor, sites, socialApi } from "./accounts";
 import { AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_EVENTS_PATH, OWNER_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
+import { themes as ownThemes } from "./extensions/themes";
+import { PimThemes } from "./themes";
 
 /**
  * Serves a Pim: everyone's web app, sign-in, API and app callbacks, on one
@@ -12,6 +15,9 @@ import type { Account } from "./directory";
  *   browsers by their passkey session's cookie, other clients by their API
  *   token, which is `pim_<owner>_<secret>`. Either is checked against that
  *   owner's own sign-in before anything else.
+ * - `/api/themes`, `/api/themes.css`: public, the color themes of Pim's
+ *   own and of the deployment's extensions, which the app needs before
+ *   anyone signs in.
  * - `/auth/*`: registration (./accounts.ts) and passkey sign-in (./auth).
  * - `/mcp/callback/<owner>`, `/mcp/events/<owner>/<watch>`: public, for
  *   connected apps. Each is checked another way: the OAuth state, and the
@@ -138,6 +144,18 @@ async function serveImage(request: Request, env: Env, pathname: string): Promise
 	return toAgent(request, env, account.ownerId, `/public-images/${match[2]}`, false);
 }
 
+let deployedThemes: PimThemes | undefined;
+
+/** The color themes, listed (`/themes`) or as the stylesheet the app loads before it draws (`/themes.css`). */
+function serveThemes(request: Request, path: string): Response {
+	if (request.method !== "GET") return fail(405, `/api${path} takes GET`);
+	deployedThemes ??= new PimThemes([ownThemes, ...pimConfig.extensions], pimConfig.defaultTheme);
+	// Small, and they change with a deploy: the browser asks again every time.
+	const headers = { "Cache-Control": "no-cache" };
+	if (path === "/themes") return Response.json(deployedThemes.list(), { headers });
+	return new Response(deployedThemes.stylesheet(), { headers: { ...headers, "Content-Type": "text/css; charset=utf-8" } });
+}
+
 export async function serve(request: Request, env: Env): Promise<Response> {
 	const { pathname } = new URL(request.url);
 	if (pathname === "/health") return withCors(Response.json({ name: "pim", ok: true }));
@@ -162,6 +180,7 @@ export async function serve(request: Request, env: Env): Promise<Response> {
 	if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
 	const path = pathname.slice("/api".length) || "/";
 	if (path === "/health") return withCors(Response.json({ name: "pim", ok: true }));
+	if (path === "/themes" || path === "/themes.css") return withCors(serveThemes(request, path));
 	const caller = await authorize(request, env);
 	if (caller instanceof Response) return withCors(caller);
 	const { account, viaSession } = caller;

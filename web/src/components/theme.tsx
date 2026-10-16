@@ -7,12 +7,8 @@ import {
   useMemo,
   useState,
 } from "react";
-import {
-  type ColorTheme,
-  type ColorThemeId,
-  defaultTheme,
-  findTheme,
-} from "~/lib/themes";
+import { type ColorTheme, loadThemes } from "~/lib/themes";
+import type { ThemeList } from "../../../src/themes";
 
 export type ThemePreference = "light" | "dark" | "system";
 
@@ -22,16 +18,23 @@ interface ThemeContextValue {
   /** The mode actually applied right now. */
   resolved: "light" | "dark";
   setPreference: (theme: ThemePreference) => void;
-  /** The color theme, which has its own light and dark palettes. */
-  colorTheme: ColorTheme;
-  setColorTheme: (id: ColorThemeId) => void;
+  /** This Pim's color themes, Pim's own and its extensions', once loaded. */
+  themes: readonly ColorTheme[];
+  /**
+   * The color theme, which has its own light and dark palettes: the one
+   * picked, or the Pim's default when none was or it's gone. Undefined until
+   * the themes load.
+   */
+  colorTheme: ColorTheme | undefined;
+  setColorTheme: (id: string) => void;
 }
 
 const ThemeContext = createContext<ThemeContextValue>({
   preference: "system",
   resolved: "light",
   setPreference: () => {},
-  colorTheme: defaultTheme,
+  themes: [],
+  colorTheme: undefined,
   setColorTheme: () => {},
 });
 
@@ -55,7 +58,8 @@ function readPreference(): ThemePreference {
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [preference, setPreferenceState] = useState<ThemePreference>("system");
   const [resolved, setResolved] = useState<"light" | "dark">("light");
-  const [colorTheme, setColorThemeState] = useState<ColorTheme>(defaultTheme);
+  const [list, setList] = useState<ThemeList | null>(null);
+  const [picked, setPicked] = useState<string | null>(null);
 
   // Sync from storage after hydration (the root inline script already applied
   // the right class and theme, so there is no flash).
@@ -63,7 +67,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     const pref = readPreference();
     setPreferenceState(pref);
     setResolved(pref === "system" ? systemTheme() : pref);
-    setColorThemeState(findTheme(window.localStorage.getItem(COLOR_THEME_KEY)));
+    setPicked(window.localStorage.getItem(COLOR_THEME_KEY));
+    loadThemes().then(setList, (error) => console.error(error));
   }, []);
 
   useEffect(() => {
@@ -79,14 +84,20 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return () => media.removeEventListener("change", onChange);
   }, []);
 
-  // The browser's own UI (mobile address bar, installed app title bar)
-  // follows the canvas.
+  // A theme that's gone matches no rule in the stylesheet, which then shows
+  // the default. The browser's own UI (mobile address bar, installed app
+  // title bar) follows the canvas.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the canvas changes with the mode, which `resolved` follows
   useEffect(() => {
-    document.documentElement.dataset.theme = colorTheme.id;
+    const root = document.documentElement;
+    if (picked) root.dataset.theme = picked;
     document
       .querySelector('meta[name="theme-color"]')
-      ?.setAttribute("content", colorTheme.background[resolved]);
-  }, [colorTheme, resolved]);
+      ?.setAttribute(
+        "content",
+        getComputedStyle(root).getPropertyValue("--background").trim(),
+      );
+  }, [picked, resolved]);
 
   const setPreference = useCallback((next: ThemePreference) => {
     setPreferenceState(next);
@@ -96,15 +107,25 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     document.documentElement.classList.toggle("dark", applied === "dark");
   }, []);
 
-  const setColorTheme = useCallback((id: ColorThemeId) => {
+  const setColorTheme = useCallback((id: string) => {
     window.localStorage.setItem(COLOR_THEME_KEY, id);
-    setColorThemeState(findTheme(id));
+    setPicked(id);
   }, []);
 
-  const value = useMemo(
-    () => ({ preference, resolved, setPreference, colorTheme, setColorTheme }),
-    [preference, resolved, setPreference, colorTheme, setColorTheme],
-  );
+  const value = useMemo(() => {
+    const themes = list?.themes ?? [];
+    const colorTheme =
+      themes.find((theme) => theme.id === picked) ??
+      themes.find((theme) => theme.id === list?.default);
+    return {
+      preference,
+      resolved,
+      setPreference,
+      themes,
+      colorTheme,
+      setColorTheme,
+    };
+  }, [preference, resolved, setPreference, list, picked, setColorTheme]);
 
   return (
     <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>

@@ -24,8 +24,9 @@ Components use the tokens in [`src/styles/app.css`](src/styles/app.css), never r
 | `--border` | Hairline dividers between panes, outlines on fields and settings cards |
 | `--foreground` | Body text and titles |
 | `--muted-foreground` | Previews, timestamps, section labels, placeholders, system events |
-| `--primary` | Primary buttons, the send button, user message bubbles |
+| `--primary` | Primary buttons, the send button |
 | `--primary-foreground` | Text and icons on primary |
+| `--bubble` / `--bubble-foreground` | User message bubbles; the primary colors unless a theme sets them |
 | `--agent-<color>` | An agent's icon and its tinted tile, one per color the API accepts |
 
 Semantic colors, used only for their meaning:
@@ -41,9 +42,10 @@ Semantic colors, used only for their meaning:
 A theme only changes colors, and every theme has a light and a dark mode. People pick the theme and the mode separately under Preferences.
 
 - **Tokyo Night** (default): "Night" navy for dark mode and the "Day" palette for light mode, with text darkened for contrast. Its blue is the primary.
-- **Gronk Bot:** neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles invert with it.
+- **Gronk:** neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles invert with it.
+- **Moose:** cool grays with black (light) or white (dark) buttons, white agent bubbles on a gray canvas in light mode, and sky-blue user bubbles.
 
-Parody themes like Gronk Bot are playful nods to apps that inspired Pim. Give them a spoof name and the inspiration's general palette, never its real name, logo, or other brand assets.
+Parody themes like Gronk and Moose are playful nods to apps that inspired Pim. Give them a spoof name and the inspiration's general palette, never its real name, logo, or other brand assets.
 
 In every theme the sidebar is one step off the canvas, bubbles and fills are one step from the canvas, and body text on the canvas meets WCAG AA contrast (4.5:1).
 
@@ -92,7 +94,7 @@ On narrow screens, the sidebar opens as a sheet over the content.
 ### Messages
 
 - **Agent messages** are muted bubbles without icons, aligned left and up to ~85% of the transcript width. Consecutive messages stack with a small gap.
-- **User messages** are primary bubbles with primary-foreground text, aligned right.
+- **User messages** are `--bubble` bubbles with `--bubble-foreground` text, aligned right.
 - **Hover actions** (copy, retry) float as bare icons beside the bubble and appear only on hover.
 - **Timestamps** ("Today 10:01 AM") and **system events** ("Approved: rename the agent", "Scheduled check-in") are centered muted text, never bubbles. A referenced object shows its icon inline and is clickable.
 

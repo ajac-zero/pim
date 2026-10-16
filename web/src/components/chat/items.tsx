@@ -97,7 +97,7 @@ export const UserMessage = memo(function UserMessage({
         </div>
       )}
       {text.length > 0 && (
-        <div className="max-w-[88%] md:max-w-[80%] whitespace-pre-wrap break-words rounded-2xl bg-primary px-4 py-3 text-[15px] text-primary-foreground leading-6">
+        <div className="max-w-[88%] md:max-w-[80%] whitespace-pre-wrap break-words rounded-2xl bg-bubble px-4 py-3 text-[15px] text-bubble-foreground leading-6">
           {text}
         </div>
       )}

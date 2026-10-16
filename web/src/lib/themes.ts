@@ -14,24 +14,34 @@ export const themes = [
   {
     id: "tokyo-night",
     name: "Tokyo Night",
-    light: { background: "#e6e7ed", primary: "#2e6bd6" },
-    dark: { background: "#1a1b26", primary: "#7aa2f7" },
+    light: { background: "#e6e7ed", swatch: "#2e6bd6" },
+    dark: { background: "#1a1b26", swatch: "#7aa2f7" },
     code: { light: "tokyo-night-day", dark: "tokyo-night" },
   },
   // Parody themes: affectionate nods to the apps that inspired Pim's design.
   {
-    id: "gronk-bot",
-    name: "Gronk Bot",
-    light: { background: "#fafafa", primary: "#0a0a0a" },
-    dark: { background: "#161616", primary: "#f2f2f2" },
+    id: "gronk",
+    name: "Gronk",
+    light: { background: "#fafafa", swatch: "#0a0a0a" },
+    dark: { background: "#161616", swatch: "#f2f2f2" },
     code: { light: "github-light-default", dark: "github-dark-default" },
+  },
+  {
+    id: "moose",
+    name: "Moose",
+    light: { background: "#f3f4f5", swatch: "#cbe5ff" },
+    dark: { background: "#181819", swatch: "#0074e8" },
+    code: { light: "light-plus", dark: "dark-plus" },
   },
 ] as const satisfies readonly {
   id: string;
   name: string;
-  /** For the picker's swatch and the browser's theme-color. */
-  light: { background: string; primary: string };
-  dark: { background: string; primary: string };
+  /**
+   * The canvas (also the browser's theme-color) and the theme's signature
+   * color, the user bubble, for the picker's swatch.
+   */
+  light: { background: string; swatch: string };
+  dark: { background: string; swatch: string };
   /** Shiki themes for code blocks: bundled, or one of `customCodeThemes`. */
   code: { light: string; dark: string };
 }[];

@@ -85,7 +85,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     document.documentElement.dataset.theme = colorTheme.id;
     document
       .querySelector('meta[name="theme-color"]')
-      ?.setAttribute("content", colorTheme[resolved].background);
+      ?.setAttribute("content", colorTheme.background[resolved]);
   }, [colorTheme, resolved]);
 
   const setPreference = useCallback((next: ThemePreference) => {

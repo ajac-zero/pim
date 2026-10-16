@@ -1,0 +1,111 @@
+/*
+ * Nord: Polar Night dark; Snow Storm light (Nord has no official light theme).
+ * Frost/Aurora light accents are darkened for contrast. Dark muted text is
+ * lifted; the sidebar is a darker Polar Night shade. Indigo/pink agent slots
+ * use distinct lightness variants of Aurora violet/red (no new palette hues).
+ * Light popovers lift Snow Storm slightly; hairlines interpolate its shades.
+ * Dark destructive text uses a deeper Polar Night shade for button contrast.
+ */
+[data-theme="nord"] {
+  --background: #e5e9f0;
+  --foreground: #2e3440;
+  --card: #e5e9f0;
+  --card-foreground: #2e3440;
+  --popover: #eceff4;
+  --popover-foreground: #2e3440;
+  --primary: #356d7c;
+  --primary-foreground: #eceff4;
+  --secondary: #d8dee9;
+  --secondary-foreground: #2e3440;
+  --muted: #d8dee9;
+  --muted-foreground: #4c566a;
+  --accent: #d8dee9;
+  --accent-foreground: #2e3440;
+  --destructive: #a13f49;
+  --destructive-foreground: #eceff4;
+  --link: #356d7c;
+  --success: #526f3c;
+  --border: #c8d0df;
+  --input: #c8d0df;
+  --ring: #356d7c;
+  --chart-1: #4a6b8c;
+  --chart-2: #526f3c;
+  --chart-3: #805578;
+  --chart-4: #99523b;
+  --chart-5: #806121;
+  --sidebar: #d8dee9;
+  --sidebar-foreground: #2e3440;
+  --sidebar-primary: #356d7c;
+  --sidebar-primary-foreground: #eceff4;
+  --sidebar-accent: #c8d0df;
+  --sidebar-accent-foreground: #2e3440;
+  --sidebar-border: #bec8da;
+  --sidebar-ring: #356d7c;
+  --agent-gray: #4c566a;
+  --agent-red: #a13f49;
+  --agent-orange: #99523b;
+  --agent-amber: #806121;
+  --agent-green: #526f3c;
+  --agent-teal: #3b706f;
+  --agent-blue: #4a6b8c;
+  --agent-indigo: #65435f;
+  --agent-violet: #805578;
+  --agent-pink: #b34c58;
+}
+
+[data-theme="nord"].dark {
+  --background: #2e3440;
+  --foreground: #d8dee9;
+  --card: #2e3440;
+  --card-foreground: #d8dee9;
+  --popover: #3b4252;
+  --popover-foreground: #d8dee9;
+  --primary: #88c0d0;
+  --primary-foreground: #2e3440;
+  --secondary: #3b4252;
+  --secondary-foreground: #d8dee9;
+  --muted: #3b4252;
+  --muted-foreground: #a5b0c5;
+  --accent: #3b4252;
+  --accent-foreground: #d8dee9;
+  --destructive: #bf616a;
+  --destructive-foreground: #10141b;
+  --link: #88c0d0;
+  --success: #a3be8c;
+  --border: #434c5e;
+  --input: #434c5e;
+  --ring: #88c0d0;
+  --chart-1: #81a1c1;
+  --chart-2: #a3be8c;
+  --chart-3: #b48ead;
+  --chart-4: #d08770;
+  --chart-5: #ebcb8b;
+  --sidebar: #292e39;
+  --sidebar-foreground: #d8dee9;
+  --sidebar-primary: #88c0d0;
+  --sidebar-primary-foreground: #2e3440;
+  --sidebar-accent: #3b4252;
+  --sidebar-accent-foreground: #d8dee9;
+  --sidebar-border: #3b4252;
+  --sidebar-ring: #88c0d0;
+  --agent-gray: #a5b0c5;
+  --agent-red: #bf616a;
+  --agent-orange: #d08770;
+  --agent-amber: #ebcb8b;
+  --agent-green: #a3be8c;
+  --agent-teal: #8fbcbb;
+  --agent-blue: #81a1c1;
+  --agent-indigo: #c8acc3;
+  --agent-violet: #b48ead;
+  --agent-pink: #d9959c;
+}
+
+/* Code: this theme's Shiki colors (see src/lib/themes.ts). */
+[data-theme="nord"] .shiki-token {
+  color: var(--shiki-nord-light);
+  font-style: var(--shiki-nord-light-font-style, normal);
+}
+[data-theme="nord"].dark .shiki-token {
+  color: var(--shiki-nord-dark);
+  font-style: var(--shiki-nord-dark-font-style, normal);
+}

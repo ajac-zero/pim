@@ -1,0 +1,111 @@
+/*
+ * Moose: cool grays, black or white buttons, and sky-blue user bubbles; a
+ * parody nod like Gronk.
+ */
+[data-theme="moose"] {
+  --background: #f3f4f5;
+  --foreground: #111112;
+  --card: #fcfcfc;
+  --card-foreground: #111112;
+  --popover: #ffffff;
+  --popover-foreground: #111112;
+  --primary: #111112;
+  --primary-foreground: #fcfcfc;
+  --bubble: #cbe5ff;
+  --bubble-foreground: #111112;
+  --secondary: #e9eaeb;
+  --secondary-foreground: #111112;
+  --muted: #ffffff;
+  --muted-foreground: #686a6e;
+  --accent: #e9eaeb;
+  --accent-foreground: #111112;
+  --destructive: #c01f37;
+  --destructive-foreground: #ffffff;
+  --link: #0064d4;
+  --success: #008200;
+  --border: #e0e2e4;
+  --input: #d1d3d5;
+  --ring: #0074e8;
+  --chart-1: #0074e8;
+  --chart-2: #008200;
+  --chart-3: #8523c6;
+  --chart-4: #c65323;
+  --chart-5: #c62385;
+  --sidebar: #eeeff0;
+  --sidebar-foreground: #111112;
+  --sidebar-primary: #111112;
+  --sidebar-primary-foreground: #fcfcfc;
+  --sidebar-accent: #e0e2e4;
+  --sidebar-accent-foreground: #111112;
+  --sidebar-border: #e0e2e4;
+  --sidebar-ring: #0074e8;
+  --agent-gray: #686a6e;
+  --agent-red: #c01f37;
+  --agent-orange: #c65323;
+  --agent-amber: #b07c00;
+  --agent-green: #008200;
+  --agent-teal: #00838a;
+  --agent-blue: #0064d4;
+  --agent-indigo: #4553e4;
+  --agent-violet: #8523c6;
+  --agent-pink: #c62385;
+}
+
+[data-theme="moose"].dark {
+  --background: #181819;
+  --foreground: #fcfcfc;
+  --card: #181819;
+  --card-foreground: #fcfcfc;
+  --popover: #1f1f20;
+  --popover-foreground: #fcfcfc;
+  --primary: #fcfcfc;
+  --primary-foreground: #111112;
+  --bubble: #0074e8;
+  --bubble-foreground: #ffffff;
+  --secondary: #28292b;
+  --secondary-foreground: #fcfcfc;
+  --muted: #252628;
+  --muted-foreground: #a1a4a8;
+  --accent: #28292b;
+  --accent-foreground: #fcfcfc;
+  --destructive: #ff5562;
+  --destructive-foreground: #111112;
+  --link: #43a9ff;
+  --success: #27b934;
+  --border: #ffffff1a;
+  --input: #383b3d;
+  --ring: #2d9dff;
+  --chart-1: #2d9dff;
+  --chart-2: #27b934;
+  --chart-3: #c680f5;
+  --chart-4: #f5a080;
+  --chart-5: #f580c6;
+  --sidebar: #111112;
+  --sidebar-foreground: #fcfcfc;
+  --sidebar-primary: #fcfcfc;
+  --sidebar-primary-foreground: #111112;
+  --sidebar-accent: #28292b;
+  --sidebar-accent-foreground: #fcfcfc;
+  --sidebar-border: #ffffff14;
+  --sidebar-ring: #2d9dff;
+  --agent-gray: #a1a4a8;
+  --agent-red: #ff5562;
+  --agent-orange: #f5a080;
+  --agent-amber: #f8c54a;
+  --agent-green: #27b934;
+  --agent-teal: #3cc7c7;
+  --agent-blue: #43a9ff;
+  --agent-indigo: #748fff;
+  --agent-violet: #c680f5;
+  --agent-pink: #f580c6;
+}
+
+/* Code: this theme's Shiki colors (see src/lib/themes.ts). */
+[data-theme="moose"] .shiki-token {
+  color: var(--shiki-moose-light);
+  font-style: var(--shiki-moose-light-font-style, normal);
+}
+[data-theme="moose"].dark .shiki-token {
+  color: var(--shiki-moose-dark);
+  font-style: var(--shiki-moose-dark-font-style, normal);
+}

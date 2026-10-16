@@ -1,0 +1,110 @@
+/*
+ * One: Atom One Light / One Dark. Light blue is darkened for button/link
+ * contrast; red is darkened for destructive text. Dark mono-2 is lightened
+ * for muted text. Panel fills vary background lightness. Blue and indigo
+ * agents vary blue lightness to fill missing slots and avoid primary. Dark
+ * pink lightens red-2; destructive uses the darker sidebar as its foreground.
+ */
+[data-theme="one"] {
+  --background: #fafafa;
+  --foreground: #383a42;
+  --card: #fafafa;
+  --card-foreground: #383a42;
+  --popover: #ffffff;
+  --popover-foreground: #383a42;
+  --primary: #326cce;
+  --primary-foreground: #ffffff;
+  --secondary: #eeeeef;
+  --secondary-foreground: #383a42;
+  --muted: #eeeeef;
+  --muted-foreground: #696c77;
+  --accent: #eeeeef;
+  --accent-foreground: #383a42;
+  --destructive: #ca3b2e;
+  --destructive-foreground: #ffffff;
+  --link: #326cce;
+  --success: #50a14f;
+  --border: #dedee0;
+  --input: #d4d4d7;
+  --ring: #326cce;
+  --chart-1: #4078f2;
+  --chart-2: #50a14f;
+  --chart-3: #a626a4;
+  --chart-4: #c18401;
+  --chart-5: #0184bc;
+  --sidebar: #f0f0f1;
+  --sidebar-foreground: #383a42;
+  --sidebar-primary: #326cce;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e2e2e5;
+  --sidebar-accent-foreground: #383a42;
+  --sidebar-border: #dedee0;
+  --sidebar-ring: #326cce;
+  --agent-gray: #696c77;
+  --agent-red: #e45649;
+  --agent-orange: #986801;
+  --agent-amber: #c18401;
+  --agent-green: #50a14f;
+  --agent-teal: #0184bc;
+  --agent-blue: #4078f2;
+  --agent-indigo: #1a54cf;
+  --agent-violet: #a626a4;
+  --agent-pink: #ca1243;
+}
+
+[data-theme="one"].dark {
+  --background: #282c34;
+  --foreground: #abb2bf;
+  --card: #282c34;
+  --card-foreground: #abb2bf;
+  --popover: #30353f;
+  --popover-foreground: #abb2bf;
+  --primary: #61afef;
+  --primary-foreground: #282c34;
+  --secondary: #343a45;
+  --secondary-foreground: #abb2bf;
+  --muted: #343a45;
+  --muted-foreground: #969eac;
+  --accent: #343a45;
+  --accent-foreground: #abb2bf;
+  --destructive: #e06c75;
+  --destructive-foreground: #21252b;
+  --link: #61afef;
+  --success: #98c379;
+  --border: #3e4451;
+  --input: #3e4451;
+  --ring: #61afef;
+  --chart-1: #61afef;
+  --chart-2: #98c379;
+  --chart-3: #c678dd;
+  --chart-4: #e5c07b;
+  --chart-5: #56b6c2;
+  --sidebar: #21252b;
+  --sidebar-foreground: #abb2bf;
+  --sidebar-primary: #61afef;
+  --sidebar-primary-foreground: #282c34;
+  --sidebar-accent: #343a45;
+  --sidebar-accent-foreground: #abb2bf;
+  --sidebar-border: #3e4451;
+  --sidebar-ring: #61afef;
+  --agent-gray: #828997;
+  --agent-red: #e06c75;
+  --agent-orange: #d19a66;
+  --agent-amber: #e5c07b;
+  --agent-green: #98c379;
+  --agent-teal: #56b6c2;
+  --agent-blue: #8ac3f3;
+  --agent-indigo: #399cea;
+  --agent-violet: #c678dd;
+  --agent-pink: #cc786f;
+}
+
+/* Code: this theme's Shiki colors (see src/lib/themes.ts). */
+[data-theme="one"] .shiki-token {
+  color: var(--shiki-one-light);
+  font-style: var(--shiki-one-light-font-style, normal);
+}
+[data-theme="one"].dark .shiki-token {
+  color: var(--shiki-one-dark);
+  font-style: var(--shiki-one-dark-font-style, normal);
+}

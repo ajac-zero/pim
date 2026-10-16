@@ -9,6 +9,7 @@ import {
   Monitor,
   Moon,
   MoreHorizontal,
+  Palette,
   PanelLeft,
   Pencil,
   Plus,
@@ -57,7 +58,6 @@ import {
   sessionsQuery,
   visitsQuery,
 } from "~/lib/queries";
-import { themes } from "~/lib/themes";
 import { cn } from "~/lib/utils";
 
 type T = ReturnType<typeof useI18n>["t"];
@@ -348,7 +348,7 @@ export function AppSidebar({
 
         {/* Preferences */}
         <div className="border-sidebar-border border-t p-3">
-          <PreferencesMenu collapsed={collapsed} />
+          <PreferencesMenu collapsed={collapsed} onNavigate={onNavigate} />
         </div>
       </div>
     </TooltipProvider>
@@ -933,9 +933,14 @@ function SessionRow({
   );
 }
 
-function PreferencesMenu({ collapsed = false }: { collapsed?: boolean }) {
-  const { preference, setPreference, resolved, colorTheme, setColorTheme } =
-    useTheme();
+function PreferencesMenu({
+  collapsed = false,
+  onNavigate,
+}: {
+  collapsed?: boolean;
+  onNavigate?: () => void;
+}) {
+  const { preference, setPreference, colorTheme } = useTheme();
   const { t } = useI18n();
 
   const trigger = (
@@ -981,34 +986,16 @@ function PreferencesMenu({ collapsed = false }: { collapsed?: boolean }) {
         <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
       )}
       <DropdownMenuContent align="start" side="top" className="w-60">
-        <DropdownMenuLabel className="text-muted-foreground text-xs">
-          {t("theme")}
-        </DropdownMenuLabel>
-        {themes.map((theme) => (
-          <DropdownMenuItem
-            key={theme.id}
-            role="menuitemradio"
-            aria-checked={colorTheme.id === theme.id}
-            // Stay open, so the change can be seen and undone.
-            onSelect={(event) => {
-              event.preventDefault();
-              setColorTheme(theme.id);
-            }}
-          >
-            {/* The theme's canvas and user bubble, in the current mode. */}
-            <span
-              className="flex size-5 items-center justify-center rounded-md border"
-              style={{ backgroundColor: theme[resolved].background }}
-            >
-              <span
-                className="size-2 rounded-full"
-                style={{ backgroundColor: theme[resolved].swatch }}
-              />
+        {/* Themes are many, so they're picked in Settings. */}
+        <DropdownMenuItem asChild>
+          <Link to="/settings" hash="appearance" onClick={onNavigate}>
+            <Palette className="size-4" />
+            <span className="flex-1">{t("theme")}</span>
+            <span className="text-muted-foreground text-xs">
+              {colorTheme.name}
             </span>
-            <span className="flex-1">{theme.name}</span>
-            {colorTheme.id === theme.id && <Check className="size-4" />}
-          </DropdownMenuItem>
-        ))}
+          </Link>
+        </DropdownMenuItem>
         <DropdownMenuLabel className="text-muted-foreground text-xs">
           {t("mode")}
         </DropdownMenuLabel>

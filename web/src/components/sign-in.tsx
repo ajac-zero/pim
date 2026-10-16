@@ -135,7 +135,7 @@ export function SignIn({ session }: { session: AuthSession }) {
   return (
     <main className="flex min-h-svh flex-col items-center justify-center px-6 py-12">
       <div className="w-full max-w-sm">
-        <PimMark className="mb-6 size-10" />
+        <PimMark className="mb-8 h-8 w-16" />
         {device ? (
           <>
             <h1 className="font-semibold text-2xl">

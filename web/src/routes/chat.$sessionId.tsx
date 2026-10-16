@@ -95,7 +95,7 @@ function ChatPage() {
               className="size-6 shrink-0 rounded-md"
             />
           ) : (
-            <PimMark className="size-6 shrink-0" />
+            <PimMark className="h-3 w-6 shrink-0" />
           )}
           <span className="min-w-0 truncate font-medium text-[15px]">
             {session ? sessionTitle(session, t) : "\u00a0"}

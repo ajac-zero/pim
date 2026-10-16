@@ -577,6 +577,14 @@ export class Pim extends DurableAgent<Env> {
 			};
 		};
 		return new (class extends DurableObjectOAuthClientProvider {
+			// Services show the name on their consent screens; the SDK would register the owner's id,
+			// which some refuse. Its client_uri, the Pim's origin, is optional, and some refuse a host
+			// they can't reach (Make refuses localhost).
+			override get clientMetadata() {
+				const { client_uri: _origin, ...metadata } = super.clientMetadata;
+				return { ...metadata, client_name: "Pim" };
+			}
+
 			override async clientInformation(context?: Parameters<DurableObjectOAuthClientProvider["clientInformation"]>[0]) {
 				const client = registered(this.serverId);
 				if (!client) return super.clientInformation(context);

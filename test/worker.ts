@@ -106,6 +106,8 @@ export const ledger = definePimExtension({
 			client: { id: "TEST_FORGE_CLIENT_ID", secret: "TEST_FORGE_CLIENT_SECRET" },
 		},
 		{ id: "hub", name: "Hub", description: "Never set up.", url: "https://hub.example.test/mcp", client: { id: "TEST_HUB_CLIENT_ID" } },
+		// And one whose sign-in lets Pim register itself, as most do (board.example.test, which tests answer).
+		{ id: "board", name: "Board", description: "Boards and cards.", url: "https://board.example.test/mcp" },
 		// The real one, for `pnpm test:live`.
 		{ id: "hugging-face", name: "Hugging Face", description: "Models, datasets and skills.", url: "https://huggingface.co/mcp" },
 		// Apps the extension implements: a bank behind OAuth (its service is bank.example.test, which tests answer), and one whose secret is never set.

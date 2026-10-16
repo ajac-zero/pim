@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { ExternalLink, Plus, Trash2, Unplug } from "lucide-react";
-import { type FormEvent, useState } from "react";
+import { ExternalLink, ImageIcon, Plus, Trash2, Unplug } from "lucide-react";
+import { type FormEvent, useId, useState } from "react";
 import { toast } from "sonner";
 import { AppIcon } from "~/components/app-icon";
 import { useI18n } from "~/components/i18n";
@@ -35,6 +35,8 @@ function AppsPage() {
   const { data: directory } = useQuery(appDirectoryQuery());
   const { data: connections } = useQuery(appsQuery());
   const [creating, setCreating] = useState(false);
+  // The admin's app whose icon they're changing, by ref.
+  const [changingIcon, setChangingIcon] = useState<string | null>(null);
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ["apps"] });
     queryClient.invalidateQueries({ queryKey: ["permissions"] });
@@ -112,7 +114,7 @@ function AppsPage() {
               return (
                 <li
                   key={app?.ref ?? connection?.id}
-                  className="flex items-center gap-3 px-4 py-3"
+                  className="flex flex-wrap items-center gap-3 px-4 py-3"
                 >
                   <AppIcon
                     name={name}
@@ -197,6 +199,23 @@ function AppsPage() {
                       variant="ghost"
                       size="icon-sm"
                       className="text-muted-foreground"
+                      aria-label={t("changeAppIconNamed", { name })}
+                      title={t("changeAppIconNamed", { name })}
+                      aria-expanded={changingIcon === app.ref}
+                      onClick={() =>
+                        setChangingIcon(
+                          changingIcon === app.ref ? null : app.ref,
+                        )
+                      }
+                    >
+                      <ImageIcon />
+                    </Button>
+                  )}
+                  {isAdmin && app?.custom && (
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="text-muted-foreground"
                       aria-label={t("unlistAppNamed", { name })}
                       title={t("unlistAppNamed", { name })}
                       disabled={unlist.isPending}
@@ -204,6 +223,12 @@ function AppsPage() {
                     >
                       <Trash2 />
                     </Button>
+                  )}
+                  {app && changingIcon === app.ref && (
+                    <AppIconForm
+                      app={app}
+                      onDone={() => setChangingIcon(null)}
+                    />
                   )}
                 </li>
               );
@@ -227,11 +252,82 @@ function AppsPage() {
   );
 }
 
+/** The admin gives an app they added another icon, or empties it to use its site's again. */
+function AppIconForm({
+  app,
+  onDone,
+}: {
+  app: DirectoryApp;
+  onDone: () => void;
+}) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const hint = useId();
+  const [icon, setIcon] = useState(
+    app.icon?.startsWith("https://") ? app.icon : "",
+  );
+  const change = useMutation({
+    mutationFn: () =>
+      admin.setAppIcon(app.ref.slice(app.ref.indexOf("/") + 1), icon),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["app-directory"] });
+      toast.success(t("appIconChanged", { name: app.name }));
+      onDone();
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    change.mutate();
+  };
+  return (
+    <form
+      onSubmit={submit}
+      className="basis-full space-y-2 pl-14"
+      aria-label={t("changeAppIconNamed", { name: app.name })}
+    >
+      <label
+        htmlFor={`${hint}-input`}
+        className="block text-[13px] text-muted-foreground"
+      >
+        {t("appIcon")}
+      </label>
+      <div className="flex gap-2">
+        <Input
+          id={`${hint}-input`}
+          value={icon}
+          onChange={(event) => setIcon(event.target.value)}
+          placeholder="https://github.com/favicon.ico"
+          type="url"
+          pattern="https://.*"
+          autoFocus
+          aria-describedby={hint}
+        />
+        <Button type="submit" size="sm" disabled={change.isPending}>
+          {t("save")}
+        </Button>
+        <Button type="button" variant="ghost" size="sm" onClick={onDone}>
+          {t("cancel")}
+        </Button>
+      </div>
+      <p id={hint} className="text-muted-foreground text-xs">
+        {t("appIconHint")}
+      </p>
+    </form>
+  );
+}
+
 /** The admin adds an app everyone on this Pim can connect: a remote MCP server. */
 function CreateAppForm({ onDone }: { onDone: () => void }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const [app, setApp] = useState({ name: "", description: "", url: "" });
+  const hint = useId();
+  const [app, setApp] = useState({
+    name: "",
+    description: "",
+    url: "",
+    icon: "",
+  });
   const create = useMutation({
     mutationFn: () => admin.addApp(app),
     onSuccess: () => {
@@ -288,6 +384,24 @@ function CreateAppForm({ onDone }: { onDone: () => void }) {
           required
         />
       </label>
+      <div className="space-y-1">
+        <label className="block space-y-1">
+          <span className="text-[13px] text-muted-foreground">
+            {t("appIcon")}
+          </span>
+          <Input
+            value={app.icon}
+            onChange={(event) => setApp({ ...app, icon: event.target.value })}
+            placeholder="https://github.com/favicon.ico"
+            type="url"
+            pattern="https://.*"
+            aria-describedby={hint}
+          />
+        </label>
+        <p id={hint} className="text-muted-foreground text-xs">
+          {t("appIconHint")}
+        </p>
+      </div>
       <div className="flex gap-2">
         <Button type="submit" size="sm" disabled={create.isPending}>
           {t("addApp")}

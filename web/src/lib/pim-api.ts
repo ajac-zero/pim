@@ -912,10 +912,21 @@ export const admin = {
         : { method: "PUT", body: JSON.stringify({ agent: id }) },
     ).then((body) => body.agent),
   /** Adds an app everyone on this Pim can connect: a remote MCP server. */
-  addApp: (app: { name: string; description: string; url: string }) =>
+  addApp: (app: {
+    name: string;
+    description: string;
+    url: string;
+    icon: string;
+  }) =>
     call<{ app: { id: string } }>("/admin/apps", {
       method: "POST",
       body: JSON.stringify(app),
+    }),
+  /** Gives an app the admin added another icon, by its id; an empty one looks its site's up again. */
+  setAppIcon: (id: string, icon: string) =>
+    call<{ app: { id: string } }>(`/admin/apps/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ icon }),
     }),
   /** Takes an app the admin added out of the directory, by its id (`custom/<id>`). */
   removeApp: (id: string) =>

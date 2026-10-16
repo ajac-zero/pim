@@ -171,6 +171,11 @@ const translations = {
     appDescriptionPlaceholder: "Issues and projects",
     appAdded: "Added {name}.",
     unlistAppNamed: "Remove {name} from this Pim",
+    appIcon: "Icon URL",
+    appIconHint:
+      "Optional. Leave it empty to use the icon of the server's website.",
+    changeAppIconNamed: "Change {name}'s icon",
+    appIconChanged: "Changed {name}'s icon.",
     appUnlisted: "{name} is no longer offered.",
     appUsedBy: "Used by {agents}",
     appUnused: "No agent works with it",
@@ -766,6 +771,11 @@ const translations = {
     appDescriptionPlaceholder: "Incidencias y proyectos",
     appAdded: "Se agregó {name}.",
     unlistAppNamed: "Quitar {name} de este Pim",
+    appIcon: "URL del ícono",
+    appIconHint:
+      "Opcional. Déjala vacía para usar el ícono del sitio web del servidor.",
+    changeAppIconNamed: "Cambiar el ícono de {name}",
+    appIconChanged: "Se cambió el ícono de {name}.",
     appUnlisted: "{name} ya no se ofrece.",
     appUsedBy: "La usa {agents}",
     appUnused: "Ningún agente trabaja con ella",

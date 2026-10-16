@@ -64,11 +64,54 @@ const SERVERS: Record<string, () => McpServer> = {
 	},
 };
 
+/**
+ * Forge: an MCP server behind an OAuth server that, like GitHub's, has no
+ * client registration, so only the client the deployment registered signs
+ * in. It records the token requests it gets, and any registration attempt.
+ */
+const forgeGrants: Record<string, string>[] = [];
+let forgeRegistrations = 0;
+
+async function forge(request: Request): Promise<Response> {
+	const { pathname } = new URL(request.url);
+	if (pathname === "/mcp") {
+		if (request.headers.get("authorization") !== "Bearer forge-token") {
+			return new Response("Unauthorized", {
+				status: 401,
+				headers: { "www-authenticate": 'Bearer resource_metadata="https://forge.example.test/.well-known/oauth-protected-resource/mcp"' },
+			});
+		}
+		return createMcpHandler(notes)(request, {}, createExecutionContext());
+	}
+	if (pathname === "/.well-known/oauth-protected-resource/mcp") {
+		return Response.json({ resource: "https://forge.example.test/mcp", authorization_servers: ["https://forge.example.test/login"] });
+	}
+	if (pathname.startsWith("/.well-known/oauth-authorization-server")) {
+		return Response.json({
+			issuer: "https://forge.example.test/login",
+			authorization_endpoint: "https://forge.example.test/login/authorize",
+			token_endpoint: "https://forge.example.test/login/token",
+			response_types_supported: ["code"],
+			code_challenge_methods_supported: ["S256"],
+		});
+	}
+	if (pathname === "/login/token") {
+		const form = Object.fromEntries(new URLSearchParams(await request.text()));
+		forgeGrants.push(form);
+		if (form.client_id !== "forge-client" || form.client_secret !== "forge-secret") return Response.json({ error: "invalid_client" }, { status: 401 });
+		if (form.code !== "good") return Response.json({ error: "invalid_grant" }, { status: 400 });
+		return Response.json({ access_token: "forge-token", token_type: "bearer" });
+	}
+	if (pathname === "/register") forgeRegistrations++;
+	return new Response("not found", { status: 404 });
+}
+
 beforeEach(() => {
 	const realFetch = globalThis.fetch;
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		const request = new Request(input, init);
 		const target = `${new URL(request.url).origin}${new URL(request.url).pathname}`;
+		if (new URL(request.url).origin === "https://forge.example.test") return forge(request);
 		if (target === "https://down.example.test/mcp") return new Response("unavailable", { status: 503 });
 		const server = SERVERS[target];
 		if (!server) return realFetch(input, init);
@@ -344,6 +387,28 @@ describe("connected apps (MCP)", () => {
 		// Nobody's callback: there's no agent to hand it to.
 		expect((await exports.default.fetch(url("/mcp/callback/o_nobody?state=forged&code=x"))).status).toBe(404);
 		expect((await exports.default.fetch(apiUrl("/mcp"))).status).toBe(401);
+	});
+
+	it("signs in to a server that can't register clients with the client the deployment registered, and offers none it didn't", async () => {
+		const directory = (await api("/app-directory")).body.apps as { ref: string }[];
+		expect(directory.some((app) => app.ref === "test.ledger/forge")).toBe(true);
+		// Hub's client isn't set: nobody is offered it, or can connect it.
+		expect(directory.some((app) => app.ref === "test.ledger/hub")).toBe(false);
+		expect((await post("/mcp", { app: "test.ledger/hub" })).status).toBe(400);
+
+		const started = await post("/mcp", { app: "test.ledger/forge" });
+		expect(started).toMatchObject({ status: 201, body: { id: "forge", state: "authenticating" } });
+		const authUrl = new URL(started.body.authUrl);
+		expect(`${authUrl.origin}${authUrl.pathname}`).toBe("https://forge.example.test/login/authorize");
+		expect(Object.fromEntries(authUrl.searchParams)).toMatchObject({ client_id: "forge-client", redirect_uri: `https://pim.test/mcp/callback/${OWNER}` });
+
+		await exports.default.fetch(url(`/mcp/callback/${OWNER}?state=${authUrl.searchParams.get("state")}&code=good`));
+		expect(forgeGrants.at(-1)).toMatchObject({ grant_type: "authorization_code", code: "good", client_id: "forge-client", client_secret: "forge-secret" });
+		expect(forgeRegistrations).toBe(0);
+		const server = (await api("/mcp")).body.servers.find((candidate: { id: string }) => candidate.id === "forge");
+		expect(server).toMatchObject({ state: "ready" });
+		expect(server.tools.map((tool: { name: string }) => tool.name)).toEqual(["forge_search"]);
+		expect((await api("/mcp/forge", { method: "DELETE" })).status).toBe(200);
 	});
 
 	it("finds an app, adds and connects it after explicit chat approval, then continues the original task", async () => {

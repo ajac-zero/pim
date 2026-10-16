@@ -149,6 +149,13 @@ type AppIdentity = {
 export type McpAppDefinition = AppIdentity & {
 	/** Its remote MCP server, https. */
 	readonly url: string;
+	/**
+	 * For a server whose sign-in doesn't let apps register themselves (GitHub's):
+	 * the Worker's environment variables holding the OAuth client the deployment
+	 * registered with the service, whose redirect URL is this Pim's `/mcp/callback`.
+	 * Until they're set, nobody is offered the app.
+	 */
+	readonly client?: { readonly id: string; readonly secret?: string };
 };
 
 /** The deployment's secrets an app named in `secrets`, from the Worker's environment. */
@@ -208,6 +215,13 @@ export type NativeAppDefinition = AppIdentity & {
 };
 
 export const isNativeApp = (app: AppDefinition): app is NativeAppDefinition => !("url" in app);
+
+/** The Worker's environment variables an app needs set before anyone is offered it. */
+export function secretsOf(app: AppDefinition | undefined): string[] {
+	if (!app) return [];
+	if (isNativeApp(app)) return [...(app.secrets ?? [])];
+	return app.client ? [app.client.id, ...(app.client.secret ? [app.client.secret] : [])] : [];
+}
 
 /** Types an app tool's `execute` by its `parameters`. */
 export function defineAppTool<T extends TSchema>(

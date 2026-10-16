@@ -12,7 +12,7 @@ export default defineConfig({
 			remoteBindings: false,
 			// An 8-line memory view, so a few dozen memories exercise every level of the tree.
 			// Open registration, so tests add people without invites unless they mean to.
-			// The secrets of the test extension's bank app.
+			// The secrets of the test extension's bank app, and the client registered for its Forge app.
 			miniflare: {
 				bindings: {
 					PIM_TIME_ZONE: "America/New_York",
@@ -20,6 +20,8 @@ export default defineConfig({
 					PIM_REGISTRATION: "open",
 					TEST_BANK_CLIENT_ID: "bank-client",
 					TEST_BANK_CLIENT_SECRET: "bank-secret",
+					TEST_FORGE_CLIENT_ID: "forge-client",
+					TEST_FORGE_CLIENT_SECRET: "forge-secret",
 				},
 			},
 		}),

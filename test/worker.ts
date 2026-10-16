@@ -97,6 +97,15 @@ export const ledger = definePimExtension({
 		{ id: "strava", name: "Strava", description: "Your runs.", url: "https://mcp.strava.example/mcp" },
 		{ id: "github", name: "GitHub", description: "Code and pull requests.", url: "https://mcp.github.example/mcp" },
 		{ id: "docs", name: "Docs", description: "Documentation.", url: "https://mcp.docs.example/mcp" },
+		// Servers whose sign-in has no client registration: the deployment registered Forge's client (forge.example.test, which tests answer), and never Hub's.
+		{
+			id: "forge",
+			name: "Forge",
+			description: "Code review.",
+			url: "https://forge.example.test/mcp",
+			client: { id: "TEST_FORGE_CLIENT_ID", secret: "TEST_FORGE_CLIENT_SECRET" },
+		},
+		{ id: "hub", name: "Hub", description: "Never set up.", url: "https://hub.example.test/mcp", client: { id: "TEST_HUB_CLIENT_ID" } },
 		// The real one, for `pnpm test:live`.
 		{ id: "hugging-face", name: "Hugging Face", description: "Models, datasets and skills.", url: "https://huggingface.co/mcp" },
 		// Apps the extension implements: a bank behind OAuth (its service is bank.example.test, which tests answer), and one whose secret is never set.

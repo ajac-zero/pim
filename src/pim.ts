@@ -14,7 +14,7 @@ import {
 	type ModelRef,
 	ROOT_CONVERSATION_ID,
 } from "@earendil-works/pi-durable";
-import { Agent as DurableAgent, type Connection, type ConnectionContext, getAgentByName, type Schedule, type WSMessage } from "agents";
+import { type AgentMcpOAuthProvider, Agent as DurableAgent, type Connection, type ConnectionContext, DurableObjectOAuthClientProvider, getAgentByName, type Schedule, type WSMessage } from "agents";
 import { type PiModel, PiHarness, type PiOperationResult, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
 import { ArtifactStore, artifactHeaders, downloadName, RESIZE_SCRIPT } from "./artifacts";
@@ -55,6 +55,7 @@ import {
 	type Ability,
 	checkToolNames,
 	isNativeApp,
+	secretsOf,
 	type NativeAppDefinition,
 	type ToolWidget,
 	type PimConfig,
@@ -547,8 +548,42 @@ export class Pim extends DurableAgent<Env> {
 
 	/** The deployment's secrets a native app names, from the Worker's environment. */
 	#secrets(app: NativeAppDefinition): Record<string, string> {
+		return this.#env(app.secrets ?? []);
+	}
+
+	/** Those of the Worker's environment variables that are set. */
+	#env(names: readonly string[]): Record<string, string> {
 		const env = this.env as unknown as Record<string, unknown>;
-		return Object.fromEntries((app.secrets ?? []).flatMap((name) => (typeof env[name] === "string" && env[name] !== "" ? [[name, env[name] as string]] : [])));
+		return Object.fromEntries(names.flatMap((name) => (typeof env[name] === "string" && env[name] !== "" ? [[name, env[name] as string]] : [])));
+	}
+
+	/**
+	 * Signs in to MCP servers as the SDK does, registering Pim with each,
+	 * except for an app with a client the deployment registered beforehand
+	 * (see `McpAppDefinition.client`): that client, with no registration.
+	 */
+	override createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
+		const registered = (serverId: string) => {
+			const url = this.getMcpServers().servers[serverId]?.server_url;
+			const app = this.appDirectory().find((candidate) => candidate.url !== null && candidate.url === url);
+			const definition = app && this.extensions.app(app.ref);
+			const client = definition && !isNativeApp(definition) ? definition.client : undefined;
+			if (!client) return undefined;
+			const env = this.#env(secretsOf(definition));
+			return {
+				client_id: env[client.id]!,
+				...(client.secret ? { client_secret: env[client.secret]!, token_endpoint_auth_method: "client_secret_post" } : {}),
+				redirect_uris: [callbackUrl],
+			};
+		};
+		return new (class extends DurableObjectOAuthClientProvider {
+			override async clientInformation(context?: Parameters<DurableObjectOAuthClientProvider["clientInformation"]>[0]) {
+				const client = registered(this.serverId);
+				if (!client) return super.clientInformation(context);
+				this.clientId = client.client_id;
+				return client;
+			}
+		})(this.ctx.storage, this.name, callbackUrl);
 	}
 
 	#appExtras(services: PimServices) {
@@ -613,9 +648,9 @@ export class Pim extends DurableAgent<Env> {
 	appDirectory(): DirectoryApp[] {
 		const custom = this.store.meta(CUSTOM_APPS_KEY);
 		return appDirectory(this.extensions.list(), custom === undefined ? [] : (JSON.parse(custom) as CustomApp[])).filter((app) => {
-			// An app its extension implements is offered once the deployment set every secret it needs.
-			const native = app.url === null ? this.extensions.app(app.ref) : undefined;
-			return !native || !isNativeApp(native) || (native.secrets ?? []).every((name) => name in this.#secrets(native));
+			// An extension's app is offered once the deployment set every secret it needs.
+			const names = secretsOf(this.extensions.app(app.ref));
+			return names.every((name) => name in this.#env(names));
 		});
 	}
 

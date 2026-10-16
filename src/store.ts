@@ -158,6 +158,9 @@ function watchOf(row: Row): AppWatch {
 	};
 }
 
+/** How many widgets from tool results a chat keeps for its messages. */
+const KEPT_WIDGETS = 20;
+
 const ERASED_SCHEMA = "CREATE TABLE IF NOT EXISTS pim_erased (erased_at INTEGER NOT NULL)";
 
 const SCHEMA = `
@@ -249,6 +252,12 @@ CREATE TABLE IF NOT EXISTS pim_sessions (
 CREATE TABLE IF NOT EXISTS pim_meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pim_tool_widgets (
+	id TEXT PRIMARY KEY,
+	session TEXT NOT NULL,
+	widget TEXT NOT NULL,
+	created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pim_credentials (
 	provider TEXT PRIMARY KEY,
@@ -369,6 +378,8 @@ export class PimStore {
 			pim_app_watches: "watches",
 			pim_sessions: "chats",
 			pim_credentials: "credentials",
+			pim_app_connections: "app connections",
+			pim_tool_widgets: "widgets from apps' results",
 			pim_notifications: "notifications",
 			pim_emails: "emails sent",
 			pim_push_subscriptions: "push subscriptions",
@@ -771,6 +782,33 @@ export class PimStore {
 			key,
 			value,
 		);
+	}
+
+	// What app tools' results showed, kept for their chat to put under a message: the latest few of each
+
+	keepWidget(session: string, widget: unknown): string {
+		const id = `tool:${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+		this.#sql.exec("INSERT INTO pim_tool_widgets (id, session, widget, created_at) VALUES (?, ?, ?, ?)", id, session, JSON.stringify(widget), Date.now());
+		// A message keeps its own copy of what it showed: older results needn't stay.
+		this.#sql.exec(
+			"DELETE FROM pim_tool_widgets WHERE session = ? AND id NOT IN (SELECT id FROM pim_tool_widgets WHERE session = ? ORDER BY created_at DESC, rowid DESC LIMIT ?)",
+			session,
+			session,
+			KEPT_WIDGETS,
+		);
+		return id;
+	}
+
+	keptWidgets(session: string): string[] {
+		return this.#sql
+			.exec("SELECT id FROM pim_tool_widgets WHERE session = ? ORDER BY created_at, rowid", session)
+			.toArray()
+			.map((row) => String(row.id));
+	}
+
+	keptWidget<T>(session: string, id: string): T | undefined {
+		const [row] = this.#sql.exec("SELECT widget FROM pim_tool_widgets WHERE session = ? AND id = ?", session, id).toArray();
+		return row ? (JSON.parse(String(row.widget)) as T) : undefined;
 	}
 
 	// Model credentials, as pi-ai's JSON, by provider id

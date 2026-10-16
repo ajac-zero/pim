@@ -119,11 +119,64 @@ It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps
 
 ## Apps
 
-An extension's `apps` are what people on the deployment can connect: remote MCP servers, each with an `id`, a `name`, a `description` and an https `url`. Each is named `<extension>/<id>`, and that name is what blueprints, agents and templates list, never the URL. Besides the extensions' apps, the admin can add their own in Settings → Apps (`custom/<id>`; no extension may be called `custom`). Together they are the directory, and nothing outside it can be connected.
+An extension's `apps` are what people on the deployment can connect: remote MCP servers, each with an `id`, a `name`, a `description` and an https `url`, or apps the extension implements itself (see [below](#apps-without-an-mcp-server)). Each is named `<extension>/<id>`, and that name is what blueprints, agents and templates list, never the URL. Besides the extensions' apps, the admin can add their own in Settings → Apps (`custom/<id>`; no extension may be called `custom`). Together they are the directory, and nothing outside it can be connected.
 
 Each person connects an app once, with their own account, from Settings → Apps, an agent's card in Your agents, or by asking an agent, whose `connect_app` connects only the apps that agent lists. Every agent of theirs that lists it then works with that one connection. A chat gets the tools and instructions of the connected apps its agent lists: the blueprint's `apps`, then the agent's own. Apps connected for another agent stay out of it. With `manage_apps` enabled (Off / Ask in Tool permissions), an agent can request additions and removals to its own app list, by name, as `find_app` finds them in the directory. Each request requires explicit chat approval, even under the auto approval policy, and approval connects additions automatically. Removal affects only the agent's own list, not blueprint apps or shared connections. `update_agent` cannot change apps.
 
 A blueprint's apps must be installed: one that names an app no extension brings fails when extensions are checked. Don't rename an app's `id`: people's agents store it.
+
+### Apps without an MCP server
+
+For a service with no MCP server, such as Spotify or Plaid, an extension implements the app: its sign-in and its tools, in place of a `url`. To everything else it is an app like the others: agents list it, people connect it once from Settings → Apps, and tool permissions and approvals cover its tools. [`spotify.ts`](../src/extensions/spotify.ts) is a complete one.
+
+```ts
+import { Type } from "@earendil-works/pi-ai";
+import { defineAppTool, definePimExtension, oauth2 } from "../src/extensions/define";
+
+export const music = definePimExtension({
+	id: "music",
+	name: "Music",
+	description: "Your music service.",
+	apps: [
+		{
+			id: "music",
+			name: "Music",
+			description: "What's playing, and playback.",
+			// Environment variables (`wrangler secret put`): until every one is set, nobody is offered the app.
+			secrets: ["MUSIC_CLIENT_ID", "MUSIC_CLIENT_SECRET"],
+			// signIn, callback and refresh, for a service that speaks OAuth 2.0 (authorization code with PKCE).
+			...oauth2({
+				authorizeUrl: "https://accounts.music.example/authorize",
+				tokenUrl: "https://accounts.music.example/token",
+				scopes: ["playback"],
+				clientId: "MUSIC_CLIENT_ID",
+				clientSecret: "MUSIC_CLIENT_SECRET",
+			}),
+			tools: [
+				defineAppTool({
+					name: "now_playing",
+					description: "What's playing now.",
+					parameters: Type.Object({}),
+					// Read-only tools run without asking under the default policy; the rest ask first.
+					readOnly: true,
+					async execute(_args, { credential }) {
+						const playing = await (await fetch("https://api.music.example/now", { headers: { authorization: `Bearer ${credential.accessToken}` } })).json();
+						return {
+							text: `Playing ${playing.title}.`,
+							// The person can be shown this under a message (see Widgets → From tools).
+							widget: { title: "Now playing", kind: "progress", items: [{ title: playing.title, value: playing.at, max: playing.length }] },
+						};
+					},
+				}),
+			],
+		},
+	],
+});
+```
+
+- **Sign-in.** `signIn` gets the `callbackUrl`, a `state` and the app's secrets, and returns the URL to send the person to, with anything to keep until they return (`pending`, such as a PKCE verifier). They come back to `callbackUrl`, which is this Pim's `/mcp/callback/apps` for everyone, so it can be registered as the redirect URI; `state` tells the Worker whose Pim it is. `callback` gets the URL they came back to and returns their credential, any JSON; throw to fail with a reason the person sees. A service with another flow, such as Plaid's Hosted Link, implements `signIn` and `callback` itself.
+- **Credentials** stay in the person's own Pim, never in exports, and go with their account. One with `expiresAt` (ms) is renewed with `refresh` a minute before it expires, once however many calls want it; without `refresh`, or when it fails, the app shows as failed and the person connects it again.
+- **Tools** are named `<connection>_<name>`, like an MCP app's, and get the person's `credential` and the app's `secrets`. A thrown error comes back to the model as the tool's error.
 
 ## Widgets
 
@@ -158,6 +211,10 @@ A widget with a `description` can also go with a message. The model reads a `wid
 
 Leave out `description` for a widget that only makes sense on its dashboard.
 
+### From tools
+
+A tool of an app an extension implements can return a `widget` with its `text`: a `title` and content of one of the kinds above. Pim keeps it for the chat (its 20 latest) and tells the model its name, `tool:<id>`, which it can put in `send_to_user`'s `widgets` to show the person the result instead of retyping it. A result the tool marks `isError` keeps none.
+
 ## Themes
 
 A theme is the web app's colors: a value for every color token its components use (see [`web/DESIGN.md`](../web/DESIGN.md#color)), in light and in dark mode, and the Shiki themes that color code in each. Like widgets, themes are data; no extension code runs in the browser.
@@ -190,11 +247,12 @@ People pick a theme in Settings → Appearance; the choice is kept in their brow
 
 ## Not built yet
 
-- **Configuration and secrets** per extension: read a deployment's keys with `import { env } from "cloudflare:workers"` for now; per-person settings have no form.
-- **Routes** for an extension's webhooks or sign-in callbacks.
+- **Configuration and secrets** per extension, beyond an app's `secrets`: read a deployment's keys with `import { env } from "cloudflare:workers"` for now; per-person settings have no form.
+- **Routes** for an extension's webhooks.
 - **Choosing Pim's own abilities per Pim**: memory, goals and the rest are every Pim's.
 - **Widget actions** beyond opening a chat or an artifact, more kinds, and arranging a dashboard.
 - **Themes beyond colors**, such as fonts and radii, and translated theme names.
 - **Widgets with arguments** in chat, such as one goal, and interfaces the model composes itself from a catalog of components.
 - **Extensions people bring themselves**, sandboxed (see [Dynamic Workers](https://developers.cloudflare.com/dynamic-workers/)); the directory's MCP apps are how people add tools today.
-- **Apps without an MCP server**, which an extension implements itself with its own sign-in, and widgets for an app's tool results.
+- **Widgets from MCP apps' results**, and interfaces apps ship themselves ([MCP Apps](https://modelcontextprotocol.io/extensions/apps)).
+- **More than one account** of an app per person, such as two banks.

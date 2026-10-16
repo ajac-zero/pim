@@ -12,7 +12,16 @@ export default defineConfig({
 			remoteBindings: false,
 			// An 8-line memory view, so a few dozen memories exercise every level of the tree.
 			// Open registration, so tests add people without invites unless they mean to.
-			miniflare: { bindings: { PIM_TIME_ZONE: "America/New_York", PIM_MEMORY_LINES: "8", PIM_REGISTRATION: "open" } },
+			// The secrets of the test extension's bank app.
+			miniflare: {
+				bindings: {
+					PIM_TIME_ZONE: "America/New_York",
+					PIM_MEMORY_LINES: "8",
+					PIM_REGISTRATION: "open",
+					TEST_BANK_CLIENT_ID: "bank-client",
+					TEST_BANK_CLIENT_SECRET: "bank-secret",
+				},
+			},
 		}),
 	],
 	test: {

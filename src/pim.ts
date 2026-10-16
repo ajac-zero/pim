@@ -50,9 +50,13 @@ import pimConfig from "../pim.config";
 import { artifactsExtension, artifactsWidgets } from "./extensions/artifacts";
 import { appDirectory, type CustomApp, type DirectoryApp } from "./extensions/app-directory";
 import { ExtensionDataStore } from "./extensions/data";
+import { NativeApps } from "./extensions/native-apps";
 import {
 	type Ability,
 	checkToolNames,
+	isNativeApp,
+	type NativeAppDefinition,
+	type ToolWidget,
 	type PimConfig,
 	PimExtensions,
 	type ShownWidget,
@@ -133,6 +137,12 @@ export const OWNER_HEADER = "x-pim-owner";
 
 /** Where apps' sign-ins return, as `/mcp/callback/<owner>`, so the Worker knows whose Pim the callback is for. */
 export const MCP_CALLBACK_PATH = "/mcp/callback";
+/**
+ * Where sign-ins to the apps extensions implement return, the same for
+ * everyone so services can have it registered: `state` names the owner,
+ * `<owner>.<nonce>`. Owner ids start with `o_`, so it is nobody's `/mcp/callback/<owner>`.
+ */
+export const APPS_CALLBACK_PATH = `${MCP_CALLBACK_PATH}/apps`;
 /** Where apps deliver event webhooks, as `/mcp/events/<owner>/<watch id>`; signed, so served without the API token. The Pim sees `/mcp/events/<watch id>`. */
 export const MCP_EVENTS_PATH = "/mcp/events/";
 const WATCH_REFRESH_CALLBACK = "refreshAppWatch";
@@ -312,11 +322,25 @@ export class Pim extends DurableAgent<Env> {
 		// The person's own plan: its tokens are theirs, not the deployment's.
 		planProviders: [CHATGPT_PROVIDER],
 	});
-	/** Actions that run only after the user approves them. */
-	/** Connected apps: the SDK's MCP client, as the bridge pim's extension builds tools from. */
+	/** The person's connections to apps extensions implement themselves, with their sign-ins. */
+	readonly nativeApps = new NativeApps({
+		sql: this.ctx.storage.sql,
+		app: (ref) => {
+			const app = this.extensions.app(ref);
+			return app && isNativeApp(app) ? app : undefined;
+		},
+		secrets: (app) => this.#secrets(app),
+		callbackUrl: () => `${this.env.PIM_PUBLIC_URL || this.store.meta("public_origin")}${APPS_CALLBACK_PATH}`,
+		owner: () => this.name,
+		changed: () => this.#installApps(),
+	});
+	/**
+	 * Connected apps: the SDK's MCP client, and the apps extensions implement,
+	 * as the bridge pim's extension builds tools from.
+	 */
 	readonly apps: McpBridge = {
-		servers: () =>
-			Object.entries(this.getMcpServers().servers).map(([id, server]) => ({
+		servers: () => [
+			...Object.entries(this.getMcpServers().servers).map(([id, server]) => ({
 				id,
 				name: server.name,
 				url: server.server_url,
@@ -326,13 +350,26 @@ export class Pim extends DurableAgent<Env> {
 				instructions: server.instructions,
 				approval: (this.store.mcpApproval(id) ?? "writes") as McpApproval,
 			})),
-		tools: () => this.mcp.listTools(),
+			...this.nativeApps.connections().map(({ id, app, name, state, error, authUrl }) => ({
+				id,
+				app,
+				name,
+				url: "",
+				state,
+				error,
+				authUrl,
+				instructions: null,
+				approval: (this.store.mcpApproval(id) ?? "writes") as McpApproval,
+			})),
+		],
+		tools: () => [...this.mcp.listTools(), ...this.nativeApps.tools()],
 		call: async (serverId, name, args) => {
 			// Work still under way on a Pim being erased acts on nobody's behalf.
 			this.#assertOpen();
+			if (this.nativeApps.has(serverId)) return this.nativeApps.call(serverId, name, args);
 			return this.mcp.callTool({ serverId, name, arguments: args });
 		},
-		connect: (name, url) => this.connectApp(name, url),
+		connect: (app) => this.connectApp(app),
 		capabilities: (serverId) => this.mcp.mcpConnections[serverId]?.serverCapabilities as McpCapabilities | undefined,
 		request: async (serverId, method, params) => {
 			const connection = this.mcp.mcpConnections[serverId];
@@ -463,22 +500,21 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Connects one of the directory's apps, by its name and server. A failed
-	 * connection leaves nothing behind; `authUrl` is set when the user must sign in.
+	 * Connects one of the directory's apps. A failed connection leaves
+	 * nothing behind; `authUrl` is set when the user must sign in.
 	 */
-	async connectApp(name: string, url: string, options: { approval?: McpApproval } = {}): Promise<{ id: string; state: string; authUrl?: string }> {
+	async connectApp(app: DirectoryApp, options: { approval?: McpApproval } = {}): Promise<{ id: string; state: string; authUrl?: string }> {
+		const { name, url } = app;
 		// A connection is the app's, found by its server: another app with the same name gets one of its own.
 		let id = slug(name);
-		const sameUrl = this.apps.servers().find((server) => server.url === url);
-		if (sameUrl) id = sameUrl.id;
+		const existing = serverFor(this.apps.servers(), app);
+		if (existing) id = existing.id;
 		else if (this.apps.servers().some((server) => server.id === id)) id = `${id.slice(0, 15)}_${crypto.randomUUID().slice(0, 8)}`;
-		const existing = this.apps.servers().find((server) => server.id === id);
 		if (existing && existing.state !== "ready") {
 			// A connection that failed, or is still waiting for sign-in (an abandoned or expired one), is not connected: clear it so the user can try again.
-			await this.removeMcpServer(id).catch(() => undefined);
-			this.store.deleteMcpApproval(id);
+			await this.#disconnect(id);
 		} else if (existing) {
-			throw new HttpError(409, `An app named ${name} is already connected`);
+			throw new HttpError(409, `${name} is already connected`);
 		}
 		const { apps } = this.limits();
 		if (apps !== null && this.apps.servers().filter((server) => server.id !== id).length >= apps) {
@@ -486,6 +522,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 		this.store.setMcpApproval(id, options.approval ?? "writes");
 		try {
+			if (url === null) return await this.nativeApps.connect(app.ref, id);
 			const result = await this.addMcpServer(name, url, {
 				id,
 				// The owner in the path tells the Worker whose Pim the sign-in returns to.
@@ -497,10 +534,21 @@ export class Pim extends DurableAgent<Env> {
 			this.#installApps();
 			return result;
 		} catch (error) {
-			await this.removeMcpServer(id).catch(() => undefined);
-			this.store.deleteMcpApproval(id);
+			await this.#disconnect(id);
 			throw new HttpError(502, `Could not connect ${name}: ${errorMessage(error)}`);
 		}
+	}
+
+	/** Ends a connection, MCP or native, and forgets its approval policy. */
+	async #disconnect(id: string): Promise<void> {
+		if (!this.nativeApps.remove(id)) await this.removeMcpServer(id).catch(() => undefined);
+		this.store.deleteMcpApproval(id);
+	}
+
+	/** The deployment's secrets a native app names, from the Worker's environment. */
+	#secrets(app: NativeAppDefinition): Record<string, string> {
+		const env = this.env as unknown as Record<string, unknown>;
+		return Object.fromEntries((app.secrets ?? []).flatMap((name) => (typeof env[name] === "string" && env[name] !== "" ? [[name, env[name] as string]] : [])));
 	}
 
 	#appExtras(services: PimServices) {
@@ -564,7 +612,11 @@ export class Pim extends DurableAgent<Env> {
 	/** The apps people on this deployment can connect: the extensions', then the admin's, as last read from the gallery. */
 	appDirectory(): DirectoryApp[] {
 		const custom = this.store.meta(CUSTOM_APPS_KEY);
-		return appDirectory(this.extensions.list(), custom === undefined ? [] : (JSON.parse(custom) as CustomApp[]));
+		return appDirectory(this.extensions.list(), custom === undefined ? [] : (JSON.parse(custom) as CustomApp[])).filter((app) => {
+			// An app its extension implements is offered once the deployment set every secret it needs.
+			const native = app.url === null ? this.extensions.app(app.ref) : undefined;
+			return !native || !isNativeApp(native) || (native.secrets ?? []).every((name) => name in this.#secrets(native));
+		});
 	}
 
 	#customAppsReadAt = 0;
@@ -835,7 +887,14 @@ export class Pim extends DurableAgent<Env> {
 				return run ? { name: run.member, session: run.session } : null;
 			},
 			widgetsFor: (session) => this.#chatWidgets(session),
-			showWidget: (session, ref) => this.#loadWidget(this.agents.ofSession(session), ref),
+			showWidget: async (session, ref) => {
+				const kept = this.store.keptWidget<ToolWidget>(session, ref);
+				if (!kept) return this.#loadWidget(this.agents.ofSession(session), ref);
+				const { title, ...content } = kept;
+				return { id: ref, title, empty: "", ...content };
+			},
+			keepWidget: (session, widget) => this.store.keepWidget(session, widget),
+			keptWidgets: (session) => (this.visits.bySession(session) || this.team.run(session) ? [] : this.store.keptWidgets(session)),
 		};
 	}
 
@@ -3038,6 +3097,21 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 		["GET", "/mcp", () => ({ servers: this.#describeApps() })],
+		// Where the person comes back from signing in to an app its extension implements; the Worker found this Pim by its `state`.
+		[
+			"GET",
+			APPS_CALLBACK_PATH,
+			async (_params, _request, url) => {
+				const result = await this.nativeApps.finish(url);
+				const ok = "name" in result;
+				return new Response(
+					ok
+						? "<!doctype html><title>Connected</title><p>Connected. You can close this window and go back to Pim.</p>"
+						: `<!doctype html><title>Not connected</title><p>Sign-in failed: ${result.error.replace(/[<&]/g, "")}</p>`,
+					{ status: ok ? 200 : 400, headers: { "content-type": "text/html; charset=utf-8" } },
+				);
+			},
+		],
 		[
 			"POST",
 			"/mcp",
@@ -3049,7 +3123,7 @@ export class Pim extends DurableAgent<Env> {
 				await this.#refreshCustomApps(true);
 				const app = this.appDirectory().find((candidate) => candidate.ref === body.app);
 				if (!app) throw new HttpError(400, "app must be the id of an app this Pim offers");
-				const result = await this.connectApp(app.name, app.url, body.approval ? { approval: body.approval } : {});
+				const result = await this.connectApp(app, body.approval ? { approval: body.approval } : {});
 				return Response.json(result, { status: 201 });
 			},
 		],
@@ -3073,8 +3147,7 @@ export class Pim extends DurableAgent<Env> {
 			async ({ id }) => {
 				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No app ${id}`);
 				for (const watch of this.store.watches(id)) await this.appEvents.stop(watch.id);
-				await this.removeMcpServer(id!);
-				this.store.deleteMcpApproval(id!);
+				await this.#disconnect(id!);
 				this.catalog.forget(id!);
 				this.#installApps();
 				return { deleted: true };
@@ -3195,9 +3268,12 @@ export class Pim extends DurableAgent<Env> {
 	#describeApps() {
 		const catalog = this.apps.tools();
 		const servers = this.apps.servers();
+		const directory = this.appDirectory();
 		const agents = this.agents.list().map((agent) => ({ name: agent.name, servers: new Set(this.#appsOf(agent).map((app) => serverFor(servers, app)?.id)) }));
 		return servers.map((server) => ({
 			...server,
+			// The directory's app it connects; null for one this Pim no longer offers.
+			app: directory.find((app) => serverFor([server], app))?.ref ?? null,
 			// The person's agents that list the app: only their chats get its tools.
 			agents: agents.filter((agent) => agent.servers.has(server.id)).map((agent) => agent.name),
 			tools: catalog

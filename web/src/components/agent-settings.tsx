@@ -376,7 +376,7 @@ function PimApps({ agent }: { agent: Agent }) {
     <ul className="mt-2 flex flex-wrap gap-1.5" aria-label={t("suggestedApps")}>
       {apps.map((app) => {
         const known = connected.some(
-          (server) => server.url === app.url && server.state === "ready",
+          (server) => server.app === app.ref && server.state === "ready",
         );
         return (
           <li

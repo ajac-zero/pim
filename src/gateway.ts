@@ -1,7 +1,7 @@
 import { getAgentByName } from "agents";
 import pimConfig from "../pim.config";
 import { accountApi, adminApi, clientIp, handleRegistration, limited, resolveAccount, siteFor, sites, socialApi } from "./accounts";
-import { AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_EVENTS_PATH, OWNER_HEADER } from "./pim";
+import { APPS_CALLBACK_PATH, AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_EVENTS_PATH, OWNER_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
 import { themes as ownThemes } from "./extensions/themes";
@@ -114,8 +114,9 @@ export type ApiExtension = (path: string, request: Request) => Promise<Response 
 /**
  * An app's callback or event delivery: `/mcp/callback/<owner>` (GET, the
  * OAuth sign-in's redirect, which the Pim matches against the callback URL
- * it gave) or `/mcp/events/<owner>/<watch>` (POST, which the Pim answers as
- * `/mcp/events/<watch>`).
+ * it gave), `/mcp/callback/apps` (GET, the same for the apps extensions
+ * implement, whose `state` starts with the owner), or
+ * `/mcp/events/<owner>/<watch>` (POST, which the Pim answers as `/mcp/events/<watch>`).
  */
 async function serveApp(request: Request, env: Env, pathname: string): Promise<Response | undefined> {
 	const callback = new RegExp(`^${MCP_CALLBACK_PATH}/([^/]+)$`).exec(pathname);
@@ -123,7 +124,8 @@ async function serveApp(request: Request, env: Env, pathname: string): Promise<R
 	if (!callback && !events) return undefined;
 	const method = callback ? "GET" : "POST";
 	if (request.method !== method) return fail(405, `${pathname} takes ${method}`);
-	const account = await resolveAccount(env, decodeURIComponent((callback ?? events)![1]!));
+	const owner = pathname === APPS_CALLBACK_PATH ? (new URL(request.url).searchParams.get("state") ?? "").split(".")[0]! : decodeURIComponent((callback ?? events)![1]!);
+	const account = await resolveAccount(env, owner);
 	if (!account) return fail(404, "Not found");
 	const refused = closed(account);
 	if (refused) return refused;

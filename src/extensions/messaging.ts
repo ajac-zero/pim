@@ -29,7 +29,7 @@ export function messagingExtension(services: PimServices) {
 			Type.Array(Type.String(), {
 				maxItems: MAX_WIDGETS,
 				description:
-					"Widgets to show under the message, from the ones your prompt lists, by name. They show the person's data as it is now, drawn by the app: use one instead of retyping what it shows.",
+					"Widgets to show under the message, from the ones your prompt lists or an app tool's result offers, by name. They show the person's data, drawn by the app: use one instead of retyping what it shows.",
 			}),
 		),
 	};
@@ -55,7 +55,7 @@ export function messagingExtension(services: PimServices) {
 			const headed = title?.trim() || headline(message);
 			// A widget this chat can't show is a mistake the model can fix: say so, and send nothing.
 			const wanted = [...new Set(args.widgets ?? [])];
-			const available = services.widgetsFor(session).map((widget) => widget.ref);
+			const available = [...services.widgetsFor(session).map((widget) => widget.ref), ...services.keptWidgets(session)];
 			const unknown = wanted.filter((ref) => !available.includes(ref));
 			if (unknown.length > 0) {
 				const offer = available.length > 0 ? `The widgets you can show here: ${available.join(", ")}.` : "No widgets can be shown here.";

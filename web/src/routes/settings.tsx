@@ -14,7 +14,7 @@ import {
   Sun,
   Trash2,
 } from "lucide-react";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
   AccountSection,
@@ -27,6 +27,8 @@ import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
 import { MembersSection } from "~/components/members";
 import { Page } from "~/components/page";
+import { ProviderLogo } from "~/components/provider-buttons";
+import { SignInMethodsSection } from "~/components/sign-in-methods";
 import { useTheme } from "~/components/theme";
 import { ToolPermissionList } from "~/components/tool-permissions";
 import { Button } from "~/components/ui/button";
@@ -34,9 +36,14 @@ import { Input } from "~/components/ui/input";
 import { Switch } from "~/components/ui/switch";
 import {
   auth,
+  authError,
   authSessionQuery,
   cancelled,
+  forgetAuthError,
+  identitiesQuery,
+  type LinkedIdentity,
   type Passkey,
+  type ProviderId,
   passkeysQuery,
 } from "~/lib/auth";
 import {
@@ -78,6 +85,7 @@ function SettingsPage() {
     <Page title={t("settings")} description={t("settingsDescription")}>
       <AccountSection />
       <MembersSection />
+      <SignInMethodsSection />
       <ProfileSection />
       <ChatGPTCard settings={data} />
       <section className="mt-10 space-y-3">
@@ -92,7 +100,7 @@ function SettingsPage() {
       <ToolPermissionsSection />
       <EmailSection />
       <PushSection />
-      <PasskeysSection />
+      <SignInSection />
       <TokensSection />
       <DeleteAccountSection />
     </Page>
@@ -777,15 +785,23 @@ function PushSection() {
   );
 }
 
-/** The passkeys that sign in to this Pim, and signing out. */
-function PasskeysSection() {
+/** The passkeys and linked accounts that sign in to this Pim, and signing out. */
+function SignInSection() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const { data: session } = useQuery(authSessionQuery());
-  // The dev server signs you in itself; there are no passkeys to manage.
-  const enabled = session?.method === "passkey";
+  // The dev server signs you in itself; there is no sign-in to manage.
+  const enabled =
+    session?.method === "passkey" || session?.method === "identity";
   const { data: passkeys } = useQuery({ ...passkeysQuery(), enabled });
+  const { data: identities } = useQuery({ ...identitiesQuery(), enabled });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["auth"] });
+  // Linking sends the browser to the provider and back here, with why it didn't work.
+  useEffect(() => {
+    const error = authError();
+    if (error) toast.error(error);
+    forgetAuthError();
+  }, []);
 
   const add = useMutation({
     mutationFn: () => auth.addPasskey(),
@@ -802,6 +818,16 @@ function PasskeysSection() {
     onSuccess: refresh,
     onError: (error) => toast.error(error.message),
   });
+  const unlink = useMutation({
+    mutationFn: auth.unlinkIdentity,
+    onSuccess: refresh,
+    onError: (error) => toast.error(error.message),
+  });
+  const link = useMutation({
+    mutationFn: (provider: ProviderId) => auth.withProvider(provider),
+    onError: (error) => toast.error(error.message),
+  });
+  const providers = session?.providers ?? [];
   const signOut = useMutation({
     mutationFn: auth.signOut,
     onSuccess: refresh,
@@ -843,18 +869,120 @@ function PasskeysSection() {
           {add.isPending ? <Loader2 className="animate-spin" /> : <KeyRound />}
           {t("addPasskey")}
         </Button>
-        {session?.method === "passkey" && (
-          <Button
-            variant="ghost"
-            onClick={() => signOut.mutate()}
-            disabled={signOut.isPending}
-          >
-            <LogOut />
-            {t("signOut")}
-          </Button>
-        )}
+      </div>
+      {(providers.length > 0 || (identities?.length ?? 0) > 0) && (
+        <>
+          <h3 className="pt-4 font-medium text-sm">{t("linkedAccounts")}</h3>
+          <p className="text-[13px] text-muted-foreground">
+            {t("linkedAccountsDescription")}
+          </p>
+          {identities && identities.length > 0 && (
+            <ul
+              className="divide-y rounded-2xl border bg-muted/20"
+              aria-label={t("linkedAccounts")}
+            >
+              {identities.map((identity) => (
+                <IdentityRow
+                  key={identity.id}
+                  identity={identity}
+                  providerName={
+                    providers.find((p) => p.id === identity.provider)?.name ??
+                    null
+                  }
+                  current={identity.id === session?.credential}
+                  removing={
+                    unlink.isPending && unlink.variables === identity.id
+                  }
+                  onRemove={() => unlink.mutate(identity.id)}
+                />
+              ))}
+            </ul>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {providers.map((provider) => (
+              <Button
+                key={provider.id}
+                variant="outline"
+                onClick={() => link.mutate(provider.id)}
+                disabled={link.isPending}
+              >
+                {link.isPending && link.variables === provider.id ? (
+                  <Loader2 className="animate-spin" />
+                ) : (
+                  <ProviderLogo provider={provider.id} />
+                )}
+                {t("linkProvider", { provider: provider.name })}
+              </Button>
+            ))}
+          </div>
+        </>
+      )}
+      <div className="pt-2">
+        <Button
+          variant="ghost"
+          onClick={() => signOut.mutate()}
+          disabled={signOut.isPending}
+        >
+          <LogOut />
+          {t("signOut")}
+        </Button>
       </div>
     </section>
+  );
+}
+
+function IdentityRow({
+  identity,
+  providerName,
+  current,
+  removing,
+  onRemove,
+}: {
+  identity: LinkedIdentity;
+  /** Null when the admin turned that provider off: it can't sign in for now. */
+  providerName: string | null;
+  current: boolean;
+  removing: boolean;
+  onRemove: () => void;
+}) {
+  const { t, formatDate } = useI18n();
+  return (
+    <li className="flex items-center gap-3 px-4 py-3">
+      <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+        <ProviderLogo provider={identity.provider} className="size-5" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate font-medium text-sm">
+          {identity.label}
+          {current && (
+            <span className="ml-2 font-normal text-muted-foreground text-xs">
+              {t("thisBrowser")}
+            </span>
+          )}
+        </span>
+        <span className="block truncate text-muted-foreground text-xs">
+          {providerName
+            ? t("identityDates", {
+                provider: providerName,
+                used: formatDate(new Date(identity.lastUsedAt), {
+                  dateStyle: "medium",
+                }),
+              })
+            : t("providerTurnedOff")}
+        </span>
+      </span>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        className="text-muted-foreground"
+        aria-label={t("unlinkIdentity", { name: identity.label })}
+        title={current ? t("unlinkCurrentIdentity") : undefined}
+        onClick={onRemove}
+        disabled={removing}
+      >
+        {removing ? <Loader2 className="animate-spin" /> : <Trash2 />}
+      </Button>
+    </li>
   );
 }
 

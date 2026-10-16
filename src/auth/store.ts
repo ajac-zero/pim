@@ -3,9 +3,11 @@ import { base64UrlEncode } from "./encoding";
 import type { PublicKey } from "./webauthn";
 
 /**
- * Who may use one person's Pim: their passkeys, whether they ever had one,
- * the one-time setup code that creates a passkey without one, recovery
- * codes, device links and API tokens. It lives in its own Durable Object,
+ * Who may use one person's Pim: their passkeys and linked accounts (Google,
+ * GitHub, single sign-on), whether they ever had either, the one-time setup
+ * code that adds one without them, recovery codes, device links and API
+ * tokens. A passkey or a linked account is a credential: a session names
+ * the one it was made with, and ends when it goes. It lives in its own Durable Object,
  * one per owner and apart from the Pim, so signing in never wakes the
  * agent. One object also makes "use the setup code once" a single step.
  */
@@ -14,6 +16,19 @@ export type Passkey = {
 	readonly id: string;
 	/** Where it was made, such as "Chrome on macOS". */
 	readonly name: string;
+	readonly createdAt: number;
+	readonly lastUsedAt: number;
+};
+
+/** An account at another provider that signs in to this Pim. */
+export type LinkedIdentity = {
+	readonly id: string;
+	/** Which button signs in with it: `google`, `github` or `oidc`. */
+	readonly provider: string;
+	readonly issuer: string;
+	readonly subject: string;
+	/** Its email or username there, as it was when linked. */
+	readonly label: string;
 	readonly createdAt: number;
 	readonly lastUsedAt: number;
 };
@@ -60,6 +75,17 @@ CREATE TABLE IF NOT EXISTS auth_recovery_codes (
 	created_at INTEGER NOT NULL,
 	used_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS auth_identities (
+	id TEXT PRIMARY KEY,
+	provider TEXT NOT NULL,
+	issuer TEXT NOT NULL,
+	subject TEXT NOT NULL,
+	label TEXT NOT NULL,
+	created_at INTEGER NOT NULL,
+	last_used_at INTEGER NOT NULL,
+	UNIQUE (issuer, subject)
+);
+-- The "passkey" column is the credential, a passkey or a linked identity, whose session made the link.
 CREATE TABLE IF NOT EXISTS auth_device_links (
 	hash TEXT PRIMARY KEY,
 	passkey TEXT NOT NULL,
@@ -117,8 +143,12 @@ export class Auth extends DurableObject<Env> {
 		return row ? { spki: String(row.spki), algorithm: Number(row.algorithm) } : null;
 	}
 
-	hasPasskey(id: string): boolean {
-		return this.ctx.storage.sql.exec("SELECT 1 FROM auth_passkeys WHERE id = ?", id).toArray().length > 0;
+	/** Whether `id` is one of this person's passkeys or linked identities: what a session needs to stay good. */
+	hasCredential(id: string): boolean {
+		return (
+			this.ctx.storage.sql.exec("SELECT 1 FROM auth_passkeys WHERE id = ? UNION ALL SELECT 1 FROM auth_identities WHERE id = ?", id, id).toArray()
+				.length > 0
+		);
 	}
 
 	passkeys(): Passkey[] {
@@ -133,17 +163,21 @@ export class Auth extends DurableObject<Env> {
 			}));
 	}
 
-	/** Whether this person has ever had a passkey, even if all were removed since. */
+	/** Whether this person has ever had a passkey or linked identity, even if all were removed since. */
 	claimed(): boolean {
 		return this.#meta("claimed") !== null;
 	}
 
-	addPasskey(id: string, key: PublicKey, name: string, now: number): Passkey {
-		// The first passkey ever, however it was made (setup link, recovery code), ends setting up:
-		// the setup code from registration must not make a second one later.
+	#claim(now: number) {
+		// The first credential ever, however it was added (setup link, recovery code), ends setting up:
+		// the setup code from registration must not add a second one later.
 		// An admin's setup link is issued only after this, so it's unaffected.
 		if (!this.claimed()) this.#setMeta("setup_code", null);
 		this.#setMeta("claimed", String(now));
+	}
+
+	addPasskey(id: string, key: PublicKey, name: string, now: number): Passkey {
+		this.#claim(now);
 		this.ctx.storage.sql.exec(
 			"INSERT INTO auth_passkeys (id, spki, algorithm, name, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?)",
 			id,
@@ -164,6 +198,57 @@ export class Auth extends DurableObject<Env> {
 		this.ctx.storage.sql.exec("DELETE FROM auth_passkeys WHERE id = ?", id);
 		// Links that passkey's browser issued go with it.
 		this.ctx.storage.sql.exec("DELETE FROM auth_device_links WHERE passkey = ?", id);
+	}
+
+	// Linked identities: accounts at Google, GitHub or a single sign-on provider.
+
+	identities(): LinkedIdentity[] {
+		return this.ctx.storage.sql
+			.exec("SELECT * FROM auth_identities ORDER BY created_at")
+			.toArray()
+			.map((row) => ({
+				id: String(row.id),
+				provider: String(row.provider),
+				issuer: String(row.issuer),
+				subject: String(row.subject),
+				label: String(row.label),
+				createdAt: Number(row.created_at),
+				lastUsedAt: Number(row.last_used_at),
+			}));
+	}
+
+	/** The linked identity with this issuer and subject, if it is one of this person's. */
+	identity(issuer: string, subject: string): LinkedIdentity | null {
+		return this.identities().find((identity) => identity.issuer === issuer && identity.subject === subject) ?? null;
+	}
+
+	/** Links an identity, or returns the one already linked, with its label brought up to date. */
+	linkIdentity(provider: string, issuer: string, subject: string, label: string, now: number): LinkedIdentity {
+		this.#claim(now);
+		this.ctx.storage.sql.exec(
+			`INSERT INTO auth_identities (id, provider, issuer, subject, label, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (issuer, subject) DO UPDATE SET label = excluded.label, last_used_at = excluded.last_used_at`,
+			`idp_${randomCode()}`,
+			provider,
+			issuer,
+			subject,
+			label,
+			now,
+			now,
+		);
+		return this.identity(issuer, subject)!;
+	}
+
+	useIdentity(id: string, label: string, now: number) {
+		this.ctx.storage.sql.exec("UPDATE auth_identities SET label = ?, last_used_at = ? WHERE id = ?", label, now, id);
+	}
+
+	/** Unlinks an identity, and returns it, so the Directory can let it go too. */
+	removeIdentity(id: string): LinkedIdentity | null {
+		const identity = this.identities().find((candidate) => candidate.id === id) ?? null;
+		this.ctx.storage.sql.exec("DELETE FROM auth_identities WHERE id = ?", id);
+		this.ctx.storage.sql.exec("DELETE FROM auth_device_links WHERE passkey = ?", id);
+		return identity;
 	}
 
 	#activeSetupCode(now: number): SetupCode | null {
@@ -214,24 +299,24 @@ export class Auth extends DurableObject<Env> {
 	// Device links: a signed-in browser hands one to the person's other device.
 
 	/**
-	 * A new link to add a device, issued for the passkey that signed in the
-	 * browser asking. It works once, for `DEVICE_LINK_MS`, and only while that
-	 * passkey is still one of this Pim's: removing the passkey, or signing out
-	 * everywhere by removing it, voids the links it issued. Making a new link
-	 * voids that passkey's older ones, so only the latest is live. Only its
+	 * A new link to add a device, issued for the credential (a passkey or a
+	 * linked identity) that signed in the browser asking. It works once, for
+	 * `DEVICE_LINK_MS`, and only while that credential is still one of this
+	 * Pim's: removing it voids the links it issued. Making a new link voids
+	 * that credential's older ones, so only the latest is live. Only its
 	 * digest is kept. It is separate from the setup code, so issuing one never
 	 * replaces a link registration or the operator gave out.
 	 */
-	async newDeviceLink(passkey: string, now: number): Promise<DeviceLink> {
+	async newDeviceLink(credential: string, now: number): Promise<DeviceLink> {
 		const code = randomCode();
 		const hash = await digestHex(code);
 		const expiresAt = now + DEVICE_LINK_MS;
 		this.ctx.storage.transactionSync(() => {
-			this.ctx.storage.sql.exec("DELETE FROM auth_device_links WHERE expires_at <= ? OR passkey = ?", now, passkey);
+			this.ctx.storage.sql.exec("DELETE FROM auth_device_links WHERE expires_at <= ? OR passkey = ?", now, credential);
 			this.ctx.storage.sql.exec(
 				"INSERT INTO auth_device_links (hash, passkey, created_at, expires_at) VALUES (?, ?, ?, ?)",
 				hash,
-				passkey,
+				credential,
 				now,
 				expiresAt,
 			);
@@ -239,12 +324,12 @@ export class Auth extends DurableObject<Env> {
 		return { code, expiresAt };
 	}
 
-	/** Voids the links a passkey's browser issued, when it signs out. */
-	voidDeviceLinks(passkey: string): void {
-		this.ctx.storage.sql.exec("DELETE FROM auth_device_links WHERE passkey = ?", passkey);
+	/** Voids the links a credential's browser issued, when it signs out. */
+	voidDeviceLinks(credential: string): void {
+		this.ctx.storage.sql.exec("DELETE FROM auth_device_links WHERE passkey = ?", credential);
 	}
 
-	/** Whether `code` is a live device link: unexpired, unused, and its issuing passkey still here. */
+	/** Whether `code` is a live device link: unexpired, unused, and its issuing credential still here. */
 	async isDeviceLink(code: string, now: number): Promise<boolean> {
 		const hash = await digestHex(code);
 		return this.#liveDeviceLink(hash, now);
@@ -254,7 +339,8 @@ export class Auth extends DurableObject<Env> {
 		return (
 			this.ctx.storage.sql
 				.exec(
-					"SELECT 1 FROM auth_device_links l JOIN auth_passkeys p ON p.id = l.passkey WHERE l.hash = ? AND l.expires_at > ?",
+					`SELECT 1 FROM auth_device_links WHERE hash = ? AND expires_at > ?
+					AND passkey IN (SELECT id FROM auth_passkeys UNION ALL SELECT id FROM auth_identities)`,
 					hash,
 					now,
 				)
@@ -340,7 +426,7 @@ export class Auth extends DurableObject<Env> {
 	}
 
 	/**
-	 * Forgets everything: passkeys, codes and tokens, so no session or token
+	 * Forgets everything: passkeys, linked identities, codes and tokens, so no session or token
 	 * works again. What is left is an empty Auth that takes a passkey only
 	 * with a setup code.
 	 */

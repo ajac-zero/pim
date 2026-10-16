@@ -1,19 +1,34 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
-import { Check, ExternalLink, KeyRound, Loader2 } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  CircleHelp,
+  ExternalLink,
+  KeyRound,
+  Loader2,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { PimMark } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
+import { ProviderButtons } from "~/components/provider-buttons";
 import { Join } from "~/components/register";
 import { Button } from "~/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "~/components/ui/collapsible";
 import { Input } from "~/components/ui/input";
 import {
   type AuthSession,
   alreadyRegistered,
   auth,
+  authError,
   cancelled,
   claimCode,
   deviceCode,
+  forgetAuthError,
   forgetDeviceCode,
   forgetSetupCode,
   inviteCode,
@@ -21,11 +36,12 @@ import {
 } from "~/lib/auth";
 
 /** Where Workers Logs live; the dashboard picks the account. */
-const DASHBOARD_URL =
+export const DASHBOARD_URL =
   "https://dash.cloudflare.com/?to=/:account/workers-and-pages";
 
 /**
- * Shown instead of the app until a passkey signs this browser in. Links open
+ * Shown instead of the app until a passkey, or an account at a provider the
+ * admin set up, signs this browser in. Links open
  * here too: a setup link or a device link makes a passkey, a claim link or
  * an invite makes an account. A Pim with no admin yet is set up here by
  * whoever opens it in the minutes after a deploy; after that, by a link the
@@ -34,7 +50,12 @@ const DASHBOARD_URL =
  * the admin can also get a setup link from the logs.
  */
 export function SignIn({ session }: { session: AuthSession }) {
-  const { claimed = true, canClaim = false, registration = "invite" } = session;
+  const {
+    claimed = true,
+    canClaim = false,
+    registration = "invite",
+    providers,
+  } = session;
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const router = useRouter();
@@ -53,7 +74,9 @@ export function SignIn({ session }: { session: AuthSession }) {
         ? "join"
         : "signIn",
   );
-  const [error, setError] = useState<string | null>(null);
+  // A provider may have sent the browser back with why it didn't work.
+  const [error, setError] = useState<string | null>(authError);
+  useEffect(() => forgetAuthError(), []);
   // While adding this device with a link: it already has a passkey for this Pim, so offer to sign
   // in with it instead. Other screens show the same news as an ordinary error.
   const [hasPasskeyHere, setHasPasskeyHere] = useState(false);
@@ -130,6 +153,13 @@ export function SignIn({ session }: { session: AuthSession }) {
   });
 
   const pending = signIn.isPending || create.isPending;
+  // The plain sign-in screen shows what went wrong under its title, where it's read first.
+  const signingIn = !device && !setup && claimed && view === "signIn";
+  const alert = error && (
+    <p role="alert" className="mt-4 text-destructive text-sm">
+      {error}
+    </p>
+  );
   const icon = pending ? <Loader2 className="animate-spin" /> : <KeyRound />;
 
   return (
@@ -209,6 +239,12 @@ export function SignIn({ session }: { session: AuthSession }) {
               {icon}
               {t("createPasskey")}
             </Button>
+            <ProviderButtons
+              providers={providers}
+              setup={setup}
+              disabled={pending}
+              onError={onError}
+            />
           </>
         ) : view === "claim" ? (
           <Join mode="claim" claim={claim} />
@@ -236,9 +272,7 @@ export function SignIn({ session }: { session: AuthSession }) {
         ) : (
           <>
             <h1 className="font-semibold text-2xl">{t("signInTitle")}</h1>
-            <p className="mt-2 text-muted-foreground text-sm">
-              {t("signInBody")}
-            </p>
+            {alert}
             <Button
               className="mt-6 w-full"
               size="lg"
@@ -248,6 +282,11 @@ export function SignIn({ session }: { session: AuthSession }) {
               {icon}
               {t("signInWithPasskey")}
             </Button>
+            <ProviderButtons
+              providers={providers}
+              disabled={pending}
+              onError={onError}
+            />
             <Button
               variant="ghost"
               className="mt-3 w-full text-muted-foreground"
@@ -256,10 +295,16 @@ export function SignIn({ session }: { session: AuthSession }) {
               {t("lostPasskey")}
             </Button>
             {/* The commonest snag: a passkey made on another device that this one doesn't have. */}
-            <div className="mt-6 rounded-lg border px-4 py-3 text-sm">
-              <p className="font-medium">{t("newDeviceTitle")}</p>
-              <p className="mt-1 text-muted-foreground">{t("newDeviceBody")}</p>
-            </div>
+            <Collapsible className="mt-1 text-center text-sm">
+              <CollapsibleTrigger className="group inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-muted-foreground text-xs hover:text-foreground">
+                <CircleHelp className="size-3.5" />
+                {t("newDeviceTitle")}
+                <ChevronDown className="size-3.5 transition-transform group-data-[state=open]:rotate-180" />
+              </CollapsibleTrigger>
+              <CollapsibleContent className="mt-2 text-left text-muted-foreground text-xs">
+                {t("newDeviceBody")}
+              </CollapsibleContent>
+            </Collapsible>
             <p className="mt-6 border-t pt-4 text-center text-muted-foreground text-sm">
               {registration === "open" ? (
                 <>
@@ -281,11 +326,7 @@ export function SignIn({ session }: { session: AuthSession }) {
           </>
         )}
 
-        {error && !(enrolling && hasPasskeyHere) && (
-          <p role="alert" className="mt-4 text-destructive text-sm">
-            {error}
-          </p>
-        )}
+        {!signingIn && !(enrolling && hasPasskeyHere) && alert}
       </div>
     </main>
   );

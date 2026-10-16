@@ -15,7 +15,7 @@ const url = (path: string) => `${ORIGIN}${path}`;
 // Tests in a file share storage: every test starts with a Pim that has no accounts and no admin.
 beforeEach(async () => {
 	await runInDurableObject(env.Directory.getByName("directory"), async (_instance: Directory, state) => {
-		for (const table of ["accounts", "registrations", "invites", "cleanups"]) state.storage.sql.exec(`DELETE FROM ${table}`);
+		for (const table of ["accounts", "registrations", "invites", "cleanups", "identities"]) state.storage.sql.exec(`DELETE FROM ${table}`);
 		state.storage.sql.exec("DELETE FROM directory_meta WHERE key NOT IN ('cookie_key', 'salt')");
 	});
 });
@@ -488,6 +488,211 @@ describe("API tokens", () => {
 		expect((await call(adminToken, "/api/admin/stats")).status).toBe(403);
 		expect((await ana.browser.fetch("/api/admin/stats")).status).toBe(200);
 		expect((await ben.browser.fetch("/api/admin/stats")).status).toBe(403);
+	});
+});
+
+/**
+ * Google, GitHub and a custom OpenID Connect provider at https://idp.test,
+ * behind `fetch`. `account` is who signs in there; a code is good once, for
+ * the PKCE verifier its sign-in started with, and the client's own secret.
+ */
+const IDP = "https://idp.test";
+let account = { sub: "1001", email: "ana@example.com" };
+let editClaims = (claims: Record<string, unknown>) => claims;
+const grants = new Map<string, { challenge: string; nonce: string | null; clientId: string; issuer: string }>();
+
+function fakeProviders() {
+	const realFetch = globalThis.fetch;
+	vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+		const request = new Request(input, init);
+		const { href } = new URL(request.url);
+		if (href === "https://accounts.google.com/.well-known/openid-configuration") {
+			return Response.json({
+				issuer: "https://accounts.google.com",
+				authorization_endpoint: "https://accounts.google.com/o/oauth2/v2/auth",
+				token_endpoint: "https://oauth2.googleapis.com/token",
+			});
+		}
+		if (href === `${IDP}/.well-known/openid-configuration`) {
+			return Response.json({
+				issuer: IDP,
+				authorization_endpoint: `${IDP}/authorize`,
+				token_endpoint: `${IDP}/token`,
+				token_endpoint_auth_methods_supported: ["client_secret_post"],
+			});
+		}
+		if (["https://oauth2.googleapis.com/token", `${IDP}/token`, "https://github.com/login/oauth/access_token"].includes(href)) {
+			const form = new URLSearchParams(await request.text());
+			const basic = request.headers.get("authorization");
+			const [clientId, secret] = basic ? atob(basic.slice(6)).split(":") : [form.get("client_id"), form.get("client_secret")];
+			const grant = grants.get(form.get("code") ?? "");
+			grants.delete(form.get("code") ?? "");
+			const verifier = base64UrlEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(form.get("code_verifier") ?? ""))));
+			if (!grant || grant.challenge !== verifier || grant.clientId !== clientId || secret !== `${clientId}-secret`) {
+				return Response.json({ error: "invalid_grant" }, { status: 400 });
+			}
+			if (href.startsWith("https://github.com")) return Response.json({ access_token: `gh:${account.sub}` });
+			const claims = editClaims({ iss: grant.issuer, aud: grant.clientId, sub: account.sub, email: account.email, nonce: grant.nonce, exp: Date.now() / 1000 + 3600 });
+			const part = (value: unknown) => base64UrlEncode(encoder.encode(JSON.stringify(value)));
+			return Response.json({ access_token: "at", id_token: `${part({ alg: "RS256" })}.${part(claims)}.signature` });
+		}
+		if (href === "https://api.github.com/user") {
+			const token = request.headers.get("authorization")?.slice("Bearer gh:".length);
+			return Response.json({ id: Number(token), login: "ana-gh" });
+		}
+		return realFetch(input, init);
+	});
+}
+
+/** All three providers on, as a deployment's secrets turn them on: each client's secret is `<client ID>-secret`. */
+const PROVIDERS = {
+	PIM_GOOGLE_CLIENT_ID: "google-client",
+	PIM_GOOGLE_CLIENT_SECRET: "google-client-secret",
+	PIM_GITHUB_CLIENT_ID: "github-client",
+	PIM_GITHUB_CLIENT_SECRET: "github-client-secret",
+	PIM_OIDC_ISSUER: IDP,
+	PIM_OIDC_CLIENT_ID: "oidc-client",
+	PIM_OIDC_CLIENT_SECRET: "oidc-client-secret",
+	PIM_OIDC_NAME: "Acme SSO",
+} as unknown as Partial<Env>;
+const DAY = 24 * 60 * 60 * 1000;
+/** A browser on a Pim whose deployment turns `vars` on. */
+const on = (vars: Partial<Env> = PROVIDERS) => new Browser(deployed(DAY, vars));
+/** The admin of a fresh Pim whose deployment turns `vars` on. */
+const adminOn = (vars: Partial<Env> = PROVIDERS) => person("ana", deployed(60 * 1000, vars));
+
+/**
+ * Signs in at a provider: starts in this browser, signs in as `account`
+ * there, and follows the provider back. Answers where the Worker sends the
+ * browser after, with any error from its fragment.
+ */
+async function viaProvider(browser: Browser, provider: string, body: Record<string, unknown> = {}, finishIn: Browser = browser) {
+	const started = await browser.json<{ url: string; error?: string }>(`/auth/oauth/${provider}`, { method: "POST", json: body });
+	if (started.status !== 200) return { status: started.status, error: started.body.error };
+	const at = new URL(started.body.url);
+	const code = `code-${crypto.randomUUID()}`;
+	const params = at.searchParams;
+	expect(params.get("redirect_uri")).toBe(url(`/auth/oauth/${provider}/callback`));
+	grants.set(code, { challenge: params.get("code_challenge")!, nonce: params.get("nonce"), clientId: params.get("client_id")!, issuer: at.origin });
+	const back = await finishIn.fetch(`/auth/oauth/${provider}/callback?${new URLSearchParams({ code, state: params.get("state")! })}`);
+	expect(back.status).toBe(302);
+	const [to = "", fragment = ""] = back.headers.get("location")!.split("#");
+	return { status: back.status, to, error: new URLSearchParams(fragment).get("auth-error") ?? undefined };
+}
+
+describe("signing in with another account", () => {
+	beforeEach(() => {
+		account = { sub: "1001", email: "ana@example.com" };
+		editClaims = (claims) => claims;
+		fakeProviders();
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("joins with Google instead of a passkey, then signs in with it from another browser", async () => {
+		const ana = await adminOn();
+		expect((await on().json("/auth/session")).body.providers).toEqual([
+			{ id: "google", name: "Google" },
+			{ id: "github", name: "GitHub" },
+			{ id: "oidc", name: "Acme SSO" },
+		]);
+
+		const joining = on();
+		const { setup } = (await register(joining, "ben")).body;
+		account = { sub: "2002", email: "ben@example.com" };
+		expect(await viaProvider(joining, "google", { setup })).toEqual({ status: 302, to: "/", error: undefined });
+		expect((await joining.json("/api/account")).body).toMatchObject({ username: "ben", status: "active" });
+
+		const elsewhere = on();
+		expect(await viaProvider(elsewhere, "google")).toMatchObject({ to: "/", error: undefined });
+		expect((await elsewhere.json("/auth/session")).body).toMatchObject({ signedIn: true, method: "identity", passkey: null, account: { username: "ben" } });
+		// The setup link was used up.
+		expect((await viaProvider(on(), "google", { setup })).status).toBe(401);
+	});
+
+	it("signs nobody in with an account nobody linked, and makes no account for it", async () => {
+		const ana = await adminOn();
+		const stranger = on();
+		account = { sub: "9999", email: "stranger@example.com" };
+		const result = await viaProvider(stranger, "google");
+		expect(result.error).toMatch(/Nobody on this Pim signs in with that Google account/);
+		expect(await stranger.signedIn()).toBe(false);
+		expect((await ana.browser.json("/api/admin/stats")).body.accounts.active).toBe(1);
+	});
+
+	it("links an account once on this Pim, and unlinking it ends its sessions", async () => {
+		const ana = await adminOn();
+		expect(await viaProvider(ana.browser, "google")).toMatchObject({ to: "/settings", error: undefined });
+		const { identities } = (await ana.browser.json<{ identities: { id: string; provider: string; label: string }[] }>("/auth/identities")).body;
+		expect(identities).toMatchObject([{ provider: "google", label: "ana@example.com" }]);
+
+		const ben = await person("ben", deployed(DAY, PROVIDERS));
+		expect(await viaProvider(ben.browser, "google")).toMatchObject({ to: "/settings", error: "That Google account already signs in to someone else on this Pim." });
+
+		const phone = on();
+		await viaProvider(phone, "google");
+		expect((await phone.json("/api/account")).body.username).toBe("ana");
+		expect((await ana.browser.fetch(`/auth/identities/${identities[0]!.id}`, { method: "DELETE" })).status).toBe(200);
+		expect(await phone.signedIn()).toBe(false);
+		expect(await ana.browser.signedIn()).toBe(true);
+		// Free for someone else now.
+		expect(await viaProvider(ben.browser, "google")).toMatchObject({ error: undefined });
+		expect(await viaProvider(on(), "google").then(() => ben.browser.json("/api/account"))).toMatchObject({ body: { username: "ben" } });
+	});
+
+	it.each<[string, (claims: Record<string, unknown>) => Record<string, unknown>]>([
+		["for another sign-in", (claims) => ({ ...claims, nonce: "another" })],
+		["for another app", (claims) => ({ ...claims, aud: "someone-else" })],
+		["from another issuer", (claims) => ({ ...claims, iss: "https://evil.example.com" })],
+		["that expired", (claims) => ({ ...claims, exp: Date.now() / 1000 - 3600 })],
+	])("refuses an ID token %s", async (_case, edit) => {
+		const ana = await adminOn();
+		await viaProvider(ana.browser, "google");
+		editClaims = edit;
+		const browser = on();
+		expect((await viaProvider(browser, "google")).error).toMatch(/wasn't for this sign-in/);
+		expect(await browser.signedIn()).toBe(false);
+	});
+
+	it("refuses to finish a sign-in in a browser that didn't start it", async () => {
+		const ana = await adminOn();
+		await viaProvider(ana.browser, "google");
+		const victim = on();
+		expect((await viaProvider(on(), "google", {}, victim)).error).toMatch(/took too long, or started in another browser/);
+		expect(await victim.signedIn()).toBe(false);
+	});
+
+	it("keeps each provider's people apart: GitHub by user ID, a custom provider by its issuer", async () => {
+		const ana = await adminOn();
+		// The same subject at two providers is two people.
+		await viaProvider(ana.browser, "github");
+		expect((await viaProvider(on(), "oidc")).error).toMatch(/Nobody on this Pim signs in with that Acme SSO account/);
+		const browser = on();
+		expect(await viaProvider(browser, "github")).toMatchObject({ error: undefined });
+		expect((await browser.json("/auth/identities")).body.identities).toMatchObject([{ provider: "github", label: "ana-gh" }]);
+	});
+
+	it("turns on only the providers the deployment's secrets fully set, and shows the admin which without their values", async () => {
+		const vars = { PIM_GITHUB_CLIENT_ID: "github-client", PIM_GITHUB_CLIENT_SECRET: "github-client-secret", PIM_OIDC_CLIENT_ID: "oidc-client" } as unknown as Partial<Env>;
+		const ana = await adminOn(vars);
+		const listed = await ana.browser.fetch("/api/admin/sign-in").then((response) => response.text());
+		expect(listed).not.toContain("github-client-secret");
+		expect(JSON.parse(listed).providers).toEqual([
+			expect.objectContaining({ id: "google", enabled: false, problem: null, secrets: ["PIM_GOOGLE_CLIENT_ID", "PIM_GOOGLE_CLIENT_SECRET"] }),
+			expect.objectContaining({ id: "github", enabled: true, problem: null, callbackUrl: url("/auth/oauth/github/callback") }),
+			// Half set: off, and the admin is told what's missing.
+			expect.objectContaining({ id: "oidc", enabled: false, problem: "Set PIM_OIDC_ISSUER and PIM_OIDC_CLIENT_SECRET too." }),
+		]);
+		const ben = await person("ben", deployed(DAY, vars));
+		expect((await ben.browser.fetch("/api/admin/sign-in")).status).toBe(403);
+
+		const elsewhere = on(vars);
+		expect((await elsewhere.json("/auth/session")).body.providers).toEqual([{ id: "github", name: "GitHub" }]);
+		expect((await viaProvider(elsewhere, "google")).status).toBe(404);
+		await viaProvider(ana.browser, "github");
+		expect(await viaProvider(elsewhere, "github")).toMatchObject({ error: undefined });
+		expect((await elsewhere.json("/api/account")).body.username).toBe("ana");
 	});
 });
 

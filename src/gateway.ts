@@ -12,13 +12,14 @@ import { PimThemes } from "./themes";
  * hostname.
  *
  * - `/api/*`: the signed-in person's own Pim. The request names its owner:
- *   browsers by their passkey session's cookie, other clients by their API
+ *   browsers by their session's cookie, other clients by their API
  *   token, which is `pim_<owner>_<secret>`. Either is checked against that
  *   owner's own sign-in before anything else.
  * - `/api/themes`, `/api/themes.css`: public, the color themes of Pim's
  *   own and of the deployment's extensions, which the app needs before
  *   anyone signs in.
- * - `/auth/*`: registration (./accounts.ts) and passkey sign-in (./auth).
+ * - `/auth/*`: registration (./accounts.ts) and sign-in (./auth): passkeys, and
+ *   accounts at Google, GitHub or a single sign-on provider.
  * - `/mcp/callback/<owner>`, `/mcp/events/<owner>/<watch>`: public, for
  *   connected apps. Each is checked another way: the OAuth state, and the
  *   watch's signing secret.
@@ -48,7 +49,7 @@ function givenToken(request: Request): string | null {
 	return header?.startsWith("Bearer ") ? header.slice(7) : new URL(request.url).searchParams.get("token");
 }
 
-/** Whose request this is, and whether it came with a passkey session (some things an API token can't do). */
+/** Whose request this is, and whether it came with a browser's session (some things an API token can't do). */
 type Caller = { readonly account: Account; readonly viaSession: boolean };
 
 /** Why an account opens nothing, if it doesn't. */
@@ -59,7 +60,7 @@ function closed(account: Account): Response | undefined {
 	return undefined;
 }
 
-/** Who may call the API: a token holder, or a browser signed in with a passkey. */
+/** Who may call the API: a token holder, or a signed-in browser. */
 async function authorize(request: Request, env: Env): Promise<Caller | Response> {
 	const token = givenToken(request);
 	const tokenAccount = token && tokenOwner(token) ? await resolveAccount(env, tokenOwner(token)!) : null;

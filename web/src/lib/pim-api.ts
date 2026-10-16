@@ -782,7 +782,26 @@ const path = (username: string) =>
   `/admin/accounts/${encodeURIComponent(username)}`;
 
 /** Running this Pim: only the admin, signed in with a passkey, may. */
+/** A sign-in provider as the admin's settings show it: never its secrets' values. */
+export type SignInProviderSettings = {
+  id: "google" | "github" | "oidc";
+  name: string;
+  /** The deployment's secrets turn it on. */
+  enabled: boolean;
+  /** Which of those secrets are missing, when only some are set. */
+  problem: string | null;
+  /** The secrets that turn it on. */
+  secrets: string[];
+  /** Where the provider must send people back to. */
+  callbackUrl: string;
+};
+
 export const admin = {
+  /** Google, GitHub and a custom single sign-on provider, and which the deployment turns on. */
+  signInProviders: () =>
+    call<{ providers: SignInProviderSettings[] }>("/admin/sign-in").then(
+      (body) => body.providers,
+    ),
   members: () =>
     call<{ accounts: Member[] }>("/admin/accounts?limit=500").then(
       (body) => body.accounts,

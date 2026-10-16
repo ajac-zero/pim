@@ -78,6 +78,14 @@
     // uncomment `send_email` below, and set this to an address on that domain.
     "PIM_EMAIL_FROM": ""
   },
+  // Signing in with Google, GitHub or your own OpenID Connect provider, besides passkeys, is off
+  // until you add an OAuth app's client ID and secret as secrets (dashboard → Workers & Pages →
+  // pim → Settings → Variables and Secrets, or `wrangler secret put`). Secrets, not vars: a deploy
+  // replaces vars set in the dashboard. The app's callback URL is shown in Settings.
+  //   Google:  PIM_GOOGLE_CLIENT_ID, PIM_GOOGLE_CLIENT_SECRET
+  //   GitHub:  PIM_GITHUB_CLIENT_ID, PIM_GITHUB_CLIENT_SECRET
+  //   OIDC:    PIM_OIDC_ISSUER (such as https://auth.example.com), PIM_OIDC_CLIENT_ID,
+  //            PIM_OIDC_CLIENT_SECRET, and optionally PIM_OIDC_NAME, its button's name
   // "send_email": [{ "name": "EMAIL" }],
   // When this version was deployed: whoever opens a Pim with no admin in the 15 minutes
   // after becomes its admin.

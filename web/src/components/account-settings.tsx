@@ -303,8 +303,9 @@ export function TokensSection() {
   const { t, formatDate } = useI18n();
   const queryClient = useQueryClient();
   const { data: session } = useQuery(authSessionQuery());
-  // Tokens are managed with a passkey session: the dev server's token can't make more.
-  const signedIn = session?.method === "passkey";
+  // Tokens are managed signed in to the app: the dev server's token can't make more.
+  const signedIn =
+    session?.method === "passkey" || session?.method === "identity";
   const { data: tokens } = useQuery({ ...tokensQuery(), enabled: signedIn });
   const [name, setName] = useState("");
   const [made, setMade] = useState<string | null>(null);

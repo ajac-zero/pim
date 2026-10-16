@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, notFound } from "@tanstack/react-router";
-import { Bot, Users } from "lucide-react";
+import { Users } from "lucide-react";
 import { useEffect } from "react";
 import { toast } from "sonner";
+import { AgentIcon, PimMark } from "~/components/agent-icon";
 import { sessionTitle, useNewChat } from "~/components/app-sidebar";
 import { Composer } from "~/components/chat/composer";
 import { TeamPanel } from "~/components/chat/team";
@@ -13,7 +14,7 @@ import { Button } from "~/components/ui/button";
 import { useElementHeight } from "~/hooks/use-element-size";
 import { CHATGPT_PROVIDER, type UserContent } from "~/lib/pim-api";
 import { pimClient, usePimClient } from "~/lib/pim-client";
-import { modelQuery, sessionsQuery } from "~/lib/queries";
+import { agentsQuery, modelQuery, sessionsQuery } from "~/lib/queries";
 
 export const Route = createFileRoute("/chat/$sessionId")({
   loader: async ({ context, params }) => {
@@ -48,6 +49,10 @@ function ChatPage() {
   const { sessionId } = Route.useParams();
   const { data: sessions } = useQuery(sessionsQuery());
   const session = sessions?.find((candidate) => candidate.id === sessionId);
+  const { data: agents } = useQuery(agentsQuery());
+  const agent = agents?.find(
+    (candidate) => candidate.id === session?.agent?.id,
+  );
   const { data: model } = useQuery(modelQuery());
   const onPlan = model?.model.provider === CHATGPT_PROVIDER;
 
@@ -78,6 +83,30 @@ function ChatPage() {
   return (
     <main className="flex min-h-0 min-w-0 flex-1">
       <div className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col">
+        <header className="hidden h-13 shrink-0 items-center gap-2 border-b bg-background px-4 md:flex">
+          {session?.visit ? (
+            <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground text-xs">
+              {session.visit.username.slice(0, 1).toUpperCase()}
+            </span>
+          ) : agent ? (
+            <AgentIcon agent={agent} className="size-5 shrink-0" />
+          ) : (
+            <PimMark className="size-5 shrink-0" />
+          )}
+          <span className="min-w-0 truncate font-medium text-[15px]">
+            {session ? sessionTitle(session, t) : "\u00a0"}
+          </span>
+          {session?.agent && (
+            <span className="hidden truncate text-muted-foreground text-[13px] sm:inline">
+              {session.agent.name}
+            </span>
+          )}
+          {ready && connection !== "open" && (
+            <span className="ml-auto text-muted-foreground text-[13px]">
+              {t("connecting")}
+            </span>
+          )}
+        </header>
         {ready && (
           <Thread
             sessionId={sessionId}
@@ -88,26 +117,6 @@ function ChatPage() {
             composerCardHeight={composerCardHeight}
           />
         )}
-
-        {/* Floats over the top of the thread. */}
-        <div className="pointer-events-none absolute inset-x-0 top-0 z-10">
-          <header className="hidden h-13 items-center gap-2 px-4 md:flex">
-            <span className="pointer-events-auto max-w-[min(32rem,70%)] truncate rounded-full border bg-background px-3 py-1 font-medium text-sm shadow-sm">
-              {session ? sessionTitle(session, t) : "\u00a0"}
-            </span>
-            {session?.agent && (
-              <span className="pointer-events-auto flex items-center gap-1.5 rounded-full border bg-background px-2.5 py-1 text-muted-foreground text-xs shadow-sm">
-                <Bot className="size-3.5" />
-                {session.agent.name}
-              </span>
-            )}
-            {ready && connection !== "open" && (
-              <span className="pointer-events-auto rounded-full border bg-background px-2.5 py-1 text-muted-foreground text-xs shadow-sm">
-                {t("connecting")}
-              </span>
-            )}
-          </header>
-        </div>
 
         {/* Floats over the bottom of the thread. Its measured height feeds
          * the thread's bottom padding, so the last message clears it. */}

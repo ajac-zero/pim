@@ -26,7 +26,7 @@ import type {
   FunctionCallOutputItem,
   MessageItem,
 } from "~/lib/openresponses";
-import type { Approval, UserContent } from "~/lib/pim-api";
+import type { UserContent } from "~/lib/pim-api";
 import {
   layoutThread,
   type ModelProblem,
@@ -54,7 +54,7 @@ const DEFAULT_COMPOSER_INSET = 160;
 const COMPOSER_INSET_GAP = 16;
 const DEFAULT_COMPOSER_CARD_HEIGHT = 56;
 const SCROLL_BUTTON_GAP = 16;
-const HEADER_INSET = 52;
+const HEADER_INSET = 24;
 
 export const Thread = memo(function Thread({
   sessionId,
@@ -160,7 +160,7 @@ export const Thread = memo(function Thread({
   return (
     <Conversation className="scrollbar-thin">
       <ConversationContent
-        className="mx-auto min-h-full w-full max-w-3xl px-4"
+        className="mx-auto min-h-full w-full max-w-3xl px-4 [&>[data-speaker=assistant]+[data-speaker=assistant]]:-mt-3 [&>[data-speaker=user]+[data-speaker=user]]:-mt-3"
         style={{
           paddingTop: HEADER_INSET,
           paddingBottom:
@@ -235,7 +235,7 @@ export const Thread = memo(function Thread({
 
         {empty && (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 py-16 text-center">
-            <PimMark className="size-10" />
+            <PimMark className="size-18" />
             <p className="font-medium text-xl">
               {visit
                 ? t("visitEmptyTitle", { username: visit })
@@ -252,20 +252,20 @@ export const Thread = memo(function Thread({
         {view.running && <ThinkingDot />}
 
         {view.retry && (
-          <div className="flex items-center gap-2 text-muted-foreground text-sm">
+          <div className="flex items-center justify-center gap-2 text-muted-foreground text-[13px]">
             <Clock className="size-4 shrink-0" />
             {t("retryingAfterError")}
           </div>
         )}
 
         {view.queued > 0 && (
-          <div className="text-muted-foreground text-sm">
+          <div className="text-center text-muted-foreground text-[13px]">
             {t("queuedMessages", { count: view.queued })}
           </div>
         )}
 
         {view.error && !view.running && (
-          <div className="flex items-start gap-3 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
+          <div className="flex items-start gap-3 rounded-2xl bg-muted px-4 py-3 text-sm">
             <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
             <div className="flex-1 space-y-2">
               {"problem" in view.error ? (

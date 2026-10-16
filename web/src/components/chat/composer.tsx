@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowUp, ImagePlus, Square, X } from "lucide-react";
+import { ArrowUp, Plus, Square, X } from "lucide-react";
 import { type ReactNode, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
@@ -114,18 +114,6 @@ function ComposerInner({
 
   return (
     <div className="w-full">
-      {showSuggestions && (
-        <Suggestions className="mb-3 px-1">
-          {promptSuggestions.map((suggestion) => (
-            <Suggestion
-              key={suggestion}
-              suggestion={suggestion}
-              disabled={disabled}
-              onClick={(value) => onSend(value)}
-            />
-          ))}
-        </Suggestions>
-      )}
       <PromptInput
         onSubmit={handleSubmit}
         accept={IMAGE_TYPES.join(",")}
@@ -140,8 +128,8 @@ function ComposerInner({
           else cantSeeImages();
         }}
         className={cn(
-          "relative rounded-[26px] border bg-card shadow-xs transition-shadow",
-          "focus-within:border-ring/60 focus-within:shadow-sm",
+          "relative rounded-2xl border bg-background transition-colors",
+          "focus-within:border-ring/60",
         )}
       >
         {files.length > 0 && (
@@ -180,9 +168,9 @@ function ComposerInner({
                 ? controller.attachments.openFileDialog()
                 : cantSeeImages()
             }
-            className="size-9 shrink-0 rounded-full text-muted-foreground"
+            className="size-9 shrink-0 rounded-full bg-muted text-muted-foreground"
           >
-            <ImagePlus className="size-4.5" />
+            <Plus className="size-4.5" />
           </Button>
           <PromptInputTextarea
             ref={textareaRef}
@@ -206,6 +194,19 @@ function ComposerInner({
           </PromptInputSubmit>
         </div>
       </PromptInput>
+
+      {showSuggestions && (
+        <Suggestions className="mt-3 px-1">
+          {promptSuggestions.map((suggestion) => (
+            <Suggestion
+              key={suggestion}
+              suggestion={suggestion}
+              disabled={disabled}
+              onClick={(value) => onSend(value)}
+            />
+          ))}
+        </Suggestions>
+      )}
 
       {disclaimer !== null && (
         <p className="flex items-center justify-center gap-1.5 px-2 pt-2 pb-1 text-center text-muted-foreground text-xs">

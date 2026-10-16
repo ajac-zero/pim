@@ -62,7 +62,7 @@ export function TeamPanel({
             type="button"
             onClick={() => setOpen(run)}
             title={run.task}
-            className="flex items-center gap-1.5 rounded-full border bg-background px-2.5 py-1 shadow-xs transition-colors hover:bg-accent"
+            className="flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 transition-colors hover:bg-accent"
           >
             <RunStatus status={run.status} />
             <span className="font-medium">{run.member}</span>
@@ -101,7 +101,7 @@ function RunStatus({ status }: { status: TeamRun["status"] }) {
     return <Loader2 className="size-3.5 animate-spin text-primary" />;
   }
   if (status === "done") {
-    return <Check className="size-3.5 text-green-600 dark:text-green-500" />;
+    return <Check className="size-3.5 text-success" />;
   }
   return <X className="size-3.5 text-destructive" />;
 }
@@ -144,8 +144,10 @@ function MemberTranscript({
                 <li
                   key={key}
                   className={cn(
-                    "rounded-lg px-3 py-2",
-                    message.role === "user" ? "bg-muted" : "border",
+                    "rounded-2xl px-4 py-3",
+                    message.role === "user"
+                      ? "ml-8 bg-primary text-primary-foreground"
+                      : "mr-8 bg-muted",
                   )}
                 >
                   <Markdown text={part.text} untrusted />

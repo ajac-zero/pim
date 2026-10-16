@@ -12,6 +12,7 @@ import {
 import { PanelLeft } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { toast } from "sonner";
+import { AgentIcon } from "~/components/agent-icon";
 import { AppSidebar, sessionTitle } from "~/components/app-sidebar";
 import { I18nProvider, useI18n } from "~/components/i18n";
 import { RouteError } from "~/components/route-error";
@@ -22,7 +23,7 @@ import { Sheet, SheetContent, SheetTitle } from "~/components/ui/sheet";
 import { Toaster } from "~/components/ui/sonner";
 import { authSessionQuery } from "~/lib/auth";
 import { pimClient } from "~/lib/pim-client";
-import { sessionsQuery } from "~/lib/queries";
+import { agentsQuery, sessionsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 export interface RouterContext {
@@ -162,10 +163,20 @@ function MobileTitle() {
   const { t } = useI18n();
   const { sessionId } = useParams({ strict: false }) as { sessionId?: string };
   const { data: sessions } = useQuery(sessionsQuery());
+  const { data: agents } = useQuery(agentsQuery());
   const session = sessions?.find((candidate) => candidate.id === sessionId);
+  const agent =
+    session && !session.visit
+      ? agents?.find((agent) =>
+          session.agent ? agent.id === session.agent.id : agent.default,
+        )
+      : undefined;
   return (
-    <span className="truncate font-semibold text-[15px]">
-      {session ? sessionTitle(session, t) : "Pim"}
+    <span className="flex min-w-0 items-center gap-2 text-[15px]">
+      {agent && <AgentIcon agent={agent} className="size-5 shrink-0" />}
+      <span className="truncate">
+        {session ? sessionTitle(session, t) : "Pim"}
+      </span>
     </span>
   );
 }
@@ -182,7 +193,7 @@ function AppLayout() {
       <aside
         className={cn(
           "hidden shrink-0 overflow-hidden border-sidebar-border border-r transition-[width] duration-200 md:block",
-          sidebarCollapsed ? "w-16" : "w-[268px]",
+          sidebarCollapsed ? "w-16" : "w-[300px]",
         )}
       >
         <div className="h-full w-full">
@@ -195,7 +206,10 @@ function AppLayout() {
 
       {/* Mobile sidebar */}
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-        <SheetContent side="left" className="w-[290px] p-0 md:hidden">
+        <SheetContent
+          side="left"
+          className="w-[300px] p-0 md:hidden [&>button]:hidden"
+        >
           <SheetTitle className="sr-only">{t("navigation")}</SheetTitle>
           <AppSidebar onNavigate={() => setMobileOpen(false)} />
         </SheetContent>

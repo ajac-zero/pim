@@ -3,9 +3,7 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Bell,
   Check,
-  ChevronDown,
   Compass,
-  MessageCircle,
   Monitor,
   Moon,
   MoreHorizontal,
@@ -15,8 +13,6 @@ import {
   Search,
   Settings,
   Shapes,
-  ShieldCheck,
-  SlidersHorizontal,
   SquarePen,
   Sun,
   Trash2,
@@ -34,7 +30,6 @@ import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -98,8 +93,18 @@ export function AppSidebar({
   // Sharing and Discover are with the other people on this Pim.
   const { data: account } = useQuery(accountQuery());
   const { data: visits } = useQuery({ ...visitsQuery(), enabled: !!account });
-  const params = useParams({ strict: false }) as { sessionId?: string };
+  const params = useParams({ strict: false }) as {
+    sessionId?: string;
+    agentId?: string;
+  };
   const activeId = params.sessionId;
+  const activeAgentId = params.agentId ?? sectionsAgentId();
+  function sectionsAgentId() {
+    const session = sessions?.find((session) => session.id === activeId);
+    return session && !session.visit
+      ? (session.agent?.id ?? agents?.find((agent) => agent.default)?.id)
+      : undefined;
+  }
   const newChat = useNewChat(onNavigate);
 
   /* Chats with an action waiting for the user's approval. */
@@ -141,7 +146,11 @@ export function AppSidebar({
         all.find((candidate) => candidate.agent.default);
       section?.list.push(session);
     }
-    return all;
+    for (const section of all)
+      section.list.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+    return all.sort(
+      (a, b) => Number(b.agent.default) - Number(a.agent.default),
+    );
   }, [agents, sessions]);
   const shownSections = useMemo(
     () =>
@@ -159,12 +168,26 @@ export function AppSidebar({
     <TooltipProvider delayDuration={0}>
       <div className="flex h-full w-full flex-col overflow-hidden bg-sidebar text-sidebar-foreground">
         {/* Header */}
-        <div className="flex items-center gap-1 px-3 pt-3 pb-1">
+        <div
+          className={cn(
+            "flex items-center gap-1 px-3 pt-3 pb-2",
+            collapsed && "flex-col",
+          )}
+        >
           <SidebarLogoToggle
             collapsed={collapsed}
             onNavigate={onNavigate}
             onToggleCollapse={onToggleCollapse}
           />
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-9 shrink-0 text-muted-foreground"
+            onClick={newChat}
+            aria-label={t("newChat")}
+          >
+            <Plus className="size-5" />
+          </Button>
           {onToggleCollapse && (
             <div
               className={cn(
@@ -197,24 +220,85 @@ export function AppSidebar({
           )}
         </div>
 
-        {/* Actions */}
-        <div className="space-y-0.5 px-3 py-2">
-          <SidebarItem
-            icon={<SquarePen className="size-4.5 shrink-0" />}
-            label={t("newChat")}
-            collapsed={collapsed}
-          >
-            {(content) => (
-              <button
-                type="button"
-                className={ITEM_CLASS(collapsed)}
-                onClick={newChat}
-                aria-label={t("newChat")}
-              >
-                {content}
-              </button>
+        {/* Search */}
+        <div
+          inert={collapsed}
+          className={cn(
+            "overflow-hidden px-3 transition-[max-height,opacity] duration-200",
+            collapsed ? "max-h-0 opacity-0" : "max-h-12 pb-2 opacity-100",
+          )}
+        >
+          <div className="relative">
+            <Search className="-translate-y-1/2 absolute top-1/2 left-2.5 size-4 text-muted-foreground" />
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={t("searchChats")}
+              className="h-9 rounded-xl border-0 bg-muted pl-8 text-sm shadow-none focus-visible:ring-1"
+            />
+          </div>
+        </div>
+
+        {/* Sessions */}
+        <div
+          className={cn(
+            "flex-1 overflow-hidden transition-opacity duration-200",
+          )}
+        >
+          <nav className="h-full overflow-y-auto px-3 pb-2 scrollbar-thin">
+            {!collapsed && shownVisits.length > 0 && (
+              <div className="mb-3">
+                <div className="px-2 pt-5 pb-2 text-muted-foreground text-[13px]">
+                  {t("sharedWithYou")}
+                </div>
+                <ul className="space-y-px" aria-label={t("sharedWithYou")}>
+                  {shownVisits.map((visit) => (
+                    <VisitRow
+                      key={visit.ownerId}
+                      visit={visit}
+                      active={
+                        visit.session !== null && visit.session === activeId
+                      }
+                      onNavigate={onNavigate}
+                    />
+                  ))}
+                </ul>
+              </div>
             )}
-          </SidebarItem>
+            {search &&
+              shownSections.length === 0 &&
+              shownVisits.length === 0 && (
+                <p className="px-2 py-6 text-center text-muted-foreground text-sm">
+                  {t("noChatsMatch")}
+                </p>
+              )}
+            {(collapsed ? sections : shownSections).map((section) => (
+              <AgentSectionList
+                key={section.agent.id}
+                section={section}
+                activeId={activeId}
+                expanded={!!search || activeAgentId === section.agent.id}
+                searching={!!search}
+                collapsed={collapsed}
+                awaitingApproval={awaitingApproval}
+                onNavigate={onNavigate}
+              />
+            ))}
+            {!collapsed && (
+              <AgentSettingsDialog>
+                <button
+                  type="button"
+                  className="mt-3 flex h-9 w-full items-center gap-2 rounded-xl px-2 text-muted-foreground text-sm hover:bg-sidebar-accent hover:text-foreground"
+                >
+                  <Plus className="size-3.5" /> {t("newAgent")}
+                </button>
+              </AgentSettingsDialog>
+            )}
+          </nav>
+        </div>
+
+        {/* Footer navigation */}
+        <div className="space-y-0.5 px-3 pt-2 text-muted-foreground">
           <SidebarNavItem
             to="/artifacts"
             icon={<Shapes className="size-4.5 shrink-0" />}
@@ -249,105 +333,11 @@ export function AppSidebar({
               onNavigate={onNavigate}
             />
           )}
-          <SidebarNavItem
-            to="/settings"
-            icon={<Settings className="size-4.5 shrink-0" />}
-            label={t("settings")}
-            collapsed={collapsed}
-            onNavigate={onNavigate}
-          />
-          <div
-            inert={!collapsed}
-            className={cn(
-              "max-h-0 overflow-hidden opacity-0 transition-[max-height,opacity] duration-0",
-              collapsed &&
-                "max-h-9 opacity-100 delay-200 duration-150 ease-out",
-            )}
-          >
-            <CollapsedChatsMenu
-              sections={sections}
-              activeId={activeId}
-              awaitingApproval={awaitingApproval}
-              onNavigate={onNavigate}
-            />
-          </div>
-        </div>
-
-        {/* Search */}
-        <div
-          className={cn(
-            "overflow-hidden px-3 transition-[max-height,opacity] duration-200",
-            collapsed ? "max-h-0 opacity-0" : "max-h-12 pb-2 opacity-100",
-          )}
-        >
-          <div className="relative">
-            <Search className="-translate-y-1/2 absolute top-1/2 left-2.5 size-4 text-muted-foreground" />
-            <Input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder={t("searchChats")}
-              className="h-8 border-transparent bg-sidebar-accent/60 pl-8 text-sm shadow-none focus-visible:border-sidebar-border focus-visible:bg-sidebar-accent/60 focus-visible:ring-0"
-            />
-          </div>
-        </div>
-
-        {/* Sessions */}
-        <div
-          className={cn(
-            "flex-1 overflow-hidden transition-opacity duration-200",
-            collapsed && "pointer-events-none opacity-0",
-          )}
-        >
-          <nav className="h-full overflow-y-auto px-3 pb-2 scrollbar-thin">
-            {shownVisits.length > 0 && (
-              <div className="mb-3">
-                <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
-                  {t("sharedWithYou")}
-                </div>
-                <ul className="space-y-px" aria-label={t("sharedWithYou")}>
-                  {shownVisits.map((visit) => (
-                    <VisitRow
-                      key={visit.ownerId}
-                      visit={visit}
-                      active={
-                        visit.session !== null && visit.session === activeId
-                      }
-                      onNavigate={onNavigate}
-                    />
-                  ))}
-                </ul>
-              </div>
-            )}
-            {search &&
-              shownSections.length === 0 &&
-              shownVisits.length === 0 && (
-                <p className="px-2 py-6 text-center text-muted-foreground text-sm">
-                  {t("noChatsMatch")}
-                </p>
-              )}
-            {shownSections.map((section) => (
-              <AgentSectionList
-                key={section.agent.id}
-                section={section}
-                activeId={activeId}
-                awaitingApproval={awaitingApproval}
-                onNavigate={onNavigate}
-              />
-            ))}
-            <AgentSettingsDialog>
-              <button
-                type="button"
-                className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-muted-foreground text-xs hover:bg-sidebar-accent hover:text-foreground"
-              >
-                <Plus className="size-3.5" /> {t("newAgent")}
-              </button>
-            </AgentSettingsDialog>
-          </nav>
         </div>
 
         {/* Preferences */}
-        <div className="border-sidebar-border border-t p-3">
-          <PreferencesMenu collapsed={collapsed} />
+        <div className="p-3">
+          <PreferencesMenu collapsed={collapsed} onNavigate={onNavigate} />
         </div>
       </div>
     </TooltipProvider>
@@ -433,7 +423,7 @@ function SidebarNavItem({
         <Link
           to={to}
           onClick={onNavigate}
-          activeProps={{ className: "bg-sidebar-accent" }}
+          activeProps={{ className: "bg-sidebar-accent text-foreground" }}
           className={ITEM_CLASS(props.collapsed)}
           aria-label={props.label}
         >
@@ -448,120 +438,157 @@ function SidebarNavItem({
 function AgentSectionList({
   section: { agent, list },
   activeId,
+  expanded,
+  searching,
+  collapsed,
   awaitingApproval,
   onNavigate,
 }: {
   section: AgentSection;
   activeId?: string;
+  expanded: boolean;
+  searching: boolean;
+  collapsed: boolean;
   awaitingApproval: ReadonlySet<string>;
   onNavigate?: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const navigate = useNavigate();
-  const [open, setOpen] = useState(true);
+  const [showAll, setShowAll] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const optionsTrigger = useRef<HTMLButtonElement>(null);
+  const latest = list[0];
+  const updated = latest?.updatedAt ? new Date(latest.updatedAt) : null;
+  const today = new Date();
+  const day = (date: Date) =>
+    Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
+  const age = updated ? (day(today) - day(updated)) / 86400000 : 0;
+  const time = updated
+    ? age === 1
+      ? new Intl.RelativeTimeFormat(locale, { numeric: "auto" }).format(
+          -1,
+          "day",
+        )
+      : new Intl.DateTimeFormat(
+          locale,
+          age === 0
+            ? { hour: "numeric", minute: "2-digit" }
+            : age < 7
+              ? { weekday: "short" }
+              : { month: "short", day: "numeric" },
+        ).format(updated)
+    : "";
+  if (collapsed)
+    return <CollapsedAgent agent={agent} onNavigate={onNavigate} />;
+  const visible = searching || showAll ? list : list.slice(0, 8);
+  const activeSession = list.find((session) => session.id === activeId);
+  if (activeSession && !visible.includes(activeSession))
+    visible.push(activeSession);
   return (
-    <section className="mb-3" aria-label={agent.name}>
-      <div className="group/section flex items-center gap-1 pr-1">
-        <span className="flex min-w-0 flex-1 items-center">
-          <Link
-            to="/agents/$agentId"
-            params={{ agentId: agent.id }}
-            onClick={onNavigate}
-            className="min-w-0 truncate rounded-md px-2 py-1.5 font-medium text-muted-foreground text-xs hover:text-foreground"
-            activeProps={{ className: "bg-sidebar-accent text-foreground" }}
-            title={t("agentDashboard", { name: agent.name })}
-          >
-            <span className="flex items-center gap-1">
-              <AgentIcon agent={agent} className="size-4" />
-              <span className="truncate">{agent.name}</span>
+    <section className="mb-1" aria-label={agent.name}>
+      <div className="group/section relative">
+        <Link
+          to="/agents/$agentId"
+          params={{ agentId: agent.id }}
+          onClick={onNavigate}
+          className="flex min-w-0 items-center gap-3 rounded-xl px-2 py-3 hover:bg-sidebar-accent"
+          activeProps={{ className: "bg-sidebar-accent text-foreground" }}
+          title={t("agentDashboard", { name: agent.name })}
+        >
+          <AgentIcon agent={agent} className="size-10 shrink-0" />
+          <span className="min-w-0 flex-1">
+            <span className="flex items-baseline gap-2">
+              <span className="min-w-0 flex-1 truncate text-[15px] text-foreground">
+                {agent.name}
+              </span>
+              <span className="shrink-0 text-muted-foreground text-[13px] first-letter:uppercase">
+                {time}
+              </span>
             </span>
-          </Link>
-          <button
-            type="button"
-            className="shrink-0 rounded-md p-1 text-muted-foreground hover:text-foreground"
-            onClick={() => setOpen(!open)}
-            aria-expanded={open}
-            aria-label={t(open ? "hideChatsOf" : "showChatsOf", {
-              name: agent.name,
-            })}
-          >
-            <ChevronDown
-              className={cn(
-                "size-3.5 transition-transform",
-                !open && "-rotate-90",
+            <span className="mt-0.5 flex items-center gap-2 text-muted-foreground text-[13px]">
+              <span className="min-w-0 flex-1 truncate">
+                {latest
+                  ? sessionTitle(latest, t)
+                  : agent.description || t("noChatsYet")}
+              </span>
+              {list.some((session) => session.busy) && (
+                <span
+                  className="size-1.5 shrink-0 animate-pulse rounded-full bg-muted-foreground"
+                  role="img"
+                  aria-label={t("working")}
+                />
               )}
-            />
-          </button>
-        </span>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              ref={optionsTrigger}
-              type="button"
-              className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
-              aria-label={t("agentOptions", { name: agent.name })}
-              title={t("agentOptions", { name: agent.name })}
-            >
-              <MoreHorizontal className="size-3.5" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="end"
-            side="bottom"
-            onCloseAutoFocus={(event) => {
-              if (settingsOpen) event.preventDefault();
-            }}
-          >
-            <DropdownMenuItem onSelect={() => setSettingsOpen(true)}>
-              <Settings className="size-4" /> {t("settings")}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-        <AgentSettingsDialog
-          agent={agent}
-          open={settingsOpen}
-          onOpenChange={setSettingsOpen}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            optionsTrigger.current?.focus();
-          }}
-        />
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              className="rounded-md p-1 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
-              onClick={() => {
-                navigate({
-                  to: "/new",
-                  search: agent.default ? {} : { agent: agent.id },
-                });
-                onNavigate?.();
+              {list.some((session) => awaitingApproval.has(session.id)) && (
+                <AwaitingApprovalMark />
+              )}
+            </span>
+          </span>
+        </Link>
+        <div className="absolute right-2 bottom-2 flex items-center rounded-full bg-sidebar opacity-0 transition-opacity focus-within:opacity-100 group-hover/section:opacity-100">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                ref={optionsTrigger}
+                type="button"
+                className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+                aria-label={t("agentOptions", { name: agent.name })}
+                title={t("agentOptions", { name: agent.name })}
+              >
+                <MoreHorizontal className="size-3.5" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              side="bottom"
+              onCloseAutoFocus={(event) => {
+                if (settingsOpen) event.preventDefault();
               }}
-              aria-label={t("newChatWith", { name: agent.name })}
             >
-              <SquarePen className="size-3.5" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent
-            side="right"
-            showArrow={false}
-            className={SIDEBAR_TOOLTIP_CLASS}
-          >
-            {t("newChatWith", { name: agent.name })}
-          </TooltipContent>
-        </Tooltip>
+              <DropdownMenuItem onSelect={() => setSettingsOpen(true)}>
+                <Settings className="size-4" /> {t("settings")}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <AgentSettingsDialog
+            agent={agent}
+            open={settingsOpen}
+            onOpenChange={setSettingsOpen}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              optionsTrigger.current?.focus();
+            }}
+          />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className="rounded-md p-1 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+                onClick={() => {
+                  navigate({
+                    to: "/new",
+                    search: agent.default ? {} : { agent: agent.id },
+                  });
+                  onNavigate?.();
+                }}
+                aria-label={t("newChatWith", { name: agent.name })}
+              >
+                <SquarePen className="size-3.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent
+              side="right"
+              showArrow={false}
+              className={SIDEBAR_TOOLTIP_CLASS}
+            >
+              {t("newChatWith", { name: agent.name })}
+            </TooltipContent>
+          </Tooltip>
+        </div>
       </div>
-      {open &&
-        (list.length === 0 ? (
-          <p className="px-2 py-1 text-muted-foreground text-xs">
-            {t("noChatsYet")}
-          </p>
-        ) : (
+      {expanded && list.length > 0 && (
+        <div className="ml-[52px] pb-2">
           <ul className="space-y-px">
-            {list.map((session) => (
+            {visible.map((session) => (
               <SessionRow
                 key={session.id}
                 session={session}
@@ -571,90 +598,52 @@ function AgentSectionList({
               />
             ))}
           </ul>
-        ))}
+          {!searching && list.length > 8 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2 text-muted-foreground text-[13px]"
+              onClick={() => setShowAll(!showAll)}
+            >
+              {t(showAll ? "sidebarShowLess" : "sidebarShowAll")}
+            </Button>
+          )}
+        </div>
+      )}
     </section>
   );
 }
 
-function CollapsedChatsMenu({
-  sections,
-  activeId,
-  awaitingApproval,
+function CollapsedAgent({
+  agent,
   onNavigate,
 }: {
-  sections: AgentSection[];
-  activeId?: string;
-  awaitingApproval: ReadonlySet<string>;
+  agent: Agent;
   onNavigate?: () => void;
 }) {
-  const { t } = useI18n();
-  const navigate = useNavigate();
-  const trigger = (
-    <button
-      type="button"
-      className="relative flex h-9 w-full items-center justify-center rounded-lg text-sm transition-colors hover:bg-sidebar-accent"
-      aria-label={t("chats")}
-    >
-      <MessageCircle className="size-4.5" />
-      {awaitingApproval.size > 0 && (
-        <span className="absolute top-1.5 right-2 size-2 rounded-full bg-primary" />
-      )}
-    </button>
-  );
-
   return (
-    <DropdownMenu>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
-        </TooltipTrigger>
-        <TooltipContent
-          side="right"
-          sideOffset={20}
-          showArrow={false}
-          className={SIDEBAR_TOOLTIP_CLASS}
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Link
+          to="/agents/$agentId"
+          params={{ agentId: agent.id }}
+          onClick={onNavigate}
+          aria-label={agent.name}
+          className="my-2 flex h-10 items-center justify-center rounded-xl hover:bg-sidebar-accent"
+          activeProps={{ className: "bg-sidebar-accent" }}
         >
-          {t("chats")}
-        </TooltipContent>
-      </Tooltip>
-      <DropdownMenuContent
-        align="start"
+          <AgentIcon agent={agent} className="size-8 shrink-0" />
+        </Link>
+      </TooltipTrigger>
+      <TooltipContent
         side="right"
-        className="max-h-[min(28rem,var(--radix-dropdown-menu-content-available-height))] w-64"
+        sideOffset={20}
+        showArrow={false}
+        className={SIDEBAR_TOOLTIP_CLASS}
       >
-        {sections.every((section) => section.list.length === 0) ? (
-          <DropdownMenuItem disabled>{t("noChatsYet")}</DropdownMenuItem>
-        ) : (
-          sections.map((section) => (
-            <DropdownMenuGroup key={section.agent.id}>
-              <DropdownMenuLabel className="flex items-center gap-1.5 truncate text-muted-foreground text-xs">
-                <AgentIcon agent={section.agent} className="size-4" />
-                {section.agent.name}
-              </DropdownMenuLabel>
-              {section.list.map((session) => (
-                <DropdownMenuItem
-                  key={session.id}
-                  className={cn(
-                    "cursor-pointer truncate",
-                    session.id === activeId && "bg-accent",
-                  )}
-                  onSelect={() => {
-                    navigate({
-                      to: "/chat/$sessionId",
-                      params: { sessionId: session.id },
-                    });
-                    onNavigate?.();
-                  }}
-                >
-                  <span className="truncate">{sessionTitle(session, t)}</span>
-                  {awaitingApproval.has(session.id) && <AwaitingApprovalMark />}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuGroup>
-          ))
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+        {agent.name}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -759,11 +748,11 @@ function VisitRow({
         onClick={() => open.mutate()}
         disabled={disabled}
         className={cn(
-          "flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-sm transition-colors hover:bg-sidebar-accent disabled:opacity-60",
+          "flex h-12 w-full items-center gap-3 rounded-xl px-2 text-left text-[15px] transition-colors hover:bg-sidebar-accent disabled:opacity-60",
           active && "bg-sidebar-accent",
         )}
       >
-        <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 font-medium text-[11px] text-primary uppercase">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-muted text-sm text-muted-foreground uppercase">
           {visit.username.slice(0, 1)}
         </span>
         <span className="min-w-0 flex-1 truncate">
@@ -783,8 +772,8 @@ function VisitRow({
 function AwaitingApprovalMark() {
   const { t } = useI18n();
   return (
-    <ShieldCheck
-      className="ml-auto size-3.5 shrink-0 text-primary"
+    <span
+      className="ml-auto size-2 shrink-0 rounded-full bg-link"
       role="img"
       aria-label={t("awaitingApproval")}
     />
@@ -875,8 +864,8 @@ function SessionRow({
         params={{ sessionId: session.id }}
         onClick={onNavigate}
         className={cn(
-          "flex items-center gap-2 rounded-lg px-2 py-2 pr-8 text-sm transition-colors hover:bg-sidebar-accent",
-          active && "bg-sidebar-accent",
+          "flex h-8 items-center gap-2 rounded-xl px-2 pr-8 text-muted-foreground text-sm transition-colors hover:bg-sidebar-accent hover:text-foreground",
+          active && "bg-sidebar-accent text-foreground",
         )}
       >
         <span className={cn("truncate", !session.title && "italic")}>
@@ -942,9 +931,17 @@ function SessionRow({
   );
 }
 
-function PreferencesMenu({ collapsed = false }: { collapsed?: boolean }) {
+function PreferencesMenu({
+  collapsed = false,
+  onNavigate,
+}: {
+  collapsed?: boolean;
+  onNavigate?: () => void;
+}) {
   const { preference, setPreference } = useTheme();
   const { t } = useI18n();
+  const { data: account } = useQuery(accountQuery());
+  const label = account?.username || t("preferences");
 
   const trigger = (
     <button
@@ -956,7 +953,9 @@ function PreferencesMenu({ collapsed = false }: { collapsed?: boolean }) {
       aria-label={t("preferences")}
     >
       <span className="flex h-9 w-10 shrink-0 items-center justify-center">
-        <SlidersHorizontal className="size-4.5" />
+        <span className="flex size-8 items-center justify-center rounded-full bg-muted text-muted-foreground uppercase">
+          {label.slice(0, 1)}
+        </span>
       </span>
       <span
         className={cn(
@@ -964,7 +963,7 @@ function PreferencesMenu({ collapsed = false }: { collapsed?: boolean }) {
           collapsed ? "max-w-0 opacity-0" : "max-w-[180px] opacity-100",
         )}
       >
-        {t("preferences")}
+        {label}
       </span>
     </button>
   );
@@ -989,6 +988,13 @@ function PreferencesMenu({ collapsed = false }: { collapsed?: boolean }) {
         <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
       )}
       <DropdownMenuContent align="start" side="top" className="w-60">
+        <DropdownMenuItem asChild>
+          <Link to="/settings" onClick={onNavigate}>
+            <Settings className="size-4" />
+            {t("settings")}
+          </Link>
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
         <DropdownMenuLabel className="text-muted-foreground text-xs">
           {t("theme")}
         </DropdownMenuLabel>

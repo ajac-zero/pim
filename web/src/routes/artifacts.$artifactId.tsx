@@ -129,7 +129,7 @@ function ArtifactPage() {
 
   return (
     <main className="flex min-h-0 flex-1 flex-col">
-      <header className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
+      <header className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
         <Button asChild size="icon" variant="ghost" className="size-8 shrink-0">
           <Link to="/artifacts" aria-label={t("allArtifacts")}>
             <ArrowLeft className="size-4" />
@@ -150,7 +150,7 @@ function ArtifactPage() {
                 search: { v: Number(event.target.value) },
               })
             }
-            className="h-8 max-w-48 rounded-md border bg-transparent px-2 text-sm"
+            className="h-9 max-w-48 rounded-xl border bg-background px-2 text-sm"
           >
             {artifact.history.map((entry) => (
               <option key={entry.version} value={entry.version}>
@@ -171,7 +171,7 @@ function ArtifactPage() {
             ))}
           </select>
         </label>
-        <div className="flex rounded-md border p-0.5 text-sm">
+        <div className="flex rounded-full border p-0.5 text-sm">
           {(["preview", "source"] as const).map((mode) => (
             <button
               key={mode}
@@ -179,7 +179,7 @@ function ArtifactPage() {
               aria-pressed={view === mode}
               onClick={() => setView(mode)}
               className={cn(
-                "rounded px-2.5 py-1",
+                "rounded-full px-3 py-1",
                 view === mode && "bg-accent font-medium",
               )}
             >

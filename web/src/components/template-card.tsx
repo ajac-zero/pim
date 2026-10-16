@@ -10,14 +10,14 @@ export function TemplateCard({ template }: { template: TemplateSummary }) {
     <Link
       to="/templates/$templateId"
       params={{ templateId: template.id }}
-      className="flex h-full flex-col rounded-xl border px-4 py-3 transition-colors hover:bg-accent/50"
+      className="flex h-full flex-col rounded-2xl border bg-muted/30 p-5 transition-colors hover:bg-muted/70"
     >
-      <span className="flex items-center gap-2">
+      <span className="flex items-center gap-3">
         <span className="text-primary">
           <AgentIcon
             agent={template}
             src={templateIconSrc(template)}
-            className="size-4"
+            className="size-12 shrink-0"
           />
         </span>
         <span className="truncate font-medium">{template.name}</span>

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
 import { Check, Copy, Download, KeyRound, Loader2, X } from "lucide-react";
 import { useEffect, useId, useState } from "react";
+import { PimMark } from "~/components/agent-icon";
 import { useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -116,14 +117,18 @@ function RegistrationForm({
         if (ready) register.mutate();
       }}
     >
-      <h1 className="font-semibold text-2xl">
+      <PimMark className="mx-auto mb-6 size-14" />
+      <h1 className="font-semibold text-xl">
         {mode === "claim" ? t("setUpTitle") : t("registerTitle")}
       </h1>
       <p className="mt-2 text-muted-foreground text-sm">
         {mode === "claim" ? t("claimBody") : t("registerBody")}
       </p>
 
-      <label htmlFor={usernameId} className="mt-6 block font-medium text-sm">
+      <label
+        htmlFor={usernameId}
+        className="mt-6 block text-left text-[13px] text-muted-foreground"
+      >
         {t("username")}
       </label>
       <Input
@@ -141,7 +146,7 @@ function RegistrationForm({
       <p
         id={`${usernameId}-hint`}
         className={cn(
-          "mt-1.5 flex min-h-5 items-center gap-1.5 text-xs",
+          "mt-1.5 flex min-h-5 items-center gap-1.5 text-left text-xs",
           current?.available === false
             ? "text-destructive"
             : "text-muted-foreground",
@@ -168,7 +173,10 @@ function RegistrationForm({
       {/* An invite link fills it in; typed only when someone sent the code alone. */}
       {mode === "invite" && !given && (
         <>
-          <label htmlFor={inviteId} className="mt-4 block font-medium text-sm">
+          <label
+            htmlFor={inviteId}
+            className="mt-4 block text-left text-[13px] text-muted-foreground"
+          >
             {t("inviteCode")}
           </label>
           <Input
@@ -245,21 +253,22 @@ function RecoveryCodes({
 
   return (
     <>
-      <h1 className="font-semibold text-2xl">{t("saveRecoveryCodesTitle")}</h1>
+      <PimMark className="mx-auto mb-6 size-14" />
+      <h1 className="font-semibold text-xl">{t("saveRecoveryCodesTitle")}</h1>
       <p className="mt-2 text-muted-foreground text-sm">
         {t("saveRecoveryCodesBody")}
       </p>
       <ul
-        className="mt-6 grid grid-cols-2 gap-x-4 gap-y-1.5 rounded-xl border bg-card px-4 py-3 font-mono text-sm"
+        className="mt-6 grid grid-cols-1 gap-x-4 gap-y-2 rounded-2xl bg-muted px-4 py-5 font-mono text-sm min-[380px]:grid-cols-2"
         aria-label={t("recoveryCodes")}
       >
         {registered.recoveryCodes.map((code) => (
           <li key={code}>{code}</li>
         ))}
       </ul>
-      <div className="mt-3 flex gap-2">
+      <div className="mt-3 flex justify-center gap-2">
         <Button
-          variant="outline"
+          variant="secondary"
           size="sm"
           onClick={async () => {
             await navigator.clipboard.writeText(text);
@@ -269,17 +278,17 @@ function RecoveryCodes({
           {copied ? <Check /> : <Copy />}
           {copied ? t("copied") : t("copy")}
         </Button>
-        <Button variant="outline" size="sm" onClick={download}>
+        <Button variant="secondary" size="sm" onClick={download}>
           <Download />
           {t("download")}
         </Button>
       </div>
-      <label className="mt-6 flex items-start gap-2 text-sm">
+      <label className="mt-6 flex items-start gap-3 text-left text-[13px] text-muted-foreground">
         <input
           type="checkbox"
           checked={saved}
           onChange={(event) => setSaved(event.target.checked)}
-          className="mt-0.5 size-4 accent-primary"
+          className="mt-0.5 size-4 shrink-0 accent-primary"
         />
         {t("savedRecoveryCodes")}
       </label>
@@ -337,17 +346,21 @@ function NameAgent() {
         start.mutate();
       }}
     >
-      <h1 className="font-semibold text-2xl">{t("nameAgentTitle")}</h1>
+      <PimMark className="mx-auto mb-7 size-24" />
+      <h1 className="font-semibold text-xl">{t("nameAgentTitle")}</h1>
       <p className="mt-2 text-muted-foreground text-sm">{t("nameAgentBody")}</p>
       {mine?.source && (
-        <div className="mt-6 rounded-xl border bg-card px-4 py-3 text-sm">
+        <div className="mt-6 rounded-2xl bg-muted px-4 py-3 text-sm">
           <p className="text-muted-foreground text-xs">
             {t("nameAgentTemplate", { author: mine.source.author })}
           </p>
           {mine.description && <p className="mt-1">{mine.description}</p>}
         </div>
       )}
-      <label htmlFor={nameId} className="mt-6 block font-medium text-sm">
+      <label
+        htmlFor={nameId}
+        className="mt-6 block text-left text-[13px] text-muted-foreground"
+      >
         {t("nameAgentLabel")}
       </label>
       <Input

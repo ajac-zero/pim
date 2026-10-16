@@ -24,7 +24,7 @@ function ArtifactsPage() {
           text={t("noArtifacts")}
         />
       ) : (
-        <ul className="divide-y rounded-xl border">
+        <ul className="divide-y">
           {artifacts.map((artifact) => (
             <li key={artifact.id}>
               <Link
@@ -35,7 +35,7 @@ function ArtifactsPage() {
               >
                 <ArtifactIcon
                   kind={artifact.kind}
-                  className="size-5 shrink-0 text-muted-foreground"
+                  className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground"
                 />
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-medium text-sm">

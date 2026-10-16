@@ -44,6 +44,14 @@ function PersonPage() {
   return (
     <Page
       title={person.displayName ?? `@${person.username}`}
+      icon={
+        <span
+          className="flex size-12 shrink-0 items-center justify-center rounded-full bg-muted font-normal text-muted-foreground"
+          aria-hidden="true"
+        >
+          {person.username.slice(0, 1).toUpperCase()}
+        </span>
+      }
       description={person.bio ?? ""}
     >
       <p className="-mt-6 mb-6 text-muted-foreground text-sm">

@@ -68,9 +68,9 @@ export function AddDevice() {
   );
 
   return (
-    <div className="space-y-3 rounded-xl border px-4 py-3">
+    <div className="space-y-4 rounded-2xl border bg-muted/20 p-4">
       <div className="flex items-start gap-3">
-        <Smartphone className="mt-0.5 size-5 shrink-0 text-muted-foreground" />
+        <Smartphone className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
         <div className="min-w-0 flex-1">
           <p className="font-medium text-sm">{t("addDeviceTitle")}</p>
           <p className="mt-0.5 text-muted-foreground text-xs">

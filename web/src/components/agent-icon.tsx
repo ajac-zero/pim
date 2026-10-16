@@ -256,7 +256,7 @@ export function AgentLookPicker({
       <AgentIcon
         agent={shown}
         src={value.image instanceof Blob ? preview : undefined}
-        className="size-20"
+        className="size-24"
       />
       <div
         role="radiogroup"

@@ -51,7 +51,7 @@ function NotificationsPage() {
           text={t("noNotifications")}
         />
       ) : (
-        <ul className="divide-y rounded-xl border">
+        <ul className="divide-y">
           {notifications.map((notification) => (
             <NotificationRow
               key={notification.id}
@@ -77,14 +77,15 @@ function NotificationRow({ notification }: { notification: PimNotification }) {
 
   return (
     <li className={cn("flex gap-3 p-4", unread && "bg-accent/40")}>
+      <Bell className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
       <span
         className={cn(
           "mt-1.5 size-2 shrink-0 rounded-full",
-          unread ? "bg-primary" : "bg-transparent",
+          unread ? "bg-link" : "bg-transparent",
         )}
       />
       <div className="min-w-0 flex-1">
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
           <p className={cn("text-sm", unread && "font-medium")}>
             {notification.title}
           </p>

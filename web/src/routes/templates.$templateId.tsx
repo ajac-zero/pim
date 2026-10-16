@@ -50,7 +50,7 @@ function TemplatePage() {
         <AgentIcon
           agent={template}
           src={templateIconSrc(template)}
-          className="size-9"
+          className="size-12"
         />
       }
       description={template.description || t("noDescription")}
@@ -73,7 +73,7 @@ function TemplatePage() {
         <h2 className="font-medium text-muted-foreground text-sm">
           {t("agentInstructions")}
         </h2>
-        <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-xl border bg-muted/40 px-4 py-3 font-sans text-sm">
+        <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-2xl border bg-muted/30 p-5 font-sans text-sm">
           {template.instructions}
         </pre>
       </section>

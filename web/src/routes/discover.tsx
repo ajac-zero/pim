@@ -39,7 +39,7 @@ function DiscoverPage() {
               onChange={(event) => setSearch(event.target.value)}
               placeholder={t("searchAgents")}
               aria-label={t("searchAgents")}
-              className="pl-9"
+              className="border-transparent bg-muted pl-9 shadow-none"
             />
           </div>
           {templates?.length === 0 ? (

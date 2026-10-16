@@ -310,7 +310,7 @@ describe("a database from when agents were personas", () => {
 				member TEXT NOT NULL, task TEXT NOT NULL, status TEXT NOT NULL, report TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
 			sql.exec("INSERT INTO pim_team_runs VALUES ('c1', 'k', 0, '9', 'p_1', 'Editor', 'Fix it', 'done', NULL, 1, 1)");
 
-			const directory = () => [{ ref: "test.ledger/strava", name: "Strava", description: "", url: "https://mcp.strava.example/mcp", custom: false, icon: null }];
+			const directory = () => [{ ref: "test.ledger/strava", name: "Strava", description: "", url: "https://mcp.strava.example/mcp", custom: false, icon: null, category: null }];
 			const agents = new AgentStore(
 				sql,
 				() => {

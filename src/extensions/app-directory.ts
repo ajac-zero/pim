@@ -1,4 +1,4 @@
-import { CUSTOM_APPS, isNativeApp, type PimExtension } from "./define";
+import { type AppCategory, CUSTOM_APPS, isNativeApp, type PimExtension } from "./define";
 
 /**
  * The apps people can connect: those the installed extensions bring, and
@@ -16,6 +16,7 @@ export type CustomApp = {
 	readonly url: string;
 	/** Its site's icon, found when the admin added it. */
 	readonly icon: string | null;
+	readonly category: AppCategory | null;
 };
 
 export type DirectoryApp = {
@@ -29,6 +30,8 @@ export type DirectoryApp = {
 	readonly custom: boolean;
 	/** An https or `data:` image URL; null shows its initial. */
 	readonly icon: string | null;
+	/** Null files it under Other. */
+	readonly category: AppCategory | null;
 };
 
 const MAX_FOUND = 8;
@@ -44,9 +47,10 @@ export function appDirectory(extensions: readonly PimExtension[], custom: readon
 				url: isNativeApp(app) ? null : app.url,
 				custom: false,
 				icon: app.icon ?? null,
+				category: app.category ?? null,
 			})),
 		),
-		...custom.map(({ id, name, description, url, icon }) => ({ ref: `${CUSTOM_APPS}/${id}`, name, description, url, custom: true, icon })),
+		...custom.map(({ id, name, description, url, icon, category }) => ({ ref: `${CUSTOM_APPS}/${id}`, name, description, url, custom: true, icon, category })),
 	];
 }
 

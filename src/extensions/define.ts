@@ -136,6 +136,10 @@ export function widgetMarkdown(widget: ShownWidget, locale = "en"): string {
  */
 export type AppDefinition = McpAppDefinition | NativeAppDefinition;
 
+/** Where the Apps page files an app; the web app names each. */
+export const APP_CATEGORIES = ["productivity", "meetings", "development", "data", "finance", "customers", "websites", "automation", "research", "media"] as const;
+export type AppCategory = (typeof APP_CATEGORIES)[number];
+
 type AppIdentity = {
 	/** Unique in its extension. Stored in people's agents: don't rename it. */
 	readonly id: string;
@@ -143,6 +147,8 @@ type AppIdentity = {
 	readonly description: string;
 	/** Its logo: an https or `data:` image URL, square, with a transparent background that works on light and dark. Without one, its initial. */
 	readonly icon?: string;
+	/** Without one, it's filed under Other. */
+	readonly category?: AppCategory;
 };
 
 /** An app that is a remote MCP server. */

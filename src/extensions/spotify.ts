@@ -100,6 +100,7 @@ export const spotifyExtension = definePimExtension({
 			name: "Spotify",
 			description: "What's playing, search, and playback on your devices.",
 			icon: `data:image/svg+xml,${encodeURIComponent(LOGO)}`,
+			category: "media",
 			secrets: ["SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"],
 			...oauth2({
 				authorizeUrl: "https://accounts.spotify.com/authorize",

@@ -1,14 +1,31 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { ExternalLink, ImageIcon, Plus, Trash2, Unplug } from "lucide-react";
-import { type FormEvent, useId, useState } from "react";
+import {
+  ExternalLink,
+  ImageIcon,
+  Plus,
+  Search,
+  Trash2,
+  Unplug,
+  X,
+} from "lucide-react";
+import { Dialog } from "radix-ui";
+import { type FormEvent, type ReactNode, useId, useState } from "react";
 import { toast } from "sonner";
 import { AppIcon } from "~/components/app-icon";
 import { useI18n } from "~/components/i18n";
-import { Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
+import {
+  APP_CATEGORIES,
+  type AppCategory,
   admin,
   type ConnectedApp,
   type DirectoryApp,
@@ -21,11 +38,35 @@ export const Route = createFileRoute("/apps")({
   component: AppsPage,
 });
 
+type Category = AppCategory | "other";
+
+const CATEGORY_LABELS = {
+  productivity: "appCategoryProductivity",
+  meetings: "appCategoryMeetings",
+  development: "appCategoryDevelopment",
+  data: "appCategoryData",
+  finance: "appCategoryFinance",
+  customers: "appCategoryCustomers",
+  websites: "appCategoryWebsites",
+  automation: "appCategoryAutomation",
+  research: "appCategoryResearch",
+  media: "appCategoryMedia",
+  other: "appCategoryOther",
+} as const;
+
+const CATEGORIES: readonly Category[] = [...APP_CATEGORIES, "other"];
+
+/** An app this Pim offers with your connection to it, or a connection to one it no longer offers. */
+type Row = { app: DirectoryApp | null; connection: ConnectedApp | undefined };
+
 /**
  * The apps this Pim offers, each with your connection to it: you connect an
  * app once, and every agent of yours that lists it works with it. Apps you
  * connected that it no longer offers can only be disconnected here. The
  * admin adds apps of their own, and takes them out.
+ *
+ * The page fits the window: its search, filters and categories stay put
+ * while the cards, grouped by category, scroll beneath them.
  */
 function AppsPage() {
   const { t } = useI18n();
@@ -34,9 +75,12 @@ function AppsPage() {
   const isAdmin = account?.role === "admin";
   const { data: directory } = useQuery(appDirectoryQuery());
   const { data: connections } = useQuery(appsQuery());
+  const [query, setQuery] = useState("");
+  const [onlyConnected, setOnlyConnected] = useState(false);
+  const [category, setCategory] = useState<Category | null>(null);
   const [creating, setCreating] = useState(false);
-  // The admin's app whose icon they're changing, by ref.
-  const [changingIcon, setChangingIcon] = useState<string | null>(null);
+  // The admin's app whose icon they're changing.
+  const [changingIcon, setChangingIcon] = useState<DirectoryApp | null>(null);
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ["apps"] });
     queryClient.invalidateQueries({ queryKey: ["permissions"] });
@@ -68,177 +112,57 @@ function AppsPage() {
     },
     onError,
   });
-  if (!directory || !connections) {
-    return (
-      <Page
-        title={t("connectedApps")}
-        description={t("connectedAppsDescription")}
-      >
-        {null}
-      </Page>
-    );
-  }
-  const stateLabel = (app: ConnectedApp) =>
-    app.state === "ready"
-      ? t("appReady")
-      : app.state === "authenticating"
-        ? t("appNeedsSignIn")
-        : app.state === "failed"
-          ? t("appFailed")
-          : t("appConnecting");
-  const unoffered = connections.filter((connection) => connection.app === null);
-  const rows = [
-    ...directory.map((app) => ({
+
+  const rows: Row[] = [
+    ...(directory ?? []).map((app) => ({
       app,
-      connection: connections.find((candidate) => candidate.app === app.ref),
+      connection: connections?.find((candidate) => candidate.app === app.ref),
     })),
-    ...unoffered.map((connection) => ({ app: null, connection })),
+    ...(connections ?? [])
+      .filter((connection) => connection.app === null)
+      .map((connection) => ({ app: null, connection })),
   ];
+  const categoryOf = (row: Row): Category => row.app?.category ?? "other";
+  const label = (category: Category) => t(CATEGORY_LABELS[category]);
+  // Every word of the search, in its name, description or category.
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const matches = (row: Row) => {
+    const text = [
+      row.app?.name ?? row.connection?.name,
+      row.app?.description,
+      label(categoryOf(row)),
+    ]
+      .join(" ")
+      .toLowerCase();
+    return words.every((word) => text.includes(word));
+  };
+  const found = rows.filter(
+    (row) => matches(row) && (!onlyConnected || row.connection),
+  );
+  const counts = new Map<Category, number>();
+  for (const row of found) {
+    counts.set(categoryOf(row), (counts.get(categoryOf(row)) ?? 0) + 1);
+  }
+  // Chips for the categories this Pim has apps in, whatever the search.
+  const offered = CATEGORIES.filter((candidate) =>
+    rows.some((row) => categoryOf(row) === candidate),
+  );
+  const sections = CATEGORIES.filter(
+    (candidate) =>
+      (category === null || category === candidate) && counts.has(candidate),
+  ).map((candidate) => ({
+    category: candidate,
+    rows: found.filter((row) => categoryOf(row) === candidate),
+  }));
+  const connectedCount = rows.filter((row) => row.connection).length;
+  const loading = !directory || !connections;
+
   return (
-    <Page
-      title={t("connectedApps")}
-      description={t("connectedAppsDescription")}
-    >
-      <div className="space-y-3">
-        {rows.length === 0 ? (
-          <p className="py-3 text-muted-foreground text-sm">
-            {t("noAppsOffered")}
-          </p>
-        ) : (
-          <ul
-            className="divide-y rounded-2xl border bg-muted/20"
-            aria-label={t("connectedApps")}
-          >
-            {rows.map(({ app, connection }) => {
-              const name = app?.name ?? connection?.name ?? "";
-              return (
-                <li
-                  key={app?.ref ?? connection?.id}
-                  className="flex flex-wrap items-center gap-3 px-4 py-3"
-                >
-                  <AppIcon
-                    name={name}
-                    icon={app?.icon}
-                    className="size-11 text-lg"
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-2">
-                      <span className="truncate font-medium text-sm">
-                        {name}
-                      </span>
-                      {connection && (
-                        <span
-                          className={cn(
-                            "shrink-0 rounded border px-1 text-[10px]",
-                            connection.state === "ready"
-                              ? "text-success"
-                              : connection.state === "failed"
-                                ? "text-destructive"
-                                : "text-muted-foreground",
-                          )}
-                          title={connection.error ?? undefined}
-                        >
-                          {stateLabel(connection)}
-                        </span>
-                      )}
-                    </span>
-                    <span className="block truncate text-muted-foreground text-xs">
-                      {app
-                        ? app.description || app.url
-                        : t("appNoLongerOffered")}
-                    </span>
-                    {connection && (
-                      <span className="block truncate text-muted-foreground text-xs">
-                        {connection.agents.length > 0
-                          ? t("appUsedBy", {
-                              agents: connection.agents.join(", "),
-                            })
-                          : t("appUnused")}
-                        {connection.state === "ready" &&
-                          ` · ${t("toolCount", { count: connection.tools.length })}`}
-                      </span>
-                    )}
-                  </span>
-                  {connection?.authUrl &&
-                    connection.state === "authenticating" && (
-                      <Button variant="outline" size="sm" asChild>
-                        <a
-                          href={connection.authUrl}
-                          target="_blank"
-                          rel="noopener"
-                        >
-                          {t("signIn")} <ExternalLink />
-                        </a>
-                      </Button>
-                    )}
-                  {app && (!connection || connection.state === "failed") && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={connect.isPending}
-                      onClick={() => connect.mutate(app)}
-                    >
-                      {t("connect")}
-                    </Button>
-                  )}
-                  {connection && (
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      className="text-muted-foreground"
-                      aria-label={t("removeAppNamed", { name })}
-                      title={t("removeAppNamed", { name })}
-                      disabled={disconnect.isPending}
-                      onClick={() => disconnect.mutate(connection)}
-                    >
-                      <Unplug />
-                    </Button>
-                  )}
-                  {isAdmin && app?.custom && (
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      className="text-muted-foreground"
-                      aria-label={t("changeAppIconNamed", { name })}
-                      title={t("changeAppIconNamed", { name })}
-                      aria-expanded={changingIcon === app.ref}
-                      onClick={() =>
-                        setChangingIcon(
-                          changingIcon === app.ref ? null : app.ref,
-                        )
-                      }
-                    >
-                      <ImageIcon />
-                    </Button>
-                  )}
-                  {isAdmin && app?.custom && (
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      className="text-muted-foreground"
-                      aria-label={t("unlistAppNamed", { name })}
-                      title={t("unlistAppNamed", { name })}
-                      disabled={unlist.isPending}
-                      onClick={() => unlist.mutate(app)}
-                    >
-                      <Trash2 />
-                    </Button>
-                  )}
-                  {app && changingIcon === app.ref && (
-                    <AppIconForm
-                      app={app}
-                      onDone={() => setChangingIcon(null)}
-                    />
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-        {isAdmin &&
-          (creating ? (
-            <CreateAppForm onDone={() => setCreating(false)} />
-          ) : (
+    <main className="flex min-h-0 flex-1 flex-col">
+      <div className="@container mx-auto w-full max-w-6xl shrink-0 px-6 pt-8 md:pt-12">
+        <div className="flex items-center justify-between gap-4">
+          <h1 className="font-semibold text-xl">{t("connectedApps")}</h1>
+          {isAdmin && (
             <Button
               variant="outline"
               size="sm"
@@ -246,9 +170,332 @@ function AppsPage() {
             >
               <Plus /> {t("createApp")}
             </Button>
-          ))}
+          )}
+        </div>
+        <p className="mt-1 text-muted-foreground text-sm">
+          {t("connectedAppsDescription")}
+        </p>
+        <div className="mt-5 flex items-center gap-2">
+          <div className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={t("searchApps")}
+              aria-label={t("searchApps")}
+              className="pl-9"
+            />
+          </div>
+          <fieldset className="flex rounded-xl border p-0.5 text-sm">
+            <legend className="sr-only">{t("connectedApps")}</legend>
+            {[
+              { value: false, text: t("appsShowAll"), count: rows.length },
+              {
+                value: true,
+                text: t("appsShowConnected"),
+                count: connectedCount,
+              },
+            ].map((option) => (
+              <button
+                key={String(option.value)}
+                type="button"
+                aria-pressed={onlyConnected === option.value}
+                onClick={() => setOnlyConnected(option.value)}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-[10px] px-3 py-1.5 text-muted-foreground transition-colors hover:text-foreground",
+                  onlyConnected === option.value &&
+                    "bg-accent font-medium text-foreground",
+                )}
+              >
+                {option.text}
+                <span className="hidden text-xs tabular-nums opacity-70 sm:inline">
+                  {option.count}
+                </span>
+              </button>
+            ))}
+          </fieldset>
+        </div>
+        {offered.length > 1 && (
+          <nav
+            aria-label={t("appsByCategory")}
+            className="-mx-6 mt-3 flex gap-1.5 overflow-x-auto px-6 pb-3 [mask-image:linear-gradient(to_right,black_calc(100%-3rem),transparent)] [scrollbar-width:none]"
+          >
+            {[null, ...offered].map((candidate) => {
+              const count =
+                candidate === null
+                  ? found.length
+                  : (counts.get(candidate) ?? 0);
+              const selected = category === candidate;
+              return (
+                <button
+                  key={candidate ?? "all"}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => setCategory(candidate)}
+                  className={cn(
+                    "flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1 text-[13px] transition-colors",
+                    selected
+                      ? "border-foreground bg-foreground text-background"
+                      : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                    !selected && count === 0 && "opacity-50",
+                  )}
+                >
+                  {candidate === null ? t("appsShowAll") : label(candidate)}
+                  <span className="text-xs tabular-nums opacity-70">
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </nav>
+        )}
       </div>
-    </Page>
+      <div className="min-h-0 flex-1 overflow-y-auto border-t scrollbar-thin">
+        <div className="@container mx-auto w-full max-w-6xl px-6 pb-12">
+          {loading ? null : rows.length === 0 ? (
+            <p className="py-6 text-muted-foreground text-sm">
+              {t("noAppsOffered")}
+            </p>
+          ) : sections.length === 0 ? (
+            <p className="py-6 text-muted-foreground text-sm">
+              {onlyConnected && words.length === 0
+                ? t("noConnectedApps")
+                : t("noAppsMatch")}
+            </p>
+          ) : (
+            sections.map((section) => (
+              <section
+                key={section.category}
+                aria-labelledby={`apps-${section.category}`}
+              >
+                <h2
+                  id={`apps-${section.category}`}
+                  className="sticky top-0 z-10 flex items-baseline gap-2 bg-background pt-5 pb-2 font-medium text-muted-foreground text-xs uppercase tracking-wide"
+                >
+                  {label(section.category)}
+                  <span className="tabular-nums opacity-70">
+                    {section.rows.length}
+                  </span>
+                </h2>
+                <ul className="grid @xl:grid-cols-2 @3xl:grid-cols-3 @6xl:grid-cols-4 grid-cols-1 gap-3">
+                  {section.rows.map((row) => (
+                    <AppCard
+                      key={row.app?.ref ?? row.connection?.id}
+                      row={row}
+                      isAdmin={isAdmin}
+                      busy={
+                        connect.isPending ||
+                        disconnect.isPending ||
+                        unlist.isPending
+                      }
+                      onConnect={(app) => connect.mutate(app)}
+                      onDisconnect={(connection) =>
+                        disconnect.mutate(connection)
+                      }
+                      onChangeIcon={setChangingIcon}
+                      onUnlist={(app) => unlist.mutate(app)}
+                    />
+                  ))}
+                </ul>
+              </section>
+            ))
+          )}
+        </div>
+      </div>
+      <AppDialog
+        title={t("createApp")}
+        open={creating}
+        onOpenChange={setCreating}
+      >
+        <CreateAppForm onDone={() => setCreating(false)} />
+      </AppDialog>
+      <AppDialog
+        title={
+          changingIcon
+            ? t("changeAppIconNamed", { name: changingIcon.name })
+            : ""
+        }
+        open={changingIcon !== null}
+        onOpenChange={(open) => !open && setChangingIcon(null)}
+      >
+        {changingIcon && (
+          <AppIconForm
+            app={changingIcon}
+            onDone={() => setChangingIcon(null)}
+          />
+        )}
+      </AppDialog>
+    </main>
+  );
+}
+
+/** One app as a card: its logo, what it does, your connection, and what you can do with it. */
+function AppCard({
+  row: { app, connection },
+  isAdmin,
+  busy,
+  onConnect,
+  onDisconnect,
+  onChangeIcon,
+  onUnlist,
+}: {
+  row: Row;
+  isAdmin: boolean;
+  busy: boolean;
+  onConnect: (app: DirectoryApp) => void;
+  onDisconnect: (connection: ConnectedApp) => void;
+  onChangeIcon: (app: DirectoryApp) => void;
+  onUnlist: (app: DirectoryApp) => void;
+}) {
+  const { t } = useI18n();
+  const name = app?.name ?? connection?.name ?? "";
+  const state = connection?.state;
+  const stateLabel =
+    state === "ready"
+      ? t("appReady")
+      : state === "authenticating"
+        ? t("appNeedsSignIn")
+        : state === "failed"
+          ? t("appFailed")
+          : t("appConnecting");
+  const adminActions = isAdmin && app?.custom;
+  return (
+    <li className="flex flex-col gap-2 rounded-xl border bg-card p-3.5 transition-colors hover:border-foreground/20">
+      <div className="flex items-center gap-3">
+        <AppIcon name={name} icon={app?.icon} className="size-9 text-sm" />
+        <h3 className="min-w-0 flex-1 truncate font-medium text-sm">{name}</h3>
+        {connection?.authUrl && state === "authenticating" && (
+          <Button variant="outline" size="sm" asChild>
+            <a href={connection.authUrl} target="_blank" rel="noopener">
+              {t("signIn")} <ExternalLink />
+            </a>
+          </Button>
+        )}
+        {app && (!connection || state === "failed") && (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy}
+            onClick={() => onConnect(app)}
+          >
+            {t("connect")}
+          </Button>
+        )}
+      </div>
+      <p className="line-clamp-2 text-muted-foreground text-xs leading-relaxed">
+        {app ? app.description || app.url : t("appNoLongerOffered")}
+      </p>
+      {(connection || adminActions) && (
+        <div className="mt-auto flex items-center gap-1 border-t pt-2">
+          <span className="flex min-w-0 flex-1 items-center gap-1.5 text-muted-foreground text-xs">
+            {connection && (
+              <>
+                <span
+                  className={cn(
+                    "shrink-0 rounded-full px-1.5 py-px text-[10px]",
+                    state === "ready"
+                      ? "bg-success/12 text-success"
+                      : state === "failed"
+                        ? "bg-destructive/10 text-destructive"
+                        : "bg-muted",
+                  )}
+                  title={connection.error ?? undefined}
+                >
+                  {stateLabel}
+                </span>
+                {state === "ready" && (
+                  <span className="shrink-0">
+                    {t("toolCount", { count: connection.tools.length })} ·
+                  </span>
+                )}
+                <span
+                  className="truncate"
+                  title={connection.agents.join(", ") || undefined}
+                >
+                  {connection.agents.length > 0
+                    ? t("appUsedBy", { agents: connection.agents.join(", ") })
+                    : t("appUnused")}
+                </span>
+              </>
+            )}
+          </span>
+          {adminActions && (
+            <>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-muted-foreground"
+                aria-label={t("changeAppIconNamed", { name })}
+                title={t("changeAppIconNamed", { name })}
+                onClick={() => onChangeIcon(app)}
+              >
+                <ImageIcon />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-muted-foreground"
+                aria-label={t("unlistAppNamed", { name })}
+                title={t("unlistAppNamed", { name })}
+                disabled={busy}
+                onClick={() => onUnlist(app)}
+              >
+                <Trash2 />
+              </Button>
+            </>
+          )}
+          {connection && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="text-muted-foreground"
+              aria-label={t("removeAppNamed", { name })}
+              title={t("removeAppNamed", { name })}
+              disabled={busy}
+              onClick={() => onDisconnect(connection)}
+            >
+              <Unplug />
+            </Button>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
+/** A dialog for the admin's forms. */
+function AppDialog({
+  title,
+  open,
+  onOpenChange,
+  children,
+}: {
+  title: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  children: ReactNode;
+}) {
+  const { t } = useI18n();
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
+        <Dialog.Content
+          aria-describedby={undefined}
+          className="fixed top-1/2 left-1/2 z-50 max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border bg-background p-5 shadow-xl sm:p-6"
+        >
+          <Dialog.Title className="mb-4 pr-8 font-semibold text-lg">
+            {title}
+          </Dialog.Title>
+          {children}
+          <Dialog.Close className="absolute top-4 right-4 rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground">
+            <X className="size-4" />
+            <span className="sr-only">{t("close")}</span>
+          </Dialog.Close>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
@@ -281,18 +528,14 @@ function AppIconForm({
     change.mutate();
   };
   return (
-    <form
-      onSubmit={submit}
-      className="basis-full space-y-2 pl-14"
-      aria-label={t("changeAppIconNamed", { name: app.name })}
-    >
-      <label
-        htmlFor={`${hint}-input`}
-        className="block text-[13px] text-muted-foreground"
-      >
-        {t("appIcon")}
-      </label>
-      <div className="flex gap-2">
+    <form onSubmit={submit} className="space-y-3">
+      <div className="space-y-1">
+        <label
+          htmlFor={`${hint}-input`}
+          className="block text-[13px] text-muted-foreground"
+        >
+          {t("appIcon")}
+        </label>
         <Input
           id={`${hint}-input`}
           value={icon}
@@ -303,16 +546,18 @@ function AppIconForm({
           autoFocus
           aria-describedby={hint}
         />
-        <Button type="submit" size="sm" disabled={change.isPending}>
-          {t("save")}
-        </Button>
+        <p id={hint} className="text-muted-foreground text-xs">
+          {t("appIconHint")}
+        </p>
+      </div>
+      <div className="flex justify-end gap-2">
         <Button type="button" variant="ghost" size="sm" onClick={onDone}>
           {t("cancel")}
         </Button>
+        <Button type="submit" size="sm" disabled={change.isPending}>
+          {t("save")}
+        </Button>
       </div>
-      <p id={hint} className="text-muted-foreground text-xs">
-        {t("appIconHint")}
-      </p>
     </form>
   );
 }
@@ -327,6 +572,7 @@ function CreateAppForm({ onDone }: { onDone: () => void }) {
     description: "",
     url: "",
     icon: "",
+    category: "" as AppCategory | "",
   });
   const create = useMutation({
     mutationFn: () => admin.addApp(app),
@@ -342,11 +588,7 @@ function CreateAppForm({ onDone }: { onDone: () => void }) {
     create.mutate();
   };
   return (
-    <form
-      onSubmit={submit}
-      className="space-y-3 rounded-2xl border p-4"
-      aria-label={t("createApp")}
-    >
+    <form onSubmit={submit} className="space-y-3">
       <p className="text-[13px] text-muted-foreground">{t("createAppHint")}</p>
       <label className="block space-y-1">
         <span className="text-[13px] text-muted-foreground">
@@ -385,6 +627,37 @@ function CreateAppForm({ onDone }: { onDone: () => void }) {
         />
       </label>
       <div className="space-y-1">
+        <span
+          id={`${hint}-category`}
+          className="block text-[13px] text-muted-foreground"
+        >
+          {t("appCategory")}
+        </span>
+        <Select
+          value={app.category || "other"}
+          onValueChange={(value) =>
+            setApp({
+              ...app,
+              category: value === "other" ? "" : (value as AppCategory),
+            })
+          }
+        >
+          <SelectTrigger
+            className="w-full"
+            aria-labelledby={`${hint}-category`}
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent position="popper">
+            {CATEGORIES.map((category) => (
+              <SelectItem key={category} value={category}>
+                {t(CATEGORY_LABELS[category])}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="space-y-1">
         <label className="block space-y-1">
           <span className="text-[13px] text-muted-foreground">
             {t("appIcon")}
@@ -402,12 +675,12 @@ function CreateAppForm({ onDone }: { onDone: () => void }) {
           {t("appIconHint")}
         </p>
       </div>
-      <div className="flex gap-2">
-        <Button type="submit" size="sm" disabled={create.isPending}>
-          {t("addApp")}
-        </Button>
+      <div className="flex justify-end gap-2 pt-1">
         <Button type="button" variant="ghost" size="sm" onClick={onDone}>
           {t("cancel")}
+        </Button>
+        <Button type="submit" size="sm" disabled={create.isPending}>
+          {t("addApp")}
         </Button>
       </div>
     </form>

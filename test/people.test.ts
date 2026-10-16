@@ -983,7 +983,8 @@ describe("the admin", () => {
 			return realSiteFetch(input, init);
 		});
 		try {
-			expect(await admin("/api/admin/apps", { method: "POST", json: crm })).toMatchObject({ status: 201, body: { app: { id: "acme-crm" } } });
+			expect((await admin("/api/admin/apps", { method: "POST", json: { ...crm, category: "crm" } })).status).toBe(400);
+			expect(await admin("/api/admin/apps", { method: "POST", json: { ...crm, category: "customers" } })).toMatchObject({ status: 201, body: { app: { id: "acme-crm" } } });
 		} finally {
 			site.mockRestore();
 		}
@@ -993,6 +994,7 @@ describe("the admin", () => {
 			...crm,
 			custom: true,
 			icon: "https://www.acme.example.test/crm/static/logo.svg?v=2&x=1",
+			category: "customers",
 		});
 		// The admin can give it another; only an https one.
 		const logo = "https://cdn.acme.example.test/logo.png";

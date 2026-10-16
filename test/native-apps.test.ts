@@ -59,7 +59,7 @@ const lastToolResult = (messages: readonly Message[]) => {
 describe("apps extensions implement", () => {
 	it("are offered once their secrets are set, and sign in once through the one callback address", async () => {
 		const directory = (await api("/app-directory")).body.apps as { ref: string; url: string | null }[];
-		expect(directory).toContainEqual({ ref: "test.ledger/bank", name: "Bank", description: "Balances and transfers.", url: null, custom: false, icon: null });
+		expect(directory).toContainEqual({ ref: "test.ledger/bank", name: "Bank", description: "Balances and transfers.", url: null, custom: false, icon: null, category: null });
 		// Its secret isn't set: nobody is offered it, or can connect it.
 		expect(directory.some((app) => app.ref === "test.ledger/vault")).toBe(false);
 		expect((await post("/mcp", { app: "test.ledger/vault" })).status).toBe(400);

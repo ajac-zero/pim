@@ -3,8 +3,8 @@ import { createFileRoute, notFound } from "@tanstack/react-router";
 import { Users } from "lucide-react";
 import { useEffect } from "react";
 import { toast } from "sonner";
-import { AgentIcon, PimMark } from "~/components/agent-icon";
-import { sessionTitle, useNewChat } from "~/components/app-sidebar";
+import { AgentIcon } from "~/components/agent-icon";
+import { PimMark, sessionTitle, useNewChat } from "~/components/app-sidebar";
 import { Composer } from "~/components/chat/composer";
 import { TeamPanel } from "~/components/chat/team";
 import { Thread } from "~/components/chat/thread";
@@ -89,9 +89,13 @@ function ChatPage() {
               {session.visit.username.slice(0, 1).toUpperCase()}
             </span>
           ) : agent ? (
-            <AgentIcon agent={agent} className="size-5 shrink-0" />
+            <AgentIcon
+              agent={agent}
+              tile
+              className="size-6 shrink-0 rounded-md"
+            />
           ) : (
-            <PimMark className="size-5 shrink-0" />
+            <PimMark className="size-6 shrink-0" />
           )}
           <span className="min-w-0 truncate font-medium text-[15px]">
             {session ? sessionTitle(session, t) : "\u00a0"}

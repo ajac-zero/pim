@@ -1,12 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { AgentIcon } from "~/components/agent-icon";
+import { Bot } from "lucide-react";
+import { AgentIcon, tileClass } from "~/components/agent-icon";
 import { Composer } from "~/components/chat/composer";
 import { useI18n } from "~/components/i18n";
 import { RouteError } from "~/components/route-error";
 import { WidgetCard } from "~/components/widgets";
 import { dashboardQuery } from "~/lib/queries";
 import { useStartChat } from "~/lib/start-chat";
+import { cn } from "~/lib/utils";
 
 /**
  * An agent's dashboard: start a chat with it, and the widgets of the
@@ -29,20 +31,31 @@ function DashboardPage() {
   const { agent, starters, widgets } = data;
   return (
     <main className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-      <div className="mx-auto w-full max-w-3xl px-4 py-8 md:py-12">
-        <header className="mb-6 flex flex-col items-center gap-4 text-center">
-          <AgentIcon agent={agent} className="size-20" />
+      <div className="mx-auto w-full max-w-4xl px-4 py-8 md:py-12">
+        <header className="mb-6 flex items-center gap-3">
+          {agent.icon === null && agent.symbol === null ? (
+            <span
+              className={cn(
+                "flex size-10 shrink-0 items-center justify-center rounded-xl font-semibold text-lg",
+                tileClass(agent.color),
+              )}
+            >
+              {agent.name.slice(0, 1).toUpperCase()}
+            </span>
+          ) : (
+            <AgentIcon agent={agent} tile className="size-10 rounded-xl" />
+          )}
           <div className="min-w-0">
-            <h1 className="flex items-center justify-center gap-2 font-semibold text-xl">
+            <h1 className="flex items-center gap-2 font-semibold text-2xl">
               <span className="truncate">{agent.name}</span>
               {agent.default && (
-                <span className="shrink-0 rounded-full bg-secondary px-2 py-0.5 font-normal text-muted-foreground text-[13px]">
+                <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
                   {t("defaultAgent")}
                 </span>
               )}
             </h1>
             {agent.description && (
-              <p className="mt-2 text-muted-foreground text-[15px]">
+              <p className="truncate text-muted-foreground text-sm">
                 {agent.description}
               </p>
             )}
@@ -57,7 +70,8 @@ function DashboardPage() {
           disclaimer={null}
         />
         {widgets.length === 0 ? (
-          <div className="mt-8 px-4 py-10 text-center text-muted-foreground text-sm">
+          <div className="mt-8 flex flex-col items-center gap-2 rounded-xl border border-dashed px-4 py-10 text-center text-muted-foreground text-sm">
+            <Bot className="size-5" />
             {t("noDashboard")}
           </div>
         ) : (

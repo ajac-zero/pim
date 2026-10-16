@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { AlertCircle, Clock } from "lucide-react";
 import { Fragment, memo, useMemo } from "react";
-import { PimMark } from "~/components/agent-icon";
+import { PimMark } from "~/components/app-sidebar";
 import { ArtifactCard, artifactReference } from "~/components/artifact";
 import {
   ApprovalBlock,
@@ -235,7 +235,7 @@ export const Thread = memo(function Thread({
 
         {empty && (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 py-16 text-center">
-            <PimMark className="size-18" />
+            <PimMark className="size-10" />
             <p className="font-medium text-xl">
               {visit
                 ? t("visitEmptyTitle", { username: visit })

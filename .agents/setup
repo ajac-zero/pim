@@ -35,6 +35,14 @@ check_toolchain() {
 		echo "Expected pnpm $expected_pnpm; found $actual_pnpm." >&2
 		return 1
 	fi
+
+	# CI runs the Node.js major in .nvmrc; a different one here still works, but may not match CI.
+	local expected_node actual_node
+	expected_node="$(tr -d '[:space:]' <.nvmrc)"
+	actual_node="$(node -p 'process.versions.node.split(".")[0]')"
+	if [[ "$actual_node" != "$expected_node" ]]; then
+		echo "Warning: CI uses Node.js $expected_node (.nvmrc); this orb has Node.js $actual_node." >&2
+	fi
 }
 
 install_dependencies() {

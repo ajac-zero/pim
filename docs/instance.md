@@ -111,10 +111,11 @@ What the fence stops, each covered by a test in `test/people.test.ts` ("erasure 
 
 ## Preview locally
 
-`pnpm preview` builds the web app and serves a Pim at <http://localhost:8787> from `wrangler.preview.jsonc`, with open registration. It runs `wrangler dev --local` with no remote bindings, so it stays on your machine and touches no Cloudflare account, even when `wrangler` is logged in. It is never deployed: there is no deploy script for it. Its state is kept in `.wrangler/state-preview`. Use `localhost`, not `127.0.0.1`: passkeys don't work on an IP address.
+`pnpm preview` builds the web app and serves a Pim at <http://localhost:8787> from `wrangler.preview.jsonc` and [`preview/worker.ts`](../preview/worker.ts), with open registration. It rebuilds the web app when `web/src` changes and reloads the Worker when its code does. It runs `wrangler dev --local` with no remote bindings, so it stays on your machine and touches no Cloudflare account, even when `wrangler` is logged in. It is never deployed: there is no deploy script for it. Its state is kept in `.wrangler/state-preview`. Use `localhost`, not `127.0.0.1`: passkeys don't work on an IP address.
 
-- **Passkeys.** Chrome, Safari and Edge on a laptop or phone use their own. On a machine without one (a Linux desktop, a headless browser), start Chrome with `--remote-debugging-port=9222` and run `node scripts/virtual-authenticator.mjs 9222`: it gives every tab a virtual passkey that answers at once. Or use DevTools → More tools → WebAuthn.
-- **Models.** Workers AI needs an account, so the preview binds a stand-in. Chats on the platform model end with "Not answered: model_error". Connect a ChatGPT plan in Settings to chat for real.
+- **Signing in.** <http://localhost:8787/__dev/sign-in/ada> signs the browser in as `ada`, making the account if it's new (the first one is the admin), and `?returnTo=/settings` picks where it lands. It makes a passkey on the server, so it works in any browser and with `curl -c cookies`.
+- **Passkeys.** To try the passkey screens themselves: Chrome, Safari and Edge on a laptop or phone use their own. On a machine without one (a Linux desktop, a headless browser), start Chrome with `--remote-debugging-port=9222` and run `node scripts/virtual-authenticator.mjs 9222`: it gives every tab a virtual passkey that answers at once. Or use DevTools → More tools → WebAuthn.
+- **Models.** Workers AI needs an account, so the preview answers with a stand-in model. It echoes what you say, and calls a tool when told to: `/tool create_goal {"title": "Run a 5k", "steps": ["Run 2k"]}`, or `/tool http_request {"method": "GET", "url": "https://example.com"}` for an approval. After a tool runs, it sends you the result. Connect a ChatGPT plan in Settings to chat with a real model.
 
 ## Known limits
 

@@ -22,6 +22,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import { Input } from "~/components/ui/input";
@@ -152,7 +153,7 @@ function AppsPage() {
   for (const row of found) {
     counts.set(categoryOf(row), (counts.get(categoryOf(row)) ?? 0) + 1);
   }
-  // Chips for the categories this Pim has apps in, whatever the search.
+  // The categories this Pim has apps in, whatever the search.
   const offered = CATEGORIES.filter((candidate) =>
     rows.some((row) => categoryOf(row) === candidate),
   );
@@ -164,6 +165,7 @@ function AppsPage() {
     rows: found.filter((row) => categoryOf(row) === candidate),
   }));
   const connectedCount = rows.filter((row) => row.connection).length;
+  const filtered = onlyConnected || category !== null;
   const loading = !directory || !connections;
 
   return (
@@ -196,92 +198,97 @@ function AppsPage() {
               className="pl-9"
             />
           </div>
-          {offered.length > 1 && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="icon-lg"
-                  className={cn(
-                    "relative shrink-0 rounded-xl",
-                    category && "border-foreground/40 bg-accent",
-                  )}
-                  aria-label={
-                    category
-                      ? `${t("filterByCategory")}: ${label(category)}`
-                      : t("filterByCategory")
-                  }
-                >
-                  <ListFilter />
-                  {category && (
-                    <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-primary" />
-                  )}
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-64">
-                <DropdownMenuLabel className="text-muted-foreground text-xs">
-                  {t("appsByCategory")}
-                </DropdownMenuLabel>
-                <DropdownMenuRadioGroup
-                  value={category ?? "all"}
-                  onValueChange={(value) =>
-                    setCategory(value === "all" ? null : (value as Category))
-                  }
-                >
-                  {[null, ...offered].map((candidate) => {
-                    const count =
-                      candidate === null
-                        ? found.length
-                        : (counts.get(candidate) ?? 0);
-                    return (
-                      <DropdownMenuRadioItem
-                        key={candidate ?? "all"}
-                        value={candidate ?? "all"}
-                        className={cn(count === 0 && "text-muted-foreground")}
-                      >
-                        <span className="flex-1 truncate">
-                          {candidate === null
-                            ? t("allCategories")
-                            : label(candidate)}
-                        </span>
-                        <span className="text-muted-foreground text-xs tabular-nums">
-                          {count}
-                        </span>
-                      </DropdownMenuRadioItem>
-                    );
-                  })}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-          <fieldset className="flex rounded-xl border p-0.5 text-sm">
-            <legend className="sr-only">{t("connectedApps")}</legend>
-            {[
-              { value: false, text: t("appsShowAll"), count: rows.length },
-              {
-                value: true,
-                text: t("appsShowConnected"),
-                count: connectedCount,
-              },
-            ].map((option) => (
-              <button
-                key={String(option.value)}
-                type="button"
-                aria-pressed={onlyConnected === option.value}
-                onClick={() => setOnlyConnected(option.value)}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="outline"
+                size="icon-lg"
                 className={cn(
-                  "flex items-center gap-1.5 rounded-[10px] px-3 py-1.5 text-muted-foreground transition-colors hover:text-foreground",
-                  onlyConnected === option.value &&
-                    "bg-accent font-medium text-foreground",
+                  "relative shrink-0 rounded-xl",
+                  filtered && "border-foreground/40 bg-accent",
                 )}
+                aria-label={[
+                  t("filterApps"),
+                  onlyConnected && t("appsShowConnected"),
+                  category && label(category),
+                ]
+                  .filter(Boolean)
+                  .join(": ")}
               >
-                {option.text}
-                <span className="hidden text-xs tabular-nums opacity-70 sm:inline">
-                  {option.count}
-                </span>
-              </button>
-            ))}
-          </fieldset>
+                <ListFilter />
+                {filtered && (
+                  <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-primary" />
+                )}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-64">
+              <DropdownMenuLabel className="text-muted-foreground text-xs">
+                {t("appsShow")}
+              </DropdownMenuLabel>
+              <DropdownMenuRadioGroup
+                value={onlyConnected ? "connected" : "all"}
+                onValueChange={(value) =>
+                  setOnlyConnected(value === "connected")
+                }
+              >
+                {[
+                  { value: "all", text: t("appsShowAll"), count: rows.length },
+                  {
+                    value: "connected",
+                    text: t("appsShowConnected"),
+                    count: connectedCount,
+                  },
+                ].map((option) => (
+                  <DropdownMenuRadioItem
+                    key={option.value}
+                    value={option.value}
+                  >
+                    <span className="flex-1">{option.text}</span>
+                    <span className="text-muted-foreground text-xs tabular-nums">
+                      {option.count}
+                    </span>
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+              {offered.length > 1 && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="text-muted-foreground text-xs">
+                    {t("appsByCategory")}
+                  </DropdownMenuLabel>
+                  <DropdownMenuRadioGroup
+                    value={category ?? "all"}
+                    onValueChange={(value) =>
+                      setCategory(value === "all" ? null : (value as Category))
+                    }
+                  >
+                    {[null, ...offered].map((candidate) => {
+                      const count =
+                        candidate === null
+                          ? found.length
+                          : (counts.get(candidate) ?? 0);
+                      return (
+                        <DropdownMenuRadioItem
+                          key={candidate ?? "all"}
+                          value={candidate ?? "all"}
+                          className={cn(count === 0 && "text-muted-foreground")}
+                        >
+                          <span className="flex-1 truncate">
+                            {candidate === null
+                              ? t("allCategories")
+                              : label(candidate)}
+                          </span>
+                          <span className="text-muted-foreground text-xs tabular-nums">
+                            {count}
+                          </span>
+                        </DropdownMenuRadioItem>
+                      );
+                    })}
+                  </DropdownMenuRadioGroup>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto border-t scrollbar-thin">

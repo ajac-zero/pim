@@ -11,8 +11,10 @@ import {
   Monitor,
   Moon,
   Plug,
+  Plus,
   Sun,
   Trash2,
+  Unplug,
 } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -54,8 +56,10 @@ import {
   passkeysQuery,
 } from "~/lib/auth";
 import {
+  admin,
   CHATGPT_PROVIDER,
   type ConnectedApp,
+  type DirectoryApp,
   type EmailState,
   type ModelInfo,
   type ModelSettings,
@@ -69,6 +73,7 @@ import {
 } from "~/lib/push";
 import {
   accountQuery,
+  appDirectoryQuery,
   appsQuery,
   emailQuery,
   modelQuery,
@@ -104,7 +109,7 @@ function SettingsPage() {
       </section>
       <PreferencesSection />
       <AppearanceSection />
-      <ConnectedAppsSection />
+      <AppsSection />
       <ToolPermissionsSection />
       <EmailSection />
       <PushSection />
@@ -576,23 +581,51 @@ function ProfileSection() {
 }
 
 /**
- * The apps you connected, with the agents that work with each: only their
- * chats get its tools. An app no agent lists can only be removed here.
+ * The apps this Pim offers, each with your connection to it: you connect an
+ * app once, and every agent of yours that lists it works with it. Apps you
+ * connected that it no longer offers can only be disconnected here. The
+ * admin adds apps of their own, and takes them out.
  */
-function ConnectedAppsSection() {
+function AppsSection() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const { data: apps } = useQuery(appsQuery());
-  const remove = useMutation({
+  const { data: account } = useQuery(accountQuery());
+  const isAdmin = account?.role === "admin";
+  const { data: directory } = useQuery(appDirectoryQuery());
+  const { data: connections } = useQuery(appsQuery());
+  const [creating, setCreating] = useState(false);
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: ["apps"] });
+    queryClient.invalidateQueries({ queryKey: ["permissions"] });
+  };
+  const onError = (error: Error) => toast.error(error.message);
+  const connect = useMutation({
+    mutationFn: (app: DirectoryApp) => pim.connectApp(app.ref),
+    onSuccess: (result) => {
+      refresh();
+      if (result.authUrl) window.open(result.authUrl, "_blank", "noopener");
+      else toast.success(t("appConnected"));
+    },
+    onError,
+  });
+  const disconnect = useMutation({
     mutationFn: (app: ConnectedApp) => pim.removeApp(app.id),
     onSuccess: (_result, app) => {
-      queryClient.invalidateQueries({ queryKey: ["apps"] });
-      queryClient.invalidateQueries({ queryKey: ["permissions"] });
+      refresh();
       toast.success(t("appRemoved", { name: app.name }));
     },
-    onError: (error) => toast.error(error.message),
+    onError,
   });
-  if (!apps) return null;
+  const unlist = useMutation({
+    mutationFn: (app: DirectoryApp) =>
+      admin.removeApp(app.ref.slice(app.ref.indexOf("/") + 1)),
+    onSuccess: (_result, app) => {
+      queryClient.invalidateQueries({ queryKey: ["app-directory"] });
+      toast.success(t("appUnlisted", { name: app.name }));
+    },
+    onError,
+  });
+  if (!directory || !connections) return null;
   const stateLabel = (app: ConnectedApp) =>
     app.state === "ready"
       ? t("appReady")
@@ -601,6 +634,16 @@ function ConnectedAppsSection() {
         : app.state === "failed"
           ? t("appFailed")
           : t("appConnecting");
+  const unoffered = connections.filter(
+    (connection) => !directory.some((app) => app.url === connection.url),
+  );
+  const rows = [
+    ...directory.map((app) => ({
+      app,
+      connection: connections.find((candidate) => candidate.url === app.url),
+    })),
+    ...unoffered.map((connection) => ({ app: null, connection })),
+  ];
   return (
     <section className="mt-10 space-y-3">
       <h2 className="font-medium text-muted-foreground text-sm">
@@ -609,74 +652,192 @@ function ConnectedAppsSection() {
       <p className="text-[13px] text-muted-foreground">
         {t("connectedAppsDescription")}
       </p>
-      {apps.length === 0 ? (
+      {rows.length === 0 ? (
         <p className="py-3 text-muted-foreground text-sm">
-          {t("noConnectedApps")}
+          {t("noAppsOffered")}
         </p>
       ) : (
         <ul
           className="divide-y rounded-2xl border bg-muted/20"
           aria-label={t("connectedApps")}
         >
-          {apps.map((app) => (
-            <li key={app.id} className="flex items-center gap-3 px-4 py-3">
-              <Plug className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
-              <span className="min-w-0 flex-1">
-                <span className="flex items-center gap-2">
-                  <span className="truncate font-medium text-sm">
-                    {app.name}
-                  </span>
-                  <span
-                    className={cn(
-                      "shrink-0 rounded border px-1 text-[10px]",
-                      app.state === "ready"
-                        ? "text-success"
-                        : app.state === "failed"
-                          ? "text-destructive"
-                          : "text-muted-foreground",
-                    )}
-                    title={app.error ?? undefined}
-                  >
-                    {stateLabel(app)}
-                  </span>
-                </span>
-                <span
-                  className="block truncate text-muted-foreground text-xs"
-                  title={app.url}
-                >
-                  {app.url}
-                </span>
-                <span className="block truncate text-muted-foreground text-xs">
-                  {app.agents.length > 0
-                    ? t("appUsedBy", { agents: app.agents.join(", ") })
-                    : t("appUnused")}
-                  {app.state === "ready" &&
-                    ` · ${t("toolCount", { count: app.tools.length })}`}
-                </span>
-              </span>
-              {app.authUrl && app.state === "authenticating" && (
-                <Button variant="outline" size="sm" asChild>
-                  <a href={app.authUrl} target="_blank" rel="noopener">
-                    {t("signIn")} <ExternalLink />
-                  </a>
-                </Button>
-              )}
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="text-muted-foreground"
-                aria-label={t("removeAppNamed", { name: app.name })}
-                title={t("removeAppNamed", { name: app.name })}
-                disabled={remove.isPending}
-                onClick={() => remove.mutate(app)}
+          {rows.map(({ app, connection }) => {
+            const name = app?.name ?? connection?.name ?? "";
+            return (
+              <li
+                key={app?.ref ?? connection?.id}
+                className="flex items-center gap-3 px-4 py-3"
               >
-                <Trash2 />
-              </Button>
-            </li>
-          ))}
+                <Plug className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-2">
+                    <span className="truncate font-medium text-sm">{name}</span>
+                    {connection && (
+                      <span
+                        className={cn(
+                          "shrink-0 rounded border px-1 text-[10px]",
+                          connection.state === "ready"
+                            ? "text-success"
+                            : connection.state === "failed"
+                              ? "text-destructive"
+                              : "text-muted-foreground",
+                        )}
+                        title={connection.error ?? undefined}
+                      >
+                        {stateLabel(connection)}
+                      </span>
+                    )}
+                  </span>
+                  <span className="block truncate text-muted-foreground text-xs">
+                    {app ? app.description || app.url : t("appNoLongerOffered")}
+                  </span>
+                  {connection && (
+                    <span className="block truncate text-muted-foreground text-xs">
+                      {connection.agents.length > 0
+                        ? t("appUsedBy", {
+                            agents: connection.agents.join(", "),
+                          })
+                        : t("appUnused")}
+                      {connection.state === "ready" &&
+                        ` · ${t("toolCount", { count: connection.tools.length })}`}
+                    </span>
+                  )}
+                </span>
+                {connection?.authUrl &&
+                  connection.state === "authenticating" && (
+                    <Button variant="outline" size="sm" asChild>
+                      <a
+                        href={connection.authUrl}
+                        target="_blank"
+                        rel="noopener"
+                      >
+                        {t("signIn")} <ExternalLink />
+                      </a>
+                    </Button>
+                  )}
+                {app && !connection && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={connect.isPending}
+                    onClick={() => connect.mutate(app)}
+                  >
+                    {t("connect")}
+                  </Button>
+                )}
+                {connection && (
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="text-muted-foreground"
+                    aria-label={t("removeAppNamed", { name })}
+                    title={t("removeAppNamed", { name })}
+                    disabled={disconnect.isPending}
+                    onClick={() => disconnect.mutate(connection)}
+                  >
+                    <Unplug />
+                  </Button>
+                )}
+                {isAdmin && app?.custom && (
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="text-muted-foreground"
+                    aria-label={t("unlistAppNamed", { name })}
+                    title={t("unlistAppNamed", { name })}
+                    disabled={unlist.isPending}
+                    onClick={() => unlist.mutate(app)}
+                  >
+                    <Trash2 />
+                  </Button>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
+      {isAdmin &&
+        (creating ? (
+          <CreateAppForm onDone={() => setCreating(false)} />
+        ) : (
+          <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
+            <Plus /> {t("createApp")}
+          </Button>
+        ))}
     </section>
+  );
+}
+
+/** The admin adds an app everyone on this Pim can connect: a remote MCP server. */
+function CreateAppForm({ onDone }: { onDone: () => void }) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const [app, setApp] = useState({ name: "", description: "", url: "" });
+  const create = useMutation({
+    mutationFn: () => admin.addApp(app),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["app-directory"] });
+      toast.success(t("appAdded", { name: app.name }));
+      onDone();
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    create.mutate();
+  };
+  return (
+    <form
+      onSubmit={submit}
+      className="space-y-3 rounded-2xl border p-4"
+      aria-label={t("createApp")}
+    >
+      <p className="text-[13px] text-muted-foreground">{t("createAppHint")}</p>
+      <label className="block space-y-1">
+        <span className="text-[13px] text-muted-foreground">
+          {t("appName")}
+        </span>
+        <Input
+          value={app.name}
+          onChange={(event) => setApp({ ...app, name: event.target.value })}
+          placeholder="Linear"
+          maxLength={40}
+          required
+        />
+      </label>
+      <label className="block space-y-1">
+        <span className="text-[13px] text-muted-foreground">
+          {t("appDescription")}
+        </span>
+        <Input
+          value={app.description}
+          onChange={(event) =>
+            setApp({ ...app, description: event.target.value })
+          }
+          placeholder={t("appDescriptionPlaceholder")}
+          maxLength={280}
+        />
+      </label>
+      <label className="block space-y-1">
+        <span className="text-[13px] text-muted-foreground">{t("appUrl")}</span>
+        <Input
+          value={app.url}
+          onChange={(event) => setApp({ ...app, url: event.target.value })}
+          placeholder="https://mcp.linear.app/mcp"
+          type="url"
+          pattern="https://.*"
+          required
+        />
+      </label>
+      <div className="flex gap-2">
+        <Button type="submit" size="sm" disabled={create.isPending}>
+          {t("addApp")}
+        </Button>
+        <Button type="button" variant="ghost" size="sm" onClick={onDone}>
+          {t("cancel")}
+        </Button>
+      </div>
+    </form>
   );
 }
 

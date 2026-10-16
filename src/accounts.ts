@@ -470,6 +470,21 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 				log("template_removed", { template: template[1], by: admin.ownerId });
 				return json({ deleted: true });
 			}
+			if (route === "POST /apps") {
+				const given = await body();
+				const app = await gallery(env)
+					.addCustomApp(given)
+					.catch((error: unknown) => rpcFailure(error));
+				if (app instanceof Response) return app;
+				log("app_added", { app: app.id, by: admin.ownerId });
+				return json({ app }, 201);
+			}
+			const customApp = /^\/admin\/apps\/([^/]+)$/.exec(path);
+			if (customApp && request.method === "DELETE") {
+				if (!(await gallery(env).removeCustomApp(decodeURIComponent(customApp[1]!)))) return fail(404, "No such app");
+				log("app_removed", { app: customApp[1], by: admin.ownerId });
+				return json({ deleted: true });
+			}
 			if (route === "POST /invites") {
 				const given = await body();
 				const count = typeof given.count === "number" && Number.isInteger(given.count) && given.count > 0 && given.count <= 100 ? given.count : 1;

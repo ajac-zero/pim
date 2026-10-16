@@ -94,6 +94,10 @@ export const emailQuery = () =>
 export const appsQuery = () =>
   queryOptions({ queryKey: ["apps"], queryFn: pim.apps });
 
+/** The apps you can connect: the extensions', and those the admin added. */
+export const appDirectoryQuery = () =>
+  queryOptions({ queryKey: ["app-directory"], queryFn: pim.appDirectory });
+
 export const templatesQuery = (query: string) =>
   queryOptions({
     queryKey: ["templates", query],

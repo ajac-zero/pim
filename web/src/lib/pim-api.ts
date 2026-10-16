@@ -18,8 +18,19 @@ export type Session = {
   agent?: { id: string; name: string } | null;
 };
 
-/** An app an agent works with, by its MCP server URL: its chats get only these apps' tools. */
-export type SuggestedApp = { name: string; url: string };
+/**
+ * An app people on this Pim can connect: an extension's, or one the admin
+ * added (`custom/<app>`). Agents list apps by `ref`; you connect each once,
+ * for all your agents.
+ */
+export type DirectoryApp = {
+  ref: string;
+  name: string;
+  description: string;
+  url: string;
+  /** Added by the admin, not brought by an extension. */
+  custom: boolean;
+};
 
 /** One of an agent's team: it does tasks the agent hands it, and answers the agent, never you. */
 export type TeamMember = {
@@ -72,7 +83,8 @@ export type Agent = {
   name: string;
   description: string;
   instructions: string;
-  apps: SuggestedApp[];
+  /** The apps it works with, by `ref`: its chats get only these apps' tools. */
+  apps: string[];
   team: TeamMember[];
   /** The blueprint it builds on, as `<extension>/<blueprint>`, which brings its dashboard; null for none. */
   blueprint: string | null;
@@ -155,7 +167,7 @@ export type AgentInput = {
   name: string;
   description: string;
   instructions: string;
-  apps: SuggestedApp[];
+  apps: string[];
   team: TeamMember[];
   /** Left out, a new agent is based on the deployment's default blueprint. */
   blueprint?: string | null;
@@ -173,8 +185,8 @@ export type InstalledExtension = {
     ref: string;
     name: string;
     description: string;
-    /** The apps agents based on this blueprint work with, besides their own. */
-    apps: SuggestedApp[];
+    /** The apps agents based on this blueprint work with, besides their own, by `ref`. */
+    apps: string[];
   }[];
   widgets: string[];
 };
@@ -193,7 +205,7 @@ export type Template = {
   name: string;
   description: string;
   instructions: string;
-  apps: SuggestedApp[];
+  apps: string[];
   team: TeamMember[];
   /** Its look, as the agent's was when published. */
   symbol: string | null;
@@ -637,10 +649,13 @@ export const pim = {
     }),
   apps: () =>
     call<{ servers: ConnectedApp[] }>("/mcp").then((body) => body.servers),
-  connectApp: (app: SuggestedApp) =>
+  /** The apps you can connect. */
+  appDirectory: () =>
+    call<{ apps: DirectoryApp[] }>("/app-directory").then((body) => body.apps),
+  connectApp: (ref: string) =>
     call<{ id: string; state: string; authUrl?: string }>("/mcp", {
       method: "POST",
-      body: JSON.stringify(app),
+      body: JSON.stringify({ app: ref }),
     }),
   removeApp: (id: string) =>
     call<{ deleted: boolean }>(`/mcp/${encodeURIComponent(id)}`, {
@@ -891,6 +906,18 @@ export const admin = {
         ? { method: "DELETE", body: "{}" }
         : { method: "PUT", body: JSON.stringify({ agent: id }) },
     ).then((body) => body.agent),
+  /** Adds an app everyone on this Pim can connect: a remote MCP server. */
+  addApp: (app: { name: string; description: string; url: string }) =>
+    call<{ app: { id: string } }>("/admin/apps", {
+      method: "POST",
+      body: JSON.stringify(app),
+    }),
+  /** Takes an app the admin added out of the directory, by its id (`custom/<id>`). */
+  removeApp: (id: string) =>
+    call<{ deleted: boolean }>(`/admin/apps/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      body: "{}",
+    }),
 };
 
 /** The agent everyone who joins starts with, as the admin chose it. */

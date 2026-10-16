@@ -2,7 +2,7 @@ import { type ImageContent, type TextContent, type TSchema, Type } from "@earend
 import { defineExtension, defineTool, section, type ToolRegistration } from "@earendil-works/pi-durable";
 import { OWNER, type PimStore, type ToolPermission } from "../store";
 import type { AppCatalog } from "./app-catalog";
-import { describeCandidates, searchRegistry } from "./app-directory";
+import { type DirectoryApp, describeFound, findApps } from "./app-directory";
 import {
 	approvalNote,
 	defineGatedAction,
@@ -11,7 +11,6 @@ import {
 	type ResolvedPermission,
 	resolvePermission,
 } from "./approvals";
-import type { PimApp } from "./define";
 import { json, type PimServices, text } from "./services";
 
 /**
@@ -217,8 +216,8 @@ export function mcpActions(bridge: McpBridge): GatedAction[] {
 export const APP_PREFIX = "pim.app.";
 export const appExtensionName = (serverId: string) => `${APP_PREFIX}${serverId}`;
 
-/** The connected server for an app a Pim lists, matched by URL. */
-export function serverFor(servers: readonly McpServerInfo[], app: PimApp): McpServerInfo | undefined {
+/** The person's connection to an app of the directory: the one to its server. */
+export function serverFor(servers: readonly McpServerInfo[], app: Pick<DirectoryApp, "url">): McpServerInfo | undefined {
 	return servers.find((server) => server.url === app.url);
 }
 
@@ -237,8 +236,10 @@ export function mcpExtensions(
 	bridge: McpBridge,
 	services: PimServices,
 	extras: { catalog: AppCatalog; tools: readonly ToolRegistration[] },
-	/** The apps a conversation's Pim works with: its blueprint's, then the person's own. */
-	appsOf: (session: string) => readonly PimApp[],
+	/** The apps a conversation's agent works with: its blueprint's, then the person's own. */
+	appsOf: (session: string) => readonly DirectoryApp[],
+	/** Every app the person can connect. */
+	directory: () => readonly DirectoryApp[],
 ) {
 	const all = bridge.servers();
 	const servers = new Map(all.map((server) => [server.id, server]));
@@ -294,8 +295,8 @@ export function mcpExtensions(
 				appsOf(String(api.conversationId)).map((app) => {
 					const server = serverFor(all, app);
 					return {
+						id: app.ref,
 						name: app.name,
-						url: app.url,
 						state: server?.state ?? "not connected",
 						...(server?.error ? { error: server.error } : {}),
 						tools: server ? catalog.filter((tool) => tool.serverId === server.id).map((tool) => toolName(server.id, tool.name)) : [],
@@ -309,15 +310,15 @@ export function mcpExtensions(
 		name: "connect_app",
 		description:
 			"Connect one of the apps this Pim works with that isn't connected yet, giving you its tools. If the person must sign in first, you get a link to give them. Only the apps listed in connected_apps can be connected.",
-		parameters: Type.Object({ app: Type.String({ description: "The app's name, as connected_apps lists it." }) }),
+		parameters: Type.Object({ app: Type.String({ description: "The app's id or name, as connected_apps lists it." }) }),
 		replay: "safe",
 		async execute({ app: wanted }, api) {
 			const mine = appsOf(String(api.conversationId));
-			const app = mine.find((candidate) => candidate.name.toLowerCase() === wanted.trim().toLowerCase());
+			const app = mine.find((candidate) => candidate.ref === wanted.trim() || candidate.name.toLowerCase() === wanted.trim().toLowerCase());
 			if (!app) {
 				const names = mine.map((candidate) => candidate.name).join(", ");
 				return text(
-					`This agent doesn't work with ${wanted}${names ? `; its apps are ${names}` : ""}. If manage_apps is available, request adding its MCP URL there; approval adds and connects it. Otherwise the person can add it in Your agents.`,
+					`This agent doesn't work with ${wanted}${names ? `; its apps are ${names}` : ""}. If manage_apps is available, request adding it there by its id from find_app; approval adds and connects it. Otherwise the person can add it in Your agents.`,
 					true,
 				);
 			}
@@ -339,17 +340,13 @@ export function mcpExtensions(
 	const findApp = defineTool({
 		name: "find_app",
 		description:
-			"Find an app's remote MCP server in the official MCP Registry, then use manage_apps if available to request adding and connecting it with the person's approval. The app's own server comes first; others are third parties that relay the app through their own server.",
+			"Find an app this Pim offers by what the person calls it, for its id, which manage_apps adds. Only apps this Pim offers can be connected.",
 		parameters: Type.Object({
-			app: Type.String({ minLength: 2, maxLength: 60, description: "The app's name, like Linear or Notion." }),
+			app: Type.String({ minLength: 2, maxLength: 60, description: "The app's name, like Linear or Notion, or what it does." }),
 		}),
 		replay: "safe",
 		async execute({ app }) {
-			try {
-				return text(describeCandidates(app, await searchRegistry(app)));
-			} catch (error) {
-				return text(`Searching the MCP Registry failed: ${error instanceof Error ? error.message : String(error)}`, true);
-			}
+			return text(describeFound(app, findApps(directory(), app)));
 		},
 	});
 
@@ -361,16 +358,16 @@ export function mcpExtensions(
 			section("connected_apps", ({ conversationId }) => {
 				const mine = appsOf(String(conversationId));
 				if (mine.length === 0) {
-					return "This agent works with no apps. Use the person's MCP URL or find_app to find one, then manage_apps if available to request adding and connecting it with their approval. If app management is off, the person can add apps in Your agents.";
+					return "This agent works with no apps. When the person wants one, find it with find_app, then use manage_apps if available to request adding and connecting it with their approval. If app management is off, the person can add apps in Your agents.";
 				}
 				return mine
 					.map((app) => {
 						const server = serverFor(all, app);
 						if (server?.state !== "ready") {
 							const why = server?.state === "authenticating" ? "waiting for the person to sign in" : "not connected";
-							return `## ${app.name}\n(${why}: connect_app connects it)\nMCP URL: ${app.url}`;
+							return `## ${app.name} [id: ${app.ref}]\n(${why}: connect_app connects it)`;
 						}
-						const lines = [`## ${server.name}`];
+						const lines = [`## ${app.name} [id: ${app.ref}]`];
 						if (server.instructions) lines.push(clip(server.instructions, MAX_INSTRUCTION_CHARS));
 						// Skills come from the app and are untrusted like its instructions; they load with read_skill.
 						const skills = extras.catalog.skills(server.id);
@@ -384,7 +381,6 @@ export function mcpExtensions(
 						if (events.length > 0) {
 							lines.push(`Events you can watch (watch_app_event): ${events.map((event) => event.name).join(", ")}`);
 						}
-						lines.push(`MCP URL: ${app.url}`);
 						return lines.join("\n");
 					})
 					.join("\n\n");

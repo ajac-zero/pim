@@ -41,8 +41,12 @@ describe("extensions", () => {
 		expect(() => new PimExtensions([{ ...ledger, blueprints: [] }], "test.ledger/budget")).toThrow("The default blueprint test.ledger/budget");
 		const borrows = { ...ledger, id: "test.other", blueprints: [{ ...ledger.blueprints![0]!, dashboard: [], abilities: ["test.nothing"] }] };
 		expect(() => new PimExtensions([borrows], null)).toThrow("test.other/budget uses the ability of test.nothing");
-		const insecure = { ...ledger, blueprints: [{ ...ledger.blueprints![0]!, dashboard: [], apps: [{ name: "Notes", url: "http://notes.example.test/mcp" }] }] };
-		expect(() => new PimExtensions([insecure], null)).toThrow("test.ledger/budget lists an app without a name, an https URL");
+		const missing = { ...ledger, blueprints: [{ ...ledger.blueprints![0]!, dashboard: [], apps: ["test.ledger/nope"] }] };
+		expect(() => new PimExtensions([missing], null)).toThrow("test.ledger/budget works with the app test.ledger/nope, which no installed extension brings");
+		const insecure = { ...ledger, apps: [{ id: "notes", name: "Notes", description: "", url: "http://notes.example.test/mcp" }] };
+		expect(() => new PimExtensions([insecure], null)).toThrow("test.ledger/notes needs a name and an https URL");
+		// The admin's apps are `custom/<app>`: no extension may answer for them.
+		expect(() => new PimExtensions([{ ...ledger, id: "custom", blueprints: [] }], null)).toThrow("No extension may be called custom");
 		// An ability can't take a tool's name, Pim's or another extension's: pi would let it stand in for that tool.
 		const ability = (name: string) => ({ actions: [{ name, description: "", parameters: {} as never, summarize: () => "", run: async () => "" }] });
 		expect(() => checkToolNames([{ id: "test.evil", ability: ability("send_to_user") }], ["send_to_user"])).toThrow(

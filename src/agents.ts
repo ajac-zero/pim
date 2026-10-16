@@ -1,3 +1,4 @@
+import { type DirectoryApp, storedApps } from "./extensions/app-directory";
 import { ASSISTANT_BLUEPRINT } from "./extensions/assistant";
 import type { BlueprintDefinition } from "./extensions/define";
 import { HttpError } from "./http";
@@ -10,7 +11,10 @@ import { HttpError } from "./http";
  * them is the default, which talks in chats started without choosing one;
  * any can be made the default. An account's first agent is a copy of the
  * one the admin chose for everyone, or one built on the deployment's
- * default blueprint. Memory, apps and approvals are shared by all of them.
+ * default blueprint. Memory, approvals and connected apps are shared by all
+ * of them: an agent lists the apps it works with by name, from the
+ * deployment's directory (./extensions/app-directory.ts), and the person
+ * connects each app once.
  * One can be published as a template others make their own (see
  * ./gallery.ts); a copy made from a template remembers where it came from.
  *
@@ -18,9 +22,6 @@ import { HttpError } from "./http";
  * which it hands tasks to and which work in parallel (see ./team.ts). The
  * person talks only with the agent.
  */
-
-/** An app a template suggests connecting: by its MCP server URL, never with credentials. */
-export type SuggestedApp = { readonly name: string; readonly url: string };
 
 /** One of an agent's team: it does tasks the agent hands it, and answers the agent, never the person. */
 export type TeamMember = {
@@ -35,7 +36,8 @@ export type Agent = {
 	readonly name: string;
 	readonly description: string;
 	readonly instructions: string;
-	readonly apps: readonly SuggestedApp[];
+	/** The apps it works with, by name in the directory: `<extension>/<app>`. */
+	readonly apps: readonly string[];
 	readonly team: readonly TeamMember[];
 	/** The blueprint it builds on, as `<extension>/<blueprint>`; null for none. */
 	readonly blueprint: string | null;
@@ -59,7 +61,7 @@ export type AgentInput = {
 	readonly name: string;
 	readonly description: string;
 	readonly instructions: string;
-	readonly apps: readonly SuggestedApp[];
+	readonly apps: readonly string[];
 	readonly team: readonly TeamMember[];
 	/** Left out, a new agent builds on the deployment's default blueprint and an edited one keeps its own. */
 	readonly blueprint?: string | null;
@@ -136,12 +138,12 @@ function renameStorage(sql: SqlStorage): void {
 
 const SELECT = "SELECT p.*, (SELECT updated_at FROM pim_agent_icons WHERE agent = p.id) AS icon FROM pim_agents p";
 
-const agentOf = (row: Row): Agent => ({
+const agentOf = (row: Row, directory: () => readonly DirectoryApp[]): Agent => ({
 	id: String(row.id),
 	name: String(row.name),
 	description: String(row.description),
 	instructions: String(row.instructions),
-	apps: JSON.parse(String(row.apps)) as SuggestedApp[],
+	apps: storedApps(JSON.parse(String(row.apps)) as unknown[], directory),
 	team: JSON.parse(String(row.team)) as TeamMember[],
 	blueprint: row.blueprint === null ? null : String(row.blueprint),
 	source: row.source ? (JSON.parse(String(row.source)) as Agent["source"]) : null,
@@ -175,13 +177,14 @@ export function agentInput(body: Record<string, unknown>, partial?: Agent): Agen
 			body.instructions === undefined && partial
 				? partial.instructions
 				: text(body.instructions, "instructions", MAX_INSTRUCTIONS, false),
-		apps: apps.map((app) => {
-			const { name, url } = (app ?? {}) as { name?: unknown; url?: unknown };
-			if (typeof url !== "string" || !/^https:\/\/[^\s]+$/.test(url) || url.length > 500) {
-				throw new HttpError(400, "Each app needs an https url");
-			}
-			return { name: text(name, "app name", 40, true), url };
-		}),
+		apps: [
+			...new Set(
+				apps.map((app) => {
+					if (typeof app !== "string" || !REF.test(app)) throw new HttpError(400, "Each app must be an app's id, such as custom/notes");
+					return app;
+				}),
+			),
+		],
 		team: body.team === undefined ? (partial?.team ?? []) : teamInput(body.team),
 		...(body.symbol === undefined ? {} : { symbol: symbolInput(body.symbol) }),
 		...(body.color === undefined ? {} : { color: colorInput(body.color) }),
@@ -189,10 +192,13 @@ export function agentInput(body: Record<string, unknown>, partial?: Agent): Agen
 	};
 }
 
+/** What an extension brings, by name: `<extension>/<name>`. */
+const REF = /^[a-z0-9][a-z0-9.-]*\/[a-z0-9][a-z0-9.-]*$/;
+
 /** A blueprint as given: `<extension>/<blueprint>`, or null. Whether it is installed is the Pim's to check. */
 function blueprintInput(value: unknown): string | null {
 	if (value === null) return null;
-	if (typeof value !== "string" || !/^[a-z0-9][a-z0-9.-]*\/[a-z0-9][a-z0-9.-]*$/.test(value)) {
+	if (typeof value !== "string" || !REF.test(value)) {
 		throw new HttpError(400, "blueprint must be an extension's blueprint, such as pim.assistant/pim, or null");
 	}
 	return value;
@@ -251,11 +257,17 @@ export function agentInstructions(agent: Agent, blueprint: BlueprintDefinition |
 export class AgentStore {
 	readonly #sql: SqlStorage;
 	readonly #starter: () => AgentInput;
+	readonly #directory: () => readonly DirectoryApp[];
 
-	/** `starter` is an account's first agent, made the first time any is asked for: one built on the deployment's default blueprint. */
-	constructor(sql: SqlStorage, starter: () => AgentInput) {
+	/**
+	 * `starter` is an account's first agent, made the first time any is asked
+	 * for: one built on the deployment's default blueprint. `directory` finds
+	 * the apps agents listed by URL before it.
+	 */
+	constructor(sql: SqlStorage, starter: () => AgentInput, directory: () => readonly DirectoryApp[]) {
 		this.#sql = sql;
 		this.#starter = starter;
+		this.#directory = directory;
 		renameStorage(this.#sql);
 		this.#sql.exec(SCHEMA);
 		const columns = this.#sql.exec("PRAGMA table_info(pim_agents)").toArray().map((row) => String(row.name));
@@ -270,13 +282,13 @@ export class AgentStore {
 	/** The default one first, then the others as they were made. */
 	list(): Agent[] {
 		this.default();
-		return this.#sql.exec(`${SELECT} ORDER BY p.is_default DESC, p.created_at, p.id`).toArray().map(agentOf);
+		return this.#sql.exec(`${SELECT} ORDER BY p.is_default DESC, p.created_at, p.id`).toArray().map((row) => agentOf(row, this.#directory));
 	}
 
 	/** The default agent, made from the starter the first time it is asked for. */
 	default(): Agent {
 		const [row] = this.#sql.exec(`${SELECT} WHERE p.is_default = 1`).toArray();
-		return row ? agentOf(row) : this.#insert(this.#starter(), null, true);
+		return row ? agentOf(row, this.#directory) : this.#insert(this.#starter(), null, true);
 	}
 
 	/** Makes another of the owner's agents the default. */
@@ -294,7 +306,7 @@ export class AgentStore {
 
 	get(id: string): Agent | undefined {
 		const [row] = this.#sql.exec(`${SELECT} WHERE p.id = ?`, id).toArray();
-		return row ? agentOf(row) : undefined;
+		return row ? agentOf(row, this.#directory) : undefined;
 	}
 
 	create(input: AgentInput, source: Agent["source"] = null): Agent {
@@ -389,7 +401,7 @@ export class AgentStore {
 		const [row] = this.#sql
 			.exec(`${SELECT} JOIN pim_agent_sessions s ON p.id = s.agent WHERE s.session = ?`, session)
 			.toArray();
-		return row ? agentOf(row) : this.default();
+		return row ? agentOf(row, this.#directory) : this.default();
 	}
 
 	/** Ties every chat in `sessions` not tied to an agent yet to the default one, so they stay with it when the default changes. */

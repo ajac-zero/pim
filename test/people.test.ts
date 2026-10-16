@@ -393,7 +393,7 @@ describe("isolation between people", () => {
 			return createMcpHandler(notes)(request, {}, createExecutionContext());
 		});
 		try {
-			const connected = await gus.browser.json("/api/mcp", { method: "POST", json: { name: "Notes", url: "https://notes.example.test/mcp" } });
+			const connected = await gus.browser.json("/api/mcp", { method: "POST", json: { app: "test.ledger/notes" } });
 			expect(connected).toMatchObject({ status: 201, body: { state: "ready" } });
 		} finally {
 			spy.mockRestore();
@@ -958,6 +958,45 @@ describe("the admin", () => {
 		await admin("/api/admin/accounts/quinn/limits", { method: "PUT", json: { limits: null } });
 		expect((await quinn.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: null });
 	});
+
+	it("adds apps everyone can connect, which each person signs in to once for all their agents", async () => {
+		const uma = await person("app-uma");
+		const crm = { name: "Acme CRM", description: "Customers and deals.", url: "https://crm.example.test/mcp" };
+		expect((await uma.browser.json("/api/admin/apps", { method: "POST", json: crm })).status).toBe(403);
+		expect((await admin("/api/admin/apps", { method: "POST", json: { ...crm, url: "http://crm.example.test/mcp" } })).status).toBe(400);
+		expect(await admin("/api/admin/apps", { method: "POST", json: crm })).toMatchObject({ status: 201, body: { app: { id: "acme-crm" } } });
+		expect((await admin("/api/admin/apps", { method: "POST", json: { ...crm, name: "Other" } })).status).toBe(400);
+		expect((await uma.browser.json("/api/app-directory")).body.apps).toContainEqual({ ref: "custom/acme-crm", ...crm, custom: true });
+
+		// Two of Uma's agents list it; connecting it once serves both.
+		const sales = (await uma.browser.json("/api/agents", { method: "POST", json: { name: "Sales", apps: ["custom/acme-crm"] } })).body;
+		await uma.browser.json("/api/agents", { method: "POST", json: { name: "Support", apps: ["custom/acme-crm"] } });
+		const realFetch = globalThis.fetch;
+		const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			if (!request.url.startsWith(crm.url)) return realFetch(input, init);
+			const server = () => {
+				const mcp = new McpServer({ name: "crm", version: "1.0.0" });
+				mcp.registerTool("deals", { description: "Open deals.", annotations: { readOnlyHint: true } }, async () => ({ content: [{ type: "text", text: "None." }] }));
+				return mcp;
+			};
+			return createMcpHandler(server)(request, {}, createExecutionContext());
+		});
+		try {
+			expect((await uma.browser.json("/api/mcp", { method: "POST", json: { app: "custom/acme-crm" } })).body).toMatchObject({ state: "ready" });
+		} finally {
+			spy.mockRestore();
+		}
+		expect((await uma.browser.json("/api/mcp")).body.servers).toEqual([expect.objectContaining({ url: crm.url, agents: ["Sales", "Support"] })]);
+		// Nothing but the directory's apps connects.
+		expect((await uma.browser.json("/api/mcp", { method: "POST", json: { name: "Evil", url: "https://evil.example.test/mcp" } })).status).toBe(400);
+
+		// Taken out, nobody can add it again; Uma's connection stays until she removes it.
+		expect((await admin("/api/admin/apps/acme-crm", { method: "DELETE" })).body).toEqual({ deleted: true });
+		expect((await uma.browser.json("/api/app-directory")).body.apps.some((app: { ref: string }) => app.ref === "custom/acme-crm")).toBe(false);
+		expect((await uma.browser.json(`/api/agents/${sales.id}`, { method: "PUT", json: { apps: ["custom/acme-crm"] } })).status).toBe(400);
+		expect((await uma.browser.json("/api/mcp")).body.servers).toHaveLength(1);
+	});
 });
 
 /**
@@ -1343,7 +1382,7 @@ describe("circles and visits", () => {
 			const ana = await person("ana");
 			const ben = await person("ben");
 			const cyd = await person("cyd");
-			expect((await ana.browser.json("/api/mcp", { method: "POST", json: { name: "Calendar", url: "https://calendar.example.test/mcp" } })).status).toBe(201);
+			expect((await ana.browser.json("/api/mcp", { method: "POST", json: { app: "test.ledger/calendar" } })).status).toBe(201);
 			await ana.browser.json("/api/memory/log", { method: "POST", json: { text: "Ana's favourite restaurant is Tasca do Chico." } });
 
 			// Ana puts Ben in a circle; Ben's Pim hears of it.
@@ -1475,7 +1514,7 @@ describe("profiles and published agents", () => {
 					name: "Marathon coach",
 					description: "Plans training weeks.",
 					instructions: "Plan one week at a time.",
-					apps: [{ name: "Strava", url: "https://mcp.strava.example/mcp" }],
+					apps: ["test.ledger/strava"],
 					team: [{ name: "Physio", instructions: "Check every plan for injury risk." }],
 					symbol: "🏃",
 					color: "teal",
@@ -1519,7 +1558,7 @@ describe("profiles and published agents", () => {
 			body: {
 				name: "Marathon coach",
 				instructions: "Plan two weeks at a time.",
-				apps: [{ name: "Strava", url: "https://mcp.strava.example/mcp" }],
+				apps: ["test.ledger/strava"],
 				team: [{ name: "Physio", instructions: "Check every plan for injury risk.", tools: null }],
 				symbol: "🏃",
 				color: "teal",

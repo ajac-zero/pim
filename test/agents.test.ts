@@ -19,13 +19,15 @@ describe("the owner's agents", () => {
 		expect((await api(`/agents/${mine.id}`, { method: "DELETE" })).status).toBe(400);
 
 		expect((await post("/agents", { name: "", instructions: "x" })).status).toBe(400);
-		expect((await post("/agents", { name: "Coach", instructions: "x", apps: [{ name: "Cal", url: "http://plain.test" }] })).status).toBe(400);
+		expect((await post("/agents", { name: "Coach", instructions: "x", apps: [{ name: "Cal", url: "https://plain.test/mcp" }] })).status).toBe(400);
+		// Only apps this Pim offers.
+		expect((await post("/agents", { name: "Coach", instructions: "x", apps: ["custom/nope"] })).status).toBe(400);
 		const coach = (
 			await post("/agents", {
 				name: "Marathon coach",
 				description: "Plans my training.",
 				instructions: "Answer every question with a training tip.",
-				apps: [{ name: "Strava", url: "https://mcp.strava.example/mcp" }],
+				apps: ["test.ledger/strava"],
 			})
 		).body;
 		expect(coach).toMatchObject({ id: expect.stringMatching(/^p_/), source: null, published: null, default: false });
@@ -115,14 +117,14 @@ describe("the owner's agents", () => {
 			name: "Code reviewer",
 			description: "Reviews my pull requests.",
 			instructions: "Point out bugs before style.",
-			apps: [{ name: "GitHub", url: "https://mcp.github.example/mcp" }],
+			apps: ["test.ledger/github"],
 			team: [{ name: "Linter", instructions: "Flag style issues.", tools: ["fetch_url"] }],
 			emoji: "🧐",
 			color: "indigo",
 		};
 		faux.setResponses([
 			record,
-			toolUse(CREATE_AGENT, { ...reviewer, apps: [{ name: "GitHub", url: "http://plain.test" }] }),
+			toolUse(CREATE_AGENT, { ...reviewer, apps: ["custom/github"] }),
 			record,
 			toolUse(CREATE_AGENT, { ...reviewer, emoji: "a sticker" }),
 			record,
@@ -137,7 +139,7 @@ describe("the owner's agents", () => {
 
 		// Refused as the API refuses it: nothing made.
 		await say("Make me a code reviewer", session);
-		expect(seen[1]!.result).toContain("Each app needs an https url");
+		expect(seen[1]!.result).toContain("This Pim offers no app custom/github");
 		await say("Try again", session);
 		expect(seen[2]!.result).toContain("symbol must be an icon's name");
 		expect((await api("/agents")).body.agents.some((agent: { name: string }) => agent.name === "Code reviewer")).toBe(false);
@@ -228,7 +230,7 @@ describe("the owner's agents", () => {
 			await post("/agents", {
 				name: "Ghostwriter",
 				instructions: "Write short.",
-				apps: [{ name: "Docs", url: "https://mcp.docs.example/mcp" }],
+				apps: ["test.ledger/docs"],
 				team: [
 					{ name: "Editor", instructions: "Fix grammar." },
 					{ name: "Fact checker", instructions: "Check every claim." },
@@ -280,7 +282,7 @@ describe("the owner's agents", () => {
 		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
 		expect((await api(`/agents/${writer.id}`)).body).toMatchObject({
 			instructions: "Write long.",
-			apps: [{ name: "Docs", url: "https://mcp.docs.example/mcp" }],
+			apps: ["test.ledger/docs"],
 			team: [
 				{ name: "Editor", instructions: "Fix grammar and tone.", tools: null },
 				{ name: "Researcher", instructions: "Find sources.", tools: ["fetch_url"] },
@@ -293,13 +295,13 @@ describe("the owner's agents", () => {
 });
 
 describe("a database from when agents were personas", () => {
-	it("is renamed in place, keeping its agents, icons, chats and team runs", async () => {
+	it("is renamed in place, keeping its agents, icons, chats, team runs, and the apps it listed by URL that the directory has", async () => {
 		await runInDurableObject(env.Pim.getByName("legacy"), async (_instance, state) => {
 			const sql = state.storage.sql;
 			for (const table of ["pim_agents", "pim_agent_icons", "pim_agent_sessions", "pim_team_runs"]) sql.exec(`DROP TABLE ${table}`);
 			sql.exec(`CREATE TABLE pim_personas (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, instructions TEXT NOT NULL, apps TEXT NOT NULL,
 				source TEXT, published TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, is_default INTEGER NOT NULL DEFAULT 0, team TEXT NOT NULL DEFAULT '[]', base TEXT)`);
-			sql.exec(`INSERT INTO pim_personas VALUES ('p_1', 'Coach', 'Runs', 'Be brief.', '[]', NULL, NULL, 1, 1, 1, '[]', 'test.ledger/budget')`);
+			sql.exec(`INSERT INTO pim_personas VALUES ('p_1', 'Coach', 'Runs', 'Be brief.', '[{"name":"Runs","url":"https://mcp.strava.example/mcp"},{"name":"Gone","url":"https://gone.example/mcp"}]', NULL, NULL, 1, 1, 1, '[]', 'test.ledger/budget')`);
 			sql.exec("CREATE TABLE pim_persona_icons (persona TEXT PRIMARY KEY, type TEXT NOT NULL, data BLOB NOT NULL, updated_at INTEGER NOT NULL)");
 			sql.exec("INSERT INTO pim_persona_icons VALUES ('p_1', 'image/png', x'00', 7)");
 			sql.exec("CREATE TABLE pim_persona_sessions (session TEXT PRIMARY KEY, persona TEXT NOT NULL)");
@@ -308,14 +310,19 @@ describe("a database from when agents were personas", () => {
 				member TEXT NOT NULL, task TEXT NOT NULL, status TEXT NOT NULL, report TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
 			sql.exec("INSERT INTO pim_team_runs VALUES ('c1', 'k', 0, '9', 'p_1', 'Editor', 'Fix it', 'done', NULL, 1, 1)");
 
-			const agents = new AgentStore(sql, () => {
-				throw new Error("the default exists, so no starter is needed");
-			});
-			expect(agents.list()).toMatchObject([{ id: "p_1", name: "Coach", blueprint: "test.ledger/budget", default: true, icon: 7 }]);
+			const directory = () => [{ ref: "test.ledger/strava", name: "Strava", description: "", url: "https://mcp.strava.example/mcp", custom: false }];
+			const agents = new AgentStore(
+				sql,
+				() => {
+					throw new Error("the default exists, so no starter is needed");
+				},
+				directory,
+			);
+			expect(agents.list()).toMatchObject([{ id: "p_1", name: "Coach", blueprint: "test.ledger/budget", default: true, icon: 7, apps: ["test.ledger/strava"] }]);
 			expect(agents.ofSession("9").id).toBe("p_1");
 			expect(new TeamStore(sql).run("c1")).toMatchObject({ agent: "p_1", member: "Editor" });
 			// Starting again changes nothing.
-			expect(new AgentStore(sql, () => { throw new Error("unused"); }).list()).toHaveLength(1);
+			expect(new AgentStore(sql, () => { throw new Error("unused"); }, directory).list()).toHaveLength(1);
 		});
 	});
 });

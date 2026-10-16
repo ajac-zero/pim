@@ -1,23 +1,26 @@
 // A Pim on your own machine, for trying the web app: `pnpm preview`. Never deploy it: it has
-// open registration and no rate limits, and it binds a stand-in for Workers AI, so it needs no
-// Cloudflare account. Its state is kept in .wrangler/state-preview.
+// open registration, no rate limits, a stand-in model and a sign-in route that needs no passkey
+// (see preview/worker.ts), so it needs no Cloudflare account. Its state is kept in
+// .wrangler/state-preview.
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "pim-preview",
-  "main": "src/index.ts",
+  "main": "preview/worker.ts",
   "compatibility_date": "2026-09-24",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
   "dev": { "ip": "127.0.0.1", "port": 8787 },
+  // The web app, rebuilt whenever web/src changes.
+  "build": { "command": "pnpm --filter pim-web build", "watch_dir": "web/src" },
   "assets": {
     "directory": "./web/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp/callback/*", "/mcp/events/*", "/images/*"]
+    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp/callback/*", "/mcp/events/*", "/images/*", "/__dev/*"]
   },
-  // Workers AI needs an account: chats on the platform model end with a model error. Connect a
-  // ChatGPT plan in Settings to chat for real.
+  // Pim needs an `AI` binding to start; chats use preview/worker.ts's stand-in model instead.
+  // Connect a ChatGPT plan in Settings to chat with a real one.
   "kv_namespaces": [{ "binding": "AI", "id": "preview-ai-stand-in" }],
   "r2_buckets": [{ "binding": "IMAGES", "bucket_name": "pim-preview-images" }],
   "durable_objects": {
@@ -42,7 +45,7 @@
     "PIM_MEMORY_LINES": "",
     "PIM_PUBLIC_URL": "",
     "PIM_APPROVAL_POLICY": "explicit",
-    "PIM_MODELS": "@cf/zai-org/glm-4.7-flash",
+    "PIM_MODELS": "preview-model",
     "PIM_LIMITS": "{\"dailyTokens\": 2000000, \"dailyModelRequests\": 1500, \"dailyRuns\": 300, \"sessions\": 500, \"schedules\": 50, \"apps\": 20, \"storageBytes\": 1000000000, \"artifacts\": 200, \"artifactVersions\": 100, \"artifactBytes\": 1000000, \"artifactStorageBytes\": 10000000}",
     "PIM_REGISTRATION": "open",
     "PIM_MAX_ACCOUNTS": "",

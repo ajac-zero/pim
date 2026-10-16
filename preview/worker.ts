@@ -1,0 +1,168 @@
+import type { Message } from "@earendil-works/pi-ai";
+import { createModels, createProvider, type Models } from "@earendil-works/pi-ai/models";
+import { createFauxCore, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
+import type { ModelRef } from "@earendil-works/pi-durable";
+import type { PiModel } from "agents/harness/pi";
+import { ownedCode } from "../src/auth";
+import { serve } from "../src/gateway";
+import { Pim as RealPim } from "../src/pim";
+import { Authenticator } from "../test/webauthn";
+
+export { Auth, Directory, Gallery } from "../src/index";
+
+/**
+ * The Worker `pnpm preview` runs (wrangler.preview.jsonc): the real Pim, with
+ * no Cloudflare account. Never deploy it. It differs from a deployment in two ways:
+ *
+ * - A stand-in model, so chats answer. It echoes what you say through
+ *   `send_to_user`, and calls a tool when told to: `/tool create_goal {"title": "Run a 5k"}`.
+ *   After a tool runs, it sends the tool's result. Memory compression gets a short summary.
+ * - `GET /__dev/sign-in/<username>?returnTo=/path` signs the browser in as
+ *   that person, making the account if it's new, with a passkey made here.
+ */
+
+const PREVIEW_MODEL = "preview-model";
+const MEMORY_MODEL = "preview-memory";
+
+const textOf = (message: Message | undefined): string => {
+	if (!message || message.role === "assistant") return "";
+	if (typeof message.content === "string") return message.content;
+	return message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+};
+
+const send = (message: string) =>
+	fauxAssistantMessage(fauxToolCall("send_to_user", { message }), { stopReason: "toolUse" });
+
+/** One answer to the conversation so far. */
+const answer: FauxResponseFactory = (context, _options, _state, model) => {
+	const messages = context.messages.filter((message) => message.role !== "system");
+	const last = messages.at(-1);
+
+	if (model.id === MEMORY_MODEL) {
+		const block = /Compress memories #(\d+-\d+)/.exec(textOf(last))?.[1] ?? "";
+		return fauxAssistantMessage(`Memories ${block}, summarized by the preview model.`);
+	}
+
+	if (last?.role === "toolResult") {
+		const result = textOf(last).slice(0, 1_000);
+		if (last.toolName === "send_to_user") {
+			// A failed send would fail again: end the turn and let the harness report it. After a progress update, finish.
+			return last.isError ? fauxAssistantMessage(result) : send("Done.");
+		}
+		return send(`\`${last.toolName}\` ${last.isError ? "failed" : "returned"}:\n\n${result || "(nothing)"}`);
+	}
+
+	const text = textOf(messages.findLast((message) => message.role === "user")).trim();
+	const directive = /^\/tool\s+(\S+)\s*([\s\S]*)$/.exec(text);
+	if (directive) {
+		const [, name, json] = directive;
+		try {
+			const args = json!.trim() === "" ? {} : JSON.parse(json!);
+			return fauxAssistantMessage(fauxToolCall(name!, args), { stopReason: "toolUse" });
+		} catch (error) {
+			return send(`That isn't JSON: ${String(error)}`);
+		}
+	}
+	return send(`You said: ${text}\n\n_Preview model. Send \`/tool <name> {json}\` to call a tool._`);
+};
+
+/** The stand-in model's provider: every request gets `answer`, streamed a little at a time. */
+function previewProvider() {
+	const core = createFauxCore({
+		provider: "preview",
+		models: [
+			{ id: PREVIEW_MODEL, name: "Preview model", contextWindow: 200_000 },
+			{ id: MEMORY_MODEL, name: "Preview memory model" },
+		],
+		tokensPerSecond: 200,
+	});
+	const respond = <A extends unknown[], R>(stream: (...args: A) => R) => (...args: A): R => {
+		core.setResponses([answer]);
+		return stream(...args);
+	};
+	const provider = createProvider({
+		id: core.provider,
+		auth: { apiKey: { name: "Preview", resolve: async () => ({ auth: {} }) } },
+		models: core.models,
+		api: {
+			stream: respond(core.stream),
+			streamSimple: respond(core.streamSimple),
+			fetchDeferred: core.fetchDeferred,
+			cancelDeferred: core.cancelDeferred,
+		},
+	});
+	return { provider, getModel: core.getModel };
+}
+
+const preview = previewProvider();
+
+export class Pim extends RealPim {
+	/** The stand-in model, and the real ChatGPT plan, for chatting with a real model. */
+	protected override models(): Models {
+		const models = createModels({ credentials: this.credentials });
+		models.setProvider(preview.provider);
+		models.setProvider(this.chatgpt.provider());
+		return models;
+	}
+
+	protected override defaultModel(): PiModel {
+		return preview.getModel(PREVIEW_MODEL)!;
+	}
+
+	protected override memoryModel(): ModelRef {
+		return { provider: "preview", modelId: MEMORY_MODEL };
+	}
+}
+
+const DEV_SIGN_IN = /^\/__dev\/sign-in\/([^/]+)$/;
+
+/** Signs the browser in as `username`, with a new software passkey, and sends it to `returnTo`. */
+async function devSignIn(request: Request, env: Env, username: string): Promise<Response> {
+	const url = new URL(request.url);
+	const call = (path: string, body: unknown, cookie?: string) =>
+		serve(
+			new Request(`${url.origin}/auth${path}`, {
+				method: "POST",
+				headers: {
+					origin: url.origin,
+					"content-type": "application/json",
+					"CF-Connecting-IP": request.headers.get("CF-Connecting-IP") ?? "127.0.0.1",
+					...(cookie ? { cookie } : {}),
+				},
+				body: JSON.stringify(body),
+			}),
+			env,
+		);
+
+	const account = await env.Directory.getByName("directory").resolve(username);
+	let setup: string;
+	if (account) {
+		const { code } = await env.Auth.getByName(account.ownerId).issueSetupCode(Date.now(), 60_000);
+		setup = ownedCode(account.ownerId, code);
+	} else {
+		const registered = await call("/register", { username });
+		if (!registered.ok) return registered;
+		setup = ((await registered.json()) as { setup: string }).setup;
+	}
+
+	const options = await call("/passkeys/options", { setup });
+	if (!options.ok) return options;
+	const challenge = options.headers.getSetCookie().map((cookie) => cookie.split(";")[0]).join("; ");
+	const authenticator = await Authenticator.make("ES256", { rpId: url.hostname, origin: url.origin });
+	const registration = await authenticator.register((await options.json()) as { challenge: string; user: { id: string } });
+	const created = await call("/passkeys", { ...registration, name: "Preview sign-in" }, challenge);
+	if (!created.ok) return created;
+
+	const returnTo = url.searchParams.get("returnTo") ?? "/";
+	const headers = new Headers({ location: /^\/(?![/\\])/.test(returnTo) ? returnTo : "/" });
+	for (const cookie of created.headers.getSetCookie()) headers.append("set-cookie", cookie);
+	return new Response(null, { status: 302, headers });
+}
+
+export default {
+	fetch(request, env): Promise<Response> {
+		const signIn = request.method === "GET" ? DEV_SIGN_IN.exec(new URL(request.url).pathname) : null;
+		if (signIn) return devSignIn(request, env, decodeURIComponent(signIn[1]!).toLowerCase());
+		return serve(request, env);
+	},
+} satisfies ExportedHandler<Env>;

@@ -1,6 +1,5 @@
 import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
-import { DELIVERY_REMINDER } from "../../../src/transcript";
 import type { FunctionCallItem } from "~/lib/openresponses";
 import {
   EMPTY_STREAM,
@@ -10,6 +9,7 @@ import {
   type StreamState,
   type ThreadEntry,
 } from "~/lib/pim-view";
+import { DELIVERY_REMINDER } from "../../../src/transcript";
 
 /* Event and entry builders. Casts keep fixtures to the fields the view reads. */
 

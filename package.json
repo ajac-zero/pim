@@ -12,9 +12,11 @@
     "build": "pnpm --filter pim-web build",
     "deploy": "wrangler deploy",
     "deploy:prod": "wrangler deploy --config wrangler.prod.jsonc",
-    "preview": "pnpm build && wrangler dev --local --config wrangler.preview.jsonc --persist-to .wrangler/state-preview",
+    "preview": "wrangler dev --local --config wrangler.preview.jsonc --persist-to .wrangler/state-preview",
     "types": "wrangler types",
     "typecheck": "tsc --noEmit && pnpm --filter pim-web typecheck",
+    "lint": "pnpm --filter pim-web lint",
+    "check": "pnpm typecheck && pnpm lint && pnpm test",
     "test": "vitest run && pnpm --filter pim-web test",
     "test:live": "PIM_LIVE=1 vitest run"
   },

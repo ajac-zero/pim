@@ -371,7 +371,9 @@ pnpm test        # Vitest in workerd, with pi-ai's faux model, then the web app'
 pnpm test:live   # live checks against real MCP servers (Hugging Face's); needs the network
 pnpm typecheck   # also generates the web app's route tree, so it works on a fresh checkout
 pnpm types       # regenerate worker-configuration.d.ts after editing wrangler.jsonc
-pnpm preview     # a Pim with a stand-in model, at http://localhost:8787, with no Cloudflare login (see docs/instance.md)
+pnpm lint        # Biome, for the web app
+pnpm check       # typecheck, lint and test, as CI does
+pnpm preview     # a Pim with a stand-in model and a passkey-free sign-in, at http://localhost:8787, with no Cloudflare login (see docs/instance.md)
 ```
 
 The web app is in [`web/`](web), with its own README. Sign-in, with passkeys and other providers, is in [`src/auth/`](src/auth).

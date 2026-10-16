@@ -1,0 +1,11 @@
+services:
+  # The local preview (wrangler.preview.jsonc, preview/worker.ts): the real Worker with a stand-in
+  # model and no Cloudflare account. It rebuilds the web app and reloads the Worker on changes.
+  preview:
+    command: pnpm preview
+    port: 8787
+    health: /health
+    portal:
+      url: /__dev/sign-in/ada?returnTo=/
+      title: Pim preview
+      description: Signs you in as @ada, the preview's admin. Chats answer with a stand-in model; send `/tool <name> {json}` to make it call a tool.

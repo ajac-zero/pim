@@ -8,7 +8,6 @@ import type {
   EntryRecord,
   MessageChange,
 } from "@earendil-works/pi-durable";
-import { DELIVERY_REMINDER } from "../../../src/transcript";
 import type {
   FunctionCallItem,
   FunctionCallOutputItem,
@@ -16,6 +15,7 @@ import type {
   ORItem,
   ReasoningItem,
 } from "~/lib/openresponses";
+import { DELIVERY_REMINDER } from "../../../src/transcript";
 
 /**
  * Folds Pim's WebSocket stream (pi's agent events: a snapshot, then one batch

@@ -5,25 +5,26 @@ import {
 } from "shiki";
 
 /**
- * The color themes a person can pick. A theme only changes colors: its tokens
- * for light and dark mode live in src/styles/app.css under
- * `[data-theme="<id>"]`, next to the rules that color code with its Shiki
- * themes below.
+ * The color themes a person can pick; the first is the default. A theme only
+ * changes colors: its tokens for light and dark mode live in
+ * src/styles/app.css under `[data-theme="<id>"]` (the default's on :root),
+ * next to the rules that color code with its Shiki themes below.
  */
 export const themes = [
-  {
-    id: "pim",
-    name: "Pim",
-    light: { background: "#fafafa", primary: "#0a0a0a" },
-    dark: { background: "#161616", primary: "#f2f2f2" },
-    code: { light: "github-light-default", dark: "github-dark-default" },
-  },
   {
     id: "tokyo-night",
     name: "Tokyo Night",
     light: { background: "#e6e7ed", primary: "#2e6bd6" },
     dark: { background: "#1a1b26", primary: "#7aa2f7" },
     code: { light: "tokyo-night-day", dark: "tokyo-night" },
+  },
+  // Parody themes: affectionate nods to the apps that inspired Pim's design.
+  {
+    id: "gronk-bot",
+    name: "Gronk Bot",
+    light: { background: "#fafafa", primary: "#0a0a0a" },
+    dark: { background: "#161616", primary: "#f2f2f2" },
+    code: { light: "github-light-default", dark: "github-dark-default" },
   },
 ] as const satisfies readonly {
   id: string;

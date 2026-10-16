@@ -9,111 +9,17 @@
 /*
  * Color themes. Each theme sets every token below for light mode
  * (`[data-theme="…"]`) and dark mode (`[data-theme="…"].dark`); components
- * only use the tokens. Pim is the default and lives on :root and .dark.
- * To add a theme: copy the Tokyo Night blocks here, including its code-token
- * rules near the end of this file, and register it in src/lib/themes.ts.
+ * only use the tokens. The default theme, Tokyo Night, lives on :root and
+ * .dark. To add a theme: copy the Gronk Bot blocks here, including its
+ * code-token rules near the end of this file, and register it in
+ * src/lib/themes.ts.
  */
-:root {
-  /* See web/DESIGN.md: neutral surfaces, black primary, color only on avatars and signals. */
-  --background: oklch(0.985 0 0);
-  --foreground: oklch(0.18 0 0);
-  --card: oklch(0.985 0 0);
-  --card-foreground: oklch(0.18 0 0);
-  --popover: oklch(0.995 0 0);
-  --popover-foreground: oklch(0.18 0 0);
-  --primary: oklch(0.145 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.94 0 0);
-  --secondary-foreground: oklch(0.18 0 0);
-  --muted: oklch(0.94 0 0);
-  --muted-foreground: oklch(0.6 0 0);
-  --accent: oklch(0.94 0 0);
-  --accent-foreground: oklch(0.18 0 0);
-  --destructive: oklch(0.577 0.245 27);
-  --destructive-foreground: oklch(0.985 0 0);
-  --link: oklch(0.55 0.2 258);
-  --success: oklch(0.65 0.17 152);
-  --border: oklch(0.92 0 0);
-  --input: oklch(0.92 0 0);
-  --ring: oklch(0.55 0.2 258);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.97 0 0);
-  --sidebar-foreground: oklch(0.18 0 0);
-  --sidebar-primary: oklch(0.145 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.925 0 0);
-  --sidebar-accent-foreground: oklch(0.18 0 0);
-  --sidebar-border: oklch(0.92 0 0);
-  --sidebar-ring: oklch(0.55 0.2 258);
-  --agent-gray: oklch(0.442 0.017 285.786);
-  --agent-red: oklch(0.577 0.245 27.325);
-  --agent-orange: oklch(0.646 0.222 41.116);
-  --agent-amber: oklch(0.666 0.179 58.318);
-  --agent-green: oklch(0.627 0.194 149.214);
-  --agent-teal: oklch(0.6 0.118 184.704);
-  --agent-blue: oklch(0.546 0.245 262.881);
-  --agent-indigo: oklch(0.511 0.262 276.966);
-  --agent-violet: oklch(0.541 0.281 293.009);
-  --agent-pink: oklch(0.592 0.249 0.584);
-  --radius: 0.75rem;
-}
-
-.dark {
-  --background: oklch(0.2 0 0);
-  --foreground: oklch(0.94 0 0);
-  --card: oklch(0.2 0 0);
-  --card-foreground: oklch(0.94 0 0);
-  --popover: oklch(0.24 0 0);
-  --popover-foreground: oklch(0.94 0 0);
-  --primary: oklch(0.96 0 0);
-  --primary-foreground: oklch(0.18 0 0);
-  --secondary: oklch(0.27 0 0);
-  --secondary-foreground: oklch(0.94 0 0);
-  --muted: oklch(0.27 0 0);
-  --muted-foreground: oklch(0.66 0 0);
-  --accent: oklch(0.27 0 0);
-  --accent-foreground: oklch(0.94 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --destructive-foreground: oklch(0.985 0 0);
-  --link: oklch(0.7 0.15 258);
-  --success: oklch(0.72 0.17 152);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 12%);
-  --ring: oklch(0.7 0.15 258);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.175 0 0);
-  --sidebar-foreground: oklch(0.94 0 0);
-  --sidebar-primary: oklch(0.96 0 0);
-  --sidebar-primary-foreground: oklch(0.18 0 0);
-  --sidebar-accent: oklch(0.25 0 0);
-  --sidebar-accent-foreground: oklch(0.94 0 0);
-  --sidebar-border: oklch(1 0 0 / 8%);
-  --sidebar-ring: oklch(0.7 0.15 258);
-  --agent-gray: oklch(0.871 0.006 286.286);
-  --agent-red: oklch(0.704 0.191 22.216);
-  --agent-orange: oklch(0.75 0.183 55.934);
-  --agent-amber: oklch(0.828 0.189 84.429);
-  --agent-green: oklch(0.792 0.209 151.711);
-  --agent-teal: oklch(0.777 0.152 181.912);
-  --agent-blue: oklch(0.707 0.165 254.624);
-  --agent-indigo: oklch(0.673 0.182 276.935);
-  --agent-violet: oklch(0.702 0.183 293.541);
-  --agent-pink: oklch(0.718 0.202 349.761);
-}
 
 /*
  * Tokyo Night: "Night" for dark mode; light mode follows "Day" with darker text
  * for contrast. Its blue is the primary, so agents' "blue" takes its cyan.
  */
-[data-theme="tokyo-night"] {
+:root {
   --background: #e6e7ed;
   --foreground: #343b58;
   --card: #e6e7ed;
@@ -158,9 +64,10 @@
   --agent-indigo: #7847bd;
   --agent-violet: #9854f1;
   --agent-pink: #d20065;
+  --radius: 0.75rem;
 }
 
-[data-theme="tokyo-night"].dark {
+.dark {
   --background: #1a1b26;
   --foreground: #c0caf5;
   --card: #1a1b26;
@@ -205,6 +112,104 @@
   --agent-indigo: #9d7cd8;
   --agent-violet: #bb9af7;
   --agent-pink: #ff007c;
+}
+
+/*
+ * Gronk Bot: neutral grays and a near-black primary that inverts in dark
+ * mode. Parody themes are nods to the apps that inspired Pim.
+ */
+[data-theme="gronk-bot"] {
+  --background: oklch(0.985 0 0);
+  --foreground: oklch(0.18 0 0);
+  --card: oklch(0.985 0 0);
+  --card-foreground: oklch(0.18 0 0);
+  --popover: oklch(0.995 0 0);
+  --popover-foreground: oklch(0.18 0 0);
+  --primary: oklch(0.145 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.94 0 0);
+  --secondary-foreground: oklch(0.18 0 0);
+  --muted: oklch(0.94 0 0);
+  --muted-foreground: oklch(0.6 0 0);
+  --accent: oklch(0.94 0 0);
+  --accent-foreground: oklch(0.18 0 0);
+  --destructive: oklch(0.577 0.245 27);
+  --destructive-foreground: oklch(0.985 0 0);
+  --link: oklch(0.55 0.2 258);
+  --success: oklch(0.65 0.17 152);
+  --border: oklch(0.92 0 0);
+  --input: oklch(0.92 0 0);
+  --ring: oklch(0.55 0.2 258);
+  --chart-1: oklch(0.646 0.222 41.116);
+  --chart-2: oklch(0.6 0.118 184.704);
+  --chart-3: oklch(0.398 0.07 227.392);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+  --sidebar: oklch(0.97 0 0);
+  --sidebar-foreground: oklch(0.18 0 0);
+  --sidebar-primary: oklch(0.145 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.925 0 0);
+  --sidebar-accent-foreground: oklch(0.18 0 0);
+  --sidebar-border: oklch(0.92 0 0);
+  --sidebar-ring: oklch(0.55 0.2 258);
+  --agent-gray: oklch(0.442 0.017 285.786);
+  --agent-red: oklch(0.577 0.245 27.325);
+  --agent-orange: oklch(0.646 0.222 41.116);
+  --agent-amber: oklch(0.666 0.179 58.318);
+  --agent-green: oklch(0.627 0.194 149.214);
+  --agent-teal: oklch(0.6 0.118 184.704);
+  --agent-blue: oklch(0.546 0.245 262.881);
+  --agent-indigo: oklch(0.511 0.262 276.966);
+  --agent-violet: oklch(0.541 0.281 293.009);
+  --agent-pink: oklch(0.592 0.249 0.584);
+}
+
+[data-theme="gronk-bot"].dark {
+  --background: oklch(0.2 0 0);
+  --foreground: oklch(0.94 0 0);
+  --card: oklch(0.2 0 0);
+  --card-foreground: oklch(0.94 0 0);
+  --popover: oklch(0.24 0 0);
+  --popover-foreground: oklch(0.94 0 0);
+  --primary: oklch(0.96 0 0);
+  --primary-foreground: oklch(0.18 0 0);
+  --secondary: oklch(0.27 0 0);
+  --secondary-foreground: oklch(0.94 0 0);
+  --muted: oklch(0.27 0 0);
+  --muted-foreground: oklch(0.66 0 0);
+  --accent: oklch(0.27 0 0);
+  --accent-foreground: oklch(0.94 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
+  --link: oklch(0.7 0.15 258);
+  --success: oklch(0.72 0.17 152);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.7 0.15 258);
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.175 0 0);
+  --sidebar-foreground: oklch(0.94 0 0);
+  --sidebar-primary: oklch(0.96 0 0);
+  --sidebar-primary-foreground: oklch(0.18 0 0);
+  --sidebar-accent: oklch(0.25 0 0);
+  --sidebar-accent-foreground: oklch(0.94 0 0);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.7 0.15 258);
+  --agent-gray: oklch(0.871 0.006 286.286);
+  --agent-red: oklch(0.704 0.191 22.216);
+  --agent-orange: oklch(0.75 0.183 55.934);
+  --agent-amber: oklch(0.828 0.189 84.429);
+  --agent-green: oklch(0.792 0.209 151.711);
+  --agent-teal: oklch(0.777 0.152 181.912);
+  --agent-blue: oklch(0.707 0.165 254.624);
+  --agent-indigo: oklch(0.673 0.182 276.935);
+  --agent-violet: oklch(0.702 0.183 293.541);
+  --agent-pink: oklch(0.718 0.202 349.761);
 }
 
 @theme inline {
@@ -280,20 +285,20 @@
  * src/lib/themes.ts); these rules pick the active theme and mode.
  */
 .shiki-token {
-  color: var(--shiki-pim-light);
-  font-style: var(--shiki-pim-light-font-style, normal);
-}
-.dark .shiki-token {
-  color: var(--shiki-pim-dark);
-  font-style: var(--shiki-pim-dark-font-style, normal);
-}
-[data-theme="tokyo-night"] .shiki-token {
   color: var(--shiki-tokyo-night-light);
   font-style: var(--shiki-tokyo-night-light-font-style, normal);
 }
-[data-theme="tokyo-night"].dark .shiki-token {
+.dark .shiki-token {
   color: var(--shiki-tokyo-night-dark);
   font-style: var(--shiki-tokyo-night-dark-font-style, normal);
+}
+[data-theme="gronk-bot"] .shiki-token {
+  color: var(--shiki-gronk-bot-light);
+  font-style: var(--shiki-gronk-bot-light-font-style, normal);
+}
+[data-theme="gronk-bot"].dark .shiki-token {
+  color: var(--shiki-gronk-bot-dark);
+  font-style: var(--shiki-gronk-bot-dark-font-style, normal);
 }
 
 /* Thin, unobtrusive scrollbars like ChatGPT */

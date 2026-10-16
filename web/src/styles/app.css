@@ -7,11 +7,11 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Parley theme tokens.
- * These follow the shadcn/ui CSS variable convention, which makes the entire
- * app themeable with generators like https://tweakcn.com — paste a generated
- * theme into the admin "Custom CSS" setting (or override this file) and every
- * component picks it up.
+ * Color themes. Each theme sets every token below for light mode
+ * (`[data-theme="…"]`) and dark mode (`[data-theme="…"].dark`); components
+ * only use the tokens. Pim is the default and lives on :root and .dark.
+ * To add a theme: copy the Tokyo Night blocks here, including its code-token
+ * rules near the end of this file, and register it in src/lib/themes.ts.
  */
 :root {
   /* See web/DESIGN.md: neutral surfaces, black primary, color only on avatars and signals. */
@@ -49,6 +49,16 @@
   --sidebar-accent-foreground: oklch(0.18 0 0);
   --sidebar-border: oklch(0.92 0 0);
   --sidebar-ring: oklch(0.55 0.2 258);
+  --agent-gray: oklch(0.442 0.017 285.786);
+  --agent-red: oklch(0.577 0.245 27.325);
+  --agent-orange: oklch(0.646 0.222 41.116);
+  --agent-amber: oklch(0.666 0.179 58.318);
+  --agent-green: oklch(0.627 0.194 149.214);
+  --agent-teal: oklch(0.6 0.118 184.704);
+  --agent-blue: oklch(0.546 0.245 262.881);
+  --agent-indigo: oklch(0.511 0.262 276.966);
+  --agent-violet: oklch(0.541 0.281 293.009);
+  --agent-pink: oklch(0.592 0.249 0.584);
   --radius: 0.75rem;
 }
 
@@ -87,6 +97,114 @@
   --sidebar-accent-foreground: oklch(0.94 0 0);
   --sidebar-border: oklch(1 0 0 / 8%);
   --sidebar-ring: oklch(0.7 0.15 258);
+  --agent-gray: oklch(0.871 0.006 286.286);
+  --agent-red: oklch(0.704 0.191 22.216);
+  --agent-orange: oklch(0.75 0.183 55.934);
+  --agent-amber: oklch(0.828 0.189 84.429);
+  --agent-green: oklch(0.792 0.209 151.711);
+  --agent-teal: oklch(0.777 0.152 181.912);
+  --agent-blue: oklch(0.707 0.165 254.624);
+  --agent-indigo: oklch(0.673 0.182 276.935);
+  --agent-violet: oklch(0.702 0.183 293.541);
+  --agent-pink: oklch(0.718 0.202 349.761);
+}
+
+/*
+ * Tokyo Night: "Night" for dark mode; light mode follows "Day" with darker text
+ * for contrast. Its blue is the primary, so agents' "blue" takes its cyan.
+ */
+[data-theme="tokyo-night"] {
+  --background: #e6e7ed;
+  --foreground: #343b58;
+  --card: #e6e7ed;
+  --card-foreground: #343b58;
+  --popover: #eeeff3;
+  --popover-foreground: #343b58;
+  --primary: #2e6bd6;
+  --primary-foreground: #ffffff;
+  --secondary: #d5d6db;
+  --secondary-foreground: #343b58;
+  --muted: #d5d6db;
+  --muted-foreground: #5c6385;
+  --accent: #d5d6db;
+  --accent-foreground: #343b58;
+  --destructive: #d6264f;
+  --destructive-foreground: #ffffff;
+  --link: #2a64c9;
+  --success: #587539;
+  --border: #c8cad4;
+  --input: #c8cad4;
+  --ring: #2e6bd6;
+  --chart-1: #2e7de9;
+  --chart-2: #587539;
+  --chart-3: #9854f1;
+  --chart-4: #b15c00;
+  --chart-5: #007197;
+  --sidebar: #dcdde3;
+  --sidebar-foreground: #343b58;
+  --sidebar-primary: #2e6bd6;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #cdcfd8;
+  --sidebar-accent-foreground: #343b58;
+  --sidebar-border: #c8cad4;
+  --sidebar-ring: #2e6bd6;
+  --agent-gray: #6172b0;
+  --agent-red: #f52a65;
+  --agent-orange: #b15c00;
+  --agent-amber: #8c6c3e;
+  --agent-green: #587539;
+  --agent-teal: #118c74;
+  --agent-blue: #007197;
+  --agent-indigo: #7847bd;
+  --agent-violet: #9854f1;
+  --agent-pink: #d20065;
+}
+
+[data-theme="tokyo-night"].dark {
+  --background: #1a1b26;
+  --foreground: #c0caf5;
+  --card: #1a1b26;
+  --card-foreground: #c0caf5;
+  --popover: #1f2335;
+  --popover-foreground: #c0caf5;
+  --primary: #7aa2f7;
+  --primary-foreground: #1a1b26;
+  --secondary: #292e42;
+  --secondary-foreground: #c0caf5;
+  --muted: #292e42;
+  --muted-foreground: #828bb8;
+  --accent: #292e42;
+  --accent-foreground: #c0caf5;
+  --destructive: #f7768e;
+  --destructive-foreground: #1a1b26;
+  --link: #7dcfff;
+  --success: #9ece6a;
+  --border: #292e42;
+  --input: #3b4261;
+  --ring: #7aa2f7;
+  --chart-1: #7aa2f7;
+  --chart-2: #9ece6a;
+  --chart-3: #bb9af7;
+  --chart-4: #ff9e64;
+  --chart-5: #7dcfff;
+  --sidebar: #16161e;
+  --sidebar-foreground: #c0caf5;
+  --sidebar-primary: #7aa2f7;
+  --sidebar-primary-foreground: #16161e;
+  --sidebar-accent: #292e42;
+  --sidebar-accent-foreground: #c0caf5;
+  --sidebar-border: #1f2335;
+  --sidebar-ring: #7aa2f7;
+  --agent-gray: #a9b1d6;
+  --agent-red: #f7768e;
+  --agent-orange: #ff9e64;
+  --agent-amber: #e0af68;
+  --agent-green: #9ece6a;
+  --agent-teal: #73daca;
+  --agent-blue: #7dcfff;
+  --agent-indigo: #9d7cd8;
+  --agent-violet: #bb9af7;
+  --agent-pink: #ff007c;
 }
 
 @theme inline {
@@ -124,6 +242,16 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --color-agent-gray: var(--agent-gray);
+  --color-agent-red: var(--agent-red);
+  --color-agent-orange: var(--agent-orange);
+  --color-agent-amber: var(--agent-amber);
+  --color-agent-green: var(--agent-green);
+  --color-agent-teal: var(--agent-teal);
+  --color-agent-blue: var(--agent-blue);
+  --color-agent-indigo: var(--agent-indigo);
+  --color-agent-violet: var(--agent-violet);
+  --color-agent-pink: var(--agent-pink);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -145,6 +273,27 @@
   html {
     scrollbar-gutter: stable;
   }
+}
+
+/*
+ * Code highlighting. Shiki colors every token for every theme at once (see
+ * src/lib/themes.ts); these rules pick the active theme and mode.
+ */
+.shiki-token {
+  color: var(--shiki-pim-light);
+  font-style: var(--shiki-pim-light-font-style, normal);
+}
+.dark .shiki-token {
+  color: var(--shiki-pim-dark);
+  font-style: var(--shiki-pim-dark-font-style, normal);
+}
+[data-theme="tokyo-night"] .shiki-token {
+  color: var(--shiki-tokyo-night-light);
+  font-style: var(--shiki-tokyo-night-light-font-style, normal);
+}
+[data-theme="tokyo-night"].dark .shiki-token {
+  color: var(--shiki-tokyo-night-dark);
+  font-style: var(--shiki-tokyo-night-dark-font-style, normal);
 }
 
 /* Thin, unobtrusive scrollbars like ChatGPT */

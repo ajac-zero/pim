@@ -57,6 +57,7 @@ import {
   sessionsQuery,
   visitsQuery,
 } from "~/lib/queries";
+import { themes } from "~/lib/themes";
 import { cn } from "~/lib/utils";
 
 type T = ReturnType<typeof useI18n>["t"];
@@ -933,7 +934,8 @@ function SessionRow({
 }
 
 function PreferencesMenu({ collapsed = false }: { collapsed?: boolean }) {
-  const { preference, setPreference } = useTheme();
+  const { preference, setPreference, resolved, colorTheme, setColorTheme } =
+    useTheme();
   const { t } = useI18n();
 
   const trigger = (
@@ -981,6 +983,34 @@ function PreferencesMenu({ collapsed = false }: { collapsed?: boolean }) {
       <DropdownMenuContent align="start" side="top" className="w-60">
         <DropdownMenuLabel className="text-muted-foreground text-xs">
           {t("theme")}
+        </DropdownMenuLabel>
+        {themes.map((theme) => (
+          <DropdownMenuItem
+            key={theme.id}
+            role="menuitemradio"
+            aria-checked={colorTheme.id === theme.id}
+            // Stay open, so the change can be seen and undone.
+            onSelect={(event) => {
+              event.preventDefault();
+              setColorTheme(theme.id);
+            }}
+          >
+            {/* The theme's canvas and primary, in the current mode. */}
+            <span
+              className="flex size-5 items-center justify-center rounded-md border"
+              style={{ backgroundColor: theme[resolved].background }}
+            >
+              <span
+                className="size-2 rounded-full"
+                style={{ backgroundColor: theme[resolved].primary }}
+              />
+            </span>
+            <span className="flex-1">{theme.name}</span>
+            {colorTheme.id === theme.id && <Check className="size-4" />}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuLabel className="text-muted-foreground text-xs">
+          {t("mode")}
         </DropdownMenuLabel>
         <div className="flex gap-1 px-2 pb-1.5">
           {(

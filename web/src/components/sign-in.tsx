@@ -1,14 +1,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
-import {
-  ArrowRight,
-  Check,
-  ExternalLink,
-  KeyRound,
-  Loader2,
-} from "lucide-react";
-import { useEffect, useId, useState } from "react";
-import { PimMark } from "~/components/agent-icon";
+import { Check, ExternalLink, KeyRound, Loader2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { PimMark } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
 import { Join } from "~/components/register";
 import { Button } from "~/components/ui/button";
@@ -137,24 +131,11 @@ export function SignIn({ session }: { session: AuthSession }) {
 
   const pending = signIn.isPending || create.isPending;
   const icon = pending ? <Loader2 className="animate-spin" /> : <KeyRound />;
-  const mainSignIn = claimed && !device && !setup && view === "signIn";
 
   return (
-    <main className="flex min-h-svh flex-col items-center justify-center bg-background px-6 py-12 text-[15px] [&_h1]:text-xl [&_label]:text-[13px] [&_label]:text-muted-foreground [&_p]:leading-relaxed [&_svg.lucide]:stroke-[1.5]">
-      <div className="w-full max-w-[400px] text-center">
-        {mainSignIn ? (
-          <div className="mb-7 flex items-center justify-center gap-5">
-            <PimMark className="size-20" />
-            <h1
-              aria-label={t("signInTitle")}
-              className="font-semibold text-[56px]! tracking-[-0.05em]"
-            >
-              Pim
-            </h1>
-          </div>
-        ) : device || setup || (view !== "claim" && view !== "join") ? (
-          <PimMark className="mx-auto mb-6 size-14" />
-        ) : null}
+    <main className="flex min-h-svh flex-col items-center justify-center px-6 py-12">
+      <div className="w-full max-w-sm">
+        <PimMark className="mb-6 size-10" />
         {device ? (
           <>
             <h1 className="font-semibold text-2xl">
@@ -254,34 +235,32 @@ export function SignIn({ session }: { session: AuthSession }) {
           <SetupLinkSteps firstPasskey={false} onBack={() => show("signIn")} />
         ) : (
           <>
-            <p className="text-[15px] text-muted-foreground">
+            <h1 className="font-semibold text-2xl">{t("signInTitle")}</h1>
+            <p className="mt-2 text-muted-foreground text-sm">
               {t("signInBody")}
             </p>
             <Button
-              className="mt-8 px-7"
+              className="mt-6 w-full"
               size="lg"
               onClick={() => signIn.mutate()}
               disabled={pending}
             >
-              {pending && <Loader2 className="animate-spin" />}
+              {icon}
               {t("signInWithPasskey")}
-              <ArrowRight />
             </Button>
             <Button
               variant="ghost"
-              className="mx-auto mt-3 flex text-[13px] text-muted-foreground"
+              className="mt-3 w-full text-muted-foreground"
               onClick={() => show("recover")}
             >
               {t("lostPasskey")}
             </Button>
             {/* The commonest snag: a passkey made on another device that this one doesn't have. */}
-            <details className="mt-5 text-[13px] text-muted-foreground">
-              <summary className="cursor-pointer hover:text-foreground">
-                {t("newDeviceTitle")}
-              </summary>
-              <p className="mt-2">{t("newDeviceBody")}</p>
-            </details>
-            <p className="mt-5 text-center text-[13px] text-muted-foreground">
+            <div className="mt-6 rounded-lg border px-4 py-3 text-sm">
+              <p className="font-medium">{t("newDeviceTitle")}</p>
+              <p className="mt-1 text-muted-foreground">{t("newDeviceBody")}</p>
+            </div>
+            <p className="mt-6 border-t pt-4 text-center text-muted-foreground text-sm">
               {registration === "open" ? (
                 <>
                   {t("newHere")}{" "}
@@ -325,8 +304,6 @@ function RecoveryCodeSteps({
   onBack: () => void;
 }) {
   const { t } = useI18n();
-  const usernameId = useId();
-  const codeId = useId();
   const [username, setUsername] = useState("");
   const [code, setCode] = useState("");
   const ready = username.trim() !== "" && code.trim() !== "";
@@ -341,11 +318,7 @@ function RecoveryCodeSteps({
       <p className="mt-2 text-muted-foreground text-sm">
         {t("recoveryCodeBody")}
       </p>
-      <label htmlFor={usernameId} className="mt-6 block text-left">
-        {t("username")}
-      </label>
       <Input
-        id={usernameId}
         value={username}
         onChange={(event) => setUsername(event.target.value)}
         placeholder={t("username")}
@@ -353,25 +326,21 @@ function RecoveryCodeSteps({
         autoComplete="username"
         autoCapitalize="none"
         spellCheck={false}
-        className="mt-1.5 h-10"
+        className="mt-6 h-10"
         autoFocus
       />
-      <label htmlFor={codeId} className="mt-4 block text-left">
-        {t("recoveryCode")}
-      </label>
       <Input
-        id={codeId}
         value={code}
         onChange={(event) => setCode(event.target.value)}
         placeholder="xxxxx-xxxxx-xxxxx"
         aria-label={t("recoveryCode")}
         autoComplete="one-time-code"
         spellCheck={false}
-        className="mt-1.5 h-10 font-mono"
+        className="mt-3 h-10 font-mono"
       />
       <Button
         type="submit"
-        className="mt-6 w-full"
+        className="mt-3 w-full"
         size="lg"
         disabled={pending || !ready}
       >
@@ -421,18 +390,18 @@ function SetupLinkSteps({
       <p className="mt-2 text-muted-foreground text-sm">
         {firstPasskey ? t("setUpBody") : t("getSetupLinkBody")}
       </p>
-      <ol className="mt-6 list-decimal space-y-2 rounded-2xl bg-muted py-4 pr-4 pl-9 text-left text-sm">
+      <ol className="mt-6 list-decimal space-y-2 pl-5 text-sm">
         <li>{t("setupStepDashboard")}</li>
         <li>{t("setupStepOpen")}</li>
       </ol>
-      <Button className="mt-6 w-full" size="lg" asChild>
+      <Button className="mt-6 w-full" asChild>
         <a href={DASHBOARD_URL} target="_blank" rel="noreferrer">
           {t("openCloudflareDashboard")}
           <ExternalLink />
         </a>
       </Button>
       <p
-        className="mt-4 flex items-center justify-center gap-2 text-muted-foreground text-xs"
+        className="mt-4 flex items-center gap-2 text-muted-foreground text-xs"
         aria-live="polite"
       >
         {request.isPending ? (
@@ -446,7 +415,7 @@ function SetupLinkSteps({
             ? t("setupLinkWritten")
             : t("writingSetupLink")}
       </p>
-      <div className="mt-4 flex flex-wrap justify-center gap-2">
+      <div className="mt-4 flex gap-2">
         <Button
           variant="ghost"
           size="sm"

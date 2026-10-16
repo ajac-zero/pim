@@ -117,14 +117,14 @@ describe("the owner's agents", () => {
 			instructions: "Point out bugs before style.",
 			apps: [{ name: "GitHub", url: "https://mcp.github.example/mcp" }],
 			team: [{ name: "Linter", instructions: "Flag style issues.", tools: ["fetch_url"] }],
-			shape: "cloud",
-			color: "brown",
+			emoji: "🧐",
+			color: "indigo",
 		};
 		faux.setResponses([
 			record,
 			toolUse(CREATE_AGENT, { ...reviewer, apps: [{ name: "GitHub", url: "http://plain.test" }] }),
 			record,
-			toolUse(CREATE_AGENT, { ...reviewer, shape: "a sticker" }),
+			toolUse(CREATE_AGENT, { ...reviewer, emoji: "a sticker" }),
 			record,
 			toolUse(CREATE_AGENT, reviewer),
 			record,
@@ -139,13 +139,13 @@ describe("the owner's agents", () => {
 		await say("Make me a code reviewer", session);
 		expect(seen[1]!.result).toContain("Each app needs an https url");
 		await say("Try again", session);
-		expect(seen[2]!.result).toContain("Validation failed");
+		expect(seen[2]!.result).toContain("symbol must be an icon's name");
 		expect((await api("/agents")).body.agents.some((agent: { name: string }) => agent.name === "Code reviewer")).toBe(false);
 		await say("Once more", session);
 		expect(seen[3]!.result).toContain('\\"created\\": true');
 		const made = (await api("/agents")).body.agents.find((agent: { name: string }) => agent.name === "Code reviewer");
-		const { shape, ...given } = reviewer;
-		expect(made).toMatchObject({ ...given, symbol: shape, color: "brown", default: false, source: null });
+		const { emoji, ...given } = reviewer;
+		expect(made).toMatchObject({ ...given, symbol: emoji, color: "indigo", default: false, source: null });
 		// One the person has already isn't made again, whatever its case.
 		await say("And another code reviewer", session);
 		expect(seen[4]!.result).toContain('\\"exists\\": true');

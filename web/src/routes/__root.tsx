@@ -173,7 +173,9 @@ function MobileTitle() {
       : undefined;
   return (
     <span className="flex min-w-0 items-center gap-2 text-[15px]">
-      {agent && <AgentIcon agent={agent} className="size-5 shrink-0" />}
+      {agent && (
+        <AgentIcon agent={agent} tile className="size-6 shrink-0 rounded-md" />
+      )}
       <span className="truncate">
         {session ? sessionTitle(session, t) : "Pim"}
       </span>

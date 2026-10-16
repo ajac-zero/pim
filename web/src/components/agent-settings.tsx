@@ -177,7 +177,7 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
   return (
     <article className="rounded-xl border px-4 py-3" aria-label={agent.name}>
       <div className="flex items-start gap-3">
-        <AgentIcon agent={agent} className="size-10" />
+        <AgentIcon agent={agent} tile className="size-8 rounded-lg" />
         <div className="min-w-0 flex-1">
           <h2 className="flex items-center gap-2 font-medium">
             <Link

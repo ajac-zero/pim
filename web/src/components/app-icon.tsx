@@ -2,9 +2,8 @@ import { useState } from "react";
 import { cn } from "~/lib/utils";
 
 /**
- * An app's logo on a white tile, as brands draw theirs for light
- * backgrounds; its initial when it has none or the image doesn't load.
- * Size it with `className`; the tile rounds, and the logo fills it, in proportion.
+ * An app's logo, as it is, on whatever it sits on; its initial on a tile
+ * when it has none or the image doesn't load. Size it with `className`.
  */
 export function AppIcon({
   name,
@@ -18,20 +17,13 @@ export function AppIcon({
   const [broken, setBroken] = useState(false);
   if (icon && !broken) {
     return (
-      <span
-        className={cn(
-          "flex shrink-0 items-center justify-center rounded-[22%] border bg-white",
-          className,
-        )}
-      >
-        <img
-          src={icon}
-          alt=""
-          referrerPolicy="no-referrer"
-          className="size-[66%] object-contain"
-          onError={() => setBroken(true)}
-        />
-      </span>
+      <img
+        src={icon}
+        alt=""
+        referrerPolicy="no-referrer"
+        className={cn("shrink-0 rounded-[22%] object-contain", className)}
+        onError={() => setBroken(true)}
+      />
     );
   }
   return (

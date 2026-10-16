@@ -67,30 +67,39 @@ const SERVERS: Record<string, () => McpServer> = {
 /**
  * Forge: an MCP server behind an OAuth server that, like GitHub's, has no
  * client registration, so only the client the deployment registered signs
- * in. It records the token requests it gets, and any registration attempt.
+ * in. Board: the same, but its OAuth server lets clients register, as most
+ * do. They record the token requests and registrations they get.
  */
 const forgeGrants: Record<string, string>[] = [];
 let forgeRegistrations = 0;
+const boardRegistrations: Record<string, unknown>[] = [];
 
 async function forge(request: Request): Promise<Response> {
-	const { pathname } = new URL(request.url);
+	const { origin, pathname } = new URL(request.url);
+	const host = origin === "https://board.example.test" ? "board" : "forge";
+	if (host === "board" && pathname === "/register") {
+		const metadata = (await request.json()) as Record<string, unknown>;
+		boardRegistrations.push(metadata);
+		return Response.json({ ...metadata, client_id: "board-client" }, { status: 201 });
+	}
 	if (pathname === "/mcp") {
 		if (request.headers.get("authorization") !== "Bearer forge-token") {
 			return new Response("Unauthorized", {
 				status: 401,
-				headers: { "www-authenticate": 'Bearer resource_metadata="https://forge.example.test/.well-known/oauth-protected-resource/mcp"' },
+				headers: { "www-authenticate": `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"` },
 			});
 		}
 		return createMcpHandler(notes)(request, {}, createExecutionContext());
 	}
 	if (pathname === "/.well-known/oauth-protected-resource/mcp") {
-		return Response.json({ resource: "https://forge.example.test/mcp", authorization_servers: ["https://forge.example.test/login"] });
+		return Response.json({ resource: `${origin}/mcp`, authorization_servers: [`${origin}/login`] });
 	}
 	if (pathname.startsWith("/.well-known/oauth-authorization-server")) {
 		return Response.json({
-			issuer: "https://forge.example.test/login",
-			authorization_endpoint: "https://forge.example.test/login/authorize",
-			token_endpoint: "https://forge.example.test/login/token",
+			issuer: `${origin}/login`,
+			authorization_endpoint: `${origin}/login/authorize`,
+			token_endpoint: `${origin}/login/token`,
+			...(host === "board" ? { registration_endpoint: `${origin}/register` } : {}),
 			response_types_supported: ["code"],
 			code_challenge_methods_supported: ["S256"],
 		});
@@ -111,7 +120,7 @@ beforeEach(() => {
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		const request = new Request(input, init);
 		const target = `${new URL(request.url).origin}${new URL(request.url).pathname}`;
-		if (new URL(request.url).origin === "https://forge.example.test") return forge(request);
+		if (["https://forge.example.test", "https://board.example.test"].includes(new URL(request.url).origin)) return forge(request);
 		if (target === "https://down.example.test/mcp") return new Response("unavailable", { status: 503 });
 		const server = SERVERS[target];
 		if (!server) return realFetch(input, init);
@@ -409,6 +418,16 @@ describe("connected apps (MCP)", () => {
 		expect(server).toMatchObject({ state: "ready" });
 		expect(server.tools.map((tool: { name: string }) => tool.name)).toEqual(["forge_search"]);
 		expect((await api("/mcp/forge", { method: "DELETE" })).status).toBe(200);
+	});
+
+	it("registers itself with a server's sign-in as Pim, not as its owner's id, and names no address services must reach", async () => {
+		const started = await post("/mcp", { app: "test.ledger/board" });
+		expect(started).toMatchObject({ status: 201, body: { state: "authenticating" } });
+		expect(new URL(started.body.authUrl).searchParams.get("client_id")).toBe("board-client");
+		expect(boardRegistrations).toHaveLength(1);
+		expect(boardRegistrations[0]).toMatchObject({ client_name: "Pim", redirect_uris: [`https://pim.test/mcp/callback/${OWNER}`] });
+		expect(boardRegistrations[0]).not.toHaveProperty("client_uri");
+		expect((await api("/mcp/board", { method: "DELETE" })).status).toBe(200);
 	});
 
 	it("finds an app, adds and connects it after explicit chat approval, then continues the original task", async () => {

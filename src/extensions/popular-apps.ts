@@ -1,13 +1,16 @@
 import { definePimExtension } from "./define";
-import { GITHUB_LOGO, HUGGING_FACE_LOGO, LINEAR_LOGO, NOTION_LOGO } from "./logos";
+import { LOGOS } from "./logos";
 
 /**
  * Popular apps with remote MCP servers of their own, which each person
- * connects with their own account. GitHub's sign-in doesn't let apps
- * register themselves, so it's offered once the deployment registers an
+ * connects with their own account. Every one lets Pim register itself at
+ * sign-in except GitHub's: it's offered once the deployment registers an
  * OAuth app at github.com/settings/developers, with this Pim's
  * `/mcp/callback` as its callback URL, and sets GITHUB_CLIENT_ID and
  * GITHUB_CLIENT_SECRET.
+ *
+ * Left out, because their servers only take clients they approved: Canva,
+ * Dropbox, Figma, Ramp, Square, Vercel and Zapier.
  */
 export const popularApps = definePimExtension({
 	id: "pim.apps",
@@ -15,33 +18,243 @@ export const popularApps = definePimExtension({
 	description: "Apps people use every day, each connected with your own account.",
 	apps: [
 		{
+			id: "airtable",
+			name: "Airtable",
+			description: "Search and update records, tables and bases.",
+			url: "https://mcp.airtable.com/mcp",
+			icon: LOGOS["airtable"],
+		},
+		{
+			id: "atlassian",
+			name: "Atlassian",
+			description: "Search and update Jira issues and Confluence pages.",
+			url: "https://mcp.atlassian.com/v2/mcp",
+			icon: LOGOS["atlassian"],
+		},
+		{
+			id: "attio",
+			name: "Attio",
+			description: "Manage contacts, companies, deals, notes and tasks.",
+			url: "https://mcp.attio.com/mcp",
+			icon: LOGOS["attio"],
+		},
+		{
+			id: "cal-com",
+			name: "Cal.com",
+			description: "Manage bookings, availability and event types.",
+			url: "https://mcp.cal.com/mcp",
+			icon: LOGOS["cal-com"],
+		},
+		{
+			id: "calendly",
+			name: "Calendly",
+			description: "Check availability and book or manage meetings.",
+			url: "https://mcp.calendly.com",
+			icon: LOGOS["calendly"],
+		},
+		{
+			id: "clickup",
+			name: "ClickUp",
+			description: "Manage tasks, documents, comments and time entries.",
+			url: "https://mcp.clickup.com/mcp",
+			icon: LOGOS["clickup"],
+		},
+		{
+			id: "cloudflare",
+			name: "Cloudflare",
+			description: "Manage DNS, Workers, storage and account services.",
+			url: "https://mcp.cloudflare.com/mcp",
+			icon: LOGOS["cloudflare"],
+		},
+		// Signed in, so each person uses their own quota rather than the anonymous one.
+		{
+			id: "context7",
+			name: "Context7",
+			description: "Find library documentation and code examples.",
+			url: "https://mcp.context7.com/mcp/oauth",
+			icon: LOGOS["context7"],
+		},
+		// Signed in, so each person searches on their own quota rather than the anonymous one.
+		{
+			id: "exa",
+			name: "Exa",
+			description: "Search the web and read pages and code examples.",
+			url: "https://mcp.exa.ai/mcp?login",
+			icon: LOGOS["exa"],
+		},
+		{
+			id: "fireflies",
+			name: "Fireflies",
+			description: "Search meeting transcripts, summaries and notes.",
+			url: "https://api.fireflies.ai/mcp",
+			icon: LOGOS["fireflies"],
+		},
+		// GitHub's sign-in doesn't let apps register themselves: see above.
+		{
 			id: "github",
 			name: "GitHub",
 			description: "Repositories, issues, pull requests and Actions.",
 			url: "https://api.githubcopilot.com/mcp/",
-			icon: GITHUB_LOGO,
+			icon: LOGOS["github"],
 			client: { id: "GITHUB_CLIENT_ID", secret: "GITHUB_CLIENT_SECRET" },
 		},
 		{
-			id: "linear",
-			name: "Linear",
-			description: "Issues, projects and cycles in your workspace.",
-			url: "https://mcp.linear.app/mcp",
-			icon: LINEAR_LOGO,
+			id: "granola",
+			name: "Granola",
+			description: "Search meeting notes, transcripts and action items.",
+			url: "https://mcp.granola.ai/mcp",
+			icon: LOGOS["granola"],
 		},
+		// Team and Enterprise plans, on Hex's shared cloud (not EU, HIPAA or single-tenant hosts).
 		{
-			id: "notion",
-			name: "Notion",
-			description: "Search, read and write your pages and databases.",
-			url: "https://mcp.notion.com/mcp",
-			icon: NOTION_LOGO,
+			id: "hex",
+			name: "Hex",
+			description: "Search projects, analyze data and edit notebooks.",
+			url: "https://app.hex.tech/mcp",
+			icon: LOGOS["hex"],
 		},
 		{
 			id: "hugging-face",
 			name: "Hugging Face",
 			description: "Search models, datasets, papers and Spaces on the Hub.",
 			url: "https://huggingface.co/mcp",
-			icon: HUGGING_FACE_LOGO,
+			icon: LOGOS["hugging-face"],
+		},
+		// US workspaces; EU ones are at mcp.eu.intercom.com, and AU has none.
+		{
+			id: "intercom",
+			name: "Intercom",
+			description: "Search conversations and customer contacts.",
+			url: "https://mcp.intercom.com/mcp",
+			icon: LOGOS["intercom"],
+		},
+		{
+			id: "jotform",
+			name: "Jotform",
+			description: "Create and edit forms and review submissions.",
+			url: "https://mcp.jotform.com/",
+			icon: LOGOS["jotform"],
+		},
+		{
+			id: "klaviyo",
+			name: "Klaviyo",
+			description: "Manage campaigns, audiences and marketing reports.",
+			url: "https://mcp.klaviyo.com/mcp",
+			icon: LOGOS["klaviyo"],
+		},
+		{
+			id: "linear",
+			name: "Linear",
+			description: "Issues, projects and cycles in your workspace.",
+			url: "https://mcp.linear.app/mcp",
+			icon: LOGOS["linear"],
+		},
+		{
+			id: "make",
+			name: "Make",
+			description: "Run scenarios and manage your automations.",
+			url: "https://mcp.make.com",
+			icon: LOGOS["make"],
+		},
+		// Its 401 names no metadata, so sign-in finds it at the server's root.
+		{
+			id: "mercury",
+			name: "Mercury",
+			description: "Review balances, transactions, cards and recipients.",
+			url: "https://mcp.mercury.com/mcp",
+			icon: LOGOS["mercury"],
+		},
+		{
+			id: "miro",
+			name: "Miro",
+			description: "Search boards and create diagrams and notes.",
+			url: "https://mcp.miro.com/",
+			icon: LOGOS["miro"],
+		},
+		// Its account admin approves each sign-in's callback first, unless they turned on auto-approval.
+		{
+			id: "monday",
+			name: "monday.com",
+			description: "Manage boards, tasks and project updates.",
+			url: "https://mcp.monday.com/mcp",
+			icon: LOGOS["monday"],
+		},
+		{
+			id: "neon",
+			name: "Neon",
+			description: "Manage Postgres projects, branches and queries.",
+			url: "https://mcp.neon.tech/mcp",
+			icon: LOGOS["neon"],
+		},
+		{
+			id: "netlify",
+			name: "Netlify",
+			description: "Build, deploy and manage sites and projects.",
+			url: "https://netlify-mcp.netlify.app/mcp",
+			icon: LOGOS["netlify"],
+		},
+		{
+			id: "notion",
+			name: "Notion",
+			description: "Search, read and write your pages and databases.",
+			url: "https://mcp.notion.com/mcp",
+			icon: LOGOS["notion"],
+		},
+		{
+			id: "paypal",
+			name: "PayPal",
+			description: "Manage payments, invoices and customer records.",
+			url: "https://mcp.paypal.com/mcp",
+			icon: LOGOS["paypal"],
+		},
+		{
+			id: "posthog",
+			name: "PostHog",
+			description: "Query analytics and manage flags and experiments.",
+			url: "https://mcp.posthog.com/mcp",
+			icon: LOGOS["posthog"],
+		},
+		{
+			id: "sentry",
+			name: "Sentry",
+			description: "Find errors, investigate issues and performance.",
+			url: "https://mcp.sentry.dev/mcp",
+			icon: LOGOS["sentry"],
+		},
+		{
+			id: "stripe",
+			name: "Stripe",
+			description: "Payments, customers, subscriptions and invoices.",
+			url: "https://mcp.stripe.com",
+			icon: LOGOS["stripe"],
+		},
+		{
+			id: "supabase",
+			name: "Supabase",
+			description: "Manage databases, projects and edge functions.",
+			url: "https://mcp.supabase.com/mcp",
+			icon: LOGOS["supabase"],
+		},
+		{
+			id: "todoist",
+			name: "Todoist",
+			description: "Create, organize and complete tasks and projects.",
+			url: "https://ai.todoist.net/mcp",
+			icon: LOGOS["todoist"],
+		},
+		{
+			id: "webflow",
+			name: "Webflow",
+			description: "Manage site designs, pages and CMS content.",
+			url: "https://mcp.webflow.com/mcp",
+			icon: LOGOS["webflow"],
+		},
+		{
+			id: "wix",
+			name: "Wix",
+			description: "Manage sites, stores, bookings and business data.",
+			url: "https://mcp.wix.com/mcp",
+			icon: LOGOS["wix"],
 		},
 	],
 });

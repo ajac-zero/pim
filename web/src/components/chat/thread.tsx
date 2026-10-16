@@ -235,7 +235,7 @@ export const Thread = memo(function Thread({
 
         {empty && (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 py-16 text-center">
-            <PimMark className="size-10" />
+            <PimMark className="mb-2 h-8 w-16" />
             <p className="font-medium text-xl">
               {visit
                 ? t("visitEmptyTitle", { username: visit })

@@ -168,7 +168,7 @@ export function AppSidebar({
           {onToggleCollapse && (
             <div
               className={cn(
-                "shrink-0 overflow-hidden transition-[max-width,opacity] duration-200",
+                "ml-auto shrink-0 overflow-hidden transition-[max-width,opacity] duration-200",
                 collapsed ? "max-w-0 opacity-0" : "max-w-10 opacity-100",
               )}
             >
@@ -679,12 +679,10 @@ function SidebarLogoToggle({
           onNavigate?.();
         }
       }}
-      className={cn(
-        "group flex h-9 min-w-0 flex-1 items-center overflow-hidden rounded-lg transition-colors hover:bg-sidebar-accent",
-        !collapsed && "gap-2",
-      )}
+      className="group flex h-9 min-w-0 items-center overflow-hidden rounded-lg transition-colors hover:bg-sidebar-accent"
       aria-label={collapsed ? t("expandSidebar") : "Pim"}
     >
+      {/* The logo is the wordmark, so no "Pim" label beside it. */}
       <span className="relative flex h-9 w-10 shrink-0 items-center justify-center">
         <span
           className={cn(
@@ -692,19 +690,11 @@ function SidebarLogoToggle({
             collapsed && "group-hover:opacity-0",
           )}
         >
-          <PimMark className="size-6" />
+          <PimMark className="h-4 w-8" />
         </span>
         {collapsed && (
           <PanelLeft className="absolute inset-0 m-auto size-4.5 opacity-0 transition-opacity group-hover:opacity-100" />
         )}
-      </span>
-      <span
-        className={cn(
-          "truncate font-semibold text-[15px] transition-[max-width,opacity] duration-200",
-          collapsed ? "max-w-0 opacity-0" : "max-w-[160px] opacity-100",
-        )}
-      >
-        Pim
       </span>
     </Link>
   );
@@ -1021,23 +1011,25 @@ function PreferencesMenu({ collapsed = false }: { collapsed?: boolean }) {
   );
 }
 
+// The Pim logo: an 8×4 pixel wordmark. Size it at whole multiples of 8×4 px
+// (w-6 h-3, w-8 h-4, w-16 h-8) so the pixels stay crisp.
 export function PimMark({ className }: { className?: string }) {
   return (
     <svg
-      viewBox="0 0 32 32"
-      fill="none"
+      viewBox="0 0 8 4"
+      shapeRendering="crispEdges"
       className={className}
       aria-hidden="true"
     >
-      <rect width="32" height="32" rx="8" className="fill-primary" />
-      <path
-        d="M11 23V9h6a4.5 4.5 0 0 1 0 9h-6"
-        className="stroke-primary-foreground"
-        strokeWidth="2.25"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <circle cx="21.5" cy="22" r="1.5" className="fill-primary-foreground" />
+      <rect x="0" y="0" width="3" height="1" fill="#e48a7a" />
+      <rect x="2" y="1" width="1" height="1" fill="#e48a7a" />
+      <rect x="0" y="1" width="1" height="1" fill="#4f8eb3" />
+      <rect x="0" y="2" width="2" height="1" fill="#4f8eb3" />
+      <rect x="0" y="3" width="1" height="1" fill="#4f8eb3" />
+      <rect x="3" y="2" width="1" height="2" fill="#eab65d" />
+      <rect x="4" y="1" width="4" height="1" fill="#a88cd6" />
+      <rect x="5" y="2" width="1" height="2" fill="#a88cd6" />
+      <rect x="7" y="2" width="1" height="2" fill="#a88cd6" />
     </svg>
   );
 }

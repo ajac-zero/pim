@@ -1,11 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, notFound } from "@tanstack/react-router";
 import { Users } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { AgentIcon } from "~/components/agent-icon";
-import { PimMark, sessionTitle, useNewChat } from "~/components/app-sidebar";
+import { useNewChat } from "~/components/app-sidebar";
 import { Composer } from "~/components/chat/composer";
+import { ChatTabs } from "~/components/chat/tabs";
 import { TeamPanel } from "~/components/chat/team";
 import { Thread } from "~/components/chat/thread";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
@@ -14,7 +14,8 @@ import { Button } from "~/components/ui/button";
 import { useElementHeight } from "~/hooks/use-element-size";
 import { CHATGPT_PROVIDER, type UserContent } from "~/lib/pim-api";
 import { pimClient, usePimClient } from "~/lib/pim-client";
-import { agentsQuery, modelQuery, sessionsQuery } from "~/lib/queries";
+import { modelQuery, sessionsQuery } from "~/lib/queries";
+import { showTab } from "~/lib/tabs";
 
 export const Route = createFileRoute("/chat/$sessionId")({
   loader: async ({ context, params }) => {
@@ -49,10 +50,6 @@ function ChatPage() {
   const { sessionId } = Route.useParams();
   const { data: sessions } = useQuery(sessionsQuery());
   const session = sessions?.find((candidate) => candidate.id === sessionId);
-  const { data: agents } = useQuery(agentsQuery());
-  const agent = agents?.find(
-    (candidate) => candidate.id === session?.agent?.id,
-  );
   const { data: model } = useQuery(modelQuery());
   const onPlan = model?.model.provider === CHATGPT_PROVIDER;
 
@@ -60,6 +57,7 @@ function ChatPage() {
   // arriving elsewhere in the app; it switches when another chat opens.
   useEffect(() => {
     pimClient.open(sessionId);
+    showTab(sessionId);
   }, [sessionId]);
 
   const followed = usePimClient((state) => state.session);
@@ -68,12 +66,24 @@ function ChatPage() {
   const connection = usePimClient((state) => state.connection);
   const ready = followed === sessionId;
 
+  // Switching chats reconnects in a moment, which would flash the label and
+  // squeeze the tabs; only a connection that stays down is worth showing.
+  const [reconnecting, setReconnecting] = useState(false);
+  useEffect(() => {
+    setReconnecting(false);
+    if (!ready || connection === "open") return;
+    const timer = setTimeout(() => setReconnecting(true), 1000);
+    return () => clearTimeout(timer);
+  }, [ready, connection]);
+
   const { ref: composerOverlayRef, height: composerHeight } =
     useElementHeight<HTMLDivElement>();
   const { ref: composerCardRef, height: composerCardHeight } =
     useElementHeight<HTMLDivElement>();
 
   const send = (content: UserContent) => {
+    // A chat you've written in keeps its tab.
+    showTab(sessionId, true);
     pimClient.send(content).catch((error: Error) => toast.error(error.message));
   };
   const stop = () => {
@@ -83,30 +93,10 @@ function ChatPage() {
   return (
     <main className="flex min-h-0 min-w-0 flex-1">
       <div className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col">
-        <header className="hidden h-13 shrink-0 items-center gap-2 border-b bg-background px-4 md:flex">
-          {session?.visit ? (
-            <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground text-xs">
-              {session.visit.username.slice(0, 1).toUpperCase()}
-            </span>
-          ) : agent ? (
-            <AgentIcon
-              agent={agent}
-              tile
-              className="size-6 shrink-0 rounded-md"
-            />
-          ) : (
-            <PimMark className="h-3 w-6 shrink-0" />
-          )}
-          <span className="min-w-0 truncate font-medium text-[15px]">
-            {session ? sessionTitle(session, t) : "\u00a0"}
-          </span>
-          {session?.agent && (
-            <span className="hidden truncate text-muted-foreground text-[13px] sm:inline">
-              {session.agent.name}
-            </span>
-          )}
-          {ready && connection !== "open" && (
-            <span className="ml-auto text-muted-foreground text-[13px]">
+        <header className="hidden h-13 shrink-0 gap-2 bg-sidebar pr-4 md:flex">
+          <ChatTabs activeId={sessionId} />
+          {reconnecting && (
+            <span className="shrink-0 self-center text-muted-foreground text-[13px]">
               {t("connecting")}
             </span>
           )}
@@ -141,6 +131,7 @@ function ChatPage() {
             )}
             <Composer
               key={sessionId}
+              draftKey={sessionId}
               onSend={send}
               placeholder={
                 session?.visit

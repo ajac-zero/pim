@@ -58,6 +58,7 @@ import {
   sessionsQuery,
   visitsQuery,
 } from "~/lib/queries";
+import { closeTab } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
 type T = ReturnType<typeof useI18n>["t"];
@@ -81,6 +82,23 @@ export function useNewChat(onDone?: () => void) {
   };
 }
 
+/** Chats with an action waiting for the user's approval. */
+export function useAwaitingApproval() {
+  const { data: approvals } = useQuery(approvalsQuery());
+  return useMemo(
+    () =>
+      new Set(
+        approvals
+          ?.filter(
+            (approval) =>
+              approval.status === "pending" && !approval.requestedBy,
+          )
+          .map((approval) => approval.member?.session ?? approval.session),
+      ),
+    [approvals],
+  );
+}
+
 export function AppSidebar({
   onNavigate,
   collapsed = false,
@@ -102,20 +120,7 @@ export function AppSidebar({
   const params = useParams({ strict: false }) as { sessionId?: string };
   const activeId = params.sessionId;
   const newChat = useNewChat(onNavigate);
-
-  /* Chats with an action waiting for the user's approval. */
-  const awaitingApproval = useMemo(
-    () =>
-      new Set(
-        approvals
-          ?.filter(
-            (approval) =>
-              approval.status === "pending" && !approval.requestedBy,
-          )
-          .map((approval) => approval.member?.session ?? approval.session),
-      ),
-    [approvals],
-  );
+  const awaitingApproval = useAwaitingApproval();
   /* Requests from people in your circles, waiting on the Sharing page. */
   const guestRequests =
     approvals?.filter(
@@ -771,11 +776,11 @@ function VisitRow({
 }
 
 /** A chat holds an action waiting for the user's approval. */
-function AwaitingApprovalMark() {
+export function AwaitingApprovalMark({ className }: { className?: string }) {
   const { t } = useI18n();
   return (
     <ShieldCheck
-      className="ml-auto size-3.5 shrink-0 text-primary"
+      className={cn("ml-auto size-3.5 shrink-0 text-primary", className)}
       role="img"
       aria-label={t("awaitingApproval")}
     />
@@ -818,8 +823,16 @@ function SessionRow({
     mutationFn: () => pim.deleteSession(session.id),
     onSuccess: async () => {
       if (pimClient.getState().session === session.id) pimClient.close();
+      // The deleted chat's tab closes; the chat next to it takes its place.
+      const next = closeTab(session.id);
       await queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      if (active) await navigate({ to: "/" });
+      if (active) {
+        await navigate(
+          next
+            ? { to: "/chat/$sessionId", params: { sessionId: next } }
+            : { to: "/" },
+        );
+      }
     },
     onError: (error) => toast.error(error.message),
   });

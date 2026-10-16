@@ -165,7 +165,7 @@ export class NativeApps {
 		} catch (error) {
 			this.#fail(id, `Sign in again: ${message(error)}`);
 			this.#host.changed();
-			return { content: [{ type: "text", text: `${app.name} needs the person to connect it again from Settings → Apps.` }], isError: true };
+			return { content: [{ type: "text", text: `${app.name} needs the person to connect it again from the Apps page.` }], isError: true };
 		}
 		try {
 			const result = await tool.execute(args, { credential, secrets: this.#host.secrets(app) });

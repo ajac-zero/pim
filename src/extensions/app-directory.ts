@@ -1,4 +1,4 @@
-import { CUSTOM_APPS, type PimExtension } from "./define";
+import { CUSTOM_APPS, isNativeApp, type PimExtension } from "./define";
 
 /**
  * The apps people can connect: those the installed extensions bring, and
@@ -21,8 +21,8 @@ export type DirectoryApp = {
 	readonly ref: string;
 	readonly name: string;
 	readonly description: string;
-	/** Its remote MCP server. */
-	readonly url: string;
+	/** Its remote MCP server; null for an app its extension implements. */
+	readonly url: string | null;
 	/** Added by the admin, not brought by an extension. */
 	readonly custom: boolean;
 };
@@ -33,7 +33,13 @@ const MAX_FOUND = 8;
 export function appDirectory(extensions: readonly PimExtension[], custom: readonly CustomApp[]): DirectoryApp[] {
 	return [
 		...extensions.flatMap((extension) =>
-			(extension.apps ?? []).map(({ id, name, description, url }) => ({ ref: `${extension.id}/${id}`, name, description, url, custom: false })),
+			(extension.apps ?? []).map((app) => ({
+				ref: `${extension.id}/${app.id}`,
+				name: app.name,
+				description: app.description,
+				url: isNativeApp(app) ? null : app.url,
+				custom: false,
+			})),
 		),
 		...custom.map(({ id, name, description, url }) => ({ ref: `${CUSTOM_APPS}/${id}`, name, description, url, custom: true })),
 	];

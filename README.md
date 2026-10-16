@@ -107,6 +107,8 @@ Configuration lives in `vars` in `wrangler.jsonc`:
 
 `ratelimits` in `wrangler.jsonc` slow down sign-in attempts from one address and API requests from one person; leave them out and nothing is slowed down. Their namespace IDs must be unique in your Cloudflare account.
 
+Apps that extensions implement need secrets of their own, set with `wrangler secret put`; until they are, nobody is offered the app. The bundled Spotify app needs `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`, from an app at [developer.spotify.com](https://developer.spotify.com/dashboard) whose redirect URI is `https://<your Pim>/mcp/callback/apps`.
+
 ### Email
 
 Pim can email each person, when they ask for it or for something worth keeping, such as a report. It's off until you set it up with [Cloudflare Email Service](https://developers.cloudflare.com/email-service/): onboard a domain for Email Sending, then add to `wrangler.jsonc`
@@ -312,7 +314,7 @@ Each job is a task in [`src/utility.ts`](src/utility.ts): instructions, a cap on
 
 Apps connect through remote [MCP](https://modelcontextprotocol.io) servers: the vendor's own (many apps publish one), or one you deploy as another Worker. The `agents` SDK's MCP client handles the connection, OAuth sign-in (with dynamic client registration), token storage in the agent's database, and reconnecting after a wake.
 
-- **The directory.** People connect only the apps this Pim offers: those its extensions bring (`apps` in [an extension](docs/extensions.md#apps)), and those the admin adds in Settings → Apps → Create new app, named `custom/<app>`. Nobody connects an arbitrary server. `GET /app-directory` lists them.
+- **The directory.** People connect only the apps this Pim offers: those its extensions bring (`apps` in [an extension](docs/extensions.md#apps): MCP servers, or apps the extension implements for services without one, like the bundled Spotify app), and those the admin adds in Settings → Apps → Create new app, named `custom/<app>`. Nobody connects an arbitrary server. `GET /app-directory` lists them.
 - **One sign-in for all your agents.** Agents, blueprints and templates list apps by name (`test.ledger/notes`, `custom/acme-crm`), never by URL. You connect an app once, and every agent of yours that lists it uses that connection. Agents and templates from before the directory listed `{ name, url }`: each is read as the directory's app at that URL, and left out while the directory has none.
 - **Each agent lists its apps.** An extension's blueprint lists the apps it works with in its definition, and each of your agents can add its own (ask in chat, or click its sidebar ⋯ → Settings → Edit → Apps it works with). A chat gets the tools, instructions, and prompt entry of the apps its agent lists, and of no other, even when you connected more. Team members work with their agent's apps.
 - **Connecting.** Connect from Settings → Apps, an agent's settings modal (sidebar ⋯ → Settings), `POST /mcp` with the app's `ref`, or ask Pim: its `connect_app` tool connects one of the apps the chat's agent lists, without asking, since the agent already chose it. It can't connect anything else. If the app needs sign-in, the response (or Pim) gives you a link; the app sends you back to `/mcp/callback/<you>`.

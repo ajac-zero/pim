@@ -6,7 +6,7 @@ import { Pim as RealPim } from "../src/pim";
 import type { Mail, Mailer } from "../src/email";
 import { type Api, type Model, Type } from "@earendil-works/pi-ai";
 import { defineTool, section } from "@earendil-works/pi-durable";
-import { defineGatedAction, definePimExtension, type PimConfig } from "../src/extensions/define";
+import { defineAppTool, defineGatedAction, definePimExtension, oauth2, type PimConfig } from "../src/extensions/define";
 
 export { default, Auth, Directory, Gallery } from "../src/index";
 
@@ -99,6 +99,53 @@ export const ledger = definePimExtension({
 		{ id: "docs", name: "Docs", description: "Documentation.", url: "https://mcp.docs.example/mcp" },
 		// The real one, for `pnpm test:live`.
 		{ id: "hugging-face", name: "Hugging Face", description: "Models, datasets and skills.", url: "https://huggingface.co/mcp" },
+		// Apps the extension implements: a bank behind OAuth (its service is bank.example.test, which tests answer), and one whose secret is never set.
+		{
+			id: "bank",
+			name: "Bank",
+			description: "Balances and transfers.",
+			secrets: ["TEST_BANK_CLIENT_ID", "TEST_BANK_CLIENT_SECRET"],
+			...oauth2({
+				authorizeUrl: "https://bank.example.test/authorize",
+				tokenUrl: "https://bank.example.test/token",
+				scopes: ["balances", "transfers"],
+				clientId: "TEST_BANK_CLIENT_ID",
+				clientSecret: "TEST_BANK_CLIENT_SECRET",
+			}),
+			tools: [
+				defineAppTool({
+					name: "balance",
+					description: "The person's balances.",
+					parameters: Type.Object({}),
+					readOnly: true,
+					async execute(_args, { credential }) {
+						const response = await fetch("https://bank.example.test/balances", { headers: { authorization: `Bearer ${credential.accessToken}` } });
+						const accounts = (await response.json()) as { name: string; balance: number }[];
+						return {
+							text: accounts.map((account) => `${account.name}: ${account.balance}`).join("\n"),
+							widget: { title: "Balances", kind: "list", items: accounts.map((account) => ({ title: account.name, detail: String(account.balance) })) },
+						};
+					},
+				}),
+				defineAppTool({
+					name: "transfer",
+					description: "Move money between the person's accounts.",
+					parameters: Type.Object({ amount: Type.Number() }),
+					async execute({ amount }) {
+						return `Moved ${amount}.`;
+					},
+				}),
+			],
+		},
+		{
+			id: "vault",
+			name: "Vault",
+			description: "Never configured.",
+			secrets: ["TEST_VAULT_KEY"],
+			signIn: async () => ({ url: "https://vault.example.test" }),
+			callback: async () => ({}),
+			tools: [],
+		},
 	],
 	blueprints: [
 		{

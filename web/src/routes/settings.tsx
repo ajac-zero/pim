@@ -634,13 +634,11 @@ function AppsSection() {
         : app.state === "failed"
           ? t("appFailed")
           : t("appConnecting");
-  const unoffered = connections.filter(
-    (connection) => !directory.some((app) => app.url === connection.url),
-  );
+  const unoffered = connections.filter((connection) => connection.app === null);
   const rows = [
     ...directory.map((app) => ({
       app,
-      connection: connections.find((candidate) => candidate.url === app.url),
+      connection: connections.find((candidate) => candidate.app === app.ref),
     })),
     ...unoffered.map((connection) => ({ app: null, connection })),
   ];
@@ -715,7 +713,7 @@ function AppsSection() {
                       </a>
                     </Button>
                   )}
-                {app && !connection && (
+                {app && (!connection || connection.state === "failed") && (
                   <Button
                     variant="outline"
                     size="sm"

@@ -11,6 +11,7 @@ import {
 	type ResolvedPermission,
 	resolvePermission,
 } from "./approvals";
+import type { ToolWidget } from "./define";
 import { json, type PimServices, text } from "./services";
 
 /**
@@ -32,6 +33,8 @@ export const MCP_APPROVALS: readonly McpApproval[] = ["writes", "all", "none"];
 
 export type McpServerInfo = {
 	readonly id: string;
+	/** The app an extension implements that it connects, `<extension>/<app>`; MCP servers have none. */
+	readonly app?: string;
 	readonly name: string;
 	readonly url: string;
 	readonly state: string;
@@ -58,6 +61,8 @@ export type McpCallResult = {
 	readonly content?: readonly McpContent[];
 	readonly structuredContent?: unknown;
 	readonly isError?: boolean;
+	/** What the result shows the person, from an app an extension implements. */
+	readonly widget?: ToolWidget;
 };
 
 /** What the bridge needs from the host's MCP client. */
@@ -65,8 +70,8 @@ export type McpBridge = {
 	servers(): readonly McpServerInfo[];
 	tools(): readonly McpToolInfo[];
 	call(serverId: string, name: string, args: Record<string, unknown>): Promise<McpCallResult>;
-	/** Adds and connects a server; `authUrl` when the user must sign in first. */
-	connect(name: string, url: string): Promise<{ id: string; state: string; authUrl?: string }>;
+	/** Connects one of the directory's apps; `authUrl` when the user must sign in first. */
+	connect(app: DirectoryApp): Promise<{ id: string; state: string; authUrl?: string }>;
 	/** The server's capabilities from its handshake, or undefined while it is not connected. */
 	capabilities(serverId: string): McpCapabilities | undefined;
 	/** A raw JSON-RPC request, for MCP extensions the client SDK does not implement yet. */
@@ -216,9 +221,9 @@ export function mcpActions(bridge: McpBridge): GatedAction[] {
 export const APP_PREFIX = "pim.app.";
 export const appExtensionName = (serverId: string) => `${APP_PREFIX}${serverId}`;
 
-/** The person's connection to an app of the directory: the one to its server. */
-export function serverFor(servers: readonly McpServerInfo[], app: Pick<DirectoryApp, "url">): McpServerInfo | undefined {
-	return servers.find((server) => server.url === app.url);
+/** The person's connection to an app of the directory: the one to its server, or to the app its extension implements. */
+export function serverFor(servers: readonly McpServerInfo[], app: Pick<DirectoryApp, "ref" | "url">): McpServerInfo | undefined {
+	return servers.find((server) => (app.url === null ? server.app === app.ref : server.url === app.url));
 }
 
 /**
@@ -278,7 +283,13 @@ export function mcpExtensions(
 						});
 					}
 					const result = await bridge.call(server.id, tool.name, call.arguments);
-					return { content: toContent(result), ...(result.isError ? { isError: true } : {}) };
+					const content = toContent(result);
+					// What the result shows is kept for this chat, for the model to put under a message.
+					if (result.widget && !result.isError) {
+						const ref = services.keepWidget(String(api.conversationId), result.widget);
+						content.push({ type: "text", text: `To show the person this result, add "${ref}" to send_to_user's widgets.` });
+					}
+					return { content, ...(result.isError ? { isError: true } : {}) };
 				},
 			}) as ToolRegistration,
 		);
@@ -325,7 +336,7 @@ export function mcpExtensions(
 			const existing = serverFor(bridge.servers(), app);
 			if (existing?.state === "ready") return text(`${app.name} is already connected.`);
 			try {
-				const result = await bridge.connect(app.name, app.url);
+				const result = await bridge.connect(app);
 				if (result.authUrl) {
 					return text(`${app.name} needs the person to sign in before it can be used. Give them this link: ${result.authUrl}`);
 				}

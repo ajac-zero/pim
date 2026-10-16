@@ -27,7 +27,8 @@ export type DirectoryApp = {
   ref: string;
   name: string;
   description: string;
-  url: string;
+  /** Its MCP server; null for an app its extension implements. */
+  url: string | null;
   /** Added by the admin, not brought by an extension. */
   custom: boolean;
 };
@@ -230,6 +231,8 @@ export type Person = Profile & { templates: TemplateSummary[] };
 /** A connected app, as Pim lists them. */
 export type ConnectedApp = {
   id: string;
+  /** The directory's app it connects, by `ref`; null for one this Pim no longer offers. */
+  app: string | null;
   name: string;
   url: string;
   /** `ready`, `authenticating` (waiting for you to sign in), `failed`, or on its way. */

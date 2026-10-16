@@ -137,7 +137,7 @@ export function manageAppsAction(
 					continue;
 				}
 				try {
-					const result = await bridge.connect(app.name, app.url);
+					const result = await bridge.connect(app);
 					results.push(result.authUrl ? `${app.name} needs the person to sign in: ${result.authUrl}` : `Connected ${app.name}.`);
 				} catch (error) {
 					results.push(`${app.name} was added, but connecting failed: ${error instanceof Error ? error.message : String(error)}. Use connect_app to retry.`);

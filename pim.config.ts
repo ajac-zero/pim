@@ -1,5 +1,6 @@
 import { assistant } from "./src/extensions/assistant";
 import { definePimConfig } from "./src/extensions/define";
+import { spotifyExtension } from "./src/extensions/spotify";
 
 /**
  * This deployment's extensions: the blueprints people's agents build on, and the widgets
@@ -12,7 +13,8 @@ import { definePimConfig } from "./src/extensions/define";
  * aren't listed here.
  */
 export default definePimConfig({
-	extensions: [assistant],
+	// Spotify is offered once SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are set (see src/extensions/spotify.ts).
+	extensions: [assistant, spotifyExtension],
 	// The blueprint every new account's first agent builds on, and new agents by default: `<extension>/<blueprint>`, or null for none.
 	defaultBlueprint: "pim.assistant/pim",
 	// The color theme people see until they pick another: a theme's id, Pim's own (src/extensions/themes) or an extension's.

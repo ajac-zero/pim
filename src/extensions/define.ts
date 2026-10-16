@@ -1,8 +1,10 @@
+import type { Static, TSchema } from "@earendil-works/pi-ai";
 import type { Extension } from "@earendil-works/pi-durable";
 import type { Theme } from "../themes";
 import type { GatedAction } from "./approvals";
 
 export { defineGatedAction, type GatedAction } from "./approvals";
+export { oauth2 } from "./native-apps";
 
 /**
  * Pim extensions: what a deployment adds to every person's agents, chosen in
@@ -127,18 +129,93 @@ export function widgetMarkdown(widget: ShownWidget, locale = "en"): string {
 }
 
 /**
- * An app people connect with their own accounts: a remote MCP server. It is
- * named `<extension>/<id>`, as blueprints and people's agents list it, and
- * each person connects it once for all of their agents.
+ * An app people connect with their own accounts. It is named
+ * `<extension>/<id>`, as blueprints and people's agents list it, and each
+ * person connects it once for all of their agents. It is a remote MCP
+ * server, or the extension implements it: its sign-in and its tools.
  */
-export type AppDefinition = {
+export type AppDefinition = McpAppDefinition | NativeAppDefinition;
+
+type AppIdentity = {
 	/** Unique in its extension. Stored in people's agents: don't rename it. */
 	readonly id: string;
 	readonly name: string;
 	readonly description: string;
+};
+
+/** An app that is a remote MCP server. */
+export type McpAppDefinition = AppIdentity & {
 	/** Its remote MCP server, https. */
 	readonly url: string;
 };
+
+/** The deployment's secrets an app named in `secrets`, from the Worker's environment. */
+export type AppSecrets = Readonly<Record<string, string>>;
+
+/** A person's sign-in to an app, as its `callback` made it: JSON. With `expiresAt` (ms), Pim has `refresh` renew it first. */
+export type AppCredential = { readonly expiresAt?: number; readonly [key: string]: unknown };
+
+export type AppSignInContext = {
+	/** Where the person comes back after signing in: the same for everyone on this Pim, so it can be registered with the service. */
+	readonly callbackUrl: string;
+	/** Send it along; it comes back with the person, as `state`. */
+	readonly state: string;
+	readonly secrets: AppSecrets;
+};
+
+/** A widget a tool's result shows: a title, and data of a kind the web app draws. */
+export type ToolWidget = { readonly title: Text } & WidgetContent;
+
+export type AppToolResult = {
+	/** What the model reads. */
+	readonly text: string;
+	/** What the person can be shown: the model adds it to a message. */
+	readonly widget?: ToolWidget;
+	readonly isError?: boolean;
+};
+
+export type AppToolContext = { readonly credential: AppCredential; readonly secrets: AppSecrets };
+
+export type AppTool = {
+	/** Lowercase letters, digits and underscores; unique in its app. The model sees it as `<app>_<name>`. */
+	readonly name: string;
+	readonly description: string;
+	/** Its arguments' JSON Schema, such as a TypeBox `Type.Object`. */
+	readonly parameters: TSchema;
+	/** It only reads: it runs without asking under the default approval policy. Anything else asks first. */
+	readonly readOnly?: boolean;
+	execute(args: Record<string, unknown>, context: AppToolContext): Promise<string | AppToolResult>;
+};
+
+/**
+ * An app the extension implements, for a service with no MCP server of its
+ * own: its sign-in, run once by each person, and its tools, run in their
+ * Pim with their credential. To everything else it is an app like an MCP
+ * server: agents list it, tool permissions and approvals cover its tools.
+ */
+export type NativeAppDefinition = AppIdentity & {
+	/** The Worker's environment variables it needs, such as `SPOTIFY_CLIENT_ID`. Without all of them set, nobody is offered it. */
+	readonly secrets?: readonly string[];
+	/** Where to send the person to sign in, and what to keep until they come back (a PKCE verifier, say). */
+	signIn(context: AppSignInContext): Promise<{ readonly url: string; readonly pending?: unknown }>;
+	/** The person came back to `url`: their credential, or a throw that says what went wrong. */
+	callback(context: AppSignInContext & { readonly url: URL; readonly pending: unknown }): Promise<AppCredential>;
+	/** A credential renewed before it expires; without it, the person signs in again. */
+	refresh?(credential: AppCredential, context: { readonly secrets: AppSecrets }): Promise<AppCredential>;
+	readonly tools: readonly AppTool[];
+};
+
+export const isNativeApp = (app: AppDefinition): app is NativeAppDefinition => !("url" in app);
+
+/** Types an app tool's `execute` by its `parameters`. */
+export function defineAppTool<T extends TSchema>(
+	tool: Omit<AppTool, "parameters" | "execute"> & {
+		readonly parameters: T;
+		execute(args: Static<T>, context: AppToolContext): Promise<string | AppToolResult>;
+	},
+): AppTool {
+	return tool as unknown as AppTool;
+}
 
 export type BlueprintDefinition = {
 	/** Unique in its extension: the blueprint is named `<extension>/<id>`. */
@@ -232,8 +309,18 @@ export class PimExtensions {
 			}
 			const apps = new Set<string>();
 			for (const app of extension.apps ?? []) {
+				const ref = `${extension.id}/${app.id}`;
 				if (!ID.test(app.id) || apps.has(app.id)) throw new Error(`${extension.id} has a missing, malformed or repeated app id ${JSON.stringify(app.id)}`);
-				if (!app.name.trim() || !/^https:\/\/\S+$/.test(app.url)) throw new Error(`${extension.id}/${app.id} needs a name and an https URL`);
+				if (!app.name.trim()) throw new Error(`${ref} needs a name`);
+				if (!isNativeApp(app)) {
+					if (!/^https:\/\/\S+$/.test(app.url)) throw new Error(`${ref} needs a name and an https URL`);
+				} else {
+					const tools = new Set<string>();
+					for (const tool of app.tools) {
+						if (!/^[a-z0-9_]{1,40}$/.test(tool.name) || tools.has(tool.name)) throw new Error(`${ref} has a missing, malformed or repeated tool name ${JSON.stringify(tool.name)}`);
+						tools.add(tool.name);
+					}
+				}
 				apps.add(app.id);
 			}
 		}

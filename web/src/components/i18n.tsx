@@ -32,7 +32,7 @@ const translations = {
     suggestedAppsHint:
       "This agent's chats can use only these apps, and those of the blueprint it's based on. You connect each app once, for all your agents.",
     noAppsOffered:
-      "This Pim offers no apps yet. Its admin can add them in Settings.",
+      "This Pim offers no apps yet. Its admin can add them in Apps.",
     appName: "App",
     appUrl: "MCP server URL",
     uploadIcon: "Upload image",
@@ -626,7 +626,7 @@ const translations = {
     suggestedAppsHint:
       "Los chats de este agente solo pueden usar estas apps y las del esquema en el que se basa. Conectas cada app una vez, para todos tus agentes.",
     noAppsOffered:
-      "Este Pim aún no ofrece apps. Su administrador puede agregarlas en Ajustes.",
+      "Este Pim aún no ofrece apps. Su administrador puede agregarlas en Apps.",
     appName: "App",
     appUrl: "URL del servidor MCP",
     uploadIcon: "Subir imagen",

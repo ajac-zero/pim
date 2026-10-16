@@ -994,6 +994,13 @@ describe("the admin", () => {
 			custom: true,
 			icon: "https://www.acme.example.test/crm/static/logo.svg?v=2&x=1",
 		});
+		// The admin can give it another; only an https one.
+		const logo = "https://cdn.acme.example.test/logo.png";
+		expect((await uma.browser.json("/api/admin/apps/acme-crm", { method: "PUT", json: { icon: logo } })).status).toBe(403);
+		expect((await admin("/api/admin/apps/acme-crm", { method: "PUT", json: { icon: "javascript:alert(1)" } })).status).toBe(400);
+		expect((await admin("/api/admin/apps/acme-crm", { method: "PUT", json: { icon: logo } })).body).toMatchObject({ app: { icon: logo } });
+		expect((await admin("/api/admin/apps/nope", { method: "PUT", json: { icon: logo } })).status).toBe(404);
+		expect((await uma.browser.json("/api/app-directory")).body.apps).toContainEqual(expect.objectContaining({ ref: "custom/acme-crm", icon: logo }));
 
 		// Two of Uma's agents list it; connecting it once serves both.
 		const sales = (await uma.browser.json("/api/agents", { method: "POST", json: { name: "Sales", apps: ["custom/acme-crm"] } })).body;

@@ -14,15 +14,16 @@ export function AppIcon({
   icon: string | null | undefined;
   className?: string;
 }) {
-  const [broken, setBroken] = useState(false);
-  if (icon && !broken) {
+  // The icon that didn't load, so another one is tried.
+  const [failed, setFailed] = useState<string | null>(null);
+  if (icon && icon !== failed) {
     return (
       <img
         src={icon}
         alt=""
         referrerPolicy="no-referrer"
         className={cn("shrink-0 rounded-[22%] object-contain", className)}
-        onError={() => setBroken(true)}
+        onError={() => setFailed(icon)}
       />
     );
   }

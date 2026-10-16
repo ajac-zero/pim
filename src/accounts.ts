@@ -480,6 +480,15 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 				return json({ app }, 201);
 			}
 			const customApp = /^\/admin\/apps\/([^/]+)$/.exec(path);
+			if (customApp && request.method === "PUT") {
+				const app = await gallery(env)
+					.setCustomAppIcon(decodeURIComponent(customApp[1]!), await body())
+					.catch((error: unknown) => rpcFailure(error));
+				if (app instanceof Response) return app;
+				if (!app) return fail(404, "No such app");
+				log("app_changed", { app: app.id, by: admin.ownerId });
+				return json({ app });
+			}
 			if (customApp && request.method === "DELETE") {
 				if (!(await gallery(env).removeCustomApp(decodeURIComponent(customApp[1]!)))) return fail(404, "No such app");
 				log("app_removed", { app: customApp[1], by: admin.ownerId });

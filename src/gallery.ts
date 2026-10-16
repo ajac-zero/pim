@@ -167,6 +167,14 @@ const summaryOf = (row: Row, directory: () => readonly DirectoryApp[]): Template
 const WITH_AUTHOR =
 	"SELECT t.id, t.owner_id, t.username, t.agent_id, t.name, t.description, t.instructions, t.apps, t.team, t.blueprint, t.symbol, t.color, t.icon_data IS NOT NULL AS has_icon, t.published_at, t.uses, p.display_name FROM templates t LEFT JOIN profiles p ON p.owner_id = t.owner_id";
 
+/** An icon the admin gave: an https image URL, or null for none. */
+function iconUrl(value: unknown): string | null {
+	if (value === undefined || value === null || (typeof value === "string" && value.trim() === "")) return null;
+	const url = typeof value === "string" ? value.trim() : "";
+	if (!/^https:\/\/\S+$/.test(url) || url.length > 1000) throw new HttpError(400, "icon must be an https URL");
+	return url;
+}
+
 function optionalText(value: unknown, field: string, max: number): string | null {
 	if (value === null || value === undefined) return null;
 	if (typeof value !== "string") throw new HttpError(400, `${field} must be a string`);
@@ -230,16 +238,17 @@ export class Gallery extends DurableObject<Env> {
 			.map((row) => ({ id: String(row.id), name: String(row.name), description: String(row.description), url: String(row.url), icon: optional(row.icon) }));
 	}
 
-	/** The admin adds an app anyone on this Pim can connect: a remote MCP server, named `custom/<id>` after its name, with its site's icon. */
-	async addCustomApp(input: { name?: unknown; description?: unknown; url?: unknown }): Promise<CustomApp> {
+	/** The admin adds an app anyone on this Pim can connect: a remote MCP server, named `custom/<id>` after its name, with the icon they give or else its site's. */
+	async addCustomApp(input: { name?: unknown; description?: unknown; url?: unknown; icon?: unknown }): Promise<CustomApp> {
 		const name = optionalText(input.name, "name", MAX_APP_NAME);
 		if (name === null) throw new HttpError(400, "name is required");
 		const description = optionalText(input.description, "description", MAX_BIO) ?? "";
 		const url = typeof input.url === "string" ? input.url.trim() : "";
 		if (!/^https:\/\/\S+$/.test(url) || url.length > 500) throw new HttpError(400, "url must be an https URL");
+		const given = iconUrl(input.icon);
 		const added = () => this.customApps().some((app) => app.url === url);
 		if (added()) throw new HttpError(409, "An app with that URL is already here");
-		const icon = await findSiteIcon(url);
+		const icon = given ?? (await findSiteIcon(url));
 		// Looking took a while: the same app may have been added since.
 		if (added()) throw new HttpError(409, "An app with that URL is already here");
 		const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "app";
@@ -248,6 +257,16 @@ export class Gallery extends DurableObject<Env> {
 		for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
 		this.#sql("INSERT INTO apps (id, name, description, url, icon, created_at) VALUES (?, ?, ?, ?, ?, ?)", id, name, description, url, icon, Date.now());
 		return { id, name, description, url, icon };
+	}
+
+	/** The admin changes an app's icon; with none given, its site's is looked up again. Null when there's no such app. */
+	async setCustomAppIcon(id: string, input: { icon?: unknown }): Promise<CustomApp | null> {
+		const given = iconUrl(input.icon);
+		const app = this.customApps().find((candidate) => candidate.id === id);
+		if (!app) return null;
+		const icon = given ?? (await findSiteIcon(app.url));
+		if (this.#sql("UPDATE apps SET icon = ? WHERE id = ?", icon, id).rowsWritten === 0) return null;
+		return { ...app, icon };
 	}
 
 	/** Takes an app the admin added out of the directory. People's connections to it stay until they remove them. */

@@ -38,7 +38,7 @@ function Section({
     <section className="mt-10 space-y-3">
       <h2 className="font-medium text-muted-foreground text-sm">{title}</h2>
       {description && (
-        <p className="px-1 text-muted-foreground text-xs">{description}</p>
+        <p className="text-[13px] text-muted-foreground">{description}</p>
       )}
       {children}
     </section>
@@ -79,7 +79,7 @@ export function AccountSection() {
     },
   ];
   return (
-    <section className="mb-10 rounded-xl border bg-card p-5 shadow-xs">
+    <section className="mb-10 rounded-2xl border bg-muted/20 p-5">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h2 className="flex items-center gap-2 font-semibold">
           @{account.username}
@@ -213,13 +213,15 @@ export function PreferencesSection() {
   ];
   return (
     <Section title={t("preferences")}>
-      <label className="flex items-center gap-3 rounded-xl border px-4 py-3">
-        <span className="min-w-0 flex-1 text-sm">{t("timeZone")}</span>
+      <label className="flex flex-col gap-2 rounded-2xl border bg-muted/20 px-4 py-4">
+        <span className="text-muted-foreground text-[13px]">
+          {t("timeZone")}
+        </span>
         <select
           value={settings.timeZone}
           onChange={(event) => update.mutate({ timeZone: event.target.value })}
           disabled={update.isPending}
-          className="h-8 max-w-56 rounded-md border bg-transparent px-2 text-sm"
+          className="h-10 w-full rounded-xl border bg-background px-3 text-sm"
         >
           {zones.map((zone) => (
             <option key={zone} value={zone}>
@@ -229,11 +231,11 @@ export function PreferencesSection() {
         </select>
       </label>
       <div className="space-y-2">
-        <p className="px-1 pt-2 text-muted-foreground text-xs">
+        <p className="pt-2 text-[13px] text-muted-foreground">
           {t("approvalPolicyDescription")}
         </p>
         <ul
-          className="divide-y rounded-xl border"
+          className="divide-y overflow-hidden rounded-2xl border bg-muted/20"
           aria-label={t("approvalPolicy")}
         >
           {policies.map((policy) => (
@@ -326,9 +328,13 @@ export function TokensSection() {
   return (
     <Section title={t("apiTokens")} description={t("apiTokensDescription")}>
       {tokens.length > 0 && (
-        <ul className="divide-y rounded-xl border" aria-label={t("apiTokens")}>
+        <ul
+          className="divide-y rounded-2xl border bg-muted/20"
+          aria-label={t("apiTokens")}
+        >
           {tokens.map((token) => (
             <li key={token.id} className="flex items-center gap-3 px-4 py-3">
+              <KeyRound className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-medium text-sm">
                   {token.name}
@@ -425,10 +431,7 @@ export function DeleteAccountSection() {
   if (stillErasing) {
     return (
       <Section title={t("deleteAccount")}>
-        <div
-          role="status"
-          className="space-y-3 rounded-xl border border-destructive/30 px-4 py-3"
-        >
+        <div role="status" className="space-y-3 rounded-2xl border px-4 py-3">
           <p className="font-medium text-sm">{t("accountClosedTitle")}</p>
           <p className="text-muted-foreground text-sm">
             {t("accountClosedBody")}
@@ -442,7 +445,7 @@ export function DeleteAccountSection() {
   }
   return (
     <Section title={t("deleteAccount")}>
-      <div className="space-y-3 rounded-xl border border-destructive/30 px-4 py-3">
+      <div className="space-y-3 rounded-2xl border px-4 py-3">
         <p className="flex items-start gap-2 text-sm">
           <ShieldAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
           {t("deleteAccountBody", { username: account.username })}
@@ -476,7 +479,7 @@ export function DeleteAccountSection() {
           </form>
         ) : (
           <Button
-            variant="outline"
+            variant="destructive"
             className="text-destructive"
             onClick={() => setConfirming(true)}
           >

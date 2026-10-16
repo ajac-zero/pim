@@ -1,6 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { Bot } from "lucide-react";
 import { AgentIcon } from "~/components/agent-icon";
 import { Composer } from "~/components/chat/composer";
 import { useI18n } from "~/components/i18n";
@@ -30,20 +29,20 @@ function DashboardPage() {
   const { agent, starters, widgets } = data;
   return (
     <main className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-      <div className="mx-auto w-full max-w-4xl px-4 py-8 md:py-12">
-        <header className="mb-6 flex items-center gap-3">
-          <AgentIcon agent={agent} className="size-12" />
+      <div className="mx-auto w-full max-w-3xl px-4 py-8 md:py-12">
+        <header className="mb-6 flex flex-col items-center gap-4 text-center">
+          <AgentIcon agent={agent} className="size-20" />
           <div className="min-w-0">
-            <h1 className="flex items-center gap-2 font-semibold text-2xl">
+            <h1 className="flex items-center justify-center gap-2 font-semibold text-xl">
               <span className="truncate">{agent.name}</span>
               {agent.default && (
-                <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
+                <span className="shrink-0 rounded-full bg-secondary px-2 py-0.5 font-normal text-muted-foreground text-[13px]">
                   {t("defaultAgent")}
                 </span>
               )}
             </h1>
             {agent.description && (
-              <p className="truncate text-muted-foreground text-sm">
+              <p className="mt-2 text-muted-foreground text-[15px]">
                 {agent.description}
               </p>
             )}
@@ -58,8 +57,7 @@ function DashboardPage() {
           disclaimer={null}
         />
         {widgets.length === 0 ? (
-          <div className="mt-8 flex flex-col items-center gap-2 rounded-xl border border-dashed px-4 py-10 text-center text-muted-foreground text-sm">
-            <Bot className="size-5" />
+          <div className="mt-8 px-4 py-10 text-center text-muted-foreground text-sm">
             {t("noDashboard")}
           </div>
         ) : (

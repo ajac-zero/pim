@@ -17,6 +17,7 @@ import { toast } from "sonner";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import { Action, Actions } from "~/components/ui/actions";
+import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { CodeBlock } from "~/components/ui/code-block";
 import {
@@ -78,7 +79,10 @@ export const UserMessage = memo(function UserMessage({
         });
 
   return (
-    <div className="group/user relative flex w-full flex-col items-end gap-1.5 pr-9">
+    <div
+      data-speaker="user"
+      className="group/user relative flex w-full flex-col items-end gap-1.5 pr-9"
+    >
       {images.length > 0 && (
         <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
           {images.map((src, index) => (
@@ -93,7 +97,7 @@ export const UserMessage = memo(function UserMessage({
         </div>
       )}
       {text.length > 0 && (
-        <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-3xl bg-secondary px-4 py-2.5 text-[15px] text-secondary-foreground leading-6">
+        <div className="max-w-[88%] md:max-w-[80%] whitespace-pre-wrap break-words rounded-2xl bg-primary px-4 py-3 text-[15px] text-primary-foreground leading-6">
           {text}
         </div>
       )}
@@ -135,18 +139,23 @@ export const AssistantMessage = memo(function AssistantMessage({
   const { copied, copy } = useCopy(text);
 
   return (
-    <div className="group/assistant relative w-full pr-9">
-      <Markdown text={text} streaming={streaming} />
-      {streaming && (
-        <span className="ml-0.5 inline-block h-4 w-2 animate-pulse rounded-sm bg-foreground/70 align-text-bottom" />
-      )}
-      {attachments}
-      {notified && !streaming && (
-        <p className="mt-1.5 flex items-center gap-1.5 text-muted-foreground text-xs">
-          <Bell className="size-3.5 shrink-0" />
-          {t("alsoNotified")}
-        </p>
-      )}
+    <div
+      data-speaker="assistant"
+      className="group/assistant relative w-full pr-9"
+    >
+      <div className="w-fit min-w-0 max-w-full md:max-w-[85%] rounded-2xl bg-muted px-4 py-3">
+        <Markdown text={text} streaming={streaming} />
+        {streaming && (
+          <span className="ml-0.5 inline-block h-4 w-2 animate-pulse rounded-sm bg-foreground/70 align-text-bottom" />
+        )}
+        {attachments}
+        {notified && !streaming && (
+          <p className="mt-1.5 flex items-center gap-1.5 text-muted-foreground text-xs">
+            <Bell className="size-3.5 shrink-0" />
+            {t("alsoNotified")}
+          </p>
+        )}
+      </div>
       {!streaming && (
         <Actions className="absolute top-0 right-0 gap-0.5 opacity-0 transition-opacity group-focus-within/assistant:opacity-100 group-hover/assistant:opacity-100">
           <Action
@@ -179,7 +188,7 @@ export const EmailedMessage = memo(function EmailedMessage({
 }) {
   const { t } = useI18n();
   return (
-    <Collapsible className="w-full rounded-xl border bg-card px-4 py-3">
+    <Collapsible className="w-full rounded-2xl bg-muted px-4 py-3">
       <CollapsibleTrigger className="group flex w-full min-w-0 items-center gap-2 text-left text-sm">
         <Mail className="size-4 shrink-0 text-muted-foreground" />
         <span className="shrink-0 text-muted-foreground">
@@ -221,7 +230,7 @@ export const EventNotice = memo(function EventNotice({
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="inline-flex max-w-full items-center gap-1.5 rounded-full border bg-card px-3 py-1 text-muted-foreground text-xs transition-colors hover:bg-accent/50"
+        className="inline-flex max-w-full items-center gap-1.5 px-3 py-1 text-muted-foreground text-[13px] transition-colors hover:text-foreground"
       >
         <Icon className="size-3.5 shrink-0" />
         <span className="truncate">{notice.title}</span>
@@ -288,35 +297,37 @@ export const ApprovalBlock = memo(function ApprovalBlock({
     : approval.member
       ? t("memberAsked", { member: approval.member.name })
       : null;
-  const heading =
-    asker === null ? status : pending ? asker : `${asker} · ${status}`;
   const view = useMemo(() => approvalView(approval), [approval]);
   const hasDetails = view.fields.length > 0 || approval.result !== null;
 
   return (
-    <article
-      className={cn(
-        "w-full min-w-0 rounded-xl border bg-card px-4 py-3",
-        pending && "border-primary/40 shadow-xs",
-      )}
-    >
-      <div
-        className={cn(
-          "flex items-center gap-2 font-medium text-xs",
-          pending && "text-muted-foreground",
-          approved && "text-green-600 dark:text-green-500",
-          approval.status === "denied" && "text-destructive",
-        )}
-      >
-        <StatusIcon className="size-3.5 shrink-0" />
-        {heading}
+    <article className="w-full min-w-0 rounded-2xl bg-muted px-4 py-4">
+      <div className="flex flex-col-reverse items-start gap-2 sm:flex-row sm:justify-between">
+        <p
+          className="min-w-0 flex-1 font-medium text-[15px] [overflow-wrap:anywhere]"
+          title={view.title}
+        >
+          {view.title}
+        </p>
+        <Badge
+          variant={approved ? "success" : "secondary"}
+          className={cn(
+            "gap-1.5",
+            !approved && "bg-background",
+            approval.status === "denied" && "text-destructive",
+          )}
+        >
+          {approved ? (
+            <span className="size-1.5 rounded-full bg-current" />
+          ) : (
+            <StatusIcon className="size-3.5 shrink-0" />
+          )}
+          {status}
+        </Badge>
       </div>
-      <p
-        className="mt-1.5 line-clamp-3 font-medium text-sm [overflow-wrap:anywhere]"
-        title={view.title}
-      >
-        {view.title}
-      </p>
+      {asker && (
+        <p className="mt-1 text-muted-foreground text-[13px]">{asker}</p>
+      )}
       {approval.note && (
         <p className="mt-1 text-muted-foreground text-sm [overflow-wrap:anywhere]">
           “{approval.note}”
@@ -340,13 +351,12 @@ export const ApprovalBlock = memo(function ApprovalBlock({
             </Collapsible>
           )}
       {pending && (
-        <div className="mt-3 flex gap-2">
+        <div className="mt-4 flex flex-wrap justify-end gap-2">
           {/* The countdown sits on the button the timeout will press. */}
           <Button
             variant="outline"
             onClick={() => decide.mutate("deny")}
             disabled={decide.isPending}
-            className="flex-1"
           >
             {/* A guest's request waits a day: no countdown for that. */}
             {approval.expiresAt !== null &&
@@ -362,14 +372,11 @@ export const ApprovalBlock = memo(function ApprovalBlock({
             {t("deny")}
           </Button>
           {/* Approve, with "always" one step away in its menu rather than a button of its own. */}
-          <div className="flex flex-1">
+          <div className="flex">
             <Button
               onClick={() => decide.mutate("approve")}
               disabled={decide.isPending}
-              className={cn(
-                "flex-1",
-                approval.tool !== null && "rounded-r-none",
-              )}
+              className={cn(approval.tool !== null && "rounded-r-none pr-3")}
             >
               {approval.expiresAt !== null && approval.onTimeout !== "deny" ? (
                 <CountdownRing
@@ -545,8 +552,10 @@ function ApprovalResult({ result }: { result: string }) {
 
 export function ThinkingDot() {
   return (
-    <div className="flex h-7 items-center">
-      <span className="size-3 animate-pulse rounded-full bg-foreground/80" />
+    <div className="flex w-fit items-center gap-1 rounded-2xl bg-muted px-4 py-3 text-muted-foreground">
+      <span className="size-1.5 animate-pulse rounded-full bg-current motion-reduce:animate-none" />
+      <span className="size-1.5 animate-pulse rounded-full bg-current [animation-delay:150ms] motion-reduce:animate-none" />
+      <span className="size-1.5 animate-pulse rounded-full bg-current [animation-delay:300ms] motion-reduce:animate-none" />
     </div>
   );
 }

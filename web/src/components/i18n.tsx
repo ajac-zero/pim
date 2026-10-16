@@ -86,8 +86,6 @@ const translations = {
     madeDefault:
       "{name} is your default agent now. Your chats stay with the agents they were started with.",
     agentDashboard: "{name}'s dashboard",
-    showChatsOf: "Show {name}'s chats",
-    hideChatsOf: "Hide {name}'s chats",
     noDashboard:
       "This agent has no dashboard. Agents based on a blueprint an extension brings get its dashboard.",
     widgetFailed: "This couldn't load. Try again later.",
@@ -198,7 +196,6 @@ const translations = {
     cancelRename: "Cancel rename",
     chatNotFound: "This chat doesn't exist.",
     chatOptions: "Chat options",
-    chats: "Chats",
     close: "Close",
     collapseSidebar: "Collapse sidebar",
     completed: "Completed",
@@ -240,6 +237,8 @@ const translations = {
     newChat: "New chat",
     noChatsMatch: "No chats match your search.",
     noChatsYet: "No chats yet.",
+    sidebarShowAll: "Show all",
+    sidebarShowLess: "Show less",
     newChatWith: "New chat with {name}",
     team: "Team",
     teamHint:
@@ -628,8 +627,6 @@ const translations = {
     madeDefault:
       "{name} es ahora tu agente predeterminado. Tus chats siguen con los agentes con que empezaron.",
     agentDashboard: "Panel de {name}",
-    showChatsOf: "Mostrar los chats de {name}",
-    hideChatsOf: "Ocultar los chats de {name}",
     noDashboard:
       "Este agente no tiene panel. Los agentes basados en un esquema que trae una extensión tienen su panel.",
     widgetFailed: "No se pudo cargar. Inténtalo más tarde.",
@@ -741,7 +738,6 @@ const translations = {
     cancelRename: "Cancelar cambio de nombre",
     chatNotFound: "Este chat no existe.",
     chatOptions: "Opciones del chat",
-    chats: "Chats",
     close: "Cerrar",
     collapseSidebar: "Contraer barra lateral",
     completed: "Completado",
@@ -783,6 +779,8 @@ const translations = {
     newChat: "Nuevo chat",
     noChatsMatch: "Ningún chat coincide con la búsqueda.",
     noChatsYet: "Aún no hay chats.",
+    sidebarShowAll: "Mostrar todos",
+    sidebarShowLess: "Mostrar menos",
     newChatWith: "Nuevo chat con {name}",
     team: "Equipo",
     teamHint:

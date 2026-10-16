@@ -1,5 +1,4 @@
 import { type ErrorComponentProps, useRouter } from "@tanstack/react-router";
-import { AlertCircle } from "lucide-react";
 import { useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
 import { SignInRequired } from "~/lib/pim-api";
@@ -11,15 +10,14 @@ export function RouteError({ error, reset }: ErrorComponentProps) {
   const signIn = error instanceof SignInRequired;
   return (
     <main className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-      <AlertCircle className="size-6 text-muted-foreground" />
-      <p className="font-medium">
+      <p className="font-medium text-[15px]">
         {signIn ? t("signInExpired") : t("couldNotReachPim")}
       </p>
-      <p className="max-w-md text-muted-foreground text-sm">
+      <p className="max-w-md text-[13px] text-muted-foreground">
         {error instanceof Error ? error.message : String(error)}
       </p>
       <Button
-        variant="outline"
+        variant="secondary"
         // Invalidating reruns the failed loader, not just the boundary;
         // reset retries whatever else failed (the sign-in check).
         onClick={() => {

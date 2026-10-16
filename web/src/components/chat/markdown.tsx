@@ -147,7 +147,7 @@ export const Markdown = memo(function Markdown({
   return (
     <div
       className={cn(
-        "max-w-none break-words text-[15px] leading-7",
+        "min-w-0 max-w-full break-words text-[15px] leading-6 [overflow-wrap:anywhere]",
         "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
         className,
       )}
@@ -192,13 +192,13 @@ export const Markdown = memo(function Markdown({
                 href={href}
                 target="_blank"
                 rel="noreferrer noopener"
-                className="font-medium text-foreground underline decoration-muted-foreground/50 underline-offset-2 transition-colors hover:decoration-foreground"
+                className="text-link underline underline-offset-2 transition-colors hover:decoration-foreground"
               >
                 {children}
               </a>
             ),
           table: ({ children }) => (
-            <div className="my-4 overflow-x-auto rounded-lg border scrollbar-thin">
+            <div className="my-4 max-w-full overflow-x-auto rounded-xl bg-background scrollbar-thin">
               <table className="w-full border-collapse text-sm">
                 {children}
               </table>
@@ -222,7 +222,7 @@ export const Markdown = memo(function Markdown({
           // inline content.
           inlineCode: ({ children, ...props }) => (
             <code
-              className="rounded-md border bg-muted px-1.5 py-0.5 font-mono text-[0.85em]"
+              className="rounded-md bg-background/80 px-1.5 py-0.5 font-mono text-[0.875em] text-destructive"
               {...props}
             >
               {children}

@@ -109,7 +109,10 @@ function ModelChoices({ settings }: { settings: ModelSettings }) {
 
   return (
     <div className="space-y-2">
-      <ul className="divide-y rounded-xl border" aria-label={t("model")}>
+      <ul
+        className="divide-y overflow-hidden rounded-2xl border bg-muted/20"
+        aria-label={t("model")}
+      >
         {settings.choices.map((choice) => {
           const selected =
             choice.provider === current.provider && choice.id === current.id;
@@ -129,7 +132,7 @@ function ModelChoices({ settings }: { settings: ModelSettings }) {
                 {plan ? (
                   <ChatGPTLogo className="size-5 shrink-0" />
                 ) : (
-                  <span className="flex size-5 shrink-0 items-center justify-center rounded bg-orange-500 font-bold text-[10px] text-white">
+                  <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-muted font-medium text-muted-foreground text-xs">
                     CF
                   </span>
                 )}
@@ -153,12 +156,12 @@ function ModelChoices({ settings }: { settings: ModelSettings }) {
         })}
       </ul>
       {!settings.chatgpt.connected && (
-        <p className="px-1 text-muted-foreground text-xs">
+        <p className="text-[13px] text-muted-foreground">
           {t("connectForMoreModels")}
         </p>
       )}
       {settings.chatgpt.error && (
-        <p className="flex items-start gap-2 px-1 text-destructive text-xs">
+        <p className="flex items-start gap-2 text-[13px] text-destructive">
           <AlertCircle className="mt-px size-3.5 shrink-0" />
           {t("couldNotListModels", { error: settings.chatgpt.error })}
         </p>
@@ -229,7 +232,7 @@ function ChatGPTCard({ settings }: { settings: ModelSettings }) {
   }
 
   return (
-    <section className="rounded-xl border bg-card p-5 shadow-xs">
+    <section className="mt-10 rounded-2xl border bg-muted/20 p-5">
       <div className="flex items-start gap-3">
         <ChatGPTLogo className="mt-0.5 size-6 shrink-0" />
         <div className="min-w-0 flex-1">
@@ -310,7 +313,7 @@ function ChatGPTCard({ settings }: { settings: ModelSettings }) {
         </form>
       ) : (
         <Button
-          className="mt-4 bg-black text-white hover:bg-black/85 dark:bg-white dark:text-black dark:hover:bg-white/85"
+          className="mt-4"
           onClick={() => start.mutate()}
           disabled={start.isPending}
         >
@@ -358,12 +361,17 @@ function ProfileSection() {
       <h2 className="font-medium text-muted-foreground text-sm">
         {t("profile")}
       </h2>
-      <p className="px-1 text-muted-foreground text-xs">
+      <p className="text-[13px] text-muted-foreground">
         {t("profileDescription")}
       </p>
-      <form onSubmit={submit} className="space-y-3 rounded-xl border px-4 py-4">
+      <form
+        onSubmit={submit}
+        className="space-y-4 rounded-2xl border bg-muted/20 p-4"
+      >
         <label className="block space-y-1">
-          <span className="font-medium text-sm">{t("displayName")}</span>
+          <span className="text-muted-foreground text-[13px]">
+            {t("displayName")}
+          </span>
           <Input
             value={value.displayName}
             onChange={(event) =>
@@ -374,7 +382,7 @@ function ProfileSection() {
           />
         </label>
         <label className="block space-y-1">
-          <span className="font-medium text-sm">{t("bio")}</span>
+          <span className="text-muted-foreground text-[13px]">{t("bio")}</span>
           <Input
             value={value.bio}
             onChange={(event) =>
@@ -425,21 +433,21 @@ function ConnectedAppsSection() {
       <h2 className="font-medium text-muted-foreground text-sm">
         {t("connectedApps")}
       </h2>
-      <p className="px-1 text-muted-foreground text-xs">
+      <p className="text-[13px] text-muted-foreground">
         {t("connectedAppsDescription")}
       </p>
       {apps.length === 0 ? (
-        <p className="rounded-xl border px-4 py-3 text-muted-foreground text-sm">
+        <p className="py-3 text-muted-foreground text-sm">
           {t("noConnectedApps")}
         </p>
       ) : (
         <ul
-          className="divide-y rounded-xl border"
+          className="divide-y rounded-2xl border bg-muted/20"
           aria-label={t("connectedApps")}
         >
           {apps.map((app) => (
             <li key={app.id} className="flex items-center gap-3 px-4 py-3">
-              <Plug className="size-4 shrink-0 text-muted-foreground" />
+              <Plug className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-2">
                   <span className="truncate font-medium text-sm">
@@ -449,7 +457,7 @@ function ConnectedAppsSection() {
                     className={cn(
                       "shrink-0 rounded border px-1 text-[10px]",
                       app.state === "ready"
-                        ? "text-green-700 dark:text-green-500"
+                        ? "text-success"
                         : app.state === "failed"
                           ? "text-destructive"
                           : "text-muted-foreground",
@@ -507,7 +515,7 @@ function ToolPermissionsSection() {
       <h2 className="font-medium text-muted-foreground text-sm">
         {t("toolPermissions")}
       </h2>
-      <p className="px-1 text-muted-foreground text-xs">
+      <p className="text-[13px] text-muted-foreground">
         {t("toolPermissionsDescription")}
       </p>
       <ToolPermissionList />
@@ -547,7 +555,7 @@ function EmailSection() {
       <h2 className="font-medium text-muted-foreground text-sm">
         {t("emailTitle")}
       </h2>
-      <p className="px-1 text-muted-foreground text-xs">
+      <p className="text-[13px] text-muted-foreground">
         {t("emailDescription")}
       </p>
       {email.address && !email.pending ? (
@@ -647,7 +655,7 @@ function PushSection() {
       <h2 className="font-medium text-muted-foreground text-sm">
         {t("pushNotifications")}
       </h2>
-      <div className="flex items-center gap-3 rounded-xl border px-4 py-3">
+      <div className="flex items-center gap-3 rounded-2xl border bg-muted/20 p-4">
         <p className="min-w-0 flex-1 text-sm">{t("pushDescription")}</p>
         <Switch
           checked={enabled}
@@ -657,7 +665,7 @@ function PushSection() {
         />
       </div>
       {(!supported || blocked) && (
-        <p className="px-1 text-muted-foreground text-xs">
+        <p className="text-[13px] text-muted-foreground">
           {t(supported ? "pushBlocked" : "pushUnsupported")}
         </p>
       )}
@@ -702,12 +710,15 @@ function PasskeysSection() {
       <h2 className="font-medium text-muted-foreground text-sm">
         {t("passkeys")}
       </h2>
-      <p className="px-1 text-muted-foreground text-xs">
+      <p className="text-[13px] text-muted-foreground">
         {t("passkeysDescription")}
       </p>
       <AddDevice />
       {passkeys && passkeys.length > 0 && (
-        <ul className="divide-y rounded-xl border" aria-label={t("passkeys")}>
+        <ul
+          className="divide-y rounded-2xl border bg-muted/20"
+          aria-label={t("passkeys")}
+        >
           {passkeys.map((passkey) => (
             <PasskeyRow
               key={passkey.id}
@@ -759,7 +770,7 @@ function PasskeyRow({
     formatDate(new Date(time), { dateStyle: "medium" });
   return (
     <li className="flex items-center gap-3 px-4 py-3">
-      <KeyRound className="size-5 shrink-0 text-muted-foreground" />
+      <KeyRound className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
       <span className="min-w-0 flex-1">
         <span className="block truncate font-medium text-sm">
           {passkey.name}

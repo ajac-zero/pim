@@ -599,7 +599,7 @@ export const PromptInputSubmit = ({
   return (
     <Button
       aria-label={isGenerating ? t("stopGenerating") : t("sendMessage")}
-      className={cn("size-9 shrink-0 rounded-full", className)}
+      className={cn("size-9 shrink-0 rounded-full disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100", className)}
       onClick={handleClick}
       size="icon"
       type={isGenerating && onStop ? "button" : "submit"}

@@ -92,7 +92,7 @@ function CirclesSection() {
         {t("circles")}
       </h2>
       {circles?.length === 0 && (
-        <p className="px-1 text-muted-foreground text-xs">{t("noCircles")}</p>
+        <p className="text-[13px] text-muted-foreground">{t("noCircles")}</p>
       )}
       {circles?.map((circle) => (
         <CircleCard key={circle.id} circle={circle} />
@@ -149,7 +149,10 @@ function CircleCard({ circle }: { circle: Circle }) {
   };
 
   return (
-    <article className="rounded-xl border" aria-label={circle.name}>
+    <article
+      className="rounded-2xl border bg-muted/20"
+      aria-label={circle.name}
+    >
       <header className="flex items-center gap-3 px-4 py-3">
         <span className="min-w-0 flex-1">
           <span className="block truncate font-medium text-sm">
@@ -209,6 +212,12 @@ function CircleCard({ circle }: { circle: Circle }) {
                 key={member.ownerId}
                 className="flex items-center gap-1 rounded-full border py-0.5 pr-1 pl-2.5 text-sm"
               >
+                <span
+                  className="flex size-7 items-center justify-center rounded-full bg-muted text-muted-foreground"
+                  aria-hidden="true"
+                >
+                  {member.username.slice(0, 1).toUpperCase()}
+                </span>
                 {member.username}
                 <button
                   type="button"

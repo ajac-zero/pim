@@ -76,13 +76,13 @@ export function AgentSettingsDialog({
     <Dialog.Root open={open} onOpenChange={setOpen}>
       {children && <Dialog.Trigger asChild>{children}</Dialog.Trigger>}
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
         <Dialog.Content
           aria-describedby={undefined}
           onCloseAutoFocus={onCloseAutoFocus}
-          className="fixed top-1/2 left-1/2 z-50 max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-2xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border bg-background p-4 shadow-lg sm:p-6"
+          className="fixed top-1/2 left-1/2 z-50 max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border bg-background p-5 shadow-xl sm:p-8"
         >
-          <Dialog.Title className="mb-4 pr-8 font-semibold text-lg">
+          <Dialog.Title className="mb-6 pr-8 font-semibold text-xl">
             {agent ? t("agentSettings", { name: agent.name }) : t("newAgent")}
           </Dialog.Title>
           {agent ? (
@@ -212,7 +212,7 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
               </span>
             )}
             {agent.published && (
-              <span className="flex items-center gap-1 text-green-700 dark:text-green-500">
+              <span className="flex items-center gap-1 text-success">
                 <Globe className="size-3" /> {t("published")}
               </span>
             )}
@@ -569,9 +569,10 @@ function AgentForm({
   return (
     <form
       onSubmit={submit}
-      className="space-y-3 rounded-xl border px-4 py-4"
+      className="space-y-5 [&_legend]:text-[13px] [&_legend]:text-muted-foreground [&_label>span]:font-normal [&_label>span]:text-[13px] [&_label>span]:text-muted-foreground [&_textarea]:rounded-xl"
       aria-label={agent ? t("editAgent") : t("newAgent")}
     >
+      <AgentLookPicker agent={agent} value={look} onChange={setLook} />
       <label className="block space-y-1">
         <span className="font-medium text-sm">{t("agentName")}</span>
         <Input
@@ -593,7 +594,6 @@ function AgentForm({
           maxLength={280}
         />
       </label>
-      <AgentLookPicker agent={agent} value={look} onChange={setLook} />
       <BaseSelect
         value={value.blueprint}
         onChange={(blueprint) => setValue({ ...value, blueprint })}
@@ -753,11 +753,11 @@ function AgentForm({
           </Button>
         )}
       </fieldset>
-      <div className="flex justify-end gap-2">
-        <Button type="button" variant="ghost" onClick={onCancel}>
+      <div className="flex justify-between gap-2 border-t pt-5">
+        <Button type="button" variant="secondary" onClick={onCancel}>
           {t("cancel")}
         </Button>
-        <Button type="submit" disabled={save.isPending}>
+        <Button type="submit" disabled={save.isPending || !value.name.trim()}>
           {t("save")}
         </Button>
       </div>

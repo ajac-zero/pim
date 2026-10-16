@@ -30,8 +30,8 @@ export function Page({
 }) {
   return (
     <main className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-      <div className="mx-auto w-full max-w-3xl px-4 py-8 md:py-12">
-        <h1 className="flex items-center gap-3 font-semibold text-2xl">
+      <div className="mx-auto w-full max-w-[768px] px-6 py-8 md:py-12">
+        <h1 className="flex items-center gap-3 font-semibold text-xl">
           {icon}
           {title}
         </h1>
@@ -44,8 +44,8 @@ export function Page({
 
 export function EmptyState({ icon, text }: { icon: ReactNode; text: string }) {
   return (
-    <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed px-4 py-10 text-center text-muted-foreground text-sm">
-      {icon}
+    <div className="flex items-center gap-2 py-6 text-muted-foreground text-sm">
+      <span className="[&>svg]:size-4">{icon}</span>
       {text}
     </div>
   );

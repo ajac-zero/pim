@@ -257,11 +257,11 @@ export function ArtifactCard({ reference }: { reference: ArtifactReference }) {
   const { data, error } = useQuery(artifactQuery(reference.id));
   const deleted = error instanceof ApiError && error.status === 404;
   return (
-    <div className="mb-4 w-full overflow-hidden rounded-xl border bg-card">
-      <div className="flex items-center gap-2 border-b px-3 py-2">
+    <div className="mb-4 w-full overflow-hidden rounded-2xl border bg-background">
+      <div className="flex items-center gap-3 border-b px-4 py-3">
         <ArtifactIcon
           kind={reference.kind}
-          className="size-4 shrink-0 text-muted-foreground"
+          className="size-10 shrink-0 rounded-lg bg-muted p-2.5 text-muted-foreground"
         />
         <span className="min-w-0 flex-1 truncate font-medium text-sm">
           {data?.title ?? reference.title}

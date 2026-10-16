@@ -60,7 +60,7 @@ export function ToolPermissionList({ circle }: { circle?: string }) {
         <Collapsible
           key={app}
           defaultOpen={infos.length <= 10}
-          className="rounded-xl border"
+          className="overflow-hidden rounded-2xl border bg-muted/20"
         >
           <CollapsibleTrigger className="group flex w-full items-center gap-2 px-4 py-3 text-left">
             <span className="min-w-0 flex-1 truncate font-medium text-sm">
@@ -140,7 +140,7 @@ function ToolPermissionRow({
           </span>
         )}
         {info.changed && (
-          <span className="mt-1 flex items-start gap-1.5 text-amber-600 text-xs dark:text-amber-400">
+          <span className="mt-1 flex items-start gap-1.5 text-muted-foreground text-xs">
             <AlertCircle className="mt-px size-3.5 shrink-0" />
             {t(forCircle ? "toolChangedCircle" : "toolChanged")}
           </span>
@@ -163,7 +163,7 @@ function ToolPermissionRow({
         <span
           role="group"
           aria-label={t("permissionFor", { tool: label })}
-          className="inline-flex rounded-lg border p-0.5"
+          className="inline-flex rounded-full border bg-background p-0.5"
         >
           {info.choices.map((choice) => {
             const selected = info.permission === choice;
@@ -178,9 +178,9 @@ function ToolPermissionRow({
                   (!selected || info.changed) && onChoose(choice)
                 }
                 className={cn(
-                  "rounded-md px-2.5 py-1 text-xs transition-colors disabled:opacity-60",
+                  "rounded-full px-3 py-1.5 text-[13px] transition-colors disabled:opacity-60",
                   selected
-                    ? "bg-primary text-primary-foreground"
+                    ? "bg-muted text-foreground"
                     : "text-muted-foreground hover:bg-accent hover:text-foreground",
                 )}
               >

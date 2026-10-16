@@ -96,10 +96,13 @@ export function MembersSection() {
       <h2 className="font-medium text-muted-foreground text-sm">
         {t("members")}
       </h2>
-      <p className="px-1 text-muted-foreground text-xs">
+      <p className="text-[13px] text-muted-foreground">
         {t("membersDescription")}
       </p>
-      <ul className="divide-y rounded-xl border" aria-label={t("members")}>
+      <ul
+        className="divide-y rounded-2xl border bg-muted/20"
+        aria-label={t("members")}
+      >
         {listed.map((member) => (
           <MemberRow
             key={member.ownerId}
@@ -179,6 +182,12 @@ function MemberRow({
   const manageable = !self && member.status !== "deleting";
   return (
     <li className="flex flex-wrap items-center gap-3 px-4 py-3">
+      <span
+        className="flex size-11 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
+        aria-hidden="true"
+      >
+        {member.username.slice(0, 1).toUpperCase()}
+      </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate font-medium text-sm">
           @{member.username}

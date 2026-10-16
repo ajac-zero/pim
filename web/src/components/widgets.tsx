@@ -19,10 +19,10 @@ export function WidgetCard({ widget }: { widget: Widget }) {
   const { t } = useI18n();
   return (
     <section
-      className="flex min-w-0 flex-col rounded-xl border bg-card px-4 py-3"
+      className="flex min-w-0 flex-col rounded-2xl bg-muted px-4 py-4"
       aria-label={widget.title}
     >
-      <h2 className="mb-2 font-medium text-sm">{widget.title}</h2>
+      <h2 className="mb-2 text-muted-foreground text-[13px]">{widget.title}</h2>
       {"failed" in widget ? (
         <p className="text-muted-foreground text-sm">{t("widgetFailed")}</p>
       ) : widget.items.length === 0 ? (
@@ -53,7 +53,7 @@ function ListRow({ item }: { item: WidgetListItem }) {
     <li>
       <ItemLink link={item.link}>
         <span className="min-w-0 flex-1">
-          <span className="line-clamp-2 text-sm">{item.title}</span>
+          <span className="line-clamp-2 text-[15px]">{item.title}</span>
           {item.detail && (
             <span className="block truncate text-muted-foreground text-xs">
               {item.detail}
@@ -80,7 +80,7 @@ function ProgressRow({ item }: { item: WidgetProgressItem }) {
       <ItemLink link={item.link}>
         <span className="min-w-0 flex-1">
           <span className="flex items-baseline gap-2">
-            <span className="min-w-0 flex-1 truncate text-sm">
+            <span className="min-w-0 flex-1 truncate text-[15px]">
               {item.title}
             </span>
             <span className="shrink-0 text-muted-foreground text-xs tabular-nums">
@@ -174,7 +174,7 @@ export function SentWidgets({
             <div
               // biome-ignore lint/suspicious/noArrayIndexKey: placeholders have only their place
               key={index}
-              className="h-24 animate-pulse rounded-xl border bg-muted/40"
+              className="h-24 animate-pulse rounded-2xl bg-muted"
             />
           ))}
     </div>

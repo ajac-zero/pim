@@ -995,14 +995,14 @@ function PreferencesMenu({ collapsed = false }: { collapsed?: boolean }) {
               setColorTheme(theme.id);
             }}
           >
-            {/* The theme's canvas and primary, in the current mode. */}
+            {/* The theme's canvas and user bubble, in the current mode. */}
             <span
               className="flex size-5 items-center justify-center rounded-md border"
               style={{ backgroundColor: theme[resolved].background }}
             >
               <span
                 className="size-2 rounded-full"
-                style={{ backgroundColor: theme[resolved].primary }}
+                style={{ backgroundColor: theme[resolved].swatch }}
               />
             </span>
             <span className="flex-1">{theme.name}</span>

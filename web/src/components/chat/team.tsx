@@ -146,7 +146,7 @@ function MemberTranscript({
                   className={cn(
                     "rounded-2xl px-4 py-3",
                     message.role === "user"
-                      ? "ml-8 bg-primary text-primary-foreground"
+                      ? "ml-8 bg-bubble text-bubble-foreground"
                       : "mr-8 bg-muted",
                   )}
                 >

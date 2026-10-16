@@ -1,0 +1,109 @@
+/*
+ * Rosé Pine: Dawn / Main (not Moon). Dawn subtle, love, gold, rose and foam
+ * are darkened for contrast; Main pine is lightened for the green agent.
+ * Sidebar Main base is darkened for panel separation. Extra agent slots use
+ * lightness variants of pine (green), foam (blue), iris (indigo), love (pink).
+ */
+[data-theme="rose-pine"] {
+  --background: #faf4ed;
+  --foreground: #575279;
+  --card: #faf4ed;
+  --card-foreground: #575279;
+  --popover: #fffaf3;
+  --popover-foreground: #575279;
+  --primary: #907aa9;
+  --primary-foreground: #191724;
+  --secondary: #f2e9e1;
+  --secondary-foreground: #575279;
+  --muted: #f2e9e1;
+  --muted-foreground: #716d8b;
+  --accent: #f2e9e1;
+  --accent-foreground: #575279;
+  --destructive: #a34e67;
+  --destructive-foreground: #fffaf3;
+  --link: #3e7781;
+  --success: #286983;
+  --border: #dfdad9;
+  --input: #cecacd;
+  --ring: #907aa9;
+  --chart-1: #907aa9;
+  --chart-2: #286983;
+  --chart-3: #b4637a;
+  --chart-4: #ad701d;
+  --chart-5: #427d87;
+  --sidebar: #f2e9e1;
+  --sidebar-foreground: #575279;
+  --sidebar-primary: #907aa9;
+  --sidebar-primary-foreground: #191724;
+  --sidebar-accent: #dfdad9;
+  --sidebar-accent-foreground: #575279;
+  --sidebar-border: #cecacd;
+  --sidebar-ring: #907aa9;
+  --agent-gray: #797593;
+  --agent-red: #b4637a;
+  --agent-orange: #b65a55;
+  --agent-amber: #ad701d;
+  --agent-green: #286983;
+  --agent-teal: #56949f;
+  --agent-blue: #427d87;
+  --agent-indigo: #75608d;
+  --agent-violet: #8870a3;
+  --agent-pink: #bd6c83;
+}
+
+[data-theme="rose-pine"].dark {
+  --background: #191724;
+  --foreground: #e0def4;
+  --card: #191724;
+  --card-foreground: #e0def4;
+  --popover: #1f1d2e;
+  --popover-foreground: #e0def4;
+  --primary: #c4a7e7;
+  --primary-foreground: #191724;
+  --secondary: #26233a;
+  --secondary-foreground: #e0def4;
+  --muted: #26233a;
+  --muted-foreground: #908caa;
+  --accent: #26233a;
+  --accent-foreground: #e0def4;
+  --destructive: #eb6f92;
+  --destructive-foreground: #191724;
+  --link: #9ccfd8;
+  --success: #4b91ad;
+  --border: #403d52;
+  --input: #403d52;
+  --ring: #c4a7e7;
+  --chart-1: #c4a7e7;
+  --chart-2: #9ccfd8;
+  --chart-3: #eb6f92;
+  --chart-4: #f6c177;
+  --chart-5: #ebbcba;
+  --sidebar: #14121d;
+  --sidebar-foreground: #e0def4;
+  --sidebar-primary: #c4a7e7;
+  --sidebar-primary-foreground: #191724;
+  --sidebar-accent: #26233a;
+  --sidebar-accent-foreground: #e0def4;
+  --sidebar-border: #26233a;
+  --sidebar-ring: #c4a7e7;
+  --agent-gray: #908caa;
+  --agent-red: #eb6f92;
+  --agent-orange: #ebbcba;
+  --agent-amber: #f6c177;
+  --agent-green: #4b91ad;
+  --agent-teal: #9ccfd8;
+  --agent-blue: #75bbc7;
+  --agent-indigo: #a17bce;
+  --agent-violet: #d2bced;
+  --agent-pink: #f092ad;
+}
+
+/* Code: this theme's Shiki colors (see src/lib/themes.ts). */
+[data-theme="rose-pine"] .shiki-token {
+  color: var(--shiki-rose-pine-light);
+  font-style: var(--shiki-rose-pine-light-font-style, normal);
+}
+[data-theme="rose-pine"].dark .shiki-token {
+  color: var(--shiki-rose-pine-dark);
+  font-style: var(--shiki-rose-pine-dark-font-style, normal);
+}

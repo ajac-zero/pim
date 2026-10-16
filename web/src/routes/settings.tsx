@@ -8,7 +8,10 @@ import {
   Loader2,
   LogOut,
   Mail,
+  Monitor,
+  Moon,
   Plug,
+  Sun,
   Trash2,
 } from "lucide-react";
 import { type FormEvent, useState } from "react";
@@ -24,6 +27,7 @@ import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
 import { MembersSection } from "~/components/members";
 import { Page } from "~/components/page";
+import { useTheme } from "~/components/theme";
 import { ToolPermissionList } from "~/components/tool-permissions";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -56,6 +60,7 @@ import {
   modelQuery,
   profileQuery,
 } from "~/lib/queries";
+import { themes } from "~/lib/themes";
 import { cn } from "~/lib/utils";
 
 export const Route = createFileRoute("/settings")({
@@ -83,6 +88,7 @@ function SettingsPage() {
         <ModelChoices settings={data} />
       </section>
       <PreferencesSection />
+      <AppearanceSection />
       <ConnectedAppsSection />
       <ToolPermissionsSection />
       <EmailSection />
@@ -326,6 +332,99 @@ function ChatGPTCard({ settings }: { settings: ModelSettings }) {
 }
 
 /** How others on this Pim see you: on your page, and next to what you publish. */
+/** The color theme and the mode; each theme previews itself in the current mode. */
+function AppearanceSection() {
+  const { t } = useI18n();
+  const { preference, setPreference, resolved, colorTheme, setColorTheme } =
+    useTheme();
+  return (
+    <section id="appearance" className="mt-10 scroll-mt-6 space-y-3">
+      <h2 className="font-medium text-muted-foreground text-sm">
+        {t("appearance")}
+      </h2>
+      <div
+        role="radiogroup"
+        aria-label={t("mode")}
+        className="inline-flex rounded-full bg-muted p-1"
+      >
+        {(
+          [
+            ["light", Sun],
+            ["dark", Moon],
+            ["system", Monitor],
+          ] as const
+        ).map(([value, Icon]) => (
+          <button
+            key={value}
+            type="button"
+            role="radio"
+            aria-checked={preference === value}
+            onClick={() => setPreference(value)}
+            className={cn(
+              "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm transition-colors",
+              preference === value
+                ? "bg-background shadow-xs"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <Icon className="size-4" />
+            {t(`${value}Theme`)}
+          </button>
+        ))}
+      </div>
+      <div
+        role="radiogroup"
+        aria-label={t("theme")}
+        className="grid grid-cols-2 gap-3 sm:grid-cols-3"
+      >
+        {themes.map((theme) => {
+          const checked = colorTheme.id === theme.id;
+          return (
+            <button
+              key={theme.id}
+              type="button"
+              role="radio"
+              aria-checked={checked}
+              onClick={() => setColorTheme(theme.id)}
+              className={cn(
+                "rounded-2xl border p-1.5 text-left transition-colors",
+                checked
+                  ? "border-ring ring-2 ring-ring/40"
+                  : "hover:border-foreground/30",
+              )}
+            >
+              {/* A miniature window in the theme's own tokens: scoping
+                  data-theme (and .dark) to this element recolors it. */}
+              <div
+                data-theme={theme.id}
+                className={cn(
+                  "flex h-20 overflow-hidden rounded-xl border bg-background",
+                  resolved === "dark" && "dark",
+                )}
+                aria-hidden="true"
+              >
+                <div className="w-1/4 border-r bg-sidebar" />
+                <div className="flex flex-1 flex-col justify-center gap-1.5 p-2.5">
+                  <div className="ml-auto h-3 w-3/5 rounded-full bg-bubble" />
+                  <div className="h-3 w-4/5 rounded-full bg-muted" />
+                  <div className="flex items-center gap-1">
+                    <div className="h-3 w-2/5 rounded-full bg-muted" />
+                    <div className="ml-auto size-3 rounded-full bg-primary" />
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center justify-between px-1.5 pt-2 pb-1 text-sm">
+                <span>{theme.name}</span>
+                {checked && <Check className="size-4" />}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function ProfileSection() {
   const { t } = useI18n();
   const queryClient = useQueryClient();

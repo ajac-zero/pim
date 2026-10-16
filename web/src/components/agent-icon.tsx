@@ -137,69 +137,72 @@ const EMOJIS = [
   "🌍",
 ];
 
-/** Each color the API accepts, as a tinted tile, a glyph's color and a swatch. */
+/**
+ * Each color the API accepts, as a tinted tile, a glyph's color and a swatch.
+ * The `agent-*` colors come from the active theme (src/styles/app.css).
+ */
 const COLORS: Record<
   string,
   { tile: string; text: string; swatch: string; label: TranslationKey }
 > = {
   gray: {
-    tile: "bg-zinc-500/15 text-zinc-600 dark:text-zinc-300",
-    text: "text-zinc-600 dark:text-zinc-300",
-    swatch: "bg-zinc-500",
+    tile: "bg-agent-gray/15 text-agent-gray",
+    text: "text-agent-gray",
+    swatch: "bg-agent-gray",
     label: "colorGray",
   },
   red: {
-    tile: "bg-red-500/15 text-red-600 dark:text-red-400",
-    text: "text-red-600 dark:text-red-400",
-    swatch: "bg-red-500",
+    tile: "bg-agent-red/15 text-agent-red",
+    text: "text-agent-red",
+    swatch: "bg-agent-red",
     label: "colorRed",
   },
   orange: {
-    tile: "bg-orange-500/15 text-orange-600 dark:text-orange-400",
-    text: "text-orange-600 dark:text-orange-400",
-    swatch: "bg-orange-500",
+    tile: "bg-agent-orange/15 text-agent-orange",
+    text: "text-agent-orange",
+    swatch: "bg-agent-orange",
     label: "colorOrange",
   },
   amber: {
-    tile: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
-    text: "text-amber-600 dark:text-amber-400",
-    swatch: "bg-amber-500",
+    tile: "bg-agent-amber/15 text-agent-amber",
+    text: "text-agent-amber",
+    swatch: "bg-agent-amber",
     label: "colorAmber",
   },
   green: {
-    tile: "bg-green-500/15 text-green-600 dark:text-green-400",
-    text: "text-green-600 dark:text-green-400",
-    swatch: "bg-green-500",
+    tile: "bg-agent-green/15 text-agent-green",
+    text: "text-agent-green",
+    swatch: "bg-agent-green",
     label: "colorGreen",
   },
   teal: {
-    tile: "bg-teal-500/15 text-teal-600 dark:text-teal-400",
-    text: "text-teal-600 dark:text-teal-400",
-    swatch: "bg-teal-500",
+    tile: "bg-agent-teal/15 text-agent-teal",
+    text: "text-agent-teal",
+    swatch: "bg-agent-teal",
     label: "colorTeal",
   },
   blue: {
-    tile: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
-    text: "text-blue-600 dark:text-blue-400",
-    swatch: "bg-blue-500",
+    tile: "bg-agent-blue/15 text-agent-blue",
+    text: "text-agent-blue",
+    swatch: "bg-agent-blue",
     label: "colorBlue",
   },
   indigo: {
-    tile: "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400",
-    text: "text-indigo-600 dark:text-indigo-400",
-    swatch: "bg-indigo-500",
+    tile: "bg-agent-indigo/15 text-agent-indigo",
+    text: "text-agent-indigo",
+    swatch: "bg-agent-indigo",
     label: "colorIndigo",
   },
   violet: {
-    tile: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
-    text: "text-violet-600 dark:text-violet-400",
-    swatch: "bg-violet-500",
+    tile: "bg-agent-violet/15 text-agent-violet",
+    text: "text-agent-violet",
+    swatch: "bg-agent-violet",
     label: "colorViolet",
   },
   pink: {
-    tile: "bg-pink-500/15 text-pink-600 dark:text-pink-400",
-    text: "text-pink-600 dark:text-pink-400",
-    swatch: "bg-pink-500",
+    tile: "bg-agent-pink/15 text-agent-pink",
+    text: "text-agent-pink",
+    swatch: "bg-agent-pink",
     label: "colorPink",
   },
 };

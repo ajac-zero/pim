@@ -12,7 +12,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Pim" />
     <script>
-      // Applies the theme before first paint, so dark mode doesn't flash.
+      // Applies the color theme and mode before first paint, so they don't flash.
       (function () {
         try {
           var t = localStorage.getItem("pim-theme");
@@ -21,6 +21,8 @@
             ((!t || t === "system") &&
               window.matchMedia("(prefers-color-scheme: dark)").matches);
           document.documentElement.classList.toggle("dark", d);
+          document.documentElement.dataset.theme =
+            localStorage.getItem("pim-color-theme") || "pim";
         } catch (e) {}
       })();
     </script>

@@ -2,44 +2,54 @@
 
 How Pim's web app should look and feel. Use this file when you build or change UI in `web/`.
 
-Pim should feel like a quiet native messaging app, not an AI dashboard. The window is almost colorless, solid black marks the action to take, and the only color comes from agents' icons and from signals that mean something.
+Pim should feel like a quiet native messaging app, not an AI dashboard. The window is almost colorless, a solid primary color marks the action to take, and the only other color comes from agents' icons and from signals that mean something. Color themes change these colors; nothing else in this file changes with the theme.
 
 ## Principles
 
-- **Neutral surfaces.** Use white and light grays for everything structural. Show hierarchy with surface tone and text gray, not borders, shadows, or bold type.
+- **Quiet surfaces.** Use the theme's background and muted tones for everything structural. Show hierarchy with surface tone and muted text, not borders, shadows, or bold type.
 - **Color has meaning.** Color appears only on agent icons and on semantic signals (links, unread, success, diffs, errors). Never use it for decoration.
-- **Black is the primary action.** Each view has at most one solid black button. Every other button is a gray pill or a ghost.
+- **Primary is the action.** Each view has at most one solid primary button. Every other button is a muted pill or a ghost.
 - **Content first.** Chrome stays thin: one header line, hairline dividers, and no panel borders inside the window.
 - **Generous space.** Rows and messages get room to breathe. When something feels crowded, remove elements before shrinking them.
 
 ## Color
 
-All tokens live in [`src/styles/app.css`](src/styles/app.css) and follow the shadcn/ui variable names. Components use the tokens, never raw colors.
+Components use the tokens in [`src/styles/app.css`](src/styles/app.css), never raw colors; they follow the shadcn/ui variable names. A theme gives every token a value.
 
-| Token | Light | Use |
-| --- | --- | --- |
-| `--background` | `oklch(0.985 0 0)` | Chat canvas and modals |
-| `--sidebar` | `oklch(0.97 0 0)` | Sidebar, one step darker than the canvas |
-| `--muted` / `--secondary` | `oklch(0.94 0 0)` | Agent message bubbles, cards in the transcript, search and input fills, selected rows, secondary buttons, chips |
-| `--border` | `oklch(0.92 0 0)` | Hairline dividers between panes, outlines on fields and settings cards |
-| `--foreground` | `oklch(0.18 0 0)` | Body text and titles |
-| `--muted-foreground` | `oklch(0.6 0 0)` | Previews, timestamps, section labels, placeholders, system events |
-| `--primary` | `oklch(0.145 0 0)` | Primary buttons, the send button, user message bubbles |
-| `--primary-foreground` | `oklch(0.985 0 0)` | Text and icons on primary |
+| Token | Use |
+| --- | --- |
+| `--background` | Chat canvas and modals |
+| `--sidebar` | Sidebar, one step off the canvas |
+| `--muted` / `--secondary` | Agent message bubbles, cards in the transcript, search and input fills, selected rows, secondary buttons, chips |
+| `--border` | Hairline dividers between panes, outlines on fields and settings cards |
+| `--foreground` | Body text and titles |
+| `--muted-foreground` | Previews, timestamps, section labels, placeholders, system events |
+| `--primary` | Primary buttons, the send button, user message bubbles |
+| `--primary-foreground` | Text and icons on primary |
+| `--agent-<color>` | An agent's icon and its tinted tile, one per color the API accepts |
 
 Semantic colors, used only for their meaning:
 
-| Role | Light | Use |
-| --- | --- | --- |
-| Link / unread | `oklch(0.55 0.2 258)` | Inline links, unread dots, toggles that are on, the focus ring |
-| Success | `oklch(0.65 0.17 152)` | The "Done" status, additions in diff stats |
-| Destructive | `oklch(0.577 0.245 27)` | Errors, deletions in diff stats, inline code text |
+| Token | Use |
+| --- | --- |
+| `--link` / `--ring` | Inline links, unread dots, toggles that are on, the focus ring |
+| `--success` | The "Done" status, additions in diff stats |
+| `--destructive` | Errors, deletions in diff stats, inline code text |
 
-**Dark mode** keeps the same structure with inverted steps. The canvas is a dark neutral gray, the sidebar is one step darker, and bubbles and fills are one step lighter. Primary inverts to near-white with dark text, and user bubbles invert with it.
+### Themes
+
+A theme only changes colors, and every theme has a light and a dark mode. People pick the theme and the mode separately under Preferences.
+
+- **Pim** (default): neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles invert with it.
+- **Tokyo Night:** "Night" navy for dark mode and the "Day" palette for light mode, with text darkened for contrast. Its blue is the primary.
+
+In every theme the sidebar is one step off the canvas, bubbles and fills are one step from the canvas, and body text on the canvas meets WCAG AA contrast (4.5:1).
+
+To add a theme, give each token a value under `[data-theme="<id>"]` (light) and `[data-theme="<id>"].dark` in `app.css`, add its `.shiki-token` rules there, and register it in [`src/lib/themes.ts`](src/lib/themes.ts) with its swatch colors and its Shiki code themes. Agent colors should take the theme's own hues, and none should match the primary, since "no color" means primary.
 
 ## Agent icons
 
-An agent is identified by its own icon: a lucide icon or an emoji in the agent's color, or an image the person uploaded (see `AgentIcon` in `src/components/agent-icon.tsx`). Show it on a tile tinted with its color wherever it stands for the agent: about 24px in headers and menus, 32–40px in lists and cards. Pim's own mark is the "P" mark.
+An agent is identified by its own icon: a lucide icon or an emoji in the agent's color, or an image the person uploaded (see `AgentIcon` in `src/components/agent-icon.tsx`). Show it on a tile tinted with its color wherever it stands for the agent: about 24px in headers and menus, 32–40px in lists and cards. Pim's own mark is the pixel wordmark (`PimMark`). It keeps its own colors in every theme.
 
 ## Typography
 
@@ -63,7 +73,7 @@ Use only regular and medium weight below title size. Show emphasis with color (f
 | ~12px | Sidebar selection, search field, text inputs, settings cards |
 | ~10px | File and plugin icons |
 
-Surfaces inside the window are flat. Only floating layers get elevation: modals, popovers, and menus have a soft, wide shadow, and modals dim the content behind them with a translucent black scrim.
+Surfaces inside the window are flat. Only floating layers get elevation: modals, popovers, and menus have a soft, wide shadow, and modals dim the content behind them with a translucent black scrim in every theme.
 
 ## Layout
 
@@ -80,7 +90,7 @@ On narrow screens, the sidebar opens as a sheet over the content.
 ### Messages
 
 - **Agent messages** are muted bubbles without icons, aligned left and up to ~85% of the transcript width. Consecutive messages stack with a small gap.
-- **User messages** are primary (black) bubbles with light text, aligned right.
+- **User messages** are primary bubbles with primary-foreground text, aligned right.
 - **Hover actions** (copy, retry) float as bare icons beside the bubble and appear only on hover.
 - **Timestamps** ("Today 10:01 AM") and **system events** ("Approved: rename the agent", "Scheduled check-in") are centered muted text, never bubbles. A referenced object shows its icon inline and is clickable.
 
@@ -88,18 +98,18 @@ On narrow screens, the sidebar opens as a sheet over the content.
 
 Rich results render as muted cards with the bubble radius:
 
-- **Approval card:** the action's summary with a status pill on the right, its details as muted rows, then an outline Deny button and a black Approve button.
-- **File card:** a file-type icon tile, the name, the size in muted text, and a download icon. It uses a white fill with a hairline border.
+- **Approval card:** the action's summary with a status pill on the right, its details as muted rows, then an outline Deny button and a primary Approve button.
+- **File card:** a file-type icon tile, the name, the size in muted text, and a download icon. It uses the background fill with a hairline border.
 
 ### Composer
 
-The composer is a single rounded field at the bottom of the transcript with a hairline border and no fill change. It has a muted circular `+` on the left, the placeholder "Message <agent name>", and a black circular send button on the right, which becomes stop while the agent works.
+The composer is a single rounded field at the bottom of the transcript with a hairline border and no fill change. It has a muted circular `+` on the left, the placeholder "Message <agent name>", and a primary circular send button on the right, which becomes stop while the agent works.
 
 ### Buttons
 
 | Variant | Look | Use |
 | --- | --- | --- |
-| Primary | Black pill, white text | The single main action ("Approve", "Save", "Create") |
+| Primary | Primary pill, primary-foreground text | The single main action ("Approve", "Save", "Create") |
 | Secondary | Muted pill, foreground text | Other actions ("Add", "Delete", "Use an existing agent") |
 | Outline | Background pill, hairline border | Secondary actions next to a primary, split buttons |
 | Ghost | Text and icon only, muted | Inline actions ("+ Add another", "View all") |
@@ -109,7 +119,7 @@ A disabled button keeps its shape and turns muted with muted text. A destructive
 
 ### Forms
 
-- A field has a muted 13px label above it and a 12px radius. Fields have a white fill with a hairline border, except search, which has a muted fill and no border.
+- A field has a muted 13px label above it and a 12px radius. Fields have the background fill with a hairline border, except search, which has a muted fill and no border.
 - Related settings sit in a bordered settings card with rows inside it. Repeatable rows end with a ghost "+ Add another".
 - Toggles are iOS-style switches that turn blue when on, with the label to their right.
 - Empty states are a single muted line ("No runs yet", "No chats yet"), with no illustration.
@@ -126,11 +136,11 @@ Rows with an icon tile, a name, a one-line muted description, and a secondary pi
 
 ### Modals
 
-A modal is a centered background surface with an 18px radius, a soft shadow, and the dimming scrim. It has a title, muted body copy, and actions at the bottom: the secondary button on the left and the black primary on the right. Close with a bare `×` in the top right.
+A modal is a centered background surface with an 18px radius, a soft shadow, and the dimming scrim. It has a title, muted body copy, and actions at the bottom: the secondary button on the left and the primary on the right. Close with a bare `×` in the top right.
 
 ### Sign-in and onboarding
 
-Keep these screens plain: Pim's mark, a title, one muted sentence, the fields, and one black primary button.
+Keep these screens plain: Pim's mark, a title, one muted sentence, the fields, and one primary button.
 
 ## Icons
 

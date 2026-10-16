@@ -28,6 +28,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "~/components/ui/select";
+import { codeThemeLoaders, codeThemes } from "~/lib/themes";
 import { cn } from "~/lib/utils";
 
 /**
@@ -37,15 +38,6 @@ import { cn } from "~/lib/utils";
  * streaming don't re-highlight unchanged content, and falls back to plain
  * text tokens synchronously while the highlighter loads in the background.
  */
-
-// Shiki uses bitflags for font styles: 1=italic, 2=bold, 4=underline
-// biome-ignore lint/suspicious/noBitwiseOperators: shiki's fontStyle is a bitflag
-const isItalic = (fontStyle: number | undefined) => fontStyle && fontStyle & 1;
-// biome-ignore lint/suspicious/noBitwiseOperators: shiki's fontStyle is a bitflag
-const isBold = (fontStyle: number | undefined) => fontStyle && fontStyle & 2;
-const isUnderline = (fontStyle: number | undefined) =>
-  // biome-ignore lint/suspicious/noBitwiseOperators: shiki's fontStyle is a bitflag
-  fontStyle && fontStyle & 4;
 
 interface KeyedToken {
   token: ThemedToken;
@@ -65,20 +57,10 @@ const addKeysToTokens = (lines: ThemedToken[][]): KeyedLine[] =>
     })),
   }));
 
+// A token carries its color for every theme as CSS variables; the
+// `.shiki-token` rules in app.css pick the active one.
 const TokenSpan = ({ token }: { token: ThemedToken }) => (
-  <span
-    className="dark:!bg-[var(--shiki-dark-bg)] dark:!text-[var(--shiki-dark)]"
-    style={
-      {
-        backgroundColor: token.bgColor,
-        color: token.color,
-        fontStyle: isItalic(token.fontStyle) ? "italic" : undefined,
-        fontWeight: isBold(token.fontStyle) ? "bold" : undefined,
-        textDecoration: isUnderline(token.fontStyle) ? "underline" : undefined,
-        ...token.htmlStyle,
-      } as CSSProperties
-    }
-  >
+  <span className="shiki-token" style={token.htmlStyle as CSSProperties}>
     {token.content}
   </span>
 );
@@ -120,8 +102,6 @@ type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
 
 interface TokenizedCode {
   tokens: ThemedToken[][];
-  fg: string;
-  bg: string;
 }
 
 interface CodeBlockContextType {
@@ -156,7 +136,7 @@ const getHighlighter = (
 
   const highlighterPromise = createHighlighter({
     langs: [language],
-    themes: ["github-light-default", "github-dark-default"],
+    themes: codeThemeLoaders(),
   });
 
   highlighterCache.set(language, highlighterPromise);
@@ -164,8 +144,6 @@ const getHighlighter = (
 };
 
 const createRawTokens = (code: string): TokenizedCode => ({
-  bg: "transparent",
-  fg: "inherit",
   tokens: code.split("\n").map((line) =>
     line === ""
       ? []
@@ -203,15 +181,11 @@ export const highlightCode = (
 
       const result = highlighter.codeToTokens(code, {
         lang: langToUse,
-        themes: {
-          dark: "github-dark-default",
-          light: "github-light-default",
-        },
+        themes: codeThemes,
+        defaultColor: false,
       });
 
       const tokenized: TokenizedCode = {
-        bg: result.bg ?? "transparent",
-        fg: result.fg ?? "inherit",
         tokens: result.tokens,
       };
 
@@ -241,14 +215,6 @@ const CodeBlockBody = memo(
     showLineNumbers: boolean;
     className?: string;
   }) => {
-    const preStyle = useMemo(
-      () => ({
-        backgroundColor: tokenized.bg,
-        color: tokenized.fg,
-      }),
-      [tokenized.bg, tokenized.fg],
-    );
-
     const keyedLines = useMemo(
       () => addKeysToTokens(tokenized.tokens),
       [tokenized.tokens],
@@ -257,10 +223,9 @@ const CodeBlockBody = memo(
     return (
       <pre
         className={cn(
-          "dark:!bg-[var(--shiki-dark-bg)] dark:!text-[var(--shiki-dark)] m-0 p-4 text-[13px] leading-relaxed",
+          "m-0 p-4 text-[13px] leading-relaxed",
           className,
         )}
-        style={preStyle}
       >
         <code
           className={cn(

@@ -7,24 +7,11 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Color themes, one file each. A theme sets every color token for light mode
- * (`[data-theme="<id>"]`) and dark mode (`[data-theme="<id>"].dark`), plus the
- * rules that pick its code colors; components only use the tokens. The default,
- * Tokyo Night, sits on :root and .dark, so it must be imported first. To add a
- * theme, copy themes/gronk.css and register it in src/lib/themes.ts.
+ * Color themes give every color token below a value. They come from the Pim's
+ * extensions (Pim's own are in src/extensions/themes at the repository's
+ * root), and the Worker serves them as /api/themes.css, which index.html
+ * loads; components only use the tokens.
  */
-@import "./themes/tokyo-night.css";
-@import "./themes/gronk.css";
-@import "./themes/moose.css";
-@import "./themes/catppuccin.css";
-@import "./themes/solarized.css";
-@import "./themes/gruvbox.css";
-@import "./themes/rose-pine.css";
-@import "./themes/one.css";
-@import "./themes/everforest.css";
-@import "./themes/nord.css";
-@import "./themes/dracula.css";
-@import "./themes/ayu.css";
 
 /*
  * Defaults a theme may override; `:where` keeps them from winning over it.

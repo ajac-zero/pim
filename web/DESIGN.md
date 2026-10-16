@@ -41,9 +41,9 @@ Semantic colors, used only for their meaning:
 
 A theme only changes colors, and every theme has a light and a dark mode. People pick both under Settings → Appearance, where each theme previews itself in the current mode; the Preferences menu keeps the mode and links to the theme picker.
 
-- **Tokyo Night** (default): "Night" navy for dark mode and the "Day" palette for light mode, with text darkened for contrast. Its blue is the primary.
+- **Tokyo Night** (the default in `pim.config.ts`): "Night" navy for dark mode and the "Day" palette for light mode, with text darkened for contrast. Its blue is the primary.
 - **Gronk:** neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles invert with it.
-- **Classics:** Catppuccin (Latte / Mocha), Solarized, Gruvbox (medium), Rosé Pine (Dawn / Main), One (Light / Dark), Everforest (medium), Nord (a light mode built from its Snow Storm palette), Dracula (Alucard / Dracula), and Ayu (Light / Mirage). Each uses the official palette, adjusted only in lightness where a pair missed contrast; each file's header comment lists its deviations.
+- **Classics:** Catppuccin (Latte / Mocha), Solarized, Gruvbox (medium), Rosé Pine (Dawn / Main), One (Light / Dark), Everforest (medium), Nord (a light mode built from its Snow Storm palette), Dracula (Alucard / Dracula), and Ayu (Light / Mirage). Each uses the official palette, adjusted only in lightness where a pair missed contrast; each theme's header comment lists its deviations.
 - **Gronk:** neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles invert with it.
 - **Moose:** cool grays with black (light) or white (dark) buttons, white agent bubbles on a gray canvas in light mode, and sky-blue user bubbles.
 
@@ -51,7 +51,7 @@ Parody themes like Gronk and Moose are playful nods to apps that inspired Pim. G
 
 In every theme the sidebar is one step off the canvas, bubbles and fills are one step from the canvas, and body text on the canvas meets WCAG AA contrast (4.5:1).
 
-To add a theme, copy a file in [`src/styles/themes/`](src/styles/themes/), give each token a value under `[data-theme="<id>"]` (light) and `[data-theme="<id>"].dark`, keep its `.shiki-token` rules, import it in `app.css`, and register it in [`src/lib/themes.ts`](src/lib/themes.ts) with its canvas colors and Shiki code themes. When Shiki ships only a dark code theme, add a light one to `recoloredCodeThemes` that maps each of its colors. Agent colors should take the theme's own hues, and none should match the primary, since "no color" means primary.
+Themes are data an extension brings (see [docs/extensions.md](../docs/extensions.md#themes)); Pim's own are the `pim.themes` extension in [`src/extensions/themes/`](../src/extensions/themes/), one file each. To add one, copy a file there, give every token a value in `light` and `dark`, name its Shiki code themes, and list it in that folder's `index.ts`. When Shiki ships only a dark code theme, make the light one by recoloring it: map each of its colors (`web/src/lib/themes.test.ts` checks none is left). Agent colors should take the theme's own hues, and none should match the primary, since "no color" means primary.
 
 ## Agent icons
 

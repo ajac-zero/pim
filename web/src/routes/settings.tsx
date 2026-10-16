@@ -60,7 +60,6 @@ import {
   modelQuery,
   profileQuery,
 } from "~/lib/queries";
-import { themes } from "~/lib/themes";
 import { cn } from "~/lib/utils";
 
 export const Route = createFileRoute("/settings")({
@@ -335,8 +334,14 @@ function ChatGPTCard({ settings }: { settings: ModelSettings }) {
 /** The color theme and the mode; each theme previews itself in the current mode. */
 function AppearanceSection() {
   const { t } = useI18n();
-  const { preference, setPreference, resolved, colorTheme, setColorTheme } =
-    useTheme();
+  const {
+    preference,
+    setPreference,
+    resolved,
+    themes,
+    colorTheme,
+    setColorTheme,
+  } = useTheme();
   return (
     <section id="appearance" className="mt-10 scroll-mt-6 space-y-3">
       <h2 className="font-medium text-muted-foreground text-sm">
@@ -378,7 +383,7 @@ function AppearanceSection() {
         className="grid grid-cols-2 gap-3 sm:grid-cols-3"
       >
         {themes.map((theme) => {
-          const checked = colorTheme.id === theme.id;
+          const checked = colorTheme?.id === theme.id;
           return (
             <button
               key={theme.id}

@@ -992,7 +992,7 @@ function PreferencesMenu({
             <Palette className="size-4" />
             <span className="flex-1">{t("theme")}</span>
             <span className="text-muted-foreground text-xs">
-              {colorTheme.name}
+              {colorTheme?.name}
             </span>
           </Link>
         </DropdownMenuItem>

@@ -1,24 +1,52 @@
 import { bundledThemes } from "shiki";
 import { describe, expect, it } from "vitest";
-import { loadRecolored, recoloredCodeThemes } from "~/lib/themes";
+import { loadRecolored } from "~/lib/themes";
+import type { RecoloredCodeTheme, Theme } from "../../../src/themes";
 
-describe("recolored light code themes", () => {
-  // A Shiki update can add colors to a dark theme; unmapped ones would show
-  // its pale colors on the light canvas.
-  it.each(
-    Object.keys(recoloredCodeThemes) as (keyof typeof recoloredCodeThemes)[],
-  )("%s recolors every token color of its dark theme", async (name) => {
-    const { base } = recoloredCodeThemes[name];
-    const dark = (await bundledThemes[base]()).default;
-    const light = await loadRecolored(name);
+// Pim's own themes, one per file; the extension that lists them is server code.
+const modules = import.meta.glob<Record<string, Theme>>(
+  [
+    "../../../src/extensions/themes/*.ts",
+    "!../../../src/extensions/themes/index.ts",
+  ],
+  { eager: true },
+);
+const recolored = Object.values(modules)
+  .flatMap((module) => Object.values(module))
+  .flatMap((theme) =>
+    (["light", "dark"] as const).flatMap((mode) => {
+      const code = theme.code[mode];
+      return typeof code === "string"
+        ? []
+        : [[`${theme.id} ${mode}`, code, mode] as const];
+    }),
+  );
 
-    const darkColors = new Set(
-      dark.tokenColors?.map((rule) => rule.settings.foreground?.toLowerCase()),
-    );
-    const leftovers = light.tokenColors
-      ?.map((rule) => rule.settings.foreground?.toLowerCase())
-      .filter((color) => color && darkColors.has(color));
-    expect(light.type).toBe("light");
-    expect(leftovers).toEqual([]);
+describe("recolored code themes", () => {
+  it("finds Pim's own", () => {
+    expect(recolored.length).toBeGreaterThan(0);
   });
+
+  // A Shiki update can add colors to a base theme; unmapped ones would show
+  // its colors on the other mode's canvas.
+  it.each(recolored)(
+    "%s recolors every token color of its base",
+    async (name, code: RecoloredCodeTheme, mode) => {
+      const original = (
+        await bundledThemes[code.base as keyof typeof bundledThemes]()
+      ).default;
+      const theme = await loadRecolored(name, code, mode);
+
+      const originalColors = new Set(
+        original.tokenColors?.map((rule) =>
+          rule.settings.foreground?.toLowerCase(),
+        ),
+      );
+      const leftovers = theme.tokenColors
+        ?.map((rule) => rule.settings.foreground?.toLowerCase())
+        .filter((color) => color && originalColors.has(color));
+      expect(theme.type).toBe(mode);
+      expect(leftovers).toEqual([]);
+    },
+  );
 });

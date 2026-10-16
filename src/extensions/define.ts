@@ -1,4 +1,5 @@
 import type { Extension } from "@earendil-works/pi-durable";
+import type { Theme } from "../themes";
 import type { GatedAction } from "./approvals";
 
 export { defineGatedAction, type GatedAction } from "./approvals";
@@ -7,8 +8,9 @@ export { defineGatedAction, type GatedAction } from "./approvals";
  * Pim extensions: what a deployment adds to every person's agents, chosen in
  * `pim.config.ts`. An extension can bring blueprints, the definitions people's
  * agents build on, each with its own instructions, dashboard and conversation starters; widgets, the cards a
- * dashboard is made of; and an ability: tools, prompt sections, hooks and
- * background tasks, plus actions that ask the person first. A person's Pim
+ * dashboard is made of; color themes for the web app; and an ability: tools,
+ * prompt sections, hooks and background tasks, plus actions that ask the
+ * person first. A person's Pim
  * builds on one extension's blueprint (its `blueprint`), and adds their own name and
  * instructions on top; its chats get the abilities that blueprint uses.
  *
@@ -16,8 +18,9 @@ export { defineGatedAction, type GatedAction } from "./approvals";
  * data of a known kind, which the web app draws with its own components. No
  * extension code runs in the browser.
  *
- * Pim's own blueprint is an extension too (`./assistant.ts`), and its abilities
- * (goals, schedules, memory, artifacts) bring their widgets the same way.
+ * Pim's own blueprint is an extension too (`./assistant.ts`), its abilities
+ * (goals, schedules, memory, artifacts) bring their widgets the same way, and
+ * its color themes are one (`./themes`).
  */
 
 /** Text an extension shows people: one string, or one per language, with English always there. */
@@ -157,6 +160,8 @@ export type PimExtension = {
 	readonly description: string;
 	readonly widgets?: Readonly<Record<string, Widget>>;
 	readonly blueprints?: readonly BlueprintDefinition[];
+	/** Color themes people can pick for the web app, in Settings → Appearance. See ../themes.ts. */
+	readonly themes?: readonly Theme[];
 	/** Built once in each person's Pim. Its tools and actions must be named apart from every other tool. */
 	readonly ability?: (context: AbilityContext) => Ability;
 };
@@ -165,6 +170,8 @@ export type PimConfig = {
 	readonly extensions: readonly PimExtension[];
 	/** The blueprint every new account's first agent builds on, and new agents by default: `<extension>/<blueprint>`, or null for none. */
 	readonly defaultBlueprint: string | null;
+	/** The color theme people see until they pick another: a theme's id, Pim's own or an extension's. */
+	readonly defaultTheme: string;
 };
 
 /** Identity function that types an extension. */

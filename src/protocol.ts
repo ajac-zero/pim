@@ -45,5 +45,7 @@ export type ServerMessage =
 	| { readonly type: "approval"; readonly approval: Approval }
 	/** Pims shared with this one's owner changed: one was shared, or taken back. */
 	| { readonly type: "visits" }
+	/** The session list changed outside a run: a session got its title. */
+	| { readonly type: "sessions" }
 	| { readonly type: "result"; readonly id: string; readonly result: JsonValue }
 	| { readonly type: "error"; readonly id?: string; readonly message: string };

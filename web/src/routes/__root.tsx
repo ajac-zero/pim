@@ -14,6 +14,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { AppSidebar, sessionTitle } from "~/components/app-sidebar";
+import { SummaryToggle } from "~/components/chat/summary";
 import { I18nProvider, useI18n } from "~/components/i18n";
 import { RouteError } from "~/components/route-error";
 import { SignIn } from "~/components/sign-in";
@@ -96,6 +97,9 @@ function usePimEvents() {
             onClick: () => navigate({ to: "/notifications" }),
           },
         });
+      },
+      onSessions: () => {
+        queryClient.invalidateQueries({ queryKey: ["sessions"] });
       },
       onVisits: () => {
         queryClient.invalidateQueries({ queryKey: ["visits"] });
@@ -187,6 +191,7 @@ function AppLayout() {
   const { t } = useI18n();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const { sessionId } = useParams({ strict: false }) as { sessionId?: string };
   usePimEvents();
 
   return (
@@ -230,6 +235,7 @@ function AppLayout() {
             <PanelLeft className="size-5" />
           </Button>
           <MobileTitle />
+          {sessionId && <SummaryToggle className="ml-auto" />}
         </div>
 
         <Outlet />

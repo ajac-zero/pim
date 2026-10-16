@@ -481,6 +481,12 @@ export type ModelSettings = {
   /** The deployment's own model, used when nothing else is chosen. */
   default: ModelInfo;
   choices: ModelInfo[];
+  /** The utility model, for side jobs: naming chats, improving prompts, summarizing. Null when there is none. */
+  utility: {
+    model: ModelInfo | null;
+    default: ModelInfo | null;
+    choices: ModelInfo[];
+  };
   chatgpt: ChatGPTStatus & { error: string | null };
 };
 
@@ -494,6 +500,7 @@ export type ServerMessage =
   | { type: "notification"; notification: PimNotification }
   | { type: "approval"; approval: Approval }
   | { type: "visits" }
+  | { type: "sessions" }
   | { type: "result"; id: string; result: unknown }
   | { type: "error"; id?: string; message: string };
 
@@ -630,6 +637,18 @@ export const pim = {
     }),
   deleteSession: (id: string) =>
     call<{ deleted: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
+  // Side jobs on the utility model.
+  regenerateTitle: (id: string) =>
+    call<Session>(`/sessions/${id}/title`, { method: "POST" }),
+  summary: (id: string) =>
+    call<{ summary: string | null }>(`/sessions/${id}/summary`).then(
+      (body) => body.summary,
+    ),
+  improvePrompt: (text: string) =>
+    call<{ text: string }>("/prompts/improve", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }).then((body) => body.text),
   send: (session: string, content: UserContent) =>
     call<{ operationId: string; accepted: boolean }>(
       `/sessions/${session}/messages`,
@@ -722,6 +741,11 @@ export const pim = {
   model: () => call<ModelSettings>("/model"),
   chooseModel: (model: Pick<ModelInfo, "provider" | "id">) =>
     call<{ model: ModelInfo }>("/model", {
+      method: "PUT",
+      body: JSON.stringify(model),
+    }),
+  chooseUtilityModel: (model: Pick<ModelInfo, "provider" | "id">) =>
+    call<{ model: ModelInfo | null }>("/model/utility", {
       method: "PUT",
       body: JSON.stringify(model),
     }),

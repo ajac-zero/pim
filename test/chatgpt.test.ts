@@ -76,6 +76,24 @@ function responseStream(text: string): Response {
 	return new Response(body, { headers: { "content-type": "text/event-stream" } });
 }
 
+/** A Responses stream that answers with `text`, as a model asked for a chat's title does. */
+function textStream(text: string): Response {
+	const item = { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text, annotations: [] }] };
+	const events = [
+		{ type: "response.created", response: { id: "resp_2", status: "in_progress" } },
+		{ type: "response.output_item.added", output_index: 0, item: { ...item, status: "in_progress", content: [] } },
+		{ type: "response.content_part.added", item_id: "msg_1", output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } },
+		{ type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: text },
+		{ type: "response.output_item.done", output_index: 0, item },
+		{
+			type: "response.completed",
+			response: { id: "resp_2", status: "completed", usage: { input_tokens: 10, output_tokens: 3, total_tokens: 13, input_tokens_details: { cached_tokens: 0 } } },
+		},
+	];
+	const body = events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+	return new Response(body, { headers: { "content-type": "text/event-stream" } });
+}
+
 type Call = { url: string; headers: Record<string, string>; body: string };
 
 let signing: KeyPair;
@@ -117,7 +135,9 @@ beforeEach(() => {
 					],
 				});
 			case "/v1/responses":
-				return responseStream("Hello from Sol");
+				return calls.at(-1)!.body.includes("You name chats")
+					? textStream("Weekly Plan")
+					: responseStream("Hello from Sol");
 			default:
 				return new Response("not found", { status: 404 });
 		}
@@ -286,10 +306,34 @@ describe("Sign in with ChatGPT", () => {
 		expect(await credential()).toMatchObject({ access: "access-2", refresh: "refresh-2", email: "me@example.com" });
 	});
 
+	it("runs side jobs, such as naming chats, on a ChatGPT model when the person chooses one as the utility model", async () => {
+		const { body: model } = await api("/model");
+		// The deployment's utility model comes first, then every model Pim may use.
+		expect(model.utility.model).toMatchObject({ provider: "utility", id: "utility-model" });
+		expect(model.utility.choices.map((choice: { id: string }) => choice.id)).toEqual(["utility-model", "faux-model", "gpt-6.1-sol"]);
+		const chosen = await api("/model/utility", { method: "PUT", body: JSON.stringify({ provider: "openai", id: "gpt-6.1-sol" }) });
+		expect(chosen.body).toMatchObject({ model: { provider: "openai", id: "gpt-6.1-sol" } });
+		expect((await api("/model")).body.model.id).toBe("gpt-6.1-sol");
+		expect((await api("/model/utility", { method: "PUT", body: JSON.stringify({ provider: "openai", id: "gpt-nope" }) })).status).toBe(400);
+
+		const { body: created } = await post<{ id: string }>("/sessions");
+		await say("Can you help me plan my week around three deadlines?", created.id);
+		await vi.waitFor(async () => {
+			const { sessions } = (await api("/sessions")).body as { sessions: { id: string; title: string }[] };
+			expect(sessions.find((session) => session.id === created.id)?.title).toBe("Weekly Plan");
+		});
+		const naming = callsTo("/v1/responses").find((call) => call.body.includes("You name chats"));
+		expect(naming!.headers.authorization).toBe("Bearer access-2");
+		expect(naming!.body).toContain("three deadlines");
+	});
+
 	it("goes back to the default model when ChatGPT is disconnected", async () => {
 		const { body } = await api("/chatgpt", { method: "DELETE" });
 		expect(body).toEqual({ connected: false, email: null });
 		expect((await api("/model")).body.model.id).toBe("faux-model");
+		// The utility model too, though the choice is kept for when the plan is back.
+		expect((await api("/model")).body.utility.model).toMatchObject({ provider: "utility", id: "utility-model" });
+		expect((await api("/model/utility", { method: "PUT", body: JSON.stringify({ provider: "openai", id: "gpt-6.1-sol" }) })).status).toBe(409);
 
 		faux.setResponses([toolUse("send_to_user", { message: "Back on the default." })]);
 		expect((await say("Still there?")).text).toBe("Back on the default.");

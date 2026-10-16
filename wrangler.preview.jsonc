@@ -42,6 +42,7 @@
     "PIM_TIME_ZONE": "UTC",
     "PIM_WEB_SEARCH": "",
     "PIM_MEMORY_MODEL": "",
+    "PIM_UTILITY_MODEL": "@cf/ibm-granite/granite-4.0-h-micro",
     "PIM_MEMORY_LINES": "",
     "PIM_PUBLIC_URL": "",
     "PIM_APPROVAL_POLICY": "explicit",

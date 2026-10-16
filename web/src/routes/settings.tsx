@@ -33,6 +33,13 @@ import { useTheme } from "~/components/theme";
 import { ToolPermissionList } from "~/components/tool-permissions";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
 import { Switch } from "~/components/ui/switch";
 import {
   auth,
@@ -93,6 +100,7 @@ function SettingsPage() {
           {t("model")}
         </h2>
         <ModelChoices settings={data} />
+        <UtilityModelSelect settings={data} />
       </section>
       <PreferencesSection />
       <AppearanceSection />
@@ -180,6 +188,59 @@ function ModelChoices({ settings }: { settings: ModelSettings }) {
         </p>
       )}
     </div>
+  );
+}
+
+/** The utility model for side jobs: the deployment's small one by default, or any model Pim may use. */
+function UtilityModelSelect({ settings }: { settings: ModelSettings }) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const { model, choices } = settings.utility;
+  const choose = useMutation({
+    mutationFn: (choice: ModelInfo) => pim.chooseUtilityModel(choice),
+    onSuccess: ({ model }) => {
+      queryClient.invalidateQueries({ queryKey: ["model"] });
+      if (model) toast.success(t("utilityModelChanged", { model: model.name }));
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const selected = choices.findIndex(
+    (choice) => choice.provider === model?.provider && choice.id === model.id,
+  );
+  return (
+    <label className="block space-y-1 pt-3">
+      <span className="font-medium text-sm">{t("utilityModel")}</span>
+      <Select
+        value={selected === -1 ? undefined : String(selected)}
+        onValueChange={(index) => {
+          const choice = choices[Number(index)];
+          if (choice) choose.mutate(choice);
+        }}
+        disabled={choose.isPending}
+      >
+        <SelectTrigger className="w-full" aria-label={t("utilityModel")}>
+          <SelectValue placeholder={t("noUtilityModel")} />
+        </SelectTrigger>
+        <SelectContent>
+          {choices.map((choice, index) => (
+            <SelectItem
+              key={`${choice.provider}/${choice.id}`}
+              value={String(index)}
+            >
+              {choice.name}
+              <span className="text-muted-foreground">
+                {choice.provider === CHATGPT_PROVIDER
+                  ? ` · ${t("usesChatGPTPlan")}`
+                  : ` · ${t("runsOnWorkersAI")}`}
+              </span>
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <span className="block text-muted-foreground text-xs">
+        {t("utilityModelHint")}
+      </span>
+    </label>
   );
 }
 

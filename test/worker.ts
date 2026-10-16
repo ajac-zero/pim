@@ -4,7 +4,7 @@ import type { HarnessSettings, ModelRef } from "@earendil-works/pi-durable";
 import type { PiModel } from "agents/harness/pi";
 import { Pim as RealPim } from "../src/pim";
 import type { Mail, Mailer } from "../src/email";
-import { Type } from "@earendil-works/pi-ai";
+import { type Api, type Model, Type } from "@earendil-works/pi-ai";
 import { defineTool, section } from "@earendil-works/pi-durable";
 import { defineGatedAction, definePimExtension, type PimConfig } from "../src/extensions/define";
 
@@ -15,6 +15,9 @@ export const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-model"
 
 /** The scripted model that compresses memories, kept apart so naps never take the conversation's responses. */
 export const napper = fauxProvider({ provider: "napper", models: [{ id: "napper-model" }] });
+
+/** The scripted utility model (src/utility.ts). With no responses set it fails, so a session keeps its first message's start. */
+export const utility = fauxProvider({ provider: "utility", models: [{ id: "utility-model" }] });
 
 /** Every email the test agents sent, in order: tests read it as an inbox. */
 export const outbox: Mail[] = [];
@@ -113,6 +116,7 @@ export class Pim extends RealPim {
 		const models = createModels({ credentials: this.credentials });
 		models.setProvider(faux.provider);
 		models.setProvider(napper.provider);
+		models.setProvider(utility.provider);
 		models.setProvider(this.chatgpt.provider());
 		return models;
 	}
@@ -133,5 +137,9 @@ export class Pim extends RealPim {
 
 	protected override memoryModel(): ModelRef {
 		return { provider: "napper", modelId: "napper-model" };
+	}
+
+	protected override defaultUtilityModel(): Model<Api> {
+		return utility.getModel();
 	}
 }

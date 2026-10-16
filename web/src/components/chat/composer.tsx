@@ -1,5 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
-import { ArrowUp, Plus, Square, X } from "lucide-react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { ArrowUp, Loader2, Plus, Sparkles, Square, X } from "lucide-react";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
@@ -13,7 +13,7 @@ import {
   PromptInputTextarea,
   usePromptInputController,
 } from "~/components/ui/prompt-input";
-import type { UserContent } from "~/lib/pim-api";
+import { pim, type UserContent } from "~/lib/pim-api";
 import { modelQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
@@ -90,7 +90,17 @@ function ComposerInner({
   const files = controller.attachments.files;
   const hasText = text.trim().length > 0;
   const hasContent = hasText || files.length > 0;
-  const canSend = !disabled && !preparing && hasContent;
+  // The utility model rewrites the draft in place.
+  const improve = useMutation({
+    mutationFn: (draft: string) => pim.improvePrompt(draft),
+    onSuccess: (improved) => {
+      controller.textInput.setInput(improved);
+      queueMicrotask(() => textareaRef.current?.focus());
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const canImprove = !disabled && hasText && !improve.isPending;
+  const canSend = !disabled && !preparing && !improve.isPending && hasContent;
   const showStop = busy && !hasContent && Boolean(onStop);
 
   const cantSeeImages = () =>
@@ -189,10 +199,29 @@ function ComposerInner({
             ref={textareaRef}
             id={inputId}
             placeholder={placeholder ?? t("messagePim")}
-            disabled={disabled}
+            disabled={disabled || improve.isPending}
             autoFocus={autoFocus}
             className="self-center"
           />
+
+          {(hasText || improve.isPending) && (
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              aria-label={t("improvePrompt")}
+              title={t("improvePrompt")}
+              disabled={!canImprove}
+              onClick={() => improve.mutate(text.trim())}
+              className="size-9 shrink-0 rounded-full text-muted-foreground"
+            >
+              {improve.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Sparkles className="size-4" />
+              )}
+            </Button>
+          )}
 
           <PromptInputSubmit
             status={showStop ? "streaming" : preparing ? "submitted" : "ready"}

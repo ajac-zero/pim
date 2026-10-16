@@ -1,12 +1,12 @@
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, type FauxResponseFactory, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { StoredImage } from "../src/images";
 import type { TranscriptMessage } from "../src/transcript";
 import { api, apiUrl, connect, OWNER, post, say, textOf, TOKEN, toolUse, url } from "./helpers";
-import { faux, type Pim } from "./worker";
+import { faux, type Pim, utility } from "./worker";
 
 describe("auth", () => {
 	it("rejects requests without the API token", async () => {
@@ -109,7 +109,7 @@ describe("conversation", () => {
 		expect((await api("/sessions/999/messages")).status).toBe(404);
 	});
 
-	it("names sessions by the user's first message and lists the most recently active first", async () => {
+	it("names sessions from the user's first message with the utility model and lists the most recently active first", async () => {
 		const first = (await post("/sessions")).body.id;
 		const second = (await post("/sessions", { title: "  Groceries  " })).body.id;
 		const third = (await post("/sessions")).body.id;
@@ -119,8 +119,12 @@ describe("conversation", () => {
 			);
 		const order = async () => ((await api("/sessions")).body.sessions as { id: string }[]).map((s) => s.id);
 
+		// The utility model's quotes and full stop are dropped.
+		utility.setResponses([fauxAssistantMessage('"Lisbon Trip Planning."')]);
 		faux.setResponses([toolUse("send_to_user", { message: "Sure." })]);
-		await say("Plan my trip to Lisbon\nwith lots of detail", first);
+		await say("Can you help me plan my trip to Lisbon in May?\nWe want lots of detail", first);
+		await vi.waitFor(async () => expect((await titles())[first]).toBe("Lisbon Trip Planning"));
+		// A session with a title is not named again.
 		faux.setResponses([toolUse("send_to_user", { message: "Ok." })]);
 		await say("Milk and eggs", second);
 		// A message Pim sends itself (a scheduled task, an event) does not name a session.
@@ -129,19 +133,80 @@ describe("conversation", () => {
 			const receipt = await instance.submitTo(third, "[Scheduled task] remind", {}, "pim");
 			await instance.harness.wait(receipt.operationId, { session: third });
 		});
-		expect(await titles()).toMatchObject({ [first]: "Plan my trip to Lisbon", [second]: "Groceries", [third]: null });
+		expect(await titles()).toMatchObject({ [first]: "Lisbon Trip Planning", [second]: "Groceries", [third]: null });
 		expect((await order()).slice(0, 3)).toEqual([third, second, first]);
+		expect(utility.getPendingResponseCount()).toBe(0);
 
 		// Activity moves a session up; later messages do not rename it.
 		faux.setResponses([toolUse("send_to_user", { message: "Booked." })]);
 		await say("Book the flights", first);
 		expect((await order())[0]).toBe(first);
-		expect((await titles())[first]).toBe("Plan my trip to Lisbon");
+		expect((await titles())[first]).toBe("Lisbon Trip Planning");
+
+		// When the utility model fails, the session keeps the first line of its first message.
+		const fourth = (await post("/sessions")).body.id;
+		faux.setResponses([toolUse("send_to_user", { message: "Will do." })]);
+		await say("Call mom on Sunday\nabout the party", fourth);
+		expect((await titles())[fourth]).toBe("Call mom on Sunday");
 
 		const renamed = await api(`/sessions/${first}`, { method: "PUT", body: JSON.stringify({ title: "Lisbon" }) });
 		expect(renamed.body).toMatchObject({ id: first, title: "Lisbon", createdAt: expect.any(Number), updatedAt: expect.any(Number) });
 		expect((await api(`/sessions/${first}`, { method: "PUT", body: JSON.stringify({ title: " " }) })).status).toBe(400);
 		expect((await api("/sessions/999", { method: "PUT", body: JSON.stringify({ title: "x" }) })).status).toBe(404);
+	});
+
+	it("regenerates a title, summarizes a chat and improves a prompt with the utility model", async () => {
+		const session = (await post("/sessions", { title: "Untitled" })).body.id;
+		expect((await api(`/sessions/${session}/summary`)).body).toEqual({ summary: null });
+		faux.setResponses([
+			fauxAssistantMessage([fauxText("Private note: check flight prices first."), fauxToolCall("send_to_user", { message: "Lisbon in May is lovely." })], {
+				stopReason: "toolUse",
+			}),
+		]);
+		await say("Plan my trip to Lisbon", session);
+		faux.setResponses([toolUse("send_to_user", { message: "Booked the 9:40 flight." })]);
+		await say("Book the morning flight", session);
+
+		// Each job reads the conversation: what each side said, without the agent's private notes.
+		const inputs: { job: string; input: string }[] = [];
+		const answer =
+			(text: string): FauxResponseFactory =>
+			({ messages }) => {
+				const [job, input] = [messages.find((message) => message.role === "system"), messages.at(-1)];
+				inputs.push({ job: JSON.stringify(job?.content), input: JSON.stringify(input?.content) });
+				return fauxAssistantMessage(text);
+			};
+		utility.setResponses([answer("Title: Lisbon Flights."), answer("- Flight booked\n\n## Next steps\n- Find a hotel")]);
+		const retitled = await post(`/sessions/${session}/title`);
+		expect(retitled.body).toMatchObject({ id: session, title: "Lisbon Flights" });
+		const summary = await api(`/sessions/${session}/summary`);
+		expect(summary.body).toEqual({ summary: "- Flight booked\n\n## Next steps\n- Find a hotel" });
+		expect(inputs[0]!.job).toContain("You name chats");
+		expect(inputs[1]!.job).toContain("You summarize");
+		for (const { input } of inputs) {
+			expect(input).toContain("Person: Plan my trip to Lisbon");
+			expect(input).toContain("Assistant: Lisbon in May is lovely.");
+			expect(input).toContain("Assistant: Booked the 9:40 flight.");
+			expect(input).not.toContain("Private note");
+		}
+
+		utility.setResponses([fauxAssistantMessage("  Plan a 3-day Lisbon trip in May for two, under €1,500.  ")]);
+		expect((await post("/prompts/improve", { text: "lisbon trip" })).body).toEqual({ text: "Plan a 3-day Lisbon trip in May for two, under €1,500." });
+		expect((await post("/prompts/improve", { text: " " })).status).toBe(400);
+		// A failed job says so and changes nothing.
+		const failed = await post(`/sessions/${session}/title`);
+		expect(failed.status).toBe(502);
+		const { sessions } = (await api("/sessions")).body as { sessions: { id: string; title: string }[] };
+		expect(sessions.find((listed) => listed.id === session)?.title).toBe("Lisbon Flights");
+
+		// The summary is kept until something more is said: asking again doesn't ask the model.
+		expect((await api(`/sessions/${session}/summary`)).body).toEqual(summary.body);
+		faux.setResponses([toolUse("send_to_user", { message: "Found a hotel in Alfama." })]);
+		await say("Now a hotel", session);
+		utility.setResponses([answer("- Flight and hotel booked\n\n## Next steps\nNone.")]);
+		expect((await api(`/sessions/${session}/summary`)).body).toEqual({ summary: "- Flight and hotel booked\n\n## Next steps\nNone." });
+		expect(inputs.at(-1)!.input).toContain("Assistant: Found a hotel in Alfama.");
+		expect(utility.getPendingResponseCount()).toBe(0);
 	});
 
 	it("deletes a chat: it leaves the list and the API, and its scheduled tasks stop", async () => {

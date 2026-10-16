@@ -56,6 +56,9 @@
     "PIM_WEB_SEARCH": "",
     // Model that compresses long-term memory; empty uses PIM_MODEL (never the ChatGPT plan).
     "PIM_MEMORY_MODEL": "",
+    // Small Workers AI model for side jobs: naming chats, improving prompts, summarizing chats.
+    // Each person can choose another in Settings; empty turns these features off until they do.
+    "PIM_UTILITY_MODEL": "@cf/ibm-granite/granite-4.0-h-micro",
     // Lines of long-term memory in every prompt; empty is 96 (about 8k tokens).
     "PIM_MEMORY_LINES": "",
     // This deployment's public URL, for app event callbacks; empty learns it from API requests.

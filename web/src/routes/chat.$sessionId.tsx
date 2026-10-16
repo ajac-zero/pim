@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useNewChat } from "~/components/app-sidebar";
 import { Composer } from "~/components/chat/composer";
+import { SummaryBox, SummaryToggle } from "~/components/chat/summary";
 import { ChatTabs } from "~/components/chat/tabs";
 import { TeamPanel } from "~/components/chat/team";
 import { Thread } from "~/components/chat/thread";
@@ -92,7 +93,7 @@ function ChatPage() {
 
   return (
     <main className="flex min-h-0 min-w-0 flex-1">
-      <div className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col">
+      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
         <header className="hidden h-13 shrink-0 gap-2 bg-sidebar pr-4 md:flex">
           <ChatTabs activeId={sessionId} />
           {reconnecting && (
@@ -100,73 +101,87 @@ function ChatPage() {
               {t("connecting")}
             </span>
           )}
+          <SummaryToggle className="shrink-0 self-center" />
         </header>
-        {ready && (
-          <Thread
-            sessionId={sessionId}
-            visit={session?.visit?.username}
-            view={view}
-            pending={pending}
-            composerHeight={composerHeight}
-            composerCardHeight={composerCardHeight}
-          />
-        )}
-
-        {/* Floats over the bottom of the thread. Its measured height feeds
-         * the thread's bottom padding, so the last message clears it. */}
-        <div
-          ref={composerOverlayRef}
-          className="pointer-events-none absolute right-2.5 bottom-0 left-0 z-10 flex justify-center bg-background px-4 pb-2"
-        >
-          <div
-            ref={composerCardRef}
-            className="pointer-events-auto w-full max-w-3xl"
-          >
-            {session?.agent && (
-              <TeamPanel
+        {/* The summary box takes a column of its own, so the thread makes room
+         * for it rather than sitting under it: at the right, or on top on phones. */}
+        <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            {ready && (
+              <Thread
                 sessionId={sessionId}
-                agentName={session.agent.name}
-                running={ready && view.running}
+                visit={session?.visit?.username}
+                view={view}
+                pending={pending}
+                composerHeight={composerHeight}
+                composerCardHeight={composerCardHeight}
               />
             )}
-            <Composer
-              key={sessionId}
-              draftKey={sessionId}
-              onSend={send}
-              placeholder={
-                session?.visit
-                  ? t("messageVisit", { username: session.visit.username })
-                  : session?.agent
-                    ? t("messageAgent", { name: session.agent.name })
-                    : undefined
-              }
-              onStop={stop}
-              busy={ready && view.running}
-              disabled={!ready}
-              disclaimer={
-                session?.visit ? (
-                  <>
-                    <Users className="size-3.5 shrink-0" />
-                    {t("visitBanner", { username: session.visit.username })}
-                  </>
-                ) : onPlan ? (
-                  <>
-                    <ChatGPTLogo className="size-3.5" />
-                    {t("usingChatGPTPlan")} ·
-                    <a
-                      href={CHATGPT_USAGE_URL}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="underline underline-offset-2 hover:text-foreground"
-                    >
-                      {t("manageUsage")}
-                    </a>
-                  </>
-                ) : undefined
-              }
-              autoFocus
-            />
+
+            {/* Floats over the bottom of the thread. Its measured height feeds
+             * the thread's bottom padding, so the last message clears it. */}
+            <div
+              ref={composerOverlayRef}
+              className="pointer-events-none absolute right-2.5 bottom-0 left-0 z-10 flex justify-center bg-background px-4 pb-2"
+            >
+              <div
+                ref={composerCardRef}
+                className="pointer-events-auto w-full max-w-3xl"
+              >
+                {session?.agent && (
+                  <TeamPanel
+                    sessionId={sessionId}
+                    agentName={session.agent.name}
+                    running={ready && view.running}
+                  />
+                )}
+                <Composer
+                  key={sessionId}
+                  draftKey={sessionId}
+                  onSend={send}
+                  placeholder={
+                    session?.visit
+                      ? t("messageVisit", { username: session.visit.username })
+                      : session?.agent
+                        ? t("messageAgent", { name: session.agent.name })
+                        : undefined
+                  }
+                  onStop={stop}
+                  busy={ready && view.running}
+                  disabled={!ready}
+                  disclaimer={
+                    session?.visit ? (
+                      <>
+                        <Users className="size-3.5 shrink-0" />
+                        {t("visitBanner", { username: session.visit.username })}
+                      </>
+                    ) : onPlan ? (
+                      <>
+                        <ChatGPTLogo className="size-3.5" />
+                        {t("usingChatGPTPlan")} ·
+                        <a
+                          href={CHATGPT_USAGE_URL}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="underline underline-offset-2 hover:text-foreground"
+                        >
+                          {t("manageUsage")}
+                        </a>
+                      </>
+                    ) : undefined
+                  }
+                  autoFocus
+                />
+              </div>
+            </div>
           </div>
+          {ready && (
+            <SummaryBox
+              sessionId={sessionId}
+              entries={view.entries.length}
+              settled={!view.running}
+            />
+          )}
         </div>
       </div>
     </main>

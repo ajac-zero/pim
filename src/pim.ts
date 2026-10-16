@@ -1,5 +1,5 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { JsonValue } from "@earendil-works/pi-ai";
+import type { Api, JsonValue, Model } from "@earendil-works/pi-ai";
 import { createModels, type Models } from "@earendil-works/pi-ai/models";
 import {
 	type AgentChange,
@@ -18,6 +18,7 @@ import { Agent as DurableAgent, type Connection, type ConnectionContext, getAgen
 import { type PiModel, PiHarness, type PiOperationResult, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
 import { ArtifactStore, artifactHeaders, downloadName, RESIZE_SCRIPT } from "./artifacts";
+import { digestHex } from "./auth/store";
 import { Email, type Mailer, mailerFrom } from "./email";
 import { ImageStore, userInput } from "./images";
 import {
@@ -105,6 +106,7 @@ import { type Agent, type AgentInput, AgentStore, agentInput, type TeamMember } 
 import type { AgentIcon } from "./gallery";
 import { type Role, TEAM_EXTENSION, type TeamRun, TeamStore, teamExtension } from "./team";
 import { projectEntries } from "./transcript";
+import { conversationText, IMPROVE_PROMPT, NAME_CHAT, SUMMARIZE_CHAT, type UtilityTask } from "./utility";
 import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
 
@@ -177,8 +179,9 @@ export type OwnerStatus = "active" | "suspended";
 export type OwnerProfile = { readonly ownerId: string; readonly username: string; readonly publicUrl: string };
 /** How long an erasure waits for runs to stop and apps to unsubscribe before wiping anyway. */
 const ERASE_COURTESY_MS = 3_000;
-/** `pim_meta` key of the model chosen through the API. */
+/** `pim_meta` keys of the models chosen through the API: for chats, and the utility model. */
 const MODEL_KEY = "model";
+const UTILITY_MODEL_KEY = "utility_model";
 /** `pim_meta` keys the Worker sets: the owner's profile, a suspension, the Pim's own limits. */
 const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
@@ -211,11 +214,18 @@ function clipTitle(text: string): string {
 	return line.length > 80 ? `${line.slice(0, 79).trimEnd()}…` : line;
 }
 
-/** A session's default name: the start of the first thing the user said. */
+function textOf(content: UserInput): string {
+	return typeof content === "string" ? content : content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join(" ");
+}
+
+/** A session's first name: the start of the first thing the user said, until the utility model names it. */
 function titleFrom(content: UserInput): string | undefined {
-	const text =
-		typeof content === "string" ? content : content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join(" ");
+	const text = textOf(content);
 	return text.trim() === "" ? undefined : clipTitle(text);
+}
+
+function sameModel(a: PiModel, b: PiModel): boolean {
+	return a.provider === b.provider && a.id === b.id;
 }
 
 /** A model as the API shows it; `images` says whether it can see them. */
@@ -642,6 +652,22 @@ export class Pim extends DurableAgent<Env> {
 		return this.defaultModel();
 	}
 
+	/**
+	 * A model from `GET /model`'s choices, by provider and id: the deployment's,
+	 * one it allows besides, or one on the connected ChatGPT plan.
+	 */
+	async #choice(provider: string, id: string): Promise<PiModel> {
+		const fallback = this.defaultModel();
+		if (provider === fallback.provider && id === fallback.id) return fallback;
+		if (provider === fallback.provider && this.#allowedModels()?.includes(id)) return this.ai(id);
+		const model = this.modelCatalog().getModel(provider, id);
+		if (!model) throw new HttpError(400, `No model ${provider}/${id}`);
+		if (provider === CHATGPT_PROVIDER && !(await this.chatgpt.status()).connected) {
+			throw new HttpError(409, "Sign in with ChatGPT first");
+		}
+		return model;
+	}
+
 	/** Makes `model` every session's model, and new sessions'; null goes back to the default. */
 	async chooseModel(model: PiModel | null): Promise<PiModel> {
 		if (model === null) this.store.deleteMeta(MODEL_KEY);
@@ -661,6 +687,58 @@ export class Pim extends DurableAgent<Env> {
 	protected memoryModel(): ModelRef | undefined {
 		const model = this.ai(this.env.PIM_MEMORY_MODEL || this.env.PIM_MODEL);
 		return { provider: model.provider, modelId: model.id };
+	}
+
+	/**
+	 * The deployment's utility model (`PIM_UTILITY_MODEL` on Workers AI), for
+	 * side jobs such as naming chats (see ./utility.ts). Empty turns them off.
+	 */
+	protected defaultUtilityModel(): Model<Api> | undefined {
+		return this.env.PIM_UTILITY_MODEL ? this.ai(this.env.PIM_UTILITY_MODEL) : undefined;
+	}
+
+	/**
+	 * The utility model: the one chosen through the API, or the default.
+	 * A ChatGPT model counts only while the plan is connected.
+	 */
+	async utilityModel(): Promise<Model<Api> | undefined> {
+		const json = this.store.meta(UTILITY_MODEL_KEY);
+		if (json !== undefined) {
+			const { provider, id } = JSON.parse(json) as { provider: string; id: string };
+			const model = this.modelCatalog().getModel(provider, id);
+			if (model && (provider !== CHATGPT_PROVIDER || (await this.chatgpt.status()).connected)) return model;
+		}
+		return this.defaultUtilityModel();
+	}
+
+	/**
+	 * Runs a side job on the utility model and returns its answer, cleaned as
+	 * the task says. It counts against the daily model limits, but not as a run.
+	 */
+	async utility(task: UtilityTask, input: string): Promise<string> {
+		this.#assertOpen();
+		if (this.status() !== "active") throw new HttpError(403, "This Pim is suspended");
+		const model = await this.utilityModel();
+		if (!model) throw new HttpError(503, "This Pim has no utility model");
+		const answer = await this.modelCatalog().completeSimple(
+			model,
+			{ systemPrompt: task.instructions, messages: [{ role: "user", content: input, timestamp: Date.now() }] },
+			// A reasoning model thinks as little as it can; a cap on its tokens could cut off the answer.
+			{ ...(model.reasoning ? { reasoning: "minimal" } : { maxTokens: task.maxTokens }), signal: AbortSignal.timeout(60_000) },
+		);
+		const text = answer.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+		const result = task.clean ? task.clean(text) : text.trim();
+		if (answer.stopReason === "error" || result === "") {
+			throw new HttpError(502, `The utility model couldn't answer: ${answer.errorMessage ?? "it said nothing"}`);
+		}
+		return result;
+	}
+
+	/** A session's conversation as the utility model reads it; 409 when there is nothing in it yet. */
+	async #conversationText(session: string, limit: number): Promise<string> {
+		const text = conversationText(projectEntries(await this.harness.session(session).messages()), limit);
+		if (text === "") throw new HttpError(409, "This chat has no conversation yet");
+		return text;
 	}
 
 	/**
@@ -783,7 +861,10 @@ export class Pim extends DurableAgent<Env> {
 			if (run !== undefined) this.usage.releaseRun(run);
 			throw error;
 		}
-		this.store.touchSession(session, from === "user" && !this.visits.bySession(session) ? titleFrom(content) : undefined);
+		const title = from === "user" && !this.visits.bySession(session) ? titleFrom(content) : undefined;
+		const named = (this.store.sessionInfo(session)?.title ?? null) !== null;
+		this.store.touchSession(session, title);
+		if (title !== undefined && !named) void this.keepAliveWhile(() => this.#nameSession(session, textOf(content), title));
 		let kept: string[] = [];
 		try {
 			await this.#selectAbilities(session);
@@ -802,6 +883,21 @@ export class Pim extends DurableAgent<Env> {
 			await this.images.delete(kept);
 		}
 		return receipt;
+	}
+
+	/**
+	 * Names a session from its first message with the utility model, in place
+	 * of `first`, the message's start. A rename meanwhile stays, and so does
+	 * `first` when there is no utility model or it fails.
+	 */
+	async #nameSession(session: string, message: string, first: string): Promise<void> {
+		try {
+			if (!(await this.utilityModel())) return;
+			const title = clipTitle(await this.utility(NAME_CHAT, `Person: ${message.slice(0, 2_000)}`));
+			if (this.store.retitleSession(session, first, title)) this.broadcastMessage({ type: "sessions" });
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.title", owner: this.name, error: errorMessage(error) }));
+		}
 	}
 
 	/**
@@ -2118,6 +2214,45 @@ export class Pim extends DurableAgent<Env> {
 				return this.store.sessionInfo(id);
 			},
 		],
+		// Side jobs on the utility model (./utility.ts).
+		[
+			"POST",
+			"/sessions/:session/title",
+			async ({ session }) => {
+				const id = await this.#session(session!);
+				const title = clipTitle(await this.utility(NAME_CHAT, await this.#conversationText(id, 8_000)));
+				this.store.renameSession(id, title);
+				this.broadcastMessage({ type: "sessions" });
+				return this.store.sessionInfo(id);
+			},
+		],
+		[
+			"GET",
+			"/sessions/:session/summary",
+			async ({ session }) => {
+				const id = await this.#session(session!);
+				const text = conversationText(projectEntries(await this.harness.session(id).messages()), 48_000);
+				if (text === "") return { summary: null };
+				// Written again only when what was said has changed since the last one.
+				const of = await digestHex(text);
+				let summary = this.store.sessionSummary(id, of);
+				if (summary === undefined) {
+					summary = await this.utility(SUMMARIZE_CHAT, text);
+					this.store.setSessionSummary(id, summary, of);
+				}
+				return { summary };
+			},
+		],
+		[
+			"POST",
+			"/prompts/improve",
+			async (_params, request) => {
+				const { text } = await readJson<{ text: string }>(request);
+				if (typeof text !== "string" || text.trim() === "") throw new HttpError(400, "text must be a non-empty string");
+				if (text.length > 8_000) throw new HttpError(413, "text is longer than 8,000 characters");
+				return { text: await this.utility(IMPROVE_PROMPT, text) };
+			},
+		],
 		[
 			"DELETE",
 			"/sessions/:session",
@@ -2269,10 +2404,21 @@ export class Pim extends DurableAgent<Env> {
 				}
 				const fallback = this.defaultModel();
 				const platform = (this.#allowedModels() ?? []).filter((id) => id !== fallback.id).map((id) => this.ai(id));
+				const choices = [fallback, ...platform, ...chatgptModels];
+				const utilityDefault = this.defaultUtilityModel();
+				const utility = await this.utilityModel();
+				const utilityChoices =
+					utilityDefault && !choices.some((model) => sameModel(model, utilityDefault)) ? [utilityDefault, ...choices] : choices;
 				return {
 					model: describeModel(this.chosenModel()),
 					default: describeModel(fallback),
-					choices: [fallback, ...platform, ...chatgptModels].map(describeModel),
+					choices: choices.map(describeModel),
+					// The model for side jobs (./utility.ts); null when there is none.
+					utility: {
+						model: utility ? describeModel(utility) : null,
+						default: utilityDefault ? describeModel(utilityDefault) : null,
+						choices: utilityChoices.map(describeModel),
+					},
 					chatgpt: { ...chatgpt, error: chatgptError },
 				};
 			},
@@ -2289,15 +2435,25 @@ export class Pim extends DurableAgent<Env> {
 				if (provider === fallback.provider && id === fallback.id) {
 					return { model: describeModel(await this.chooseModel(null)) };
 				}
-				if (provider === fallback.provider && this.#allowedModels()?.includes(id)) {
-					return { model: describeModel(await this.chooseModel(this.ai(id))) };
+				return { model: describeModel(await this.chooseModel(await this.#choice(provider, id))) };
+			},
+		],
+		[
+			"PUT",
+			"/model/utility",
+			async (_params, request) => {
+				const { provider, id } = await readJson<{ provider: string; id: string }>(request);
+				if (typeof provider !== "string" || typeof id !== "string") {
+					throw new HttpError(400, "provider and id must be strings");
 				}
-				const model = this.modelCatalog().getModel(provider, id);
-				if (!model) throw new HttpError(400, `No model ${provider}/${id}`);
-				if (provider === CHATGPT_PROVIDER && !(await this.chatgpt.status()).connected) {
-					throw new HttpError(409, "Sign in with ChatGPT first");
+				const fallback = this.defaultUtilityModel();
+				if (fallback && provider === fallback.provider && id === fallback.id) this.store.deleteMeta(UTILITY_MODEL_KEY);
+				else {
+					const model = await this.#choice(provider, id);
+					this.store.setMeta(UTILITY_MODEL_KEY, JSON.stringify({ provider: model.provider, id: model.id }));
 				}
-				return { model: describeModel(await this.chooseModel(model)) };
+				const model = await this.utilityModel();
+				return { model: model ? describeModel(model) : null };
 			},
 		],
 		// The address Pim emails the person at, confirmed with a code it sends there.

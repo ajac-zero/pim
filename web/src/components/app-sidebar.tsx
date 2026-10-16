@@ -18,6 +18,7 @@ import {
   Shapes,
   ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
   SquarePen,
   Sun,
   Trash2,
@@ -816,6 +817,12 @@ function SessionRow({
     setRenaming(false);
   };
 
+  const regenerate = useMutation({
+    mutationFn: () => pim.regenerateTitle(session.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onError: (error) => toast.error(error.message),
+  });
+
   const navigate = useNavigate();
   // Delete asks twice: the first click turns the item into a confirmation.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -916,6 +923,12 @@ function SessionRow({
             }}
           >
             <Pencil className="size-4" /> {t("rename")}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            disabled={regenerate.isPending}
+            onClick={() => regenerate.mutate()}
+          >
+            <Sparkles className="size-4" /> {t("regenerate")}
           </DropdownMenuItem>
           <DropdownMenuItem
             variant="destructive"

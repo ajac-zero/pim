@@ -95,6 +95,7 @@ Configuration lives in `vars` in `wrangler.jsonc`:
 | `PIM_TIME_ZONE` | `UTC` | IANA time zone for anyone who hasn't set theirs; joining sets the browser's |
 | `PIM_WEB_SEARCH` | empty | `exa`, `ceramic`, or `linkup` enables `web_search` |
 | `PIM_MEMORY_MODEL` | empty | Model that compresses memories; empty uses `PIM_MODEL`, never the ChatGPT plan |
+| `PIM_UTILITY_MODEL` | `@cf/ibm-granite/granite-4.0-h-micro` | Small Workers AI model for side jobs, such as naming chats (see [Utility model](#utility-model)); empty turns them off. Each person can choose another in Settings |
 | `PIM_MEMORY_LINES` | `96` | Lines of long-term memory in every prompt (about 8k tokens) |
 | `PIM_PUBLIC_URL` | empty | This Pim's public URL, for apps' callbacks and the links it makes; empty uses the address requests come to |
 | `PIM_APPROVAL_POLICY` | `auto` | What an unanswered approval becomes: `auto` approves it after 30 seconds, `explicit` waits for an answer however long. Each person can change theirs in Settings |
@@ -128,9 +129,12 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | --- | --- | --- | --- |
 | GET | `/health` | | `{ name: "pim", ok: true }`; no token needed; also at the root |
 | GET | `/` | | Model, time zone, root session, and tools (with `requiresApproval`) |
-| GET | `/sessions` | | `{ sessions: [{ id, title, busy, createdAt, updatedAt }] }`, most recently active first; `title` is the start of the user's first message until renamed |
+| GET | `/sessions` | | `{ sessions: [{ id, title, busy, createdAt, updatedAt }] }`, most recently active first; `title` is a few words the utility model picks from the user's first message, and the start of that message until it answers or if it fails |
 | POST | `/sessions` | `{ title? }` | A new session |
 | PUT | `/sessions/:s` | `{ title }` | Renames it |
+| POST | `/sessions/:s/title` | | Names it again from the conversation so far, with the utility model; the session |
+| GET | `/sessions/:s/summary` | | `{ summary }`: Markdown with what the chat covered and its next steps, from the utility model, written again only when more was said since the last one; null before anything was said |
+| POST | `/prompts/improve` | `{ text }` | `{ text }`: a message the person is about to send, rewritten by the utility model so their agent can act on it |
 | GET | `/sessions/:s/messages` | | `{ busy, pending, messages }`: the transcript as display messages |
 | POST | `/sessions/:s/messages` | `{ content, wait?, whenBusy?: "followUp" \| "steer", operationId? }`. `content` is text, or an array of `{ type: "text", text }` and `{ type: "image", data, mimeType }` parts: up to 4 PNG, JPEG, WebP or GIF images, base64, at most 5 MB each. Images are kept in R2; the transcript shows each as `{ type: "image", mimeType, url }`. Models on the OpenAI Responses and Anthropic Messages APIs fetch them from a signed URL (`/images/<owner>/<id>`, valid 15 minutes) when Pim has a public HTTPS address; any other model gets them inline | `202` with a receipt `{ operationId, accepted }`, or the result `{ status, replies, text?, reason? }` when `wait` is true. `replies` contains only successful chat sends, in order; `text`, when present, joins those replies with blank lines. Private notes are never used as a fallback |
 | GET | `/images/:id` | | An image sent in a chat, by the `url` its message keeps |
@@ -142,8 +146,9 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | PUT | `/settings` | Any of `{ timeZone, approvalPolicy, notifyWebhook }`; `null` goes back to the deployment's | The settings |
 | GET | `/usage` | | `{ limits, today, history, storageBytes }`: model requests, tokens (the ChatGPT plan's apart) and runs by UTC day |
 | GET | `/export` | | Everything as one JSON download, without credentials |
-| GET | `/model` | | `{ model, default, choices, chatgpt: { connected, email, error } }`: the model every session uses, and the ones you can choose. Each says whether it sees images (`images`); a model that doesn't is told an image was left out |
+| GET | `/model` | | `{ model, default, choices, utility: { model, default, choices }, chatgpt: { connected, email, error } }`: the model every session uses, and the ones you can choose. Each says whether it sees images (`images`); a model that doesn't is told an image was left out. `utility` is the utility model: `PIM_UTILITY_MODEL` unless you chose another, and the deployment's default again while a chosen ChatGPT model's plan is disconnected |
 | PUT | `/model` | `{ provider, id }`, one of `choices` | Moves every session, and new ones, to that model |
+| PUT | `/model/utility` | `{ provider, id }`, one of `utility.choices` | Makes that model the utility model |
 | GET | `/chatgpt` | | `{ connected, email }` |
 | POST | `/chatgpt/login` | | `{ url }` to open in a browser, to sign in with ChatGPT |
 | POST | `/chatgpt/callback` | `{ url }`: the `http://127.0.0.1:1455/...` address the browser landed on | `{ connected, email }` |
@@ -289,6 +294,16 @@ OpenAI only redirects a sign-in to a loopback address (`http://127.0.0.1:1455/..
 4. `PUT /model` with one of `GET /model`'s choices, such as `{ "provider": "openai", "id": "gpt-6.1-sol" }`.
 
 Pim registers with OpenAI as one agent host (a `urn:uuid:` ID it keeps) and refreshes the token itself, one refresh at a time, since OpenAI rotates refresh tokens. Memory compression stays on `PIM_MODEL`, so background work doesn't spend the plan. pi-ai sends these requests the way the flow requires: `store: false`, streaming, and no `temperature` or `max_output_tokens`.
+
+## Utility model
+
+Small jobs around a conversation go to one utility model rather than the chat's model: a fast, cheap one by default (`PIM_UTILITY_MODEL`), or any model you can chat with, such as one on your ChatGPT plan (Settings → Model → Utility model). Its requests count against the daily model limits, but not as runs. Today it:
+
+- **Names chats.** A chat is called by the start of its first message at once, then by the few words the utility model picks. A rename in the meantime stays. Chat ⋯ → Regenerate names it again from the conversation so far.
+- **Improves prompts.** The ✨ button in the message box rewrites the draft in place so the agent can act on it.
+- **Summarizes chats.** The summary button in a chat's header opens a box at the top right with what the chat covered and the next steps; it stays open from chat to chat until closed. Nothing is written while it's closed, and a summary is kept until more is said.
+
+Each job is a task in [`src/utility.ts`](src/utility.ts): instructions, a cap on the answer for models that don't reason, and how to clean the answer. `Pim.utility(task, input)` runs one on the utility model, and `conversationText` gives it a chat as what each side said, without tool calls or the agent's private notes. A new feature adds a task there and a route that calls it.
 
 ## Connected apps
 

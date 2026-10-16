@@ -123,6 +123,8 @@ An extension's `apps` are what people on the deployment can connect: remote MCP 
 
 Each person connects an app once, with their own account, from the Apps page, an agent's card in Your agents, or by asking an agent, whose `connect_app` connects only the apps that agent lists. Every agent of theirs that lists it then works with that one connection. A chat gets the tools and instructions of the connected apps its agent lists: the blueprint's `apps`, then the agent's own. Apps connected for another agent stay out of it. With `manage_apps` enabled (Off / Ask in Tool permissions), an agent can request additions and removals to its own app list, by name, as `find_app` finds them in the directory. Each request requires explicit chat approval, even under the auto approval policy, and approval connects additions automatically. Removal affects only the agent's own list, not blueprint apps or shared connections. `update_agent` cannot change apps.
 
+Most MCP servers let Pim register itself when someone signs in. For one that doesn't, such as GitHub's, register an OAuth client with the service whose redirect URL is this Pim's `/mcp/callback`, and name the Worker's environment variables holding it in the app's `client`: `client: { id: "GITHUB_CLIENT_ID", secret: "GITHUB_CLIENT_SECRET" }`. Pim signs everyone in with that client, and offers the app only once they're set. [`popular-apps.ts`](../src/extensions/popular-apps.ts), the apps Pim brings, has one.
+
 A blueprint's apps must be installed: one that names an app no extension brings fails when extensions are checked. Don't rename an app's `id`: people's agents store it.
 
 ### Apps without an MCP server

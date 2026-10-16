@@ -1,5 +1,6 @@
 import { assistant } from "./src/extensions/assistant";
 import { definePimConfig } from "./src/extensions/define";
+import { popularApps } from "./src/extensions/popular-apps";
 import { spotifyExtension } from "./src/extensions/spotify";
 
 /**
@@ -13,8 +14,9 @@ import { spotifyExtension } from "./src/extensions/spotify";
  * aren't listed here.
  */
 export default definePimConfig({
-	// Spotify is offered once SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are set (see src/extensions/spotify.ts).
-	extensions: [assistant, spotifyExtension],
+	// GitHub is offered once GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET are set (see src/extensions/popular-apps.ts),
+	// and Spotify once SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are (see src/extensions/spotify.ts).
+	extensions: [assistant, popularApps, spotifyExtension],
 	// The blueprint every new account's first agent builds on, and new agents by default: `<extension>/<blueprint>`, or null for none.
 	defaultBlueprint: "pim.assistant/pim",
 	// The color theme people see until they pick another: a theme's id, Pim's own (src/extensions/themes) or an extension's.

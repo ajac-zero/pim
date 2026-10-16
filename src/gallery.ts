@@ -3,7 +3,7 @@ import { DurableObject } from "cloudflare:workers";
 import pimConfig from "../pim.config";
 import { HttpError } from "./http";
 import type { TeamMember } from "./agents";
-import { appDirectory, type CustomApp, type DirectoryApp, storedApps } from "./extensions/app-directory";
+import { appDirectory, type CustomApp, type DirectoryApp, findSiteIcon, storedApps } from "./extensions/app-directory";
 
 /**
  * What the people on a Pim show each other: profiles, and the agents they
@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS apps (
 	name TEXT NOT NULL,
 	description TEXT NOT NULL,
 	url TEXT NOT NULL UNIQUE,
+	icon TEXT,
 	created_at INTEGER NOT NULL
 );
 `;
@@ -224,25 +225,29 @@ export class Gallery extends DurableObject<Env> {
 
 	/** The apps the admin added, as they added them. */
 	customApps(): CustomApp[] {
-		return this.#sql("SELECT id, name, description, url FROM apps ORDER BY created_at, id")
+		return this.#sql("SELECT id, name, description, url, icon FROM apps ORDER BY created_at, id")
 			.toArray()
-			.map((row) => ({ id: String(row.id), name: String(row.name), description: String(row.description), url: String(row.url) }));
+			.map((row) => ({ id: String(row.id), name: String(row.name), description: String(row.description), url: String(row.url), icon: optional(row.icon) }));
 	}
 
-	/** The admin adds an app anyone on this Pim can connect: a remote MCP server, named `custom/<id>` after its name. */
-	addCustomApp(input: { name?: unknown; description?: unknown; url?: unknown }): CustomApp {
+	/** The admin adds an app anyone on this Pim can connect: a remote MCP server, named `custom/<id>` after its name, with its site's icon. */
+	async addCustomApp(input: { name?: unknown; description?: unknown; url?: unknown }): Promise<CustomApp> {
 		const name = optionalText(input.name, "name", MAX_APP_NAME);
 		if (name === null) throw new HttpError(400, "name is required");
 		const description = optionalText(input.description, "description", MAX_BIO) ?? "";
 		const url = typeof input.url === "string" ? input.url.trim() : "";
 		if (!/^https:\/\/\S+$/.test(url) || url.length > 500) throw new HttpError(400, "url must be an https URL");
-		if (this.customApps().some((app) => app.url === url)) throw new HttpError(409, "An app with that URL is already here");
+		const added = () => this.customApps().some((app) => app.url === url);
+		if (added()) throw new HttpError(409, "An app with that URL is already here");
+		const icon = await findSiteIcon(url);
+		// Looking took a while: the same app may have been added since.
+		if (added()) throw new HttpError(409, "An app with that URL is already here");
 		const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "app";
 		const taken = new Set(this.customApps().map((app) => app.id));
 		let id = base;
 		for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
-		this.#sql("INSERT INTO apps (id, name, description, url, created_at) VALUES (?, ?, ?, ?, ?)", id, name, description, url, Date.now());
-		return { id, name, description, url };
+		this.#sql("INSERT INTO apps (id, name, description, url, icon, created_at) VALUES (?, ?, ?, ?, ?, ?)", id, name, description, url, icon, Date.now());
+		return { id, name, description, url, icon };
 	}
 
 	/** Takes an app the admin added out of the directory. People's connections to it stay until they remove them. */

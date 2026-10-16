@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { ExternalLink, Plug, Plus, Trash2, Unplug } from "lucide-react";
+import { ExternalLink, Plus, Trash2, Unplug } from "lucide-react";
 import { type FormEvent, useState } from "react";
 import { toast } from "sonner";
+import { AppIcon } from "~/components/app-icon";
 import { useI18n } from "~/components/i18n";
 import { Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
@@ -113,7 +114,11 @@ function AppsPage() {
                   key={app?.ref ?? connection?.id}
                   className="flex items-center gap-3 px-4 py-3"
                 >
-                  <Plug className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
+                  <AppIcon
+                    name={name}
+                    icon={app?.icon}
+                    className="size-11 text-lg"
+                  />
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-2">
                       <span className="truncate font-medium text-sm">

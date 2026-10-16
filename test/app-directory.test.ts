@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { type DirectoryApp, findApps } from "../src/extensions/app-directory";
 
-const app = (ref: string, name: string, description = ""): DirectoryApp => ({ ref, name, description, url: `https://${ref.replace("/", ".")}.test/mcp`, custom: false });
+const app = (ref: string, name: string, description = ""): DirectoryApp => ({ ref, name, description, url: `https://${ref.replace("/", ".")}.test/mcp`, custom: false, icon: null });
 
 describe("findApps", () => {
 	it("puts the app named as asked first, then names with every word, then some, then descriptions, and nothing else", () => {

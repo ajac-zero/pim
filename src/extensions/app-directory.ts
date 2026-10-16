@@ -14,6 +14,8 @@ export type CustomApp = {
 	readonly name: string;
 	readonly description: string;
 	readonly url: string;
+	/** Its site's icon, found when the admin added it. */
+	readonly icon: string | null;
 };
 
 export type DirectoryApp = {
@@ -25,6 +27,8 @@ export type DirectoryApp = {
 	readonly url: string | null;
 	/** Added by the admin, not brought by an extension. */
 	readonly custom: boolean;
+	/** An https or `data:` image URL; null shows its initial. */
+	readonly icon: string | null;
 };
 
 const MAX_FOUND = 8;
@@ -39,10 +43,59 @@ export function appDirectory(extensions: readonly PimExtension[], custom: readon
 				description: app.description,
 				url: isNativeApp(app) ? null : app.url,
 				custom: false,
+				icon: app.icon ?? null,
 			})),
 		),
-		...custom.map(({ id, name, description, url }) => ({ ref: `${CUSTOM_APPS}/${id}`, name, description, url, custom: true })),
+		...custom.map(({ id, name, description, url, icon }) => ({ ref: `${CUSTOM_APPS}/${id}`, name, description, url, custom: true, icon })),
 	];
+}
+
+/**
+ * The icon of the site an MCP server belongs to, from the home page of its
+ * host, or else of its parent domain (mcp.notion.com is notion.com's), after
+ * redirects: an SVG `<link rel="icon">` first, then the largest, then its
+ * `/favicon.ico`. Null when none is an image.
+ */
+export async function findSiteIcon(server: string): Promise<string | null> {
+	const get = (url: string | URL, accept: string) => fetch(url, { headers: { accept }, signal: AbortSignal.timeout(5000) });
+	const host = new URL(server).hostname;
+	const parent = host.split(".").length > 2 ? host.slice(host.indexOf(".") + 1) : null;
+	for (const site of parent ? [host, parent] : [host]) {
+		let home = new URL(`https://${site}/`);
+		const links: { href: string; rank: number }[] = [];
+		try {
+			const page = await get(home, "text/html");
+			home = new URL(page.url || home);
+			if (page.ok && (page.headers.get("content-type") ?? "").includes("text/html")) {
+				const html = (await page.text()).slice(0, 500_000);
+				for (const [tag] of html.matchAll(/<link\b[^>]*>/gi)) {
+					const attribute = (name: string) => {
+						const match = new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i").exec(tag);
+						return (match?.[1] ?? match?.[2] ?? match?.[3])?.replaceAll("&amp;", "&");
+					};
+					const href = attribute("href");
+					if (!href || !/(^|\s)(icon|apple-touch-icon)(\s|$)/i.test(attribute("rel") ?? "")) continue;
+					const svg = attribute("type") === "image/svg+xml" || /\.svg($|\?)/i.test(href);
+					const size = Math.max(0, ...(attribute("sizes") ?? "").split(/\s+/).map((size) => Number.parseInt(size, 10) || 0));
+					links.push({ href: new URL(href, home).href, rank: svg ? Number.POSITIVE_INFINITY : size });
+				}
+			} else await page.body?.cancel();
+		} catch {
+			// No home page: its favicon may still be there.
+		}
+		const candidates = [...links.sort((a, b) => b.rank - a.rank).map((link) => link.href), new URL("/favicon.ico", home).href];
+		for (const candidate of new Set(candidates)) {
+			if (!candidate.startsWith("https://")) continue;
+			try {
+				const response = await get(candidate, "image/*");
+				await response.body?.cancel();
+				if (response.ok && (response.headers.get("content-type") ?? "").startsWith("image/")) return candidate;
+			} catch {
+				// Try the next.
+			}
+		}
+	}
+	return null;
 }
 
 /**

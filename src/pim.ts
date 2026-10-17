@@ -38,6 +38,8 @@ import { SqlCredentialStore } from "./credentials";
 import { AppCatalog } from "./extensions/app-catalog";
 import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
 import { skillTools } from "./extensions/app-skills";
+import { skillsExtension, WRITE_SKILL, writeSkillAction } from "./extensions/skills";
+import { SKILL_NAME, SkillStore } from "./skills";
 import {
 	approvalsExtension,
 	gatedTools,
@@ -212,7 +214,7 @@ const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
 /** Tools of the Pim the person talks with that its team members don't get, though their extensions stay. */
-const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, RENAME_AGENT, MANAGE_APPS]);
+const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, RENAME_AGENT, MANAGE_APPS, WRITE_SKILL]);
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
 /** The admin's apps, as this Pim last read them from the gallery, and how long before it reads them again. */
 const CUSTOM_APPS_KEY = "custom_apps";
@@ -292,8 +294,10 @@ export class Pim extends DurableAgent<Env> {
 		// The majordomo until the person names it: built on the deployment's default blueprint, or bare.
 		const ref = this.extensions.defaultBlueprint;
 		const blueprint = ref === null ? undefined : this.extensions.blueprint(ref);
-		return { name: "Majordomo", description: "", instructions: "", apps: [], team: [], blueprint: blueprint ? ref : null };
+		return { name: "Majordomo", description: "", instructions: "", apps: [], skills: [], team: [], blueprint: blueprint ? ref : null };
 	}, () => this.appDirectory());
+	/** The skills the owner's agents wrote for work they do again. */
+	readonly skills = new SkillStore(this.ctx.storage.sql);
 	/** The tasks the agents' teams were given, each in a conversation of its own. */
 	readonly team = new TeamStore(this.ctx.storage.sql);
 	/** Images the person sent, in R2; their messages keep their URLs. */
@@ -436,6 +440,7 @@ export class Pim extends DurableAgent<Env> {
 		manageAppsAction(this.agents, this.apps, () => this.appDirectory()),
 		fileDeleteAction(this.#files),
 		...(this.browser.available ? [browserClickAction(this.browser), browserTypeAction(this.browser)] : []),
+		writeSkillAction(this.skills, this.agents),
 	];
 
 	/** Every action an approval can be for: Pim's own, and the extensions'. */
@@ -448,6 +453,7 @@ export class Pim extends DurableAgent<Env> {
 			const services = this.services();
 			this.#migrateAlwaysApproved();
 			this.registry.install(this.#agentExtension(services));
+			this.registry.install(this.#skillsExtension(services));
 			this.registry.install(goalsExtension(services));
 			this.registry.install(scheduleExtension(services));
 			this.registry.install(messagingExtension(services));
@@ -645,7 +651,7 @@ export class Pim extends DurableAgent<Env> {
 	#appExtras(services: PimServices) {
 		return {
 			catalog: this.catalog,
-			tools: [...skillTools(this.apps, this.catalog), ...eventTools(this.apps, this.catalog, this.appEvents, services)],
+			tools: [...skillTools(this.apps, this.catalog, (name) => this.skills.get(name)), ...eventTools(this.apps, this.catalog, this.appEvents, services)],
 		};
 	}
 
@@ -729,6 +735,33 @@ export class Pim extends DurableAgent<Env> {
 		const directory = this.appDirectory();
 		const missing = input.apps.find((ref) => !directory.some((app) => app.ref === ref));
 		if (missing) throw new HttpError(400, `This Pim offers no app ${missing}`);
+		return input;
+	}
+
+	/** One of the person's skills, or 404. */
+	#skill(name: string) {
+		const skill = SKILL_NAME.test(name) ? this.skills.get(name) : undefined;
+		if (!skill) throw new HttpError(404, `No skill ${name}`);
+		return skill;
+	}
+
+	/** The agents that use a skill. */
+	#skillAgents(name: string) {
+		return this.agents
+			.list()
+			.filter((agent) => agent.skills.includes(name))
+			.map(({ id, name: agentName }) => ({ id, name: agentName }));
+	}
+
+	/** A skill as its latest version, with the versions kept and the agents that use it. */
+	#describeSkill(name: string) {
+		return { ...this.#skill(name), history: this.skills.history(name), agents: this.#skillAgents(name) };
+	}
+
+	/** Skills given through the API must be the person's. */
+	#checkSkills<T extends { skills: readonly string[] }>(input: T): T {
+		const missing = input.skills.find((name) => !this.skills.get(name));
+		if (missing) throw new HttpError(400, `You have no skill ${missing}`);
 		return input;
 	}
 
@@ -2257,7 +2290,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/** At registration: gives the person a copy of the agent the admin chose for everyone, its icon too, besides their majordomo. */
-	async adoptEveryonesAgent(agent: AgentInput & { author: string; image: AgentIcon | null }): Promise<Agent> {
+	async adoptEveryonesAgent(agent: Omit<AgentInput, "skills"> & { author: string; image: AgentIcon | null }): Promise<Agent> {
 		this.#assertOpen();
 		const { author, image, ...input } = agent;
 		const copy = this.agents.create(await this.#installed(agentInput({ ...input })), { template: "default", author });
@@ -2496,6 +2529,7 @@ export class Pim extends DurableAgent<Env> {
 			watches: this.appEvents.list(),
 			artifacts: this.artifacts.export(),
 			files: await this.files.export(),
+			skills: this.skills.export(),
 			usage: this.usage.history(90),
 		});
 	}
@@ -3332,7 +3366,7 @@ export class Pim extends DurableAgent<Env> {
 			"POST",
 			"/agents",
 			async (_params, request) => {
-				const agent = this.agents.create(this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request)))));
+				const agent = this.agents.create(this.#checkSkills(this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request))))));
 				return Response.json(agent, { status: 201 });
 			},
 		],
@@ -3340,7 +3374,50 @@ export class Pim extends DurableAgent<Env> {
 			"PUT",
 			"/agents/:agent",
 			async ({ agent: id }, request) => {
-				return this.agents.update(id!, this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request), this.#agent(id!)))));
+				return this.agents.update(id!, this.#checkSkills(this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request), this.#agent(id!))))));
+			},
+		],
+		// Skills the agents wrote, with the person's approval, every version kept; each agent lists the ones it uses.
+		[
+			"GET",
+			"/skills",
+			() => ({
+				skills: this.skills.list().map(({ instructions: _instructions, ...skill }) => ({ ...skill, agents: this.#skillAgents(skill.name) })),
+			}),
+		],
+		["GET", "/skills/:name", ({ name }) => this.#describeSkill(this.#skill(name!).name)],
+		[
+			"GET",
+			"/skills/:name/versions/:version",
+			({ name, version }) => {
+				const found = VERSION.test(version!) ? this.skills.version(this.#skill(name!).name, Number(version)) : undefined;
+				if (!found) throw new HttpError(404, `No version ${version} of the skill ${name}`);
+				return found;
+			},
+		],
+		[
+			"POST",
+			"/skills/:name/restore",
+			async ({ name }, request) => {
+				const skill = this.#skill(name!);
+				const { version, baseVersion } = await readJson<{ version: number; baseVersion: number }>(request);
+				if (!Number.isSafeInteger(version) || !Number.isSafeInteger(baseVersion)) {
+					throw new HttpError(400, "version and baseVersion must be version numbers");
+				}
+				this.skills.restore(skill.name, version!, baseVersion!);
+				return Response.json(this.#describeSkill(skill.name), { status: 201 });
+			},
+		],
+		[
+			"DELETE",
+			"/skills/:name",
+			({ name }) => {
+				const skill = this.#skill(name!);
+				for (const agent of this.agents.list().filter((candidate) => candidate.skills.includes(skill.name))) {
+					this.agents.update(agent.id, agentInput({ skills: agent.skills.filter((other) => other !== skill.name) }, agent));
+				}
+				this.skills.delete(skill.name);
+				return { deleted: skill.name };
 			},
 		],
 		// What a model provider fetches; the signature, not the API token, lets it in.
@@ -3654,11 +3731,17 @@ export class Pim extends DurableAgent<Env> {
 		);
 	}
 
+	/** The person's skills in their agents' chats: rebuilt when whether `write_skill` asks first changes. */
+	#skillsExtension(services: PimServices) {
+		return skillsExtension(services, (session) => this.#roleOf(session), this.skills);
+	}
+
 	/** Rebuilds the extensions whose tools describe the approval policy, once pi's registry has been set up. */
 	#reinstallApprovals(): void {
 		if (!this.registry.snapshot().extension("pim.approvals")) return;
 		const services = this.services();
 		this.registry.install(this.#agentExtension(services));
+		this.registry.install(this.#skillsExtension(services));
 		this.registry.install(approvalsExtension(services, this.#ownActions));
 		this.#installBrowser(services);
 		this.#installAbilities(services);

@@ -2,6 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
 import type { AppCatalog, AppSkill } from "./app-catalog";
 import type { McpBridge, McpResourceContent } from "./mcp";
+import type { Skill } from "../skills";
 import { text } from "./services";
 
 /**
@@ -10,6 +11,9 @@ import { text } from "./services";
  * `read_skill` and its supporting files with `read_skill_file`. Every file
  * is checked against the digest and size in the app's manifest, and its
  * origin is stated wherever it enters the model's context.
+ *
+ * `read_skill` without an app loads one of the person's own skills instead
+ * (see ../skills.ts), found by `own`.
  */
 
 const MAX_SKILL_CHARS = 50_000;
@@ -72,7 +76,7 @@ function clip(value: string): string {
 	return value.length > MAX_SKILL_CHARS ? `${value.slice(0, MAX_SKILL_CHARS)}\n[... ${value.length - MAX_SKILL_CHARS} more characters]` : value;
 }
 
-export function skillTools(bridge: McpBridge, catalog: AppCatalog) {
+export function skillTools(bridge: McpBridge, catalog: AppCatalog, own: (name: string) => Skill | undefined) {
 	const app = (name: string) => {
 		const wanted = name.toLowerCase();
 		return bridge.servers().find((server) => server.id === wanted || server.name.toLowerCase() === wanted);
@@ -100,10 +104,25 @@ export function skillTools(bridge: McpBridge, catalog: AppCatalog) {
 	const readSkill = defineTool({
 		name: "read_skill",
 		description:
-			"Load the instructions of a skill a connected app offers (listed in your prompt under the app), before doing the work it describes.",
-		parameters: Type.Object({ app: Type.String(), skill: Type.String() }),
+			"Load a skill's instructions before doing the work it describes: one of your skills (listed under your_skills), by its name alone, or one a connected app offers (listed under the app), with the app's name.",
+		parameters: Type.Object({
+			app: Type.Optional(Type.String({ description: "The app that offers it; leave out for one of your skills." })),
+			skill: Type.String(),
+		}),
 		replay: "safe",
 		async execute({ app: appName, skill: skillName }) {
+			if (appName === undefined) {
+				const skill = own(skillName);
+				if (!skill) return text(`There is no skill named ${skillName} of the person's. An app's skill needs its app.`, true);
+				return text(
+					[
+						`Skill "${skill.name}", version ${skill.version}: one of the person's skills, which their agents wrote with their approval.`,
+						`Description: ${skill.description}`,
+						"",
+						skill.instructions,
+					].join("\n"),
+				);
+			}
 			try {
 				const { server, result } = await withSkill(appName, skillName, async (skill, serverId) => {
 					const { bytes } = await readFile(bridge, serverId, skill, skill.uri);

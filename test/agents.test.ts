@@ -5,7 +5,8 @@ import { exports } from "cloudflare:workers";
 import { AgentStore } from "../src/agents";
 import { TeamStore } from "../src/team";
 import { CREATE_AGENT, RENAME_AGENT, UPDATE_AGENT } from "../src/extensions/agents";
-import { api, apiUrl, decisionRun, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
+import { WRITE_SKILL } from "../src/extensions/skills";
+import { api, apiUrl, decisionRun, lastUserText, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
 import { faux } from "./worker";
 
 /** The prompt sections sent last: pi sends the whole prompt once, then only what changed. */
@@ -290,6 +291,106 @@ describe("the owner's agents", () => {
 		});
 		expect(prompt).toContain("Write long.");
 		expect(prompt).toContain("- Researcher: Find sources.");
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
+	});
+
+	it("saves a skill it writes once the person approves, and loads it in its own chats", async () => {
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
+		const coach = (await post("/agents", { name: "Coach", instructions: "Coach my running." })).body;
+		const chef = (await post("/agents", { name: "Chef", instructions: "Plan meals." })).body;
+		const session = (await post("/sessions", { agent: coach.id })).body.id;
+		const results: string[] = [];
+		const record = (context: { messages: Message[] }) => {
+			results.push(JSON.stringify(context.messages.findLast((m) => m.role === "toolResult")?.content));
+			return toolUse("send_to_user", { message: "ok" });
+		};
+		const skill = { name: "weekly-plan", description: "Plan the week's runs.", instructions: "1. Read last week's runs.\n2. Add 10% distance." };
+		faux.setResponses([toolUse(WRITE_SKILL, { ...skill, name: "Weekly Plan" }), record]);
+		await say("Remember how we plan my week", session);
+		expect(results[0]).toContain("lowercase letters, digits and single hyphens");
+
+		faux.setResponses([toolUse(WRITE_SKILL, skill), toolUse("send_to_user", { message: "Asked." })]);
+		await say("Try again", session);
+		const approval = await pendingApproval();
+		expect(approval.summary).toBe("Coach saves a new skill: weekly-plan");
+		// The person reads what they approve.
+		expect(approval.args).toMatchObject({ instructions: skill.instructions, description: skill.description });
+		expect((await api("/skills")).body.skills).toEqual([]);
+		faux.setResponses([toolUse("send_to_user", { message: "Saved." })]);
+		await post(`/approvals/${approval.id}/approve`);
+		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
+		expect((await api("/skills")).body.skills).toEqual([
+			{ name: "weekly-plan", description: skill.description, version: 1, author: "Coach", restoredFrom: null, createdAt: expect.any(Number), updatedAt: expect.any(Number), agents: [{ id: coach.id, name: "Coach" }] },
+		]);
+
+		// The agent that wrote it lists it and loads it; another agent doesn't see it.
+		let prompt = "";
+		faux.setResponses([
+			(context) => {
+				prompt = system(context.messages);
+				return toolUse("read_skill", { skill: "weekly-plan" });
+			},
+			record,
+		]);
+		await say("Plan my week", (await post("/sessions", { agent: coach.id })).body.id);
+		expect(prompt).toContain("- weekly-plan: Plan the week's runs.");
+		expect(results[1]).toContain("version 1");
+		expect(results[1]).toContain("2. Add 10% distance.");
+		faux.setResponses([
+			(context) => {
+				prompt = system(context.messages);
+				return toolUse("send_to_user", { message: "Hello." });
+			},
+		]);
+		await say("Hi", (await post("/sessions", { agent: chef.id })).body.id);
+		expect(prompt).toContain("You have no skills yet.");
+		expect(prompt).not.toContain("weekly-plan");
+
+		// Two rewrites of the same version: the one approved second finds the skill changed and changes nothing.
+		for (const [message, instructions] of [["Make it 5%", "Add 5% distance."], ["No, 20%", "Add 20% distance."]]) {
+			faux.setResponses([toolUse(WRITE_SKILL, { ...skill, instructions: instructions!, base_version: 1 }), toolUse("send_to_user", { message: "Asked." })]);
+			await say(message!, session);
+		}
+		const pending = (await api("/approvals?status=pending")).body.approvals;
+		const [five, twenty] = ["Add 5% distance.", "Add 20% distance."].map((wanted) => pending.find((request: { args: { instructions: string } }) => request.args.instructions === wanted));
+		expect(twenty.summary).toBe("Coach rewrites the skill weekly-plan");
+		let told = "";
+		faux.setResponses([
+			toolUse("send_to_user", { message: "Saved." }),
+			(context) => {
+				told = lastUserText(context.messages);
+				return toolUse("send_to_user", { message: "Kept 20%." });
+			},
+		]);
+		for (const request of [twenty, five]) {
+			await post(`/approvals/${request.id}/approve`);
+			expect(await decisionRun(request)).toMatchObject({ status: "done" });
+		}
+		expect(told).toContain("is at version 2 now, not 1");
+		expect((await api("/skills/weekly-plan")).body).toMatchObject({
+			instructions: "Add 20% distance.",
+			version: 2,
+			history: [
+				{ version: 2, author: "Coach", restoredFrom: null },
+				{ version: 1, author: "Coach", restoredFrom: null },
+			],
+		});
+
+		// The person restores an older version as a new one, from the version they saw.
+		expect((await api("/skills/weekly-plan/versions/1")).body.instructions).toBe(skill.instructions);
+		const restore = (baseVersion: number) => post("/skills/weekly-plan/restore", { version: 1, baseVersion });
+		expect((await restore(1)).status).toBe(409);
+		const restored = await restore(2);
+		expect(restored.status).toBe(201);
+		expect(restored.body).toMatchObject({ instructions: skill.instructions, version: 3, history: [{ version: 3, author: null, restoredFrom: 1 }, { version: 2 }, { version: 1 }] });
+
+		// The person gives skills to agents and deletes them.
+		expect((await api(`/agents/${chef.id}`, { method: "PUT", body: JSON.stringify({ skills: ["meal-prep"] }) })).status).toBe(400);
+		expect((await api(`/agents/${chef.id}`, { method: "PUT", body: JSON.stringify({ skills: ["weekly-plan"] }) })).body.skills).toEqual(["weekly-plan"]);
+		expect((await api("/skills/weekly-plan", { method: "DELETE" })).status).toBe(200);
+		expect((await api(`/agents/${coach.id}`)).body.skills).toEqual([]);
+		expect((await api(`/agents/${chef.id}`)).body.skills).toEqual([]);
+		expect((await api("/skills/weekly-plan")).status).toBe(404);
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
 	});
 });

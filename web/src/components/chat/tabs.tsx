@@ -53,7 +53,9 @@ export function ChatTabs({ activeId }: { activeId: string }) {
     session.visit
       ? undefined
       : agents?.find((candidate) =>
-          session.agent ? candidate.id === session.agent.id : candidate.majordomo,
+          session.agent
+            ? candidate.id === session.agent.id
+            : candidate.majordomo,
         );
   const iconOf = (session: Session, circle: string) => {
     const agent = agentOf(session);

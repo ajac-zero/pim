@@ -248,6 +248,23 @@ describe("registration", () => {
 		}
 	});
 
+	it("counts someone else as here only while their account is active", async () => {
+		const stub = await freshDirectory();
+		const keeper = (await stub.resolve("keeper"))!;
+		expect(await stub.hasOthers(keeper.ownerId)).toBe(false);
+		const joined = await stub.register({ username: "newcomer", ip: "1", policy: OPEN });
+		if (!joined.ok) throw new Error(joined.error);
+		// Registered, but no passkey yet.
+		expect(await stub.hasOthers(keeper.ownerId)).toBe(false);
+		await stub.activate(joined.account.ownerId);
+		expect(await stub.hasOthers(keeper.ownerId)).toBe(true);
+		expect(await stub.hasOthers(joined.account.ownerId)).toBe(true);
+		await stub.setStatus(joined.account.ownerId, "suspended", null);
+		expect(await stub.hasOthers(keeper.ownerId)).toBe(false);
+		// The admin of the shared Pim isn't alone: everyone these tests register is here too.
+		expect((await operator.browser.json("/api/account")).body).toMatchObject({ alone: false });
+	});
+
 	it("keeps invites single-use, giving one back only with the registration that used it", async () => {
 		const stub = await freshDirectory();
 		const policy: RegistrationPolicy = { ...OPEN, mode: "invite" };

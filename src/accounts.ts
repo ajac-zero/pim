@@ -265,7 +265,11 @@ export function accountApi(env: Env, account: Account, site: AuthSite, request: 
 		const route = `${request.method} ${path}`;
 		if (route === "GET /account") {
 			const pim = await pimOf(env, account.ownerId);
-			const [usage, recoveryCodesLeft] = await Promise.all([pim.usageReport(), site.store.recoveryCodesLeft()]);
+			const [usage, recoveryCodesLeft, others] = await Promise.all([
+				pim.usageReport(),
+				site.store.recoveryCodesLeft(),
+				directory(env).hasOthers(account.ownerId),
+			]);
 			return json({
 				username: account.username,
 				ownerId: account.ownerId,
@@ -274,6 +278,8 @@ export function accountApi(env: Env, account: Account, site: AuthSite, request: 
 				createdAt: account.createdAt,
 				usage,
 				recoveryCodesLeft,
+				// Nobody else is here yet: the app hides Sharing, Discover and publishing until someone is.
+				alone: !others,
 			});
 		}
 		if (route === "GET /account/export") {

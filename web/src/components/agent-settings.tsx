@@ -258,7 +258,8 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
         <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
           <Pencil /> {t("edit")}
         </Button>
-        {account && (
+        {/* Alone on this Pim, there is nobody to publish for, unless it already is. */}
+        {account && (!account.alone || agent.published) && (
           <Button
             size="sm"
             variant="outline"

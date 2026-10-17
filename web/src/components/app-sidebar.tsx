@@ -137,6 +137,8 @@ export function AppSidebar({
   const { data: notifications } = useQuery(notificationsQuery());
   // Sharing, Discover and your profile are with the other people on this Pim.
   const { data: account } = useQuery(accountQuery());
+  // Alone on this Pim, there is nobody to share with or discover.
+  const withOthers = !!account && !account.alone;
   const { data: profile } = useQuery({ ...profileQuery(), enabled: !!account });
   const awaitingApproval = useAwaitingApproval();
   /* Requests from people in your circles, waiting in Sharing. */
@@ -197,7 +199,7 @@ export function AppSidebar({
           />
           {/* Below, what opens over the chat instead of beside it. */}
           <div className="mt-auto" />
-          {account && (
+          {withOthers && (
             <RailDialogLink
               dialog="discover"
               icon={<Compass className="size-4.5" />}
@@ -211,7 +213,7 @@ export function AppSidebar({
             label={t("connectedApps")}
             onNavigate={onNavigate}
           />
-          {account && (
+          {withOthers && (
             <RailDialogLink
               dialog="sharing"
               icon={<Users className="size-4.5" />}

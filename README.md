@@ -189,7 +189,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | POST | `/sessions` | `{ title?, agent? }` | A new session with that agent, or the majordomo; sessions list their `agent` (null in a visit) |
 | GET | `/sessions/:id/team` | | `{ runs: [{ conversation, call, member, task, status, createdAt, updatedAt }] }`: the tasks the chat's Pim handed its team, newest first; `status` is `running`, `done` or `failed` |
 | GET | `/sessions/:id/team/:conversation` | | One of them, with the member's conversation as `messages`, read-only |
-| GET | `/account` | | `{ username, ownerId, role, status, createdAt, usage, recoveryCodesLeft }` |
+| GET | `/account` | | `{ username, ownerId, role, status, createdAt, usage, recoveryCodesLeft, alone }` (`alone`: nobody else has an active account here) |
 | GET | `/account/export` | | Your account and everything in your Pim, as one JSON download, without credentials |
 | DELETE | `/account` | `{ confirm: username }` | Deletes your account and erases your Pim; a signed-in browser only. `202` while erasing is still being retried |
 | GET, PUT | `/profile` | PUT: `{ displayName, bio }` | How others on this Pim see you |
@@ -367,7 +367,7 @@ Your agents are named assistants, each with its own instructions: a marathon coa
 
 **Dashboards.** Each agent's name in the sidebar opens its dashboard: a box to start a chat with it, suggested first messages, and widgets from the blueprint it builds on. Pim's own dashboard shows what's coming up, the goals being worked on, what it remembered lately, and what it made recently, across that person's agents (memory is shared, so every dashboard shows the same).
 
-An agent can be **published** to the others on your Pim: Discover lists published agents, and anyone on it can read one in full and **make it their own**, which copies its name, description, instructions, suggested apps and look (its icon or emoji, color, or uploaded image) into their own agents. The agent the admin chooses for everyone who joins is copied the same way. Nothing else of the author's goes with it: no memory, chats or credentials. The copy is theirs to change; publishing again updates what others see, not their copies. Unpublishing, deleting the agent, or deleting the account takes it out of Discover. Each person has a profile (a name and a line about them), shown on their page and next to what they publish.
+An agent can be **published** to the others on your Pim: Discover lists published agents, and anyone on it can read one in full and **make it their own**, which copies its name, description, instructions, suggested apps and look (its icon or emoji, color, or uploaded image) into their own agents. The agent the admin chooses for everyone who joins is copied the same way. Nothing else of the author's goes with it: no memory, chats or credentials. The copy is theirs to change; publishing again updates what others see, not their copies. Unpublishing, deleting the agent, or deleting the account takes it out of Discover. Each person has a profile (a name and a line about them), shown on their page and next to what they publish. Until someone else has an account on your Pim, there is nobody to publish for, so the app hides Discover and the Publish button.
 
 A published agent's instructions are someone else's words running with your tools, so read them before you take one: your copy still asks before acting wherever your tool permissions say it should.
 
@@ -391,7 +391,7 @@ An agent can have a team: up to eight members, each with a name, its own instruc
 
 ## Sharing
 
-You can let others on your Pim message your agent from their own. Sharing → Circles: make a circle (Family, Close friends, Acquaintances), add people by their username, and choose what the circle can use: each connected app's tools (Off, Ask or On, as in [Tool permissions](#tool-permissions)) and your memory (read-only). Everything starts off.
+You can let others on your Pim message your agent from their own. Sharing → Circles: make a circle (Family, Close friends, Acquaintances), add people by their username, and choose what the circle can use: each connected app's tools (Off, Ask or On, as in [Tool permissions](#tool-permissions)) and your memory (read-only). Everything starts off. Until someone else has an account on your Pim, the app hides Sharing.
 
 - **Their conversation runs in their Pim.** Someone you share with finds your Pim under Shared with you. Their conversation with it (a visit) is a chat in their own Pim, on their own model and usage: whoever sends the messages pays for them. It sees a brief your Pim sends before each of their turns: what their circle may use, your memory if allowed, and your time zone. Nothing of their own Pim (its tools, memory or apps) is in that conversation, and nothing of yours is in their other chats.
 - **The boundary is in your Pim, at every call.** Each tool in a visit is a call into your Pim (`guestCall`), which checks again that they're in a circle, that the circle is on, and that the tool is allowed for it now. A tool turned off, an app that changed a tool since you allowed it, or a person you removed is refused, whatever their Pim was told before.

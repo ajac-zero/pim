@@ -304,17 +304,25 @@ describe("the owner's agents", () => {
 			results.push(JSON.stringify(context.messages.findLast((m) => m.role === "toolResult")?.content));
 			return toolUse("send_to_user", { message: "ok" });
 		};
-		const skill = { name: "weekly-plan", description: "Plan the week's runs.", instructions: "1. Read last week's runs.\n2. Add 10% distance." };
+		const skill = {
+			name: "weekly-plan",
+			description: "Plan the week's runs.",
+			instructions: "1. Read last week's runs.\n2. Add 10% distance, with scripts/paces.js.",
+			files: [{ path: "scripts/paces.js", content: "export const easy = (race) => race * 1.25;" }],
+		};
 		faux.setResponses([toolUse(WRITE_SKILL, { ...skill, name: "Weekly Plan" }), record]);
 		await say("Remember how we plan my week", session);
 		expect(results[0]).toContain("lowercase letters, digits and single hyphens");
+		faux.setResponses([toolUse(WRITE_SKILL, { ...skill, files: [{ path: "../notes.md", content: "Mine." }] }), record]);
+		await say("Keep my notes with it", session);
+		expect(results[1]).toContain("../notes.md is not a supporting file's path");
 
 		faux.setResponses([toolUse(WRITE_SKILL, skill), toolUse("send_to_user", { message: "Asked." })]);
 		await say("Try again", session);
 		const approval = await pendingApproval();
 		expect(approval.summary).toBe("Coach saves a new skill: weekly-plan");
 		// The person reads what they approve.
-		expect(approval.args).toMatchObject({ instructions: skill.instructions, description: skill.description });
+		expect(approval.args).toMatchObject({ instructions: skill.instructions, description: skill.description, files: skill.files });
 		expect((await api("/skills")).body.skills).toEqual([]);
 		faux.setResponses([toolUse("send_to_user", { message: "Saved." })]);
 		await post(`/approvals/${approval.id}/approve`);
@@ -330,12 +338,18 @@ describe("the owner's agents", () => {
 				prompt = system(context.messages);
 				return toolUse("read_skill", { skill: "weekly-plan" });
 			},
+			(context) => {
+				record(context);
+				return toolUse("read_skill_file", { skill: "weekly-plan", path: "scripts/paces.js" });
+			},
 			record,
 		]);
 		await say("Plan my week", (await post("/sessions", { agent: coach.id })).body.id);
 		expect(prompt).toContain("- weekly-plan: Plan the week's runs.");
-		expect(results[1]).toContain("version 1");
-		expect(results[1]).toContain("2. Add 10% distance.");
+		expect(results[2]).toContain("version 1");
+		expect(results[2]).toContain("2. Add 10% distance");
+		expect(results[2]).toContain("Supporting files (read with read_skill_file): scripts/paces.js");
+		expect(results[3]).toContain("export const easy = (race) => race * 1.25;");
 		faux.setResponses([
 			(context) => {
 				prompt = system(context.messages);
@@ -348,7 +362,8 @@ describe("the owner's agents", () => {
 
 		// Two rewrites of the same version: the one approved second finds the skill changed and changes nothing.
 		for (const [message, instructions] of [["Make it 5%", "Add 5% distance."], ["No, 20%", "Add 20% distance."]]) {
-			faux.setResponses([toolUse(WRITE_SKILL, { ...skill, instructions: instructions!, base_version: 1 }), toolUse("send_to_user", { message: "Asked." })]);
+			const { files: _kept, ...rewrite } = skill;
+			faux.setResponses([toolUse(WRITE_SKILL, { ...rewrite, instructions: instructions!, base_version: 1 }), toolUse("send_to_user", { message: "Asked." })]);
 			await say(message!, session);
 		}
 		const pending = (await api("/approvals?status=pending")).body.approvals;
@@ -370,6 +385,8 @@ describe("the owner's agents", () => {
 		expect((await api("/skills/weekly-plan")).body).toMatchObject({
 			instructions: "Add 20% distance.",
 			version: 2,
+			// A rewrite that gives no files keeps them.
+			files: skill.files,
 			history: [
 				{ version: 2, author: "Coach", restoredFrom: null },
 				{ version: 1, author: "Coach", restoredFrom: null },
@@ -382,7 +399,7 @@ describe("the owner's agents", () => {
 		expect((await restore(1)).status).toBe(409);
 		const restored = await restore(2);
 		expect(restored.status).toBe(201);
-		expect(restored.body).toMatchObject({ instructions: skill.instructions, version: 3, history: [{ version: 3, author: null, restoredFrom: 1 }, { version: 2 }, { version: 1 }] });
+		expect(restored.body).toMatchObject({ instructions: skill.instructions, files: skill.files, version: 3, history: [{ version: 3, author: null, restoredFrom: 1 }, { version: 2 }, { version: 1 }] });
 
 		// The person gives skills to agents and deletes them.
 		expect((await api(`/agents/${chef.id}`, { method: "PUT", body: JSON.stringify({ skills: ["meal-prep"] }) })).status).toBe(400);

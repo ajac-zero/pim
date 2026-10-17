@@ -12,8 +12,8 @@ import { text } from "./services";
  * is checked against the digest and size in the app's manifest, and its
  * origin is stated wherever it enters the model's context.
  *
- * `read_skill` without an app loads one of the person's own skills instead
- * (see ../skills.ts), found by `own`.
+ * Without an app, `read_skill` and `read_skill_file` read one of the
+ * person's own skills instead (see ../skills.ts), found by `own`.
  */
 
 const MAX_SKILL_CHARS = 50_000;
@@ -118,6 +118,7 @@ export function skillTools(bridge: McpBridge, catalog: AppCatalog, own: (name: s
 					[
 						`Skill "${skill.name}", version ${skill.version}: one of the person's skills, which their agents wrote with their approval.`,
 						`Description: ${skill.description}`,
+						`Supporting files (read with read_skill_file): ${skill.files.map((file) => file.path).join(", ") || "none"}`,
 						"",
 						skill.instructions,
 					].join("\n"),
@@ -157,10 +158,22 @@ export function skillTools(bridge: McpBridge, catalog: AppCatalog, own: (name: s
 
 	const readSkillFile = defineTool({
 		name: "read_skill_file",
-		description: "Read a supporting file of an app's skill, by its path relative to the skill, such as references/guide.md.",
-		parameters: Type.Object({ app: Type.String(), skill: Type.String(), path: Type.String() }),
+		description:
+			"Read a supporting file of a skill, by its path relative to the skill, such as references/guide.md: one of yours by the skill's name alone, or an app's with the app's name.",
+		parameters: Type.Object({
+			app: Type.Optional(Type.String({ description: "The app that offers the skill; leave out for one of your skills." })),
+			skill: Type.String(),
+			path: Type.String(),
+		}),
 		replay: "safe",
 		async execute({ app: appName, skill: skillName, path }) {
+			if (appName === undefined) {
+				const skill = own(skillName);
+				if (!skill) return text(`There is no skill named ${skillName} of the person's. An app's skill needs its app.`, true);
+				const file = skill.files.find((candidate) => candidate.path === path.replace(/^\.\//, ""));
+				if (!file) return text(`${skillName} has no file ${path}. Its files: ${skill.files.map((candidate) => candidate.path).join(", ") || "none"}.`, true);
+				return text(`${file.path} from the ${skill.name} skill, version ${skill.version}:\n\n${clip(file.content)}`);
+			}
 			try {
 				const { server, result } = await withSkill(appName, skillName, async (skill, serverId) => {
 					const uri = fileUri(skill, path);

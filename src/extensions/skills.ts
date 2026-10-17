@@ -2,7 +2,7 @@ import { type Static, Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { type AgentStore, agentInput } from "../agents";
 import { HttpError } from "../http";
-import { MAX_SKILL_DESCRIPTION, MAX_SKILL_INSTRUCTIONS, type SkillStore } from "../skills";
+import { MAX_SKILL_DESCRIPTION, MAX_SKILL_FILE_CHARS, MAX_SKILL_FILES, MAX_SKILL_INSTRUCTIONS, type SkillStore } from "../skills";
 import type { Role } from "../team";
 import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";
 import { type PimServices, text } from "./services";
@@ -27,6 +27,19 @@ const Write = Type.Object({
 		description:
 			"The whole procedure in Markdown, for an agent that knows nothing else about it: the steps, the apps and tools to use, what to check, and what the result looks like. A rewrite replaces all of it.",
 	}),
+	files: Type.Optional(
+		Type.Array(
+			Type.Object({
+				path: Type.String({ description: "Relative to the skill, such as references/guide.md or scripts/convert.js." }),
+				content: Type.String({ maxLength: MAX_SKILL_FILE_CHARS }),
+			}),
+			{
+				maxItems: MAX_SKILL_FILES,
+				description:
+					"Supporting files the instructions point to: references, templates, or JavaScript that run_javascript can run. Every file the skill should have; leave out to keep the ones it has.",
+			},
+		),
+	),
 	base_version: Type.Optional(Type.Integer({ minimum: 1, description: "To rewrite an existing skill: its version, as read_skill gave it." })),
 });
 type Write = Static<typeof Write>;
@@ -45,10 +58,10 @@ export function writeSkillAction(skills: SkillStore, agents: Pick<AgentStore, "g
 		internal: true,
 		parameters: Type.Object({ agent: Type.String(), ...Write.properties }),
 		summarize: ({ name }) => `Save the skill ${name}`,
-		async run({ agent: id, name, description, instructions, base_version }) {
+		async run({ agent: id, name, description, instructions, files, base_version }) {
 			try {
 				const agent = agents.get(id);
-				const skill = skills.write({ name, description, instructions, baseVersion: base_version, author: agent?.name });
+				const skill = skills.write({ name, description, instructions, files, baseVersion: base_version, author: agent?.name });
 				if (agent && !agent.skills.includes(name)) agents.update(id, agentInput({ skills: [...agent.skills, name] }, agent));
 				return `Saved the skill ${name}, version ${skill.version}${agent ? `, one of ${agent.name}'s skills` : ""}. It applies from the next step.`;
 			} catch (error) {

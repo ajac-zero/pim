@@ -956,23 +956,35 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Fired by `schedule_task` schedules: hands the instruction to the session
-	 * that made it. A firing a limit or a suspension refuses is skipped, not
-	 * retried; the person hears about the limit once a day.
+	 * that made it, and tells the person it started with a notification that
+	 * links to that chat. A firing a limit or a suspension refuses is skipped,
+	 * not retried; the person hears about the limit once a day.
 	 */
 	async runScheduledTask(payload: ScheduledTaskPayload, schedule: Schedule<ScheduledTaskPayload>): Promise<void> {
 		const label = payload.label ? ` "${payload.label}"` : "";
+		// The same firing retried is one submission and one notification.
+		const firing = `schedule:${schedule.id}:${schedule.time}`;
 		try {
 			await this.submitTo(
 				payload.session,
 				`[Scheduled task${label} ${schedule.id}] ${payload.instruction}`,
-				// The same firing retried is one submission.
-				{ operationId: `schedule:${schedule.id}:${schedule.time}` },
+				{ operationId: firing },
 				"pim",
 			);
 		} catch (error) {
 			if (!(error instanceof HttpError)) throw error;
 			if (error.status === 429) await this.#tellLimitOnce(`Skipped scheduled task${label}`, error.message);
+			return;
 		}
+		if (this.store.notification(firing)) return;
+		const title = payload.label ?? payload.instruction;
+		const notification = this.store.addNotification({
+			id: firing,
+			session: payload.session,
+			title: `Scheduled task ran: ${title.length > 80 ? `${title.slice(0, 79)}…` : title}`,
+			body: payload.label ? payload.instruction : "",
+		});
+		await this.deliverNotification(notification);
 	}
 
 	/** One notification a day about work a limit stopped, so a frequent schedule doesn't flood the person. */

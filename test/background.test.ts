@@ -36,8 +36,21 @@ describe("scheduled tasks", () => {
 		const operation = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
 			const [due] = await instance.listSchedules();
 			await instance.runScheduledTask(due!.payload as never, due as never);
+			// The same firing retried tells the person once.
+			await instance.runScheduledTask(due!.payload as never, due as never);
 			return `schedule:${due!.id}:${due!.time}`;
 		});
+		// The person sees that it ran, with a link to the chat it ran in.
+		expect((await api("/notifications")).body.notifications).toEqual([
+			expect.objectContaining({
+				session: "1",
+				title: "Scheduled task ran: Flight check",
+				body: "Check whether the flight price dropped.",
+				readAt: null,
+			}),
+		]);
+		const [ran] = (await api("/notifications")).body.notifications;
+		await post(`/notifications/${ran.id}/read`);
 		const settled = await api(`/sessions/1/operations/${encodeURIComponent(operation)}`);
 		// Work Pim gave itself may stay silent: its final text is notes, not a reply.
 		expect(settled.body).toMatchObject({ status: "done", replies: [] });
@@ -85,7 +98,7 @@ describe("sending to the person", () => {
 		const { body } = await post("/sessions/1/messages", { content: "How's the flight price?", wait: true });
 		expect(body).toMatchObject({ status: "done", text: "On it.\n\nYour flight is **$80** cheaper.", replies: ["On it.", "Your flight is **$80** cheaper."] });
 		// Without notify, nothing else hears of it.
-		expect((await api("/notifications")).body.notifications).toEqual([]);
+		expect((await api("/notifications?unread=true")).body.notifications).toEqual([]);
 
 		// Private final text prompts an explicit send; it is never passed off as the answer.
 		faux.setResponses([
@@ -195,7 +208,9 @@ describe("sending to the person", () => {
 		expect((await api("/notifications?unread=true")).body.notifications).toHaveLength(1);
 		await post(`/notifications/${pushed.notification.id}/read`);
 		expect((await api("/notifications?unread=true")).body.notifications).toEqual([]);
-		expect((await api("/notifications")).body.notifications).toHaveLength(1);
+		expect((await api("/notifications")).body.notifications).toContainEqual(
+			expect.objectContaining({ id: pushed.notification.id, readAt: expect.any(Number) }),
+		);
 		root.socket.close();
 		elsewhere.socket.close();
 	});

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Bell,
+  CalendarClock,
   Check,
   ChevronDown,
   Compass,
@@ -230,6 +231,13 @@ export function AppSidebar({
             onNavigate={onNavigate}
           />
           <SidebarNavItem
+            to="/schedules"
+            icon={<CalendarClock className="size-4.5 shrink-0" />}
+            label={t("schedules")}
+            collapsed={collapsed}
+            onNavigate={onNavigate}
+          />
+          <SidebarNavItem
             to="/notifications"
             icon={<Bell className="size-4.5 shrink-0" />}
             label={t("notifications")}
@@ -427,7 +435,13 @@ function SidebarNavItem({
   onNavigate,
   ...props
 }: {
-  to: "/artifacts" | "/notifications" | "/discover" | "/sharing" | "/settings";
+  to:
+    | "/artifacts"
+    | "/schedules"
+    | "/notifications"
+    | "/discover"
+    | "/sharing"
+    | "/settings";
   icon: ReactNode;
   label: string;
   count?: number;

@@ -457,6 +457,20 @@ export type PimNotification = {
   readAt: number | null;
 };
 
+/** Work Pim scheduled for itself: once, or repeating on a cron in UTC. */
+export type PimSchedule = {
+  id: string;
+  type: "scheduled" | "delayed" | "cron" | "interval";
+  /** When it runs next, as an ISO date. */
+  next: string;
+  cron?: string;
+  intervalSeconds?: number;
+  /** The chat it runs in. */
+  session: string;
+  label: string | null;
+  instruction: string;
+};
+
 export type ModelInfo = {
   provider: string;
   id: string;
@@ -722,6 +736,14 @@ export const pim = {
     ),
   markRead: (id: string) =>
     call<PimNotification>(`/notifications/${id}/read`, { method: "POST" }),
+  schedules: () =>
+    call<{ schedules: PimSchedule[] }>("/schedules").then(
+      (body) => body.schedules,
+    ),
+  cancelSchedule: (id: string) =>
+    call<{ deleted: boolean }>(`/schedules/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
   pushKey: () =>
     call<{ publicKey: string }>("/push/key").then((body) => body.publicKey),
   subscribePush: (subscription: {

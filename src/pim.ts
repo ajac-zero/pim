@@ -1767,15 +1767,17 @@ export class Pim extends DurableAgent<Env> {
 	async #loadWidget(agent: Agent, ref: string): Promise<ShownWidget> {
 		const widget = this.extensions.widget(ref)!;
 		const deleted = this.store.deletedSessions();
+		// A team member's conversation works for the chat that gave it its task.
+		const chatFor = (session: string) => this.team.run(session)?.session ?? session;
+		const ofAgent = (session: string) => {
+			const chat = chatFor(session);
+			return !this.visits.bySession(chat) && this.agents.ofSession(chat).id === agent.id;
+		};
 		const context: WidgetContext = {
 			agent: { id: agent.id, name: agent.name, default: agent.default },
 			timeZone: this.settings().timeZone,
-			chatOf: (session) => {
-				// A team member's conversation works for the chat that gave it its task.
-				const chat = this.team.run(session)?.session ?? session;
-				if (deleted.has(chat) || this.visits.bySession(chat)) return null;
-				return this.agents.ofSession(chat).id === agent.id ? chat : null;
-			},
+			chatOf: (session) => (ofAgent(session) && !deleted.has(chatFor(session)) ? chatFor(session) : null),
+			ofAgent,
 			data: this.extensionData.for(ref.slice(0, ref.indexOf("/"))),
 		};
 		const shown = { id: ref, title: widget.title, empty: widget.empty };
@@ -2299,8 +2301,9 @@ export class Pim extends DurableAgent<Env> {
 				// Nothing keeps working in a chat the user can no longer see.
 				await this.harness.session(id).abort();
 				const services = this.services();
+				// A task that starts new chats goes on without the chat that scheduled it.
 				for (const schedule of await services.listSchedules()) {
-					if (schedule.payload.session === id) await services.cancelSchedule(schedule.id);
+					if (schedule.payload.session === id && !schedule.payload.newChat) await services.cancelSchedule(schedule.id);
 				}
 				for (const watch of this.store.watches()) {
 					if (watch.session === id) await this.appEvents.stop(watch.id);

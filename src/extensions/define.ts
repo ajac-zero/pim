@@ -88,6 +88,8 @@ export type WidgetContext = {
 	 * is this Pim's; null otherwise.
 	 */
 	chatOf(session: string): string | null;
+	/** Whether a conversation is, or works for, one of this agent's chats, including one since deleted. */
+	ofAgent(session: string): boolean;
 	/** The person's IANA time zone. */
 	readonly timeZone: string;
 	/** The data of the extension that brings the widget. */

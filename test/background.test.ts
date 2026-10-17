@@ -75,12 +75,24 @@ describe("scheduled tasks", () => {
 
 		// Two days' firings, the first retried: one chat per day, none for the retry.
 		faux.setResponses([fauxAssistantMessage("Day one."), fauxAssistantMessage("Day two.")]);
-		const operations = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
-			const [due] = await instance.listSchedules();
-			const tomorrow = { ...due!, time: due!.time + 86_400 };
-			for (const firing of [due!, due!, tomorrow]) await instance.runScheduledTask(firing.payload as never, firing as never);
-			return [due!, tomorrow].map((firing) => `schedule:${firing.id}:${firing.time}`);
-		});
+		const fire = (days: number, times: number) =>
+			runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+				const [due] = await instance.listSchedules();
+				const firing = { ...due!, time: due!.time + days * 86_400 };
+				for (let i = 0; i < times; i++) await instance.runScheduledTask(firing.payload as never, firing as never);
+				return `schedule:${firing.id}:${firing.time}`;
+			});
+		const operations = [await fire(0, 2)];
+		expect((await api(`/sessions/${origin}/messages`)).body.messages).toHaveLength(originLength);
+
+		// Deleting the chat that scheduled it leaves it running, still on the agent's dashboard.
+		expect((await api(`/sessions/${origin}`, { method: "DELETE" })).status).toBe(200);
+		expect((await api("/schedules")).body.schedules).toMatchObject([{ id: schedule.id }]);
+		const board = (await api(`/agents/${coach.id}/dashboard`)).body;
+		const upcoming = board.widgets.find((shown: { id: string }) => shown.id === "pim.schedule/upcoming").items;
+		expect(upcoming).toEqual([{ title: "Daily plan", time: expect.any(String) }]);
+		operations.push(await fire(1, 1));
+
 		const chats = (await api("/sessions")).body.sessions.filter((session: { title: string }) => session.title === "Daily plan");
 		expect(chats).toHaveLength(2);
 		chats.sort((a: { id: string }, b: { id: string }) => Number(a.id) - Number(b.id));
@@ -91,7 +103,6 @@ describe("scheduled tasks", () => {
 			const fired = JSON.stringify(messages).split(`[Scheduled task \\"Daily plan\\" ${schedule.id}] Write today's training plan.`);
 			expect(fired).toHaveLength(2);
 		}
-		expect((await api(`/sessions/${origin}/messages`)).body.messages).toHaveLength(originLength);
 		expect((await api(`/schedules/${schedule.id}`, { method: "DELETE" })).status).toBe(200);
 	});
 

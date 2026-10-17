@@ -103,19 +103,20 @@ export function scheduleWidgets(listSchedules: PimServices["listSchedules"]) {
 				title: { en: "Coming up", es: "Próximamente" },
 				description: "The next scheduled tasks of this chat's Pim, soonest first, with when each runs.",
 				empty: { en: "Nothing scheduled. Ask for a reminder or a recurring check-in.", es: "Nada programado. Pide un recordatorio o un seguimiento periódico." },
-				load: async ({ chatOf }) => ({
+				load: async ({ chatOf, ofAgent }) => ({
 					kind: "list",
 					items: (await listSchedules())
 						.sort((a, b) => a.time - b.time)
 						.flatMap((schedule) => {
 							const chat = chatOf(schedule.payload.session);
-							if (chat === null) return [];
+							// A task that starts new chats still shows once the chat that scheduled it is deleted, without a link.
+							if (chat === null && !(schedule.payload.newChat && ofAgent(schedule.payload.session))) return [];
 							const title = schedule.payload.label ?? schedule.payload.instruction;
 							return [
 								{
 									title: title.length > 120 ? `${title.slice(0, 119)}…` : title,
 									time: new Date(schedule.time * 1000).toISOString(),
-									link: { chat },
+									...(chat === null ? {} : { link: { chat } }),
 								},
 							];
 						})

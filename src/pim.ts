@@ -1,3 +1,4 @@
+import { Workspace } from "@cloudflare/computer";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Api, JsonValue, Model } from "@earendil-works/pi-ai";
 import { createModels, type Models } from "@earendil-works/pi-ai/models";
@@ -49,6 +50,7 @@ import {
 } from "./extensions/approvals";
 import pimConfig from "../pim.config";
 import { artifactsExtension, artifactsWidgets } from "./extensions/artifacts";
+import { type FileServices, fileDeleteAction, filesExtension } from "./extensions/files";
 import { appDirectory, type CustomApp, type DirectoryApp } from "./extensions/app-directory";
 import { ExtensionDataStore } from "./extensions/data";
 import { NativeApps } from "./extensions/native-apps";
@@ -95,6 +97,7 @@ import { CREATE_AGENT, agentExtension, MANAGE_APPS, manageAppsAction, RENAME_AGE
 import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
+import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { dispatch, HttpError, readJson, type Route } from "./http";
 import type { ClientMessage, ServerMessage, ToolInfo } from "./protocol";
 import { generateVapidKeys, type PushSubscription, sendPush, validSubscription, type VapidKeys } from "./push";
@@ -306,6 +309,14 @@ export class Pim extends DurableAgent<Env> {
 			return storageBytes === null ? null : storageBytes - this.storedBytes();
 		},
 	});
+	#workspace: Workspace | undefined;
+	/** The person's files, which they and their agents share (see ./files.ts). */
+	readonly files = new Files(() => this.#files.workspace());
+	readonly #files: FileServices = {
+		workspace: () => (this.#workspace ??= new Workspace({ storage: this.ctx.storage, output: false })),
+		assertOpen: () => this.#assertOpen(),
+		storageRefusal: () => this.#storageRefusal(),
+	};
 	readonly ai = createAI({ binding: this.env.AI });
 	/** The person's email address, and emailing them there. */
 	readonly email = new Email(this.store, () => this.mailer());
@@ -415,6 +426,7 @@ export class Pim extends DurableAgent<Env> {
 		updateAgentAction(this.agents),
 		renameAgentAction(this.agents),
 		manageAppsAction(this.agents, this.apps, () => this.appDirectory()),
+		fileDeleteAction(this.#files),
 	];
 
 	/** Every action an approval can be for: Pim's own, and the extensions'. */
@@ -451,6 +463,7 @@ export class Pim extends DurableAgent<Env> {
 			this.registry.install(approvalsExtension(services, this.#ownActions));
 			this.registry.install(webExtension({ ai: this.env.AI, searchProvider: this.env.PIM_WEB_SEARCH }));
 			this.registry.install(artifactsExtension({ artifacts: this.artifacts, assertOpen: () => this.#assertOpen() }));
+			this.registry.install(filesExtension(this.#files));
 			// Restored connections reconnect in the background after a wake; give them a moment.
 			await this.mcp.waitForConnections({ timeout: 5_000 });
 			this.#migrateAlwaysApproved();
@@ -2472,6 +2485,7 @@ export class Pim extends DurableAgent<Env> {
 			apps: this.apps.servers().map(({ id, name, url, approval }) => ({ id, name, url, approval })),
 			watches: this.appEvents.list(),
 			artifacts: this.artifacts.export(),
+			files: await this.files.export(),
 			usage: this.usage.history(90),
 		});
 	}
@@ -2965,6 +2979,46 @@ export class Pim extends DurableAgent<Env> {
 					const { ascii, utf8 } = downloadName(artifact.title, found.version, artifact.kind);
 					headers.set("content-disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(utf8)}`);
 					return new Response(found.content, { headers });
+				}),
+		],
+		// Files: the person's, which their agents read and write too (see ./files.ts).
+		["GET", "/files", (_params, _request, url) => this.#artifactRequest(url, async () => noStore(await this.files.list(url.searchParams.get("path") ?? FILES_ROOT)))],
+		[
+			"GET",
+			"/files/content",
+			(_params, _request, url) =>
+				this.#artifactRequest(url, async () => {
+					const file = await this.files.read(url.searchParams.get("path"));
+					return new Response(file.body, { headers: fileHeaders(file, url.searchParams.has("download")) });
+				}),
+		],
+		[
+			"PUT",
+			"/files/content",
+			(_params, request, url) =>
+				this.#artifactRequest(url, async () => {
+					this.#assertOpen();
+					const tooLarge = `A file can be at most ${MAX_UPLOAD_BYTES} bytes`;
+					if (Number(request.headers.get("content-length") ?? 0) > MAX_UPLOAD_BYTES) throw new HttpError(413, tooLarge);
+					const body = new Uint8Array(await request.arrayBuffer());
+					if (body.byteLength > MAX_UPLOAD_BYTES) throw new HttpError(413, tooLarge);
+					const refusal = this.#storageRefusal();
+					if (refusal) throw new HttpError(429, refusal);
+					const { storageBytes } = this.limits();
+					if (storageBytes !== null && body.byteLength > storageBytes - this.storedBytes()) {
+						throw new HttpError(429, `Pim storage quota exceeded: there is room for ${Math.max(0, storageBytes - this.storedBytes())} more bytes.`);
+					}
+					return noStore(await this.files.write(url.searchParams.get("path"), body), 201);
+				}),
+		],
+		[
+			"DELETE",
+			"/files",
+			(_params, _request, url) =>
+				this.#artifactRequest(url, async () => {
+					this.#assertOpen();
+					await this.files.remove(url.searchParams.get("path"));
+					return noStore({ deleted: true });
 				}),
 		],
 		[

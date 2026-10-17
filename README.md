@@ -48,6 +48,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 | --- | --- | --- |
 | Long-term memory | `note`, `recall`, `zoom`, `forget` | OptMem-style: an append-only log, compressed in the background into a tree of summaries. Every conversation sees a fixed-size view of it. See [Memory](#memory). |
 | Artifacts | `artifact_create`, `artifact_update`, `artifact_read`, `artifact_list` | Documents and small HTML pages the agent makes for you, with every version kept. They show in the chat and in Artifacts, run in a sandbox apart from your account, and can be restored or downloaded. See [docs/artifacts.md](docs/artifacts.md). |
+| Files | `file_read`, `file_list`, `file_find`, `file_search`, `file_write`, `file_edit`, `file_delete` (gated) | A folder you and your agents share, `/workspace`, kept in your Pim's database. You see it under Files in the sidebar, where you can upload, preview, download and delete; every agent you chat with, and its team, reads and writes the same files. Writing and editing count toward your storage; deleting asks first, because files keep no earlier versions. Uploads are at most 25 MB each. |
 | Your agents | `create_agent`, `update_agent`, `rename_agent`, `manage_apps` (edits gated) | Every chat's agent knows your other agents and points you to the one made for what you ask. When none fits ongoing help you want, such as a coding helper, it makes one, with its instructions, apps, team, and an emoji and color for its icon, without asking; it never makes two with the same name. It can change its own instructions, description and team, rename itself or another of your agents, or request changes to its own apps through the approval flow. See [Your agents](#your-agents). |
 | Goals and plans | `create_goal`, `update_goal`, `list_goals` | Goals have step-by-step plans and progress notes. Active goals are always in the prompt. |
 | Background work | `schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task` | Delays, dates, or cron. When a task fires, the agent receives a `[Scheduled task]` message in the session that scheduled it, or, with `new_chat`, in a new chat with the same agent each time, titled with the task's label, and you get a notification that links to that chat. Schedules, in the sidebar, lists what's pending, soonest first, each opening the chat it runs in, and cancels any of it. Deleting the chat that scheduled a task cancels it, unless the task starts new chats: that one goes on until cancelled. |
@@ -171,6 +172,10 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | GET | `/artifacts/:id/versions/:v/frame`, `…/download` | | An HTML version as a sandboxed page, or any version as a file |
 | POST | `/artifacts/:id/restore` | `{ version, baseVersion }` | Restores a version as the new latest; `409` if `baseVersion` isn't the latest |
 | DELETE | `/artifacts/:id` | | Deletes it with every version |
+| GET | `/files` | `?path=` (default `/workspace`) | `{ path, entries: [{ name, path, type, size, updatedAt }] }`: one folder, folders first |
+| GET | `/files/content` | `?path=`, `&download` | The file's bytes, served as inert data: HTML, SVG and unknown types come back as `text/plain` with a sandboxing CSP |
+| PUT | `/files/content` | `?path=`, the file as the body | Saves it, making its folders; `413` over 25 MB, `429` when your Pim is out of storage |
+| DELETE | `/files` | `?path=` | Deletes a file, or a folder with everything in it |
 | GET | `/goals`, `/goals/:id` | `?status=active\|paused\|done\|abandoned` | Goals with steps and notes |
 | DELETE | `/goals/:id` | | |
 | GET | `/schedules` | | Pending scheduled tasks |
@@ -352,7 +357,7 @@ MCP servers expose tools, prompts and resources; pim uses their tools, instructi
 
 ### Tool permissions
 
-Settings → Tool permissions lists every tool that acts on the world or comes from an app, grouped by app, with Pim's own (`http_request`, `watch_app_event`, `update_agent`, `rename_agent`) first. Each is **Off** (the model isn't offered it), **Ask** (each call files an approval) or **On** (it runs without asking). A tool you haven't set follows its default: Pim's own ask, and an app's follow its approval policy. **Always approve** on a request sets its tool to On.
+Settings → Tool permissions lists every tool that acts on the world or comes from an app, grouped by app, with Pim's own (`http_request`, `watch_app_event`, `update_agent`, `rename_agent`, `file_delete`) first. Each is **Off** (the model isn't offered it), **Ask** (each call files an approval) or **On** (it runs without asking). A tool you haven't set follows its default: Pim's own ask, and an app's follow its approval policy. **Always approve** on a request sets its tool to On.
 
 - **App management always asks.** `manage_apps` offers only Off / Ask. Each request waits for your explicit decision, even under the auto policy; turning it off also blocks pending changes.
 - **Tied to the tool you saw.** An app tool set to On is held to its definition at the time: description, input schema and annotations. If the app changes any of them, Pim asks before each call again and Settings says so until you choose again.
@@ -435,7 +440,7 @@ To add a blueprint, tools only some agents get, or dashboard widgets, write an e
 
 - Falling back to `PIM_MODEL` when the ChatGPT plan's usage limit is reached. Until then, a run that hits the limit fails with OpenAI's error.
 - Publishing artifacts, JSX artifacts, and artifacts that keep their own state.
-- A sandboxed computer and browser for the agent: Cloudflare Containers or Browser Rendering.
+- A sandboxed computer and browser for the agent, beyond its files: running code, a shell, and a browser (Cloudflare Containers or Browser Run).
 - Extensions beyond MCP: Agent Skills, and full pi extensions that Pim builds into itself by redeploying its own Worker.
 - Secret placeholders, so approved requests can use credentials the model never sees.
 - Semantic recall. `recall` is a regular expression over the log, so it finds words, not meanings.

@@ -50,6 +50,14 @@ export const membersQuery = () =>
 export const artifactsQuery = () =>
   queryOptions({ queryKey: ["artifacts"], queryFn: pim.artifacts });
 
+/** A folder of your files. A folder that's gone answers 404: no retries. */
+export const filesQuery = (path: string) =>
+  queryOptions({
+    queryKey: ["files", path],
+    queryFn: () => pim.files(path),
+    retry: false,
+  });
+
 export const artifactQuery = (id: string) =>
   queryOptions({
     queryKey: ["artifacts", id],

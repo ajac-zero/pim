@@ -1,16 +1,26 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "@tanstack/react-router";
-import { type ReactNode, useState } from "react";
+import {
+  Link,
+  useNavigate,
+  useParams,
+  useSearch,
+} from "@tanstack/react-router";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { ArtifactIcon } from "~/components/artifact";
+import { ArtifactIcon, formatBytes } from "~/components/artifact";
 import { useI18n } from "~/components/i18n";
 import {
+  ArrowLeft,
   CalendarClock,
   Check,
   CheckCheck,
+  Download,
+  FileIcon,
+  Folder,
   MoreHorizontal,
   Repeat,
   Trash2,
+  Upload,
 } from "~/components/icons";
 import {
   DropdownMenu,
@@ -23,9 +33,19 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
-import { type PimNotification, type PimSchedule, pim } from "~/lib/pim-api";
+import { baseName, parentOf } from "~/lib/files";
+import {
+  ApiError,
+  FILES_ROOT,
+  type FileEntry,
+  fileContentUrl,
+  type PimNotification,
+  type PimSchedule,
+  pim,
+} from "~/lib/pim-api";
 import {
   artifactsQuery,
+  filesQuery,
   notificationsQuery,
   schedulesQuery,
   sessionsQuery,
@@ -296,6 +316,209 @@ export function ArtifactsPanel({ onNavigate }: { onNavigate?: () => void }) {
         ))}
       </PanelList>
     </>
+  );
+}
+
+/**
+ * Your files, which your agents read and write too: one folder at a time,
+ * folders first. Opening a file shows it beside the sidebar; uploads go to
+ * the folder showing.
+ */
+export function FilesPanel({ onNavigate }: { onNavigate?: () => void }) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  // The panel opens on the folder of the file showing, if one is.
+  const { path: open } = useSearch({ strict: false }) as { path?: string };
+  const [folder, setFolder] = useState(
+    () => (open && parentOf(open)) || FILES_ROOT,
+  );
+  const { data, error } = useQuery(filesQuery(folder));
+  // A folder deleted meanwhile leaves you at the top.
+  useEffect(() => {
+    if (error instanceof ApiError && error.status === 404)
+      setFolder(FILES_ROOT);
+  }, [error]);
+  const input = useRef<HTMLInputElement>(null);
+  const upload = useMutation({
+    mutationFn: (files: File[]) =>
+      Promise.all(
+        files.map((file) => pim.uploadFile(`${folder}/${file.name}`, file)),
+      ),
+    onSuccess: (saved) =>
+      toast.success(t("filesUploaded", { count: saved.length })),
+    onError: (failure) => toast.error(failure.message),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["files"] }),
+  });
+  const parent = parentOf(folder);
+  return (
+    <>
+      <SidebarPanelHeader title={t("files")}>
+        <SidebarPanelAction
+          label={t("uploadFiles")}
+          onClick={() => input.current?.click()}
+          disabled={upload.isPending}
+        >
+          <Upload className="size-4.5" />
+        </SidebarPanelAction>
+        <input
+          ref={input}
+          type="file"
+          multiple
+          hidden
+          onChange={(event) => {
+            const files = [...(event.target.files ?? [])];
+            event.target.value = "";
+            if (files.length > 0) upload.mutate(files);
+          }}
+        />
+      </SidebarPanelHeader>
+      {parent !== null && (
+        <button
+          type="button"
+          onClick={() => setFolder(parent)}
+          className="mx-3 mb-1 flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-muted-foreground text-sm transition-colors hover:bg-sidebar-accent hover:text-foreground"
+        >
+          <ArrowLeft className="size-4 shrink-0" />
+          <span className="truncate">
+            {parent === FILES_ROOT ? t("files") : baseName(parent)}
+            <span className="sr-only">: {t("parentFolder")}</span>
+          </span>
+          <span className="ml-auto truncate text-foreground">
+            {baseName(folder)}
+          </span>
+        </button>
+      )}
+      <PanelList
+        label={t("files")}
+        empty={
+          data?.entries.length === 0 &&
+          t(folder === FILES_ROOT ? "noFiles" : "emptyFolder")
+        }
+      >
+        {data?.entries.map((entry) => (
+          <FileRow
+            key={entry.path}
+            entry={entry}
+            active={entry.path === open}
+            onOpenFolder={() => setFolder(entry.path)}
+            onNavigate={onNavigate}
+          />
+        ))}
+      </PanelList>
+    </>
+  );
+}
+
+function FileRow({
+  entry,
+  active,
+  onOpenFolder,
+  onNavigate,
+}: {
+  entry: FileEntry;
+  active: boolean;
+  onOpenFolder: () => void;
+  onNavigate?: () => void;
+}) {
+  const { t, formatDate, formatNumber } = useI18n();
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const folder = entry.type === "directory";
+  // Deleting asks twice: the first click turns the item into a confirmation.
+  const [confirming, setConfirming] = useState(false);
+  const remove = useMutation({
+    mutationFn: () => pim.deleteFile(entry.path),
+    onSuccess: () => {
+      toast.success(t("fileDeleted", { name: entry.name }));
+      void queryClient.invalidateQueries({ queryKey: ["files"] });
+      if (active) void navigate({ to: "/" });
+    },
+    onError: (failure) => toast.error(failure.message),
+  });
+  const date = formatDate(new Date(entry.updatedAt), { dateStyle: "medium" });
+  const content = (
+    <>
+      {folder ? (
+        <Folder className={ROW_ICON_CLASS} />
+      ) : (
+        <FileIcon className={ROW_ICON_CLASS} />
+      )}
+      <RowText
+        title={entry.name}
+        meta={
+          folder
+            ? t("folder")
+            : `${formatBytes(entry.size, formatNumber)} · ${date}`
+        }
+      />
+    </>
+  );
+  return (
+    <li className="group/row relative">
+      {folder ? (
+        <button
+          type="button"
+          onClick={onOpenFolder}
+          className={cn(ROW_CLASS, "pr-8")}
+        >
+          {content}
+        </button>
+      ) : (
+        <Link
+          to="/files"
+          search={{ path: entry.path }}
+          onClick={onNavigate}
+          className={cn(ROW_CLASS, "pr-8", active && "bg-sidebar-accent")}
+        >
+          {content}
+        </Link>
+      )}
+      <DropdownMenu onOpenChange={() => setConfirming(false)}>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className={cn(
+              "-translate-y-1/2 absolute top-1/2 right-1.5 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-foreground focus:opacity-100 group-hover/row:opacity-100 data-[state=open]:opacity-100",
+              active && "opacity-100",
+            )}
+            aria-label={t("fileOptions", { name: entry.name })}
+          >
+            <MoreHorizontal className="size-4" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" side="right">
+          {!folder && (
+            <DropdownMenuItem asChild>
+              <a href={fileContentUrl(entry.path, true)} download>
+                <Download className="size-4" />
+                {t("download")}
+              </a>
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuItem
+            variant="destructive"
+            disabled={remove.isPending}
+            onSelect={(event) => {
+              if (!confirming) {
+                event.preventDefault();
+                setConfirming(true);
+                return;
+              }
+              remove.mutate();
+            }}
+          >
+            {confirming ? (
+              <Check className="size-4" />
+            ) : (
+              <Trash2 className="size-4" />
+            )}
+            {confirming
+              ? t(folder ? "confirmDeleteFolder" : "confirmDeleteFile")
+              : t("deleteFile")}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </li>
   );
 }
 

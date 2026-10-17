@@ -6,6 +6,7 @@ import {
 import {
   createRootRouteWithContext,
   Outlet,
+  retainSearchParams,
   useNavigate,
   useParams,
 } from "@tanstack/react-router";
@@ -13,8 +14,15 @@ import { PanelLeft } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
-import { AppSidebar, sessionTitle } from "~/components/app-sidebar";
+import {
+  AppSidebar,
+  SIDEBAR_PANELS,
+  type SidebarPanel,
+  sessionTitle,
+} from "~/components/app-sidebar";
+import { AppsDialog } from "~/components/apps-dialog";
 import { SummaryToggle } from "~/components/chat/summary";
+import { DiscoverDialog } from "~/components/discover-dialog";
 import { I18nProvider, useI18n } from "~/components/i18n";
 import { RouteError } from "~/components/route-error";
 import {
@@ -37,21 +45,34 @@ export interface RouterContext {
   queryClient: QueryClient;
 }
 
+const DIALOGS = ["settings", "sharing", "discover", "apps"] as const;
+type AppDialog = (typeof DIALOGS)[number];
+
 /**
- * Settings and Sharing open as dialogs over any page, named in the URL so
- * links and redirects can open them: `?dialog=settings&tab=model`.
+ * Settings, Sharing, Discover and Apps open as dialogs over any page, named
+ * in the URL so links and redirects can open them: `?dialog=settings&tab=model`.
+ * What the sidebar shows is in the URL too (`?panel=artifacts`), and stays
+ * as you move between chats.
  */
-type AppSearch = { dialog?: "settings" | "sharing"; tab?: SettingsTab };
+type AppSearch = {
+  dialog?: AppDialog;
+  tab?: SettingsTab;
+  panel?: SidebarPanel;
+};
 
 export const Route = createRootRouteWithContext<RouterContext>()({
   validateSearch: (search: Record<string, unknown>): AppSearch => ({
-    ...((search.dialog === "settings" || search.dialog === "sharing") && {
-      dialog: search.dialog,
+    ...(DIALOGS.includes(search.dialog as AppDialog) && {
+      dialog: search.dialog as AppDialog,
     }),
     ...(SETTINGS_TABS.includes(search.tab as SettingsTab) && {
       tab: search.tab as SettingsTab,
     }),
+    ...(SIDEBAR_PANELS.includes(search.panel as SidebarPanel) && {
+      panel: search.panel as SidebarPanel,
+    }),
   }),
+  search: { middlewares: [retainSearchParams(["panel"])] },
   component: Root,
 });
 
@@ -115,7 +136,11 @@ function usePimEvents() {
           description: notification.body,
           action: {
             label: t("view"),
-            onClick: () => navigate({ to: "/notifications" }),
+            onClick: () =>
+              navigate({
+                to: ".",
+                search: (prev) => ({ ...prev, panel: "notifications" }),
+              }),
           },
         });
       },
@@ -214,7 +239,10 @@ function MobileTitle() {
 
 function AppLayout() {
   const { t } = useI18n();
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const { panel = "chats" } = Route.useSearch();
+  // Collapsing hides the panel the sidebar was showing; showing another opens it again.
+  const [collapsedOn, setCollapsedOn] = useState<string | null>(null);
+  const sidebarCollapsed = collapsedOn === panel;
   const [mobileOpen, setMobileOpen] = useState(false);
   const { sessionId } = useParams({ strict: false }) as { sessionId?: string };
   usePimEvents();
@@ -231,7 +259,9 @@ function AppLayout() {
         <div className="h-full w-full">
           <AppSidebar
             collapsed={sidebarCollapsed}
-            onToggleCollapse={() => setSidebarCollapsed((v) => !v)}
+            onToggleCollapse={() =>
+              setCollapsedOn(sidebarCollapsed ? null : panel)
+            }
           />
         </div>
       </aside>
@@ -289,6 +319,8 @@ function AppDialogs() {
         onOpenChange={close}
       />
       <SharingDialog open={dialog === "sharing"} onOpenChange={close} />
+      <DiscoverDialog open={dialog === "discover"} onOpenChange={close} />
+      <AppsDialog open={dialog === "apps"} onOpenChange={close} />
     </>
   );
 }

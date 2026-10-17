@@ -464,6 +464,15 @@ const translations = {
     fileDeleted: "{name} deleted",
     fileMissing: "This file isn't there anymore.",
     allFiles: "All files",
+    browser: "Browser",
+    browserIdle:
+      "Closed. When an agent opens a page, you see it here, and you can take over to sign in or finish something yourself.",
+    browserPicture: "What the browser shows: {title}",
+    takeOverBrowser: "Take over",
+    takeOverHint:
+      "Opens the browser in a new tab, for you to use. Sign in or do what's needed there, then tell your agent you're done. Nobody else can open that tab's link.",
+    closeBrowser: "Close the browser",
+    browserClosed: "Browser closed",
     noFilePreview: "There's no preview for this file. Download it to open it.",
     deleteFileNamed: "Delete {name}",
     deleteFileConfirm:
@@ -1157,6 +1166,15 @@ const translations = {
     fileDeleted: "{name} eliminado",
     fileMissing: "Este archivo ya no está.",
     allFiles: "Todos los archivos",
+    browser: "Navegador",
+    browserIdle:
+      "Cerrado. Cuando un agente abra una página, la verás aquí, y podrás tomar el control para iniciar sesión o terminar algo tú.",
+    browserPicture: "Lo que muestra el navegador: {title}",
+    takeOverBrowser: "Tomar el control",
+    takeOverHint:
+      "Abre el navegador en una pestaña nueva, para que lo uses tú. Inicia sesión o haz lo necesario allí y luego dile a tu agente que terminaste. Nadie más puede abrir el enlace de esa pestaña.",
+    closeBrowser: "Cerrar el navegador",
+    browserClosed: "Navegador cerrado",
     noFilePreview:
       "Este archivo no tiene vista previa. Descárgalo para abrirlo.",
     deleteFileNamed: "Eliminar {name}",

@@ -154,9 +154,10 @@ function usePimEvents() {
         // A run may have changed what a dashboard shows: goals, schedules, memories, artifacts.
         queryClient.invalidateQueries({ queryKey: ["dashboard"] });
         queryClient.invalidateQueries({ queryKey: ["schedules"] });
-        // Or made an agent, or written files.
+        // Or made an agent, written files, or used the browser.
         queryClient.invalidateQueries({ queryKey: ["agents"] });
         queryClient.invalidateQueries({ queryKey: ["files"] });
+        queryClient.invalidateQueries({ queryKey: ["browser"] });
       },
       onNotification: (notification) => {
         queryClient.invalidateQueries({ queryKey: ["notifications"] });

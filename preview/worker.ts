@@ -6,6 +6,7 @@ import type { PiModel } from "agents/harness/pi";
 import { ownedCode } from "../src/auth";
 import { serve } from "../src/gateway";
 import { Pim as RealPim } from "../src/pim";
+import { INTRODUCTION } from "../src/transcript";
 import { Authenticator } from "../test/webauthn";
 
 export { Auth, Directory, Gallery } from "../src/index";
@@ -17,8 +18,8 @@ export { Auth, Directory, Gallery } from "../src/index";
  * - A stand-in model, so chats answer. It echoes what you say through
  *   `send_to_user`, and calls a tool when told to: `/tool create_goal {"title": "Run a 5k"}`.
  *   After a tool runs, it sends the tool's result. Memory compression gets a short summary.
- *   An agent at work for another (a team member, or one the majordomo gave a task) answers in
- *   plain text, and the majordomo asks the person about every approval it reviews.
+ *   A team member answers in plain text, the majordomo introduces itself with a stock greeting,
+ *   and it asks the person about every approval it reviews.
  *   The utility model titles a chat with the first words of its last message, appends a
  *   line to a prompt it improves, and writes a placeholder summary.
  * - `GET /__dev/sign-in/<username>?returnTo=/path` signs the browser in as
@@ -87,6 +88,13 @@ const answer: FauxResponseFactory = (context, _options, _state, model) => {
 	}
 
 	const text = textOf(messages.findLast((message) => message.role === "user")).trim();
+	if (text.startsWith(INTRODUCTION)) {
+		const name = /named you (.+?)\.(?: |$)/m.exec(text)?.[1] ?? "your majordomo";
+		const them = /Their name is (.+?)\.(?: |$)/m.exec(text)?.[1];
+		return send(
+			`Hello${them ? `, ${them}` : ""}! I'm ${name}, your majordomo. Come to me for almost anything: I'll get to know you, set up agents for the bigger jobs, and look after what they need your approval for.\n\nTell me about yourself, as much or as little as you like. What keeps you busy these days?`,
+		);
+	}
 	const directive = /^\/tool\s+(\S+)\s*([\s\S]*)$/.exec(text);
 	if (directive) {
 		const [, name, json] = directive;

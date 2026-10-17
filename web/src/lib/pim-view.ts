@@ -15,7 +15,7 @@ import type {
   ORItem,
   ReasoningItem,
 } from "~/lib/openresponses";
-import { DELIVERY_REMINDER } from "../../../src/transcript";
+import { DELIVERY_REMINDER, INTRODUCTION } from "../../../src/transcript";
 
 /**
  * Folds Pim's WebSocket stream (pi's agent events: a snapshot, then one batch
@@ -211,7 +211,9 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
   switch (message.role) {
     case "user": {
       const text = textOf(message.content);
-      if (text === DELIVERY_REMINDER) return [];
+      // Pim's own prompts: the majordomo's introduction starts with its message.
+      if (text === DELIVERY_REMINDER || text.startsWith(INTRODUCTION))
+        return [];
       const notice = noticeOf(text);
       if (notice) return [{ key, kind: "notice", notice }];
       return [

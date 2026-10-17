@@ -10,6 +10,11 @@ import { HttpError } from "./http";
  * person's approval (./extensions/skills.ts), since what a skill says steers
  * every later run that loads it.
  *
+ * Besides its instructions (its SKILL.md), a skill can have supporting
+ * files: references, templates, or scripts that `run_javascript` can run,
+ * by paths such as `references/guide.md`. They are text, and go with each
+ * version.
+ *
  * Every write adds a version, and nothing rewrites one; the person can
  * restore an older one, which adds a new version with its content. The
  * latest `MAX_SKILL_VERSIONS` are kept. A write names the version it was
@@ -26,10 +31,14 @@ export type SkillVersionInfo = {
 	readonly createdAt: number;
 };
 
+/** A supporting file, by its path relative to the skill. */
+export type SkillFile = { readonly path: string; readonly content: string };
+
 export type SkillVersion = SkillVersionInfo & {
 	readonly name: string;
 	readonly description: string;
 	readonly instructions: string;
+	readonly files: readonly SkillFile[];
 };
 
 /** A skill as its latest version. */
@@ -42,6 +51,13 @@ export const MAX_SKILLS = 50;
 export const MAX_SKILL_VERSIONS = 20;
 export const MAX_SKILL_DESCRIPTION = 1024;
 export const MAX_SKILL_INSTRUCTIONS = 20_000;
+export const MAX_SKILL_FILES = 20;
+export const MAX_SKILL_FILE_CHARS = 50_000;
+/** Instructions and files together. */
+export const MAX_SKILL_CHARS = 200_000;
+
+/** A supporting file's path: relative, its parts letters, digits, dots, hyphens and underscores, none starting with a dot, and not SKILL.md. */
+const FILE_PATH = /^(?=.{1,200}$)(?!SKILL\.md$)[\w-][\w.-]*(\/[\w-][\w.-]*)*$/;
 
 /** A skill's name as Agent Skills has it: lowercase letters, digits and single hyphens, at most 64 characters. */
 export const SKILL_NAME = /^(?=.{1,64}$)[a-z0-9]+(-[a-z0-9]+)*$/;
@@ -57,6 +73,7 @@ CREATE TABLE IF NOT EXISTS pim_skill_versions (
 	version INTEGER NOT NULL,
 	description TEXT NOT NULL,
 	instructions TEXT NOT NULL,
+	files TEXT NOT NULL DEFAULT '[]',
 	author TEXT,
 	restored_from INTEGER,
 	created_at INTEGER NOT NULL,
@@ -77,6 +94,7 @@ const versionOf = (row: Row): SkillVersion => ({
 	name: String(row.name),
 	description: String(row.description),
 	instructions: String(row.instructions),
+	files: JSON.parse(String(row.files)) as SkillFile[],
 	...versionInfo(row),
 });
 
@@ -94,6 +112,8 @@ export type SkillWrite = {
 	readonly name: string;
 	readonly description: string;
 	readonly instructions: string;
+	/** Every supporting file; left out, a rewrite keeps the files it had. */
+	readonly files?: readonly SkillFile[];
 	readonly baseVersion?: number;
 	/** The agent writing it, by name; left out for a restore. */
 	readonly author?: string;
@@ -152,7 +172,21 @@ export class SkillStore {
 			throw new HttpError(409, `${write.name} is at version ${existing.version} now, not ${write.baseVersion}: read it again before rewriting it`);
 		}
 		if (!existing && this.list().length >= MAX_SKILLS) throw new HttpError(429, `The person can have up to ${MAX_SKILLS} skills.`);
-		return { ...write, description, instructions };
+		const files = write.files ?? existing?.files ?? [];
+		if (files.length > MAX_SKILL_FILES) throw new HttpError(400, `A skill can have up to ${MAX_SKILL_FILES} supporting files`);
+		const paths = new Set<string>();
+		for (const file of files) {
+			if (!FILE_PATH.test(file.path)) {
+				throw new HttpError(400, `${file.path} is not a supporting file's path: give one relative to the skill, such as references/guide.md`);
+			}
+			if (paths.has(file.path)) throw new HttpError(400, `Two supporting files are at ${file.path}`);
+			paths.add(file.path);
+			if (file.content.length > MAX_SKILL_FILE_CHARS) throw new HttpError(400, `${file.path} is longer than ${MAX_SKILL_FILE_CHARS} characters`);
+		}
+		if (files.reduce((total, file) => total + file.content.length, instructions.length) > MAX_SKILL_CHARS) {
+			throw new HttpError(400, `A skill's instructions and files together must be at most ${MAX_SKILL_CHARS} characters`);
+		}
+		return { ...write, description, instructions, files };
 	}
 
 	/** Makes a skill or adds a version, checked again against the skill as it is now. */
@@ -161,11 +195,12 @@ export class SkillStore {
 		const now = Date.now();
 		const version = (write.baseVersion ?? 0) + 1;
 		this.#sql.exec(
-			"INSERT INTO pim_skill_versions (name, version, description, instructions, author, restored_from, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			"INSERT INTO pim_skill_versions (name, version, description, instructions, files, author, restored_from, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			write.name,
 			version,
 			write.description,
 			write.instructions,
+			JSON.stringify(write.files),
 			write.author ?? null,
 			write.restoredFrom ?? null,
 			now,
@@ -184,7 +219,7 @@ export class SkillStore {
 	restore(name: string, version: number, baseVersion: number): Skill {
 		const old = this.version(name, version);
 		if (!old) throw new HttpError(404, `No version ${version} of the skill ${name}`);
-		return this.write({ name, description: old.description, instructions: old.instructions, baseVersion, restoredFrom: version });
+		return this.write({ name, description: old.description, instructions: old.instructions, files: old.files, baseVersion, restoredFrom: version });
 	}
 
 	/** Deletes a skill and every version of it. */

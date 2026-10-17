@@ -3382,7 +3382,7 @@ export class Pim extends DurableAgent<Env> {
 			"GET",
 			"/skills",
 			() => ({
-				skills: this.skills.list().map(({ instructions: _instructions, ...skill }) => ({ ...skill, agents: this.#skillAgents(skill.name) })),
+				skills: this.skills.list().map(({ instructions: _instructions, files: _files, ...skill }) => ({ ...skill, agents: this.#skillAgents(skill.name) })),
 			}),
 		],
 		["GET", "/skills/:name", ({ name }) => this.#describeSkill(this.#skill(name!).name)],

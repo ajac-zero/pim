@@ -68,7 +68,9 @@ const SERVERS: Record<string, () => McpServer> = {
  * Forge: an MCP server behind an OAuth server that, like GitHub's, has no
  * client registration, so only the client the deployment registered signs
  * in. Board: the same, but its OAuth server lets clients register, as most
- * do. They record the token requests and registrations they get.
+ * do. Studio: the same as Forge, but its OAuth server, like Amp's, takes a
+ * client metadata document, which it fetches. All three say they take those
+ * documents. They record the token requests and registrations they get.
  */
 const forgeGrants: Record<string, string>[] = [];
 let forgeRegistrations = 0;
@@ -76,7 +78,7 @@ const boardRegistrations: Record<string, unknown>[] = [];
 
 async function forge(request: Request): Promise<Response> {
 	const { origin, pathname } = new URL(request.url);
-	const host = origin === "https://board.example.test" ? "board" : "forge";
+	const host = origin === "https://board.example.test" ? "board" : origin === "https://studio.example.test" ? "studio" : "forge";
 	if (host === "board" && pathname === "/register") {
 		const metadata = (await request.json()) as Record<string, unknown>;
 		boardRegistrations.push(metadata);
@@ -100,6 +102,7 @@ async function forge(request: Request): Promise<Response> {
 			authorization_endpoint: `${origin}/login/authorize`,
 			token_endpoint: `${origin}/login/token`,
 			...(host === "board" ? { registration_endpoint: `${origin}/register` } : {}),
+			client_id_metadata_document_supported: true,
 			response_types_supported: ["code"],
 			code_challenge_methods_supported: ["S256"],
 		});
@@ -107,6 +110,14 @@ async function forge(request: Request): Promise<Response> {
 	if (pathname === "/login/token") {
 		const form = Object.fromEntries(new URLSearchParams(await request.text()));
 		forgeGrants.push(form);
+		if (host === "studio") {
+			// The client is whoever its metadata document says, and may only come back where that says.
+			const document = (await (await exports.default.fetch(form.client_id!)).json()) as { client_id: string; redirect_uris: string[] };
+			if (document.client_id !== form.client_id || !document.redirect_uris.includes(form.redirect_uri!) || form.client_secret) {
+				return Response.json({ error: "invalid_client" }, { status: 401 });
+			}
+			return Response.json({ access_token: "forge-token", token_type: "bearer" });
+		}
 		if (form.client_id !== "forge-client" || form.client_secret !== "forge-secret") return Response.json({ error: "invalid_client" }, { status: 401 });
 		if (form.code !== "good") return Response.json({ error: "invalid_grant" }, { status: 400 });
 		return Response.json({ access_token: "forge-token", token_type: "bearer" });
@@ -120,7 +131,7 @@ beforeEach(() => {
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		const request = new Request(input, init);
 		const target = `${new URL(request.url).origin}${new URL(request.url).pathname}`;
-		if (["https://forge.example.test", "https://board.example.test"].includes(new URL(request.url).origin)) return forge(request);
+		if (["https://forge.example.test", "https://board.example.test", "https://studio.example.test"].includes(new URL(request.url).origin)) return forge(request);
 		if (target === "https://down.example.test/mcp") return new Response("unavailable", { status: 503 });
 		const server = SERVERS[target];
 		if (!server) return realFetch(input, init);
@@ -428,6 +439,31 @@ describe("connected apps (MCP)", () => {
 		expect(boardRegistrations[0]).toMatchObject({ client_name: "Pim", redirect_uris: [`https://pim.test/mcp/callback/${OWNER}`] });
 		expect(boardRegistrations[0]).not.toHaveProperty("client_uri");
 		expect((await api("/mcp/board", { method: "DELETE" })).status).toBe(200);
+	});
+
+	it("signs in to a server that takes client metadata documents with the one it serves for its owner", async () => {
+		const started = await post("/mcp", { app: "test.ledger/studio" });
+		expect(started).toMatchObject({ status: 201, body: { id: "studio", state: "authenticating" } });
+		const authUrl = new URL(started.body.authUrl);
+		const document = `https://pim.test/mcp/client/${OWNER}`;
+		expect(Object.fromEntries(authUrl.searchParams)).toMatchObject({ client_id: document, redirect_uri: `https://pim.test/mcp/callback/${OWNER}` });
+		expect(await (await exports.default.fetch(document)).json()).toEqual({
+			client_id: document,
+			client_name: "Pim",
+			redirect_uris: [`https://pim.test/mcp/callback/${OWNER}`],
+			grant_types: ["authorization_code", "refresh_token"],
+			response_types: ["code"],
+			token_endpoint_auth_method: "none",
+		});
+		// Nobody else's, and nothing else.
+		expect((await exports.default.fetch(url("/mcp/client/o_nobody"))).status).toBe(404);
+		expect((await exports.default.fetch(document, { method: "POST" })).status).toBe(405);
+
+		await exports.default.fetch(url(`/mcp/callback/${OWNER}?state=${authUrl.searchParams.get("state")}&code=good`));
+		expect(forgeGrants.at(-1)).toMatchObject({ grant_type: "authorization_code", client_id: document });
+		const server = (await api("/mcp")).body.servers.find((candidate: { id: string }) => candidate.id === "studio");
+		expect(server).toMatchObject({ state: "ready" });
+		expect((await api("/mcp/studio", { method: "DELETE" })).status).toBe(200);
 	});
 
 	it("finds an app, adds and connects it after explicit chat approval, then continues the original task", async () => {

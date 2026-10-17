@@ -1,7 +1,7 @@
 import { getAgentByName } from "agents";
 import pimConfig from "../pim.config";
 import { accountApi, adminApi, clientIp, handleRegistration, limited, resolveAccount, siteFor, sites, socialApi } from "./accounts";
-import { APPS_CALLBACK_PATH, AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_EVENTS_PATH, OWNER_HEADER } from "./pim";
+import { APPS_CALLBACK_PATH, AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, OWNER_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
 import { themes as ownThemes } from "./extensions/themes";
@@ -117,8 +117,25 @@ export type ApiExtension = (path: string, request: Request) => Promise<Response 
  * it gave), `/mcp/callback/apps` (GET, the same for the apps extensions
  * implement, whose `state` starts with the owner), or
  * `/mcp/events/<owner>/<watch>` (POST, which the Pim answers as `/mcp/events/<watch>`).
+ * Also `/mcp/client/<owner>` (GET): Pim's client metadata document for that
+ * owner's sign-ins, for services that take one instead of registering clients.
  */
 async function serveApp(request: Request, env: Env, pathname: string): Promise<Response | undefined> {
+	const client = new RegExp(`^${MCP_CLIENT_PATH}/([^/]+)$`).exec(pathname);
+	if (client) {
+		if (request.method !== "GET") return fail(405, `${pathname} takes GET`);
+		if (!(await resolveAccount(env, decodeURIComponent(client[1]!)))) return fail(404, "Not found");
+		const { origin } = new URL(request.url);
+		// The same metadata Pim registers with elsewhere; its id is this document's URL.
+		return Response.json({
+			client_id: `${origin}${pathname}`,
+			client_name: "Pim",
+			redirect_uris: [`${origin}${MCP_CALLBACK_PATH}/${client[1]}`],
+			grant_types: ["authorization_code", "refresh_token"],
+			response_types: ["code"],
+			token_endpoint_auth_method: "none",
+		});
+	}
 	const callback = new RegExp(`^${MCP_CALLBACK_PATH}/([^/]+)$`).exec(pathname);
 	const events = new RegExp(`^${MCP_EVENTS_PATH}([^/]+)/([^/]+)$`).exec(pathname);
 	if (!callback && !events) return undefined;

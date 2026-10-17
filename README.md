@@ -107,7 +107,7 @@ Configuration lives in `vars` in `wrangler.jsonc`:
 
 `ratelimits` in `wrangler.jsonc` slow down sign-in attempts from one address and API requests from one person; leave them out and nothing is slowed down. Their namespace IDs must be unique in your Cloudflare account.
 
-Pim comes with 34 apps ([`popular-apps.ts`](src/extensions/popular-apps.ts), [`spotify.ts`](src/extensions/spotify.ts)): Airtable, Atlassian (Jira and Confluence), Attio, Cal.com, Calendly, ClickUp, Cloudflare, Context7, Exa, Fireflies, GitHub, Granola, Hex, Hugging Face, Intercom, Jotform, Klaviyo, Linear, Make, Mercury, Miro, monday.com, Neon, Netlify, Notion, PayPal, PostHog, Sentry, Spotify, Stripe, Supabase, Todoist, Webflow and Wix. All but two work as they are. Two need secrets of your own, set with `wrangler secret put`; until they are, nobody is offered the app:
+Pim comes with 36 apps ([`popular-apps.ts`](src/extensions/popular-apps.ts), [`spotify.ts`](src/extensions/spotify.ts)): Airtable, Amp, Atlassian (Jira and Confluence), Attio, Cal.com, Calendly, ClickUp, Cloudflare, Context7, Exa, Firecrawl, Fireflies, GitHub, Granola, Hex, Hugging Face, Intercom, Jotform, Klaviyo, Linear, Make, Mercury, Miro, monday.com, Neon, Netlify, Notion, PayPal, PostHog, Sentry, Spotify, Stripe, Supabase, Todoist, Webflow and Wix. All but two work as they are. Two need secrets of your own, set with `wrangler secret put`; until they are, nobody is offered the app:
 
 - **GitHub**: `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`, from an OAuth app at [github.com/settings/developers](https://github.com/settings/developers) whose callback URL is `https://<your Pim>/mcp/callback`. GitHub's MCP server doesn't let apps register themselves, so Pim signs everyone in with this one.
 - **Spotify**: `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`, from an app at [developer.spotify.com](https://developer.spotify.com/dashboard) whose redirect URI is `https://<your Pim>/mcp/callback/apps`.
@@ -128,7 +128,7 @@ For local development, run `pnpm dev`: the Worker and the built web app at `http
 
 ## API
 
-The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out the prefix. It is the signed-in person's own Pim. The web app calls it with its session cookie. Other clients send `Authorization: Bearer <token>`, with a token made in Settings (API tokens), which names its owner (`pim_<owner>_…`). WebSockets from clients that can't set headers pass `?token=<token>` instead. Only the two paths connected apps call stay at the root, without the prefix, and name whose agent they are for: `/mcp/callback/:owner` and `/mcp/events/:owner/:watch`. Sessions are separate conversations. The root session is `1`.
+The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out the prefix. It is the signed-in person's own Pim. The web app calls it with its session cookie. Other clients send `Authorization: Bearer <token>`, with a token made in Settings (API tokens), which names its owner (`pim_<owner>_…`). WebSockets from clients that can't set headers pass `?token=<token>` instead. Only the three paths connected apps call stay at the root, without the prefix, and name whose agent they are for: `/mcp/callback/:owner`, `/mcp/events/:owner/:watch`, and `/mcp/client/:owner`, Pim's client metadata document for services whose sign-in takes one instead of registering clients (Amp's). Sessions are separate conversations. The root session is `1`.
 
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |

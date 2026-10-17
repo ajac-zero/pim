@@ -19,7 +19,6 @@ import {
   ChevronDown,
   Compass,
   Folder,
-  Globe,
   MessageCircle,
   MoreHorizontal,
   Pencil,
@@ -40,7 +39,6 @@ import {
 } from "~/components/profile-popover";
 import {
   ArtifactsPanel,
-  BrowserPanel,
   FilesPanel,
   NotificationsPanel,
   SchedulesPanel,
@@ -68,7 +66,6 @@ import {
   accountQuery,
   agentsQuery,
   approvalsQuery,
-  browserQuery,
   notificationsQuery,
   profileQuery,
   sessionsQuery,
@@ -117,15 +114,13 @@ export const SIDEBAR_PANELS = [
   "notifications",
   "artifacts",
   "files",
-  "browser",
   "schedules",
 ] as const;
 export type SidebarPanel = (typeof SIDEBAR_PANELS)[number];
 
 /**
  * The sidebar: a rail of icons beside a panel. The icons at the top choose
- * what the panel shows (notifications, your chats, artifacts, files, the
- * agents' browser where this Pim has one, or schedules)
+ * what the panel shows (notifications, your chats, artifacts, files or schedules)
  * while the open chat stays where it is; those at the bottom open dialogs
  * over it. Choosing the panel that's already showing collapses the sidebar
  * to the rail, and choosing any panel brings it back.
@@ -143,7 +138,6 @@ export function AppSidebar({
   const { panel } = useSearch({ strict: false });
   const { data: approvals } = useQuery(approvalsQuery());
   const { data: notifications } = useQuery(notificationsQuery());
-  const { data: browser } = useQuery(browserQuery());
   // Sharing, Discover and your profile are with the other people on this Pim.
   const { data: account } = useQuery(accountQuery());
   // Alone on this Pim, there is nobody to share with or discover.
@@ -206,15 +200,6 @@ export function AppSidebar({
             icon={<Folder className="size-4.5" />}
             label={t("files")}
           />
-          {browser?.available && (
-            <RailPanel
-              {...railPanel}
-              panel="browser"
-              icon={<Globe className="size-4.5" />}
-              label={t("browser")}
-              count={browser.page ? 1 : 0}
-            />
-          )}
           <RailPanel
             {...railPanel}
             panel="schedules"
@@ -298,8 +283,6 @@ export function AppSidebar({
             <ArtifactsPanel onNavigate={onNavigate} />
           ) : panel === "files" ? (
             <FilesPanel onNavigate={onNavigate} />
-          ) : panel === "browser" ? (
-            <BrowserPanel />
           ) : panel === "schedules" ? (
             <SchedulesPanel onNavigate={onNavigate} />
           ) : (

@@ -5,6 +5,7 @@ import {
   Download,
   KeyRound,
   Loader2,
+  Plug,
   Plus,
   ShieldAlert,
   Trash2,
@@ -14,7 +15,12 @@ import { toast } from "sonner";
 import { LanguageSelect, useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
-import { auth, authSessionQuery, tokensQuery } from "~/lib/auth";
+import {
+  auth,
+  authSessionQuery,
+  connectionsQuery,
+  tokensQuery,
+} from "~/lib/auth";
 import {
   type Account,
   type ApprovalPolicy,
@@ -414,6 +420,82 @@ export function TokensSection() {
           {t("createToken")}
         </Button>
       </form>
+    </Section>
+  );
+}
+
+/** Pim's MCP server: its address, and the clients the person let in, to disconnect. */
+export function McpSection() {
+  const { t, formatDate } = useI18n();
+  const queryClient = useQueryClient();
+  const { data: session } = useQuery(authSessionQuery());
+  // Clients are let in, and seen, signed in to the app, as tokens are.
+  const signedIn =
+    session?.method === "passkey" || session?.method === "identity";
+  const { data: connections } = useQuery({
+    ...connectionsQuery(),
+    enabled: signedIn,
+  });
+  const disconnect = useMutation({
+    mutationFn: auth.disconnect,
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["auth", "connections"] }),
+    onError: (error) => toast.error(error.message),
+  });
+  if (!connections) return null;
+  const mcpUrl = `${window.location.origin}/mcp`;
+  return (
+    <Section title={t("mcpServer")} description={t("mcpServerBody")}>
+      <div className="flex items-center gap-2">
+        <code className="min-w-0 flex-1 truncate rounded-xl bg-muted px-3 py-2 font-mono text-xs">
+          {mcpUrl}
+        </code>
+        <CopyButton text={mcpUrl} />
+      </div>
+      {connections.length > 0 && (
+        <ul
+          className="divide-y rounded-2xl border bg-muted/20"
+          aria-label={t("mcpConnections")}
+        >
+          {connections.map((connection) => (
+            <li
+              key={connection.id}
+              className="flex items-center gap-3 px-4 py-3"
+            >
+              <Plug className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-medium text-sm">
+                  {connection.name}
+                </span>
+                <span className="block truncate text-muted-foreground text-xs">
+                  {t("mcpConnected", {
+                    created: formatDate(new Date(connection.createdAt), {
+                      dateStyle: "medium",
+                    }),
+                  })}
+                </span>
+              </span>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-muted-foreground"
+                aria-label={t("disconnectClient", { name: connection.name })}
+                onClick={() => disconnect.mutate(connection.id)}
+                disabled={
+                  disconnect.isPending && disconnect.variables === connection.id
+                }
+              >
+                {disconnect.isPending &&
+                disconnect.variables === connection.id ? (
+                  <Loader2 className="animate-spin" />
+                ) : (
+                  <Trash2 />
+                )}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
     </Section>
   );
 }

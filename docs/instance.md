@@ -31,6 +31,7 @@ People on the same Pim can share with each other: circles let others message you
   - Signing in reads the owner from the passkey's user handle, which is the owner ID the passkey was made for, then checks the signature with that owner's passkey. A passkey that names someone else isn't one of theirs.
   - Signing in with Google, GitHub or a custom OpenID Connect provider finds the owner in the Directory by the provider's issuer and user ID (never the email), then checks that owner's Auth object has that identity. The provider's ID token comes straight from its token endpoint, in exchange for a code and a PKCE verifier only this sign-in knows; its issuer, audience, nonce and expiry are checked. The flow's state rides in a sealed, `SameSite=Lax` cookie, so a sign-in finishes only in the browser that started it.
   - An API token is `pim_<owner>_<secret>`, checked in that owner's Auth object.
+  - An MCP client's OAuth grant names its owner, the person signed in to the app who allowed it on `/authorize`; its access tokens, checked in `OAUTH_KV`, open only that owner's `/mcp` (see [src/mcp-auth.ts](../src/mcp-auth.ts)).
   - Setup and device links carry their owner before the code (`#setup=<owner>.<code>`). A recovery code comes with the person's username.
   - Apps' sign-ins return to `/mcp/callback/<owner>`, matched by the agent against the OAuth state; event webhooks go to `/mcp/events/<owner>/<watch>`, checked against the watch's signing secret.
   - The agent refuses any request whose forwarded owner isn't its own name (`pim.misrouted`).

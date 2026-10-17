@@ -14,7 +14,7 @@
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     // Everything else is the app's pages and files.
-    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*"]
+    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp", "/oauth/*", "/.well-known/*", "/authorize", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*"]
   },
   // Workers AI runs the model; under `wrangler dev` it calls your logged-in account.
   "ai": { "binding": "AI", "remote": true },
@@ -37,6 +37,9 @@
     { "tag": "v3", "new_sqlite_classes": ["Directory"] },
     { "tag": "v4", "new_sqlite_classes": ["Gallery"] }
   ],
+  // MCP clients' sign-ins to people's Pims: registered clients, grants and hashed tokens
+  // (src/mcp-auth.ts). Deploying creates the namespace.
+  "kv_namespaces": [{ "binding": "OAUTH_KV" }],
   // Images people send in chats; their messages keep only the images' URLs. Deploying creates the
   // bucket, once R2 is turned on for the account (Dashboard → R2; it asks for a payment method).
   "r2_buckets": [{ "binding": "IMAGES" }],

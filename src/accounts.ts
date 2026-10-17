@@ -81,7 +81,7 @@ function claimWindowOpen(env: Env, now: number): boolean {
 }
 
 /** This Pim's address: `PIM_PUBLIC_URL`, or the one the request came to. */
-const origin = (request: Request, env: Env) => (env.PIM_PUBLIC_URL ? new URL(env.PIM_PUBLIC_URL).origin : new URL(request.url).origin);
+export const pimOrigin = (request: Request, env: Env) => (env.PIM_PUBLIC_URL ? new URL(env.PIM_PUBLIC_URL).origin : new URL(request.url).origin);
 
 /** A person's sign-in, as ./auth uses it. */
 export function siteFor(env: Env, account: Account): AuthSite {
@@ -179,13 +179,13 @@ export async function handleRegistration(request: Request, env: Env, now = Date.
 		if (!admin) {
 			const { code, expiresAt } = await dir.claimCode(now);
 			const until = new Date(expiresAt).toISOString();
-			console.log(`Pim setup link. Open it to set this Pim up and become its admin; it works once, until ${until}: ${origin(request, env)}/#claim=${code}`);
+			console.log(`Pim setup link. Open it to set this Pim up and become its admin; it works once, until ${until}: ${pimOrigin(request, env)}/#claim=${code}`);
 			return json({ expiresAt: until });
 		}
 		const { code, expiresAt } = await authOf(env, admin.ownerId).setupCode(now);
 		const until = new Date(expiresAt).toISOString();
 		console.log(
-			`Pim setup link for ${admin.username}, the admin. Open it to add a passkey; it works once, until ${until}: ${origin(request, env)}/#setup=${ownedCode(admin.ownerId, code)}`,
+			`Pim setup link for ${admin.username}, the admin. Open it to add a passkey; it works once, until ${until}: ${pimOrigin(request, env)}/#setup=${ownedCode(admin.ownerId, code)}`,
 		);
 		return json({ expiresAt: until });
 	}
@@ -223,7 +223,7 @@ async function register(request: Request, env: Env, now: number): Promise<Respon
 	try {
 		[setup, recoveryCodes] = await Promise.all([auth.issueSetupCode(now, PENDING_MS), auth.newRecoveryCodes(now)]);
 		const pim = await pimOf(env, account.ownerId);
-		await pim.provision({ ownerId: account.ownerId, username, publicUrl: origin(request, env) });
+		await pim.provision({ ownerId: account.ownerId, username, publicUrl: pimOrigin(request, env) });
 		// The deployment's limits are for members: the admin pays for the deployment.
 		if (account.role === "admin") await pim.setLimits(UNLIMITED);
 		// Everyone gets a copy of the agent the admin chose, if they chose one, besides the majordomo they name next.
@@ -505,7 +505,7 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 				const count = typeof given.count === "number" && Number.isInteger(given.count) && given.count > 0 && given.count <= 100 ? given.count : 1;
 				const codes = await dir.createInvites(count, typeof given.note === "string" ? given.note.slice(0, 200) : null);
 				log("invites_created", { count, by: admin.ownerId });
-				const base = origin(request, env);
+				const base = pimOrigin(request, env);
 				return json({ codes, links: codes.map((code) => `${base}/#invite=${code}`) }, 201);
 			}
 			const match = /^\/admin\/accounts\/([^/]+)(\/[a-z-]+)?$/.exec(path);
@@ -547,7 +547,7 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 				if (gone) return fail(409, `${username} is ${account.status}`);
 				const { code, expiresAt } = await authOf(env, account.ownerId).issueSetupCode(Date.now(), 60 * 60 * 1000);
 				log("setup_link_issued", { owner: account.ownerId, username, by: admin.ownerId });
-				return json({ setupUrl: `${origin(request, env)}/#setup=${ownedCode(account.ownerId, code)}`, expiresAt: new Date(expiresAt).toISOString() });
+				return json({ setupUrl: `${pimOrigin(request, env)}/#setup=${ownedCode(account.ownerId, code)}`, expiresAt: new Date(expiresAt).toISOString() });
 			}
 			if (request.method === "DELETE" && action === "") {
 				if (self) return fail(409, "Delete your own account from Settings.");

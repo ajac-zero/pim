@@ -26,6 +26,7 @@ import { toast } from "sonner";
 import {
   AccountSection,
   DeleteAccountSection,
+  McpSection,
   PreferencesSection,
   TokensSection,
 } from "~/components/account-settings";
@@ -203,6 +204,7 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
           <>
             <AccountSection />
             <SignInSection />
+            <McpSection />
             <TokensSection />
             <DeleteAccountSection />
           </>

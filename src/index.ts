@@ -11,7 +11,7 @@ export { Gallery } from "./gallery";
  * whose it is.
  */
 export default {
-	fetch(request, env): Promise<Response> {
-		return serve(request, env);
+	fetch(request, env, ctx): Promise<Response> {
+		return serve(request, env, ctx);
 	},
 } satisfies ExportedHandler<Env>;

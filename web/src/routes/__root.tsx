@@ -9,6 +9,7 @@ import {
   retainSearchParams,
   useNavigate,
   useParams,
+  useRouterState,
 } from "@tanstack/react-router";
 import { PanelLeft } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
@@ -78,13 +79,21 @@ export const Route = createRootRouteWithContext<RouterContext>()({
 });
 
 function Root() {
+  // Letting an MCP client in is a page of its own, between the client and the person.
+  const alone = useRouterState({
+    select: (state) => state.location.pathname === "/authorize",
+  });
   return (
     <I18nProvider>
       <ThemeProvider>
         <SignedIn>
-          <Introduced>
-            <AppLayout />
-          </Introduced>
+          {alone ? (
+            <Outlet />
+          ) : (
+            <Introduced>
+              <AppLayout />
+            </Introduced>
+          )}
         </SignedIn>
         <Toaster position="top-center" />
       </ThemeProvider>

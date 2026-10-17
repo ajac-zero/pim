@@ -483,6 +483,15 @@ export const FILES_ROOT = "/workspace";
 export const fileContentUrl = (path: string, download = false) =>
   `/api/files/content?path=${encodeURIComponent(path)}${download ? "&download" : ""}`;
 
+/** The browser your agents share: whether this Pim has one, and the page it shows when it's open. */
+export type BrowserStatus = {
+  available: boolean;
+  page: { url: string; title: string } | null;
+};
+
+/** A picture of the page the browser shows. */
+export const BROWSER_SCREENSHOT_URL = "/api/browser/screenshot";
+
 export type DayUsage = {
   day: string;
   tokens: number;
@@ -721,6 +730,12 @@ export const pim = {
     call<{ deleted: boolean }>(`/files?path=${encodeURIComponent(path)}`, {
       method: "DELETE",
     }),
+  browser: () => call<BrowserStatus>("/browser"),
+  /** A Live View link to use the browser yourself; it carries its own access. */
+  takeOverBrowser: () =>
+    call<{ url: string }>("/browser/live", { method: "POST" }),
+  closeBrowser: () =>
+    call<{ closed: boolean }>("/browser", { method: "DELETE" }),
   removeAgentIcon: (id: string) =>
     call<Agent>(`/agents/${id}/icon`, { method: "DELETE" }),
   deleteAgent: (id: string) =>

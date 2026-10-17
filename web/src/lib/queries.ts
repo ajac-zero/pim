@@ -58,6 +58,9 @@ export const filesQuery = (path: string) =>
     retry: false,
   });
 
+export const browserQuery = () =>
+  queryOptions({ queryKey: ["browser"], queryFn: pim.browser });
+
 export const artifactQuery = (id: string) =>
   queryOptions({
     queryKey: ["artifacts", id],

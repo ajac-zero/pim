@@ -32,8 +32,18 @@ export type ProviderSettings = {
 	readonly name?: string;
 };
 
-/** Who signed in, as a provider says. `label` is shown in Settings: an email or a username. */
-export type Identity = { readonly issuer: string; readonly subject: string; readonly label: string };
+/**
+ * Who signed in, as a provider says. `label` is shown in Settings: an email
+ * or a username. `name` is what the provider says the person is called, if
+ * it says: their given name when it knows it.
+ */
+export type Identity = { readonly issuer: string; readonly subject: string; readonly label: string; readonly name: string | null };
+
+/** A provider's name for the person, if it is one line of a sensible length. */
+function personName(...candidates: unknown[]): string | null {
+	const name = candidates.find((value): value is string => typeof value === "string" && value.trim() !== "")?.trim();
+	return name && name.length <= 80 && !/[\r\n]/.test(name) ? name : null;
+}
 
 const GOOGLE_ISSUER = "https://accounts.google.com";
 const GITHUB_ISSUER = "https://github.com";
@@ -196,14 +206,14 @@ function idTokenIdentity(issuer: string, clientId: string, token: unknown, nonce
 		claims.sub !== "";
 	if (!valid) throw new Error(`${name}'s answer wasn't for this sign-in. Try again.`);
 	const label = [claims.email, claims.preferred_username, claims.name].find((value) => typeof value === "string" && value !== "");
-	return { issuer, subject: claims.sub as string, label: (label as string | undefined) ?? (claims.sub as string) };
+	return { issuer, subject: claims.sub as string, label: (label as string | undefined) ?? (claims.sub as string), name: personName(claims.given_name, claims.name) };
 }
 
 async function githubIdentity(accessToken: string): Promise<Identity> {
 	const response = await fetch("https://api.github.com/user", {
 		headers: { authorization: `Bearer ${accessToken}`, accept: "application/vnd.github+json", "user-agent": "pim" },
 	});
-	const user = (await response.json().catch(() => null)) as { id?: unknown; login?: unknown } | null;
+	const user = (await response.json().catch(() => null)) as { id?: unknown; login?: unknown; name?: unknown } | null;
 	if (!response.ok || typeof user?.id !== "number") throw new Error("GitHub didn't say who signed in.");
-	return { issuer: GITHUB_ISSUER, subject: String(user.id), label: typeof user.login === "string" ? user.login : String(user.id) };
+	return { issuer: GITHUB_ISSUER, subject: String(user.id), label: typeof user.login === "string" ? user.login : String(user.id), name: personName(user.name) };
 }

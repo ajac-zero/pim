@@ -164,9 +164,7 @@ export type MajordomoSetup = {
 	readonly color?: string | null;
 	/** What the person is called, which it remembers. */
 	readonly yourName: string | null;
-	/** What they like to be called, which it remembers. */
-	readonly callMe: string | null;
-	/** What they'd like a hand with, as `HELP_WITH` names it, which it remembers. */
+	/** What they'd like a hand with, as `HELP_WITH` names it and in their own words, which it remembers. */
 	readonly helpWith: readonly string[];
 	/** Its instructions: how it talks and how much it handles on its own. */
 	readonly instructions: string;
@@ -201,14 +199,19 @@ export function majordomoSetup(body: Record<string, unknown>): MajordomoSetup {
 	if (!Array.isArray(helpWith) || helpWith.some((area) => typeof area !== "string" || !Object.hasOwn(HELP_WITH, area))) {
 		throw new HttpError(400, `helpWith must list some of ${Object.keys(HELP_WITH).join(", ")}`);
 	}
-	const instructions = [choice(body.tone, "tone", TONES), choice(body.involvement, "involvement", INVOLVEMENT)].filter((part) => part !== null);
+	const customTone = line(body.customTone, "customTone", 120);
+	const instructions = [
+		choice(body.tone, "tone", TONES),
+		customTone && `Talk with them the way they asked, in their words: ${customTone}`,
+		choice(body.involvement, "involvement", INVOLVEMENT),
+	].filter((part) => part !== null);
+	const otherHelp = line(body.otherHelp, "otherHelp", 120);
 	return {
 		name,
 		symbol,
 		color,
 		yourName: line(body.yourName, "yourName", 80),
-		callMe: line(body.callMe, "callMe", 80),
-		helpWith: Object.keys(HELP_WITH).filter((area) => helpWith.includes(area)).map((area) => HELP_WITH[area]!),
+		helpWith: [...Object.keys(HELP_WITH).filter((area) => helpWith.includes(area)).map((area) => HELP_WITH[area]!), ...(otherHelp ? [otherHelp] : [])],
 		instructions: instructions.join("\n"),
 		locale: locale as string | null,
 		title: line(body.title, "title", 100),
@@ -221,7 +224,6 @@ export function setupMemories(setup: MajordomoSetup): string[] {
 	const areas = rest.length === 0 ? last : `${rest.reverse().join(", ")} and ${last}`;
 	return [
 		...(setup.yourName ? [`Their name is ${setup.yourName}.`] : []),
-		...(setup.callMe ? [`They like to be called ${setup.callMe}.`] : []),
 		...(areas ? [`They'd like a hand with ${areas}.`] : []),
 	];
 }
@@ -235,7 +237,7 @@ export function setupMemories(setup: MajordomoSetup): string[] {
 export function introduction(majordomo: Agent, setup: MajordomoSetup): string {
 	const known = setupMemories(setup);
 	const ask = [
-		...(setup.callMe ? [] : ["what to call them"]),
+		...(setup.yourName ? [] : ["what to call them"]),
 		...(setup.helpWith.length > 0 ? ["more about those parts of their life"] : ["what they'd like a hand with"]),
 		"what they do",
 		"the people and routines in their life",
@@ -244,6 +246,6 @@ export function introduction(majordomo: Agent, setup: MajordomoSetup): string {
 	return [
 		`${INTRODUCTION} The person just joined and named you ${majordomo.name}.${known.length > 0 ? ` ${known.join(" ")}` : ""} This is your first conversation, and you start it.`,
 		...(setup.locale && !setup.locale.startsWith("en") ? [`Their app is in the language with the code "${setup.locale}": write to them in it.`] : []),
-		`Introduce yourself with send_to_user in a few short sentences: greet them${setup.yourName || setup.callMe ? " by name" : ""}, say who you are and what you're for (they can come to you for almost anything; you get to know them, set up agents for the bigger jobs, and look after the approvals those agents ask for), and invite them to tell you about themselves, as much or as little as they like, such as ${ask.join(", ")}. End with one light question to get them going, not a list of questions. Note what they tell you as it comes.`,
+		`Introduce yourself with send_to_user in a few short sentences: greet them${setup.yourName ? " by name" : ""}, say who you are and what you're for (they can come to you for almost anything; you get to know them, set up agents for the bigger jobs, and look after the approvals those agents ask for), and invite them to tell you about themselves, as much or as little as they like, such as ${ask.join(", ")}. End with one light question to get them going, not a list of questions. Note what they tell you as it comes.`,
 	].join("\n\n");
 }

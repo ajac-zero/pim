@@ -23,6 +23,8 @@ export type AuthSession = {
   providers?: SignInProvider[];
   /** Who is signed in. */
   account: { username: string; role: Role } | null;
+  /** Signed in: what an account they linked at another provider calls them, if any. */
+  name?: string | null;
   /** Signed out: whether this Pim has its admin yet. */
   claimed?: boolean;
   /** Signed out, with no admin yet: right after a deploy, whoever registers first becomes the admin. */

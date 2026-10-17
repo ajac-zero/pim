@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, Loader2, Pencil } from "lucide-react";
 import { type ReactNode, useEffect, useId, useState } from "react";
@@ -16,6 +16,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "~/components/ui/popover";
+import { authSessionQuery } from "~/lib/auth";
 import {
   type Agent,
   MAJORDOMO_HELP_WITH,
@@ -56,29 +57,34 @@ const helpWithKey = {
 } as const;
 
 /**
- * The first thing after joining: say your name, name your majordomo and
- * choose how it looks, then, if you like, pick how it should address you,
- * how it should talk with you, what you'd like a hand with, and how much it
- * handles on its own. Then it opens your
- * first chat by introducing itself, and you tell it the rest as you talk.
+ * The first thing after joining. Unless an account they signed up with
+ * already says it, they give their name; then they name their majordomo and
+ * choose how it looks; then, if they like, how it should talk with them,
+ * what they'd like a hand with, and how much it handles on its own, each
+ * with a pencil for an answer of their own. Then it opens their first chat
+ * by introducing itself, and they tell it the rest as they talk.
  */
 export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
   const { t, locale } = useI18n();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const ids = { yourName: useId(), name: useId(), callMe: useId() };
-  const [step, setStep] = useState<"names" | "about">("names");
-  const [yourName, setYourName] = useState("");
+  const given = useQuery(authSessionQuery()).data?.name ?? null;
+  const ids = { yourName: useId(), name: useId() };
+  const [step, setStep] = useState<"you" | "majordomo" | "preferences">(
+    given ? "majordomo" : "you",
+  );
+  const [yourName, setYourName] = useState(given ?? "");
   const [name, setName] = useState("");
   const [look, setLook] = useState<LookChoice>({
     symbol: "🎩",
     color: "violet",
     image: null,
   });
-  const [callMe, setCallMe] = useState<string | null>(null);
-  const [customCallMe, setCustomCallMe] = useState(false);
   const [tone, setTone] = useState<Tone | null>(null);
+  // Null while the pencil's field is closed.
+  const [customTone, setCustomTone] = useState<string | null>(null);
   const [helpWith, setHelpWith] = useState<HelpWith[]>([]);
+  const [otherHelp, setOtherHelp] = useState<string | null>(null);
   const [involvement, setInvolvement] = useState<Involvement | null>(null);
   const [preview, setPreview] = useState<string>();
   useEffect(() => {
@@ -89,20 +95,25 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
   }, [look.image]);
 
   const meet = useMutation({
-    mutationFn: async (about: boolean) => {
+    mutationFn: async (preferences: boolean) => {
       // The icon first: the introduction that starts with the setup shows it.
       if (look.image instanceof Blob)
         await pim.setAgentIcon(majordomo.id, look.image);
-      const addressed = (about && callMe?.trim()) || yourName.trim();
       const setup: MajordomoSetup = {
         name: name.trim(),
         symbol: look.symbol,
         color: look.color,
         yourName: yourName.trim() || null,
         locale,
-        title: t("welcomeChat", { name: addressed }),
-        ...(about
-          ? { callMe: callMe?.trim() || null, tone, helpWith, involvement }
+        title: t("welcomeChat", { name: yourName.trim() }),
+        ...(preferences
+          ? {
+              tone,
+              customTone: customTone?.trim() || null,
+              helpWith,
+              otherHelp: otherHelp?.trim() || null,
+              involvement,
+            }
           : {}),
       };
       return pim.setUpMajordomo(setup);
@@ -115,7 +126,6 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
       navigate({ to: "/chat/$sessionId", params: { sessionId: session } });
     },
   });
-  const ready = yourName.trim() !== "" && name.trim() !== "";
   const shown = name.trim() || t("majordomoNamePlaceholder");
   const icon = (
     <AgentIcon
@@ -125,20 +135,49 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
       className="size-10 rounded-xl"
     />
   );
-  // Ways to address them from the name they gave: their first name, and the whole of it.
-  const suggestions = [
-    ...new Set([yourName.trim().split(/\s+/)[0] ?? "", yourName.trim()]),
-  ].filter((suggestion) => suggestion !== "");
 
   return (
     <main className="flex min-h-svh flex-col items-center justify-center px-6 py-12">
       <div className="w-full max-w-md">
         <PimMark className="mb-8 h-8 w-16" />
-        {step === "names" ? (
+        {step === "you" && (
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              if (ready) setStep("about");
+              if (yourName.trim() !== "") setStep("majordomo");
+            }}
+          >
+            <h1 className="font-semibold text-2xl">{t("yourNameTitle")}</h1>
+            <p className="mt-2 text-muted-foreground text-sm">
+              {t("yourNameBody")}
+            </p>
+            <Input
+              id={ids.yourName}
+              value={yourName}
+              onChange={(event) => setYourName(event.target.value)}
+              placeholder={t("yourNamePlaceholder")}
+              aria-label={t("yourNameLabel")}
+              maxLength={80}
+              autoComplete="given-name"
+              className="mt-6"
+              required
+              autoFocus
+            />
+            <Button
+              type="submit"
+              size="lg"
+              className="mt-8 w-full"
+              disabled={yourName.trim() === ""}
+            >
+              {t("continue")}
+            </Button>
+          </form>
+        )}
+        {step === "majordomo" && (
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (name.trim() !== "") setStep("preferences");
             }}
           >
             <h1 className="font-semibold text-2xl">
@@ -148,25 +187,8 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
               {t("meetMajordomoBody")}
             </p>
             <label
-              htmlFor={ids.yourName}
-              className="mt-6 block font-medium text-sm"
-            >
-              {t("yourNameLabel")}
-            </label>
-            <Input
-              id={ids.yourName}
-              value={yourName}
-              onChange={(event) => setYourName(event.target.value)}
-              placeholder={t("yourNamePlaceholder")}
-              maxLength={80}
-              autoComplete="given-name"
-              className="mt-1.5"
-              required
-              autoFocus
-            />
-            <label
               htmlFor={ids.name}
-              className="mt-5 block font-medium text-sm"
+              className="mt-6 block font-medium text-sm"
             >
               {t("majordomoNameLabel")}
             </label>
@@ -197,18 +219,33 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
                 maxLength={MAX_PIM_NAME}
                 autoComplete="off"
                 required
+                autoFocus
               />
             </div>
-            <Button
-              type="submit"
-              size="lg"
-              className="mt-8 w-full"
-              disabled={!ready}
-            >
-              {t("continue")}
-            </Button>
+            <div className="mt-8 flex items-center gap-2">
+              {!given && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label={t("back")}
+                  onClick={() => setStep("you")}
+                >
+                  <ArrowLeft />
+                </Button>
+              )}
+              <Button
+                type="submit"
+                size="lg"
+                className="flex-1"
+                disabled={name.trim() === ""}
+              >
+                {t("continue")}
+              </Button>
+            </div>
           </form>
-        ) : (
+        )}
+        {step === "preferences" && (
           <form
             onSubmit={(event) => {
               event.preventDefault();
@@ -224,52 +261,38 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
             <p className="mt-2 text-muted-foreground text-sm">
               {t("aboutYouBody", { name: shown })}
             </p>
-            <Question label={t("callMeLabel", { name: shown })}>
-              {suggestions.map((suggestion) => (
-                <Chip
-                  key={suggestion}
-                  selected={!customCallMe && callMe === suggestion}
-                  onSelect={() => {
-                    setCustomCallMe(false);
-                    setCallMe(callMe === suggestion ? null : suggestion);
-                  }}
-                >
-                  {suggestion}
-                </Chip>
-              ))}
-              <Chip
-                selected={customCallMe}
-                onSelect={() => {
-                  setCustomCallMe(!customCallMe);
-                  setCallMe(null);
-                }}
-              >
-                {t("callMeOther")}
-              </Chip>
-            </Question>
-            {customCallMe && (
-              <Input
-                id={ids.callMe}
-                value={callMe ?? ""}
-                onChange={(event) => setCallMe(event.target.value)}
-                placeholder={t("callMePlaceholder")}
-                aria-label={t("callMeLabel", { name: shown })}
-                maxLength={80}
-                className="mt-2"
-                autoFocus
-              />
-            )}
             <Question label={t("toneLabel", { name: shown })}>
               {MAJORDOMO_TONES.map((choice) => (
                 <Chip
                   key={choice}
                   selected={tone === choice}
-                  onSelect={() => setTone(tone === choice ? null : choice)}
+                  onSelect={() => {
+                    setTone(tone === choice ? null : choice);
+                    setCustomTone(null);
+                  }}
                 >
                   {t(toneKey[choice])}
                 </Chip>
               ))}
+              <WriteYourOwn
+                open={customTone !== null}
+                onToggle={() => {
+                  setCustomTone(customTone === null ? "" : null);
+                  setTone(null);
+                }}
+              />
             </Question>
+            {customTone !== null && (
+              <Input
+                value={customTone}
+                onChange={(event) => setCustomTone(event.target.value)}
+                placeholder={t("customTonePlaceholder")}
+                aria-label={t("toneLabel", { name: shown })}
+                maxLength={120}
+                className="mt-2"
+                autoFocus
+              />
+            )}
             <Question label={t("helpWithLabel")}>
               {MAJORDOMO_HELP_WITH.map((area) => (
                 <Chip
@@ -286,7 +309,22 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
                   {t(helpWithKey[area])}
                 </Chip>
               ))}
+              <WriteYourOwn
+                open={otherHelp !== null}
+                onToggle={() => setOtherHelp(otherHelp === null ? "" : null)}
+              />
             </Question>
+            {otherHelp !== null && (
+              <Input
+                value={otherHelp}
+                onChange={(event) => setOtherHelp(event.target.value)}
+                placeholder={t("otherHelpPlaceholder")}
+                aria-label={t("helpWithLabel")}
+                maxLength={120}
+                className="mt-2"
+                autoFocus
+              />
+            )}
             <InvolvementBar
               label={t("involvementLabel", { name: shown })}
               value={involvement}
@@ -298,7 +336,7 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
                 variant="ghost"
                 size="icon"
                 aria-label={t("back")}
-                onClick={() => setStep("names")}
+                onClick={() => setStep("majordomo")}
                 disabled={meet.isPending}
               >
                 <ArrowLeft />
@@ -333,6 +371,22 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
   );
 }
 
+/** The last choice of a question: a pencil that opens a field for an answer in their own words. */
+function WriteYourOwn({
+  open,
+  onToggle,
+}: {
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <Chip selected={open} onSelect={onToggle} label={t("writeYourOwn")}>
+      <Pencil className="size-3.5" />
+    </Chip>
+  );
+}
+
 /** One multiple-choice question: a label over its choices. */
 function Question({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -347,16 +401,21 @@ function Question({ label, children }: { label: string; children: ReactNode }) {
 function Chip({
   selected,
   onSelect,
+  label,
   children,
 }: {
   selected: boolean;
   onSelect: () => void;
+  /** Its name, when its content is only an icon. */
+  label?: string;
   children: ReactNode;
 }) {
   return (
     <button
       type="button"
       aria-pressed={selected}
+      aria-label={label}
+      title={label}
       onClick={onSelect}
       className={cn(
         "rounded-full px-3.5 py-1.5 text-sm transition-colors",

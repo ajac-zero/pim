@@ -16,7 +16,8 @@ import { useElementHeight } from "~/hooks/use-element-size";
 import { CHATGPT_PROVIDER, type UserContent } from "~/lib/pim-api";
 import { pimClient, usePimClient } from "~/lib/pim-client";
 import { modelQuery, sessionsQuery } from "~/lib/queries";
-import { showTab } from "~/lib/tabs";
+import { showTab, useTabs } from "~/lib/tabs";
+import { cn } from "~/lib/utils";
 
 export const Route = createFileRoute("/chat/$sessionId")({
   loader: async ({ context, params }) => {
@@ -91,10 +92,18 @@ function ChatPage() {
     pimClient.stop().catch((error: Error) => toast.error(error.message));
   };
 
+  const shelf = useTabs().length > 1;
+
   return (
     <main className="flex min-h-0 min-w-0 flex-1">
       <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
-        <header className="hidden h-13 shrink-0 gap-2 bg-sidebar pr-4 md:flex">
+        <header
+          className={cn(
+            "hidden h-13 shrink-0 gap-2 pr-4 md:flex",
+            // The tabs sit on a shelf; a lone chat's title sits on the canvas.
+            shelf && "bg-sidebar",
+          )}
+        >
           <ChatTabs activeId={sessionId} />
           {reconnecting && (
             <span className="shrink-0 self-center text-muted-foreground text-[13px]">

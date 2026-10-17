@@ -10,6 +10,7 @@ import {
   useAwaitingApproval,
 } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
+import type { Session } from "~/lib/pim-api";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
 import { closeTab, pruneTabs, showTab, useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
@@ -17,7 +18,8 @@ import { cn } from "~/lib/utils";
 /**
  * The open chats, as tabs in the chat's header. Each shows its agent, its
  * title, and whether it is working or waiting for an approval, so chats in
- * the background stay in view with the sidebar collapsed.
+ * the background stay in view with the sidebar collapsed. With only one
+ * open, it shows that chat's title instead.
  */
 export function ChatTabs({ activeId }: { activeId: string }) {
   const { t } = useI18n();
@@ -47,6 +49,56 @@ export function ChatTabs({ activeId }: { activeId: string }) {
     );
   };
 
+  const agentOf = (session: Session) =>
+    session.visit
+      ? undefined
+      : agents?.find((candidate) =>
+          session.agent ? candidate.id === session.agent.id : candidate.default,
+        );
+  const iconOf = (session: Session, circle: string) => {
+    const agent = agentOf(session);
+    return session.visit ? (
+      <span
+        className={cn(
+          "flex size-5 shrink-0 items-center justify-center rounded-full font-medium text-[11px] uppercase",
+          circle,
+        )}
+      >
+        {session.visit.username.slice(0, 1)}
+      </span>
+    ) : agent ? (
+      <AgentIcon agent={agent} tile className="size-5 shrink-0 rounded-md" />
+    ) : (
+      <PimMark className="h-3 w-6 shrink-0" />
+    );
+  };
+  const statusOf = (session: Session) =>
+    session.busy ? (
+      <span
+        className="size-1.5 rounded-full bg-primary motion-safe:animate-pulse"
+        role="img"
+        aria-label={t("working")}
+      />
+    ) : awaitingApproval.has(session.id) ? (
+      <AwaitingApprovalMark className="ml-0" />
+    ) : null;
+
+  // With one chat open there is nothing to switch between: its title, not a tab.
+  const open = tabs.filter((tab) =>
+    sessions?.some((session) => session.id === tab.session),
+  );
+  if (open.length <= 1) {
+    const session = sessions?.find((candidate) => candidate.id === activeId);
+    if (!session) return <div className="flex-1" />;
+    return (
+      <div className="flex min-w-0 flex-1 items-center gap-2 pl-4 text-[15px]">
+        {iconOf(session, "bg-muted")}
+        <span className="truncate">{sessionTitle(session, t)}</span>
+        {statusOf(session)}
+      </div>
+    );
+  }
+
   return (
     <nav
       aria-label={t("openChats")}
@@ -61,22 +113,7 @@ export function ChatTabs({ activeId }: { activeId: string }) {
           if (!session) return null;
           const active = session.id === activeId;
           const title = sessionTitle(session, t);
-          const agent = session.visit
-            ? undefined
-            : agents?.find((candidate) =>
-                session.agent
-                  ? candidate.id === session.agent.id
-                  : candidate.default,
-              );
-          const status = session.busy ? (
-            <span
-              className="size-1.5 rounded-full bg-primary motion-safe:animate-pulse"
-              role="img"
-              aria-label={t("working")}
-            />
-          ) : awaitingApproval.has(session.id) ? (
-            <AwaitingApprovalMark className="ml-0" />
-          ) : null;
+          const status = statusOf(session);
           return (
             <li
               key={session.id}
@@ -110,19 +147,7 @@ export function ChatTabs({ activeId }: { activeId: string }) {
                 }}
                 className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-t-xl pr-8 pl-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
               >
-                {session.visit ? (
-                  <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-background font-medium text-[11px] uppercase">
-                    {session.visit.username.slice(0, 1)}
-                  </span>
-                ) : agent ? (
-                  <AgentIcon
-                    agent={agent}
-                    tile
-                    className="size-5 shrink-0 rounded-md"
-                  />
-                ) : (
-                  <PimMark className="h-3 w-6 shrink-0" />
-                )}
+                {iconOf(session, "bg-background")}
                 <span className={cn("truncate", !tab.kept && "italic")}>
                   {title}
                 </span>

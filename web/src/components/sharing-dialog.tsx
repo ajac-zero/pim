@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, Plus, Trash2, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { type FormEvent, useState } from "react";
 import { toast } from "sonner";
 import { ApprovalBlock } from "~/components/chat/items";
 import { useI18n } from "~/components/i18n";
+import { ChevronDown, Plus, Trash2, X } from "~/components/icons";
 import { ToolPermissionList } from "~/components/tool-permissions";
 import { Button } from "~/components/ui/button";
 import {

@@ -1,8 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
-import { Check, Copy, Download, KeyRound, Loader2, X } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import { useI18n } from "~/components/i18n";
+import {
+  Check,
+  Copy,
+  Download,
+  KeyRound,
+  Loader2,
+  X,
+} from "~/components/icons";
 import { ProviderButtons } from "~/components/provider-buttons";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";

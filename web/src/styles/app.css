@@ -1,6 +1,32 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Pixeloid 0.4 by GGBotNet, bundled under the SIL Open Font License.
+   See public/licenses/pixeloid.txt and https://ggbot.itch.io/pixeloid-font. */
+@font-face {
+  font-family: "Pixeloid Sans";
+  src: url("./fonts/pixeloid-sans.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Pixeloid Sans";
+  src: url("./fonts/pixeloid-sans-bold.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Pixeloid Mono";
+  src: url("./fonts/pixeloid-mono.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
 /* Required for Streamdown's markdown-rendering utility classes (chat markdown). */
 @source "../../node_modules/streamdown/dist/*.js";
 
@@ -77,9 +103,24 @@
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
   --radius-2xl: calc(var(--radius) + 6px);
-  --font-sans:
-    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    "Helvetica Neue", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --font-sans: var(--theme-font-ui);
+  --font-mono: var(--theme-font-code);
+}
+
+/* Nested theme previews use their own typography, not the page's selection. */
+:where(body, [data-theme]) {
+  font-family: var(--theme-font-ui);
+}
+
+/* Both drawings share one SVG box; CSS selects the set before first paint. */
+.themed-icon > :not(.pixel-glyph) {
+  display: var(--theme-icon-lucide);
+}
+
+.themed-icon > .pixel-glyph {
+  display: var(--theme-icon-pixel);
+  width: 24px;
+  height: 24px;
 }
 
 @layer base {

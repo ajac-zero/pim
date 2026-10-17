@@ -1,4 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Dialog } from "radix-ui";
+import { type FormEvent, type ReactNode, useId, useState } from "react";
+import { toast } from "sonner";
+import { AppIcon } from "~/components/app-icon";
+import { useI18n } from "~/components/i18n";
 import {
   ExternalLink,
   ImageIcon,
@@ -8,12 +13,7 @@ import {
   Trash2,
   Unplug,
   X,
-} from "lucide-react";
-import { Dialog } from "radix-ui";
-import { type FormEvent, type ReactNode, useId, useState } from "react";
-import { toast } from "sonner";
-import { AppIcon } from "~/components/app-icon";
-import { useI18n } from "~/components/i18n";
+} from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,

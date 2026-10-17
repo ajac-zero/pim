@@ -1,9 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { Bot } from "lucide-react";
 import { AgentIcon, tileClass } from "~/components/agent-icon";
 import { Composer } from "~/components/chat/composer";
 import { useI18n } from "~/components/i18n";
+import { Bot } from "~/components/icons";
 import { RouteError } from "~/components/route-error";
 import { WidgetCard } from "~/components/widgets";
 import { dashboardQuery } from "~/lib/queries";

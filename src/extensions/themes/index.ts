@@ -8,6 +8,7 @@ import { gruvbox } from "./gruvbox";
 import { moose } from "./moose";
 import { nord } from "./nord";
 import { one } from "./one";
+import { pixel } from "./pixel";
 import { rosePine } from "./rose-pine";
 import { solarized } from "./solarized";
 import { tokyoNight } from "./tokyo-night";
@@ -23,6 +24,7 @@ export const themes = definePimExtension({
 	description: "Pim's own color themes.",
 	themes: [
 		tokyoNight,
+		pixel,
 		catppuccin,
 		solarized,
 		gruvbox,

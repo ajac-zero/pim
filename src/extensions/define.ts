@@ -274,7 +274,7 @@ export type PimExtension = {
 	readonly description: string;
 	readonly widgets?: Readonly<Record<string, Widget>>;
 	readonly blueprints?: readonly BlueprintDefinition[];
-	/** Color themes people can pick for the web app, in Settings → Appearance. See ../themes.ts. */
+	/** Themes people can pick for the web app, in Settings → Appearance. See ../themes.ts. */
 	readonly themes?: readonly Theme[];
 	/** Apps people can connect, and blueprints and agents list as `<extension>/<app>`. */
 	readonly apps?: readonly AppDefinition[];
@@ -286,7 +286,7 @@ export type PimConfig = {
 	readonly extensions: readonly PimExtension[];
 	/** The blueprint every new account's first agent builds on, and new agents by default: `<extension>/<blueprint>`, or null for none. */
 	readonly defaultBlueprint: string | null;
-	/** The color theme people see until they pick another: a theme's id, Pim's own or an extension's. */
+	/** The theme people see until they pick another: a theme's id, Pim's own or an extension's. */
 	readonly defaultTheme: string;
 };
 

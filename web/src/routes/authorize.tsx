@@ -1,9 +1,9 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { Loader2, TriangleAlert } from "lucide-react";
 import { useEffect } from "react";
 import { PimMark } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
+import { Loader2, TriangleAlert } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { auth } from "~/lib/auth";
 import { majordomoQuery } from "~/lib/queries";

@@ -1,4 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+import { toast } from "sonner";
+import { LanguageSelect, useI18n } from "~/components/i18n";
 import {
   Check,
   Copy,
@@ -9,10 +12,7 @@ import {
   Plus,
   ShieldAlert,
   Trash2,
-} from "lucide-react";
-import { useState } from "react";
-import { toast } from "sonner";
-import { LanguageSelect, useI18n } from "~/components/i18n";
+} from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {

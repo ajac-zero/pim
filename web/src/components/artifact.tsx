@@ -1,15 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
+import { useEffect, useRef, useState } from "react";
+import { Markdown } from "~/components/chat/markdown";
+import { useI18n } from "~/components/i18n";
 import {
   Download,
   FileCode2,
   FileText,
   Maximize2,
   ShieldAlert,
-} from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { Markdown } from "~/components/chat/markdown";
-import { useI18n } from "~/components/i18n";
+} from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import {
   ApiError,

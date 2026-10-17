@@ -1,6 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { ArrowLeft, Check as CheckIcon, Loader2, Pencil } from "lucide-react";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import {
   AgentIcon,
@@ -9,6 +8,12 @@ import {
 } from "~/components/agent-icon";
 import { PimMark } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
+import {
+  ArrowLeft,
+  Check as CheckIcon,
+  Loader2,
+  Pencil,
+} from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {

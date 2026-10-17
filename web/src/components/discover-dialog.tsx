@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { Bot, Search, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useEffect, useState } from "react";
 import { useI18n } from "~/components/i18n";
+import { Bot, Search, X } from "~/components/icons";
 import { EmptyState } from "~/components/page";
 import { TemplateCard } from "~/components/template-card";
 import { Input } from "~/components/ui/input";

@@ -5,7 +5,7 @@ import { exports } from "cloudflare:workers";
 import { checkToolNames, PimExtensions } from "../src/extensions/define";
 import { themes as ownThemes } from "../src/extensions/themes";
 import { nord } from "../src/extensions/themes/nord";
-import { PimThemes } from "../src/themes";
+import { PimThemes, type Theme, type ThemeList } from "../src/themes";
 import { api, apiUrl, decisionRun, lastUserText, pendingApproval, post, say, systemPrompt, toolUse } from "./helpers";
 import { faux, ledger, outbox } from "./worker";
 
@@ -419,10 +419,11 @@ describe("extensions", () => {
 	it("serves the deployment's color themes before anyone signs in", async () => {
 		const list = await exports.default.fetch(apiUrl("/themes"));
 		expect(list.status).toBe(200);
-		const { default: fallback, themes } = (await list.json()) as { default: string; themes: { id: string; extension: string }[] };
+		const { default: fallback, themes } = (await list.json()) as ThemeList;
 		expect(fallback).toBe("tokyo-night");
 		expect(themes.map((theme) => theme.id)).toEqual(ownThemes.themes!.map((theme) => theme.id));
 		expect(themes.every((theme) => theme.extension === "pim.themes")).toBe(true);
+		expect(themes.find((theme) => theme.id === "pixel")).toMatchObject({ fonts: { ui: "pixel", code: "pixel" }, icons: "pixel" });
 
 		const sheet = await exports.default.fetch(apiUrl("/themes.css"));
 		expect(sheet.headers.get("Content-Type")).toContain("text/css");
@@ -432,6 +433,28 @@ describe("extensions", () => {
 		expect(css).toContain('.dark,\n[data-theme="tokyo-night"].dark {\n  --background: #1a1b26;');
 		expect(css).toContain('[data-theme="nord"].dark {\n  --background: #2e3440;');
 		expect(css).toContain('[data-theme="nord"].dark .shiki-token {\n  color: var(--shiki-nord-dark);');
+	});
+
+	it("lets themes select bundled fonts and icons independently, with system defaults for older themes", () => {
+		const pixel: Theme = { ...nord, id: "test-pixel", fonts: { ui: "pixel" }, icons: "pixel" };
+		const codeOnly: Theme = { ...nord, id: "test-code", fonts: { code: "pixel" } };
+		const themes = new PimThemes([{ id: "test.styles", themes: [pixel, nord, codeOnly] }], pixel.id);
+		const css = themes.stylesheet();
+		const style = (id: string) => [...css.matchAll(new RegExp(`\\[data-theme="${id}"\\] \\{([^}]+)\\}`, "g"))].map((match) => match[1]).join("");
+		expect(style(pixel.id)).toContain('--theme-font-ui: "Pixeloid Sans"');
+		expect(style(pixel.id)).toContain("--theme-font-code: ui-monospace");
+		expect(style(pixel.id)).toContain("--theme-icon-lucide: none;");
+		expect(style(pixel.id)).toContain("--theme-icon-pixel: inline;");
+		// Every theme declares its defaults, so a nested preview cannot inherit the pixel look.
+		expect(style(nord.id)).toContain("--theme-font-ui: ui-sans-serif");
+		expect(style(nord.id)).toContain("--theme-font-code: ui-monospace");
+		expect(style(nord.id)).toContain("--theme-icon-lucide: inline;");
+		expect(style(nord.id)).toContain("--theme-icon-pixel: none;");
+		expect(style(codeOnly.id)).toContain('--theme-font-code: "Pixeloid Mono"');
+		expect(style(codeOnly.id)).toContain("--theme-font-ui: ui-sans-serif");
+		for (const invalid of [{ fonts: { ui: "remote" } }, { fonts: { code: "remote" } }, { icons: "remote" }]) {
+			expect(() => new PimThemes([{ id: "test.styles", themes: [{ ...nord, ...invalid } as Theme] }], nord.id)).toThrow("isn't bundled");
+		}
 	});
 
 	it("checks the deployment's color themes, and puts its default on the page", () => {

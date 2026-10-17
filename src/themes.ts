@@ -1,5 +1,5 @@
 /**
- * Color themes, which extensions bring: a value for every color token the web
+ * Themes, which extensions bring: a value for every color token the web
  * app's components use (web/src/styles/app.css) in light mode and in dark
  * mode, and the Shiki themes that color code in each. Themes are data: the
  * Worker turns the deployment's into one stylesheet, `/api/themes.css`, and
@@ -81,12 +81,31 @@ export type RecoloredCodeTheme = {
 /** A theme Shiki bundles, by name, or a recolored one. */
 export type CodeTheme = string | RecoloredCodeTheme;
 
+/** Bundled typography and icon styles; themes select assets, not browser code. */
+export type ThemeFont = "system" | "pixel";
+export type ThemeIcons = "lucide" | "pixel";
+
+const FONTS = {
+	ui: {
+		system: 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji"',
+		pixel: '"Pixeloid Sans", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji"',
+	},
+	code: {
+		system: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+		pixel: '"Pixeloid Mono", ui-monospace, monospace',
+	},
+} as const;
+
 export type Theme = {
 	/** Unique among every extension's themes: lowercase letters, digits and hyphens. Stored in people's browsers: don't rename it. */
 	readonly id: string;
 	readonly name: string;
 	readonly light: ThemeColors;
 	readonly dark: ThemeColors;
+	/** Omitted roles keep the system fonts, even inside another theme's preview. */
+	readonly fonts?: { readonly ui?: ThemeFont; readonly code?: ThemeFont };
+	/** Utility and named agent icons. Images, emoji and brand logos keep their identity. */
+	readonly icons?: ThemeIcons;
 	/** What colors code blocks in each mode. */
 	readonly code: { readonly light: CodeTheme; readonly dark: CodeTheme };
 };
@@ -95,7 +114,7 @@ export type Theme = {
 export type ThemeList = {
 	/** What people see until they pick another, and when the one they picked is gone. */
 	readonly default: string;
-	readonly themes: readonly { readonly id: string; readonly name: string; readonly extension: string; readonly code: Theme["code"] }[];
+	readonly themes: readonly (Pick<Theme, "id" | "name" | "code" | "fonts" | "icons"> & { readonly extension: string })[];
 };
 
 /** Shiki colors code for every theme and mode at once, in CSS variables named `--shiki-<key>`. */
@@ -123,6 +142,11 @@ export class PimThemes {
 				const owner = ids.get(theme.id);
 				if (owner !== undefined) throw new Error(`${extension.id} brings a theme called ${theme.id}, which ${owner} already has`);
 				ids.set(theme.id, extension.id);
+				for (const role of ["ui", "code"] as const) {
+					const font = theme.fonts?.[role];
+					if (font !== undefined && !Object.hasOwn(FONTS[role], font)) throw new Error(`${theme.id}'s ${role} font ${JSON.stringify(font)} isn't bundled`);
+				}
+				if (theme.icons !== undefined && theme.icons !== "lucide" && theme.icons !== "pixel") throw new Error(`${theme.id}'s icon set ${JSON.stringify(theme.icons)} isn't bundled`);
 				for (const mode of ["light", "dark"] as const) {
 					const missing = THEME_TOKENS.filter((token) => !Object.hasOwn(theme[mode], token));
 					const unknown = Object.keys(theme[mode]).filter((token) => !TOKENS.has(token));
@@ -139,7 +163,7 @@ export class PimThemes {
 	list(): ThemeList {
 		return {
 			default: this.defaultTheme,
-			themes: this.#themes.map(({ extension, theme }) => ({ id: theme.id, name: theme.name, extension, code: theme.code })),
+			themes: this.#themes.map(({ extension, theme }) => ({ id: theme.id, name: theme.name, extension, code: theme.code, fonts: theme.fonts, icons: theme.icons })),
 		};
 	}
 
@@ -166,6 +190,12 @@ export class PimThemes {
 				};
 				return [
 					rule([...(isDefault ? [":root"] : []), own], Object.entries(theme.light).map(([token, value]) => [`--${token}`, value])),
+					rule([...(isDefault ? [":root"] : []), own], [
+						["--theme-font-ui", FONTS.ui[theme.fonts?.ui ?? "system"]],
+						["--theme-font-code", FONTS.code[theme.fonts?.code ?? "system"]],
+						["--theme-icon-lucide", theme.icons === "pixel" ? "none" : "inline"],
+						["--theme-icon-pixel", theme.icons === "pixel" ? "inline" : "none"],
+					]),
 					rule([...(isDefault ? [".dark"] : []), `${own}.dark`], Object.entries(theme.dark).map(([token, value]) => [`--${token}`, value])),
 					rule([...(isDefault ? [".shiki-token"] : []), `${own} .shiki-token`], code("light")),
 					rule([...(isDefault ? [".dark .shiki-token"] : []), `${own}.dark .shiki-token`], code("dark")),

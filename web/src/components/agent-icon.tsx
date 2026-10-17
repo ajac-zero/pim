@@ -1,3 +1,6 @@
+import { type ReactNode, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
   Baby,
   Bike,
@@ -43,10 +46,7 @@ import {
   Wallet,
   Wrench,
   Zap,
-} from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
-import { toast } from "sonner";
-import { type TranslationKey, useI18n } from "~/components/i18n";
+} from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import type { Agent } from "~/lib/pim-api";

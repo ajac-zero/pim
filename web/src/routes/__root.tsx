@@ -11,7 +11,6 @@ import {
   useParams,
   useRouterState,
 } from "@tanstack/react-router";
-import { PanelLeft } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
@@ -25,6 +24,7 @@ import { AppsDialog } from "~/components/apps-dialog";
 import { SummaryToggle } from "~/components/chat/summary";
 import { DiscoverDialog } from "~/components/discover-dialog";
 import { I18nProvider, useI18n } from "~/components/i18n";
+import { PanelLeft } from "~/components/icons";
 import { MeetMajordomo } from "~/components/majordomo-setup";
 import { RouteError } from "~/components/route-error";
 import {

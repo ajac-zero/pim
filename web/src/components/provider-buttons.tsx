@@ -1,6 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
-import { Loader2, LogIn } from "lucide-react";
 import { useI18n } from "~/components/i18n";
+import { Loader2, LogIn } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { auth, type ProviderId, type SignInProvider } from "~/lib/auth";
 

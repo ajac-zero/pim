@@ -5,6 +5,12 @@ import {
   useParams,
   useSearch,
 } from "@tanstack/react-router";
+import type { ReactNode } from "react";
+import { useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
+import { AgentIcon } from "~/components/agent-icon";
+import { AgentSettingsDialog } from "~/components/agent-settings";
+import { useI18n } from "~/components/i18n";
 import {
   Bell,
   Blocks,
@@ -25,13 +31,7 @@ import {
   Trash2,
   Users,
   X,
-} from "lucide-react";
-import type { ReactNode } from "react";
-import { useMemo, useRef, useState } from "react";
-import { toast } from "sonner";
-import { AgentIcon } from "~/components/agent-icon";
-import { AgentSettingsDialog } from "~/components/agent-settings";
-import { useI18n } from "~/components/i18n";
+} from "~/components/icons";
 import {
   ProfilePopover,
   ProfilePopoverTrigger,

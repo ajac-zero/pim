@@ -1,25 +1,4 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  AlertCircle,
-  Bell,
-  Check,
-  ExternalLink,
-  KeyRound,
-  Loader2,
-  LogOut,
-  type LucideIcon,
-  Mail,
-  Monitor,
-  Moon,
-  ShieldCheck,
-  SlidersHorizontal,
-  Sparkles,
-  Sun,
-  Trash2,
-  UserRound,
-  Users,
-  X,
-} from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -33,6 +12,28 @@ import {
 import { AddDevice } from "~/components/add-device";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { type TranslationKey, useI18n } from "~/components/i18n";
+import {
+  AlertCircle,
+  Bell,
+  Check,
+  ExternalLink,
+  KeyRound,
+  Loader2,
+  LogOut,
+  type LucideIcon,
+  Mail,
+  MessageCircle,
+  Monitor,
+  Moon,
+  ShieldCheck,
+  SlidersHorizontal,
+  Sparkles,
+  Sun,
+  Trash2,
+  UserRound,
+  Users,
+  X,
+} from "~/components/icons";
 import { MembersSection } from "~/components/members";
 import { ProviderLogo } from "~/components/provider-buttons";
 import { SignInMethodsSection } from "~/components/sign-in-methods";
@@ -564,6 +565,7 @@ function AppearanceSection() {
               type="button"
               role="radio"
               aria-checked={checked}
+              aria-label={theme.name}
               onClick={() => setColorTheme(theme.id)}
               className={cn(
                 "rounded-2xl border p-1.5 text-left transition-colors",
@@ -572,23 +574,33 @@ function AppearanceSection() {
                   : "hover:border-foreground/30",
               )}
             >
-              {/* A miniature window in the theme's own tokens: scoping
-                  data-theme (and .dark) to this element recolors it. */}
+              {/* Each miniature window uses its own colors, fonts and icons. */}
               <div
                 data-theme={theme.id}
                 className={cn(
-                  "flex h-20 overflow-hidden rounded-xl border bg-background",
+                  "flex h-28 overflow-hidden rounded-xl border bg-background text-foreground",
                   resolved === "dark" && "dark",
                 )}
                 aria-hidden="true"
               >
-                <div className="w-1/4 border-r bg-sidebar" />
-                <div className="flex flex-1 flex-col justify-center gap-1.5 p-2.5">
-                  <div className="ml-auto h-3 w-3/5 rounded-full bg-bubble" />
-                  <div className="h-3 w-4/5 rounded-full bg-muted" />
-                  <div className="flex items-center gap-1">
-                    <div className="h-3 w-2/5 rounded-full bg-muted" />
-                    <div className="ml-auto size-3 rounded-full bg-primary" />
+                <div className="flex w-8 shrink-0 flex-col items-center gap-3 border-r bg-sidebar py-3 text-muted-foreground">
+                  <MessageCircle className="size-4" />
+                  <Bell className="size-4" />
+                  <SlidersHorizontal className="size-4" />
+                </div>
+                <div className="flex min-w-0 flex-1 flex-col justify-center gap-2 p-2">
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <Sparkles className="size-3.5 shrink-0" />
+                    <span>Pim</span>
+                  </div>
+                  <div className="ml-auto max-w-full truncate rounded-full bg-bubble px-2 py-1 text-bubble-foreground text-xs">
+                    {t("newChat")}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="h-2 w-3/5 rounded-full bg-muted" />
+                    <code className="font-mono text-muted-foreground text-xs">
+                      Aa
+                    </code>
                   </div>
                 </div>
               </div>

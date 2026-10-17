@@ -1,4 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { memo, type ReactNode, useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
+import { Markdown } from "~/components/chat/markdown";
+import { useI18n } from "~/components/i18n";
 import {
   Bell,
   Check,
@@ -12,11 +16,7 @@ import {
   ShieldCheck,
   X,
   Zap,
-} from "lucide-react";
-import { memo, type ReactNode, useEffect, useMemo, useState } from "react";
-import { toast } from "sonner";
-import { Markdown } from "~/components/chat/markdown";
-import { useI18n } from "~/components/i18n";
+} from "~/components/icons";
 import { Action, Actions } from "~/components/ui/actions";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";

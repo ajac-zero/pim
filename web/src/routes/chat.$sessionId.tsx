@@ -1,6 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, notFound } from "@tanstack/react-router";
-import { Users } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useNewChat } from "~/components/app-sidebar";
@@ -11,6 +10,7 @@ import { TeamPanel } from "~/components/chat/team";
 import { Thread } from "~/components/chat/thread";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
+import { Users } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { useElementHeight } from "~/hooks/use-element-size";
 import { CHATGPT_PROVIDER, type UserContent } from "~/lib/pim-api";

@@ -85,7 +85,7 @@ Surfaces inside the window are flat. Only floating layers get elevation: modals,
 
 The app has two panes, a sidebar and the content, separated by a hairline divider.
 
-- **Sidebar.** Pim's mark, the main navigation (new chat, artifacts, notifications, discover, sharing, settings), a search field with a muted fill, then each agent's chats under the agent's name. The selected row gets a muted fill with a 12px radius. Preferences sit at the bottom.
+- **Sidebar.** A rail of icons, one tone darker than the sidebar, beside the chats panel. The rail has Pim's mark, then notifications, chats, artifacts, apps, schedules and discover at the top, and sharing, settings and preferences at the bottom; each icon's label is its tooltip, and a dot marks one with something waiting. The chats panel has its title with a new-chat button, a search field with a muted fill, then each agent's chats under the agent's name. The selected row or icon gets a muted fill with a 12px radius. Collapsing the sidebar, with the rail's chats button, leaves only the rail.
 - **Chat header.** The open chats as folder tabs on a shelf in the sidebar's tone. A tab shows the agent's icon, the chat's title, and a mark when the chat is working or waiting for an approval; the close button takes the mark's place on hover. The open chat's tab is the canvas's tone, with 12px top corners and bottom corners that flare into the shelf, so it runs into the transcript with no line between them. The others are muted text on the shelf. A chat opened from the sidebar replaces the preview tab, whose title is italic, until you send a message in it or double-click its tab. On narrow screens there are no tabs.
 - **Transcript.** It has a readable max width (~720px) and wide gutters.
 

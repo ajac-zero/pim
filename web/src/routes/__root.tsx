@@ -201,7 +201,7 @@ function AppLayout() {
       <aside
         className={cn(
           "hidden shrink-0 overflow-hidden border-sidebar-border border-r transition-[width] duration-200 md:block",
-          sidebarCollapsed ? "w-16" : "w-[300px]",
+          sidebarCollapsed ? "w-16" : "w-80",
         )}
       >
         <div className="h-full w-full">
@@ -216,7 +216,7 @@ function AppLayout() {
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
         <SheetContent
           side="left"
-          className="w-[300px] p-0 md:hidden [&>button]:hidden"
+          className="w-80 p-0 md:hidden [&>button]:hidden"
         >
           <SheetTitle className="sr-only">{t("navigation")}</SheetTitle>
           <AppSidebar onNavigate={() => setMobileOpen(false)} />

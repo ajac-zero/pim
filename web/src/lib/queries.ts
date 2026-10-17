@@ -28,6 +28,9 @@ export const visitsQuery = () =>
 export const notificationsQuery = () =>
   queryOptions({ queryKey: ["notifications"], queryFn: pim.notifications });
 
+export const schedulesQuery = () =>
+  queryOptions({ queryKey: ["schedules"], queryFn: pim.schedules });
+
 export const modelQuery = () =>
   queryOptions({ queryKey: ["model"], queryFn: pim.model });
 

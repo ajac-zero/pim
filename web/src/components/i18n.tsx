@@ -267,6 +267,17 @@ const translations = {
     nameAgentLabel: "Its name",
     nameAgentStart: "Start",
     noNotifications: "No notifications yet.",
+    schedules: "Schedules",
+    schedulesDescription:
+      "Work Pim does later, once or on a repeating schedule. You get a notification each time one runs.",
+    noSchedules:
+      "Nothing scheduled. Ask Pim for a reminder or a recurring check-in.",
+    scheduleOnce: "Once",
+    scheduleRepeats: "Repeats",
+    scheduleNext: "Next: {date}",
+    cancelSchedule: "Cancel schedule",
+    confirmCancelSchedule: "Cancel it for good",
+    scheduleCancelled: "Schedule cancelled",
     notifications: "Notifications",
     notificationsDescription: "What Pim told you while you were away.",
     pushNotifications: "Push notifications",
@@ -844,6 +855,17 @@ const translations = {
     noNotifications: "Aún no hay notificaciones.",
     notifications: "Notificaciones",
     notificationsDescription: "Lo que Pim te avisó mientras no estabas.",
+    schedules: "Programaciones",
+    schedulesDescription:
+      "Trabajo que Pim hace más tarde, una vez o de forma periódica. Recibes una notificación cada vez que se ejecuta.",
+    noSchedules:
+      "Nada programado. Pide a Pim un recordatorio o un seguimiento periódico.",
+    scheduleOnce: "Una vez",
+    scheduleRepeats: "Se repite",
+    scheduleNext: "Próxima: {date}",
+    cancelSchedule: "Cancelar programación",
+    confirmCancelSchedule: "Cancelarla definitivamente",
+    scheduleCancelled: "Programación cancelada",
     pushNotifications: "Notificaciones push",
     pushDescription:
       "Recibe las notificaciones de Pim en este dispositivo, incluso con la app cerrada.",

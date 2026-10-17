@@ -308,8 +308,7 @@ const translations = {
     aboutYouBody:
       "All optional. Pick what fits, and {name} learns the rest as you talk.",
     writeYourOwn: "Write your own",
-    customTonePlaceholder: "Describe it in your own words",
-    otherHelpPlaceholder: "Anything else you'd like a hand with",
+    writeYourOwnPlaceholder: "Your own",
     toneLabel: "How should {name} talk with you?",
     toneWarm: "Warm",
     toneFormal: "Formal",
@@ -965,9 +964,7 @@ const translations = {
     aboutYouBody:
       "Todo es opcional. Elige lo que encaje, y {name} aprenderá el resto mientras hablan.",
     writeYourOwn: "Escribir la tuya",
-    customTonePlaceholder: "Descríbelo con tus palabras",
-    otherHelpPlaceholder:
-      "Cualquier otra cosa en la que te venga bien una mano",
+    writeYourOwnPlaceholder: "Lo tuyo",
     toneLabel: "¿Cómo debería hablarte {name}?",
     toneWarm: "Cálido",
     toneFormal: "Formal",

@@ -69,6 +69,12 @@ const CATEGORIES: readonly Category[] = [...APP_CATEGORIES, "other"];
 /** An app this Pim offers with your connection to it, or a connection to one it no longer offers. */
 type Row = { app: DirectoryApp | null; connection: ConnectedApp | undefined };
 
+/** An app is connected once its sign-in succeeds, not while it waits for one or after one failed. */
+const isConnected = ({ connection }: Row) =>
+  connection !== undefined &&
+  connection.state !== "authenticating" &&
+  connection.state !== "failed";
+
 /**
  * The apps this Pim offers, each with your connection to it: you connect an
  * app once, and every agent of yours that lists it works with it. Apps you
@@ -147,7 +153,7 @@ function AppsPage() {
     return words.every((word) => text.includes(word));
   };
   const found = rows.filter(
-    (row) => matches(row) && (!onlyConnected || row.connection),
+    (row) => matches(row) && (!onlyConnected || isConnected(row)),
   );
   const counts = new Map<Category, number>();
   for (const row of found) {
@@ -164,7 +170,7 @@ function AppsPage() {
     category: candidate,
     rows: found.filter((row) => categoryOf(row) === candidate),
   }));
-  const connectedCount = rows.filter((row) => row.connection).length;
+  const connectedCount = rows.filter(isConnected).length;
   const filtered = onlyConnected || category !== null;
   const loading = !directory || !connections;
 

@@ -466,6 +466,23 @@ export const artifactFrameUrl = (id: string, version: number) =>
 export const artifactDownloadUrl = (id: string, version: number) =>
   `${artifactPath(id, version)}/download`;
 
+/** A file or folder in your files, which you and your agents share. */
+export type FileEntry = {
+  name: string;
+  /** Absolute, under `FILES_ROOT`. */
+  path: string;
+  type: "file" | "directory";
+  size: number;
+  updatedAt: string;
+};
+
+/** The folder that holds your files; the agents see it at this path. */
+export const FILES_ROOT = "/workspace";
+
+/** Where the browser opens a file's bytes, or downloads them. */
+export const fileContentUrl = (path: string, download = false) =>
+  `/api/files/content?path=${encodeURIComponent(path)}${download ? "&download" : ""}`;
+
 export type DayUsage = {
   day: string;
   tokens: number;
@@ -674,6 +691,36 @@ export const pim = {
       );
     }
   },
+  files: (path: string) =>
+    call<{ path: string; entries: FileEntry[] }>(
+      `/files?path=${encodeURIComponent(path)}`,
+    ),
+  /** Saves a file at `path`, replacing one already there. */
+  uploadFile: async (path: string, file: Blob) => {
+    const response = await fetch(
+      `/api/files/content?path=${encodeURIComponent(path)}`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/octet-stream" },
+        body: file,
+      },
+    );
+    const body = (await response.json().catch(() => null)) as
+      | (FileEntry & { error?: string })
+      | null;
+    if (!response.ok) {
+      throw new ApiError(
+        response.status,
+        body?.error ?? `Pim answered ${response.status}`,
+      );
+    }
+    return body as FileEntry;
+  },
+  /** Deletes a file, or a folder with everything in it. */
+  deleteFile: (path: string) =>
+    call<{ deleted: boolean }>(`/files?path=${encodeURIComponent(path)}`, {
+      method: "DELETE",
+    }),
   removeAgentIcon: (id: string) =>
     call<Agent>(`/agents/${id}/icon`, { method: "DELETE" }),
   deleteAgent: (id: string) =>

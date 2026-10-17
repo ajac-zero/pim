@@ -21,6 +21,7 @@
     "test:live": "PIM_LIVE=1 vitest run"
   },
   "dependencies": {
+    "@cloudflare/computer": "0.5.1",
     "@cloudflare/workers-oauth-provider": "^1.2.3",
     "@earendil-works/chord": "1.1.0",
     "@earendil-works/pi-ai": "1.1.0",

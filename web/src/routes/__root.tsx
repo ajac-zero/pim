@@ -154,8 +154,9 @@ function usePimEvents() {
         // A run may have changed what a dashboard shows: goals, schedules, memories, artifacts.
         queryClient.invalidateQueries({ queryKey: ["dashboard"] });
         queryClient.invalidateQueries({ queryKey: ["schedules"] });
-        // Or made an agent.
+        // Or made an agent, or written files.
         queryClient.invalidateQueries({ queryKey: ["agents"] });
+        queryClient.invalidateQueries({ queryKey: ["files"] });
       },
       onNotification: (notification) => {
         queryClient.invalidateQueries({ queryKey: ["notifications"] });
@@ -180,6 +181,8 @@ function usePimEvents() {
       },
       onApproval: (approval) => {
         queryClient.invalidateQueries({ queryKey: ["approvals"] });
+        if (approval.action === "file_delete" && approval.status === "approved")
+          queryClient.invalidateQueries({ queryKey: ["files"] });
         if (
           (approval.action === "rename_agent" ||
             approval.action === "manage_apps") &&

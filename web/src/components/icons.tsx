@@ -125,11 +125,13 @@ export const Dumbbell = themedIcon(
 );
 export const ExternalLink = themedIcon(Lucide.ExternalLink, Pixel.ExternalLink);
 export const FileCode2 = themedIcon(Lucide.FileCode2, Pixel.Script);
+export const FileIcon = themedIcon(Lucide.File, Pixel.File);
 export const FileText = themedIcon(Lucide.FileText, Pixel.FileText);
 export const Flower2 = themedIcon(
   Lucide.Flower2,
   pixelPath("M9 7V3h6v4h6v6h-6v4H9v-4H3V7h6Zm2 2h2v2h-2V9Zm1 8v6m0-2h6v-4h-4"),
 );
+export const Folder = themedIcon(Lucide.Folder, Pixel.Folder);
 export const Footprints = themedIcon(
   Lucide.Footprints,
   pixelPath(
@@ -236,6 +238,7 @@ export const TriangleAlert = themedIcon(
   Pixel.WarningDiamond,
 );
 export const Unplug = themedIcon(Lucide.Unplug, Pixel.Unlink);
+export const Upload = themedIcon(Lucide.Upload, Pixel.Upload);
 export const UserPlus = themedIcon(Lucide.UserPlus, Pixel.UserPlus);
 export const UserRound = themedIcon(Lucide.UserRound, Pixel.User);
 export const Users = themedIcon(Lucide.Users, Pixel.Users);

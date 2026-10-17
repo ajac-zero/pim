@@ -2,8 +2,10 @@ packages:
   - web
 allowBuilds:
   '@google/genai': false
+  '@mongodb-js/zstd': false
   core-js-pure: false
   esbuild: true
+  node-liblzma: false
   protobufjs: false
   workerd: true
 minimumReleaseAgeExclude:

@@ -18,6 +18,7 @@ import {
   Check,
   ChevronDown,
   Compass,
+  Folder,
   MessageCircle,
   MoreHorizontal,
   Pencil,
@@ -38,6 +39,7 @@ import {
 } from "~/components/profile-popover";
 import {
   ArtifactsPanel,
+  FilesPanel,
   NotificationsPanel,
   SchedulesPanel,
   SIDEBAR_TOOLTIP_CLASS,
@@ -111,13 +113,14 @@ export function useAwaitingApproval() {
 export const SIDEBAR_PANELS = [
   "notifications",
   "artifacts",
+  "files",
   "schedules",
 ] as const;
 export type SidebarPanel = (typeof SIDEBAR_PANELS)[number];
 
 /**
  * The sidebar: a rail of icons beside a panel. The icons at the top choose
- * what the panel shows (notifications, your chats, artifacts or schedules)
+ * what the panel shows (notifications, your chats, artifacts, files or schedules)
  * while the open chat stays where it is; those at the bottom open dialogs
  * over it. Choosing the panel that's already showing collapses the sidebar
  * to the rail, and choosing any panel brings it back.
@@ -190,6 +193,12 @@ export function AppSidebar({
             panel="artifacts"
             icon={<Shapes className="size-4.5" />}
             label={t("artifacts")}
+          />
+          <RailPanel
+            {...railPanel}
+            panel="files"
+            icon={<Folder className="size-4.5" />}
+            label={t("files")}
           />
           <RailPanel
             {...railPanel}
@@ -272,6 +281,8 @@ export function AppSidebar({
             <NotificationsPanel onNavigate={onNavigate} />
           ) : panel === "artifacts" ? (
             <ArtifactsPanel onNavigate={onNavigate} />
+          ) : panel === "files" ? (
+            <FilesPanel onNavigate={onNavigate} />
           ) : panel === "schedules" ? (
             <SchedulesPanel onNavigate={onNavigate} />
           ) : (

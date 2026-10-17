@@ -192,7 +192,7 @@ describe("extensions", () => {
 			tone: "formal",
 			customTone: "Like a gentle aunt",
 			helpWith: ["travel", "work", "money"],
-			otherHelp: "my garden",
+			otherHelp: ["my garden", " my taxes ", "my garden"],
 			involvement: "close",
 			locale: "es",
 			title: "Te damos la bienvenida, Anita",
@@ -200,7 +200,8 @@ describe("extensions", () => {
 		for (const bad of [
 			{ ...setup, name: " " },
 			{ ...setup, yourName: "Ana\nSouza" },
-			{ ...setup, otherHelp: "x".repeat(121) },
+			{ ...setup, otherHelp: ["x".repeat(121)] },
+			{ ...setup, otherHelp: ["a", "b", "c", "d", "e", "f", "g"] },
 			{ ...setup, locale: "Spanish!" },
 			{ ...setup, tone: "grumpy" },
 			{ ...setup, involvement: "toString" },
@@ -228,7 +229,7 @@ describe("extensions", () => {
 		});
 		expect(intro.replies).toEqual(["¡Hola, Ana! Soy Alfred. Cuéntame de ti: ¿a qué te dedicas?"]);
 		expect(prompt).toMatch(
-			/^\[Introduction\] The person just joined and named you Alfred\. Their name is Anita\. They'd like a hand with work, money, travel and my garden\./,
+			/^\[Introduction\] The person just joined and named you Alfred\. Their name is Anita\. They'd like a hand with work, money, travel, my garden and my taxes\./,
 		);
 		expect(prompt).toContain('"es"');
 		// What they already chose, it doesn't ask again.
@@ -240,7 +241,7 @@ describe("extensions", () => {
 		expect(named.agent.instructions).toContain("in their words: Like a gentle aunt");
 		expect(named.agent.instructions).toContain("Keep them closely involved");
 		const memories = (await api("/memory/log")).body.entries.map((entry: { text: string }) => entry.text);
-		expect(memories.slice(0, 2).reverse()).toEqual(["Their name is Anita.", "They'd like a hand with work, money, travel and my garden."]);
+		expect(memories.slice(0, 2).reverse()).toEqual(["Their name is Anita.", "They'd like a hand with work, money, travel, my garden and my taxes."]);
 		expect((await api("/memory")).body.count).toBe(before + 2);
 		expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === "1").title).toBe("Te damos la bienvenida, Anita");
 		// Once: after that it is edited like any agent.

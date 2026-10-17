@@ -29,6 +29,8 @@ export type LinkedIdentity = {
 	readonly subject: string;
 	/** Its email or username there, as it was when linked. */
 	readonly label: string;
+	/** What it calls the person, if it says: for their majordomo to call them. */
+	readonly name: string | null;
 	readonly createdAt: number;
 	readonly lastUsedAt: number;
 };
@@ -83,6 +85,7 @@ CREATE TABLE IF NOT EXISTS auth_identities (
 	label TEXT NOT NULL,
 	created_at INTEGER NOT NULL,
 	last_used_at INTEGER NOT NULL,
+	name TEXT,
 	UNIQUE (issuer, subject)
 );
 -- The "passkey" column is the credential, a passkey or a linked identity, whose session made the link.
@@ -126,6 +129,8 @@ export class Auth extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		ctx.storage.sql.exec(SCHEMA);
+		const columns = ctx.storage.sql.exec("PRAGMA table_info(auth_identities)").toArray().map((row) => String(row.name));
+		if (!columns.includes("name")) ctx.storage.sql.exec("ALTER TABLE auth_identities ADD COLUMN name TEXT");
 	}
 
 	#meta(key: string): string | null {
@@ -212,6 +217,7 @@ export class Auth extends DurableObject<Env> {
 				issuer: String(row.issuer),
 				subject: String(row.subject),
 				label: String(row.label),
+				name: row.name === null ? null : String(row.name),
 				createdAt: Number(row.created_at),
 				lastUsedAt: Number(row.last_used_at),
 			}));
@@ -222,25 +228,26 @@ export class Auth extends DurableObject<Env> {
 		return this.identities().find((identity) => identity.issuer === issuer && identity.subject === subject) ?? null;
 	}
 
-	/** Links an identity, or returns the one already linked, with its label brought up to date. */
-	linkIdentity(provider: string, issuer: string, subject: string, label: string, now: number): LinkedIdentity {
+	/** Links an identity, or returns the one already linked, with its label and name brought up to date. */
+	linkIdentity(provider: string, issuer: string, subject: string, label: string, name: string | null, now: number): LinkedIdentity {
 		this.#claim(now);
 		this.ctx.storage.sql.exec(
-			`INSERT INTO auth_identities (id, provider, issuer, subject, label, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (issuer, subject) DO UPDATE SET label = excluded.label, last_used_at = excluded.last_used_at`,
+			`INSERT INTO auth_identities (id, provider, issuer, subject, label, name, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (issuer, subject) DO UPDATE SET label = excluded.label, name = excluded.name, last_used_at = excluded.last_used_at`,
 			`idp_${randomCode()}`,
 			provider,
 			issuer,
 			subject,
 			label,
+			name,
 			now,
 			now,
 		);
 		return this.identity(issuer, subject)!;
 	}
 
-	useIdentity(id: string, label: string, now: number) {
-		this.ctx.storage.sql.exec("UPDATE auth_identities SET label = ?, last_used_at = ? WHERE id = ?", label, now, id);
+	useIdentity(id: string, label: string, name: string | null, now: number) {
+		this.ctx.storage.sql.exec("UPDATE auth_identities SET label = ?, name = ?, last_used_at = ? WHERE id = ?", label, name, now, id);
 	}
 
 	/** Unlinks an identity, and returns it, so the Directory can let it go too. */

@@ -122,11 +122,13 @@ export type MajordomoSetup = {
   color: string | null;
   /** Your name, which it remembers. */
   yourName: string | null;
-  /** What it should call you, which it remembers. */
-  callMe?: string | null;
   tone?: (typeof MAJORDOMO_TONES)[number] | null;
+  /** How it should talk, in your words, instead of or besides `tone`. */
+  customTone?: string | null;
   /** What you'd like a hand with, which it remembers. */
   helpWith?: (typeof MAJORDOMO_HELP_WITH)[number][];
+  /** Anything else you'd like a hand with, in your words. */
+  otherHelp?: string | null;
   involvement?: (typeof MAJORDOMO_INVOLVEMENT)[number] | null;
   /** The language your app is in, for its introduction. */
   locale: string;

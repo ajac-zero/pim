@@ -282,12 +282,15 @@ export async function handleAuth(request: Request, env: Env, sites: Sites, now =
 		}
 		const { credential } = current.session;
 		const identity = isIdentity(credential);
+		// What an account they linked calls them, so the app needn't ask their name.
+		const name = (await current.site.store.identities()).find((linked) => linked.name !== null)?.name ?? null;
 		return json({
 			signedIn: true,
 			method: identity ? "identity" : "passkey",
 			passkey: identity ? null : credential,
 			credential,
 			account: current.site.account,
+			name,
 			providers,
 		});
 	}
@@ -553,7 +556,7 @@ async function finishOAuth(request: Request, env: Env, sites: Sites, provider: s
 		// Signed out, or that credential removed, while away at the provider.
 		if (site?.status !== "active" || !(await site.store.hasCredential(flow.link.credential))) return back("/", "Sign in again to link an account.");
 		if (!(await sites.claimIdentity(identity, site.owner))) return back(to, taken);
-		await site.store.linkIdentity(flow.provider, identity.issuer, identity.subject, identity.label, now);
+		await site.store.linkIdentity(flow.provider, identity.issuer, identity.subject, identity.label, identity.name, now);
 		log("identity_linked", site.owner);
 		return back(to);
 	}
@@ -567,7 +570,7 @@ async function finishOAuth(request: Request, env: Env, sites: Sites, provider: s
 			if (!(await site.store.identity(identity.issuer, identity.subject))) await sites.releaseIdentity(identity, site.owner);
 			return back(to, "This setup link has expired or was already used.");
 		}
-		const linked = await site.store.linkIdentity(flow.provider, identity.issuer, identity.subject, identity.label, now);
+		const linked = await site.store.linkIdentity(flow.provider, identity.issuer, identity.subject, identity.label, identity.name, now);
 		log("identity_linked", site.owner);
 		await site.onCredentialAdded?.();
 		return back(to, undefined, [await sessionCookie(env, site, linked.id, now)]);
@@ -580,7 +583,7 @@ async function finishOAuth(request: Request, env: Env, sites: Sites, provider: s
 		return back(to, `Nobody on this Pim signs in with that ${name} account. Sign in another way and link it in Settings, or join first.`);
 	}
 	if (site.status === "suspended") return back(to, "Your account is suspended. Ask the person who runs this Pim.");
-	await site.store.useIdentity(linked.id, identity.label, now);
+	await site.store.useIdentity(linked.id, identity.label, identity.name, now);
 	return back(to, undefined, [await sessionCookie(env, site, linked.id, now)]);
 }
 

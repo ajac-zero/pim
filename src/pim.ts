@@ -3177,8 +3177,7 @@ export class Pim extends DurableAgent<Env> {
 				if (memories.length > 0) await this.startMemoryNap();
 				this.agents.introduce();
 				// It opens the person's first chat by introducing itself; they answer with whatever they like it to know.
-				const welcomed = setup.callMe ?? setup.yourName;
-				const title = setup.title ?? (welcomed ? `Welcome, ${welcomed}` : null);
+				const title = setup.title ?? (setup.yourName ? `Welcome, ${setup.yourName}` : null);
 				if (title) this.store.renameSession(ROOT_SESSION, title);
 				try {
 					await this.submitTo(ROOT_SESSION, introduction(this.agents.majordomo(), setup), { operationId: "introduction" }, "pim");

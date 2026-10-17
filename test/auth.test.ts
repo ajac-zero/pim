@@ -601,8 +601,12 @@ describe("signing in with another account", () => {
 		const joining = on();
 		const { setup } = (await register(joining, "ben")).body;
 		account = { sub: "2002", email: "ben@example.com" };
+		editClaims = (claims) => ({ ...claims, name: "Benjamín Ortiz", given_name: "Benjamín" });
 		expect(await viaProvider(joining, "google", { setup })).toEqual({ status: 302, to: "/", error: undefined });
 		expect((await joining.json("/api/account")).body).toMatchObject({ username: "ben", status: "active" });
+		// Google says what to call him, so the app needn't ask; a passkey says nothing.
+		expect((await joining.json("/auth/session")).body.name).toBe("Benjamín");
+		expect((await ana.browser.json("/auth/session")).body.name).toBeNull();
 
 		const elsewhere = on();
 		expect(await viaProvider(elsewhere, "google")).toMatchObject({ to: "/", error: undefined });

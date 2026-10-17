@@ -71,6 +71,28 @@ function fieldOf(name: string, value: unknown): ApprovalField {
   return { name, kind: "text", text: String(value) };
 }
 
+/** Files a request would save, such as a skill's supporting files. */
+function isFileList(
+  value: unknown,
+): value is { path: string; content: string }[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(
+      (item) =>
+        isRecord(item) &&
+        typeof item.path === "string" &&
+        typeof item.content === "string",
+    )
+  );
+}
+
+function languageOf(path: string): CodeLanguage {
+  if (/\.(m?js|ts)$/i.test(path)) return "javascript";
+  if (/\.json$/i.test(path)) return "json";
+  return "text";
+}
+
 export function approvalView(
   approval: Pick<Approval, "action" | "args" | "summary">,
 ): ApprovalView {
@@ -91,7 +113,8 @@ export function approvalView(
       : [];
     return { title: app ? `${app} · ${args.tool}` : args.tool, fields };
   }
-  // Pim's own actions summarize themselves; show what the summary leaves out.
+  // Pim's own actions summarize themselves; show what the summary leaves out,
+  // and each file they would save as a field of its own, named by its path.
   const fields = isRecord(args)
     ? Object.entries(args)
         .filter(
@@ -99,7 +122,16 @@ export function approvalView(
             value !== undefined &&
             !(typeof value === "string" && summary.includes(value)),
         )
-        .map(([name, value]) => fieldOf(name, value))
+        .flatMap(([name, value]): ApprovalField[] =>
+          isFileList(value)
+            ? value.map((file) => ({
+                name: file.path,
+                kind: "code",
+                code: file.content,
+                language: languageOf(file.path),
+              }))
+            : [fieldOf(name, value)],
+        )
     : [];
   return { title: summary, fields };
 }

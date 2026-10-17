@@ -462,16 +462,19 @@ export type SkillVersion = SkillVersionInfo & {
   name: string;
   description: string;
   instructions: string;
+  /** Supporting files, by their paths relative to the skill. */
+  files: { path: string; content: string }[];
 };
 
 /** A skill your agents wrote, as its latest version, and the agents that use it. */
-export type Skill = Omit<SkillVersion, "instructions"> & {
+export type Skill = Omit<SkillVersion, "instructions" | "files"> & {
   updatedAt: number;
   agents: { id: string; name: string }[];
 };
 
 export type SkillDetail = Skill & {
   instructions: string;
+  files: SkillVersion["files"];
   /** The versions kept, newest first. */
   history: SkillVersionInfo[];
 };

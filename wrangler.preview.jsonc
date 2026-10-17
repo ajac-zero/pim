@@ -26,6 +26,8 @@
     { "binding": "OAUTH_KV", "id": "preview-oauth" }
   ],
   "r2_buckets": [{ "binding": "IMAGES", "bucket_name": "pim-preview-images" }],
+  // Runs agents' code (`run_code`), as deployments on the Workers Paid plan can.
+  "worker_loaders": [{ "binding": "LOADER" }],
   "durable_objects": {
     "bindings": [
       { "name": "Pim", "class_name": "Pim" },

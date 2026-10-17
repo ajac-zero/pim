@@ -1,4 +1,5 @@
 import type { Workspace } from "@cloudflare/computer";
+import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-javascript";
 import { HttpError } from "./http";
 
 /**
@@ -9,6 +10,38 @@ import { HttpError } from "./http";
  * `FILES_ROOT`; the Workspace's other paths are its own.
  */
 export const FILES_ROOT = "/workspace";
+
+/** The Workspace backend that runs agents' JavaScript (`run_code`). */
+export const CODE_BACKEND = "javascript";
+
+/**
+ * The Worker Loader that runs agents' code, when the deployment has one: a
+ * `worker_loaders` binding named `LOADER`, which needs the Workers Paid plan.
+ */
+export function codeLoader(env: object): WorkerLoader | null {
+	return (env as { LOADER?: WorkerLoader }).LOADER ?? null;
+}
+
+/**
+ * The Workspace's backends: JavaScript in a fresh Dynamic Worker for each
+ * run, which reads and writes the files under `FILES_ROOT` and nothing
+ * else. It has no network, so nothing leaves the Pim except through
+ * Pim's own tools and their approvals.
+ */
+export function codeBackends(env: object): WorkerJavaScriptBackend[] {
+	const loader = codeLoader(env);
+	if (!loader) return [];
+	return [
+		new WorkerJavaScriptBackend({
+			id: CODE_BACKEND,
+			loader,
+			root: FILES_ROOT,
+			egress: { mode: "none" },
+			defaultTimeoutMs: 60_000,
+			maxTimeoutMs: 60_000,
+		}),
+	];
+}
 
 /** The largest file the app can upload. */
 export const MAX_UPLOAD_BYTES = 25_000_000;

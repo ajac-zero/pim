@@ -8,20 +8,15 @@ import {
   ChevronDown,
   Compass,
   MessageCircle,
-  Monitor,
-  Moon,
   MoreHorizontal,
-  Palette,
   Pencil,
   Plus,
   Search,
   Settings,
   Shapes,
   ShieldCheck,
-  SlidersHorizontal,
   Sparkles,
   SquarePen,
-  Sun,
   Trash2,
   Users,
   X,
@@ -31,15 +26,12 @@ import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { AgentSettingsDialog } from "~/components/agent-settings";
-import { LanguageSelect, useI18n } from "~/components/i18n";
-import { useTheme } from "~/components/theme";
+import { useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import { Input } from "~/components/ui/input";
@@ -56,6 +48,7 @@ import {
   agentsQuery,
   approvalsQuery,
   notificationsQuery,
+  profileQuery,
   sessionsQuery,
   visitsQuery,
 } from "~/lib/queries";
@@ -120,9 +113,10 @@ export function AppSidebar({
   const { data: agents } = useQuery(agentsQuery());
   const { data: approvals } = useQuery(approvalsQuery());
   const { data: notifications } = useQuery(notificationsQuery());
-  // Sharing and Discover are with the other people on this Pim.
+  // Sharing, Discover and your profile are with the other people on this Pim.
   const { data: account } = useQuery(accountQuery());
   const { data: visits } = useQuery({ ...visitsQuery(), enabled: !!account });
+  const { data: profile } = useQuery({ ...profileQuery(), enabled: !!account });
   const params = useParams({ strict: false }) as { sessionId?: string };
   const activeId = params.sessionId;
   const newChat = useNewChat(onNavigate);
@@ -255,7 +249,28 @@ export function AppSidebar({
             label={t("settings")}
             onNavigate={onNavigate}
           />
-          <PreferencesMenu onNavigate={onNavigate} />
+          {account && (
+            <RailItem
+              icon={
+                <span className="flex size-7 items-center justify-center rounded-full bg-background font-medium text-foreground text-xs uppercase">
+                  {(profile?.displayName ?? account.username).slice(0, 1)}
+                </span>
+              }
+              label={profile?.displayName ?? `@${account.username}`}
+            >
+              {(content) => (
+                <Link
+                  to="/people/$username"
+                  params={{ username: account.username }}
+                  onClick={onNavigate}
+                  className={cn(RAIL_ITEM_CLASS, RAIL_ACTIVE_CLASS)}
+                  aria-label={t("profile")}
+                >
+                  {content}
+                </Link>
+              )}
+            </RailItem>
+          )}
         </nav>
 
         {/* Chats */}
@@ -358,6 +373,8 @@ export function AppSidebar({
 
 const RAIL_ITEM_CLASS =
   "relative flex size-10 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground";
+const RAIL_ACTIVE_CLASS =
+  "data-[status=active]:bg-sidebar-accent data-[status=active]:text-foreground";
 
 /** An icon in the rail, with a dot while something waits there and its label as a tooltip. */
 function RailItem({
@@ -418,10 +435,7 @@ function RailLink({
         <Link
           to={to}
           onClick={onNavigate}
-          className={cn(
-            RAIL_ITEM_CLASS,
-            "data-[status=active]:bg-sidebar-accent data-[status=active]:text-foreground",
-          )}
+          className={cn(RAIL_ITEM_CLASS, RAIL_ACTIVE_CLASS)}
           aria-label={props.label}
         >
           {content}
@@ -796,74 +810,6 @@ function SessionRow({
         </DropdownMenuContent>
       </DropdownMenu>
     </li>
-  );
-}
-
-function PreferencesMenu({ onNavigate }: { onNavigate?: () => void }) {
-  const { preference, setPreference, colorTheme } = useTheme();
-  const { t } = useI18n();
-
-  return (
-    <DropdownMenu>
-      <RailItem
-        icon={<SlidersHorizontal className="size-4.5" />}
-        label={t("preferences")}
-      >
-        {(content) => (
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              className={cn(
-                RAIL_ITEM_CLASS,
-                "data-[state=open]:bg-sidebar-accent",
-              )}
-              aria-label={t("preferences")}
-            >
-              {content}
-            </button>
-          </DropdownMenuTrigger>
-        )}
-      </RailItem>
-      <DropdownMenuContent align="end" side="right" className="w-60">
-        {/* Themes are many, so they're picked in Settings. */}
-        <DropdownMenuItem asChild>
-          <Link to="/settings" hash="appearance" onClick={onNavigate}>
-            <Palette className="size-4" />
-            <span className="flex-1">{t("theme")}</span>
-            <span className="text-muted-foreground text-xs">
-              {colorTheme?.name}
-            </span>
-          </Link>
-        </DropdownMenuItem>
-        <DropdownMenuLabel className="text-muted-foreground text-xs">
-          {t("mode")}
-        </DropdownMenuLabel>
-        <div className="flex gap-1 px-2 pb-1.5">
-          {(
-            [
-              ["light", Sun],
-              ["dark", Moon],
-              ["system", Monitor],
-            ] as const
-          ).map(([value, Icon]) => (
-            <Button
-              key={value}
-              variant={preference === value ? "secondary" : "ghost"}
-              size="icon"
-              className="size-8 flex-1"
-              onClick={() => setPreference(value)}
-              aria-label={t(`${value}Theme`)}
-            >
-              <Icon className="size-4" />
-            </Button>
-          ))}
-        </div>
-        <DropdownMenuSeparator />
-        <div className="px-2 py-1.5">
-          <LanguageSelect className="block w-full" />
-        </div>
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }
 

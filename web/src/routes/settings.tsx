@@ -526,7 +526,7 @@ function ProfileSection() {
     });
   };
   return (
-    <section className="mt-10 space-y-3">
+    <section id="profile" className="mt-10 scroll-mt-6 space-y-3">
       <h2 className="font-medium text-muted-foreground text-sm">
         {t("profile")}
       </h2>

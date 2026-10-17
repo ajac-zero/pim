@@ -112,6 +112,7 @@ const translations = {
     publishedAgents: "Published agents",
     nothingPublished: "Nothing published yet.",
     messageTheirPim: "Message {username}'s Pim",
+    editProfile: "Edit profile",
     profile: "Profile",
     profileDescription:
       "How others on this Pim see you: on your page, and next to the agents you publish.",
@@ -733,6 +734,7 @@ const translations = {
     publishedAgents: "Agentes publicados",
     nothingPublished: "Nada publicado todavía.",
     messageTheirPim: "Escribir al Pim de {username}",
+    editProfile: "Editar perfil",
     profile: "Perfil",
     profileDescription:
       "Cómo te ven otros en este Pim: en tu página y junto a los agentes que publicas.",
@@ -1339,15 +1341,16 @@ export function useI18n(): I18nContextValue {
   return useContext(I18nContext);
 }
 
-export function LanguageSelect({ className }: { className?: string }) {
+/** The app's language, a setting of this browser, as a field in Settings. */
+export function LanguageSelect() {
   const { locale, setLocale, t } = useI18n();
   return (
-    <label className={className}>
-      <span className="sr-only">{t("language")}</span>
+    <label className="flex flex-col gap-2 rounded-2xl border bg-muted/20 px-4 py-4">
+      <span className="text-muted-foreground text-[13px]">{t("language")}</span>
       <select
         value={locale}
         onChange={(event) => setLocale(event.target.value as Locale)}
-        className="h-8 rounded-md border bg-transparent px-2 text-sm"
+        className="h-10 w-full rounded-xl border bg-background px-3 text-sm"
       >
         <option value="en">{t("english")}</option>
         <option value="es">{t("spanish")}</option>

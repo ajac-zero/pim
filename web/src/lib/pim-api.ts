@@ -147,6 +147,8 @@ export type Agent = {
   instructions: string;
   /** The apps it works with, by `ref`: its chats get only these apps' tools. */
   apps: string[];
+  /** The names of your skills it uses. */
+  skills: string[];
   team: TeamMember[];
   /** The blueprint it builds on, as `<extension>/<blueprint>`, which brings its dashboard; null for none. */
   blueprint: string | null;
@@ -230,6 +232,7 @@ export type AgentInput = {
   description: string;
   instructions: string;
   apps: string[];
+  skills?: string[];
   team: TeamMember[];
   /** Left out, a new agent is based on the deployment's default blueprint. */
   blueprint?: string | null;
@@ -443,6 +446,34 @@ export type ArtifactVersion = ArtifactVersionInfo & {
   kind: ArtifactKind;
   latest: number;
   content: string;
+};
+
+/** One version of a skill, without its text. */
+export type SkillVersionInfo = {
+  version: number;
+  /** The agent that wrote it, by name then; null for a version you restored. */
+  author: string | null;
+  /** The version a restore copied. */
+  restoredFrom: number | null;
+  createdAt: number;
+};
+
+export type SkillVersion = SkillVersionInfo & {
+  name: string;
+  description: string;
+  instructions: string;
+};
+
+/** A skill your agents wrote, as its latest version, and the agents that use it. */
+export type Skill = Omit<SkillVersion, "instructions"> & {
+  updatedAt: number;
+  agents: { id: string; name: string }[];
+};
+
+export type SkillDetail = Skill & {
+  instructions: string;
+  /** The versions kept, newest first. */
+  history: SkillVersionInfo[];
 };
 
 /** What an artifact tool answers: a reference to the version it made, never its content. */
@@ -967,6 +998,23 @@ export const pim = {
     ),
   deleteArtifact: (id: string) =>
     call<{ deleted: boolean }>(`/artifacts/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  skills: () =>
+    call<{ skills: Skill[] }>("/skills").then((body) => body.skills),
+  skill: (name: string) =>
+    call<SkillDetail>(`/skills/${encodeURIComponent(name)}`),
+  skillVersion: (name: string, version: number) =>
+    call<SkillVersion>(
+      `/skills/${encodeURIComponent(name)}/versions/${version}`,
+    ),
+  restoreSkill: (name: string, version: number, baseVersion: number) =>
+    call<SkillDetail>(`/skills/${encodeURIComponent(name)}/restore`, {
+      method: "POST",
+      body: JSON.stringify({ version, baseVersion }),
+    }),
+  deleteSkill: (name: string) =>
+    call<{ deleted: string }>(`/skills/${encodeURIComponent(name)}`, {
       method: "DELETE",
     }),
   account: () => call<Account>("/account"),

@@ -207,6 +207,7 @@ export const ShieldAlert = themedIcon(
     "M3 3h6V1h6v2h6v12h-2v2h-2v2h-2v2H9v-2H7v-2H5v-2H3V3Zm9 4v6m-1 4h2",
   ),
 );
+export const ScrollText = themedIcon(Lucide.ScrollText, Pixel.Script);
 export const ShieldCheck = themedIcon(
   Lucide.ShieldCheck,
   pixelPath(

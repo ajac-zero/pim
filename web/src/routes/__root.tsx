@@ -154,10 +154,11 @@ function usePimEvents() {
         // A run may have changed what a dashboard shows: goals, schedules, memories, artifacts.
         queryClient.invalidateQueries({ queryKey: ["dashboard"] });
         queryClient.invalidateQueries({ queryKey: ["schedules"] });
-        // Or made an agent, written files, or used the browser.
+        // Or made an agent, saved a skill, written files, or used the browser.
         queryClient.invalidateQueries({ queryKey: ["agents"] });
         queryClient.invalidateQueries({ queryKey: ["files"] });
         queryClient.invalidateQueries({ queryKey: ["browser"] });
+        queryClient.invalidateQueries({ queryKey: ["skills"] });
       },
       onNotification: (notification) => {
         queryClient.invalidateQueries({ queryKey: ["notifications"] });
@@ -194,6 +195,13 @@ function usePimEvents() {
           queryClient.invalidateQueries({ queryKey: ["dashboard"] });
           if (approval.action === "manage_apps")
             queryClient.invalidateQueries({ queryKey: ["apps"] });
+        }
+        if (
+          approval.action === "write_skill" &&
+          approval.status === "approved"
+        ) {
+          queryClient.invalidateQueries({ queryKey: ["skills"] });
+          queryClient.invalidateQueries({ queryKey: ["agents"] });
         }
         if (approval.requestedBy) {
           // Someone in a circle asked: their request waits in Sharing.

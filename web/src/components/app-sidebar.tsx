@@ -1,5 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import {
+  Link,
+  useNavigate,
+  useParams,
+  useSearch,
+} from "@tanstack/react-router";
 import {
   Bell,
   Blocks,
@@ -31,6 +36,14 @@ import {
   ProfilePopover,
   ProfilePopoverTrigger,
 } from "~/components/profile-popover";
+import {
+  ArtifactsPanel,
+  NotificationsPanel,
+  SchedulesPanel,
+  SIDEBAR_TOOLTIP_CLASS,
+  SidebarPanelAction,
+  SidebarPanelHeader,
+} from "~/components/sidebar-panels";
 import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
@@ -68,9 +81,6 @@ export function sessionTitle(session: Pick<Session, "title">, t: T) {
   return session.title ?? t("newChat");
 }
 
-const SIDEBAR_TOOLTIP_CLASS =
-  "rounded-md border border-sidebar-border bg-sidebar px-2.5 py-1.5 font-normal text-xs text-sidebar-foreground shadow-md";
-
 /** Opens an empty draft; the session is created when its first message is sent. */
 export function useNewChat(onDone?: () => void) {
   const navigate = useNavigate();
@@ -97,10 +107,20 @@ export function useAwaitingApproval() {
   );
 }
 
+/** What the sidebar can show beside the rail instead of your chats, named in the URL (`?panel=artifacts`). */
+export const SIDEBAR_PANELS = [
+  "notifications",
+  "artifacts",
+  "schedules",
+] as const;
+export type SidebarPanel = (typeof SIDEBAR_PANELS)[number];
+
 /**
- * The sidebar: a rail of icons for Pim's pages beside the chats panel. With
- * the sidebar collapsed only the rail shows, and its Chats button brings the
- * panel back.
+ * The sidebar: a rail of icons beside a panel. The icons at the top choose
+ * what the panel shows (your chats, notifications, artifacts or schedules)
+ * while the open chat stays where it is; those at the bottom open dialogs
+ * over it. Choosing the panel that's already showing collapses the sidebar
+ * to the rail, and choosing any panel brings it back.
  */
 export function AppSidebar({
   onNavigate,
@@ -112,58 +132,26 @@ export function AppSidebar({
   onToggleCollapse?: () => void;
 }) {
   const { t } = useI18n();
-  const [search, setSearch] = useState("");
-  const { data: sessions } = useQuery(sessionsQuery());
-  const { data: agents } = useQuery(agentsQuery());
+  const { panel } = useSearch({ strict: false });
   const { data: approvals } = useQuery(approvalsQuery());
   const { data: notifications } = useQuery(notificationsQuery());
   // Sharing, Discover and your profile are with the other people on this Pim.
   const { data: account } = useQuery(accountQuery());
-  const { data: visits } = useQuery({ ...visitsQuery(), enabled: !!account });
   const { data: profile } = useQuery({ ...profileQuery(), enabled: !!account });
-  const params = useParams({ strict: false }) as { sessionId?: string };
-  const activeId = params.sessionId;
-  const newChat = useNewChat(onNavigate);
   const awaitingApproval = useAwaitingApproval();
   /* Requests from people in your circles, waiting in Sharing. */
   const guestRequests =
     approvals?.filter(
       (approval) => approval.status === "pending" && approval.requestedBy,
     ).length ?? 0;
-  const shownVisits = (visits ?? []).filter((visit) =>
-    visit.username.toLowerCase().includes(search.toLowerCase()),
-  );
   const unreadNotifications =
     notifications?.filter((notification) => notification.readAt === null)
       .length ?? 0;
-
-  // A section for each of your agents, the default one first, holding the chats with it.
-  const sections = useMemo((): AgentSection[] => {
-    const all = (agents ?? []).map((agent) => ({
-      agent,
-      list: [] as Session[],
-    }));
-    for (const session of sessions ?? []) {
-      // Conversations with others' Pims are listed under Shared with you.
-      if (session.visit) continue;
-      const section =
-        all.find((candidate) => candidate.agent.id === session.agent?.id) ??
-        all.find((candidate) => candidate.agent.default);
-      section?.list.push(session);
-    }
-    return all;
-  }, [agents, sessions]);
-  const shownSections = useMemo(
-    () =>
-      sections.flatMap((section) => {
-        if (!search) return [section];
-        const list = section.list.filter((session) =>
-          sessionTitle(session, t).toLowerCase().includes(search.toLowerCase()),
-        );
-        return list.length > 0 ? [{ ...section, list }] : [];
-      }),
-    [sections, search, t],
-  );
+  const railPanel = {
+    current: panel,
+    collapsed,
+    onToggleCollapse,
+  };
 
   return (
     <TooltipProvider delayDuration={0}>
@@ -182,63 +170,47 @@ export function AppSidebar({
             {/* The logo is the wordmark, so no "Pim" label beside it. */}
             <PimMark className="h-4 w-8" />
           </Link>
-          <RailLink
-            to="/notifications"
+          <RailPanel
+            {...railPanel}
+            icon={<MessageCircle className="size-4.5" />}
+            label={t("chats")}
+            count={panel || collapsed ? awaitingApproval.size : 0}
+          />
+          <RailPanel
+            {...railPanel}
+            panel="notifications"
             icon={<Bell className="size-4.5" />}
             label={t("notifications")}
             count={unreadNotifications}
-            onNavigate={onNavigate}
           />
-          {onToggleCollapse && (
-            <RailItem
-              icon={<MessageCircle className="size-4.5" />}
-              label={t(collapsed ? "showChats" : "hideChats")}
-              count={collapsed ? awaitingApproval.size : 0}
-            >
-              {(content) => (
-                <button
-                  type="button"
-                  className={cn(
-                    RAIL_ITEM_CLASS,
-                    "aria-expanded:text-foreground",
-                  )}
-                  onClick={onToggleCollapse}
-                  aria-label={t("chats")}
-                  aria-expanded={!collapsed}
-                >
-                  {content}
-                </button>
-              )}
-            </RailItem>
-          )}
-          <RailLink
-            to="/artifacts"
+          <RailPanel
+            {...railPanel}
+            panel="artifacts"
             icon={<Shapes className="size-4.5" />}
             label={t("artifacts")}
-            onNavigate={onNavigate}
           />
-          <RailLink
-            to="/apps"
-            icon={<Blocks className="size-4.5" />}
-            label={t("connectedApps")}
-            onNavigate={onNavigate}
-          />
-          <RailLink
-            to="/schedules"
+          <RailPanel
+            {...railPanel}
+            panel="schedules"
             icon={<CalendarClock className="size-4.5" />}
             label={t("schedules")}
-            onNavigate={onNavigate}
           />
+          {/* Below, what opens over the chat instead of beside it. */}
+          <div className="mt-auto" />
           {account && (
-            <RailLink
-              to="/discover"
+            <RailDialogLink
+              dialog="discover"
               icon={<Compass className="size-4.5" />}
               label={t("discover")}
               onNavigate={onNavigate}
             />
           )}
-          {/* Below, configuration: each opens over the page instead of replacing it. */}
-          <div className="mt-auto" />
+          <RailDialogLink
+            dialog="apps"
+            icon={<Blocks className="size-4.5" />}
+            label={t("connectedApps")}
+            onNavigate={onNavigate}
+          />
           {account && (
             <RailDialogLink
               dialog="sharing"
@@ -287,7 +259,6 @@ export function AppSidebar({
           )}
         </nav>
 
-        {/* Chats */}
         <div
           inert={collapsed}
           className={cn(
@@ -295,93 +266,139 @@ export function AppSidebar({
             collapsed && "opacity-0",
           )}
         >
-          <div className="flex items-center justify-between pt-3 pr-3 pb-1 pl-5">
-            <h2 className="text-muted-foreground text-sm">{t("chats")}</h2>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  className="flex size-10 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
-                  onClick={newChat}
-                  aria-label={t("newChat")}
-                >
-                  <SquarePen className="size-4.5" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent
-                side="right"
-                showArrow={false}
-                className={SIDEBAR_TOOLTIP_CLASS}
-              >
-                {t("newChat")}
-              </TooltipContent>
-            </Tooltip>
-          </div>
-
-          {/* Search */}
-          <div className="px-3 pt-1 pb-2">
-            <div className="relative">
-              <Search className="-translate-y-1/2 absolute top-1/2 left-2.5 size-4 text-muted-foreground" />
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder={t("searchChats")}
-                className="h-8 border-transparent bg-sidebar-accent/60 pl-8 text-sm shadow-none focus-visible:border-sidebar-border focus-visible:bg-sidebar-accent/60 focus-visible:ring-0"
-              />
-            </div>
-          </div>
-
-          <nav
-            aria-label={t("chats")}
-            className="flex-1 overflow-y-auto px-3 pb-2 scrollbar-thin"
-          >
-            {shownVisits.length > 0 && (
-              <div className="mb-3">
-                <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
-                  {t("sharedWithYou")}
-                </div>
-                <ul className="space-y-px" aria-label={t("sharedWithYou")}>
-                  {shownVisits.map((visit) => (
-                    <VisitRow
-                      key={visit.ownerId}
-                      visit={visit}
-                      active={
-                        visit.session !== null && visit.session === activeId
-                      }
-                      onNavigate={onNavigate}
-                    />
-                  ))}
-                </ul>
-              </div>
-            )}
-            {search &&
-              shownSections.length === 0 &&
-              shownVisits.length === 0 && (
-                <p className="px-2 py-6 text-center text-muted-foreground text-sm">
-                  {t("noChatsMatch")}
-                </p>
-              )}
-            {shownSections.map((section) => (
-              <AgentSectionList
-                key={section.agent.id}
-                section={section}
-                activeId={activeId}
-                awaitingApproval={awaitingApproval}
-                onNavigate={onNavigate}
-              />
-            ))}
-            <AgentSettingsDialog>
-              <button
-                type="button"
-                className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-muted-foreground text-xs hover:bg-sidebar-accent hover:text-foreground"
-              >
-                <Plus className="size-3.5" /> {t("newAgent")}
-              </button>
-            </AgentSettingsDialog>
-          </nav>
+          {panel === "notifications" ? (
+            <NotificationsPanel onNavigate={onNavigate} />
+          ) : panel === "artifacts" ? (
+            <ArtifactsPanel onNavigate={onNavigate} />
+          ) : panel === "schedules" ? (
+            <SchedulesPanel onNavigate={onNavigate} />
+          ) : (
+            <ChatsPanel
+              awaitingApproval={awaitingApproval}
+              onNavigate={onNavigate}
+            />
+          )}
         </div>
       </div>
     </TooltipProvider>
+  );
+}
+
+/** Your chats, a section for each of your agents, and the Pims shared with you. */
+function ChatsPanel({
+  awaitingApproval,
+  onNavigate,
+}: {
+  awaitingApproval: ReadonlySet<string>;
+  onNavigate?: () => void;
+}) {
+  const { t } = useI18n();
+  const [search, setSearch] = useState("");
+  const { data: sessions } = useQuery(sessionsQuery());
+  const { data: agents } = useQuery(agentsQuery());
+  const { data: account } = useQuery(accountQuery());
+  const { data: visits } = useQuery({ ...visitsQuery(), enabled: !!account });
+  const params = useParams({ strict: false }) as { sessionId?: string };
+  const activeId = params.sessionId;
+  const newChat = useNewChat(onNavigate);
+  const shownVisits = (visits ?? []).filter((visit) =>
+    visit.username.toLowerCase().includes(search.toLowerCase()),
+  );
+
+  // A section for each of your agents, the default one first, holding the chats with it.
+  const sections = useMemo((): AgentSection[] => {
+    const all = (agents ?? []).map((agent) => ({
+      agent,
+      list: [] as Session[],
+    }));
+    for (const session of sessions ?? []) {
+      // Conversations with others' Pims are listed under Shared with you.
+      if (session.visit) continue;
+      const section =
+        all.find((candidate) => candidate.agent.id === session.agent?.id) ??
+        all.find((candidate) => candidate.agent.default);
+      section?.list.push(session);
+    }
+    return all;
+  }, [agents, sessions]);
+  const shownSections = useMemo(
+    () =>
+      sections.flatMap((section) => {
+        if (!search) return [section];
+        const list = section.list.filter((session) =>
+          sessionTitle(session, t).toLowerCase().includes(search.toLowerCase()),
+        );
+        return list.length > 0 ? [{ ...section, list }] : [];
+      }),
+    [sections, search, t],
+  );
+
+  return (
+    <>
+      <SidebarPanelHeader title={t("chats")}>
+        <SidebarPanelAction label={t("newChat")} onClick={newChat}>
+          <SquarePen className="size-4.5" />
+        </SidebarPanelAction>
+      </SidebarPanelHeader>
+
+      {/* Search */}
+      <div className="px-3 pt-1 pb-2">
+        <div className="relative">
+          <Search className="-translate-y-1/2 absolute top-1/2 left-2.5 size-4 text-muted-foreground" />
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={t("searchChats")}
+            className="h-8 border-transparent bg-sidebar-accent/60 pl-8 text-sm shadow-none focus-visible:border-sidebar-border focus-visible:bg-sidebar-accent/60 focus-visible:ring-0"
+          />
+        </div>
+      </div>
+
+      <nav
+        aria-label={t("chats")}
+        className="flex-1 overflow-y-auto px-3 pb-2 scrollbar-thin"
+      >
+        {shownVisits.length > 0 && (
+          <div className="mb-3">
+            <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
+              {t("sharedWithYou")}
+            </div>
+            <ul className="space-y-px" aria-label={t("sharedWithYou")}>
+              {shownVisits.map((visit) => (
+                <VisitRow
+                  key={visit.ownerId}
+                  visit={visit}
+                  active={visit.session !== null && visit.session === activeId}
+                  onNavigate={onNavigate}
+                />
+              ))}
+            </ul>
+          </div>
+        )}
+        {search && shownSections.length === 0 && shownVisits.length === 0 && (
+          <p className="px-2 py-6 text-center text-muted-foreground text-sm">
+            {t("noChatsMatch")}
+          </p>
+        )}
+        {shownSections.map((section) => (
+          <AgentSectionList
+            key={section.agent.id}
+            section={section}
+            activeId={activeId}
+            awaitingApproval={awaitingApproval}
+            onNavigate={onNavigate}
+          />
+        ))}
+        <AgentSettingsDialog>
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-muted-foreground text-xs hover:bg-sidebar-accent hover:text-foreground"
+          >
+            <Plus className="size-3.5" /> {t("newAgent")}
+          </button>
+        </AgentSettingsDialog>
+      </nav>
+    </>
   );
 }
 
@@ -425,25 +442,41 @@ function RailItem({
   );
 }
 
-function RailLink({
-  to,
-  onNavigate,
+/** A rail icon that shows its panel in the sidebar, or collapses the sidebar when it's already showing. */
+function RailPanel({
+  panel,
+  current,
+  collapsed,
+  onToggleCollapse,
   ...props
 }: {
-  to: "/artifacts" | "/apps" | "/schedules" | "/notifications" | "/discover";
+  /** Which panel; none for your chats. */
+  panel?: SidebarPanel;
+  current?: SidebarPanel;
+  collapsed: boolean;
+  onToggleCollapse?: () => void;
   icon: ReactNode;
   label: string;
   count?: number;
-  onNavigate?: () => void;
 }) {
+  const selected = panel === current;
   return (
     <RailItem {...props}>
       {(content) => (
         <Link
-          to={to}
-          onClick={onNavigate}
-          className={cn(RAIL_ITEM_CLASS, RAIL_ACTIVE_CLASS)}
+          to="."
+          search={(prev) => ({ ...prev, panel })}
+          onClick={(event) => {
+            if (!selected || !onToggleCollapse) return;
+            event.preventDefault();
+            onToggleCollapse();
+          }}
+          className={cn(
+            RAIL_ITEM_CLASS,
+            selected && !collapsed && "bg-sidebar-accent text-foreground",
+          )}
           aria-label={props.label}
+          aria-current={selected && !collapsed ? "true" : undefined}
         >
           {content}
         </Link>
@@ -458,7 +491,7 @@ function RailDialogLink({
   onNavigate,
   ...props
 }: {
-  dialog: "settings" | "sharing";
+  dialog: "settings" | "sharing" | "discover" | "apps";
   icon: ReactNode;
   label: string;
   count?: number;

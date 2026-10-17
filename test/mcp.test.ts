@@ -430,6 +430,18 @@ describe("connected apps (MCP)", () => {
 		expect((await api("/mcp/board", { method: "DELETE" })).status).toBe(200);
 	});
 
+	it("counts only signed-in apps against the apps limit", async () => {
+		const signedIn = (await api("/mcp")).body.servers.filter((server: { state: string }) => !["authenticating", "failed"].includes(server.state)).length;
+		const pim = env.Pim.getByName(OWNER);
+		await runInDurableObject(pim, (instance: Pim) => instance.setLimits({ apps: signedIn + 1 }));
+		expect(await post("/mcp", { app: "test.ledger/forge" })).toMatchObject({ status: 201, body: { state: "authenticating" } });
+		// Forge's sign-in isn't done, so it takes no slot.
+		expect(await post("/mcp", { app: "test.ledger/board" })).toMatchObject({ status: 201, body: { state: "authenticating" } });
+		expect((await api("/mcp/forge", { method: "DELETE" })).status).toBe(200);
+		expect((await api("/mcp/board", { method: "DELETE" })).status).toBe(200);
+		await runInDurableObject(pim, (instance: Pim) => instance.setLimits(null));
+	});
+
 	it("finds an app, adds and connects it after explicit chat approval, then continues the original task", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "auto" }) });
 		const app = "test.ledger/firecrawl";

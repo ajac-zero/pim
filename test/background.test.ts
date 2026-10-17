@@ -96,6 +96,10 @@ describe("scheduled tasks", () => {
 		const chats = (await api("/sessions")).body.sessions.filter((session: { title: string }) => session.title === "Daily plan");
 		expect(chats).toHaveLength(2);
 		chats.sort((a: { id: string }, b: { id: string }) => Number(a.id) - Number(b.id));
+		// Each run's notification links to the chat it started.
+		const ran = (await api("/notifications")).body.notifications.filter((notification: { title: string }) => notification.title === "Scheduled task ran: Daily plan");
+		expect(ran.map((notification: { session: string }) => notification.session).sort()).toEqual(chats.map((chat: { id: string }) => chat.id).sort());
+		for (const notification of ran) await post(`/notifications/${notification.id}/read`);
 		for (const [index, chat] of chats.entries()) {
 			expect(chat.agent).toMatchObject({ id: coach.id });
 			expect((await api(`/sessions/${chat.id}/operations/${encodeURIComponent(operations[index]!)}`)).body).toMatchObject({ status: "done" });

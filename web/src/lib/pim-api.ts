@@ -465,10 +465,12 @@ export type PimSchedule = {
   next: string;
   cron?: string;
   intervalSeconds?: number;
-  /** The chat it runs in. */
+  /** The chat that scheduled it: where it runs, unless it starts a new chat each time. */
   session: string;
   label: string | null;
   instruction: string;
+  /** Each run starts a new chat with the same agent; it outlives the chat that scheduled it. */
+  newChat: boolean;
 };
 
 export type ModelInfo = {

@@ -103,14 +103,18 @@ function ScheduleRow({
                 <code className="font-mono">{schedule.cron}</code> UTC
               </>
             )}
+            {schedule.newChat && ` · ${t("scheduleNewChat")}`}
           </span>
-          <Link
-            to="/chat/$sessionId"
-            params={{ sessionId: schedule.session }}
-            className="max-w-60 truncate underline-offset-2 hover:text-foreground hover:underline"
-          >
-            {session ? sessionTitle(session, t) : t("openChat")}
-          </Link>
+          {/* A task that starts new chats outlives the chat that scheduled it: no link once that chat is gone. */}
+          {(session || !schedule.newChat) && (
+            <Link
+              to="/chat/$sessionId"
+              params={{ sessionId: schedule.session }}
+              className="max-w-60 truncate underline-offset-2 hover:text-foreground hover:underline"
+            >
+              {session ? sessionTitle(session, t) : t("openChat")}
+            </Link>
+          )}
           <button
             type="button"
             className={cn(

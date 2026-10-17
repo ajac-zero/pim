@@ -11,7 +11,7 @@ import { HttpError } from "./http";
  */
 export const FILES_ROOT = "/workspace";
 
-/** The Workspace backend that runs agents' JavaScript (`run_code`). */
+/** The Workspace backend that runs agents' JavaScript (`run_javascript`). */
 export const CODE_BACKEND = "javascript";
 
 /**

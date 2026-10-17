@@ -28,7 +28,7 @@
   "r2_buckets": [{ "binding": "IMAGES", "bucket_name": "pim-preview-images" }],
   // The agents' browser: a Chrome on this machine, which wrangler downloads the first time.
   "browser": { "binding": "BROWSER" },
-  // Runs agents' code (`run_code`), as deployments on the Workers Paid plan can.
+  // Runs agents' code (`run_javascript`), as deployments on the Workers Paid plan can.
   "worker_loaders": [{ "binding": "LOADER" }],
   "durable_objects": {
     "bindings": [

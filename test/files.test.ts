@@ -77,18 +77,18 @@ describe("files", () => {
 				await writeFile("/workspace/costs/total.json", JSON.stringify({ total }));
 				return { total, rows: rows.length };
 			}`;
-		const ran = await callTool("run_code", { command: source });
+		const ran = await callTool("run_javascript", { command: source });
 		// The result is the code's return value and output, without the code sent back.
 		expect(JSON.parse(ran.text)).toEqual({ cwd: null, backend: "javascript", exitCode: 0, stdout: "", stderr: "", result: { total: 1210.5, rows: 2 } });
 		expect(await (await raw("/files/content?path=/workspace/costs/total.json")).text()).toBe('{"total":1210.5}');
 
-		const fetched = await callTool("run_code", { command: `export default async () => (await fetch("https://example.com")).status;` });
+		const fetched = await callTool("run_javascript", { command: `export default async () => (await fetch("https://example.com")).status;` });
 		expect(JSON.parse(fetched.text)).toMatchObject({ exitCode: 1, stderr: expect.stringContaining("not permitted to access the internet") });
 
-		const outside = await callTool("run_code", { command: `export default () => 1;`, cwd: "/" });
+		const outside = await callTool("run_javascript", { command: `export default () => 1;`, cwd: "/" });
 		expect(outside).toMatchObject({ isError: true });
 		// Code reaches no further than the person's files either.
-		const escaped = await callTool("run_code", {
+		const escaped = await callTool("run_javascript", {
 			command: `import { writeFile } from "node:fs/promises"; export default () => writeFile("/workspace/../escaped.txt", "out");`,
 		});
 		expect(JSON.parse(escaped.text)).toMatchObject({ exitCode: 1, stderr: expect.stringContaining("must stay under /workspace") });

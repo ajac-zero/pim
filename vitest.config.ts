@@ -14,7 +14,7 @@ export default defineConfig({
 			// Open registration, so tests add people without invites unless they mean to.
 			// Approvals as they were before majordomos, so only the tests about them script a majordomo's review.
 			// The secrets of the test extension's bank app, and the client registered for its Forge app.
-			// A Worker Loader, which deployments add for `run_code` (the Workers Paid plan has it).
+			// A Worker Loader, which deployments add for `run_javascript` (the Workers Paid plan has it).
 			miniflare: {
 				workerLoaders: { LOADER: {} },
 				bindings: {

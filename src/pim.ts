@@ -97,7 +97,7 @@ import { CREATE_AGENT, agentExtension, MANAGE_APPS, manageAppsAction, RENAME_AGE
 import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
-import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
+import { CODE_BACKEND, codeBackends, codeLoader, FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { dispatch, HttpError, readJson, type Route } from "./http";
 import type { ClientMessage, ServerMessage, ToolInfo } from "./protocol";
 import { generateVapidKeys, type PushSubscription, sendPush, validSubscription, type VapidKeys } from "./push";
@@ -313,7 +313,8 @@ export class Pim extends DurableAgent<Env> {
 	/** The person's files, which they and their agents share (see ./files.ts). */
 	readonly files = new Files(() => this.#files.workspace());
 	readonly #files: FileServices = {
-		workspace: () => (this.#workspace ??= new Workspace({ storage: this.ctx.storage, output: false })),
+		workspace: () => (this.#workspace ??= new Workspace({ storage: this.ctx.storage, output: false, backends: codeBackends(this.env) })),
+		codeBackend: () => (codeLoader(this.env) ? CODE_BACKEND : null),
 		assertOpen: () => this.#assertOpen(),
 		storageRefusal: () => this.#storageRefusal(),
 	};

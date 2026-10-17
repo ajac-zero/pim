@@ -11,6 +11,8 @@ import { text } from "./services";
  * Pim's names, held to `FILES_ROOT`, which the person sees as Files in the
  * app. Deleting asks first (`file_delete` is a gated action): files keep no
  * earlier versions. Writing and editing don't, and a full Pim refuses them.
+ * Where the deployment can run code (a Worker Loader binding), `run_code`
+ * runs JavaScript over the same files, with no network.
  */
 export const FILES_EXTENSION = "pim.files";
 
@@ -23,33 +25,58 @@ const NAMES = {
 	write: "file_write",
 	edit: "file_edit",
 	delete: "file_delete",
+	exec: "run_code",
 } as const;
 
 type WorkspaceTool = keyof typeof NAMES;
 
 /** Tools that change files: a Pim being erased, or out of storage, refuses them. */
-const CHANGES: ReadonlySet<WorkspaceTool> = new Set(["write", "edit", "delete"]);
-/** Running these again after an eviction does what the first run did. `edit` would apply its edits twice. */
+const CHANGES: ReadonlySet<WorkspaceTool> = new Set(["write", "edit", "delete", "exec"]);
+/** Running these again after an eviction does what the first run did. `edit` would apply its edits twice, and code could do anything twice. */
 const REPLAY_SAFE: ReadonlySet<WorkspaceTool> = new Set(["read", "ls", "find", "grep", "write", "delete"]);
 
 const WHERE = `The person's files are under ${FILES_ROOT}; they see the same files under Files in the app, and can add their own there. Paths outside ${FILES_ROOT} are refused.`;
 
+/** What `run_code` is for, before the backend's own description of the language and modules. */
+const CODE = `Run JavaScript to work with the person's files: analyse data, convert formats, compute, or make files such as CSV, JSON, SVG charts or HTML. Each run starts fresh, has no network (use http_request or fetch_url for that), and stops after a minute. Write what the person should keep to a file under ${FILES_ROOT}; return what you need to read in the result.`;
+
 export type FileServices = {
 	readonly workspace: () => Workspace;
+	/** The id of the Workspace's JavaScript backend, or null when this deployment can't run code. */
+	readonly codeBackend: () => string | null;
 	/** Throws once the Pim is being erased: work still under way then writes nothing. */
 	assertOpen(): void;
 	/** Why the Pim can't store more now, or null when it can. */
 	storageRefusal(): string | null;
 };
 
-/** Says what's wrong with a call's path, or null when every path in it is under `FILES_ROOT`. */
+/** Says what's wrong with a call's path or folder, or null when each is under `FILES_ROOT`. */
 function outside(args: Record<string, unknown>): string | null {
-	if (args.path === undefined || filesPath(args.path) !== null) return null;
-	return `${String(args.path)} is not one of the person's files. Use an absolute path under ${FILES_ROOT}.`;
+	for (const key of ["path", "cwd"] as const) {
+		if (args[key] === undefined || filesPath(args[key]) !== null) continue;
+		return `${String(args[key])} is not one of the person's files. Use an absolute path under ${FILES_ROOT}.`;
+	}
+	return null;
+}
+
+/** A run's result without the code the model just wrote, which it would otherwise read back in full. */
+function withoutSource<T extends { type: string }>(part: T): T {
+	if (part.type !== "text") return part;
+	try {
+		const { command: _, ...rest } = JSON.parse((part as unknown as { text: string }).text);
+		return { ...part, text: JSON.stringify(rest) };
+	} catch {
+		return part;
+	}
 }
 
 function definitions(services: FileServices) {
-	const { tools, execute } = createPiTools({ workspace: services.workspace(), exec: {} });
+	const code = services.codeBackend();
+	const { tools, execute } = createPiTools({
+		workspace: services.workspace(),
+		root: FILES_ROOT,
+		exec: code ? { [code]: { description: CODE } } : {},
+	});
 	const run = async (name: WorkspaceTool, args: Record<string, unknown>, id: string, signal?: AbortSignal): Promise<ToolExecutionResult> => {
 		const problem = outside(args);
 		if (problem) return text(problem, true);
@@ -59,7 +86,8 @@ function definitions(services: FileServices) {
 			if (refusal) return text(refusal, true);
 		}
 		const result = await execute({ id, name, arguments: args }, { abortSignal: signal });
-		return { content: result.content as ToolExecutionResult["content"], ...(result.isError ? { isError: true } : {}) };
+		const content = (name === "exec" ? result.content.map(withoutSource) : result.content) as ToolExecutionResult["content"];
+		return { content, ...(result.isError ? { isError: true } : {}) };
 	};
 	return { tools: tools.filter((tool): tool is typeof tool & { name: WorkspaceTool } => tool.name in NAMES), run };
 }
@@ -71,7 +99,7 @@ export function filesExtension(services: FileServices) {
 		.map(
 			(tool): ToolRegistration => ({
 				name: NAMES[tool.name],
-				description: `${tool.description} ${WHERE}`,
+				description: tool.name === "exec" ? tool.description : `${tool.description} ${WHERE}`,
 				parameters: tool.parameters as unknown as TSchema,
 				replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
 				execute: (args, api, context) => run(tool.name, args as Record<string, unknown>, api.callId, context.abortSignal),

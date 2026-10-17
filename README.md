@@ -48,7 +48,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 | --- | --- | --- |
 | Long-term memory | `note`, `recall`, `zoom`, `forget` | OptMem-style: an append-only log, compressed in the background into a tree of summaries. Every conversation sees a fixed-size view of it. See [Memory](#memory). |
 | Artifacts | `artifact_create`, `artifact_update`, `artifact_read`, `artifact_list` | Documents and small HTML pages the agent makes for you, with every version kept. They show in the chat and in Artifacts, run in a sandbox apart from your account, and can be restored or downloaded. See [docs/artifacts.md](docs/artifacts.md). |
-| Files | `file_read`, `file_list`, `file_find`, `file_search`, `file_write`, `file_edit`, `file_delete` (gated) | A folder you and your agents share, `/workspace`, kept in your Pim's database. You see it under Files in the sidebar, where you can upload, preview, download and delete; every agent you chat with, and its team, reads and writes the same files. Writing and editing count toward your storage; deleting asks first, because files keep no earlier versions. Uploads are at most 25 MB each. |
+| Files and code | `file_read`, `file_list`, `file_find`, `file_search`, `file_write`, `file_edit`, `file_delete` (gated), `run_code` (opt-in) | A folder you and your agents share, `/workspace`, kept in your Pim's database. You see it under Files in the sidebar, where you can upload, preview, download and delete; every agent you chat with, and its team, reads and writes the same files. Writing and editing count toward your storage; deleting asks first, because files keep no earlier versions. Uploads are at most 25 MB each. Where the deployment can run code (see [Running code](#running-code)), `run_code` runs JavaScript over those files, to analyse data, convert formats or make files such as charts; each run is a fresh sandbox with no network, which stops after a minute and can't reach past `/workspace`. Code can change and remove files without asking, as `file_write` can. |
 | Your agents | `create_agent`, `update_agent`, `rename_agent`, `manage_apps` (edits gated) | Every chat's agent knows your other agents and points you to the one made for what you ask. When none fits ongoing help you want, such as a coding helper, it makes one, with its instructions, apps, team, and an emoji and color for its icon, without asking; it never makes two with the same name. It can change its own instructions, description and team, rename itself or another of your agents, or request changes to its own apps through the approval flow. See [Your agents](#your-agents). |
 | Goals and plans | `create_goal`, `update_goal`, `list_goals` | Goals have step-by-step plans and progress notes. Active goals are always in the prompt. |
 | Background work | `schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task` | Delays, dates, or cron. When a task fires, the agent receives a `[Scheduled task]` message in the session that scheduled it, or, with `new_chat`, in a new chat with the same agent each time, titled with the task's label, and you get a notification that links to that chat. Schedules, in the sidebar, lists what's pending, soonest first, each opening the chat it runs in, and cancels any of it. Deleting the chat that scheduled a task cancels it, unless the task starts new chats: that one goes on until cancelled. |
@@ -124,6 +124,16 @@ Pim can email each person, when they ask for it or for something worth keeping, 
 ```
 
 and set `PIM_EMAIL_FROM` in `vars` to an address on that domain, such as `pim@example.com`. Each person then adds their address in Settings and confirms it with a code Pim emails there; Pim only ever emails that one address, at most 50 times a day.
+
+### Running code
+
+Agents can run JavaScript over people's files once the deployment has a Worker Loader: uncomment
+
+```jsonc
+"worker_loaders": [{ "binding": "LOADER" }],
+```
+
+in `wrangler.jsonc`. [Dynamic Workers](https://developers.cloudflare.com/dynamic-workers/) need the Workers Paid plan; each `run_code` call loads one, with no network access, and its CPU time counts toward the account's Workers usage. Without the binding nobody is offered `run_code`; files work either way.
 
 `PIM_TIME_ZONE` and `PIM_APPROVAL_POLICY` are defaults: each person's own choices in Settings (`PUT /settings`) take their place.
 
@@ -440,7 +450,7 @@ To add a blueprint, tools only some agents get, or dashboard widgets, write an e
 
 - Falling back to `PIM_MODEL` when the ChatGPT plan's usage limit is reached. Until then, a run that hits the limit fails with OpenAI's error.
 - Publishing artifacts, JSX artifacts, and artifacts that keep their own state.
-- A sandboxed computer and browser for the agent, beyond its files: running code, a shell, and a browser (Cloudflare Containers or Browser Run).
+- A sandboxed computer for the agent beyond its files and JavaScript: a shell, packages and other languages (Cloudflare Containers), and a browser (Browser Run).
 - Extensions beyond MCP: Agent Skills, and full pi extensions that Pim builds into itself by redeploying its own Worker.
 - Secret placeholders, so approved requests can use credentials the model never sees.
 - Semantic recall. `recall` is a regular expression over the log, so it finds words, not meanings.

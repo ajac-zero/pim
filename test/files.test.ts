@@ -67,6 +67,33 @@ describe("files", () => {
 		expect((await api("/files?path=/")).status).toBe(400);
 	});
 
+	it("are what agents' code works on, with no network", async () => {
+		await upload("/workspace/costs/march.csv", "item,eur\nrent,900\nfood,310.5\n");
+		const source = `
+			import { readFile, writeFile } from "node:fs/promises";
+			export default async function () {
+				const rows = (await readFile("costs/march.csv", "utf8")).trim().split("\\n").slice(1);
+				const total = rows.reduce((sum, row) => sum + Number(row.split(",")[1]), 0);
+				await writeFile("/workspace/costs/total.json", JSON.stringify({ total }));
+				return { total, rows: rows.length };
+			}`;
+		const ran = await callTool("run_code", { command: source });
+		// The result is the code's return value and output, without the code sent back.
+		expect(JSON.parse(ran.text)).toEqual({ cwd: null, backend: "javascript", exitCode: 0, stdout: "", stderr: "", result: { total: 1210.5, rows: 2 } });
+		expect(await (await raw("/files/content?path=/workspace/costs/total.json")).text()).toBe('{"total":1210.5}');
+
+		const fetched = await callTool("run_code", { command: `export default async () => (await fetch("https://example.com")).status;` });
+		expect(JSON.parse(fetched.text)).toMatchObject({ exitCode: 1, stderr: expect.stringContaining("not permitted to access the internet") });
+
+		const outside = await callTool("run_code", { command: `export default () => 1;`, cwd: "/" });
+		expect(outside).toMatchObject({ isError: true });
+		// Code reaches no further than the person's files either.
+		const escaped = await callTool("run_code", {
+			command: `import { writeFile } from "node:fs/promises"; export default () => writeFile("/workspace/../escaped.txt", "out");`,
+		});
+		expect(JSON.parse(escaped.text)).toMatchObject({ exitCode: 1, stderr: expect.stringContaining("must stay under /workspace") });
+	});
+
 	it("are served inert, whatever they contain", async () => {
 		await upload("/workspace/page.html", "<script>alert(document.cookie)</script>");
 		const response = await raw("/files/content?path=/workspace/page.html");

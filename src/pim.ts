@@ -517,12 +517,6 @@ export class Pim extends DurableAgent<Env> {
 		} else if (existing) {
 			throw new HttpError(409, `${name} is already connected`);
 		}
-		const { apps } = this.limits();
-		// The limit is on connected apps: one waiting for sign-in, or whose sign-in failed, isn't one yet.
-		const connected = this.apps.servers().filter((server) => server.id !== id && server.state !== "authenticating" && server.state !== "failed");
-		if (apps !== null && connected.length >= apps) {
-			throw new HttpError(429, `You can connect up to ${apps} apps. Remove one first.`);
-		}
 		this.store.setMcpApproval(id, options.approval ?? "writes");
 		try {
 			if (url === null) return await this.nativeApps.connect(app.ref, id);

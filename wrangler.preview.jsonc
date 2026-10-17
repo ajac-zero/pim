@@ -47,7 +47,7 @@
     "PIM_PUBLIC_URL": "",
     "PIM_APPROVAL_POLICY": "explicit",
     "PIM_MODELS": "preview-model",
-    "PIM_LIMITS": "{\"dailyTokens\": 2000000, \"dailyModelRequests\": 1500, \"dailyRuns\": 300, \"sessions\": 500, \"schedules\": 50, \"apps\": 20, \"storageBytes\": 1000000000, \"artifacts\": 200, \"artifactVersions\": 100, \"artifactBytes\": 1000000, \"artifactStorageBytes\": 10000000}",
+    "PIM_LIMITS": "{\"dailyTokens\": 2000000, \"dailyModelRequests\": 1500, \"dailyRuns\": 300, \"sessions\": 500, \"schedules\": 50, \"storageBytes\": 1000000000, \"artifacts\": 200, \"artifactVersions\": 100, \"artifactBytes\": 1000000, \"artifactStorageBytes\": 10000000}",
     "PIM_REGISTRATION": "open",
     "PIM_MAX_ACCOUNTS": "",
     "PIM_REGISTRATIONS_PER_ADDRESS": "50"

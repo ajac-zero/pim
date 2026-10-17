@@ -355,7 +355,6 @@ export type Limits = {
   dailyRuns: number | null;
   sessions: number | null;
   schedules: number | null;
-  apps: number | null;
   storageBytes: number | null;
   artifacts: number | null;
   artifactVersions: number | null;

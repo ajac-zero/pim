@@ -110,7 +110,7 @@ import {
 import { type Agent, type AgentInput, AgentStore, agentInput, type TeamMember } from "./agents";
 import type { AgentIcon } from "./gallery";
 import { type Role, TEAM_EXTENSION, type TeamRun, TeamStore, teamExtension } from "./team";
-import { CHAT_REPORT, DECIDE_APPROVAL, MAJORDOMO_EXTENSION, introduction, majordomoExtension, majordomoSetup, REVIEW_EXTENSION, reviewExtension } from "./majordomo";
+import { CHAT_REPORT, DECIDE_APPROVAL, MAJORDOMO_EXTENSION, introduction, majordomoExtension, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension } from "./majordomo";
 import { projectEntries } from "./transcript";
 import { conversationText, IMPROVE_PROMPT, NAME_CHAT, SUMMARIZE_CHAT, type UtilityTask } from "./utility";
 import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage";
@@ -3172,10 +3172,7 @@ export class Pim extends DurableAgent<Env> {
 				const majordomo = this.agents.majordomo();
 				const { name, symbol, color, instructions } = setup;
 				this.agents.update(majordomo.id, agentInput({ name, symbol, color, instructions }, majordomo));
-				const memories = [
-					...(setup.yourName ? [`Their name is ${setup.yourName}.`] : []),
-					...(setup.callMe ? [`They like to be called ${setup.callMe}.`] : []),
-				];
+				const memories = setupMemories(setup);
 				for (const memory of memories) this.memory.store.append(memory, this.memory.today());
 				if (memories.length > 0) await this.startMemoryNap();
 				this.agents.introduce();

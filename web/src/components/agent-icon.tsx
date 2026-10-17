@@ -9,6 +9,8 @@ import {
   Camera,
   Cat,
   ChefHat,
+  ChevronLeft,
+  ChevronRight,
   Code,
   Coffee,
   Dog,
@@ -527,6 +529,231 @@ export function AgentLookPicker({
         </div>
       )}
     </fieldset>
+  );
+}
+
+/** Icons or emoji per page of the compact picker: six across, four down. */
+const PAGE = 24;
+
+/**
+ * Chooses an agent's look in a popover, without typing: pages of icons or
+ * emoji to step through with arrows, an image to upload, and a color for
+ * the first two. Every row follows the grid's six columns: the tabs span
+ * them, the arrows sit in the first and last, and the colors run between
+ * the centers of those two.
+ */
+export function CompactLookPicker({
+  value,
+  onChange,
+}: {
+  value: LookChoice;
+  onChange: (value: LookChoice) => void;
+}) {
+  const { t } = useI18n();
+  const [tab, setTab] = useState<"icon" | "emoji" | "image">(
+    value.image !== null
+      ? "image"
+      : value.symbol && !isIconName(value.symbol)
+        ? "emoji"
+        : "icon",
+  );
+  const listOf = (name: "icon" | "emoji" | "image") =>
+    name === "icon" ? Object.keys(ICONS) : EMOJIS;
+  const chosen = (name: "icon" | "emoji" | "image") =>
+    name === "icon" ? (value.symbol ?? "bot") : value.symbol;
+  // A tab opens on the page that shows what is chosen.
+  const pageFor = (name: "icon" | "emoji" | "image") =>
+    Math.max(0, Math.floor(listOf(name).indexOf(chosen(name) ?? "") / PAGE));
+  const symbols = listOf(tab);
+  const selected = (symbol: string) =>
+    value.image === null && chosen(tab) === symbol;
+  const [page, setPage] = useState(() => pageFor(tab));
+  const pages = Math.ceil(symbols.length / PAGE);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const tabs = [
+    ["icon", "lookIcon"],
+    ["emoji", "lookEmoji"],
+    ["image", "lookImage"],
+  ] as const;
+
+  return (
+    <div className="w-71 space-y-3">
+      <div
+        role="tablist"
+        aria-label={t("agentLook")}
+        className="grid grid-cols-3 rounded-lg bg-muted p-0.5"
+      >
+        {tabs.map(([name, label]) => (
+          <button
+            key={name}
+            type="button"
+            role="tab"
+            aria-selected={tab === name}
+            onClick={() => {
+              setTab(name);
+              setPage(pageFor(name));
+            }}
+            className={cn(
+              "rounded-md py-1 text-sm",
+              tab === name
+                ? "bg-background shadow-xs"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {t(label)}
+          </button>
+        ))}
+      </div>
+      {tab === "image" ? (
+        <div className="flex h-57 flex-col items-center justify-center gap-2 rounded-xl border border-dashed">
+          <input
+            ref={fileInput}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            aria-label={t("uploadIcon")}
+            onChange={async (event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (!file) return;
+              try {
+                onChange({ ...value, image: await iconFromFile(file) });
+              } catch {
+                toast.error(t("notAnImage"));
+              }
+            }}
+          />
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            onClick={() => fileInput.current?.click()}
+          >
+            <ImagePlus /> {t("uploadIcon")}
+          </Button>
+          {value.image !== null && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => onChange({ ...value, image: null })}
+            >
+              {t("removeIcon")}
+            </Button>
+          )}
+        </div>
+      ) : (
+        <div>
+          <div className="grid grid-cols-6 grid-rows-[repeat(4,2.75rem)] gap-1">
+            {symbols.slice(page * PAGE, (page + 1) * PAGE).map((symbol) => (
+              <button
+                key={symbol}
+                type="button"
+                aria-label={symbol}
+                aria-pressed={selected(symbol)}
+                title={symbol}
+                onClick={() =>
+                  onChange({
+                    ...value,
+                    // The robot is the default: choosing it chooses no icon.
+                    symbol: symbol === "bot" ? null : symbol,
+                    image: null,
+                  })
+                }
+                className={cn(
+                  "flex size-11 items-center justify-center rounded-lg",
+                  selected(symbol)
+                    ? "bg-accent ring-2 ring-ring"
+                    : "hover:bg-accent",
+                )}
+              >
+                <Glyph
+                  symbol={symbol}
+                  className={tab === "icon" ? "size-5" : "size-6"}
+                />
+              </button>
+            ))}
+          </div>
+          <div className="mt-2 grid grid-cols-6 place-items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              aria-label={t("previousIcons")}
+              disabled={page === 0}
+              onClick={() => setPage(page - 1)}
+            >
+              <ChevronLeft />
+            </Button>
+            <div
+              role="img"
+              aria-label={t("iconsPage", { page: page + 1, pages })}
+              className="col-span-4 flex gap-1.5"
+            >
+              {Array.from({ length: pages }, (_, index) => (
+                <span
+                  // biome-ignore lint/suspicious/noArrayIndexKey: pages are positions.
+                  key={index}
+                  className={cn(
+                    "size-1.5 rounded-full",
+                    index === page ? "bg-foreground" : "bg-border",
+                  )}
+                />
+              ))}
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              aria-label={t("nextIcons")}
+              disabled={page === pages - 1}
+              onClick={() => setPage(page + 1)}
+            >
+              <ChevronRight />
+            </Button>
+          </div>
+        </div>
+      )}
+      {value.image === null && (
+        <div
+          role="radiogroup"
+          aria-label={t("agentColor")}
+          className="flex justify-between px-3"
+        >
+          {[
+            {
+              color: null,
+              label: "defaultColor" as const,
+              swatch: "bg-primary",
+            },
+            ...Object.entries(COLORS).map(([color, { label, swatch }]) => ({
+              color,
+              label,
+              swatch,
+            })),
+          ].map(({ color, label, swatch }) => (
+            <button
+              key={color ?? "default"}
+              type="button"
+              role="radio"
+              aria-checked={value.color === color}
+              aria-label={t(label)}
+              title={t(label)}
+              onClick={() => onChange({ ...value, color })}
+              className={cn(
+                "size-5 rounded-full ring-offset-1 ring-offset-popover",
+                swatch,
+                value.color === color
+                  ? "ring-2 ring-ring"
+                  : "hover:ring-2 hover:ring-border",
+              )}
+            />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

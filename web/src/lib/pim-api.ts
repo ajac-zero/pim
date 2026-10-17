@@ -99,6 +99,16 @@ export type MajordomoState = { agent: Agent; introduced: boolean };
 /** How the majordomo talks. */
 export const MAJORDOMO_TONES = ["warm", "formal", "playful", "brief"] as const;
 
+/** What you can say you'd like a hand with. */
+export const MAJORDOMO_HELP_WITH = [
+  "work",
+  "home",
+  "health",
+  "money",
+  "learning",
+  "travel",
+] as const;
+
 /** How much the majordomo handles without asking you. */
 export const MAJORDOMO_INVOLVEMENT = [
   "close",
@@ -115,6 +125,8 @@ export type MajordomoSetup = {
   /** What it should call you, which it remembers. */
   callMe?: string | null;
   tone?: (typeof MAJORDOMO_TONES)[number] | null;
+  /** What you'd like a hand with, which it remembers. */
+  helpWith?: (typeof MAJORDOMO_HELP_WITH)[number][];
   involvement?: (typeof MAJORDOMO_INVOLVEMENT)[number] | null;
   /** The language your app is in, for its introduction. */
   locale: string;

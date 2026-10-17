@@ -4,7 +4,7 @@ import { ArrowLeft, Loader2, Pencil } from "lucide-react";
 import { type ReactNode, useEffect, useId, useState } from "react";
 import {
   AgentIcon,
-  AgentLookPicker,
+  CompactLookPicker,
   type LookChoice,
 } from "~/components/agent-icon";
 import { PimMark } from "~/components/app-sidebar";
@@ -18,6 +18,7 @@ import {
 } from "~/components/ui/popover";
 import {
   type Agent,
+  MAJORDOMO_HELP_WITH,
   MAJORDOMO_INVOLVEMENT,
   MAJORDOMO_TONES,
   MAX_PIM_NAME,
@@ -30,6 +31,7 @@ import { cn } from "~/lib/utils";
 
 type Tone = (typeof MAJORDOMO_TONES)[number];
 type Involvement = (typeof MAJORDOMO_INVOLVEMENT)[number];
+type HelpWith = (typeof MAJORDOMO_HELP_WITH)[number];
 
 const toneKey = {
   warm: "toneWarm",
@@ -38,16 +40,26 @@ const toneKey = {
   brief: "toneBrief",
 } as const;
 
-const involvementKeys = {
-  close: ["involvementClose", "involvementCloseHint"],
-  balanced: ["involvementBalanced", "involvementBalancedHint"],
-  hands_off: ["involvementHandsOff", "involvementHandsOffHint"],
+const involvementKey = {
+  close: "involvementClose",
+  balanced: "involvementBalanced",
+  hands_off: "involvementHandsOff",
+} as const;
+
+const helpWithKey = {
+  work: "helpWork",
+  home: "helpHome",
+  health: "helpHealth",
+  money: "helpMoney",
+  learning: "helpLearning",
+  travel: "helpTravel",
 } as const;
 
 /**
  * The first thing after joining: say your name, name your majordomo and
  * choose how it looks, then, if you like, pick how it should address you,
- * talk with you, and how much it handles on its own. Then it opens your
+ * how it should talk with you, what you'd like a hand with, and how much it
+ * handles on its own. Then it opens your
  * first chat by introducing itself, and you tell it the rest as you talk.
  */
 export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
@@ -66,6 +78,7 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
   const [callMe, setCallMe] = useState<string | null>(null);
   const [customCallMe, setCustomCallMe] = useState(false);
   const [tone, setTone] = useState<Tone | null>(null);
+  const [helpWith, setHelpWith] = useState<HelpWith[]>([]);
   const [involvement, setInvolvement] = useState<Involvement | null>(null);
   const [preview, setPreview] = useState<string>();
   useEffect(() => {
@@ -88,7 +101,9 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
         yourName: yourName.trim() || null,
         locale,
         title: t("welcomeChat", { name: addressed }),
-        ...(about ? { callMe: callMe?.trim() || null, tone, involvement } : {}),
+        ...(about
+          ? { callMe: callMe?.trim() || null, tone, helpWith, involvement }
+          : {}),
       };
       return pim.setUpMajordomo(setup);
     },
@@ -165,16 +180,13 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
                     className="relative shrink-0 rounded-xl outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40"
                   >
                     {icon}
-                    <span className="-right-1 -bottom-1 absolute flex size-5 items-center justify-center rounded-full bg-background shadow-sm ring-1 ring-border">
+                    <span className="-right-1.5 -bottom-1.5 absolute flex size-4.5 items-center justify-center rounded-full bg-background shadow-sm ring-1 ring-border">
                       <Pencil className="size-2.5" />
                     </span>
                   </button>
                 </PopoverTrigger>
-                <PopoverContent
-                  align="start"
-                  className="w-[26rem] max-w-[calc(100vw-2rem)]"
-                >
-                  <AgentLookPicker value={look} onChange={setLook} />
+                <PopoverContent align="start" className="w-auto p-3">
+                  <CompactLookPicker value={look} onChange={setLook} />
                 </PopoverContent>
               </Popover>
               <Input
@@ -258,37 +270,28 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
                 </Chip>
               ))}
             </Question>
-            <fieldset className="mt-6">
-              <legend className="font-medium text-sm">
-                {t("involvementLabel", { name: shown })}
-              </legend>
-              <div className="mt-2 grid gap-2">
-                {MAJORDOMO_INVOLVEMENT.map((choice) => {
-                  const [title, hint] = involvementKeys[choice];
-                  return (
-                    <button
-                      key={choice}
-                      type="button"
-                      aria-pressed={involvement === choice}
-                      onClick={() =>
-                        setInvolvement(involvement === choice ? null : choice)
-                      }
-                      className={cn(
-                        "rounded-xl px-3.5 py-2.5 text-left transition-colors",
-                        involvement === choice
-                          ? "bg-background ring-2 ring-ring"
-                          : "bg-secondary hover:bg-accent",
-                      )}
-                    >
-                      <span className="block text-sm">{t(title)}</span>
-                      <span className="block text-[13px] text-muted-foreground">
-                        {t(hint)}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </fieldset>
+            <Question label={t("helpWithLabel")}>
+              {MAJORDOMO_HELP_WITH.map((area) => (
+                <Chip
+                  key={area}
+                  selected={helpWith.includes(area)}
+                  onSelect={() =>
+                    setHelpWith(
+                      helpWith.includes(area)
+                        ? helpWith.filter((other) => other !== area)
+                        : [...helpWith, area],
+                    )
+                  }
+                >
+                  {t(helpWithKey[area])}
+                </Chip>
+              ))}
+            </Question>
+            <InvolvementBar
+              label={t("involvementLabel", { name: shown })}
+              value={involvement}
+              onChange={setInvolvement}
+            />
             <div className="mt-8 flex items-center gap-2">
               <Button
                 type="button"
@@ -364,5 +367,63 @@ function Chip({
     >
       {children}
     </button>
+  );
+}
+
+/**
+ * How much the majordomo handles on its own, as a bar of three steps: each
+ * step fills the bar up to it. Choosing the chosen one again clears it.
+ */
+function InvolvementBar({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: Involvement | null;
+  onChange: (value: Involvement | null) => void;
+}) {
+  const { t } = useI18n();
+  const level = value === null ? -1 : MAJORDOMO_INVOLVEMENT.indexOf(value);
+  return (
+    <fieldset className="mt-6">
+      <legend className="font-medium text-sm">{label}</legend>
+      <div
+        role="radiogroup"
+        aria-label={label}
+        className="mt-3 grid grid-cols-3 gap-1.5"
+      >
+        {MAJORDOMO_INVOLVEMENT.map((choice, index) => (
+          <button
+            key={choice}
+            type="button"
+            role="radio"
+            aria-checked={value === choice}
+            onClick={() => onChange(value === choice ? null : choice)}
+            className="group flex flex-col gap-2 rounded-md outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40"
+          >
+            <span
+              className={cn(
+                "h-2 w-full rounded-full transition-colors",
+                index <= level
+                  ? "bg-ring"
+                  : "bg-secondary group-hover:bg-accent",
+              )}
+            />
+            <span
+              className={cn(
+                "w-full text-[13px]",
+                ["text-left", "text-center", "text-right"][index],
+                value === choice
+                  ? "text-foreground"
+                  : "text-muted-foreground group-hover:text-foreground",
+              )}
+            >
+              {t(involvementKey[choice])}
+            </span>
+          </button>
+        ))}
+      </div>
+    </fieldset>
   );
 }

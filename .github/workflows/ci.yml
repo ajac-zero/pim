@@ -22,4 +22,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm lint
+      # The Chrome that stands in for Browser Run in the browser tests.
+      - run: node scripts/install-test-browser.mjs
       - run: pnpm test

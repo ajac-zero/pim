@@ -79,3 +79,4 @@ CONF
 }
 
 run_step 'Install UI fonts for browser screenshots' install_fonts
+run_step "Install the Chrome that stands in for Browser Run in tests and the preview" node scripts/install-test-browser.mjs

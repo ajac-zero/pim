@@ -37,6 +37,9 @@
     { "tag": "v3", "new_sqlite_classes": ["Directory"] },
     { "tag": "v4", "new_sqlite_classes": ["Gallery"] }
   ],
+  // The agents' web browser (Browser Run): one Chrome per person while they use it. The free plan
+  // allows 10 minutes of browser time a day; the paid plan includes 10 hours a month.
+  "browser": { "binding": "BROWSER" },
   // MCP clients' sign-ins to people's Pims: registered clients, grants and hashed tokens
   // (src/mcp-auth.ts). Deploying creates the namespace.
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],

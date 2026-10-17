@@ -2,6 +2,7 @@ import { type DirectoryApp, storedApps } from "./extensions/app-directory";
 import { ASSISTANT_BLUEPRINT } from "./extensions/assistant";
 import type { BlueprintDefinition } from "./extensions/define";
 import { HttpError } from "./http";
+import { SKILL_NAME } from "./skills";
 
 /**
  * The owner's agents: each with its own instructions, such as "Marathon
@@ -40,6 +41,8 @@ export type Agent = {
 	readonly instructions: string;
 	/** The apps it works with, by name in the directory: `<extension>/<app>`. */
 	readonly apps: readonly string[];
+	/** The person's skills it uses, by name (see ./skills.ts). */
+	readonly skills: readonly string[];
 	readonly team: readonly TeamMember[];
 	/** The blueprint it builds on, as `<extension>/<blueprint>`; null for none. */
 	readonly blueprint: string | null;
@@ -64,6 +67,7 @@ export type AgentInput = {
 	readonly description: string;
 	readonly instructions: string;
 	readonly apps: readonly string[];
+	readonly skills: readonly string[];
 	readonly team: readonly TeamMember[];
 	/** Left out, a new agent builds on the deployment's default blueprint and an edited one keeps its own. */
 	readonly blueprint?: string | null;
@@ -80,6 +84,7 @@ export const MAX_NAME = 60;
 export const MAX_DESCRIPTION = 280;
 export const MAX_INSTRUCTIONS = 8000;
 export const MAX_APPS = 10;
+export const MAX_AGENT_SKILLS = 20;
 export const MAX_TEAM = 8;
 export const MAX_MEMBER_NAME = 40;
 export const MAX_MEMBER_TOOLS = 50;
@@ -101,7 +106,8 @@ CREATE TABLE IF NOT EXISTS pim_agents (
 	blueprint TEXT,
 	symbol TEXT,
 	color TEXT,
-	introduced INTEGER NOT NULL DEFAULT 0
+	introduced INTEGER NOT NULL DEFAULT 0,
+	skills TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS pim_agent_icons (
 	agent TEXT PRIMARY KEY,
@@ -149,6 +155,7 @@ const agentOf = (row: Row, directory: () => readonly DirectoryApp[]): Agent => (
 	description: String(row.description),
 	instructions: String(row.instructions),
 	apps: storedApps(JSON.parse(String(row.apps)) as unknown[], directory),
+	skills: JSON.parse(String(row.skills)) as string[],
 	team: JSON.parse(String(row.team)) as TeamMember[],
 	blueprint: row.blueprint === null ? null : String(row.blueprint),
 	source: row.source ? (JSON.parse(String(row.source)) as Agent["source"]) : null,
@@ -190,6 +197,7 @@ export function agentInput(body: Record<string, unknown>, partial?: Agent): Agen
 				}),
 			),
 		],
+		skills: body.skills === undefined ? (partial?.skills ?? []) : skillsInput(body.skills),
 		team: body.team === undefined ? (partial?.team ?? []) : teamInput(body.team),
 		...(body.symbol === undefined ? {} : { symbol: symbolInput(body.symbol) }),
 		...(body.color === undefined ? {} : { color: colorInput(body.color) }),
@@ -207,6 +215,14 @@ function blueprintInput(value: unknown): string | null {
 		throw new HttpError(400, "blueprint must be an extension's blueprint, such as pim.assistant/pim, or null");
 	}
 	return value;
+}
+
+/** Skills as given: names of the person's skills. Whether each exists is the Pim's to check. */
+function skillsInput(value: unknown): string[] {
+	if (!Array.isArray(value) || value.length > MAX_AGENT_SKILLS || value.some((name) => typeof name !== "string" || !SKILL_NAME.test(name))) {
+		throw new HttpError(400, `skills must be a list of up to ${MAX_AGENT_SKILLS} skill names, such as weekly-report`);
+	}
+	return [...new Set(value as string[])];
 }
 
 /** A symbol as given: a named icon, which the app draws, or a single emoji; or null. */
@@ -285,6 +301,7 @@ export class AgentStore {
 		if (!columns.includes("color")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN color TEXT");
 		// Accounts from before majordomos already have the agent they talk with: it becomes theirs as it is.
 		if (!columns.includes("introduced")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN introduced INTEGER NOT NULL DEFAULT 1");
+		if (!columns.includes("skills")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN skills TEXT NOT NULL DEFAULT '[]'");
 		const sessionColumns = this.#sql.exec("PRAGMA table_info(pim_agent_sessions)").toArray().map((row) => String(row.name));
 		if (!sessionColumns.includes("handed_by")) this.#sql.exec("ALTER TABLE pim_agent_sessions ADD COLUMN handed_by TEXT");
 		if (!sessionColumns.includes("handoff")) this.#sql.exec("ALTER TABLE pim_agent_sessions ADD COLUMN handoff TEXT");
@@ -327,12 +344,13 @@ export class AgentStore {
 		const id = `p_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT INTO pim_agents (id, name, description, instructions, apps, team, blueprint, symbol, color, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+			"INSERT INTO pim_agents (id, name, description, instructions, apps, skills, team, blueprint, symbol, color, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
 			id,
 			input.name,
 			input.description,
 			input.instructions,
 			JSON.stringify(input.apps),
+			JSON.stringify(input.skills),
 			JSON.stringify(input.team),
 			input.blueprint === undefined ? (this.#starter().blueprint ?? null) : input.blueprint,
 			input.symbol ?? null,
@@ -347,11 +365,12 @@ export class AgentStore {
 
 	update(id: string, input: AgentInput): Agent {
 		this.#sql.exec(
-			"UPDATE pim_agents SET name = ?, description = ?, instructions = ?, apps = ?, team = ?, updated_at = ? WHERE id = ?",
+			"UPDATE pim_agents SET name = ?, description = ?, instructions = ?, apps = ?, skills = ?, team = ?, updated_at = ? WHERE id = ?",
 			input.name,
 			input.description,
 			input.instructions,
 			JSON.stringify(input.apps),
+			JSON.stringify(input.skills),
 			JSON.stringify(input.team),
 			Date.now(),
 			id,

@@ -102,7 +102,7 @@ describe("an agent's team", () => {
 		expect(seen.Researcher!.prompt).not.toContain("Plan trips in detail.");
 		expect(seen.Researcher!.task).toBe("Find the best month to visit Lisbon.");
 		expect(seen.Researcher!.tools).toContain("current_time");
-		for (const tool of ["send_to_user", "delegate", "schedule_task", "watch_app_event", "create_agent", "update_agent", "rename_agent", "manage_apps"]) expect(seen.Researcher!.tools).not.toContain(tool);
+		for (const tool of ["send_to_user", "delegate", "schedule_task", "watch_app_event", "create_agent", "update_agent", "rename_agent", "manage_apps", "write_skill"]) expect(seen.Researcher!.tools).not.toContain(tool);
 		expect(seen.Writer!.tools).toEqual(["current_time"]);
 		// Their answers come back together, by name.
 		expect(results).toContain("## Researcher\\nMay: mild and before the crowds.");

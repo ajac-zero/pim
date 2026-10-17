@@ -3170,14 +3170,19 @@ export class Pim extends DurableAgent<Env> {
 				if (this.agents.introduced()) throw new HttpError(409, "Your majordomo already has a name");
 				const setup = majordomoSetup(await readJson<Record<string, unknown>>(request));
 				const majordomo = this.agents.majordomo();
-				const { name, symbol, color } = setup;
-				this.agents.update(majordomo.id, agentInput({ name, symbol, color }, majordomo));
-				if (setup.yourName) {
-					this.memory.store.append(`Their name is ${setup.yourName}.`, this.memory.today());
-					await this.startMemoryNap();
-				}
+				const { name, symbol, color, instructions } = setup;
+				this.agents.update(majordomo.id, agentInput({ name, symbol, color, instructions }, majordomo));
+				const memories = [
+					...(setup.yourName ? [`Their name is ${setup.yourName}.`] : []),
+					...(setup.callMe ? [`They like to be called ${setup.callMe}.`] : []),
+				];
+				for (const memory of memories) this.memory.store.append(memory, this.memory.today());
+				if (memories.length > 0) await this.startMemoryNap();
 				this.agents.introduce();
 				// It opens the person's first chat by introducing itself; they answer with whatever they like it to know.
+				const welcomed = setup.callMe ?? setup.yourName;
+				const title = setup.title ?? (welcomed ? `Welcome, ${welcomed}` : null);
+				if (title) this.store.renameSession(ROOT_SESSION, title);
 				try {
 					await this.submitTo(ROOT_SESSION, introduction(this.agents.majordomo(), setup), { operationId: "introduction" }, "pim");
 				} catch (error) {

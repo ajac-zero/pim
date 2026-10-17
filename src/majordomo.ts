@@ -130,29 +130,72 @@ export function reviewExtension(host: ReviewHost) {
 	});
 }
 
-/** The person naming their majordomo, as given through the API: its name and look, and the person's own name if they gave it. */
+/** How the majordomo talks, as the person chose when they named it: part of its instructions. */
+const TONES: Record<string, string> = {
+	warm: "Talk with them warmly, like a trusted friend who happens to be very capable.",
+	formal: "Talk with them formally and politely, like a seasoned butler.",
+	playful: "Talk with them playfully, with a light touch of humor.",
+	brief: "Talk with them briefly and to the point, without small talk.",
+};
+
+/** How much the majordomo handles without asking the person, as they chose: part of its instructions. */
+const INVOLVEMENT: Record<string, string> = {
+	close:
+		"Keep them closely involved: check with them before starting work for them, and ask them about their agents' approval requests unless one is trivial and plainly what they asked for.",
+	balanced: "Handle the routine for them and check with them on the rest, including their agents' approval requests.",
+	hands_off:
+		"Take as much off their hands as you can: go ahead without checking in whenever you can tell what they want, and decide their agents' approval requests yourself unless they truly need to, such as when money is spent or someone else hears from them.",
+};
+
+/** The person naming their majordomo, as given through the API: its name and look, theirs, and a few optional choices. */
 export type MajordomoSetup = {
 	readonly name: string;
 	readonly symbol?: string | null;
 	readonly color?: string | null;
 	/** What the person is called, which it remembers. */
 	readonly yourName: string | null;
+	/** What they like to be called, which it remembers. */
+	readonly callMe: string | null;
+	/** Its instructions: how it talks and how much it handles on its own. */
+	readonly instructions: string;
 	/** The language of the person's app, such as `es`, for its introduction. */
 	readonly locale: string | null;
+	/** The title of the chat it opens, in that language. */
+	readonly title: string | null;
 };
 
 const LOCALE = /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
 
+function line(value: unknown, field: string, max: number): string | null {
+	if (value === undefined || value === null) return null;
+	if (typeof value !== "string" || /[\r\n]/.test(value) || value.trim().length > max) {
+		throw new HttpError(400, `${field} must be one line of at most ${max} characters`);
+	}
+	return value.trim() || null;
+}
+
+function choice(value: unknown, field: string, choices: Record<string, string>): string | null {
+	if (value === undefined || value === null) return null;
+	if (typeof value !== "string" || !Object.hasOwn(choices, value)) throw new HttpError(400, `${field} must be one of ${Object.keys(choices).join(", ")}, or null`);
+	return choices[value]!;
+}
+
 /** A majordomo's setup as given; checked, so nothing is applied when any of it is refused. */
 export function majordomoSetup(body: Record<string, unknown>): MajordomoSetup {
 	const { name, symbol, color } = agentInput({ name: body.name, symbol: body.symbol ?? null, color: body.color ?? null });
-	const yourName = body.yourName ?? null;
-	if (yourName !== null && (typeof yourName !== "string" || /[\r\n]/.test(yourName) || yourName.trim().length > 80)) {
-		throw new HttpError(400, "yourName must be one line of at most 80 characters");
-	}
 	const locale = body.locale ?? null;
 	if (locale !== null && (typeof locale !== "string" || !LOCALE.test(locale))) throw new HttpError(400, "locale must be a language tag, such as en or es");
-	return { name, symbol, color, yourName: (yourName as string | null)?.trim() || null, locale: locale as string | null };
+	const instructions = [choice(body.tone, "tone", TONES), choice(body.involvement, "involvement", INVOLVEMENT)].filter((part) => part !== null);
+	return {
+		name,
+		symbol,
+		color,
+		yourName: line(body.yourName, "yourName", 80),
+		callMe: line(body.callMe, "callMe", 80),
+		instructions: instructions.join("\n"),
+		locale: locale as string | null,
+		title: line(body.title, "title", 100),
+	};
 }
 
 /**
@@ -162,9 +205,20 @@ export function majordomoSetup(body: Record<string, unknown>): MajordomoSetup {
  * its prefix is `INTRODUCTION` (see ./transcript.ts).
  */
 export function introduction(majordomo: Agent, setup: MajordomoSetup): string {
+	const known = [
+		...(setup.yourName ? [`Their name is ${setup.yourName}.`] : []),
+		...(setup.callMe ? [`They like to be called ${setup.callMe}.`] : []),
+	];
+	const ask = [
+		...(setup.callMe ? [] : ["what to call them"]),
+		"what they do",
+		"the people and routines in their life",
+		"what they'd like a hand with",
+		...(setup.instructions === "" ? ["how they'd like you to talk"] : []),
+	];
 	return [
-		`${INTRODUCTION} The person just joined and named you ${majordomo.name}.${setup.yourName ? ` Their name is ${setup.yourName}.` : ""} This is your first conversation, and you start it.`,
+		`${INTRODUCTION} The person just joined and named you ${majordomo.name}.${known.length > 0 ? ` ${known.join(" ")}` : ""} This is your first conversation, and you start it.`,
 		...(setup.locale && !setup.locale.startsWith("en") ? [`Their app is in the language with the code "${setup.locale}": write to them in it.`] : []),
-		`Introduce yourself with send_to_user in a few short sentences: greet them${setup.yourName ? " by name" : ""}, say who you are and what you're for (they can come to you for almost anything; you get to know them, set up agents for the bigger jobs, and look after the approvals those agents ask for), and invite them to tell you about themselves, as much or as little as they like: what to call you and them, what they do, the people and routines in their life, how they'd like you to talk. End with one light question to get them going, not a list of questions. Note what they tell you as it comes.`,
+		`Introduce yourself with send_to_user in a few short sentences: greet them${known.length > 0 ? " by name" : ""}, say who you are and what you're for (they can come to you for almost anything; you get to know them, set up agents for the bigger jobs, and look after the approvals those agents ask for), and invite them to tell you about themselves, as much or as little as they like, such as ${ask.join(", ")}. End with one light question to get them going, not a list of questions. Note what they tell you as it comes.`,
 	].join("\n\n");
 }

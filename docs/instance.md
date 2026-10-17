@@ -52,7 +52,7 @@ People on the same Pim can share with each other: circles let others message you
 
 ## Running it
 
-The admin manages the Pim in Settings → People on this Pim: invite someone, make a setup link, suspend or restore an account, delete one. Settings → Sign-in methods shows which of Google, GitHub and a custom OpenID Connect provider the deployment's `PIM_<PROVIDER>_*` secrets turn on, and how to set one up (see [Deploy](../README.md#deploy)). The same is in the API, under `/api/admin`, for the admin signed in to the app; an API token can't run the instance:
+The admin manages the Pim in Settings → Members: invite someone, make a setup link, suspend or restore an account, delete one. The same tab shows which of Google, GitHub and a custom OpenID Connect provider the deployment's `PIM_<PROVIDER>_*` secrets turn on, and how to set one up (see [Deploy](../README.md#deploy)). The same is in the API, under `/api/admin`, for the admin signed in to the app; an API token can't run the instance:
 
 | Method | Path | Body | Does |
 | --- | --- | --- | --- |

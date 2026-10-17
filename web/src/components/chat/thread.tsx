@@ -302,7 +302,16 @@ export const Thread = memo(function Thread({
                         </Button>
                       )}
                       <Button asChild size="sm" variant="outline">
-                        <Link to="/settings">{t("settings")}</Link>
+                        <Link
+                          to="."
+                          search={(prev) => ({
+                            ...prev,
+                            dialog: "settings",
+                            tab: "model",
+                          })}
+                        >
+                          {t("settings")}
+                        </Link>
                       </Button>
                     </div>
                   )}

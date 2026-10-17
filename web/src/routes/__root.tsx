@@ -17,6 +17,12 @@ import { AppSidebar, sessionTitle } from "~/components/app-sidebar";
 import { SummaryToggle } from "~/components/chat/summary";
 import { I18nProvider, useI18n } from "~/components/i18n";
 import { RouteError } from "~/components/route-error";
+import {
+  SETTINGS_TABS,
+  SettingsDialog,
+  type SettingsTab,
+} from "~/components/settings-dialog";
+import { SharingDialog } from "~/components/sharing-dialog";
 import { SignIn } from "~/components/sign-in";
 import { ThemeProvider } from "~/components/theme";
 import { Button } from "~/components/ui/button";
@@ -31,7 +37,21 @@ export interface RouterContext {
   queryClient: QueryClient;
 }
 
+/**
+ * Settings and Sharing open as dialogs over any page, named in the URL so
+ * links and redirects can open them: `?dialog=settings&tab=model`.
+ */
+type AppSearch = { dialog?: "settings" | "sharing"; tab?: SettingsTab };
+
 export const Route = createRootRouteWithContext<RouterContext>()({
+  validateSearch: (search: Record<string, unknown>): AppSearch => ({
+    ...((search.dialog === "settings" || search.dialog === "sharing") && {
+      dialog: search.dialog,
+    }),
+    ...(SETTINGS_TABS.includes(search.tab as SettingsTab) && {
+      tab: search.tab as SettingsTab,
+    }),
+  }),
   component: Root,
 });
 
@@ -120,7 +140,7 @@ function usePimEvents() {
             queryClient.invalidateQueries({ queryKey: ["apps"] });
         }
         if (approval.requestedBy) {
-          // Someone in a circle asked: their request waits on the Sharing page.
+          // Someone in a circle asked: their request waits in Sharing.
           queryClient.invalidateQueries({ queryKey: ["guest-activity"] });
           queryClient.invalidateQueries({ queryKey: ["notifications"] });
           if (approval.status !== "pending") return;
@@ -133,7 +153,11 @@ function usePimEvents() {
               description: approval.summary,
               action: {
                 label: t("review"),
-                onClick: () => navigate({ to: "/sharing" }),
+                onClick: () =>
+                  navigate({
+                    to: ".",
+                    search: (prev) => ({ ...prev, dialog: "sharing" }),
+                  }),
               },
             },
           );
@@ -241,6 +265,30 @@ function AppLayout() {
 
         <Outlet />
       </div>
+      <AppDialogs />
     </div>
+  );
+}
+
+function AppDialogs() {
+  const { dialog, tab } = Route.useSearch();
+  const navigate = useNavigate();
+  const close = (open: boolean) => {
+    if (open) return;
+    navigate({
+      to: ".",
+      search: ({ dialog: _, tab: __, ...rest }) => rest,
+      replace: true,
+    });
+  };
+  return (
+    <>
+      <SettingsDialog
+        open={dialog === "settings"}
+        tab={tab}
+        onOpenChange={close}
+      />
+      <SharingDialog open={dialog === "sharing"} onOpenChange={close} />
+    </>
   );
 }

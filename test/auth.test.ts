@@ -623,12 +623,12 @@ describe("signing in with another account", () => {
 
 	it("links an account once on this Pim, and unlinking it ends its sessions", async () => {
 		const ana = await adminOn();
-		expect(await viaProvider(ana.browser, "google")).toMatchObject({ to: "/settings", error: undefined });
+		expect(await viaProvider(ana.browser, "google")).toMatchObject({ to: "/?dialog=settings&tab=account", error: undefined });
 		const { identities } = (await ana.browser.json<{ identities: { id: string; provider: string; label: string }[] }>("/auth/identities")).body;
 		expect(identities).toMatchObject([{ provider: "google", label: "ana@example.com" }]);
 
 		const ben = await person("ben", deployed(DAY, PROVIDERS));
-		expect(await viaProvider(ben.browser, "google")).toMatchObject({ to: "/settings", error: "That Google account already signs in to someone else on this Pim." });
+		expect(await viaProvider(ben.browser, "google")).toMatchObject({ to: "/?dialog=settings&tab=account", error: "That Google account already signs in to someone else on this Pim." });
 
 		const phone = on();
 		await viaProvider(phone, "google");

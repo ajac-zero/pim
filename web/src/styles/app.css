@@ -90,9 +90,6 @@
     @apply bg-background text-foreground antialiased;
     font-feature-settings: "cv11", "ss01";
   }
-  html {
-    scrollbar-gutter: stable;
-  }
 }
 
 /* Thin, unobtrusive scrollbars like ChatGPT */

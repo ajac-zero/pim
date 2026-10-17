@@ -191,6 +191,7 @@ describe("extensions", () => {
 			yourName: "Ana Souza",
 			callMe: "Anita",
 			tone: "formal",
+			helpWith: ["travel", "work", "money"],
 			involvement: "close",
 			locale: "es",
 			title: "Te damos la bienvenida, Anita",
@@ -201,6 +202,7 @@ describe("extensions", () => {
 			{ ...setup, locale: "Spanish!" },
 			{ ...setup, tone: "grumpy" },
 			{ ...setup, involvement: "toString" },
+			{ ...setup, helpWith: ["work", "chores"] },
 		]) {
 			expect((await post("/majordomo", bad)).status).toBe(400);
 		}
@@ -223,17 +225,24 @@ describe("extensions", () => {
 			return body;
 		});
 		expect(intro.replies).toEqual(["¡Hola, Ana! Soy Alfred. Cuéntame de ti: ¿a qué te dedicas?"]);
-		expect(prompt).toMatch(/^\[Introduction\] The person just joined and named you Alfred\. Their name is Ana Souza\. They like to be called Anita\./);
+		expect(prompt).toMatch(
+			/^\[Introduction\] The person just joined and named you Alfred\. Their name is Ana Souza\. They like to be called Anita\. They'd like a hand with work, money and travel\./,
+		);
 		expect(prompt).toContain('"es"');
 		// What they already chose, it doesn't ask again.
 		expect(prompt).not.toContain("what to call them");
 		expect(prompt).not.toContain("how they'd like you to talk");
+		expect(prompt).not.toContain("what they'd like a hand with");
 		// How it talks and how much it handles alone are its instructions, theirs to edit later.
 		expect(named.agent.instructions).toContain("formally");
 		expect(named.agent.instructions).toContain("Keep them closely involved");
 		const memories = (await api("/memory/log")).body.entries.map((entry: { text: string }) => entry.text);
-		expect(memories.slice(0, 2).reverse()).toEqual(["Their name is Ana Souza.", "They like to be called Anita."]);
-		expect((await api("/memory")).body.count).toBe(before + 2);
+		expect(memories.slice(0, 3).reverse()).toEqual([
+			"Their name is Ana Souza.",
+			"They like to be called Anita.",
+			"They'd like a hand with work, money and travel.",
+		]);
+		expect((await api("/memory")).body.count).toBe(before + 3);
 		expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === "1").title).toBe("Te damos la bienvenida, Anita");
 		// Once: after that it is edited like any agent.
 		expect((await post("/majordomo", { name: "Jeeves" })).status).toBe(409);

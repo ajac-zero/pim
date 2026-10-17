@@ -147,6 +147,16 @@ const INVOLVEMENT: Record<string, string> = {
 		"Take as much off their hands as you can: go ahead without checking in whenever you can tell what they want, and decide their agents' approval requests yourself unless they truly need to, such as when money is spent or someone else hears from them.",
 };
 
+/** What the person can say they'd like a hand with, as it remembers each. */
+const HELP_WITH: Record<string, string> = {
+	work: "work",
+	home: "home and family",
+	health: "health and fitness",
+	money: "money",
+	learning: "learning",
+	travel: "travel",
+};
+
 /** The person naming their majordomo, as given through the API: its name and look, theirs, and a few optional choices. */
 export type MajordomoSetup = {
 	readonly name: string;
@@ -156,6 +166,8 @@ export type MajordomoSetup = {
 	readonly yourName: string | null;
 	/** What they like to be called, which it remembers. */
 	readonly callMe: string | null;
+	/** What they'd like a hand with, as `HELP_WITH` names it, which it remembers. */
+	readonly helpWith: readonly string[];
 	/** Its instructions: how it talks and how much it handles on its own. */
 	readonly instructions: string;
 	/** The language of the person's app, such as `es`, for its introduction. */
@@ -185,6 +197,10 @@ export function majordomoSetup(body: Record<string, unknown>): MajordomoSetup {
 	const { name, symbol, color } = agentInput({ name: body.name, symbol: body.symbol ?? null, color: body.color ?? null });
 	const locale = body.locale ?? null;
 	if (locale !== null && (typeof locale !== "string" || !LOCALE.test(locale))) throw new HttpError(400, "locale must be a language tag, such as en or es");
+	const helpWith = body.helpWith ?? [];
+	if (!Array.isArray(helpWith) || helpWith.some((area) => typeof area !== "string" || !Object.hasOwn(HELP_WITH, area))) {
+		throw new HttpError(400, `helpWith must list some of ${Object.keys(HELP_WITH).join(", ")}`);
+	}
 	const instructions = [choice(body.tone, "tone", TONES), choice(body.involvement, "involvement", INVOLVEMENT)].filter((part) => part !== null);
 	return {
 		name,
@@ -192,10 +208,22 @@ export function majordomoSetup(body: Record<string, unknown>): MajordomoSetup {
 		color,
 		yourName: line(body.yourName, "yourName", 80),
 		callMe: line(body.callMe, "callMe", 80),
+		helpWith: Object.keys(HELP_WITH).filter((area) => helpWith.includes(area)).map((area) => HELP_WITH[area]!),
 		instructions: instructions.join("\n"),
 		locale: locale as string | null,
 		title: line(body.title, "title", 100),
 	};
+}
+
+/** What it remembers from the setup, one memory each. */
+export function setupMemories(setup: MajordomoSetup): string[] {
+	const [last, ...rest] = [...setup.helpWith].reverse();
+	const areas = rest.length === 0 ? last : `${rest.reverse().join(", ")} and ${last}`;
+	return [
+		...(setup.yourName ? [`Their name is ${setup.yourName}.`] : []),
+		...(setup.callMe ? [`They like to be called ${setup.callMe}.`] : []),
+		...(areas ? [`They'd like a hand with ${areas}.`] : []),
+	];
 }
 
 /**
@@ -205,20 +233,17 @@ export function majordomoSetup(body: Record<string, unknown>): MajordomoSetup {
  * its prefix is `INTRODUCTION` (see ./transcript.ts).
  */
 export function introduction(majordomo: Agent, setup: MajordomoSetup): string {
-	const known = [
-		...(setup.yourName ? [`Their name is ${setup.yourName}.`] : []),
-		...(setup.callMe ? [`They like to be called ${setup.callMe}.`] : []),
-	];
+	const known = setupMemories(setup);
 	const ask = [
 		...(setup.callMe ? [] : ["what to call them"]),
+		...(setup.helpWith.length > 0 ? ["more about those parts of their life"] : ["what they'd like a hand with"]),
 		"what they do",
 		"the people and routines in their life",
-		"what they'd like a hand with",
 		...(setup.instructions === "" ? ["how they'd like you to talk"] : []),
 	];
 	return [
 		`${INTRODUCTION} The person just joined and named you ${majordomo.name}.${known.length > 0 ? ` ${known.join(" ")}` : ""} This is your first conversation, and you start it.`,
 		...(setup.locale && !setup.locale.startsWith("en") ? [`Their app is in the language with the code "${setup.locale}": write to them in it.`] : []),
-		`Introduce yourself with send_to_user in a few short sentences: greet them${known.length > 0 ? " by name" : ""}, say who you are and what you're for (they can come to you for almost anything; you get to know them, set up agents for the bigger jobs, and look after the approvals those agents ask for), and invite them to tell you about themselves, as much or as little as they like, such as ${ask.join(", ")}. End with one light question to get them going, not a list of questions. Note what they tell you as it comes.`,
+		`Introduce yourself with send_to_user in a few short sentences: greet them${setup.yourName || setup.callMe ? " by name" : ""}, say who you are and what you're for (they can come to you for almost anything; you get to know them, set up agents for the bigger jobs, and look after the approvals those agents ask for), and invite them to tell you about themselves, as much or as little as they like, such as ${ask.join(", ")}. End with one light question to get them going, not a list of questions. Note what they tell you as it comes.`,
 	].join("\n\n");
 }

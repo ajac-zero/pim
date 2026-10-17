@@ -157,6 +157,9 @@ const HELP_WITH: Record<string, string> = {
 	travel: "travel",
 };
 
+/** How many things in their own words they can add to what they'd like a hand with. */
+const MAX_OTHER_HELP = 6;
+
 /** The person naming their majordomo, as given through the API: its name and look, theirs, and a few optional choices. */
 export type MajordomoSetup = {
 	readonly name: string;
@@ -205,13 +208,15 @@ export function majordomoSetup(body: Record<string, unknown>): MajordomoSetup {
 		customTone && `Talk with them the way they asked, in their words: ${customTone}`,
 		choice(body.involvement, "involvement", INVOLVEMENT),
 	].filter((part) => part !== null);
-	const otherHelp = line(body.otherHelp, "otherHelp", 120);
+	const others = body.otherHelp ?? [];
+	if (!Array.isArray(others) || others.length > MAX_OTHER_HELP) throw new HttpError(400, `otherHelp must list at most ${MAX_OTHER_HELP} things`);
+	const otherHelp = [...new Set(others.map((other) => line(other, "otherHelp", 120)).filter((other) => other !== null))];
 	return {
 		name,
 		symbol,
 		color,
 		yourName: line(body.yourName, "yourName", 80),
-		helpWith: [...Object.keys(HELP_WITH).filter((area) => helpWith.includes(area)).map((area) => HELP_WITH[area]!), ...(otherHelp ? [otherHelp] : [])],
+		helpWith: [...Object.keys(HELP_WITH).filter((area) => helpWith.includes(area)).map((area) => HELP_WITH[area]!), ...otherHelp],
 		instructions: instructions.join("\n"),
 		locale: locale as string | null,
 		title: line(body.title, "title", 100),

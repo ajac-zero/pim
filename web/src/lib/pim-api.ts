@@ -127,8 +127,8 @@ export type MajordomoSetup = {
   customTone?: string | null;
   /** What you'd like a hand with, which it remembers. */
   helpWith?: (typeof MAJORDOMO_HELP_WITH)[number][];
-  /** Anything else you'd like a hand with, in your words. */
-  otherHelp?: string | null;
+  /** Anything else you'd like a hand with, in your words: a few things at most. */
+  otherHelp?: string[];
   involvement?: (typeof MAJORDOMO_INVOLVEMENT)[number] | null;
   /** The language your app is in, for its introduction. */
   locale: string;

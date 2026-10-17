@@ -34,6 +34,9 @@ type Tone = (typeof MAJORDOMO_TONES)[number];
 type Involvement = (typeof MAJORDOMO_INVOLVEMENT)[number];
 type HelpWith = (typeof MAJORDOMO_HELP_WITH)[number];
 
+/** How many things in their own words they can add to what they'd like a hand with, as the API allows. */
+const MAX_OTHER_HELP = 6;
+
 const toneKey = {
   warm: "toneWarm",
   formal: "toneFormal",
@@ -83,7 +86,7 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
   const [tone, setTone] = useState<Tone | null>(null);
   const [customTone, setCustomTone] = useState<string | null>(null);
   const [helpWith, setHelpWith] = useState<HelpWith[]>([]);
-  const [otherHelp, setOtherHelp] = useState<string | null>(null);
+  const [otherHelp, setOtherHelp] = useState<string[]>([]);
   const [involvement, setInvolvement] = useState<Involvement | null>(null);
   const [preview, setPreview] = useState<string>();
   useEffect(() => {
@@ -298,11 +301,36 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
                   {t(helpWithKey[area])}
                 </Check>
               ))}
-              <WriteYourOwn
-                shape="box"
-                value={otherHelp}
-                onChange={setOtherHelp}
-              />
+              {otherHelp.map((other, index) => (
+                <WriteYourOwn
+                  key={other}
+                  shape="box"
+                  value={other}
+                  // Emptied, or made the same as another, it goes.
+                  onChange={(text) =>
+                    setOtherHelp(
+                      text === null ||
+                        otherHelp.some(
+                          (kept, at) => at !== index && kept === text,
+                        )
+                        ? otherHelp.filter((_, at) => at !== index)
+                        : otherHelp.map((kept, at) =>
+                            at === index ? text : kept,
+                          ),
+                    )
+                  }
+                />
+              ))}
+              {otherHelp.length < MAX_OTHER_HELP && (
+                <WriteYourOwn
+                  shape="box"
+                  value={null}
+                  onChange={(text) => {
+                    if (text !== null && !otherHelp.includes(text))
+                      setOtherHelp([...otherHelp, text]);
+                  }}
+                />
+              )}
             </Question>
             <InvolvementBar
               label={t("involvementLabel", { name: shown })}
@@ -351,10 +379,11 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
 }
 
 /**
- * The last choice of a question: a pencil that turns, in place, into a
- * field the size of a choice for an answer in their own words. Enter or
- * leaving it keeps the answer, shown as a chosen choice that opens again to
- * edit; Escape, or emptying it, takes it back. `box` matches `Check`.
+ * A pencil that turns, in place, into a field the size of a choice for an
+ * answer in their own words. Enter or leaving it keeps the answer, shown as
+ * a chosen choice that opens again to edit; Escape, or emptying it, takes it
+ * back. A question that takes several answers shows one per answer and a
+ * last one to add another. `box` matches `Check`.
  */
 function WriteYourOwn({
   shape,

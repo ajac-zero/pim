@@ -184,8 +184,24 @@ describe("extensions", () => {
 		expect(first).toMatchObject({ name: "Majordomo", majordomo: true, instructions: "" });
 
 		// Refused in any part, none of it is applied.
-		const setup = { name: "Alfred", symbol: "🎩", color: "violet", yourName: "Ana Souza", locale: "es" };
-		for (const bad of [{ ...setup, name: " " }, { ...setup, yourName: "Ana\nSouza" }, { ...setup, locale: "Spanish!" }]) {
+		const setup = {
+			name: "Alfred",
+			symbol: "🎩",
+			color: "violet",
+			yourName: "Ana Souza",
+			callMe: "Anita",
+			tone: "formal",
+			involvement: "close",
+			locale: "es",
+			title: "Te damos la bienvenida, Anita",
+		};
+		for (const bad of [
+			{ ...setup, name: " " },
+			{ ...setup, yourName: "Ana\nSouza" },
+			{ ...setup, locale: "Spanish!" },
+			{ ...setup, tone: "grumpy" },
+			{ ...setup, involvement: "toString" },
+		]) {
 			expect((await post("/majordomo", bad)).status).toBe(400);
 		}
 		expect((await api("/majordomo")).body).toMatchObject({ agent: { name: "Majordomo" }, introduced: false });
@@ -207,11 +223,18 @@ describe("extensions", () => {
 			return body;
 		});
 		expect(intro.replies).toEqual(["¡Hola, Ana! Soy Alfred. Cuéntame de ti: ¿a qué te dedicas?"]);
-		expect(prompt).toMatch(/^\[Introduction\] The person just joined and named you Alfred\. Their name is Ana Souza\./);
+		expect(prompt).toMatch(/^\[Introduction\] The person just joined and named you Alfred\. Their name is Ana Souza\. They like to be called Anita\./);
 		expect(prompt).toContain('"es"');
+		// What they already chose, it doesn't ask again.
+		expect(prompt).not.toContain("what to call them");
+		expect(prompt).not.toContain("how they'd like you to talk");
+		// How it talks and how much it handles alone are its instructions, theirs to edit later.
+		expect(named.agent.instructions).toContain("formally");
+		expect(named.agent.instructions).toContain("Keep them closely involved");
 		const memories = (await api("/memory/log")).body.entries.map((entry: { text: string }) => entry.text);
-		expect(memories[0]).toBe("Their name is Ana Souza.");
-		expect((await api("/memory")).body.count).toBe(before + 1);
+		expect(memories.slice(0, 2).reverse()).toEqual(["Their name is Ana Souza.", "They like to be called Anita."]);
+		expect((await api("/memory")).body.count).toBe(before + 2);
+		expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === "1").title).toBe("Te damos la bienvenida, Anita");
 		// Once: after that it is edited like any agent.
 		expect((await post("/majordomo", { name: "Jeeves" })).status).toBe(409);
 

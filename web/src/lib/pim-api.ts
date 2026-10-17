@@ -96,14 +96,30 @@ export type TeamRun = {
 
 export type MajordomoState = { agent: Agent; introduced: boolean };
 
+/** How the majordomo talks. */
+export const MAJORDOMO_TONES = ["warm", "formal", "playful", "brief"] as const;
+
+/** How much the majordomo handles without asking you. */
+export const MAJORDOMO_INVOLVEMENT = [
+  "close",
+  "balanced",
+  "hands_off",
+] as const;
+
 export type MajordomoSetup = {
   name: string;
   symbol: string | null;
   color: string | null;
-  /** What to call you, which it remembers. */
+  /** Your name, which it remembers. */
   yourName: string | null;
+  /** What it should call you, which it remembers. */
+  callMe?: string | null;
+  tone?: (typeof MAJORDOMO_TONES)[number] | null;
+  involvement?: (typeof MAJORDOMO_INVOLVEMENT)[number] | null;
   /** The language your app is in, for its introduction. */
   locale: string;
+  /** The title of the chat it opens. */
+  title?: string;
 };
 
 /** How long an agent's name may be. */

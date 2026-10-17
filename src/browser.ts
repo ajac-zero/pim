@@ -83,12 +83,13 @@ const READ_PAGE = `(([first, max]) => {
 		}
 		return ref;
 	};
-	const token = (el) => {
-		const role = roleOf(el);
+	// A control styled away behind its label (a custom checkbox) is clicked through the label, which gets its number.
+	const token = (el, control = el) => {
+		const role = roleOf(control);
 		let token = "[" + refOf(el) + " " + role + " “" + nameOf(el) + "”";
-		if (role === "checkbox" || role === "radio") token += el.checked ? " checked" : "";
-		else if (el.tagName === "SELECT") token += " = “" + clean(el.selectedOptions[0] && el.selectedOptions[0].text) + "”";
-		else if ((el.tagName === "INPUT" || el.tagName === "TEXTAREA") && el.value && el.type !== "password") token += " = “" + clean(el.value).slice(0, 80) + "”";
+		if (role === "checkbox" || role === "radio") token += control.checked ? " checked" : "";
+		else if (control.tagName === "SELECT") token += " = “" + clean(control.selectedOptions[0] && control.selectedOptions[0].text) + "”";
+		else if ((control.tagName === "INPUT" || control.tagName === "TEXTAREA") && control.value && control.type !== "password") token += " = “" + clean(control.value).slice(0, 80) + "”";
 		return token + "]";
 	};
 	const walk = (node) => {
@@ -99,6 +100,10 @@ const READ_PAGE = `(([first, max]) => {
 				continue;
 			}
 			if (child.nodeType !== 1 || SKIP.test(child.tagName) || !visible(child)) continue;
+			if (child.tagName === "LABEL" && child.control && !visible(child.control)) {
+				line += " " + token(child, child.control) + " ";
+				continue;
+			}
 			if (child.matches(INTERACTIVE)) {
 				line += " " + token(child) + " ";
 				continue;

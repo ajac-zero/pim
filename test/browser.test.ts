@@ -12,6 +12,7 @@ const FORM = `data:text/html;charset=utf-8,${encodeURIComponent(`<title>Orders</
 <label>Name <input id="name"></label>
 <a href="#menu">Menu</a>
 <button onclick="document.querySelector('h1').textContent = 'Ordered for ' + document.querySelector('#name').value">Order</button>
+<label><input type="checkbox" style="opacity:0">Extra bread</label>
 <button style="display:none">Hidden</button>`)}`;
 
 function lastToolResult(messages: readonly Message[]): string {
@@ -56,6 +57,8 @@ describe("the browser", () => {
 		expect(page).toContain("# Order soup");
 		expect(page).toContain("Tomato, 4 €.");
 		expect(page).not.toContain("Hidden");
+		// A checkbox drawn by its label is there to click, through the label.
+		expect(page).toMatch(/\[\d+ checkbox “Extra bread”\]/);
 		const name = refOf(page, "textbox", "Name");
 		const order = refOf(page, "button", "Order");
 

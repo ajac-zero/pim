@@ -144,6 +144,8 @@ export const MCP_CALLBACK_PATH = "/mcp/callback";
  * `<owner>.<nonce>`. Owner ids start with `o_`, so it is nobody's `/mcp/callback/<owner>`.
  */
 export const APPS_CALLBACK_PATH = `${MCP_CALLBACK_PATH}/apps`;
+/** Pim's client metadata document for sign-ins that take one, as `/mcp/client/<owner>`: it names that owner's callback. */
+export const MCP_CLIENT_PATH = "/mcp/client";
 /** Where apps deliver event webhooks, as `/mcp/events/<owner>/<watch id>`; signed, so served without the API token. The Pim sees `/mcp/events/<watch id>`. */
 export const MCP_EVENTS_PATH = "/mcp/events/";
 const WATCH_REFRESH_CALLBACK = "refreshAppWatch";
@@ -555,17 +557,22 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Signs in to MCP servers as the SDK does, registering Pim with each,
-	 * except for an app with a client the deployment registered beforehand
-	 * (see `McpAppDefinition.client`): that client, with no registration.
+	 * except for an app whose definition says otherwise (see
+	 * `McpAppDefinition.client`): the client the deployment registered
+	 * beforehand, or Pim's client metadata document.
 	 */
 	override createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
-		const registered = (serverId: string) => {
+		const clientOf = (serverId: string) => {
 			const url = this.getMcpServers().servers[serverId]?.server_url;
 			const app = this.appDirectory().find((candidate) => candidate.url !== null && candidate.url === url);
 			const definition = app && this.extensions.app(app.ref);
-			const client = definition && !isNativeApp(definition) ? definition.client : undefined;
-			if (!client) return undefined;
-			const env = this.#env(secretsOf(definition));
+			return definition && !isNativeApp(definition) ? definition.client : undefined;
+		};
+		const metadataDocument = new URL(`${MCP_CLIENT_PATH}/${this.name}`, callbackUrl).href;
+		const registered = (serverId: string) => {
+			const client = clientOf(serverId);
+			if (typeof client !== "object") return undefined;
+			const env = this.#env([client.id, ...(client.secret ? [client.secret] : [])]);
 			return {
 				client_id: env[client.id]!,
 				...(client.secret ? { client_secret: env[client.secret]!, token_endpoint_auth_method: "client_secret_post" } : {}),
@@ -579,6 +586,11 @@ export class Pim extends DurableAgent<Env> {
 			override get clientMetadata() {
 				const { client_uri: _origin, ...metadata } = super.clientMetadata;
 				return { ...metadata, client_name: "Pim" };
+			}
+
+			// The SDK names Pim by it when the sign-in takes metadata documents.
+			get clientMetadataUrl() {
+				return clientOf(this.serverId) === "metadata-document" ? metadataDocument : undefined;
 			}
 
 			override async clientInformation(context?: Parameters<DurableObjectOAuthClientProvider["clientInformation"]>[0]) {

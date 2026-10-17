@@ -4,10 +4,10 @@ import { LOGOS } from "./logos";
 /**
  * Popular apps with remote MCP servers of their own, which each person
  * connects with their own account. Every one lets Pim register itself at
- * sign-in except GitHub's: it's offered once the deployment registers an
- * OAuth app at github.com/settings/developers, with this Pim's
- * `/mcp/callback` as its callback URL, and sets GITHUB_CLIENT_ID and
- * GITHUB_CLIENT_SECRET.
+ * sign-in except two. Amp's takes Pim's client metadata document instead.
+ * GitHub's is offered once the deployment registers an OAuth app at
+ * github.com/settings/developers, with this Pim's `/mcp/callback` as its
+ * callback URL, and sets GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET.
  *
  * Left out, because their servers only take clients they approved: Canva,
  * Dropbox, Figma, Ramp, Square, Vercel and Zapier.
@@ -24,6 +24,16 @@ export const popularApps = definePimExtension({
 			url: "https://mcp.airtable.com/mcp",
 			icon: LOGOS["airtable"],
 			category: "productivity",
+		},
+		{
+			id: "amp",
+			name: "Amp",
+			description: "Hand work to Puck and check on your Amp agents and orbs.",
+			url: "https://ampcode.com/mcp",
+			// Amp's sign-in takes client metadata documents, not registrations.
+			client: "metadata-document",
+			icon: LOGOS["amp"],
+			category: "development",
 		},
 		{
 			id: "atlassian",
@@ -89,6 +99,14 @@ export const popularApps = definePimExtension({
 			description: "Search the web and read pages and code examples.",
 			url: "https://mcp.exa.ai/mcp?login",
 			icon: LOGOS["exa"],
+			category: "research",
+		},
+		{
+			id: "firecrawl",
+			name: "Firecrawl",
+			description: "Search, scrape and crawl the web into clean data.",
+			url: "https://mcp.firecrawl.dev/v2/mcp-oauth",
+			icon: LOGOS["firecrawl"],
 			category: "research",
 		},
 		{

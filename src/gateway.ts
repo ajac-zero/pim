@@ -1,10 +1,11 @@
 import { getAgentByName } from "agents";
 import pimConfig from "../pim.config";
-import { accountApi, adminApi, clientIp, handleRegistration, limited, resolveAccount, siteFor, sites, socialApi } from "./accounts";
-import { APPS_CALLBACK_PATH, AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, OWNER_HEADER } from "./pim";
+import { accountApi, adminApi, clientIp, handleRegistration, limited, pimOrigin, resolveAccount, siteFor, sites, socialApi } from "./accounts";
+import { APPS_CALLBACK_PATH, AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
 import { themes as ownThemes } from "./extensions/themes";
+import { type McpAccess, type McpGrant, serveConsent, serveOAuth } from "./mcp-auth";
 import { PimThemes } from "./themes";
 
 /**
@@ -20,6 +21,11 @@ import { PimThemes } from "./themes";
  *   anyone signs in.
  * - `/auth/*`: registration (./accounts.ts) and sign-in (./auth): passkeys, and
  *   accounts at Google, GitHub or a single sign-on provider.
+ * - `/mcp`: the person's Pim as an MCP server (./mcp-server.ts), for MCP
+ *   clients such as Claude or ChatGPT, opened by an OAuth access token or an
+ *   API token. `/oauth/*` and `/.well-known/*` sign those clients in, and
+ *   `/authorize` is the app's page where the person lets them
+ *   (./mcp-auth.ts).
  * - `/mcp/callback/<owner>`, `/mcp/events/<owner>/<watch>`: public, for
  *   connected apps. Each is checked another way: the OAuth state, and the
  *   watch's signing secret.
@@ -69,19 +75,55 @@ async function authorize(request: Request, env: Env): Promise<Caller | Response>
 		if (refused) return refused;
 		if (await siteFor(env, tokenAccount).store.checkToken(token, Date.now())) return { account: tokenAccount, viaSession: false };
 	}
-	const claim = await sessionClaim(request, env);
-	const account = claim ? await resolveAccount(env, claim.owner) : null;
-	if (account) {
-		const refused = closed(account);
-		if (refused) return refused;
-		if (await currentSession(request, env, siteFor(env, account))) {
-			// A cookie rides along on requests other sites trigger; a token can't.
-			if (fromAnotherSite(request)) return fail(403, "Requests must come from this app");
-			return { account, viaSession: true };
-		}
-	}
+	const account = await signedIn(request, env);
+	if (account) return account instanceof Response ? account : { account, viaSession: true };
 	return fail(401, "Unauthorized");
 }
+
+/** The account a browser's session signs in, if it does, or why it opens nothing. */
+async function signedIn(request: Request, env: Env): Promise<Account | Response | null> {
+	const claim = await sessionClaim(request, env);
+	const account = claim ? await resolveAccount(env, claim.owner) : null;
+	if (!account) return null;
+	const refused = closed(account);
+	if (refused) return refused;
+	if (!(await currentSession(request, env, siteFor(env, account)))) return null;
+	// A cookie rides along on requests other sites trigger; a token can't.
+	if (fromAnotherSite(request)) return fail(403, "Requests must come from this app");
+	return account;
+}
+
+/** Whether `account` may make a request now: heavy use is slowed down per person. */
+async function throttled(env: Env, account: Account): Promise<Response | undefined> {
+	if (!(await limited(env.API_LIMITER, account.ownerId))) return undefined;
+	console.log(JSON.stringify({ event: "pim.rate_limited", limit: "api", owner: account.ownerId }));
+	return fail(429, "Too many requests. Slow down a little.");
+}
+
+/** Whose request this is, if they may make it now. */
+async function admit(request: Request, env: Env): Promise<Caller | Response> {
+	const caller = await authorize(request, env);
+	if (caller instanceof Response) return caller;
+	return (await throttled(env, caller.account)) ?? caller;
+}
+
+/** The MCP server, for the person an OAuth grant or API token names, checked as the API is. */
+const mcpAccess: McpAccess = {
+	server: {
+		async fetch(request, env, ctx) {
+			const account = await resolveAccount(env, (ctx.props as McpGrant).owner);
+			if (!account) return fail(410, "This account was deleted.");
+			const refused = closed(account) ?? (await throttled(env, account));
+			if (refused) return refused;
+			return toAgent(request, env, account.ownerId, MCP_SERVER_PATH, true);
+		},
+	},
+	async apiTokenOwner(token, env) {
+		const account = tokenOwner(token) ? await resolveAccount(env, tokenOwner(token)!) : null;
+		if (!account || closed(account)) return null;
+		return (await siteFor(env, account).store.checkToken(token, Date.now())) ? account.ownerId : null;
+	},
+};
 
 const under = (pathname: string, prefix: string) => pathname === prefix || pathname.startsWith(`${prefix}/`);
 
@@ -176,17 +218,40 @@ function serveThemes(request: Request, path: string): Response {
 	return new Response(deployedThemes.stylesheet(), { headers: { ...headers, "Content-Type": "text/css; charset=utf-8" } });
 }
 
-export async function serve(request: Request, env: Env): Promise<Response> {
+export async function serve(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 	const { pathname } = new URL(request.url);
 	if (pathname === "/health") return withCors(Response.json({ name: "pim", ok: true }));
 
-	if (under(pathname, "/auth")) {
-		// Guessing at passkeys, recovery codes and tokens is slowed down per address.
-		if (request.method !== "GET" && (await limited(env.AUTH_LIMITER, clientIp(request)))) {
+	if (under(pathname, "/auth") || under(pathname, "/oauth")) {
+		// Guessing at passkeys, recovery codes and tokens, and registering clients, is slowed down per address.
+		if (request.method !== "GET" && request.method !== "OPTIONS" && (await limited(env.AUTH_LIMITER, clientIp(request)))) {
 			console.log(JSON.stringify({ event: "pim.rate_limited", limit: "auth" }));
 			return fail(429, "Too many attempts. Wait a minute and try again.");
 		}
-		return (await handleRegistration(request, env)) ?? handleAuth(request, env, sites(env));
+	}
+
+	if (pathname === "/mcp" || under(pathname, "/oauth") || under(pathname, "/.well-known")) {
+		return serveOAuth(request, env, ctx, pimOrigin(request, env), mcpAccess);
+	}
+
+	if (pathname === "/auth/authorize" || under(pathname, "/auth/connections")) {
+		// Only the person, in the app, lets clients in and sees which they let in.
+		const account = await signedIn(request, env);
+		if (!account) return fail(401, "Sign in to Pim");
+		if (account instanceof Response) return account;
+		return serveConsent(request, env, account.ownerId, pimOrigin(request, env), mcpAccess);
+	}
+
+	if (under(pathname, "/auth")) return (await handleRegistration(request, env)) ?? handleAuth(request, env, sites(env));
+
+	if (pathname === "/authorize") {
+		// The app's page where the person lets an MCP client in, which no other site may frame.
+		const asset = await env.ASSETS.fetch(request);
+		const page = new Response(asset.body, asset);
+		page.headers.set("Content-Security-Policy", "frame-ancestors 'none'");
+		page.headers.set("X-Frame-Options", "DENY");
+		page.headers.set("Cache-Control", "no-store");
+		return page;
 	}
 
 	if (under(pathname, "/images")) return serveImage(request, env, pathname);
@@ -201,14 +266,9 @@ export async function serve(request: Request, env: Env): Promise<Response> {
 	const path = pathname.slice("/api".length) || "/";
 	if (path === "/health") return withCors(Response.json({ name: "pim", ok: true }));
 	if (path === "/themes" || path === "/themes.css") return withCors(serveThemes(request, path));
-	const caller = await authorize(request, env);
+	const caller = await admit(request, env);
 	if (caller instanceof Response) return withCors(caller);
 	const { account, viaSession } = caller;
-	// Heavy use is slowed down per person.
-	if (await limited(env.API_LIMITER, account.ownerId)) {
-		console.log(JSON.stringify({ event: "pim.rate_limited", limit: "api", owner: account.ownerId }));
-		return withCors(fail(429, "Too many requests. Slow down a little."));
-	}
 	const site = siteFor(env, account);
 	const extensions = [
 		accountApi(env, account, site, request, viaSession),

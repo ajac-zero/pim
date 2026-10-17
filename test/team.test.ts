@@ -1,8 +1,10 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { type FauxResponseFactory, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { Approval } from "../src/store";
-import { api, decisionRun, lastUserText, pendingApproval, post, say, systemPrompt, toolUse } from "./helpers";
+import { api, decisionRun, lastUserText, pendingApproval, post, say, systemPrompt, TOKEN, toolUse, url } from "./helpers";
 import { faux } from "./worker";
 
 type Context = Parameters<FauxResponseFactory>[0];
@@ -273,6 +275,60 @@ describe("the majordomo", () => {
 		});
 		await say("Hello", own);
 		expect(scoutSaw.tools).not.toContain("send_to_agent");
+	});
+
+	it("talks with MCP clients at /mcp, a new chat per call unless they continue one, handing work down as in the app", async () => {
+		const finder = (await post("/agents", { name: "Dentist finder", instructions: "Find dentists near the person." })).body;
+		const client = new Client({ name: "test-client", version: "1.0.0" });
+		await client.connect(
+			new StreamableHTTPClientTransport(new URL(url("/mcp")), {
+				fetch: (input, init) => exports.default.fetch(new Request(input, init)),
+				requestInit: { headers: { Authorization: `Bearer ${TOKEN}` } },
+			}),
+		);
+		expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(["pim"]);
+		const lastAsked = { messages: "" };
+		const answer = (message: string) => (context: { messages: unknown }) => {
+			lastAsked.messages = JSON.stringify(context.messages);
+			return toolUse("send_to_user", { message });
+		};
+
+		scripts({
+			lead: [
+				() => toolUse("send_to_agent", { agent: "Dentist finder", message: "Find a dentist open on Tuesdays." }),
+				() => toolUse("send_to_user", { message: "Dr. Silva can see you Tuesday at 9." }),
+			],
+			"Dentist finder": [() => toolUse("send_to_user", { message: "Dr. Silva, Tuesday 9:00." })],
+		});
+		const first = await client.callTool({ name: "pim", arguments: { message: "Find me a dentist" } });
+		const { conversation } = first.structuredContent as { conversation: string };
+		expect(first.structuredContent).toEqual({ conversation, reply: "Dr. Silva can see you Tuesday at 9." });
+		expect(first.content).toEqual([{ type: "text", text: `Dr. Silva can see you Tuesday at 9.\n\n[conversation: ${conversation}]` }]);
+
+		// Naming the conversation continues it, where the earlier work is.
+		scripts({ lead: [answer("Yes, Tuesday at 9 with Dr. Silva.")] });
+		const second = await client.callTool({ name: "pim", arguments: { message: "Did you book it?", conversation } });
+		expect(second.structuredContent).toEqual({ conversation, reply: "Yes, Tuesday at 9 with Dr. Silva." });
+		expect(lastAsked.messages).toContain("Find me a dentist");
+		expect(lastAsked.messages).toContain("Dr. Silva, Tuesday 9:00.");
+
+		// Leaving it out starts afresh.
+		scripts({ lead: [answer("Hello!")] });
+		const third = await client.callTool({ name: "pim", arguments: { message: "Hi" } });
+		expect((third.structuredContent as { conversation: string }).conversation).not.toBe(conversation);
+		expect(lastAsked.messages).not.toContain("dentist");
+
+		// Only the majordomo's chats can be continued, not the person's other chats.
+		const sessions: { id: string; agent: { id: string } }[] = (await api("/sessions")).body.sessions;
+		const finderChat = sessions.find((session) => session.agent.id === finder.id)!.id;
+		const { name } = (await api("/majordomo")).body.agent;
+		for (const other of [finderChat, "nope"]) {
+			const refused = await client.callTool({ name: "pim", arguments: { message: "Hi", conversation: other } });
+			expect(refused).toMatchObject({ isError: true, content: [{ type: "text", text: `No conversation ${other} with ${name}: leave out conversation to start one.` }] });
+		}
+		await client.close();
+
+		expect((await exports.default.fetch(url("/mcp"), { method: "POST" })).status).toBe(401);
 	});
 
 	it("hears what an agent says in a chat it started once an approval there is decided", async () => {

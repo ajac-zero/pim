@@ -130,6 +130,8 @@ type Sealed = {
 		link?: { owner: string; credential: string };
 		/** Adding the first credential with a setup code, or one after losing the rest. */
 		setup?: { owner: string; code: string };
+		/** The page on this site to go back to, such as an MCP client's `/authorize` request. */
+		returnTo?: string;
 	};
 };
 
@@ -426,13 +428,15 @@ export async function handleAuth(request: Request, env: Env, sites: Sites, now =
 		const provider = start[1]!;
 		const settings = isProviderId(provider) ? (await sites.providers())[provider] : undefined;
 		if (!isProviderId(provider) || !settings) return fail(404, "That sign-in method isn't set up on this Pim.");
-		const body = (await request.json().catch(() => null)) as { setup?: unknown } | null;
+		const body = (await request.json().catch(() => null)) as { setup?: unknown; returnTo?: unknown } | null;
 		const flow: Sealed["oauth"] = {
 			provider,
 			state: randomValue(),
 			nonce: randomValue(),
 			verifier: randomValue(),
 			redirectUri: `${url.origin}/auth/oauth/${provider}/callback`,
+			// A path here, never another site, short enough for the cookie that carries it.
+			...(typeof body?.returnTo === "string" && /^\/(?![/\\])/.test(body.returnTo) && body.returnTo.length <= 2000 ? { returnTo: body.returnTo } : {}),
 		};
 		const current = await signedIn();
 		const setup = splitOwnedCode(body?.setup);
@@ -535,7 +539,7 @@ async function finishOAuth(request: Request, env: Env, sites: Sites, provider: s
 		return back("/", "Signing in took too long, or started in another browser. Try again.");
 	}
 	// Linking started in Settings, so it ends there, on the tab with your sign-ins.
-	const to = flow.link ? "/?dialog=settings&tab=account" : "/";
+	const to = flow.link ? "/?dialog=settings&tab=account" : (flow.returnTo ?? "/");
 	const settings = (await sites.providers())[flow.provider];
 	const name = providerName(flow.provider, settings);
 	if (!settings) return back(to, `Signing in with ${name} isn't set up on this Pim anymore.`);

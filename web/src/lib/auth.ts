@@ -54,6 +54,30 @@ export type ApiToken = {
   lastUsedAt: number | null;
 };
 
+/** An MCP client asking to be let in, for the `/authorize` page; or where to send the browser instead. */
+export type AuthorizationRequest =
+  | {
+      handle: string;
+      client: {
+        /** What the client calls itself, unverified. */
+        name: string;
+        /** Where access goes if the person allows it. */
+        redirectHost: string;
+        /** Whether that is an app on this computer. */
+        local: boolean;
+      };
+    }
+  | { redirectTo: string };
+
+/** An MCP client the person let in. */
+export type McpConnection = {
+  id: string;
+  name: string;
+  createdAt: number;
+  /** When it is disconnected unless it is used before then. */
+  expiresAt: number | null;
+};
+
 export type Registered = {
   username: string;
   role: Role;
@@ -179,10 +203,15 @@ export const auth = {
    * link's code, it adds the account's first way in.
    */
   async withProvider(provider: ProviderId, setup?: string) {
-    const { url } = await post<{ url: string }>(
-      `/oauth/${provider}`,
-      setup ? { setup } : {},
-    );
+    // An MCP client's request to be let in waits on the other side.
+    const returnTo =
+      location.pathname === "/authorize"
+        ? location.pathname + location.search
+        : undefined;
+    const { url } = await post<{ url: string }>(`/oauth/${provider}`, {
+      ...(setup && { setup }),
+      ...(returnTo && { returnTo }),
+    });
     location.assign(url);
     // The page is leaving: stay pending until it does.
     await new Promise(() => {});
@@ -282,6 +311,19 @@ export const auth = {
   revokeToken: (id: string) =>
     call(`/tokens/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
+  /** An MCP client's request to be let in (`search` is the `/authorize` page's), and the person's answer. */
+  authorizationRequest: (search: string) =>
+    call<AuthorizationRequest>(`/authorize${search}`),
+  answerAuthorization: (handle: string, allow: boolean) =>
+    post<{ redirectTo: string }>("/authorize", { handle, allow }),
+  /** MCP clients the person let in, and disconnecting one. */
+  connections: () =>
+    call<{ connections: McpConnection[] }>("/connections").then(
+      (body) => body.connections,
+    ),
+  disconnect: (id: string) =>
+    call(`/connections/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
   /** Joining this Pim, or claiming it. */
   usernameAvailable: (name: string) =>
     call<{ available: boolean; reason?: string }>(
@@ -297,6 +339,12 @@ export const auth = {
 
 export const tokensQuery = () =>
   queryOptions({ queryKey: ["auth", "tokens"], queryFn: auth.tokens });
+
+export const connectionsQuery = () =>
+  queryOptions({
+    queryKey: ["auth", "connections"],
+    queryFn: auth.connections,
+  });
 
 /** A code a link carries in its fragment, such as `/#setup=…`. */
 const linkCode = (name: string) =>

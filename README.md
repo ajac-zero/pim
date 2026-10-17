@@ -4,7 +4,7 @@ An open-source personal agent you deploy to your own Cloudflare account. Inspire
 
 A deployment is a Pim for you and the people you invite: family, friends, a small team. Each person gets their own Pim, with their own agents, conversations, memories and connected apps, and can share it with the others. You run it, and everything stays in your Cloudflare account. The name is [pi](https://github.com/earendil-works/pi), the harness it runs on, plus **m** for multiplayer.
 
-This repository is the agent, its API, and its web app ([`web/`](web)): chat, approvals, notifications and settings, signed in with a passkey, or with Google, GitHub or your own single sign-on when you set those up. One Worker serves all of it, for everyone, at one address. Mobile apps and messaging bridges can use the same API with an API token.
+This repository is the agent, its API, and its web app ([`web/`](web)): chat, approvals, notifications and settings, signed in with a passkey, or with Google, GitHub or your own single sign-on when you set those up. One Worker serves all of it, for everyone, at one address. Mobile apps and messaging bridges can use the same API with an API token, and Claude, ChatGPT and other MCP clients can talk with your majordomo at `/mcp` (see [Talking with Pim from other apps](#talking-with-pim-from-other-apps)).
 
 **Vocabulary:** Pim is the platform and a person's own space; an agent is what you create and chat with; a blueprint is what an extension defines in code for agents to build on; a template is an agent shared through the gallery.
 
@@ -14,8 +14,10 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
  Browser, bot, app                        Cloudflare
 ┌─────────────────────┐   HTTPS / WS   ┌──────────────────────────────────────────────┐
 │ web app, or REST +  │───────────────▶│ Worker (src/index.ts, src/gateway.ts)        │
-│ WebSocket at /api   │                │  ├ /*       the web app (web/, static files) │
-└─────────────────────┘                │  ├ /auth/*  joining, passkeys, Google/GitHub │
+│ WebSocket at /api;  │                │  ├ /*       the web app (web/, static files) │
+│ MCP clients at /mcp │                │  ├ /auth/*  joining, passkeys, Google/GitHub │
+└─────────────────────┘                │  ├ /mcp, /oauth/*  the majordomo over MCP,   │
+                                       │  │          and its OAuth (OAUTH_KV)         │
                                        │  └ /api/*   whoever the session or token     │
                                        │   │         names                            │
                                        │   ▼                                          │
@@ -128,7 +130,7 @@ For local development, run `pnpm dev`: the Worker and the built web app at `http
 
 ## API
 
-The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out the prefix. It is the signed-in person's own Pim. The web app calls it with its session cookie. Other clients send `Authorization: Bearer <token>`, with a token made in Settings (API tokens), which names its owner (`pim_<owner>_…`). WebSockets from clients that can't set headers pass `?token=<token>` instead. Only the three paths connected apps call stay at the root, without the prefix, and name whose agent they are for: `/mcp/callback/:owner`, `/mcp/events/:owner/:watch`, and `/mcp/client/:owner`, Pim's client metadata document for services whose sign-in takes one instead of registering clients (Amp's). Sessions are separate conversations. The root session is `1`.
+The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out the prefix. It is the signed-in person's own Pim. The web app calls it with its session cookie. Other clients send `Authorization: Bearer <token>`, with a token made in Settings (API tokens), which names its owner (`pim_<owner>_…`). WebSockets from clients that can't set headers pass `?token=<token>` instead. Only the three paths connected apps call stay at the root, without the prefix, and name whose agent they are for: `/mcp/callback/:owner`, `/mcp/events/:owner/:watch`, and `/mcp/client/:owner`, Pim's client metadata document for services whose sign-in takes one instead of registering clients (Amp's). MCP clients talk with your majordomo at `/mcp`, also at the root, with an OAuth access token or an API token (see [Talking with Pim from other apps](#talking-with-pim-from-other-apps)). Sessions are separate conversations. The root session is `1`.
 
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
@@ -388,6 +390,20 @@ An agent can have a team: up to eight members, each with a name, its own instruc
 - **The chat shows the team at work**, above the composer: who has the latest tasks and whether each is working, done or didn't finish. A member opens read-only, with its task and what it did. Members' conversations aren't chats in the sidebar.
 - **Approvals.** A member's tools ask before acting, as the agent's do. The request shows in the chat the member works for, labeled with its name. The decision goes to the member, and what it answers then comes to the agent's chat as a message starting with "[Team".
 - **Copies.** Publishing an agent, making one your own, and the agent everyone who joins gets copy its team.
+
+## Talking with Pim from other apps
+
+Claude, ChatGPT and other MCP clients can talk with your [majordomo](#your-majordomo). Add `https://<your Pim>/mcp` to one as a custom connector (Settings → Account → MCP clients shows the address). It works like Amp's Puck over MCP: the server has one tool, `pim`, which sends a message to your majordomo and returns its reply.
+
+- **Connecting signs you in.** The client registers itself with Pim ([dynamic client registration](https://datatracker.ietf.org/doc/html/rfc7591)) and opens Pim's `/authorize` page, where you sign in if you aren't already and see who is asking and where access goes. Allow sends it back with a code it exchanges for tokens. Pim is the OAuth authorization server for its own MCP server, as the [MCP authorization spec](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization) asks, with [`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider): discovery at `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-authorization-server`, registration at `/oauth/register`, and tokens at `/oauth/token`, with PKCE. Clients, grants and hashed tokens are kept in the `OAUTH_KV` namespace, which deploying creates (see [`src/mcp-auth.ts`](src/mcp-auth.ts)).
+- **Access lasts while it's used.** An access token lasts an hour, and the client refreshes it. A connection ends after 30 days without use, or when you disconnect it in Settings → Account → MCP clients.
+- **API tokens work too**, for clients without OAuth: send one from Settings → API tokens as `Authorization: Bearer <token>`.
+- **A new chat per call, unless the client continues one.** Every reply names its conversation, a chat with your majordomo that you can also continue in Pim; a call that passes it back as `conversation` continues that chat, and one without it starts a new one. Only your majordomo's chats can be continued this way.
+- **It hands work down as in the app.** Your majordomo sends bigger work to your other agents, and what they say later comes back to its chat, so asking again in the same conversation ("did Concierge book it?") tells you how things went.
+- **A reply waits up to 45 seconds.** A turn still going after that answers "still working"; ask again in the same conversation in a little while, and that message is answered once the turn before it ends.
+- **Everything else works as in the app:** approvals, usage limits and tool permissions.
+
+A connection opens only `/mcp`; an API token opens your whole API, so give it only to clients you trust.
 
 ## Sharing
 

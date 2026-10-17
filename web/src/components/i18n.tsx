@@ -606,6 +606,22 @@ const translations = {
     tokenName: "Token name",
     tokenNamePlaceholder: "What will use it, such as “Phone”",
     createToken: "Create token",
+    mcpServer: "MCP clients",
+    mcpServerBody:
+      "Claude, ChatGPT and other MCP clients can talk with your majordomo. Add this address to them as a connector, then sign in here to let them in.",
+    mcpConnections: "Connected MCP clients",
+    mcpConnected: "Connected {created}",
+    disconnectClient: "Disconnect {name}",
+    authorizeTitle: "Let {client} talk with {majordomo}?",
+    authorizeBody:
+      "{client} will message {majordomo}, your majordomo, for you, and read its answers. {majordomo} can hand work to your other agents as it does here. Pim can't check that the app is really {client}.",
+    authorizeSendsTo: "Access goes to",
+    authorizeLocal:
+      "That's an app on this computer. Continue only if you just started connecting it.",
+    authorizeAllow: "Allow",
+    authorizeFailedTitle: "This request can't be used",
+    authorizeFailedBody:
+      "Start connecting again from the app that sent you here.",
     deleteAccount: "Delete account",
     deleteAccountBody:
       "Deletes {username}'s Pim: conversations, memories, goals, connected apps, and passkeys. It can't be undone, and the username won't be available again.",
@@ -1271,6 +1287,21 @@ const translations = {
     tokenName: "Nombre del token",
     tokenNamePlaceholder: "Qué lo usará, como “Teléfono”",
     createToken: "Crear token",
+    mcpServer: "Clientes MCP",
+    mcpServerBody:
+      "Claude, ChatGPT y otros clientes MCP pueden hablar con tu mayordomo. Agrega esta dirección como conector y luego inicia sesión aquí para darles acceso.",
+    mcpConnections: "Clientes MCP conectados",
+    mcpConnected: "Conectado {created}",
+    disconnectClient: "Desconectar {name}",
+    authorizeTitle: "¿Dejar que {client} hable con {majordomo}?",
+    authorizeBody:
+      "{client} enviará mensajes a {majordomo}, tu mayordomo, por ti, y leerá sus respuestas. {majordomo} puede pasar trabajo a tus otros agentes como lo hace aquí. Pim no puede comprobar que la app sea realmente {client}.",
+    authorizeSendsTo: "El acceso va a",
+    authorizeLocal:
+      "Es una app en esta computadora. Continúa solo si acabas de empezar a conectarla.",
+    authorizeAllow: "Permitir",
+    authorizeFailedTitle: "Esta solicitud no se puede usar",
+    authorizeFailedBody: "Vuelve a conectar desde la app que te envió aquí.",
     deleteAccount: "Eliminar cuenta",
     deleteAccountBody:
       "Elimina el Pim de {username}: conversaciones, memorias, metas, apps conectadas y llaves de acceso. No se puede deshacer y el nombre de usuario no volverá a estar disponible.",

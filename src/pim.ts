@@ -21,6 +21,7 @@ import { ArtifactStore, artifactHeaders, downloadName, RESIZE_SCRIPT } from "./a
 import { digestHex } from "./auth/store";
 import { Email, type Mailer, mailerFrom } from "./email";
 import { ImageStore, userInput } from "./images";
+import { serveMcp } from "./mcp-server";
 import {
 	type Circle,
 	CircleStore,
@@ -147,6 +148,8 @@ export const MCP_CALLBACK_PATH = "/mcp/callback";
 export const APPS_CALLBACK_PATH = `${MCP_CALLBACK_PATH}/apps`;
 /** Pim's client metadata document for sign-ins that take one, as `/mcp/client/<owner>`: it names that owner's callback. */
 export const MCP_CLIENT_PATH = "/mcp/client";
+/** Where the Worker sends `/mcp`: this Pim as an MCP server (./mcp-server.ts). */
+export const MCP_SERVER_PATH = "/mcp-server";
 /** Where apps deliver event webhooks, as `/mcp/events/<owner>/<watch id>`; signed, so served without the API token. The Pim sees `/mcp/events/<watch id>`. */
 export const MCP_EVENTS_PATH = "/mcp/events/";
 const WATCH_REFRESH_CALLBACK = "refreshAppWatch";
@@ -1182,6 +1185,32 @@ export class Pim extends DurableAgent<Env> {
 		this.agents.setSession(id, agent.id, handoff);
 		this.store.touchSession(id, title);
 		return id;
+	}
+
+	/** This Pim as an MCP server (./mcp-server.ts): its clients talk with the majordomo, in a new chat or one they started before. */
+	#mcpServer(request: Request): Promise<Response> {
+		const majordomo = this.agents.majordomo();
+		return serveMcp(request, {
+			majordomo,
+			send: async (message, conversation, signal) => {
+				let session: string;
+				if (conversation === undefined) session = await this.#startChat(majordomo, undefined);
+				else {
+					session = await this.#session(conversation).catch(() => "");
+					if (!session || this.visits.bySession(session) || this.agents.ofSession(session).id !== majordomo.id) {
+						throw new HttpError(404, `No conversation ${conversation} with ${majordomo.name}: leave out conversation to start one.`);
+					}
+				}
+				// A message to a chat still busy with an earlier one is answered after it.
+				const receipt = await this.submitTo(session, userInput(message), { operationId: crypto.randomUUID(), whenBusy: "followUp" }, "user");
+				try {
+					return { conversation: session, reply: await this.#withReplies(await this.harness.wait(receipt.operationId, { session, signal })) };
+				} catch (error) {
+					if (signal.aborted) return { conversation: session, reply: null };
+					throw error;
+				}
+			},
+		});
 	}
 
 	/** One notification a day about work a limit stopped, so a frequent schedule doesn't flood the person. */
@@ -2561,6 +2590,8 @@ export class Pim extends DurableAgent<Env> {
 				tools: this.tools(),
 			}),
 		],
+		// This Pim as an MCP server, for MCP clients such as Claude or ChatGPT.
+		...(["POST", "GET", "DELETE"] as const).map((method): Route => [method, MCP_SERVER_PATH, (_params, request) => this.#mcpServer(request)]),
 
 		// Sessions: separate conversations, each with its own transcript and runs.
 		[

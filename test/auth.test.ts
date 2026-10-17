@@ -1,4 +1,5 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { createExecutionContext, env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Pim } from "../src/pim";
@@ -50,7 +51,7 @@ class Browser {
 		if (init.json !== undefined) headers.set("content-type", "application/json");
 		headers.set("CF-Connecting-IP", this.ip);
 		const request = new Request(url(path), { ...init, headers, body: init.json === undefined ? init.body : JSON.stringify(init.json) });
-		const response = await worker.fetch(request as Request<unknown, IncomingRequestCfProperties>, this.env);
+		const response = await worker.fetch(request as Request<unknown, IncomingRequestCfProperties>, this.env, createExecutionContext());
 		for (const cookie of response.headers.getSetCookie()) {
 			const [pair = "", ...attributes] = cookie.split("; ");
 			const [name = "", ...value] = pair.split("=");
@@ -491,6 +492,84 @@ describe("API tokens", () => {
 	});
 });
 
+describe("MCP clients", () => {
+	it("register, ask the signed-in person, and open only their Pim's /mcp with the token they get, until disconnected", async () => {
+		await admin();
+		const ben = await person("ben");
+		const unauthorized = await exports.default.fetch(url("/mcp"), { method: "POST" });
+		expect(unauthorized.status).toBe(401);
+		const metadataUrl = url("/.well-known/oauth-protected-resource/mcp");
+		expect(unauthorized.headers.get("WWW-Authenticate")).toContain(`resource_metadata="${metadataUrl}"`);
+		expect(await (await exports.default.fetch(metadataUrl)).json()).toMatchObject({ resource: url("/mcp"), authorization_servers: [ORIGIN] });
+		const server = (await (await exports.default.fetch(url("/.well-known/oauth-authorization-server"))).json()) as Record<string, string>;
+		expect(server).toMatchObject({ authorization_endpoint: url("/authorize"), token_endpoint: url("/oauth/token"), registration_endpoint: url("/oauth/register") });
+
+		const callback = "https://claude.example/callback";
+		const registered = await exports.default.fetch(url("/oauth/register"), {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ client_name: "Claude", redirect_uris: [callback], token_endpoint_auth_method: "none" }),
+		});
+		expect(registered.status).toBe(201);
+		const { client_id } = (await registered.json()) as { client_id: string };
+		const verifier = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
+		const challenge = base64UrlEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(verifier))));
+		const query = (state: string) =>
+			new URLSearchParams({ response_type: "code", client_id, redirect_uri: callback, state, code_challenge: challenge, code_challenge_method: "S256", resource: url("/mcp") });
+
+		// Only someone signed in to the app is asked, and only in the browser that was asked.
+		expect((await new Browser().fetch(`/auth/authorize?${query("s1")}`)).status).toBe(401);
+		const asked = await ben.browser.json(`/auth/authorize?${query("s1")}`);
+		expect(asked.body.client).toEqual({ name: "Claude", redirectHost: "claude.example", local: false });
+		const elsewhere = await (await person("cleo")).browser.json("/auth/authorize", { method: "POST", json: { handle: asked.body.handle, allow: true } });
+		expect(elsewhere.status).toBe(400);
+		const allowed = await ben.browser.json("/auth/authorize", { method: "POST", json: { handle: asked.body.handle, allow: true } });
+		const redirect = new URL(allowed.body.redirectTo);
+		expect(`${redirect.origin}${redirect.pathname}`).toBe(callback);
+		expect(redirect.searchParams.get("state")).toBe("s1");
+		// The page answers once.
+		expect((await ben.browser.json("/auth/authorize", { method: "POST", json: { handle: asked.body.handle, allow: true } })).status).toBe(400);
+
+		const exchanged = await exports.default.fetch(url("/oauth/token"), {
+			method: "POST",
+			headers: { "content-type": "application/x-www-form-urlencoded" },
+			body: new URLSearchParams({ grant_type: "authorization_code", code: redirect.searchParams.get("code")!, redirect_uri: callback, client_id, code_verifier: verifier }),
+		});
+		expect(exchanged.status).toBe(200);
+		const { access_token, refresh_token } = (await exchanged.json()) as { access_token: string; refresh_token: string };
+		expect(refresh_token).toBeTruthy();
+
+		const client = new Client({ name: "Claude", version: "1.0.0" });
+		await client.connect(
+			new StreamableHTTPClientTransport(new URL(url("/mcp")), {
+				fetch: (input, init) => exports.default.fetch(new Request(input, init)),
+				requestInit: { headers: { Authorization: `Bearer ${access_token}` } },
+			}),
+		);
+		expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(["pim"]);
+		await client.close();
+		// The grant is Ben's, whoever else is signed in to this Pim.
+		expect(access_token.split(":")[0]).toBe(ben.owner);
+
+		// Settings lists it for Ben alone, and disconnecting it ends its access.
+		const { connections } = (await ben.browser.json("/auth/connections")).body;
+		expect(connections).toEqual([{ id: expect.any(String), name: "Claude", createdAt: expect.any(Number), expiresAt: expect.any(Number) }]);
+		expect((await (await person("dan")).browser.json("/auth/connections")).body.connections).toEqual([]);
+		expect((await ben.browser.fetch(`/auth/connections/${connections[0].id}`, { method: "DELETE" })).status).toBe(200);
+		const revoked = await exports.default.fetch(url("/mcp"), {
+			method: "POST",
+			headers: { Authorization: `Bearer ${access_token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+			body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+		});
+		expect(revoked.status).toBe(401);
+
+		// Declining sends the client back with access_denied.
+		const again = await ben.browser.json(`/auth/authorize?${query("s2")}`);
+		const declined = new URL((await ben.browser.json("/auth/authorize", { method: "POST", json: { handle: again.body.handle, allow: false } })).body.redirectTo);
+		expect(Object.fromEntries(declined.searchParams)).toMatchObject({ error: "access_denied", state: "s2" });
+	});
+});
+
 /**
  * Google, GitHub and a custom OpenID Connect provider at https://idp.test,
  * behind `fetch`. `account` is who signs in there; a code is good once, for
@@ -608,8 +687,10 @@ describe("signing in with another account", () => {
 		expect((await joining.json("/auth/session")).body.name).toBe("Benjamín");
 		expect((await ana.browser.json("/auth/session")).body.name).toBeNull();
 
+		// Signing in on an MCP client's /authorize page goes back to it, and never to another site.
 		const elsewhere = on();
-		expect(await viaProvider(elsewhere, "google")).toMatchObject({ to: "/", error: undefined });
+		expect(await viaProvider(elsewhere, "google", { returnTo: "/authorize?client_id=c&state=s" })).toMatchObject({ to: "/authorize?client_id=c&state=s", error: undefined });
+		expect(await viaProvider(on(), "google", { returnTo: "//evil.example/authorize" })).toMatchObject({ to: "/", error: undefined });
 		expect((await elsewhere.json("/auth/session")).body).toMatchObject({ signedIn: true, method: "identity", passkey: null, account: { username: "ben" } });
 		// The setup link was used up.
 		expect((await viaProvider(on(), "google", { setup })).status).toBe(401);

@@ -164,7 +164,7 @@ export class Pim extends RealPim {
 const DEV_SIGN_IN = /^\/__dev\/sign-in\/([^/]+)$/;
 
 /** Signs the browser in as `username`, with a new software passkey, and sends it to `returnTo`. */
-async function devSignIn(request: Request, env: Env, username: string): Promise<Response> {
+async function devSignIn(request: Request, env: Env, ctx: ExecutionContext, username: string): Promise<Response> {
 	const url = new URL(request.url);
 	const call = (path: string, body: unknown, cookie?: string) =>
 		serve(
@@ -179,6 +179,7 @@ async function devSignIn(request: Request, env: Env, username: string): Promise<
 				body: JSON.stringify(body),
 			}),
 			env,
+			ctx,
 		);
 
 	const account = await env.Directory.getByName("directory").resolve(username);
@@ -207,9 +208,9 @@ async function devSignIn(request: Request, env: Env, username: string): Promise<
 }
 
 export default {
-	fetch(request, env): Promise<Response> {
+	fetch(request, env, ctx): Promise<Response> {
 		const signIn = request.method === "GET" ? DEV_SIGN_IN.exec(new URL(request.url).pathname) : null;
-		if (signIn) return devSignIn(request, env, decodeURIComponent(signIn[1]!).toLowerCase());
-		return serve(request, env);
+		if (signIn) return devSignIn(request, env, ctx, decodeURIComponent(signIn[1]!).toLowerCase());
+		return serve(request, env, ctx);
 	},
 } satisfies ExportedHandler<Env>;

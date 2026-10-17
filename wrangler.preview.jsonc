@@ -17,11 +17,14 @@
     "directory": "./web/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*", "/__dev/*"]
+    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp", "/oauth/*", "/.well-known/*", "/authorize", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*", "/__dev/*"]
   },
   // Pim needs an `AI` binding to start; chats use preview/worker.ts's stand-in model instead.
   // Connect a ChatGPT plan in Settings to chat with a real one.
-  "kv_namespaces": [{ "binding": "AI", "id": "preview-ai-stand-in" }],
+  "kv_namespaces": [
+    { "binding": "AI", "id": "preview-ai-stand-in" },
+    { "binding": "OAUTH_KV", "id": "preview-oauth" }
+  ],
   "r2_buckets": [{ "binding": "IMAGES", "bucket_name": "pim-preview-images" }],
   "durable_objects": {
     "bindings": [

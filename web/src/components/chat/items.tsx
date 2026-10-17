@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bell,
   Check,
@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Loader2,
   Mail,
   RotateCcw,
   ShieldCheck,
@@ -44,6 +45,7 @@ import {
 } from "~/lib/openresponses";
 import { type Approval, pim } from "~/lib/pim-api";
 import type { PimNotice } from "~/lib/pim-view";
+import { agentsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 function useCopy(text: string) {
@@ -280,14 +282,38 @@ export const ApprovalBlock = memo(function ApprovalBlock({
     },
     onError: (error) => toast.error(error.message),
   });
+  // The majordomo decides other agents' requests first, and may ask you with a word of its own.
+  const { data: agents } = useQuery(agentsQuery());
+  const majordomo = agents?.find((agent) => agent.majordomo)?.name ?? "";
   const pending = approval.status === "pending";
   const approved = approval.status === "approved";
-  const StatusIcon = pending ? ShieldCheck : approved ? Check : X;
-  const status = pending
-    ? t("approvalRequested")
-    : approved
-      ? t(approval.decidedBy === "timeout" ? "approvedNoAnswer" : "approved")
-      : t(approval.decidedBy === "timeout" ? "deniedNoAnswer" : "denied");
+  const reviewing = pending && approval.review?.status === "reviewing";
+  const escalated = pending && approval.review?.status === "escalated";
+  const StatusIcon = reviewing
+    ? Loader2
+    : pending
+      ? ShieldCheck
+      : approved
+        ? Check
+        : X;
+  const status = reviewing
+    ? t("majordomoReviewing", { name: majordomo })
+    : escalated
+      ? t("majordomoAsks", { name: majordomo })
+      : pending
+        ? t("approvalRequested")
+        : approval.decidedBy === "majordomo"
+          ? t(approved ? "approvedByMajordomo" : "deniedByMajordomo", {
+              name: majordomo,
+            })
+          : approved
+            ? t(
+                approval.decidedBy === "timeout"
+                  ? "approvedNoAnswer"
+                  : "approved",
+              )
+            : t(approval.decidedBy === "timeout" ? "deniedNoAnswer" : "denied");
+  const escalation = escalated && approval.review?.note;
   // Someone in a circle asked: who, and through which circle. Or a member of this Pim's team.
   const asker = approval.requestedBy
     ? t("guestAsked", {
@@ -320,13 +346,20 @@ export const ApprovalBlock = memo(function ApprovalBlock({
           {approved ? (
             <span className="size-1.5 rounded-full bg-current" />
           ) : (
-            <StatusIcon className="size-3.5 shrink-0" />
+            <StatusIcon
+              className={cn("size-3.5 shrink-0", reviewing && "animate-spin")}
+            />
           )}
           {status}
         </Badge>
       </div>
       {asker && (
         <p className="mt-1 text-muted-foreground text-[13px]">{asker}</p>
+      )}
+      {escalation && (
+        <p className="mt-1 text-sm [overflow-wrap:anywhere]">
+          {majordomo}: “{escalation}”
+        </p>
       )}
       {approval.note && (
         <p className="mt-1 text-muted-foreground text-sm [overflow-wrap:anywhere]">

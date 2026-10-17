@@ -201,7 +201,7 @@ export class Pim extends RealPim {
 
 	/** Under `auto`, long enough for a test to answer an approval, short enough to wait out. */
 	protected override approvalTimeoutMs(policy = this.settings().approvalPolicy): number | null {
-		return policy === "explicit" ? null : 1_500;
+		return policy === "auto" ? 1_500 : null;
 	}
 
 	/** Compactions keep almost nothing, so a test can compact a short conversation. */

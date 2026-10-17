@@ -94,6 +94,28 @@ export type TeamRun = {
   updatedAt: number;
 };
 
+export type MajordomoState = { agent: Agent; introduced: boolean };
+
+/** How the majordomo talks. */
+export const MAJORDOMO_TONES = ["warm", "formal", "playful", "brief"] as const;
+
+export type MajordomoSetup = {
+  name: string;
+  symbol: string | null;
+  color: string | null;
+  tone: (typeof MAJORDOMO_TONES)[number] | null;
+  /** All optional: what the majordomo remembers about you from the start. */
+  about: {
+    name?: string;
+    callMe?: string;
+    age?: number;
+    notes?: string;
+  };
+};
+
+/** How long a line about yourself may be, for the majordomo to remember. */
+export const MAX_ABOUT = 240;
+
 /** How long an agent's name may be. */
 export const MAX_PIM_NAME = 60;
 
@@ -118,8 +140,8 @@ export type Agent = {
   symbol: string | null;
   /** The color of its symbol, such as `teal`; null for the default. */
   color: string | null;
-  /** The one that talks in chats started without choosing an agent. It can't be deleted while it is. */
-  default: boolean;
+  /** Your majordomo: the one that talks in chats started without choosing an agent. There is one, always the same, and it can't be deleted. */
+  majordomo: boolean;
   createdAt: number;
   updatedAt: number;
 };
@@ -172,7 +194,7 @@ export type Dashboard = {
     | "id"
     | "name"
     | "description"
-    | "default"
+    | "majordomo"
     | "blueprint"
     | "icon"
     | "symbol"
@@ -285,8 +307,8 @@ export type Approval = {
   expiresAt: number | null;
   /** What the timeout decides: approve (the auto policy) or deny (explicit). Missing from older Pims, which approve. */
   onTimeout?: "approve" | "deny";
-  /** Who decided: the user, the timeout, or "always approve". */
-  decidedBy?: "user" | "timeout" | "always" | null;
+  /** Who decided: the user, the timeout, "always approve", or the majordomo for the user. */
+  decidedBy?: "user" | "timeout" | "always" | "majordomo" | null;
   /** Someone in one of your circles asked, from their own Pim; null when your Pim asked. */
   requestedBy?: {
     ownerId: string;
@@ -296,6 +318,11 @@ export type Approval = {
   } | null;
   /** A member of an agent's team asked, working for the chat `session` names; the approval's own `session` is the member's. */
   member?: { name: string; session: string } | null;
+  /** The majordomo has it first: deciding, or it asked you, with what it said. Null when you were asked directly. */
+  review?: {
+    status: "reviewing" | "escalated";
+    note: string | null;
+  } | null;
 };
 
 /** One of your circles: people who may message your Pim, and what they may use. */
@@ -329,7 +356,7 @@ export type Visit = {
   session: string | null;
 };
 
-export type ApprovalPolicy = "auto" | "explicit";
+export type ApprovalPolicy = "majordomo" | "auto" | "explicit";
 
 /** The address Pim emails you at. */
 export type EmailState = {
@@ -630,9 +657,14 @@ export const pim = {
   deleteAgent: (id: string) =>
     call<{ deleted: boolean }>(`/agents/${id}`, { method: "DELETE" }),
   extensions: () => call<Extensions>("/extensions"),
-  /** Makes it the agent chats started without choosing one talk with. */
-  makeDefaultAgent: (id: string) =>
-    call<Agent>(`/agents/${id}/default`, { method: "POST" }),
+  /** Your majordomo, and whether you named it yet. */
+  majordomo: () => call<MajordomoState>("/majordomo"),
+  /** Names your majordomo, once, with what it should know about you. */
+  setUpMajordomo: (setup: MajordomoSetup) =>
+    call<MajordomoState>("/majordomo", {
+      method: "POST",
+      body: JSON.stringify(setup),
+    }),
   /** An agent's dashboard, with its text in `locale` where the extensions translated it. */
   dashboard: (id: string, locale: string) =>
     call<Dashboard>(

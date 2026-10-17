@@ -8,13 +8,16 @@ import type { PimStore } from "./store";
  */
 
 /**
- * What a pending approval becomes when nobody answers: `auto` approves it
- * after 30 seconds, so autonomous jobs never stall; `explicit` waits for an
- * answer however long, so nothing acts on the world without a yes.
+ * Who answers a pending approval, and what it becomes when nobody does:
+ * `majordomo` sends other agents' requests to the person's majordomo first,
+ * which decides those it is sure about and asks the person about the rest,
+ * and waits for the person however long; `auto` approves it after 30
+ * seconds, so autonomous jobs never stall; `explicit` waits for the person's
+ * answer however long, so nothing acts on the world without their yes.
  */
-export type ApprovalPolicy = "auto" | "explicit";
+export type ApprovalPolicy = "majordomo" | "auto" | "explicit";
 
-export const APPROVAL_POLICIES: readonly ApprovalPolicy[] = ["auto", "explicit"];
+export const APPROVAL_POLICIES: readonly ApprovalPolicy[] = ["majordomo", "auto", "explicit"];
 
 export type Settings = {
 	/** IANA time zone the person lives in. */
@@ -39,7 +42,7 @@ function defaults(env: Env): Settings {
 	const policy: string | undefined = env.PIM_APPROVAL_POLICY;
 	return {
 		timeZone: env.PIM_TIME_ZONE && validTimeZone(env.PIM_TIME_ZONE) ? env.PIM_TIME_ZONE : "UTC",
-		approvalPolicy: policy === "explicit" ? "explicit" : "auto",
+		approvalPolicy: APPROVAL_POLICIES.find((known) => known === policy) ?? "majordomo",
 		notifyWebhook: null,
 	};
 }

@@ -110,6 +110,7 @@ import {
 import { type Agent, type AgentInput, AgentStore, agentInput, type TeamMember } from "./agents";
 import type { AgentIcon } from "./gallery";
 import { type Role, TEAM_EXTENSION, type TeamRun, TeamStore, teamExtension } from "./team";
+import { CHAT_REPORT, DECIDE_APPROVAL, MAJORDOMO_EXTENSION, majordomoExtension, majordomoSetup, REVIEW_EXTENSION, reviewExtension } from "./majordomo";
 import { projectEntries } from "./transcript";
 import { conversationText, IMPROVE_PROMPT, NAME_CHAT, SUMMARIZE_CHAT, type UtilityTask } from "./utility";
 import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage";
@@ -153,6 +154,9 @@ const WATCH_REFRESH_CALLBACK = "refreshAppWatch";
 const APPROVAL_TIMEOUT_MS = 30_000;
 /** Decides an approval its timeout reached, as it was filed to be decided. */
 const APPROVAL_EXPIRY_CALLBACK = "expireApproval";
+/** How long the majordomo has to decide another agent's request before the person is asked anyway. */
+const REVIEW_MS = 5 * 60 * 1000;
+const REVIEW_EXPIRY_CALLBACK = "expireReview";
 
 /** A circle's permission row for reading the owner's memory. */
 const MEMORY_TOOL = "memory";
@@ -167,7 +171,7 @@ function circleName(name: unknown): string {
 }
 
 /** Why an approval was decided without the user deciding: it timed out, or the user always approves its tool. */
-type AutoApproval = "timeout" | "always";
+type AutoApproval = "timeout" | "always" | "majordomo";
 
 /** A tool a permission can be set for, as the API shows it. */
 export type ToolPermissionInfo = ResolvedPermission & {
@@ -275,12 +279,12 @@ export class Pim extends DurableAgent<Env> {
 	readonly circles = new CircleStore(this.ctx.storage.sql);
 	/** Pims shared with this Pim's owner, and their conversations with them. */
 	readonly visits = new VisitStore(this.ctx.storage.sql);
-	/** The owner's agents: each with its own instructions, the default one first. */
+	/** The owner's agents: each with its own instructions, the majordomo first. */
 	readonly agents = new AgentStore(this.ctx.storage.sql, () => {
-		// An account's first agent: one built on the deployment's default blueprint, or a bare one named Pim.
+		// The majordomo until the person names it: built on the deployment's default blueprint, or bare.
 		const ref = this.extensions.defaultBlueprint;
 		const blueprint = ref === null ? undefined : this.extensions.blueprint(ref);
-		return { name: blueprint?.name ?? "Pim", description: blueprint?.description ?? "", instructions: "", apps: [], team: [], blueprint: blueprint ? ref : null };
+		return { name: "Majordomo", description: "", instructions: "", apps: [], team: [], blueprint: blueprint ? ref : null };
 	}, () => this.appDirectory());
 	/** The tasks the agents' teams were given, each in a conversation of its own. */
 	readonly team = new TeamStore(this.ctx.storage.sql);
@@ -430,6 +434,16 @@ export class Pim extends DurableAgent<Env> {
 					memberAgent: (member, agent) => this.#memberAgent(member, agent),
 					ask: (conversation, task, operation) => this.#askMember(conversation, task, operation),
 				}),
+			);
+			this.registry.install(
+				majordomoExtension({
+					chatAgent: (session) => (this.team.run(session) || this.visits.bySession(session) ? null : this.agents.ofSession(session)),
+					agents: () => this.agents.list(),
+					sendToAgent: (handoff) => this.#sendToAgent(handoff),
+				}),
+			);
+			this.registry.install(
+				reviewExtension({ majordomo: () => this.agents.majordomo(), decide: (conversation, decision, note) => this.#reviewDecision(conversation, decision, note) }),
 			);
 			this.registry.install(approvalsExtension(services, this.#ownActions));
 			this.registry.install(webExtension({ ai: this.env.AI, searchProvider: this.env.PIM_WEB_SEARCH }));
@@ -701,9 +715,13 @@ export class Pim extends DurableAgent<Env> {
 		});
 	}
 
-	/** Extensions only some chats select: abilities, by the agents that use them, and apps, by the agents that list them. */
+	/**
+	 * Extensions only some conversations select: abilities, by the agents that
+	 * use them; apps, by the agents that list them; the majordomo's own, by its
+	 * chats; and reviews', by the majordomo's reviews.
+	 */
 	#perPim(name: string): boolean {
-		return this.abilities.has(name) || name.startsWith(APP_PREFIX);
+		return this.abilities.has(name) || name.startsWith(APP_PREFIX) || name === MAJORDOMO_EXTENSION || name === REVIEW_EXTENSION;
 	}
 
 	/** pi's run policy, shared by every session. */
@@ -711,8 +729,8 @@ export class Pim extends DurableAgent<Env> {
 		const registry = this.registry;
 		const perPim = (name: string) => this.#perPim(name);
 		return {
-			// Every extension but visits', abilities' and apps': a visit's own conversation selects its extension,
-			// and the chats of agents that use an ability or list an app select it.
+			// Every extension but visits', abilities', apps' and the majordomo's: a visit's own conversation selects its
+			// extension, and the chats of agents that use an ability or list an app, or of the majordomo, select it.
 			get extensions() {
 				return registry
 					.snapshot()
@@ -1152,7 +1170,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/** Starts a chat with `agent`, within the person's limit on chats. */
-	async #startChat(agent: Agent, title: string | undefined): Promise<string> {
+	async #startChat(agent: Agent, title: string | undefined, handoff?: { from: string; key: string }): Promise<string> {
 		const { sessions } = this.limits();
 		if (sessions !== null) {
 			const hidden = this.#hiddenSessions();
@@ -1161,8 +1179,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 		const { id } = await this.harness.sessions.create();
 		await this.harness.session(id).setModel(this.chosenModel());
-		// Tied to its agent, so it stays with it when another becomes the default.
-		this.agents.setSession(id, agent.id);
+		this.agents.setSession(id, agent.id, handoff);
 		this.store.touchSession(id, title);
 		return id;
 	}
@@ -1231,13 +1248,27 @@ export class Pim extends DurableAgent<Env> {
 	 * approval (a replayed call) returns its outcome; a tool the user lets run
 	 * without asking runs now, and the turn goes on with its result. Otherwise
 	 * the user is asked, once: the request goes to their open apps and devices,
-	 * and an `auto` approval's timeout is set. The decision comes back later as
+	 * and an `auto` approval's timeout is set. Under the `majordomo` policy,
+	 * another agent's request goes to the majordomo instead, which asks the
+	 * user only if it must (see `#review`). The decision comes back later as
 	 * a message (see `decideApproval`), so the turn need not wait for it.
 	 */
 	async #approvalFiled(approval: Approval, isNew: boolean): Promise<string> {
 		if (approval.status !== "pending") return this.#outcome(approval);
 		if (this.#approvalPermission(approval) === "on") {
 			return this.#outcome(await this.decideApproval(approval.id, "approve", undefined, "always", { inTurn: true }));
+		}
+		if (isNew && this.#reviewable(approval)) {
+			this.store.setApprovalReview(approval.id, { status: "reviewing", note: null });
+			const reviewing = this.store.approval(approval.id)!;
+			// Open apps show the request, and that the majordomo is on it; the person can still decide first.
+			this.broadcastMessage({ type: "approval", approval: reviewing });
+			await this.schedule(new Date(Date.now() + REVIEW_MS), REVIEW_EXPIRY_CALLBACK, { id: approval.id });
+			void this.keepAliveWhile(() => this.#review(reviewing));
+		}
+		if (this.store.approval(approval.id)?.review) {
+			const { name } = this.agents.majordomo();
+			return `[Approval ${approval.id}] Asked ${name}, the person's majordomo, who decides for them or asks them: ${approval.summary}. The decision, with the result, will arrive in this conversation as a message starting with "[Approval ${approval.id}]". Don't call it again; go on with anything that doesn't depend on it.`;
 		}
 		if (isNew) {
 			this.broadcastMessage({ type: "approval", approval });
@@ -1258,15 +1289,20 @@ export class Pim extends DurableAgent<Env> {
 
 	/** How long approvals filed under `policy` wait before they are approved; null waits for the user however long. */
 	protected approvalTimeoutMs(policy: ApprovalPolicy = this.settings().approvalPolicy): number | null {
-		return policy === "explicit" ? null : APPROVAL_TIMEOUT_MS;
+		return policy === "auto" ? APPROVAL_TIMEOUT_MS : null;
 	}
 
 	#outcome(approval: Approval): string {
-		const note = approval.note ? `\nThe user's note: ${approval.note}` : "";
+		const majordomo = approval.decidedBy === "majordomo" ? this.agents.majordomo().name : null;
+		const note = approval.note ? `\n${majordomo ? `${majordomo}'s` : "The user's"} note: ${approval.note}` : "";
 		const waited = describeWait((approval.expiresAt ?? approval.createdAt) - approval.createdAt);
 		if (approval.status === "denied") {
 			const who =
-				approval.decidedBy === "timeout" ? `The user did not respond within ${waited}, so it was denied` : "The user denied";
+				approval.decidedBy === "timeout"
+					? `The user did not respond within ${waited}, so it was denied`
+					: majordomo
+						? `${majordomo}, the user's majordomo, denied it for them`
+						: "The user denied";
 			return `[Approval ${approval.id}] ${who}: ${approval.summary}${note}\nDo not perform this action.`;
 		}
 		const who =
@@ -1274,7 +1310,9 @@ export class Pim extends DurableAgent<Env> {
 				? `The user did not respond within ${waited}, so it was approved automatically`
 				: approval.decidedBy === "always"
 					? `The user always approves ${approval.tool}, so it was approved automatically`
-					: "The user approved";
+					: majordomo
+						? `${majordomo}, the user's majordomo, approved it for them`
+						: "The user approved";
 		return `[Approval ${approval.id}] ${who}: ${approval.summary}${note}\nResult:\n${approval.result ?? ""}`;
 	}
 
@@ -1340,6 +1378,9 @@ export class Pim extends DurableAgent<Env> {
 				this.team.setReport(run.conversation, operation);
 				void this.#report(run, operation);
 			}
+			// What an agent says next in a chat the majordomo started reaches the majordomo too.
+			const from = this.agents.handedBy(approval.session);
+			if (from) void this.#forwardHandoff(approval.session, from, operation);
 		}
 		return decided;
 	}
@@ -1736,13 +1777,122 @@ export class Pim extends DurableAgent<Env> {
 		await this.expireApproval(payload);
 	}
 
+	// The majordomo deciding other agents' approval requests for the person.
+
+	/**
+	 * Whether the majordomo decides `approval` first: under the `majordomo`
+	 * policy, the request of any agent but the majordomo itself, in a chat
+	 * with the person, where they are the ones to ask. Never a guest's, and
+	 * never one that needs the person's own decision.
+	 */
+	#reviewable(approval: Approval): boolean {
+		if (this.settings().approvalPolicy !== "majordomo" || approval.requestedBy) return false;
+		if (this.actions.find((action) => action.name === approval.action)?.explicitApproval) return false;
+		return approval.member !== null || !this.agents.ofSession(approval.session).majordomo;
+	}
+
+	/**
+	 * The majordomo looks at another agent's request in a conversation of its
+	 * own: who it is and how it decides, the person's memory, and the request.
+	 * Whatever it leaves undecided, or a review that fails, goes to the
+	 * person, as does one that outlasts `REVIEW_MS` (see `expireReview`).
+	 */
+	async #review(approval: Approval): Promise<void> {
+		const call = `review:${approval.id}`;
+		try {
+			let run = this.team.byCall(call);
+			if (!run) {
+				const majordomo = this.agents.majordomo();
+				const { id } = await this.harness.sessions.create();
+				await this.harness.session(id).setModel(this.chosenModel());
+				const snapshot = this.registry.snapshot();
+				const extensions = [REVIEW_EXTENSION, this.memory.extension.name].flatMap((name) => snapshot.extension(name) ?? []);
+				const tools = snapshot
+					.tools()
+					.filter(({ extension, tool }) => extensions.includes(extension) && [DECIDE_APPROVAL, "recall", "zoom"].includes(tool.name))
+					.map(({ tool }) => tool);
+				await (await this.harness.conversation(id)).configure({ extensions, tools }, BACKGROUND_CONTEXT);
+				const chat = approval.member?.session ?? approval.session;
+				this.team.start({ kind: "review", conversation: id, call, position: 0, session: chat, agent: majordomo.id, member: majordomo.name, task: approval.summary });
+				run = this.team.run(id)!;
+			}
+			await this.harness.submit(this.#reviewRequest(approval), { session: run.conversation, operationId: call });
+			const result = await this.harness.wait(call, { session: run.conversation });
+			this.team.setStatus(run.conversation, result.status === "done" ? "done" : "failed");
+		} catch (error) {
+			console.warn(`the majordomo's review of ${approval.id} failed`, error);
+		}
+		await this.#escalate(approval.id, null);
+	}
+
+	/** What the majordomo reads to decide: who asks, for what, and in what chat. */
+	#reviewRequest(approval: Approval): string {
+		const asker = approval.member
+			? `${approval.member.name}, a member of an agent's team`
+			: (() => {
+					const agent = this.agents.ofSession(approval.session);
+					const chat = this.agents.handedBy(approval.session) ? "in a chat you started with it for the person" : "in a chat the person has with it";
+					return `${agent.name}${agent.description ? ` (${agent.description})` : ""}, ${chat}`;
+				})();
+		const args = JSON.stringify(approval.args, null, 2);
+		return [
+			`[Approval review ${approval.id}] ${asker}, asks for approval.`,
+			`Request: ${approval.summary}`,
+			`Action: ${approval.action}`,
+			`Details:\n${args.length > 4000 ? `${args.slice(0, 4000)}\n[... ${args.length - 4000} more characters]` : args}`,
+		].join("\n");
+	}
+
+	/** The majordomo's decision, from its review. Once the person is asked, or decides, it is theirs. */
+	async #reviewDecision(conversation: string, decision: "approve" | "deny" | "escalate", note: string): Promise<string> {
+		const run = this.team.run(conversation);
+		if (run?.kind !== "review") return "This conversation reviews no approval.";
+		const id = run.call.slice("review:".length);
+		const approval = this.store.approval(id);
+		if (approval?.status !== "pending" || approval.review?.status !== "reviewing") return "It's no longer yours to decide: the person has it.";
+		if (decision === "escalate") {
+			await this.#escalate(id, note);
+			return "Asked the person.";
+		}
+		try {
+			const decided = await this.decideApproval(id, decision, note, "majordomo");
+			return decided.status === "approved" ? `Approved. Result:\n${decided.result ?? ""}` : "Denied.";
+		} catch (error) {
+			return `It couldn't be decided: ${errorMessage(error)}`;
+		}
+	}
+
+	/** Asks the person about a request the majordomo is still reviewing, with what it has to say. */
+	async #escalate(id: string, note: string | null): Promise<void> {
+		const approval = this.store.approval(id);
+		if (approval?.status !== "pending" || approval.review?.status !== "reviewing" || this.#closed()) return;
+		this.store.setApprovalReview(id, { status: "escalated", note });
+		const escalated = this.store.approval(id)!;
+		this.broadcastMessage({ type: "approval", approval: escalated });
+		const { name } = this.agents.majordomo();
+		const notification = this.store.addNotification({
+			id: crypto.randomUUID(),
+			session: approval.member?.session ?? approval.session,
+			title: `${name} needs your approval`,
+			body: note ? `${approval.summary}\n${note}` : approval.summary,
+		});
+		// Open apps show the request itself, from the approval just broadcast; this reaches the others.
+		await this.deliverNotification(notification, { sockets: false });
+	}
+
+	/** Fired when a review has taken too long: the person is asked. */
+	async expireReview(payload: { id: string }): Promise<void> {
+		await this.#escalate(payload.id, null);
+	}
+
 	// The owner's agents, and their teams.
 
-	/** The agent a conversation talks as, and the team member it is, if it is one. */
+	/** The agent a conversation talks as, and the team member it is, if it is one. A review talks as the majordomo. */
 	#roleOf(session: string): Role {
 		const run = this.team.run(session);
 		if (!run) return { agent: this.agents.ofSession(session), member: null };
-		const agent = this.agents.get(run.agent) ?? this.agents.default();
+		if (run.kind === "review") return { agent: this.agents.majordomo(), member: null };
+		const agent = this.agents.get(run.agent) ?? this.agents.majordomo();
 		// A member taken off the team since keeps working on what it was given, with no instructions of its own.
 		const member = agent.team.find((candidate) => candidate.name === run.member) ?? { name: run.member, instructions: "", tools: null };
 		return { agent, member };
@@ -1767,6 +1917,55 @@ export class Pim extends DurableAgent<Env> {
 		if (member.tools) return { extensions, tools: kept.filter(({ tool }) => member.tools!.includes(tool.name)).map(({ tool }) => tool) };
 		const leadOnly = snapshot.tools().filter(({ tool }) => LEAD_ONLY_TOOLS.has(tool.name));
 		return { extensions, ...(leadOnly.length > 0 ? { tools: { remove: leadOnly.map(({ tool }) => tool) } } : {}) };
+	}
+
+	/**
+	 * The majordomo's handoff: its message goes into a chat of the person's
+	 * with the agent as though they had sent it, a new chat or one the
+	 * majordomo started before, and the agent answers there as it would
+	 * answer them. What it sent comes back to the majordomo.
+	 */
+	async #sendToAgent({ from, agent, message, chat, key }: { from: string; agent: Agent; message: string; chat: string | undefined; key: string }): Promise<string> {
+		let session = this.agents.byHandoff(key);
+		if (!session && chat !== undefined) {
+			const open = !this.#hiddenSessions().has(chat) && (await this.harness.sessions.list()).some((candidate) => candidate.id === chat);
+			if (!open || this.agents.ofSession(chat).id !== agent.id) return `No chat ${chat} with ${agent.name}: leave out chat to start one.`;
+			session = chat;
+		}
+		const operation = `handoff:${key}`;
+		try {
+			session ??= await this.#startChat(agent, undefined, { from, key });
+			await this.submitTo(session, message, { operationId: operation, whenBusy: "followUp" }, "user");
+		} catch (error) {
+			return `It couldn't be sent: ${errorMessage(error)}`;
+		}
+		const result = await this.#withReplies(await this.harness.wait(operation, { session }));
+		const where = `Chat ${session} with ${agent.name}, at /chat/${session}.`;
+		if (result.status !== "done") return `${where}\n${agent.name} didn't finish: ${result.reason ?? "unanswered"}.`;
+		const answer = result.replies.length > 0 ? result.replies.join("\n\n") : "(It sent nothing.)";
+		return `${where}\n${agent.name} answered:\n${answer}`;
+	}
+
+	/**
+	 * Passes on what an agent said in a chat the majordomo started, after the
+	 * decision on its approval request, to the majordomo's chat, once.
+	 */
+	async #forwardHandoff(session: string, from: string, operation: string): Promise<void> {
+		try {
+			await this.keepAliveWhile(async () => {
+				const { replies } = await this.#withReplies(await this.harness.wait(operation, { session }));
+				if (replies.length === 0 || this.store.deletedSessions().has(from) || this.store.deletedSessions().has(session)) return;
+				const { name } = this.agents.ofSession(session);
+				await this.submitTo(
+					from,
+					`${CHAT_REPORT} ${name}] In chat ${session}, after the decision on its approval request, ${name} said:\n${replies.join("\n\n")}`,
+					{ operationId: `handoff-report:${operation}`, whenBusy: "followUp" },
+					"pim",
+				);
+			});
+		} catch (error) {
+			console.warn(`passing on what was said in ${session} failed`, error);
+		}
 	}
 
 	/** Gives a member its task and waits for its answer. */
@@ -1868,7 +2067,8 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Gives a chat the abilities its agent uses and the apps it lists, as they
+	 * Gives a chat the abilities its agent uses and the apps it lists, and a
+	 * chat with the majordomo the majordomo's own extension, as they
 	 * are now, before its next run: its agent, the agent's blueprint, the extensions or
 	 * the connected apps may have changed since.
 	 * Visits choose their own extensions, and team members get theirs when
@@ -1877,7 +2077,8 @@ export class Pim extends DurableAgent<Env> {
 	async #selectAbilities(session: string): Promise<void> {
 		if (this.visits.bySession(session) || this.team.run(session)) return;
 		const agent = this.agents.ofSession(session);
-		const wanted = [...this.extensions.abilitiesOf(agent.blueprint), ...this.#appExtensionsOf(agent)];
+		// Apps last: their tools come and go, and pi only appends cheaply at the end.
+		const wanted = [...(agent.majordomo ? [MAJORDOMO_EXTENSION] : []), ...this.extensions.abilitiesOf(agent.blueprint), ...this.#appExtensionsOf(agent)];
 		const key = wanted.join(" ");
 		if ((this.agents.abilities(session) ?? "") === key) return;
 		const snapshot = this.registry.snapshot();
@@ -1911,7 +2112,7 @@ export class Pim extends DurableAgent<Env> {
 		const blueprint = agent.blueprint === null ? undefined : this.extensions.blueprint(agent.blueprint);
 		const widgets = await Promise.all((blueprint?.dashboard ?? []).map((ref) => this.#loadWidget(agent, ref)));
 		return {
-			agent: { id: agent.id, name: agent.name, description: agent.description, default: agent.default, blueprint: agent.blueprint, icon: agent.icon, symbol: agent.symbol, color: agent.color },
+			agent: { id: agent.id, name: agent.name, description: agent.description, majordomo: agent.majordomo, blueprint: agent.blueprint, icon: agent.icon, symbol: agent.symbol, color: agent.color },
 			starters: (blueprint?.starters ?? []).map((starter) => localize(starter, locale)),
 			widgets: widgets.map((widget) => ({ ...widget, title: localize(widget.title, locale), empty: localize(widget.empty, locale) })),
 		};
@@ -1928,7 +2129,7 @@ export class Pim extends DurableAgent<Env> {
 			return !this.visits.bySession(chat) && this.agents.ofSession(chat).id === agent.id;
 		};
 		const context: WidgetContext = {
-			agent: { id: agent.id, name: agent.name, default: agent.default },
+			agent: { id: agent.id, name: agent.name, majordomo: agent.majordomo },
 			timeZone: this.settings().timeZone,
 			chatOf: (session) => (ofAgent(session) && !deleted.has(chatFor(session)) ? chatFor(session) : null),
 			ofAgent,
@@ -2003,13 +2204,12 @@ export class Pim extends DurableAgent<Env> {
 		return this.agents.get(agent.id)!;
 	}
 
-	/** At registration: makes the default agent a copy of the one the admin chose for everyone, its icon too. */
-	async adoptDefaultAgent(agent: AgentInput & { author: string; image: AgentIcon | null }): Promise<Agent> {
+	/** At registration: gives the person a copy of the agent the admin chose for everyone, its icon too, besides their majordomo. */
+	async adoptEveryonesAgent(agent: AgentInput & { author: string; image: AgentIcon | null }): Promise<Agent> {
 		this.#assertOpen();
 		const { author, image, ...input } = agent;
-		const copy = this.agents.replaceDefault(await this.#installed(agentInput({ ...input })), { template: "default", author });
+		const copy = this.agents.create(await this.#installed(agentInput({ ...input })), { template: "default", author });
 		if (image) this.agents.setIcon(copy.id, image.type, image.data);
-		else this.agents.removeIcon(copy.id);
 		return this.agents.get(copy.id)!;
 	}
 
@@ -2389,7 +2589,7 @@ export class Pim extends DurableAgent<Env> {
 			"/sessions",
 			async (_params, request) => {
 				const { title, agent: agentId } = await readJson<{ title: string; agent: string }>(request);
-				const agent = agentId === undefined ? this.agents.default() : this.#agent(agentId);
+				const agent = agentId === undefined ? this.agents.majordomo() : this.#agent(agentId);
 				const id = await this.#startChat(agent, typeof title === "string" && title.trim() !== "" ? clipTitle(title) : undefined);
 				return { id, ...this.store.sessionInfo(id), agent: this.#agentRef(id) };
 			},
@@ -2958,8 +3158,26 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 
-		// The owner's agents, the default one first.
+		// The owner's agents, the majordomo first.
 		["GET", "/agents", () => ({ agents: this.agents.list() })],
+		// The majordomo, and whether the person has named it yet.
+		["GET", "/majordomo", () => ({ agent: this.agents.majordomo(), introduced: this.agents.introduced() })],
+		[
+			"POST",
+			"/majordomo",
+			async (_params, request) => {
+				// Named once, when the person first signs in; after that it is edited like any agent.
+				if (this.agents.introduced()) throw new HttpError(409, "Your majordomo already has a name");
+				const setup = majordomoSetup(await readJson<Record<string, unknown>>(request));
+				const majordomo = this.agents.majordomo();
+				const { name, symbol, color, instructions } = setup;
+				this.agents.update(majordomo.id, agentInput({ name, symbol, color, instructions }, majordomo));
+				for (const line of setup.memories) this.memory.store.append(line, this.memory.today());
+				if (setup.memories.length > 0) await this.startMemoryNap();
+				this.agents.introduce();
+				return { agent: this.agents.majordomo(), introduced: true };
+			},
+		],
 		["GET", "/agents/:agent", ({ agent }) => this.#agent(agent!)],
 		[
 			"POST",
@@ -3033,17 +3251,6 @@ export class Pim extends DurableAgent<Env> {
 				this.#agent(id!);
 				this.agents.removeIcon(id!);
 				return this.#agent(id!);
-			},
-		],
-		[
-			"POST",
-			"/agents/:agent/default",
-			async ({ agent: id }) => {
-				this.#agent(id!);
-				// Chats tied to no agent are the current default's: tie them to it first, so they stay with it.
-				this.agents.tieToDefault((await this.harness.sessions.list()).map((session) => session.id));
-				this.agents.setDefault(id!);
-				return this.agents.get(id!);
 			},
 		],
 		["GET", "/agents/:agent/dashboard", ({ agent }, _request, url) => this.#dashboard(this.#agent(agent!), url.searchParams.get("locale") ?? "en")],

@@ -6,6 +6,9 @@ import { admin, pim } from "~/lib/pim-api";
 export const sessionsQuery = () =>
   queryOptions({ queryKey: ["sessions"], queryFn: pim.sessions });
 
+export const majordomoQuery = () =>
+  queryOptions({ queryKey: ["agents", "majordomo"], queryFn: pim.majordomo });
+
 export const approvalsQuery = () =>
   queryOptions({ queryKey: ["approvals"], queryFn: () => pim.approvals() });
 

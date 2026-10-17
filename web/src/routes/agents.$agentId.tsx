@@ -48,9 +48,9 @@ function DashboardPage() {
           <div className="min-w-0">
             <h1 className="flex items-center gap-2 font-semibold text-2xl">
               <span className="truncate">{agent.name}</span>
-              {agent.default && (
+              {agent.majordomo && (
                 <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
-                  {t("defaultAgent")}
+                  {t("majordomoBadge")}
                 </span>
               )}
             </h1>

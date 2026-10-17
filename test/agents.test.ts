@@ -12,10 +12,10 @@ import { faux } from "./worker";
 const system = (messages: readonly Message[]) => JSON.stringify(messages.filter((message) => message.role === "system").at(-1));
 
 describe("the owner's agents", () => {
-	it("talks in every chat as the chat's agent, or the default one, as each is at each request", async () => {
-		// Every account has its agent: plain until changed, and there to stay.
+	it("talks in every chat as the chat's agent, or the majordomo, as each is at each request", async () => {
+		// Every account has its majordomo: plain until named, and there to stay.
 		const [mine] = (await api("/agents")).body.agents;
-		expect(mine).toMatchObject({ name: "Pim", instructions: "", default: true, source: null });
+		expect(mine).toMatchObject({ name: "Majordomo", instructions: "", majordomo: true, source: null });
 		expect((await api(`/agents/${mine.id}`, { method: "DELETE" })).status).toBe(400);
 
 		expect((await post("/agents", { name: "", instructions: "x" })).status).toBe(400);
@@ -30,12 +30,12 @@ describe("the owner's agents", () => {
 				apps: ["test.ledger/strava"],
 			})
 		).body;
-		expect(coach).toMatchObject({ id: expect.stringMatching(/^p_/), source: null, published: null, default: false });
-		expect((await api("/agents")).body.agents.map((agent: { name: string }) => agent.name)).toEqual(["Pim", "Marathon coach"]);
+		expect(coach).toMatchObject({ id: expect.stringMatching(/^p_/), source: null, published: null, majordomo: false });
+		expect((await api("/agents")).body.agents.map((agent: { name: string }) => agent.name)).toEqual(["Majordomo", "Marathon coach"]);
 		expect((await post("/sessions", { agent: "p_nope" })).status).toBe(404);
 		const session = (await post("/sessions", { agent: coach.id })).body;
 		expect(session.agent).toEqual({ id: coach.id, name: "Marathon coach" });
-		expect((await post("/sessions", {})).body.agent).toEqual({ id: mine.id, name: "Pim" });
+		expect((await post("/sessions", {})).body.agent).toEqual({ id: mine.id, name: "Majordomo" });
 
 		const prompts: string[] = [];
 		const record = (context: { messages: Message[] }) => {
@@ -47,10 +47,10 @@ describe("the owner's agents", () => {
 		await say("Hello", "1");
 		expect(prompts[0]).toContain('In this conversation you are \\"Marathon coach\\"');
 		expect(prompts[0]).toContain("Answer every question with a training tip.");
-		expect(prompts[1]).toContain('In this conversation you are \\"Pim\\".');
+		expect(prompts[1]).toContain('In this conversation you are \\"Majordomo\\".');
 		expect(prompts[1]).not.toContain("training tip");
 
-		// Edited, an agent's chats follow from their next request: the default one's are every chat not started with another.
+		// Edited, an agent's chats follow from their next request: the majordomo's are every chat not started with another.
 		await api(`/agents/${coach.id}`, { method: "PUT", body: JSON.stringify({ instructions: "Speak only in haiku." }) });
 		await api(`/agents/${mine.id}`, { method: "PUT", body: JSON.stringify({ name: "Sam", instructions: "Sign off with -S." }) });
 		faux.setResponses([record, record]);
@@ -64,13 +64,13 @@ describe("the owner's agents", () => {
 			name: "Marathon coach",
 		});
 
-		// Deleted, its chats stay, with the default agent.
+		// Deleted, its chats stay, with the majordomo.
 		expect((await api(`/agents/${coach.id}`, { method: "DELETE" })).body).toEqual({ deleted: true });
 		faux.setResponses([record]);
 		await say("Still there?", session.id);
 		expect(prompts[4]).toContain("Sign off with -S.");
 		expect(prompts[4]).not.toContain("haiku");
-		expect((await api("/agents")).body.agents).toEqual([expect.objectContaining({ id: mine.id, name: "Sam", default: true })]);
+		expect((await api("/agents")).body.agents).toEqual([expect.objectContaining({ id: mine.id, name: "Sam", majordomo: true })]);
 	});
 
 	it("keeps an icon for each agent, only as a picture", async () => {
@@ -135,7 +135,7 @@ describe("the owner's agents", () => {
 		]);
 		await say("Hi", session);
 		expect(seen[0]!.prompt).toContain("- Trip planner (you): Plans my trips.");
-		expect(seen[0]!.prompt).toMatch(/- [^\\]+ \(default\)/);
+		expect(seen[0]!.prompt).toMatch(/- [^\\]+ \(their majordomo\) \[id/);
 
 		// Refused as the API refuses it: nothing made.
 		await say("Make me a code reviewer", session);
@@ -147,7 +147,7 @@ describe("the owner's agents", () => {
 		expect(seen[3]!.result).toContain('\\"created\\": true');
 		const made = (await api("/agents")).body.agents.find((agent: { name: string }) => agent.name === "Code reviewer");
 		const { emoji, ...given } = reviewer;
-		expect(made).toMatchObject({ ...given, symbol: emoji, color: "indigo", default: false, source: null });
+		expect(made).toMatchObject({ ...given, symbol: emoji, color: "indigo", majordomo: false, source: null });
 		// One the person has already isn't made again, whatever its case.
 		await say("And another code reviewer", session);
 		expect(seen[4]!.result).toContain('\\"exists\\": true');
@@ -314,13 +314,15 @@ describe("a database from when agents were personas", () => {
 			const agents = new AgentStore(
 				sql,
 				() => {
-					throw new Error("the default exists, so no starter is needed");
+					throw new Error("the majordomo exists, so no starter is needed");
 				},
 				directory,
 			);
-			expect(agents.list()).toMatchObject([{ id: "p_1", name: "Coach", blueprint: "test.ledger/budget", default: true, icon: 7, apps: ["test.ledger/strava"] }]);
+			expect(agents.list()).toMatchObject([{ id: "p_1", name: "Coach", blueprint: "test.ledger/budget", majordomo: true, icon: 7, apps: ["test.ledger/strava"] }]);
+			// Its default agent is its majordomo, already named: nobody is asked to name theirs again.
+			expect(agents.introduced()).toBe(true);
 			expect(agents.ofSession("9").id).toBe("p_1");
-			expect(new TeamStore(sql).run("c1")).toMatchObject({ agent: "p_1", member: "Editor" });
+			expect(new TeamStore(sql).run("c1")).toMatchObject({ kind: "member", agent: "p_1", member: "Editor" });
 			// Starting again changes nothing.
 			expect(new AgentStore(sql, () => { throw new Error("unused"); }, directory).list()).toHaveLength(1);
 		});

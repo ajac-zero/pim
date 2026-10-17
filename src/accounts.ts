@@ -226,12 +226,12 @@ async function register(request: Request, env: Env, now: number): Promise<Respon
 		await pim.provision({ ownerId: account.ownerId, username, publicUrl: origin(request, env) });
 		// The deployment's limits are for members: the admin pays for the deployment.
 		if (account.role === "admin") await pim.setLimits(UNLIMITED);
-		// Everyone starts with a copy of the agent the admin chose, or a plain one when they chose none.
+		// Everyone gets a copy of the agent the admin chose, if they chose one, besides the majordomo they name next.
 		const everyone = await gallery(env).defaultAgent();
 		if (everyone) {
 			const { author, name, description, instructions, apps, team, blueprint, symbol, color } = everyone;
 			const image = everyone.icon ? await gallery(env).defaultAgentIcon() : null;
-			await pim.adoptDefaultAgent({ author, name, description, instructions, apps, team, blueprint, symbol, color, image });
+			await pim.adoptEveryonesAgent({ author, name, description, instructions, apps, team, blueprint, symbol, color, image });
 		}
 		if (typeof body?.timeZone === "string") {
 			// The browser's zone, a good first guess; a bad one is just not applied.

@@ -83,7 +83,7 @@ export type Ability = Omit<Extension, "name"> & { readonly actions?: readonly Ga
 
 export type WidgetContext = {
 	/** The agent whose dashboard shows the widget. */
-	readonly agent: { readonly id: string; readonly name: string; readonly default: boolean };
+	readonly agent: { readonly id: string; readonly name: string; readonly majordomo: boolean };
 	/**
 	 * The person's chat that a conversation is, or works for (a team member's
 	 * conversation works for the chat that gave it its task), when that chat

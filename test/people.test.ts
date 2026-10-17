@@ -1619,7 +1619,7 @@ describe("profiles and published agents", () => {
 		// Unpublished, it's gone from the gallery; Eli keeps his copy.
 		expect((await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "DELETE" })).status).toBe(200);
 		expect((await eli.browser.json(`/api/templates/${templateId}`)).status).toBe(404);
-		expect((await eli.browser.json("/api/agents")).body.agents.map((agent: { name: string }) => agent.name)).toEqual(["Pim", "Marathon coach"]);
+		expect((await eli.browser.json("/api/agents")).body.agents.map((agent: { name: string }) => agent.name)).toEqual(["Majordomo", "Marathon coach"]);
 
 		// Deleting a published agent unpublishes it; deleting the account takes the profile and everything published.
 		const again = (await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "POST" })).body.id;
@@ -1661,9 +1661,10 @@ describe("profiles and published agents", () => {
 			icon: true,
 		});
 
-		// A newcomer's default agent is a copy; whoever joined before keeps theirs.
+		// A newcomer gets a copy besides the majordomo they are yet to name; whoever joined before doesn't.
 		const otto = await person("otto");
-		const [copy] = (await otto.browser.json("/api/agents")).body.agents;
+		expect((await otto.browser.json("/api/majordomo")).body).toMatchObject({ agent: { name: "Majordomo", majordomo: true }, introduced: false });
+		const [, copy] = (await otto.browser.json("/api/agents")).body.agents;
 		expect(copy).toMatchObject({
 			name: "Household helper",
 			description: "Keeps the house running.",
@@ -1671,25 +1672,25 @@ describe("profiles and published agents", () => {
 			symbol: "house",
 			color: "amber",
 			icon: expect.any(Number),
-			default: true,
+			majordomo: false,
 			source: { template: "default", author: "boss" },
 		});
 		expect(new Uint8Array(await (await otto.browser.fetch(`/api/agents/${copy.id}/icon`)).arrayBuffer())).toEqual(png);
-		expect((await before.browser.json("/api/agents")).body.agents).toEqual([expect.objectContaining({ name: "Pim", default: true })]);
+		expect((await before.browser.json("/api/agents")).body.agents).toEqual([expect.objectContaining({ name: "Majordomo", majordomo: true })]);
 
 		// The copy is Otto's: the admin's later edits don't reach it, and his don't reach theirs.
 		await admin(`/api/agents/${helper.id}`, { method: "PUT", json: { instructions: "Ask before buying anything." } });
 		await otto.browser.json(`/api/agents/${copy.id}`, { method: "PUT", json: { name: "Otto's helper" } });
-		expect((await otto.browser.json("/api/agents")).body.agents[0]).toMatchObject({
+		expect((await otto.browser.json("/api/agents")).body.agents[1]).toMatchObject({
 			name: "Otto's helper",
 			instructions: "Check the family calendar first.",
 		});
 		expect((await admin(`/api/agents/${helper.id}`)).body.name).toBe("Household helper");
 
-		// Taken back, people join with a plain agent again.
+		// Taken back, people join with only their majordomo again.
 		expect((await admin("/api/admin/default-agent", { method: "DELETE" })).body).toEqual({ agent: null });
 		expect((await (await person("pia")).browser.json("/api/agents")).body.agents).toEqual([
-			expect.objectContaining({ name: "Pim", instructions: "", symbol: null, color: null, icon: null, default: true }),
+			expect.objectContaining({ name: "Majordomo", instructions: "", symbol: null, color: null, icon: null, majordomo: true }),
 		]);
 	});
 

@@ -22,7 +22,7 @@ import {
   type PimSettings,
   pim,
 } from "~/lib/pim-api";
-import { accountQuery, settingsQuery } from "~/lib/queries";
+import { accountQuery, majordomoQuery, settingsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 function Section({
@@ -188,11 +188,15 @@ function RecoveryCodesRow({ account }: { account: Account }) {
   );
 }
 
-/** The person's own settings: time zone, language, and what an unanswered approval becomes. */
+/** The person's own settings: time zone, language, and who answers approvals. */
 export function PreferencesSection() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const { data: settings } = useQuery(settingsQuery());
+  const { data: majordomo } = useQuery({
+    ...majordomoQuery(),
+    select: (state) => state.agent,
+  });
   const update = useMutation({
     mutationFn: pim.updateSettings,
     onSuccess: (next) => {
@@ -204,6 +208,11 @@ export function PreferencesSection() {
   if (!settings) return null;
   const zones = timeZones(settings.timeZone);
   const policies: { value: ApprovalPolicy; title: string; body: string }[] = [
+    {
+      value: "majordomo",
+      title: t("approvalMajordomo"),
+      body: t("approvalMajordomoBody", { name: majordomo?.name ?? "" }),
+    },
     {
       value: "explicit",
       title: t("approvalExplicit"),

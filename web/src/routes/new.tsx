@@ -5,7 +5,7 @@ import { useI18n } from "~/components/i18n";
 import { agentsQuery } from "~/lib/queries";
 import { useStartChat } from "~/lib/start-chat";
 
-/** An empty draft chat, with your default agent or another of yours. No session exists until the first message is sent. */
+/** An empty draft chat, with your majordomo or another of your agents. No session exists until the first message is sent. */
 export const Route = createFileRoute("/new")({
   validateSearch: (search: Record<string, unknown>): { agent?: string } =>
     typeof search.agent === "string" ? { agent: search.agent } : {},
@@ -17,7 +17,7 @@ function NewChatPage() {
   const { agent: agentId } = Route.useSearch();
   const { data: agents } = useQuery(agentsQuery());
   const agent = agents?.find((candidate) =>
-    agentId === undefined ? candidate.default : candidate.id === agentId,
+    agentId === undefined ? candidate.majordomo : candidate.id === agentId,
   );
   const { start, starting } = useStartChat(agent?.id);
 

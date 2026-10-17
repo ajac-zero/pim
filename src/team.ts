@@ -18,8 +18,16 @@ import { MAX_TEAM, type Agent, type TeamMember } from "./agents";
 /** How a member's task went: running, answered, or not (failed, aborted). */
 export type TeamRunStatus = "running" | "done" | "failed";
 
+/**
+ * Who works in the conversation: a `member` of the agent's team, or the
+ * majordomo deciding another agent's approval request (`review`, see
+ * ./majordomo.ts), which no chat shows.
+ */
+export type TeamRunKind = "member" | "review";
+
 /** One task a member was given, in its own conversation. */
 export type TeamRun = {
+	readonly kind: TeamRunKind;
 	/** The member's conversation. */
 	readonly conversation: string;
 	/** The `delegate` call that gave it: tasks handed out together share it. */
@@ -46,7 +54,8 @@ CREATE TABLE IF NOT EXISTS pim_team_runs (
 	status TEXT NOT NULL,
 	report TEXT,
 	created_at INTEGER NOT NULL,
-	updated_at INTEGER NOT NULL
+	updated_at INTEGER NOT NULL,
+	kind TEXT NOT NULL DEFAULT 'member'
 );
 CREATE INDEX IF NOT EXISTS pim_team_runs_by_session ON pim_team_runs (session, created_at);
 `;
@@ -54,6 +63,7 @@ CREATE INDEX IF NOT EXISTS pim_team_runs_by_session ON pim_team_runs (session, c
 type Row = Record<string, SqlStorageValue>;
 
 const runOf = (row: Row): TeamRun => ({
+	kind: String(row.kind) as TeamRunKind,
 	conversation: String(row.conversation),
 	call: String(row.call),
 	session: String(row.session),
@@ -74,13 +84,15 @@ export class TeamStore {
 		// Agents were once called personas: renamed in place, keeping the rows.
 		const columns = this.#sql.exec("PRAGMA table_info(pim_team_runs)").toArray().map((row) => String(row.name));
 		if (columns.includes("persona")) this.#sql.exec("ALTER TABLE pim_team_runs RENAME COLUMN persona TO agent");
+		if (!columns.includes("kind")) this.#sql.exec("ALTER TABLE pim_team_runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'member'");
 	}
 
 	/** Idempotent on the conversation: a replayed call finds the runs it started. */
-	start(run: { conversation: string; call: string; position: number; session: string; agent: string; member: string; task: string }): void {
+	start(run: { kind?: TeamRunKind; conversation: string; call: string; position: number; session: string; agent: string; member: string; task: string }): void {
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT OR IGNORE INTO pim_team_runs (conversation, call, position, session, agent, member, task, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)",
+			"INSERT OR IGNORE INTO pim_team_runs (kind, conversation, call, position, session, agent, member, task, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)",
+			run.kind ?? "member",
 			run.conversation,
 			run.call,
 			run.position,
@@ -114,10 +126,16 @@ export class TeamStore {
 		return row ? runOf(row) : undefined;
 	}
 
+	/** The conversation a call started. */
+	byCall(call: string): TeamRun | undefined {
+		const [row] = this.#sql.exec("SELECT * FROM pim_team_runs WHERE call = ? ORDER BY position LIMIT 1", call).toArray();
+		return row ? runOf(row) : undefined;
+	}
+
 	/** What a chat's team was given, newest first. */
 	ofSession(session: string, limit = 50): TeamRun[] {
 		return this.#sql
-			.exec("SELECT * FROM pim_team_runs WHERE session = ? ORDER BY created_at DESC, position DESC LIMIT ?", session, limit)
+			.exec("SELECT * FROM pim_team_runs WHERE session = ? AND kind = 'member' ORDER BY created_at DESC, position DESC LIMIT ?", session, limit)
 			.toArray()
 			.map(runOf);
 	}

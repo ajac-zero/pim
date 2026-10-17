@@ -7,7 +7,6 @@ import {
   Pencil,
   Plus,
   Puzzle,
-  Star,
   Trash2,
   Users,
   X,
@@ -133,15 +132,6 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
     queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     return queryClient.invalidateQueries({ queryKey: ["agents"] });
   };
-  const makeDefault = useMutation({
-    mutationFn: () => pim.makeDefaultAgent(agent.id),
-    onSuccess: () => {
-      refresh();
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      toast.success(t("madeDefault", { name: agent.name }));
-    },
-    onError: (error) => toast.error(error.message),
-  });
   const remove = useMutation({
     mutationFn: () => pim.deleteAgent(agent.id),
     onSuccess: () => {
@@ -188,9 +178,9 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
             >
               {agent.name}
             </Link>
-            {agent.default && (
+            {agent.majordomo && (
               <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
-                {t("defaultAgent")}
+                {t("majordomoBadge")}
               </span>
             )}
           </h2>
@@ -288,16 +278,6 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
             {t("unpublish")}
           </Button>
         )}
-        {!agent.default && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => makeDefault.mutate()}
-            disabled={makeDefault.isPending}
-          >
-            <Star /> {t("makeDefault")}
-          </Button>
-        )}
         {isAdmin && everyones !== undefined && !forEveryone && (
           <Button
             size="sm"
@@ -309,7 +289,7 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
           </Button>
         )}
         <span className="ml-auto">
-          {agent.default ? null : confirming ? (
+          {agent.majordomo ? null : confirming ? (
             <span className="flex items-center gap-1">
               <Button
                 size="sm"

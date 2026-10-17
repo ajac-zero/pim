@@ -8,11 +8,13 @@ import { HttpError } from "./http";
  * coach" or "Trip planner". Each builds on a blueprint an extension brings
  * (its `blueprint`, see ./extensions/define.ts), usually Pim's own
  * assistant, and adds the person's name and instructions on top. One of
- * them is the default, which talks in chats started without choosing one;
- * any can be made the default. An account's first agent is a copy of the
- * one the admin chose for everyone, or one built on the deployment's
- * default blueprint. Memory, approvals and connected apps are shared by all
- * of them: an agent lists the apps it works with by name, from the
+ * them is the majordomo: the agent the person comes to first, which knows
+ * them best, hands work down to the others, and stands in for the person on
+ * their approvals (see ./majordomo.ts). It talks in chats started without
+ * choosing an agent, and it is always the same one: the title can't move to
+ * another agent, and it can't be deleted. The person names it and chooses
+ * its look when they first sign in. Memory, approvals and connected apps
+ * are shared by all of them: an agent lists the apps it works with by name, from the
  * deployment's directory (./extensions/app-directory.ts), and the person
  * connects each app once.
  * One can be published as a template others make their own (see
@@ -51,8 +53,8 @@ export type Agent = {
 	readonly symbol: string | null;
 	/** One of `AGENT_COLORS`, for its symbol; null for the default. */
 	readonly color: string | null;
-	/** The one that talks in chats started without choosing an agent. It can't be deleted while it is the default. */
-	readonly default: boolean;
+	/** The person's majordomo: the one that talks in chats started without choosing an agent. There is one, always the same, and it can't be deleted. */
+	readonly majordomo: boolean;
 	readonly createdAt: number;
 	readonly updatedAt: number;
 };
@@ -98,7 +100,8 @@ CREATE TABLE IF NOT EXISTS pim_agents (
 	team TEXT NOT NULL DEFAULT '[]',
 	blueprint TEXT,
 	symbol TEXT,
-	color TEXT
+	color TEXT,
+	introduced INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS pim_agent_icons (
 	agent TEXT PRIMARY KEY,
@@ -108,7 +111,9 @@ CREATE TABLE IF NOT EXISTS pim_agent_icons (
 );
 CREATE TABLE IF NOT EXISTS pim_agent_sessions (
 	session TEXT PRIMARY KEY,
-	agent TEXT NOT NULL
+	agent TEXT NOT NULL,
+	handed_by TEXT,
+	handoff TEXT
 );
 CREATE TABLE IF NOT EXISTS pim_session_abilities (
 	session TEXT PRIMARY KEY,
@@ -151,7 +156,7 @@ const agentOf = (row: Row, directory: () => readonly DirectoryApp[]): Agent => (
 	icon: row.icon === null ? null : Number(row.icon),
 	symbol: row.symbol === null ? null : String(row.symbol),
 	color: row.color === null ? null : String(row.color),
-	default: Number(row.is_default) === 1,
+	majordomo: Number(row.is_default) === 1,
 	createdAt: Number(row.created_at),
 	updatedAt: Number(row.updated_at),
 });
@@ -242,16 +247,17 @@ function teamInput(value: unknown): TeamMember[] {
 }
 
 /**
- * Who a chat's agent is and how it works: its name, then the instructions of
- * the blueprint it builds on, then the person's own, which win.
+ * Who a chat's agent is and how it works: its name and `role`, such as the
+ * majordomo's, then the instructions of the blueprint it builds on, then the
+ * person's own, which win.
  */
-export function agentInstructions(agent: Agent, blueprint: BlueprintDefinition | undefined): string {
+export function agentInstructions(agent: Agent, blueprint: BlueprintDefinition | undefined, role?: string): string {
 	const identity = `In this conversation you are "${agent.name}"${agent.description ? `: ${agent.description}` : "."}`;
 	const own =
 		agent.instructions === ""
 			? []
 			: [`Your instructions, which come before your general habits wherever the two differ:\n${agent.instructions}`];
-	return [identity, ...(blueprint ? [blueprint.instructions] : []), ...own].join("\n\n");
+	return [identity, ...(role ? [role] : []), ...(blueprint ? [blueprint.instructions] : []), ...own].join("\n\n");
 }
 
 export class AgentStore {
@@ -260,9 +266,9 @@ export class AgentStore {
 	readonly #directory: () => readonly DirectoryApp[];
 
 	/**
-	 * `starter` is an account's first agent, made the first time any is asked
-	 * for: one built on the deployment's default blueprint. `directory` finds
-	 * the apps agents listed by URL before it.
+	 * `starter` is the majordomo as it is made, the first time any agent is
+	 * asked for, until the person names it. `directory` finds the apps agents
+	 * listed by URL before it.
 	 */
 	constructor(sql: SqlStorage, starter: () => AgentInput, directory: () => readonly DirectoryApp[]) {
 		this.#sql = sql;
@@ -277,31 +283,34 @@ export class AgentStore {
 		if (!columns.includes("blueprint")) this.#sql.exec(`ALTER TABLE pim_agents ADD COLUMN blueprint TEXT DEFAULT '${ASSISTANT_BLUEPRINT}'`);
 		if (!columns.includes("symbol")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN symbol TEXT");
 		if (!columns.includes("color")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN color TEXT");
+		// Accounts from before majordomos already have the agent they talk with: it becomes theirs as it is.
+		if (!columns.includes("introduced")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN introduced INTEGER NOT NULL DEFAULT 1");
+		const sessionColumns = this.#sql.exec("PRAGMA table_info(pim_agent_sessions)").toArray().map((row) => String(row.name));
+		if (!sessionColumns.includes("handed_by")) this.#sql.exec("ALTER TABLE pim_agent_sessions ADD COLUMN handed_by TEXT");
+		if (!sessionColumns.includes("handoff")) this.#sql.exec("ALTER TABLE pim_agent_sessions ADD COLUMN handoff TEXT");
 	}
 
-	/** The default one first, then the others as they were made. */
+	/** The majordomo first, then the others as they were made. */
 	list(): Agent[] {
-		this.default();
+		this.majordomo();
 		return this.#sql.exec(`${SELECT} ORDER BY p.is_default DESC, p.created_at, p.id`).toArray().map((row) => agentOf(row, this.#directory));
 	}
 
-	/** The default agent, made from the starter the first time it is asked for. */
-	default(): Agent {
+	/** The majordomo, made from the starter the first time it is asked for. */
+	majordomo(): Agent {
 		const [row] = this.#sql.exec(`${SELECT} WHERE p.is_default = 1`).toArray();
 		return row ? agentOf(row, this.#directory) : this.#insert(this.#starter(), null, true);
 	}
 
-	/** Makes another of the owner's agents the default. */
-	setDefault(id: string): void {
-		this.#sql.exec("UPDATE pim_agents SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END", id);
+	/** Whether the person has named their majordomo yet, which they do when they first sign in. */
+	introduced(): boolean {
+		const [row] = this.#sql.exec("SELECT introduced FROM pim_agents WHERE id = ?", this.majordomo().id).toArray();
+		return Number(row?.introduced) === 1;
 	}
 
-	/** Makes the default agent a copy of `input`: at registration, the one the admin chose for everyone. */
-	replaceDefault(input: AgentInput, source: Agent["source"]): Agent {
-		const current = this.default();
-		this.update(current.id, input);
-		this.#sql.exec("UPDATE pim_agents SET source = ? WHERE id = ?", source === null ? null : JSON.stringify(source), current.id);
-		return this.get(current.id)!;
+	/** The person named their majordomo. */
+	introduce(): void {
+		this.#sql.exec("UPDATE pim_agents SET introduced = 1 WHERE is_default = 1");
 	}
 
 	get(id: string): Agent | undefined {
@@ -357,9 +366,9 @@ export class AgentStore {
 		this.#sql.exec("UPDATE pim_agents SET published = ? WHERE id = ?", template, id);
 	}
 
-	/** Deletes it; its chats stay, with the default agent. */
+	/** Deletes it; its chats stay, with the majordomo. */
 	delete(id: string): void {
-		if (this.get(id)?.default) throw new HttpError(400, "Your default agent can't be deleted. Make another one the default first.");
+		if (this.get(id)?.majordomo) throw new HttpError(400, "Your majordomo can't be deleted.");
 		this.#sql.exec("DELETE FROM pim_agent_sessions WHERE agent = ?", id);
 		this.#sql.exec("DELETE FROM pim_agent_icons WHERE agent = ?", id);
 		this.#sql.exec("DELETE FROM pim_agents WHERE id = ?", id);
@@ -388,28 +397,39 @@ export class AgentStore {
 		this.#sql.exec("DELETE FROM pim_agent_icons WHERE agent = ?", id);
 	}
 
-	setSession(session: string, agent: string): void {
+	/**
+	 * Ties a chat to an agent. A chat the majordomo started for the person
+	 * also records the majordomo's chat it came from and the handoff's key,
+	 * so a retried handoff finds the same chat.
+	 */
+	setSession(session: string, agent: string, handoff?: { from: string; key: string }): void {
 		this.#sql.exec(
-			"INSERT INTO pim_agent_sessions (session, agent) VALUES (?, ?) ON CONFLICT (session) DO UPDATE SET agent = excluded.agent",
+			"INSERT INTO pim_agent_sessions (session, agent, handed_by, handoff) VALUES (?, ?, ?, ?) ON CONFLICT (session) DO UPDATE SET agent = excluded.agent",
 			session,
 			agent,
+			handoff?.from ?? null,
+			handoff?.key ?? null,
 		);
 	}
 
-	/** The agent a chat was started with, or the default one for a chat tied to none. */
+	/** The majordomo's chat a chat was started from, if the majordomo started it. */
+	handedBy(session: string): string | undefined {
+		const [row] = this.#sql.exec("SELECT handed_by FROM pim_agent_sessions WHERE session = ?", session).toArray();
+		return row?.handed_by == null ? undefined : String(row.handed_by);
+	}
+
+	/** The chat a handoff started, if it has. */
+	byHandoff(key: string): string | undefined {
+		const [row] = this.#sql.exec("SELECT session FROM pim_agent_sessions WHERE handoff = ?", key).toArray();
+		return row ? String(row.session) : undefined;
+	}
+
+	/** The agent a chat was started with, or the majordomo for a chat tied to none. */
 	ofSession(session: string): Agent {
 		const [row] = this.#sql
 			.exec(`${SELECT} JOIN pim_agent_sessions s ON p.id = s.agent WHERE s.session = ?`, session)
 			.toArray();
-		return row ? agentOf(row, this.#directory) : this.default();
-	}
-
-	/** Ties every chat in `sessions` not tied to an agent yet to the default one, so they stay with it when the default changes. */
-	tieToDefault(sessions: readonly string[]): void {
-		const id = this.default().id;
-		for (const session of sessions) {
-			this.#sql.exec("INSERT INTO pim_agent_sessions (session, agent) VALUES (?, ?) ON CONFLICT (session) DO NOTHING", session, id);
-		}
+		return row ? agentOf(row, this.#directory) : this.majordomo();
 	}
 
 	/** The abilities a chat was last given, as space-separated extension ids; null if never. */

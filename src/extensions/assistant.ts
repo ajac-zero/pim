@@ -14,7 +14,7 @@ How you work:
 /**
  * Pim's own blueprint: a personal assistant that remembers, plans and follows up.
  * It is an extension like any other, so a deployment can leave it out and a
- * person can make another agent their default and delete this one.
+ * person can move their majordomo to another blueprint.
  */
 export const assistant = definePimExtension({
 	id: "pim.assistant",

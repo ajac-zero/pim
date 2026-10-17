@@ -2,7 +2,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { type FauxResponseFactory, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it, vi } from "vitest";
 import type { Approval } from "../src/store";
-import { api, lastUserText, pendingApproval, post, say, systemPrompt, toolUse } from "./helpers";
+import { api, decisionRun, lastUserText, pendingApproval, post, say, systemPrompt, toolUse } from "./helpers";
 import { faux } from "./worker";
 
 type Context = Parameters<FauxResponseFactory>[0];
@@ -10,15 +10,24 @@ type Context = Parameters<FauxResponseFactory>[0];
 const toolResult = (messages: readonly Message[]) =>
 	JSON.stringify(messages.findLast((message) => message.role === "toolResult")?.content);
 
-/** Who a request is from: the agent, or a member by name, from the preamble its conversation got. */
-const speaker = (context: Context) => /You are \\"([^"\\]+)\\", a member of the team/.exec(systemPrompt(context.messages))?.[1] ?? "lead";
+/** Who a request is from, by the preamble its conversation got: a member, by name; the majordomo reviewing an approval; or the agent the chat is with. */
+const speaker = (context: Context) => {
+	const prompt = systemPrompt(context.messages);
+	if (/the majordomo of one person/.test(prompt)) return "review";
+	return /You are \\"([^"\\]+)\\", a member of the team/.exec(prompt)?.[1] ?? "lead";
+};
 
-/** Answers each request with the script of whoever asked, in order: members run at once, so their order isn't fixed. */
+/**
+ * Answers each request with the script of whoever asked, in order: members run at once, so their order isn't fixed.
+ * The agent a chat is with answers with its own script, by name, if it has one, or else with `lead`'s.
+ */
 function scripts(byRole: Record<string, ((context: Context) => ReturnType<FauxResponseFactory>)[]>) {
 	const count = Object.values(byRole).reduce((sum, list) => sum + list.length, 0);
 	const route = (context: Context) => {
-		const next = byRole[speaker(context)]?.shift();
-		if (!next) throw new Error(`No response left for ${speaker(context)}`);
+		const agent = /In this conversation you are \\"([^"\\]+)\\"/.exec(systemPrompt(context.messages))?.[1];
+		const role = speaker(context) === "lead" && agent !== undefined && agent in byRole ? agent : speaker(context);
+		const next = byRole[role]?.shift();
+		if (!next) throw new Error(`No response left for ${role}`);
 		return next(context);
 	};
 	faux.setResponses(Array.from({ length: count }, () => route));
@@ -169,5 +178,233 @@ describe("an agent's team", () => {
 		expect(decision).toContain(`[Approval ${approval.id}] The user approved`);
 		expect(report).toBe("[Team: Researcher] After the person's decision, Researcher answered:\nBooked: confirmation 77.");
 		expect((await api(`/sessions/${session}/team`)).body.runs[0].status).toBe("done");
+	});
+});
+
+describe("the majordomo", () => {
+	const majordomo = async () => ((await api("/agents")).body.agents as { id: string; name: string; majordomo: boolean }[]).find((agent) => agent.majordomo)!;
+
+	it("sends tasks to the person's other agents in chats the person sees, as though they wrote them, and only it can", async () => {
+		const self = await majordomo();
+		await api(`/agents/${self.id}`, { method: "PUT", body: JSON.stringify({ name: "Alfred" }) });
+		const scout = (await post("/agents", { name: "Scout", instructions: "Find facts and cite where they came from." })).body;
+		const tools = (context: Context) => context.messages.flatMap((message) => (message.role === "system" ? (message.toolsAdded ?? []).map((tool) => tool.name) : []));
+
+		let lead = { prompt: "", tools: [] as string[] };
+		let scoutSaw = { prompt: "", tools: [] as string[], message: "" };
+		const results: string[] = [];
+		scripts({
+			lead: [
+				(context) => {
+					lead = { prompt: systemPrompt(context.messages), tools: tools(context) };
+					return toolUse("send_to_agent", { agent: "scout", message: "Find the best month to visit Lisbon." });
+				},
+				(context) => {
+					results.push(toolResult(context.messages));
+					return toolUse("send_to_user", { message: "Scout says May." });
+				},
+			],
+			Scout: [
+				(context) => {
+					scoutSaw = { prompt: systemPrompt(context.messages), tools: tools(context), message: lastUserText(context.messages) };
+					return toolUse("send_to_user", { message: "May: mild and before the crowds." });
+				},
+			],
+		});
+		// The main chat is the majordomo's.
+		expect(await say("When should I go to Lisbon?")).toMatchObject({ status: "done", replies: ["Scout says May."] });
+
+		expect(lead.prompt).toContain("You are the person's majordomo, Alfred");
+		expect(lead.prompt).toContain(`- Scout [id: ${scout.id}]`);
+		expect(lead.tools).toContain("send_to_agent");
+		// Scout talks with the person as in any chat with it, and can't hand work on the same way.
+		expect(scoutSaw.prompt).not.toContain("majordomo, Scout");
+		expect(scoutSaw.prompt).toContain("Find facts and cite where they came from.");
+		expect(scoutSaw.message).toBe("Find the best month to visit Lisbon.");
+		expect(scoutSaw.tools).toContain("send_to_user");
+		expect(scoutSaw.tools).not.toContain("send_to_agent");
+		expect(results[0]).toContain("Scout answered:\\nMay: mild and before the crowds.");
+
+		// It is one of the person's chats with Scout, the message theirs, and no hidden conversation of the majordomo's.
+		const chat = /Chat (\S+) with Scout/.exec(results[0]!)?.[1];
+		const sessions = async () => (await api("/sessions")).body.sessions as { id: string; agent: { id: string } | null }[];
+		expect((await sessions()).find((info) => info.id === chat)?.agent?.id).toBe(scout.id);
+		const transcript = async () => ((await api(`/sessions/${chat}/messages`)).body.messages as { role: string; parts: { type: string; text?: string }[] }[]).filter((message) => message.role === "user").map((message) => message.parts[0]?.text);
+		expect(await transcript()).toEqual(["Find the best month to visit Lisbon."]);
+		expect((await api("/sessions/1/team")).body.runs).toEqual([]);
+
+		// It carries on in that chat, not in one that isn't Scout's, and only with agents that exist.
+		const count = (await sessions()).length;
+		scripts({
+			lead: [
+				() => toolUse("send_to_agent", { agent: "Nobody", message: "Hi." }),
+				(context) => {
+					results.push(toolResult(context.messages));
+					return toolUse("send_to_agent", { agent: "Scout", message: "Hi.", chat: "1" });
+				},
+				(context) => {
+					results.push(toolResult(context.messages));
+					return toolUse("send_to_agent", { agent: scout.id, message: "And in autumn?", chat: chat! });
+				},
+				(context) => {
+					results.push(toolResult(context.messages));
+					return toolUse("send_to_user", { message: "October works too." });
+				},
+			],
+			Scout: [() => toolUse("send_to_user", { message: "October." })],
+		});
+		await say("And autumn?");
+		expect(results[1]).toContain("No agent called Nobody.");
+		expect(results[2]).toContain("No chat 1 with Scout");
+		expect(results[3]).toContain(`Chat ${chat} with Scout`);
+		expect(results[3]).toContain("Scout answered:\\nOctober.");
+		expect(await transcript()).toEqual(["Find the best month to visit Lisbon.", "And in autumn?"]);
+		expect((await sessions()).length).toBe(count);
+
+		// Another agent's chats don't offer it.
+		const own = (await post("/sessions", { agent: scout.id })).body.id;
+		scripts({
+			Scout: [
+				(context) => {
+					scoutSaw = { ...scoutSaw, tools: tools(context) };
+					return toolUse("send_to_user", { message: "Hi." });
+				},
+			],
+		});
+		await say("Hello", own);
+		expect(scoutSaw.tools).not.toContain("send_to_agent");
+	});
+
+	it("hears what an agent says in a chat it started once an approval there is decided", async () => {
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("booked", { status: 201 }));
+		const concierge = (await post("/agents", { name: "Concierge", instructions: "Book what the person asks for." })).body;
+		scripts({
+			lead: [
+				() => toolUse("send_to_agent", { agent: "Concierge", message: "Book the hotel." }),
+				() => toolUse("send_to_user", { message: "Concierge asked you to approve the booking." }),
+			],
+			Concierge: [
+				() => toolUse("http_request", { method: "POST", url: "https://hooks.example.test/hotel" }),
+				() => toolUse("send_to_user", { message: "Waiting for your approval." }),
+			],
+		});
+		await say("Book my hotel.");
+		const approval = await pendingApproval();
+		expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === approval.session).agent.id).toBe(concierge.id);
+
+		let forwarded = "";
+		scripts({
+			Concierge: [() => toolUse("send_to_user", { message: "Booked." })],
+			lead: [
+				(context) => {
+					forwarded = lastUserText(context.messages);
+					return fauxAssistantMessage("Noted.");
+				},
+			],
+		});
+		await post(`/approvals/${approval.id}/approve`);
+		expect((await decisionRun(approval)).replies).toEqual(["Booked."]);
+		await vi.waitFor(() => expect(forwarded).toBe(`[Chat with Concierge] In chat ${approval.session}, after the decision on its approval request, Concierge said:\nBooked.`));
+	});
+
+	it("decides other agents' approvals for the person, or asks them, under the majordomo policy", async () => {
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "majordomo" }) });
+		const realFetch = globalThis.fetch;
+		const sent: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			if (!request.url.startsWith("https://hooks.example.test/")) return realFetch(input, init);
+			sent.push(request.url);
+			return new Response("booked", { status: 201 });
+		});
+		const { name } = await majordomo();
+		const booker = (await post("/agents", { name: "Booker", instructions: "Book what the person asks for." })).body;
+		const chat = (await post("/sessions", { agent: booker.id })).body.id;
+		const chats = async () => (await api("/sessions")).body.sessions.map((info: { id: string }) => info.id);
+		const before = await chats();
+
+		// It approves what it is sure the person wants; the agent hears who decided, and why.
+		let review = { prompt: "", tools: [] as string[], request: "" };
+		let outcome = "";
+		scripts({
+			lead: [
+				() => toolUse("http_request", { method: "POST", url: "https://hooks.example.test/hotel" }),
+				() => toolUse("send_to_user", { message: "Asked." }),
+				(context) => {
+					outcome = lastUserText(context.messages);
+					return toolUse("send_to_user", { message: "Booked." });
+				},
+			],
+			review: [
+				(context) => {
+					review = {
+						prompt: systemPrompt(context.messages),
+						tools: context.messages.flatMap((message) => (message.role === "system" ? (message.toolsAdded ?? []).map((tool) => tool.name) : [])),
+						request: lastUserText(context.messages),
+					};
+					return toolUse("decide_approval", { decision: "approve", note: "They asked for this hotel." });
+				},
+				() => fauxAssistantMessage("Approved."),
+			],
+		});
+		await say("Book the hotel.", chat);
+		const approved = await vi.waitFor(async () => {
+			const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=approved")).body.approvals;
+			expect(approval).toBeDefined();
+			return approval!;
+		});
+		expect(approved).toMatchObject({ decidedBy: "majordomo", note: "They asked for this hotel.", result: "HTTP 201 Created\nbooked" });
+		expect(sent).toEqual(["https://hooks.example.test/hotel"]);
+		expect((await decisionRun(approved)).status).toBe("done");
+		expect(outcome).toContain(`${name}, the user's majordomo, approved it for them: POST https://hooks.example.test/hotel`);
+		expect(outcome).toContain(`${name}'s note: They asked for this hotel.`);
+		expect(review.prompt).toContain(`You are \\"${name}\\", the majordomo of one person`);
+		expect(review.request).toContain("Booker, in a chat the person has with it, asks for approval.");
+		expect(review.tools.sort()).toEqual(["decide_approval", "recall", "zoom"]);
+		// The review isn't a chat, and nobody was notified: there was nothing to ask.
+		expect((await chats()).sort()).toEqual(before.sort());
+		const notified = async () => (await api("/notifications")).body.notifications.filter((notification: { session: string }) => notification.session === chat);
+		expect(await notified()).toEqual([]);
+
+		// What it isn't sure about goes to the person, with what it has to say, and waits for them.
+		scripts({
+			lead: [
+				() => toolUse("http_request", { method: "POST", url: "https://hooks.example.test/pay" }),
+				() => toolUse("send_to_user", { message: "Asked." }),
+			],
+			review: [
+				() => toolUse("decide_approval", { decision: "escalate", note: "It's a payment: your call." }),
+				() => fauxAssistantMessage("Asked them."),
+			],
+		});
+		await say("Pay the deposit.", chat);
+		const escalated = await vi.waitFor(async () => {
+			const approval = await pendingApproval();
+			expect(approval.review).toEqual({ status: "escalated", note: "It's a payment: your call." });
+			return approval;
+		});
+		expect(escalated.expiresAt).toBeNull();
+		expect(await notified()).toEqual([
+			expect.objectContaining({ title: `${name} needs your approval`, body: "POST https://hooks.example.test/pay\nIt's a payment: your call.", session: chat }),
+		]);
+		expect(sent).toEqual(["https://hooks.example.test/hotel"]);
+		scripts({ lead: [() => toolUse("send_to_user", { message: "Not paid." })] });
+		expect((await post<Approval>(`/approvals/${escalated.id}/deny`)).body).toMatchObject({ status: "denied", decidedBy: "user" });
+		expect((await decisionRun(escalated)).status).toBe("done");
+
+		// The majordomo's own requests, in its chats with the person, go straight to them.
+		scripts({
+			lead: [
+				() => toolUse("http_request", { method: "POST", url: "https://hooks.example.test/own" }),
+				() => toolUse("send_to_user", { message: "Asked you." }),
+			],
+		});
+		await say("Call the hook.");
+		const own = await pendingApproval();
+		expect(own).toMatchObject({ review: null, expiresAt: null });
+		scripts({ lead: [() => toolUse("send_to_user", { message: "Fine." })] });
+		await post(`/approvals/${own.id}/deny`);
+		expect((await decisionRun(own)).status).toBe("done");
 	});
 });

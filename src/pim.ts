@@ -956,23 +956,28 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Fired by `schedule_task` schedules: hands the instruction to the session
-	 * that made it, and tells the person it started with a notification that
-	 * links to that chat. A firing a limit or a suspension refuses is skipped,
-	 * not retried; the person hears about the limit once a day.
+	 * that made it, or to a new chat with its agent, and tells the person it
+	 * started with a notification that links to that chat. A firing a limit or
+	 * a suspension refuses is skipped, not retried; the person hears about the
+	 * limit once a day.
 	 */
 	async runScheduledTask(payload: ScheduledTaskPayload, schedule: Schedule<ScheduledTaskPayload>): Promise<void> {
 		const label = payload.label ? ` "${payload.label}"` : "";
 		// The same firing retried is one submission and one notification.
 		const firing = `schedule:${schedule.id}:${schedule.time}`;
+		let started: string | null = null;
 		try {
+			if (payload.newChat) started = await this.#scheduledChat(payload, schedule);
 			await this.submitTo(
-				payload.session,
+				started ?? payload.session,
 				`[Scheduled task${label} ${schedule.id}] ${payload.instruction}`,
 				{ operationId: firing },
 				"pim",
 			);
 		} catch (error) {
 			if (!(error instanceof HttpError)) throw error;
+			// A skipped firing leaves no empty chat behind.
+			if (started !== null) this.store.deleteSession(started);
 			if (error.status === 429) await this.#tellLimitOnce(`Skipped scheduled task${label}`, error.message);
 			return;
 		}
@@ -980,11 +985,38 @@ export class Pim extends DurableAgent<Env> {
 		const title = payload.label ?? payload.instruction;
 		const notification = this.store.addNotification({
 			id: firing,
-			session: payload.session,
+			session: started ?? payload.session,
 			title: `Scheduled task ran: ${title.length > 80 ? `${title.slice(0, 79)}…` : title}`,
 			body: payload.label ? payload.instruction : "",
 		});
 		await this.deliverNotification(notification);
+	}
+
+	/** A firing's new chat: started on its first try, and the same one when the firing is retried. */
+	async #scheduledChat(payload: ScheduledTaskPayload, schedule: Schedule<ScheduledTaskPayload>): Promise<string> {
+		const key = `schedule_chat:${schedule.id}`;
+		const [time, session] = (this.store.meta(key) ?? "").split(" ");
+		if (Number(time) === schedule.time && session && !this.store.deletedSessions().has(session)) return session;
+		const id = await this.#startChat(this.agents.ofSession(payload.session), clipTitle(payload.label ?? payload.instruction));
+		this.store.setMeta(key, `${schedule.time} ${id}`);
+		this.broadcastMessage({ type: "sessions" });
+		return id;
+	}
+
+	/** Starts a chat with `agent`, within the person's limit on chats. */
+	async #startChat(agent: Agent, title: string | undefined): Promise<string> {
+		const { sessions } = this.limits();
+		if (sessions !== null) {
+			const hidden = this.#hiddenSessions();
+			const open = (await this.harness.sessions.list()).filter((session) => !hidden.has(session.id)).length;
+			if (open >= sessions) throw new HttpError(429, `You can have up to ${sessions} chats. Delete one first.`);
+		}
+		const { id } = await this.harness.sessions.create();
+		await this.harness.session(id).setModel(this.chosenModel());
+		// Tied to its agent, so it stays with it when another becomes the default.
+		this.agents.setSession(id, agent.id);
+		this.store.touchSession(id, title);
+		return id;
 	}
 
 	/** One notification a day about work a limit stopped, so a frequent schedule doesn't flood the person. */
@@ -2200,18 +2232,8 @@ export class Pim extends DurableAgent<Env> {
 			"/sessions",
 			async (_params, request) => {
 				const { title, agent: agentId } = await readJson<{ title: string; agent: string }>(request);
-				const agent = agentId === undefined ? undefined : this.#agent(agentId);
-				const { sessions } = this.limits();
-				if (sessions !== null) {
-					const hidden = this.#hiddenSessions();
-					const open = (await this.harness.sessions.list()).filter((session) => !hidden.has(session.id)).length;
-					if (open >= sessions) throw new HttpError(429, `You can have up to ${sessions} chats. Delete one first.`);
-				}
-				const { id } = await this.harness.sessions.create();
-				await this.harness.session(id).setModel(this.chosenModel());
-				// Tied to its agent, so it stays with it when another becomes the default.
-				this.agents.setSession(id, (agent ?? this.agents.default()).id);
-				this.store.touchSession(id, typeof title === "string" && title.trim() !== "" ? clipTitle(title) : undefined);
+				const agent = agentId === undefined ? this.agents.default() : this.#agent(agentId);
+				const id = await this.#startChat(agent, typeof title === "string" && title.trim() !== "" ? clipTitle(title) : undefined);
 				return { id, ...this.store.sessionInfo(id), agent: this.#agentRef(id) };
 			},
 		],

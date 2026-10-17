@@ -5,9 +5,12 @@ import type { ShownWidget } from "./define";
 
 /** Payload of a schedule created by `schedule_task`. */
 export type ScheduledTaskPayload = {
+	/** The chat that scheduled it: where it fires, or whose agent starts each new chat. */
 	readonly session: string;
 	readonly instruction: string;
 	readonly label?: string;
+	/** Each firing starts a new chat with the scheduling chat's agent instead of continuing that chat. */
+	readonly newChat?: true;
 };
 
 /**

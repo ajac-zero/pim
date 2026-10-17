@@ -61,6 +61,40 @@ describe("scheduled tasks", () => {
 		expect((await api("/schedules")).body.schedules).toEqual([]);
 	});
 
+	it("starts a new chat with the same agent each time a new-chat task fires", async () => {
+		const coach = (await post("/agents", { name: "Coach", instructions: "Coach me." })).body;
+		const origin = (await post("/sessions", { agent: coach.id, title: "Training" })).body.id;
+		faux.setResponses([
+			toolUse("schedule_task", { instruction: "Write today's training plan.", label: "Daily plan", cron: "0 9 * * *", new_chat: true }),
+			toolUse("send_to_user", { message: "Every morning." }),
+		]);
+		await say("Plan my training every morning.", origin);
+		const [schedule] = (await api("/schedules")).body.schedules;
+		expect(schedule).toMatchObject({ type: "cron", session: origin, newChat: true });
+		const originLength = (await api(`/sessions/${origin}/messages`)).body.messages.length;
+
+		// Two days' firings, the first retried: one chat per day, none for the retry.
+		faux.setResponses([fauxAssistantMessage("Day one."), fauxAssistantMessage("Day two.")]);
+		const operations = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			const [due] = await instance.listSchedules();
+			const tomorrow = { ...due!, time: due!.time + 86_400 };
+			for (const firing of [due!, due!, tomorrow]) await instance.runScheduledTask(firing.payload as never, firing as never);
+			return [due!, tomorrow].map((firing) => `schedule:${firing.id}:${firing.time}`);
+		});
+		const chats = (await api("/sessions")).body.sessions.filter((session: { title: string }) => session.title === "Daily plan");
+		expect(chats).toHaveLength(2);
+		chats.sort((a: { id: string }, b: { id: string }) => Number(a.id) - Number(b.id));
+		for (const [index, chat] of chats.entries()) {
+			expect(chat.agent).toMatchObject({ id: coach.id });
+			expect((await api(`/sessions/${chat.id}/operations/${encodeURIComponent(operations[index]!)}`)).body).toMatchObject({ status: "done" });
+			const { messages } = (await api(`/sessions/${chat.id}/messages`)).body;
+			const fired = JSON.stringify(messages).split(`[Scheduled task \\"Daily plan\\" ${schedule.id}] Write today's training plan.`);
+			expect(fired).toHaveLength(2);
+		}
+		expect((await api(`/sessions/${origin}/messages`)).body.messages).toHaveLength(originLength);
+		expect((await api(`/schedules/${schedule.id}`, { method: "DELETE" })).status).toBe(200);
+	});
+
 	it("rejects ambiguous or past times without scheduling anything", async () => {
 		let results = "";
 		faux.setResponses([

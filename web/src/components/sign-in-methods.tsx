@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { Check, Copy, ExternalLink } from "lucide-react";
 import { useState } from "react";
 import { useI18n } from "~/components/i18n";
+import { Check, Copy, ExternalLink } from "~/components/icons";
 import { ProviderLogo } from "~/components/provider-buttons";
 import { DASHBOARD_URL } from "~/components/sign-in";
 import { Button } from "~/components/ui/button";

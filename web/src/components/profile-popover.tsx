@@ -1,10 +1,10 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { ArrowUpRight } from "lucide-react";
 import { Popover } from "radix-ui";
 import { type FormEvent, type ReactNode, useState } from "react";
 import { toast } from "sonner";
 import { useI18n } from "~/components/i18n";
+import { ArrowUpRight } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import type { Account, Profile } from "~/lib/pim-api";

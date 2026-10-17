@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { MessageCircle } from "lucide-react";
 import { toast } from "sonner";
 import { useI18n } from "~/components/i18n";
+import { MessageCircle } from "~/components/icons";
 import { Page } from "~/components/page";
 import { TemplateCard } from "~/components/template-card";
 import { Button } from "~/components/ui/button";

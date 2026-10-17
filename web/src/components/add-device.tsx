@@ -1,9 +1,15 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Check, Copy, Loader2, Smartphone } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { renderSVG } from "uqr";
 import { useI18n } from "~/components/i18n";
+import {
+  AlertCircle,
+  Check,
+  Copy,
+  Loader2,
+  Smartphone,
+} from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { auth } from "~/lib/auth";
 

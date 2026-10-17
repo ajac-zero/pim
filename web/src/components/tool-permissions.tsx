@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, ChevronDown, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { useI18n } from "~/components/i18n";
+import { AlertCircle, ChevronDown, RotateCcw } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import {
   Collapsible,

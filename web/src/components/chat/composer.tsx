@@ -1,9 +1,16 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowUp, Loader2, Plus, Sparkles, Square, X } from "lucide-react";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
 import { useI18n } from "~/components/i18n";
+import {
+  ArrowUp,
+  Loader2,
+  Plus,
+  Sparkles,
+  Square,
+  X,
+} from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import {
   PromptInput,

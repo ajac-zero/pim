@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { Bot, Copy, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
 import { AgentIcon, templateIconSrc } from "~/components/agent-icon";
 import { AppIcon } from "~/components/app-icon";
 import { useI18n } from "~/components/i18n";
+import { Bot, Copy, ShieldAlert } from "~/components/icons";
 import { Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import { pim } from "~/lib/pim-api";

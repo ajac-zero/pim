@@ -19,7 +19,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { CornerDownLeft, ImagePlus, Loader2, Plus, Square, X } from "lucide-react";
+import { CornerDownLeft, ImagePlus, Loader2, Plus, Square, X } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { useI18n } from "~/components/i18n";
 import {

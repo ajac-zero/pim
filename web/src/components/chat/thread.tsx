@@ -1,6 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { AlertCircle, Clock } from "lucide-react";
 import { Fragment, memo, useEffect, useLayoutEffect, useMemo } from "react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 import { PimMark } from "~/components/app-sidebar";
@@ -15,6 +14,7 @@ import {
 } from "~/components/chat/items";
 import { CHATGPT_USAGE_URL } from "~/components/chatgpt-logo";
 import { type TranslationKey, useI18n } from "~/components/i18n";
+import { AlertCircle, Clock } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import {
   Conversation,

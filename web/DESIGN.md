@@ -2,7 +2,7 @@
 
 How Pim's web app should look and feel. Use this file when you build or change UI in `web/`.
 
-Pim should feel like a quiet native messaging app, not an AI dashboard. The window is almost colorless, a solid primary color marks the action to take, and the only other color comes from agents' icons and from signals that mean something. Color themes change these colors; nothing else in this file changes with the theme.
+Pim should feel like a quiet native messaging app, not an AI dashboard. The window is almost colorless, a solid primary color marks the action to take, and the only other color comes from agents' icons and from signals that mean something. Themes choose colors, fonts and icon style; layout, spacing and shapes stay consistent.
 
 ## Principles
 
@@ -39,9 +39,10 @@ Semantic colors, used only for their meaning:
 
 ### Themes
 
-A theme only changes colors, and every theme has a light and a dark mode. People pick both in Settings, under General → Appearance, where each theme previews itself in the current mode.
+A theme chooses colors and may choose bundled fonts and an icon set. Every theme has a light and a dark mode. People pick both in Settings, under General → Appearance, where each theme previews its colors, typography and icons in the current mode.
 
 - **Tokyo Night** (the default in `pim.config.ts`): "Night" navy for dark mode and the "Day" palette for light mode, with text darkened for contrast. Its blue is the primary.
+- **Pixel:** Tokyo Night's palettes with Pixeloid Sans (regular and bold) for interface text, Pixeloid Mono for code, and pixel-outline icons. Other themes keep system fonts and Lucide icons unless they explicitly choose another bundled style.
 - **Gronk:** neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles invert with it.
 - **Classics:** Catppuccin (Latte / Mocha), Solarized, Gruvbox (medium), Rosé Pine (Dawn / Main), One (Light / Dark), Everforest (medium), Nord (a light mode built from its Snow Storm palette), Dracula (Alucard / Dracula), and Ayu (Light / Mirage). Each uses the official palette, adjusted only in lightness where a pair missed contrast; each theme's header comment lists its deviations.
 - **Gronk:** neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles invert with it.
@@ -55,11 +56,11 @@ Themes are data an extension brings (see [docs/extensions.md](../docs/extensions
 
 ## Agent icons
 
-An agent is identified by its own icon: a lucide icon or an emoji in the agent's color, or an image the person uploaded (see `AgentIcon` in `src/components/agent-icon.tsx`). Show it on a tile tinted with its color wherever it stands for the agent: about 24px in headers and menus, 32–40px in lists and cards. Pim's own mark is the pixel wordmark (`PimMark`). It keeps its own colors in every theme.
+An agent is identified by its own icon: a named symbol drawn in the theme's icon set or an emoji in the agent's color, or an image the person uploaded (see `AgentIcon` in `src/components/agent-icon.tsx`). Show it on a tile tinted with its color wherever it stands for the agent: about 24px in headers and menus, 32–40px in lists and cards. Pim's own mark is the pixel wordmark (`PimMark`). It keeps its own colors in every theme. Emoji, uploaded images and app logos do not change with the icon set.
 
 ## Typography
 
-Use the system UI font stack (`ui-sans-serif, system-ui, -apple-system, …`), which is SF Pro on Apple devices. Keep the scale small:
+Use the theme's UI and monospace font variables (`--theme-font-ui` and `--theme-font-code`), including in forms, dialogs and notifications. They default to the system stacks, which use SF Pro on Apple devices for UI text. Pixel fonts are bundled and fall back to system fonts for unsupported characters. Keep the scale small:
 
 | Style | Size / weight | Use |
 | --- | --- | --- |
@@ -150,7 +151,7 @@ Keep these screens plain: Pim's mark, a title, one muted sentence, the fields, a
 
 ## Icons
 
-Use lucide icons at a 1.5px stroke, 16–20px, in muted or foreground color. Icons support labels. Avoid filled or colored icons except brand logos for connected apps.
+Import utility icons from `src/components/icons.tsx`, not directly from an icon library, so the theme selects their drawings. The default is Lucide; Pixel uses grid-aligned outlines. Use icons at 16–20px, in muted or foreground color. Icons support labels. Avoid filled or colored icons except brand logos for connected apps.
 
 ## Motion
 

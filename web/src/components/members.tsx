@@ -1,4 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+import { toast } from "sonner";
+import { useI18n } from "~/components/i18n";
 import {
   Check,
   Copy,
@@ -8,10 +11,7 @@ import {
   Play,
   Trash2,
   UserPlus,
-} from "lucide-react";
-import { useState } from "react";
-import { toast } from "sonner";
-import { useI18n } from "~/components/i18n";
+} from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { admin, type Member } from "~/lib/pim-api";
 import { accountQuery, membersQuery } from "~/lib/queries";

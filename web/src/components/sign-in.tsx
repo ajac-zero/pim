@@ -1,5 +1,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { PimMark } from "~/components/app-sidebar";
+import { useI18n } from "~/components/i18n";
 import {
   Check,
   ChevronDown,
@@ -7,10 +10,7 @@ import {
   ExternalLink,
   KeyRound,
   Loader2,
-} from "lucide-react";
-import { useEffect, useState } from "react";
-import { PimMark } from "~/components/app-sidebar";
-import { useI18n } from "~/components/i18n";
+} from "~/components/icons";
 import { ProviderButtons } from "~/components/provider-buttons";
 import { Join } from "~/components/register";
 import { Button } from "~/components/ui/button";

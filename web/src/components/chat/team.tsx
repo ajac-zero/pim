@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { Check, Loader2, Users, Wrench, X } from "lucide-react";
 import { useState } from "react";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
+import { Check, Loader2, Users, Wrench, X } from "~/components/icons";
 import {
   Sheet,
   SheetContent,

@@ -1,5 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
+import { type ReactNode, useState } from "react";
+import { toast } from "sonner";
+import { ArtifactIcon } from "~/components/artifact";
+import { useI18n } from "~/components/i18n";
 import {
   CalendarClock,
   Check,
@@ -7,11 +11,7 @@ import {
   MoreHorizontal,
   Repeat,
   Trash2,
-} from "lucide-react";
-import { type ReactNode, useState } from "react";
-import { toast } from "sonner";
-import { ArtifactIcon } from "~/components/artifact";
-import { useI18n } from "~/components/i18n";
+} from "~/components/icons";
 import {
   DropdownMenu,
   DropdownMenuContent,

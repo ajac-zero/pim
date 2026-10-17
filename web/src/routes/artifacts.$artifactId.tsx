@@ -1,6 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { ArrowLeft, Download, History, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
@@ -9,6 +8,7 @@ import {
   formatBytes,
 } from "~/components/artifact";
 import { useI18n } from "~/components/i18n";
+import { ArrowLeft, Download, History, Trash2 } from "~/components/icons";
 import { SessionLink } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import { CodeBlock } from "~/components/ui/code-block";

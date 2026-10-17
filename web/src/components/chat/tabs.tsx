@@ -1,6 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { X } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { AgentIcon } from "~/components/agent-icon";
 import {
@@ -10,6 +9,7 @@ import {
   useAwaitingApproval,
 } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
+import { X } from "~/components/icons";
 import type { Session } from "~/lib/pim-api";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
 import { closeTab, pruneTabs, showTab, useTabs } from "~/lib/tabs";

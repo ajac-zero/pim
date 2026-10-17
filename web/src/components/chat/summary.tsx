@@ -1,8 +1,8 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { AlertCircle, ListChecks, Loader2 } from "lucide-react";
 import { useSyncExternalStore } from "react";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
+import { AlertCircle, ListChecks, Loader2 } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { pim } from "~/lib/pim-api";
 import { cn } from "~/lib/utils";

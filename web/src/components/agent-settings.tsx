@@ -1,16 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import {
-  Bot,
-  Globe,
-  MessageCircle,
-  Pencil,
-  Plus,
-  Puzzle,
-  Trash2,
-  Users,
-  X,
-} from "lucide-react";
 import { Dialog } from "radix-ui";
 import { type FormEvent, type ReactNode, useState } from "react";
 import { toast } from "sonner";
@@ -21,6 +10,17 @@ import {
 } from "~/components/agent-icon";
 import { AppIcon } from "~/components/app-icon";
 import { useI18n } from "~/components/i18n";
+import {
+  Bot,
+  Globe,
+  MessageCircle,
+  Pencil,
+  Plus,
+  Puzzle,
+  Trash2,
+  Users,
+  X,
+} from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {

@@ -219,7 +219,7 @@ A tool of an app an extension implements can return a `widget` with its `text`: 
 
 ## Themes
 
-A theme is the web app's colors: a value for every color token its components use (see [`web/DESIGN.md`](../web/DESIGN.md#color)), in light and in dark mode, and the Shiki themes that color code in each. Like widgets, themes are data; no extension code runs in the browser.
+A theme gives the web app its colors, typography and icon style: every color token its components use (see [`web/DESIGN.md`](../web/DESIGN.md#color)), in light and in dark mode, the Shiki themes that color code in each, and optional choices of bundled fonts and icons. Like widgets, themes are data; no extension code runs in the browser.
 
 ```ts
 import { nord } from "../src/extensions/themes/nord";
@@ -243,9 +243,11 @@ export const brand = definePimExtension({
 - **Every token, in each mode.** `light` and `dark` give every token in [`THEME_TOKENS`](../src/themes.ts) a CSS color; `bubble` and `bubble-foreground` are optional and follow the primary. A missing or unknown token fails with the reason, like any mistake in `pim.config.ts`.
 - **Ids are the deployment's.** A theme's id is lowercase letters, digits and hyphens, unique across every extension, Pim's own included. Prefix yours with your extension's name.
 - **Code colors** are a theme Shiki bundles, by name, or one recolored from it: `{ base, background, foreground, colors }`, mapping each of the base's colors to yours. A name Shiki doesn't ship leaves that theme's code uncolored.
+- **Fonts** are optional: `fonts: { ui: "pixel", code: "pixel" }` chooses Pixeloid Sans (regular and bold) for interface text and Pixeloid Mono for monospace text. Each role independently accepts `"system"` (the default) or `"pixel"`. Font files ship with the web app; missing characters use the fallback stack. Themes do not fetch fonts from third parties.
+- **Icons** are optional: `icons: "pixel"` chooses pixel outlines for utility icons and named agent symbols; `"lucide"` is the default. Uploaded images, emoji, app logos and Pim's wordmark keep their identity. Fonts and icons can be selected independently of each other and of the colors. Adding a new font or icon set requires bundling it in Pim, not supplying browser code in an extension.
 - **The default** is `defaultTheme` in `pim.config.ts`: what people see until they pick another, and when the one they picked is gone.
 
-People pick a theme in Settings → General, under Appearance; the choice is kept in their browser. The Worker serves every theme's tokens as one stylesheet, `/api/themes.css`, which the app loads before it draws, and lists them at `/api/themes`. Both are public, since the sign-in screens use them too.
+People pick a theme in Settings → General, under Appearance; previews show its colors, fonts and icons, and the choice is kept in their browser. Pim's Pixel theme pairs Tokyo Night's colors with pixel fonts and icons; existing themes keep system fonts and Lucide icons. The Worker serves every theme's tokens as one stylesheet, `/api/themes.css`, which the app loads before it draws, and lists them at `/api/themes`. Both are public, since the sign-in screens use them too.
 
 ## Not built yet
 
@@ -253,7 +255,7 @@ People pick a theme in Settings → General, under Appearance; the choice is kep
 - **Routes** for an extension's webhooks.
 - **Choosing Pim's own abilities per Pim**: memory, goals and the rest are every Pim's.
 - **Widget actions** beyond opening a chat or an artifact, more kinds, and arranging a dashboard.
-- **Themes beyond colors**, such as fonts and radii, and translated theme names.
+- **Theme-specific shapes and spacing**, and translated theme names.
 - **Widgets with arguments** in chat, such as one goal, and interfaces the model composes itself from a catalog of components.
 - **Extensions people bring themselves**, sandboxed (see [Dynamic Workers](https://developers.cloudflare.com/dynamic-workers/)); the directory's MCP apps are how people add tools today.
 - **Widgets from MCP apps' results**, and interfaces apps ship themselves ([MCP Apps](https://modelcontextprotocol.io/extensions/apps)).

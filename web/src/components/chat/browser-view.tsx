@@ -83,7 +83,6 @@ export function BrowserView({
           <ExternalLink className="size-4" />
           {t("takeOverBrowser")}
         </Button>
-        <p className="text-muted-foreground text-xs">{t("takeOverHint")}</p>
       </div>
     </section>
   );

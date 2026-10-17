@@ -468,8 +468,6 @@ const translations = {
     summaryAndBrowser: "Summary and browser",
     browserPicture: "What the browser shows: {title}",
     takeOverBrowser: "Take over",
-    takeOverHint:
-      "Opens the browser in a new tab, for you to use. Sign in or do what's needed there, then tell your agent you're done. Nobody else can open that tab's link.",
     closeBrowser: "Close the browser",
     browserClosed: "Browser closed",
     noFilePreview: "There's no preview for this file. Download it to open it.",
@@ -1169,8 +1167,6 @@ const translations = {
     summaryAndBrowser: "Resumen y navegador",
     browserPicture: "Lo que muestra el navegador: {title}",
     takeOverBrowser: "Tomar el control",
-    takeOverHint:
-      "Abre el navegador en una pestaña nueva, para que lo uses tú. Inicia sesión o haz lo necesario allí y luego dile a tu agente que terminaste. Nadie más puede abrir el enlace de esa pestaña.",
     closeBrowser: "Cerrar el navegador",
     browserClosed: "Navegador cerrado",
     noFilePreview:

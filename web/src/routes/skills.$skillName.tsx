@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import type { BundledLanguage } from "shiki";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { Markdown } from "~/components/chat/markdown";
@@ -7,11 +8,19 @@ import { useI18n } from "~/components/i18n";
 import {
   ArrowLeft,
   Check,
+  ChevronRight,
+  FileIcon,
   History,
   RotateCcw,
   Trash2,
 } from "~/components/icons";
 import { Button } from "~/components/ui/button";
+import { CodeBlock } from "~/components/ui/code-block";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "~/components/ui/collapsible";
 import {
   Select,
   SelectContent,
@@ -19,7 +28,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "~/components/ui/select";
-import { type Agent, ApiError, pim } from "~/lib/pim-api";
+import { previewOf } from "~/lib/files";
+import { type Agent, ApiError, pim, type SkillVersion } from "~/lib/pim-api";
 import { agentsQuery, skillQuery, skillVersionQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
@@ -255,8 +265,48 @@ function SkillPage() {
               )}
             </div>
           </section>
+          {shown && shown.files.length > 0 && (
+            <section>
+              <h2 className="mb-2 text-[13px] text-muted-foreground">
+                {t("skillFiles")}
+              </h2>
+              <ul className="divide-y rounded-xl border">
+                {shown.files.map((file) => (
+                  <SkillFileRow key={file.path} file={file} />
+                ))}
+              </ul>
+            </section>
+          )}
         </div>
       </div>
     </main>
+  );
+}
+
+/** A supporting file: its path, opening to its text. */
+function SkillFileRow({ file }: { file: SkillVersion["files"][number] }) {
+  const preview = previewOf(file.path);
+  const language =
+    preview.kind === "code"
+      ? preview.language
+      : preview.kind === "markdown"
+        ? "markdown"
+        : "text";
+  return (
+    <li>
+      <Collapsible>
+        <CollapsibleTrigger className="group flex w-full items-center gap-2 px-4 py-2.5 text-left text-[15px]">
+          <FileIcon className="size-4 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 truncate">{file.path}</span>
+          <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
+        </CollapsibleTrigger>
+        <CollapsibleContent className="px-3 pb-3">
+          <CodeBlock
+            code={file.content}
+            language={language as BundledLanguage}
+          />
+        </CollapsibleContent>
+      </Collapsible>
+    </li>
   );
 }

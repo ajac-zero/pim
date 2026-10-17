@@ -509,6 +509,7 @@ const translations = {
     skillUsedByHint:
       "Their chats list it, and they load it before the work it describes.",
     skillInstructions: "Instructions",
+    skillFiles: "Files",
     skillRestore: "Restore this version",
     skillRestored: "Version {from} restored as version {version}",
     skillDelete: "Delete skill",
@@ -1226,6 +1227,7 @@ const translations = {
     skillUsedByHint:
       "Sus chats la muestran, y la cargan antes del trabajo que describe.",
     skillInstructions: "Instrucciones",
+    skillFiles: "Archivos",
     skillRestore: "Restaurar esta versión",
     skillRestored: "La versión {from} se restauró como versión {version}",
     skillDelete: "Borrar habilidad",

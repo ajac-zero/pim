@@ -65,6 +65,34 @@ describe("approvalView", () => {
       { name: "body", kind: "text", text: "env=prod" },
     ]);
   });
+
+  it("shows each file a request would save under its path, as code", () => {
+    const view = approvalView({
+      action: "write_skill",
+      args: {
+        name: "weekly-plan",
+        files: [
+          { path: "scripts/paces.js", content: "export const easy = 1;" },
+          { path: "references/notes.md", content: "Run easy.\nRest after." },
+        ],
+      },
+      summary: "Coach saves a new skill: weekly-plan",
+    });
+    expect(view.fields).toEqual([
+      {
+        name: "scripts/paces.js",
+        kind: "code",
+        code: "export const easy = 1;",
+        language: "javascript",
+      },
+      {
+        name: "references/notes.md",
+        kind: "code",
+        code: "Run easy.\nRest after.",
+        language: "text",
+      },
+    ]);
+  });
 });
 
 describe("resultView", () => {

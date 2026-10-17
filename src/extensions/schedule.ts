@@ -14,6 +14,7 @@ export function describeSchedule(schedule: Schedule<ScheduledTaskPayload>) {
 		session: schedule.payload.session,
 		label: schedule.payload.label ?? null,
 		instruction: schedule.payload.instruction,
+		newChat: schedule.payload.newChat === true,
 	};
 }
 
@@ -23,16 +24,22 @@ export function scheduleExtension(services: PimServices) {
 	const scheduleTask = defineTool({
 		name: "schedule_task",
 		description:
-			"Wake yourself up later with an instruction, to follow up, check progress, send a reminder, or do recurring work. Give exactly one of delay_seconds, at (ISO 8601 with offset), or cron (5 fields, UTC). The instruction arrives in this conversation as a message starting with \"[Scheduled task]\".",
+			"Wake yourself up later with an instruction, to follow up, check progress, send a reminder, or do recurring work. Give exactly one of delay_seconds, at (ISO 8601 with offset), or cron (5 fields, UTC). The instruction arrives as a message starting with \"[Scheduled task]\": in this conversation, or with new_chat in a new chat each time it fires.",
 		parameters: Type.Object({
 			instruction: Type.String({ minLength: 1, description: "What to do when it fires, written to your future self." }),
-			label: Type.Optional(Type.String({ description: "Short name shown to the user." })),
+			label: Type.Optional(Type.String({ description: "Short name shown to the user, and the title of each new chat." })),
 			delay_seconds: Type.Optional(Type.Integer({ minimum: 1 })),
 			at: Type.Optional(Type.String()),
 			cron: Type.Optional(Type.String()),
+			new_chat: Type.Optional(
+				Type.Boolean({
+					description:
+						"Start a new chat with you each time it fires, instead of continuing this one: for recurring work read on its own, such as a daily briefing. The new chat doesn't see this conversation, so make the instruction complete.",
+				}),
+			),
 		}),
 		replay: "safe",
-		async execute({ instruction, label, delay_seconds, at, cron }, api, context) {
+		async execute({ instruction, label, delay_seconds, at, cron, new_chat }, api, context) {
 			const given = [delay_seconds, at, cron].filter((value) => value !== undefined);
 			if (given.length !== 1) return text("Give exactly one of delay_seconds, at, or cron.", true);
 			let when: Date | number | string;
@@ -54,6 +61,7 @@ export function scheduleExtension(services: PimServices) {
 				session: String(api.conversationId),
 				instruction,
 				...(label ? { label } : {}),
+				...(new_chat ? { newChat: true } : {}),
 			};
 			const schedule = await services.schedule(when, payload);
 			await api.memo("schedule", schedule.id, context);

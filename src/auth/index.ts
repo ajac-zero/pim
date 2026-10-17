@@ -531,7 +531,8 @@ async function finishOAuth(request: Request, env: Env, sites: Sites, provider: s
 	if (!flow || flow.provider !== provider || flow.state !== url.searchParams.get("state")) {
 		return back("/", "Signing in took too long, or started in another browser. Try again.");
 	}
-	const to = flow.link ? "/settings" : "/";
+	// Linking started in Settings, so it ends there, on the tab with your sign-ins.
+	const to = flow.link ? "/?dialog=settings&tab=account" : "/";
 	const settings = (await sites.providers())[flow.provider];
 	const name = providerName(flow.provider, settings);
 	if (!settings) return back(to, `Signing in with ${name} isn't set up on this Pim anymore.`);

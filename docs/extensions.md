@@ -110,7 +110,7 @@ People then make agents built on it: Your agents → New agent → Based on blue
 
 It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps`, `tasks`; see [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable#extensions)), plus `actions`. The ability is installed under the extension's id and selected only in the chats of Pims that use it, and in their team members' conversations.
 
-- **Actions ask first.** Each `GatedAction` becomes a tool that files an approval and returns at once. `run` runs only once the person approves, or their approval policy approves it. Actions are listed in Settings → Tool permissions with Pim's own, where they can be turned Off, Ask or On.
+- **Actions ask first.** Each `GatedAction` becomes a tool that files an approval and returns at once. `run` runs only once the person approves, or their approval policy approves it. Actions are listed in Settings → Permissions with Pim's own, where they can be turned Off, Ask or On.
 - **Names are checked.** An ability whose tool or action has the name of one of Pim's tools, or of another extension's, stops the agent with an error. pi would let the later tool replace the earlier one, so an extension could otherwise stand in for `send_to_user` or a tool that asks first. Prefix your tools' names with your extension's.
 - **Code-level trust.** An ability runs in the person's agent, with what the context gives it and whatever its code can reach, such as `fetch`. Install only extensions you would merge into Pim itself.
 
@@ -245,7 +245,7 @@ export const brand = definePimExtension({
 - **Code colors** are a theme Shiki bundles, by name, or one recolored from it: `{ base, background, foreground, colors }`, mapping each of the base's colors to yours. A name Shiki doesn't ship leaves that theme's code uncolored.
 - **The default** is `defaultTheme` in `pim.config.ts`: what people see until they pick another, and when the one they picked is gone.
 
-People pick a theme in Settings → Appearance; the choice is kept in their browser. The Worker serves every theme's tokens as one stylesheet, `/api/themes.css`, which the app loads before it draws, and lists them at `/api/themes`. Both are public, since the sign-in screens use them too.
+People pick a theme in Settings → General, under Appearance; the choice is kept in their browser. The Worker serves every theme's tokens as one stylesheet, `/api/themes.css`, which the app loads before it draws, and lists them at `/api/themes`. Both are public, since the sign-in screens use them too.
 
 ## Not built yet
 

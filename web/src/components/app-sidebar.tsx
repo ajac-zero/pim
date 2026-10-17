@@ -27,6 +27,10 @@ import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { AgentSettingsDialog } from "~/components/agent-settings";
 import { useI18n } from "~/components/i18n";
+import {
+  ProfilePopover,
+  ProfilePopoverTrigger,
+} from "~/components/profile-popover";
 import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
@@ -121,7 +125,7 @@ export function AppSidebar({
   const activeId = params.sessionId;
   const newChat = useNewChat(onNavigate);
   const awaitingApproval = useAwaitingApproval();
-  /* Requests from people in your circles, waiting on the Sharing page. */
+  /* Requests from people in your circles, waiting in Sharing. */
   const guestRequests =
     approvals?.filter(
       (approval) => approval.status === "pending" && approval.requestedBy,
@@ -233,43 +237,53 @@ export function AppSidebar({
               onNavigate={onNavigate}
             />
           )}
+          {/* Below, configuration: each opens over the page instead of replacing it. */}
           <div className="mt-auto" />
           {account && (
-            <RailLink
-              to="/sharing"
+            <RailDialogLink
+              dialog="sharing"
               icon={<Users className="size-4.5" />}
               label={t("sharing")}
               count={guestRequests}
               onNavigate={onNavigate}
             />
           )}
-          <RailLink
-            to="/settings"
+          <RailDialogLink
+            dialog="settings"
             icon={<Settings className="size-4.5" />}
             label={t("settings")}
             onNavigate={onNavigate}
           />
           {account && (
-            <RailItem
-              icon={
-                <span className="flex size-7 items-center justify-center rounded-full bg-background font-medium text-foreground text-xs uppercase">
-                  {(profile?.displayName ?? account.username).slice(0, 1)}
-                </span>
-              }
-              label={profile?.displayName ?? `@${account.username}`}
+            <ProfilePopover
+              account={account}
+              profile={profile}
+              onNavigate={onNavigate}
             >
-              {(content) => (
-                <Link
-                  to="/people/$username"
-                  params={{ username: account.username }}
-                  onClick={onNavigate}
-                  className={cn(RAIL_ITEM_CLASS, RAIL_ACTIVE_CLASS)}
-                  aria-label={t("profile")}
-                >
-                  {content}
-                </Link>
-              )}
-            </RailItem>
+              <RailItem
+                icon={
+                  <span className="flex size-7 items-center justify-center rounded-full bg-background font-medium text-foreground text-xs uppercase">
+                    {(profile?.displayName ?? account.username).slice(0, 1)}
+                  </span>
+                }
+                label={profile?.displayName ?? `@${account.username}`}
+              >
+                {(content) => (
+                  <ProfilePopoverTrigger asChild>
+                    <button
+                      type="button"
+                      className={cn(
+                        RAIL_ITEM_CLASS,
+                        "aria-expanded:bg-sidebar-accent",
+                      )}
+                      aria-label={t("profile")}
+                    >
+                      {content}
+                    </button>
+                  </ProfilePopoverTrigger>
+                )}
+              </RailItem>
+            </ProfilePopover>
           )}
         </nav>
 
@@ -416,14 +430,7 @@ function RailLink({
   onNavigate,
   ...props
 }: {
-  to:
-    | "/artifacts"
-    | "/apps"
-    | "/schedules"
-    | "/notifications"
-    | "/discover"
-    | "/sharing"
-    | "/settings";
+  to: "/artifacts" | "/apps" | "/schedules" | "/notifications" | "/discover";
   icon: ReactNode;
   label: string;
   count?: number;
@@ -434,6 +441,35 @@ function RailLink({
       {(content) => (
         <Link
           to={to}
+          onClick={onNavigate}
+          className={cn(RAIL_ITEM_CLASS, RAIL_ACTIVE_CLASS)}
+          aria-label={props.label}
+        >
+          {content}
+        </Link>
+      )}
+    </RailItem>
+  );
+}
+
+/** A rail icon that opens a dialog over the current page. */
+function RailDialogLink({
+  dialog,
+  onNavigate,
+  ...props
+}: {
+  dialog: "settings" | "sharing";
+  icon: ReactNode;
+  label: string;
+  count?: number;
+  onNavigate?: () => void;
+}) {
+  return (
+    <RailItem {...props}>
+      {(content) => (
+        <Link
+          to="."
+          search={(prev) => ({ ...prev, dialog, tab: undefined })}
           onClick={onNavigate}
           className={cn(RAIL_ITEM_CLASS, RAIL_ACTIVE_CLASS)}
           aria-label={props.label}

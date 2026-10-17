@@ -192,6 +192,8 @@ const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, 
 const AGENT_SECTION_KEY = "pim_section";
 /** The day the person was last told a limit stopped background work. */
 const LIMIT_NOTICE_KEY = "limit_notice";
+/** The chat each new-chat task last started, so a retried firing doesn't start another. */
+const SCHEDULED_CHATS_KEY = "scheduled_chats";
 /** Set by the Worker on requests that carried the API token. */
 export const AUTHORIZED_HEADER = "x-pim-authorized";
 /** Accepts any JSON-RPC result: pim checks the shapes of extension results itself. */
@@ -994,13 +996,21 @@ export class Pim extends DurableAgent<Env> {
 
 	/** A firing's new chat: started on its first try, and the same one when the firing is retried. */
 	async #scheduledChat(payload: ScheduledTaskPayload, schedule: Schedule<ScheduledTaskPayload>): Promise<string> {
-		const key = `schedule_chat:${schedule.id}`;
-		const [time, session] = (this.store.meta(key) ?? "").split(" ");
-		if (Number(time) === schedule.time && session && !this.store.deletedSessions().has(session)) return session;
+		const last = this.#scheduledChats()[schedule.id];
+		if (last?.time === schedule.time && !this.store.deletedSessions().has(last.session)) return last.session;
 		const id = await this.#startChat(this.agents.ofSession(payload.session), clipTitle(payload.label ?? payload.instruction));
-		this.store.setMeta(key, `${schedule.time} ${id}`);
+		const live = new Set((await this.listSchedules()).map((scheduled) => scheduled.id));
+		// Read again after the awaits, and keep only schedules still pending, so the record stays one entry per task.
+		const chats = Object.fromEntries(Object.entries(this.#scheduledChats()).filter(([scheduled]) => live.has(scheduled)));
+		chats[schedule.id] = { time: schedule.time, session: id };
+		this.store.setMeta(SCHEDULED_CHATS_KEY, JSON.stringify(chats));
 		this.broadcastMessage({ type: "sessions" });
 		return id;
+	}
+
+	/** The chat each new-chat task's latest firing started, by schedule. */
+	#scheduledChats(): Record<string, { time: number; session: string }> {
+		return JSON.parse(this.store.meta(SCHEDULED_CHATS_KEY) ?? "{}");
 	}
 
 	/** Starts a chat with `agent`, within the person's limit on chats. */

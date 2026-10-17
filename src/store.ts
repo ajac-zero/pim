@@ -58,7 +58,15 @@ export type Approval = {
 	 * in the chat it works for.
 	 */
 	readonly member: ApprovalMember | null;
+	/**
+	 * The majordomo looking at it for the person, under the `majordomo`
+	 * policy: `reviewing` while it decides, `escalated` once it asked the
+	 * person, with what it told them. Null when the person was asked directly.
+	 */
+	readonly review: ApprovalReview | null;
 };
+
+export type ApprovalReview = { readonly status: "reviewing" | "escalated"; readonly note: string | null };
 
 /** The team member whose call filed an approval, and the chat it was working for. */
 export type ApprovalMember = { readonly name: string; readonly session: string };
@@ -71,7 +79,7 @@ export type ApprovalRequester = {
 	readonly circleName: string;
 };
 
-export type ApprovalDecider = "user" | "timeout" | "always";
+export type ApprovalDecider = "user" | "timeout" | "always" | "majordomo";
 
 /** Whether Pim may use a tool: not at all, after asking the user, or without asking. */
 export type ToolPermission = "off" | "ask" | "on";
@@ -197,7 +205,8 @@ CREATE TABLE IF NOT EXISTS pim_approvals (
 	on_timeout TEXT,
 	decided_by TEXT,
 	requested_by TEXT,
-	member TEXT
+	member TEXT,
+	review TEXT
 );
 CREATE TABLE IF NOT EXISTS pim_always_approved (
 	tool TEXT PRIMARY KEY,
@@ -311,6 +320,7 @@ function approvalOf(row: Row): Approval {
 		decidedBy: row.decided_by === null || row.decided_by === undefined ? null : (String(row.decided_by) as ApprovalDecider),
 		requestedBy: row.requested_by ? (JSON.parse(String(row.requested_by)) as ApprovalRequester) : null,
 		member: row.member ? (JSON.parse(String(row.member)) as ApprovalMember) : null,
+		review: row.review ? (JSON.parse(String(row.review)) as ApprovalReview) : null,
 	};
 }
 
@@ -411,6 +421,7 @@ export class PimStore {
 		if (!columns.includes("decided_by")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN decided_by TEXT");
 		if (!columns.includes("requested_by")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN requested_by TEXT");
 		if (!columns.includes("member")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN member TEXT");
+		if (!columns.includes("review")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN review TEXT");
 		const sessionColumns = this.#sql.exec("PRAGMA table_info(pim_sessions)").toArray().map((row) => String(row.name));
 		if (!sessionColumns.includes("deleted_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN deleted_at INTEGER");
 		if (!sessionColumns.includes("summary")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN summary TEXT");
@@ -543,6 +554,10 @@ export class PimStore {
 				id,
 			).rowsWritten > 0
 		);
+	}
+
+	setApprovalReview(id: string, review: ApprovalReview): void {
+		this.#sql.exec("UPDATE pim_approvals SET review = ? WHERE id = ?", JSON.stringify(review), id);
 	}
 
 	recordApprovalResult(id: string, result: string): void {

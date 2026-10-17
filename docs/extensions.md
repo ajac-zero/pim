@@ -2,7 +2,7 @@
 
 An extension is what a deployment adds to everyone's Pims: blueprints for agents to build on, abilities (tools, prompt sections, background work, and actions that ask first), widgets for their dashboards, and color themes for the web app. Its admin chooses them in code, in [`pim.config.ts`](../pim.config.ts), and deploys; people choose among what's there. Nothing is loaded at runtime.
 
-Pim's own blueprint is an extension too, [`pim.assistant`](../src/extensions/assistant.ts), written with the same API. A deployment can leave it out, and a person can make another agent their default and delete theirs. So are Pim's own color themes, [`pim.themes`](../src/extensions/themes/index.ts), which every deployment has.
+Pim's own blueprint is an extension too, [`pim.assistant`](../src/extensions/assistant.ts), written with the same API. A deployment can leave it out, and a person can move their majordomo to another blueprint. So are Pim's own color themes, [`pim.themes`](../src/extensions/themes/index.ts), which every deployment has.
 
 Pim is the platform and a person's own space; an agent is what they create and chat with; a blueprint is what an extension defines in code for agents to build on; a template is an agent shared through the gallery.
 
@@ -193,7 +193,7 @@ A `link` is `{ chat }` or `{ artifact }`: the item opens it.
 
 `load` gets:
 
-- `agent`: the agent whose dashboard it is (`id`, `name`, `default`).
+- `agent`: the agent whose dashboard it is (`id`, `name`, `majordomo`).
 - `chatOf(session)`: the person's chat that a conversation is, or works for, when that chat is this Pim's; null otherwise. A team member's conversation works for the chat that gave it its task. Use it to show only what belongs to this Pim, and to link to the chat.
 - `ofAgent(session)`: whether a conversation is, or works for, one of this Pim's chats, including one since deleted. Use it for what outlives the chat it came from, such as a task that starts new chats.
 - `timeZone`: the person's.

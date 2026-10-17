@@ -143,7 +143,7 @@ export function artifactsExtension({ artifacts, assertOpen }: ArtifactServices) 
 	return defineExtension({ name: "pim.artifacts", tools: [create, update, read, list] });
 }
 
-/** On a dashboard: what the Pim made most recently. Artifacts made outside any chat are the default Pim's. */
+/** On a dashboard: what the Pim made most recently. Artifacts made outside any chat are the majordomo's. */
 export function artifactsWidgets(artifacts: ArtifactStore) {
 	return definePimExtension({
 		id: "pim.artifacts",
@@ -158,7 +158,7 @@ export function artifactsWidgets(artifacts: ArtifactStore) {
 					kind: "list",
 					items: artifacts
 						.list()
-						.filter((artifact) => (artifact.session === null ? agent.default : chatOf(artifact.session) !== null))
+						.filter((artifact) => (artifact.session === null ? agent.majordomo : chatOf(artifact.session) !== null))
 						.sort((a, b) => b.updatedAt - a.updatedAt)
 						.slice(0, 5)
 						.map((artifact) => ({

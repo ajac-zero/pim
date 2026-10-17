@@ -103,7 +103,7 @@ export function messagingExtension(services: PimServices) {
 								continue;
 							}
 							// Background work may deliberately stay silent.
-							required = !/^\[(?:Scheduled task|Approval |App event\]|Team:)/.test(input);
+							required = !/^\[(?:Scheduled task|Approval |App event\]|Team:|Chat with )/.test(input);
 							reminders = 0;
 						}
 					}

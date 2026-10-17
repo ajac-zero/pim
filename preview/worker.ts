@@ -17,6 +17,8 @@ export { Auth, Directory, Gallery } from "../src/index";
  * - A stand-in model, so chats answer. It echoes what you say through
  *   `send_to_user`, and calls a tool when told to: `/tool create_goal {"title": "Run a 5k"}`.
  *   After a tool runs, it sends the tool's result. Memory compression gets a short summary.
+ *   An agent at work for another (a team member, or one the majordomo gave a task) answers in
+ *   plain text, and the majordomo asks the person about every approval it reviews.
  *   The utility model titles a chat with the first words of its last message, appends a
  *   line to a prompt it improves, and writes a placeholder summary.
  * - `GET /__dev/sign-in/<username>?returnTo=/path` signs the browser in as
@@ -61,6 +63,18 @@ const answer: FauxResponseFactory = (context, _options, _state, model) => {
 		return fauxAssistantMessage(
 			`- A preview conversation of ${turns} turns.\n- The preview model can't read it.\n\n## Next steps\n\n- Choose a real utility model to get a real summary.`,
 		);
+	}
+
+	const system = JSON.stringify(context.messages.filter((message) => message.role === "system"));
+	if (system.includes('"name":"decide_approval"')) {
+		return last?.role === "toolResult"
+			? fauxAssistantMessage("Asked the person.")
+			: fauxAssistantMessage(fauxToolCall("decide_approval", { decision: "escalate", note: "The preview model can't judge this: you decide." }), { stopReason: "toolUse" });
+	}
+	// An agent at work for another has no `send_to_user`: it answers in plain text, after a tool when told to call one.
+	if (!system.includes('"name":"send_to_user"')) {
+		if (last?.role === "toolResult") return fauxAssistantMessage(`\`${last.toolName}\` returned:\n\n${textOf(last).slice(0, 1_000) || "(nothing)"}`);
+		if (!/^\/tool\s/.test(textOf(last).trim())) return fauxAssistantMessage(`Done: ${textOf(last).trim()}`);
 	}
 
 	if (last?.role === "toolResult") {

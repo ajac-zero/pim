@@ -63,9 +63,10 @@
     "PIM_MEMORY_LINES": "",
     // This deployment's public URL, for app event callbacks; empty learns it from API requests.
     "PIM_PUBLIC_URL": "",
-    // What an approval nobody answers becomes: "auto" approves it after 30 seconds; "explicit"
-    // waits for an answer however long. Each person can change theirs in Settings.
-    "PIM_APPROVAL_POLICY": "auto",
+    // Who answers approvals: "majordomo" sends other agents' requests to each person's majordomo,
+    // which decides or asks them; "auto" approves what nobody answers after 30 seconds; "explicit"
+    // waits for the person's answer however long. Each person can change theirs in Settings.
+    "PIM_APPROVAL_POLICY": "majordomo",
     // Platform models sessions may use besides PIM_MODEL, comma-separated; empty allows any.
     "PIM_MODELS": "",
     // Usage limits for members as JSON, such as {"dailyTokens": 2000000, "dailyRuns": 500};

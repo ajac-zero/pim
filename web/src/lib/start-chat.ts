@@ -7,7 +7,7 @@ import { pimClient } from "~/lib/pim-client";
 import { showTab } from "~/lib/tabs";
 
 /**
- * Starts a chat with an agent (the default one when `agent` is undefined)
+ * Starts a chat with an agent (the majordomo when `agent` is undefined)
  * with its first message: the chat is made only when there is something to
  * send, then opened, then sent to.
  */

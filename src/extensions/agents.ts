@@ -13,6 +13,7 @@ import {
 	agentInput,
 	agentInstructions,
 } from "../agents";
+import { majordomoRole, SEND_TO_AGENT } from "../majordomo";
 import { memberInstructions, memberPreamble, type Role } from "../team";
 import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";
 import type { DirectoryApp } from "./app-directory";
@@ -187,9 +188,11 @@ function agentsSection(self: Agent, host: AgentsHost): string {
 			.list()
 			.map(
 				(agent) =>
-					`- ${agent.name}${agent.id === self.id ? " (you)" : ""}${agent.default ? " (default)" : ""}${agent.description ? `: ${agent.description}` : ""} [id: ${agent.id}]`,
+					`- ${agent.name}${agent.id === self.id ? " (you)" : ""}${agent.majordomo ? " (their majordomo)" : ""}${agent.description ? `: ${agent.description}` : ""} [id: ${agent.id}]`,
 			),
-		`When the person wants ongoing help of the kind another of these is for, tell them to start a chat with it from the sidebar. When they want ongoing help none of these covers, such as a coding helper or a trip planner, make one with \`${CREATE_AGENT}\` without asking first, then tell them it's in the sidebar. Don't make one for a one-off question: answer it yourself.`,
+		self.majordomo
+			? `Hand work to these with \`${SEND_TO_AGENT}\`. When none of them is right for it, such as a coding helper or a trip planner, make one with \`${CREATE_AGENT}\` without asking first, then send it the task. Each is in the sidebar too, with the chats you start with it, for the person to read and carry on.`
+			: `When the person wants ongoing help of the kind another of these is for, tell them to start a chat with it from the sidebar. When they want ongoing help none of these covers, such as a coding helper or a trip planner, make one with \`${CREATE_AGENT}\` without asking first, then tell them it's in the sidebar. Don't make one for a one-off question: answer it yourself.`,
 		...(blueprints.length > 1
 			? [
 					"A new agent can build on one of these blueprints, which gives it their habits and tools; give it as `blueprint`, or leave it out for the deployment's default:",
@@ -343,7 +346,8 @@ export function agentExtension(
 			// Rendered at each request, so a chat follows its agent's edits from the next one.
 			section("agent", ({ conversationId }) => {
 				const { agent, member } = roleOf(String(conversationId));
-				return member ? memberInstructions(member) : agentInstructions(agent, blueprintOf(agent));
+				if (member) return memberInstructions(member);
+				return agentInstructions(agent, blueprintOf(agent), agent.majordomo ? majordomoRole(agent) : undefined);
 			}),
 			section("your_agents", ({ conversationId }) => {
 				const { agent, member } = roleOf(String(conversationId));

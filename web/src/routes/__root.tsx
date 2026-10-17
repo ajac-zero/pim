@@ -24,6 +24,7 @@ import { AppsDialog } from "~/components/apps-dialog";
 import { SummaryToggle } from "~/components/chat/summary";
 import { DiscoverDialog } from "~/components/discover-dialog";
 import { I18nProvider, useI18n } from "~/components/i18n";
+import { MeetMajordomo } from "~/components/majordomo-setup";
 import { RouteError } from "~/components/route-error";
 import {
   SETTINGS_TABS,
@@ -38,7 +39,7 @@ import { Sheet, SheetContent, SheetTitle } from "~/components/ui/sheet";
 import { Toaster } from "~/components/ui/sonner";
 import { authSessionQuery } from "~/lib/auth";
 import { pimClient } from "~/lib/pim-client";
-import { agentsQuery, sessionsQuery } from "~/lib/queries";
+import { agentsQuery, majordomoQuery, sessionsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 export interface RouterContext {
@@ -81,7 +82,9 @@ function Root() {
     <I18nProvider>
       <ThemeProvider>
         <SignedIn>
-          <AppLayout />
+          <Introduced>
+            <AppLayout />
+          </Introduced>
         </SignedIn>
         <Toaster position="top-center" />
       </ThemeProvider>
@@ -110,6 +113,21 @@ function SignedIn({ children }: { children: ReactNode }) {
   }
   if (!data) return null;
   if (!data.signedIn) return <SignIn session={data} />;
+  return children;
+}
+
+/** The app once the person has named their majordomo; naming it until then, the first time they sign in. */
+function Introduced({ children }: { children: ReactNode }) {
+  const { data, error, refetch } = useQuery(majordomoQuery());
+  if (error) {
+    return (
+      <div className="flex h-svh">
+        <RouteError error={error} reset={() => refetch()} />
+      </div>
+    );
+  }
+  if (!data) return null;
+  if (!data.introduced) return <MeetMajordomo majordomo={data.agent} />;
   return children;
 }
 
@@ -189,12 +207,19 @@ function usePimEvents() {
           return;
         }
         // The open chat shows it inline; elsewhere, point to its chat (for a team member, the chat it works for).
+        // Nothing to ask yet while the majordomo decides it.
         const chat = approval.member?.session ?? approval.session;
-        if (approval.status !== "pending" || chat === sessionId) {
+        if (
+          approval.status !== "pending" ||
+          approval.review?.status === "reviewing" ||
+          chat === sessionId
+        ) {
           return;
         }
         toast(t("approvalRequested"), {
-          description: approval.summary,
+          description: approval.review?.note
+            ? `${approval.summary}\n${approval.review.note}`
+            : approval.summary,
           action: {
             label: t("review"),
             onClick: () =>
@@ -222,7 +247,7 @@ function MobileTitle() {
   const agent =
     session && !session.visit
       ? agents?.find((agent) =>
-          session.agent ? agent.id === session.agent.id : agent.default,
+          session.agent ? agent.id === session.agent.id : agent.majordomo,
         )
       : undefined;
   return (

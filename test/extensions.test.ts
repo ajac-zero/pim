@@ -9,7 +9,7 @@ import { PimThemes } from "../src/themes";
 import { api, apiUrl, decisionRun, pendingApproval, post, say, systemPrompt, toolUse } from "./helpers";
 import { faux, ledger, outbox } from "./worker";
 
-type Agent = { id: string; name: string; blueprint: string | null; default: boolean };
+type Agent = { id: string; name: string; blueprint: string | null; majordomo: boolean };
 
 /** A message's result as API clients get it: what Pim sent, in order. */
 const ask = async (content: string, session: string) => (await say(content, session)) as unknown as { replies: string[] };
@@ -57,7 +57,7 @@ describe("extensions", () => {
 
 	it("builds each agent on an extension's blueprint: its instructions first, then the person's own", async () => {
 		const [mine] = (await api("/agents")).body.agents as Agent[];
-		expect(mine).toMatchObject({ name: "Pim", blueprint: "pim.assistant/pim", default: true });
+		expect(mine).toMatchObject({ name: "Majordomo", blueprint: "pim.assistant/pim", majordomo: true });
 		const { extensions } = (await api("/extensions")).body;
 		expect(extensions.flatMap((extension: { blueprints: { ref: string }[] }) => extension.blueprints.map((blueprint) => blueprint.ref))).toEqual([
 			"pim.assistant/pim",
@@ -96,7 +96,7 @@ describe("extensions", () => {
 	});
 
 	it("shows each agent's dashboard, with what belongs to its chats", async () => {
-		const mine = ((await api("/agents")).body.agents as Agent[]).find((agent) => agent.default)!;
+		const mine = ((await api("/agents")).body.agents as Agent[]).find((agent) => agent.majordomo)!;
 		const coach = (await post("/agents", { name: "Run coach", team: [{ name: "Tracker", instructions: "Track goals." }] })).body as Agent;
 		const chat = (await post("/sessions", { agent: coach.id })).body.id;
 
@@ -119,7 +119,7 @@ describe("extensions", () => {
 		await api(`/memory/log/${forgotten.id}`, { method: "DELETE" });
 
 		const board = await dashboard(coach);
-		expect(board.agent).toMatchObject({ id: coach.id, name: "Run coach", default: false });
+		expect(board.agent).toMatchObject({ id: coach.id, name: "Run coach", majordomo: false });
 		expect(board.starters).toEqual(["What can you do for me?", "Help me plan my week", "Start tracking a goal with me"]);
 		expect(board.widgets.map((shown: { id: string }) => shown.id)).toEqual([
 			"pim.schedule/upcoming",
@@ -178,24 +178,52 @@ describe("extensions", () => {
 		}
 	});
 
-	it("makes any agent the default, and chats stay with the agent they were started with", async () => {
-		const first = ((await api("/agents")).body.agents as Agent[]).find((agent) => agent.default)!;
+	it("has one majordomo, which the person names once, and which talks in chats started without an agent", async () => {
+		const { agent: first, introduced } = (await api("/majordomo")).body;
+		expect(introduced).toBe(false);
+		expect(first).toMatchObject({ name: "Majordomo", majordomo: true, instructions: "" });
+
+		// Refused in any part, none of it is applied.
+		const setup = {
+			name: "Alfred",
+			symbol: "🎩",
+			color: "violet",
+			tone: "formal",
+			about: { name: "Ana Souza", callMe: "Ana", age: 34, notes: "Lives in Lisbon with two cats." },
+		};
+		for (const bad of [{ ...setup, name: " " }, { ...setup, tone: "grumpy" }, { ...setup, about: { age: 0 } }, { ...setup, about: { notes: "x".repeat(241) } }]) {
+			expect((await post("/majordomo", bad)).status).toBe(400);
+		}
+		expect((await api("/majordomo")).body).toMatchObject({ agent: { name: "Majordomo" }, introduced: false });
+		const before = (await api("/memory")).body.count;
+
+		const named = (await post("/majordomo", setup)).body;
+		expect(named).toMatchObject({ introduced: true, agent: { id: first.id, name: "Alfred", symbol: "🎩", color: "violet", majordomo: true } });
+		expect(named.agent.instructions).toContain("formally");
+		// What they said about themselves is remembered, for every agent.
+		const memories = (await api("/memory/log")).body.entries.map((entry: { text: string }) => entry.text);
+		expect(memories.slice(0, 4).reverse()).toEqual([
+			"Their name is Ana Souza.",
+			"They like to be called Ana.",
+			"They are 34 years old.",
+			"About them, in their words: Lives in Lisbon with two cats.",
+		]);
+		expect((await api("/memory")).body.count).toBe(before + 4);
+		// Once: after that it is edited like any agent.
+		expect((await post("/majordomo", { name: "Jeeves" })).status).toBe(409);
+
+		// The title can't move, and the majordomo can't be deleted.
 		const other = (await post("/agents", { name: "Planner" })).body as Agent;
-		const before = (await post("/sessions", {})).body.id;
-		expect(await agentOf(before)).toEqual({ id: first.id, name: first.name });
+		expect((await post(`/agents/${other.id}/default`)).status).toBe(404);
+		expect((await api(`/agents/${first.id}`, { method: "DELETE" })).status).toBe(400);
+		expect(((await api("/agents")).body.agents as Agent[]).filter((agent) => agent.majordomo).map((agent) => agent.id)).toEqual([first.id]);
 
-		expect((await post(`/agents/${other.id}/default`)).body).toMatchObject({ id: other.id, default: true });
-		const agents = (await api("/agents")).body.agents as Agent[];
-		expect(agents.filter((agent) => agent.default).map((agent) => agent.id)).toEqual([other.id]);
-		// The main chat and chats started with the old default stay with it; new ones get the new default.
-		expect(await agentOf(before)).toEqual({ id: first.id, name: first.name });
-		expect(await agentOf("1")).toEqual({ id: first.id, name: first.name });
-		expect((await post("/sessions", {})).body.agent).toEqual({ id: other.id, name: "Planner" });
-
-		// No longer the default, Pim's own agent can be deleted: its chats go to the default.
-		expect((await api(`/agents/${other.id}`, { method: "DELETE" })).status).toBe(400);
-		expect((await api(`/agents/${first.id}`, { method: "DELETE" })).body).toEqual({ deleted: true });
-		expect(await agentOf(before)).toEqual({ id: other.id, name: "Planner" });
+		// Chats started without an agent are the majordomo's; a deleted agent's chats go on with it.
+		expect((await post("/sessions", {})).body.agent).toEqual({ id: first.id, name: "Alfred" });
+		const planning = (await post("/sessions", { agent: other.id })).body.id;
+		expect(await agentOf(planning)).toEqual({ id: other.id, name: "Planner" });
+		expect((await api(`/agents/${other.id}`, { method: "DELETE" })).body).toEqual({ deleted: true });
+		expect(await agentOf(planning)).toEqual({ id: first.id, name: "Alfred" });
 	});
 
 	it("gives an agent's chats, and its team, the abilities of the blueprint it builds on, and only those", async () => {

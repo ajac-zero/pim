@@ -305,7 +305,7 @@ function ChatsPanel({
     visit.username.toLowerCase().includes(search.toLowerCase()),
   );
 
-  // A section for each of your agents, the default one first, holding the chats with it.
+  // A section for each of your agents, the majordomo first, holding the chats with it.
   const sections = useMemo((): AgentSection[] => {
     const all = (agents ?? []).map((agent) => ({
       agent,
@@ -316,7 +316,7 @@ function ChatsPanel({
       if (session.visit) continue;
       const section =
         all.find((candidate) => candidate.agent.id === session.agent?.id) ??
-        all.find((candidate) => candidate.agent.default);
+        all.find((candidate) => candidate.agent.majordomo);
       section?.list.push(session);
     }
     return all;
@@ -606,7 +606,7 @@ function AgentSectionList({
               onClick={() => {
                 navigate({
                   to: "/new",
-                  search: agent.default ? {} : { agent: agent.id },
+                  search: agent.majordomo ? {} : { agent: agent.id },
                 });
                 onNavigate?.();
               }}

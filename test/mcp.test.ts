@@ -154,8 +154,8 @@ function offered(messages: readonly Message[]): string[] {
 	return [...tools];
 }
 
-/** Sets the apps the person's default agent works with. */
-async function defaultAgentApps(apps: string[]) {
+/** Sets the apps the person's majordomo works with. */
+async function majordomoApps(apps: string[]) {
 	const [agent] = (await api("/agents")).body.agents;
 	expect((await api(`/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ apps }) })).status).toBe(200);
 }
@@ -168,10 +168,10 @@ describe("connected apps (MCP)", () => {
 
 		// Connected, but no Pim works with it yet.
 		expect((await api("/mcp")).body.servers).toEqual([expect.objectContaining({ id: "calendar", agents: [] })]);
-		await defaultAgentApps(["test.ledger/calendar"]);
+		await majordomoApps(["test.ledger/calendar"]);
 		const apps = (await api("/mcp")).body.servers;
 		expect(apps).toEqual([
-			expect.objectContaining({ id: "calendar", name: "Calendar", state: "ready", approval: "writes", agents: ["Pim"] }),
+			expect.objectContaining({ id: "calendar", name: "Calendar", state: "ready", approval: "writes", agents: ["Majordomo"] }),
 		]);
 		expect(apps[0].tools).toEqual([
 			{ name: "calendar_find_events", description: "Find events on a day.", permission: "on", requiresApproval: false },
@@ -294,7 +294,7 @@ describe("connected apps (MCP)", () => {
 	});
 
 	it("adds a new app's tools without re-sending the prompt sent so far", async () => {
-		await defaultAgentApps(["test.ledger/calendar", "test.ledger/notes"]);
+		await majordomoApps(["test.ledger/calendar", "test.ledger/notes"]);
 		const session = (await post("/sessions")).body.id;
 		const prompts: Message[][] = [];
 		const record = (context: { messages: Message[] }) => {

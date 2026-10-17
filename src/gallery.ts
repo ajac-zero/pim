@@ -16,8 +16,8 @@ import { APP_CATEGORIES, type AppCategory } from "./extensions/define";
  * symbol, color and uploaded icon), never their memory, conversations or
  * credentials. Publishing again replaces it.
  *
- * The admin also chooses the agent everyone starts with: a copy of one of
- * theirs, which becomes each new account's default agent; and adds apps
+ * The admin also chooses an agent everyone starts with: a copy of one of
+ * theirs, which each new account gets besides its majordomo; and adds apps
  * anyone can connect besides the extensions' (`custom/<app>`).
  */
 
@@ -399,7 +399,7 @@ export class Gallery extends DurableObject<Env> {
 		return this.#sql("DELETE FROM templates WHERE id = ?", id).rowsWritten > 0;
 	}
 
-	/** The agent everyone starts with; null when the admin chose none, and people start with a plain one. */
+	/** The agent everyone starts with besides their majordomo; null when the admin chose none. */
 	defaultAgent(): DefaultAgent | null {
 		const [row] = this.#sql("SELECT * FROM default_agent WHERE id = 1").toArray();
 		if (!row) return null;

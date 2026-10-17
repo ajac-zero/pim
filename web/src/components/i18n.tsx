@@ -465,8 +465,7 @@ const translations = {
     fileMissing: "This file isn't there anymore.",
     allFiles: "All files",
     browser: "Browser",
-    browserIdle:
-      "Closed. When an agent opens a page, you see it here, and you can take over to sign in or finish something yourself.",
+    summaryAndBrowser: "Summary and browser",
     browserPicture: "What the browser shows: {title}",
     takeOverBrowser: "Take over",
     takeOverHint:
@@ -1167,8 +1166,7 @@ const translations = {
     fileMissing: "Este archivo ya no está.",
     allFiles: "Todos los archivos",
     browser: "Navegador",
-    browserIdle:
-      "Cerrado. Cuando un agente abra una página, la verás aquí, y podrás tomar el control para iniciar sesión o terminar algo tú.",
+    summaryAndBrowser: "Resumen y navegador",
     browserPicture: "Lo que muestra el navegador: {title}",
     takeOverBrowser: "Tomar el control",
     takeOverHint:

@@ -1,11 +1,16 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useSyncExternalStore } from "react";
+import { BrowserView } from "~/components/chat/browser-view";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import { AlertCircle, ListChecks, Loader2 } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { pim } from "~/lib/pim-api";
+import { browserQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
+
+/** How often the open box looks at the agents' browser again. */
+const BROWSER_REFRESH_MS = 4_000;
 
 /** Whether the summary box is open: one setting for every chat, kept across visits. */
 const OPEN_KEY = "pim-summary-open";
@@ -28,32 +33,38 @@ function useSummaryOpen(): [boolean, (open: boolean) => void] {
   return [open, setOpen];
 }
 
-/** The header button that shows or hides the summary box. */
+/** The header button that shows or hides the summary box; a dot says the agents' browser is open in it. */
 export function SummaryToggle({ className }: { className?: string }) {
   const { t } = useI18n();
   const [open, setOpen] = useSummaryOpen();
+  const { data: browser } = useQuery(browserQuery());
+  const label = browser?.page ? t("summaryAndBrowser") : t("summary");
   return (
     <Button
       variant="ghost"
       size="icon"
-      aria-label={t("summary")}
-      title={t("summary")}
+      aria-label={label}
+      title={label}
       aria-expanded={open}
       onClick={() => setOpen(!open)}
       className={cn(
-        "rounded-full",
+        "relative rounded-full",
         open && "bg-accent text-foreground",
         className,
       )}
     >
       <ListChecks className="size-4.5" />
+      {browser?.page && (
+        <span className="absolute top-1.5 right-1.5 size-2 rounded-full bg-primary" />
+      )}
     </Button>
   );
 }
 
 /**
  * A box beside a chat (above it on phones) with a quick summary of it and
- * its next steps, from the utility model. The thread makes room for it. Nothing is written while it is closed. Open,
+ * its next steps, from the utility model, and below it, while it's open,
+ * the browser the person's agents share. The thread makes room for it. Nothing is written while it is closed. Open,
  * it asks again only when the chat has settled with new entries (`entries`),
  * and Pim writes a new summary only if something more was said.
  */
@@ -76,14 +87,17 @@ export function SummaryBox({
     placeholderData: keepPreviousData,
     retry: false,
   });
+  const browser = useQuery({
+    ...browserQuery(),
+    enabled: open,
+    refetchInterval: BROWSER_REFRESH_MS,
+  });
   if (!open) return null;
+  const page = browser.data?.page;
 
   return (
-    <aside
-      aria-label={t("summary")}
-      className="order-first flex max-h-[45%] shrink-0 flex-col px-3 pt-3 pb-2 md:order-none md:max-h-none md:w-80 md:pb-3 md:pl-0"
-    >
-      <div className="fade-in-0 flex min-h-0 animate-in flex-col overflow-hidden rounded-[18px] border bg-muted/40 duration-150">
+    <aside className="order-first flex max-h-[45%] shrink-0 flex-col px-3 pt-3 pb-2 md:order-none md:max-h-none md:w-80 md:pb-3 md:pl-0">
+      <div className="fade-in-0 min-h-0 animate-in overflow-y-auto rounded-[18px] border bg-muted/40 duration-150">
         <h2 className="flex items-center gap-2 px-4 pt-3.5 pb-1 text-[13px] text-muted-foreground">
           {t("summary")}
           {summary.isFetching && summary.data !== undefined && (
@@ -93,7 +107,7 @@ export function SummaryBox({
             />
           )}
         </h2>
-        <div className="min-h-0 overflow-y-auto px-4 pb-4 text-sm">
+        <div className="px-4 pb-4 text-sm">
           {entries === 0 || summary.data === null ? (
             <p className="text-muted-foreground">{t("nothingToSummarize")}</p>
           ) : summary.data !== undefined ? (
@@ -114,6 +128,7 @@ export function SummaryBox({
             </p>
           )}
         </div>
+        {page && <BrowserView page={page} updatedAt={browser.dataUpdatedAt} />}
       </div>
     </aside>
   );

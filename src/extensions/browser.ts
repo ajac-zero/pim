@@ -16,7 +16,7 @@ export const BROWSER_EXTENSION = "pim.browser";
 export const BROWSER_CLICK = "browser_click";
 export const BROWSER_TYPE = "browser_type";
 
-const SHARED = `The browser is one Chrome the person's agents share; it starts signed in nowhere, keeps its pages between your steps, and closes itself after ten minutes unused. If a page needs the person (signing in, a check that they're human, payment details), stop and ask them to take over: under Browser in the app's sidebar, they choose Take over and tell you when they're done. Never ask them for passwords or codes in the chat.`;
+const SHARED = `The browser is one Chrome the person's agents share; it starts signed in nowhere, keeps its pages between your steps, and closes itself after ten minutes unused. If a page needs the person (signing in, a check that they're human, payment details), stop and ask them to take over: in the box beside the chat, under its summary, they choose Take over and tell you when they're done. Never ask them for passwords or codes in the chat.`;
 
 const Ref = Type.Integer({ minimum: 1, description: "The element's number, from the page as browser_open or browser_read last showed it: 12 for [12 button “Search”]." });
 const ClickArgs = Type.Object({ ref: Ref });

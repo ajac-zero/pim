@@ -15,16 +15,13 @@ import {
   Check,
   CheckCheck,
   Download,
-  ExternalLink,
   FileIcon,
   Folder,
   MoreHorizontal,
   Repeat,
   Trash2,
   Upload,
-  X,
 } from "~/components/icons";
-import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -39,7 +36,6 @@ import {
 import { baseName, parentOf } from "~/lib/files";
 import {
   ApiError,
-  BROWSER_SCREENSHOT_URL,
   FILES_ROOT,
   type FileEntry,
   fileContentUrl,
@@ -49,7 +45,6 @@ import {
 } from "~/lib/pim-api";
 import {
   artifactsQuery,
-  browserQuery,
   filesQuery,
   notificationsQuery,
   schedulesQuery,
@@ -525,106 +520,6 @@ function FileRow({
       </DropdownMenu>
     </li>
   );
-}
-
-/** How often the panel looks at the browser again while it's open. */
-const BROWSER_REFRESH_MS = 4_000;
-
-/**
- * The browser your agents share: the page it shows, as a picture that keeps
- * up with them, and taking it over to sign in or finish something yourself.
- */
-export function BrowserPanel() {
-  const { t } = useI18n();
-  const queryClient = useQueryClient();
-  const { data, dataUpdatedAt } = useQuery({
-    ...browserQuery(),
-    refetchInterval: BROWSER_REFRESH_MS,
-  });
-  const page = data?.page ?? null;
-  const takeOver = useMutation({
-    // The tab opens on the click, so no popup blocker stops it; the link comes after.
-    mutationFn: async (tab: Window | null) => {
-      try {
-        const { url } = await pim.takeOverBrowser();
-        if (tab) tab.location.href = url;
-        else window.open(url, "_blank", "noopener");
-      } catch (error) {
-        tab?.close();
-        throw error;
-      }
-    },
-    onError: (error) => toast.error(error.message),
-  });
-  const close = useMutation({
-    mutationFn: pim.closeBrowser,
-    onSuccess: () => toast.success(t("browserClosed")),
-    onError: (error) => toast.error(error.message),
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ["browser"] }),
-  });
-  return (
-    <>
-      <SidebarPanelHeader title={t("browser")}>
-        {page && (
-          <SidebarPanelAction
-            label={t("closeBrowser")}
-            onClick={() => close.mutate()}
-            disabled={close.isPending}
-          >
-            <X className="size-4.5" />
-          </SidebarPanelAction>
-        )}
-      </SidebarPanelHeader>
-      <div className="flex-1 space-y-3 overflow-y-auto px-5 pb-3 scrollbar-thin">
-        {!page ? (
-          <p className="text-muted-foreground text-xs">
-            {data ? t("browserIdle") : t("loading")}
-          </p>
-        ) : (
-          <>
-            <div className="min-w-0">
-              <p className="truncate font-medium text-sm">
-                {page.title || hostOf(page.url)}
-              </p>
-              <p className="truncate text-muted-foreground text-xs">
-                {hostOf(page.url)}
-              </p>
-            </div>
-            <img
-              src={`${BROWSER_SCREENSHOT_URL}?at=${dataUpdatedAt}`}
-              alt={t("browserPicture", {
-                title: page.title || hostOf(page.url),
-              })}
-              className="w-full rounded-lg border bg-background"
-            />
-            <Button
-              className="w-full"
-              disabled={takeOver.isPending}
-              onClick={() => {
-                const tab = window.open("", "_blank");
-                if (tab) tab.opener = null;
-                takeOver.mutate(tab);
-              }}
-            >
-              <ExternalLink className="size-4" />
-              {t("takeOverBrowser")}
-            </Button>
-            <p className="text-muted-foreground text-xs">{t("takeOverHint")}</p>
-          </>
-        )}
-      </div>
-    </>
-  );
-}
-
-/** Where a page is from, as a person reads it. */
-function hostOf(url: string): string {
-  if (url.startsWith("data:")) return "HTML";
-  try {
-    return new URL(url).host || url;
-  } catch {
-    return url;
-  }
 }
 
 /** What your agents will do later, soonest first; each opens the chat it runs in. */

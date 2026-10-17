@@ -281,6 +281,11 @@ export class Directory extends DurableObject<Env> {
 		return row ? accountOf(row) : null;
 	}
 
+	/** Whether anyone but this owner has an active account: alone, there is nobody to share with or publish for. */
+	hasOthers(ownerId: string): boolean {
+		return this.#sql("SELECT 1 FROM accounts WHERE status = 'active' AND owner_id != ? LIMIT 1", ownerId).toArray().length > 0;
+	}
+
 	/**
 	 * Gives back a registration that never made a passkey: its username, its
 	 * place under `maxAccounts`, and the invite it used, which works again.

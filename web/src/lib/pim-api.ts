@@ -490,6 +490,8 @@ export type Account = {
   createdAt: number;
   usage: UsageReport;
   recoveryCodesLeft: number;
+  /** Nobody else has an active account on this Pim, so there is nobody to share with. */
+  alone: boolean;
 };
 
 /** Someone's account, as the admin sees it. */

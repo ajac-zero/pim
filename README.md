@@ -417,7 +417,8 @@ A skill is how you want work that comes up again done, written down for your age
 - **Your agents write them.** When you ask an agent to remember how to do something, or it has worked out with you a task you'll ask for again, it saves it with `write_skill`. The request shows the whole skill, and nothing is saved until it is approved under your approval policy, as with `update_agent`, since a skill steers every later run that loads it. Settings → Tool permissions sets `write_skill` to Off, Ask or On.
 - **Each agent lists the skills it uses**, as it lists apps. A skill an agent writes goes on its own list; `PUT /agents/:id` with `skills` gives one to another agent. Its chats list each skill's name and description, and the agent loads one with `read_skill` before the work it describes.
 - **Versions.** Every write adds a version, and the latest 20 are kept. A rewrite names the version it read; one approved after the skill changed is refused, so two rewrites never overwrite each other unseen.
-- **Not yet:** a screen for skills in the web app, supporting files, sharing skills through Discover, and serving them to other apps over MCP.
+- **Seeing them.** Skills, in the sidebar's rail, lists them. A skill's page shows what it says at any version kept, who wrote each, and the agents that use it: click an agent to give it the skill or take it away. Restore an older version (it becomes the newest) or delete the skill there.
+- **Not yet:** supporting files, sharing skills through Discover, and serving them to other apps over MCP.
 
 ### Teams
 

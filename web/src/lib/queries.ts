@@ -76,6 +76,24 @@ export const artifactVersionQuery = (id: string, version: number) =>
     retry: false,
   });
 
+export const skillsQuery = () =>
+  queryOptions({ queryKey: ["skills"], queryFn: pim.skills });
+
+export const skillQuery = (name: string) =>
+  queryOptions({
+    queryKey: ["skills", name],
+    queryFn: () => pim.skill(name),
+    // A deleted skill answers 404: that's the answer, not a failure to retry.
+    retry: false,
+  });
+
+export const skillVersionQuery = (name: string, version: number) =>
+  queryOptions({
+    queryKey: ["skills", name, "versions", version],
+    queryFn: () => pim.skillVersion(name, version),
+    retry: false,
+  });
+
 export const agentsQuery = () =>
   queryOptions({ queryKey: ["agents"], queryFn: pim.agents });
 

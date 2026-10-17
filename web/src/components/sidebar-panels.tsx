@@ -19,6 +19,7 @@ import {
   Folder,
   MoreHorizontal,
   Repeat,
+  ScrollText,
   Trash2,
   Upload,
 } from "~/components/icons";
@@ -49,6 +50,7 @@ import {
   notificationsQuery,
   schedulesQuery,
   sessionsQuery,
+  skillsQuery,
 } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
@@ -519,6 +521,38 @@ function FileRow({
         </DropdownMenuContent>
       </DropdownMenu>
     </li>
+  );
+}
+
+/** How your agents do work that comes up again, by name; each opens the skill. */
+export function SkillsPanel({ onNavigate }: { onNavigate?: () => void }) {
+  const { t } = useI18n();
+  const { data: skills } = useQuery(skillsQuery());
+  return (
+    <>
+      <SidebarPanelHeader title={t("skills")} />
+      <PanelList
+        label={t("skills")}
+        empty={skills?.length === 0 && t("noSkills")}
+      >
+        {skills?.map((skill) => (
+          <li key={skill.name}>
+            <Link
+              to="/skills/$skillName"
+              params={{ skillName: skill.name }}
+              onClick={onNavigate}
+              className={ROW_CLASS}
+              activeOptions={{ includeSearch: false }}
+              activeProps={{ className: "bg-sidebar-accent" }}
+              title={skill.description}
+            >
+              <ScrollText className={ROW_ICON_CLASS} />
+              <RowText title={skill.name} meta={skill.description} />
+            </Link>
+          </li>
+        ))}
+      </PanelList>
+    </>
   );
 }
 

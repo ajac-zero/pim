@@ -23,6 +23,7 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  ScrollText,
   Search,
   Settings,
   Shapes,
@@ -45,6 +46,7 @@ import {
   SIDEBAR_TOOLTIP_CLASS,
   SidebarPanelAction,
   SidebarPanelHeader,
+  SkillsPanel,
 } from "~/components/sidebar-panels";
 import { Button } from "~/components/ui/button";
 import {
@@ -114,13 +116,14 @@ export const SIDEBAR_PANELS = [
   "notifications",
   "artifacts",
   "files",
+  "skills",
   "schedules",
 ] as const;
 export type SidebarPanel = (typeof SIDEBAR_PANELS)[number];
 
 /**
  * The sidebar: a rail of icons beside a panel. The icons at the top choose
- * what the panel shows (notifications, your chats, artifacts, files or schedules)
+ * what the panel shows (notifications, your chats, artifacts, files, skills or schedules)
  * while the open chat stays where it is; those at the bottom open dialogs
  * over it. Choosing the panel that's already showing collapses the sidebar
  * to the rail, and choosing any panel brings it back.
@@ -199,6 +202,12 @@ export function AppSidebar({
             panel="files"
             icon={<Folder className="size-4.5" />}
             label={t("files")}
+          />
+          <RailPanel
+            {...railPanel}
+            panel="skills"
+            icon={<ScrollText className="size-4.5" />}
+            label={t("skills")}
           />
           <RailPanel
             {...railPanel}
@@ -283,6 +292,8 @@ export function AppSidebar({
             <ArtifactsPanel onNavigate={onNavigate} />
           ) : panel === "files" ? (
             <FilesPanel onNavigate={onNavigate} />
+          ) : panel === "skills" ? (
+            <SkillsPanel onNavigate={onNavigate} />
           ) : panel === "schedules" ? (
             <SchedulesPanel onNavigate={onNavigate} />
           ) : (

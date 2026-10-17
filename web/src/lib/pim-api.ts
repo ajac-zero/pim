@@ -96,25 +96,15 @@ export type TeamRun = {
 
 export type MajordomoState = { agent: Agent; introduced: boolean };
 
-/** How the majordomo talks. */
-export const MAJORDOMO_TONES = ["warm", "formal", "playful", "brief"] as const;
-
 export type MajordomoSetup = {
   name: string;
   symbol: string | null;
   color: string | null;
-  tone: (typeof MAJORDOMO_TONES)[number] | null;
-  /** All optional: what the majordomo remembers about you from the start. */
-  about: {
-    name?: string;
-    callMe?: string;
-    age?: number;
-    notes?: string;
-  };
+  /** What to call you, which it remembers. */
+  yourName: string | null;
+  /** The language your app is in, for its introduction. */
+  locale: string;
 };
-
-/** How long a line about yourself may be, for the majordomo to remember. */
-export const MAX_ABOUT = 240;
 
 /** How long an agent's name may be. */
 export const MAX_PIM_NAME = 60;
@@ -659,9 +649,9 @@ export const pim = {
   extensions: () => call<Extensions>("/extensions"),
   /** Your majordomo, and whether you named it yet. */
   majordomo: () => call<MajordomoState>("/majordomo"),
-  /** Names your majordomo, once, with what it should know about you. */
+  /** Names your majordomo, once, and has it open your first chat, whose id it returns. */
   setUpMajordomo: (setup: MajordomoSetup) =>
-    call<MajordomoState>("/majordomo", {
+    call<MajordomoState & { session: string }>("/majordomo", {
       method: "POST",
       body: JSON.stringify(setup),
     }),

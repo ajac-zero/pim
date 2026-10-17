@@ -9,7 +9,7 @@ import {
   type StreamState,
   type ThreadEntry,
 } from "~/lib/pim-view";
-import { DELIVERY_REMINDER } from "../../../src/transcript";
+import { DELIVERY_REMINDER, INTRODUCTION } from "../../../src/transcript";
 
 /* Event and entry builders. Casts keep fixtures to the fields the view reads. */
 
@@ -92,14 +92,20 @@ const run = (events: AgentEvent[], from: StreamState = EMPTY_STREAM) =>
   reduceAll(from, events);
 
 describe("snapshot", () => {
-  it("hides private delivery corrections without hiding the person's message", () => {
+  it("hides private delivery corrections and the majordomo's introduction prompt without hiding the person's message", () => {
     const state = run([
       snapshot({
-        entries: [user(1, "Please answer."), user(2, DELIVERY_REMINDER)],
+        entries: [
+          user(1, `${INTRODUCTION} The person just joined.`),
+          user(2, "Please answer."),
+          user(3, DELIVERY_REMINDER),
+          user(4, `Why does it say ${INTRODUCTION}?`),
+        ],
       }),
     ]);
     expect(describeEntries(state.view.entries)).toEqual([
-      "1 user: Please answer.",
+      "2 user: Please answer.",
+      `4 user: Why does it say ${INTRODUCTION}?`,
     ]);
   });
 

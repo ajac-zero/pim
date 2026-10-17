@@ -1,9 +1,9 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { type Agent, agentInput } from "./agents";
-import { byteLength, ENTRY_BYTES } from "./extensions/optmem/store";
 import { text } from "./extensions/services";
 import { HttpError } from "./http";
+import { INTRODUCTION } from "./transcript";
 
 /**
  * The majordomo: the one agent the person comes to first, for almost
@@ -130,55 +130,41 @@ export function reviewExtension(host: ReviewHost) {
 	});
 }
 
-/** How the majordomo talks, as the person chose when they named it. */
-const TONES: Record<string, string> = {
-	warm: "Talk with them warmly, like a trusted friend who happens to be very capable.",
-	formal: "Talk with them formally and politely, like a seasoned butler.",
-	playful: "Talk with them playfully, with a light touch of humor.",
-	brief: "Talk with them briefly and to the point, without small talk.",
-};
-
-export const MAX_ABOUT = 240;
-
-/** The person naming their majordomo, as given through the API: its look, its tone, and a few things about them, all but the name optional. */
+/** The person naming their majordomo, as given through the API: its name and look, and the person's own name if they gave it. */
 export type MajordomoSetup = {
 	readonly name: string;
 	readonly symbol?: string | null;
 	readonly color?: string | null;
-	/** Its instructions: how it talks. */
-	readonly instructions: string;
-	/** What it learns about the person, as memories. */
-	readonly memories: readonly string[];
+	/** What the person is called, which it remembers. */
+	readonly yourName: string | null;
+	/** The language of the person's app, such as `es`, for its introduction. */
+	readonly locale: string | null;
 };
 
-function optional(value: unknown, field: string, max: number): string | null {
-	if (value === undefined || value === null) return null;
-	if (typeof value !== "string" || /[\r\n]/.test(value)) throw new HttpError(400, `${field} must be one line of text`);
-	const trimmed = value.trim();
-	if (trimmed.length > max) throw new HttpError(400, `${field} must be at most ${max} characters`);
-	return trimmed === "" ? null : trimmed;
-}
+const LOCALE = /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
 
 /** A majordomo's setup as given; checked, so nothing is applied when any of it is refused. */
 export function majordomoSetup(body: Record<string, unknown>): MajordomoSetup {
 	const { name, symbol, color } = agentInput({ name: body.name, symbol: body.symbol ?? null, color: body.color ?? null });
-	const tone = body.tone ?? null;
-	if (tone !== null && (typeof tone !== "string" || !(tone in TONES))) {
-		throw new HttpError(400, `tone must be one of ${Object.keys(TONES).join(", ")}, or null`);
+	const yourName = body.yourName ?? null;
+	if (yourName !== null && (typeof yourName !== "string" || /[\r\n]/.test(yourName) || yourName.trim().length > 80)) {
+		throw new HttpError(400, "yourName must be one line of at most 80 characters");
 	}
-	const about = (body.about ?? {}) as Record<string, unknown>;
-	if (typeof about !== "object" || Array.isArray(about)) throw new HttpError(400, "about must be an object");
-	const theirName = optional(about.name, "about.name", 80);
-	const callMe = optional(about.callMe, "about.callMe", 80);
-	const age = about.age ?? null;
-	if (age !== null && (typeof age !== "number" || !Number.isInteger(age) || age < 1 || age > 130)) throw new HttpError(400, "about.age must be a whole number of years");
-	const notes = optional(about.notes, "about.notes", MAX_ABOUT);
-	const memories = [
-		...(theirName ? [`Their name is ${theirName}.`] : []),
-		...(callMe ? [`They like to be called ${callMe}.`] : []),
-		...(age !== null ? [`They are ${age} years old.`] : []),
-		...(notes ? [`About them, in their words: ${notes}`] : []),
-	];
-	if (memories.some((line) => byteLength(line) > ENTRY_BYTES)) throw new HttpError(400, "That is too long to remember in one line");
-	return { name, symbol, color, instructions: tone === null ? "" : TONES[tone as string]!, memories };
+	const locale = body.locale ?? null;
+	if (locale !== null && (typeof locale !== "string" || !LOCALE.test(locale))) throw new HttpError(400, "locale must be a language tag, such as en or es");
+	return { name, symbol, color, yourName: (yourName as string | null)?.trim() || null, locale: locale as string | null };
+}
+
+/**
+ * What starts the majordomo's first chat with the person, right after they
+ * name it: it introduces itself and asks them about themselves, so they
+ * tell it what they like in their own words. Apps don't show the message;
+ * its prefix is `INTRODUCTION` (see ./transcript.ts).
+ */
+export function introduction(majordomo: Agent, setup: MajordomoSetup): string {
+	return [
+		`${INTRODUCTION} The person just joined and named you ${majordomo.name}.${setup.yourName ? ` Their name is ${setup.yourName}.` : ""} This is your first conversation, and you start it.`,
+		...(setup.locale && !setup.locale.startsWith("en") ? [`Their app is in the language with the code "${setup.locale}": write to them in it.`] : []),
+		`Introduce yourself with send_to_user in a few short sentences: greet them${setup.yourName ? " by name" : ""}, say who you are and what you're for (they can come to you for almost anything; you get to know them, set up agents for the bigger jobs, and look after the approvals those agents ask for), and invite them to tell you about themselves, as much or as little as they like: what to call you and them, what they do, the people and routines in their life, how they'd like you to talk. End with one light question to get them going, not a list of questions. Note what they tell you as it comes.`,
+	].join("\n\n");
 }

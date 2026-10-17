@@ -110,7 +110,7 @@ import {
 import { type Agent, type AgentInput, AgentStore, agentInput, type TeamMember } from "./agents";
 import type { AgentIcon } from "./gallery";
 import { type Role, TEAM_EXTENSION, type TeamRun, TeamStore, teamExtension } from "./team";
-import { CHAT_REPORT, DECIDE_APPROVAL, MAJORDOMO_EXTENSION, majordomoExtension, majordomoSetup, REVIEW_EXTENSION, reviewExtension } from "./majordomo";
+import { CHAT_REPORT, DECIDE_APPROVAL, MAJORDOMO_EXTENSION, introduction, majordomoExtension, majordomoSetup, REVIEW_EXTENSION, reviewExtension } from "./majordomo";
 import { projectEntries } from "./transcript";
 import { conversationText, IMPROVE_PROMPT, NAME_CHAT, SUMMARIZE_CHAT, type UtilityTask } from "./utility";
 import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage";
@@ -3170,12 +3170,20 @@ export class Pim extends DurableAgent<Env> {
 				if (this.agents.introduced()) throw new HttpError(409, "Your majordomo already has a name");
 				const setup = majordomoSetup(await readJson<Record<string, unknown>>(request));
 				const majordomo = this.agents.majordomo();
-				const { name, symbol, color, instructions } = setup;
-				this.agents.update(majordomo.id, agentInput({ name, symbol, color, instructions }, majordomo));
-				for (const line of setup.memories) this.memory.store.append(line, this.memory.today());
-				if (setup.memories.length > 0) await this.startMemoryNap();
+				const { name, symbol, color } = setup;
+				this.agents.update(majordomo.id, agentInput({ name, symbol, color }, majordomo));
+				if (setup.yourName) {
+					this.memory.store.append(`Their name is ${setup.yourName}.`, this.memory.today());
+					await this.startMemoryNap();
+				}
 				this.agents.introduce();
-				return { agent: this.agents.majordomo(), introduced: true };
+				// It opens the person's first chat by introducing itself; they answer with whatever they like it to know.
+				try {
+					await this.submitTo(ROOT_SESSION, introduction(this.agents.majordomo(), setup), { operationId: "introduction" }, "pim");
+				} catch (error) {
+					console.warn("the majordomo's introduction failed", error);
+				}
+				return { agent: this.agents.majordomo(), introduced: true, session: ROOT_SESSION };
 			},
 		],
 		["GET", "/agents/:agent", ({ agent }) => this.#agent(agent!)],

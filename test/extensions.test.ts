@@ -6,7 +6,7 @@ import { checkToolNames, PimExtensions } from "../src/extensions/define";
 import { themes as ownThemes } from "../src/extensions/themes";
 import { nord } from "../src/extensions/themes/nord";
 import { PimThemes } from "../src/themes";
-import { api, apiUrl, decisionRun, pendingApproval, post, say, systemPrompt, toolUse } from "./helpers";
+import { api, apiUrl, decisionRun, lastUserText, pendingApproval, post, say, systemPrompt, toolUse } from "./helpers";
 import { faux, ledger, outbox } from "./worker";
 
 type Agent = { id: string; name: string; blueprint: string | null; majordomo: boolean };
@@ -184,31 +184,34 @@ describe("extensions", () => {
 		expect(first).toMatchObject({ name: "Majordomo", majordomo: true, instructions: "" });
 
 		// Refused in any part, none of it is applied.
-		const setup = {
-			name: "Alfred",
-			symbol: "🎩",
-			color: "violet",
-			tone: "formal",
-			about: { name: "Ana Souza", callMe: "Ana", age: 34, notes: "Lives in Lisbon with two cats." },
-		};
-		for (const bad of [{ ...setup, name: " " }, { ...setup, tone: "grumpy" }, { ...setup, about: { age: 0 } }, { ...setup, about: { notes: "x".repeat(241) } }]) {
+		const setup = { name: "Alfred", symbol: "🎩", color: "violet", yourName: "Ana Souza", locale: "es" };
+		for (const bad of [{ ...setup, name: " " }, { ...setup, yourName: "Ana\nSouza" }, { ...setup, locale: "Spanish!" }]) {
 			expect((await post("/majordomo", bad)).status).toBe(400);
 		}
 		expect((await api("/majordomo")).body).toMatchObject({ agent: { name: "Majordomo" }, introduced: false });
 		const before = (await api("/memory")).body.count;
 
-		const named = (await post("/majordomo", setup)).body;
-		expect(named).toMatchObject({ introduced: true, agent: { id: first.id, name: "Alfred", symbol: "🎩", color: "violet", majordomo: true } });
-		expect(named.agent.instructions).toContain("formally");
-		// What they said about themselves is remembered, for every agent.
-		const memories = (await api("/memory/log")).body.entries.map((entry: { text: string }) => entry.text);
-		expect(memories.slice(0, 4).reverse()).toEqual([
-			"Their name is Ana Souza.",
-			"They like to be called Ana.",
-			"They are 34 years old.",
-			"About them, in their words: Lives in Lisbon with two cats.",
+		// Named, it opens the main chat by introducing itself, in the person's language, and remembers their name.
+		let prompt = "";
+		faux.setResponses([
+			(context) => {
+				prompt = lastUserText(context.messages);
+				return toolUse("send_to_user", { message: "¡Hola, Ana! Soy Alfred. Cuéntame de ti: ¿a qué te dedicas?" });
+			},
 		]);
-		expect((await api("/memory")).body.count).toBe(before + 4);
+		const named = (await post("/majordomo", setup)).body;
+		expect(named).toMatchObject({ introduced: true, session: "1", agent: { id: first.id, name: "Alfred", symbol: "🎩", color: "violet", majordomo: true } });
+		const intro = await vi.waitFor(async () => {
+			const { body } = await api("/sessions/1/operations/introduction");
+			expect(body.status).toBe("done");
+			return body;
+		});
+		expect(intro.replies).toEqual(["¡Hola, Ana! Soy Alfred. Cuéntame de ti: ¿a qué te dedicas?"]);
+		expect(prompt).toMatch(/^\[Introduction\] The person just joined and named you Alfred\. Their name is Ana Souza\./);
+		expect(prompt).toContain('"es"');
+		const memories = (await api("/memory/log")).body.entries.map((entry: { text: string }) => entry.text);
+		expect(memories[0]).toBe("Their name is Ana Souza.");
+		expect((await api("/memory")).body.count).toBe(before + 1);
 		// Once: after that it is edited like any agent.
 		expect((await post("/majordomo", { name: "Jeeves" })).status).toBe(409);
 

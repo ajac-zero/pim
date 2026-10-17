@@ -97,7 +97,7 @@
   //   OIDC:    PIM_OIDC_ISSUER (such as https://auth.example.com), PIM_OIDC_CLIENT_ID,
   //            PIM_OIDC_CLIENT_SECRET, and optionally PIM_OIDC_NAME, its button's name
   // "send_email": [{ "name": "EMAIL" }],
-  // Running agents' code over people's files (`run_code`) is off until you uncomment this. Dynamic
+  // Running agents' code over people's files (`run_javascript`) is off until you uncomment this. Dynamic
   // Workers need the Workers Paid plan; each run is a fresh Worker with no network.
   // "worker_loaders": [{ "binding": "LOADER" }],
   // When this version was deployed: whoever opens a Pim with no admin in the 15 minutes

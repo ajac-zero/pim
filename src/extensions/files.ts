@@ -11,7 +11,7 @@ import { text } from "./services";
  * Pim's names, held to `FILES_ROOT`, which the person sees as Files in the
  * app. Deleting asks first (`file_delete` is a gated action): files keep no
  * earlier versions. Writing and editing don't, and a full Pim refuses them.
- * Where the deployment can run code (a Worker Loader binding), `run_code`
+ * Where the deployment can run code (a Worker Loader binding), `run_javascript`
  * runs JavaScript over the same files, with no network.
  */
 export const FILES_EXTENSION = "pim.files";
@@ -25,7 +25,7 @@ const NAMES = {
 	write: "file_write",
 	edit: "file_edit",
 	delete: "file_delete",
-	exec: "run_code",
+	exec: "run_javascript",
 } as const;
 
 type WorkspaceTool = keyof typeof NAMES;
@@ -37,7 +37,7 @@ const REPLAY_SAFE: ReadonlySet<WorkspaceTool> = new Set(["read", "ls", "find", "
 
 const WHERE = `The person's files are under ${FILES_ROOT}; they see the same files under Files in the app, and can add their own there. Paths outside ${FILES_ROOT} are refused.`;
 
-/** What `run_code` is for, before the backend's own description of the language and modules. */
+/** What `run_javascript` is for, before the backend's own description of the language and modules. */
 const CODE = `Run JavaScript to work with the person's files: analyse data, convert formats, compute, or make files such as CSV, JSON, SVG charts or HTML. Each run starts fresh, has no network (use http_request or fetch_url for that), and stops after a minute. Write what the person should keep to a file under ${FILES_ROOT}; return what you need to read in the result.`;
 
 export type FileServices = {

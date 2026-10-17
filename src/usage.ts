@@ -29,8 +29,6 @@ export type Limits = {
 	readonly sessions: number | null;
 	/** Pending scheduled tasks. */
 	readonly schedules: number | null;
-	/** Connected apps. */
-	readonly apps: number | null;
 	/** The Pim's database, in bytes. */
 	readonly storageBytes: number | null;
 	/** Artifacts kept. */
@@ -49,7 +47,6 @@ export const LIMIT_NAMES = [
 	"dailyRuns",
 	"sessions",
 	"schedules",
-	"apps",
 	"storageBytes",
 	"artifacts",
 	"artifactVersions",

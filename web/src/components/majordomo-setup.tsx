@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { ArrowLeft, Loader2, Pencil } from "lucide-react";
-import { type ReactNode, useEffect, useId, useState } from "react";
+import { ArrowLeft, Check as CheckIcon, Loader2, Pencil } from "lucide-react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import {
   AgentIcon,
   CompactLookPicker,
@@ -81,7 +81,6 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
     image: null,
   });
   const [tone, setTone] = useState<Tone | null>(null);
-  // Null while the pencil's field is closed.
   const [customTone, setCustomTone] = useState<string | null>(null);
   const [helpWith, setHelpWith] = useState<HelpWith[]>([]);
   const [otherHelp, setOtherHelp] = useState<string | null>(null);
@@ -109,9 +108,9 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
         ...(preferences
           ? {
               tone,
-              customTone: customTone?.trim() || null,
+              customTone,
               helpWith,
-              otherHelp: otherHelp?.trim() || null,
+              otherHelp,
               involvement,
             }
           : {}),
@@ -275,30 +274,20 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
                 </Chip>
               ))}
               <WriteYourOwn
-                open={customTone !== null}
-                onToggle={() => {
-                  setCustomTone(customTone === null ? "" : null);
-                  setTone(null);
+                shape="pill"
+                value={customTone}
+                onChange={(text) => {
+                  setCustomTone(text);
+                  if (text !== null) setTone(null);
                 }}
               />
             </Question>
-            {customTone !== null && (
-              <Input
-                value={customTone}
-                onChange={(event) => setCustomTone(event.target.value)}
-                placeholder={t("customTonePlaceholder")}
-                aria-label={t("toneLabel", { name: shown })}
-                maxLength={120}
-                className="mt-2"
-                autoFocus
-              />
-            )}
             <Question label={t("helpWithLabel")}>
               {MAJORDOMO_HELP_WITH.map((area) => (
-                <Chip
+                <Check
                   key={area}
-                  selected={helpWith.includes(area)}
-                  onSelect={() =>
+                  checked={helpWith.includes(area)}
+                  onToggle={() =>
                     setHelpWith(
                       helpWith.includes(area)
                         ? helpWith.filter((other) => other !== area)
@@ -307,24 +296,14 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
                   }
                 >
                   {t(helpWithKey[area])}
-                </Chip>
+                </Check>
               ))}
               <WriteYourOwn
-                open={otherHelp !== null}
-                onToggle={() => setOtherHelp(otherHelp === null ? "" : null)}
+                shape="box"
+                value={otherHelp}
+                onChange={setOtherHelp}
               />
             </Question>
-            {otherHelp !== null && (
-              <Input
-                value={otherHelp}
-                onChange={(event) => setOtherHelp(event.target.value)}
-                placeholder={t("otherHelpPlaceholder")}
-                aria-label={t("helpWithLabel")}
-                maxLength={120}
-                className="mt-2"
-                autoFocus
-              />
-            )}
             <InvolvementBar
               label={t("involvementLabel", { name: shown })}
               value={involvement}
@@ -371,19 +350,131 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
   );
 }
 
-/** The last choice of a question: a pencil that opens a field for an answer in their own words. */
+/**
+ * The last choice of a question: a pencil that turns, in place, into a
+ * field the size of a choice for an answer in their own words. Enter or
+ * leaving it keeps the answer, shown as a chosen choice that opens again to
+ * edit; Escape, or emptying it, takes it back. `box` matches `Check`.
+ */
 function WriteYourOwn({
-  open,
-  onToggle,
+  shape,
+  value,
+  onChange,
 }: {
-  open: boolean;
-  onToggle: () => void;
+  shape: "pill" | "box";
+  value: string | null;
+  onChange: (value: string | null) => void;
 }) {
   const { t } = useI18n();
+  const [draft, setDraft] = useState<string | null>(null);
+  const editing = draft !== null;
+  const field = useRef<HTMLInputElement>(null);
+  // It opens because they asked to type: the field takes the keyboard.
+  useEffect(() => {
+    if (editing) field.current?.focus();
+  }, [editing]);
+  const round = shape === "pill" ? "rounded-full" : "rounded-lg";
+  const keep = () => {
+    if (draft === null) return;
+    onChange(draft.trim() || null);
+    setDraft(null);
+  };
+  if (draft !== null) {
+    return (
+      <span
+        className={cn(
+          "flex items-center gap-2 bg-background px-3.5 py-1.5 ring-2 ring-ring",
+          round,
+        )}
+      >
+        <Pencil className="size-3.5 shrink-0 text-muted-foreground" />
+        <input
+          ref={field}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={keep}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              keep();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              setDraft(null);
+            }
+          }}
+          placeholder={t("writeYourOwnPlaceholder")}
+          aria-label={t("writeYourOwn")}
+          maxLength={120}
+          // Opens small, where the pencil was, and grows with what they type.
+          style={{
+            width: `${Math.max(t("writeYourOwnPlaceholder").length, draft.length) + 1}ch`,
+          }}
+          className="max-w-60 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+        />
+      </span>
+    );
+  }
   return (
-    <Chip selected={open} onSelect={onToggle} label={t("writeYourOwn")}>
-      <Pencil className="size-3.5" />
-    </Chip>
+    <button
+      type="button"
+      aria-pressed={value !== null}
+      aria-label={value ?? t("writeYourOwn")}
+      title={t("writeYourOwn")}
+      onClick={() => setDraft(value ?? "")}
+      className={cn(
+        "flex items-center gap-2 px-3.5 py-1.5 text-sm transition-colors",
+        round,
+        value !== null
+          ? "bg-background ring-2 ring-ring"
+          : "bg-secondary hover:bg-accent",
+      )}
+    >
+      {value !== null && shape === "box" && <CheckMark checked />}
+      {value !== null && <span className="max-w-52 truncate">{value}</span>}
+      <Pencil className="size-3.5 text-muted-foreground" />
+    </button>
+  );
+}
+
+/** One of several choices that can all be picked: boxier than a single choice's pill, with a check. */
+function Check({
+  checked,
+  onToggle,
+  children,
+}: {
+  checked: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={checked}
+      onClick={onToggle}
+      className={cn(
+        "flex items-center gap-2 rounded-lg py-1.5 pr-3.5 pl-2.5 text-sm transition-colors",
+        checked
+          ? "bg-background ring-2 ring-ring"
+          : "bg-secondary hover:bg-accent",
+      )}
+    >
+      <CheckMark checked={checked} />
+      {children}
+    </button>
+  );
+}
+
+function CheckMark({ checked }: { checked: boolean }) {
+  return (
+    <span
+      className={cn(
+        "flex size-4 shrink-0 items-center justify-center rounded-[5px]",
+        checked ? "bg-ring text-background" : "ring-1 ring-muted-foreground/50",
+      )}
+    >
+      {checked && <CheckIcon className="size-3" strokeWidth={3} />}
+    </span>
   );
 }
 

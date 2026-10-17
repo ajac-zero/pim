@@ -51,6 +51,7 @@ import {
 import pimConfig from "../pim.config";
 import { artifactsExtension, artifactsWidgets } from "./extensions/artifacts";
 import { type FileServices, fileDeleteAction, filesExtension } from "./extensions/files";
+import { browserClickAction, browserExtension, browserTypeAction } from "./extensions/browser";
 import { appDirectory, type CustomApp, type DirectoryApp } from "./extensions/app-directory";
 import { ExtensionDataStore } from "./extensions/data";
 import { NativeApps } from "./extensions/native-apps";
@@ -98,6 +99,7 @@ import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidget
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import { CODE_BACKEND, codeBackends, codeLoader, FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
+import { PimBrowser } from "./browser";
 import { dispatch, HttpError, readJson, type Route } from "./http";
 import type { ClientMessage, ServerMessage, ToolInfo } from "./protocol";
 import { generateVapidKeys, type PushSubscription, sendPush, validSubscription, type VapidKeys } from "./push";
@@ -318,6 +320,11 @@ export class Pim extends DurableAgent<Env> {
 		assertOpen: () => this.#assertOpen(),
 		storageRefusal: () => this.#storageRefusal(),
 	};
+	/** The browser the person's agents share (see ./browser.ts). */
+	readonly browser = new PimBrowser(this.env.BROWSER as BrowserRun | undefined, {
+		get: (key) => this.store.meta(key) || null,
+		set: (key, value) => this.store.setMeta(key, value ?? ""),
+	});
 	readonly ai = createAI({ binding: this.env.AI });
 	/** The person's email address, and emailing them there. */
 	readonly email = new Email(this.store, () => this.mailer());
@@ -428,6 +435,7 @@ export class Pim extends DurableAgent<Env> {
 		renameAgentAction(this.agents),
 		manageAppsAction(this.agents, this.apps, () => this.appDirectory()),
 		fileDeleteAction(this.#files),
+		...(this.browser.available ? [browserClickAction(this.browser), browserTypeAction(this.browser)] : []),
 	];
 
 	/** Every action an approval can be for: Pim's own, and the extensions'. */
@@ -465,6 +473,7 @@ export class Pim extends DurableAgent<Env> {
 			this.registry.install(webExtension({ ai: this.env.AI, searchProvider: this.env.PIM_WEB_SEARCH }));
 			this.registry.install(artifactsExtension({ artifacts: this.artifacts, assertOpen: () => this.#assertOpen() }));
 			this.registry.install(filesExtension(this.#files));
+			this.#installBrowser(services);
 			// Restored connections reconnect in the background after a wake; give them a moment.
 			await this.mcp.waitForConnections({ timeout: 5_000 });
 			this.#migrateAlwaysApproved();
@@ -2532,8 +2541,10 @@ export class Pim extends DurableAgent<Env> {
 			await Promise.allSettled(this.store.watches().map((watch) => this.appEvents.stop(watch.id)));
 		};
 		await Promise.race([courtesy().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, ERASE_COURTESY_MS))]);
-		// Images live outside this object's storage, so they go first.
+		// Images live outside this object's storage, so they go first, and the browser closes with
+		// whatever was signed in there.
 		await this.images.deleteAll();
+		await this.browser.close().catch(() => undefined);
 		await this.ctx.storage.deleteAll();
 		this.store.markErased(Date.now());
 		await this.ctx.storage.sync();
@@ -2579,6 +2590,12 @@ export class Pim extends DurableAgent<Env> {
 	#artifactRequest(url: URL, answer: () => Response | Promise<Response>): Response | Promise<Response> {
 		if (url.searchParams.has("token")) throw new HttpError(400, "Send the API token in the Authorization header, not the address");
 		return answer();
+	}
+
+	/** The browser, or 404 where this deployment has none. */
+	#browserIn(): PimBrowser {
+		if (!this.browser.available) throw new HttpError(404, "This Pim has no browser");
+		return this.browser;
 	}
 
 	#artifact(id: string) {
@@ -3021,6 +3038,43 @@ export class Pim extends DurableAgent<Env> {
 					await this.files.remove(url.searchParams.get("path"));
 					return noStore({ deleted: true });
 				}),
+		],
+		// The agents' browser (see ./browser.ts): what it shows, a picture of it, taking it over, closing it.
+		[
+			"GET",
+			"/browser",
+			async () => noStore({ available: this.browser.available, page: this.browser.available ? await this.browser.current() : null }),
+		],
+		[
+			"GET",
+			"/browser/screenshot",
+			async () => {
+				const png = await this.#browserIn().screenshot();
+				if (!png) throw new HttpError(404, "The browser is closed");
+				return new Response(png, { headers: { "content-type": "image/png", "cache-control": "no-store, private", "x-content-type-options": "nosniff" } });
+			},
+		],
+		[
+			"POST",
+			"/browser/live",
+			async () => {
+				let url: string | null;
+				try {
+					url = await this.#browserIn().liveView();
+				} catch (error) {
+					throw new HttpError(501, error instanceof Error ? error.message : String(error));
+				}
+				if (!url) throw new HttpError(404, "The browser is closed");
+				return noStore({ url });
+			},
+		],
+		[
+			"DELETE",
+			"/browser",
+			async () => {
+				await this.#browserIn().close();
+				return noStore({ closed: true });
+			},
 		],
 		[
 			"GET",
@@ -3606,8 +3660,26 @@ export class Pim extends DurableAgent<Env> {
 		const services = this.services();
 		this.registry.install(this.#agentExtension(services));
 		this.registry.install(approvalsExtension(services, this.#ownActions));
+		this.#installBrowser(services);
 		this.#installAbilities(services);
 		this.#installApps();
+	}
+
+	/** The browser's tools, where this deployment has a browser; clicking and typing follow their permissions. */
+	#installBrowser(services: PimServices): void {
+		if (!this.browser.available) return;
+		this.registry.install(
+			browserExtension(services, {
+				browser: this.browser,
+				saveScreenshot: async (path, png) => {
+					this.#assertOpen();
+					const refusal = this.#storageRefusal();
+					if (refusal) throw new Error(refusal);
+					const target = path ?? `${FILES_ROOT}/screenshots/${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
+					return (await this.files.write(target, png)).path;
+				},
+			}),
+		);
 	}
 
 	#describeCircles() {

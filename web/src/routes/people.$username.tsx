@@ -1,13 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { MessageCircle } from "lucide-react";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { MessageCircle, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { useI18n } from "~/components/i18n";
 import { Page } from "~/components/page";
 import { TemplateCard } from "~/components/template-card";
 import { Button } from "~/components/ui/button";
 import { pim } from "~/lib/pim-api";
-import { personQuery, visitsQuery } from "~/lib/queries";
+import { accountQuery, personQuery, visitsQuery } from "~/lib/queries";
 
 export const Route = createFileRoute("/people/$username")({
   component: PersonPage,
@@ -21,6 +21,7 @@ function PersonPage() {
   const queryClient = useQueryClient();
   const { data: person, error } = useQuery(personQuery(username));
   const { data: visits } = useQuery(visitsQuery());
+  const { data: account } = useQuery(accountQuery());
   const visit = visits?.find(
     (candidate) => candidate.username === username && candidate.available,
   );
@@ -60,6 +61,13 @@ function PersonPage() {
       {visit && (
         <Button className="mb-8" onClick={() => message.mutate()}>
           <MessageCircle /> {t("messageTheirPim", { username })}
+        </Button>
+      )}
+      {account?.username === person.username && (
+        <Button variant="secondary" className="mb-8" asChild>
+          <Link to="/settings" hash="profile">
+            <Pencil /> {t("editProfile")}
+          </Link>
         </Button>
       )}
       <section className="space-y-3">

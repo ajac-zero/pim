@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
-import { useI18n } from "~/components/i18n";
+import { LanguageSelect, useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { auth, authSessionQuery, tokensQuery } from "~/lib/auth";
@@ -188,7 +188,7 @@ function RecoveryCodesRow({ account }: { account: Account }) {
   );
 }
 
-/** The person's own settings: time zone, and what an unanswered approval becomes. */
+/** The person's own settings: time zone, language, and what an unanswered approval becomes. */
 export function PreferencesSection() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
@@ -230,6 +230,7 @@ export function PreferencesSection() {
           ))}
         </select>
       </label>
+      <LanguageSelect />
       <div className="space-y-2">
         <p className="pt-2 text-[13px] text-muted-foreground">
           {t("approvalPolicyDescription")}

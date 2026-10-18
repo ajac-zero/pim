@@ -19,6 +19,7 @@ export default defineConfig({
 			miniflare: {
 				workerLoaders: { LOADER: {} },
 				bindings: {
+					PIM_PUBLIC_URL: "https://pim.test",
 					PIM_TIME_ZONE: "America/New_York",
 					PIM_MEMORY_LINES: "8",
 					PIM_REGISTRATION: "open",

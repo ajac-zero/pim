@@ -206,7 +206,7 @@ export type ToolPermissionInfo = ResolvedPermission & {
 export type OwnerStatus = "active" | "suspended";
 
 /** What registration tells a Pim about its owner when it provisions it. */
-export type OwnerProfile = { readonly ownerId: string; readonly username: string; readonly publicUrl: string };
+export type OwnerProfile = { readonly ownerId: string; readonly username: string };
 /** How long an erasure waits for runs to stop and apps to unsubscribe before wiping anyway. */
 const ERASE_COURTESY_MS = 3_000;
 /** `pim_meta` keys of the models chosen through the API: for chats, and the utility model. */
@@ -227,8 +227,6 @@ const AGENT_SECTION_KEY = "pim_section";
 const LIMIT_NOTICE_KEY = "limit_notice";
 /** The chat each new-chat task last started, so a retried firing doesn't start another. */
 const SCHEDULED_CHATS_KEY = "scheduled_chats";
-/** Set by the Worker on requests that carried the API token. */
-export const AUTHORIZED_HEADER = "x-pim-authorized";
 /** Accepts any JSON-RPC result: pim checks the shapes of extension results itself. */
 const ANY_RESULT = { "~standard": { version: 1, vendor: "pim", validate: (value: unknown) => ({ value }) } };
 
@@ -307,7 +305,7 @@ export class Pim extends DurableAgent<Env> {
 		sql: this.ctx.storage.sql,
 		bucket: this.env.IMAGES,
 		owner: () => this.name,
-		publicOrigin: () => this.deployment().publicUrl ?? this.store.meta("public_origin"),
+		publicOrigin: () => this.deployment().publicUrl ?? undefined,
 		meta: { get: (key) => this.store.meta(key), set: (key, value) => this.store.setMeta(key, value) },
 	});
 	/** What the agent made for its owner, with every version. */
@@ -377,7 +375,7 @@ export class Pim extends DurableAgent<Env> {
 			return app && isNativeApp(app) ? app : undefined;
 		},
 		secrets: (app) => this.#secrets(app),
-		callbackUrl: () => `${this.deployment().publicUrl ?? this.store.meta("public_origin")}${APPS_CALLBACK_PATH}`,
+		callbackUrl: () => `${this.deployment().publicUrl}${APPS_CALLBACK_PATH}`,
 		owner: () => this.name,
 		changed: () => this.#installApps(),
 	});
@@ -433,7 +431,7 @@ export class Pim extends DurableAgent<Env> {
 		bridge: this.apps,
 		store: this.store,
 		catalog: this.catalog,
-		publicUrl: () => this.deployment().publicUrl ?? this.store.meta("public_origin"),
+		publicUrl: () => this.deployment().publicUrl ?? undefined,
 		owner: () => this.name,
 		scheduleRefresh: (id, at) => this.#scheduleWatchRefresh(id, at),
 		submit: async (session, content, operationId) => {
@@ -1030,7 +1028,7 @@ export class Pim extends DurableAgent<Env> {
 				return pim.mailer() !== null;
 			},
 			sendEmail: (mail) => {
-				const origin = this.deployment().publicUrl ?? this.store.meta("public_origin");
+				const origin = this.deployment().publicUrl;
 				const link = origin ? `\n\n—\nFrom your Pim: ${new URL(`/chat/${this.store.publicId(mail.session)}`, origin)}` : "";
 				return this.email.send({ ...mail, text: `${mail.text}${link}` });
 			},
@@ -1346,7 +1344,7 @@ export class Pim extends DurableAgent<Env> {
 		const subscriptions = this.store.pushSubscriptions();
 		if (subscriptions.length === 0) return;
 		const keys = await this.#vapidKeys();
-		const subject = (this.deployment().publicUrl ?? this.store.meta("public_origin")) || "https://pim.invalid";
+		const subject = this.deployment().publicUrl ?? "https://pim.invalid";
 		// A push message holds about 4 KB; the full text is in the app.
 		const message = { id, session, title: title.slice(0, 120), body: body.slice(0, 500) };
 		await Promise.all(
@@ -2483,12 +2481,11 @@ export class Pim extends DurableAgent<Env> {
 		return super.alarm();
 	}
 
-	/** Records who owns this Pim and where it is served, so callbacks and pushes use that address. */
+	/** Records who owns this Pim. */
 	async provision(profile: OwnerProfile): Promise<void> {
 		this.#assertOpen();
 		if (profile.ownerId !== this.name) throw new Error(`Owner ${profile.ownerId} is not this agent's (${this.name})`);
 		this.store.setMeta(PROFILE_KEY, JSON.stringify(profile));
-		this.store.setMeta("public_origin", new URL(profile.publicUrl).origin);
 	}
 
 	profile(): OwnerProfile | null {
@@ -2640,11 +2637,6 @@ export class Pim extends DurableAgent<Env> {
 	async onRequest(request: Request): Promise<Response> {
 		// Checked again here, not only in `fetch`: erasure may have begun while the request was on its way in.
 		if (this.#closed()) return Response.json({ error: "This Pim was erased" }, { status: 410 });
-		// Apps deliver events to callback URLs on this origin, so remember the one the owner uses.
-		if (request.headers.get(AUTHORIZED_HEADER) === "1") {
-			const origin = new URL(request.url).origin;
-			if (this.store.meta("public_origin") !== origin) this.store.setMeta("public_origin", origin);
-		}
 		return dispatch(this.#routes, request, new URL(request.url).pathname);
 	}
 

@@ -1,5 +1,5 @@
 import { queryOptions } from "@tanstack/react-query";
-import { SignInRequired } from "~/lib/pim-api";
+import { followMove, SignInRequired } from "~/lib/pim-api";
 
 /**
  * Signing in with passkeys, or with an account at Google, GitHub or the
@@ -119,9 +119,10 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   });
   if (response.type === "opaqueredirect") throw new SignInRequired();
   const body = (await response.json().catch(() => null)) as
-    | (T & { error?: string })
+    | (T & { error?: string; url?: unknown })
     | null;
   if (!response.ok) {
+    followMove(response, body);
     throw new Error(body?.error ?? `Sign-in answered ${response.status}`);
   }
   return body as T;

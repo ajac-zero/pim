@@ -713,6 +713,14 @@ export class SignInRequired extends Error {
   }
 }
 
+/** Pim answers only at its own address: one opened at another goes there. */
+export function followMove(response: Response, body: { url?: unknown } | null) {
+  if (response.status === 421 && typeof body?.url === "string") {
+    const { pathname, search, hash } = window.location;
+    window.location.replace(new URL(pathname + search + hash, body.url));
+  }
+}
+
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`/api${path}`, {
     ...init,
@@ -724,9 +732,10 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new SignInRequired();
   }
   const body = (await response.json().catch(() => null)) as
-    | (T & { error?: string })
+    | (T & { error?: string; url?: unknown })
     | null;
   if (!response.ok) {
+    followMove(response, body);
     throw new ApiError(
       response.status,
       body?.error ?? `Pim answered ${response.status}`,

@@ -447,13 +447,24 @@ describe("sessions", () => {
 	});
 });
 
-describe("the Pim behind a passkey session", () => {
-	it("learns the address its owner uses, for apps' callbacks", async () => {
-		const { browser, owner } = await admin();
-		await runInDurableObject(env.Pim.getByName(owner), async (instance: Pim) => instance.store.setMeta("public_origin", "https://old.example"));
-		expect(await browser.signedIn()).toBe(true);
-		const origin = await runInDurableObject(env.Pim.getByName(owner), async (instance: Pim) => instance.store.meta("public_origin"));
-		expect(origin).toBe(ORIGIN);
+describe("the Pim's address", () => {
+	it("answers only at PIM_PUBLIC_URL, and nowhere without one", async () => {
+		const { browser } = await admin();
+		const at = (publicUrl: string) => {
+			const elsewhere = new Browser(deployed(24 * 60 * 60 * 1000, { PIM_PUBLIC_URL: publicUrl }));
+			elsewhere.cookies = browser.cookies;
+			return elsewhere;
+		};
+		// Only the origin counts.
+		expect(await at(`${ORIGIN}/ignored`).signedIn()).toBe(true);
+		const moved = await at("https://pim.example.com").json("/api/sessions");
+		expect(moved).toEqual({ status: 421, body: { error: "This Pim is at https://pim.example.com", url: "https://pim.example.com" } });
+		expect((await at("https://pim.example.com").fetch("/auth/session")).status).toBe(421);
+		const unset = await at("").json("/auth/session");
+		expect(unset.status).toBe(503);
+		expect(unset.body.error).toContain(`such as ${ORIGIN}`);
+		expect((await at("pim.test").fetch("/api/sessions")).status).toBe(503);
+		expect((await at("").fetch("/health")).status).toBe(200);
 	});
 });
 

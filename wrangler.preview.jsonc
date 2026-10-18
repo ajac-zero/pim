@@ -46,6 +46,7 @@
   ],
   // Only what differs from the defaults in src/deployment.ts.
   "vars": {
+    "PIM_PUBLIC_URL": "http://localhost:8787",
     "PIM_REGISTRATION": "open",
     "PIM_REGISTRATIONS_PER_ADDRESS": "50",
     "PIM_MODELS": "preview-model",

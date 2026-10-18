@@ -530,7 +530,7 @@ const translations = {
     settingsMembers: "Members",
     settingsDeployment: "Deployment",
     deploymentDescription:
-      "How this Pim runs for everyone. Each setting is a variable in the Cloudflare dashboard (Workers & Pages → pim → Settings → Variables and Secrets), and applies as soon as you save it there. Unset ones take the default.",
+      "How this Pim runs for everyone. Each setting but its address is a variable in the Cloudflare dashboard (Workers & Pages → pim → Settings → Variables and Secrets), and applies as soon as you save it there. Unset ones take the default.",
     deploymentProblems:
       "{count} variables can't be read. Each one below shows what Pim uses instead.",
     deploymentProblem: "Set to “{value}”, which Pim can't use: {problem}.",
@@ -568,7 +568,8 @@ const translations = {
     deploymentNoLimit: "No limit",
     deploymentAddress: "Address and email",
     deploymentPublicUrl: "Public URL",
-    deploymentPublicUrlLearned: "Learned from requests",
+    deploymentPublicUrlHint:
+      "Fixed when deploying, in wrangler.jsonc. Passkeys belong to it, so changing it means everyone makes new ones.",
     deploymentEmailFrom: "Emails from",
     limitDailyTokens: "Tokens a day",
     limitDailyModelRequests: "Model requests a day",
@@ -1306,7 +1307,7 @@ const translations = {
     settingsMembers: "Miembros",
     settingsDeployment: "Despliegue",
     deploymentDescription:
-      "Cómo funciona este Pim para todos. Cada ajuste es una variable en el panel de Cloudflare (Workers & Pages → pim → Settings → Variables and Secrets) y se aplica en cuanto la guardas allí. Las que no están definidas usan el valor predeterminado.",
+      "Cómo funciona este Pim para todos. Cada ajuste, salvo su dirección, es una variable en el panel de Cloudflare (Workers & Pages → pim → Settings → Variables and Secrets) y se aplica en cuanto la guardas allí. Las que no están definidas usan el valor predeterminado.",
     deploymentProblems:
       "{count} variables no se pueden leer. Cada una muestra abajo qué usa Pim en su lugar.",
     deploymentProblem: "Vale “{value}”, que Pim no puede usar: {problem}.",
@@ -1344,7 +1345,8 @@ const translations = {
     deploymentNoLimit: "Sin límite",
     deploymentAddress: "Dirección y correo",
     deploymentPublicUrl: "URL pública",
-    deploymentPublicUrlLearned: "Se aprende de las peticiones",
+    deploymentPublicUrlHint:
+      "Se fija al desplegar, en wrangler.jsonc. Las llaves de acceso le pertenecen, así que cambiarla obliga a todos a crear nuevas.",
     deploymentEmailFrom: "Envía correos desde",
     limitDailyTokens: "Tokens al día",
     limitDailyModelRequests: "Peticiones al modelo al día",

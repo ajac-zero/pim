@@ -1,7 +1,8 @@
 import { getAgentByName } from "agents";
 import pimConfig from "../pim.config";
-import { accountApi, adminApi, clientIp, handleRegistration, limited, pimOrigin, resolveAccount, siteFor, sites, socialApi } from "./accounts";
-import { APPS_CALLBACK_PATH, AUTHORIZED_HEADER, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER } from "./pim";
+import { deploymentSettings } from "./deployment";
+import { accountApi, adminApi, clientIp, handleRegistration, limited, resolveAccount, siteFor, sites, socialApi } from "./accounts";
+import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
 import { themes as ownThemes } from "./extensions/themes";
@@ -115,7 +116,7 @@ const mcpAccess: McpAccess = {
 			if (!account) return fail(410, "This account was deleted.");
 			const refused = closed(account) ?? (await throttled(env, account));
 			if (refused) return refused;
-			return toAgent(request, env, account.ownerId, MCP_SERVER_PATH, true);
+			return toAgent(request, env, account.ownerId, MCP_SERVER_PATH);
 		},
 	},
 	async apiTokenOwner(token, env) {
@@ -128,15 +129,12 @@ const mcpAccess: McpAccess = {
 const under = (pathname: string, prefix: string) => pathname === prefix || pathname.startsWith(`${prefix}/`);
 
 /** Hands a request to an owner's Pim, `path` being its path in the Pim's API. */
-export async function toAgent(request: Request, env: Env, owner: string, path: string, authorized: boolean): Promise<Response> {
+export async function toAgent(request: Request, env: Env, owner: string, path: string): Promise<Response> {
 	const agent = await getAgentByName(env.Pim, owner);
 	const url = new URL(request.url);
 	url.pathname = path;
 	// Bodies are small JSON; buffering them lets the Pim answer without reading one.
 	const forwarded = new Request(url, request.body === null ? request : new Request(request, { body: await request.arrayBuffer() }));
-	// Tells the Pim the request was authorized, so it can trust details like the origin.
-	forwarded.headers.delete(AUTHORIZED_HEADER);
-	if (authorized) forwarded.headers.set(AUTHORIZED_HEADER, "1");
 	// The Pim checks it is the one this owner's requests are for.
 	forwarded.headers.set(OWNER_HEADER, owner);
 	try {
@@ -188,7 +186,7 @@ async function serveApp(request: Request, env: Env, pathname: string): Promise<R
 	if (!account) return fail(404, "Not found");
 	const refused = closed(account);
 	if (refused) return refused;
-	return toAgent(request, env, account.ownerId, callback ? pathname : `${MCP_EVENTS_PATH}${events![2]}`, false);
+	return toAgent(request, env, account.ownerId, callback ? pathname : `${MCP_EVENTS_PATH}${events![2]}`);
 }
 
 /**
@@ -203,7 +201,7 @@ async function serveImage(request: Request, env: Env, pathname: string): Promise
 	if (!account) return fail(404, "Not found");
 	const refused = closed(account);
 	if (refused) return refused;
-	return toAgent(request, env, account.ownerId, `/public-images/${match[2]}`, false);
+	return toAgent(request, env, account.ownerId, `/public-images/${match[2]}`);
 }
 
 let deployedThemes: PimThemes | undefined;
@@ -219,8 +217,16 @@ function serveThemes(request: Request, path: string): Response {
 }
 
 export async function serve(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-	const { pathname } = new URL(request.url);
+	const { pathname, origin } = new URL(request.url);
 	if (pathname === "/health") return withCors(Response.json({ name: "pim", ok: true }));
+
+	// Passkeys, sessions and apps' callbacks all belong to one address, fixed when deploying.
+	const { publicUrl } = deploymentSettings(env);
+	if (!publicUrl) {
+		return fail(503, `This Pim has no address yet. Deploy it with PIM_PUBLIC_URL set to the address people will use, such as ${origin}.`);
+	}
+	// The web app goes to the address it names; nothing is served at any other.
+	if (origin !== publicUrl) return Response.json({ error: `This Pim is at ${publicUrl}`, url: publicUrl }, { status: 421 });
 
 	if (under(pathname, "/auth") || under(pathname, "/oauth")) {
 		// Guessing at passkeys, recovery codes and tokens, and registering clients, is slowed down per address.
@@ -231,7 +237,7 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 	}
 
 	if (pathname === "/mcp" || under(pathname, "/oauth") || under(pathname, "/.well-known")) {
-		return serveOAuth(request, env, ctx, pimOrigin(request, env), mcpAccess);
+		return serveOAuth(request, env, ctx, publicUrl, mcpAccess);
 	}
 
 	if (pathname === "/auth/authorize" || under(pathname, "/auth/connections")) {
@@ -239,7 +245,7 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 		const account = await signedIn(request, env);
 		if (!account) return fail(401, "Sign in to Pim");
 		if (account instanceof Response) return account;
-		return serveConsent(request, env, account.ownerId, pimOrigin(request, env), mcpAccess);
+		return serveConsent(request, env, account.ownerId, publicUrl, mcpAccess);
 	}
 
 	if (under(pathname, "/auth")) return (await handleRegistration(request, env)) ?? handleAuth(request, env, sites(env));
@@ -284,5 +290,5 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 	if (upgrade !== (path === "/ws")) {
 		return withCors(fail(upgrade ? 404 : 426, upgrade ? "WebSockets connect at /api/ws" : "/api/ws expects a WebSocket upgrade"));
 	}
-	return withCors(await toAgent(request, env, account.ownerId, path, true));
+	return withCors(await toAgent(request, env, account.ownerId, path));
 }

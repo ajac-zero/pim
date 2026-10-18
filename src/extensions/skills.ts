@@ -36,7 +36,7 @@ const Write = Type.Object({
 			{
 				maxItems: MAX_SKILL_FILES,
 				description:
-					"Supporting files the instructions point to: references, templates, or JavaScript that run_javascript can run. Every file the skill should have; leave out to keep the ones it has.",
+					"Supporting files the instructions point to, such as references and templates. Every file the skill should have; leave out to keep the ones it has.",
 			},
 		),
 	),
@@ -71,12 +71,17 @@ export function writeSkillAction(skills: SkillStore, agents: Pick<AgentStore, "g
 	}) as GatedAction;
 }
 
-export function skillsExtension(services: PimServices, roleOf: (session: string) => Role, skills: SkillStore) {
+/** What a script in a skill is, where the deployment runs code: one that runs as it is, without rewriting. */
+const SCRIPTS =
+	"A skill can carry scripts for run_javascript: each an ES module whose `export default async function (input)` does the work, which an agent runs by passing the file's content to run_javascript as `command`, with `input`.";
+
+/** `canRunCode`: the deployment offers `run_javascript`, so skills can carry scripts for it. */
+export function skillsExtension(services: PimServices, roleOf: (session: string) => Role, skills: SkillStore, canRunCode: boolean) {
 	const permission = () => ownToolPermission(services.store, WRITE_SKILL).permission;
 
 	const writeSkill = defineTool({
 		name: WRITE_SKILL,
-		description: `Save how to do something as one of your skills, so the work is done the same way next time, or rewrite one. Do it when the person asks you to remember how they want something done, or once you have worked out with them a task they'll ask for again. To rewrite a skill, load it with read_skill first and give its version as base_version with the complete new instructions.${permission() === "ask" ? ` ${approvalNote(services)}` : ""}`,
+		description: `Save how to do something as one of your skills, so the work is done the same way next time, or rewrite one. Do it when the person asks you to remember how they want something done, or once you have worked out with them a task they'll ask for again. To rewrite a skill, load it with read_skill first and give its version as base_version with the complete new instructions.${canRunCode ? ` ${SCRIPTS}` : ""}${permission() === "ask" ? ` ${approvalNote(services)}` : ""}`,
 		parameters: Write,
 		replay: "safe",
 		async execute(write: Write, api, context) {

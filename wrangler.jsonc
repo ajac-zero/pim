@@ -86,7 +86,15 @@
     "PIM_REGISTRATIONS_PER_ADDRESS": "",
     // Email to each person, off until set up: onboard a domain to Cloudflare Email Service,
     // uncomment `send_email` below, and set this to an address on that domain.
-    "PIM_EMAIL_FROM": ""
+    "PIM_EMAIL_FROM": "",
+    // OpenTelemetry traces of the agents' runs, model requests and tool calls, in the conventions for
+    // generative AI: an OTLP/HTTP endpoint that takes JSON, such as Langfuse's, Honeycomb's or an
+    // OpenTelemetry Collector's. Put its key in the OTEL_EXPORTER_OTLP_HEADERS secret, such as
+    // "Authorization=Basic ...". Empty sends no traces.
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "",
+    // "true" adds prompts, messages, and tool arguments and results to the traces: people's private
+    // conversations, so only for a backend that may hold them.
+    "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": ""
   },
   // Signing in with Google, GitHub or your own OpenID Connect provider, besides passkeys, is off
   // until you add an OAuth app's client ID and secret as secrets (dashboard → Workers & Pages →

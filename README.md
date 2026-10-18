@@ -140,6 +140,21 @@ Agents can run JavaScript over people's files once the deployment has a Worker L
 
 in `wrangler.jsonc`. [Dynamic Workers](https://developers.cloudflare.com/dynamic-workers/) need the Workers Paid plan; each `run_javascript` call loads one, with no network access, and its CPU time counts toward the account's Workers usage. Without the binding nobody is offered `run_javascript`; files work either way.
 
+### Traces
+
+Pim sends [OpenTelemetry](https://opentelemetry.io/) traces of what the agents do to any backend that takes OTLP over HTTP as JSON: Langfuse, Arize Phoenix, Honeycomb, Grafana, Jaeger, or an OpenTelemetry Collector. They follow the [semantic conventions for generative AI](https://github.com/open-telemetry/semantic-conventions-genai): each run of a conversation is an `invoke_agent` span, each model request in it a `chat` span with the model, finish reason and tokens, and each tool call an `execute_tool` span. Work a tool call starts in another conversation is that call's child, so one trace holds everything a message led to: a team member's task, a chat the majordomo started with another agent, and the majordomo's review of an approval request, with its decision.
+
+Set the endpoint in `vars` and its key as a secret, with the standard OpenTelemetry variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | The backend's OTLP base URL; traces go to `/v1/traces` under it. Or set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` to the full URL. Empty sends no traces |
+| `OTEL_EXPORTER_OTLP_HEADERS` | A secret (`wrangler secret put`): headers as `key=value,key=value`, such as `Authorization=Basic ...` |
+| `OTEL_SERVICE_NAME` | The traces' service name; `pim` when unset |
+| `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | `true` adds prompts, messages, and tool arguments and results. They are people's private conversations: set it only for a backend that may hold them |
+
+Each span's `gen_ai.conversation.id` is its conversation's id; for a chat, the one in `/chat/<id>`. Spans go out every few seconds and whenever a person's agents go idle; any not yet sent are lost if their Pim is evicted.
+
 `PIM_TIME_ZONE` and `PIM_APPROVAL_POLICY` are defaults: each person's own choices in Settings (`PUT /settings`) take their place.
 
 For local development, run `pnpm dev`: the Worker and the built web app at `http://localhost:8787` (use `localhost`: passkeys don't work on an IP address). Its first 15 minutes count as just deployed, so the first account you make is the admin, and setup links show up in the terminal. For the web app with hot reload, make an API token in Settings and run `PIM_API_TOKEN=... pnpm dev:web` (port 3000), which signs in with it. The `AI` binding is remote, so `wrangler dev` needs a Cloudflare login, and model calls bill that account. `pnpm preview` runs the same Pim with no Cloudflare login and a stand-in model, at the same address.

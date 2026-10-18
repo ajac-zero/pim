@@ -5,7 +5,7 @@ import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { Approval } from "../src/store";
 import { api, decisionRun, lastUserText, pendingApproval, post, say, systemPrompt, TOKEN, toolUse, url } from "./helpers";
-import { faux } from "./worker";
+import { faux, spans } from "./worker";
 
 type Context = Parameters<FauxResponseFactory>[0];
 
@@ -375,6 +375,7 @@ describe("the majordomo", () => {
 			return new Response("booked", { status: 201 });
 		});
 		const { name } = await majordomo();
+		spans.reset();
 		const booker = (await post("/agents", { name: "Booker", instructions: "Book what the person asks for." })).body;
 		const chat = (await post("/sessions", { agent: booker.id })).body.id;
 		const chats = async () => (await api("/sessions")).body.sessions.map((info: { id: string }) => info.id);
@@ -418,6 +419,28 @@ describe("the majordomo", () => {
 		expect(review.prompt).toContain(`You are \\"${name}\\", the majordomo of one person`);
 		expect(review.request).toContain("Booker, in a chat the person has with it, asks for approval.");
 		expect(review.tools.sort()).toEqual(["decide_approval", "recall", "zoom"]);
+		// One trace, in OpenTelemetry's conventions for generative AI, holds the request and the review it led to.
+		const span = (name: string) => spans.getFinishedSpans().find((candidate) => candidate.name === name)!;
+		await vi.waitFor(() => expect(span(`invoke_agent ${name}`)).toBeDefined());
+		const run = span("invoke_agent Booker");
+		const call = span("execute_tool http_request");
+		const reviewRun = span(`invoke_agent ${name}`);
+		const decided = span("execute_tool decide_approval");
+		const parent = (child: typeof run) => child.parentSpanContext?.spanId;
+		expect(run.attributes).toMatchObject({ "gen_ai.operation.name": "invoke_agent", "gen_ai.agent.id": booker.id, "gen_ai.conversation.id": chat, "pim.input.from": "user" });
+		expect(parent(call)).toBe(run.spanContext().spanId);
+		expect(parent(reviewRun)).toBe(call.spanContext().spanId);
+		expect(parent(decided)).toBe(reviewRun.spanContext().spanId);
+		expect(new Set([run, call, reviewRun, decided].map((each) => each.spanContext().traceId)).size).toBe(1);
+		expect(reviewRun.attributes).toMatchObject({ "pim.input.from": "review" });
+		expect(decided.attributes).toMatchObject({ "gen_ai.tool.name": "decide_approval", "gen_ai.tool.call.result": "Approved. Result:\nHTTP 201 Created\nbooked" });
+		const reviewChat = spans.getFinishedSpans().find((candidate) => parent(candidate) === reviewRun.spanContext().spanId && candidate.name.startsWith("chat"))!;
+		expect(reviewChat.name).toBe("chat faux-model");
+		expect(reviewChat.attributes).toMatchObject({ "gen_ai.provider.name": "faux", "gen_ai.response.finish_reasons": ["tool_call"] });
+		expect(reviewChat.attributes["gen_ai.system_instructions"]).toContain("the majordomo of one person");
+		expect(JSON.parse(String(reviewChat.attributes["gen_ai.output.messages"]))).toEqual([
+			{ role: "assistant", parts: [expect.objectContaining({ type: "tool_call", name: "decide_approval" })], finish_reason: "tool_call" },
+		]);
 		// The review isn't a chat, and nobody was notified: there was nothing to ask.
 		expect((await chats()).sort()).toEqual(before.sort());
 		const notified = async () => (await api("/notifications")).body.notifications.filter((notification: { session: string }) => notification.session === chat);

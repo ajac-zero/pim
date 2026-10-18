@@ -1,6 +1,7 @@
 import { createModels, type Models } from "@earendil-works/pi-ai/models";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import type { HarnessSettings, ModelRef } from "@earendil-works/pi-durable";
+import { InMemorySpanExporter, type SpanExporter } from "@opentelemetry/sdk-trace";
 import type { PiModel } from "agents/harness/pi";
 import { Pim as RealPim } from "../src/pim";
 import type { Mail, Mailer } from "../src/email";
@@ -18,6 +19,9 @@ export const napper = fauxProvider({ provider: "napper", models: [{ id: "napper-
 
 /** The scripted utility model (src/utility.ts). With no responses set it fails, so a session keeps its first message's start. */
 export const utility = fauxProvider({ provider: "utility", models: [{ id: "utility-model" }] });
+
+/** Every span the test agents' traces sent, as the deployment's OTLP backend would get them. */
+export const spans = new InMemorySpanExporter();
 
 /** Every email the test agents sent, in order: tests read it as an inbox. */
 export const outbox: Mail[] = [];
@@ -183,6 +187,11 @@ export class Pim extends RealPim {
 	/** Email works in tests, into `outbox`. */
 	protected override mailer(): Mailer {
 		return { send: async (mail) => void outbox.push(mail) };
+	}
+
+	/** Traces go to `spans`. */
+	protected override spanExporter(): SpanExporter {
+		return spans;
 	}
 
 	/** The scripted models, plus the real ChatGPT provider: tests script OpenAI over `fetch`. */

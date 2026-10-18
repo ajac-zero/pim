@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { createFileRoute, notFound } from "@tanstack/react-router";
+import { createFileRoute, notFound, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useNewChat } from "~/components/app-sidebar";
+import { ArtifactView } from "~/components/artifact-view";
 import { Composer } from "~/components/chat/composer";
 import { SummaryBox, SummaryToggle } from "~/components/chat/summary";
 import { ChatTabs } from "~/components/chat/tabs";
@@ -19,7 +20,18 @@ import { modelQuery, sessionsQuery } from "~/lib/queries";
 import { showTab, useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
+/** An artifact open in the canvas beside the chat, and which of its versions. */
+type ChatSearch = { artifact?: string; v?: number };
+
 export const Route = createFileRoute("/chat/$sessionId")({
+  validateSearch: (search: Record<string, unknown>): ChatSearch => {
+    const v = Number(search.v);
+    return {
+      ...(typeof search.artifact === "string" &&
+        search.artifact && { artifact: search.artifact }),
+      ...(Number.isSafeInteger(v) && v > 0 && { v }),
+    };
+  },
   loader: async ({ context, params }) => {
     const sessions = await context.queryClient.ensureQueryData(sessionsQuery());
     if (!sessions.some((session) => session.id === params.sessionId)) {
@@ -50,6 +62,15 @@ function SessionNotFound() {
 function ChatPage() {
   const { t } = useI18n();
   const { sessionId } = Route.useParams();
+  const { artifact, v } = Route.useSearch();
+  const navigate = useNavigate();
+  const showArtifact = (search: ChatSearch) =>
+    void navigate({
+      to: "/chat/$sessionId",
+      params: { sessionId },
+      search,
+      replace: true,
+    });
   const { data: sessions } = useQuery(sessionsQuery());
   const session = sessions?.find((candidate) => candidate.id === sessionId);
   const { data: model } = useQuery(modelQuery());
@@ -184,7 +205,7 @@ function ChatPage() {
               </div>
             </div>
           </div>
-          {ready && (
+          {ready && !artifact && (
             <SummaryBox
               sessionId={sessionId}
               entries={view.entries.length}
@@ -193,6 +214,19 @@ function ChatPage() {
           )}
         </div>
       </div>
+      {artifact && (
+        // The canvas: beside the chat, or over it on phones.
+        <aside className="fixed inset-0 z-40 flex min-h-0 flex-col bg-background md:static md:z-auto md:w-[56%] md:min-w-96 md:max-w-5xl md:shrink-0 md:border-l">
+          <ArtifactView
+            key={artifact}
+            artifactId={artifact}
+            version={v}
+            onVersion={(version) => showArtifact({ artifact, v: version })}
+            onDeleted={() => showArtifact({})}
+            onClose={() => showArtifact({})}
+          />
+        </aside>
+      )}
     </main>
   );
 }

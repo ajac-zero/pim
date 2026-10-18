@@ -1,6 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Fragment, memo, useEffect, useLayoutEffect, useMemo } from "react";
+import {
+  Fragment,
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+} from "react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 import { PimMark } from "~/components/app-sidebar";
 import { ArtifactCard, artifactReference } from "~/components/artifact";
@@ -97,6 +104,16 @@ export const Thread = memo(function Thread({
     }
     return [...all, ...view.live];
   }, [view.entries, view.live, pending]);
+
+  // The entries the chat had when it was shown: an artifact made after them,
+  // while the person watches, opens in the canvas by itself.
+  const shownWith = useRef<{ session: string; keys: Set<string> } | null>(null);
+  if (view.entries.length > 0 && shownWith.current?.session !== sessionId) {
+    shownWith.current = {
+      session: sessionId,
+      keys: new Set(view.entries.map((entry) => entry.key)),
+    };
+  }
 
   /* A tool call renders with its result (call ids are unique per session). */
   const outputs = useMemo(() => {
@@ -237,7 +254,14 @@ export const Thread = memo(function Thread({
               outputs.get(call.call_id)?.output,
             );
             if (artifact) {
-              return <ArtifactCard key={entry.key} reference={artifact} />;
+              return (
+                <ArtifactCard
+                  key={entry.key}
+                  reference={artifact}
+                  sessionId={sessionId}
+                  live={!shownWith.current?.keys.has(entry.key)}
+                />
+              );
             }
           }
           return null;

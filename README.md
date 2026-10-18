@@ -67,7 +67,7 @@ The chat never displays raw tool calls, their arguments or results, working note
 
 Pim's Durable Objects run on the Workers free plan, but the default model, GLM-5.3 on Workers AI, needs the Workers Paid plan or prepaid AI Gateway credits. For a free first look, set `PIM_MODEL` to `@cf/zai-org/glm-4.7-flash`, which runs on Workers AI's daily free allocation but is not good enough for real use; or connect a ChatGPT plan in Settings.
 
-Images people send in chats, and files that aren't text, are kept in an R2 bucket, which deploying creates. R2 has to be turned on for the account first: in the dashboard, open Storage & databases, then R2, and add the R2 subscription. Its free tier covers 10 GB, but Cloudflare asks for a payment method.
+Images people send in chats, files that aren't text, and artifacts' files (under `artifacts/<owner>/`), are kept in an R2 bucket, which deploying creates. R2 has to be turned on for the account first: in the dashboard, open Storage & databases, then R2, and add the R2 subscription. Its free tier covers 10 GB, but Cloudflare asks for a payment method.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ajac-zero/pim)
 

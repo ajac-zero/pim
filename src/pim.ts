@@ -19,7 +19,22 @@ import {
 import { type AgentMcpOAuthProvider, Agent as DurableAgent, type Connection, type ConnectionContext, DurableObjectOAuthClientProvider, getAgentByName, type Schedule, type WSMessage } from "agents";
 import { type PiModel, PiHarness, type PiOperationResult, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
-import { type ArtifactKind, type ArtifactSummary, ArtifactStore, artifactHeaders, checkContent, checkTitle, type DataScope, downloadName, framePage } from "./artifacts";
+import {
+	ENTRY_FILES,
+	type ArtifactFile,
+	type ArtifactKind,
+	type ArtifactSummary,
+	ArtifactStore,
+	artifactHeaders,
+	checkContent,
+	checkTitle,
+	type DataScope,
+	downloadName,
+	framePage,
+	type LoadedFiles,
+	readFiles,
+	textOf as fileText,
+} from "./artifacts";
 import { digestHex } from "./auth/store";
 import { Email, type Mailer, mailerFrom } from "./email";
 import { ImageStore, userInput } from "./images";
@@ -310,6 +325,8 @@ export class Pim extends DurableAgent<Env> {
 	});
 	/** What the agent made for its owner, with every version. */
 	readonly artifacts = new ArtifactStore(this.ctx.storage.sql, () => this.limits(), {
+		bucket: this.env.BLOBS,
+		owner: () => this.name,
 		storageRoom: () => {
 			const { storageBytes } = this.limits();
 			return storageBytes === null ? null : storageBytes - this.storedBytes();
@@ -1207,9 +1224,9 @@ export class Pim extends DurableAgent<Env> {
 		return { ...result, text: replies.length > 0 ? replies.join("\n\n") : undefined, replies };
 	}
 
-	/** What this space holds: its database, and in R2 the images sent to it and its stored files. */
+	/** What this space holds: its database, and in R2 the images sent to it, its stored files and its artifacts' files. */
 	storedBytes(): number {
-		return this.ctx.storage.sql.databaseSize + this.images.bytes() + this.files.storedBytes();
+		return this.ctx.storage.sql.databaseSize + this.images.bytes() + this.files.storedBytes() + this.artifacts.fileBytes();
 	}
 
 	#storageRefusal(): string | null {
@@ -1819,11 +1836,13 @@ export class Pim extends DurableAgent<Env> {
 	async guestArtifact(
 		guest: Guest,
 		id: string,
-	): Promise<{ ok: true; artifact: Omit<ArtifactSummary, "session">; content: string } | { ok: false; status: number; reason: string }> {
+	): Promise<{ ok: true; artifact: Omit<ArtifactSummary, "session">; files: ArtifactFile[] } | { ok: false; status: number; reason: string }> {
 		const found = this.#sharedArtifact(guest, id);
 		if (!found.ok) return found;
 		const { session: _session, ...artifact } = found.artifact;
-		return { ok: true, artifact, content: this.artifacts.version(id)!.content };
+		// The guest's Pim reads the files from R2 itself, so they must be there.
+		const stored = await this.artifacts.stored(id, artifact.version);
+		return { ok: true, artifact, files: [...stored.files] };
 	}
 
 	/** A guest's call on what an artifact shared with them keeps for everyone using it (`window.pim.shared`). */
@@ -1856,7 +1875,9 @@ export class Pim extends DurableAgent<Env> {
 		if (version !== undefined && Number(version) !== found.artifact.version) {
 			throw new HttpError(404, `Only the latest version, ${found.artifact.version}, is shared`);
 		}
-		return { share, me, host, artifact: found.artifact, content: found.content, key: `${share.ownerId}/${found.artifact.id}` };
+		const files = found.files as ArtifactFile[];
+		const load = () => readFiles(this.env.BLOBS, share.ownerId, files);
+		return { share, me, host, artifact: found.artifact, files, load, key: `${share.ownerId}/${found.artifact.id}` };
 	}
 
 	/**
@@ -2389,9 +2410,10 @@ export class Pim extends DurableAgent<Env> {
 	async artifactToPublish(id: string): Promise<ArtifactToPublish | null> {
 		this.#assertOpen();
 		const artifact = ARTIFACT_ID.test(id) ? this.artifacts.get(id) : undefined;
-		const latest = artifact && this.artifacts.version(artifact.id);
-		if (!artifact || !latest) return null;
-		return { id: artifact.id, version: latest.version, title: artifact.title, kind: artifact.kind, content: latest.content, sha256: latest.sha256, size: latest.size };
+		if (!artifact) return null;
+		// Viewers' Pims read the files from R2 under this owner's prefix, so they must be there.
+		const latest = await this.artifacts.stored(artifact.id, artifact.version);
+		return { id: artifact.id, version: latest.version, title: artifact.title, kind: artifact.kind, files: [...latest.files], sha256: latest.sha256, size: latest.size };
 	}
 
 	/**
@@ -2428,11 +2450,14 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	/** Makes a published artifact one of the owner's: a new artifact with its content, theirs to change. */
-	async adoptArtifact(published: { title: string; kind: ArtifactKind; content: string }): Promise<ArtifactSummary> {
+	/** Makes a published artifact one of the owner's: a new artifact with copies of its files, theirs to change. */
+	async adoptArtifact(published: { title: string; kind: ArtifactKind; owner: string; files: readonly ArtifactFile[] }): Promise<ArtifactSummary> {
 		this.#assertOpen();
+		const loaded = await readFiles(this.env.BLOBS, published.owner, published.files);
+		const entry = ENTRY_FILES[published.kind];
+		const files = Object.fromEntries([...loaded].filter(([path]) => path !== entry).map(([path, file]) => [path, file.bytes]));
 		const id = crypto.randomUUID();
-		await this.artifacts.create({ id, title: published.title, kind: published.kind, content: published.content, session: null });
+		await this.artifacts.create({ id, title: published.title, kind: published.kind, content: loaded.get(entry)!.bytes, files, session: null });
 		return this.artifacts.get(id)!;
 	}
 
@@ -2696,7 +2721,7 @@ export class Pim extends DurableAgent<Env> {
 			notifications: this.store.notifications({ unread: false }).map((notification) => this.#publicSession(notification)),
 			apps: this.apps.servers().map(({ id, name, url, approval }) => ({ id, name, url, approval })),
 			watches: this.appEvents.list(),
-			artifacts: this.artifacts.export().map((artifact) => this.#publicSession(artifact)),
+			...(await this.artifacts.export().then(({ artifacts, files }) => ({ artifacts: artifacts.map((artifact) => this.#publicSession(artifact)), artifactFiles: files }))),
 			othersArtifactData: this.artifacts.othersData(),
 			files: await this.files.export(),
 			skills: this.skills.export(),
@@ -2716,6 +2741,7 @@ export class Pim extends DurableAgent<Env> {
 		if ((await this.listSchedules()).some((schedule) => own.has(schedule.callback))) remaining.push("schedules");
 		if (Object.keys(this.getMcpServers().servers).length > 0) remaining.push("app connections");
 		if (await this.images.any()) remaining.push("images");
+		if (await this.artifacts.anyFiles()) remaining.push("artifact files");
 		return remaining;
 	}
 
@@ -2748,6 +2774,7 @@ export class Pim extends DurableAgent<Env> {
 		// Images and stored files live outside this object's storage, in R2 under the owner's prefix,
 		// so they go first, and the browser closes with whatever was signed in there.
 		await this.images.deleteAll();
+		await this.artifacts.deleteAllFiles();
 		await this.browser.close().catch(() => undefined);
 		await this.ctx.storage.deleteAll();
 		this.store.markErased(Date.now());
@@ -3265,10 +3292,10 @@ export class Pim extends DurableAgent<Env> {
 			"DELETE",
 			"/artifacts/:id",
 			({ id }, _request, url) =>
-				this.#artifactRequest(url, () => {
+				this.#artifactRequest(url, async () => {
 					this.#assertOpen();
 					const artifact = this.#artifact(id!);
-					this.artifacts.delete(artifact.id);
+					await this.artifacts.delete(artifact.id);
 					return noStore({ deleted: true });
 				}),
 		],
@@ -3312,18 +3339,19 @@ export class Pim extends DurableAgent<Env> {
 			"GET",
 			"/artifacts/:id/versions/:version",
 			({ id, version }, _request, url) =>
-				this.#artifactRequest(url, () => {
+				this.#artifactRequest(url, async () => {
 					const { artifact, found } = this.#artifactVersion(id!, version!);
-					return noStore({ id: artifact.id, title: artifact.title, kind: artifact.kind, latest: artifact.version, ...found });
+					const content = await this.artifacts.text(artifact.id, found.version);
+					return noStore({ id: artifact.id, title: artifact.title, kind: artifact.kind, latest: artifact.version, ...found, content });
 				}),
 		],
 		[
 			"GET",
 			"/artifacts/:id/versions/:version/frame",
 			({ id, version }, _request, url) =>
-				this.#artifactRequest(url, () => {
+				this.#artifactRequest(url, async () => {
 					const { artifact, found } = this.#artifactVersion(id!, version!);
-					return framePage(artifact.kind, found.content, url.origin);
+					return framePage(artifact.kind, await this.artifacts.read(artifact.id, found.version), url.origin);
 				}),
 		],
 		[
@@ -3395,8 +3423,9 @@ export class Pim extends DurableAgent<Env> {
 			"/shared-artifacts/:host/:id/versions/:version",
 			({ host, id, version }, _request, url) =>
 				this.#artifactRequest(url, async () => {
-					const { artifact, content } = await this.#othersArtifact(host!, id!, version!);
-					return noStore({ id: artifact.id, title: artifact.title, kind: artifact.kind, latest: artifact.version, version: artifact.version, sha256: artifact.sha256, size: artifact.size, content });
+					const { artifact, files, load } = await this.#othersArtifact(host!, id!, version!);
+					const content = fileText((await load()).get(ENTRY_FILES[artifact.kind])!.bytes);
+					return noStore({ id: artifact.id, title: artifact.title, kind: artifact.kind, latest: artifact.version, version: artifact.version, sha256: artifact.sha256, size: artifact.size, files, content });
 				}),
 		],
 		[
@@ -3404,8 +3433,8 @@ export class Pim extends DurableAgent<Env> {
 			"/shared-artifacts/:host/:id/versions/:version/frame",
 			({ host, id, version }, _request, url) =>
 				this.#artifactRequest(url, async () => {
-					const { artifact, content } = await this.#othersArtifact(host!, id!, version!);
-					return framePage(artifact.kind, content, url.origin);
+					const { artifact, load } = await this.#othersArtifact(host!, id!, version!);
+					return framePage(artifact.kind, await load(), url.origin);
 				}),
 		],
 		[
@@ -3439,14 +3468,14 @@ export class Pim extends DurableAgent<Env> {
 			"GET",
 			"/artifacts/:id/versions/:version/download",
 			({ id, version }, _request, url) =>
-				this.#artifactRequest(url, () => {
+				this.#artifactRequest(url, async () => {
 					const { artifact, found } = this.#artifactVersion(id!, version!);
 					// Plain text, whatever the kind: the file is for saving, and a browser that shows it
 					// anyway shows its source, still under the sandbox. Its name keeps the extension.
 					const headers = artifactHeaders(url.origin, "text/plain; charset=utf-8");
 					const { ascii, utf8 } = downloadName(artifact.title, found.version, artifact.kind);
 					headers.set("content-disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(utf8)}`);
-					return new Response(found.content, { headers });
+					return new Response(await this.artifacts.text(artifact.id, found.version), { headers });
 				}),
 		],
 		// Files: the person's, which their agents read and write too (see ./files.ts).

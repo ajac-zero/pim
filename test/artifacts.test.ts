@@ -307,9 +307,15 @@ export default function App() {
 		await callTool("artifact_update", { id: made.id, base_version: 1, content: "<p>Second</p>" });
 		const exported = JSON.parse(await (await raw("/export")).text());
 		const mine = exported.artifacts.find((artifact: { id: string }) => artifact.id === made.id);
-		expect(mine.versions.map((version: { version: number; content: string }) => [version.version, version.content])).toEqual([
-			[1, PAGE],
-			[2, "<p>Second</p>"],
+		const contents = new Map(exported.artifactFiles.map((file: { sha256: string; content: string }) => [file.sha256, file.content]));
+		expect(
+			mine.versions.map((version: { version: number; files: { path: string; sha256: string }[] }) => [
+				version.version,
+				version.files.map((file) => [file.path, contents.get(file.sha256)]),
+			]),
+		).toEqual([
+			[1, [["index.html", PAGE]]],
+			[2, [["index.html", "<p>Second</p>"]]],
 		]);
 
 		expect((await api(`/artifacts/${made.id}`, { method: "DELETE" })).body).toEqual({ deleted: true });
@@ -324,21 +330,84 @@ export default function App() {
 		expect((await callTool("artifact_read", { id: made.id })).isError).toBe(true);
 	});
 
+	it("keep each file once in R2, free it when no version has it, and read versions from before files", async () => {
+		const stored = (hash: string) => env.BLOBS.head(`artifacts/${OWNER}/${hash}`).then((object) => object !== null);
+		const outcome = await runInDurableObject(agent(), async (instance: Pim, state) => {
+			const content = `<p>Shared by two ${crypto.randomUUID()}</p>`;
+			const one = await instance.artifacts.create({ id: crypto.randomUUID(), title: "One", kind: "html", content, session: null });
+			const before = instance.artifacts.fileBytes();
+			const two = await instance.artifacts.create({ id: crypto.randomUUID(), title: "Two", kind: "html", content, session: null });
+			const hash = one.files[0]!.sha256;
+			const counted = instance.artifacts.fileBytes() - before;
+			await instance.artifacts.delete(one.artifact);
+			const keptForTwo = await stored(hash);
+			await instance.artifacts.delete(two.artifact);
+			const freed = !(await stored(hash));
+
+			// A version from before files: its one file in the version row, and none listed.
+			const old = crypto.randomUUID();
+			const page = "<p>From before files</p>";
+			const oldHash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(page)))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+			state.storage.sql.exec("INSERT INTO pim_artifacts (id, title, kind, session, head, created_at, updated_at) VALUES (?, 'Old', 'html', NULL, 1, 0, 0)", old);
+			state.storage.sql.exec(
+				"INSERT INTO pim_artifact_versions (artifact, version, content, sha256, size, source, restored_from, call_id, created_at) VALUES (?, 1, ?, ?, ?, 'agent', NULL, NULL, 0)",
+				old,
+				page,
+				oldHash,
+				page.length,
+			);
+			const read = await instance.artifacts.text(old, 1);
+			const listed = instance.artifacts.version(old, 1)!.files;
+			const inR2Before = await stored(oldHash);
+			// Someone else needs it: it moves to R2, keeping its hash, so permissions given to it still hold.
+			const moved = await instance.artifacts.stored(old, 1);
+			const inR2After = await stored(oldHash);
+			const row = state.storage.sql.exec("SELECT content, sha256 FROM pim_artifact_versions WHERE artifact = ?", old).one();
+			const readAfter = await instance.artifacts.text(old, 1);
+			// A new version keeps its files: the unchanged one isn't stored again.
+			const next = await instance.artifacts.append(old, { baseVersion: 1, files: { "extra.css": "p{color:red}" }, source: "agent" });
+			await instance.artifacts.delete(old);
+			const freedOld = !(await stored(oldHash));
+			return {
+				counted: counted === 0,
+				keptForTwo,
+				freed,
+				read,
+				listed,
+				inR2Before,
+				moved: moved.sha256 === oldHash && inR2After,
+				freedOld,
+				row: { content: row.content, sha256: row.sha256 === oldHash },
+				readAfter,
+				next: next.version.files.map((file) => file.path),
+			};
+		});
+		expect(outcome).toEqual({
+			counted: true,
+			keptForTwo: true,
+			freed: true,
+			read: "<p>From before files</p>",
+			listed: [{ path: "index.html", sha256: expect.any(String), size: 24, type: "text/html" }],
+			inR2Before: false,
+			moved: true,
+			freedOld: true,
+			row: { content: "", sha256: true },
+			readAfter: "<p>From before files</p>",
+			next: ["extra.css", "index.html"],
+		});
+	});
+
 	it("are left whole when the record of their deletion can't be written", async () => {
 		const outcome = await runInDurableObject(agent(), async (instance: Pim, state) => {
 			const made = await instance.artifacts.create({ id: crypto.randomUUID(), title: "Whole", kind: "html", content: "<p>kept</p>", session: null });
 			state.storage.sql.exec("ALTER TABLE pim_artifact_deleted RENAME TO pim_artifact_deleted_away");
-			const failed = (() => {
-				try {
-					instance.artifacts.delete(made.artifact);
-					return false;
-				} catch {
-					return true;
-				}
-			})();
-			const left = instance.artifacts.version(made.artifact, 1)?.content;
+			const failed = await instance.artifacts.delete(made.artifact).then(
+				() => false,
+				() => true,
+			);
+			const left = await instance.artifacts.text(made.artifact, 1);
 			state.storage.sql.exec("ALTER TABLE pim_artifact_deleted_away RENAME TO pim_artifact_deleted");
-			instance.artifacts.delete(made.artifact);
+			await instance.artifacts.delete(made.artifact);
 			return { failed, left };
 		});
 		expect(outcome).toEqual({ failed: true, left: "<p>kept</p>" });
@@ -351,65 +420,84 @@ export default function App() {
 			await instance.artifacts.create(input);
 			// Before deletion a replay returns the version it made.
 			const replayed = (await instance.artifacts.create(input)).version;
-			instance.artifacts.delete(id);
+			await instance.artifacts.delete(id);
 			const afterDelete = await instance.artifacts.create(input).then(() => "created", (error: { status?: number }) => error.status);
 			const fresh = await instance.artifacts.create({ ...input, id: crypto.randomUUID() });
 			// Deleting what never existed remembers nothing; the export lists only what exists.
 			const never = crypto.randomUUID();
-			instance.artifacts.delete(never);
+			await instance.artifacts.delete(never);
 			const tombstones = Number(state.storage.sql.exec("SELECT COUNT(*) AS n FROM pim_artifact_deleted WHERE id = ?", never).one().n);
-			const exported = instance.artifacts.export().some((artifact) => artifact.id === id);
+			const exported = (await instance.artifacts.export()).artifacts.some((artifact) => artifact.id === id);
 			const kept = state.storage.sql.exec("SELECT * FROM pim_artifact_deleted WHERE id = ?", id).toArray();
-			instance.artifacts.delete(fresh.artifact);
+			await instance.artifacts.delete(fresh.artifact);
 			return { replayed, afterDelete, listed: instance.artifacts.get(id), tombstones, exported, fresh: fresh.version, kept: kept.map((row) => Object.keys(row).sort()) };
 		});
 		expect(outcome).toEqual({ replayed: 1, afterDelete: 410, listed: undefined, tombstones: 0, exported: false, fresh: 1, kept: [["deleted_at", "id"]] });
 	});
 
-	it("export in full near their total cap, which holds whatever the limits say", async () => {
-		// Ten versions of nearly 1 MB each, made straight in the store: about the most artifacts can hold.
+	it("export near their total cap, which holds whatever the limits say, inlining what fits and listing the rest", async () => {
+		// Versions of nearly the most one can be, made straight in the store: about the most artifacts can hold.
+		const size = 9_500_000;
 		const ids = await runInDurableObject(agent(), async (instance: Pim) => {
 			const made: string[] = [];
 			const room = MAX_ARTIFACT_STORAGE_BYTES - instance.artifacts.totalBytes();
-			const size = 950_000;
 			for (let index = 0; index < Math.floor(room / size); index++) {
 				const id = crypto.randomUUID();
-				await instance.artifacts.create({ id, title: `Big ${index}`, kind: "html", content: `<p>${"z".repeat(size - 7)}</p>`, session: null });
+				// Each different, so each is stored and counted.
+				await instance.artifacts.create({ id, title: `Big ${index}`, kind: "html", content: `<p>${index}${"z".repeat(size - 7 - String(index).length)}</p>`, session: null });
 				made.push(id);
 			}
 			return made;
 		});
 		try {
-		expect(ids.length).toBeGreaterThanOrEqual(9);
-		// Even with no limits set, the cap holds.
-		// Two writes racing for the room left, each fitting alone: one is refused, and the hard cap holds.
-		const race = await runInDurableObject(agent(), async (instance: Pim) => {
-			const room = MAX_ARTIFACT_STORAGE_BYTES - instance.artifacts.totalBytes();
-			const size = Math.floor(room * 0.6);
-			const made: string[] = [];
-			const settle = (id: string) =>
-				instance.artifacts.create({ id, title: "Racing for room", kind: "html", content: "q".repeat(size), session: null }).then(
-					() => (made.push(id), "ok"),
-					(error: { status?: number }) => error.status,
-				);
-			const outcomes = await Promise.all([settle(crypto.randomUUID()), settle(crypto.randomUUID())]);
-			const total = instance.artifacts.totalBytes();
-			for (const id of made) instance.artifacts.delete(id);
-			return { outcomes: outcomes.sort(), withinCap: total <= MAX_ARTIFACT_STORAGE_BYTES };
-		});
-		expect(race).toEqual({ outcomes: [429, "ok"], withinCap: true });
-		const left = MAX_ARTIFACT_STORAGE_BYTES - (await api("/artifacts")).body.bytes;
-		expect(left).toBeLessThan(950_000);
-		// In a chat of its own: what it sends stays out of the others' context.
-		const chat = (await post("/sessions")).body.id;
-		const over = await callTool("artifact_create", { title: "Over the cap", kind: "html", content: "x".repeat(left + 1) }, chat);
-		expect(over.text).toContain("in all");
-		const response = await raw("/export");
-		expect(response.status).toBe(200);
-		const exported = JSON.parse(await response.text());
-		const big = exported.artifacts.filter((artifact: { id: string }) => ids.includes(artifact.id));
-		expect(big).toHaveLength(ids.length);
-		expect(big.every((artifact: { versions: { content: string }[] }) => artifact.versions[0]!.content.length === 950_000)).toBe(true);
+			expect(ids.length).toBeGreaterThanOrEqual(9);
+			// Even with no limits set, the cap holds.
+			// Two writes racing for the room left, each fitting alone: one is refused, and the hard cap holds.
+			const race = await runInDurableObject(agent(), async (instance: Pim) => {
+				const room = MAX_ARTIFACT_STORAGE_BYTES - instance.artifacts.totalBytes();
+				const made: string[] = [];
+				const settle = (id: string, fill: string) =>
+					instance.artifacts.create({ id, title: "Racing for room", kind: "html", content: fill.repeat(Math.floor(room * 0.6)), session: null }).then(
+						() => (made.push(id), "ok"),
+						(error: { status?: number }) => error.status,
+					);
+				const outcomes = await Promise.all([settle(crypto.randomUUID(), "q"), settle(crypto.randomUUID(), "r")]);
+				const total = instance.artifacts.totalBytes();
+				for (const id of made) await instance.artifacts.delete(id);
+				return { outcomes: outcomes.sort(), withinCap: total <= MAX_ARTIFACT_STORAGE_BYTES };
+			});
+			expect(race).toEqual({ outcomes: [429, "ok"], withinCap: true });
+			const left = MAX_ARTIFACT_STORAGE_BYTES - (await api("/artifacts")).body.bytes;
+			expect(left).toBeLessThan(size);
+			const over = await runInDurableObject(agent(), (instance: Pim) =>
+				instance.artifacts
+					.create({ id: crypto.randomUUID(), title: "Over the cap", kind: "html", content: "x".repeat(left + 1), session: null })
+					.then(() => "written", (error: Error) => error.message),
+			);
+			expect(over).toContain("in all");
+			// The same content again takes no more room: it's stored once.
+			const again = await runInDurableObject(agent(), async (instance: Pim) => {
+				const before = instance.artifacts.totalBytes();
+				const id = crypto.randomUUID();
+				const content = await instance.artifacts.text(ids[0]!, 1);
+				await instance.artifacts.create({ id, title: "Twin", kind: "html", content, session: null });
+				const after = instance.artifacts.totalBytes();
+				await instance.artifacts.delete(id);
+				return after - before;
+			});
+			expect(again).toBe(0);
+			const response = await raw("/export");
+			expect(response.status).toBe(200);
+			const exported = JSON.parse(await response.text());
+			const big = exported.artifacts.filter((artifact: { id: string }) => ids.includes(artifact.id));
+			expect(big).toHaveLength(ids.length);
+			const hashes = new Set(big.map((artifact: { versions: { files: { sha256: string }[] }[] }) => artifact.versions[0]!.files[0]!.sha256));
+			const files = exported.artifactFiles.filter((file: { sha256: string }) => hashes.has(file.sha256));
+			expect(files).toHaveLength(ids.length);
+			const inlined = files.filter((file: { content?: string }) => file.content !== undefined);
+			expect(inlined.length).toBeGreaterThanOrEqual(3);
+			expect(inlined.length).toBeLessThan(ids.length);
+			expect(inlined.every((file: { content: string; size: number }) => file.content.length === size && file.size === size)).toBe(true);
 		} finally {
 			for (const id of ids) expect((await api(`/artifacts/${id}`, { method: "DELETE" })).status).toBe(200);
 		}
@@ -420,16 +508,16 @@ export default function App() {
 			const id = crypto.randomUUID();
 			await instance.artifacts.create({ id, title: "Kept", kind: "html", content: "<p>1</p>", session: null });
 			await instance.artifacts.append(id, { baseVersion: 1, content: "<p>2</p>", source: "agent" });
-			const snapshot = () =>
-				JSON.stringify({ artifact: instance.artifacts.get(id), history: instance.artifacts.versions(id), content: instance.artifacts.version(id)!.content });
-			const before = snapshot();
+			const snapshot = async () =>
+				JSON.stringify({ artifact: instance.artifacts.get(id), history: instance.artifacts.versions(id), content: await instance.artifacts.text(id, instance.artifacts.get(id)!.version) });
+			const before = await snapshot();
 			const attempt = async (limits: Partial<Limits> | null, baseVersion: number, content: string) => {
 				await instance.setLimits(limits);
 				const status = await instance.artifacts.append(id, { baseVersion, content, source: "agent", title: "Renamed" }).then(
 					() => "written",
 					(error: { status?: number }) => error.status,
 				);
-				return { status, unchanged: snapshot() === before };
+				return { status, unchanged: (await snapshot()) === before };
 			};
 			const results = {
 				tooBig: await attempt({ artifactBytes: 10 }, 2, "x".repeat(11)),
@@ -438,9 +526,9 @@ export default function App() {
 				stale: await attempt(null, 1, "<p>3</p>"),
 				restoreStale: await instance.artifacts.restore(id, 1, 1).then(() => "written", (error: { status?: number }) => error.status),
 			};
-			const afterRestore = snapshot() === before;
+			const afterRestore = (await snapshot()) === before;
 			await instance.setLimits(null);
-			instance.artifacts.delete(id);
+			await instance.artifacts.delete(id);
 			return { ...results, afterRestore };
 		});
 		expect(refusals).toEqual({
@@ -470,18 +558,18 @@ export default function App() {
 			// Two new artifacts that each fit, but not both.
 			await instance.setLimits({ artifactStorageBytes: instance.artifacts.totalBytes() + 1_500 });
 			const big = (index: number) =>
-				settle(instance.artifacts.create({ id: crypto.randomUUID(), title: `Racer ${index}`, kind: "html", content: "r".repeat(1_000), session: null }));
+				settle(instance.artifacts.create({ id: crypto.randomUUID(), title: `Racer ${index}`, kind: "html", content: String(index).repeat(1_000), session: null }));
 			const created = await Promise.all([big(1), big(2)]);
 			const total = instance.artifacts.totalBytes();
 			const limit = instance.limits().artifactStorageBytes!;
 			// A refused version changes nothing: not the title, the latest version or its content.
-			const before = JSON.stringify({ ...instance.artifacts.get(id)!, content: instance.artifacts.version(id)!.content });
+			const before = JSON.stringify({ ...instance.artifacts.get(id)!, content: await instance.artifacts.text(id, 2) });
 			await instance.setLimits({ artifactBytes: 10 });
 			const renamed = await settle(instance.artifacts.append(id, { baseVersion: 2, content: "x".repeat(11), source: "agent", title: "Renamed" }));
 			const after = instance.artifacts.get(id)!;
 			const title = after.title;
-			const unchanged = JSON.stringify({ ...after, content: instance.artifacts.version(id)!.content }) === before;
-			for (const artifact of instance.artifacts.list()) if (artifact.title === "Race" || artifact.title.startsWith("Racer")) instance.artifacts.delete(artifact.id);
+			const unchanged = JSON.stringify({ ...after, content: await instance.artifacts.text(id, after.version) }) === before;
+			for (const artifact of instance.artifacts.list()) if (artifact.title === "Race" || artifact.title.startsWith("Racer")) await instance.artifacts.delete(artifact.id);
 			return { raced: raced.sort(), created: created.sort(), withinLimit: total <= limit, renamed, title, unchanged };
 		});
 		expect(outcome).toEqual({ raced: [409, "ok"], created: [429, "ok"], withinLimit: true, renamed: 413, title: "Race", unchanged: true });

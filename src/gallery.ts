@@ -5,7 +5,7 @@ import { HttpError } from "./http";
 import type { TeamMember } from "./agents";
 import { appDirectory, type CustomApp, type DirectoryApp, findSiteIcon, storedApps } from "./extensions/app-directory";
 import { APP_CATEGORIES, type AppCategory } from "./extensions/define";
-import type { ArtifactKind } from "./artifacts";
+import type { ArtifactFile, ArtifactKind } from "./artifacts";
 
 /**
  * What the people on a Pim show each other: profiles, and the agents they
@@ -116,7 +116,8 @@ export type ArtifactToPublish = {
 	readonly version: number;
 	readonly title: string;
 	readonly kind: ArtifactKind;
-	readonly content: string;
+	/** Its files, whose bytes stay in R2 under the author's prefix. */
+	readonly files: readonly ArtifactFile[];
 	readonly sha256: string;
 	readonly size: number;
 };
@@ -171,7 +172,7 @@ CREATE TABLE IF NOT EXISTS published_artifacts (
 	version INTEGER NOT NULL,
 	title TEXT NOT NULL,
 	kind TEXT NOT NULL,
-	content TEXT NOT NULL,
+	files TEXT NOT NULL,
 	sha256 TEXT NOT NULL,
 	size INTEGER NOT NULL,
 	published_at INTEGER NOT NULL,
@@ -223,7 +224,7 @@ const summaryOf = (row: Row, directory: () => readonly DirectoryApp[]): Template
 const WITH_AUTHOR =
 	"SELECT t.id, t.owner_id, t.username, t.agent_id, t.name, t.description, t.instructions, t.apps, t.team, t.blueprint, t.symbol, t.color, t.icon_data IS NOT NULL AS has_icon, t.published_at, t.uses, p.display_name FROM templates t LEFT JOIN profiles p ON p.owner_id = t.owner_id";
 
-// Every column but the content, which only opening one reads.
+// Every column but the files, which only opening one reads.
 const PUBLISHED_ARTIFACT =
 	"SELECT a.id, a.username, a.artifact_id, a.version, a.title, a.kind, a.sha256, a.size, a.published_at, a.uses, a.public, p.display_name FROM published_artifacts a LEFT JOIN profiles p ON p.owner_id = a.owner_id";
 
@@ -485,8 +486,8 @@ export class Gallery extends DurableObject<Env> {
 		}
 		const id = known ? String(known.id) : `pa_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 		this.#sql(
-			`INSERT INTO published_artifacts (id, owner_id, username, artifact_id, version, title, kind, content, sha256, size, published_at, public) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (id) DO UPDATE SET version = excluded.version, title = excluded.title, kind = excluded.kind, content = excluded.content, sha256 = excluded.sha256,
+			`INSERT INTO published_artifacts (id, owner_id, username, artifact_id, version, title, kind, files, sha256, size, published_at, public) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (id) DO UPDATE SET version = excluded.version, title = excluded.title, kind = excluded.kind, files = excluded.files, sha256 = excluded.sha256,
 			size = excluded.size, published_at = excluded.published_at, public = ?`,
 			id,
 			ownerId,
@@ -495,7 +496,7 @@ export class Gallery extends DurableObject<Env> {
 			artifact.version,
 			artifact.title,
 			artifact.kind,
-			artifact.content,
+			JSON.stringify(artifact.files),
 			artifact.sha256,
 			artifact.size,
 			Date.now(),
@@ -521,16 +522,18 @@ export class Gallery extends DurableObject<Env> {
 		return row ? publishedArtifactOf(row) : null;
 	}
 
-	/** A published artifact's content. */
-	publishedContent(id: string): string | null {
-		const [row] = this.#sql("SELECT content FROM published_artifacts WHERE id = ?", id).toArray();
-		return row ? String(row.content) : null;
+	/** A published artifact's files, and whose prefix in R2 they're under. */
+	publishedFiles(id: string): { owner: string; files: ArtifactFile[] } | null {
+		const [row] = this.#sql("SELECT owner_id, files FROM published_artifacts WHERE id = ?", id).toArray();
+		return row ? { owner: String(row.owner_id), files: JSON.parse(String(row.files)) as ArtifactFile[] } : null;
 	}
 
-	/** A published artifact anyone with its link may see, with its content; null for any other id. */
-	publicArtifact(id: string): { kind: ArtifactKind; title: string; content: string } | null {
-		const [row] = this.#sql("SELECT kind, title, content FROM published_artifacts WHERE id = ? AND public = 1", id).toArray();
-		return row ? { kind: String(row.kind) as ArtifactKind, title: String(row.title), content: String(row.content) } : null;
+	/** A published artifact anyone with its link may see, with its files; null for any other id. */
+	publicArtifact(id: string): { kind: ArtifactKind; title: string; owner: string; files: ArtifactFile[] } | null {
+		const [row] = this.#sql("SELECT kind, title, owner_id, files FROM published_artifacts WHERE id = ? AND public = 1", id).toArray();
+		return row
+			? { kind: String(row.kind) as ArtifactKind, title: String(row.title), owner: String(row.owner_id), files: JSON.parse(String(row.files)) as ArtifactFile[] }
+			: null;
 	}
 
 	/** Published artifacts, most used first; matching `query` in their title or author, or by one author. */

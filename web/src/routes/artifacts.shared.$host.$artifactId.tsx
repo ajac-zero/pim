@@ -1,11 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useCallback, useState } from "react";
-import {
-  ArtifactCaution,
-  ArtifactPreview,
-  ArtifactPrint,
-} from "~/components/artifact";
+import { ArtifactPreview, ArtifactPrint } from "~/components/artifact";
 import { useI18n } from "~/components/i18n";
 import { ArrowLeft, Printer } from "~/components/icons";
 import { Button } from "~/components/ui/button";
@@ -82,7 +78,6 @@ function SharedArtifactPage() {
             fill
           />
         </div>
-        <ArtifactCaution kind={artifact.kind} />
         {printing && (
           <ArtifactPrint
             id={artifact.id}

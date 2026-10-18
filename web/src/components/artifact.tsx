@@ -425,30 +425,6 @@ export function ArtifactPrint({
   );
 }
 
-/** Warns, next to an artifact that runs code, what it could do with what is typed into it. */
-export function ArtifactCaution({
-  kind,
-  className,
-}: {
-  kind: ArtifactKind;
-  className?: string;
-}) {
-  const { t } = useI18n();
-  // A Markdown document runs nothing, so there is nothing to warn about.
-  if (kind === "markdown") return null;
-  return (
-    <p
-      className={cn(
-        "flex items-start gap-1.5 text-muted-foreground text-xs",
-        className,
-      )}
-    >
-      <ShieldAlert className="mt-px size-3.5 shrink-0" />
-      {t("artifactCaution")}
-    </p>
-  );
-}
-
 export function ArtifactIcon({
   kind,
   className,
@@ -536,15 +512,12 @@ export function ArtifactCard({ reference }: { reference: ArtifactReference }) {
             {t("artifactDeleted")}
           </p>
         ) : (
-          <>
-            <ArtifactPreview
-              id={reference.id}
-              version={reference.version}
-              kind={reference.kind}
-              title={reference.title}
-            />
-            <ArtifactCaution kind={reference.kind} className="mt-2" />
-          </>
+          <ArtifactPreview
+            id={reference.id}
+            version={reference.version}
+            kind={reference.kind}
+            title={reference.title}
+          />
         )}
       </div>
     </div>

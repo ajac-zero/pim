@@ -1830,7 +1830,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * The artifacts shared with a guest's circle, as their own Pim asks for
+	 * The artifacts shared with a guest's circle, as their own space asks for
 	 * them. Like a tool call, it's checked here every time: who they are,
 	 * that their circle is on, and that the artifact is shared with it.
 	 * Only the latest version is shared, and nothing of the chat it was made in.
@@ -1849,7 +1849,7 @@ export class Pim extends DurableAgent<Env> {
 		const found = this.#sharedArtifact(guest, id);
 		if (!found.ok) return found;
 		const { session: _session, ...artifact } = found.artifact;
-		// The guest's Pim reads the files from R2 itself, so they must be there.
+		// The guest's space reads the files from R2 itself, so they must be there.
 		const stored = await this.artifacts.stored(id, artifact.version);
 		return { ok: true, artifact, files: [...stored.files] };
 	}
@@ -1871,7 +1871,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * An artifact someone shared with this person, as their Pim answers for
+	 * An artifact someone shared with this person, as their space answers for
 	 * it now: its latest version, which `version` must still be.
 	 */
 	async #othersArtifact(username: string, id: string, version?: string) {
@@ -2420,7 +2420,7 @@ export class Pim extends DurableAgent<Env> {
 		this.#assertOpen();
 		const artifact = ARTIFACT_ID.test(id) ? this.artifacts.get(id) : undefined;
 		if (!artifact) return null;
-		// Viewers' Pims read the files from R2 under this owner's prefix, so they must be there.
+		// Viewers' spaces read the files from R2 under this owner's prefix, so they must be there.
 		const latest = await this.artifacts.stored(artifact.id, artifact.version);
 		return { id: artifact.id, version: latest.version, title: artifact.title, kind: artifact.kind, files: [...latest.files], sha256: latest.sha256, size: latest.size };
 	}
@@ -2882,8 +2882,8 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * One call an artifact made through the bridge, as the app relays it,
-	 * for the person this Pim is: on their own artifact, or one shared with
-	 * them, which this Pim knows by `key` (its own artifact's id, or
+	 * for the person this space is: on their own artifact, or one shared with
+	 * them, which this space knows by `key` (its own artifact's id, or
 	 * `<host>/<id>`). What it keeps for them (`storage`) and needs no
 	 * permission is kept here; the model and app tools are theirs too, and
 	 * need their permission, given to this version (`needs` asks for it).
@@ -2947,7 +2947,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	/** Lets the person use `capability` from a version of an artifact, by the key this Pim knows it by. */
+	/** Lets the person use `capability` from a version of an artifact, by the key this space knows it by. */
 	#grantArtifact(key: string, sha: string, capability: unknown): string {
 		if (capability !== "model") {
 			if (typeof capability !== "string" || !capability.startsWith("tool:")) throw new HttpError(400, "capability must be model or tool:<name>");
@@ -3333,7 +3333,7 @@ export class Pim extends DurableAgent<Env> {
 						source: "person",
 						...(name !== undefined ? { title: name } : {}),
 					});
-					return noStore({ ...this.artifacts.get(artifact.id), saved: version.version, changed }, changed ? 201 : 200);
+					return noStore({ ...this.#publicSession(this.artifacts.get(artifact.id)!), saved: version.version, changed }, changed ? 201 : 200);
 				}),
 		],
 		[
@@ -3406,10 +3406,10 @@ export class Pim extends DurableAgent<Env> {
 					for (const circle of circles) this.#circle(String(circle));
 					this.#assertOpen();
 					this.artifacts.setCircles(artifact.id, circles.map(String));
-					return noStore({ ...this.artifacts.get(artifact.id), circles: this.artifacts.circlesOf(artifact.id) });
+					return noStore({ ...this.#publicSession(this.artifacts.get(artifact.id)!), circles: this.artifacts.circlesOf(artifact.id) });
 				}),
 		],
-		// Artifacts others shared with this person, from their Pims, which check each request.
+		// Artifacts others shared with this person, from their spaces, which check each request.
 		[
 			"GET",
 			"/shared-artifacts",

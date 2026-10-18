@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS pim_artifact_grants (
 	granted_at INTEGER NOT NULL,
 	PRIMARY KEY (artifact, sha256, capability)
 );
--- The circles an artifact is shared with: their people see its latest version from their own Pim.
+-- The circles an artifact is shared with: their people see its latest version from their own space.
 CREATE TABLE IF NOT EXISTS pim_artifact_circles (
 	artifact TEXT NOT NULL,
 	circle TEXT NOT NULL,
@@ -360,7 +360,7 @@ export function applyEdits(content: string, edits: readonly { find: string; repl
 }
 
 export type ArtifactWriteOptions = {
-	/** Bytes the Pim may still grow by, or null for no limit. */
+	/** Bytes the space may still grow by, or null for no limit. */
 	readonly storageRoom: () => number | null;
 	/** Where files' bytes are kept. */
 	readonly bucket: R2Bucket;
@@ -476,7 +476,7 @@ export class ArtifactStore {
 	}
 
 	/**
-	 * Makes sure a version's files are in R2, where others' Pims read them:
+	 * Makes sure a version's files are in R2, where others' spaces read them:
 	 * a version from before files is moved there, keeping its hash.
 	 */
 	async stored(id: string, version: number): Promise<ArtifactVersion> {
@@ -767,7 +767,7 @@ export class ArtifactStore {
 		return true;
 	}
 
-	/** Deletes every file artifacts keep in R2, including any a lost write left unlisted. Run when the Pim is erased. */
+	/** Deletes every file artifacts keep in R2, including any a lost write left unlisted. Run when the space is erased. */
 	async deleteAllFiles(): Promise<void> {
 		let cursor: string | undefined;
 		do {
@@ -804,7 +804,7 @@ export class ArtifactStore {
 			.map((row) => String(row.key));
 	}
 
-	/** Keeps a value under a key for the artifact, within its room and the Pim's. */
+	/** Keeps a value under a key for the artifact, within its room and the space's. */
 	dataSet(id: string, scope: DataScope, key: string, value: string): void {
 		checkKey(key);
 		if (typeof value !== "string") throw new HttpError(400, "An artifact can keep only text: use JSON.stringify for anything else.");
@@ -820,7 +820,7 @@ export class ArtifactStore {
 			throw new HttpError(429, `Artifacts can keep up to ${MAX_ARTIFACT_DATA_TOTAL_BYTES} bytes in all; ${all} are used. Delete an artifact first.`);
 		}
 		const room = this.#storageRoom();
-		if (room !== null && size > room) throw new HttpError(429, `Pim storage quota exceeded: there is room for ${Math.max(0, room)} more bytes.`);
+		if (room !== null && size > room) throw new HttpError(429, `Space storage quota exceeded: there is room for ${Math.max(0, room)} more bytes.`);
 		this.#sql.exec(
 			"INSERT INTO pim_artifact_data (artifact, scope, key, value, size, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (artifact, scope, key) DO UPDATE SET value = excluded.value, size = excluded.size, updated_at = excluded.updated_at",
 			id,

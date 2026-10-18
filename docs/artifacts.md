@@ -41,7 +41,7 @@ Under `/api`, with the owner's passkey session or an API token in the `Authoriza
 | DELETE | `/artifacts/:id` | Deletes it and every version |
 | PUT | `/artifacts/:id/circles` | `{ circles }`: the ids of the circles to share it with (see [Sharing](#sharing)); `[]` stops sharing it |
 | GET | `/shared-artifacts` | `{ artifacts }`: what others share with you, each as its latest version with its owner's username as `host` |
-| GET | `/shared-artifacts/:host/:id`, `…/versions/:v`, `…/versions/:v/frame` | One of them, its content, and its page, from its owner's Pim; `404` once they stop sharing it or it isn't the latest version |
+| GET | `/shared-artifacts/:host/:id`, `…/versions/:v`, `…/versions/:v/frame` | One of them, its content, and its page, from its owner's space; `404` once they stop sharing it or it isn't the latest version |
 | POST | `/shared-artifacts/:host/:id/versions/:v/bridge`, `…/grants` | Its bridge calls and permissions, as for your own |
 | GET, POST, DELETE | `/artifacts/:id/publish` | What you published of it, with `linkable` and its public `link` (`404` if nothing); `{ public? }`: publishes its latest version, replacing what was published, and with `public`, lets anyone with the link see it or stops them; or takes it down (see [Publishing](#publishing)) |
 | GET | `/published-artifacts` | `{ artifacts }`: published artifacts (`?q=` searches titles and authors), without content |
@@ -79,27 +79,27 @@ Every framed artifact can use `window.pim`, whose calls return promises:
 | Call | What it does | Permission |
 | --- | --- | --- |
 | `pim.storage.get(key)`, `.set(key, text)`, `.delete(key)`, `.list(prefix?)` | Text the artifact keeps under keys (1 to 200 characters), across visits and versions, until it's deleted | None: it's the artifact's own, and nothing else can read it |
-| `pim.shared.get(key)`, `.set(key, text)`, `.delete(key)`, `.list(prefix?)` | The same, kept once for everyone the artifact is shared with, its owner included, in the owner's Pim: a tally, a sign-up sheet, a shared list. Separate from `pim.storage`, which stays each person's own. A published artifact opened from Discover keeps nothing for everyone, and these calls fail there | None, as for `pim.storage` |
+| `pim.shared.get(key)`, `.set(key, text)`, `.delete(key)`, `.list(prefix?)` | The same, kept once for everyone the artifact is shared with, its owner included, in the owner's space: a tally, a sign-up sheet, a shared list. Separate from `pim.storage`, which stays each person's own. A published artifact opened from Discover keeps nothing for everyone, and these calls fail there | None, as for `pim.storage` |
 | `pim.ask(prompt)` | An answer from the utility model (`ARTIFACT_ASK` in [`src/utility.ts`](../src/utility.ts)), which has no tools and sees only the prompt (at most 20,000 characters). It counts toward the daily model limits | The person's, for this version |
 | `pim.tools.call(name, input)` | Runs an app tool, by its tool name, and answers with its result as text | The person's, for this version and this tool; only tools the owner lets run without asking (`on`). A tool that asks first can't be allowed or called: nothing in an artifact could show the person what it's about to do |
 
 The app relays a call to `POST /api/artifacts/:id/versions/:v/bridge` as `{ op, args }`. Pim answers `{ value }`, or `{ needs: { capability, label } }` when the person hasn't allowed it. The app then asks them, over the frame: "“Water tracker” wants to ask Pim's model…", or "…wants to use Calendar: find_events for you". A yes is kept (`POST …/grants { capability }`, in `pim_artifact_grants`) for that version's `sha256`, so a new version, which is new code, asks again. A no is remembered by the frame until it's shown again, and the call fails with "The person didn't allow it."
 
-What an artifact gets back, it could send elsewhere, like anything else it shows (see above), and the prompts say so. What it keeps is in `pim_artifact_data` (with `pim.shared` data apart, by its `scope`), at most 1,000,000 bytes per artifact and 10,000,000 for all of them, within the Pim's storage quota; it's in the export, deleted with the artifact, and counted by the erasure check.
+What an artifact gets back, it could send elsewhere, like anything else it shows (see above), and the prompts say so. What it keeps is in `pim_artifact_data` (with `pim.shared` data apart, by its `scope`), at most 1,000,000 bytes per artifact and 10,000,000 for all of them, within the space's storage quota; it's in the export, deleted with the artifact, and counted by the erasure check.
 
 ## Sharing
 
 An artifact can be shared with your circles (see [Sharing](../README.md#sharing)): Share on its page lists them. The people in those circles find it in Artifacts under Shared with you, as its latest version, which they can use and print but not change, see older versions of, or download. Stop sharing it, delete it, delete the circle, or take someone out of the circle, and their next look is refused.
 
-- **It runs in their Pim.** Their app asks their own Pim, which asks yours (`guestArtifact`) and checks nothing itself: your Pim checks, at every request, that they're in a circle it's shared with and that the version is the latest. The page is framed and sandboxed as your own are.
-- **What it keeps for them is theirs.** `pim.storage` keeps their data in their own Pim, apart from yours and everyone else's. `pim.ask` uses their model and counts toward their limits, and `pim.tools.call` their apps' tools, under their permissions. Nothing of yours is reached but the artifact and its `pim.shared` data.
-- **What it keeps for everyone is yours.** `pim.shared` writes go to your Pim (`guestArtifactShared`), within the artifact's limits. Anyone it's shared with can change or delete that data, so an artifact should keep there only what they may all see.
+- **It runs in their space.** Their app asks their own space, which asks yours (`guestArtifact`) and checks nothing itself: your space checks, at every request, that they're in a circle it's shared with and that the version is the latest. The page is framed and sandboxed as your own are.
+- **What it keeps for them is theirs.** `pim.storage` keeps their data in their own space, apart from yours and everyone else's. `pim.ask` uses their model and counts toward their limits, and `pim.tools.call` their apps' tools, under their permissions. Nothing of yours is reached but the artifact and its `pim.shared` data.
+- **What it keeps for everyone is yours.** `pim.shared` writes go to your space (`guestArtifactShared`), within the artifact's limits. Anyone it's shared with can change or delete that data, so an artifact should keep there only what they may all see.
 
 ## Publishing
 
 An artifact can also be published for everyone on the Pim, from Share on its page, as agents are published (see the README). The Gallery keeps a copy of its latest version, which Discover lists. Publishing again replaces the copy with the latest version; until then, a new version stays the author's own.
 
-- **Anyone signed in can open it.** It runs framed and sandboxed, as their own artifacts do. Like an artifact shared with them, what it keeps for them is in their own Pim (under `gallery/<id>`), and its model and tool calls are theirs, once they allow the published version. It keeps nothing for everyone: `pim.shared` fails.
+- **Anyone signed in can open it.** It runs framed and sandboxed, as their own artifacts do. Like an artifact shared with them, what it keeps for them is in their own space (under `gallery/<id>`), and its model and tool calls are theirs, once they allow the published version. It keeps nothing for everyone: `pim.shared` fails.
 - **Make it your own** copies the published version into their artifacts, as a new artifact of theirs to change, and counts the use.
 - **Taking it down.** Unpublishing, deleting the artifact, deleting the account, or the admin's takedown removes it from Discover, and the next request for it is refused. Copies people made, and what it kept for them, stay theirs.
 - Each person can publish up to 20 artifacts.
@@ -109,7 +109,7 @@ An artifact can also be published for everyone on the Pim, from Share on its pag
 A published page, React app, drawing or diagram can also be seen by anyone with its link, without an account, once its author turns on "Anyone with the link" under Share. Links are off until the deployment sets `PIM_CONTENT_ORIGIN` to an origin of its own, such as `https://pim-content.example.com`, apart from the app's: a link is `<that origin>/p/<id>`.
 
 - **The content origin serves only published pages.** A request to it gets `/p/<id>` for a published artifact whose link is on, `/artifact-runtime/*`, and `404` for everything else, including the API and `/auth`: nobody signs in there, and the app's cookies, which belong to its own host, aren't sent. Route only `<content host>/p/*` and `<content host>/artifact-runtime/*` to the Worker: the app's static files would answer other paths there.
-- **The page is the one Pim frames**, under the same sandbox and headers, plus `x-robots-tag: noindex`, and with the content origin's runtime. At the top of a tab, the bridge has no Pim to answer it: every `window.pim` call fails ("Pim isn't here"), so it keeps nothing and asks for nothing.
+- **The page is the one Pim frames**, under the same sandbox and headers, plus `x-robots-tag: noindex`, and with the content origin's runtime. At the top of a tab, the bridge has no space to answer it: every `window.pim` call fails ("Pim isn't here"), so it keeps nothing and asks for nothing.
 - **Anyone who has the link can pass it on.** Its id is random (64 bits), but it isn't a secret once shared. Turning the link off, unpublishing, deleting the artifact or the account, or the admin's takedown makes the next request `404`; pages already open stay as they are. Requests are rate-limited per address.
 - Markdown artifacts don't get links: they're shown in the app, not as pages.
 
@@ -131,8 +131,8 @@ A version is a set of files: an HTML page's `index.html`, a JSX app's `App.jsx`,
 - **Each file is stored once.** A new version stores only files that changed; the same file in two versions, or two artifacts, is one object, counted once against the limits. A restore lists the older version's files again and stores nothing.
 - **Writing stores first, then lists.** A write stores its new files, then, with nothing awaited between its checks and its writes, adds the version, or is refused (`409`, `413`, `429`). The checks run before storing too, so a write that's sure to be refused stores nothing.
 - **Deleting frees what nothing else lists.** Deleting an artifact deletes from R2 each of its files that no other version has. A write storing the same file at that moment has claimed it (`pim_artifact_pending`), and work on one file waits for the work on it before, so a deletion can't take a file from under a write. A file a refused write stored is freed the same way.
-- **Versions from before files** keep their one file in the version row, where the owner's Pim reads it. When someone else's Pim needs it (sharing, publishing, a restore), it moves to R2, keeping its hash, so permissions given to that version still hold.
-- Others' Pims read files from R2 themselves, under the owner's prefix, after the owner's Pim (or the Gallery, for a published one) has said which: an artifact shared with a circle, or published, is never copied to them, except by making it their own.
+- **Versions from before files** keep their one file in the version row, where the owner's space reads it. When someone else's space needs it (sharing, publishing, a restore), it moves to R2, keeping its hash, so permissions given to that version still hold.
+- Others' spaces read files from R2 themselves, under the owner's prefix, after the owner's space (or the Gallery, for a published one) has said which: an artifact shared with a circle, or published, is never copied to them, except by making it their own.
 
 ## Limits
 
@@ -144,7 +144,7 @@ Each limit is checked against the stored versions before anything is written. Th
 | `artifactVersions` | Versions one artifact keeps. At the limit, it takes no new versions: delete it, or make a new one | |
 | `artifactBytes` | One version's size: all its files, in bytes | 10,000,000 (a framed version is served as one page) |
 | `artifactStorageBytes` | All artifacts' files, each distinct file once | 100,000,000 |
-| `storageBytes` | The whole Pim: a write is refused if it wouldn't fit | |
+| `storageBytes` | The whole space: a write is refused if it wouldn't fit | |
 
 ## Export and deletion
 

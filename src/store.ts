@@ -258,6 +258,10 @@ CREATE TABLE IF NOT EXISTS pim_sessions (
 	summary TEXT,
 	summary_of TEXT
 );
+CREATE TABLE IF NOT EXISTS pim_session_ids (
+	id TEXT PRIMARY KEY,
+	session TEXT NOT NULL UNIQUE
+);
 CREATE TABLE IF NOT EXISTS pim_meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
@@ -387,6 +391,7 @@ export class PimStore {
 			pim_mcp_servers: "apps",
 			pim_app_watches: "watches",
 			pim_sessions: "chats",
+			pim_session_ids: "chat ids",
 			pim_credentials: "credentials",
 			pim_app_connections: "app connections",
 			pim_tool_widgets: "widgets from apps' results",
@@ -721,7 +726,25 @@ export class PimStore {
 		return this.#sql.exec("DELETE FROM pim_app_watches WHERE id = ?", id).rowsWritten > 0;
 	}
 
-	// Sessions: what a sidebar shows. pi owns the conversations; this is their title and activity.
+	// Sessions: what a sidebar shows. pi owns the conversations; this is their ids, titles and activity.
+
+	/**
+	 * The id a conversation goes by outside the Pim: in the app's addresses,
+	 * the API, links, and what agents read. pi numbers its conversations
+	 * from a counter it shares with everything else it stores, so those
+	 * numbers stay inside; each conversation gets a random id the first time
+	 * it is shown, and keeps it.
+	 */
+	publicId(session: string): string {
+		this.#sql.exec("INSERT OR IGNORE INTO pim_session_ids (id, session) VALUES (?, ?)", crypto.randomUUID(), session);
+		return String(this.#sql.exec("SELECT id FROM pim_session_ids WHERE session = ?", session).one().id);
+	}
+
+	/** The conversation a public id names, if any (see `publicId`). */
+	sessionOf(id: string): string | undefined {
+		const [row] = this.#sql.exec("SELECT session FROM pim_session_ids WHERE id = ?", id).toArray();
+		return row ? String(row.session) : undefined;
+	}
 
 	sessionInfo(id: string): SessionInfo | undefined {
 		const [row] = this.#sql.exec("SELECT * FROM pim_sessions WHERE id = ?", id).toArray();

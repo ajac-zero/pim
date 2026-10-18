@@ -105,7 +105,9 @@ export function useAwaitingApproval() {
             (approval) =>
               approval.status === "pending" && !approval.requestedBy,
           )
-          .map((approval) => approval.member?.session ?? approval.session),
+          .flatMap(
+            (approval) => approval.member?.session ?? approval.session ?? [],
+          ),
       ),
     [approvals],
   );

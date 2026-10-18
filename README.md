@@ -161,7 +161,7 @@ For local development, run `pnpm dev`: the Worker and the built web app at `http
 
 ## API
 
-The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out the prefix. It is the signed-in person's own Pim. The web app calls it with its session cookie. Other clients send `Authorization: Bearer <token>`, with a token made in Settings (API tokens), which names its owner (`pim_<owner>_…`). WebSockets from clients that can't set headers pass `?token=<token>` instead. Only the three paths connected apps call stay at the root, without the prefix, and name whose agent they are for: `/mcp/callback/:owner`, `/mcp/events/:owner/:watch`, and `/mcp/client/:owner`, Pim's client metadata document for services whose sign-in takes one instead of registering clients (Amp's). MCP clients talk with your majordomo at `/mcp`, also at the root, with an OAuth access token or an API token (see [Talking with Pim from other apps](#talking-with-pim-from-other-apps)). Sessions are separate conversations. The root session is `1`.
+The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out the prefix. It is the signed-in person's own Pim. The web app calls it with its session cookie. Other clients send `Authorization: Bearer <token>`, with a token made in Settings (API tokens), which names its owner (`pim_<owner>_…`). WebSockets from clients that can't set headers pass `?token=<token>` instead. Only the three paths connected apps call stay at the root, without the prefix, and name whose agent they are for: `/mcp/callback/:owner`, `/mcp/events/:owner/:watch`, and `/mcp/client/:owner`, Pim's client metadata document for services whose sign-in takes one instead of registering clients (Amp's). MCP clients talk with your majordomo at `/mcp`, also at the root, with an OAuth access token or an API token (see [Talking with Pim from other apps](#talking-with-pim-from-other-apps)). Sessions are separate conversations. Each has a random id (a UUID) of its own, which is also its address in the app (`/chat/<id>`); `GET /` names the root session, where API clients talk by default.
 
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
@@ -214,7 +214,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | DELETE | `/goals/:id` | | |
 | GET | `/schedules` | | Pending scheduled tasks |
 | DELETE | `/schedules/:id` | | Cancel one |
-| GET | `/approvals`, `/approvals/:id` | `?status=pending\|approved\|denied` | Approval requests; each says what its timeout decides (`onTimeout`), who decided it (`decidedBy`: `user`, `timeout`, `always` or `majordomo`), and `review`: `{ status: "reviewing" \| "escalated", note }` while the majordomo has it, or after it asked you, with what it said; null when you were asked directly |
+| GET | `/approvals`, `/approvals/:id` | `?status=pending\|approved\|denied` | Approval requests; each says what its timeout decides (`onTimeout`), who decided it (`decidedBy`: `user`, `timeout`, `always` or `majordomo`), and `review`: `{ status: "reviewing" \| "escalated", note }` while the majordomo has it, or after it asked you, with what it said; null when you were asked directly. `session` is the chat that asked, or null when a guest asked from their own Pim |
 | POST | `/approvals/:id/approve`, `/approvals/:id/deny` | `{ note? }` | The decided approval; `409` if already decided |
 | POST | `/approvals/:id/approve` | `{ note?, always: true }` | Also sets the approval's tool to `on`, so later calls run without asking, and approves other pending calls to it |
 | GET | `/permissions` | `?circle=` | `{ tools: [{ app, appName, tool, name, description, readOnly, permission, default, chosen, changed, choices }] }`: Pim's own tools that ask first (`app: null`) and every connected app's tools, or with `circle`, that circle's (memory, and the apps' tools). `permission` is what applies: `off`, `ask` or `on`. `chosen` is yours, or null for the default |
@@ -293,7 +293,7 @@ The admin runs the Pim under `/admin`, from a signed-in browser only: an API tok
 
 ### WebSocket
 
-Connect to `wss://<host>/api/ws?session=1` (add `&token=...` without a passkey session). Each socket follows one session. Message types are in [`src/protocol.ts`](src/protocol.ts).
+Connect to `wss://<host>/api/ws?session=<id>` (add `&token=...` without a passkey session); without `session`, the socket follows the root session. Each socket follows one session. Message types are in [`src/protocol.ts`](src/protocol.ts).
 
 - Server → client:
   - `hello`: the session and tools.

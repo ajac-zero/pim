@@ -6,7 +6,7 @@ import { AgentStore } from "../src/agents";
 import { TeamStore } from "../src/team";
 import { CREATE_AGENT, RENAME_AGENT, UPDATE_AGENT } from "../src/extensions/agents";
 import { WRITE_SKILL } from "../src/extensions/skills";
-import { api, apiUrl, decisionRun, lastUserText, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, decisionRun, lastUserText, pendingApproval, post, ROOT, say, TOKEN, toolUse } from "./helpers";
 import { faux } from "./worker";
 
 /** The prompt sections sent last: pi sends the whole prompt once, then only what changed. */
@@ -45,7 +45,7 @@ describe("the owner's agents", () => {
 		};
 		faux.setResponses([record, record]);
 		await say("How far today?", session.id);
-		await say("Hello", "1");
+		await say("Hello", ROOT);
 		expect(prompts[0]).toContain('In this conversation you are \\"Marathon coach\\"');
 		expect(prompts[0]).toContain("Answer every question with a training tip.");
 		expect(prompts[1]).toContain('In this conversation you are \\"Majordomo\\".');
@@ -56,7 +56,7 @@ describe("the owner's agents", () => {
 		await api(`/agents/${mine.id}`, { method: "PUT", body: JSON.stringify({ name: "Sam", instructions: "Sign off with -S." }) });
 		faux.setResponses([record, record]);
 		await say("And tomorrow?", session.id);
-		await say("Hi again", "1");
+		await say("Hi again", ROOT);
 		expect(prompts[2]).toContain("Speak only in haiku.");
 		expect(prompts[3]).toContain('you are \\"Sam\\"');
 		expect(prompts[3]).toContain("Sign off with -S.");

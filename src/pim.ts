@@ -104,7 +104,7 @@ import { webExtension } from "./extensions/web";
 import { CODE_BACKEND, codeBackends, codeLoader, FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { PimBrowser } from "./browser";
 import { dispatch, HttpError, readJson, type Route } from "./http";
-import type { ClientMessage, ServerMessage, ToolInfo } from "./protocol";
+import type { ClientMessage, PublicApproval, ServerMessage, ToolInfo } from "./protocol";
 import { generateVapidKeys, type PushSubscription, sendPush, validSubscription, type VapidKeys } from "./push";
 import { type ApprovalPolicy, readSettings, type Settings, updateSettings } from "./settings";
 import {
@@ -231,7 +231,6 @@ export const AUTHORIZED_HEADER = "x-pim-authorized";
 /** Accepts any JSON-RPC result: pim checks the shapes of extension results itself. */
 const ANY_RESULT = { "~standard": { version: 1, vendor: "pim", validate: (value: unknown) => ({ value }) } };
 
-const SESSION_ID = /^[1-9][0-9]{0,15}$/;
 const ARTIFACT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const VERSION = /^[1-9][0-9]{0,8}$/;
 
@@ -355,6 +354,7 @@ export class Pim extends DurableAgent<Env> {
 			const { agent, member } = this.#roleOf(conversation);
 			return member ? { id: `${agent.id}:${member.name}`, name: member.name } : { id: agent.id, name: agent.name };
 		},
+		idOf: (conversation) => this.store.publicId(conversation),
 	});
 	readonly registry = this.telemetry.instrument(createRegistry());
 	#extensions: PimExtensions | undefined;
@@ -1019,7 +1019,7 @@ export class Pim extends DurableAgent<Env> {
 			},
 			sendEmail: (mail) => {
 				const origin = this.env.PIM_PUBLIC_URL || this.store.meta("public_origin");
-				const link = origin ? `\n\n—\nFrom your Pim: ${new URL(`/chat/${mail.session}`, origin)}` : "";
+				const link = origin ? `\n\n—\nFrom your Pim: ${new URL(`/chat/${this.store.publicId(mail.session)}`, origin)}` : "";
 				return this.email.send({ ...mail, text: `${mail.text}${link}` });
 			},
 			approvalFiled: (approval, isNew) => this.#approvalFiled(approval, isNew),
@@ -1293,10 +1293,11 @@ export class Pim extends DurableAgent<Env> {
 				}
 				// A message to a chat still busy with an earlier one is answered after it.
 				const receipt = await this.submitTo(session, userInput(message), { operationId: crypto.randomUUID(), whenBusy: "followUp" }, "user");
+				const id = this.store.publicId(session);
 				try {
-					return { conversation: session, reply: await this.#withReplies(await this.harness.wait(receipt.operationId, { session, signal })) };
+					return { conversation: id, reply: await this.#withReplies(await this.harness.wait(receipt.operationId, { session, signal })) };
 				} catch (error) {
-					if (signal.aborted) return { conversation: session, reply: null };
+					if (signal.aborted) return { conversation: id, reply: null };
 					throw error;
 				}
 			},
@@ -1314,8 +1315,9 @@ export class Pim extends DurableAgent<Env> {
 
 	async deliverNotification(notification: Notification, options: { sockets?: boolean } = {}): Promise<void> {
 		if (this.#closed()) return;
-		if (options.sockets !== false) this.broadcastMessage({ type: "notification", notification });
-		await Promise.all([this.#pushNotification(notification), this.#postWebhook(notification)]);
+		const shown = this.#publicSession(notification);
+		if (options.sockets !== false) this.broadcastMessage({ type: "notification", notification: shown });
+		await Promise.all([this.#pushNotification(shown), this.#postWebhook(shown)]);
 	}
 
 	/** This deployment's VAPID keys, made the first time a browser asks to subscribe. */
@@ -1381,7 +1383,7 @@ export class Pim extends DurableAgent<Env> {
 			this.store.setApprovalReview(approval.id, { status: "reviewing", note: null });
 			const reviewing = this.store.approval(approval.id)!;
 			// Open apps show the request, and that the majordomo is on it; the person can still decide first.
-			this.broadcastMessage({ type: "approval", approval: reviewing });
+			this.broadcastMessage({ type: "approval", approval: this.#publicApproval(reviewing) });
 			await this.schedule(new Date(Date.now() + REVIEW_MS), REVIEW_EXPIRY_CALLBACK, { id: approval.id });
 			void this.keepAliveWhile(() => this.#review(reviewing));
 		}
@@ -1390,7 +1392,7 @@ export class Pim extends DurableAgent<Env> {
 			return `[Approval ${approval.id}] Asked ${name}, the person's majordomo, who decides for them or asks them: ${approval.summary}. The decision, with the result, will arrive in this conversation as a message starting with "[Approval ${approval.id}]". Don't call it again; go on with anything that doesn't depend on it.`;
 		}
 		if (isNew) {
-			this.broadcastMessage({ type: "approval", approval });
+			this.broadcastMessage({ type: "approval", approval: this.#publicApproval(approval) });
 			const notification = this.store.addNotification({
 				id: crypto.randomUUID(),
 				// A team member's request shows in the chat it works for.
@@ -1472,7 +1474,7 @@ export class Pim extends DurableAgent<Env> {
 			this.store.recordApprovalResult(id, result);
 		}
 		const decided = this.store.approval(id)!;
-		this.broadcastMessage({ type: "approval", approval: decided });
+		this.broadcastMessage({ type: "approval", approval: this.#publicApproval(decided) });
 		if (decided.requestedBy) {
 			// A guest asked: the outcome continues their visit, in their own Pim, on their own usage.
 			try {
@@ -1856,7 +1858,7 @@ export class Pim extends DurableAgent<Env> {
 		if (!known) {
 			logged();
 			await this.schedule(new Date(approval.expiresAt!), APPROVAL_EXPIRY_CALLBACK, { id });
-			this.broadcastMessage({ type: "approval", approval });
+			this.broadcastMessage({ type: "approval", approval: this.#publicApproval(approval) });
 			const notification = this.store.addNotification({
 				id: crypto.randomUUID(),
 				session: null,
@@ -1987,7 +1989,7 @@ export class Pim extends DurableAgent<Env> {
 		if (approval?.status !== "pending" || approval.review?.status !== "reviewing" || this.#closed()) return;
 		this.store.setApprovalReview(id, { status: "escalated", note });
 		const escalated = this.store.approval(id)!;
-		this.broadcastMessage({ type: "approval", approval: escalated });
+		this.broadcastMessage({ type: "approval", approval: this.#publicApproval(escalated) });
 		const { name } = this.agents.majordomo();
 		const notification = this.store.addNotification({
 			id: crypto.randomUUID(),
@@ -2047,9 +2049,9 @@ export class Pim extends DurableAgent<Env> {
 	async #sendToAgent({ from, agent, message, chat, key }: { from: string; agent: Agent; message: string; chat: string | undefined; key: string }): Promise<string> {
 		let session = this.agents.byHandoff(key);
 		if (!session && chat !== undefined) {
-			const open = !this.#hiddenSessions().has(chat) && (await this.harness.sessions.list()).some((candidate) => candidate.id === chat);
-			if (!open || this.agents.ofSession(chat).id !== agent.id) return `No chat ${chat} with ${agent.name}: leave out chat to start one.`;
-			session = chat;
+			const named = await this.#session(chat).catch(() => undefined);
+			if (named === undefined || this.agents.ofSession(named).id !== agent.id) return `No chat ${chat} with ${agent.name}: leave out chat to start one.`;
+			session = named;
 		}
 		const operation = `handoff:${key}`;
 		try {
@@ -2059,7 +2061,8 @@ export class Pim extends DurableAgent<Env> {
 			return `It couldn't be sent: ${errorMessage(error)}`;
 		}
 		const result = await this.#withReplies(await this.harness.wait(operation, { session }));
-		const where = `Chat ${session} with ${agent.name}, at /chat/${session}.`;
+		const id = this.store.publicId(session);
+		const where = `Chat ${id} with ${agent.name}, at /chat/${id}.`;
 		if (result.status !== "done") return `${where}\n${agent.name} didn't finish: ${result.reason ?? "unanswered"}.`;
 		const answer = result.replies.length > 0 ? result.replies.join("\n\n") : "(It sent nothing.)";
 		return `${where}\n${agent.name} answered:\n${answer}`;
@@ -2077,7 +2080,7 @@ export class Pim extends DurableAgent<Env> {
 				const { name } = this.agents.ofSession(session);
 				await this.submitTo(
 					from,
-					`${CHAT_REPORT} ${name}] In chat ${session}, after the decision on its approval request, ${name} said:\n${replies.join("\n\n")}`,
+					`${CHAT_REPORT} ${name}] In chat ${this.store.publicId(session)}, after the decision on its approval request, ${name} said:\n${replies.join("\n\n")}`,
 					{ operationId: `handoff-report:${operation}`, whenBusy: "followUp" },
 					"pim",
 				);
@@ -2250,7 +2253,7 @@ export class Pim extends DurableAgent<Env> {
 		const context: WidgetContext = {
 			agent: { id: agent.id, name: agent.name, majordomo: agent.majordomo },
 			timeZone: this.settings().timeZone,
-			chatOf: (session) => (ofAgent(session) && !deleted.has(chatFor(session)) ? chatFor(session) : null),
+			chatOf: (session) => (ofAgent(session) && !deleted.has(chatFor(session)) ? this.store.publicId(chatFor(session)) : null),
 			ofAgent,
 			data: this.extensionData.for(ref.slice(0, ref.indexOf("/"))),
 		};
@@ -2534,7 +2537,7 @@ export class Pim extends DurableAgent<Env> {
 			if (deleted.has(session.id)) continue;
 			const info = this.store.sessionInfo(session.id);
 			sessions.push({
-				id: session.id,
+				id: this.store.publicId(session.id),
 				title: info?.title ?? null,
 				createdAt: info?.createdAt ?? null,
 				updatedAt: info?.updatedAt ?? null,
@@ -2550,19 +2553,19 @@ export class Pim extends DurableAgent<Env> {
 			model: describeModel(this.chosenModel()),
 			sessions,
 			memory: { entries: this.memory.store.page(Number.MAX_SAFE_INTEGER) },
-			goals: this.store.goals(),
+			goals: this.store.goals().map((goal) => this.#publicSession(goal)),
 			extensions: this.extensionData.export(),
-			schedules: (await this.services().listSchedules()).map(describeSchedule),
-			approvals: this.store.approvals(),
+			schedules: (await this.services().listSchedules()).map((schedule) => describeSchedule(schedule, this.store)),
+			approvals: this.store.approvals().map((approval) => this.#publicApproval(approval)),
 			permissions: this.store.toolPermissions(),
 			circles: this.#describeCircles(),
 			agents: this.agents.list(),
 			guestActivity: this.circles.activity(500),
 			sharedWithMe: this.visits.shares().map(({ ownerId, username, sharedAt, revoked }) => ({ ownerId, username, sharedAt, revoked })),
-			notifications: this.store.notifications({ unread: false }),
+			notifications: this.store.notifications({ unread: false }).map((notification) => this.#publicSession(notification)),
 			apps: this.apps.servers().map(({ id, name, url, approval }) => ({ id, name, url, approval })),
 			watches: this.appEvents.list(),
-			artifacts: this.artifacts.export(),
+			artifacts: this.artifacts.export().map((artifact) => this.#publicSession(artifact)),
 			files: await this.files.export(),
 			skills: this.skills.export(),
 			usage: this.usage.history(90),
@@ -2638,17 +2641,39 @@ export class Pim extends DurableAgent<Env> {
 		return new Set([...this.store.deletedSessions(), ...this.team.conversations()]);
 	}
 
+	/** The session a public id names (see `PimStore.publicId`), if it is one of the person's chats. */
 	async #session(id: string): Promise<string> {
+		const session = this.store.sessionOf(id);
 		// The root stays reachable when deleted: it is where API clients talk by default.
-		if (id === ROOT_SESSION) return id;
+		if (session === ROOT_SESSION) return session;
 		if (
-			!SESSION_ID.test(id) ||
-			this.#hiddenSessions().has(id) ||
-			!(await this.harness.sessions.list()).some((session) => session.id === id)
+			session === undefined ||
+			this.#hiddenSessions().has(session) ||
+			!(await this.harness.sessions.list()).some((candidate) => candidate.id === session)
 		) {
 			throw new HttpError(404, `No session ${id}`);
 		}
-		return id;
+		return session;
+	}
+
+	/** A session's name and activity, under its public id. */
+	#sessionInfo(session: string) {
+		const info = this.store.sessionInfo(session);
+		return info && { ...info, id: this.store.publicId(session) };
+	}
+
+	/** A record as it leaves the Pim: with its session's public id. */
+	#publicSession<T extends { readonly session: string | null }>(record: T): T {
+		return record.session === null ? record : { ...record, session: this.store.publicId(record.session) };
+	}
+
+	/** An approval as it leaves the Pim. A guest's conversation is in the guest's own Pim, so it has none here. */
+	#publicApproval(approval: Approval): PublicApproval {
+		return {
+			...approval,
+			session: approval.requestedBy ? null : this.store.publicId(approval.session),
+			member: approval.member && { ...approval.member, session: this.store.publicId(approval.member.session) },
+		};
 	}
 
 	/**
@@ -2687,7 +2712,7 @@ export class Pim extends DurableAgent<Env> {
 			() => ({
 				model: this.chosenModel().id,
 				timeZone: this.settings().timeZone,
-				rootSession: ROOT_SESSION,
+				rootSession: this.store.publicId(ROOT_SESSION),
 				tools: this.tools(),
 			}),
 		],
@@ -2704,7 +2729,8 @@ export class Pim extends DurableAgent<Env> {
 					const info = this.store.sessionInfo(session.id);
 					const visit = this.visits.bySession(session.id);
 					return {
-						...session,
+						id: this.store.publicId(session.id),
+						busy: session.busy,
 						title: info?.title ?? null,
 						createdAt: info?.createdAt ?? null,
 						updatedAt: info?.updatedAt ?? null,
@@ -2723,7 +2749,7 @@ export class Pim extends DurableAgent<Env> {
 				const { title, agent: agentId } = await readJson<{ title: string; agent: string }>(request);
 				const agent = agentId === undefined ? this.agents.majordomo() : this.#agent(agentId);
 				const id = await this.#startChat(agent, typeof title === "string" && title.trim() !== "" ? clipTitle(title) : undefined);
-				return { id, ...this.store.sessionInfo(id), agent: this.#agentRef(id) };
+				return { ...this.#sessionInfo(id), agent: this.#agentRef(id) };
 			},
 		],
 		[
@@ -2734,7 +2760,7 @@ export class Pim extends DurableAgent<Env> {
 				const { title } = await readJson<{ title: string }>(request);
 				if (typeof title !== "string" || title.trim() === "") throw new HttpError(400, "title must be a non-empty string");
 				this.store.renameSession(id, clipTitle(title));
-				return this.store.sessionInfo(id);
+				return this.#sessionInfo(id);
 			},
 		],
 		// Side jobs on the utility model (./utility.ts).
@@ -2746,7 +2772,7 @@ export class Pim extends DurableAgent<Env> {
 				const title = clipTitle(await this.utility(NAME_CHAT, await this.#conversationText(id, 8_000)));
 				this.store.renameSession(id, title);
 				this.broadcastMessage({ type: "sessions" });
-				return this.store.sessionInfo(id);
+				return this.#sessionInfo(id);
 			},
 		],
 		[
@@ -2836,8 +2862,8 @@ export class Pim extends DurableAgent<Env> {
 					},
 					"user",
 				);
-				if (!body.wait) return Response.json(receipt, { status: 202 });
-				return this.#withReplies(await this.harness.wait(receipt.operationId, { session: id }));
+				if (!body.wait) return Response.json({ ...receipt, session }, { status: 202 });
+				return { ...(await this.#withReplies(await this.harness.wait(receipt.operationId, { session: id }))), session };
 			},
 		],
 		[
@@ -2848,9 +2874,9 @@ export class Pim extends DurableAgent<Env> {
 				const timeout = Math.min(Number(url.searchParams.get("timeout") ?? 25_000) || 25_000, 60_000);
 				const signal = AbortSignal.timeout(timeout);
 				try {
-					return await this.#withReplies(await this.harness.wait(operation!, { session: id, signal }));
+					return { ...(await this.#withReplies(await this.harness.wait(operation!, { session: id, signal }))), session };
 				} catch (error) {
-					if (signal.aborted) return { operationId: operation, session: id, status: "pending" };
+					if (signal.aborted) return { operationId: operation, session, status: "pending" };
 					throw error;
 				}
 			},
@@ -2859,15 +2885,17 @@ export class Pim extends DurableAgent<Env> {
 		[
 			"GET",
 			"/sessions/:session/team",
-			async ({ session }) => ({ runs: this.team.ofSession(await this.#session(session!)) }),
+			async ({ session }) => ({
+				runs: this.team.ofSession(await this.#session(session!)).map((run) => ({ ...run, conversation: this.store.publicId(run.conversation), session })),
+			}),
 		],
 		[
 			"GET",
 			"/sessions/:session/team/:conversation",
 			async ({ session, conversation }) => {
-				const run = this.team.run(conversation!);
+				const run = this.team.run(this.store.sessionOf(conversation!) ?? "");
 				if (!run || run.session !== (await this.#session(session!))) throw new HttpError(404, `No team task ${conversation}`);
-				return { ...run, messages: projectEntries(await this.harness.session(run.conversation).messages()) };
+				return { ...run, conversation, session, messages: projectEntries(await this.harness.session(run.conversation).messages()) };
 			},
 		],
 		[
@@ -2999,14 +3027,14 @@ export class Pim extends DurableAgent<Env> {
 
 		// Artifacts: what the agent made, every version kept. Their bytes are never kept by the browser,
 		// and HTML in them runs only sandboxed (see ./artifacts.ts).
-		["GET", "/artifacts", (_params, _request, url) => this.#artifactRequest(url, () => noStore({ artifacts: this.artifacts.list(), bytes: this.artifacts.totalBytes() }))],
+		["GET", "/artifacts", (_params, _request, url) => this.#artifactRequest(url, () => noStore({ artifacts: this.artifacts.list().map((artifact) => this.#publicSession(artifact)), bytes: this.artifacts.totalBytes() }))],
 		[
 			"GET",
 			"/artifacts/:id",
 			({ id }, _request, url) =>
 				this.#artifactRequest(url, () => {
 					const artifact = this.#artifact(id!);
-					return noStore({ ...artifact, history: this.artifacts.versions(artifact.id) });
+					return noStore({ ...this.#publicSession(artifact), history: this.artifacts.versions(artifact.id) });
 				}),
 		],
 		[
@@ -3032,7 +3060,7 @@ export class Pim extends DurableAgent<Env> {
 					}
 					this.#assertOpen();
 					const restored = await this.artifacts.restore(artifact.id, version!, baseVersion!);
-					return noStore({ ...this.artifacts.get(artifact.id), restored: restored.version }, 201);
+					return noStore({ ...this.#publicSession(this.artifacts.get(artifact.id)!), restored: restored.version }, 201);
 				}),
 		],
 		[
@@ -3269,13 +3297,17 @@ export class Pim extends DurableAgent<Env> {
 				if (status !== null && !GOAL_STATUSES.includes(status as GoalStatus)) {
 					throw new HttpError(400, `status must be one of ${GOAL_STATUSES.join(", ")}`);
 				}
-				return { goals: this.store.goals(status === null ? undefined : (status as GoalStatus)) };
+				return { goals: this.store.goals(status === null ? undefined : (status as GoalStatus)).map((goal) => this.#publicSession(goal)) };
 			},
 		],
 		[
 			"GET",
 			"/goals/:id",
-			({ id }) => this.store.goal(id!) ?? Promise.reject(new HttpError(404, `No goal ${id}`)),
+			({ id }) => {
+				const goal = this.store.goal(id!);
+				if (!goal) throw new HttpError(404, `No goal ${id}`);
+				return this.#publicSession(goal);
+			},
 		],
 		[
 			"DELETE",
@@ -3290,7 +3322,7 @@ export class Pim extends DurableAgent<Env> {
 		[
 			"GET",
 			"/schedules",
-			async () => ({ schedules: (await this.services().listSchedules()).map(describeSchedule) }),
+			async () => ({ schedules: (await this.services().listSchedules()).map((schedule) => describeSchedule(schedule, this.store)) }),
 		],
 		[
 			"DELETE",
@@ -3310,13 +3342,17 @@ export class Pim extends DurableAgent<Env> {
 				if (status !== null && !["pending", "approved", "denied"].includes(status)) {
 					throw new HttpError(400, "status must be pending, approved or denied");
 				}
-				return { approvals: this.store.approvals((status ?? undefined) as Approval["status"] | undefined) };
+				return { approvals: this.store.approvals((status ?? undefined) as Approval["status"] | undefined).map((approval) => this.#publicApproval(approval)) };
 			},
 		],
 		[
 			"GET",
 			"/approvals/:id",
-			({ id }) => this.store.approval(id!) ?? Promise.reject(new HttpError(404, `No approval ${id}`)),
+			({ id }) => {
+				const approval = this.store.approval(id!);
+				if (!approval) throw new HttpError(404, `No approval ${id}`);
+				return this.#publicApproval(approval);
+			},
 		],
 		[
 			"POST",
@@ -3324,7 +3360,7 @@ export class Pim extends DurableAgent<Env> {
 			async ({ id }, request) => {
 				const { note, always } = await readJson<{ note: string; always: boolean }>(request);
 				const given = typeof note === "string" ? note : undefined;
-				return always === true ? this.alwaysApprove(id!, given) : this.decideApproval(id!, "approve", given);
+				return this.#publicApproval(always === true ? await this.alwaysApprove(id!, given) : await this.decideApproval(id!, "approve", given));
 			},
 		],
 		[
@@ -3332,7 +3368,7 @@ export class Pim extends DurableAgent<Env> {
 			"/approvals/:id/deny",
 			async ({ id }, request) => {
 				const { note } = await readJson<{ note: string }>(request);
-				return this.decideApproval(id!, "deny", typeof note === "string" ? note : undefined);
+				return this.#publicApproval(await this.decideApproval(id!, "deny", typeof note === "string" ? note : undefined));
 			},
 		],
 		// Tool permissions: which tools Pim may use, and which ask first.
@@ -3393,7 +3429,7 @@ export class Pim extends DurableAgent<Env> {
 				} catch (error) {
 					console.warn("the majordomo's introduction failed", error);
 				}
-				return { agent: this.agents.majordomo(), introduced: true, session: ROOT_SESSION };
+				return { agent: this.agents.majordomo(), introduced: true, session: this.store.publicId(ROOT_SESSION) };
 			},
 		],
 		["GET", "/agents/:agent", ({ agent }) => this.#agent(agent!)],
@@ -3600,11 +3636,11 @@ export class Pim extends DurableAgent<Env> {
 					username: share.username,
 					sharedAt: share.sharedAt,
 					available: !share.revoked,
-					session: share.session !== null && !this.store.deletedSessions().has(share.session) ? share.session : null,
+					session: share.session !== null && !this.store.deletedSessions().has(share.session) ? this.store.publicId(share.session) : null,
 				})),
 			}),
 		],
-		["POST", "/visits/:username", async ({ username }) => ({ session: await this.startVisit(username!) })],
+		["POST", "/visits/:username", async ({ username }) => ({ session: this.store.publicId(await this.startVisit(username!)) })],
 
 		// The apps people can connect, and the person's connections to them.
 		[
@@ -3731,7 +3767,7 @@ export class Pim extends DurableAgent<Env> {
 			"GET",
 			"/notifications",
 			(_params, _request, url) => ({
-				notifications: this.store.notifications({ unread: url.searchParams.get("unread") === "true" }),
+				notifications: this.store.notifications({ unread: url.searchParams.get("unread") === "true" }).map((notification) => this.#publicSession(notification)),
 			}),
 		],
 		[
@@ -3740,7 +3776,7 @@ export class Pim extends DurableAgent<Env> {
 			({ id }) => {
 				if (!this.store.notification(id!)) throw new HttpError(404, `No notification ${id}`);
 				this.store.markNotificationRead(id!);
-				return this.store.notification(id!);
+				return this.#publicSession(this.store.notification(id!)!);
 			},
 		],
 	];
@@ -3841,17 +3877,17 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	async onConnect(connection: Connection<SocketState>, ctx: ConnectionContext): Promise<void> {
-		const requested = new URL(ctx.request.url).searchParams.get("session") || ROOT_SESSION;
+		const requested = new URL(ctx.request.url).searchParams.get("session");
 		let session: string;
 		try {
-			session = await this.#session(requested);
+			session = requested ? await this.#session(requested) : ROOT_SESSION;
 		} catch (error) {
 			this.#send(connection, { type: "error", message: errorMessage(error) });
 			connection.close(4004, "Unknown session");
 			return;
 		}
 		connection.setState({ session });
-		this.#send(connection, { type: "hello", session, tools: this.tools() });
+		this.#send(connection, { type: "hello", session: this.store.publicId(session), tools: this.tools() });
 		await this.#watch(connection, session);
 	}
 
@@ -3888,8 +3924,8 @@ export class Pim extends DurableAgent<Env> {
 	async #command(connection: Connection, session: string, message: ClientMessage): Promise<JsonValue> {
 		const handle = this.harness.session(session);
 		switch (message.type) {
-			case "submit":
-				return await this.submitTo(
+			case "submit": {
+				const receipt = await this.submitTo(
 					session,
 					userInput(message.content),
 					{
@@ -3898,6 +3934,8 @@ export class Pim extends DurableAgent<Env> {
 					},
 					"user",
 				);
+				return { ...receipt, session: this.store.publicId(session) };
+			}
 			case "abort":
 				return await handle.abort(message.operationId);
 			case "reset":
@@ -3915,13 +3953,14 @@ export class Pim extends DurableAgent<Env> {
 		await this.#unwatch(connection.id);
 		const stream = await this.harness.session(session).events();
 		this.#watches.set(connection.id, stream);
-		this.#send(connection, { type: "events", session, events: [stream.snapshot] });
+		const id = this.store.publicId(session);
+		this.#send(connection, { type: "events", session: id, events: [stream.snapshot] });
 		stream.start(async (events) => {
 			if (connection.readyState !== WebSocket.OPEN) {
 				void this.#unwatch(connection.id);
 				return;
 			}
-			this.#send(connection, { type: "events", session, events });
+			this.#send(connection, { type: "events", session: id, events });
 		});
 	}
 

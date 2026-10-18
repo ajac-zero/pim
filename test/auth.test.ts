@@ -417,9 +417,9 @@ describe("sessions", () => {
 		const { browser } = await admin();
 		const evil = await browser.fetch("/api/sessions", { method: "POST", headers: { origin: "https://evil.example.com" }, json: {} });
 		expect(evil.status).toBe(403);
-		const socketWithoutOrigin = await browser.fetch("/api/ws?session=1", { headers: { upgrade: "websocket" } });
+		const socketWithoutOrigin = await browser.fetch("/api/ws", { headers: { upgrade: "websocket" } });
 		expect(socketWithoutOrigin.status).toBe(403);
-		const socket = await browser.fetch("/api/ws?session=1", { headers: { upgrade: "websocket", origin: ORIGIN } });
+		const socket = await browser.fetch("/api/ws", { headers: { upgrade: "websocket", origin: ORIGIN } });
 		expect(socket.status).toBe(101);
 		socket.webSocket?.accept();
 		socket.webSocket?.close();

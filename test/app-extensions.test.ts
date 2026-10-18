@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { newSecret, signWebhook } from "../src/extensions/app-events";
 import type { Approval } from "../src/store";
-import { api, apiUrl, lastUserText, OWNER, pendingApproval, post, say, toolUse, url } from "./helpers";
+import { api, apiUrl, lastUserText, OWNER, pendingApproval, post, ROOT as ROOT_SESSION, say, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /**
@@ -262,7 +262,7 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		const [watch] = (await api("/watches")).body.watches;
 		watchId = watch.id;
 		secret = await watchSecret(watchId);
-		expect(watch).toMatchObject({ app: "Travel", event: "flight.price_changed", status: "active", session: "1", arguments: { route: "JFK-LIS" } });
+		expect(watch).toMatchObject({ app: "Travel", event: "flight.price_changed", status: "active", session: ROOT_SESSION, arguments: { route: "JFK-LIS" } });
 		expect(subscribes).toEqual([
 			{
 				name: "flight.price_changed",
@@ -303,7 +303,7 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 			cursor: "c1",
 		};
 		expect((await deliver(`/mcp/events/${OWNER}/${watchId}`, secret, event)).status).toBe(204);
-		const settled = await api(`/sessions/1/operations/event:${watchId}:evt_1`);
+		const settled = await api(`/sessions/${ROOT_SESSION}/operations/event:${watchId}:evt_1`);
 		expect(settled.body).toMatchObject({ status: "done", text: "It's $480 now." });
 		expect(woken).toContain(`[App event] Travel sent "flight.price_changed" (event evt_1 at 2026-10-08T12:00:00Z) for watch ${watchId}.`);
 		expect(woken).toContain("Your instruction for this watch: Tell me if it drops below $500.");
@@ -312,7 +312,7 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 
 		// The app retries: same event, new signature. No second run (the faux model has no response left for one).
 		expect((await deliver(`/mcp/events/${OWNER}/${watchId}`, secret, event)).status).toBe(204);
-		const { body } = await api("/sessions/1/messages");
+		const { body } = await api(`/sessions/${ROOT_SESSION}/messages`);
 		const deliveries = body.messages.filter((message: { role: string; parts: { text?: string }[] }) =>
 			message.parts.some((part) => part.text?.startsWith("[App event]")),
 		);

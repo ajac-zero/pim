@@ -87,14 +87,17 @@ export class Telemetry {
 	readonly #tracer: Tracer | null;
 	readonly #content: boolean;
 	readonly #agentOf: (conversation: string) => AgentRef;
+	/** The id a conversation goes by outside the Pim, which its spans give it. */
+	readonly #idOf: (conversation: string) => string;
 	/** Open runs, by conversation. In memory: a run resumed after an eviction starts a new trace. */
 	readonly #runs = new Map<string, Run>();
 	/** The tool call whose execution is under way, so work it submits elsewhere joins its trace. */
 	readonly #active = new AsyncLocalStorage<Context>();
 
-	constructor(options: { exporter: SpanExporter | null; content: boolean; service: string; instance: string; agentOf: (conversation: string) => AgentRef }) {
+	constructor(options: { exporter: SpanExporter | null; content: boolean; service: string; instance: string; agentOf: (conversation: string) => AgentRef; idOf: (conversation: string) => string }) {
 		this.#content = options.content;
 		this.#agentOf = options.agentOf;
+		this.#idOf = options.idOf;
 		this.#provider = options.exporter
 			? new TracerProvider({
 					resource: resourceFromAttributes({ "service.name": options.service, "service.instance.id": options.instance }),
@@ -133,7 +136,7 @@ export class Telemetry {
 					"gen_ai.operation.name": "invoke_agent",
 					"gen_ai.agent.id": agent.id,
 					"gen_ai.agent.name": agent.name,
-					"gen_ai.conversation.id": conversation,
+					"gen_ai.conversation.id": this.#idOf(conversation),
 					"pim.input.from": from,
 					...this.#capture("gen_ai.input.messages", () => [{ role: "user", parts: parts(input) }]),
 				},
@@ -180,7 +183,7 @@ export class Telemetry {
 								kind: SpanKind.CLIENT,
 								attributes: {
 									"gen_ai.operation.name": "chat",
-									"gen_ai.conversation.id": conversation,
+									"gen_ai.conversation.id": this.#idOf(conversation),
 									...this.#capture("gen_ai.system_instructions", () => instructions(messages)),
 									...this.#capture("gen_ai.input.messages", () => messages.flatMap(semconvMessage)),
 								},
@@ -234,7 +237,7 @@ export class Telemetry {
 						"gen_ai.tool.name": tool.name,
 						"gen_ai.tool.call.id": api.callId,
 						"gen_ai.tool.type": "function",
-						"gen_ai.conversation.id": conversation,
+						"gen_ai.conversation.id": telemetry.#idOf(conversation),
 						...telemetry.#capture("gen_ai.tool.call.arguments", () => args),
 					},
 				},

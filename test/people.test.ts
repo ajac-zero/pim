@@ -88,6 +88,11 @@ async function person(username: string, extra: Record<string, unknown> = {}) {
 	return { browser, passkey, registered: registered.body, setup, ownerId: account.ownerId };
 }
 
+/** The public id of the person's root session. */
+async function rootOf(browser: Browser): Promise<string> {
+	return (await browser.json("/api/")).body.rootSession;
+}
+
 const directory = () => env.Directory.getByName("directory");
 const OPEN: RegistrationPolicy = { mode: "open", maxAccounts: null, perAddressPerDay: 100 };
 /** A Directory of its own, with only its admin, for tests that need an otherwise empty one. */
@@ -371,7 +376,7 @@ describe("isolation between people", () => {
 		const noted = await ian.browser.json("/api/memory/log", { method: "POST", json: { text: "Ian's passport expires in May" } });
 		expect(noted.body).toMatchObject({ text: expect.stringContaining("passport") });
 		faux.setResponses([toolUse("send_to_user", { message: "Noted, Ian." })]);
-		expect((await ian.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Hi, I'm Ian", wait: true } })).body).toMatchObject({
+		expect((await ian.browser.json(`/api/sessions/${await rootOf(ian.browser)}/messages`, { method: "POST", json: { content: "Hi, I'm Ian", wait: true } })).body).toMatchObject({
 			status: "done",
 		});
 		await runInDurableObject(env.Pim.getByName(ian.ownerId), (instance: Pim) => {
@@ -380,7 +385,11 @@ describe("isolation between people", () => {
 
 		const joMemory = (await jo.browser.json("/api/memory/log")).body;
 		expect(JSON.stringify(joMemory)).not.toContain("passport");
-		expect((await jo.browser.json("/api/sessions/1/messages")).body.messages).toEqual([]);
+		expect((await jo.browser.json(`/api/sessions/${await rootOf(jo.browser)}/messages`)).body.messages).toEqual([]);
+		// Each Pim names its chats with ids of its own: Ian's main chat is no chat of Jo's.
+		const ianRoot = await rootOf(ian.browser);
+		expect(ianRoot).not.toBe(await rootOf(jo.browser));
+		expect((await jo.browser.json(`/api/sessions/${ianRoot}/messages`)).status).toBe(404);
 		expect((await jo.browser.json("/api/chatgpt")).body).toEqual({ connected: false, email: null });
 		expect((await ian.browser.json("/api/chatgpt")).body).toEqual({ connected: true, email: "ian@example.com" });
 		// Each person's Pim is its own agent host to OpenAI.
@@ -862,7 +871,7 @@ describe("the account", () => {
 /** Has the person's Pim make an HTML artifact, as its model would, and returns its id. */
 async function makeArtifact(browser: Browser, content: string) {
 	faux.setResponses([toolUse("artifact_create", { title: "Page", kind: "html", content }), toolUse("send_to_user", { message: "Made it." })]);
-	expect((await browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Make a page", wait: true } })).status).toBe(200);
+	expect((await browser.json(`/api/sessions/${await rootOf(browser)}/messages`, { method: "POST", json: { content: "Make a page", wait: true } })).status).toBe(200);
 	const { artifacts } = (await browser.json("/api/artifacts")).body as { artifacts: { id: string; title: string }[] };
 	return artifacts[0]!.id;
 }
@@ -969,7 +978,7 @@ describe("the admin", () => {
 		expect((await quinn.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: null, sessions: null });
 		await admin("/api/admin/accounts/quinn/limits", { method: "PUT", json: { limits: { dailyRuns: 0 } } });
 		expect((await quinn.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: 0, sessions: null });
-		const refused = await quinn.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Hello" } });
+		const refused = await quinn.browser.json(`/api/sessions/${await rootOf(quinn.browser)}/messages`, { method: "POST", json: { content: "Hello" } });
 		expect(refused.status).toBe(429);
 		expect((await admin("/api/admin/accounts/quinn/limits", { method: "PUT", json: { limits: { dailyRuns: "lots" } } })).status).toBe(400);
 		await admin("/api/admin/accounts/quinn/limits", { method: "PUT", json: { limits: null } });
@@ -1095,7 +1104,7 @@ describe("erasure boundaries", () => {
 
 	it("closes a socket that was open across the deletion, and takes nothing from it", async () => {
 		const ana = await person("eb-socket");
-		const upgrade = await ana.browser.fetch("/api/ws?session=1", { headers: { Upgrade: "websocket", origin: ORIGIN } });
+		const upgrade = await ana.browser.fetch("/api/ws", { headers: { Upgrade: "websocket", origin: ORIGIN } });
 		expect(upgrade.status).toBe(101);
 		const socket = upgrade.webSocket!;
 		const closed = new Promise<number>((resolve) => socket.addEventListener("close", (event) => resolve(event.code)));
@@ -1116,6 +1125,7 @@ describe("erasure boundaries", () => {
 
 	it("refuses the write of a request that was already inside the Pim when the deletion began", async () => {
 		const ben = await person("eb-inflight");
+		const root = await rootOf(ben.browser);
 		const held = gate();
 		const prototype = Pim.prototype as Pim;
 		const original = prototype.submitTo;
@@ -1125,13 +1135,13 @@ describe("erasure boundaries", () => {
 		};
 		try {
 			// Past the Worker and the Pim's own check, waiting just before it writes.
-			const late = ben.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Written after deletion" } });
+			const late = ben.browser.json(`/api/sessions/${root}/messages`, { method: "POST", json: { content: "Written after deletion" } });
 			await held.reached();
 			expect(await deleteAccount(ben.browser, "eb-inflight")).toEqual({ deleted: true });
 			held.release();
 			// The instance it was in ended: it gets "try again", and trying again gets "gone".
 			expect(await late).toMatchObject({ status: 503 });
-			const retry = await ben.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Written after deletion" } });
+			const retry = await ben.browser.json(`/api/sessions/${root}/messages`, { method: "POST", json: { content: "Written after deletion" } });
 			expect(retry.status).toBe(410);
 		} finally {
 			prototype.submitTo = original;
@@ -1240,7 +1250,7 @@ describe("erasure boundaries", () => {
 				return fauxAssistantMessage("Written after deletion");
 			},
 		]);
-		expect((await cy.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Think slowly" } })).status).toBe(202);
+		expect((await cy.browser.json(`/api/sessions/${await rootOf(cy.browser)}/messages`, { method: "POST", json: { content: "Think slowly" } })).status).toBe(202);
 		await held.reached();
 		expect(await deleteAccount(cy.browser, "eb-model")).toEqual({ deleted: true });
 		held.release();
@@ -1272,7 +1282,7 @@ describe("erasure boundaries", () => {
 					return original.call(this);
 				},
 			async () => {
-				expect((await di.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Make a page" } })).status).toBe(202);
+				expect((await di.browser.json(`/api/sessions/${await rootOf(di.browser)}/messages`, { method: "POST", json: { content: "Make a page" } })).status).toBe(202);
 				await held.reached();
 				expect(await deleteAccount(di.browser, "eb-artifact")).toEqual({ deleted: true });
 			},
@@ -1313,7 +1323,7 @@ describe("erasure boundaries", () => {
 					return original.call(this);
 				},
 			async () => {
-				expect((await ivy.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Think slowly" } })).status).toBe(202);
+				expect((await ivy.browser.json(`/api/sessions/${await rootOf(ivy.browser)}/messages`, { method: "POST", json: { content: "Think slowly" } })).status).toBe(202);
 				await held.reached();
 				const started = Date.now();
 				expect(await deleteAccount(ivy.browser, "eb-model-during")).toEqual({ deleted: true });
@@ -1340,7 +1350,7 @@ describe("erasure boundaries", () => {
 		});
 		try {
 			faux.setResponses([toolUse("http_request", { method: "POST", url: "https://hooks.example.test/after-deletion" })]);
-			await dot.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Send it" } });
+			await dot.browser.json(`/api/sessions/${await rootOf(dot.browser)}/messages`, { method: "POST", json: { content: "Send it" } });
 			await vi.waitFor(async () => {
 				const pending = await runInDurableObject(env.Pim.getByName(dot.ownerId), (instance: Pim) => instance.store.approvals("pending"));
 				expect(pending).toHaveLength(1);
@@ -1378,7 +1388,7 @@ describe("erasure boundaries", () => {
 			body: JSON.stringify({ text: "Written by a stale gateway" }),
 		});
 		expect((await toAgent(write, env, stale, "/memory/log", true)).status).toBe(410);
-		const socket = new Request(`${ORIGIN}/api/ws?session=1`, { headers: { Upgrade: "websocket" } });
+		const socket = new Request(`${ORIGIN}/api/ws`, { headers: { Upgrade: "websocket" } });
 		expect((await toAgent(socket, env, stale, "/ws", true)).status).toBe(410);
 		const callback = new Request(`${ORIGIN}/mcp/events/watch-1`, { method: "POST", body: "{}" });
 		expect((await toAgent(callback, env, stale, "/mcp/events/watch-1", false)).status).toBe(410);
@@ -1496,7 +1506,7 @@ describe("circles and visits", () => {
 					return toolUse("send_to_user", { message: "Hi Ben." });
 				},
 			]);
-			await say(ben.browser, "1", "Hi");
+			await say(ben.browser, await rootOf(ben.browser), "Hi");
 			expect(ownTools).toContain("note");
 			expect(ownTools).not.toContain("calendar_find_events");
 			expect(own).not.toContain("ana's Pim");

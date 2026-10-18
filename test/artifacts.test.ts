@@ -4,7 +4,7 @@ import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vitest";
 import { MAX_ARTIFACT_STORAGE_BYTES } from "../src/artifacts";
 import type { Limits } from "../src/usage";
-import { api, apiUrl, connect, OWNER, post, say, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, connect, OWNER, post, ROOT, say, TOKEN, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
@@ -29,7 +29,7 @@ function lastToolResult(messages: readonly Message[]): { text: string; isError: 
 }
 
 /** Runs one tool call through the model, as the model would, and returns what the tool answered. */
-async function callTool(name: string, args: Record<string, unknown>, session = "1") {
+async function callTool(name: string, args: Record<string, unknown>, session = ROOT) {
 	let result = { text: "", isError: false };
 	faux.setResponses([
 		toolUse(name, args as never),
@@ -56,7 +56,7 @@ describe("artifacts", () => {
 		expect(made).toMatchObject({ version: 1, size: new TextEncoder().encode(PAGE).byteLength });
 		expect(made.sha256).toMatch(/^[0-9a-f]{64}$/);
 		const { body: list } = await api("/artifacts");
-		expect(list.artifacts).toEqual([expect.objectContaining({ id: made.id, title: "Tip calculator", kind: "html", version: 1, versions: 1, session: "1" })]);
+		expect(list.artifacts).toEqual([expect.objectContaining({ id: made.id, title: "Tip calculator", kind: "html", version: 1, versions: 1, session: ROOT })]);
 		const { body: version } = await api(`/artifacts/${made.id}/versions/1`);
 		expect(version).toMatchObject({ content: PAGE, sha256: made.sha256, source: "agent", latest: 1 });
 

@@ -313,7 +313,8 @@ export type ApprovalStatus = "pending" | "approved" | "denied";
 
 export type Approval = {
   id: string;
-  session: string;
+  /** The chat that asked; null when a guest asked, from their own Pim. */
+  session: string | null;
   action: string;
   /** The tool "always approve" remembers; null for explicit-only or older requests. */
   tool: string | null;

@@ -2,7 +2,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/provid
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { DELIVERY_REMINDER } from "../src/transcript";
-import { api, connect, lastUserText, OWNER, post, say, toolUse } from "./helpers";
+import { api, connect, lastUserText, OWNER, post, ROOT, say, toolUse } from "./helpers";
 import { faux, outbox, type Pim } from "./worker";
 
 describe("scheduled tasks", () => {
@@ -20,7 +20,7 @@ describe("scheduled tasks", () => {
 		const { body } = await api("/schedules");
 		expect(body.schedules).toHaveLength(1);
 		const [schedule] = body.schedules;
-		expect(schedule).toMatchObject({ type: "delayed", session: "1", label: "Flight check" });
+		expect(schedule).toMatchObject({ type: "delayed", session: ROOT, label: "Flight check" });
 		const next = Date.parse(schedule.next);
 		expect(next).toBeGreaterThanOrEqual(before + 3_599_000);
 		expect(next).toBeLessThanOrEqual(Date.now() + 3_601_000);
@@ -43,7 +43,7 @@ describe("scheduled tasks", () => {
 		// The person sees that it ran, with a link to the chat it ran in.
 		expect((await api("/notifications")).body.notifications).toEqual([
 			expect.objectContaining({
-				session: "1",
+				session: ROOT,
 				title: "Scheduled task ran: Flight check",
 				body: "Check whether the flight price dropped.",
 				readAt: null,
@@ -51,7 +51,7 @@ describe("scheduled tasks", () => {
 		]);
 		const [ran] = (await api("/notifications")).body.notifications;
 		await post(`/notifications/${ran.id}/read`);
-		const settled = await api(`/sessions/1/operations/${encodeURIComponent(operation)}`);
+		const settled = await api(`/sessions/${ROOT}/operations/${encodeURIComponent(operation)}`);
 		// Work Pim gave itself may stay silent: its final text is notes, not a reply.
 		expect(settled.body).toMatchObject({ status: "done", replies: [] });
 		expect(settled.body).not.toHaveProperty("text");
@@ -95,7 +95,7 @@ describe("scheduled tasks", () => {
 
 		const chats = (await api("/sessions")).body.sessions.filter((session: { title: string }) => session.title === "Daily plan");
 		expect(chats).toHaveLength(2);
-		chats.sort((a: { id: string }, b: { id: string }) => Number(a.id) - Number(b.id));
+		chats.sort((a: { createdAt: number }, b: { createdAt: number }) => a.createdAt - b.createdAt);
 		// Each run's notification links to the chat it started.
 		const ran = (await api("/notifications")).body.notifications.filter((notification: { title: string }) => notification.title === "Scheduled task ran: Daily plan");
 		expect(ran.map((notification: { session: string }) => notification.session).sort()).toEqual(chats.map((chat: { id: string }) => chat.id).sort());
@@ -144,7 +144,7 @@ describe("sending to the person", () => {
 				{ stopReason: "toolUse" },
 			),
 		]);
-		const { body } = await post("/sessions/1/messages", { content: "How's the flight price?", wait: true });
+		const { body } = await post(`/sessions/${ROOT}/messages`, { content: "How's the flight price?", wait: true });
 		expect(body).toMatchObject({ status: "done", text: "On it.\n\nYour flight is **$80** cheaper.", replies: ["On it.", "Your flight is **$80** cheaper."] });
 		// Without notify, nothing else hears of it.
 		expect((await api("/notifications?unread=true")).body.notifications).toEqual([]);
@@ -157,7 +157,7 @@ describe("sending to the person", () => {
 				return toolUse("send_to_user", { message: "Same as before." });
 			},
 		]);
-		const forgot = await post("/sessions/1/messages", { content: "And now?", wait: true });
+		const forgot = await post(`/sessions/${ROOT}/messages`, { content: "And now?", wait: true });
 		expect(forgot.body).toMatchObject({ status: "done", replies: ["Same as before."] });
 	});
 
@@ -169,7 +169,7 @@ describe("sending to the person", () => {
 				fauxAssistantMessage("Private draft answer."),
 				toolUse("send_to_user", { message: "Here's the answer." }),
 			]);
-			const answer = await post("/sessions/1/messages", { content: "Check for me.", wait: true });
+			const answer = await post(`/sessions/${ROOT}/messages`, { content: "Check for me.", wait: true });
 			expect(answer.body).toMatchObject({ status: "done", replies: ["I'll check.", "Here's the answer."] });
 		}
 	});
@@ -180,7 +180,7 @@ describe("sending to the person", () => {
 			fauxAssistantMessage("Still private."),
 			fauxAssistantMessage("Private third answer."),
 		]);
-		const failed = await post("/sessions/1/messages", { content: "Answer me.", wait: true });
+		const failed = await post(`/sessions/${ROOT}/messages`, { content: "Answer me.", wait: true });
 		expect(failed.body).toMatchObject({ status: "unanswered", replies: [] });
 		expect(failed.body).not.toHaveProperty("text");
 		// A new user turn gets a fresh correction budget, not the previous turn's reminders.
@@ -188,7 +188,7 @@ describe("sending to the person", () => {
 			fauxAssistantMessage("Another private draft."),
 			toolUse("send_to_user", { message: "A delivered answer." }),
 		]);
-		expect((await post("/sessions/1/messages", { content: "Try again.", wait: true })).body).toMatchObject({ status: "done", replies: ["A delivered answer."] });
+		expect((await post(`/sessions/${ROOT}/messages`, { content: "Try again.", wait: true })).body).toMatchObject({ status: "done", replies: ["A delivered answer."] });
 	});
 
 	it("emails the person at the address they confirmed, and only there", async () => {
@@ -206,7 +206,7 @@ describe("sending to the person", () => {
 				return toolUse("send_to_user", { message: "Add an email address first." });
 			},
 		]);
-		const unsent = await post("/sessions/1/messages", { content: "Email me my week.", wait: true });
+		const unsent = await post(`/sessions/${ROOT}/messages`, { content: "Email me my week.", wait: true });
 		expect(emailed).toContain("hasn't added an email address");
 		expect(outbox).toEqual([]);
 		// A failed email cannot finish the turn: an explicit chat message explains why.
@@ -225,10 +225,10 @@ describe("sending to the person", () => {
 		expect((await post("/email/confirm", { code })).body).toEqual({ available: true, address: "ada@example.com", pending: null });
 
 		sendEmail();
-		const sent = await post("/sessions/1/messages", { content: "Email me my week.", wait: true });
-		expect(JSON.stringify((await api("/sessions/1/messages")).body.messages)).toContain("Emailed it to ada@example.com.");
+		const sent = await post(`/sessions/${ROOT}/messages`, { content: "Email me my week.", wait: true });
+		expect(JSON.stringify((await api(`/sessions/${ROOT}/messages`)).body.messages)).toContain("Emailed it to ada@example.com.");
 		expect(outbox).toEqual([
-			{ to: "ada@example.com", subject: "Your week", text: "3 workouts, 1 flight booked.\n\n—\nFrom your Pim: https://pim.test/chat/1" },
+			{ to: "ada@example.com", subject: "Your week", text: `3 workouts, 1 flight booked.\n\n—\nFrom your Pim: https://pim.test/chat/${ROOT}` },
 		]);
 		// The chat shows it was emailed; it is not a reply in the conversation.
 		expect(sent.body).toMatchObject({ status: "done", replies: [] });
@@ -252,7 +252,7 @@ describe("sending to the person", () => {
 			await vi.waitFor(() => expect(received.some((message) => message.type === "notification")).toBe(true));
 		}
 		const pushed = root.received.find((message) => message.type === "notification");
-		expect(pushed.notification).toMatchObject({ title: "Price drop", body: "Your flight is $80 cheaper.", session: "1" });
+		expect(pushed.notification).toMatchObject({ title: "Price drop", body: "Your flight is $80 cheaper.", session: ROOT });
 
 		expect((await api("/notifications?unread=true")).body.notifications).toHaveLength(1);
 		await post(`/notifications/${pushed.notification.id}/read`);
@@ -324,7 +324,7 @@ describe("web push", () => {
 			await deliver("Price drop", "Your flight is $80 cheaper.");
 			const [[endpoint, init]] = fetched.mock.calls as [[string, RequestInit]];
 			expect(endpoint).toBe("https://push.example/phone");
-			expect(await phone.decrypt(new Uint8Array(init.body as ArrayBuffer))).toMatchObject({ title: "Price drop", body: "Your flight is $80 cheaper.", session: "1" });
+			expect(await phone.decrypt(new Uint8Array(init.body as ArrayBuffer))).toMatchObject({ title: "Price drop", body: "Your flight is $80 cheaper.", session: ROOT });
 
 			// The VAPID token is signed by the key /push/key advertises, for the push service's origin.
 			const header = (init.headers as Record<string, string>).Authorization!;

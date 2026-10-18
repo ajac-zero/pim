@@ -151,7 +151,7 @@ export class AppEvents {
 			event: watch.event,
 			arguments: watch.arguments,
 			instruction: watch.instruction,
-			session: watch.session,
+			session: this.#host.store.publicId(watch.session),
 			status: watch.status,
 			lastError: watch.lastError,
 			lastEventAt: watch.lastEventAt === null ? null : new Date(watch.lastEventAt).toISOString(),

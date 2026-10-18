@@ -1,11 +1,12 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { type FauxResponseFactory, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { Approval } from "../src/store";
-import { api, decisionRun, lastUserText, pendingApproval, post, say, systemPrompt, TOKEN, toolUse, url } from "./helpers";
-import { faux, spans } from "./worker";
+import { api, decisionRun, lastUserText, OWNER, pendingApproval, post, ROOT, say, systemPrompt, TOKEN, toolUse, url } from "./helpers";
+import { faux, type Pim, spans } from "./worker";
 
 type Context = Parameters<FauxResponseFactory>[0];
 
@@ -121,14 +122,14 @@ describe("an agent's team", () => {
 		expect(listed).toContain(session);
 		expect(listed).not.toContain(researcher.conversation);
 		expect((await api(`/sessions/${researcher.conversation}/messages`)).status).toBe(404);
-		expect((await api(`/sessions/1/team/${researcher.conversation}`)).status).toBe(404);
+		expect((await api(`/sessions/${ROOT}/team/${researcher.conversation}`)).status).toBe(404);
 
 		// An agent without a team is told so.
 		scripts({ lead: [() => toolUse("delegate", { tasks: [{ member: "Researcher", task: "x" }] }), (context: Context) => {
 			results = toolResult(context.messages);
 			return toolUse("send_to_user", { message: "Fine." });
 		}] });
-		await say("Ask your team.", "1");
+		await say("Ask your team.", ROOT);
 		expect(results).toContain("has no team: do the work yourself.");
 	});
 
@@ -175,7 +176,9 @@ describe("an agent's team", () => {
 			],
 		});
 		expect((await post<Approval>(`/approvals/${approval.id}/approve`)).body.status).toBe("approved");
-		const reported = await api(`/sessions/${session}/operations/${encodeURIComponent(`team-report:${run.conversation}:approval:${approval.id}`)}`);
+		// The report's operation is named for the member's conversation by pi's number for it.
+		const member = await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.store.sessionOf(run.conversation));
+		const reported = await api(`/sessions/${session}/operations/${encodeURIComponent(`team-report:${member}:approval:${approval.id}`)}`);
 		expect(reported.body.status).toBe("done");
 		expect(decision).toContain(`[Approval ${approval.id}] The user approved`);
 		expect(report).toBe("[Team: Researcher] After the person's decision, Researcher answered:\nBooked: confirmation 77.");
@@ -233,7 +236,7 @@ describe("the majordomo", () => {
 		expect((await sessions()).find((info) => info.id === chat)?.agent?.id).toBe(scout.id);
 		const transcript = async () => ((await api(`/sessions/${chat}/messages`)).body.messages as { role: string; parts: { type: string; text?: string }[] }[]).filter((message) => message.role === "user").map((message) => message.parts[0]?.text);
 		expect(await transcript()).toEqual(["Find the best month to visit Lisbon."]);
-		expect((await api("/sessions/1/team")).body.runs).toEqual([]);
+		expect((await api(`/sessions/${ROOT}/team`)).body.runs).toEqual([]);
 
 		// It carries on in that chat, not in one that isn't Scout's, and only with agents that exist.
 		const count = (await sessions()).length;
@@ -242,7 +245,7 @@ describe("the majordomo", () => {
 				() => toolUse("send_to_agent", { agent: "Nobody", message: "Hi." }),
 				(context) => {
 					results.push(toolResult(context.messages));
-					return toolUse("send_to_agent", { agent: "Scout", message: "Hi.", chat: "1" });
+					return toolUse("send_to_agent", { agent: "Scout", message: "Hi.", chat: ROOT });
 				},
 				(context) => {
 					results.push(toolResult(context.messages));
@@ -257,7 +260,7 @@ describe("the majordomo", () => {
 		});
 		await say("And autumn?");
 		expect(results[1]).toContain("No agent called Nobody.");
-		expect(results[2]).toContain("No chat 1 with Scout");
+		expect(results[2]).toContain(`No chat ${ROOT} with Scout`);
 		expect(results[3]).toContain(`Chat ${chat} with Scout`);
 		expect(results[3]).toContain("Scout answered:\\nOctober.");
 		expect(await transcript()).toEqual(["Find the best month to visit Lisbon.", "And in autumn?"]);

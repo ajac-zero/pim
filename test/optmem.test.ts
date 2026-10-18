@@ -243,7 +243,7 @@ describe("long-term memory", () => {
 		faux.setResponses([fauxAssistantMessage("The user said one, then asked to remember something.")]);
 		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
 			const pi = await instance.harness.pi();
-			const conversation = (await pi.conversation(Number(session) as never, BACKGROUND_CONTEXT))!;
+			const conversation = (await pi.conversation(Number(instance.store.sessionOf(session)) as never, BACKGROUND_CONTEXT))!;
 			const task = await pi.waitForTask(await conversation.compact(undefined, BACKGROUND_CONTEXT), BACKGROUND_CONTEXT);
 			const outcome = task.state.outcome;
 			expect(outcome.status).toBe("completed");

@@ -67,7 +67,7 @@ export function goalsExtension({ store }: PimServices) {
 		parameters: Type.Object({ status: Type.Optional(GoalStatus) }),
 		replay: "safe",
 		async execute({ status }) {
-			return json(store.goals(status));
+			return json(store.goals(status).map((goal) => ({ ...goal, session: store.publicId(goal.session) })));
 		},
 	});
 

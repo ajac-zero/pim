@@ -4,7 +4,6 @@ import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import {
   ARTIFACT_KIND_NAMES,
-  ArtifactCaution,
   ArtifactPreview,
   ArtifactPrint,
 } from "~/components/artifact";
@@ -167,7 +166,6 @@ function PublishedArtifactPage() {
             fill
           />
         </div>
-        <ArtifactCaution kind={artifact.kind} />
         {printing && (
           <ArtifactPrint
             id={artifact.id}

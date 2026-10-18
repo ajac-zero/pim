@@ -10,7 +10,6 @@ import {
 import { toast } from "sonner";
 import {
   ARTIFACT_LANGUAGES,
-  ArtifactCaution,
   ArtifactPreview,
   ArtifactPrint,
   formatBytes,
@@ -469,9 +468,6 @@ function ArtifactPage() {
             title={artifact.title}
             onDone={donePrinting}
           />
-        )}
-        {view === "preview" && draft === null && (
-          <ArtifactCaution kind={artifact.kind} />
         )}
       </div>
     </main>

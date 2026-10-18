@@ -497,8 +497,6 @@ const translations = {
     artifactVersionMissing: "This artifact has no version {version}.",
     artifactLatest: "Open the latest, version {version}",
     artifactDeletedToast: "Artifact deleted",
-    artifactCaution:
-      "Don't type passwords into it: it could send what you type to another site.",
     artifactNavigated:
       "This artifact tried to open another page, so Pim stopped showing it. Anything it put in that page's address may have been sent.",
     artifactShowAgain: "Show it again",
@@ -1349,8 +1347,6 @@ const translations = {
     skillDeletedToast: "Habilidad borrada",
     skillVersionMissing: "Esta habilidad no tiene la versión {version}.",
     skillLatest: "Abrir la última, versión {version}",
-    artifactCaution:
-      "No escribas contraseñas en él: podría enviar lo que escribas a otro sitio.",
     artifactNavigated:
       "Este artefacto intentó abrir otra página, así que Pim dejó de mostrarlo. Lo que pusiera en la dirección de esa página puede haberse enviado.",
     artifactShowAgain: "Mostrarlo de nuevo",

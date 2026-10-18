@@ -21,7 +21,7 @@
  */
 
 import { Buffer } from "node:buffer";
-import { compileJsx, inlineScript } from "./artifact-jsx";
+import { compileJsxApp, dataUrl, inlineCssUrls, inlineScript, resolvePath } from "./artifact-jsx";
 import { HttpError } from "./http";
 
 export const ARTIFACT_KINDS = ["html", "markdown", "svg", "mermaid", "jsx"] as const;
@@ -315,11 +315,26 @@ export function checkKind(kind: unknown): ArtifactKind {
 /** An SVG artifact's markup: an `<svg>` element, after at most an XML declaration and comments. */
 const SVG_START = /^\s*(<\?xml[^>]*\?>\s*)?(<!--[\s\S]*?-->\s*)*<svg[\s>]/i;
 
-/** Refuses content its kind can't show, with what to fix, so a mistake reaches the one who made it. */
+/** The kinds whose main file can use files of their own: a page's scripts, styles and images, an app's modules. */
+export const MULTI_FILE_KINDS: readonly ArtifactKind[] = ["html", "jsx"];
+
+/** Refuses a main file its kind can't show, with what to fix, so a mistake reaches the one who made it. */
 export function checkContent(kind: ArtifactKind, content: string): void {
+	checkFiles(kind, new Map([[ENTRY_FILES[kind], { type: fileType(ENTRY_FILES[kind]), bytes: encoder.encode(content) }]]));
+}
+
+/** Refuses a version's files its kind can't show: the main file, any other files for a kind without them, a JSX app that won't compile. */
+export function checkFiles(kind: ArtifactKind, files: LoadedFiles): void {
+	const entry = ENTRY_FILES[kind];
+	const main = files.get(entry);
+	if (!main) throw new HttpError(400, `A ${kind} artifact needs its main file, ${entry}.`);
+	if (files.size > 1 && !MULTI_FILE_KINDS.includes(kind)) {
+		throw new HttpError(400, `Only HTML and JSX artifacts can have files besides their main one; a ${kind} artifact is ${entry} alone.`);
+	}
+	const content = textOf(main.bytes);
 	if (kind === "svg" && !SVG_START.test(content)) throw new HttpError(400, "An SVG artifact must be one <svg> element, starting with <svg.");
 	if (kind === "mermaid" && content.trim() === "") throw new HttpError(400, "A Mermaid artifact needs a diagram.");
-	if (kind === "jsx") compileJsx(content);
+	if (kind === "jsx") compileJsxApp(files, entry);
 }
 
 function checkKey(key: unknown): string {
@@ -1014,7 +1029,7 @@ export function framePage(kind: ArtifactKind, files: LoadedFiles, origin: string
 		new Response(body + RESIZE_SCRIPT, { headers: artifactHeaders(origin, "text/html; charset=utf-8", { runtime }) });
 	switch (kind) {
 		case "html":
-			return html(withBridge(content));
+			return inlineOwnFiles(html(withBridge(content)), files);
 		case "svg":
 			return html(`${PAGE_HEAD}<style>svg{display:block;max-width:100%;height:auto;margin:0 auto}</style></head><body>${content}</body></html>`);
 		case "mermaid":
@@ -1024,7 +1039,7 @@ export function framePage(kind: ArtifactKind, files: LoadedFiles, origin: string
 				true,
 			);
 		case "jsx": {
-			const { code, runtimes } = compileJsx(content);
+			const { code, runtimes } = compileJsxApp(files, ENTRY_FILES[kind]);
 			const scripts = [...runtimes, "tailwind"].map((name) => `<script src="${origin}${RUNTIME_PATH}${name}.js"></script>`).join("");
 			return html(
 				`${PAGE_HEAD}</head><body><div id="root"></div>${scripts}<script>__pimMount(function (require, module, exports) {\n${inlineScript(code)}\n})</script></body></html>`,
@@ -1036,16 +1051,71 @@ export function framePage(kind: ArtifactKind, files: LoadedFiles, origin: string
 	}
 }
 
-/** A download's name: the title, made safe for a header and a file system, and the version. */
-export function downloadName(title: string, version: number, kind: ArtifactKind): { ascii: string; utf8: string } {
-	const extension = EXTENSIONS[kind];
+/** What an attribute names, as one of the artifact's files, if it is one: relative to the main file, without a query or fragment. */
+function ownFile(files: LoadedFiles, reference: string | null) {
+	if (!reference || /^[a-z][a-z0-9+.-]*:|^\/\/|^#/i.test(reference.trim())) return undefined;
+	const path = resolvePath(ENTRY_FILES.html, reference.trim().split(/[?#]/)[0]!);
+	return path === null ? undefined : files.get(path);
+}
+
+/**
+ * A page with what it loads of its own files put inline, since a sandboxed
+ * page can load nothing: scripts become inline scripts, stylesheets
+ * `<style>` (their `url()`s `data:` URLs), and images, media and icons
+ * `data:` URLs. What names no file of its own is left alone, and blocked.
+ */
+function inlineOwnFiles(page: Response, files: LoadedFiles): Response {
+	if (files.size < 2) return page;
+	const media = (attribute: string) => ({
+		element(element: Element) {
+			const file = ownFile(files, element.getAttribute(attribute));
+			if (file) element.setAttribute(attribute, dataUrl(file));
+		},
+	});
+	return new HTMLRewriter()
+		.on("script[src]", {
+			element(element) {
+				const file = ownFile(files, element.getAttribute("src"));
+				if (!file) return;
+				element.removeAttribute("src");
+				element.setInnerContent(inlineScript(textOf(file.bytes)), { html: true });
+			},
+		})
+		.on("link[href]", {
+			element(element) {
+				const rel = (element.getAttribute("rel") ?? "").toLowerCase().split(/\s+/);
+				const href = element.getAttribute("href");
+				const file = ownFile(files, href);
+				if (!file) return;
+				if (rel.includes("stylesheet")) {
+					const path = resolvePath(ENTRY_FILES.html, href!.trim().split(/[?#]/)[0]!)!;
+					const css = inlineCssUrls(textOf(file.bytes), path, files).replace(/<\/(style)/gi, "<\\/$1");
+					element.replace(`<style>${css}</style>`, { html: true });
+				} else if (rel.includes("icon")) element.setAttribute("href", dataUrl(file));
+			},
+		})
+		.on("img[src]", media("src"))
+		.on("source[src]", media("src"))
+		.on("audio[src]", media("src"))
+		.on("video[src]", media("src"))
+		.on("video[poster]", media("poster"))
+		.transform(page);
+}
+
+/**
+ * A download's name: the title, made safe for a header and a file system,
+ * and the version; for a file besides the main one, its name after them.
+ */
+export function downloadName(title: string, version: number, kind: ArtifactKind, path?: string): { ascii: string; utf8: string } {
+	const extension = path === undefined ? EXTENSIONS[kind] : path.slice(path.lastIndexOf("/") + 1);
+	const separator = path === undefined ? "." : "-";
 	const cleaned = title
 		.normalize("NFC")
 		.replace(/[\u0000-\u001f\u007f"\\/:*?<>|]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim()
 		.slice(0, 80) || "artifact";
-	const utf8 = `${cleaned}-v${version}.${extension}`;
-	const ascii = `${cleaned.replace(/[^\x20-\x7e]+/g, "_").replace(/[;%]+/g, "_") || "artifact"}-v${version}.${extension}`;
+	const utf8 = `${cleaned}-v${version}${separator}${extension}`;
+	const ascii = `${cleaned.replace(/[^\x20-\x7e]+/g, "_").replace(/[;%]+/g, "_") || "artifact"}-v${version}${separator}${extension}`;
 	return { ascii, utf8 };
 }

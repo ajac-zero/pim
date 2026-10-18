@@ -536,8 +536,10 @@ export type ArtifactVersion = ArtifactVersionInfo & {
   latest: number;
   /** The files it has, its main file among them. */
   files: ArtifactFile[];
-  /** The main file's text. */
-  content: string;
+  /** The file `content` is, its main file unless another was asked for. */
+  path: string;
+  /** That file's text; null when it isn't text. */
+  content: string | null;
 };
 
 /** One version of a skill, without its text. */
@@ -602,9 +604,13 @@ export const artifactFrameUrl = (
   from?: ArtifactFrom,
 ) => `${artifactPath(id, version, from)}/frame`;
 
-/** Where the browser downloads a version, as a file. */
-export const artifactDownloadUrl = (id: string, version: number) =>
-  `${artifactPath(id, version)}/download`;
+/** Where the browser downloads a version's file: its main one, unless `path` names another. */
+export const artifactDownloadUrl = (
+  id: string,
+  version: number,
+  path?: string,
+) =>
+  `${artifactPath(id, version)}/download${path ? `?path=${encodeURIComponent(path)}` : ""}`;
 
 /** A file or folder in your files, which you and your agents share. */
 export type FileEntry = {
@@ -1117,8 +1123,16 @@ export const pim = {
   artifacts: () => call<{ artifacts: Artifact[]; bytes: number }>("/artifacts"),
   artifact: (id: string) =>
     call<ArtifactDetail>(`/artifacts/${encodeURIComponent(id)}`),
-  artifactVersion: (id: string, version: number, from?: ArtifactFrom) =>
-    call<ArtifactVersion>(`${artifactRoot(id, from)}/versions/${version}`),
+  /** A version, with the text of its main file, or of the file at `path`. */
+  artifactVersion: (
+    id: string,
+    version: number,
+    from?: ArtifactFrom,
+    path?: string,
+  ) =>
+    call<ArtifactVersion>(
+      `${artifactRoot(id, from)}/versions/${version}${path ? `?path=${encodeURIComponent(path)}` : ""}`,
+    ),
   sharedArtifacts: () =>
     call<{ artifacts: SharedArtifact[] }>("/shared-artifacts"),
   sharedArtifact: (host: string, id: string) =>
@@ -1163,10 +1177,23 @@ export const pim = {
       `/artifacts/${encodeURIComponent(id)}/restore`,
       { method: "POST", body: JSON.stringify({ version, baseVersion }) },
     ),
-  saveArtifact: (id: string, baseVersion: number, content: string) =>
+  /** Saves new content for one file (the main one, unless `path` names another) as a new version. */
+  saveArtifact: (
+    id: string,
+    baseVersion: number,
+    content: string,
+    path?: string,
+  ) =>
     call<Artifact & { saved: number; changed: boolean }>(
       `/artifacts/${encodeURIComponent(id)}/versions`,
-      { method: "POST", body: JSON.stringify({ baseVersion, content }) },
+      {
+        method: "POST",
+        body: JSON.stringify({
+          baseVersion,
+          content,
+          ...(path ? { path } : {}),
+        }),
+      },
     ),
   /** One call an artifact made through its bridge: its answer, or what the person must allow first. */
   artifactBridge: (

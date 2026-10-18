@@ -4,8 +4,9 @@ Artifacts are documents, small interactive pages, React apps, drawings and diagr
 
 ## What they are
 
-- **Kinds.** `html` is one self-contained document, with its CSS and JavaScript inline. `markdown` is a document. `svg` is one `<svg>` element: a drawing, a logo, an illustration. `mermaid` is [Mermaid](https://mermaid.js.org) source for a diagram. `jsx` is one React component (JSX or TSX), for an app or a dashboard: it may import only `react`, `recharts` (charts) and `lucide-react` (icons), and is styled with Tailwind classes. A version keeps its source; it's compiled ([Sucrase](https://github.com/alangpierce/sucrase), in [`src/artifact-jsx.ts`](../src/artifact-jsx.ts)) when it's written, so a compile error or another import goes back to whoever wrote it, and again each time it's shown. Content a kind can't show (an `svg` that isn't an `<svg>` element) is refused before it's kept, with what to fix.
-- **Where they live.** In the Durable Object `Pim` holding the owner's space, in `pim_artifacts` and `pim_artifact_versions` ([`src/artifacts.ts`](../src/artifacts.ts)). Every request for one goes through the owner's gateway and agent, like the rest of the API. Nothing is cached outside the agent, and there is no index across owners.
+- **Kinds.** `html` is a page, `index.html`, with its CSS and JavaScript inline or in files of its own. `markdown` is a document. `svg` is one `<svg>` element: a drawing, a logo, an illustration. `mermaid` is [Mermaid](https://mermaid.js.org) source for a diagram. `jsx` is a React app (JSX or TSX), `App.jsx`, for an app or a dashboard: it may import `react`, `recharts` (charts), `lucide-react` (icons) and its own files, and is styled with Tailwind classes. A version keeps its source; it's compiled ([Sucrase](https://github.com/alangpierce/sucrase), in [`src/artifact-jsx.ts`](../src/artifact-jsx.ts)) when it's written, so a compile error or another import goes back to whoever wrote it, and again each time it's shown. Content a kind can't show (an `svg` that isn't an `<svg>` element) is refused before it's kept, with what to fix.
+- **Files.** HTML and JSX artifacts can have up to 100 files besides their main one, by relative path (`app.js`, `components/Chart.tsx`, `data.json`, `images/logo.png`): text the agent writes, or copies of the person's own files (an image, a dataset). The other kinds are their main file alone. See [Several files](#several-files).
+- **Where they live.** The owner's space Durable Object keeps them and their versions, and R2 the files' bytes (see [Storage](#storage)). Every request for one goes through the owner's gateway and agent, like the rest of the API. Nothing is cached outside the agent, and there is no index across owners.
 - **Versions are append-only.** Each change adds a version, and nothing rewrites one, so a version number and its `sha256` always name the same bytes. Restoring an older version adds a new one with the old content (`source: "restore"`, `restoredFrom`).
 - **Every write names its base version.** The agent (`base_version`) and the person (`baseVersion`) both say which version they changed. If it's no longer the latest, the write is refused with `409`, so neither overwrites the other unseen. A write hashes its content first, then rechecks the latest version and every limit and stores it with nothing awaited in between, so two writes that race can't both pass a check meant for one, and the caps can't be overshot. A refused write changes nothing, not even the title.
 - **People edit them too.** On the latest version, the owner can edit the source and save it as a new version (`source: "person"`), checked like the agent's. `artifact_read` tells the agent a version is the person's. They can also ask the agent for a change from the artifact itself: the app sends the request, and what's selected in a Markdown artifact, to the chat that made it (or a new one, if that chat is gone) and opens it.
@@ -16,10 +17,10 @@ Artifacts are documents, small interactive pages, React apps, drawings and diagr
 
 | Tool | What it does |
 | --- | --- |
-| `artifact_create` | `{ title, kind, content }`: a new artifact at version 1 |
-| `artifact_update` | `{ id, base_version, edits \| content, title? }`: a new version. `edits` are find-and-replace pairs, each matching exactly once. The same content again makes no version |
-| `artifact_read` | `{ id, version?, offset? }`: the source of the latest or a given version, 60,000 characters at a time |
-| `artifact_list` | Every artifact's id, title, kind, latest version and size |
+| `artifact_create` | `{ title, kind, content, files? }`: a new artifact at version 1. `content` is its main file; `files` its others, each `{ path, content }` or `{ path, from_file }` (a path in the person's files to copy) |
+| `artifact_update` | `{ id, base_version, path?, edits \| content, files?, delete_files?, title? }`: a new version. `edits` (find-and-replace pairs, each matching exactly once) or `content` change one file, the main one unless `path` names another; `files` adds or replaces whole files; `delete_files` removes them. Files it doesn't mention stay. The same files again make no version |
+| `artifact_read` | `{ id, version?, path?, offset? }`: one file of the latest or a given version, the main one unless `path` names another, 60,000 characters at a time, with the list of its files |
+| `artifact_list` | Every artifact's id, title, kind, latest version, size and files |
 
 `artifact_create` and `artifact_update` answer with a reference (`{ artifact: { id, title, kind, version, sha256, size } }`), never the content. The web app shows that answer as the artifact. A replayed call (after an eviction) returns the version it made instead of making another. The tools need no approval: they change nothing outside the owner's own space.
 
@@ -31,10 +32,10 @@ Under `/api`, with the owner's passkey session or an API token in the `Authoriza
 | --- | --- | --- |
 | GET | `/artifacts` | `{ artifacts, bytes }`: each artifact as its latest version, and the bytes all versions take |
 | GET | `/artifacts/:id` | The artifact and its `history`, newest first, without content |
-| GET | `/artifacts/:id/versions/:v` | One version with its `content`, as JSON |
+| GET | `/artifacts/:id/versions/:v` | One version with its `files` and the `content` of its main file, or of the file at `?path=`, as JSON; `content` is null for a file that isn't text |
 | GET | `/artifacts/:id/versions/:v/frame` | An HTML version as a page, for the sandboxed frame |
-| GET | `/artifacts/:id/versions/:v/download` | The version's exact bytes as an attachment named `.html` or `.md`, served as `text/plain` |
-| POST | `/artifacts/:id/versions` | `{ baseVersion, content, title? }`: the person's edit, as a new version: `201` with `saved`, its number, or `200` with `changed: false` when the content is the latest's; `409` if `baseVersion` isn't the latest; `400` for content its kind can't show |
+| GET | `/artifacts/:id/versions/:v/download` | Its main file's exact bytes, or the file at `?path=`, as an attachment named after the title and version, served as `text/plain` (or `application/octet-stream` for a file that isn't text) |
+| POST | `/artifacts/:id/versions` | `{ baseVersion, content, path?, title? }`: the person's edit of one file (the main one unless `path` names another), as a new version: `201` with `saved`, its number, or `200` with `changed: false` when the content is the latest's; `409` if `baseVersion` isn't the latest; `400` for content its kind can't show |
 | POST | `/artifacts/:id/restore` | `{ version, baseVersion }`: `201` with the new latest version; `409` if `baseVersion` isn't the latest |
 | DELETE | `/artifacts/:id` | Deletes it and every version |
 | PUT | `/artifacts/:id/circles` | `{ circles }`: the ids of the circles to share it with (see [Sharing](#sharing)); `[]` stops sharing it |
@@ -48,6 +49,14 @@ Under `/api`, with the owner's passkey session or an API token in the `Authoriza
 | POST | `/published-artifacts/:id/use` | `201` with a new artifact of yours, a copy of the published version |
 
 Every artifact response has `Cache-Control: no-store, private`, so every look is a fresh request, checked again: after signing out or losing the passkey a session was made with it gets `401`, while the account is suspended `403`, after the account is deleted `410`, and after the artifact is deleted `404`. When the app finds itself signed out, the sign-in screen takes its place, which unmounts every artifact frame, and it drops what it read of artifacts. That revokes nothing already delivered: a frame still on another screen, a page in the browser's back-forward cache, or a saved download stays as it was.
+
+## Several files
+
+A sandboxed page can load nothing, its own files included, so the frame page carries them inline. Nothing about the sandbox changes, and the files need no address of their own:
+
+- **A page** (`html`): when it's served, an `HTMLRewriter` puts inline what it names of its own files by relative path: `<script src>` becomes an inline script, with the same escaping as a JSX app's; `<link rel="stylesheet">` becomes `<style>`, its `url()`s of its own files `data:` URLs; `<img>`, `<source>`, `<audio>` and `<video>` sources, video posters and icons become `data:` URLs. A `<script type="application/json" src="data.json">` keeps its type, so a page reads data from it. What names no file of its own is left alone, and blocked. `fetch` stays blocked, so a page can't read its files any other way.
+- **An app** (`jsx`) imports its files by relative path (`./components/Chart`, which may leave out `.jsx`, `.tsx`, `.js` or `.ts`, or name a folder's `index`). They're compiled with the main file into one script of modules, each run once, when first imported. A JSON file is its value, a CSS file adds a style to the page, and anything else (an image, a font) is its `data:` URL. An import of a file it doesn't have is refused when it's written.
+- The person's edits and the agent's change one file at a time; the viewer's Source view picks the file, and Download saves the one it shows.
 
 ## How an HTML artifact runs
 
@@ -157,6 +166,7 @@ Each limit is checked against the stored versions before anything is written. Th
 | Restore is append-only and needs the latest base | "restore an older version as a new one…" |
 | The person's edits are versions from the latest base, refused when stale or unshowable, and read by the model as theirs | "take the person's edits as new versions…" |
 | Files are stored once, freed when no version lists them, and read from versions from before files, which move to R2 keeping their hash | "keep each file once in R2…" |
+| Several files: a page's own scripts, styles, data and images put inline when shown, with what names no file of its own left alone; an app's modules, JSON, CSS and images compiled into one script; files copied from the person's files; one file read, changed, downloaded or deleted at a time; the main file kept; other kinds refused more files | "span several files…" |
 | Delete removes every version; export has every version | "are deleted with every version…" |
 | Per-version, version-count, artifact-count, total and storage limits, checked before writing | "stay within their limits…" |
 | A refused write (`413` too big, `429` too many versions or too much in all, `409` stale base, for an edit or a restore) leaves the title, time, latest version, history and content as they were | "change nothing on a refused write…" |

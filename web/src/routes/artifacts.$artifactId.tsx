@@ -22,15 +22,15 @@ import {
   Download,
   ExternalLink,
   Globe,
-  History,
   Link2,
+  MessageCircle,
+  MoreHorizontal,
   Pencil,
   Printer,
   Trash2,
   Users,
   X,
 } from "~/components/icons";
-import { SessionLink } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import { CodeBlock } from "~/components/ui/code-block";
 import {
@@ -226,10 +226,9 @@ function ArtifactPage() {
         <h1 className="min-w-0 flex-1 truncate font-semibold">
           {artifact.title}
         </h1>
-        <label className="flex items-center gap-1.5 text-sm">
-          <History className="size-4 text-muted-foreground" />
-          <span className="sr-only">{t("artifactHistory")}</span>
+        {artifact.history.length > 1 && (
           <select
+            aria-label={t("artifactHistory")}
             value={version}
             onChange={(event) =>
               void navigate({
@@ -238,7 +237,7 @@ function ArtifactPage() {
                 search: { v: Number(event.target.value) },
               })
             }
-            className="h-9 max-w-48 rounded-xl border bg-background px-2 text-sm"
+            className="h-8 max-w-64 rounded-full border bg-background px-3 text-sm"
           >
             {artifact.history.map((entry) => (
               <option key={entry.version} value={entry.version}>
@@ -252,15 +251,17 @@ function ArtifactPage() {
                     version: entry.version,
                     from: entry.restoredFrom ?? 0,
                     date: formatDate(new Date(entry.createdAt), {
-                      dateStyle: "short",
-                      timeStyle: "short",
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
                     }),
                   },
                 )}
               </option>
             ))}
           </select>
-        </label>
+        )}
         {draft === null ? (
           <>
             <div className="flex rounded-full border p-0.5 text-sm">
@@ -271,7 +272,7 @@ function ArtifactPage() {
                   aria-pressed={view === mode}
                   onClick={() => setView(mode)}
                   className={cn(
-                    "rounded-full px-3 py-1",
+                    "rounded-full px-3 py-0.5",
                     view === mode && "bg-accent font-medium",
                   )}
                 >
@@ -279,30 +280,6 @@ function ArtifactPage() {
                 </button>
               ))}
             </div>
-            <Button asChild size="sm" variant="outline" className="h-8">
-              <a
-                href={artifactDownloadUrl(
-                  artifactId,
-                  version,
-                  view === "source" ? source.data?.path : undefined,
-                )}
-                download
-              >
-                <Download className="size-3.5" />
-                {t("download")}
-              </a>
-            </Button>
-            <Button
-              size="icon"
-              variant="ghost"
-              className="size-8"
-              aria-label={t("artifactPrint")}
-              title={t("artifactPrint")}
-              disabled={printing}
-              onClick={() => setPrinting(true)}
-            >
-              <Printer className="size-4" />
-            </Button>
             <ShareMenu artifact={artifact} />
             {isLatest ? (
               <Button
@@ -331,9 +308,74 @@ function ArtifactPage() {
                   restore.mutate({ from: version, base: artifact.version })
                 }
               >
-                {t("artifactRestore", { version })}
+                {t("artifactRestore")}
               </Button>
             )}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="size-8"
+                  aria-label={t("artifactOptions")}
+                >
+                  <MoreHorizontal className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem asChild>
+                  <a
+                    href={artifactDownloadUrl(
+                      artifactId,
+                      version,
+                      view === "source" ? source.data?.path : undefined,
+                    )}
+                    download
+                  >
+                    <Download />
+                    {t("download")}
+                    <span className="ml-auto pl-4 text-muted-foreground text-xs">
+                      {formatBytes(current.size, formatNumber)}
+                    </span>
+                  </a>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={printing}
+                  onSelect={() => setPrinting(true)}
+                >
+                  <Printer />
+                  {t("artifactPrint")}
+                </DropdownMenuItem>
+                {artifact.session && (
+                  <DropdownMenuItem asChild>
+                    <Link
+                      to="/chat/$sessionId"
+                      params={{ sessionId: artifact.session }}
+                    >
+                      <MessageCircle />
+                      {t("openChat")}
+                    </Link>
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  variant="destructive"
+                  disabled={remove.isPending}
+                  onSelect={() => {
+                    if (
+                      window.confirm(
+                        t("artifactDeleteConfirm", { title: artifact.title }),
+                      )
+                    ) {
+                      remove.mutate();
+                    }
+                  }}
+                >
+                  <Trash2 />
+                  {t("artifactDelete")}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </>
         ) : (
           <>
@@ -353,53 +395,28 @@ function ArtifactPage() {
                 save.mutate({ base: artifact.version, content: draft })
               }
             >
-              {t("artifactSaveVersion", { version: artifact.version + 1 })}
+              {t("artifactSaveVersion")}
             </Button>
           </>
         )}
-        <Button
-          size="icon"
-          variant="ghost"
-          className="size-8 text-destructive"
-          aria-label={t("artifactDelete")}
-          disabled={remove.isPending}
-          onClick={() => {
-            if (
-              window.confirm(
-                t("artifactDeleteConfirm", {
-                  title: artifact.title,
-                  versions: artifact.versions,
-                }),
-              )
-            ) {
-              remove.mutate();
-            }
-          }}
-        >
-          <Trash2 className="size-4" />
-        </Button>
       </header>
       <div className="flex min-h-0 flex-1 flex-col gap-2 p-2 md:p-3">
         {(view === "source" || draft !== null) &&
           shown &&
           shown.files.length > 1 && (
-            <label className="flex items-center gap-2 text-sm">
-              <span className="text-muted-foreground">
-                {t("artifactFiles", { count: shown.files.length })}
-              </span>
-              <select
-                value={shown.path}
-                disabled={draft !== null}
-                onChange={(event) => setFile(event.target.value)}
-                className="h-8 max-w-72 rounded-xl border bg-background px-2 font-mono text-xs"
-              >
-                {shown.files.map((entry) => (
-                  <option key={entry.path} value={entry.path}>
-                    {entry.path}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <select
+              aria-label={t("artifactFiles")}
+              value={shown.path}
+              disabled={draft !== null}
+              onChange={(event) => setFile(event.target.value)}
+              className="h-8 max-w-72 self-start rounded-full border bg-background px-3 font-mono text-xs disabled:opacity-50"
+            >
+              {shown.files.map((entry) => (
+                <option key={entry.path} value={entry.path}>
+                  {entry.path}
+                </option>
+              ))}
+            </select>
           )}
         {draft !== null ? (
           <textarea
@@ -453,23 +470,9 @@ function ArtifactPage() {
             onDone={donePrinting}
           />
         )}
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
-          <ArtifactCaution />
-          <p className="text-muted-foreground text-xs">
-            {t("artifactVersionDetails", {
-              version,
-              latest: artifact.version,
-              size: formatBytes(current.size, formatNumber),
-              sha: current.sha256.slice(0, 12),
-            })}
-            {artifact.session && (
-              <>
-                {" · "}
-                <SessionLink session={artifact.session} />
-              </>
-            )}
-          </p>
-        </div>
+        {view === "preview" && draft === null && (
+          <ArtifactCaution kind={artifact.kind} />
+        )}
       </div>
     </main>
   );
@@ -599,12 +602,7 @@ function ShareMenu({ artifact }: { artifact: ArtifactDetail }) {
                       publish.mutate({ on: true, open: checked })
                     }
                   >
-                    <span className="min-w-0 flex-1">
-                      {t("artifactAnyoneWithLink")}
-                      <span className="block text-muted-foreground text-xs">
-                        {t("artifactAnyoneWithLinkHint")}
-                      </span>
-                    </span>
+                    {t("artifactAnyoneWithLink")}
                   </DropdownMenuCheckboxItem>
                 )}
                 {publication.link && (

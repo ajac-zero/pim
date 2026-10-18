@@ -15,6 +15,7 @@ export default defineConfig({
 			// Approvals as they were before majordomos, so only the tests about them script a majordomo's review.
 			// The secrets of the test extension's bank app, and the client registered for its Forge app.
 			// A Worker Loader, which deployments add for `run_javascript` (the Workers Paid plan has it).
+			// Traces with their content, so the tests check what an operator who opts in would see.
 			miniflare: {
 				workerLoaders: { LOADER: {} },
 				bindings: {
@@ -26,6 +27,7 @@ export default defineConfig({
 					TEST_BANK_CLIENT_SECRET: "bank-secret",
 					TEST_FORGE_CLIENT_ID: "forge-client",
 					TEST_FORGE_CLIENT_SECRET: "forge-secret",
+					OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "true",
 				},
 			},
 		}),

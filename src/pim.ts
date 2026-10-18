@@ -2,6 +2,7 @@ import { Workspace } from "@cloudflare/computer";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Api, JsonValue, Model } from "@earendil-works/pi-ai";
 import { createModels, type Models } from "@earendil-works/pi-ai/models";
+import type { SpanExporter } from "@opentelemetry/sdk-trace";
 import {
 	type AgentChange,
 	type AgentEventStream,
@@ -119,6 +120,7 @@ import { type Agent, type AgentInput, AgentStore, agentInput, type TeamMember } 
 import type { AgentIcon } from "./gallery";
 import { type Role, TEAM_EXTENSION, type TeamRun, TeamStore, teamExtension } from "./team";
 import { CHAT_REPORT, DECIDE_APPROVAL, MAJORDOMO_EXTENSION, introduction, majordomoExtension, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension } from "./majordomo";
+import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { projectEntries } from "./transcript";
 import { conversationText, IMPROVE_PROMPT, NAME_CHAT, SUMMARIZE_CHAT, type UtilityTask } from "./utility";
 import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage";
@@ -343,7 +345,18 @@ export class Pim extends DurableAgent<Env> {
 		viewLines: Number(this.env.PIM_MEMORY_LINES) || undefined,
 		compressionModel: () => this.memoryModel(),
 	});
-	readonly registry = createRegistry();
+	/** Traces of the agents' runs, model requests and tool calls, for the deployment's OpenTelemetry backend (./telemetry.ts). */
+	readonly telemetry = new Telemetry({
+		exporter: this.spanExporter(),
+		content: (this.env as TelemetryEnv).OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT === "true",
+		service: (this.env as TelemetryEnv).OTEL_SERVICE_NAME || "pim",
+		instance: this.ctx.id.toString(),
+		agentOf: (conversation) => {
+			const { agent, member } = this.#roleOf(conversation);
+			return member ? { id: `${agent.id}:${member.name}`, name: member.name } : { id: agent.id, name: agent.name };
+		},
+	});
+	readonly registry = this.telemetry.instrument(createRegistry());
 	#extensions: PimExtensions | undefined;
 	/** Extensions' own data, each apart from the others'. */
 	readonly extensionData = new ExtensionDataStore(this.ctx.storage.sql);
@@ -452,6 +465,7 @@ export class Pim extends DurableAgent<Env> {
 		harness: async ({ storage, context }) => {
 			const services = this.services();
 			this.#migrateAlwaysApproved();
+			this.registry.install(this.telemetry.extension());
 			this.registry.install(this.#agentExtension(services));
 			this.registry.install(this.#skillsExtension(services));
 			this.registry.install(goalsExtension(services));
@@ -1088,7 +1102,7 @@ export class Pim extends DurableAgent<Env> {
 			// Images go to R2; the message keeps their URLs.
 			const stored = await this.images.keep(session, content);
 			kept = stored.ids;
-			receipt = await this.harness.submit(stored.content, { session, ...options });
+			receipt = await this.#submit(session, stored.content, options, from);
 		} catch (error) {
 			if (run !== undefined) this.usage.releaseRun(run);
 			await this.images.delete(kept);
@@ -1100,6 +1114,26 @@ export class Pim extends DurableAgent<Env> {
 			await this.images.delete(kept);
 		}
 		return receipt;
+	}
+
+	/** Gives pi input for a conversation, traced as part of its run (see ./telemetry.ts). */
+	async #submit(session: string, content: UserInput, options: { operationId?: string; whenBusy?: "followUp" | "steer" }, from: string): Promise<PiReceipt> {
+		const withdraw = this.telemetry.submitting(session, content, from);
+		let receipt: PiReceipt;
+		try {
+			receipt = await this.harness.submit(content, { session, ...options });
+		} catch (error) {
+			withdraw();
+			throw error;
+		}
+		if (!receipt.accepted) withdraw();
+		else if (this.telemetry.enabled) void this.keepAliveWhile(async () => this.telemetry.settled(session, await this.harness.wait(receipt.operationId, { session })));
+		return receipt;
+	}
+
+	/** Where traces go: the OTLP endpoint the deployment sets, or nowhere. */
+	protected spanExporter(): SpanExporter | null {
+		return exporterFrom(this.env as TelemetryEnv);
 	}
 
 	/**
@@ -1891,7 +1925,7 @@ export class Pim extends DurableAgent<Env> {
 				const { id } = await this.harness.sessions.create();
 				await this.harness.session(id).setModel(this.chosenModel());
 				const snapshot = this.registry.snapshot();
-				const extensions = [REVIEW_EXTENSION, this.memory.extension.name].flatMap((name) => snapshot.extension(name) ?? []);
+				const extensions = [REVIEW_EXTENSION, this.memory.extension.name, TELEMETRY_EXTENSION].flatMap((name) => snapshot.extension(name) ?? []);
 				const tools = snapshot
 					.tools()
 					.filter(({ extension, tool }) => extensions.includes(extension) && [DECIDE_APPROVAL, "recall", "zoom"].includes(tool.name))
@@ -1901,7 +1935,7 @@ export class Pim extends DurableAgent<Env> {
 				this.team.start({ kind: "review", conversation: id, call, position: 0, session: chat, agent: majordomo.id, member: majordomo.name, task: approval.summary });
 				run = this.team.run(id)!;
 			}
-			await this.harness.submit(this.#reviewRequest(approval), { session: run.conversation, operationId: call });
+			await this.#submit(run.conversation, this.#reviewRequest(approval), { operationId: call }, "review");
 			const result = await this.harness.wait(call, { session: run.conversation });
 			this.team.setStatus(run.conversation, result.status === "done" ? "done" : "failed");
 		} catch (error) {
@@ -2055,7 +2089,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/** Gives a member its task and waits for its answer. */
 	async #askMember(conversation: string, task: string, operation: string): Promise<{ ok: boolean; text: string }> {
-		await this.harness.submit(task, { session: conversation, operationId: operation });
+		await this.#submit(conversation, task, { operationId: operation }, "member");
 		return this.#memberAnswer(conversation, operation);
 	}
 
@@ -2365,8 +2399,9 @@ export class Pim extends DurableAgent<Env> {
 		const extension = this.#installVisit(result.brief, me.username);
 		const conversation = await this.harness.conversation(share.session);
 		// The visitor reads what the visit sends them, as in any of their conversations.
-		const messaging = this.registry.snapshot().extension(MESSAGING_EXTENSION)!;
-		await conversation.configure({ extensions: [extension, messaging] }, BACKGROUND_CONTEXT);
+		const snapshot = this.registry.snapshot();
+		const messaging = snapshot.extension(MESSAGING_EXTENSION)!;
+		await conversation.configure({ extensions: [extension, messaging, snapshot.extension(TELEMETRY_EXTENSION)!] }, BACKGROUND_CONTEXT);
 	}
 
 	/** Installs (or replaces) a visit's extension; its tools call the host's Pim. */

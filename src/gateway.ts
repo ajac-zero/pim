@@ -1,7 +1,7 @@
 import { getAgentByName } from "agents";
 import pimConfig from "../pim.config";
 import { deploymentSettings } from "./deployment";
-import { accountApi, adminApi, clientIp, handleRegistration, limited, resolveAccount, siteFor, sites, socialApi } from "./accounts";
+import { accountApi, adminApi, clientIp, contentOrigin, handleRegistration, limited, resolveAccount, servePublicArtifact, siteFor, sites, socialApi } from "./accounts";
 import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
@@ -218,6 +218,11 @@ function serveThemes(request: Request, path: string): Response {
 
 export async function serve(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 	const { pathname, origin } = new URL(request.url);
+	if (origin === contentOrigin(env)) {
+		// Nobody signs in here, so pages are slowed down per address.
+		if (await limited(env.API_LIMITER, `public:${clientIp(request)}`)) return fail(429, "Too many requests. Slow down a little.");
+		return servePublicArtifact(request, env, pathname);
+	}
 	if (pathname === "/health") return withCors(Response.json({ name: "pim", ok: true }));
 	// The app's look, which the page asking for an address needs too.
 	if (pathname === "/api/themes" || pathname === "/api/themes.css") return withCors(serveThemes(request, pathname.slice("/api".length)));

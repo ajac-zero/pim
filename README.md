@@ -96,6 +96,7 @@ Then set `PIM_PUBLIC_URL` in the dashboard as above (from the CLI, `pnpm wrangle
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PIM_PUBLIC_URL` | none: required | The address people use, such as `https://pim.example.com`: passkeys, apps' callbacks and the links Pim makes belong to it. Pim answers only there, sends the web app there from any other address, and answers nothing until it's set |
+| `PIM_CONTENT_ORIGIN` | unset | Another address, routed to this Worker, for public artifact links (see [docs/artifacts.md](docs/artifacts.md#public-links)); unset turns links off. It must differ from `PIM_PUBLIC_URL` |
 | `PIM_REGISTRATION` | `invite` | How people join once there is an admin: `invite` (links the admin makes), `open` or `closed` |
 | `PIM_MAX_ACCOUNTS` | unset | Accounts allowed in all; unset for no cap |
 | `PIM_REGISTRATIONS_PER_ADDRESS` | `3` | Accounts one IP address may make in a day |
@@ -256,7 +257,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | GET | `/published-artifacts/:id`, `…/versions/:v`, `…/versions/:v/frame` | | One, its content, and its page; `v` must be the published version |
 | POST | `/published-artifacts/:id/versions/:v/bridge`, `…/grants` | | Its bridge calls and permissions, with your own data, model and tools |
 | POST | `/published-artifacts/:id/use` | | Makes it one of your artifacts: a copy of the published version |
-| GET, POST, DELETE | `/artifacts/:id/publish` | | What you published of it (`404` if nothing); publishes its latest version (again, to update it); or takes it down |
+| GET, POST, DELETE | `/artifacts/:id/publish` | `{ public? }` | What you published of it, with its public `link` (`404` if nothing); publishes its latest version (again, to update it), `public` saying whether anyone with the link may see it; or takes it down |
 | GET | `/circles` | | `{ circles: [{ id, name, enabled, createdAt, members: [{ ownerId, username, addedAt }] }] }` (see [Sharing](#sharing)) |
 | POST | `/circles` | `{ name }` | A new circle, with nothing allowed |
 | PUT | `/circles/:id` | `{ name?, enabled? }` | The circle; `enabled: false` pauses everyone in it |
@@ -504,7 +505,6 @@ To add a blueprint, tools only some agents get, or dashboard widgets, write an e
 ## Not built yet
 
 - Falling back to `PIM_MODEL` when the ChatGPT plan's usage limit is reached. Until then, a run that hits the limit fails with OpenAI's error.
-- Links to artifacts for people without an account.
 - A sandboxed computer for the agent beyond its files, JavaScript and browser: a shell, packages and other languages (Cloudflare Containers). And signing in once for the agents: the browser forgets a sign-in when it closes.
 - Extensions beyond MCP: installing Agent Skills from elsewhere, and full pi extensions that Pim builds into itself by redeploying its own Worker.
 - Secret placeholders, so approved requests can use credentials the model never sees.

@@ -990,6 +990,31 @@ describe("artifacts", () => {
 		expect((await v2("/bridge", { method: "POST", json: { op: "model.ask", args: { prompt: "Hi" } } })).body).toEqual({ needs: { capability: "model", label: "model" } });
 		expect((await v2("/bridge", { method: "POST", json: { op: "storage.get", args: { key: "tip" } } })).body).toEqual({ value: "18" });
 
+		// Anyone with the link, once the author says so: on the content origin, which serves nothing else, and with no bridge.
+		expect((await gus.browser.json(`/api/artifacts/${id}/publish`)).body).toMatchObject({ public: false, linkable: true, link: null });
+		const link = (await gus.browser.json(`/api/artifacts/${id}/publish`, { method: "POST", json: { public: true } })).body.link as string;
+		expect(link).toBe(`https://content.pim.test/p/${published.id}`);
+		const anonymous = (url: string, init?: RequestInit) => exports.default.fetch(new Request(url, init));
+		const page = await anonymous(link);
+		expect(page.status).toBe(200);
+		expect(page.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
+		expect(page.headers.get("content-security-policy")).toContain("connect-src 'none'");
+		const html = await page.text();
+		expect(html).toContain("Tip calculator 2");
+		expect(html).toContain("Pim isn't here");
+		for (const path of ["/", "/api/artifacts", "/api/published-artifacts", `/api/published-artifacts/${published.id}/versions/2/frame`, "/auth/session", "/p/pa_0000000000000000"]) {
+			expect((await anonymous(`https://content.pim.test${path}`, { headers: { cookie: [...hal.browser.cookies].map(([k, v]) => `${k}=${v}`).join("; ") } })).status).toBe(404);
+		}
+		expect((await anonymous(link, { method: "POST" })).status).toBe(404);
+		// Republished, it keeps its link; taken back, the link is gone.
+		expect((await gus.browser.json(`/api/artifacts/${id}/publish`, { method: "POST" })).body.link).toBe(link);
+		expect((await gus.browser.json(`/api/artifacts/${id}/publish`, { method: "POST", json: { public: false } })).body.link).toBeNull();
+		expect((await anonymous(link)).status).toBe(404);
+		faux.setResponses([toolUse("artifact_create", { title: "Notes", kind: "markdown", content: "# Notes" }), toolUse("send_to_user", { message: "Made it." })]);
+		await gus.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Make notes", wait: true } });
+		const notes = (await gus.browser.json("/api/artifacts")).body.artifacts[0].id;
+		expect((await gus.browser.json(`/api/artifacts/${notes}/publish`, { method: "POST", json: { public: true } })).status).toBe(400);
+
 		// Made their own: a new artifact of theirs, counted once others do.
 		const copy = (await hal.browser.json(`${root}/use`, { method: "POST" })).body;
 		expect(copy).toMatchObject({ title: "Page", kind: "html", version: 1 });

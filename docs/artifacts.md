@@ -1,6 +1,6 @@
 # Artifacts
 
-Artifacts are documents and small interactive pages the agent makes for its owner: a calculator, a chart, a report, trip notes. They stay private to the owner. This is milestone M2a. Publishing artifacts, JSX, and artifacts that keep their own state are later milestones.
+Artifacts are documents, small interactive pages, React apps, drawings and diagrams the agent makes for its owner: a calculator, a chart, a report, trip notes. They are private to the owner until the owner [shares](#sharing) one with their circles or [publishes](#publishing) it, and can keep data and use the owner's model and tools through [the bridge](#the-bridge).
 
 ## What they are
 
@@ -41,7 +41,7 @@ Under `/api`, with the owner's passkey session or an API token in the `Authoriza
 | GET | `/shared-artifacts` | `{ artifacts }`: what others share with you, each as its latest version with its owner's username as `host` |
 | GET | `/shared-artifacts/:host/:id`, `…/versions/:v`, `…/versions/:v/frame` | One of them, its content, and its page, from its owner's Pim; `404` once they stop sharing it or it isn't the latest version |
 | POST | `/shared-artifacts/:host/:id/versions/:v/bridge`, `…/grants` | Its bridge calls and permissions, as for your own |
-| GET, POST, DELETE | `/artifacts/:id/publish` | What you published of it (`404` if nothing); publishes its latest version, replacing what was published; or takes it down (see [Publishing](#publishing)) |
+| GET, POST, DELETE | `/artifacts/:id/publish` | What you published of it, with `linkable` and its public `link` (`404` if nothing); `{ public? }`: publishes its latest version, replacing what was published, and with `public`, lets anyone with the link see it or stops them; or takes it down (see [Publishing](#publishing)) |
 | GET | `/published-artifacts` | `{ artifacts }`: published artifacts (`?q=` searches titles and authors), without content |
 | GET | `/published-artifacts/:id`, `…/versions/:v`, `…/versions/:v/frame` | One of them, its content, and its page; `404` for any version but the published one |
 | POST | `/published-artifacts/:id/versions/:v/bridge`, `…/grants` | Its bridge calls and permissions, as for your own |
@@ -93,6 +93,15 @@ An artifact can also be published for everyone on the Pim, from Share on its pag
 - **Make it your own** copies the published version into their artifacts, as a new artifact of theirs to change, and counts the use.
 - **Taking it down.** Unpublishing, deleting the artifact, deleting the account, or the admin's takedown removes it from Discover, and the next request for it is refused. Copies people made, and what it kept for them, stay theirs.
 - Each person can publish up to 20 artifacts.
+
+### Public links
+
+A published page, React app, drawing or diagram can also be seen by anyone with its link, without an account, once its author turns on "Anyone with the link" under Share. Links are off until the deployment sets `PIM_CONTENT_ORIGIN` to an origin of its own, such as `https://pim-content.example.com`, apart from the app's: a link is `<that origin>/p/<id>`.
+
+- **The content origin serves only published pages.** A request to it gets `/p/<id>` for a published artifact whose link is on, `/artifact-runtime/*`, and `404` for everything else, including the API and `/auth`: nobody signs in there, and the app's cookies, which belong to its own host, aren't sent. Route only `<content host>/p/*` and `<content host>/artifact-runtime/*` to the Worker: the app's static files would answer other paths there.
+- **The page is the one Pim frames**, under the same sandbox and headers, plus `x-robots-tag: noindex`, and with the content origin's runtime. At the top of a tab, the bridge has no Pim to answer it: every `window.pim` call fails ("Pim isn't here"), so it keeps nothing and asks for nothing.
+- **Anyone who has the link can pass it on.** Its id is random (64 bits), but it isn't a secret once shared. Turning the link off, unpublishing, deleting the artifact or the account, or the admin's takedown makes the next request `404`; pages already open stay as they are. Requests are rate-limited per address.
+- Markdown artifacts don't get links: they're shown in the app, not as pages.
 
 ## Markdown
 
@@ -146,6 +155,7 @@ Each limit is checked against the stored versions before anything is written. Th
 | Export near the total cap, and the cap holding with no limits set | "export in full near their total cap…" |
 | Shared with circles: their people see only the latest version, from their own space, with their own storage apart and shared data in the owner's space; stopping sharing, an older version, or someone outside the circles gets `404` | `test/people.test.ts`: "are shown to the people of the circles they're shared with…" |
 | Published: a copy of one version for everyone signed in, with their own storage, model and tools and no `pim.shared`; republishing replaces the version; made their own as a copy; taken down by unpublishing, deletion or the admin | `test/people.test.ts`: "are published to everyone as a copy of one version…" |
+| Public links: off until the author turns them on, only for framed kinds; the content origin serves the sandboxed page with no bridge and `404` for anything else, cookies or not; turning the link off ends it | "are published to everyone as a copy of one version…" |
 | Another person's space returns `404` for the artifact; anonymous `401` | `test/people.test.ts`: "are shown only to their owner" |
 | Fresh requests refused: signed out `401`, passkey removed `401`, suspended `403`, deleted `410` on frame, download and metadata; account export has every version; erased | "stop showing when the browser signs out, its passkey is removed…" |
 | A tool call or a restore under way during the erasure leaves nothing | "keeps an artifact the model asks for during the erasure…", "refuses an artifact restore in the agent's handler…" |

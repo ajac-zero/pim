@@ -10,7 +10,7 @@ import type { Approval, Notification } from "./store";
 
 /**
  * An approval as clients see it. Its `session` is null when a guest asked:
- * their conversation is in their own Pim.
+ * their conversation is in their own space.
  */
 export type PublicApproval = Omit<Approval, "session"> & { readonly session: string | null };
 

@@ -16,7 +16,7 @@ import { faux } from "./worker";
  */
 export let OWNER = "";
 export let TOKEN = "";
-/** The public id of the Pim's root session, where API clients talk by default. */
+/** The public id of the space's root session, where API clients talk by default. */
 export let ROOT = "";
 
 beforeAll(async () => {

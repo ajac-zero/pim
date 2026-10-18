@@ -87,7 +87,7 @@ export class Telemetry {
 	readonly #tracer: Tracer | null;
 	readonly #content: boolean;
 	readonly #agentOf: (conversation: string) => AgentRef;
-	/** The id a conversation goes by outside the Pim, which its spans give it. */
+	/** The id a conversation goes by outside the space, which its spans give it. */
 	readonly #idOf: (conversation: string) => string;
 	/** Open runs, by conversation. In memory: a run resumed after an eviction starts a new trace. */
 	readonly #runs = new Map<string, Run>();

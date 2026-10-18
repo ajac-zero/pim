@@ -158,7 +158,7 @@ Set the endpoint as a variable in the dashboard, like the settings above, and it
 | `OTEL_SERVICE_NAME` | The traces' service name; `pim` when unset |
 | `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | `true` adds prompts, messages, and tool arguments and results. They are people's private conversations: set it only for a backend that may hold them |
 
-Each span's `gen_ai.conversation.id` is its conversation's id; for a chat, the one in `/chat/<id>`. Spans go out every few seconds and whenever a person's agents go idle; any not yet sent are lost if their Pim is evicted.
+Each span's `gen_ai.conversation.id` is its conversation's id; for a chat, the one in `/chat/<id>`. Spans go out every few seconds and whenever a person's agents go idle; any not yet sent are lost if their space is evicted.
 
 For local development, run `pnpm dev`: the Worker and the built web app at `http://localhost:8787` (use `localhost`: passkeys don't work on an IP address). Its first 15 minutes count as just deployed, so the first account you make is the admin, and setup links show up in the terminal. For the web app with hot reload, make an API token in Settings and run `PIM_API_TOKEN=... pnpm dev:web` (port 3000), which signs in with it. The `AI` binding is remote, so `wrangler dev` needs a Cloudflare login, and model calls bill that account. `pnpm preview` runs the same Pim with no Cloudflare login and a stand-in model, at the same address.
 
@@ -217,7 +217,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | DELETE | `/goals/:id` | | |
 | GET | `/schedules` | | Pending scheduled tasks |
 | DELETE | `/schedules/:id` | | Cancel one |
-| GET | `/approvals`, `/approvals/:id` | `?status=pending\|approved\|denied` | Approval requests; each says what its timeout decides (`onTimeout`), who decided it (`decidedBy`: `user`, `timeout`, `always` or `majordomo`), and `review`: `{ status: "reviewing" \| "escalated", note }` while the majordomo has it, or after it asked you, with what it said; null when you were asked directly. `session` is the chat that asked, or null when a guest asked from their own Pim |
+| GET | `/approvals`, `/approvals/:id` | `?status=pending\|approved\|denied` | Approval requests; each says what its timeout decides (`onTimeout`), who decided it (`decidedBy`: `user`, `timeout`, `always` or `majordomo`), and `review`: `{ status: "reviewing" \| "escalated", note }` while the majordomo has it, or after it asked you, with what it said; null when you were asked directly. `session` is the chat that asked, or null when a guest asked from their own space |
 | POST | `/approvals/:id/approve`, `/approvals/:id/deny` | `{ note? }` | The decided approval; `409` if already decided |
 | POST | `/approvals/:id/approve` | `{ note?, always: true }` | Also sets the approval's tool to `on`, so later calls run without asking, and approves other pending calls to it |
 | GET | `/permissions` | `?circle=` | `{ tools: [{ app, appName, tool, name, description, readOnly, permission, default, chosen, changed, choices }] }`: Pim's own tools that ask first (`app: null`) and every connected app's tools, or with `circle`, that circle's (memory, and the apps' tools). `permission` is what applies: `off`, `ask` or `on`. `chosen` is yours, or null for the default |

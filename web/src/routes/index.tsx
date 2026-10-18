@@ -8,12 +8,12 @@ import { agentsQuery } from "~/lib/queries";
 export const Route = createFileRoute("/")({
   loader: async ({ context }) => {
     const agents = await context.queryClient.fetchQuery(agentsQuery());
-    const agent = agents.find((agent) => agent.majordomo) ?? agents[0];
-    if (agent === undefined)
-      throw redirect({ to: "/new", search: true, hash: true });
+    // Pim makes the majordomo the first time its agents are listed.
+    const majordomo = agents.find((agent) => agent.majordomo);
+    if (majordomo === undefined) throw new Error("No majordomo");
     throw redirect({
       to: "/agents/$agentId",
-      params: { agentId: agent.id },
+      params: { agentId: majordomo.id },
       search: true,
       hash: true,
     });

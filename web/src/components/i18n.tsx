@@ -90,7 +90,6 @@ const translations = {
     fromTemplateBy: "From an agent by",
     connected: "Connected",
     appConnected: "Connected.",
-    startChatWith: "Start a chat with {name}.",
     messageAgent: "Message {name}…",
     discover: "Discover",
     discoverDescription:
@@ -919,7 +918,6 @@ const translations = {
     fromTemplateBy: "De un agente de",
     connected: "Conectada",
     appConnected: "Conectada.",
-    startChatWith: "Empieza un chat con {name}.",
     messageAgent: "Escribe a {name}…",
     discover: "Descubrir",
     discoverDescription:

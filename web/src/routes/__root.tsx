@@ -314,9 +314,7 @@ function AppLayout() {
   }
   const { sessionId } = useParams({ strict: false }) as { sessionId?: string };
   const inChat = useRouterState({
-    select: (state) =>
-      state.location.pathname.startsWith("/chat/") ||
-      state.location.pathname === "/new",
+    select: (state) => state.location.pathname.startsWith("/chat/"),
   });
   const awaitingApproval = useAwaitingApproval();
   usePimEvents();

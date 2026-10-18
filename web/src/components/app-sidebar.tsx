@@ -19,7 +19,7 @@ import {
   ChevronDown,
   Compass,
   Folder,
-  MessageCircle,
+  MessagesSquare,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -229,7 +229,7 @@ export function AppSidebar({
           />
           <RailPanel
             {...railPanel}
-            icon={<MessageCircle className="size-4.5" />}
+            icon={<MessagesSquare className="size-4.5" />}
             label={t("chats")}
             count={panel || collapsed ? awaitingApproval.size : 0}
           />

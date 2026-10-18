@@ -71,7 +71,7 @@ Images people send in chats are kept in an R2 bucket, which deploying creates. R
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ajac-zero/pim)
 
-The button copies this repository to your GitHub account and deploys it to your Cloudflare account. It asks one thing: `PIM_PUBLIC_URL`, the address people will use. Pim answers only there, and passkeys belong to it, so choose the one you'll keep. The Worker's own is `https://pim.<your subdomain>.workers.dev` (the subdomain is on the Workers & Pages overview); for a custom domain, attach it to the Worker once it's deployed. Then open that address, pick a username, save your recovery codes and create your passkey: your face, fingerprint, or PIN. You're the admin of this Pim. That's the whole setup.
+The button copies this repository to your GitHub account and deploys it to your Cloudflare account. It asks for nothing. Then open the Worker's `workers.dev` URL, which the deploy shows: Pim asks for its address, `PIM_PUBLIC_URL`, before anything else. Pim answers only there, and passkeys belong to it, so choose the one you'll keep: the `workers.dev` URL, or a custom domain you attach to the Worker first. Add it in the dashboard (Workers & Pages → `pim` → Settings → Variables and Secrets), open it, pick a username, save your recovery codes and create your passkey: your face, fingerprint, or PIN. You're the admin of this Pim. That's the whole setup.
 
 - **The first account** can be made that way for 15 minutes after a deploy, and it is the admin's. Until you make it, whoever opens the URL first could, so open it right after deploying. Missed the 15 minutes? The sign-in screen has the Worker write a one-time setup link to its logs, which only someone signed in to your Cloudflare account can read. In the dashboard, open Workers & Pages, then `pim`, then Observability, and open the link in the log that starts with "Pim setup link". It works once, for an hour.
 - **Inviting people.** Settings → Members → Invite someone makes a link that lets one person join. With `PIM_REGISTRATION` set to `open`, anyone who finds the address can; `closed` lets nobody in.
@@ -86,16 +86,16 @@ Or from a checkout:
 ```sh
 pnpm install
 pnpm wrangler login
-pnpm wrangler deploy --var PIM_PUBLIC_URL:https://pim.example.com   # builds web/ first
+pnpm run deploy        # builds web/ first
 ```
 
-Then open that address to set it up. Set `PIM_PUBLIC_URL` in `wrangler.jsonc` instead if your checkout is your own, and every deploy keeps it. With the CLI, `pnpm wrangler tail` shows setup links as the sign-in screen asks for them.
+Then set `PIM_PUBLIC_URL` in the dashboard as above (from the CLI, `pnpm wrangler secret put PIM_PUBLIC_URL` works too, since wrangler has no command for plain variables), and open that address to set it up. With the CLI, `pnpm wrangler tail` shows setup links as the sign-in screen asks for them.
 
-Apart from `PIM_PUBLIC_URL`, which every deploy fixes, what's yours is a variable you set in the dashboard (Workers & Pages → `pim` → Settings → Variables and Secrets), not in `wrangler.jsonc`: `keep_vars` keeps them through deploys, and saving one there applies it at once. Leave any of them unset for its default (in [`src/deployment.ts`](src/deployment.ts)). The admin sees what each is, and any Pim can't read, in Settings → Deployment:
+`wrangler.jsonc` is the same for every deployment, so deploy it as it is. What's yours is a variable you set in the dashboard (Workers & Pages → `pim` → Settings → Variables and Secrets), not in `wrangler.jsonc`: `keep_vars` keeps them through deploys, and saving one there applies it at once. Leave any of them unset for its default (in [`src/deployment.ts`](src/deployment.ts)). The admin sees what each is, and any Pim can't read, in Settings → Deployment:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `PIM_PUBLIC_URL` | none: set when deploying | The address people use, such as `https://pim.example.com`: passkeys, apps' callbacks and the links Pim makes belong to it. Pim answers only there, sends the web app there from any other address, and answers nothing until it's set |
+| `PIM_PUBLIC_URL` | none: required | The address people use, such as `https://pim.example.com`: passkeys, apps' callbacks and the links Pim makes belong to it. Pim answers only there, sends the web app there from any other address, and answers nothing until it's set |
 | `PIM_REGISTRATION` | `invite` | How people join once there is an admin: `invite` (links the admin makes), `open` or `closed` |
 | `PIM_MAX_ACCOUNTS` | unset | Accounts allowed in all; unset for no cap |
 | `PIM_REGISTRATIONS_PER_ADDRESS` | `3` | Accounts one IP address may make in a day |

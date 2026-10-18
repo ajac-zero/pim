@@ -6,20 +6,13 @@
   "private": true,
   "packageManager": "pnpm@12.0.0",
   "type": "module",
-  "cloudflare": {
-    "bindings": {
-      "PIM_PUBLIC_URL": {
-        "description": "The address people will use, such as `https://pim.example.com`. Pim answers only there, and passkeys belong to it. For the Worker's own address, enter `https://<Worker name>.<your subdomain>.workers.dev`; your subdomain is on the Workers & Pages overview. A custom domain must also be attached to the Worker after deploying."
-      }
-    }
-  },
   "scripts": {
     "dev": "wrangler dev --var PIM_PUBLIC_URL:http://localhost:8787",
     "dev:web": "pnpm --filter pim-web dev",
     "build": "pnpm --filter pim-web build",
     "deploy": "wrangler deploy",
     "preview": "wrangler dev --local --config wrangler.preview.jsonc --persist-to .wrangler/state-preview",
-    "types": "wrangler types --strict-vars=false",
+    "types": "wrangler types",
     "typecheck": "tsc --noEmit && pnpm --filter pim-web typecheck",
     "lint": "pnpm --filter pim-web lint",
     "check": "pnpm typecheck && pnpm lint && pnpm test",

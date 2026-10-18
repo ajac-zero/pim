@@ -425,9 +425,17 @@ export function ArtifactPrint({
   );
 }
 
-/** Says, next to an artifact, who made it and what it can still do. */
-export function ArtifactCaution({ className }: { className?: string }) {
+/** Warns, next to an artifact that runs code, what it could do with what is typed into it. */
+export function ArtifactCaution({
+  kind,
+  className,
+}: {
+  kind: ArtifactKind;
+  className?: string;
+}) {
   const { t } = useI18n();
+  // A Markdown document runs nothing, so there is nothing to warn about.
+  if (kind === "markdown") return null;
   return (
     <p
       className={cn(
@@ -535,7 +543,7 @@ export function ArtifactCard({ reference }: { reference: ArtifactReference }) {
               kind={reference.kind}
               title={reference.title}
             />
-            <ArtifactCaution className="mt-2" />
+            <ArtifactCaution kind={reference.kind} className="mt-2" />
           </>
         )}
       </div>

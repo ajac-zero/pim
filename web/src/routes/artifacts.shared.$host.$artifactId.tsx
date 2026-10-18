@@ -82,7 +82,7 @@ function SharedArtifactPage() {
             fill
           />
         </div>
-        <ArtifactCaution />
+        <ArtifactCaution kind={artifact.kind} />
         {printing && (
           <ArtifactPrint
             id={artifact.id}

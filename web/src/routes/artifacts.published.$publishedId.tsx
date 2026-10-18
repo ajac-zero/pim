@@ -167,7 +167,7 @@ function PublishedArtifactPage() {
             fill
           />
         </div>
-        <ArtifactCaution />
+        <ArtifactCaution kind={artifact.kind} />
         {printing && (
           <ArtifactPrint
             id={artifact.id}

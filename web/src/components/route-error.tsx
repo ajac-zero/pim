@@ -38,12 +38,6 @@ export function RouteError({ error, reset }: ErrorComponentProps) {
 function SetAddress() {
   const { t } = useI18n();
   const code = "rounded bg-muted px-1 py-0.5 font-mono text-[13px]";
-  // The address this page was opened at, such as the Worker's workers.dev one,
-  // unless it's a local one nobody else can reach.
-  const example =
-    location.protocol === "https:"
-      ? location.origin
-      : "https://pim.example.com";
   return (
     <main className="flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto px-6 py-12">
       <div className="w-full max-w-sm">
@@ -54,9 +48,7 @@ function SetAddress() {
           <li>
             {t("noAddressAdd")} <code className={code}>PIM_PUBLIC_URL</code>{" "}
             {t("noAddressAddValue")}{" "}
-            <code className={`${code} mt-1.5 block w-fit max-w-full break-all`}>
-              {example}
-            </code>
+            <code className={code}>https://pim.example.com</code>
           </li>
           <li>{t("noAddressReload")}</li>
         </ol>

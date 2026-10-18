@@ -232,6 +232,7 @@ function usePimEvents() {
         // Nothing to ask yet while the majordomo decides it.
         const chat = approval.member?.session ?? approval.session;
         if (
+          chat === null ||
           approval.status !== "pending" ||
           approval.review?.status === "reviewing" ||
           chat === sessionId

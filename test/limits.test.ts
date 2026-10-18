@@ -10,7 +10,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { type Limits, UNLIMITED, UsageMeter } from "../src/usage";
 import { exports } from "cloudflare:workers";
-import { api, apiUrl, OWNER, post, say, TOKEN, toolUse, url } from "./helpers";
+import { api, apiUrl, OWNER, post, ROOT, say, TOKEN, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
@@ -170,7 +170,7 @@ describe("limits", () => {
 	it("refuse a run past the daily limit", async () => {
 		const { runs } = (await api<Usage>("/usage")).body.today;
 		await setLimits({ dailyRuns: runs });
-		const refused = await post("/sessions/1/messages", { content: "One more" });
+		const refused = await post(`/sessions/${ROOT}/messages`, { content: "One more" });
 		expect(refused.status).toBe(429);
 		expect(refused.body.error).toMatch(/quota exceeded: today's \d+ runs are used up/);
 	});
@@ -183,7 +183,7 @@ describe("limits", () => {
 		const answer = await say("Are you there?");
 		expect(answer).toMatchObject({ status: "unanswered", reason: "model_error" });
 		// The person reads why in the chat.
-		const { messages } = (await api("/sessions/1/messages")).body;
+		const { messages } = (await api(`/sessions/${ROOT}/messages`)).body;
 		expect(JSON.stringify(messages.at(-1))).toMatch(/quota exceeded: today's \d+ model requests are used up/);
 		// Retries back off for seconds; a quota error is final.
 		expect(Date.now() - started).toBeLessThan(3_000);

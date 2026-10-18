@@ -6,7 +6,7 @@ import { checkToolNames, PimExtensions } from "../src/extensions/define";
 import { themes as ownThemes } from "../src/extensions/themes";
 import { nord } from "../src/extensions/themes/nord";
 import { PimThemes, type Theme, type ThemeList } from "../src/themes";
-import { api, apiUrl, decisionRun, lastUserText, pendingApproval, post, say, systemPrompt, toolUse } from "./helpers";
+import { api, apiUrl, decisionRun, lastUserText, pendingApproval, post, ROOT, say, systemPrompt, toolUse } from "./helpers";
 import { faux, ledger, outbox } from "./worker";
 
 type Agent = { id: string; name: string; blueprint: string | null; majordomo: boolean };
@@ -77,7 +77,7 @@ describe("extensions", () => {
 			return toolUse("send_to_user", { message: "ok" });
 		};
 		faux.setResponses([record, record, record]);
-		await say("Hi", "1");
+		await say("Hi", ROOT);
 		await say("Spent?", (await post("/sessions", { agent: budget.id })).body.id);
 		await say("Hello", (await post("/sessions", { agent: bare.id })).body.id);
 		const [assistant, books, plain] = prompts as [string, string, string];
@@ -113,7 +113,7 @@ describe("extensions", () => {
 		await say("Plan my training and check in later.", chat);
 		await say("Track my 10k.", chat);
 		faux.setResponses([toolUse("create_goal", { title: "Learn Portuguese", steps: ["Find a tutor"] }), toolUse("send_to_user", { message: "ok" })]);
-		await say("I want to learn Portuguese.", "1");
+		await say("I want to learn Portuguese.", ROOT);
 		await post("/memory/log", { text: "Prefers morning runs" });
 		const forgotten = (await post("/memory/log", { text: "Lives in Lisbon" })).body;
 		await api(`/memory/log/${forgotten.id}`, { method: "DELETE" });
@@ -221,9 +221,9 @@ describe("extensions", () => {
 			},
 		]);
 		const named = (await post("/majordomo", setup)).body;
-		expect(named).toMatchObject({ introduced: true, session: "1", agent: { id: first.id, name: "Alfred", symbol: "🎩", color: "violet", majordomo: true } });
+		expect(named).toMatchObject({ introduced: true, session: ROOT, agent: { id: first.id, name: "Alfred", symbol: "🎩", color: "violet", majordomo: true } });
 		const intro = await vi.waitFor(async () => {
-			const { body } = await api("/sessions/1/operations/introduction");
+			const { body } = await api(`/sessions/${ROOT}/operations/introduction`);
 			expect(body.status).toBe("done");
 			return body;
 		});
@@ -243,7 +243,7 @@ describe("extensions", () => {
 		const memories = (await api("/memory/log")).body.entries.map((entry: { text: string }) => entry.text);
 		expect(memories.slice(0, 2).reverse()).toEqual(["Their name is Anita.", "They'd like a hand with work, money, travel, my garden and my taxes."]);
 		expect((await api("/memory")).body.count).toBe(before + 2);
-		expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === "1").title).toBe("Te damos la bienvenida, Anita");
+		expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === ROOT).title).toBe("Te damos la bienvenida, Anita");
 		// Once: after that it is edited like any agent.
 		expect((await post("/majordomo", { name: "Jeeves" })).status).toBe(409);
 

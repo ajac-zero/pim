@@ -16,6 +16,8 @@ import { faux } from "./worker";
  */
 export let OWNER = "";
 export let TOKEN = "";
+/** The public id of the Pim's root session, where API clients talk by default. */
+export let ROOT = "";
 
 beforeAll(async () => {
 	const directory = env.Directory.getByName("directory");
@@ -31,6 +33,7 @@ beforeAll(async () => {
 	const agent = await getAgentByName(env.Pim, OWNER);
 	await agent.provision({ ownerId: OWNER, username: "tester", publicUrl: "https://pim.test" });
 	TOKEN = (await env.Auth.getByName(OWNER).createToken(OWNER, "tests", Date.now())).token;
+	ROOT = (await api("/")).body.rootSession;
 });
 
 export function url(path: string) {
@@ -57,7 +60,7 @@ export function post<T = any>(path: string, body: unknown = {}) {
 }
 
 /** Sends a message and waits for the answer. */
-export async function say(content: string, session = "1") {
+export async function say(content: string, session = ROOT) {
 	const { status, body } = await post(`/sessions/${session}/messages`, { content, wait: true });
 	expect(status).toBe(200);
 	return body as { status: string; text?: string; reason?: string };

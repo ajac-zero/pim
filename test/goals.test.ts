@@ -2,7 +2,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "vitest";
 import type { Goal } from "../src/store";
 import type { Message } from "@earendil-works/pi-ai";
-import { api, post, say, systemPrompt, toolUse } from "./helpers";
+import { api, post, ROOT, say, systemPrompt, toolUse } from "./helpers";
 import { faux } from "./worker";
 
 describe("goals", () => {
@@ -35,7 +35,7 @@ describe("goals", () => {
 		]);
 		await say("I want to run a 10k.");
 		const [goal] = (await api<{ goals: Goal[] }>("/goals")).body.goals;
-		expect(goal).toMatchObject({ title: "Run a 10k", status: "active", session: "1" });
+		expect(goal).toMatchObject({ title: "Run a 10k", status: "active", session: ROOT });
 
 		let prompt = "";
 		faux.setResponses([

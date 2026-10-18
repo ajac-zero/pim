@@ -194,7 +194,7 @@ A `link` is `{ chat }` or `{ artifact }`: the item opens it.
 `load` gets:
 
 - `agent`: the agent whose dashboard it is (`id`, `name`, `majordomo`).
-- `chatOf(session)`: the person's chat that a conversation is, or works for, when that chat is this Pim's; null otherwise. A team member's conversation works for the chat that gave it its task. Use it to show only what belongs to this Pim, and to link to the chat.
+- `chatOf(session)`: the person's chat that a conversation is, or works for, when that chat is this Pim's, by the id a `link` takes; null otherwise. A team member's conversation works for the chat that gave it its task. Use it to show only what belongs to this Pim, and to link to the chat.
 - `ofAgent(session)`: whether a conversation is, or works for, one of this Pim's chats, including one since deleted. Use it for what outlives the chat it came from, such as a task that starts new chats.
 - `timeZone`: the person's.
 - `data`: the data of the extension that brings the widget.

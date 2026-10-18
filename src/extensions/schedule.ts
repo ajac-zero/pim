@@ -2,16 +2,18 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import type { Schedule } from "agents";
 import { definePimExtension } from "./define";
+import type { PimStore } from "../store";
 import { type PimServices, type ScheduledTaskPayload, json, text } from "./services";
 
-export function describeSchedule(schedule: Schedule<ScheduledTaskPayload>) {
+/** A schedule as the API and the model see it, its chat by its public id. */
+export function describeSchedule(schedule: Schedule<ScheduledTaskPayload>, store: Pick<PimStore, "publicId">) {
 	return {
 		id: schedule.id,
 		type: schedule.type,
 		next: new Date(schedule.time * 1000).toISOString(),
 		...(schedule.type === "cron" ? { cron: schedule.cron } : {}),
 		...(schedule.type === "interval" ? { intervalSeconds: schedule.intervalSeconds } : {}),
-		session: schedule.payload.session,
+		session: store.publicId(schedule.payload.session),
 		label: schedule.payload.label ?? null,
 		instruction: schedule.payload.instruction,
 		newChat: schedule.payload.newChat === true,
@@ -55,7 +57,7 @@ export function scheduleExtension(services: PimServices) {
 			const existing = await api.memo<string>("schedule", context);
 			if (existing !== undefined) {
 				const known = (await services.listSchedules()).find((schedule) => schedule.id === existing);
-				if (known) return json(describeSchedule(known));
+				if (known) return json(describeSchedule(known, services.store));
 			}
 			const payload: ScheduledTaskPayload = {
 				session: String(api.conversationId),
@@ -65,7 +67,7 @@ export function scheduleExtension(services: PimServices) {
 			};
 			const schedule = await services.schedule(when, payload);
 			await api.memo("schedule", schedule.id, context);
-			return json(describeSchedule(schedule));
+			return json(describeSchedule(schedule, services.store));
 		},
 	});
 
@@ -75,7 +77,7 @@ export function scheduleExtension(services: PimServices) {
 		parameters: Type.Object({}),
 		replay: "safe",
 		async execute() {
-			return json((await services.listSchedules()).map(describeSchedule));
+			return json((await services.listSchedules()).map((schedule) => describeSchedule(schedule, services.store)));
 		},
 	});
 

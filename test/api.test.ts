@@ -5,8 +5,10 @@ import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { StoredImage } from "../src/images";
 import type { TranscriptMessage } from "../src/transcript";
-import { api, apiUrl, connect, OWNER, post, say, textOf, TOKEN, toolUse, url } from "./helpers";
+import { api, apiUrl, connect, OWNER, post, ROOT, say, textOf, TOKEN, toolUse, url } from "./helpers";
 import { faux, type Pim, utility } from "./worker";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 describe("auth", () => {
 	it("rejects requests without the API token", async () => {
@@ -53,7 +55,7 @@ describe("auth", () => {
 describe("agent", () => {
 	it("describes itself and marks the tools that need approval", async () => {
 		const { body } = await api("/");
-		expect(body).toMatchObject({ model: "faux-model", timeZone: "America/New_York", rootSession: "1" });
+		expect(body).toMatchObject({ model: "faux-model", timeZone: "America/New_York", rootSession: expect.stringMatching(UUID) });
 		const tools = new Map((body.tools as { name: string; requiresApproval: boolean }[]).map((tool) => [tool.name, tool]));
 		expect(tools.get("http_request")?.requiresApproval).toBe(true);
 		expect(tools.get("note")?.requiresApproval).toBe(false);
@@ -88,7 +90,7 @@ describe("conversation", () => {
 		const answer = await say("What is the capital of France?");
 		expect(answer).toMatchObject({ status: "done", text: "Paris." });
 
-		const { body } = await api("/sessions/1/messages");
+		const { body } = await api(`/sessions/${ROOT}/messages`);
 		const messages = body.messages as TranscriptMessage[];
 		expect(messages.map((message) => [message.role, textOf(message)])).toEqual([
 			["user", "What is the capital of France?"],
@@ -107,6 +109,11 @@ describe("conversation", () => {
 		expect(body.messages.map(textOf)).toEqual(["hi", "", ""]);
 		expect(body.messages[1].parts[0].arguments.message).toBe("In the new session.");
 		expect((await api("/sessions/999/messages")).status).toBe(404);
+		// A session goes by a random id; pi's number for its conversation is no address.
+		expect(created.id).toMatch(UUID);
+		const number = await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.store.sessionOf(created.id));
+		expect(number).toMatch(/^[0-9]+$/);
+		expect((await api(`/sessions/${number}/messages`)).status).toBe(404);
 	});
 
 	it("names sessions from the user's first message with the utility model and lists the most recently active first", async () => {
@@ -130,8 +137,9 @@ describe("conversation", () => {
 		// A message Pim sends itself (a scheduled task, an event) does not name a session.
 		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
 			faux.setResponses([fauxAssistantMessage("Reminder sent.")]);
-			const receipt = await instance.submitTo(third, "[Scheduled task] remind", {}, "pim");
-			await instance.harness.wait(receipt.operationId, { session: third });
+			const session = instance.store.sessionOf(third)!;
+			const receipt = await instance.submitTo(session, "[Scheduled task] remind", {}, "pim");
+			await instance.harness.wait(receipt.operationId, { session });
 		});
 		expect(await titles()).toMatchObject({ [first]: "Lisbon Trip Planning", [second]: "Groceries", [third]: null });
 		expect((await order()).slice(0, 3)).toEqual([third, second, first]);
@@ -235,11 +243,11 @@ describe("conversation", () => {
 		// The root is where API clients talk by default: deleting hides it until it gets a message.
 		faux.setResponses([toolUse("send_to_user", { message: "Hi." })]);
 		await say("hello root");
-		expect((await api("/sessions/1", { method: "DELETE" })).status).toBe(200);
-		expect(await listed()).not.toContain("1");
+		expect((await api(`/sessions/${ROOT}`, { method: "DELETE" })).status).toBe(200);
+		expect(await listed()).not.toContain(ROOT);
 		faux.setResponses([toolUse("send_to_user", { message: "Back." })]);
 		expect((await say("hello again")).text).toBe("Back.");
-		expect(await listed()).toContain("1");
+		expect(await listed()).toContain(ROOT);
 	});
 
 	it("returns a receipt without waiting, and the operation settles later", async () => {
@@ -297,7 +305,7 @@ describe("conversation", () => {
 		const gone = await exports.default.fetch(url(images[0]!.url), { headers: { Authorization: `Bearer ${TOKEN}` } });
 		expect(gone.status).toBe(404);
 
-		const refused = async (parts: unknown) => (await post("/sessions/1/messages", { content: parts })).status;
+		const refused = async (parts: unknown) => (await post(`/sessions/${ROOT}/messages`, { content: parts })).status;
 		expect(await refused([{ type: "image", data: "A".repeat(6_666_668), mimeType: "image/png" }])).toBe(413);
 		expect(await refused(Array.from({ length: 5 }, () => ({ type: "image", data: "AAAA", mimeType: "image/png" })))).toBe(400);
 		expect(await refused([{ type: "image", data: "AAAA", mimeType: "image/svg+xml" }])).toBe(415);

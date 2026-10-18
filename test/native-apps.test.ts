@@ -2,7 +2,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { api, decisionRun, OWNER, pendingApproval, post, say, toolUse, url } from "./helpers";
+import { api, decisionRun, OWNER, pendingApproval, post, ROOT, say, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /**
@@ -118,7 +118,7 @@ describe("apps extensions implement", () => {
 		expect(tokensUsed.at(-1)).toBe("Bearer token-1");
 		expect(read).toContain("Checking: 120\nSavings: 900");
 		// The person sees the result as a widget under the message, as it was when sent.
-		const transcript = JSON.stringify((await api("/sessions/1/messages")).body.messages);
+		const transcript = JSON.stringify((await api(`/sessions/${ROOT}/messages`)).body.messages);
 		expect(transcript).toContain('\\"title\\":\\"Balances\\"');
 		expect(transcript).toContain('{\\"title\\":\\"Savings\\",\\"detail\\":\\"900\\"}');
 

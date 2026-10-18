@@ -8,6 +8,12 @@ import type { Approval, Notification } from "./store";
  * UIs can import these types from `pim/src/protocol`.
  */
 
+/**
+ * An approval as clients see it. Its `session` is null when a guest asked:
+ * their conversation is in their own Pim.
+ */
+export type PublicApproval = Omit<Approval, "session"> & { readonly session: string | null };
+
 export type ToolInfo = {
 	readonly name: string;
 	readonly description: string;
@@ -42,7 +48,7 @@ export type ServerMessage =
 	| { readonly type: "events"; readonly session: string; readonly events: readonly AgentEvent[] }
 	| { readonly type: "notification"; readonly notification: Notification }
 	/** An approval was requested or decided. */
-	| { readonly type: "approval"; readonly approval: Approval }
+	| { readonly type: "approval"; readonly approval: PublicApproval }
 	/** Pims shared with this one's owner changed: one was shared, or taken back. */
 	| { readonly type: "visits" }
 	/** The session list changed outside a run: a session got its title. */

@@ -87,7 +87,7 @@ export type WidgetContext = {
 	/**
 	 * The person's chat that a conversation is, or works for (a team member's
 	 * conversation works for the chat that gave it its task), when that chat
-	 * is this Pim's; null otherwise.
+	 * is this Pim's, by the id links use; null otherwise.
 	 */
 	chatOf(session: string): string | null;
 	/** Whether a conversation is, or works for, one of this agent's chats, including one since deleted. */

@@ -106,6 +106,8 @@ export type PublishedArtifact = {
 	readonly publishedAt: number;
 	/** How many people made it their own. */
 	readonly uses: number;
+	/** Whether anyone with its link may see it, without an account, on the content origin. */
+	readonly public: boolean;
 };
 
 /** An artifact as its author publishes it. */
@@ -174,6 +176,7 @@ CREATE TABLE IF NOT EXISTS published_artifacts (
 	size INTEGER NOT NULL,
 	published_at INTEGER NOT NULL,
 	uses INTEGER NOT NULL DEFAULT 0,
+	public INTEGER NOT NULL DEFAULT 0,
 	UNIQUE (owner_id, artifact_id)
 );
 CREATE INDEX IF NOT EXISTS published_artifacts_by_author ON published_artifacts (username, published_at);
@@ -222,7 +225,7 @@ const WITH_AUTHOR =
 
 // Every column but the content, which only opening one reads.
 const PUBLISHED_ARTIFACT =
-	"SELECT a.id, a.username, a.artifact_id, a.version, a.title, a.kind, a.sha256, a.size, a.published_at, a.uses, p.display_name FROM published_artifacts a LEFT JOIN profiles p ON p.owner_id = a.owner_id";
+	"SELECT a.id, a.username, a.artifact_id, a.version, a.title, a.kind, a.sha256, a.size, a.published_at, a.uses, a.public, p.display_name FROM published_artifacts a LEFT JOIN profiles p ON p.owner_id = a.owner_id";
 
 const publishedArtifactOf = (row: Row): PublishedArtifact => ({
 	id: String(row.id),
@@ -236,6 +239,7 @@ const publishedArtifactOf = (row: Row): PublishedArtifact => ({
 	size: Number(row.size),
 	publishedAt: Number(row.published_at),
 	uses: Number(row.uses),
+	public: Number(row.public) === 1,
 });
 
 /** The category the admin filed an app under, or null for Other. */
@@ -468,18 +472,22 @@ export class Gallery extends DurableObject<Env> {
 		return this.#sql("DELETE FROM templates WHERE id = ?", id).rowsWritten > 0;
 	}
 
-	/** Publishes the latest version of one of the author's artifacts, or replaces what was published of it. */
-	publishArtifact(ownerId: string, username: string, artifact: ArtifactToPublish): PublishedArtifact {
-		const [known] = this.#sql("SELECT id FROM published_artifacts WHERE owner_id = ? AND artifact_id = ?", ownerId, artifact.id).toArray();
+	/**
+	 * Publishes the latest version of one of the author's artifacts, or
+	 * replaces what was published of it. `open` says whether anyone with its
+	 * link may see it too; left out, that stays as it was (no, at first).
+	 */
+	publishArtifact(ownerId: string, username: string, artifact: ArtifactToPublish, open?: boolean): PublishedArtifact {
+		const [known] = this.#sql("SELECT id, public FROM published_artifacts WHERE owner_id = ? AND artifact_id = ?", ownerId, artifact.id).toArray();
 		if (!known) {
 			const count = Number(this.#sql("SELECT COUNT(*) AS n FROM published_artifacts WHERE owner_id = ?", ownerId).one().n);
 			if (count >= MAX_PUBLISHED_ARTIFACTS) throw new HttpError(429, `You can publish up to ${MAX_PUBLISHED_ARTIFACTS} artifacts.`);
 		}
 		const id = known ? String(known.id) : `pa_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 		this.#sql(
-			`INSERT INTO published_artifacts (id, owner_id, username, artifact_id, version, title, kind, content, sha256, size, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO published_artifacts (id, owner_id, username, artifact_id, version, title, kind, content, sha256, size, published_at, public) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET version = excluded.version, title = excluded.title, kind = excluded.kind, content = excluded.content, sha256 = excluded.sha256,
-			size = excluded.size, published_at = excluded.published_at`,
+			size = excluded.size, published_at = excluded.published_at, public = ?`,
 			id,
 			ownerId,
 			username,
@@ -491,6 +499,8 @@ export class Gallery extends DurableObject<Env> {
 			artifact.sha256,
 			artifact.size,
 			Date.now(),
+			open ? 1 : 0,
+			open === undefined ? (known ? Number(known.public) : 0) : open ? 1 : 0,
 		);
 		return this.publishedArtifact(id)!;
 	}
@@ -515,6 +525,12 @@ export class Gallery extends DurableObject<Env> {
 	publishedContent(id: string): string | null {
 		const [row] = this.#sql("SELECT content FROM published_artifacts WHERE id = ?", id).toArray();
 		return row ? String(row.content) : null;
+	}
+
+	/** A published artifact anyone with its link may see, with its content; null for any other id. */
+	publicArtifact(id: string): { kind: ArtifactKind; title: string; content: string } | null {
+		const [row] = this.#sql("SELECT kind, title, content FROM published_artifacts WHERE id = ? AND public = 1", id).toArray();
+		return row ? { kind: String(row.kind) as ArtifactKind, title: String(row.title), content: String(row.content) } : null;
 	}
 
 	/** Published artifacts, most used first; matching `query` in their title or author, or by one author. */

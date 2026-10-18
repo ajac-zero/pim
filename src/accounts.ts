@@ -3,7 +3,8 @@ import { configuredProviders, PROVIDER_IDS, providerName, providerSecrets } from
 import { type AuthSite, clearCookie, fromAnotherSite, ownedCode, SESSION_COOKIE, type Sites, userHandle } from "./auth";
 import type { ApiExtension } from "./gateway";
 import { deploymentSettings, readDeployment } from "./deployment";
-import { framePage } from "./artifacts";
+import { FRAMED_KINDS, framePage, RUNTIME_PATH } from "./artifacts";
+import type { PublishedArtifact } from "./gallery";
 import { HttpError } from "./http";
 import { parseLimits, UNLIMITED } from "./usage";
 import { type Account, type AccountStatus, type CleanupResult, PENDING_MS, type RegistrationPolicy } from "./directory";
@@ -72,6 +73,38 @@ function registrationPolicy(env: Env): RegistrationPolicy {
 function claimWindowOpen(env: Env, now: number): boolean {
 	const deployed = Date.parse(env.CF_VERSION_METADATA?.timestamp ?? "");
 	return now >= deployed && now < deployed + CLAIM_WINDOW_MS;
+}
+
+/**
+ * The origin public artifact links are served from, `PIM_CONTENT_ORIGIN`:
+ * another host, routed to this Worker, that serves nothing but published
+ * artifacts' pages and their scripts, and has no session, cookie or API.
+ * Null when it isn't set, and links are off.
+ */
+export const contentOrigin = (env: Env) => deploymentSettings(env).contentOrigin;
+
+/** What an author sees of an artifact they published: also its public link, if it has one, and whether it can. */
+function publication(env: Env, published: PublishedArtifact) {
+	const content = contentOrigin(env);
+	const linkable = content !== null && FRAMED_KINDS.includes(published.kind);
+	return { ...published, linkable, link: linkable && published.public ? `${content}/p/${published.id}` : null };
+}
+
+/**
+ * A request to the content origin. It answers only `/p/<id>`, a published
+ * artifact its author lets anyone with the link see, as the same sandboxed
+ * page Pim frames, whose bridge refuses every call (no Pim is there to
+ * answer), and the runtime scripts such pages load. Nothing else.
+ */
+export async function servePublicArtifact(request: Request, env: Env, pathname: string): Promise<Response> {
+	if (request.method !== "GET" && request.method !== "HEAD") return new Response("Not found", { status: 404 });
+	if (pathname.startsWith(RUNTIME_PATH)) return env.ASSETS.fetch(request);
+	const id = /^\/p\/(pa_[0-9a-f]{16})$/.exec(pathname)?.[1];
+	const found = id ? await gallery(env).publicArtifact(id) : null;
+	if (!found) return new Response("Not found", { status: 404, headers: { "cache-control": "no-store" } });
+	const page = framePage(found.kind, found.content, contentOrigin(env)!);
+	page.headers.set("x-robots-tag", "noindex");
+	return page;
 }
 
 /** This Pim's address, `PIM_PUBLIC_URL`, which `serve` answers nothing without. */
@@ -445,14 +478,18 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				const id = decodeURIComponent(publishArtifact[1]!);
 				if (request.method === "GET") {
 					const found = await gallery(env).publishedArtifactOf(account.ownerId, id);
-					return found ? noStore(found) : fail(404, "Not published");
+					return found ? noStore(publication(env, found)) : fail(404, "Not published");
 				}
 				if (request.method === "POST") {
 					const artifact = await (await pim()).artifactToPublish(id);
 					if (!artifact) return fail(404, `No artifact ${id}`);
-					const done = await gallery(env).publishArtifact(account.ownerId, account.username, artifact);
-					log("artifact_published", { owner: account.ownerId, artifact: done.id });
-					return noStore(done, 201);
+					const open = (await body()).public;
+					if (open !== undefined && typeof open !== "boolean") return fail(400, "public must be true or false");
+					if (open && contentOrigin(env) === null) return fail(400, "This Pim has no content origin for public links (PIM_CONTENT_ORIGIN).");
+					if (open && !FRAMED_KINDS.includes(artifact.kind)) return fail(400, "Only pages, React apps, drawings and diagrams can have a public link.");
+					const done = await gallery(env).publishArtifact(account.ownerId, account.username, artifact, open);
+					log("artifact_published", { owner: account.ownerId, artifact: done.id, public: done.public });
+					return noStore(publication(env, done), 201);
 				}
 				if (request.method === "DELETE") return noStore({ deleted: await gallery(env).unpublishArtifact(account.ownerId, id) });
 				return undefined;

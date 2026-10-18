@@ -525,6 +525,11 @@ const translations = {
     artifactSeePublished: "See it in Discover",
     artifactUnpublish: "Unpublish",
     artifactUnpublished: "It is no longer published.",
+    artifactAnyoneWithLink: "Anyone with the link",
+    artifactAnyoneWithLinkHint:
+      "Without an account; it can’t keep data or ask Pim there.",
+    artifactCopyLink: "Copy link",
+    artifactLinkCopied: "Link copied.",
     artifactMadeYourOwn: "{title} is one of your artifacts now.",
     artifactTakeDown: "Take down",
     artifactTakeDownConfirm:
@@ -1375,6 +1380,11 @@ const translations = {
     artifactSeePublished: "Verlo en Descubrir",
     artifactUnpublish: "Dejar de publicar",
     artifactUnpublished: "Ya no está publicado.",
+    artifactAnyoneWithLink: "Cualquiera con el enlace",
+    artifactAnyoneWithLinkHint:
+      "Sin cuenta; ahí no puede guardar datos ni preguntar a Pim.",
+    artifactCopyLink: "Copiar enlace",
+    artifactLinkCopied: "Enlace copiado.",
     artifactMadeYourOwn: "{title} ya es uno de tus artefactos.",
     artifactTakeDown: "Retirar",
     artifactTakeDownConfirm:

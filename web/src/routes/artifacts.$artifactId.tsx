@@ -23,6 +23,7 @@ import {
   ExternalLink,
   Globe,
   History,
+  Link2,
   Pencil,
   Printer,
   Trash2,
@@ -443,16 +444,18 @@ function ShareMenu({ artifact }: { artifact: ArtifactDetail }) {
     onError: (failure) => toast.error(failure.message),
   });
   const publish = useMutation({
-    mutationFn: async (on: boolean) => {
-      if (on) await pim.publishArtifact(artifact.id);
+    mutationFn: async (change: { on: boolean; open?: boolean }) => {
+      if (change.on) await pim.publishArtifact(artifact.id, change.open);
       else await pim.unpublishArtifact(artifact.id);
     },
-    onSuccess: (_answer, on) =>
+    onSuccess: (_answer, change) => {
+      if (change.open !== undefined) return;
       toast.success(
-        on
+        change.on
           ? t("artifactPublished", { version: artifact.version })
           : t("artifactUnpublished"),
-      ),
+      );
+    },
     onSettled: () => {
       void queryClient.invalidateQueries({
         queryKey: ["artifacts", artifact.id, "publication"],
@@ -520,7 +523,7 @@ function ShareMenu({ artifact }: { artifact: ArtifactDetail }) {
             {(!publication || publication.version !== artifact.version) && (
               <DropdownMenuItem
                 disabled={publish.isPending}
-                onSelect={() => publish.mutate(true)}
+                onSelect={() => publish.mutate({ on: true })}
               >
                 <Globe />
                 {t("artifactPublish", { version: artifact.version })}
@@ -537,9 +540,40 @@ function ShareMenu({ artifact }: { artifact: ArtifactDetail }) {
                     {t("artifactSeePublished")}
                   </Link>
                 </DropdownMenuItem>
+                {publication.linkable && (
+                  <DropdownMenuCheckboxItem
+                    checked={publication.public}
+                    disabled={publish.isPending}
+                    onSelect={(event) => event.preventDefault()}
+                    onCheckedChange={(checked) =>
+                      publish.mutate({ on: true, open: checked })
+                    }
+                  >
+                    <span className="min-w-0 flex-1">
+                      {t("artifactAnyoneWithLink")}
+                      <span className="block text-muted-foreground text-xs">
+                        {t("artifactAnyoneWithLinkHint")}
+                      </span>
+                    </span>
+                  </DropdownMenuCheckboxItem>
+                )}
+                {publication.link && (
+                  <DropdownMenuItem
+                    onSelect={() => {
+                      const link = publication.link ?? "";
+                      void navigator.clipboard.writeText(link).then(
+                        () => toast.success(t("artifactLinkCopied")),
+                        () => toast(link),
+                      );
+                    }}
+                  >
+                    <Link2 />
+                    {t("artifactCopyLink")}
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem
                   disabled={publish.isPending}
-                  onSelect={() => publish.mutate(false)}
+                  onSelect={() => publish.mutate({ on: false })}
                 >
                   <X />
                   {t("artifactUnpublish")}

@@ -39,6 +39,8 @@ export type DeploymentSettings = {
 	readonly limits: Limits;
 	/** `PIM_PUBLIC_URL`: the only address this Pim answers at; null, when unset or unreadable, and it answers nowhere. */
 	readonly publicUrl: string | null;
+	/** `PIM_CONTENT_ORIGIN`: another address, routed to this Worker, that serves published artifacts' public links and nothing else; null turns links off. */
+	readonly contentOrigin: string | null;
 	/** `PIM_EMAIL_FROM`: the address Pim emails from; null sends no email. */
 	readonly emailFrom: string | null;
 };
@@ -61,6 +63,12 @@ function count(value: string): number {
 function model(value: string): string {
 	if (!MODEL_ID.test(value)) throw new Error(`${JSON.stringify(value)} isn't a model id, such as @cf/zai-org/glm-5.3`);
 	return value;
+}
+
+function origin(value: string): string {
+	const url = URL.parse(value);
+	if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) throw new Error("must be a URL, such as https://pim.example.com");
+	return url.origin;
 }
 
 function oneOf<T extends string>(choices: readonly T[]) {
@@ -116,17 +124,13 @@ export function readDeployment(env: object): Deployment {
 	});
 	const webSearch = variable<SearchProvider | null>("PIM_WEB_SEARCH", null, oneOf(SEARCH_PROVIDERS));
 	const limits = Object.fromEntries(LIMIT_NAMES.map((name) => [name, variable<number | null>(limitVariable(name), null, count, 0)])) as unknown as Limits;
-	const publicUrl = variable<string | null>(
-		"PIM_PUBLIC_URL",
-		null,
-		(value) => {
-			const url = URL.parse(value);
-			if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) throw new Error("must be a URL, such as https://pim.example.com");
-			return url.origin;
-		},
-		null,
-		true,
-	);
+	const publicUrl = variable<string | null>("PIM_PUBLIC_URL", null, origin, null, true);
+	// Pages anyone can open must not share the app's origin, its cookies and its API.
+	const contentOrigin = variable<string | null>("PIM_CONTENT_ORIGIN", null, (value) => {
+		const content = origin(value);
+		if (content === publicUrl) throw new Error("must be another address than PIM_PUBLIC_URL");
+		return content;
+	});
 	const emailFrom = variable<string | null>("PIM_EMAIL_FROM", null, (value) => {
 		if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) throw new Error("must be an email address, such as pim@example.com");
 		return value;
@@ -146,6 +150,7 @@ export function readDeployment(env: object): Deployment {
 			webSearch,
 			limits,
 			publicUrl,
+			contentOrigin,
 			emailFrom,
 		},
 		variables,

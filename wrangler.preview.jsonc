@@ -17,7 +17,7 @@
     "directory": "./web/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp", "/oauth/*", "/.well-known/*", "/authorize", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*", "/__dev/*"]
+    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp", "/oauth/*", "/.well-known/*", "/authorize", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*", "/__dev/*", "/p/*"]
   },
   // Pim needs an `AI` binding to start; chats use preview/worker.ts's stand-in model instead.
   // Connect a ChatGPT plan in Settings to chat with a real one.
@@ -47,6 +47,7 @@
   // Only what differs from the defaults in src/deployment.ts.
   "vars": {
     "PIM_PUBLIC_URL": "http://localhost:8787",
+    "PIM_CONTENT_ORIGIN": "http://127.0.0.1:8787",
     "PIM_REGISTRATION": "open",
     "PIM_REGISTRATIONS_PER_ADDRESS": "50",
     "PIM_MODELS": "preview-model",

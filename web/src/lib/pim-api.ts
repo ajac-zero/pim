@@ -435,6 +435,8 @@ export type DeploymentSettings = {
   limits: Limits;
   /** Null: learned from requests. */
   publicUrl: string | null;
+  /** Null: no public artifact links. */
+  contentOrigin: string | null;
   /** Null: no email. */
   emailFrom: string | null;
 };
@@ -506,6 +508,14 @@ export type PublishedArtifact = {
   publishedAt: number;
   /** How many people made it their own. */
   uses: number;
+  /** Whether anyone with its link may see it, without an account. */
+  public: boolean;
+};
+
+/** What you published of one of your artifacts, with its public link if it has one, and whether it can. */
+export type ArtifactPublication = PublishedArtifact & {
+  linkable: boolean;
+  link: string | null;
 };
 
 export type ArtifactVersion = ArtifactVersionInfo & {
@@ -1107,15 +1117,17 @@ export const pim = {
     call<PublishedArtifact>(artifactRoot(id, { published: true })),
   /** What you published of one of your artifacts; null when you haven't. */
   artifactPublication: (id: string) =>
-    call<PublishedArtifact>(
+    call<ArtifactPublication>(
       `/artifacts/${encodeURIComponent(id)}/publish`,
     ).catch((failure) => {
       if (failure instanceof ApiError && failure.status === 404) return null;
       throw failure;
     }),
-  publishArtifact: (id: string) =>
-    call<PublishedArtifact>(`/artifacts/${encodeURIComponent(id)}/publish`, {
+  /** Publishes the latest version; `open` also lets anyone with the link see it, or stops them. */
+  publishArtifact: (id: string, open?: boolean) =>
+    call<ArtifactPublication>(`/artifacts/${encodeURIComponent(id)}/publish`, {
       method: "POST",
+      body: JSON.stringify(open === undefined ? {} : { public: open }),
     }),
   unpublishArtifact: (id: string) =>
     call<{ deleted: boolean }>(`/artifacts/${encodeURIComponent(id)}/publish`, {

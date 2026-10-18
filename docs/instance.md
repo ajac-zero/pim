@@ -109,6 +109,7 @@ What the fence stops, each covered by a test in `test/people.test.ts` ("erasure 
 ## Before inviting people
 
 1. **Domain.** Passkeys belong to the hostname, so pick the address people will use before anyone joins: moving later means everyone makes new passkeys and reconnects their apps. Attach it to the Worker and set `PIM_PUBLIC_URL` to it, both in the dashboard.
+   For public artifact links, add a second hostname that isn't under the first one's cookies (another domain is best), route its `/p/*` and `/artifact-runtime/*` to the Worker, and set `PIM_CONTENT_ORIGIN` to it in the dashboard (see [artifacts](artifacts.md#public-links)).
 2. **OpenAI:** for people outside your household, confirm with OpenAI that they may use ChatGPT-plan sign-in through your Pim.
 3. **Data residency:** agents are created without a jurisdiction. Choosing one (for example `eu`) must happen before anyone joins, because an object can't move.
 4. **Policy:** `PIM_REGISTRATION`, the `PIM_LIMIT_*` variables and `PIM_MODELS` for what you're willing to pay for.
@@ -116,7 +117,7 @@ What the fence stops, each covered by a test in `test/people.test.ts` ("erasure 
 
 ## Preview locally
 
-`pnpm preview` builds the web app and serves a Pim at <http://localhost:8787> from `wrangler.preview.jsonc` and [`preview/worker.ts`](../preview/worker.ts), with open registration. It rebuilds the web app when `web/src` changes and reloads the Worker when its code does. It runs `wrangler dev --local` with no remote bindings, so it stays on your machine and touches no Cloudflare account, even when `wrangler` is logged in. It is never deployed: there is no deploy script for it. Its state is kept in `.wrangler/state-preview`. Use `localhost`, not `127.0.0.1`: passkeys don't work on an IP address.
+`pnpm preview` builds the web app and serves a Pim at <http://localhost:8787> from `wrangler.preview.jsonc` and [`preview/worker.ts`](../preview/worker.ts), with open registration. It rebuilds the web app when `web/src` changes and reloads the Worker when its code does. It runs `wrangler dev --local` with no remote bindings, so it stays on your machine and touches no Cloudflare account, even when `wrangler` is logged in. It is never deployed: there is no deploy script for it. Its state is kept in `.wrangler/state-preview`. Use `localhost`, not `127.0.0.1`: passkeys don't work on an IP address, and the preview serves `127.0.0.1` as its content origin, for public artifact links.
 
 - **Signing in.** <http://localhost:8787/__dev/sign-in/ada> signs the browser in as `ada`, making the account if it's new (the first one is the admin), and `?returnTo=/settings` picks where it lands. It makes a passkey on the server, so it works in any browser and with `curl -c cookies`.
 - **Passkeys.** To try the passkey screens themselves: Chrome, Safari and Edge on a laptop or phone use their own. On a machine without one (a Linux desktop, a headless browser), start Chrome with `--remote-debugging-port=9222` and run `node scripts/virtual-authenticator.mjs 9222`: it gives every tab a virtual passkey that answers at once. Or use DevTools → More tools → WebAuthn.

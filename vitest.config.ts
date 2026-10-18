@@ -14,6 +14,7 @@ export default defineConfig({
 			// Open registration, so tests add people without invites unless they mean to.
 			// Approvals as they were before majordomos, so only the tests about them script a majordomo's review.
 			// The secrets of the test extension's bank app, and the client registered for its Forge app.
+			// A content origin, so public artifact links are on.
 			// A Worker Loader, which deployments add for `run_javascript` (the Workers Paid plan has it).
 			// Traces with their content, so the tests check what an operator who opts in would see.
 			miniflare: {
@@ -24,6 +25,7 @@ export default defineConfig({
 					PIM_MEMORY_LINES: "8",
 					PIM_REGISTRATION: "open",
 					PIM_APPROVAL_POLICY: "auto",
+					PIM_CONTENT_ORIGIN: "https://content.pim.test",
 					TEST_BANK_CLIENT_ID: "bank-client",
 					TEST_BANK_CLIENT_SECRET: "bank-secret",
 					TEST_FORGE_CLIENT_ID: "forge-client",

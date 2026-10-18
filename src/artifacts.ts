@@ -10,8 +10,8 @@
  *   overwrite each other's change unseen.
  * - Sizes are bounded per version, per artifact (versions) and in total,
  *   counted from the stored versions themselves, before anything is written.
- * - A version is a set of files. Their bytes are in R2, under the owner's
- *   `artifacts/` prefix and their SHA-256, each stored once however many
+ * - A version is a set of files. Their bytes are in the artifacts' R2
+ *   bucket, under the owner's name and their SHA-256, each stored once however many
  *   versions and artifacts have it; this object keeps what each version
  *   lists. Versions from before files were in R2 keep their one file here,
  *   until someone else needs it (see `stored`).
@@ -268,7 +268,7 @@ async function versionHash(kind: ArtifactKind, files: readonly ArtifactFile[]): 
 }
 
 /** Where a file's bytes are in R2. */
-export const blobKey = (owner: string, hash: string) => `artifacts/${owner}/${hash}`;
+export const blobKey = (owner: string, hash: string) => `${owner}/${hash}`;
 
 /** Reads a version's files from R2, from the prefix of the owner who stored them. */
 export async function readFiles(bucket: R2Bucket, owner: string, files: readonly ArtifactFile[]): Promise<Map<string, { type: string; bytes: Uint8Array }>> {
@@ -771,7 +771,7 @@ export class ArtifactStore {
 	async deleteAllFiles(): Promise<void> {
 		let cursor: string | undefined;
 		do {
-			const listed = await this.#bucket.list({ prefix: `artifacts/${this.#owner()}/`, ...(cursor ? { cursor } : {}) });
+			const listed = await this.#bucket.list({ prefix: `${this.#owner()}/`, ...(cursor ? { cursor } : {}) });
 			if (listed.objects.length > 0) await this.#bucket.delete(listed.objects.map((object) => object.key));
 			cursor = listed.truncated ? listed.cursor : undefined;
 		} while (cursor);
@@ -779,7 +779,7 @@ export class ArtifactStore {
 
 	/** Whether any file is left in R2 under the owner's prefix. */
 	async anyFiles(): Promise<boolean> {
-		return (await this.#bucket.list({ prefix: `artifacts/${this.#owner()}/`, limit: 1 })).objects.length > 0;
+		return (await this.#bucket.list({ prefix: `${this.#owner()}/`, limit: 1 })).objects.length > 0;
 	}
 
 	/** A value the artifact kept, or null. */

@@ -45,9 +45,10 @@
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
   // What each space keeps outside its database, under its owner's ID: images people send in
   // chats (their messages keep only the images' URLs), and files that aren't text
-  // (src/files.ts). Deploying creates the bucket, once R2 is turned on for the account
-  // (Dashboard → R2; it asks for a payment method).
-  "r2_buckets": [{ "binding": "BLOBS" }],
+  // (src/files.ts), in one bucket; artifacts' files (src/artifacts.ts) in another. Deploying
+  // creates the buckets, once R2 is turned on for the account (Dashboard → R2; it asks for a
+  // payment method).
+  "r2_buckets": [{ "binding": "BLOBS" }, { "binding": "ARTIFACTS" }],
   // Slow down guessing at sign-in from one address, and heavy API use by one person.
   // Namespace IDs are positive integers unique in your Cloudflare account.
   "ratelimits": [

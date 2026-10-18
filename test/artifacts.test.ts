@@ -399,7 +399,7 @@ export default function App() {
 	});
 
 	it("keep each file once in R2, free it when no version has it, and read versions from before files", async () => {
-		const stored = (hash: string) => env.BLOBS.head(`artifacts/${OWNER}/${hash}`).then((object) => object !== null);
+		const stored = (hash: string) => env.ARTIFACTS.head(`${OWNER}/${hash}`).then((object) => object !== null);
 		const outcome = await runInDurableObject(agent(), async (instance: Pim, state) => {
 			const content = `<p>Shared by two ${crypto.randomUUID()}</p>`;
 			const one = await instance.artifacts.create({ id: crypto.randomUUID(), title: "One", kind: "html", content, session: null });

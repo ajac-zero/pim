@@ -125,7 +125,7 @@ Downloads are `text/plain`. Chat messages are rendered as before. A render test 
 
 ## Storage
 
-A version is a set of files: an HTML page's `index.html`, a JSX app's `App.jsx`, and so on (`ENTRY_FILES` in [`src/artifacts.ts`](../src/artifacts.ts)). The owner's Durable Object keeps the artifacts, their versions and the files each version lists (`pim_artifact_files`: path, SHA-256, size, media type). The files' bytes are in R2, in the deployment's bucket (`BLOBS`), at `artifacts/<owner>/<sha256>`:
+A version is a set of files: an HTML page's `index.html`, a JSX app's `App.jsx`, and so on (`ENTRY_FILES` in [`src/artifacts.ts`](../src/artifacts.ts)). The owner's Durable Object keeps the artifacts, their versions and the files each version lists (`pim_artifact_files`: path, SHA-256, size, media type). The files' bytes are in R2, in the artifacts' own bucket (`ARTIFACTS`), at `<owner>/<sha256>`:
 
 - **Each file is stored once.** A new version stores only files that changed; the same file in two versions, or two artifacts, is one object, counted once against the limits. A restore lists the older version's files again and stores nothing.
 - **Writing stores first, then lists.** A write stores its new files, then, with nothing awaited between its checks and its writes, adds the version, or is refused (`409`, `413`, `429`). The checks run before storing too, so a write that's sure to be refused stores nothing.

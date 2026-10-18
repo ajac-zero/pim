@@ -1,6 +1,14 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { Markdown, UNTRUSTED_SCHEMA } from "~/components/chat/markdown";
+import { agentsQuery, sessionsQuery } from "~/lib/queries";
 
 /** Everything Markdown or raw HTML could use to load, run or send something. */
 const HOSTILE = [
@@ -182,5 +190,54 @@ describe("untrusted Markdown", () => {
       <Markdown text={"![a](https://example.com/a.png)"} />,
     );
     expect(chat).not.toContain("Image blocked");
+  });
+});
+
+describe("chats an agent names", () => {
+  const chat = "7af6a6ec-9d58-489a-b2be-512eda1cb34b";
+  // An artifact's id, say: no chat of the person's.
+  const other = "0b5e8f9c-1d2e-4f3a-8b7c-6d5e4f3a2b1c";
+
+  async function render(text: string) {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(sessionsQuery().queryKey, [
+      {
+        id: chat,
+        title: "Autumn trip",
+        busy: false,
+        createdAt: 0,
+        updatedAt: 0,
+        visit: null,
+        agent: { id: "p_scout", name: "Scout" },
+      },
+    ] as never);
+    queryClient.setQueryData(agentsQuery().queryKey, []);
+    const router = createRouter({
+      routeTree: createRootRoute({ component: () => <Markdown text={text} /> }),
+      history: createMemoryHistory(),
+    });
+    await router.load();
+    return renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+  }
+
+  it("links a chat by its id, bare, in backticks or as its address, and shows its title", async () => {
+    const html = await render(
+      `Asked Scout in chat ${chat}, also \`${chat}\` and /chat/${chat}. See [the plan](/chat/${chat}) and artifact ${other}.`,
+    );
+    const links = [
+      ...html.matchAll(/<a [^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g),
+    ].map(([, href, text]) => [href, String(text).replace(/<[^>]+>/g, "")]);
+    expect(links).toEqual([
+      [`/chat/${chat}`, "Autumn trip"],
+      [`/chat/${chat}`, "Autumn trip"],
+      [`/chat/${chat}`, "Autumn trip"],
+      [`/chat/${chat}`, "the plan"],
+    ]);
+    // An id that isn't a chat stays as it was written.
+    expect(html).toContain(`artifact ${other}.`);
   });
 });

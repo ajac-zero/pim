@@ -41,6 +41,11 @@ Under `/api`, with the owner's passkey session or an API token in the `Authoriza
 | GET | `/shared-artifacts` | `{ artifacts }`: what others share with you, each as its latest version with its owner's username as `host` |
 | GET | `/shared-artifacts/:host/:id`, `…/versions/:v`, `…/versions/:v/frame` | One of them, its content, and its page, from its owner's Pim; `404` once they stop sharing it or it isn't the latest version |
 | POST | `/shared-artifacts/:host/:id/versions/:v/bridge`, `…/grants` | Its bridge calls and permissions, as for your own |
+| GET, POST, DELETE | `/artifacts/:id/publish` | What you published of it (`404` if nothing); publishes its latest version, replacing what was published; or takes it down (see [Publishing](#publishing)) |
+| GET | `/published-artifacts` | `{ artifacts }`: published artifacts (`?q=` searches titles and authors), without content |
+| GET | `/published-artifacts/:id`, `…/versions/:v`, `…/versions/:v/frame` | One of them, its content, and its page; `404` for any version but the published one |
+| POST | `/published-artifacts/:id/versions/:v/bridge`, `…/grants` | Its bridge calls and permissions, as for your own |
+| POST | `/published-artifacts/:id/use` | `201` with a new artifact of yours, a copy of the published version |
 
 Every artifact response has `Cache-Control: no-store, private`, so every look is a fresh request, checked again: after signing out or losing the passkey a session was made with it gets `401`, while the account is suspended `403`, after the account is deleted `410`, and after the artifact is deleted `404`. When the app finds itself signed out, the sign-in screen takes its place, which unmounts every artifact frame, and it drops what it read of artifacts. That revokes nothing already delivered: a frame still on another screen, a page in the browser's back-forward cache, or a saved download stays as it was.
 
@@ -64,7 +69,7 @@ Every framed artifact can use `window.pim`, whose calls return promises:
 | Call | What it does | Permission |
 | --- | --- | --- |
 | `pim.storage.get(key)`, `.set(key, text)`, `.delete(key)`, `.list(prefix?)` | Text the artifact keeps under keys (1 to 200 characters), across visits and versions, until it's deleted | None: it's the artifact's own, and nothing else can read it |
-| `pim.shared.get(key)`, `.set(key, text)`, `.delete(key)`, `.list(prefix?)` | The same, kept once for everyone the artifact is shared with, its owner included, in the owner's Pim: a tally, a sign-up sheet, a shared list. Separate from `pim.storage`, which stays each person's own | None, as for `pim.storage` |
+| `pim.shared.get(key)`, `.set(key, text)`, `.delete(key)`, `.list(prefix?)` | The same, kept once for everyone the artifact is shared with, its owner included, in the owner's Pim: a tally, a sign-up sheet, a shared list. Separate from `pim.storage`, which stays each person's own. A published artifact opened from Discover keeps nothing for everyone, and these calls fail there | None, as for `pim.storage` |
 | `pim.ask(prompt)` | An answer from the utility model (`ARTIFACT_ASK` in [`src/utility.ts`](../src/utility.ts)), which has no tools and sees only the prompt (at most 20,000 characters). It counts toward the daily model limits | The person's, for this version |
 | `pim.tools.call(name, input)` | Runs an app tool, by its tool name, and answers with its result as text | The person's, for this version and this tool; only tools the owner lets run without asking (`on`). A tool that asks first can't be allowed or called: nothing in an artifact could show the person what it's about to do |
 
@@ -79,6 +84,15 @@ An artifact can be shared with your circles (see [Sharing](../README.md#sharing)
 - **It runs in their Pim.** Their app asks their own Pim, which asks yours (`guestArtifact`) and checks nothing itself: your Pim checks, at every request, that they're in a circle it's shared with and that the version is the latest. The page is framed and sandboxed as your own are.
 - **What it keeps for them is theirs.** `pim.storage` keeps their data in their own Pim, apart from yours and everyone else's. `pim.ask` uses their model and counts toward their limits, and `pim.tools.call` their apps' tools, under their permissions. Nothing of yours is reached but the artifact and its `pim.shared` data.
 - **What it keeps for everyone is yours.** `pim.shared` writes go to your Pim (`guestArtifactShared`), within the artifact's limits. Anyone it's shared with can change or delete that data, so an artifact should keep there only what they may all see.
+
+## Publishing
+
+An artifact can also be published for everyone on the Pim, from Share on its page, as agents are published (see the README). The Gallery keeps a copy of its latest version, which Discover lists. Publishing again replaces the copy with the latest version; until then, a new version stays the author's own.
+
+- **Anyone signed in can open it.** It runs framed and sandboxed, as their own artifacts do. Like an artifact shared with them, what it keeps for them is in their own Pim (under `gallery/<id>`), and its model and tool calls are theirs, once they allow the published version. It keeps nothing for everyone: `pim.shared` fails.
+- **Make it your own** copies the published version into their artifacts, as a new artifact of theirs to change, and counts the use.
+- **Taking it down.** Unpublishing, deleting the artifact, deleting the account, or the admin's takedown removes it from Discover, and the next request for it is refused. Copies people made, and what it kept for them, stay theirs.
+- Each person can publish up to 20 artifacts.
 
 ## Markdown
 
@@ -105,7 +119,7 @@ Each limit is checked against the stored versions before anything is written. Th
 
 ## Export and deletion
 
-- **Export** (`/export`, and `/account/export`) includes every artifact with every version and its content, what each keeps (its own and shared data), the circles it's shared with, and what artifacts others share with you keep for you.
+- **Export** (`/export`, and `/account/export`) includes every artifact with every version and its content, what each keeps (its own and shared data), the circles it's shared with, and what artifacts others share or publish keep for you.
 - **Deleting an artifact** removes all its versions, and the chat cards that showed it say it was deleted. The chats keep their own copy: what the agent sent to make or change it is part of the conversation until that chat is deleted. The app says so when you delete one.
 - **Deleting an account** erases artifacts with everything else, and the erasure check (`remainingData`) counts `artifacts` and `artifact versions`. A request or a run still under way when the deletion begins writes nothing.
 - **Already downloaded files** can't be taken back.
@@ -131,6 +145,7 @@ Each limit is checked against the stored versions before anything is written. Th
 | Markdown: the hostile corpus above leaves no loading, running or submitting element or attribute; only `http(s)`, `mailto` and `#` links; raw HTML and images only as text; task lists, tables and code still render | `web/src/components/chat/markdown.test.tsx` |
 | Export near the total cap, and the cap holding with no limits set | "export in full near their total cap…" |
 | Shared with circles: their people see only the latest version, from their own space, with their own storage apart and shared data in the owner's space; stopping sharing, an older version, or someone outside the circles gets `404` | `test/people.test.ts`: "are shown to the people of the circles they're shared with…" |
+| Published: a copy of one version for everyone signed in, with their own storage, model and tools and no `pim.shared`; republishing replaces the version; made their own as a copy; taken down by unpublishing, deletion or the admin | `test/people.test.ts`: "are published to everyone as a copy of one version…" |
 | Another person's space returns `404` for the artifact; anonymous `401` | `test/people.test.ts`: "are shown only to their owner" |
 | Fresh requests refused: signed out `401`, passkey removed `401`, suspended `403`, deleted `410` on frame, download and metadata; account export has every version; erased | "stop showing when the browser signs out, its passkey is removed…" |
 | A tool call or a restore under way during the erasure leaves nothing | "keeps an artifact the model asks for during the erasure…", "refuses an artifact restore in the agent's handler…" |

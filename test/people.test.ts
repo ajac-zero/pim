@@ -948,6 +948,65 @@ describe("artifacts", () => {
 		expect((await eli.browser.json("/api/export")).body.othersArtifactData).toEqual([{ artifact: `${dee.ownerId}/${id}`, data: { note: "Eli's" } }]);
 	});
 
+	it("are published to everyone as a copy of one version, used with each viewer's own data, made their own, and taken down", async () => {
+		const gus = await person("art-gus");
+		const hal = await person("art-hal");
+		const id = await makeArtifact(gus.browser, "<p>Tip calculator</p>");
+		expect((await gus.browser.fetch(`/api/artifacts/${id}/publish`)).status).toBe(404);
+		expect((await hal.browser.json(`/api/artifacts/${id}/publish`, { method: "POST" })).status).toBe(404);
+		const published = (await gus.browser.json(`/api/artifacts/${id}/publish`, { method: "POST" })).body;
+		expect(published).toMatchObject({ author: "art-gus", artifactId: id, version: 1, kind: "html", uses: 0 });
+		expect((await gus.browser.json(`/api/artifacts/${id}/publish`)).body.id).toBe(published.id);
+		const root = `/api/published-artifacts/${published.id}`;
+
+		// Everyone finds it; the list and the summary carry no content.
+		const listed = (await hal.browser.json("/api/published-artifacts")).body.artifacts;
+		expect(listed).toEqual(expect.arrayContaining([expect.objectContaining({ id: published.id, author: "art-gus" })]));
+		expect(JSON.stringify(listed)).not.toContain("Tip calculator");
+		expect((await hal.browser.json("/api/published-artifacts?q=nothing-like-it")).body.artifacts).toEqual([]);
+		const frame = await hal.browser.fetch(`${root}/versions/1/frame`);
+		expect(frame.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
+		expect(await frame.text()).toContain("Tip calculator");
+		expect((await new Browser().fetch(`${root}/versions/1/frame`)).status).toBe(401);
+		expect((await hal.browser.fetch(`${root}/versions/1/frame?token=x`)).status).toBe(400);
+
+		// What it keeps is each viewer's own; it keeps nothing for everyone; the model asks the viewer.
+		const bridge = (browser: Browser, op: string, args: unknown) => browser.json(`${root}/versions/1/bridge`, { method: "POST", json: { op, args } });
+		await bridge(hal.browser, "storage.set", { key: "tip", value: "18" });
+		expect((await bridge(hal.browser, "storage.get", { key: "tip" })).body).toEqual({ value: "18" });
+		expect((await bridge(gus.browser, "storage.get", { key: "tip" })).body).toEqual({ value: null });
+		expect((await bridge(hal.browser, "shared.set", { key: "x", value: "1" })).status).toBe(400);
+		expect((await bridge(hal.browser, "model.ask", { prompt: "Hi" })).body).toEqual({ needs: { capability: "model", label: "model" } });
+		expect((await hal.browser.json(`${root}/versions/1/grants`, { method: "POST", json: { capability: "model" } })).status).toBe(201);
+
+		// The author's next version isn't published until they publish again, which a new grant needs.
+		faux.setResponses([toolUse("artifact_update", { id, base_version: 1, content: "<p>Tip calculator 2</p>" }), toolUse("send_to_user", { message: "Done." })]);
+		await gus.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Change it", wait: true } });
+		expect(await (await hal.browser.fetch(`${root}/versions/1/frame`)).text()).not.toContain("Tip calculator 2");
+		expect((await gus.browser.json(`/api/artifacts/${id}/publish`, { method: "POST" })).body).toMatchObject({ id: published.id, version: 2 });
+		expect((await hal.browser.fetch(`${root}/versions/1/frame`)).status).toBe(404);
+		expect((await bridge(hal.browser, "storage.get", { key: "tip" })).status).toBe(404);
+		const v2 = (path: string, init?: RequestInit & { json?: unknown }) => hal.browser.json(`${root}/versions/2${path}`, init);
+		expect((await v2("/bridge", { method: "POST", json: { op: "model.ask", args: { prompt: "Hi" } } })).body).toEqual({ needs: { capability: "model", label: "model" } });
+		expect((await v2("/bridge", { method: "POST", json: { op: "storage.get", args: { key: "tip" } } })).body).toEqual({ value: "18" });
+
+		// Made their own: a new artifact of theirs, counted once others do.
+		const copy = (await hal.browser.json(`${root}/use`, { method: "POST" })).body;
+		expect(copy).toMatchObject({ title: "Page", kind: "html", version: 1 });
+		expect((await hal.browser.json(`/api/artifacts/${copy.id}/versions/1`)).body.content).toBe("<p>Tip calculator 2</p>");
+		expect((await gus.browser.json(`/api/artifacts/${id}/publish`)).body.uses).toBe(1);
+
+		// Taken down by the admin, or deleted by the author: gone for everyone, the copy and what was kept stay.
+		expect((await hal.browser.json(`/api/admin/published-artifacts/${published.id}`, { method: "DELETE" })).status).toBe(403);
+		expect((await admin(`/api/admin/published-artifacts/${published.id}`, { method: "DELETE" })).body).toEqual({ deleted: true });
+		expect((await hal.browser.fetch(`${root}/versions/2/frame`)).status).toBe(404);
+		const again = (await gus.browser.json(`/api/artifacts/${id}/publish`, { method: "POST" })).body;
+		expect((await gus.browser.json(`/api/artifacts/${id}`, { method: "DELETE" })).body).toEqual({ deleted: true });
+		expect((await hal.browser.fetch(`/api/published-artifacts/${again.id}`)).status).toBe(404);
+		expect((await hal.browser.json(`/api/artifacts/${copy.id}`)).status).toBe(200);
+		expect((await hal.browser.json("/api/export")).body.othersArtifactData).toEqual([{ artifact: `gallery/${published.id}`, data: { tip: "18" } }]);
+	});
+
 	it("stop showing when the browser signs out, its passkey is removed, the account is suspended, or it is deleted", async () => {
 		const cy = await person("art-cy");
 		const id = await makeArtifact(cy.browser, "<p>Cy's page</p>");

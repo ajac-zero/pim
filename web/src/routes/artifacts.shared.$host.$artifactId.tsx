@@ -78,7 +78,7 @@ function SharedArtifactPage() {
             version={artifact.version}
             kind={artifact.kind}
             title={artifact.title}
-            host={host}
+            from={{ host }}
             fill
           />
         </div>
@@ -89,7 +89,7 @@ function SharedArtifactPage() {
             version={artifact.version}
             kind={artifact.kind}
             title={artifact.title}
-            host={host}
+            from={{ host }}
             onDone={donePrinting}
           />
         )}

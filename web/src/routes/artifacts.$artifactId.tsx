@@ -20,6 +20,8 @@ import {
   ArrowLeft,
   ArrowUp,
   Download,
+  ExternalLink,
+  Globe,
   History,
   Pencil,
   Printer,
@@ -34,7 +36,9 @@ import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import { Input } from "~/components/ui/input";
@@ -45,6 +49,8 @@ import {
   pim,
 } from "~/lib/pim-api";
 import {
+  accountQuery,
+  artifactPublicationQuery,
   artifactQuery,
   artifactVersionQuery,
   circlesQuery,
@@ -420,12 +426,15 @@ function ArtifactPage() {
 
 /**
  * Shares the artifact with your circles, whose people then find its latest
- * version under Shared with you. Shown once you have a circle.
+ * version under Shared with you, and publishes a version of it for everyone
+ * on this Pim, in Discover. Shown once there's someone to share with.
  */
 function ShareMenu({ artifact }: { artifact: ArtifactDetail }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
+  const { data: account } = useQuery(accountQuery());
   const { data: circles } = useQuery(circlesQuery());
+  const { data: publication } = useQuery(artifactPublicationQuery(artifact.id));
   const share = useMutation({
     mutationFn: (shared: string[]) =>
       pim.setArtifactCircles(artifact.id, shared),
@@ -433,46 +442,112 @@ function ShareMenu({ artifact }: { artifact: ArtifactDetail }) {
       queryClient.invalidateQueries({ queryKey: ["artifacts", artifact.id] }),
     onError: (failure) => toast.error(failure.message),
   });
-  if (!circles?.length) return null;
+  const publish = useMutation({
+    mutationFn: async (on: boolean) => {
+      if (on) await pim.publishArtifact(artifact.id);
+      else await pim.unpublishArtifact(artifact.id);
+    },
+    onSuccess: (_answer, on) =>
+      toast.success(
+        on
+          ? t("artifactPublished", { version: artifact.version })
+          : t("artifactUnpublished"),
+      ),
+    onSettled: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["artifacts", artifact.id, "publication"],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["published-artifacts"],
+      });
+    },
+    onError: (failure) => toast.error(failure.message),
+  });
+  // Alone on this Pim, there is nobody to publish for, unless it already is.
+  const canPublish = !!account && (!account.alone || !!publication);
+  if (!circles?.length && !canPublish) return null;
   const shared = artifact.circles.filter((id) =>
-    circles.some((circle) => circle.id === id),
+    circles?.some((circle) => circle.id === id),
   );
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
           size="sm"
-          variant={shared.length ? "secondary" : "outline"}
+          variant={shared.length || publication ? "secondary" : "outline"}
           className="h-8"
         >
           <Users className="size-3.5" />
-          {t(shared.length ? "artifactShared" : "artifactShare")}
+          {t(shared.length || publication ? "artifactShared" : "artifactShare")}
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-64">
-        <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
-          {t("artifactShareHint")}
-        </DropdownMenuLabel>
-        {circles.map((circle) => (
-          <DropdownMenuCheckboxItem
-            key={circle.id}
-            checked={shared.includes(circle.id)}
-            disabled={share.isPending}
-            onSelect={(event) => event.preventDefault()}
-            onCheckedChange={(checked) =>
-              share.mutate(
-                checked
-                  ? [...shared, circle.id]
-                  : shared.filter((id) => id !== circle.id),
-              )
-            }
-          >
-            <span className="min-w-0 flex-1 truncate">{circle.name}</span>
-            <span className="text-muted-foreground text-xs">
-              {circle.members.length}
-            </span>
-          </DropdownMenuCheckboxItem>
-        ))}
+      <DropdownMenuContent align="end" className="w-72">
+        {!!circles?.length && (
+          <>
+            <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
+              {t("artifactShareHint")}
+            </DropdownMenuLabel>
+            {circles.map((circle) => (
+              <DropdownMenuCheckboxItem
+                key={circle.id}
+                checked={shared.includes(circle.id)}
+                disabled={share.isPending}
+                onSelect={(event) => event.preventDefault()}
+                onCheckedChange={(checked) =>
+                  share.mutate(
+                    checked
+                      ? [...shared, circle.id]
+                      : shared.filter((id) => id !== circle.id),
+                  )
+                }
+              >
+                <span className="min-w-0 flex-1 truncate">{circle.name}</span>
+                <span className="text-muted-foreground text-xs">
+                  {circle.members.length}
+                </span>
+              </DropdownMenuCheckboxItem>
+            ))}
+          </>
+        )}
+        {!!circles?.length && canPublish && <DropdownMenuSeparator />}
+        {canPublish && (
+          <>
+            <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
+              {publication
+                ? t("artifactPublishedHint", { version: publication.version })
+                : t("artifactPublishHint")}
+            </DropdownMenuLabel>
+            {(!publication || publication.version !== artifact.version) && (
+              <DropdownMenuItem
+                disabled={publish.isPending}
+                onSelect={() => publish.mutate(true)}
+              >
+                <Globe />
+                {t("artifactPublish", { version: artifact.version })}
+              </DropdownMenuItem>
+            )}
+            {publication && (
+              <>
+                <DropdownMenuItem asChild>
+                  <Link
+                    to="/artifacts/published/$publishedId"
+                    params={{ publishedId: publication.id }}
+                  >
+                    <ExternalLink />
+                    {t("artifactSeePublished")}
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={publish.isPending}
+                  onSelect={() => publish.mutate(false)}
+                >
+                  <X />
+                  {t("artifactUnpublish")}
+                </DropdownMenuItem>
+              </>
+            )}
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

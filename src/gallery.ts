@@ -5,6 +5,7 @@ import { HttpError } from "./http";
 import type { TeamMember } from "./agents";
 import { appDirectory, type CustomApp, type DirectoryApp, findSiteIcon, storedApps } from "./extensions/app-directory";
 import { APP_CATEGORIES, type AppCategory } from "./extensions/define";
+import type { ArtifactKind } from "./artifacts";
 
 /**
  * What the people on a Pim show each other: profiles, and the agents they
@@ -15,6 +16,10 @@ import { APP_CATEGORIES, type AppCategory } from "./extensions/define";
  * its name, description, instructions, suggested apps, team and look (its
  * symbol, color and uploaded icon), never their memory, conversations or
  * credentials. Publishing again replaces it.
+ *
+ * People publish artifacts here too, the same way: a copy of one version,
+ * which anyone can open and use, with their own storage, model and tools,
+ * or make their own. Publishing again replaces it with the latest version.
  *
  * The admin also chooses an agent everyone starts with: a copy of one of
  * theirs, which each new account gets besides its majordomo; and adds apps
@@ -85,12 +90,42 @@ export type PublishedAgent = {
 	readonly image: AgentIcon | null;
 };
 
+/** An artifact someone published: a copy of one of its versions. */
+export type PublishedArtifact = {
+	readonly id: string;
+	/** The author's username. */
+	readonly author: string;
+	readonly authorName: string | null;
+	/** Which of the author's artifacts it is a copy of, and which version. */
+	readonly artifactId: string;
+	readonly version: number;
+	readonly title: string;
+	readonly kind: ArtifactKind;
+	readonly sha256: string;
+	readonly size: number;
+	readonly publishedAt: number;
+	/** How many people made it their own. */
+	readonly uses: number;
+};
+
+/** An artifact as its author publishes it. */
+export type ArtifactToPublish = {
+	readonly id: string;
+	readonly version: number;
+	readonly title: string;
+	readonly kind: ArtifactKind;
+	readonly content: string;
+	readonly sha256: string;
+	readonly size: number;
+};
+
 /** A template in a list: everything but its instructions. */
 export type TemplateSummary = Omit<Template, "instructions">;
 
 export const MAX_DISPLAY_NAME = 50;
 export const MAX_BIO = 280;
 export const MAX_TEMPLATES = 20;
+export const MAX_PUBLISHED_ARTIFACTS = 20;
 export const MAX_APP_NAME = 40;
 
 const SCHEMA = `
@@ -126,6 +161,22 @@ CREATE TABLE IF NOT EXISTS default_agent (
 	apps TEXT NOT NULL,
 	updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS published_artifacts (
+	id TEXT PRIMARY KEY,
+	owner_id TEXT NOT NULL,
+	username TEXT NOT NULL,
+	artifact_id TEXT NOT NULL,
+	version INTEGER NOT NULL,
+	title TEXT NOT NULL,
+	kind TEXT NOT NULL,
+	content TEXT NOT NULL,
+	sha256 TEXT NOT NULL,
+	size INTEGER NOT NULL,
+	published_at INTEGER NOT NULL,
+	uses INTEGER NOT NULL DEFAULT 0,
+	UNIQUE (owner_id, artifact_id)
+);
+CREATE INDEX IF NOT EXISTS published_artifacts_by_author ON published_artifacts (username, published_at);
 CREATE TABLE IF NOT EXISTS apps (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
@@ -168,6 +219,24 @@ const summaryOf = (row: Row, directory: () => readonly DirectoryApp[]): Template
 // Every column but the icon's bytes, which only its own route reads.
 const WITH_AUTHOR =
 	"SELECT t.id, t.owner_id, t.username, t.agent_id, t.name, t.description, t.instructions, t.apps, t.team, t.blueprint, t.symbol, t.color, t.icon_data IS NOT NULL AS has_icon, t.published_at, t.uses, p.display_name FROM templates t LEFT JOIN profiles p ON p.owner_id = t.owner_id";
+
+// Every column but the content, which only opening one reads.
+const PUBLISHED_ARTIFACT =
+	"SELECT a.id, a.username, a.artifact_id, a.version, a.title, a.kind, a.sha256, a.size, a.published_at, a.uses, p.display_name FROM published_artifacts a LEFT JOIN profiles p ON p.owner_id = a.owner_id";
+
+const publishedArtifactOf = (row: Row): PublishedArtifact => ({
+	id: String(row.id),
+	author: String(row.username),
+	authorName: optional(row.display_name),
+	artifactId: String(row.artifact_id),
+	version: Number(row.version),
+	title: String(row.title),
+	kind: String(row.kind) as ArtifactKind,
+	sha256: String(row.sha256),
+	size: Number(row.size),
+	publishedAt: Number(row.published_at),
+	uses: Number(row.uses),
+});
 
 /** The category the admin filed an app under, or null for Other. */
 function appCategory(value: unknown): AppCategory | null {
@@ -399,6 +468,89 @@ export class Gallery extends DurableObject<Env> {
 		return this.#sql("DELETE FROM templates WHERE id = ?", id).rowsWritten > 0;
 	}
 
+	/** Publishes the latest version of one of the author's artifacts, or replaces what was published of it. */
+	publishArtifact(ownerId: string, username: string, artifact: ArtifactToPublish): PublishedArtifact {
+		const [known] = this.#sql("SELECT id FROM published_artifacts WHERE owner_id = ? AND artifact_id = ?", ownerId, artifact.id).toArray();
+		if (!known) {
+			const count = Number(this.#sql("SELECT COUNT(*) AS n FROM published_artifacts WHERE owner_id = ?", ownerId).one().n);
+			if (count >= MAX_PUBLISHED_ARTIFACTS) throw new HttpError(429, `You can publish up to ${MAX_PUBLISHED_ARTIFACTS} artifacts.`);
+		}
+		const id = known ? String(known.id) : `pa_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
+		this.#sql(
+			`INSERT INTO published_artifacts (id, owner_id, username, artifact_id, version, title, kind, content, sha256, size, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (id) DO UPDATE SET version = excluded.version, title = excluded.title, kind = excluded.kind, content = excluded.content, sha256 = excluded.sha256,
+			size = excluded.size, published_at = excluded.published_at`,
+			id,
+			ownerId,
+			username,
+			artifact.id,
+			artifact.version,
+			artifact.title,
+			artifact.kind,
+			artifact.content,
+			artifact.sha256,
+			artifact.size,
+			Date.now(),
+		);
+		return this.publishedArtifact(id)!;
+	}
+
+	/** Takes one of the author's artifacts out of the gallery. False when it wasn't published. */
+	unpublishArtifact(ownerId: string, artifactId: string): boolean {
+		return this.#sql("DELETE FROM published_artifacts WHERE owner_id = ? AND artifact_id = ?", ownerId, artifactId).rowsWritten > 0;
+	}
+
+	/** What the author published of one of their artifacts, if they did. */
+	publishedArtifactOf(ownerId: string, artifactId: string): PublishedArtifact | null {
+		const [row] = this.#sql(`${PUBLISHED_ARTIFACT} WHERE a.owner_id = ? AND a.artifact_id = ?`, ownerId, artifactId).toArray();
+		return row ? publishedArtifactOf(row) : null;
+	}
+
+	publishedArtifact(id: string): PublishedArtifact | null {
+		const [row] = this.#sql(`${PUBLISHED_ARTIFACT} WHERE a.id = ?`, id).toArray();
+		return row ? publishedArtifactOf(row) : null;
+	}
+
+	/** A published artifact's content. */
+	publishedContent(id: string): string | null {
+		const [row] = this.#sql("SELECT content FROM published_artifacts WHERE id = ?", id).toArray();
+		return row ? String(row.content) : null;
+	}
+
+	/** Published artifacts, most used first; matching `query` in their title or author, or by one author. */
+	publishedArtifacts(options: { query?: string; author?: string; limit?: number } = {}): PublishedArtifact[] {
+		const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
+		if (options.author) {
+			return this.#sql(`${PUBLISHED_ARTIFACT} WHERE a.username = ? ORDER BY a.published_at DESC LIMIT ?`, options.author, limit)
+				.toArray()
+				.map(publishedArtifactOf);
+		}
+		const query = options.query?.trim().toLowerCase();
+		if (query) {
+			const like = `%${query.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
+			return this.#sql(
+				`${PUBLISHED_ARTIFACT} WHERE lower(a.title) LIKE ? ESCAPE '\\' OR a.username LIKE ? ESCAPE '\\' OR lower(coalesce(p.display_name, '')) LIKE ? ESCAPE '\\' ORDER BY a.uses DESC, a.published_at DESC LIMIT ?`,
+				like,
+				like,
+				like,
+				limit,
+			)
+				.toArray()
+				.map(publishedArtifactOf);
+		}
+		return this.#sql(`${PUBLISHED_ARTIFACT} ORDER BY a.uses DESC, a.published_at DESC LIMIT ?`, limit).toArray().map(publishedArtifactOf);
+	}
+
+	/** Someone made a published artifact their own. */
+	artifactUsed(id: string): void {
+		this.#sql("UPDATE published_artifacts SET uses = uses + 1 WHERE id = ?", id);
+	}
+
+	/** The operator takes a published artifact down. */
+	removeArtifact(id: string): boolean {
+		return this.#sql("DELETE FROM published_artifacts WHERE id = ?", id).rowsWritten > 0;
+	}
+
 	/** The agent everyone starts with besides their majordomo; null when the admin chose none. */
 	defaultAgent(): DefaultAgent | null {
 		const [row] = this.#sql("SELECT * FROM default_agent WHERE id = 1").toArray();
@@ -445,9 +597,10 @@ export class Gallery extends DurableObject<Env> {
 		return this.#sql("DELETE FROM default_agent").rowsWritten > 0;
 	}
 
-	/** Forgets a person: their profile, everything they published, and the agent everyone starts with if it was theirs. Run when their account is deleted. */
+	/** Forgets a person: their profile, everything they published (agents and artifacts), and the agent everyone starts with if it was theirs. Run when their account is deleted. */
 	forgetOwner(ownerId: string): void {
 		this.#sql("DELETE FROM templates WHERE owner_id = ?", ownerId);
+		this.#sql("DELETE FROM published_artifacts WHERE owner_id = ?", ownerId);
 		this.#sql("DELETE FROM profiles WHERE owner_id = ?", ownerId);
 		this.#sql("DELETE FROM default_agent WHERE owner_id = ?", ownerId);
 	}
@@ -456,7 +609,8 @@ export class Gallery extends DurableObject<Env> {
 	holds(ownerId: string): boolean {
 		return (
 			this.#sql(
-				"SELECT 1 FROM profiles WHERE owner_id = ? UNION SELECT 1 FROM templates WHERE owner_id = ? UNION SELECT 1 FROM default_agent WHERE owner_id = ? LIMIT 1",
+				"SELECT 1 FROM profiles WHERE owner_id = ? UNION SELECT 1 FROM templates WHERE owner_id = ? UNION SELECT 1 FROM published_artifacts WHERE owner_id = ? UNION SELECT 1 FROM default_agent WHERE owner_id = ? LIMIT 1",
+				ownerId,
 				ownerId,
 				ownerId,
 				ownerId,

@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { ARTIFACT_KINDS, type ArtifactStore, type ArtifactVersion, applyEdits, checkKind, checkTitle } from "../artifacts";
+import { ARTIFACT_KINDS, type ArtifactKind, type ArtifactStore, type ArtifactVersion, applyEdits, checkContent, checkKind, checkTitle } from "../artifacts";
 import { HttpError } from "../http";
 import { definePimExtension } from "./define";
 import { text } from "./services";
@@ -21,7 +21,9 @@ const HOW_IT_RUNS =
 	"That doesn't stop it sending data out: it can still navigate itself away, so treat what it contains, and what the user types into it, as possibly visible to others. " +
 	"Don't put passwords, codes or personal details in an artifact unless the user asks. " +
 	"Images must be inline (data: URLs or SVG). It shows in the chat and on a full screen, including on phones, so make it responsive. " +
-	"Markdown artifacts are documents; images and raw HTML in them aren't rendered.";
+	"Markdown artifacts are documents; images and raw HTML in them aren't rendered. " +
+	"An svg artifact is one <svg> element, for a drawing, a logo or an illustration. " +
+	"A mermaid artifact is Mermaid source (flowchart, sequenceDiagram, gantt, mindmap, and so on), for a diagram, drawn for the user; don't wrap it in a code fence.";
 
 /** A tool's answer about a version: a reference the app shows as the artifact, never its content. */
 function reference(version: ArtifactVersion, title: string, kind: string, note: string) {
@@ -53,7 +55,8 @@ export function artifactsExtension({ artifacts, assertOpen }: ArtifactServices) 
 			try {
 				assertOpen();
 				const name = checkTitle(title);
-				const version = await artifacts.create({ id, title: name, kind: checkKind(kind), content, session: String(api.conversationId) });
+				checkContent(checkKind(kind), content);
+				const version = await artifacts.create({ id, title: name, kind, content, session: String(api.conversationId) });
 				return reference(version, name, kind, `Created artifact ${id}, version 1. The user sees it in the chat.`);
 			} catch (error) {
 				return failure(error);
@@ -83,6 +86,7 @@ export function artifactsExtension({ artifacts, assertOpen }: ArtifactServices) 
 				// Edits apply to the version they were based on, which must be the latest; append checks that again.
 				const base = base_version === latest.version ? latest : undefined;
 				const next = content ?? (base ? applyEdits(base.content, edits!) : latest.content);
+				checkContent(artifacts.get(id)!.kind, next);
 				const { version, changed } = await artifacts.append(id, {
 					baseVersion: base_version,
 					content: next,
@@ -143,6 +147,8 @@ export function artifactsExtension({ artifacts, assertOpen }: ArtifactServices) 
 	return defineExtension({ name: "pim.artifacts", tools: [create, update, read, list] });
 }
 
+const KIND_NAMES: Record<ArtifactKind, string> = { html: "HTML", markdown: "Markdown", svg: "SVG", mermaid: "Diagram" };
+
 /** On a dashboard: what the space made most recently. Artifacts made outside any chat are the majordomo's. */
 export function artifactsWidgets(artifacts: ArtifactStore) {
 	return definePimExtension({
@@ -163,7 +169,7 @@ export function artifactsWidgets(artifacts: ArtifactStore) {
 						.slice(0, 5)
 						.map((artifact) => ({
 							title: artifact.title,
-							detail: `${artifact.kind === "html" ? "HTML" : "Markdown"} · v${artifact.version}`,
+							detail: `${KIND_NAMES[artifact.kind]} · v${artifact.version}`,
 							time: new Date(artifact.updatedAt).toISOString(),
 							link: { artifact: artifact.id },
 						})),

@@ -7,12 +7,15 @@ import {
   Download,
   FileCode2,
   FileText,
+  ImageIcon,
   Maximize2,
   ShieldAlert,
+  Workflow,
 } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import {
   ApiError,
+  ARTIFACT_KINDS,
   type ArtifactKind,
   type ArtifactReference,
   artifactDownloadUrl,
@@ -148,7 +151,7 @@ export function ArtifactFrame({
   );
 }
 
-/** A version of an artifact, shown as it runs (HTML) or reads (Markdown). */
+/** A version of an artifact, shown as it runs or draws in a frame, or as it reads (Markdown). */
 export function ArtifactPreview({
   id,
   version,
@@ -164,7 +167,7 @@ export function ArtifactPreview({
   fill?: boolean;
   maxHeight?: number;
 }) {
-  if (kind === "html") {
+  if (kind !== "markdown") {
     return (
       <ArtifactFrame
         id={id}
@@ -240,12 +243,30 @@ export function ArtifactIcon({
   kind: ArtifactKind;
   className?: string;
 }) {
-  return kind === "html" ? (
-    <FileCode2 className={className} />
-  ) : (
-    <FileText className={className} />
-  );
+  const Icon = {
+    html: FileCode2,
+    markdown: FileText,
+    svg: ImageIcon,
+    mermaid: Workflow,
+  }[kind];
+  return <Icon className={className} />;
 }
+
+/** What each kind is called, short, next to an artifact's name. */
+export const ARTIFACT_KIND_NAMES: Record<ArtifactKind, string> = {
+  html: "HTML",
+  markdown: "Markdown",
+  svg: "SVG",
+  mermaid: "Mermaid",
+};
+
+/** The language an artifact's source is highlighted as. */
+export const ARTIFACT_LANGUAGES = {
+  html: "html",
+  markdown: "markdown",
+  svg: "xml",
+  mermaid: "mermaid",
+} as const satisfies Record<ArtifactKind, string>;
 
 /**
  * An artifact version the agent made in a chat: its title and version, a
@@ -326,7 +347,7 @@ export function artifactReference(output: unknown): ArtifactReference | null {
       artifact &&
       typeof artifact.id === "string" &&
       typeof artifact.title === "string" &&
-      (artifact.kind === "html" || artifact.kind === "markdown") &&
+      ARTIFACT_KINDS.includes(artifact.kind as ArtifactKind) &&
       typeof artifact.version === "number"
     ) {
       return artifact as ArtifactReference;

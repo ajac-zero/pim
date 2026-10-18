@@ -7,7 +7,11 @@ import {
 } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { ArtifactIcon, formatBytes } from "~/components/artifact";
+import {
+  ARTIFACT_KIND_NAMES,
+  ArtifactIcon,
+  formatBytes,
+} from "~/components/artifact";
 import { useI18n } from "~/components/i18n";
 import {
   ArrowLeft,
@@ -308,7 +312,7 @@ export function ArtifactsPanel({ onNavigate }: { onNavigate?: () => void }) {
               <ArtifactIcon kind={artifact.kind} className={ROW_ICON_CLASS} />
               <RowText
                 title={artifact.title}
-                meta={`${artifact.kind === "html" ? "HTML" : "Markdown"} · ${formatDate(
+                meta={`${ARTIFACT_KIND_NAMES[artifact.kind]} · ${formatDate(
                   new Date(artifact.updatedAt),
                   { dateStyle: "medium" },
                 )}`}

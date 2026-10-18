@@ -3,6 +3,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
+  ARTIFACT_LANGUAGES,
   ArtifactCaution,
   ArtifactPreview,
   formatBytes,
@@ -243,7 +244,7 @@ function ArtifactPage() {
             {source.data ? (
               <CodeBlock
                 code={source.data.content}
-                language={artifact.kind === "html" ? "html" : "markdown"}
+                language={ARTIFACT_LANGUAGES[artifact.kind]}
               />
             ) : (
               <p className="text-muted-foreground text-sm">

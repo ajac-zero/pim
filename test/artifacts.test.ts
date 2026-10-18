@@ -122,6 +122,35 @@ describe("artifacts", () => {
 		expect((await raw(`/artifacts/${id}/versions/1/frame`)).status).toBe(404);
 	});
 
+	it("draw SVG and Mermaid in the same sandbox, loading only Pim's own runtime and only for diagrams", async () => {
+		const drawing = await callTool("artifact_create", { title: "Logo", kind: "svg", content: '<svg viewBox="0 0 10 10"><circle r="4" cx="5" cy="5"/></svg>' });
+		const svg = JSON.parse(drawing.text).artifact.id;
+		const svgFrame = await raw(`/artifacts/${svg}/versions/1/frame`);
+		expect(svgFrame.headers.get("content-security-policy")).toContain("script-src 'unsafe-inline';");
+		expect(await svgFrame.text()).toMatch(/^<!doctype html>.*<body><svg viewBox="0 0 10 10"><circle r="4" cx="5" cy="5"\/><\/svg><\/body><\/html><script>/);
+		expect((await raw(`/artifacts/${svg}/versions/1/download`)).headers.get("content-disposition")).toMatch(/-v1\.svg"/);
+
+		// Diagram source is text in the page: markup in it is escaped, never parsed.
+		const source = 'flowchart LR\n  A["</pre><script>parent.x=1</script>"] --> B';
+		const diagram = await callTool("artifact_create", { title: "Flow", kind: "mermaid", content: source });
+		const mermaid = JSON.parse(diagram.text).artifact.id;
+		const mermaidFrame = await raw(`/artifacts/${mermaid}/versions/1/frame`);
+		const directives = mermaidFrame.headers.get("content-security-policy")!.split(";").map((directive) => directive.trim());
+		expect(directives).toEqual(expect.arrayContaining(["sandbox allow-scripts", "default-src 'none'", "connect-src 'none'", "script-src 'unsafe-inline' https://pim.test/artifact-runtime/"]));
+		const page = await mermaidFrame.text();
+		expect(page).toContain('<pre class="mermaid">flowchart LR\n  A["&lt;/pre&gt;&lt;script&gt;parent.x=1&lt;/script&gt;"] --&gt; B</pre>');
+		expect(page).toContain('<script src="https://pim.test/artifact-runtime/mermaid.js"></script>');
+		expect(page).not.toContain("<script>parent.x=1");
+		expect((await raw(`/artifacts/${mermaid}/versions/1/download`)).headers.get("content-disposition")).toMatch(/-v1\.mmd"/);
+
+		// Content its kind can't show is refused, to the model, before anything is kept.
+		const notSvg = await callTool("artifact_create", { title: "Bad", kind: "svg", content: "<div>hi</div>" });
+		expect(notSvg).toMatchObject({ isError: true, text: expect.stringContaining("<svg") });
+		const broken = await callTool("artifact_update", { id: svg, base_version: 1, content: "<p>no</p>" });
+		expect(broken.isError).toBe(true);
+		expect((await api(`/artifacts/${svg}`)).body.version).toBe(1);
+	});
+
 	it("refuse an API token in the address, which WebSockets still use", async () => {
 		const made = await makePage();
 		for (const path of [`/artifacts/${made.id}/versions/1/frame`, `/artifacts/${made.id}/versions/1/download`, `/artifacts/${made.id}/versions/1`, "/artifacts"]) {

@@ -17,8 +17,14 @@
 
 import { HttpError } from "./http";
 
-export const ARTIFACT_KINDS = ["html", "markdown"] as const;
+export const ARTIFACT_KINDS = ["html", "markdown", "svg", "mermaid"] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
+
+/** The kinds the app shows in a sandboxed frame; Markdown it renders itself. */
+export const FRAMED_KINDS: readonly ArtifactKind[] = ["html", "svg", "mermaid"];
+
+/** Each kind's file extension, for downloads. */
+const EXTENSIONS: Record<ArtifactKind, string> = { html: "html", markdown: "md", svg: "svg", mermaid: "mmd" };
 
 /** Who made a version: the agent, or the person restoring an older one. */
 export type ArtifactSource = "agent" | "restore";
@@ -132,6 +138,15 @@ export function checkTitle(title: unknown): string {
 export function checkKind(kind: unknown): ArtifactKind {
 	if (!ARTIFACT_KINDS.includes(kind as ArtifactKind)) throw new HttpError(400, `kind must be one of ${ARTIFACT_KINDS.join(", ")}`);
 	return kind as ArtifactKind;
+}
+
+/** An SVG artifact's markup: an `<svg>` element, after at most an XML declaration and comments. */
+const SVG_START = /^\s*(<\?xml[^>]*\?>\s*)?(<!--[\s\S]*?-->\s*)*<svg[\s>]/i;
+
+/** Refuses content its kind can't show, with what to fix, so a mistake reaches the one who made it. */
+export function checkContent(kind: ArtifactKind, content: string): void {
+	if (kind === "svg" && !SVG_START.test(content)) throw new HttpError(400, "An SVG artifact must be one <svg> element, starting with <svg.");
+	if (kind === "mermaid" && content.trim() === "") throw new HttpError(400, "A Mermaid artifact needs a diagram.");
 }
 
 /** Search-and-replace edits, each matching exactly once, applied in order. */
@@ -368,17 +383,19 @@ export class ArtifactStore {
  * Headers for any response that carries an artifact's bytes. HTML in it can
  * only ever run sandboxed, in an opaque origin: even opened directly in a tab,
  * it can't read this origin's cookies or storage, or call its API. The CSP
- * also keeps it from loading anything or connecting anywhere. That is not a
+ * also keeps it from loading anything or connecting anywhere, except, with
+ * `runtime`, Pim's own scripts under `RUNTIME_PATH`. That is not a
  * promise it can't send data out: it can still navigate itself away, with
  * what it shows or what someone typed in the address.
  */
-export function artifactHeaders(origin: string, contentType: string): Headers {
+export function artifactHeaders(origin: string, contentType: string, options: { runtime?: boolean } = {}): Headers {
 	return new Headers({
 		"content-type": contentType,
 		"content-security-policy": [
 			"sandbox allow-scripts",
 			"default-src 'none'",
-			"script-src 'unsafe-inline'",
+			// A diagram or a JSX artifact also loads the scripts it runs on, Pim's own (see `RUNTIME_PATH`).
+			options.runtime ? `script-src 'unsafe-inline' ${origin}${RUNTIME_PATH}` : "script-src 'unsafe-inline'",
 			"style-src 'unsafe-inline'",
 			"img-src data: blob:",
 			"font-src data:",
@@ -403,9 +420,46 @@ export function artifactHeaders(origin: string, contentType: string): Headers {
  */
 export const RESIZE_SCRIPT = `<script>(()=>{let last=-1;const post=()=>{const h=Math.ceil(document.documentElement.scrollHeight);if(h!==last){last=h;parent.postMessage({type:"pim:artifact-height",height:h},"*")}};addEventListener("load",post);new ResizeObserver(post).observe(document.documentElement);post()})()</script>`;
 
+/**
+ * Where the scripts that diagrams and JSX artifacts run on are served from:
+ * static files the web app's build makes (`web/scripts/build-artifact-runtimes.mjs`),
+ * the same for everyone, which load nothing else.
+ */
+export const RUNTIME_PATH = "/artifact-runtime/";
+
+const escapeHtml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+const PAGE_HEAD =
+	'<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+	"<style>html,body{margin:0;background:#fff}body{font:14px/1.5 system-ui,sans-serif}</style>";
+
+/**
+ * The page a framed version is shown as: an HTML artifact as it is; an SVG
+ * one in a page that fits it to the frame; a Mermaid one as its source, in
+ * text, which the Mermaid runtime draws. Each ends with the height script.
+ */
+export function framePage(kind: ArtifactKind, content: string, origin: string): Response {
+	const html = (body: string, runtime = false) =>
+		new Response(body + RESIZE_SCRIPT, { headers: artifactHeaders(origin, "text/html; charset=utf-8", { runtime }) });
+	switch (kind) {
+		case "html":
+			return html(content);
+		case "svg":
+			return html(`${PAGE_HEAD}<style>svg{display:block;max-width:100%;height:auto;margin:0 auto}</style></head><body>${content}</body></html>`);
+		case "mermaid":
+			return html(
+				`${PAGE_HEAD}<style>body{padding:16px}pre.mermaid{margin:0;display:flex;justify-content:center}pre.error{white-space:pre-wrap;color:#991b1b}</style></head>` +
+					`<body><pre class="mermaid">${escapeHtml(content)}</pre><script src="${origin}${RUNTIME_PATH}mermaid.js"></script></body></html>`,
+				true,
+			);
+		default:
+			throw new HttpError(404, "This kind of artifact isn't shown in a frame");
+	}
+}
+
 /** A download's name: the title, made safe for a header and a file system, and the version. */
 export function downloadName(title: string, version: number, kind: ArtifactKind): { ascii: string; utf8: string } {
-	const extension = kind === "html" ? "html" : "md";
+	const extension = EXTENSIONS[kind];
 	const cleaned = title
 		.normalize("NFC")
 		.replace(/[\u0000-\u001f\u007f"\\/:*?<>|]+/g, " ")

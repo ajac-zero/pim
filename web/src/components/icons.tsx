@@ -125,6 +125,7 @@ export const Dumbbell = themedIcon(
 );
 export const ExternalLink = themedIcon(Lucide.ExternalLink, Pixel.ExternalLink);
 export const FileCode2 = themedIcon(Lucide.FileCode2, Pixel.Script);
+export const Workflow = themedIcon(Lucide.Workflow, Pixel.GitBranch);
 export const FileIcon = themedIcon(Lucide.File, Pixel.File);
 export const FileText = themedIcon(Lucide.FileText, Pixel.FileText);
 export const Flower2 = themedIcon(

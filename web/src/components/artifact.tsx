@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import {
@@ -45,6 +46,7 @@ export function ArtifactFrame({
   maxHeight = 360,
   fill = false,
   className,
+  eager = false,
 }: {
   id: string;
   version: number;
@@ -54,6 +56,8 @@ export function ArtifactFrame({
   /** Fills its container instead of following its page's height. */
   fill?: boolean;
   className?: string;
+  /** Loads at once, even out of view, as a copy to print must. */
+  eager?: boolean;
 }) {
   const { t } = useI18n();
   const frame = useRef<HTMLIFrameElement>(null);
@@ -133,7 +137,7 @@ export function ArtifactFrame({
       src={artifactFrameUrl(id, version)}
       sandbox="allow-scripts"
       referrerPolicy="no-referrer"
-      loading="lazy"
+      loading={eager ? "eager" : "lazy"}
       onLoad={() => {
         // The first load is the artifact; another is the page navigating itself somewhere.
         if (loads.current.key !== key) loads.current = { key, count: 0 };
@@ -159,6 +163,7 @@ export function ArtifactPreview({
   title,
   fill,
   maxHeight,
+  eager,
 }: {
   id: string;
   version: number;
@@ -166,6 +171,7 @@ export function ArtifactPreview({
   title: string;
   fill?: boolean;
   maxHeight?: number;
+  eager?: boolean;
 }) {
   if (kind !== "markdown") {
     return (
@@ -175,6 +181,7 @@ export function ArtifactPreview({
         title={title}
         fill={fill}
         maxHeight={maxHeight}
+        eager={eager}
       />
     );
   }
@@ -217,6 +224,47 @@ function MarkdownArtifact({
     >
       <Markdown text={data.content} untrusted />
     </div>
+  );
+}
+
+/**
+ * Prints a version (or saves it as a PDF, from the browser's print dialog):
+ * a full-height copy of it, the only thing the page prints, which is taken
+ * away once printing ends. It waits for a framed page to report its height.
+ */
+export function ArtifactPrint({
+  id,
+  version,
+  kind,
+  title,
+  onDone,
+}: {
+  id: string;
+  version: number;
+  kind: ArtifactKind;
+  title: string;
+  onDone: () => void;
+}) {
+  useEffect(() => {
+    window.addEventListener("afterprint", onDone);
+    const timer = window.setTimeout(() => window.print(), 1200);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("afterprint", onDone);
+    };
+  }, [onDone]);
+  return createPortal(
+    <div className="print-area" aria-hidden="true">
+      <ArtifactPreview
+        id={id}
+        version={version}
+        kind={kind}
+        title={title}
+        maxHeight={100_000}
+        eager
+      />
+    </div>,
+    document.body,
   );
 }
 

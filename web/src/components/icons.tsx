@@ -177,6 +177,7 @@ export const PanelLeft = themedIcon(Lucide.PanelLeft, Pixel.Layout);
 export const Pause = themedIcon(Lucide.Pause, Pixel.Pause);
 export const PenLine = themedIcon(Lucide.PenLine, Pixel.Pencil);
 export const Pencil = themedIcon(Lucide.Pencil, Pixel.Pencil);
+export const Printer = themedIcon(Lucide.Printer, Pixel.Printer);
 export const Plane = themedIcon(
   Lucide.Plane,
   pixelPath(

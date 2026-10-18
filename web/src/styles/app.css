@@ -171,3 +171,39 @@
     border-radius: 9999px;
   }
 }
+
+/*
+ * Printing an artifact (and saving it as a PDF): the page prints only the
+ * copy of it in `.print-area`, at its full height, and nothing of the app.
+ */
+@media screen {
+  .print-area {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 800px;
+    opacity: 0;
+    pointer-events: none;
+    z-index: -1;
+  }
+}
+@media print {
+  body:has(.print-area) > :not(.print-area) {
+    display: none !important;
+  }
+  html,
+  body {
+    background: #fff !important;
+  }
+  /* Ink on paper, whichever theme and mode the app is in. */
+  .print-area {
+    width: 100%;
+    --background: #fff;
+    --foreground: #111;
+    --muted: #f2f2f2;
+    --muted-foreground: #555;
+    --border: #ddd;
+    --link: #1a4fd6;
+    color: var(--foreground);
+  }
+}

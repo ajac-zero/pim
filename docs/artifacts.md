@@ -8,6 +8,7 @@ Artifacts are documents and small interactive pages the agent makes for its owne
 - **Where they live.** In the Durable Object `Pim` holding the owner's space, in `pim_artifacts` and `pim_artifact_versions` ([`src/artifacts.ts`](../src/artifacts.ts)). Every request for one goes through the owner's gateway and agent, like the rest of the API. Nothing is cached outside the agent, and there is no index across owners.
 - **Versions are append-only.** Each change adds a version, and nothing rewrites one, so a version number and its `sha256` always name the same bytes. Restoring an older version adds a new one with the old content (`source: "restore"`, `restoredFrom`).
 - **Every write names its base version.** The agent (`base_version`) and the person (`baseVersion`) both say which version they changed. If it's no longer the latest, the write is refused with `409`, so neither overwrites the other unseen. A write hashes its content first, then rechecks the latest version and every limit and stores it with nothing awaited in between, so two writes that race can't both pass a check meant for one, and the caps can't be overshot. A refused write changes nothing, not even the title.
+- **People edit them too.** On the latest version, the owner can edit the source and save it as a new version (`source: "person"`), checked like the agent's. `artifact_read` tells the agent a version is the person's. They can also ask the agent for a change from the artifact itself: the app sends the request, and what's selected in a Markdown artifact, to the chat that made it (or a new one, if that chat is gone) and opens it.
 - **Owner-wide.** An artifact records the chat it was made in, but deleting that chat doesn't delete the artifact.
 
 ## The agent's tools
@@ -32,6 +33,7 @@ Under `/api`, with the owner's passkey session or an API token in the `Authoriza
 | GET | `/artifacts/:id/versions/:v` | One version with its `content`, as JSON |
 | GET | `/artifacts/:id/versions/:v/frame` | An HTML version as a page, for the sandboxed frame |
 | GET | `/artifacts/:id/versions/:v/download` | The version's exact bytes as an attachment named `.html` or `.md`, served as `text/plain` |
+| POST | `/artifacts/:id/versions` | `{ baseVersion, content, title? }`: the person's edit, as a new version: `201` with `saved`, its number, or `200` with `changed: false` when the content is the latest's; `409` if `baseVersion` isn't the latest; `400` for content its kind can't show |
 | POST | `/artifacts/:id/restore` | `{ version, baseVersion }`: `201` with the new latest version; `409` if `baseVersion` isn't the latest |
 | DELETE | `/artifacts/:id` | Deletes it and every version |
 
@@ -91,6 +93,7 @@ Each limit is checked against the stored versions before anything is written. Th
 | `?token=` refused on artifact paths; WebSockets still take it | "refuse an API token in the address, which WebSockets still use" |
 | Stale base version refused, edits match exactly once, unchanged content makes no version | "get new versions only from the latest…" |
 | Restore is append-only and needs the latest base | "restore an older version as a new one…" |
+| The person's edits are versions from the latest base, refused when stale or unshowable, and read by the model as theirs | "take the person's edits as new versions…" |
 | Delete removes every version; export has every version | "are deleted with every version…" |
 | Per-version, version-count, artifact-count, total and storage limits, checked before writing | "stay within their limits…" |
 | A refused write (`413` too big, `429` too many versions or too much in all, `409` stale base, for an edit or a restore) leaves the title, time, latest version, history and content as they were | "change nothing on a refused write…" |

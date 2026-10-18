@@ -204,6 +204,28 @@ describe("artifacts", () => {
 		expect((await post(`/artifacts/${made.id}/restore`, { version: 9, baseVersion: 3 })).status).toBe(404);
 	});
 
+	it("take the person's edits as new versions, only from the latest, which the model then reads as theirs", async () => {
+		const made = await makePage();
+		const saved = await post(`/artifacts/${made.id}/versions`, { baseVersion: 1, content: "<p>Mine</p>", title: "My page" });
+		expect(saved.status).toBe(201);
+		expect(saved.body).toMatchObject({ version: 2, title: "My page", saved: 2, changed: true });
+		// The agent's base is now stale, and so is a second edit from version 1.
+		const stale = await callTool("artifact_update", { id: made.id, base_version: 1, content: "<p>Agent</p>" });
+		expect(stale.text).toContain("not the latest");
+		expect((await post(`/artifacts/${made.id}/versions`, { baseVersion: 1, content: "<p>Late</p>" })).status).toBe(409);
+		// The same content again makes no version; content the kind can't show makes none either.
+		expect((await post(`/artifacts/${made.id}/versions`, { baseVersion: 2, content: "<p>Mine</p>" })).body).toMatchObject({ version: 2, changed: false });
+		const drawing = await callTool("artifact_create", { title: "Logo", kind: "svg", content: "<svg></svg>" });
+		const svg = JSON.parse(drawing.text).artifact.id;
+		expect((await post(`/artifacts/${svg}/versions`, { baseVersion: 1, content: "<div></div>" })).status).toBe(400);
+
+		const read = await callTool("artifact_read", { id: made.id });
+		expect(read.text).toContain('"My page" (html), version 2 of 2 (edited by the user)');
+		expect(read.text).toContain("<p>Mine</p>");
+		const { body } = await api(`/artifacts/${made.id}`);
+		expect(body.history.map((version: { source: string }) => version.source)).toEqual(["person", "agent"]);
+	});
+
 	it("are deleted with every version, and are in the export until then", async () => {
 		const made = await makePage();
 		await callTool("artifact_update", { id: made.id, base_version: 1, content: "<p>Second</p>" });

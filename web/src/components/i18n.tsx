@@ -504,6 +504,17 @@ const translations = {
     artifactNavigated:
       "This artifact tried to open another page, so Pim stopped showing it. Anything it put in that page's address may have been sent.",
     artifactShowAgain: "Show it again",
+    artifactEditSource: "Edit",
+    artifactSaveVersion: "Save as version {version}",
+    artifactSaved: "Saved as version {version}",
+    artifactUnchanged: "Nothing changed, so no new version",
+    artifactAskPlaceholder: "Ask Pim to change this…",
+    artifactAskAbout: "About: “{text}”",
+    artifactAskClear: "Don't ask about the selection",
+    artifactAskMessage:
+      "Please change the artifact “{title}” (id {id}, version {version}): {request}",
+    artifactAskAboutMessage: "It’s about this part: “{text}”",
+    artifactEditedBy: "Version {version} (yours) · {date}",
     skills: "Skills",
     noSkills:
       "None yet. Ask an agent to remember how you want something done, and its skill appears here.",
@@ -1313,6 +1324,17 @@ const translations = {
     artifactNavigated:
       "Este artefacto intentó abrir otra página, así que Pim dejó de mostrarlo. Lo que pusiera en la dirección de esa página puede haberse enviado.",
     artifactShowAgain: "Mostrarlo de nuevo",
+    artifactEditSource: "Editar",
+    artifactSaveVersion: "Guardar como versión {version}",
+    artifactSaved: "Guardado como versión {version}",
+    artifactUnchanged: "No cambió nada, así que no hay versión nueva",
+    artifactAskPlaceholder: "Pídele a Pim que lo cambie…",
+    artifactAskAbout: "Sobre: “{text}”",
+    artifactAskClear: "No preguntar por la selección",
+    artifactAskMessage:
+      "Cambia el artefacto “{title}” (id {id}, versión {version}): {request}",
+    artifactAskAboutMessage: "Se trata de esta parte: “{text}”",
+    artifactEditedBy: "Versión {version} (tuya) · {date}",
     loading: "Cargando…",
     open: "Abrir",
     settingsGeneral: "General",

@@ -19,7 +19,7 @@ import {
 import { type AgentMcpOAuthProvider, Agent as DurableAgent, type Connection, type ConnectionContext, DurableObjectOAuthClientProvider, getAgentByName, type Schedule, type WSMessage } from "agents";
 import { type PiModel, PiHarness, type PiOperationResult, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
-import { ArtifactStore, artifactHeaders, downloadName, framePage } from "./artifacts";
+import { ArtifactStore, artifactHeaders, checkContent, checkTitle, downloadName, framePage } from "./artifacts";
 import { digestHex } from "./auth/store";
 import { Email, type Mailer, mailerFrom } from "./email";
 import { ImageStore, userInput } from "./images";
@@ -3056,6 +3056,27 @@ export class Pim extends DurableAgent<Env> {
 					const artifact = this.#artifact(id!);
 					this.artifacts.delete(artifact.id);
 					return noStore({ deleted: true });
+				}),
+		],
+		[
+			"POST",
+			"/artifacts/:id/versions",
+			({ id }, request, url) =>
+				this.#artifactRequest(url, async () => {
+					const artifact = this.#artifact(id!);
+					const { baseVersion, content, title } = await readJson<{ baseVersion: number; content: string; title: string }>(request);
+					if (!Number.isSafeInteger(baseVersion)) throw new HttpError(400, "baseVersion must be a version number");
+					if (typeof content !== "string") throw new HttpError(400, "content must be a string");
+					checkContent(artifact.kind, content);
+					const name = title === undefined ? undefined : checkTitle(title);
+					this.#assertOpen();
+					const { version, changed } = await this.artifacts.append(artifact.id, {
+						baseVersion: baseVersion!,
+						content,
+						source: "person",
+						...(name !== undefined ? { title: name } : {}),
+					});
+					return noStore({ ...this.artifacts.get(artifact.id), saved: version.version, changed }, changed ? 201 : 200);
 				}),
 		],
 		[

@@ -467,8 +467,8 @@ export type ArtifactVersionInfo = {
   version: number;
   sha256: string;
   size: number;
-  /** "restore": the person restored `restoredFrom`. */
-  source: "agent" | "restore";
+  /** "person": the person edited it; "restore": they restored `restoredFrom`. */
+  source: "agent" | "person" | "restore";
   restoredFrom: number | null;
   createdAt: number;
 };
@@ -1054,6 +1054,11 @@ export const pim = {
     call<Artifact & { restored: number }>(
       `/artifacts/${encodeURIComponent(id)}/restore`,
       { method: "POST", body: JSON.stringify({ version, baseVersion }) },
+    ),
+  saveArtifact: (id: string, baseVersion: number, content: string) =>
+    call<Artifact & { saved: number; changed: boolean }>(
+      `/artifacts/${encodeURIComponent(id)}/versions`,
+      { method: "POST", body: JSON.stringify({ baseVersion, content }) },
     ),
   deleteArtifact: (id: string) =>
     call<{ deleted: boolean }>(`/artifacts/${encodeURIComponent(id)}`, {

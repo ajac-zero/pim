@@ -122,7 +122,8 @@ export function artifactsExtension({ artifacts, assertOpen }: ArtifactServices) 
 			const summary = artifacts.get(id)!;
 			const part = found.content.slice(offset, offset + READ_CHARS);
 			const rest = found.content.length - offset - part.length;
-			const header = `Artifact ${id} "${summary.title}" (${summary.kind}), version ${found.version} of ${summary.version}, ${found.content.length} characters${offset > 0 ? `, from ${offset}` : ""}:`;
+			const by = found.source === "person" ? " (edited by the user)" : found.source === "restore" ? ` (the user restored version ${found.restoredFrom})` : "";
+			const header = `Artifact ${id} "${summary.title}" (${summary.kind}), version ${found.version} of ${summary.version}${by}, ${found.content.length} characters${offset > 0 ? `, from ${offset}` : ""}:`;
 			const more = rest > 0 ? `\n[... ${rest} more characters: read again with offset ${offset + part.length}]` : "";
 			return text(`${header}\n${part}${more}`);
 		},

@@ -303,7 +303,7 @@ export class Pim extends DurableAgent<Env> {
 	/** Images the person sent, in R2; their messages keep their URLs. */
 	readonly images = new ImageStore({
 		sql: this.ctx.storage.sql,
-		bucket: this.env.IMAGES,
+		bucket: this.env.BLOBS,
 		owner: () => this.name,
 		publicOrigin: () => this.deployment().publicUrl ?? undefined,
 		meta: { get: (key) => this.store.meta(key), set: (key, value) => this.store.setMeta(key, value) },
@@ -320,7 +320,7 @@ export class Pim extends DurableAgent<Env> {
 	readonly files = new Files({
 		workspace: () => this.#files.workspace(),
 		sql: this.ctx.storage.sql,
-		bucket: this.env.IMAGES,
+		bucket: this.env.BLOBS,
 		owner: () => this.name,
 	});
 	readonly #files: FileServices = {

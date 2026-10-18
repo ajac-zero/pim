@@ -25,7 +25,7 @@
     { "binding": "AI", "id": "preview-ai-stand-in" },
     { "binding": "OAUTH_KV", "id": "preview-oauth" }
   ],
-  "r2_buckets": [{ "binding": "IMAGES", "bucket_name": "pim-preview-images" }],
+  "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "pim-preview-blobs" }],
   // The agents' browser: a Chrome on this machine, which wrangler downloads the first time.
   "browser": { "binding": "BROWSER" },
   // Runs agents' code (`run_javascript`), as deployments on the Workers Paid plan can.

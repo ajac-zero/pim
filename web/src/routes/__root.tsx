@@ -11,7 +11,7 @@ import {
   useParams,
   useRouterState,
 } from "@tanstack/react-router";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import {
@@ -37,6 +37,7 @@ import {
 import { SharingDialog } from "~/components/sharing-dialog";
 import { SignIn } from "~/components/sign-in";
 import { ThemeProvider } from "~/components/theme";
+import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
 import { Toaster } from "~/components/ui/sonner";
 import { TooltipProvider } from "~/components/ui/tooltip";
 import { authSessionQuery } from "~/lib/auth";
@@ -290,11 +291,20 @@ function MobileTitle() {
  * the bottom takes its place, always there like the rail, and its lists fill
  * the screen over the page.
  */
+/** The desktop sidebar's width in pixels, rail included, which the person can drag. */
+const SIDEBAR_WIDTH = { default: 320, min: 256, max: 480 };
+
 function AppLayout() {
+  const { t } = useI18n();
   const { panel } = Route.useSearch();
   // Collapsing hides the panel the sidebar was showing; showing another opens it again.
   const [collapsedOn, setCollapsedOn] = useState<string | null>(null);
   const sidebarCollapsed = collapsedOn === (panel ?? "chats");
+  const [sidebarWidth, setSidebarWidth] = useStoredSize(
+    "pim-sidebar-width",
+    SIDEBAR_WIDTH.default,
+  );
+  const sidebar = useRef<HTMLElement>(null);
   const [listOpen, setListOpen] = useState(false);
   // Anything that shows another panel, such as a notification's View, shows its list.
   const [listedPanel, setListedPanel] = useState(panel);
@@ -313,21 +323,41 @@ function AppLayout() {
 
   return (
     <div className="flex h-svh w-full overflow-hidden">
-      <aside
-        className={cn(
-          "hidden shrink-0 overflow-hidden border-sidebar-border border-r transition-[width] duration-200 md:block",
-          sidebarCollapsed ? "w-16" : "w-80",
-        )}
-      >
-        <div className="h-full w-full">
-          <AppSidebar
-            collapsed={sidebarCollapsed}
-            onToggleCollapse={() =>
-              setCollapsedOn(sidebarCollapsed ? null : (panel ?? "chats"))
+      {/* As wide as the person last made it */}
+      <div className="relative hidden shrink-0 md:flex">
+        <aside
+          ref={sidebar}
+          style={sidebarCollapsed ? undefined : { width: sidebarWidth }}
+          className={cn(
+            "shrink-0 overflow-hidden border-sidebar-border border-r transition-[width] duration-200",
+            sidebarCollapsed && "w-16",
+          )}
+        >
+          <div className="h-full w-full">
+            <AppSidebar
+              collapsed={sidebarCollapsed}
+              onToggleCollapse={() =>
+                setCollapsedOn(sidebarCollapsed ? null : (panel ?? "chats"))
+              }
+            />
+          </div>
+        </aside>
+        {!sidebarCollapsed && (
+          <ResizeHandle
+            label={t("resizeSidebar")}
+            edge="right"
+            value={sidebarWidth}
+            min={SIDEBAR_WIDTH.min}
+            max={SIDEBAR_WIDTH.max}
+            step={16}
+            onChange={setSidebarWidth}
+            onReset={() => setSidebarWidth(null)}
+            fromPointer={(x) =>
+              x - (sidebar.current?.getBoundingClientRect().left ?? 0)
             }
           />
-        </div>
-      </aside>
+        )}
+      </div>
 
       <div className="flex min-w-0 flex-1 flex-col">
         {listOpen ? (

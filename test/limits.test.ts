@@ -36,7 +36,7 @@ describe("usage", () => {
 		// The run's request, and the utility model's naming the chat from its first message.
 		expect(after.today.modelRequests).toBe(before.modelRequests + 2);
 		expect(after.today.tokens).toBeGreaterThan(before.tokens);
-		// A self-hosted Pim has no limits unless PIM_LIMITS sets some.
+		// A self-hosted Pim has no limits unless its PIM_LIMIT_* variables set some.
 		expect(after.limits).toMatchObject({ dailyTokens: null, dailyRuns: null, sessions: null });
 	});
 

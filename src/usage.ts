@@ -11,8 +11,8 @@ import { HttpError } from "./http";
 
 /**
  * What this Pim has used, by UTC day, and the limits on it. Members have
- * the limits `PIM_LIMITS` sets, if any; the admin has none, and can change
- * anyone's.
+ * the limits the deployment's `PIM_LIMIT_*` variables set, if any (see
+ * ./deployment.ts); the admin has none, and can change anyone's.
  *
  * Model usage is counted where every request goes through, the model catalog,
  * so conversations, compactions and memory compression all count.
@@ -56,7 +56,7 @@ export const LIMIT_NAMES = [
 
 export const UNLIMITED: Limits = Object.fromEntries(LIMIT_NAMES.map((name) => [name, null])) as unknown as Limits;
 
-/** Checks a partial limits object, as `PIM_LIMITS` or an operator sets it: each a non-negative integer or null. */
+/** Checks a partial limits object, as the admin sets one person's: each a non-negative integer or null. */
 export function parseLimits(value: unknown): Partial<Limits> {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) throw new HttpError(400, "limits must be an object");
 	const limits: Record<string, number | null> = {};
@@ -68,17 +68,6 @@ export function parseLimits(value: unknown): Partial<Limits> {
 		limits[name] = limit as number | null;
 	}
 	return limits as Partial<Limits>;
-}
-
-/** `PIM_LIMITS`: empty means none. A malformed value fails closed, to no runs at all, rather than lifting every limit. */
-export function deploymentLimits(json: string | undefined): Limits {
-	if (!json || json.trim() === "") return UNLIMITED;
-	try {
-		return { ...UNLIMITED, ...parseLimits(JSON.parse(json)) };
-	} catch (error) {
-		console.error("PIM_LIMITS is not valid; refusing model requests and runs until it is fixed", error);
-		return { ...UNLIMITED, dailyTokens: 0, dailyModelRequests: 0, dailyRuns: 0 };
-	}
 }
 
 export type DayUsage = {

@@ -47,20 +47,15 @@ const fetchUrl = defineTool({
 	},
 });
 
-type SearchProvider = "exa" | "ceramic" | "linkup";
+export const SEARCH_PROVIDERS = ["exa", "ceramic", "linkup"] as const;
+export type SearchProvider = (typeof SEARCH_PROVIDERS)[number];
 
 /**
  * `fetch_url` always; `web_search` only when a provider is configured,
  * since searches are billed to the account's AI Gateway.
  */
-export function webExtension(options: { ai: Ai; searchProvider?: string }) {
+export function webExtension(options: { ai: Ai; searchProvider: SearchProvider | null }) {
 	const tools: ToolRegistration[] = [fetchUrl as ToolRegistration];
-	const provider = options.searchProvider?.trim();
-	if (provider) {
-		if (!["exa", "ceramic", "linkup"].includes(provider)) {
-			throw new Error(`PIM_WEB_SEARCH must be exa, ceramic or linkup, not ${JSON.stringify(provider)}`);
-		}
-		tools.push(webSearchTool({ binding: options.ai, provider: provider as SearchProvider }) as ToolRegistration);
-	}
+	if (options.searchProvider) tools.push(webSearchTool({ binding: options.ai, provider: options.searchProvider }) as ToolRegistration);
 	return defineExtension({ name: "pim.web", tools });
 }

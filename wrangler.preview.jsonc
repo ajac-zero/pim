@@ -44,20 +44,21 @@
     { "tag": "v3", "new_sqlite_classes": ["Directory"] },
     { "tag": "v4", "new_sqlite_classes": ["Gallery"] }
   ],
+  // Only what differs from the defaults in src/deployment.ts.
   "vars": {
-    "PIM_MODEL": "@cf/zai-org/glm-5.3",
-    "PIM_TIME_ZONE": "UTC",
-    "PIM_WEB_SEARCH": "",
-    "PIM_MEMORY_MODEL": "",
-    "PIM_UTILITY_MODEL": "@cf/ibm-granite/granite-4.0-h-micro",
-    "PIM_MEMORY_LINES": "",
-    "PIM_PUBLIC_URL": "",
-    "PIM_APPROVAL_POLICY": "majordomo",
-    "PIM_MODELS": "preview-model",
-    "PIM_LIMITS": "{\"dailyTokens\": 2000000, \"dailyModelRequests\": 1500, \"dailyRuns\": 300, \"sessions\": 500, \"schedules\": 50, \"storageBytes\": 1000000000, \"artifacts\": 200, \"artifactVersions\": 100, \"artifactBytes\": 1000000, \"artifactStorageBytes\": 10000000}",
     "PIM_REGISTRATION": "open",
-    "PIM_MAX_ACCOUNTS": "",
-    "PIM_REGISTRATIONS_PER_ADDRESS": "50"
+    "PIM_REGISTRATIONS_PER_ADDRESS": "50",
+    "PIM_MODELS": "preview-model",
+    "PIM_LIMIT_DAILY_TOKENS": "2000000",
+    "PIM_LIMIT_DAILY_MODEL_REQUESTS": "1500",
+    "PIM_LIMIT_DAILY_RUNS": "300",
+    "PIM_LIMIT_SESSIONS": "500",
+    "PIM_LIMIT_SCHEDULES": "50",
+    "PIM_LIMIT_STORAGE_BYTES": "1000000000",
+    "PIM_LIMIT_ARTIFACTS": "200",
+    "PIM_LIMIT_ARTIFACT_VERSIONS": "100",
+    "PIM_LIMIT_ARTIFACT_BYTES": "1000000",
+    "PIM_LIMIT_ARTIFACT_STORAGE_BYTES": "10000000"
   },
   "version_metadata": { "binding": "CF_VERSION_METADATA" }
 }

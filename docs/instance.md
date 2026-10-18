@@ -45,7 +45,7 @@ People on the same Pim can share with each other: circles let others message you
 - **Registering** (`POST /auth/register`) provisions the person's Pim, gives them a copy of the agent the admin chose for everyone, if any (see [Your agents](../README.md#your-agents)), sets its time zone from the browser, and returns ten recovery codes and a one-time setup code (good for a day). The web app shows the codes, then makes the first passkey with the setup code, which activates the account. Signed in, the person names their [majordomo](../README.md#your-majordomo).
 - **Recovery.** A recovery code, with its username, makes one passkey, once. People can replace their codes in Settings. The admin can make anyone a one-hour setup link from Settings, after checking who they are some other way, and gets one for themselves from the logs.
 - **Approvals** default to `PIM_APPROVAL_POLICY`; each person can change theirs.
-- **Usage and limits.** Every model request goes through a metered model catalog. Requests and runs are checked and counted in one step before they start, so concurrent ones can't all take the last slot. Tokens are known only when a request ends, so requests already under way can take a day past `dailyTokens`; the next one is refused. Tokens are counted by the day the request was sent, and by provider. Tokens on someone's own ChatGPT plan are counted apart and never use up the deployment's allowance. `PIM_LIMITS` sets members' limits; the admin has none. The admin can set one person's in the admin API. Running out stops the model request with a non-retryable "quota exceeded" error, refuses new runs with `429`, and skips scheduled tasks with one notification a day. Usage is recorded, not charged.
+- **Usage and limits.** Every model request goes through a metered model catalog. Requests and runs are checked and counted in one step before they start, so concurrent ones can't all take the last slot. Tokens are known only when a request ends, so requests already under way can take a day past `dailyTokens`; the next one is refused. Tokens are counted by the day the request was sent, and by provider. Tokens on someone's own ChatGPT plan are counted apart and never use up the deployment's allowance. The `PIM_LIMIT_*` variables set members' limits; the admin has none. The admin can set one person's in the admin API. Running out stops the model request with a non-retryable "quota exceeded" error, refuses new runs with `429`, and skips scheduled tasks with one notification a day. Usage is recorded, not charged.
 - **Sharing.** Adding someone to a circle is answered by the Worker (`POST /api/circles/:id/members`), because only the Directory knows whose Pim a username is. Everything after is between the two Pims, by Durable Object RPC: the owner's tells the guest's it is shared (`shareReceived`), the guest's asks for a brief before each turn (`guestBrief`) and makes every tool call through `guestCall`, which checks the circle and the tool's permission each time, and the owner's sends decisions back (`visitAnswer`). A guest's conversation runs in their own Pim, so it is metered against their own limits. Each guest has 200 calls a day into one Pim; a circle can hold up to 200 people.
 - **Profiles and templates** live in the Gallery: profiles, Discover's search, someone's page, publishing an agent (a copy of its name, description, instructions and suggested apps) and making one your own. Deleting an account forgets its profile and everything it published, in the same cleanup job that erases its Pim; the job is done only once the Gallery holds nothing of it. The admin can take a published template down.
 - **Apps the admin adds** live in the Gallery too, next to the extensions' apps in code. Each person's Pim reads them again at most once a minute, when a request comes in, and keeps the last list it read, so scheduled work has them without asking. Connections and their sign-ins stay in each person's own Pim.
@@ -53,7 +53,7 @@ People on the same Pim can share with each other: circles let others message you
 
 ## Running it
 
-The admin manages the Pim in Settings → Members: invite someone, make a setup link, suspend or restore an account, delete one. The same tab shows which of Google, GitHub and a custom OpenID Connect provider the deployment's `PIM_<PROVIDER>_*` secrets turn on, and how to set one up (see [Deploy](../README.md#deploy)). The same is in the API, under `/api/admin`, for the admin signed in to the app; an API token can't run the instance:
+How the Pim runs for everyone is its variables, set in the Cloudflare dashboard (see [Deploy](../README.md#deploy)); Settings → Deployment shows the admin each one and any Pim can't read. The admin manages people in Settings → Members: invite someone, make a setup link, suspend or restore an account, delete one. The same tab shows which of Google, GitHub and a custom OpenID Connect provider the deployment's `PIM_<PROVIDER>_*` secrets turn on, and how to set one up (see [Deploy](../README.md#deploy)). The same is in the API, under `/api/admin`, for the admin signed in to the app; an API token can't run the instance:
 
 | Method | Path | Body | Does |
 | --- | --- | --- | --- |
@@ -62,7 +62,8 @@ The admin manages the Pim in Settings → Members: invite someone, make a setup 
 | GET | `/api/admin/accounts/:username` | | The account, its usage, and its cleanup job if one is queued |
 | POST | `/api/admin/accounts/:username/suspend` | `{ reason? }` | Stops the agent at once: its runs abort, sockets close, requests get `403` |
 | POST | `/api/admin/accounts/:username/unsuspend` | | Restores it |
-| PUT | `/api/admin/accounts/:username/limits` | `{ limits }` or `{ limits: null }` | One person's limits over `PIM_LIMITS` |
+| GET | `/api/admin/deployment` | | How the deployment runs, from its variables, and why Pim can't read any it can't |
+| PUT | `/api/admin/accounts/:username/limits` | `{ limits }` or `{ limits: null }` | One person's limits over the `PIM_LIMIT_*` variables |
 | POST | `/api/admin/accounts/:username/setup-link` | | A one-hour link that adds a passkey, for recovery |
 | DELETE | `/api/admin/accounts/:username` | `{ reason? }` | Deletes it as the owner would: `200` once erased, `202` while the cleanup is still queued. Run it again to retry at once |
 | DELETE | `/api/admin/templates/:id` | | Takes a published agent out of Discover |
@@ -92,7 +93,7 @@ The admin can't suspend or delete their own account from here; deleting it from 
 | `pim.default_agent_set` | The admin chose the agent everyone who joins gets (`agent`), or went back to none (`agent: null`) |
 | `pim.misrouted` | A request reached the wrong agent. This should never happen: investigate |
 
-**Abuse and limits.** Per address: `AUTH_LIMITER` (30 sign-in, recovery and registration attempts a minute in `wrangler.jsonc`) and `PIM_REGISTRATIONS_PER_ADDRESS`. Per person: `API_LIMITER` (600 requests a minute), `PIM_LIMITS` (tokens, model requests, runs, chats, schedules, apps, storage, artifacts), and `PIM_MODELS`, so only models you pay for can be chosen. Paid `web_search` stays off unless `PIM_WEB_SEARCH` names a provider.
+**Abuse and limits.** Per address: `AUTH_LIMITER` (30 sign-in, recovery and registration attempts a minute in `wrangler.jsonc`) and `PIM_REGISTRATIONS_PER_ADDRESS`. Per person: `API_LIMITER` (600 requests a minute), the `PIM_LIMIT_*` variables (tokens, model requests, runs, chats, schedules, storage, artifacts), and `PIM_MODELS`, so only models you pay for can be chosen. Paid `web_search` stays off unless `PIM_WEB_SEARCH` names a provider.
 
 **Deleting an account** makes it `deleting` in the Directory first, so it opens nothing at once (`410`), and queues a cleanup job there. The job wipes the agent (runs aborted, app event subscriptions stopped, sockets closed, storage and alarms deleted, schedules and credentials with them), writes an erased mark into the empty storage, flushes it, and ends the agent's instance so nothing under way there can write afterwards. Every later instance finds the mark and refuses everything: requests (`410`), sockets, alarms and the Worker's own writes. That makes the agent itself the fence: a request a Worker authorized just before the deletion, or with an account it still had cached, can't write after it. The job then checks a fresh instance is marked and holds nothing, and wipes and checks the Auth object. Only then is the account `deleted`; a request that slipped in before the mark makes the check fail, and the retry wipes it.
 
@@ -107,10 +108,10 @@ What the fence stops, each covered by a test in `test/people.test.ts` ("erasure 
 
 ## Before inviting people
 
-1. **Domain.** Passkeys belong to the hostname, so pick the address people will use before anyone joins: moving later means everyone makes new passkeys and reconnects their apps. Set `PIM_PUBLIC_URL` to it.
+1. **Domain.** Passkeys belong to the hostname, so pick the address people will use before anyone joins: moving later means everyone makes new passkeys and reconnects their apps. Attach it to the Worker and set `PIM_PUBLIC_URL` to it, both in the dashboard.
 2. **OpenAI:** for people outside your household, confirm with OpenAI that they may use ChatGPT-plan sign-in through your Pim.
 3. **Data residency:** agents are created without a jurisdiction. Choosing one (for example `eu`) must happen before anyone joins, because an object can't move.
-4. **Policy:** `PIM_REGISTRATION`, `PIM_LIMITS` and `PIM_MODELS` for what you're willing to pay for.
+4. **Policy:** `PIM_REGISTRATION`, the `PIM_LIMIT_*` variables and `PIM_MODELS` for what you're willing to pay for.
 5. **Monitoring:** alerts in Workers Logs on `pim.cleanup_failed` (with rising `attempts`) and `pim.misrouted` (which should never happen), and a watch on `pim.limit` and `pim.rate_limited`.
 
 ## Preview locally

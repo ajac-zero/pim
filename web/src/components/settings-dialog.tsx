@@ -11,6 +11,7 @@ import {
 } from "~/components/account-settings";
 import { AddDevice } from "~/components/add-device";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
+import { DeploymentSection } from "~/components/deployment-settings";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
   AlertCircle,
@@ -25,6 +26,7 @@ import {
   MessageCircle,
   Monitor,
   Moon,
+  Settings,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -87,6 +89,7 @@ export const SETTINGS_TABS = [
   "permissions",
   "account",
   "members",
+  "deployment",
 ] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
 
@@ -97,6 +100,7 @@ const TAB_LABELS: Record<SettingsTab, [TranslationKey, LucideIcon]> = {
   permissions: ["settingsPermissions", ShieldCheck],
   account: ["settingsAccount", UserRound],
   members: ["settingsMembers", Users],
+  deployment: ["settingsDeployment", Settings],
 };
 
 /**
@@ -137,9 +141,10 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
   const { t } = useI18n();
   const { data: model } = useQuery(modelQuery());
   const { data: account } = useQuery(accountQuery());
-  // Members and how they sign in are the admin's.
+  // Members, how they sign in, and how the deployment runs are the admin's.
   const tabs = SETTINGS_TABS.filter(
-    (tab) => tab !== "members" || account?.role === "admin",
+    (tab) =>
+      (tab !== "members" && tab !== "deployment") || account?.role === "admin",
   );
   const [tab, setTab] = useState(tabs.includes(initial) ? initial : "general");
   return (
@@ -216,6 +221,7 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
             <SignInMethodsSection />
           </>
         )}
+        {tab === "deployment" && <DeploymentSection />}
       </div>
     </>
   );

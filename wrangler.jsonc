@@ -52,58 +52,22 @@
     { "name": "AUTH_LIMITER", "namespace_id": "71420101", "simple": { "limit": 30, "period": 60 } },
     { "name": "API_LIMITER", "namespace_id": "71420102", "simple": { "limit": 600, "period": 60 } }
   ],
-  "vars": {
-    // Any Workers AI id (`@cf/...`) or AI Gateway catalog id (`anthropic/...`). GLM-5.3 needs the
-    // Workers Paid plan or AI Gateway credits; `@cf/zai-org/glm-4.7-flash` is free, for a first look.
-    "PIM_MODEL": "@cf/zai-org/glm-5.3",
-    // IANA time zone for anyone who hasn't set theirs; registering sets the browser's.
-    "PIM_TIME_ZONE": "UTC",
-    // Set to "exa", "ceramic" or "linkup" to enable web_search (billed by AI Gateway).
-    "PIM_WEB_SEARCH": "",
-    // Model that compresses long-term memory; empty uses PIM_MODEL (never the ChatGPT plan).
-    "PIM_MEMORY_MODEL": "",
-    // Small Workers AI model for side jobs: naming chats, improving prompts, summarizing chats.
-    // Each person can choose another in Settings; empty turns these features off until they do.
-    "PIM_UTILITY_MODEL": "@cf/ibm-granite/granite-4.0-h-micro",
-    // Lines of long-term memory in every prompt; empty is 96 (about 8k tokens).
-    "PIM_MEMORY_LINES": "",
-    // This deployment's public URL, for app event callbacks; empty learns it from API requests.
-    "PIM_PUBLIC_URL": "",
-    // Who answers approvals: "majordomo" sends other agents' requests to each person's majordomo,
-    // which decides or asks them; "auto" approves what nobody answers after 30 seconds; "explicit"
-    // waits for the person's answer however long. Each person can change theirs in Settings.
-    "PIM_APPROVAL_POLICY": "majordomo",
-    // Platform models sessions may use besides PIM_MODEL, comma-separated; empty allows any.
-    "PIM_MODELS": "",
-    // Usage limits for members as JSON, such as {"dailyTokens": 2000000, "dailyRuns": 500};
-    // empty is none. The admin has none. See src/usage.ts for every limit.
-    "PIM_LIMITS": "",
-    // How people join once there is an admin: "invite" (links the admin makes), "open" or "closed".
-    "PIM_REGISTRATION": "invite",
-    // Accounts allowed in all; empty for no cap.
-    "PIM_MAX_ACCOUNTS": "",
-    // Registrations one IP address may make in a day; empty is 3.
-    "PIM_REGISTRATIONS_PER_ADDRESS": "",
-    // Email to each person, off until set up: onboard a domain to Cloudflare Email Service,
-    // uncomment `send_email` below, and set this to an address on that domain.
-    "PIM_EMAIL_FROM": "",
-    // OpenTelemetry traces of the agents' runs, model requests and tool calls, in the conventions for
-    // generative AI: an OTLP/HTTP endpoint that takes JSON, such as Langfuse's, Honeycomb's or an
-    // OpenTelemetry Collector's. Put its key in the OTEL_EXPORTER_OTLP_HEADERS secret, such as
-    // "Authorization=Basic ...". Empty sends no traces.
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "",
-    // "true" adds prompts, messages, and tool arguments and results to the traces: people's private
-    // conversations, so only for a backend that may hold them.
-    "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": ""
-  },
+  // How a Pim runs (who may join, its models, members' limits, who answers approvals, its address)
+  // is each deployment's own, so it isn't here: set those variables in the dashboard (Workers & Pages
+  // → pim → Settings → Variables and Secrets), and this keeps them through deploys. Each has a
+  // default in src/deployment.ts; the README lists them, and the admin sees them in Settings →
+  // Deployment. OpenTelemetry traces are set the same way: see Traces in the README.
+  "keep_vars": true,
   // Signing in with Google, GitHub or your own OpenID Connect provider, besides passkeys, is off
   // until you add an OAuth app's client ID and secret as secrets (dashboard → Workers & Pages →
-  // pim → Settings → Variables and Secrets, or `wrangler secret put`). Secrets, not vars: a deploy
-  // replaces vars set in the dashboard. The app's callback URL is shown in Settings.
+  // pim → Settings → Variables and Secrets, or `wrangler secret put`). The app's callback URL is
+  // shown in Settings.
   //   Google:  PIM_GOOGLE_CLIENT_ID, PIM_GOOGLE_CLIENT_SECRET
   //   GitHub:  PIM_GITHUB_CLIENT_ID, PIM_GITHUB_CLIENT_SECRET
   //   OIDC:    PIM_OIDC_ISSUER (such as https://auth.example.com), PIM_OIDC_CLIENT_ID,
   //            PIM_OIDC_CLIENT_SECRET, and optionally PIM_OIDC_NAME, its button's name
+  // Email to each person, off until set up: onboard a domain to Cloudflare Email Service,
+  // uncomment this, and set PIM_EMAIL_FROM to an address on that domain.
   // "send_email": [{ "name": "EMAIL" }],
   // Running agents' code over people's files (`run_javascript`) is off until you uncomment this. Dynamic
   // Workers need the Workers Paid plan; each run is a fresh Worker with no network.

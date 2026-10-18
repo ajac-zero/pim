@@ -61,7 +61,7 @@ Downloads are `text/plain`. Chat messages are rendered as before. A render test 
 
 ## Limits
 
-Each limit is checked against the stored versions before anything is written. They are set in `PIM_LIMITS`, or per person with the admin API:
+Each limit is checked against the stored versions before anything is written. They are set for every member with the `PIM_LIMIT_*` variables, or per person with the admin API:
 
 | Limit | Meaning | Always at most |
 | --- | --- | --- |

@@ -11,7 +11,7 @@ import { TeamPanel } from "~/components/chat/team";
 import { Thread } from "~/components/chat/thread";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
-import { Users } from "~/components/icons";
+import { Loader2, Users } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
 import { useElementHeight } from "~/hooks/use-element-size";
@@ -94,6 +94,7 @@ function ChatPage() {
 
   const followed = usePimClient((state) => state.session);
   const view = usePimClient((state) => state.view);
+  const loaded = usePimClient((state) => state.loaded);
   const pending = usePimClient((state) => state.pending);
   const connection = usePimClient((state) => state.connection);
   const ready = followed === sessionId;
@@ -146,7 +147,9 @@ function ChatPage() {
          * for it rather than sitting under it: at the right, or on top on phones. */}
         <div className="flex min-h-0 flex-1 flex-col md:flex-row">
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-            {ready && (
+            {/* Until its snapshot arrives a chat would look empty; a message
+             * just sent is already worth showing. */}
+            {ready && (loaded || pending !== null) ? (
               <Thread
                 sessionId={sessionId}
                 visit={session?.visit?.username}
@@ -155,6 +158,14 @@ function ChatPage() {
                 composerHeight={composerHeight}
                 composerCardHeight={composerCardHeight}
               />
+            ) : (
+              // Fades in late, so a chat that loads at once doesn't flash it.
+              <div className="flex flex-1 animate-in items-center justify-center pb-40 delay-300 duration-300 fade-in fill-mode-backwards">
+                <Loader2
+                  className="size-5 animate-spin text-muted-foreground"
+                  aria-label={t("loading")}
+                />
+              </div>
             )}
 
             {/* Floats over the bottom of the thread. Its measured height feeds

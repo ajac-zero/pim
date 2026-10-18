@@ -25,6 +25,8 @@ export type ClientState = {
   session: string | null;
   connection: ConnectionState;
   view: SessionView;
+  /** Whether the followed session's snapshot has arrived, so `view` shows it. */
+  loaded: boolean;
   /** A message sent but not yet in the transcript. */
   pending: UserContent | null;
 };
@@ -47,6 +49,7 @@ class PimClient {
     session: null,
     connection: "closed",
     view: EMPTY_STREAM.view,
+    loaded: false,
     pending: null,
   };
   #stream: StreamState = EMPTY_STREAM;
@@ -78,6 +81,7 @@ class PimClient {
     this.#set({
       session,
       view: EMPTY_STREAM.view,
+      loaded: false,
       pending: null,
       connection: "connecting",
     });
@@ -132,6 +136,7 @@ class PimClient {
           view.entries.length > before.entries.length || view.running;
         this.#set({
           view,
+          loaded: true,
           ...(placed && this.#state.pending !== null ? { pending: null } : {}),
         });
         if (before.running !== view.running) {

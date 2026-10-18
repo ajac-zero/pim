@@ -4,8 +4,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-24",
   "compatibility_flags": ["nodejs_compat"],
-  // Served from custom domains only.
-  "workers_dev": false,
+  // A new deployment is reachable at its workers.dev address until it has a custom domain.
+  "workers_dev": true,
   "preview_urls": false,
   // The web app, built from web/ before every `wrangler dev` and `wrangler deploy`.
   "build": { "command": "pnpm --filter pim-web build", "watch_dir": "web/src" },

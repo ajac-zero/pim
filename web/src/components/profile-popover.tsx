@@ -14,17 +14,20 @@ import { pim } from "~/lib/pim-api";
 export const ProfilePopoverTrigger = Popover.Trigger;
 
 /**
- * Your profile, from the rail: how others on this Pim see you, editable in
- * place, with a link to your page.
+ * Your profile, from the rail or the mobile navigation's More sheet: how
+ * others on this Pim see you, editable in place, with a link to your page.
  */
 export function ProfilePopover({
   account,
   profile,
+  side = "right",
   onNavigate,
   children,
 }: {
   account: Account;
   profile?: Profile;
+  /** Which side of its trigger it opens on. */
+  side?: "right" | "top";
   onNavigate?: () => void;
   children: ReactNode;
 }) {
@@ -35,7 +38,7 @@ export function ProfilePopover({
       {children}
       <Popover.Portal>
         <Popover.Content
-          side="right"
+          side={side}
           align="end"
           sideOffset={12}
           collisionPadding={8}

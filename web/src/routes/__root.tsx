@@ -18,14 +18,16 @@ import {
   AppSidebar,
   SIDEBAR_PANELS,
   type SidebarPanel,
+  SidebarPanelContent,
   sessionTitle,
+  useAwaitingApproval,
 } from "~/components/app-sidebar";
 import { AppsDialog } from "~/components/apps-dialog";
 import { SummaryToggle } from "~/components/chat/summary";
 import { DiscoverDialog } from "~/components/discover-dialog";
 import { I18nProvider, useI18n } from "~/components/i18n";
-import { PanelLeft } from "~/components/icons";
 import { MeetMajordomo } from "~/components/majordomo-setup";
+import { MobileNav } from "~/components/mobile-nav";
 import { RouteError } from "~/components/route-error";
 import {
   SETTINGS_TABS,
@@ -35,9 +37,8 @@ import {
 import { SharingDialog } from "~/components/sharing-dialog";
 import { SignIn } from "~/components/sign-in";
 import { ThemeProvider } from "~/components/theme";
-import { Button } from "~/components/ui/button";
-import { Sheet, SheetContent, SheetTitle } from "~/components/ui/sheet";
 import { Toaster } from "~/components/ui/sonner";
+import { TooltipProvider } from "~/components/ui/tooltip";
 import { authSessionQuery } from "~/lib/auth";
 import { pimClient } from "~/lib/pim-client";
 import { agentsQuery, majordomoQuery, sessionsQuery } from "~/lib/queries";
@@ -283,19 +284,34 @@ function MobileTitle() {
   );
 }
 
+/**
+ * The sidebar beside the page on wider screens. On narrow ones a bar along
+ * the bottom takes its place, always there like the rail, and its lists fill
+ * the screen over the page.
+ */
 function AppLayout() {
-  const { t } = useI18n();
-  const { panel = "chats" } = Route.useSearch();
+  const { panel } = Route.useSearch();
   // Collapsing hides the panel the sidebar was showing; showing another opens it again.
   const [collapsedOn, setCollapsedOn] = useState<string | null>(null);
-  const sidebarCollapsed = collapsedOn === panel;
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const sidebarCollapsed = collapsedOn === (panel ?? "chats");
+  const [listOpen, setListOpen] = useState(false);
+  // Anything that shows another panel, such as a notification's View, shows its list.
+  const [listedPanel, setListedPanel] = useState(panel);
+  if (listedPanel !== panel) {
+    setListedPanel(panel);
+    setListOpen(true);
+  }
   const { sessionId } = useParams({ strict: false }) as { sessionId?: string };
+  const inChat = useRouterState({
+    select: (state) =>
+      state.location.pathname.startsWith("/chat/") ||
+      state.location.pathname === "/new",
+  });
+  const awaitingApproval = useAwaitingApproval();
   usePimEvents();
 
   return (
     <div className="flex h-svh w-full overflow-hidden">
-      {/* Desktop sidebar */}
       <aside
         className={cn(
           "hidden shrink-0 overflow-hidden border-sidebar-border border-r transition-[width] duration-200 md:block",
@@ -306,40 +322,46 @@ function AppLayout() {
           <AppSidebar
             collapsed={sidebarCollapsed}
             onToggleCollapse={() =>
-              setCollapsedOn(sidebarCollapsed ? null : panel)
+              setCollapsedOn(sidebarCollapsed ? null : (panel ?? "chats"))
             }
           />
         </div>
       </aside>
 
-      {/* Mobile sidebar */}
-      <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-        <SheetContent
-          side="left"
-          className="w-80 p-0 md:hidden [&>button]:hidden"
-        >
-          <SheetTitle className="sr-only">{t("navigation")}</SheetTitle>
-          <AppSidebar onNavigate={() => setMobileOpen(false)} />
-        </SheetContent>
-      </Sheet>
-
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Mobile top bar */}
-        <div className="flex items-center gap-2 border-sidebar-border border-b px-2 py-2 md:hidden">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="text-muted-foreground"
-            onClick={() => setMobileOpen(true)}
-            aria-label={t("openSidebar")}
-          >
-            <PanelLeft className="size-5" />
-          </Button>
-          <MobileTitle />
-          {sessionId && <SummaryToggle className="ml-auto" />}
+        {listOpen ? (
+          <div className="flex min-h-0 flex-1 flex-col bg-sidebar text-sidebar-foreground md:hidden">
+            <TooltipProvider>
+              <SidebarPanelContent
+                awaitingApproval={awaitingApproval}
+                onNavigate={() => setListOpen(false)}
+              />
+            </TooltipProvider>
+          </div>
+        ) : (
+          inChat && (
+            <div className="flex h-13 shrink-0 items-center gap-2 border-sidebar-border border-b px-4 md:hidden">
+              <MobileTitle />
+              {sessionId && <SummaryToggle className="ml-auto" />}
+            </div>
+          )
+        )}
+
+        {/* Stays mounted under a list, so going back finds the page as it was. */}
+        <div
+          className={cn(
+            "flex min-h-0 flex-1 flex-col",
+            listOpen && "hidden md:flex",
+          )}
+        >
+          <Outlet />
         </div>
 
-        <Outlet />
+        <MobileNav
+          list={listOpen}
+          onShowList={() => setListOpen(true)}
+          onHideList={() => setListOpen(false)}
+        />
       </div>
       <AppDialogs />
     </div>

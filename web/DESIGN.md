@@ -90,7 +90,7 @@ The app has two panes, a sidebar and the content, separated by a hairline divide
 - **Chat header.** The open chats as folder tabs on a shelf in the sidebar's tone. A tab shows the agent's icon, the chat's title, and a mark when the chat is working or waiting for an approval; the close button takes the mark's place on hover. The open chat's tab is the canvas's tone, with 12px top corners and bottom corners that flare into the shelf, so it runs into the transcript with no line between them. The others are muted text on the shelf. A chat opened from the sidebar replaces the preview tab, whose title is italic, until you send a message in it or double-click its tab. With a single chat open there are no tabs: its agent's icon and title sit on the canvas. On narrow screens there are no tabs.
 - **Transcript.** It has a readable max width (~720px) and wide gutters.
 
-On narrow screens, the sidebar opens as a sheet over the content.
+On narrow screens there is no sidebar. A bar of icons along the bottom, in the sidebar's tone with a hairline above it, takes its place: Home (the majordomo's dashboard), chats, notifications, artifacts, and More. The chosen icon sits on a muted pill, and a dot marks one with something waiting. Chats, notifications and artifacts fill the screen with their panel; choosing a row opens it. More opens a bottom sheet with your profile, then files, skills and schedules, then Discover, Apps, Sharing and Settings. The bar stays on every page, as the rail does; in a chat it sits below the composer, under a header line with the agent's icon and the chat's title, and the chats icon is the chosen one.
 
 ## Components
 
@@ -143,7 +143,7 @@ Rows with an icon tile, a name, a one-line muted description, and a secondary pi
 
 ### Modals
 
-A modal is a centered background surface with an 18px radius, a soft shadow, and the dimming scrim. It has a title, muted body copy, and actions at the bottom: the secondary button on the left and the primary on the right. Close with a bare `×` in the top right.
+A modal is a centered background surface with an 18px radius, a soft shadow, and the dimming scrim. On narrow screens, large modals (Settings, Apps, Sharing, Discover) fill the screen, and small ones, such as an agent's settings, rise from the bottom as sheets with rounded top corners. It has a title, muted body copy, and actions at the bottom: the secondary button on the left and the primary on the right. Close with a bare `×` in the top right.
 
 ### Sign-in and onboarding
 

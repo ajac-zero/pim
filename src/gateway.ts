@@ -226,7 +226,8 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 	const { publicUrl } = deploymentSettings(env);
 	if (!publicUrl) {
 		// `missing` lets the web app show how to set it.
-		const error = `This Pim has no address yet: add PIM_PUBLIC_URL to the Worker's variables, the address people will use, such as ${origin}.`;
+		const example = origin.startsWith("https:") ? origin : "https://pim.example.com";
+		const error = `This Pim has no address yet: add PIM_PUBLIC_URL to the Worker's variables, the address people will use, such as ${example}.`;
 		return Response.json({ error, missing: "PIM_PUBLIC_URL" }, { status: 503 });
 	}
 	// The web app goes to the address it names; nothing is served at any other.

@@ -24,7 +24,7 @@ const PNG = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAA
 const PDF = new Uint8Array([...new TextEncoder().encode("%PDF-1.7\n%"), 0xe2, 0xe3, 0xcf, 0xd3, ...new TextEncoder().encode("\n1 0 obj\n")]);
 
 /** How many of the space's files R2 holds. */
-const storedObjects = async () => (await env.IMAGES.list({ prefix: `${OWNER}/files/` })).objects.length;
+const storedObjects = async () => (await env.BLOBS.list({ prefix: `${OWNER}/files/` })).objects.length;
 
 /** The last tool result's text, and the types of the images it shows the model. */
 function lastToolResult(messages: readonly Message[]): { text: string; isError: boolean; images: string[] } {
@@ -115,8 +115,11 @@ describe("files", () => {
 		await response.body?.cancel();
 	});
 
-	it("are deleted by an agent only once the person approves", async () => {
+	it("are deleted by an agent only once the person approves, stored ones too", async () => {
 		await upload("/workspace/old/draft.txt", "first draft");
+		const before = await storedObjects();
+		await upload("/workspace/old/scan.pdf", PDF);
+		expect(await storedObjects()).toBe(before + 1);
 		faux.setResponses([toolUse("file_delete", { path: "/workspace/old", recursive: true }), toolUse("send_to_user", { message: "Asked." })]);
 		await say("Clean up the old folder.");
 		const approval = await pendingApproval();
@@ -128,6 +131,7 @@ describe("files", () => {
 		expect(decided.body.status).toBe("approved");
 		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
 		expect((await api("/files?path=/workspace/old")).status).toBe(404);
+		expect(await storedObjects()).toBe(before);
 	});
 
 	it("count toward the space's storage, which refuses more once full", async () => {

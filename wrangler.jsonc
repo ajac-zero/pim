@@ -43,10 +43,11 @@
   // MCP clients' sign-ins to people's spaces: registered clients, grants and hashed tokens
   // (src/mcp-auth.ts). Deploying creates the namespace.
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
-  // Images people send in chats (their messages keep only the images' URLs), and files that
-  // aren't text (src/files.ts). Deploying creates the bucket, once R2 is turned on for the
-  // account (Dashboard → R2; it asks for a payment method).
-  "r2_buckets": [{ "binding": "IMAGES" }],
+  // What each space keeps outside its database, under its owner's ID: images people send in
+  // chats (their messages keep only the images' URLs), and files that aren't text
+  // (src/files.ts). Deploying creates the bucket, once R2 is turned on for the account
+  // (Dashboard → R2; it asks for a payment method).
+  "r2_buckets": [{ "binding": "BLOBS" }],
   // Slow down guessing at sign-in from one address, and heavy API use by one person.
   // Namespace IDs are positive integers unique in your Cloudflare account.
   "ratelimits": [

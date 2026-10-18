@@ -465,10 +465,21 @@ export type Artifact = {
   session: string | null;
   version: number;
   versions: number;
+  /** The latest version's size: all its files. */
   size: number;
+  /** How many files the latest version has. */
+  files: number;
   sha256: string;
   createdAt: number;
   updatedAt: number;
+};
+
+/** One file of a version. */
+export type ArtifactFile = {
+  path: string;
+  sha256: string;
+  size: number;
+  type: string;
 };
 
 export type ArtifactVersionInfo = {
@@ -523,6 +534,9 @@ export type ArtifactVersion = ArtifactVersionInfo & {
   title: string;
   kind: ArtifactKind;
   latest: number;
+  /** The files it has, its main file among them. */
+  files: ArtifactFile[];
+  /** The main file's text. */
   content: string;
 };
 

@@ -114,23 +114,33 @@ Markdown artifacts are shown in the app itself, through an allowlist of Pim's ow
 
 Downloads are `text/plain`. Chat messages are rendered as before. A render test ([`markdown.test.tsx`](../web/src/components/chat/markdown.test.tsx)) pins this with a hostile corpus: `picture`/`source` and `img` with `src` and `srcset`, `video` with `poster`, `audio`, `iframe`, `object`, `embed`, `link`, `style` elements and inline `style` with `url()`, event handlers, `form` with `input type=image` and `formaction`, and `javascript:`, `data:`, relative and protocol-relative links and images. It checks that no element or attribute that could load, run, submit or send anything survives, that the only links are the allowed ones, and that raw HTML and images show only as text. It fails if the raw-HTML plugin comes back, if Streamdown's default schema replaces Pim's, or if the link filter is removed.
 
+## Storage
+
+A version is a set of files: an HTML page's `index.html`, a JSX app's `App.jsx`, and so on (`ENTRY_FILES` in [`src/artifacts.ts`](../src/artifacts.ts)). The owner's Durable Object keeps the artifacts, their versions and the files each version lists (`pim_artifact_files`: path, SHA-256, size, media type). The files' bytes are in R2, in the deployment's bucket (`BLOBS`), at `artifacts/<owner>/<sha256>`:
+
+- **Each file is stored once.** A new version stores only files that changed; the same file in two versions, or two artifacts, is one object, counted once against the limits. A restore lists the older version's files again and stores nothing.
+- **Writing stores first, then lists.** A write stores its new files, then, with nothing awaited between its checks and its writes, adds the version, or is refused (`409`, `413`, `429`). The checks run before storing too, so a write that's sure to be refused stores nothing.
+- **Deleting frees what nothing else lists.** Deleting an artifact deletes from R2 each of its files that no other version has. A write storing the same file at that moment has claimed it (`pim_artifact_pending`), and work on one file waits for the work on it before, so a deletion can't take a file from under a write. A file a refused write stored is freed the same way.
+- **Versions from before files** keep their one file in the version row, where the owner's Pim reads it. When someone else's Pim needs it (sharing, publishing, a restore), it moves to R2, keeping its hash, so permissions given to that version still hold.
+- Others' Pims read files from R2 themselves, under the owner's prefix, after the owner's Pim (or the Gallery, for a published one) has said which: an artifact shared with a circle, or published, is never copied to them, except by making it their own.
+
 ## Limits
 
-Each limit is checked against the stored versions before anything is written. They are set for every member with the `PIM_LIMIT_*` variables, or per person with the admin API:
+Each limit is checked against the stored versions before anything is written. They are set in `PIM_LIMITS`, or per person with the admin API. A version also has at most 100 files. What the agent writes in one tool call is bounded by its chat's transcript, which keeps the call, far below these:
 
 | Limit | Meaning | Always at most |
 | --- | --- | --- |
 | `artifacts` | Artifacts kept | |
 | `artifactVersions` | Versions one artifact keeps. At the limit, it takes no new versions: delete it, or make a new one | |
-| `artifactBytes` | One version's size, in UTF-8 bytes | 1,000,000 (a SQLite row is at most 2 MB) |
-| `artifactStorageBytes` | All versions of all artifacts | 10,000,000 (an export holds them all in memory, and the chats that made them hold their text again) |
-| `storageBytes` | The whole space: a write is refused if it wouldn't fit | |
+| `artifactBytes` | One version's size: all its files, in bytes | 10,000,000 (a framed version is served as one page) |
+| `artifactStorageBytes` | All artifacts' files, each distinct file once | 100,000,000 |
+| `storageBytes` | The whole Pim: a write is refused if it wouldn't fit | |
 
 ## Export and deletion
 
-- **Export** (`/export`, and `/account/export`) includes every artifact with every version and its content, what each keeps (its own and shared data), the circles it's shared with, and what artifacts others share or publish keep for you.
+- **Export** (`/export`, and `/account/export`) includes every artifact with every version and the files it lists, what each keeps (its own and shared data), the circles it's shared with, and what artifacts others share or publish keep for you. The files' contents are in `artifactFiles`, by SHA-256, once each: text as text, anything else as base64. Past 32,000,000 bytes, files are listed there without their contents, which the app still downloads.
 - **Deleting an artifact** removes all its versions, and the chat cards that showed it say it was deleted. The chats keep their own copy: what the agent sent to make or change it is part of the conversation until that chat is deleted. The app says so when you delete one.
-- **Deleting an account** erases artifacts with everything else, and the erasure check (`remainingData`) counts `artifacts` and `artifact versions`. A request or a run still under way when the deletion begins writes nothing.
+- **Deleting an account** erases artifacts with everything else: their files in R2 first, by the owner's prefix, including any a lost write left unlisted. The erasure check (`remainingData`) counts `artifacts`, `artifact versions` and `artifact files` (anything left in R2 under the prefix). A request or a run still under way when the deletion begins writes nothing.
 - **Already downloaded files** can't be taken back.
 
 ## Acceptance
@@ -146,13 +156,14 @@ Each limit is checked against the stored versions before anything is written. Th
 | Stale base version refused, edits match exactly once, unchanged content makes no version | "get new versions only from the latest…" |
 | Restore is append-only and needs the latest base | "restore an older version as a new one…" |
 | The person's edits are versions from the latest base, refused when stale or unshowable, and read by the model as theirs | "take the person's edits as new versions…" |
+| Files are stored once, freed when no version lists them, and read from versions from before files, which move to R2 keeping their hash | "keep each file once in R2…" |
 | Delete removes every version; export has every version | "are deleted with every version…" |
 | Per-version, version-count, artifact-count, total and storage limits, checked before writing | "stay within their limits…" |
 | A refused write (`413` too big, `429` too many versions or too much in all, `409` stale base, for an edit or a restore) leaves the title, time, latest version, history and content as they were | "change nothing on a refused write…" |
-| Racing writes: an edit and a restore on the same base give one version and a `409`; two creates that don't both fit give one and a `429`, under a limit and under the hard cap | "take one of two writes racing on the same version…", "export in full near their total cap…" |
+| Racing writes: an edit and a restore on the same base give one version and a `409`; two creates that don't both fit give one and a `429`, under a limit and under the hard cap | "take one of two writes racing on the same version…", "export near their total cap…" |
 | The bridge is the page's first script; storage is the artifact's own, within its limits, kept across versions, exported and deleted with it; the model and app tools need the person's yes for each version; tools that ask first can't be allowed or called | "keep their own data through the bridge…", `test/mcp.test.ts`: "lets an artifact call a tool…" |
 | Markdown: the hostile corpus above leaves no loading, running or submitting element or attribute; only `http(s)`, `mailto` and `#` links; raw HTML and images only as text; task lists, tables and code still render | `web/src/components/chat/markdown.test.tsx` |
-| Export near the total cap, and the cap holding with no limits set | "export in full near their total cap…" |
+| Export near the total cap, inlining what fits and listing the rest, and the cap holding with no limits set | "export near their total cap…" |
 | Shared with circles: their people see only the latest version, from their own space, with their own storage apart and shared data in the owner's space; stopping sharing, an older version, or someone outside the circles gets `404` | `test/people.test.ts`: "are shown to the people of the circles they're shared with…" |
 | Published: a copy of one version for everyone signed in, with their own storage, model and tools and no `pim.shared`; republishing replaces the version; made their own as a copy; taken down by unpublishing, deletion or the admin | `test/people.test.ts`: "are published to everyone as a copy of one version…" |
 | Public links: off until the author turns them on, only for framed kinds; the content origin serves the sandboxed page with no bridge and `404` for anything else, cookies or not; turning the link off ends it | "are published to everyone as a copy of one version…" |

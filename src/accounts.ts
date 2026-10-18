@@ -3,7 +3,7 @@ import { configuredProviders, PROVIDER_IDS, providerName, providerSecrets } from
 import { type AuthSite, clearCookie, fromAnotherSite, ownedCode, SESSION_COOKIE, type Sites, userHandle } from "./auth";
 import type { ApiExtension } from "./gateway";
 import { deploymentSettings, readDeployment } from "./deployment";
-import { FRAMED_KINDS, framePage, RUNTIME_PATH } from "./artifacts";
+import { FRAMED_KINDS, framePage, RUNTIME_PATH, ENTRY_FILES, readFiles, textOf } from "./artifacts";
 import type { PublishedArtifact } from "./gallery";
 import { HttpError } from "./http";
 import { parseLimits, UNLIMITED } from "./usage";
@@ -102,7 +102,7 @@ export async function servePublicArtifact(request: Request, env: Env, pathname: 
 	const id = /^\/p\/(pa_[0-9a-f]{16})$/.exec(pathname)?.[1];
 	const found = id ? await gallery(env).publicArtifact(id) : null;
 	if (!found) return new Response("Not found", { status: 404, headers: { "cache-control": "no-store" } });
-	const page = framePage(found.kind, found.content, contentOrigin(env)!);
+	const page = framePage(found.kind, await readFiles(env.BLOBS, found.owner, found.files), contentOrigin(env)!);
 	page.headers.set("x-robots-tag", "noindex");
 	return page;
 }
@@ -442,9 +442,9 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				if (!found) return fail(404, "No such artifact. It may have been unpublished.");
 				if (!use && !version && request.method === "GET") return noStore(found);
 				if (use && request.method === "POST") {
-					const content = await gallery(env).publishedContent(found.id);
-					if (content === null) return fail(404, "No such artifact. It may have been unpublished.");
-					const artifact = await (await pim()).adoptArtifact({ title: found.title, kind: found.kind, content });
+					const stored = await gallery(env).publishedFiles(found.id);
+					if (stored === null) return fail(404, "No such artifact. It may have been unpublished.");
+					const artifact = await (await pim()).adoptArtifact({ title: found.title, kind: found.kind, ...stored });
 					if (found.author !== account.username) await gallery(env).artifactUsed(found.id);
 					log("published_artifact_used", { owner: account.ownerId, artifact: found.id });
 					return noStore(artifact, 201);
@@ -452,10 +452,11 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				if (!version) return undefined;
 				if (Number(version) !== found.version) return fail(404, `Only version ${found.version} is published`);
 				if (request.method === "GET" && (!part || part === "frame")) {
-					const content = await gallery(env).publishedContent(found.id);
-					if (content === null) return fail(404, "No such artifact. It may have been unpublished.");
-					if (part === "frame") return framePage(found.kind, content, new URL(request.url).origin);
-					return noStore({ ...found, latest: found.version, content });
+					const stored = await gallery(env).publishedFiles(found.id);
+					if (stored === null) return fail(404, "No such artifact. It may have been unpublished.");
+					const files = await readFiles(env.BLOBS, stored.owner, stored.files);
+					if (part === "frame") return framePage(found.kind, files, new URL(request.url).origin);
+					return noStore({ ...found, latest: found.version, files: stored.files, content: textOf(files.get(ENTRY_FILES[found.kind])!.bytes) });
 				}
 				if (request.method === "POST" && part === "bridge") {
 					const { op, args } = await body();

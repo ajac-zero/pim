@@ -10,11 +10,17 @@
  *   overwrite each other's change unseen.
  * - Sizes are bounded per version, per artifact (versions) and in total,
  *   counted from the stored versions themselves, before anything is written.
+ * - A version is a set of files. Their bytes are in R2, under the owner's
+ *   `artifacts/` prefix and their SHA-256, each stored once however many
+ *   versions and artifacts have it; this object keeps what each version
+ *   lists. Versions from before files were in R2 keep their one file here,
+ *   until someone else needs it (see `stored`).
  *
  * An HTML artifact runs, in the browser, only in a sandbox with an opaque
  * origin (see `artifactHtmlHeaders`); this module only stores it.
  */
 
+import { Buffer } from "node:buffer";
 import { compileJsx, inlineScript } from "./artifact-jsx";
 import { HttpError } from "./http";
 
@@ -30,6 +36,24 @@ const EXTENSIONS: Record<ArtifactKind, string> = { html: "html", markdown: "md",
 /** Who made a version: the agent, the person editing it, or the person restoring an older one. */
 export type ArtifactSource = "agent" | "person" | "restore";
 
+/** Each kind's main file, which every version has: the page, the document, the drawing, the diagram or the component. */
+export const ENTRY_FILES: Record<ArtifactKind, string> = { html: "index.html", markdown: "README.md", svg: "image.svg", mermaid: "diagram.mmd", jsx: "App.jsx" };
+
+/** One file of a version, as the version lists it. */
+export type ArtifactFile = {
+	readonly path: string;
+	readonly sha256: string;
+	readonly size: number;
+	/** Its media type, from its name. */
+	readonly type: string;
+};
+
+/** A version's files with their bytes, by path. */
+export type LoadedFiles = ReadonlyMap<string, { readonly type: string; readonly bytes: Uint8Array }>;
+
+/** New content for files, by path: text, or bytes. */
+export type FileContents = Readonly<Record<string, string | Uint8Array>>;
+
 export type ArtifactSummary = {
 	readonly id: string;
 	readonly title: string;
@@ -39,8 +63,10 @@ export type ArtifactSummary = {
 	/** The latest version's number. */
 	readonly version: number;
 	readonly versions: number;
-	/** The latest version's size, in UTF-8 bytes. */
+	/** The latest version's size: all its files, in bytes. */
 	readonly size: number;
+	/** How many files the latest version has. */
+	readonly files: number;
 	readonly sha256: string;
 	readonly createdAt: number;
 	readonly updatedAt: number;
@@ -56,7 +82,7 @@ export type ArtifactVersionInfo = {
 	readonly createdAt: number;
 };
 
-export type ArtifactVersion = ArtifactVersionInfo & { readonly artifact: string; readonly content: string };
+export type ArtifactVersion = ArtifactVersionInfo & { readonly artifact: string; readonly files: readonly ArtifactFile[] };
 
 /** Whose data an artifact keeps: the person using it (`own`), or everyone using it (`shared`). */
 export type DataScope = "own" | "shared";
@@ -70,14 +96,20 @@ export type ArtifactLimits = {
 };
 
 /**
- * Caps that hold whatever the limits say. A version is one SQLite row, which
- * can't exceed 2 MB. An export holds every version in memory at once, and
- * the chats that made them hold their text again, so all of them together
- * stay far below a Worker's 128 MB.
+ * Caps that hold whatever the limits say. A framed version is served as one
+ * page with all its files, so a version stays well within a Worker's
+ * memory; all of them together are counted once per distinct file, and an
+ * export carries up to `EXPORT_INLINE_BYTES` of them.
  */
-export const MAX_ARTIFACT_BYTES = 1_000_000;
-export const MAX_ARTIFACT_STORAGE_BYTES = 10_000_000;
+export const MAX_ARTIFACT_BYTES = 10_000_000;
+export const MAX_ARTIFACT_STORAGE_BYTES = 100_000_000;
+export const MAX_ARTIFACT_FILES = 100;
 export const MAX_TITLE_LENGTH = 200;
+const MAX_PATH_LENGTH = 200;
+/** How many bytes of files an export carries inline; the rest are listed by hash. */
+const EXPORT_INLINE_BYTES = 32_000_000;
+/** How long a write's claim on a file it is storing keeps it from being collected, should the write never finish. */
+const PENDING_MS = 60 * 60 * 1000;
 /**
  * What one artifact, and all of them, may keep through the bridge, keys and
  * values together, in UTF-8 bytes: an export holds it all in memory too.
@@ -96,6 +128,8 @@ CREATE TABLE IF NOT EXISTS pim_artifacts (
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL
 );
+-- A version: its files are in pim_artifact_files. Versions from before that keep their one file in content, and
+-- have no rows there; newer ones keep content empty.
 CREATE TABLE IF NOT EXISTS pim_artifact_versions (
 	artifact TEXT NOT NULL,
 	version INTEGER NOT NULL,
@@ -142,6 +176,24 @@ CREATE TABLE IF NOT EXISTS pim_artifact_deleted (
 	id TEXT PRIMARY KEY,
 	deleted_at INTEGER NOT NULL
 );
+-- The files each version has. Their bytes are in R2 at artifacts/<owner>/<sha256>, once each.
+CREATE TABLE IF NOT EXISTS pim_artifact_files (
+	artifact TEXT NOT NULL,
+	version INTEGER NOT NULL,
+	path TEXT NOT NULL,
+	sha256 TEXT NOT NULL,
+	size INTEGER NOT NULL,
+	type TEXT NOT NULL,
+	PRIMARY KEY (artifact, version, path)
+);
+CREATE INDEX IF NOT EXISTS pim_artifact_files_by_hash ON pim_artifact_files (sha256);
+-- Files a write is storing in R2 before it lists them: they aren't collected meanwhile.
+CREATE TABLE IF NOT EXISTS pim_artifact_pending (
+	sha256 TEXT NOT NULL,
+	write TEXT NOT NULL,
+	at INTEGER NOT NULL,
+	PRIMARY KEY (sha256, write)
+);
 `;
 
 type Row = Record<string, SqlStorageValue>;
@@ -149,9 +201,85 @@ type Row = Record<string, SqlStorageValue>;
 const encoder = new TextEncoder();
 export const utf8Bytes = (text: string) => encoder.encode(text).byteLength;
 
-export async function sha256(text: string): Promise<string> {
-	const digest = await crypto.subtle.digest("SHA-256", encoder.encode(text));
+export async function sha256(content: string | Uint8Array): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", typeof content === "string" ? encoder.encode(content) : content);
 	return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+const decoder = new TextDecoder();
+/** A file's bytes as text. */
+export const textOf = (bytes: Uint8Array) => decoder.decode(bytes);
+
+/** Media types by file extension; anything else is `application/octet-stream`. */
+const TYPES: Record<string, string> = {
+	html: "text/html",
+	htm: "text/html",
+	css: "text/css",
+	js: "text/javascript",
+	mjs: "text/javascript",
+	jsx: "text/jsx",
+	ts: "text/typescript",
+	tsx: "text/tsx",
+	json: "application/json",
+	md: "text/markdown",
+	txt: "text/plain",
+	csv: "text/csv",
+	mmd: "text/plain",
+	svg: "image/svg+xml",
+	png: "image/png",
+	jpg: "image/jpeg",
+	jpeg: "image/jpeg",
+	gif: "image/gif",
+	webp: "image/webp",
+	avif: "image/avif",
+	ico: "image/x-icon",
+	woff: "font/woff",
+	woff2: "font/woff2",
+	ttf: "font/ttf",
+	otf: "font/otf",
+	mp3: "audio/mpeg",
+	wav: "audio/wav",
+	ogg: "audio/ogg",
+	mp4: "video/mp4",
+	webm: "video/webm",
+};
+
+export const fileType = (path: string) => TYPES[path.slice(path.lastIndexOf(".") + 1).toLowerCase()] ?? "application/octet-stream";
+
+/** Whether a file of this type is text, which tools and the editor show as such. */
+export const isTextType = (type: string) => type.startsWith("text/") || type === "application/json" || type === "image/svg+xml";
+
+/** Refuses a file path that isn't plain: relative, with segments of letters, digits, dots, dashes and underscores, not starting with a dot. */
+export function checkPath(path: unknown): string {
+	if (typeof path !== "string" || path.length === 0 || path.length > MAX_PATH_LENGTH || !path.split("/").every((part) => /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(part))) {
+		throw new HttpError(400, `A file path is relative, like "app.js" or "assets/logo.png": letters, digits, dots, dashes and underscores, at most ${MAX_PATH_LENGTH} characters.`);
+	}
+	return path;
+}
+
+/**
+ * A version's hash: its one file's, when it has only its main file, so a
+ * version keeps the hash it had before versions had files; otherwise the
+ * hash of its list of paths and file hashes.
+ */
+async function versionHash(kind: ArtifactKind, files: readonly ArtifactFile[]): Promise<string> {
+	if (files.length === 1 && files[0]!.path === ENTRY_FILES[kind]) return files[0]!.sha256;
+	return sha256(JSON.stringify([...files].sort((a, b) => (a.path < b.path ? -1 : 1)).map((file) => [file.path, file.sha256])));
+}
+
+/** Where a file's bytes are in R2. */
+export const blobKey = (owner: string, hash: string) => `artifacts/${owner}/${hash}`;
+
+/** Reads a version's files from R2, from the prefix of the owner who stored them. */
+export async function readFiles(bucket: R2Bucket, owner: string, files: readonly ArtifactFile[]): Promise<Map<string, { type: string; bytes: Uint8Array }>> {
+	const loaded = await Promise.all(
+		files.map(async (file) => {
+			const object = await bucket.get(blobKey(owner, file.sha256));
+			if (!object) throw new HttpError(404, `The file ${file.path} is no longer stored`);
+			return [file.path, { type: file.type, bytes: new Uint8Array(await object.arrayBuffer()) }] as const;
+		}),
+	);
+	return new Map(loaded);
 }
 
 function versionInfo(row: Row): ArtifactVersionInfo {
@@ -164,6 +292,13 @@ function versionInfo(row: Row): ArtifactVersionInfo {
 		createdAt: Number(row.created_at),
 	};
 }
+
+/** Versions from before files, which keep their one file in `content`. */
+const INLINE = "NOT EXISTS (SELECT 1 FROM pim_artifact_files f WHERE f.artifact = v.artifact AND f.version = v.version)";
+
+const SUMMARY = `SELECT a.*, v.size, v.sha256, (SELECT COUNT(*) FROM pim_artifact_versions c WHERE c.artifact = a.id) AS versions,
+	(SELECT COUNT(*) FROM pim_artifact_files f WHERE f.artifact = a.id AND f.version = a.head) AS files
+	FROM pim_artifacts a JOIN pim_artifact_versions v ON v.artifact = a.id AND v.version = a.head`;
 
 export function checkTitle(title: unknown): string {
 	if (typeof title !== "string" || title.trim() === "") throw new HttpError(400, "title must be a non-empty string");
@@ -210,43 +345,45 @@ export function applyEdits(content: string, edits: readonly { find: string; repl
 }
 
 export type ArtifactWriteOptions = {
-	/** Bytes the whole database may still grow by, or null for no limit. */
+	/** Bytes the Pim may still grow by, or null for no limit. */
 	readonly storageRoom: () => number | null;
+	/** Where files' bytes are kept. */
+	readonly bucket: R2Bucket;
+	/** The owner's id: their files' prefix in the bucket. */
+	readonly owner: () => string;
 };
+
+/** A version as it is about to be written: its files, and their bytes where they aren't stored yet. */
+type Draft = { readonly files: ArtifactFile[]; readonly bytes: Map<string, Uint8Array> };
 
 export class ArtifactStore {
 	readonly #sql: SqlStorage;
 	readonly #limits: () => ArtifactLimits;
 	readonly #storageRoom: () => number | null;
+	readonly #bucket: R2Bucket;
+	readonly #owner: () => string;
+	/** One chain of R2 work per file hash, so a file isn't collected while a write stores it again. */
+	readonly #locks = new Map<string, Promise<void>>();
 
 	constructor(sql: SqlStorage, limits: () => ArtifactLimits, options: ArtifactWriteOptions) {
 		this.#sql = sql;
 		this.#limits = limits;
 		this.#storageRoom = options.storageRoom;
+		this.#bucket = options.bucket;
+		this.#owner = options.owner;
 		this.#sql.exec(SCHEMA);
 	}
 
 	/** Every artifact, most recently changed first. */
 	list(): ArtifactSummary[] {
 		return this.#sql
-			.exec(
-				`SELECT a.*, v.size, v.sha256, (SELECT COUNT(*) FROM pim_artifact_versions c WHERE c.artifact = a.id) AS versions
-				FROM pim_artifacts a JOIN pim_artifact_versions v ON v.artifact = a.id AND v.version = a.head
-				ORDER BY a.updated_at DESC, a.rowid DESC`,
-			)
+			.exec(`${SUMMARY} ORDER BY a.updated_at DESC, a.rowid DESC`)
 			.toArray()
 			.map((row) => this.#summary(row));
 	}
 
 	get(id: string): ArtifactSummary | undefined {
-		const [row] = this.#sql
-			.exec(
-				`SELECT a.*, v.size, v.sha256, (SELECT COUNT(*) FROM pim_artifact_versions c WHERE c.artifact = a.id) AS versions
-				FROM pim_artifacts a JOIN pim_artifact_versions v ON v.artifact = a.id AND v.version = a.head
-				WHERE a.id = ?`,
-				id,
-			)
-			.toArray();
+		const [row] = this.#sql.exec(`${SUMMARY} WHERE a.id = ?`, id).toArray();
 		return row ? this.#summary(row) : undefined;
 	}
 
@@ -259,6 +396,7 @@ export class ArtifactStore {
 			version: Number(row.head),
 			versions: Number(row.versions),
 			size: Number(row.size),
+			files: Math.max(1, Number(row.files)),
 			sha256: String(row.sha256),
 			createdAt: Number(row.created_at),
 			updatedAt: Number(row.updated_at),
@@ -273,26 +411,99 @@ export class ArtifactStore {
 			.map(versionInfo);
 	}
 
-	/** A version with its content; the latest when `version` is omitted. */
+	/** A version with the files it has; the latest when `version` is omitted. */
 	version(id: string, version?: number): ArtifactVersion | undefined {
 		const summary = this.get(id);
 		if (!summary) return undefined;
 		const [row] = this.#sql
-			.exec("SELECT * FROM pim_artifact_versions WHERE artifact = ? AND version = ?", id, version ?? summary.version)
+			.exec("SELECT version, sha256, size, source, restored_from, created_at FROM pim_artifact_versions WHERE artifact = ? AND version = ?", id, version ?? summary.version)
 			.toArray();
-		return row ? { ...versionInfo(row), artifact: id, content: String(row.content) } : undefined;
+		if (!row) return undefined;
+		const info = versionInfo(row);
+		return { ...info, artifact: id, files: this.#files(id, summary.kind, info) };
 	}
 
-	/** Bytes every version of every artifact takes, as stored. */
+	/** A version's files: as listed, or, for a version from before files, its one main file. */
+	#files(id: string, kind: ArtifactKind, info: ArtifactVersionInfo): ArtifactFile[] {
+		const files = this.#sql
+			.exec("SELECT path, sha256, size, type FROM pim_artifact_files WHERE artifact = ? AND version = ? ORDER BY path", id, info.version)
+			.toArray()
+			.map((row) => ({ path: String(row.path), sha256: String(row.sha256), size: Number(row.size), type: String(row.type) }));
+		if (files.length > 0) return files;
+		const path = ENTRY_FILES[kind];
+		return [{ path, sha256: info.sha256, size: info.size, type: fileType(path) }];
+	}
+
+	/** Whether a version is from before files, with its one file in this object. */
+	#inline(id: string, version: number): boolean {
+		return this.#sql.exec("SELECT 1 FROM pim_artifact_files WHERE artifact = ? AND version = ? LIMIT 1", id, version).toArray().length === 0;
+	}
+
+	/** A version's files with their bytes; only those at `paths`, if given. */
+	async read(id: string, version: number, paths?: readonly string[]): Promise<Map<string, { type: string; bytes: Uint8Array }>> {
+		const found = this.version(id, version);
+		if (!found) throw new HttpError(404, `No version ${version} of artifact ${id}`);
+		const wanted = paths ? found.files.filter((file) => paths.includes(file.path)) : found.files;
+		if (this.#inline(id, version)) {
+			const [row] = this.#sql.exec("SELECT content FROM pim_artifact_versions WHERE artifact = ? AND version = ?", id, version).toArray();
+			return new Map(wanted.map((file) => [file.path, { type: file.type, bytes: encoder.encode(String(row?.content ?? "")) }]));
+		}
+		return readFiles(this.#bucket, this.#owner(), wanted);
+	}
+
+	/** One file of a version as text: its main file, unless `path` names another. */
+	async text(id: string, version: number, path?: string): Promise<string> {
+		const found = this.version(id, version);
+		if (!found) throw new HttpError(404, `No version ${version} of artifact ${id}`);
+		const wanted = path ?? ENTRY_FILES[this.get(id)!.kind];
+		if (!found.files.some((file) => file.path === wanted)) throw new HttpError(404, `Version ${version} has no file ${wanted}`);
+		return textOf((await this.read(id, version, [wanted])).get(wanted)!.bytes);
+	}
+
+	/**
+	 * Makes sure a version's files are in R2, where others' Pims read them:
+	 * a version from before files is moved there, keeping its hash.
+	 */
+	async stored(id: string, version: number): Promise<ArtifactVersion> {
+		const found = this.version(id, version);
+		if (!found) throw new HttpError(404, `No version ${version} of artifact ${id}`);
+		if (!this.#inline(id, version)) return found;
+		const [row] = this.#sql.exec("SELECT content FROM pim_artifact_versions WHERE artifact = ? AND version = ?", id, version).toArray();
+		const file = found.files[0]!;
+		await this.#store([{ ...file }], new Map([[file.sha256, encoder.encode(String(row!.content))]]), () => {
+			if (!this.#inline(id, version)) return;
+			this.#sql.exec("INSERT INTO pim_artifact_files (artifact, version, path, sha256, size, type) VALUES (?, ?, ?, ?, ?, ?)", id, version, file.path, file.sha256, file.size, file.type);
+			this.#sql.exec("UPDATE pim_artifact_versions SET content = '' WHERE artifact = ? AND version = ?", id, version);
+		});
+		return this.version(id, version)!;
+	}
+
+	/** Bytes all artifacts take: each distinct file once, and versions from before files as they are. */
 	totalBytes(): number {
-		return Number(this.#sql.exec("SELECT COALESCE(SUM(size), 0) AS total FROM pim_artifact_versions").one().total);
+		return this.fileBytes() + Number(this.#sql.exec(`SELECT COALESCE(SUM(size), 0) AS total FROM pim_artifact_versions v WHERE ${INLINE}`).one().total);
 	}
 
-	/** Refuses a version of `size` bytes that would break a limit; `adding` is whether it's a new artifact. */
-	#checkRoom(size: number, artifact: string | null): void {
+	/** Bytes artifacts keep in R2, outside this object's database. */
+	fileBytes(): number {
+		return Number(this.#sql.exec("SELECT COALESCE(SUM(size), 0) AS total FROM (SELECT sha256, MAX(size) AS size FROM pim_artifact_files GROUP BY sha256)").one().total);
+	}
+
+	/** Whether this file's bytes are already stored, for some version. */
+	#known(hash: string): boolean {
+		return this.#sql.exec("SELECT 1 FROM pim_artifact_files WHERE sha256 = ? LIMIT 1", hash).toArray().length > 0;
+	}
+
+	/**
+	 * Refuses a version that would break a limit: its files' size, the
+	 * versions one artifact keeps, how many artifacts there are, and the
+	 * bytes its new files would add. `artifact` is null for a new one.
+	 */
+	#checkRoom(draft: Draft, artifact: string | null): void {
 		const limits = this.#limits();
+		const size = draft.files.reduce((total, file) => total + file.size, 0);
 		const perVersion = Math.min(MAX_ARTIFACT_BYTES, limits.artifactBytes ?? MAX_ARTIFACT_BYTES);
 		if (size > perVersion) throw new HttpError(413, `An artifact can be at most ${perVersion} bytes; this one is ${size}. Make it smaller.`);
+		if (draft.files.length > MAX_ARTIFACT_FILES) throw new HttpError(413, `An artifact can have at most ${MAX_ARTIFACT_FILES} files; this one has ${draft.files.length}.`);
 		if (artifact === null) {
 			const count = Number(this.#sql.exec("SELECT COUNT(*) AS count FROM pim_artifacts").one().count);
 			if (limits.artifacts !== null && count >= limits.artifacts) {
@@ -307,83 +518,96 @@ export class ArtifactStore {
 				);
 			}
 		}
+		const added = [...new Map(draft.files.filter((file) => !this.#known(file.sha256)).map((file) => [file.sha256, file.size])).values()].reduce(
+			(total, bytes) => total + bytes,
+			0,
+		);
 		const total = Math.min(MAX_ARTIFACT_STORAGE_BYTES, limits.artifactStorageBytes ?? MAX_ARTIFACT_STORAGE_BYTES);
 		const used = this.totalBytes();
-		if (used + size > total) {
+		if (added > 0 && used + added > total) {
 			throw new HttpError(429, `Artifacts can take up to ${total} bytes in all; ${used} are used. Delete some first.`);
 		}
 		const room = this.#storageRoom();
-		if (room !== null && size > room) throw new HttpError(429, `Space storage quota exceeded: there is room for ${Math.max(0, room)} more bytes.`);
+		if (room !== null && added > room) throw new HttpError(429, `Space storage quota exceeded: there is room for ${Math.max(0, room)} more bytes.`);
 	}
 
-	/** Makes an artifact with its first version. Run again with the same id, it returns what the first run made, or is refused (410) if that was deleted since. */
-	async create(input: { id: string; title: string; kind: ArtifactKind; content: string; session: string | null }): Promise<ArtifactVersion> {
-		const hash = await sha256(input.content);
-		// Nothing awaits from here on: the checks and the write are one step, which no other write can come between.
-		const existing = this.version(input.id, 1);
-		if (existing) return existing;
-		if (this.#sql.exec("SELECT 1 FROM pim_artifact_deleted WHERE id = ?", input.id).toArray().length > 0) {
-			throw new HttpError(410, "This artifact was deleted, so this create, run again, made nothing. Make a new artifact if the user still wants it.");
+	/** A version's files from new contents, over `base`'s files when given (whose other files it keeps), without `remove`. */
+	async #draft(kind: ArtifactKind, put: FileContents, base: readonly ArtifactFile[] = [], remove: readonly string[] = []): Promise<Draft> {
+		const files = new Map(base.map((file) => [file.path, file]));
+		for (const path of remove) {
+			if (path === ENTRY_FILES[kind]) throw new HttpError(400, `${path} is the artifact's main file, which it can't do without.`);
+			if (!files.delete(checkPath(path))) throw new HttpError(400, `There is no file ${path} to delete.`);
 		}
-		const size = utf8Bytes(input.content);
-		this.#checkRoom(size, null);
-		const now = Date.now();
-		this.#sql.exec(
-			"INSERT INTO pim_artifacts (id, title, kind, session, head, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
-			input.id,
-			input.title,
-			input.kind,
-			input.session,
-			now,
-			now,
-		);
-		this.#sql.exec(
-			"INSERT INTO pim_artifact_versions (artifact, version, content, sha256, size, source, restored_from, call_id, created_at) VALUES (?, 1, ?, ?, ?, 'agent', NULL, NULL, ?)",
-			input.id,
-			input.content,
-			hash,
-			size,
-			now,
-		);
-		return this.version(input.id, 1)!;
+		const bytes = new Map<string, Uint8Array>();
+		for (const [path, content] of Object.entries(put)) {
+			const data = typeof content === "string" ? encoder.encode(content) : content;
+			const hash = await sha256(data);
+			files.set(checkPath(path), { path, sha256: hash, size: data.byteLength, type: fileType(path) });
+			bytes.set(hash, data);
+		}
+		if (!files.has(ENTRY_FILES[kind])) throw new HttpError(400, `A ${kind} artifact needs its main file, ${ENTRY_FILES[kind]}.`);
+		return { files: [...files.values()].sort((a, b) => (a.path < b.path ? -1 : 1)), bytes };
 	}
 
 	/**
-	 * Adds a version to `id`, based on `baseVersion`, which must still be the
-	 * latest. `callId` makes a replayed tool call return the version it made
-	 * instead of adding another. Content equal to the latest adds nothing.
+	 * Stores a draft's new files in R2, then runs `commit`, with nothing
+	 * awaited between its checks and its writes. While a file is being
+	 * stored, it's claimed, so a deletion doesn't collect it; one a refused
+	 * write stored and no version lists is collected after.
 	 */
-	async append(
-		id: string,
-		input: { baseVersion: number; content: string; source: ArtifactSource; restoredFrom?: number; callId?: string; title?: string },
-	): Promise<{ version: ArtifactVersion; changed: boolean }> {
-		const hash = await sha256(input.content);
-		// Nothing awaits from here on: the checks and the write are one step, which no other write can come between.
-		const summary = this.get(id);
-		if (!summary) throw new HttpError(404, `No artifact ${id}`);
-		if (input.callId !== undefined) {
-			const [made] = this.#sql.exec("SELECT version FROM pim_artifact_versions WHERE artifact = ? AND call_id = ?", id, input.callId).toArray();
-			if (made) return { version: this.version(id, Number(made.version))!, changed: true };
-		}
-		if (input.baseVersion !== summary.version) {
-			throw new HttpError(409, `Version ${input.baseVersion} is not the latest: version ${summary.version} is. Read it, then edit that.`);
-		}
-		const latest = this.version(id)!;
+	async #store<T>(files: readonly ArtifactFile[], bytes: ReadonlyMap<string, Uint8Array>, commit: () => T): Promise<T> {
+		const write = crypto.randomUUID();
+		const hashes = [...new Set(files.map((file) => file.sha256))].filter((hash) => bytes.has(hash));
 		const now = Date.now();
-		const title = input.title ?? summary.title;
-		if (input.content === latest.content && input.source !== "restore") {
-			if (title !== summary.title) this.#sql.exec("UPDATE pim_artifacts SET title = ?, updated_at = ? WHERE id = ?", title, now, id);
-			return { version: latest, changed: false };
+		for (const hash of hashes) this.#sql.exec("INSERT INTO pim_artifact_pending (sha256, write, at) VALUES (?, ?, ?)", hash, write, now);
+		try {
+			await Promise.all(
+				hashes.map((hash) =>
+					this.#locked(hash, async () => {
+						await this.#bucket.put(blobKey(this.#owner(), hash), bytes.get(hash)!);
+					}),
+				),
+			);
+			return commit();
+		} finally {
+			this.#sql.exec("DELETE FROM pim_artifact_pending WHERE write = ?", write);
+			await this.#collect(hashes);
 		}
-		// A version that is refused renames nothing.
-		const size = utf8Bytes(input.content);
-		this.#checkRoom(size, id);
-		const next = summary.version + 1;
+	}
+
+	/** Runs R2 work on one file hash after the work on it before. */
+	#locked(hash: string, work: () => Promise<void>): Promise<void> {
+		const before = this.#locks.get(hash) ?? Promise.resolve();
+		const done = before.then(work, work);
+		const settled = done.catch(() => undefined);
+		this.#locks.set(hash, settled);
+		void settled.then(() => {
+			if (this.#locks.get(hash) === settled) this.#locks.delete(hash);
+		});
+		return done;
+	}
+
+	/** Deletes from R2 the files no version lists and no write is storing. */
+	async #collect(hashes: readonly string[]): Promise<void> {
+		this.#sql.exec("DELETE FROM pim_artifact_pending WHERE at < ?", Date.now() - PENDING_MS);
+		await Promise.all(
+			hashes.map((hash) =>
+				this.#locked(hash, async () => {
+					// Checked here, just before deleting: a write that claims it later stores it again after.
+					if (this.#known(hash) || this.#sql.exec("SELECT 1 FROM pim_artifact_pending WHERE sha256 = ? LIMIT 1", hash).toArray().length > 0) return;
+					await this.#bucket.delete(blobKey(this.#owner(), hash));
+				}),
+			),
+		);
+	}
+
+	/** Writes a version's row and its files' rows. */
+	#insertVersion(id: string, version: number, draft: Draft, hash: string, input: { source: ArtifactSource; restoredFrom?: number; callId?: string }, now: number) {
+		const size = draft.files.reduce((total, file) => total + file.size, 0);
 		this.#sql.exec(
-			"INSERT INTO pim_artifact_versions (artifact, version, content, sha256, size, source, restored_from, call_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			"INSERT INTO pim_artifact_versions (artifact, version, content, sha256, size, source, restored_from, call_id, created_at) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?)",
 			id,
-			next,
-			input.content,
+			version,
 			hash,
 			size,
 			input.source,
@@ -391,28 +615,156 @@ export class ArtifactStore {
 			input.callId ?? null,
 			now,
 		);
-		this.#sql.exec("UPDATE pim_artifacts SET head = ?, title = ?, updated_at = ? WHERE id = ?", next, title, now, id);
-		return { version: this.version(id, next)!, changed: true };
+		for (const file of draft.files) {
+			this.#sql.exec("INSERT INTO pim_artifact_files (artifact, version, path, sha256, size, type) VALUES (?, ?, ?, ?, ?, ?)", id, version, file.path, file.sha256, file.size, file.type);
+		}
+	}
+
+	/**
+	 * Makes an artifact with its first version: its main file's `content`,
+	 * and any other `files`. Run again with the same id, it returns what the
+	 * first run made, or is refused (410) if that was deleted since.
+	 */
+	async create(input: { id: string; title: string; kind: ArtifactKind; content: string | Uint8Array; files?: FileContents; session: string | null }): Promise<ArtifactVersion> {
+		const draft = await this.#draft(input.kind, { ...input.files, [ENTRY_FILES[input.kind]]: input.content });
+		const hash = await versionHash(input.kind, draft.files);
+		const check = () => {
+			const existing = this.version(input.id, 1);
+			if (existing) return existing;
+			if (this.#sql.exec("SELECT 1 FROM pim_artifact_deleted WHERE id = ?", input.id).toArray().length > 0) {
+				throw new HttpError(410, "This artifact was deleted, so this create, run again, made nothing. Make a new artifact if the user still wants it.");
+			}
+			this.#checkRoom(draft, null);
+			return undefined;
+		};
+		// Checked before storing anything, and again when writing, after storing took a while.
+		const before = check();
+		if (before) return before;
+		return this.#store(draft.files, draft.bytes, () => {
+			const existing = check();
+			if (existing) return existing;
+			const now = Date.now();
+			this.#sql.exec(
+				"INSERT INTO pim_artifacts (id, title, kind, session, head, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
+				input.id,
+				input.title,
+				input.kind,
+				input.session,
+				now,
+				now,
+			);
+			this.#insertVersion(input.id, 1, draft, hash, { source: "agent" }, now);
+			return this.version(input.id, 1)!;
+		});
+	}
+
+	/**
+	 * Adds a version to `id`, based on `baseVersion`, which must still be the
+	 * latest: the latest's files, with `files` put over them (new or
+	 * changed) and `remove` taken away. `callId` makes a replayed tool call
+	 * return the version it made instead of adding another. A version with
+	 * the same files as the latest adds nothing.
+	 */
+	async append(
+		id: string,
+		input: {
+			baseVersion: number;
+			/** The main file's new content: the same as giving it in `files`. */
+			content?: string | Uint8Array;
+			files?: FileContents;
+			remove?: readonly string[];
+			source: ArtifactSource;
+			restoredFrom?: number;
+			callId?: string;
+			title?: string;
+			/** The files to have, as another version listed them, for a restore. */
+			copy?: readonly ArtifactFile[];
+		},
+	): Promise<{ version: ArtifactVersion; changed: boolean }> {
+		const summary = this.get(id);
+		if (!summary) throw new HttpError(404, `No artifact ${id}`);
+		const replayed = () => {
+			if (input.callId === undefined) return undefined;
+			const [made] = this.#sql.exec("SELECT version FROM pim_artifact_versions WHERE artifact = ? AND call_id = ?", id, input.callId).toArray();
+			return made ? { version: this.version(id, Number(made.version))!, changed: true } : undefined;
+		};
+		const early = replayed();
+		if (early) return early;
+		const latest = this.version(id)!;
+		const put = input.content === undefined ? (input.files ?? {}) : { ...input.files, [ENTRY_FILES[summary.kind]]: input.content };
+		const draft = input.copy ? { files: [...input.copy], bytes: new Map<string, Uint8Array>() } : await this.#draft(summary.kind, put, latest.files, input.remove);
+		const hash = await versionHash(summary.kind, draft.files);
+		// Checked before storing anything, and again when writing, with nothing awaited between the checks and the write.
+		const check = () => {
+			const again = replayed();
+			if (again) return again;
+			const current = this.get(id);
+			if (!current) throw new HttpError(404, `No artifact ${id}`);
+			if (input.baseVersion !== current.version) {
+				throw new HttpError(409, `Version ${input.baseVersion} is not the latest: version ${current.version} is. Read it, then edit that.`);
+			}
+			const title = input.title ?? current.title;
+			if (hash === current.sha256 && input.source !== "restore") {
+				if (title !== current.title) this.#sql.exec("UPDATE pim_artifacts SET title = ?, updated_at = ? WHERE id = ?", title, Date.now(), id);
+				return { version: this.version(id)!, changed: false };
+			}
+			// A version that is refused renames nothing.
+			this.#checkRoom(draft, id);
+			return undefined;
+		};
+		const before = check();
+		if (before) return before;
+		return this.#store(draft.files, draft.bytes, () => {
+			const decided = check();
+			if (decided) return decided;
+			const current = this.get(id)!;
+			const now = Date.now();
+			const next = current.version + 1;
+			this.#insertVersion(id, next, draft, hash, input, now);
+			this.#sql.exec("UPDATE pim_artifacts SET head = ?, title = ?, updated_at = ? WHERE id = ?", next, input.title ?? current.title, now, id);
+			return { version: this.version(id, next)!, changed: true };
+		});
 	}
 
 	/** Restores `version` as a new latest version, if `baseVersion` is still the latest. */
 	async restore(id: string, version: number, baseVersion: number): Promise<ArtifactVersion> {
-		const old = this.version(id, version);
-		if (!old) throw new HttpError(404, `No version ${version} of artifact ${id}`);
-		return (await this.append(id, { baseVersion, content: old.content, source: "restore", restoredFrom: version })).version;
+		if (!this.version(id, version)) throw new HttpError(404, `No version ${version} of artifact ${id}`);
+		const old = await this.stored(id, version);
+		return (await this.append(id, { baseVersion, copy: old.files, source: "restore", restoredFrom: version })).version;
 	}
 
-	/** Deletes an artifact and every version of it. */
-	delete(id: string): boolean {
+	/** Deletes an artifact and every version of it, and then the files no other version has. */
+	async delete(id: string): Promise<boolean> {
 		if (!this.get(id)) return false;
+		const hashes = this.#sql
+			.exec("SELECT DISTINCT sha256 FROM pim_artifact_files WHERE artifact = ?", id)
+			.toArray()
+			.map((row) => String(row.sha256));
 		// The fence first, then the deletion, with nothing awaited between: if the fence can't be written, nothing is deleted.
 		this.#sql.exec("INSERT OR IGNORE INTO pim_artifact_deleted (id, deleted_at) VALUES (?, ?)", id, Date.now());
 		this.#sql.exec("DELETE FROM pim_artifact_versions WHERE artifact = ?", id);
+		this.#sql.exec("DELETE FROM pim_artifact_files WHERE artifact = ?", id);
 		this.#sql.exec("DELETE FROM pim_artifact_data WHERE artifact = ?", id);
 		this.#sql.exec("DELETE FROM pim_artifact_grants WHERE artifact = ?", id);
 		this.#sql.exec("DELETE FROM pim_artifact_circles WHERE artifact = ?", id);
 		this.#sql.exec("DELETE FROM pim_artifacts WHERE id = ?", id);
+		await this.#collect(hashes);
 		return true;
+	}
+
+	/** Deletes every file artifacts keep in R2, including any a lost write left unlisted. Run when the Pim is erased. */
+	async deleteAllFiles(): Promise<void> {
+		let cursor: string | undefined;
+		do {
+			const listed = await this.#bucket.list({ prefix: `artifacts/${this.#owner()}/`, ...(cursor ? { cursor } : {}) });
+			if (listed.objects.length > 0) await this.#bucket.delete(listed.objects.map((object) => object.key));
+			cursor = listed.truncated ? listed.cursor : undefined;
+		} while (cursor);
+	}
+
+	/** Whether any file is left in R2 under the owner's prefix. */
+	async anyFiles(): Promise<boolean> {
+		return (await this.#bucket.list({ prefix: `artifacts/${this.#owner()}/`, limit: 1 })).objects.length > 0;
 	}
 
 	/** A value the artifact kept, or null. */
@@ -536,18 +888,42 @@ export class ArtifactStore {
 		this.#sql.exec("INSERT OR IGNORE INTO pim_artifact_grants (artifact, sha256, capability, granted_at) VALUES (?, ?, ?, ?)", id, sha, capability, Date.now());
 	}
 
-	/** Every artifact with every version, for the owner's export. */
-	export() {
-		return this.list().map((artifact) => ({
+	/**
+	 * Every artifact with every version and the files each has, for the
+	 * owner's export, and the files' contents by hash, once each: text as
+	 * text, anything else as base64. Past `EXPORT_INLINE_BYTES`, files are
+	 * listed without their contents, which the app still downloads.
+	 */
+	async export() {
+		const artifacts = this.list().map((artifact) => ({
 			...artifact,
-			versions: this.#sql
-				.exec("SELECT * FROM pim_artifact_versions WHERE artifact = ? ORDER BY version", artifact.id)
-				.toArray()
-				.map((row) => ({ ...versionInfo(row), content: String(row.content) })),
+			versions: this.versions(artifact.id)
+				.reverse()
+				.map((info) => ({ ...info, files: this.version(artifact.id, info.version)!.files })),
 			data: this.data(artifact.id, "own"),
 			sharedData: this.data(artifact.id, "shared"),
 			circles: this.circlesOf(artifact.id),
 		}));
+		const contents: { sha256: string; size: number; encoding?: "utf8" | "base64"; content?: string }[] = [];
+		const seen = new Set<string>();
+		let inlined = 0;
+		for (const artifact of artifacts) {
+			for (const version of artifact.versions) {
+				for (const file of version.files) {
+					if (seen.has(file.sha256)) continue;
+					seen.add(file.sha256);
+					if (inlined + file.size > EXPORT_INLINE_BYTES) {
+						contents.push({ sha256: file.sha256, size: file.size });
+						continue;
+					}
+					inlined += file.size;
+					const { bytes } = (await this.read(artifact.id, version.version, [file.path])).get(file.path)!;
+					if (isTextType(file.type)) contents.push({ sha256: file.sha256, size: file.size, encoding: "utf8", content: textOf(bytes) });
+					else contents.push({ sha256: file.sha256, size: file.size, encoding: "base64", content: Buffer.from(bytes).toString("base64") });
+				}
+			}
+		}
+		return { artifacts, files: contents };
 	}
 }
 
@@ -630,7 +1006,10 @@ const PAGE_HEAD =
  * text, which the Mermaid runtime draws; a JSX one compiled, after the React
  * runtime and the modules it imports. Each ends with the height script.
  */
-export function framePage(kind: ArtifactKind, content: string, origin: string): Response {
+export function framePage(kind: ArtifactKind, files: LoadedFiles, origin: string): Response {
+	const main = files.get(ENTRY_FILES[kind]);
+	if (!main) throw new HttpError(404, `The artifact has no ${ENTRY_FILES[kind]}`);
+	const content = textOf(main.bytes);
 	const html = (body: string, runtime = false) =>
 		new Response(body + RESIZE_SCRIPT, { headers: artifactHeaders(origin, "text/html; charset=utf-8", { runtime }) });
 	switch (kind) {

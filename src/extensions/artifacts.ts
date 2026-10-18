@@ -93,11 +93,11 @@ export function artifactsExtension({ artifacts, assertOpen }: ArtifactServices) 
 				if (!latest) throw new HttpError(404, `No artifact ${id}. List the artifacts to find it.`);
 				// Edits apply to the version they were based on, which must be the latest; append checks that again.
 				const base = base_version === latest.version ? latest : undefined;
-				const next = content ?? (base ? applyEdits(base.content, edits!) : latest.content);
-				checkContent(artifacts.get(id)!.kind, next);
+				const next = content ?? (base ? applyEdits(await artifacts.text(id, base.version), edits!) : undefined);
+				if (next !== undefined) checkContent(artifacts.get(id)!.kind, next);
 				const { version, changed } = await artifacts.append(id, {
 					baseVersion: base_version,
-					content: next,
+					...(next !== undefined ? { content: next } : {}),
 					source: "agent",
 					callId: api.callId,
 					...(title !== undefined ? { title: checkTitle(title) } : {}),
@@ -128,10 +128,11 @@ export function artifactsExtension({ artifacts, assertOpen }: ArtifactServices) 
 			const found = artifacts.version(id, version);
 			if (!found) return text(version === undefined ? `No artifact ${id}.` : `No version ${version} of artifact ${id}.`, true);
 			const summary = artifacts.get(id)!;
-			const part = found.content.slice(offset, offset + READ_CHARS);
-			const rest = found.content.length - offset - part.length;
+			const content = await artifacts.text(id, found.version);
+			const part = content.slice(offset, offset + READ_CHARS);
+			const rest = content.length - offset - part.length;
 			const by = found.source === "person" ? " (edited by the user)" : found.source === "restore" ? ` (the user restored version ${found.restoredFrom})` : "";
-			const header = `Artifact ${id} "${summary.title}" (${summary.kind}), version ${found.version} of ${summary.version}${by}, ${found.content.length} characters${offset > 0 ? `, from ${offset}` : ""}:`;
+			const header = `Artifact ${id} "${summary.title}" (${summary.kind}), version ${found.version} of ${summary.version}${by}, ${content.length} characters${offset > 0 ? `, from ${offset}` : ""}:`;
 			const more = rest > 0 ? `\n[... ${rest} more characters: read again with offset ${offset + part.length}]` : "";
 			return text(`${header}\n${part}${more}`);
 		},

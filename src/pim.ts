@@ -19,7 +19,7 @@ import {
 import { type AgentMcpOAuthProvider, Agent as DurableAgent, type Connection, type ConnectionContext, DurableObjectOAuthClientProvider, getAgentByName, type Schedule, type WSMessage } from "agents";
 import { type PiModel, PiHarness, type PiOperationResult, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
-import { ArtifactStore, artifactHeaders, downloadName, RESIZE_SCRIPT } from "./artifacts";
+import { ArtifactStore, artifactHeaders, downloadName, framePage } from "./artifacts";
 import { digestHex } from "./auth/store";
 import { Email, type Mailer, mailerFrom } from "./email";
 import { ImageStore, userInput } from "./images";
@@ -3088,8 +3088,7 @@ export class Pim extends DurableAgent<Env> {
 			({ id, version }, _request, url) =>
 				this.#artifactRequest(url, () => {
 					const { artifact, found } = this.#artifactVersion(id!, version!);
-					if (artifact.kind !== "html") throw new HttpError(404, "Only HTML artifacts are shown in a frame");
-					return new Response(found.content + RESIZE_SCRIPT, { headers: artifactHeaders(url.origin, "text/html; charset=utf-8") });
+					return framePage(artifact.kind, found.content, url.origin);
 				}),
 		],
 		[

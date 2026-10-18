@@ -122,39 +122,80 @@ export const SIDEBAR_PANELS = [
 export type SidebarPanel = (typeof SIDEBAR_PANELS)[number];
 
 /**
- * The sidebar: a rail of icons beside a panel. The icons at the top choose
- * what the panel shows (notifications, your chats, artifacts, files, skills or schedules)
- * while the open chat stays where it is; those at the bottom open dialogs
- * over it. Choosing the panel that's already showing collapses the sidebar
- * to the rail, and choosing any panel brings it back.
+ * What the navigation shows beside its icons: who you are, whether there
+ * are others on this Pim, and what waits for you behind each icon.
+ */
+export function useNavigationState() {
+  const { data: approvals } = useQuery(approvalsQuery());
+  const { data: notifications } = useQuery(notificationsQuery());
+  // Sharing, Discover and your profile are with the other people on this Pim.
+  const { data: account } = useQuery(accountQuery());
+  const { data: profile } = useQuery({ ...profileQuery(), enabled: !!account });
+  return {
+    account,
+    profile,
+    // Alone on this Pim, there is nobody to share with or discover.
+    withOthers: !!account && !account.alone,
+    awaitingApproval: useAwaitingApproval(),
+    /* Requests from people in your circles, waiting in Sharing. */
+    guestRequests:
+      approvals?.filter(
+        (approval) => approval.status === "pending" && approval.requestedBy,
+      ).length ?? 0,
+    unreadNotifications:
+      notifications?.filter((notification) => notification.readAt === null)
+        .length ?? 0,
+  };
+}
+
+/** The panel the URL names: notifications, your chats, artifacts, files, skills or schedules. */
+export function SidebarPanelContent({
+  awaitingApproval,
+  onNavigate,
+}: {
+  awaitingApproval: ReadonlySet<string>;
+  onNavigate?: () => void;
+}) {
+  const { panel } = useSearch({ strict: false });
+  return panel === "notifications" ? (
+    <NotificationsPanel onNavigate={onNavigate} />
+  ) : panel === "artifacts" ? (
+    <ArtifactsPanel onNavigate={onNavigate} />
+  ) : panel === "files" ? (
+    <FilesPanel onNavigate={onNavigate} />
+  ) : panel === "skills" ? (
+    <SkillsPanel onNavigate={onNavigate} />
+  ) : panel === "schedules" ? (
+    <SchedulesPanel onNavigate={onNavigate} />
+  ) : (
+    <ChatsPanel awaitingApproval={awaitingApproval} onNavigate={onNavigate} />
+  );
+}
+
+/**
+ * The sidebar on wider screens: a rail of icons beside a panel. The icons at
+ * the top choose what the panel shows (notifications, your chats, artifacts,
+ * files, skills or schedules) while the open chat stays where it is; those at
+ * the bottom open dialogs over it. Choosing the panel that's already showing
+ * collapses the sidebar to the rail, and choosing any panel brings it back.
  */
 export function AppSidebar({
-  onNavigate,
   collapsed = false,
   onToggleCollapse,
 }: {
-  onNavigate?: () => void;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
 }) {
   const { t } = useI18n();
   const { panel } = useSearch({ strict: false });
-  const { data: approvals } = useQuery(approvalsQuery());
-  const { data: notifications } = useQuery(notificationsQuery());
-  // Sharing, Discover and your profile are with the other people on this Pim.
-  const { data: account } = useQuery(accountQuery());
-  // Alone on this Pim, there is nobody to share with or discover.
-  const withOthers = !!account && !account.alone;
-  const { data: profile } = useQuery({ ...profileQuery(), enabled: !!account });
-  const awaitingApproval = useAwaitingApproval();
-  /* Requests from people in your circles, waiting in Sharing. */
-  const guestRequests =
-    approvals?.filter(
-      (approval) => approval.status === "pending" && approval.requestedBy,
-    ).length ?? 0;
-  const unreadNotifications =
-    notifications?.filter((notification) => notification.readAt === null)
-      .length ?? 0;
+  const {
+    account,
+    profile,
+    withOthers,
+    awaitingApproval,
+    guestRequests,
+    unreadNotifications,
+  } = useNavigationState();
   const railPanel = {
     current: panel,
     collapsed,
@@ -171,7 +212,6 @@ export function AppSidebar({
         >
           <Link
             to="/"
-            onClick={onNavigate}
             className="mb-2 flex size-10 items-center justify-center rounded-xl transition-colors hover:bg-sidebar-accent"
             aria-label="Pim"
           >
@@ -222,14 +262,12 @@ export function AppSidebar({
               dialog="discover"
               icon={<Compass className="size-4.5" />}
               label={t("discover")}
-              onNavigate={onNavigate}
             />
           )}
           <RailDialogLink
             dialog="apps"
             icon={<Blocks className="size-4.5" />}
             label={t("connectedApps")}
-            onNavigate={onNavigate}
           />
           {withOthers && (
             <RailDialogLink
@@ -237,21 +275,15 @@ export function AppSidebar({
               icon={<Users className="size-4.5" />}
               label={t("sharing")}
               count={guestRequests}
-              onNavigate={onNavigate}
             />
           )}
           <RailDialogLink
             dialog="settings"
             icon={<Settings className="size-4.5" />}
             label={t("settings")}
-            onNavigate={onNavigate}
           />
           {account && (
-            <ProfilePopover
-              account={account}
-              profile={profile}
-              onNavigate={onNavigate}
-            >
+            <ProfilePopover account={account} profile={profile}>
               <RailItem
                 icon={
                   <span className="flex size-7 items-center justify-center rounded-full bg-background font-medium text-foreground text-xs uppercase">
@@ -286,22 +318,7 @@ export function AppSidebar({
             collapsed && "opacity-0",
           )}
         >
-          {panel === "notifications" ? (
-            <NotificationsPanel onNavigate={onNavigate} />
-          ) : panel === "artifacts" ? (
-            <ArtifactsPanel onNavigate={onNavigate} />
-          ) : panel === "files" ? (
-            <FilesPanel onNavigate={onNavigate} />
-          ) : panel === "skills" ? (
-            <SkillsPanel onNavigate={onNavigate} />
-          ) : panel === "schedules" ? (
-            <SchedulesPanel onNavigate={onNavigate} />
-          ) : (
-            <ChatsPanel
-              awaitingApproval={awaitingApproval}
-              onNavigate={onNavigate}
-            />
-          )}
+          <SidebarPanelContent awaitingApproval={awaitingApproval} />
         </div>
       </div>
     </TooltipProvider>
@@ -512,14 +529,12 @@ function RailPanel({
 /** A rail icon that opens a dialog over the current page. */
 function RailDialogLink({
   dialog,
-  onNavigate,
   ...props
 }: {
   dialog: "settings" | "sharing" | "discover" | "apps";
   icon: ReactNode;
   label: string;
   count?: number;
-  onNavigate?: () => void;
 }) {
   return (
     <RailItem {...props}>
@@ -527,7 +542,6 @@ function RailDialogLink({
         <Link
           to="."
           search={(prev) => ({ ...prev, dialog, tab: undefined })}
-          onClick={onNavigate}
           className={cn(RAIL_ITEM_CLASS, RAIL_ACTIVE_CLASS)}
           aria-label={props.label}
         >
@@ -854,7 +868,7 @@ function SessionRow({
           <button
             type="button"
             className={cn(
-              "-translate-y-1/2 absolute top-1/2 right-1.5 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-foreground focus:opacity-100 group-hover/row:opacity-100",
+              "-translate-y-1/2 absolute top-1/2 right-1.5 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-foreground focus:opacity-100 group-hover/row:opacity-100 pointer-coarse:opacity-100",
               active && "opacity-100",
             )}
             aria-label={t("chatOptions")}

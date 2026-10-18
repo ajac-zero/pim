@@ -265,6 +265,8 @@ const translations = {
     seesImages: "Sees images",
     moreActions: "More actions",
     navigation: "Navigation",
+    home: "Home",
+    more: "More",
     newChat: "New chat",
     noChatsMatch: "No chats match your search.",
     noChatsYet: "No chats yet.",
@@ -355,7 +357,6 @@ const translations = {
     pushUnsupported:
       "This browser can't receive push notifications. On an iPhone or iPad, add Pim to your Home Screen first.",
     openChat: "Open chat",
-    openSidebar: "Open sidebar",
     pending: "Pending",
     pimCanMakeMistakes: "Pim can make mistakes. Check important info.",
     preferences: "Preferences",
@@ -985,6 +986,8 @@ const translations = {
     seesImages: "Ve imágenes",
     moreActions: "Más acciones",
     navigation: "Navegación",
+    home: "Inicio",
+    more: "Más",
     newChat: "Nuevo chat",
     noChatsMatch: "Ningún chat coincide con la búsqueda.",
     noChatsYet: "Aún no hay chats.",
@@ -1075,7 +1078,6 @@ const translations = {
     pushUnsupported:
       "Este navegador no puede recibir notificaciones push. En un iPhone o iPad, primero agrega Pim a tu pantalla de inicio.",
     openChat: "Abrir chat",
-    openSidebar: "Abrir barra lateral",
     pending: "Pendiente",
     pimCanMakeMistakes:
       "Pim puede cometer errores. Verifica la información importante.",

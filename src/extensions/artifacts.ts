@@ -27,6 +27,7 @@ const HOW_IT_RUNS =
 	"A mermaid artifact is Mermaid source (flowchart, sequenceDiagram, gantt, mindmap, and so on), for a diagram, drawn for the user; don't wrap it in a code fence. " +
 	"Any artifact but Markdown can use window.pim, whose calls return promises and can fail: " +
 	"pim.storage.get(key), .set(key, text), .delete(key) and .list(prefix) keep text that stays across visits and new versions (up to 1 MB; JSON.stringify anything else); " +
+	"pim.shared has the same calls, for text everyone the user shares the artifact with sees and changes (a family list, scores); it's the user's own when nobody else uses it; " +
 	"pim.ask(prompt) answers with text from Pim's model, which has no tools and sees only the prompt; " +
 	"pim.tools.call(name, input) runs one of the user's app tools that runs without asking, by its tool name, and answers with its result as text. " +
 	"The user is asked once per version before ask or a tool first runs; tools that ask before they run can't be used. Show a message when a call fails. " +

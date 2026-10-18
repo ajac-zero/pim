@@ -896,6 +896,58 @@ describe("artifacts", () => {
 		expect((await new Browser().fetch(`/api/artifacts/${id}/versions/1/frame`)).status).toBe(401);
 	});
 
+	it("are shown to the people of the circles they're shared with, from their own Pim, latest version only, with their own data apart", async () => {
+		const dee = await person("art-dee");
+		const eli = await person("art-eli");
+		const fay = await person("art-fay");
+		const id = await makeArtifact(dee.browser, "<p>Shopping list</p>");
+		const family = (await dee.browser.json("/api/circles", { method: "POST", json: { name: "Family" } })).body;
+		await dee.browser.json(`/api/circles/${family.id}/members`, { method: "POST", json: { username: "art-eli" } });
+		const theirs = (version: number) => `/api/shared-artifacts/art-dee/${id}/versions/${version}`;
+
+		// In the circle, but nothing is shared with it yet.
+		expect((await eli.browser.json("/api/shared-artifacts")).body.artifacts).toEqual([]);
+		expect((await eli.browser.fetch(`${theirs(1)}/frame`)).status).toBe(404);
+		expect((await dee.browser.json(`/api/artifacts/${id}/circles`, { method: "PUT", json: { circles: ["nope"] } })).status).toBe(404);
+		expect((await dee.browser.json(`/api/artifacts/${id}/circles`, { method: "PUT", json: { circles: [family.id] } })).body.circles).toEqual([family.id]);
+
+		const listed = (await eli.browser.json("/api/shared-artifacts")).body.artifacts;
+		expect(listed).toEqual([expect.objectContaining({ id, host: "art-dee", title: "Page", version: 1 })]);
+		expect(listed[0]).not.toHaveProperty("session");
+		const frame = await eli.browser.fetch(`${theirs(1)}/frame`);
+		expect(frame.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
+		expect(await frame.text()).toContain("Shopping list");
+		// Someone not in the circle sees nothing of it.
+		expect((await fay.browser.json("/api/shared-artifacts")).body.artifacts).toEqual([]);
+		expect((await fay.browser.fetch(`${theirs(1)}/frame`)).status).toBe(404);
+
+		// What everyone sees is the owner's; what each keeps is their own.
+		const bridge = (browser: Browser, base: string, op: string, args: unknown) => browser.json(`${base}/bridge`, { method: "POST", json: { op, args } });
+		const mine = `/api/artifacts/${id}/versions/1`;
+		await bridge(dee.browser, mine, "shared.set", { key: "milk", value: "2" });
+		await bridge(dee.browser, mine, "storage.set", { key: "note", value: "Dee's" });
+		expect((await bridge(eli.browser, theirs(1), "shared.get", { key: "milk" })).body).toEqual({ value: "2" });
+		await bridge(eli.browser, theirs(1), "shared.set", { key: "eggs", value: "6" });
+		expect((await bridge(dee.browser, mine, "shared.list", {})).body).toEqual({ value: ["eggs", "milk"] });
+		expect((await bridge(eli.browser, theirs(1), "storage.get", { key: "note" })).body).toEqual({ value: null });
+		await bridge(eli.browser, theirs(1), "storage.set", { key: "note", value: "Eli's" });
+		expect((await bridge(dee.browser, mine, "storage.get", { key: "note" })).body).toEqual({ value: "Dee's" });
+		// The model is the visitor's own, asked of them.
+		expect((await bridge(eli.browser, theirs(1), "model.ask", { prompt: "Hi" })).body).toEqual({ needs: { capability: "model", label: "model" } });
+
+		// A new version replaces the shared one.
+		faux.setResponses([toolUse("artifact_update", { id, base_version: 1, content: "<p>List 2</p>" }), toolUse("send_to_user", { message: "Done." })]);
+		await dee.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Change it", wait: true } });
+		expect((await eli.browser.fetch(`${theirs(1)}/frame`)).status).toBe(404);
+		expect(await (await eli.browser.fetch(`${theirs(2)}/frame`)).text()).toContain("List 2");
+
+		// Taken out of the circle: nothing more, and what they kept for it stays theirs.
+		expect((await dee.browser.fetch(`/api/circles/${family.id}/members/${eli.ownerId}`, { method: "DELETE" })).status).toBe(200);
+		expect((await eli.browser.fetch(`${theirs(2)}/frame`)).status).toBe(404);
+		expect((await eli.browser.json("/api/shared-artifacts")).body.artifacts).toEqual([]);
+		expect((await eli.browser.json("/api/export")).body.othersArtifactData).toEqual([{ artifact: `${dee.ownerId}/${id}`, data: { note: "Eli's" } }]);
+	});
+
 	it("stop showing when the browser signs out, its passkey is removed, the account is suspended, or it is deleted", async () => {
 		const cy = await person("art-cy");
 		const id = await makeArtifact(cy.browser, "<p>Cy's page</p>");

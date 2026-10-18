@@ -24,11 +24,19 @@ import {
   Pencil,
   Printer,
   Trash2,
+  Users,
   X,
 } from "~/components/icons";
 import { SessionLink } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import { CodeBlock } from "~/components/ui/code-block";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "~/components/ui/dropdown-menu";
 import { Input } from "~/components/ui/input";
 import {
   ApiError,
@@ -36,7 +44,11 @@ import {
   artifactDownloadUrl,
   pim,
 } from "~/lib/pim-api";
-import { artifactQuery, artifactVersionQuery } from "~/lib/queries";
+import {
+  artifactQuery,
+  artifactVersionQuery,
+  circlesQuery,
+} from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 export const Route = createFileRoute("/artifacts/$artifactId")({
@@ -266,6 +278,7 @@ function ArtifactPage() {
             >
               <Printer className="size-4" />
             </Button>
+            <ShareMenu artifact={artifact} />
             {isLatest ? (
               <Button
                 size="sm"
@@ -402,6 +415,66 @@ function ArtifactPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+/**
+ * Shares the artifact with your circles, whose people then find its latest
+ * version under Shared with you. Shown once you have a circle.
+ */
+function ShareMenu({ artifact }: { artifact: ArtifactDetail }) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const { data: circles } = useQuery(circlesQuery());
+  const share = useMutation({
+    mutationFn: (shared: string[]) =>
+      pim.setArtifactCircles(artifact.id, shared),
+    onSettled: () =>
+      queryClient.invalidateQueries({ queryKey: ["artifacts", artifact.id] }),
+    onError: (failure) => toast.error(failure.message),
+  });
+  if (!circles?.length) return null;
+  const shared = artifact.circles.filter((id) =>
+    circles.some((circle) => circle.id === id),
+  );
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          size="sm"
+          variant={shared.length ? "secondary" : "outline"}
+          className="h-8"
+        >
+          <Users className="size-3.5" />
+          {t(shared.length ? "artifactShared" : "artifactShare")}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-64">
+        <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
+          {t("artifactShareHint")}
+        </DropdownMenuLabel>
+        {circles.map((circle) => (
+          <DropdownMenuCheckboxItem
+            key={circle.id}
+            checked={shared.includes(circle.id)}
+            disabled={share.isPending}
+            onSelect={(event) => event.preventDefault()}
+            onCheckedChange={(checked) =>
+              share.mutate(
+                checked
+                  ? [...shared, circle.id]
+                  : shared.filter((id) => id !== circle.id),
+              )
+            }
+          >
+            <span className="min-w-0 flex-1 truncate">{circle.name}</span>
+            <span className="text-muted-foreground text-xs">
+              {circle.members.length}
+            </span>
+          </DropdownMenuCheckboxItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

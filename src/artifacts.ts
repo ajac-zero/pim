@@ -132,6 +132,12 @@ CREATE TABLE IF NOT EXISTS pim_artifact_grants (
 	granted_at INTEGER NOT NULL,
 	PRIMARY KEY (artifact, sha256, capability)
 );
+-- The circles an artifact is shared with: their people see its latest version from their own Pim.
+CREATE TABLE IF NOT EXISTS pim_artifact_circles (
+	artifact TEXT NOT NULL,
+	circle TEXT NOT NULL,
+	PRIMARY KEY (artifact, circle)
+);
 CREATE TABLE IF NOT EXISTS pim_artifact_deleted (
 	id TEXT PRIMARY KEY,
 	deleted_at INTEGER NOT NULL
@@ -404,6 +410,7 @@ export class ArtifactStore {
 		this.#sql.exec("DELETE FROM pim_artifact_versions WHERE artifact = ?", id);
 		this.#sql.exec("DELETE FROM pim_artifact_data WHERE artifact = ?", id);
 		this.#sql.exec("DELETE FROM pim_artifact_grants WHERE artifact = ?", id);
+		this.#sql.exec("DELETE FROM pim_artifact_circles WHERE artifact = ?", id);
 		this.#sql.exec("DELETE FROM pim_artifacts WHERE id = ?", id);
 		return true;
 	}
@@ -479,6 +486,47 @@ export class ArtifactStore {
 		);
 	}
 
+	/** The circles the artifact is shared with. */
+	circlesOf(id: string): string[] {
+		return this.#sql
+			.exec("SELECT circle FROM pim_artifact_circles WHERE artifact = ? ORDER BY circle", id)
+			.toArray()
+			.map((row) => String(row.circle));
+	}
+
+	/** Shares the artifact with exactly these circles. */
+	setCircles(id: string, circles: readonly string[]): void {
+		this.#sql.exec("DELETE FROM pim_artifact_circles WHERE artifact = ?", id);
+		for (const circle of new Set(circles)) this.#sql.exec("INSERT INTO pim_artifact_circles (artifact, circle) VALUES (?, ?)", id, circle);
+	}
+
+	/** The artifacts shared with a circle, most recently changed first. */
+	sharedWith(circle: string): ArtifactSummary[] {
+		const ids = new Set(
+			this.#sql
+				.exec("SELECT artifact FROM pim_artifact_circles WHERE circle = ?", circle)
+				.toArray()
+				.map((row) => String(row.artifact)),
+		);
+		return this.list().filter((artifact) => ids.has(artifact.id));
+	}
+
+	/** Forgets a deleted circle's shares. */
+	forgetCircle(circle: string): void {
+		this.#sql.exec("DELETE FROM pim_artifact_circles WHERE circle = ?", circle);
+	}
+
+	/**
+	 * What this person keeps for artifacts that aren't theirs: others' they
+	 * use, shared or published, by the key the bridge kept it under.
+	 */
+	othersData(): { artifact: string; data: Record<string, string> }[] {
+		return this.#sql
+			.exec("SELECT DISTINCT artifact FROM pim_artifact_data WHERE artifact NOT IN (SELECT id FROM pim_artifacts) ORDER BY artifact")
+			.toArray()
+			.map((row) => ({ artifact: String(row.artifact), data: this.data(String(row.artifact), "own") }));
+	}
+
 	/** Whether the person let this version (by its hash) use `capability`. */
 	granted(id: string, sha: string, capability: string): boolean {
 		return this.#sql.exec("SELECT 1 FROM pim_artifact_grants WHERE artifact = ? AND sha256 = ? AND capability = ?", id, sha, capability).toArray().length > 0;
@@ -497,6 +545,8 @@ export class ArtifactStore {
 				.toArray()
 				.map((row) => ({ ...versionInfo(row), content: String(row.content) })),
 			data: this.data(artifact.id, "own"),
+			sharedData: this.data(artifact.id, "shared"),
+			circles: this.circlesOf(artifact.id),
 		}));
 	}
 }
@@ -556,8 +606,9 @@ const escapeHtml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "
  * messages to the app that shows it, which asks Pim and the person (see
  * `ArtifactFrame` in the web app). It answers only messages from that app,
  * the frame's parent. Added before the artifact's own scripts, so they find it.
+ * A page open on its own, with no app around it, gets failed calls.
  */
-export const BRIDGE_SCRIPT = `<script>(()=>{let next=0;const waiting=new Map();addEventListener("message",(event)=>{if(event.source!==parent)return;const data=event.data;if(!data||data.type!=="pim:reply"||!waiting.has(data.id))return;const [resolve,reject]=waiting.get(data.id);waiting.delete(data.id);if(data.error!==undefined)reject(new Error(String(data.error)));else resolve(data.value)});const call=(op,args)=>new Promise((resolve,reject)=>{const id=++next;waiting.set(id,[resolve,reject]);parent.postMessage({type:"pim:call",id,op,args},"*")});window.pim=Object.freeze({storage:Object.freeze({get:(key)=>call("storage.get",{key}),set:(key,value)=>call("storage.set",{key,value}),delete:(key)=>call("storage.delete",{key}),list:(prefix)=>call("storage.list",{prefix})}),ask:(prompt)=>call("model.ask",{prompt}),tools:Object.freeze({call:(name,input)=>call("tools.call",{name,input})})})})()</script>`;
+export const BRIDGE_SCRIPT = `<script>(()=>{let next=0;const waiting=new Map();const alone=parent===window;addEventListener("message",(event)=>{if(event.source!==parent)return;const data=event.data;if(!data||data.type!=="pim:reply"||!waiting.has(data.id))return;const [resolve,reject]=waiting.get(data.id);waiting.delete(data.id);if(data.error!==undefined)reject(new Error(String(data.error)));else resolve(data.value)});const call=(op,args)=>alone?Promise.reject(new Error("Pim isn't here: this page is open on its own.")):new Promise((resolve,reject)=>{const id=++next;waiting.set(id,[resolve,reject]);parent.postMessage({type:"pim:call",id,op,args},"*")});const store=(scope)=>Object.freeze({get:(key)=>call(scope+".get",{key}),set:(key,value)=>call(scope+".set",{key,value}),delete:(key)=>call(scope+".delete",{key}),list:(prefix)=>call(scope+".list",{prefix})});window.pim=Object.freeze({storage:store("storage"),shared:store("shared"),ask:(prompt)=>call("model.ask",{prompt}),tools:Object.freeze({call:(name,input)=>call("tools.call",{name,input})})})})()</script>`;
 
 /**
  * An HTML artifact with the bridge added first: after its doctype, so the

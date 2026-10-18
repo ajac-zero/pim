@@ -19,7 +19,7 @@ import {
 import { type AgentMcpOAuthProvider, Agent as DurableAgent, type Connection, type ConnectionContext, DurableObjectOAuthClientProvider, getAgentByName, type Schedule, type WSMessage } from "agents";
 import { type PiModel, PiHarness, type PiOperationResult, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
-import { ArtifactStore, artifactHeaders, checkContent, checkTitle, downloadName, framePage } from "./artifacts";
+import { type ArtifactSummary, ArtifactStore, artifactHeaders, checkContent, checkTitle, type DataScope, downloadName, framePage } from "./artifacts";
 import { digestHex } from "./auth/store";
 import { Email, type Mailer, mailerFrom } from "./email";
 import { ImageStore, userInput } from "./images";
@@ -1794,6 +1794,71 @@ export class Pim extends DurableAgent<Env> {
 		};
 	}
 
+	/** An artifact shared with a guest's circle, or why they can't see it. */
+	#sharedArtifact(guest: Guest, id: string): { ok: true; artifact: ArtifactSummary } | { ok: false; status: number; reason: string } {
+		const access = this.#guestAccess(guest);
+		if (!access.ok) return { ok: false, status: 403, reason: access.reason };
+		const artifact = this.artifacts.get(id);
+		if (!artifact || !this.artifacts.circlesOf(id).includes(access.circle.id)) return { ok: false, status: 404, reason: `No artifact ${id}` };
+		return { ok: true, artifact };
+	}
+
+	/**
+	 * The artifacts shared with a guest's circle, as their own Pim asks for
+	 * them. Like a tool call, it's checked here every time: who they are,
+	 * that their circle is on, and that the artifact is shared with it.
+	 * Only the latest version is shared, and nothing of the chat it was made in.
+	 */
+	async guestArtifacts(guest: Guest): Promise<{ ok: true; artifacts: Omit<ArtifactSummary, "session">[] } | { ok: false; reason: string }> {
+		const access = this.#guestAccess(guest);
+		if (!access.ok) return access;
+		return { ok: true, artifacts: this.artifacts.sharedWith(access.circle.id).map(({ session: _session, ...artifact }) => artifact) };
+	}
+
+	/** An artifact shared with a guest, as its latest version. */
+	async guestArtifact(
+		guest: Guest,
+		id: string,
+	): Promise<{ ok: true; artifact: Omit<ArtifactSummary, "session">; content: string } | { ok: false; status: number; reason: string }> {
+		const found = this.#sharedArtifact(guest, id);
+		if (!found.ok) return found;
+		const { session: _session, ...artifact } = found.artifact;
+		return { ok: true, artifact, content: this.artifacts.version(id)!.content };
+	}
+
+	/** A guest's call on what an artifact shared with them keeps for everyone using it (`window.pim.shared`). */
+	async guestArtifactShared(
+		guest: Guest,
+		id: string,
+		call: { op: string; args: Record<string, unknown> },
+	): Promise<{ ok: true; value: unknown } | { ok: false; status: number; reason: string }> {
+		const found = this.#sharedArtifact(guest, id);
+		if (!found.ok) return found;
+		try {
+			return { ok: true, value: this.#artifactData(id, "shared", call.op, call.args) };
+		} catch (error) {
+			if (error instanceof HttpError) return { ok: false, status: error.status, reason: error.message };
+			throw error;
+		}
+	}
+
+	/**
+	 * An artifact someone shared with this person, as their Pim answers for
+	 * it now: its latest version, which `version` must still be.
+	 */
+	async #othersArtifact(username: string, id: string, version?: string) {
+		const share = this.visits.byUsername(username);
+		const me = this.#me();
+		if (!share || share.revoked || me === null) throw new HttpError(404, `${username} doesn't share artifacts with you`);
+		const host = await this.#pimOf(share.ownerId);
+		const found = await host.guestArtifact(me, id);
+		if (!found.ok) throw new HttpError(found.status, found.reason);
+		if (version !== undefined && Number(version) !== found.artifact.version) {
+			throw new HttpError(404, `Only the latest version, ${found.artifact.version}, is shared`);
+		}
+		return { share, me, host, artifact: found.artifact, content: found.content, key: `${share.ownerId}/${found.artifact.id}` };
+	}
+
 	/**
 	 * A guest's tool call, from their own space: the hard boundary. The guest's
 	 * circle and the tool's permission are checked here at every call, as
@@ -2581,6 +2646,7 @@ export class Pim extends DurableAgent<Env> {
 			apps: this.apps.servers().map(({ id, name, url, approval }) => ({ id, name, url, approval })),
 			watches: this.appEvents.list(),
 			artifacts: this.artifacts.export().map((artifact) => this.#publicSession(artifact)),
+			othersArtifactData: this.artifacts.othersData(),
 			files: await this.files.export(),
 			skills: this.skills.export(),
 			usage: this.usage.history(90),
@@ -2728,40 +2794,40 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * One call an artifact made through the bridge, as the app relays it.
-	 * Storage is the artifact's own and needs no permission; the model and
-	 * app tools need the person's, given to this version (`needs` asks for it).
+	 * One call an artifact made through the bridge, as the app relays it,
+	 * for the person this Pim is: on their own artifact, or one shared with
+	 * them, which this Pim knows by `key` (its own artifact's id, or
+	 * `<host>/<id>`). What it keeps for them (`storage`) and needs no
+	 * permission is kept here; the model and app tools are theirs too, and
+	 * need their permission, given to this version (`needs` asks for it).
+	 * What everyone using it sees (`shared`) is the artifact owner's,
+	 * reached through `shared`.
 	 */
 	async #artifactBridge(
-		artifact: string,
-		version: { sha256: string },
+		key: string,
+		sha: string,
 		op: unknown,
 		args: Record<string, unknown>,
+		shared: (op: string, args: Record<string, unknown>) => Promise<unknown>,
 	): Promise<{ value: unknown } | { needs: { capability: string; label: string } }> {
+		if (typeof op === "string" && op.startsWith("shared.")) return { value: await shared(op, args) };
 		switch (op) {
 			case "storage.get":
-				return { value: this.artifacts.dataGet(artifact, "own", args.key as string) };
 			case "storage.list":
-				return { value: this.artifacts.dataKeys(artifact, "own", typeof args.prefix === "string" ? args.prefix : "") };
 			case "storage.set":
-				this.#assertOpen();
-				this.artifacts.dataSet(artifact, "own", args.key as string, args.value as string);
-				return { value: null };
 			case "storage.delete":
-				this.#assertOpen();
-				this.artifacts.dataDelete(artifact, "own", args.key as string);
-				return { value: null };
+				return { value: this.#artifactData(key, "own", op, args) };
 			case "model.ask": {
 				const prompt = args.prompt;
 				if (typeof prompt !== "string" || prompt.trim() === "") throw new HttpError(400, "pim.ask needs a prompt");
 				if (prompt.length > 20_000) throw new HttpError(413, "A prompt can be at most 20,000 characters");
-				if (!this.artifacts.granted(artifact, version.sha256, "model")) return { needs: { capability: "model", label: "model" } };
+				if (!this.artifacts.granted(key, sha, "model")) return { needs: { capability: "model", label: "model" } };
 				return { value: await this.utility(ARTIFACT_ASK, prompt) };
 			}
 			case "tools.call": {
 				const { server, tool, label } = this.#artifactTool(args.name);
 				const capability = `tool:${toolName(server.id, tool.name)}`;
-				if (!this.artifacts.granted(artifact, version.sha256, capability)) return { needs: { capability, label } };
+				if (!this.artifacts.granted(key, sha, capability)) return { needs: { capability, label } };
 				const input = args.input ?? {};
 				if (typeof input !== "object" || Array.isArray(input)) throw new HttpError(400, "A tool's input must be an object");
 				this.#assertOpen();
@@ -2772,6 +2838,37 @@ export class Pim extends DurableAgent<Env> {
 			default:
 				throw new HttpError(400, `There is no pim.${String(op)}`);
 		}
+	}
+
+	/** A storage call (`storage.get`, `shared.set`, ...) on what an artifact keeps here, in a scope. */
+	#artifactData(key: string, scope: DataScope, op: string, args: Record<string, unknown>): unknown {
+		switch (op.slice(op.indexOf(".") + 1)) {
+			case "get":
+				return this.artifacts.dataGet(key, scope, args.key as string);
+			case "list":
+				return this.artifacts.dataKeys(key, scope, typeof args.prefix === "string" ? args.prefix : "");
+			case "set":
+				this.#assertOpen();
+				this.artifacts.dataSet(key, scope, args.key as string, args.value as string);
+				return null;
+			case "delete":
+				this.#assertOpen();
+				this.artifacts.dataDelete(key, scope, args.key as string);
+				return null;
+			default:
+				throw new HttpError(400, `There is no pim.${op}`);
+		}
+	}
+
+	/** Lets the person use `capability` from a version of an artifact, by the key this Pim knows it by. */
+	#grantArtifact(key: string, sha: string, capability: unknown): string {
+		if (capability !== "model") {
+			if (typeof capability !== "string" || !capability.startsWith("tool:")) throw new HttpError(400, "capability must be model or tool:<name>");
+			this.#artifactTool(capability.slice("tool:".length));
+		}
+		this.#assertOpen();
+		this.artifacts.grant(key, sha, capability);
+		return capability;
 	}
 
 	#artifactVersion(id: string, version: string) {
@@ -3110,7 +3207,7 @@ export class Pim extends DurableAgent<Env> {
 			({ id }, _request, url) =>
 				this.#artifactRequest(url, () => {
 					const artifact = this.#artifact(id!);
-					return noStore({ ...this.#publicSession(artifact), history: this.artifacts.versions(artifact.id) });
+					return noStore({ ...this.#publicSession(artifact), history: this.artifacts.versions(artifact.id), circles: this.artifacts.circlesOf(artifact.id) });
 				}),
 		],
 		[
@@ -3185,7 +3282,8 @@ export class Pim extends DurableAgent<Env> {
 				this.#artifactRequest(url, async () => {
 					const { artifact, found } = this.#artifactVersion(id!, version!);
 					const { op, args } = await readJson<{ op: string; args: Record<string, unknown> }>(request);
-					return noStore(await this.#artifactBridge(artifact.id, found, op, args && typeof args === "object" ? args : {}));
+					const shared = async (call: string, input: Record<string, unknown>) => this.#artifactData(artifact.id, "shared", call, input);
+					return noStore(await this.#artifactBridge(artifact.id, found.sha256, op, args && typeof args === "object" ? args : {}, shared));
 				}),
 		],
 		[
@@ -3195,13 +3293,95 @@ export class Pim extends DurableAgent<Env> {
 				this.#artifactRequest(url, async () => {
 					const { artifact, found } = this.#artifactVersion(id!, version!);
 					const { capability } = await readJson<{ capability: string }>(request);
-					if (capability !== "model") {
-						if (typeof capability !== "string" || !capability.startsWith("tool:")) throw new HttpError(400, "capability must be model or tool:<name>");
-						this.#artifactTool(capability.slice("tool:".length));
-					}
+					return noStore({ granted: this.#grantArtifact(artifact.id, found.sha256, capability) }, 201);
+				}),
+		],
+		[
+			"PUT",
+			"/artifacts/:id/circles",
+			({ id }, request, url) =>
+				this.#artifactRequest(url, async () => {
+					const artifact = this.#artifact(id!);
+					const { circles } = await readJson<{ circles: string[] }>(request);
+					if (!Array.isArray(circles)) throw new HttpError(400, "circles must be a list of circle ids");
+					for (const circle of circles) this.#circle(String(circle));
 					this.#assertOpen();
-					this.artifacts.grant(artifact.id, found.sha256, capability);
-					return noStore({ granted: capability }, 201);
+					this.artifacts.setCircles(artifact.id, circles.map(String));
+					return noStore({ ...this.artifacts.get(artifact.id), circles: this.artifacts.circlesOf(artifact.id) });
+				}),
+		],
+		// Artifacts others shared with this person, from their Pims, which check each request.
+		[
+			"GET",
+			"/shared-artifacts",
+			(_params, _request, url) =>
+				this.#artifactRequest(url, async () => {
+					const me = this.#me();
+					const shared = [];
+					for (const share of this.visits.shares().filter((candidate) => !candidate.revoked)) {
+						if (me === null) break;
+						try {
+							const found = await (await this.#pimOf(share.ownerId)).guestArtifacts(me);
+							if (found.ok) shared.push(...found.artifacts.map((artifact) => ({ ...artifact, host: share.username })));
+						} catch (error) {
+							console.warn(`listing ${share.username}'s shared artifacts failed`, error);
+						}
+					}
+					return noStore({ artifacts: shared.sort((a, b) => b.updatedAt - a.updatedAt) });
+				}),
+		],
+		[
+			"GET",
+			"/shared-artifacts/:host/:id",
+			({ host, id }, _request, url) =>
+				this.#artifactRequest(url, async () => {
+					const { artifact } = await this.#othersArtifact(host!, id!);
+					return noStore({ ...artifact, host });
+				}),
+		],
+		[
+			"GET",
+			"/shared-artifacts/:host/:id/versions/:version",
+			({ host, id, version }, _request, url) =>
+				this.#artifactRequest(url, async () => {
+					const { artifact, content } = await this.#othersArtifact(host!, id!, version!);
+					return noStore({ id: artifact.id, title: artifact.title, kind: artifact.kind, latest: artifact.version, version: artifact.version, sha256: artifact.sha256, size: artifact.size, content });
+				}),
+		],
+		[
+			"GET",
+			"/shared-artifacts/:host/:id/versions/:version/frame",
+			({ host, id, version }, _request, url) =>
+				this.#artifactRequest(url, async () => {
+					const { artifact, content } = await this.#othersArtifact(host!, id!, version!);
+					return framePage(artifact.kind, content, url.origin);
+				}),
+		],
+		[
+			"POST",
+			"/shared-artifacts/:host/:id/versions/:version/bridge",
+			({ host, id, version }, request, url) =>
+				this.#artifactRequest(url, async () => {
+					const found = await this.#othersArtifact(host!, id!, version!);
+					const { op, args } = await readJson<{ op: string; args: Record<string, unknown> }>(request);
+					const shared = async (call: string, input: Record<string, unknown>) => {
+						const answer = (await found.host.guestArtifactShared(found.me, found.artifact.id, { op: call, args: input })) as
+							| { ok: true; value: unknown }
+							| { ok: false; status: number; reason: string };
+						if (answer.ok) return answer.value;
+						throw new HttpError(answer.status, answer.reason);
+					};
+					return noStore(await this.#artifactBridge(found.key, found.artifact.sha256, op, args && typeof args === "object" ? args : {}, shared));
+				}),
+		],
+		[
+			"POST",
+			"/shared-artifacts/:host/:id/versions/:version/grants",
+			({ host, id, version }, request, url) =>
+				this.#artifactRequest(url, async () => {
+					const found = await this.#othersArtifact(host!, id!, version!);
+					const { capability } = await readJson<{ capability: string }>(request);
+					return noStore({ granted: this.#grantArtifact(found.key, found.artifact.sha256, capability) }, 201);
 				}),
 		],
 		[
@@ -3732,6 +3912,7 @@ export class Pim extends DurableAgent<Env> {
 				this.#circle(circle!);
 				const members = this.circles.deleteCircle(circle!);
 				this.store.clearAudience(circle!);
+				this.artifacts.forgetCircle(circle!);
 				await this.#tellRevoked(members.map((member) => member.ownerId));
 				return { deleted: true };
 			},

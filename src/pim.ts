@@ -2672,12 +2672,12 @@ export class Pim extends DurableAgent<Env> {
 		return info && { ...info, id: this.store.publicId(session) };
 	}
 
-	/** A record as it leaves the Pim: with its session's public id. */
+	/** A record as it leaves the space: with its session's public id. */
 	#publicSession<T extends { readonly session: string | null }>(record: T): T {
 		return record.session === null ? record : { ...record, session: this.store.publicId(record.session) };
 	}
 
-	/** An approval as it leaves the Pim. A guest's conversation is in the guest's own Pim, so it has none here. */
+	/** An approval as it leaves the space. A guest's conversation is in the guest's own space, so it has none here. */
 	#publicApproval(approval: Approval): PublicApproval {
 		return {
 			...approval,

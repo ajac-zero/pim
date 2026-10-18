@@ -729,7 +729,7 @@ export class PimStore {
 	// Sessions: what a sidebar shows. pi owns the conversations; this is their ids, titles and activity.
 
 	/**
-	 * The id a conversation goes by outside the Pim: in the app's addresses,
+	 * The id a conversation goes by outside the space: in the app's addresses,
 	 * the API, links, and what agents read. pi numbers its conversations
 	 * from a counter it shares with everything else it stores, so those
 	 * numbers stay inside; each conversation gets a random id the first time

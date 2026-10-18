@@ -234,6 +234,14 @@ const translations = {
     connecting: "Connecting…",
     copied: "Copied",
     couldNotReachPim: "Couldn't reach Pim",
+    noAddressTitle: "Give this Pim its address",
+    noAddressOpen:
+      "In the Cloudflare dashboard, open this Worker's Settings → Variables and Secrets.",
+    noAddressAdd: "Add",
+    noAddressAddValue: "set to the address people will use, such as",
+    noAddressReload: "Save, then reload this page.",
+    noAddressNote:
+      "Pim answers only at that address, and passkeys belong to it, so choose one you'll keep. A custom domain must be attached to the Worker first.",
     copy: "Copy",
     copyMessage: "Copy message",
     deleteChat: "Delete",
@@ -1008,6 +1016,14 @@ const translations = {
     connecting: "Conectando…",
     copied: "Copiado",
     couldNotReachPim: "No se pudo contactar a Pim",
+    noAddressTitle: "Dale a este Pim su dirección",
+    noAddressOpen:
+      "En el panel de Cloudflare, abre Settings → Variables and Secrets de este Worker.",
+    noAddressAdd: "Añade",
+    noAddressAddValue: "con la dirección que usará la gente, como",
+    noAddressReload: "Guarda y recarga esta página.",
+    noAddressNote:
+      "Pim solo responde en esa dirección y las llaves de acceso le pertenecen, así que elige una que vayas a conservar. Un dominio propio debe estar conectado al Worker antes.",
     copy: "Copiar",
     copyMessage: "Copiar mensaje",
     deleteChat: "Eliminar",

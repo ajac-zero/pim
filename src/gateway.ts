@@ -219,14 +219,15 @@ function serveThemes(request: Request, path: string): Response {
 export async function serve(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 	const { pathname, origin } = new URL(request.url);
 	if (pathname === "/health") return withCors(Response.json({ name: "pim", ok: true }));
+	// The app's look, which the page asking for an address needs too.
+	if (pathname === "/api/themes" || pathname === "/api/themes.css") return withCors(serveThemes(request, pathname.slice("/api".length)));
 
 	// Passkeys, sessions and apps' callbacks all belong to one address, which the deployment sets.
 	const { publicUrl } = deploymentSettings(env);
 	if (!publicUrl) {
-		return fail(
-			503,
-			`This Pim has no address yet. In the Cloudflare dashboard, open this Worker's Settings → Variables and Secrets, and add PIM_PUBLIC_URL, the address people will use, such as ${origin}.`,
-		);
+		// `missing` lets the web app show how to set it.
+		const error = `This Pim has no address yet: add PIM_PUBLIC_URL to the Worker's variables, the address people will use, such as ${origin}.`;
+		return Response.json({ error, missing: "PIM_PUBLIC_URL" }, { status: 503 });
 	}
 	// The web app goes to the address it names; nothing is served at any other.
 	if (origin !== publicUrl) return Response.json({ error: `This Pim is at ${publicUrl}`, url: publicUrl }, { status: 421 });
@@ -274,7 +275,6 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 	if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
 	const path = pathname.slice("/api".length) || "/";
 	if (path === "/health") return withCors(Response.json({ name: "pim", ok: true }));
-	if (path === "/themes" || path === "/themes.css") return withCors(serveThemes(request, path));
 	const caller = await admit(request, env);
 	if (caller instanceof Response) return withCors(caller);
 	const { account, viaSession } = caller;

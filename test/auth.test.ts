@@ -463,6 +463,9 @@ describe("the Pim's address", () => {
 		const unset = await at("").json("/auth/session");
 		expect(unset.status).toBe(503);
 		expect(unset.body.error).toContain(`such as ${ORIGIN}`);
+		// The web app shows how to set it, in the app's own look.
+		expect(unset.body.missing).toBe("PIM_PUBLIC_URL");
+		expect((await at("").fetch("/api/themes.css")).status).toBe(200);
 		expect((await at("pim.test").fetch("/api/sessions")).status).toBe(503);
 		expect((await at("").fetch("/health")).status).toBe(200);
 	});

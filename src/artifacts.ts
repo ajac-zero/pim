@@ -26,8 +26,8 @@ export const FRAMED_KINDS: readonly ArtifactKind[] = ["html", "svg", "mermaid"];
 /** Each kind's file extension, for downloads. */
 const EXTENSIONS: Record<ArtifactKind, string> = { html: "html", markdown: "md", svg: "svg", mermaid: "mmd" };
 
-/** Who made a version: the agent, or the person restoring an older one. */
-export type ArtifactSource = "agent" | "restore";
+/** Who made a version: the agent, the person editing it, or the person restoring an older one. */
+export type ArtifactSource = "agent" | "person" | "restore";
 
 export type ArtifactSummary = {
 	readonly id: string;
@@ -326,7 +326,7 @@ export class ArtifactStore {
 		const latest = this.version(id)!;
 		const now = Date.now();
 		const title = input.title ?? summary.title;
-		if (input.content === latest.content && input.source === "agent") {
+		if (input.content === latest.content && input.source !== "restore") {
 			if (title !== summary.title) this.#sql.exec("UPDATE pim_artifacts SET title = ?, updated_at = ? WHERE id = ?", title, now, id);
 			return { version: latest, changed: false };
 		}

@@ -203,6 +203,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | GET | `/artifacts`, `/artifacts/:id` | | Artifacts, and one with its version history. See [docs/artifacts.md](docs/artifacts.md) |
 | GET | `/artifacts/:id/versions/:v` | | One version with its content |
 | GET | `/artifacts/:id/versions/:v/frame`, `…/download` | | An HTML version as a sandboxed page, or any version as a file |
+| POST | `/artifacts/:id/versions` | `{ baseVersion, content, title? }` | Saves the person's edit as the new latest; `409` if `baseVersion` isn't the latest |
 | POST | `/artifacts/:id/restore` | `{ version, baseVersion }` | Restores a version as the new latest; `409` if `baseVersion` isn't the latest |
 | DELETE | `/artifacts/:id` | | Deletes it with every version |
 | GET | `/files` | `?path=` (default `/workspace`) | `{ path, entries: [{ name, path, type, size, updatedAt }] }`: one folder, folders first |

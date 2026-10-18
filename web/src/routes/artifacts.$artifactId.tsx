@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   ARTIFACT_LANGUAGES,
@@ -9,11 +9,25 @@ import {
   formatBytes,
 } from "~/components/artifact";
 import { useI18n } from "~/components/i18n";
-import { ArrowLeft, Download, History, Trash2 } from "~/components/icons";
+import {
+  ArrowLeft,
+  ArrowUp,
+  Download,
+  History,
+  Pencil,
+  Trash2,
+  X,
+} from "~/components/icons";
 import { SessionLink } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import { CodeBlock } from "~/components/ui/code-block";
-import { ApiError, artifactDownloadUrl, pim } from "~/lib/pim-api";
+import { Input } from "~/components/ui/input";
+import {
+  ApiError,
+  type ArtifactDetail,
+  artifactDownloadUrl,
+  pim,
+} from "~/lib/pim-api";
 import { artifactQuery, artifactVersionQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
@@ -32,6 +46,9 @@ function ArtifactPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [view, setView] = useState<"preview" | "source">("preview");
+  // The source being edited, from the latest version; null when not editing.
+  const [draft, setDraft] = useState<string | null>(null);
+  const preview = useRef<HTMLDivElement>(null);
   const {
     data: artifact,
     error,
@@ -55,7 +72,37 @@ function ArtifactPage() {
   }, [listed, askedFor, wanted, refetch]);
   const source = useQuery({
     ...artifactVersionQuery(artifactId, version ?? 0),
-    enabled: view === "source" && listed === true,
+    enabled: (view === "source" || draft !== null) && listed === true,
+  });
+  // Another version, or another artifact, isn't the one being edited.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new version or artifact ends the edit
+  useEffect(() => {
+    setDraft(null);
+  }, [artifactId, version]);
+
+  const save = useMutation({
+    mutationFn: ({ base, content }: { base: number; content: string }) =>
+      pim.saveArtifact(artifactId, base, content),
+    onSuccess: async (saved) => {
+      setDraft(null);
+      if (!saved.changed) {
+        toast(t("artifactUnchanged"));
+        return;
+      }
+      toast.success(t("artifactSaved", { version: saved.saved }));
+      await queryClient.invalidateQueries({ queryKey: ["artifacts"] });
+      await navigate({
+        to: "/artifacts/$artifactId",
+        params: { artifactId },
+        search: { v: saved.saved },
+      });
+    },
+    onError: (failure) => {
+      toast.error(failure.message);
+      void queryClient.invalidateQueries({
+        queryKey: ["artifacts", artifactId],
+      });
+    },
   });
 
   const restore = useMutation({
@@ -158,7 +205,9 @@ function ArtifactPage() {
                 {t(
                   entry.source === "restore"
                     ? "artifactVersionRestoredOption"
-                    : "artifactVersionOption",
+                    : entry.source === "person"
+                      ? "artifactEditedBy"
+                      : "artifactVersionOption",
                   {
                     version: entry.version,
                     from: entry.restoredFrom ?? 0,
@@ -172,39 +221,79 @@ function ArtifactPage() {
             ))}
           </select>
         </label>
-        <div className="flex rounded-full border p-0.5 text-sm">
-          {(["preview", "source"] as const).map((mode) => (
-            <button
-              key={mode}
-              type="button"
-              aria-pressed={view === mode}
-              onClick={() => setView(mode)}
-              className={cn(
-                "rounded-full px-3 py-1",
-                view === mode && "bg-accent font-medium",
-              )}
+        {draft === null ? (
+          <>
+            <div className="flex rounded-full border p-0.5 text-sm">
+              {(["preview", "source"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={view === mode}
+                  onClick={() => setView(mode)}
+                  className={cn(
+                    "rounded-full px-3 py-1",
+                    view === mode && "bg-accent font-medium",
+                  )}
+                >
+                  {t(mode === "preview" ? "artifactPreview" : "artifactSource")}
+                </button>
+              ))}
+            </div>
+            <Button asChild size="sm" variant="outline" className="h-8">
+              <a href={artifactDownloadUrl(artifactId, version)} download>
+                <Download className="size-3.5" />
+                {t("download")}
+              </a>
+            </Button>
+            {isLatest ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8"
+                disabled={!source.data && source.isFetching}
+                onClick={async () => {
+                  const latest =
+                    source.data ?? (await source.refetch()).data ?? null;
+                  if (latest) setDraft(latest.content);
+                }}
+              >
+                <Pencil className="size-3.5" />
+                {t("artifactEditSource")}
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                className="h-8"
+                disabled={restore.isPending}
+                onClick={() =>
+                  restore.mutate({ from: version, base: artifact.version })
+                }
+              >
+                {t("artifactRestore", { version })}
+              </Button>
+            )}
+          </>
+        ) : (
+          <>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-8"
+              onClick={() => setDraft(null)}
             >
-              {t(mode === "preview" ? "artifactPreview" : "artifactSource")}
-            </button>
-          ))}
-        </div>
-        <Button asChild size="sm" variant="outline" className="h-8">
-          <a href={artifactDownloadUrl(artifactId, version)} download>
-            <Download className="size-3.5" />
-            {t("download")}
-          </a>
-        </Button>
-        {!isLatest && (
-          <Button
-            size="sm"
-            className="h-8"
-            disabled={restore.isPending}
-            onClick={() =>
-              restore.mutate({ from: version, base: artifact.version })
-            }
-          >
-            {t("artifactRestore", { version })}
-          </Button>
+              {t("cancel")}
+            </Button>
+            <Button
+              size="sm"
+              className="h-8"
+              disabled={save.isPending || draft === source.data?.content}
+              onClick={() =>
+                save.mutate({ base: artifact.version, content: draft })
+              }
+            >
+              {t("artifactSaveVersion", { version: artifact.version + 1 })}
+            </Button>
+          </>
         )}
         <Button
           size="icon"
@@ -229,8 +318,16 @@ function ArtifactPage() {
         </Button>
       </header>
       <div className="flex min-h-0 flex-1 flex-col gap-2 p-2 md:p-3">
-        {view === "preview" ? (
-          <div className="min-h-0 flex-1">
+        {draft !== null ? (
+          <textarea
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            aria-label={t("artifactSource")}
+            spellCheck={artifact.kind === "markdown"}
+            className="min-h-0 flex-1 resize-none rounded-lg border bg-background p-3 font-mono text-sm leading-6 outline-none scrollbar-thin focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20"
+          />
+        ) : view === "preview" ? (
+          <div ref={preview} className="min-h-0 flex-1">
             <ArtifactPreview
               id={artifactId}
               version={version}
@@ -253,6 +350,9 @@ function ArtifactPage() {
             )}
           </div>
         )}
+        {isLatest && draft === null && (
+          <AskPim artifact={artifact} preview={preview} />
+        )}
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
           <ArtifactCaution />
           <p className="text-muted-foreground text-xs">
@@ -272,5 +372,128 @@ function ArtifactPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+/** What's selected in an element, as the person last left it there; kept when focus moves elsewhere. */
+function useSelectionIn(
+  container: React.RefObject<HTMLElement | null>,
+  reset: unknown,
+) {
+  const [selected, setSelected] = useState("");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: another version starts with nothing selected
+  useEffect(() => {
+    setSelected("");
+  }, [reset]);
+  useEffect(() => {
+    const onChange = () => {
+      const selection = document.getSelection();
+      const text = selection?.toString().trim() ?? "";
+      if (
+        text &&
+        selection?.anchorNode &&
+        container.current?.contains(selection.anchorNode)
+      ) {
+        setSelected(text.replace(/\s+/g, " ").slice(0, 500));
+      }
+    };
+    document.addEventListener("selectionchange", onChange);
+    return () => document.removeEventListener("selectionchange", onChange);
+  }, [container]);
+  return [selected, setSelected] as const;
+}
+
+/**
+ * Asks the agent to change the artifact, in the chat it was made in (or a
+ * new one, if that chat is gone), about what's selected in a Markdown
+ * artifact if anything is, then opens that chat.
+ */
+function AskPim({
+  artifact,
+  preview,
+}: {
+  artifact: ArtifactDetail;
+  preview: React.RefObject<HTMLDivElement | null>;
+}) {
+  const { t } = useI18n();
+  const navigate = useNavigate();
+  const [request, setRequest] = useState("");
+  const [selected, setSelected] = useSelectionIn(
+    preview,
+    `${artifact.id}:${artifact.version}`,
+  );
+  const ask = useMutation({
+    mutationFn: async (text: string) => {
+      let session = artifact.session;
+      if (session) {
+        try {
+          await pim.send(session, text);
+          return session;
+        } catch (failure) {
+          if (!(failure instanceof ApiError && failure.status === 404)) {
+            throw failure;
+          }
+        }
+      }
+      session = (await pim.createSession()).id;
+      await pim.send(session, text);
+      return session;
+    },
+    onSuccess: (session) =>
+      void navigate({ to: "/chat/$sessionId", params: { sessionId: session } }),
+    onError: (failure) => toast.error(failure.message),
+  });
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const wanted = request.trim();
+    if (!wanted || ask.isPending) return;
+    const message = t("artifactAskMessage", {
+      title: artifact.title,
+      id: artifact.id,
+      version: artifact.version,
+      request: wanted,
+    });
+    ask.mutate(
+      selected
+        ? `${message}\n\n${t("artifactAskAboutMessage", { text: selected })}`
+        : message,
+    );
+  };
+  return (
+    <form onSubmit={submit} className="flex flex-col gap-1.5">
+      {selected && (
+        <span className="flex max-w-full items-center gap-1 self-start rounded-full bg-muted py-0.5 pr-1 pl-3 text-muted-foreground text-xs">
+          <span className="truncate">
+            {t("artifactAskAbout", { text: selected })}
+          </span>
+          <button
+            type="button"
+            aria-label={t("artifactAskClear")}
+            onClick={() => setSelected("")}
+            className="rounded-full p-0.5 hover:bg-accent"
+          >
+            <X className="size-3" />
+          </button>
+        </span>
+      )}
+      <div className="flex items-center gap-2">
+        <Input
+          value={request}
+          onChange={(event) => setRequest(event.target.value)}
+          placeholder={t("artifactAskPlaceholder")}
+          aria-label={t("artifactAskPlaceholder")}
+          maxLength={2000}
+        />
+        <Button
+          type="submit"
+          size="icon"
+          className="size-10 shrink-0 rounded-full"
+          aria-label={t("sendMessage")}
+          disabled={!request.trim() || ask.isPending}
+        >
+          <ArrowUp className="size-4" />
+        </Button>
+      </div>
+    </form>
   );
 }

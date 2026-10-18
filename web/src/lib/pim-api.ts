@@ -1066,6 +1066,20 @@ export const pim = {
       `/artifacts/${encodeURIComponent(id)}/versions`,
       { method: "POST", body: JSON.stringify({ baseVersion, content }) },
     ),
+  /** One call an artifact made through its bridge: its answer, or what the person must allow first. */
+  artifactBridge: (id: string, version: number, op: string, args: unknown) =>
+    call<{ value: unknown } | { needs: { capability: string; label: string } }>(
+      `/artifacts/${encodeURIComponent(id)}/versions/${version}/bridge`,
+      {
+        method: "POST",
+        body: JSON.stringify({ op, args }),
+      },
+    ),
+  grantArtifact: (id: string, version: number, capability: string) =>
+    call<{ granted: string }>(
+      `/artifacts/${encodeURIComponent(id)}/versions/${version}/grants`,
+      { method: "POST", body: JSON.stringify({ capability }) },
+    ),
   deleteArtifact: (id: string) =>
     call<{ deleted: boolean }>(`/artifacts/${encodeURIComponent(id)}`, {
       method: "DELETE",

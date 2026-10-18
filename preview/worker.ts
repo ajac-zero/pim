@@ -61,6 +61,9 @@ const answer: FauxResponseFactory = (context, _options, _state, model) => {
 		if (job.startsWith("You improve")) {
 			return fauxAssistantMessage(`${input}\n\nPlease be specific, and tell me what you need from me to get it right.`);
 		}
+		if (job.startsWith("You answer requests from a small app")) {
+			return fauxAssistantMessage(`The preview model got your request: ${input}`);
+		}
 		const turns = input.split("\n\n").length;
 		return fauxAssistantMessage(
 			`- A preview conversation of ${turns} turns.\n- The preview model can't read it.\n\n## Next steps\n\n- Choose a real utility model to get a real summary.`,

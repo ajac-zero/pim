@@ -504,6 +504,13 @@ const translations = {
     artifactNavigated:
       "This artifact tried to open another page, so Pim stopped showing it. Anything it put in that page's address may have been sent.",
     artifactShowAgain: "Show it again",
+    artifactWantsModel:
+      "“{title}” wants to ask Pim's model. It counts toward your daily use, and what it gets back, it could send elsewhere.",
+    artifactWantsTool:
+      "“{title}” wants to use {tool} for you. What it gets back, it could send elsewhere.",
+    artifactAllow: "Allow",
+    artifactDeny: "Don't allow",
+    artifactDenied: "You didn't allow it.",
     artifactPrint: "Print or save as PDF",
     artifactEditSource: "Edit",
     artifactSaveVersion: "Save as version {version}",
@@ -1325,6 +1332,13 @@ const translations = {
     artifactNavigated:
       "Este artefacto intentó abrir otra página, así que Pim dejó de mostrarlo. Lo que pusiera en la dirección de esa página puede haberse enviado.",
     artifactShowAgain: "Mostrarlo de nuevo",
+    artifactWantsModel:
+      "“{title}” quiere preguntarle al modelo de Pim. Cuenta para tu uso diario, y lo que reciba podría enviarlo a otro sitio.",
+    artifactWantsTool:
+      "“{title}” quiere usar {tool} por ti. Lo que reciba podría enviarlo a otro sitio.",
+    artifactAllow: "Permitir",
+    artifactDeny: "No permitir",
+    artifactDenied: "No lo permitiste.",
     artifactPrint: "Imprimir o guardar como PDF",
     artifactEditSource: "Editar",
     artifactSaveVersion: "Guardar como versión {version}",

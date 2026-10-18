@@ -54,6 +54,16 @@ export const SUMMARIZE_CHAT: UtilityTask = {
 	maxTokens: 800,
 };
 
+/** A request from an artifact the person is using (`window.pim.ask`): answered as asked, for the page to show or use. */
+export const ARTIFACT_ASK: UtilityTask = {
+	instructions: [
+		"You answer requests from a small app (an artifact) that a person's AI assistant made for them, which they are using now.",
+		"Do what the request asks and reply with only that, in the format it asks for, with no preamble.",
+		"You can't use tools or see anything but the request.",
+	].join(" "),
+	maxTokens: 2048,
+};
+
 /**
  * A conversation as the utility model reads it: what the person said and
  * what their agent sent them, one turn after another. Events Pim delivers

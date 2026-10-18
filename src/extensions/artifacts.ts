@@ -25,6 +25,11 @@ const HOW_IT_RUNS =
 	"Markdown artifacts are documents; images and raw HTML in them aren't rendered. " +
 	"An svg artifact is one <svg> element, for a drawing, a logo or an illustration. " +
 	"A mermaid artifact is Mermaid source (flowchart, sequenceDiagram, gantt, mindmap, and so on), for a diagram, drawn for the user; don't wrap it in a code fence. " +
+	"Any artifact but Markdown can use window.pim, whose calls return promises and can fail: " +
+	"pim.storage.get(key), .set(key, text), .delete(key) and .list(prefix) keep text that stays across visits and new versions (up to 1 MB; JSON.stringify anything else); " +
+	"pim.ask(prompt) answers with text from Pim's model, which has no tools and sees only the prompt; " +
+	"pim.tools.call(name, input) runs one of the user's app tools that runs without asking, by its tool name, and answers with its result as text. " +
+	"The user is asked once per version before ask or a tool first runs; tools that ask before they run can't be used. Show a message when a call fails. " +
 	`A jsx artifact is one React component, for an interactive app or a dashboard: \`export default function App() { ... }\`, with hooks from "react". It may import only ${JSX_MODULES.map((name) => `"${name}"`).join(", ")} (charts and icons), and is styled with Tailwind classes. It's compiled when you save it: a compile error comes back to you to fix.`;
 
 /** A tool's answer about a version: a reference the app shows as the artifact, never its content. */

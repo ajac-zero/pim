@@ -22,6 +22,7 @@ import {
   type ArtifactReference,
   artifactDownloadUrl,
   artifactFrameUrl,
+  pim,
 } from "~/lib/pim-api";
 import { artifactQuery, artifactVersionQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -32,13 +33,78 @@ const MIN_HEIGHT = 80;
 /** At most this many height messages a second are taken; a page that sends more is left as it is. */
 const MAX_MESSAGES_PER_SECOND = 20;
 
+/** A call the page makes through its bridge (`window.pim`), and the answer it's sent. */
+const CALL_MESSAGE = "pim:call";
+const REPLY_MESSAGE = "pim:reply";
+/** At most this many bridge calls a second are taken; more are dropped, unanswered. */
+const MAX_CALLS_PER_SECOND = 20;
+
+type Needs = { capability: string; label: string };
+type Asking = Needs & { answer: (allowed: boolean) => void };
+
+/**
+ * The app's side of an artifact's bridge. The page's calls go to Pim as
+ * this version's; what needs the person's permission (the model, an app's
+ * tool) is asked here first, once per thing per version: Pim keeps the
+ * answer when it's yes, and this frame remembers a no until it's reloaded.
+ */
+function useBridge(id: string, version: number) {
+  const [asking, setAsking] = useState<Asking[]>([]);
+  const answers = useRef(new Map<string, Promise<boolean>>());
+  // biome-ignore lint/correctness/useExhaustiveDependencies: another version asks anew
+  useEffect(() => {
+    answers.current = new Map();
+    setAsking([]);
+  }, [id, version]);
+
+  const ask = (needs: Needs) => {
+    let answer = answers.current.get(needs.capability);
+    if (!answer) {
+      answer = new Promise<boolean>((resolve) =>
+        setAsking((queue) => [
+          ...queue,
+          {
+            ...needs,
+            answer: (allowed) => {
+              setAsking((rest) =>
+                rest.filter((item) => item.capability !== needs.capability),
+              );
+              // A yes is kept by Pim; asking again after a yes only happens on a new version.
+              if (allowed) answers.current.delete(needs.capability);
+              resolve(allowed);
+            },
+          },
+        ]),
+      );
+      answers.current.set(needs.capability, answer);
+    }
+    return answer;
+  };
+
+  const call = async (op: string, args: unknown): Promise<unknown> => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const answer = await pim.artifactBridge(id, version, op, args);
+      if ("value" in answer) return answer.value;
+      if (!(await ask(answer.needs))) {
+        throw new Error("The person didn't allow it.");
+      }
+      await pim.grantArtifact(id, version, answer.needs.capability);
+    }
+    throw new Error("The person didn't allow it.");
+  };
+
+  return { call, asking: asking[0] ?? null };
+}
+
 /**
  * An HTML artifact's version, in a sandboxed frame. The page it loads gets an
  * opaque origin from its own response (and from `sandbox`, again here): it
- * can't reach this app's cookies, storage or API. The frame only listens for
- * the page's height, from this frame and no other window, and sends it
- * nothing. If the page navigates itself away, it's taken down: that's how an
- * artifact could send what it shows, or what someone typed, elsewhere.
+ * can't reach this app's cookies, storage or API. The frame listens only to
+ * this frame's window: for the page's height, and for calls through its
+ * bridge, which it makes to Pim for the page (asking the person when they
+ * must allow something) and answers. If the page navigates itself away, it's
+ * taken down: that's how an artifact could send what it shows, or what
+ * someone typed, elsewhere.
  */
 export function ArtifactFrame({
   id,
@@ -68,6 +134,13 @@ export function ArtifactFrame({
   // Loads of the frame now shown; a new version or a retry starts again.
   const loads = useRef({ key: "", count: 0 });
   const key = `${id}:${version}:${attempt}`;
+  const bridge = useBridge(id, version);
+  // The bridge as it is now, for the listener, which stays the same.
+  const call = useRef(bridge.call);
+  call.current = bridge.call;
+  // The page now shown; a call is answered only while it still is.
+  const shownKey = useRef(key);
+  shownKey.current = key;
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new version is a new page, not one that left
   useEffect(() => {
     setLeft(false);
@@ -76,9 +149,50 @@ export function ArtifactFrame({
   useEffect(() => {
     let windowStart = 0;
     let count = 0;
+    let callStart = 0;
+    let calls = 0;
     const onMessage = (event: MessageEvent) => {
       // The origin of a sandboxed page is "null" whoever sent it: only the source tells.
       if (!frame.current || event.source !== frame.current.contentWindow) {
+        return;
+      }
+      const page = event.source as Window;
+      const message = event.data as {
+        type?: unknown;
+        id?: unknown;
+        op?: unknown;
+        args?: unknown;
+      } | null;
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        message.type === CALL_MESSAGE &&
+        typeof message.id === "number" &&
+        typeof message.op === "string"
+      ) {
+        const now = Date.now();
+        if (now - callStart > 1000) {
+          callStart = now;
+          calls = 0;
+        }
+        if (++calls > MAX_CALLS_PER_SECOND) return;
+        const shown = shownKey.current;
+        const reply = (body: { value: unknown } | { error: string }) => {
+          // Only to the page that asked: not one it navigated to since, nor after a retry or a new version.
+          const left = loads.current.key === shown && loads.current.count > 1;
+          if (shownKey.current !== shown || left) return;
+          page.postMessage(
+            { type: REPLY_MESSAGE, id: message.id, ...body },
+            "*",
+          );
+        };
+        call.current(message.op, message.args ?? {}).then(
+          (value) => reply({ value }),
+          (failure: unknown) =>
+            reply({
+              error: failure instanceof Error ? failure.message : "failed",
+            }),
+        );
         return;
       }
       const data = event.data as { type?: unknown; height?: unknown } | null;
@@ -131,28 +245,56 @@ export function ArtifactFrame({
   }
 
   return (
-    <iframe
-      key={key}
-      ref={frame}
-      title={title}
-      src={artifactFrameUrl(id, version)}
-      sandbox="allow-scripts"
-      referrerPolicy="no-referrer"
-      loading={eager ? "eager" : "lazy"}
-      onLoad={() => {
-        // The first load is the artifact; another is the page navigating itself somewhere.
-        if (loads.current.key !== key) loads.current = { key, count: 0 };
-        loads.current.count += 1;
-        if (loads.current.count > 1) setLeft(true);
-      }}
-      className={cn(
-        "block w-full rounded-lg border bg-white",
-        fill && "h-full",
-        className,
+    <div className={cn("relative", fill && "h-full")}>
+      {bridge.asking && (
+        <div
+          role="alertdialog"
+          aria-label={title}
+          className="absolute inset-x-2 top-2 z-10 flex flex-wrap items-center gap-3 rounded-xl border bg-background p-3 text-sm shadow-lg"
+        >
+          <ShieldAlert className="size-4 shrink-0 text-muted-foreground" />
+          <p className="min-w-0 flex-1">
+            {bridge.asking.capability === "model"
+              ? t("artifactWantsModel", { title })
+              : t("artifactWantsTool", { title, tool: bridge.asking.label })}
+          </p>
+          <div className="flex shrink-0 gap-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => bridge.asking?.answer(false)}
+            >
+              {t("artifactDeny")}
+            </Button>
+            <Button size="sm" onClick={() => bridge.asking?.answer(true)}>
+              {t("artifactAllow")}
+            </Button>
+          </div>
+        </div>
       )}
-      // The page's height, plus the frame's border.
-      style={fill ? undefined : { height: Math.min(height + 2, maxHeight) }}
-    />
+      <iframe
+        key={key}
+        ref={frame}
+        title={title}
+        src={artifactFrameUrl(id, version)}
+        sandbox="allow-scripts"
+        referrerPolicy="no-referrer"
+        loading={eager ? "eager" : "lazy"}
+        onLoad={() => {
+          // The first load is the artifact; another is the page navigating itself somewhere.
+          if (loads.current.key !== key) loads.current = { key, count: 0 };
+          loads.current.count += 1;
+          if (loads.current.count > 1) setLeft(true);
+        }}
+        className={cn(
+          "block w-full rounded-lg border bg-white",
+          fill && "h-full",
+          className,
+        )}
+        // The page's height, plus the frame's border.
+        style={fill ? undefined : { height: Math.min(height + 2, maxHeight) }}
+      />
+    </div>
   );
 }
 

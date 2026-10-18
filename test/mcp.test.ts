@@ -293,6 +293,30 @@ describe("connected apps (MCP)", () => {
 		await api("/permissions", { method: "PUT", body: JSON.stringify({ app: "calendar", tool: "create_event", permission: null }) });
 	});
 
+	it("lets an artifact call a tool that runs without asking, once the person allows its version", async () => {
+		faux.setResponses([toolUse("artifact_create", { title: "My day", kind: "html", content: "<p>Day</p>" }), toolUse("send_to_user", { message: "Made." })]);
+		await say("Make a page for my day.");
+		const { id } = (await api("/artifacts")).body.artifacts.find((artifact: { title: string }) => artifact.title === "My day");
+		const bridge = (version: number, op: string, args: unknown) => post(`/artifacts/${id}/versions/${version}/bridge`, { op, args });
+		const find = { name: "calendar_find_events", input: { day: "monday" } };
+
+		// Not yet allowed: the app is told what to ask the person, and nothing runs.
+		expect((await bridge(1, "tools.call", find)).body).toEqual({ needs: { capability: "tool:calendar_find_events", label: "Calendar: find_events" } });
+		expect((await post(`/artifacts/${id}/versions/1/grants`, { capability: "tool:calendar_find_events" })).status).toBe(201);
+		expect((await bridge(1, "tools.call", find)).body).toEqual({ value: "Events on monday: dentist at 9." });
+
+		// A tool that asks before it runs can't be allowed or called from an artifact.
+		const before = created.length;
+		expect((await post(`/artifacts/${id}/versions/1/grants`, { capability: "tool:calendar_create_event" })).status).toBe(403);
+		expect((await bridge(1, "tools.call", { name: "calendar_create_event", input: { title: "X", day: "friday" } })).status).toBe(403);
+		expect(created).toHaveLength(before);
+
+		// A new version is new code: it asks again.
+		faux.setResponses([toolUse("artifact_update", { id, base_version: 1, content: "<p>Day 2</p>" }), toolUse("send_to_user", { message: "Changed." })]);
+		await say("Change it.");
+		expect((await bridge(2, "tools.call", find)).body).toMatchObject({ needs: { capability: "tool:calendar_find_events" } });
+	});
+
 	it("adds a new app's tools without re-sending the prompt sent so far", async () => {
 		await majordomoApps(["test.ledger/calendar", "test.ledger/notes"]);
 		const session = (await post("/sessions")).body.id;

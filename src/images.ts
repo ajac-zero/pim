@@ -255,7 +255,11 @@ export class ImageStore {
 		}
 	}
 
-	/** Deletes every image under the owner's prefix, including any a lost write left unrecorded. */
+	/**
+	 * Deletes everything under the owner's prefix: every image, including any
+	 * a lost write left unrecorded, and the space's stored files (see ./files.ts),
+	 * which share it.
+	 */
 	async deleteAll(): Promise<void> {
 		let cursor: string | undefined;
 		do {
@@ -266,7 +270,7 @@ export class ImageStore {
 		this.#sql.exec("DELETE FROM pim_images");
 	}
 
-	/** Whether any image is left in R2 under the owner's prefix. */
+	/** Whether any image or stored file is left in R2 under the owner's prefix. */
 	async any(): Promise<boolean> {
 		return (await this.#bucket.list({ prefix: `${this.#owner()}/`, limit: 1 })).objects.length > 0;
 	}

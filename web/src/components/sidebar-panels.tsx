@@ -293,6 +293,11 @@ export function ArtifactsPanel({ onNavigate }: { onNavigate?: () => void }) {
   const { t, formatDate } = useI18n();
   const { data } = useQuery(artifactsQuery());
   const { data: shared } = useQuery(sharedArtifactsQuery());
+  const { data: sessions } = useQuery(sessionsQuery());
+  const openArtifact = useSearch({
+    strict: false,
+    select: (search: { artifact?: string }) => search.artifact,
+  });
   return (
     <>
       <SidebarPanelHeader title={t("artifacts")} />
@@ -302,17 +307,9 @@ export function ArtifactsPanel({ onNavigate }: { onNavigate?: () => void }) {
           data?.artifacts.length === 0 && !shared?.length && t("noArtifacts")
         }
       >
-        {data?.artifacts.map((artifact) => (
-          <li key={artifact.id}>
-            <Link
-              to="/artifacts/$artifactId"
-              params={{ artifactId: artifact.id }}
-              search={{ v: artifact.version }}
-              onClick={onNavigate}
-              className={ROW_CLASS}
-              activeOptions={{ includeSearch: false }}
-              activeProps={{ className: "bg-sidebar-accent" }}
-            >
+        {data?.artifacts.map((artifact) => {
+          const row = (
+            <>
               <ArtifactIcon kind={artifact.kind} className={ROW_ICON_CLASS} />
               <RowText
                 title={artifact.title}
@@ -321,9 +318,45 @@ export function ArtifactsPanel({ onNavigate }: { onNavigate?: () => void }) {
                   { dateStyle: "medium" },
                 )}`}
               />
-            </Link>
-          </li>
-        ))}
+            </>
+          );
+          // An artifact opens beside the chat it was made in, while that chat is there.
+          const chat = sessions?.some(
+            (session) => session.id === artifact.session,
+          )
+            ? artifact.session
+            : null;
+          return (
+            <li key={artifact.id}>
+              {chat ? (
+                <Link
+                  to="/chat/$sessionId"
+                  params={{ sessionId: chat }}
+                  search={{ artifact: artifact.id }}
+                  onClick={onNavigate}
+                  className={cn(
+                    ROW_CLASS,
+                    openArtifact === artifact.id && "bg-sidebar-accent",
+                  )}
+                >
+                  {row}
+                </Link>
+              ) : (
+                <Link
+                  to="/artifacts/$artifactId"
+                  params={{ artifactId: artifact.id }}
+                  search={{ v: artifact.version }}
+                  onClick={onNavigate}
+                  className={ROW_CLASS}
+                  activeOptions={{ includeSearch: false }}
+                  activeProps={{ className: "bg-sidebar-accent" }}
+                >
+                  {row}
+                </Link>
+              )}
+            </li>
+          );
+        })}
         {shared && shared.length > 0 && (
           <li className="pt-3">
             <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">

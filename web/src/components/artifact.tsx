@@ -1,16 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import {
   Code,
-  Download,
   FileCode2,
   FileText,
   ImageIcon,
-  Maximize2,
   ShieldAlert,
   Workflow,
 } from "~/components/icons";
@@ -21,7 +19,6 @@ import {
   type ArtifactFrom,
   type ArtifactKind,
   type ArtifactReference,
-  artifactDownloadUrl,
   artifactFrameUrl,
   pim,
 } from "~/lib/pim-api";
@@ -461,66 +458,74 @@ export const ARTIFACT_LANGUAGES = {
 } as const satisfies Record<ArtifactKind, string>;
 
 /**
- * An artifact version the agent made in a chat: its title and version, a
- * preview, and ways to open or download it. The version stays the one this
- * call made, so a chat shows how the artifact changed.
+ * An artifact version the agent made in a chat, as a block that opens it in
+ * the canvas beside the chat. The version stays the one this call made, so
+ * a chat shows how the artifact changed. One made while the person watches
+ * (`live`) opens by itself.
  */
-export function ArtifactCard({ reference }: { reference: ArtifactReference }) {
+export function ArtifactCard({
+  reference,
+  sessionId,
+  live = false,
+}: {
+  reference: ArtifactReference;
+  sessionId: string;
+  live?: boolean;
+}) {
   const { t } = useI18n();
+  const navigate = useNavigate();
   const { data, error } = useQuery(artifactQuery(reference.id));
+  // The canvas shows the latest version when it names none.
+  const open = useSearch({
+    strict: false,
+    select: (search: { artifact?: string; v?: number }) =>
+      search.artifact === reference.id &&
+      (search.v ?? data?.version) === reference.version,
+  });
   const deleted = error instanceof ApiError && error.status === 404;
-  return (
-    <div className="mb-4 w-full overflow-hidden rounded-2xl border bg-background">
-      <div className="flex items-center gap-3 border-b px-4 py-3">
-        <ArtifactIcon
-          kind={reference.kind}
-          className="size-10 shrink-0 rounded-lg bg-muted p-2.5 text-muted-foreground"
-        />
-        <span className="min-w-0 flex-1 truncate font-medium text-sm">
+  const opened = useRef(false);
+  useEffect(() => {
+    if (!live || deleted || opened.current) return;
+    opened.current = true;
+    void navigate({
+      to: "/chat/$sessionId",
+      params: { sessionId },
+      search: { artifact: reference.id, v: reference.version },
+    });
+  }, [live, deleted, navigate, sessionId, reference.id, reference.version]);
+  const body = (
+    <>
+      <ArtifactIcon
+        kind={reference.kind}
+        className="size-10 shrink-0 rounded-lg bg-muted p-2.5 text-muted-foreground"
+      />
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate font-medium text-sm">
           {data?.title ?? reference.title}
         </span>
-        <span className="shrink-0 text-muted-foreground text-xs">
-          {t("artifactVersion", { version: reference.version })}
+        <span className="truncate text-muted-foreground text-xs">
+          {deleted
+            ? t("artifactDeleted")
+            : `${ARTIFACT_KIND_NAMES[reference.kind]} · ${t("artifactVersion", { version: reference.version })}`}
         </span>
-        {!deleted && (
-          <>
-            <Button asChild size="icon" variant="ghost" className="size-8">
-              <a
-                href={artifactDownloadUrl(reference.id, reference.version)}
-                download
-                aria-label={t("download")}
-              >
-                <Download className="size-4" />
-              </a>
-            </Button>
-            <Button asChild size="sm" variant="outline" className="h-8">
-              <Link
-                to="/artifacts/$artifactId"
-                params={{ artifactId: reference.id }}
-                search={{ v: reference.version }}
-              >
-                <Maximize2 className="size-3.5" />
-                {t("open")}
-              </Link>
-            </Button>
-          </>
-        )}
-      </div>
-      <div className="p-3">
-        {deleted ? (
-          <p className="text-muted-foreground text-sm">
-            {t("artifactDeleted")}
-          </p>
-        ) : (
-          <ArtifactPreview
-            id={reference.id}
-            version={reference.version}
-            kind={reference.kind}
-            title={reference.title}
-          />
-        )}
-      </div>
-    </div>
+      </span>
+    </>
+  );
+  const className = cn(
+    "mb-4 flex w-full max-w-sm items-center gap-3 rounded-2xl border bg-background px-3 py-2.5 text-left",
+    open && "border-ring/60 bg-muted/60",
+  );
+  if (deleted) return <div className={className}>{body}</div>;
+  return (
+    <Link
+      to="/chat/$sessionId"
+      params={{ sessionId }}
+      search={{ artifact: reference.id, v: reference.version }}
+      aria-current={open || undefined}
+      className={cn(className, "transition-colors hover:bg-muted/60")}
+    >
+      {body}
+    </Link>
   );
 }
 

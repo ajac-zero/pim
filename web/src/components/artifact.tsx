@@ -48,7 +48,7 @@ type Asking = Needs & { answer: (allowed: boolean) => void };
  * tool) is asked here first, once per thing per version: Pim keeps the
  * answer when it's yes, and this frame remembers a no until it's reloaded.
  */
-function useBridge(id: string, version: number) {
+function useBridge(id: string, version: number, host?: string) {
   const [asking, setAsking] = useState<Asking[]>([]);
   const answers = useRef(new Map<string, Promise<boolean>>());
   // biome-ignore lint/correctness/useExhaustiveDependencies: another version asks anew
@@ -83,12 +83,12 @@ function useBridge(id: string, version: number) {
 
   const call = async (op: string, args: unknown): Promise<unknown> => {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const answer = await pim.artifactBridge(id, version, op, args);
+      const answer = await pim.artifactBridge(id, version, op, args, host);
       if ("value" in answer) return answer.value;
       if (!(await ask(answer.needs))) {
         throw new Error("The person didn't allow it.");
       }
-      await pim.grantArtifact(id, version, answer.needs.capability);
+      await pim.grantArtifact(id, version, answer.needs.capability, host);
     }
     throw new Error("The person didn't allow it.");
   };
@@ -114,10 +114,13 @@ export function ArtifactFrame({
   fill = false,
   className,
   eager = false,
+  host,
 }: {
   id: string;
   version: number;
   title: string;
+  /** Whose it is, when someone shared it with you: their username. */
+  host?: string;
   /** The tallest it grows to its page's height; ignored when `fill`. */
   maxHeight?: number;
   /** Fills its container instead of following its page's height. */
@@ -134,7 +137,7 @@ export function ArtifactFrame({
   // Loads of the frame now shown; a new version or a retry starts again.
   const loads = useRef({ key: "", count: 0 });
   const key = `${id}:${version}:${attempt}`;
-  const bridge = useBridge(id, version);
+  const bridge = useBridge(id, version, host);
   // The bridge as it is now, for the listener, which stays the same.
   const call = useRef(bridge.call);
   call.current = bridge.call;
@@ -276,7 +279,7 @@ export function ArtifactFrame({
         key={key}
         ref={frame}
         title={title}
-        src={artifactFrameUrl(id, version)}
+        src={artifactFrameUrl(id, version, host)}
         sandbox="allow-scripts"
         referrerPolicy="no-referrer"
         loading={eager ? "eager" : "lazy"}
@@ -307,6 +310,7 @@ export function ArtifactPreview({
   fill,
   maxHeight,
   eager,
+  host,
 }: {
   id: string;
   version: number;
@@ -315,6 +319,8 @@ export function ArtifactPreview({
   fill?: boolean;
   maxHeight?: number;
   eager?: boolean;
+  /** Whose it is, when someone shared it with you: their username. */
+  host?: string;
 }) {
   if (kind !== "markdown") {
     return (
@@ -325,6 +331,7 @@ export function ArtifactPreview({
         fill={fill}
         maxHeight={maxHeight}
         eager={eager}
+        host={host}
       />
     );
   }
@@ -334,6 +341,7 @@ export function ArtifactPreview({
       version={version}
       fill={fill}
       maxHeight={maxHeight}
+      host={host}
     />
   );
 }
@@ -343,14 +351,16 @@ function MarkdownArtifact({
   version,
   fill,
   maxHeight = 360,
+  host,
 }: {
   id: string;
   version: number;
   fill?: boolean;
   maxHeight?: number;
+  host?: string;
 }) {
   const { t } = useI18n();
-  const { data, error } = useQuery(artifactVersionQuery(id, version));
+  const { data, error } = useQuery(artifactVersionQuery(id, version, host));
   if (error) {
     return <p className="text-muted-foreground text-sm">{error.message}</p>;
   }
@@ -381,12 +391,14 @@ export function ArtifactPrint({
   kind,
   title,
   onDone,
+  host,
 }: {
   id: string;
   version: number;
   kind: ArtifactKind;
   title: string;
   onDone: () => void;
+  host?: string;
 }) {
   useEffect(() => {
     window.addEventListener("afterprint", onDone);
@@ -405,6 +417,7 @@ export function ArtifactPrint({
         title={title}
         maxHeight={100_000}
         eager
+        host={host}
       />
     </div>,
     document.body,

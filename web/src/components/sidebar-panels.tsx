@@ -54,6 +54,7 @@ import {
   notificationsQuery,
   schedulesQuery,
   sessionsQuery,
+  sharedArtifactsQuery,
   skillsQuery,
 } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -291,12 +292,15 @@ function NotificationRow({
 export function ArtifactsPanel({ onNavigate }: { onNavigate?: () => void }) {
   const { t, formatDate } = useI18n();
   const { data } = useQuery(artifactsQuery());
+  const { data: shared } = useQuery(sharedArtifactsQuery());
   return (
     <>
       <SidebarPanelHeader title={t("artifacts")} />
       <PanelList
         label={t("artifacts")}
-        empty={data?.artifacts.length === 0 && t("noArtifacts")}
+        empty={
+          data?.artifacts.length === 0 && !shared?.length && t("noArtifacts")
+        }
       >
         {data?.artifacts.map((artifact) => (
           <li key={artifact.id}>
@@ -320,6 +324,35 @@ export function ArtifactsPanel({ onNavigate }: { onNavigate?: () => void }) {
             </Link>
           </li>
         ))}
+        {shared && shared.length > 0 && (
+          <li className="pt-3">
+            <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
+              {t("sharedWithYou")}
+            </div>
+            <ul className="space-y-px" aria-label={t("sharedWithYou")}>
+              {shared.map((artifact) => (
+                <li key={`${artifact.host}/${artifact.id}`}>
+                  <Link
+                    to="/artifacts/shared/$host/$artifactId"
+                    params={{ host: artifact.host, artifactId: artifact.id }}
+                    onClick={onNavigate}
+                    className={ROW_CLASS}
+                    activeProps={{ className: "bg-sidebar-accent" }}
+                  >
+                    <ArtifactIcon
+                      kind={artifact.kind}
+                      className={ROW_ICON_CLASS}
+                    />
+                    <RowText
+                      title={artifact.title}
+                      meta={`${ARTIFACT_KIND_NAMES[artifact.kind]} · ${t("sharedBy", { host: artifact.host })}`}
+                    />
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </li>
+        )}
       </PanelList>
     </>
   );

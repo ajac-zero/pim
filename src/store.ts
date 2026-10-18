@@ -403,6 +403,7 @@ export class PimStore {
 			pim_artifact_deleted: "deleted artifact ids",
 			pim_artifact_data: "what artifacts keep",
 			pim_artifact_grants: "what artifacts may use",
+			pim_artifact_circles: "artifacts' circles",
 			pi_entries: "conversations",
 		};
 		const existing = new Set(

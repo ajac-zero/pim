@@ -69,10 +69,30 @@ export const artifactQuery = (id: string) =>
     retry: false,
   });
 
-export const artifactVersionQuery = (id: string, version: number) =>
+export const artifactVersionQuery = (
+  id: string,
+  version: number,
+  host?: string,
+) =>
   queryOptions({
-    queryKey: ["artifacts", id, "versions", version],
-    queryFn: () => pim.artifactVersion(id, version),
+    queryKey: host
+      ? ["shared-artifacts", host, id, "versions", version]
+      : ["artifacts", id, "versions", version],
+    queryFn: () => pim.artifactVersion(id, version, host),
+    retry: false,
+  });
+
+/** Artifacts people shared with you, from their Pims. */
+export const sharedArtifactsQuery = () =>
+  queryOptions({
+    queryKey: ["shared-artifacts"],
+    queryFn: () => pim.sharedArtifacts().then((body) => body.artifacts),
+  });
+
+export const sharedArtifactQuery = (host: string, id: string) =>
+  queryOptions({
+    queryKey: ["shared-artifacts", host, id],
+    queryFn: () => pim.sharedArtifact(host, id),
     retry: false,
   });
 

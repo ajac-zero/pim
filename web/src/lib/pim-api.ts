@@ -479,7 +479,17 @@ export type ArtifactVersionInfo = {
   createdAt: number;
 };
 
-export type ArtifactDetail = Artifact & { history: ArtifactVersionInfo[] };
+export type ArtifactDetail = Artifact & {
+  history: ArtifactVersionInfo[];
+  /** The circles it's shared with, whose people see its latest version. */
+  circles: string[];
+};
+
+/** An artifact someone shared with you: its latest version, from their Pim. */
+export type SharedArtifact = Omit<Artifact, "session"> & {
+  /** Whose it is: their username. */
+  host: string;
+};
 
 export type ArtifactVersion = ArtifactVersionInfo & {
   id: string;
@@ -530,12 +540,18 @@ export type ArtifactReference = {
   size: number;
 };
 
-const artifactPath = (id: string, version: number) =>
-  `/api/artifacts/${encodeURIComponent(id)}/versions/${version}`;
+/** Where an artifact is in the API: one of yours, or one `host` (their username) shared with you. */
+const artifactRoot = (id: string, host?: string) =>
+  host
+    ? `/shared-artifacts/${encodeURIComponent(host)}/${encodeURIComponent(id)}`
+    : `/artifacts/${encodeURIComponent(id)}`;
 
-/** The sandboxed page an HTML artifact's version is shown in. */
-export const artifactFrameUrl = (id: string, version: number) =>
-  `${artifactPath(id, version)}/frame`;
+const artifactPath = (id: string, version: number, host?: string) =>
+  `/api${artifactRoot(id, host)}/versions/${version}`;
+
+/** The sandboxed page a framed artifact's version is shown in. */
+export const artifactFrameUrl = (id: string, version: number, host?: string) =>
+  `${artifactPath(id, version, host)}/frame`;
 
 /** Where the browser downloads a version, as a file. */
 export const artifactDownloadUrl = (id: string, version: number) =>
@@ -1052,10 +1068,17 @@ export const pim = {
   artifacts: () => call<{ artifacts: Artifact[]; bytes: number }>("/artifacts"),
   artifact: (id: string) =>
     call<ArtifactDetail>(`/artifacts/${encodeURIComponent(id)}`),
-  artifactVersion: (id: string, version: number) =>
-    call<ArtifactVersion>(
-      `/artifacts/${encodeURIComponent(id)}/versions/${version}`,
-    ),
+  artifactVersion: (id: string, version: number, host?: string) =>
+    call<ArtifactVersion>(`${artifactRoot(id, host)}/versions/${version}`),
+  sharedArtifacts: () =>
+    call<{ artifacts: SharedArtifact[] }>("/shared-artifacts"),
+  sharedArtifact: (host: string, id: string) =>
+    call<SharedArtifact>(artifactRoot(id, host)),
+  setArtifactCircles: (id: string, circles: string[]) =>
+    call<ArtifactDetail>(`/artifacts/${encodeURIComponent(id)}/circles`, {
+      method: "PUT",
+      body: JSON.stringify({ circles }),
+    }),
   restoreArtifact: (id: string, version: number, baseVersion: number) =>
     call<Artifact & { restored: number }>(
       `/artifacts/${encodeURIComponent(id)}/restore`,
@@ -1067,17 +1090,25 @@ export const pim = {
       { method: "POST", body: JSON.stringify({ baseVersion, content }) },
     ),
   /** One call an artifact made through its bridge: its answer, or what the person must allow first. */
-  artifactBridge: (id: string, version: number, op: string, args: unknown) =>
+  artifactBridge: (
+    id: string,
+    version: number,
+    op: string,
+    args: unknown,
+    host?: string,
+  ) =>
     call<{ value: unknown } | { needs: { capability: string; label: string } }>(
-      `/artifacts/${encodeURIComponent(id)}/versions/${version}/bridge`,
-      {
-        method: "POST",
-        body: JSON.stringify({ op, args }),
-      },
+      `${artifactRoot(id, host)}/versions/${version}/bridge`,
+      { method: "POST", body: JSON.stringify({ op, args }) },
     ),
-  grantArtifact: (id: string, version: number, capability: string) =>
+  grantArtifact: (
+    id: string,
+    version: number,
+    capability: string,
+    host?: string,
+  ) =>
     call<{ granted: string }>(
-      `/artifacts/${encodeURIComponent(id)}/versions/${version}/grants`,
+      `${artifactRoot(id, host)}/versions/${version}/grants`,
       { method: "POST", body: JSON.stringify({ capability }) },
     ),
   deleteArtifact: (id: string) =>

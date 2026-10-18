@@ -71,7 +71,7 @@ Images people send in chats are kept in an R2 bucket, which deploying creates. R
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ajac-zero/pim)
 
-The button copies this repository to your GitHub account and deploys it to your Cloudflare account. It asks for nothing. Then open the Worker's URL, pick a username, save your recovery codes and create your passkey: your face, fingerprint, or PIN. You're the admin of this Pim. That's the whole setup.
+The button copies this repository to your GitHub account and deploys it to your Cloudflare account. It asks for nothing. Then open the Worker's `workers.dev` URL, which the deploy shows, pick a username, save your recovery codes and create your passkey: your face, fingerprint, or PIN. You're the admin of this Pim. That's the whole setup.
 
 - **The first account** can be made that way for 15 minutes after a deploy, and it is the admin's. Until you make it, whoever opens the URL first could, so open it right after deploying. Missed the 15 minutes? The sign-in screen has the Worker write a one-time setup link to its logs, which only someone signed in to your Cloudflare account can read. In the dashboard, open Workers & Pages, then `pim`, then Observability, and open the link in the log that starts with "Pim setup link". It works once, for an hour.
 - **Inviting people.** Settings → Members → Invite someone makes a link that lets one person join. With `PIM_REGISTRATION` set to `open`, anyone who finds the address can; `closed` lets nobody in.

@@ -3733,7 +3733,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/** The person's skills in their agents' chats: rebuilt when whether `write_skill` asks first changes. */
 	#skillsExtension(services: PimServices) {
-		return skillsExtension(services, (session) => this.#roleOf(session), this.skills);
+		return skillsExtension(services, (session) => this.#roleOf(session), this.skills, codeLoader(this.env) !== null);
 	}
 
 	/** Rebuilds the extensions whose tools describe the approval policy, once pi's registry has been set up. */

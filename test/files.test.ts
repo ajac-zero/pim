@@ -19,14 +19,26 @@ const raw = (path: string, init: RequestInit = {}) =>
 
 const upload = (path: string, body: BodyInit) => raw(`/files/content?path=${encodeURIComponent(path)}`, { method: "PUT", body });
 
-function lastToolResult(messages: readonly Message[]): { text: string; isError: boolean } {
+/** A 1×1 PNG, and the start of a PDF: not UTF-8, though it has no NUL byte. */
+const PNG = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="), (char) => char.charCodeAt(0));
+const PDF = new Uint8Array([...new TextEncoder().encode("%PDF-1.7\n%"), 0xe2, 0xe3, 0xcf, 0xd3, ...new TextEncoder().encode("\n1 0 obj\n")]);
+
+/** How many of the space's files R2 holds. */
+const storedObjects = async () => (await env.IMAGES.list({ prefix: `${OWNER}/files/` })).objects.length;
+
+/** The last tool result's text, and the types of the images it shows the model. */
+function lastToolResult(messages: readonly Message[]): { text: string; isError: boolean; images: string[] } {
 	const result = messages.findLast((message) => message.role === "toolResult");
 	if (!result || result.role !== "toolResult") throw new Error("no tool result");
-	return { text: result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join(""), isError: result.isError === true };
+	return {
+		text: result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join(""),
+		isError: result.isError === true,
+		images: result.content.flatMap((part) => (part.type === "image" ? [part.mimeType] : [])),
+	};
 }
 
 async function callTool(name: string, args: Record<string, unknown>) {
-	let result = { text: "", isError: false };
+	let result: ReturnType<typeof lastToolResult> = { text: "", isError: false, images: [] };
 	faux.setResponses([
 		toolUse(name, args as never),
 		(context) => {
@@ -122,17 +134,102 @@ describe("files", () => {
 		await setLimits({ storageBytes: 1 });
 		expect((await upload("/workspace/big.bin", new Uint8Array(10))).status).toBe(429);
 		await setLimits(null);
+		// Stored files count too, though R2 holds them, not the space's database.
+		const before = await runInDurableObject(agent(), (instance: Pim) => instance.storedBytes());
+		expect((await upload("/workspace/quota/scan.pdf", new Uint8Array(100_000))).status).toBe(201);
+		await setLimits({ storageBytes: before + 50_000 });
+		expect((await upload("/workspace/quota/note.txt", "x")).status).toBe(429);
+		await setLimits(null);
+		await raw("/files?path=/workspace/quota", { method: "DELETE" });
 		// The person's own delete needs no approval.
 		await upload("/workspace/gone.txt", "bye");
 		expect((await raw("/files?path=/workspace/gone.txt", { method: "DELETE" })).status).toBe(200);
 		expect((await raw("/files/content?path=/workspace/gone.txt")).status).toBe(404);
 	});
 
-	it("go into the account export, binary ones as base64", async () => {
+	it("go into the account export: text inline, stored files by path", async () => {
 		await upload("/workspace/export/note.txt", "keep me");
 		await upload("/workspace/export/pixel.bin", new Uint8Array([0, 255, 1]));
 		const exported = (await (await raw("/export")).json()) as { files: { path: string; encoding?: string; content?: string }[] };
 		expect(exported.files).toContainEqual(expect.objectContaining({ path: "/workspace/export/note.txt", encoding: "utf8", content: "keep me" }));
-		expect(exported.files).toContainEqual(expect.objectContaining({ path: "/workspace/export/pixel.bin", encoding: "base64", content: "AP8B" }));
+		expect(exported.files).toContainEqual({ path: "/workspace/export/pixel.bin", size: 3, updatedAt: expect.any(String) });
+	});
+
+	it("that aren't text are kept in R2, in the same folders as the rest", async () => {
+		const before = await storedObjects();
+		await upload("/workspace/trip/photo.png", PNG);
+		await upload("/workspace/trip/ticket.pdf", PDF);
+		// A character cut off where the type is judged still leaves this text.
+		await upload("/workspace/trip/notes.txt", `a${"é".repeat(5000)}`);
+		expect(await storedObjects()).toBe(before + 2);
+
+		// The person sees one folder, and gets the same bytes back.
+		const { body: trip } = await api("/files?path=/workspace/trip");
+		expect(trip.entries.map((entry: { name: string; size: number }) => [entry.name, entry.size])).toEqual([
+			["notes.txt", 10_001],
+			["photo.png", PNG.length],
+			["ticket.pdf", PDF.length],
+		]);
+		expect(new Uint8Array(await (await raw("/files/content?path=/workspace/trip/photo.png")).arrayBuffer())).toEqual(PNG);
+
+		// Agents see them too, marked stored, and find them by name; text stays searchable.
+		const listed = JSON.parse((await callTool("file_list", { path: "/workspace/trip" })).text);
+		expect(listed.count).toBe(3);
+		expect(listed.entries).toContainEqual(expect.objectContaining({ name: "photo.png", size: PNG.length, stored: true }));
+		expect(listed.entries.find((entry: { name: string }) => entry.name === "notes.txt").stored).toBeUndefined();
+		const found = JSON.parse((await callTool("file_find", { path: "/workspace", pattern: "**/*.pdf" })).text);
+		expect(found.entries).toContainEqual({ path: "/workspace/trip/ticket.pdf", type: "file", stored: true });
+		const pruned = JSON.parse((await callTool("file_find", { path: "/workspace", pattern: "**/*.pdf", exclude: "trip" })).text);
+		expect(pruned.entries).not.toContainEqual(expect.objectContaining({ path: "/workspace/trip/ticket.pdf" }));
+		expect(JSON.parse((await callTool("file_search", { path: "/workspace/trip", query: "éé" })).text).count).toBeGreaterThan(0);
+
+		// Reading shows the model an image, and says what anything else is.
+		expect((await callTool("file_read", { path: "/workspace/trip/photo.png" })).images).toEqual(["image/png"]);
+		const ticket = await callTool("file_read", { path: "/workspace/trip/ticket.pdf" });
+		expect(ticket).toMatchObject({ isError: false, images: [] });
+		expect(ticket.text).toContain("file_load");
+
+		// Text saved over a stored file replaces it, and deleting a folder deletes what's stored in it.
+		await upload("/workspace/trip/ticket.pdf", "cancelled");
+		expect(await storedObjects()).toBe(before + 1);
+		expect(await (await raw("/files/content?path=/workspace/trip/ticket.pdf")).text()).toBe("cancelled");
+		expect((await raw("/files?path=/workspace/trip", { method: "DELETE" })).status).toBe(200);
+		expect(await storedObjects()).toBe(before);
+	});
+
+	it("that are stored reach agents' code once loaded, and what code makes that isn't text is stored", async () => {
+		await upload("/workspace/data/blob.bin", new Uint8Array([0, 1, 2, 255]));
+		const unseen = await callTool("run_javascript", {
+			command: `import { readFile } from "node:fs/promises"; export default async () => (await readFile("data/blob.bin")).length;`,
+		});
+		expect(JSON.parse(unseen.text)).toMatchObject({ exitCode: 1 });
+		expect((await callTool("file_load", { path: "/workspace/data/blob.bin" })).text).toContain("/workspace/.loaded/data/blob.bin");
+
+		const before = await storedObjects();
+		const ran = await callTool("run_javascript", {
+			command: `
+				import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
+				export default async function () {
+					const bytes = await readFile(".loaded/data/blob.bin");
+					await mkdir("out", { recursive: true });
+					await writeFile("/workspace/out/chart.png", new Uint8Array([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10, ...bytes]));
+					await rm("data", { recursive: true });
+					return bytes.reduce((sum, byte) => sum + byte, 0);
+				}`,
+		});
+		expect(JSON.parse(ran.text)).toMatchObject({ stderr: "", exitCode: 0, result: 258 });
+		// The chart is stored; the folder code removed comes back with the file it never saw.
+		expect(await storedObjects()).toBe(before + 1);
+		expect(new Uint8Array(await (await raw("/files/content?path=/workspace/out/chart.png")).arrayBuffer())).toEqual(
+			new Uint8Array([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10, 0, 1, 2, 255]),
+		);
+		expect((await api("/files?path=/workspace/data")).body.entries).toEqual([expect.objectContaining({ name: "blob.bin", size: 4 })]);
+		// The person doesn't see agents' copies.
+		expect((await api("/files")).body.entries.map((entry: { name: string }) => entry.name)).not.toContain(".loaded");
+
+		// Text code writes over a stored file replaces it.
+		await callTool("run_javascript", { command: `import { writeFile } from "node:fs/promises"; export default () => writeFile("out/chart.png", "redrawn");` });
+		expect(await storedObjects()).toBe(before);
+		expect(await (await raw("/files/content?path=/workspace/out/chart.png")).text()).toBe("redrawn");
 	});
 });

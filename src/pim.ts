@@ -317,9 +317,15 @@ export class Pim extends DurableAgent<Env> {
 	});
 	#workspace: Workspace | undefined;
 	/** The person's files, which they and their agents share (see ./files.ts). */
-	readonly files = new Files(() => this.#files.workspace());
+	readonly files = new Files({
+		workspace: () => this.#files.workspace(),
+		sql: this.ctx.storage.sql,
+		bucket: this.env.IMAGES,
+		owner: () => this.name,
+	});
 	readonly #files: FileServices = {
 		workspace: () => (this.#workspace ??= new Workspace({ storage: this.ctx.storage, output: false, backends: codeBackends(this.env) })),
+		files: this.files,
 		codeBackend: () => (codeLoader(this.env) ? CODE_BACKEND : null),
 		assertOpen: () => this.#assertOpen(),
 		storageRefusal: () => this.#storageRefusal(),
@@ -1201,9 +1207,9 @@ export class Pim extends DurableAgent<Env> {
 		return { ...result, text: replies.length > 0 ? replies.join("\n\n") : undefined, replies };
 	}
 
-	/** What this space holds: its database, and the images sent to it. */
+	/** What this space holds: its database, and in R2 the images sent to it and its stored files. */
 	storedBytes(): number {
-		return this.ctx.storage.sql.databaseSize + this.images.bytes();
+		return this.ctx.storage.sql.databaseSize + this.images.bytes() + this.files.storedBytes();
 	}
 
 	#storageRefusal(): string | null {
@@ -2622,8 +2628,8 @@ export class Pim extends DurableAgent<Env> {
 			await Promise.allSettled(this.store.watches().map((watch) => this.appEvents.stop(watch.id)));
 		};
 		await Promise.race([courtesy().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, ERASE_COURTESY_MS))]);
-		// Images live outside this object's storage, so they go first, and the browser closes with
-		// whatever was signed in there.
+		// Images and stored files live outside this object's storage, in R2 under the owner's prefix,
+		// so they go first, and the browser closes with whatever was signed in there.
 		await this.images.deleteAll();
 		await this.browser.close().catch(() => undefined);
 		await this.ctx.storage.deleteAll();

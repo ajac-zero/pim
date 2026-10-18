@@ -1,7 +1,10 @@
-import { memo } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+import { memo, type ReactNode } from "react";
 import type { BundledLanguage } from "shiki";
 import {
   defaultRehypePlugins,
+  defaultRemarkPlugins,
   Streamdown,
   type StreamdownProps,
 } from "streamdown";
@@ -9,6 +12,8 @@ import {
 type PluggableList = NonNullable<StreamdownProps["rehypePlugins"]>;
 type Pluggable = PluggableList[number];
 
+import { AgentIcon } from "~/components/agent-icon";
+import { useI18n } from "~/components/i18n";
 import {
   CodeBlock,
   CodeBlockCopyButton,
@@ -16,7 +21,137 @@ import {
   CodeBlockHeader,
   CodeBlockTitle,
 } from "~/components/ui/code-block";
+import { agentsQuery, sessionsQuery } from "~/lib/queries";
+import { showTab } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
+
+const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+/** A chat an agent names in its text: by its id, or by its address. */
+const CHAT_MENTION = new RegExp(`(?:/chat/)?\\b(${UUID})\\b`, "gi");
+/** A link to a chat in this app. */
+const CHAT_HREF = new RegExp(`^(https?://[^/]+)?/chat/(${UUID})$`, "i");
+/** Link text that is only the chat's id or address, which its title reads better than. */
+const BARE_CHAT = new RegExp(`^(?:(?:https?://[^/\\s]+)?/chat/)?${UUID}$`, "i");
+
+type MdastNode = {
+  type: string;
+  value?: string;
+  url?: string;
+  children?: MdastNode[];
+};
+
+/**
+ * Makes the chats an agent names into links: an id, bare or in backticks,
+ * and a `/chat/<id>` address. An id that turns out not to be a chat (an
+ * artifact's or an approval's) is shown as text again by `ChatLink`.
+ */
+function remarkChatLinks() {
+  const link = (text: string, id: string): MdastNode => ({
+    type: "link",
+    url: `/chat/${id.toLowerCase()}`,
+    children: [{ type: "text", value: text }],
+  });
+  const mentions = (text: string): MdastNode[] => {
+    const nodes: MdastNode[] = [];
+    let last = 0;
+    for (const match of text.matchAll(CHAT_MENTION)) {
+      if (match.index > last) {
+        nodes.push({ type: "text", value: text.slice(last, match.index) });
+      }
+      nodes.push(link(match[0], match[1] as string));
+      last = match.index + match[0].length;
+    }
+    if (last < text.length)
+      nodes.push({ type: "text", value: text.slice(last) });
+    return nodes;
+  };
+  const visit = (node: MdastNode) => {
+    // Text already in a link stays that link's.
+    if (!node.children || node.type === "link" || node.type === "linkReference")
+      return;
+    node.children = node.children.flatMap((child) => {
+      if (child.type === "text" && child.value) return mentions(child.value);
+      if (
+        child.type === "inlineCode" &&
+        child.value &&
+        BARE_CHAT.test(child.value)
+      ) {
+        return [link(child.value, child.value.slice(-36))];
+      }
+      visit(child);
+      return [child];
+    });
+  };
+  return (tree: MdastNode) => visit(tree);
+}
+
+const chatRemarkPlugins: PluggableList = [
+  ...Object.values(defaultRemarkPlugins),
+  remarkChatLinks as Pluggable,
+];
+
+/** The chat a link goes to, when it goes to one in this app. */
+function chatOf(href: string | undefined): string | undefined {
+  const match = href ? CHAT_HREF.exec(href) : null;
+  if (!match) return undefined;
+  const [, origin, id] = match;
+  if (
+    origin &&
+    (typeof location === "undefined" || origin !== location.origin)
+  ) {
+    return undefined;
+  }
+  return id?.toLowerCase();
+}
+
+/**
+ * A chat an agent's message names: its agent's icon and its title, opening
+ * it in a tab of its own. An id that names none of the person's chats stays
+ * as it was written.
+ */
+function ChatLink({ id, children }: { id: string; children: ReactNode }) {
+  const { t } = useI18n();
+  const { data: sessions } = useQuery(sessionsQuery());
+  const { data: agents } = useQuery(agentsQuery());
+  const chat = sessions?.find((session) => session.id === id);
+  if (!chat) return <>{children}</>;
+  const agent = chat.visit
+    ? undefined
+    : agents?.find((candidate) =>
+        chat.agent ? candidate.id === chat.agent.id : candidate.majordomo,
+      );
+  const title = chat.title ?? t("newChat");
+  const bare = typeof children === "string" && BARE_CHAT.test(children);
+  return (
+    <Link
+      to="/chat/$sessionId"
+      params={{ sessionId: id }}
+      title={title}
+      onClick={(event) => {
+        // A click the browser opens elsewhere leaves this window's tabs alone.
+        if (
+          event.button !== 0 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey
+        )
+          return;
+        showTab(id, true);
+      }}
+      className="text-link underline underline-offset-2 transition-colors hover:decoration-foreground"
+    >
+      {agent && (
+        <AgentIcon
+          agent={agent}
+          tile
+          className="mr-1 inline-flex size-4 rounded align-[-3px]"
+        />
+      )}
+      {bare ? title : children}
+    </Link>
+  );
+}
 
 /**
  * Chat-tuned markdown. Styled to feel like ChatGPT: comfortable line height,
@@ -155,7 +290,9 @@ export const Markdown = memo(function Markdown({
       <Streamdown
         isAnimating={streaming}
         skipHtml={untrusted}
-        {...(untrusted ? { rehypePlugins: untrustedRehypePlugins } : {})}
+        {...(untrusted
+          ? { rehypePlugins: untrustedRehypePlugins }
+          : { remarkPlugins: chatRemarkPlugins })}
         components={{
           ...(untrusted ? untrustedComponents : {}),
           h1: ({ children }) => (
@@ -185,7 +322,9 @@ export const Markdown = memo(function Markdown({
           ),
           hr: () => <hr className="my-6 border-border" />,
           a: ({ href, children }) =>
-            untrusted && !safeLink(href) ? (
+            !untrusted && chatOf(href) ? (
+              <ChatLink id={chatOf(href) as string}>{children}</ChatLink>
+            ) : untrusted && !safeLink(href) ? (
               <span>{children}</span>
             ) : (
               <a

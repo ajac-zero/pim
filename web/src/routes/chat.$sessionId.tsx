@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, notFound, useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { type CSSProperties, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useNewChat } from "~/components/app-sidebar";
 import { ArtifactView } from "~/components/artifact-view";
@@ -13,12 +13,16 @@ import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
 import { Users } from "~/components/icons";
 import { Button } from "~/components/ui/button";
+import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
 import { useElementHeight } from "~/hooks/use-element-size";
 import { CHATGPT_PROVIDER, type UserContent } from "~/lib/pim-api";
 import { pimClient, usePimClient } from "~/lib/pim-client";
 import { modelQuery, sessionsQuery } from "~/lib/queries";
 import { showTab, useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
+
+/** The canvas's width, as a percentage of the page beside the sidebar, which the person can drag. */
+const CANVAS_WIDTH = { default: 56, min: 30, max: 75 };
 
 /** An artifact open in the canvas beside the chat, and which of its versions. */
 type ChatSearch = { artifact?: string; v?: number };
@@ -64,6 +68,11 @@ function ChatPage() {
   const { sessionId } = Route.useParams();
   const { artifact, v } = Route.useSearch();
   const navigate = useNavigate();
+  const page = useRef<HTMLElement>(null);
+  const [canvasWidth, setCanvasWidth] = useStoredSize(
+    "pim-canvas-width",
+    CANVAS_WIDTH.default,
+  );
   const showArtifact = (search: ChatSearch) =>
     void navigate({
       to: "/chat/$sessionId",
@@ -116,7 +125,7 @@ function ChatPage() {
   const shelf = useTabs().length > 1;
 
   return (
-    <main className="flex min-h-0 min-w-0 flex-1">
+    <main ref={page} className="flex min-h-0 min-w-0 flex-1">
       <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
         <header
           className={cn(
@@ -215,8 +224,28 @@ function ChatPage() {
         </div>
       </div>
       {artifact && (
-        // The canvas: beside the chat, or over it on phones.
-        <aside className="fixed inset-0 z-40 flex min-h-0 flex-col bg-background md:static md:z-auto md:w-[56%] md:min-w-96 md:max-w-5xl md:shrink-0 md:border-l">
+        // The canvas: beside the chat, as wide as the person last made it, or over it on phones.
+        <aside
+          style={{ "--canvas-width": `${canvasWidth}%` } as CSSProperties}
+          className="fixed inset-0 z-40 flex min-h-0 flex-col bg-background md:relative md:inset-auto md:z-auto md:w-(--canvas-width) md:min-w-96 md:max-w-[calc(100%-22rem)] md:shrink-0 md:border-l"
+        >
+          <ResizeHandle
+            label={t("resizeCanvas")}
+            edge="left"
+            value={canvasWidth}
+            min={CANVAS_WIDTH.min}
+            max={CANVAS_WIDTH.max}
+            step={2}
+            onChange={setCanvasWidth}
+            onReset={() => setCanvasWidth(null)}
+            fromPointer={(x) => {
+              const box = page.current?.getBoundingClientRect();
+              return box
+                ? Math.round(((box.right - x) / box.width) * 1000) / 10
+                : canvasWidth;
+            }}
+            className="hidden md:block"
+          />
           <ArtifactView
             key={artifact}
             artifactId={artifact}

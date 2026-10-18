@@ -173,6 +173,20 @@
 }
 
 /*
+ * While a panel is being resized (see ResizeHandle), nothing animates or
+ * gets selected, frames don't take the pointer, and the cursor stays.
+ */
+html[data-resizing],
+html[data-resizing] * {
+  cursor: col-resize !important;
+  user-select: none;
+  transition: none !important;
+}
+html[data-resizing] iframe {
+  pointer-events: none;
+}
+
+/*
  * Printing an artifact (and saving it as a PDF): the page prints only the
  * copy of it in `.print-area`, at its full height, and nothing of the app.
  */

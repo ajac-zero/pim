@@ -166,6 +166,8 @@ export const Mail = themedIcon(Lucide.Mail, Pixel.Mail);
 const MapIcon = themedIcon(Lucide.Map, Pixel.Map);
 export const Maximize2 = themedIcon(Lucide.Maximize2, Pixel.Expand);
 export const MessageCircle = themedIcon(Lucide.MessageCircle, Pixel.Comment);
+/** Your chats, as a list: Pixelarticons has no pair of bubbles, so its own is one. */
+export const MessagesSquare = themedIcon(Lucide.MessagesSquare, Pixel.Message);
 export const Monitor = themedIcon(Lucide.Monitor, Pixel.Monitor);
 export const Moon = themedIcon(Lucide.Moon, Pixel.Moon);
 export const MoreHorizontal = themedIcon(

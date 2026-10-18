@@ -17,7 +17,7 @@ import {
   Compass,
   Folder,
   House,
-  MessageCircle,
+  MessagesSquare,
   MoreHorizontal,
   ScrollText,
   Settings,
@@ -83,7 +83,7 @@ export function MobileNav({
         onClick={onShowList}
         // An open chat counts as being in your chats, as the rail shows it.
         active={showing(undefined) || (!list && pathname.startsWith("/chat/"))}
-        icon={<MessageCircle className="size-5" />}
+        icon={<MessagesSquare className="size-5" />}
         label={t("chats")}
         count={awaitingApproval.size}
       />

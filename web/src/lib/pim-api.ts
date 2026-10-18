@@ -446,7 +446,13 @@ export type DeploymentVariable = {
   problem: string | null;
 };
 
-export const ARTIFACT_KINDS = ["html", "markdown", "svg", "mermaid"] as const;
+export const ARTIFACT_KINDS = [
+  "html",
+  "markdown",
+  "svg",
+  "mermaid",
+  "jsx",
+] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 
 /** An artifact, as its latest version. */

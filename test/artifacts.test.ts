@@ -151,6 +151,41 @@ describe("artifacts", () => {
 		expect((await api(`/artifacts/${svg}`)).body.version).toBe(1);
 	});
 
+	it("run JSX compiled, on Pim's React runtime and only the modules it imports, and refuse what won't run", async () => {
+		const source = `import { useState } from "react";
+import { LineChart, Line } from "recharts";
+export default function App() {
+	const [count, setCount] = useState<number>(0);
+	const note = "</script><script>parent.x=1</script> <!-- <script>";
+	return <div className="p-4" onClick={() => setCount(count + 1)} title={note}>{count}<LineChart data={[]}><Line /></LineChart></div>;
+}`;
+		const made = await callTool("artifact_create", { title: "Counter", kind: "jsx", content: source });
+		expect(made.isError).toBe(false);
+		const id = JSON.parse(made.text).artifact.id;
+		// The stored version is the source; the frame is what it compiles to.
+		expect((await api(`/artifacts/${id}/versions/1`)).body.content).toBe(source);
+		const frame = await raw(`/artifacts/${id}/versions/1/frame`);
+		expect(frame.headers.get("content-security-policy")).toContain("script-src 'unsafe-inline' https://pim.test/artifact-runtime/");
+		const page = await frame.text();
+		const sources = [...page.matchAll(/<script src="([^"]+)"><\/script>/g)].map((match) => match[1]);
+		expect(sources).toEqual(["https://pim.test/artifact-runtime/react.js", "https://pim.test/artifact-runtime/recharts.js", "https://pim.test/artifact-runtime/tailwind.js"]);
+		// The page closes only its own scripts: those, the component, and the height script. Its strings can't close one.
+		expect(page.match(/<\/script>/g)).toHaveLength(5);
+		expect(page).toContain("<\\/script><script>parent.x=1<\\/script> <\\!-- <script>");
+		expect(page).not.toContain("useState<number>");
+		expect((await raw(`/artifacts/${id}/versions/1/download`)).headers.get("content-disposition")).toMatch(/-v1\.jsx"/);
+
+		for (const [content, error] of [
+			["export default () => <div>", "doesn't compile"],
+			['import fs from "node:fs";\nexport default () => <div>{String(fs)}</div>', 'not "node:fs"'],
+			["export function App() { return <div /> }", "export its component as the default"],
+		] as const) {
+			const refused = await callTool("artifact_create", { title: "Bad", kind: "jsx", content });
+			expect(refused).toMatchObject({ isError: true, text: expect.stringContaining(error) });
+		}
+		expect((await api("/artifacts")).body.artifacts.filter((artifact: { kind: string }) => artifact.kind === "jsx")).toHaveLength(1);
+	});
+
 	it("refuse an API token in the address, which WebSockets still use", async () => {
 		const made = await makePage();
 		for (const path of [`/artifacts/${made.id}/versions/1/frame`, `/artifacts/${made.id}/versions/1/download`, `/artifacts/${made.id}/versions/1`, "/artifacts"]) {

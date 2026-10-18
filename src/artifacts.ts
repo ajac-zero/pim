@@ -15,16 +15,17 @@
  * origin (see `artifactHtmlHeaders`); this module only stores it.
  */
 
+import { compileJsx, inlineScript } from "./artifact-jsx";
 import { HttpError } from "./http";
 
-export const ARTIFACT_KINDS = ["html", "markdown", "svg", "mermaid"] as const;
+export const ARTIFACT_KINDS = ["html", "markdown", "svg", "mermaid", "jsx"] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 
 /** The kinds the app shows in a sandboxed frame; Markdown it renders itself. */
-export const FRAMED_KINDS: readonly ArtifactKind[] = ["html", "svg", "mermaid"];
+export const FRAMED_KINDS: readonly ArtifactKind[] = ["html", "svg", "mermaid", "jsx"];
 
 /** Each kind's file extension, for downloads. */
-const EXTENSIONS: Record<ArtifactKind, string> = { html: "html", markdown: "md", svg: "svg", mermaid: "mmd" };
+const EXTENSIONS: Record<ArtifactKind, string> = { html: "html", markdown: "md", svg: "svg", mermaid: "mmd", jsx: "jsx" };
 
 /** Who made a version: the agent, the person editing it, or the person restoring an older one. */
 export type ArtifactSource = "agent" | "person" | "restore";
@@ -147,6 +148,7 @@ const SVG_START = /^\s*(<\?xml[^>]*\?>\s*)?(<!--[\s\S]*?-->\s*)*<svg[\s>]/i;
 export function checkContent(kind: ArtifactKind, content: string): void {
 	if (kind === "svg" && !SVG_START.test(content)) throw new HttpError(400, "An SVG artifact must be one <svg> element, starting with <svg.");
 	if (kind === "mermaid" && content.trim() === "") throw new HttpError(400, "A Mermaid artifact needs a diagram.");
+	if (kind === "jsx") compileJsx(content);
 }
 
 /** Search-and-replace edits, each matching exactly once, applied in order. */
@@ -436,7 +438,8 @@ const PAGE_HEAD =
 /**
  * The page a framed version is shown as: an HTML artifact as it is; an SVG
  * one in a page that fits it to the frame; a Mermaid one as its source, in
- * text, which the Mermaid runtime draws. Each ends with the height script.
+ * text, which the Mermaid runtime draws; a JSX one compiled, after the React
+ * runtime and the modules it imports. Each ends with the height script.
  */
 export function framePage(kind: ArtifactKind, content: string, origin: string): Response {
 	const html = (body: string, runtime = false) =>
@@ -452,6 +455,14 @@ export function framePage(kind: ArtifactKind, content: string, origin: string): 
 					`<body><pre class="mermaid">${escapeHtml(content)}</pre><script src="${origin}${RUNTIME_PATH}mermaid.js"></script></body></html>`,
 				true,
 			);
+		case "jsx": {
+			const { code, runtimes } = compileJsx(content);
+			const scripts = [...runtimes, "tailwind"].map((name) => `<script src="${origin}${RUNTIME_PATH}${name}.js"></script>`).join("");
+			return html(
+				`${PAGE_HEAD}</head><body><div id="root"></div>${scripts}<script>__pimMount(function (require, module, exports) {\n${inlineScript(code)}\n})</script></body></html>`,
+				true,
+			);
+		}
 		default:
 			throw new HttpError(404, "This kind of artifact isn't shown in a frame");
 	}

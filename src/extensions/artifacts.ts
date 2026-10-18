@@ -1,6 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { ARTIFACT_KINDS, type ArtifactKind, type ArtifactStore, type ArtifactVersion, applyEdits, checkContent, checkKind, checkTitle } from "../artifacts";
+import { JSX_MODULES } from "../artifact-jsx";
 import { HttpError } from "../http";
 import { definePimExtension } from "./define";
 import { text } from "./services";
@@ -23,7 +24,8 @@ const HOW_IT_RUNS =
 	"Images must be inline (data: URLs or SVG). It shows in the chat and on a full screen, including on phones, so make it responsive. " +
 	"Markdown artifacts are documents; images and raw HTML in them aren't rendered. " +
 	"An svg artifact is one <svg> element, for a drawing, a logo or an illustration. " +
-	"A mermaid artifact is Mermaid source (flowchart, sequenceDiagram, gantt, mindmap, and so on), for a diagram, drawn for the user; don't wrap it in a code fence.";
+	"A mermaid artifact is Mermaid source (flowchart, sequenceDiagram, gantt, mindmap, and so on), for a diagram, drawn for the user; don't wrap it in a code fence. " +
+	`A jsx artifact is one React component, for an interactive app or a dashboard: \`export default function App() { ... }\`, with hooks from "react". It may import only ${JSX_MODULES.map((name) => `"${name}"`).join(", ")} (charts and icons), and is styled with Tailwind classes. It's compiled when you save it: a compile error comes back to you to fix.`;
 
 /** A tool's answer about a version: a reference the app shows as the artifact, never its content. */
 function reference(version: ArtifactVersion, title: string, kind: string, note: string) {
@@ -148,7 +150,7 @@ export function artifactsExtension({ artifacts, assertOpen }: ArtifactServices) 
 	return defineExtension({ name: "pim.artifacts", tools: [create, update, read, list] });
 }
 
-const KIND_NAMES: Record<ArtifactKind, string> = { html: "HTML", markdown: "Markdown", svg: "SVG", mermaid: "Diagram" };
+const KIND_NAMES: Record<ArtifactKind, string> = { html: "HTML", markdown: "Markdown", svg: "SVG", mermaid: "Diagram", jsx: "App" };
 
 /** On a dashboard: what the space made most recently. Artifacts made outside any chat are the majordomo's. */
 export function artifactsWidgets(artifacts: ArtifactStore) {

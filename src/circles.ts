@@ -1,11 +1,11 @@
 /**
- * The people a Pim's owner lets message it, in circles: Family, Close
+ * The people a space's owner lets message it, in circles: Family, Close
  * friends, Acquaintances. Each circle has its own tool permissions (in
  * `pim_tool_permissions`, by the circle's id), and anything a circle wasn't
  * given is off. A person is in at most one circle.
  *
- * Guests never run anything here: their conversations with this Pim run in
- * their own Pim (see ./visits.ts), on their own usage, and every tool they
+ * Guests never run anything here: their conversations with this space run in
+ * their own space (see ./visits.ts), on their own usage, and every tool they
  * use comes back here through `Pim.guestCall`, which checks the circle and
  * the tool's permission each time.
  */
@@ -13,14 +13,14 @@
 export type Circle = {
 	readonly id: string;
 	readonly name: string;
-	/** Off: nobody in the circle can message the Pim, until it is on again. */
+	/** Off: nobody in the circle can message the space, until it is on again. */
 	readonly enabled: boolean;
 	readonly createdAt: number;
 };
 
 /** Someone the owner put in a circle. */
 export type Member = {
-	/** Their Pim's owner ID: who a guest call is from. */
+	/** Their space's owner ID: who a guest call is from. */
 	readonly ownerId: string;
 	readonly username: string;
 	readonly circle: string;
@@ -40,7 +40,7 @@ export type GuestActivity = {
 	readonly summary: string;
 };
 
-/** Who is calling: a guest's Pim, as the Worker or the guest's own agent vouches. */
+/** Who is calling: a guest's space, as the Worker or the guest's own agent vouches. */
 export type Guest = { readonly ownerId: string; readonly username: string };
 
 const SCHEMA = `

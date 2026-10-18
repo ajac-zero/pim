@@ -500,7 +500,7 @@ describe("recovery codes", () => {
 });
 
 describe("API tokens", () => {
-	it("open only their owner's Pim, from anywhere, and can't manage sign-in", async () => {
+	it("open only their owner's space, from anywhere, and can't manage sign-in", async () => {
 		const ana = await admin();
 		const ben = await person("ben");
 		const made = await ben.browser.json("/auth/tokens", { method: "POST", json: { name: "bot" } });
@@ -527,7 +527,7 @@ describe("API tokens", () => {
 });
 
 describe("MCP clients", () => {
-	it("register, ask the signed-in person, and open only their Pim's /mcp with the token they get, until disconnected", async () => {
+	it("register, ask the signed-in person, and open only their space's /mcp with the token they get, until disconnected", async () => {
 		await admin();
 		const ben = await person("ben");
 		const unauthorized = await exports.default.fetch(url("/mcp"), { method: "POST" });

@@ -1,6 +1,6 @@
 /**
  * Usernames name people on a Pim: in circles, on profiles and published
- * Pims, and at `/people/<username>`. They are lowercase, and never reused, so
+ * spaces, and at `/people/<username>`. They are lowercase, and never reused, so
  * nobody inherits what others knew by a name.
  */
 

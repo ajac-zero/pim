@@ -5,7 +5,7 @@ import type { Agent } from "./agents";
 import { HttpError } from "./http";
 
 /**
- * The person's Pim as an MCP server, at `/mcp`, so MCP clients such as
+ * The person's space as an MCP server, at `/mcp`, so MCP clients such as
  * Claude or ChatGPT can talk with it. Like Amp's Puck over MCP, it has one
  * tool, `pim`: a message to the person's majordomo (./majordomo.ts),
  * answered with what the majordomo sends back. Each call starts a new chat

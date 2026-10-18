@@ -10,7 +10,7 @@ import { text } from "./services";
  * The person's files as tools: `@cloudflare/computer`'s file tools under
  * Pim's names, held to `FILES_ROOT`, which the person sees as Files in the
  * app. Deleting asks first (`file_delete` is a gated action): files keep no
- * earlier versions. Writing and editing don't, and a full Pim refuses them.
+ * earlier versions. Writing and editing don't, and a full space refuses them.
  * Where the deployment can run code (a Worker Loader binding), `run_javascript`
  * runs JavaScript over the same files, with no network.
  */
@@ -30,7 +30,7 @@ const NAMES = {
 
 type WorkspaceTool = keyof typeof NAMES;
 
-/** Tools that change files: a Pim being erased, or out of storage, refuses them. */
+/** Tools that change files: a space being erased, or out of storage, refuses them. */
 const CHANGES: ReadonlySet<WorkspaceTool> = new Set(["write", "edit", "delete", "exec"]);
 /** Running these again after an eviction does what the first run did. `edit` would apply its edits twice, and code could do anything twice. */
 const REPLAY_SAFE: ReadonlySet<WorkspaceTool> = new Set(["read", "ls", "find", "grep", "write", "delete"]);
@@ -44,9 +44,9 @@ export type FileServices = {
 	readonly workspace: () => Workspace;
 	/** The id of the Workspace's JavaScript backend, or null when this deployment can't run code. */
 	readonly codeBackend: () => string | null;
-	/** Throws once the Pim is being erased: work still under way then writes nothing. */
+	/** Throws once the space is being erased: work still under way then writes nothing. */
 	assertOpen(): void;
-	/** Why the Pim can't store more now, or null when it can. */
+	/** Why the space can't store more now, or null when it can. */
 	storageRefusal(): string | null;
 };
 

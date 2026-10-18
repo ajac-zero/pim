@@ -11,8 +11,8 @@ import { faux } from "./worker";
 /**
  * Each test file gets its own storage, so each file starts with a fresh
  * Pim; tests within a file share it. Before they run, the file's Pim gets
- * its admin, whose Pim the tests talk to with an API token: `OWNER` names
- * that Pim, and `TOKEN` opens it.
+ * its admin, whose space the tests talk to with an API token: `OWNER` names
+ * that space, and `TOKEN` opens it.
  */
 export let OWNER = "";
 export let TOKEN = "";
@@ -40,7 +40,7 @@ export function url(path: string) {
 	return `https://pim.test${path}`;
 }
 
-/** A path in the Pim's API, which the Worker serves under `/api`. */
+/** A path in the space's API, which the Worker serves under `/api`. */
 export function apiUrl(path: string) {
 	return url(`/api${path}`);
 }
@@ -116,6 +116,6 @@ export const toolUse = (name: string, args: Record<string, JsonValue>) =>
 
 afterEach(() => {
 	vi.restoreAllMocks();
-	// Every scripted model response was used: the Pim did what the test expected.
+	// Every scripted model response was used: the space did what the test expected.
 	expect(faux.getPendingResponseCount()).toBe(0);
 });

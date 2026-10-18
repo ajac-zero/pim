@@ -12,11 +12,11 @@ export { oauth2 } from "./native-apps";
  * agents build on, each with its own instructions, dashboard and conversation starters; widgets, the cards a
  * dashboard is made of; color themes for the web app; and an ability: tools,
  * prompt sections, hooks and background tasks, plus actions that ask the
- * person first. A person's Pim
+ * person first. A person's space
  * builds on one extension's blueprint (its `blueprint`), and adds their own name and
  * instructions on top; its chats get the abilities that blueprint uses.
  *
- * Widgets are declarative: `load` runs in the person's Pim and returns
+ * Widgets are declarative: `load` runs in the person's space and returns
  * data of a known kind, which the web app draws with its own components. No
  * extension code runs in the browser.
  *
@@ -52,7 +52,7 @@ export type WidgetContent =
 	| { readonly kind: "list"; readonly items: readonly ListItem[] }
 	| { readonly kind: "progress"; readonly items: readonly ProgressItem[] };
 
-/** An extension's own data in a person's Pim: JSON values by key, apart from every other extension's. */
+/** An extension's own data in a person's space: JSON values by key, apart from every other extension's. */
 export type ExtensionData = {
 	get<T = unknown>(key: string): T | undefined;
 	/** `value` must survive JSON. */
@@ -62,7 +62,7 @@ export type ExtensionData = {
 	list<T = unknown>(prefix?: string): { key: string; value: T }[];
 };
 
-/** What an ability gets from the person's Pim it runs in. */
+/** What an ability gets from the person's space it runs in. */
 export type AbilityContext = {
 	/** The extension's own data. */
 	readonly data: ExtensionData;
@@ -87,7 +87,7 @@ export type WidgetContext = {
 	/**
 	 * The person's chat that a conversation is, or works for (a team member's
 	 * conversation works for the chat that gave it its task), when that chat
-	 * is this Pim's, by the id links use; null otherwise.
+	 * is this space's, by the id links use; null otherwise.
 	 */
 	chatOf(session: string): string | null;
 	/** Whether a conversation is, or works for, one of this agent's chats, including one since deleted. */
@@ -110,7 +110,7 @@ export type Widget = {
 	load(context: WidgetContext): WidgetContent | Promise<WidgetContent>;
 };
 
-/** A widget as loaded for one Pim: on a dashboard, or kept with a message. Its text is in every language it has. */
+/** A widget as loaded for one space: on a dashboard, or kept with a message. Its text is in every language it has. */
 export type ShownWidget = { readonly id: string; readonly title: Text; readonly empty: Text } & (WidgetContent | { readonly failed: true });
 
 /**
@@ -244,17 +244,17 @@ export function defineAppTool<T extends TSchema>(
 export type BlueprintDefinition = {
 	/** Unique in its extension: the blueprint is named `<extension>/<id>`. */
 	readonly id: string;
-	/** What a person's new Pim built on this blueprint is called, until they rename it. */
+	/** What a person's new agent built on this blueprint is called, until they rename it. */
 	readonly name: string;
 	readonly description: string;
-	/** The model reads these in every chat with a Pim built on this blueprint, before the person's own instructions. */
+	/** The model reads these in every chat with an agent built on this blueprint, before the person's own instructions. */
 	readonly instructions: string;
 	/** Its dashboard's widgets, in order, each `<extension>/<widget>`. */
 	readonly dashboard: readonly string[];
 	/**
 	 * Other extensions whose abilities its chats get, by id; its own
 	 * extension's always. Pim's own abilities (memory, goals, schedules,
-	 * artifacts, apps, the web) are every Pim's.
+	 * artifacts, apps, the web) are every space's.
 	 */
 	readonly abilities?: readonly string[];
 	/**
@@ -278,7 +278,7 @@ export type PimExtension = {
 	readonly themes?: readonly Theme[];
 	/** Apps people can connect, and blueprints and agents list as `<extension>/<app>`. */
 	readonly apps?: readonly AppDefinition[];
-	/** Built once in each person's Pim. Its tools and actions must be named apart from every other tool. */
+	/** Built once in each person's space. Its tools and actions must be named apart from every other tool. */
 	readonly ability?: (context: AbilityContext) => Ability;
 };
 
@@ -377,7 +377,7 @@ export class PimExtensions {
 		return this.#extensions.get(extension)?.blueprints?.find((blueprint) => blueprint.id === id);
 	}
 
-	/** The extensions whose abilities the chats of a Pim built on `ref` get: its own extension's, then the ones it names. */
+	/** The extensions whose abilities the chats of an agent built on `ref` get: its own extension's, then the ones it names. */
 	abilitiesOf(ref: string | null): string[] {
 		if (ref === null) return [];
 		const blueprint = this.blueprint(ref);

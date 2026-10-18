@@ -4,15 +4,15 @@ import type { Guest } from "./circles";
 import { text } from "./extensions/services";
 
 /**
- * The other side of circles: Pims whose owners put this person in one, and
+ * The other side of circles: spaces whose owners put this person in one, and
  * this person's conversations with them ("visits").
  *
- * A visit runs here, in the visitor's own Pim, on the visitor's model and
- * usage: whoever sends the messages pays for them. The host's Pim sends a
+ * A visit runs here, in the visitor's own space, on the visitor's model and
+ * usage: whoever sends the messages pays for them. The host's space sends a
  * brief (what its owner lets this visitor's circle use), and the visit's
  * conversation sees only that: an extension of its own, made from the
  * brief, which no other conversation selects. Every tool in it is a call
- * into the host's Pim (`guestCall`), which checks the circle and the tool's
+ * into the host's space (`guestCall`), which checks the circle and the tool's
  * permission again each time; nothing of the host's runs or is kept here
  * but the answers.
  */
@@ -30,7 +30,7 @@ export type BriefTool = {
 	readonly asks: boolean;
 };
 
-/** What a visitor's Pim may know of the host and use, as the host's Pim tells it. */
+/** What a visitor's space may know of the host and use, as the host's space tells it. */
 export type GuestBrief = {
 	readonly host: Guest;
 	readonly circle: string;
@@ -45,7 +45,7 @@ export type BriefResult = { readonly ok: true; readonly brief: GuestBrief } | { 
 /** A guest call's answer, as the model reads it. */
 export type GuestCallResult = { readonly text: string; readonly isError?: boolean };
 
-/** A Pim shared with this person. */
+/** A space shared with this person. */
 export type Share = {
 	readonly ownerId: string;
 	readonly username: string;
@@ -140,10 +140,10 @@ export class VisitStore {
 	}
 }
 
-/** The model's instructions in a visit: whose Pim it speaks for, to whom, and how asking works. */
+/** The model's instructions in a visit: whose space it speaks for, to whom, and how asking works. */
 function preamble(brief: GuestBrief, visitor: string): string {
 	const host = brief.host.username;
-	return `You are ${host}'s Pim, ${host}'s personal AI agent. You are talking with ${visitor}, not with ${host}: ${host} put ${visitor} in their "${brief.circle}" circle, which lets ${visitor} message you and use what ${host} allowed that circle, and nothing else.
+	return `You are ${host}'s personal AI agent. You are talking with ${visitor}, not with ${host}: ${host} put ${visitor} in their "${brief.circle}" circle, which lets ${visitor} message you and use what ${host} allowed that circle, and nothing else.
 
 How you work here:
 - ${visitor} sees only what you send with \`send_to_user\`; everything else you write is private working notes. Answer each of their messages with it.
@@ -157,7 +157,7 @@ How you work here:
 /**
  * The visit's extension: its instructions, the host's memory if the circle
  * may read it, the host's time, and one tool per tool in the brief, each a
- * call into the host's Pim.
+ * call into the host's space.
  */
 export function visitExtension(
 	brief: GuestBrief,
@@ -200,7 +200,7 @@ export function visitExtension(
 			: [
 					defineTool({
 						name: "recall",
-						description: `Search everything ${brief.host.username}'s Pim remembers, word for word, with a case-insensitive regular expression.`,
+						description: `Search everything ${brief.host.username}'s space remembers, word for word, with a case-insensitive regular expression.`,
 						parameters: Type.Object({ pattern: Type.String({ minLength: 1 }) }),
 						replay: "safe",
 						async execute({ pattern }, api) {

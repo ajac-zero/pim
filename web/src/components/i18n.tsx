@@ -109,7 +109,7 @@ const translations = {
     backToDiscover: "Discover",
     publishedAgents: "Published agents",
     nothingPublished: "Nothing published yet.",
-    messageTheirPim: "Message {username}'s Pim",
+    messageTheirPim: "Message {username}'s space",
     yourPage: "Your page",
     profile: "Profile",
     profileDescription:
@@ -119,7 +119,7 @@ const translations = {
     bioPlaceholder: "Runner, cook, always planning the next trip",
     sharing: "Sharing",
     sharingDescription:
-      "Put people in circles to let them message your Pim from their own. They can use only what you give their circle, and their messages count against their own usage, not yours.",
+      "Put people in circles to let them message your space from their own. They can use only what you give their circle, and their messages count against their own usage, not yours.",
     waitingForYou: "Waiting for you",
     circles: "Circles",
     noCircles:
@@ -127,7 +127,7 @@ const translations = {
     circleNamePlaceholder: "Family, Close friends…",
     newCircle: "New circle",
     circleMembers: "People: {count}",
-    circlePaused: "Paused: nobody in it can message your Pim",
+    circlePaused: "Paused: nobody in it can message your space",
     shareWithCircle: "Share with {circle}",
     deleteCircle: "Delete",
     deleteCircleNamed: "Delete {circle}",
@@ -147,18 +147,18 @@ const translations = {
     alwaysApproveForCircle: "Always approve for {circle}",
     memoryTool: "Memory",
     memoryToolDescription:
-      "What your Pim remembers about you: they can read and search it, never change it.",
+      "What your space remembers about you: they can read and search it, never change it.",
     toolChangedCircle:
       "Changed by the app since you allowed it, so it's off for this circle until you choose again.",
     sharedWithYou: "Shared with you",
-    visitEmptyTitle: "Message {username}'s Pim",
+    visitEmptyTitle: "Message {username}'s space",
     visitEmptyHint:
       "It answers for {username}, with what they share with you. Anything they want to approve goes to them first.",
-    messageVisit: "Message {username}'s Pim…",
-    visitPim: "{username}'s Pim",
+    messageVisit: "Message {username}'s space…",
+    visitPim: "{username}'s space",
     visitUnavailable: "No longer shared",
     visitBanner:
-      "You're messaging {username}'s Pim. It acts for {username}, within what they allow you. Your messages use your own usage.",
+      "You're messaging {username}'s space. It acts for {username}, within what they allow you. Your messages use your own usage.",
     connectedApps: "Apps",
     connectedAppsDescription:
       "Connect an app once with your own account, and every agent of yours that lists it can use it.",
@@ -413,7 +413,7 @@ const translations = {
     chatGPTStepCopy:
       "The tab ends on a 127.0.0.1 page that doesn't load. That's expected. Copy the whole address from its address bar.",
     chatGPTStepPaste:
-      "Paste it below, here in your own Pim, within 15 minutes. It holds a one-time code that finishes the sign-in, so don't paste it anywhere else.",
+      "Paste it below, here in your own space, within 15 minutes. It holds a one-time code that finishes the sign-in, so don't paste it anywhere else.",
     chatGPTAfterPaste:
       "After this, Pim normally keeps the connection going on its own. If access expires or is revoked in ChatGPT, connect again the same way.",
     connect: "Connect",
@@ -734,7 +734,7 @@ const translations = {
       "Start connecting again from the app that sent you here.",
     deleteAccount: "Delete account",
     deleteAccountBody:
-      "Deletes {username}'s Pim: conversations, memories, goals, connected apps, and passkeys. It can't be undone, and the username won't be available again.",
+      "Deletes {username}'s space: conversations, memories, goals, connected apps, and passkeys. It can't be undone, and the username won't be available again.",
     typeUsernameToConfirm: "Type {username} to confirm",
     deleteForever: "Delete forever",
     deleteAccountButton: "Delete my account…",
@@ -746,7 +746,7 @@ const translations = {
     addDeviceCancelFailed:
       "Couldn't end the link ({error}), so it may still work until it expires. Try again.",
     addThisDeviceBody:
-      "Your Pim sent this link from a device where you're signed in. Create a passkey here, and this device can sign in on its own from now on.",
+      "You sent this link from a device where you're signed in. Create a passkey here, and this device can sign in on its own from now on.",
     addThisDeviceNote:
       "The link works once, for 10 minutes. Your other devices and passkeys stay as they are.",
     newDeviceTitle: "Signed up on another device?",
@@ -891,7 +891,7 @@ const translations = {
     backToDiscover: "Descubrir",
     publishedAgents: "Agentes publicados",
     nothingPublished: "Nada publicado todavía.",
-    messageTheirPim: "Escribir al Pim de {username}",
+    messageTheirPim: "Escribir al espacio de {username}",
     yourPage: "Tu página",
     profile: "Perfil",
     profileDescription:
@@ -901,7 +901,7 @@ const translations = {
     bioPlaceholder: "Corredora, cocinera, siempre planeando el próximo viaje",
     sharing: "Compartir",
     sharingDescription:
-      "Pon a personas en círculos para que escriban a tu Pim desde el suyo. Solo pueden usar lo que le des a su círculo, y sus mensajes cuentan contra su propio uso, no el tuyo.",
+      "Pon a personas en círculos para que escriban a tu espacio desde el suyo. Solo pueden usar lo que le des a su círculo, y sus mensajes cuentan contra su propio uso, no el tuyo.",
     waitingForYou: "Esperan tu respuesta",
     circles: "Círculos",
     noCircles:
@@ -909,7 +909,7 @@ const translations = {
     circleNamePlaceholder: "Familia, Amigos cercanos…",
     newCircle: "Nuevo círculo",
     circleMembers: "Personas: {count}",
-    circlePaused: "En pausa: nadie en él puede escribir a tu Pim",
+    circlePaused: "En pausa: nadie en él puede escribir a tu espacio",
     shareWithCircle: "Compartir con {circle}",
     deleteCircle: "Eliminar",
     deleteCircleNamed: "Eliminar {circle}",
@@ -929,18 +929,18 @@ const translations = {
     alwaysApproveForCircle: "Aprobar siempre para {circle}",
     memoryTool: "Memoria",
     memoryToolDescription:
-      "Lo que tu Pim recuerda de ti: pueden leerlo y buscar en ello, nunca cambiarlo.",
+      "Lo que tu espacio recuerda de ti: pueden leerlo y buscar en ello, nunca cambiarlo.",
     toolChangedCircle:
       "La app la cambió desde que la permitiste, así que está desactivada para este círculo hasta que elijas de nuevo.",
     sharedWithYou: "Compartidos contigo",
-    visitEmptyTitle: "Escribe al Pim de {username}",
+    visitEmptyTitle: "Escribe al espacio de {username}",
     visitEmptyHint:
       "Responde por {username}, con lo que te comparte. Lo que quiera aprobar le llega primero.",
-    messageVisit: "Escribe al Pim de {username}…",
-    visitPim: "Pim de {username}",
+    messageVisit: "Escribe al espacio de {username}…",
+    visitPim: "Espacio de {username}",
     visitUnavailable: "Ya no se comparte",
     visitBanner:
-      "Estás escribiendo al Pim de {username}. Actúa para {username}, dentro de lo que te permite. Tus mensajes usan tu propio uso.",
+      "Estás escribiendo al espacio de {username}. Actúa para {username}, dentro de lo que te permite. Tus mensajes usan tu propio uso.",
     connectedApps: "Apps",
     connectedAppsDescription:
       "Conecta una app una vez con tu propia cuenta y todos tus agentes que la indiquen podrán usarla.",
@@ -1197,7 +1197,7 @@ const translations = {
     chatGPTStepCopy:
       "La pestaña termina en una página de 127.0.0.1 que no carga. Es normal. Copia la dirección completa de la barra de direcciones.",
     chatGPTStepPaste:
-      "Pégala abajo, aquí en tu propio Pim, antes de 15 minutos. Contiene un código de un solo uso que completa el inicio de sesión, así que no la pegues en ningún otro lugar.",
+      "Pégala abajo, aquí en tu propio espacio, antes de 15 minutos. Contiene un código de un solo uso que completa el inicio de sesión, así que no la pegues en ningún otro lugar.",
     chatGPTAfterPaste:
       "Después, Pim normalmente mantiene la conexión por su cuenta. Si el acceso vence o se revoca en ChatGPT, vuelve a conectarte de la misma forma.",
     connect: "Conectar",
@@ -1524,7 +1524,7 @@ const translations = {
     authorizeFailedBody: "Vuelve a conectar desde la app que te envió aquí.",
     deleteAccount: "Eliminar cuenta",
     deleteAccountBody:
-      "Elimina el Pim de {username}: conversaciones, memorias, metas, apps conectadas y llaves de acceso. No se puede deshacer y el nombre de usuario no volverá a estar disponible.",
+      "Elimina el espacio de {username}: conversaciones, memorias, metas, apps conectadas y llaves de acceso. No se puede deshacer y el nombre de usuario no volverá a estar disponible.",
     typeUsernameToConfirm: "Escribe {username} para confirmar",
     deleteForever: "Eliminar para siempre",
     deleteAccountButton: "Eliminar mi cuenta…",
@@ -1536,7 +1536,7 @@ const translations = {
     addDeviceCancelFailed:
       "No se pudo terminar el enlace ({error}), así que podría seguir funcionando hasta que venza. Inténtalo de nuevo.",
     addThisDeviceBody:
-      "Tu Pim envió este enlace desde un dispositivo donde tienes sesión iniciada. Crea aquí una llave de acceso y este dispositivo podrá iniciar sesión por su cuenta desde ahora.",
+      "Enviaste este enlace desde un dispositivo donde tienes sesión iniciada. Crea aquí una llave de acceso y este dispositivo podrá iniciar sesión por su cuenta desde ahora.",
     addThisDeviceNote:
       "El enlace funciona una vez, durante 10 minutos. Tus otros dispositivos y llaves de acceso no cambian.",
     newDeviceTitle: "¿Te registraste en otro dispositivo?",

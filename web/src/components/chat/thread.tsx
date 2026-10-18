@@ -75,7 +75,7 @@ export const Thread = memo(function Thread({
   composerCardHeight,
 }: {
   sessionId: string;
-  /** The username whose Pim this conversation is with, when it's someone else's. */
+  /** The username whose space this conversation is with, when it's someone else's. */
   visit?: string;
   view: SessionView;
   /** A message sent but not yet in the transcript, shown right away. */

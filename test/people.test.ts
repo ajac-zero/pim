@@ -134,7 +134,7 @@ async function makeDue(stub: DurableObjectStub<Directory>, ownerId: string) {
 	});
 }
 
-/** Swaps a method of the test Pim for the length of `run`. */
+/** Swaps a method of the test space for the length of `run`. */
 async function withAgentMethod<K extends "deleteEverything">(name: K, replacement: (original: Pim[K]) => Pim[K], run: () => Promise<void>) {
 	const prototype = Pim.prototype as Pim;
 	const original = prototype[name];
@@ -150,7 +150,7 @@ const toolUse = (name: string, args: Record<string, unknown>) =>
 	fauxAssistantMessage(fauxToolCall(name, args as never), { stopReason: "toolUse" });
 
 describe("registration", () => {
-	it("gives a username its own Pim, set up with a one-time link, and recovery codes", async () => {
+	it("gives a username its own space, set up with a one-time link, and recovery codes", async () => {
 		const { status, body } = await register("alice", { timeZone: "Europe/Lisbon" });
 		expect(status).toBe(201);
 		expect(body).toMatchObject({ username: "alice", role: "member", setup: expect.stringMatching(/^o_[0-9a-z]{26}\.[\w-]+$/) });
@@ -340,20 +340,20 @@ describe("registration", () => {
 });
 
 describe("isolation between people", () => {
-	it("a session or a passkey opens only its owner's Pim", async () => {
+	it("a session or a passkey opens only its owner's space", async () => {
 		const erin = await person("erin");
 		const frank = await person("frank");
 		expect(erin.ownerId).not.toBe(frank.ownerId);
 		await erin.browser.json("/api/memory/log", { method: "POST", json: { text: "Erin's locker code is 4512" } });
 		expect(JSON.stringify((await frank.browser.json("/api/memory/log")).body)).not.toContain("4512");
-		// Signing in with Erin's passkey anywhere opens Erin's Pim, never Frank's.
+		// Signing in with Erin's passkey anywhere opens Erin's space, never Frank's.
 		const elsewhere = new Browser();
 		expect(await signIn(elsewhere, erin.passkey)).toBe(200);
 		expect((await elsewhere.json("/api/account")).body).toMatchObject({ username: "erin" });
 		expect(JSON.stringify((await elsewhere.json("/api/memory/log")).body)).toContain("4512");
 	});
 
-	it("an API token opens only its owner's Pim, and can't manage tokens", async () => {
+	it("an API token opens only its owner's space, and can't manage tokens", async () => {
 		const gina = await person("gina");
 		const hank = await person("hank");
 		const made = await gina.browser.json("/auth/tokens", { method: "POST", json: { name: "Phone" } });
@@ -392,7 +392,7 @@ describe("isolation between people", () => {
 		expect((await jo.browser.json(`/api/sessions/${ianRoot}/messages`)).status).toBe(404);
 		expect((await jo.browser.json("/api/chatgpt")).body).toEqual({ connected: false, email: null });
 		expect((await ian.browser.json("/api/chatgpt")).body).toEqual({ connected: true, email: "ian@example.com" });
-		// Each person's Pim is its own agent host to OpenAI.
+		// Each person's space is its own agent host to OpenAI.
 		const hostId = async (browser: Browser) =>
 			new URL((await browser.json("/api/chatgpt/login", { method: "POST" })).body.url).searchParams.get("ext_agent_host_id");
 		const [ianHost, joHost] = [await hostId(ian.browser), await hostId(jo.browser)];
@@ -730,14 +730,14 @@ describe("the account", () => {
 		await runInDurableObject(env.Pim.getByName(rita.ownerId), async (instance: Pim) => {
 			instance.store.putCredential("openai", JSON.stringify({ type: "oauth", access: "rita-access", refresh: "rita-refresh" }));
 			await instance.schedule(new Date(Date.now() + 60 * 60_000), "runScheduledTask", { session: "1", instruction: "Call the bank" });
-			// Images are kept in R2, outside the Pim's storage.
+			// Images are kept in R2, outside the space's storage.
 			await instance.images.keep("1", [{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }]);
 		});
 		expect((await holdings(rita.ownerId)).remaining).toEqual(
 			expect.arrayContaining(["credentials", "memories", "schedules", "owner profile", "images"]),
 		);
 
-		// The Pim can't be reached: nothing is erased, and nothing says it was.
+		// The space can't be reached: nothing is erased, and nothing says it was.
 		await withAgentMethod(
 			"deleteEverything",
 			() => async () => {
@@ -771,7 +771,7 @@ describe("the account", () => {
 		expect(await holdings(rita.ownerId)).toEqual({ remaining: [], memories: 0, credentials: [], passkeys: 0, tokens: 0 });
 	});
 
-	it("doesn't report a deletion done when the Pim can't even be addressed", async () => {
+	it("doesn't report a deletion done when the space can't even be addressed", async () => {
 		const uma = await person("uma");
 		await uma.browser.json("/api/memory/log", { method: "POST", json: { text: "Uma's diary" } });
 		const agents = env.Pim as unknown as { idFromName: (name: string) => DurableObjectId };
@@ -794,7 +794,7 @@ describe("the account", () => {
 		expect((await directory().account(uma.ownerId))?.status).toBe("deleted");
 	});
 
-	it("refuses a request authorized before the deletion that reaches the Pim after it", async () => {
+	it("refuses a request authorized before the deletion that reaches the space after it", async () => {
 		const rex = await person("reviewrace");
 		const token = (await rex.browser.json("/auth/tokens", { method: "POST", json: { name: "CLI" } })).body.token as string;
 		// Hold the first valid token check after it says yes, until the deletion is done.
@@ -833,8 +833,8 @@ describe("the account", () => {
 		expect((await directory().account(rex.ownerId))?.status).toBe("deleted");
 	});
 
-	it("counts a deletion done only when the Pim is checked empty, whatever its call said", async () => {
-		// The call that erases the Pim can end abruptly after erasing it: that is done.
+	it("counts a deletion done only when the space is checked empty, whatever its call said", async () => {
+		// The call that erases the space can end abruptly after erasing it: that is done.
 		const sam = await person("sam");
 		await sam.browser.json("/api/memory/log", { method: "POST", json: { text: "Sam" } });
 		await withAgentMethod(
@@ -868,7 +868,7 @@ describe("the account", () => {
 	});
 });
 
-/** Has the person's Pim make an HTML artifact, as its model would, and returns its id. */
+/** Has the person's space make an HTML artifact, as its model would, and returns its id. */
 async function makeArtifact(browser: Browser, content: string) {
 	faux.setResponses([toolUse("artifact_create", { title: "Page", kind: "html", content }), toolUse("send_to_user", { message: "Made it." })]);
 	expect((await browser.json(`/api/sessions/${await rootOf(browser)}/messages`, { method: "POST", json: { content: "Make a page", wait: true } })).status).toBe(200);
@@ -886,7 +886,7 @@ describe("artifacts", () => {
 		expect(frame.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
 		expect(frame.headers.get("content-security-policy")).toContain(`frame-ancestors ${ORIGIN}`);
 		expect(await frame.text()).toContain("Ada's plans");
-		// Bo's Pim has no such artifact, signed in or not, whatever path is asked.
+		// Bo's space has no such artifact, signed in or not, whatever path is asked.
 		for (const path of [`/api/artifacts/${id}`, `/api/artifacts/${id}/versions/1`, `/api/artifacts/${id}/versions/1/frame`, `/api/artifacts/${id}/versions/1/download`]) {
 			expect((await bo.browser.fetch(path)).status).toBe(404);
 		}
@@ -929,7 +929,7 @@ describe("artifacts", () => {
 		expect((await cy.browser.json(`/api/artifacts/${gone}`, { method: "DELETE" })).body).toEqual({ deleted: true });
 		expect((await holdings(cy.ownerId)).remaining).toContain("deleted artifact ids");
 		expect(JSON.stringify(JSON.parse(await (await cy.browser.fetch("/api/account/export")).text()).pim.artifacts)).not.toContain(gone);
-		// Deleted: gone, and the Pim holds nothing.
+		// Deleted: gone, and the space holds nothing.
 		const before = new Map(cy.browser.cookies);
 		expect((await cy.browser.json("/api/account", { method: "DELETE", json: { confirm: "art-cy" } })).body).toEqual({ deleted: true });
 		// As another device still holding the session would.
@@ -966,7 +966,7 @@ describe("the admin", () => {
 			statusReason: "spam",
 		});
 		expect((await pat.browser.json("/api/sessions")).status).toBe(403);
-		// The Pim refuses too, whatever a Worker has cached.
+		// The space refuses too, whatever a Worker has cached.
 		const agent = await runInDurableObject(env.Pim.getByName(pat.ownerId), (instance: Pim) => instance.status());
 		expect(agent).toBe("suspended");
 		await admin("/api/admin/accounts/pat/unsuspend", { method: "POST" });
@@ -1062,20 +1062,20 @@ describe("the admin", () => {
 });
 
 /**
- * What erasing a Pim must stop, case by case: everything that could
+ * What erasing a space must stop, case by case: everything that could
  * still write to it, or act for its owner, once the Directory says it's gone.
  */
 describe("erasure boundaries", () => {
 	/**
-	 * A gate a test holds work on inside a Pim, and a flag that the work
-	 * reached it. Only plain flags cross between the test and the Pim, each
+	 * A gate a test holds work on inside a space, and a flag that the work
+	 * reached it. Only plain flags cross between the test and the space, each
 	 * polled with its own timers: a promise made in the test and awaited in an
 	 * agent that then ends would hang the test runner itself.
 	 */
 	function gate() {
 		const state = { reached: false, open: false };
 		return {
-			/** Called by the held work, in the Pim. */
+			/** Called by the held work, in the space. */
 			hold: async () => {
 				state.reached = true;
 				while (!state.open) await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1123,7 +1123,7 @@ describe("erasure boundaries", () => {
 		await expectErased(ana.ownerId);
 	});
 
-	it("refuses the write of a request that was already inside the Pim when the deletion began", async () => {
+	it("refuses the write of a request that was already inside the space when the deletion began", async () => {
 		const ben = await person("eb-inflight");
 		const root = await rootOf(ben.browser);
 		const held = gate();
@@ -1134,7 +1134,7 @@ describe("erasure boundaries", () => {
 			return original.apply(this, args);
 		};
 		try {
-			// Past the Worker and the Pim's own check, waiting just before it writes.
+			// Past the Worker and the space's own check, waiting just before it writes.
 			const late = ben.browser.json(`/api/sessions/${root}/messages`, { method: "POST", json: { content: "Written after deletion" } });
 			await held.reached();
 			expect(await deleteAccount(ben.browser, "eb-inflight")).toEqual({ deleted: true });
@@ -1150,9 +1150,9 @@ describe("erasure boundaries", () => {
 	});
 
 	/**
-	 * Holds the first `POST /memory/log` inside the Pim's request handler,
-	 * past the Worker and the Pim's `fetch`, and records how it ended. The
-	 * SDK binds `onRequest` when a Pim is made, so this goes in before the
+	 * Holds the first `POST /memory/log` inside the space's request handler,
+	 * past the Worker and the space's `fetch`, and records how it ended. The
+	 * SDK binds `onRequest` when a space is made, so this goes in before the
 	 * person registers. `duringErasure` lets the request go on from inside
 	 * the erasure itself, between its start and the wipe.
 	 */
@@ -1188,7 +1188,7 @@ describe("erasure boundaries", () => {
 		return { seen, restore: () => (prototype.onRequest = original) };
 	}
 
-	it("refuses a write in the Pim's handler that goes on while the erasure runs", async () => {
+	it("refuses a write in the space's handler that goes on while the erasure runs", async () => {
 		const held = gate();
 		const hook = holdMemoryWrite(held, { duringErasure: true });
 		try {
@@ -1196,7 +1196,7 @@ describe("erasure boundaries", () => {
 			const late = gil.browser.json("/api/memory/log", { method: "POST", json: { text: "Written during erasure" } });
 			await held.reached();
 			expect(await deleteAccount(gil.browser, "eb-handler-during")).toEqual({ deleted: true });
-			// It went on before the wipe, and the Pim, already erasing, refused it.
+			// It went on before the wipe, and the space, already erasing, refused it.
 			expect(hook.seen.outcome).toBe("answered 410");
 			expect((await late).status).toBe(410);
 			await expectErased(gil.ownerId);
@@ -1205,7 +1205,7 @@ describe("erasure boundaries", () => {
 		}
 	});
 
-	it("refuses an artifact restore in the Pim's handler that goes on while the erasure runs", async () => {
+	it("refuses an artifact restore in the space's handler that goes on while the erasure runs", async () => {
 		const held = gate();
 		const hook = holdMemoryWrite(held, { duringErasure: true, path: /^\/artifacts\/[^/]+\/restore$/ });
 		try {
@@ -1222,7 +1222,7 @@ describe("erasure boundaries", () => {
 		}
 	});
 
-	it("drops a write held in the Pim's handler until the instance has ended", async () => {
+	it("drops a write held in the space's handler until the instance has ended", async () => {
 		const held = gate();
 		const hook = holdMemoryWrite(held, { duringErasure: false });
 		try {
@@ -1336,7 +1336,7 @@ describe("erasure boundaries", () => {
 		await expectErased(ivy.ownerId);
 	});
 
-	it("never runs an action whose approval timer outlives the Pim", async () => {
+	it("never runs an action whose approval timer outlives the space", async () => {
 		const dot = await person("eb-approval");
 		// Auto-approve after the timeout: the dangerous case.
 		expect((await dot.browser.json("/api/settings", { method: "PUT", json: { approvalPolicy: "auto" } })).body).toMatchObject({ approvalPolicy: "auto" });
@@ -1439,7 +1439,7 @@ describe("circles and visits", () => {
 	const setPermission = (browser: Browser, circle: string, app: string | null, tool: string, permission: string | null) =>
 		browser.json("/api/permissions", { method: "PUT", json: { circle, app, tool, permission } });
 
-	it("lets someone in a circle message the owner's Pim from their own, with only what the circle was given", async () => {
+	it("lets someone in a circle message the owner's space from their own, with only what the circle was given", async () => {
 		const spy = withCalendar();
 		try {
 			const ana = await person("ana");
@@ -1448,7 +1448,7 @@ describe("circles and visits", () => {
 			expect((await ana.browser.json("/api/mcp", { method: "POST", json: { app: "test.ledger/calendar" } })).status).toBe(201);
 			await ana.browser.json("/api/memory/log", { method: "POST", json: { text: "Ana's favourite restaurant is Tasca do Chico." } });
 
-			// Ana puts Ben in a circle; Ben's Pim hears of it.
+			// Ana puts Ben in a circle; Ben's space hears of it.
 			const family = (await ana.browser.json("/api/circles", { method: "POST", json: { name: "Family" } })).body;
 			expect((await ana.browser.json(`/api/circles/${family.id}/members`, { method: "POST", json: { username: "nobody-here" } })).status).toBe(404);
 			expect((await ana.browser.json(`/api/circles/${family.id}/members`, { method: "POST", json: { username: "ana" } })).status).toBe(400);
@@ -1456,7 +1456,7 @@ describe("circles and visits", () => {
 			expect((await ben.browser.json("/api/visits")).body.visits).toEqual([
 				{ ownerId: ana.ownerId, username: "ana", sharedAt: expect.any(Number), available: true, session: null },
 			]);
-			expect((await ben.browser.json("/api/notifications")).body.notifications[0]).toMatchObject({ title: "ana shared their Pim with you" });
+			expect((await ben.browser.json("/api/notifications")).body.notifications[0]).toMatchObject({ title: "ana shared their space with you" });
 
 			// A circle starts with nothing: every tool off, memory off.
 			const circleTools = (await ana.browser.json(`/api/permissions?circle=${family.id}`)).body.tools;
@@ -1470,7 +1470,7 @@ describe("circles and visits", () => {
 			await setPermission(ana.browser, family.id, "calendar", "find_events", "on");
 			await setPermission(ana.browser, family.id, "calendar", "create_event", "ask");
 
-			// Ben's visit runs in Ben's Pim, on Ben's usage, with Ana's tools and memory and nothing of Ben's own.
+			// Ben's visit runs in Ben's space, on Ben's usage, with Ana's tools and memory and nothing of Ben's own.
 			const session = (await ben.browser.json("/api/visits/ana", { method: "POST" })).body.session as string;
 			let system = "";
 			let offered: string[] = [];
@@ -1485,7 +1485,7 @@ describe("circles and visits", () => {
 				toolUse("send_to_user", { message: "Ana sees the dentist at 9 on Monday." }),
 			]);
 			expect((await say(ben.browser, session, "Is Ana free Monday morning?")).body).toMatchObject({ status: "done" });
-			expect(system).toContain("You are ana's Pim");
+			expect(system).toContain("You are ana's personal AI agent");
 			expect(system).toContain("Tasca do Chico");
 			// The circle's tools, and the visitor's own way to be answered.
 			expect(offered.sort()).toEqual(["calendar_create_event", "calendar_find_events", "current_time", "recall", "send_to_user"]);
@@ -1509,7 +1509,7 @@ describe("circles and visits", () => {
 			await say(ben.browser, await rootOf(ben.browser), "Hi");
 			expect(ownTools).toContain("note");
 			expect(ownTools).not.toContain("calendar_find_events");
-			expect(own).not.toContain("ana's Pim");
+			expect(own).not.toContain("ana's space");
 			expect((await ben.browser.json("/api/sessions")).body.sessions.find((info: { id: string }) => info.id === session)).toMatchObject({
 				visit: { username: "ana", available: true },
 			});
@@ -1524,7 +1524,7 @@ describe("circles and visits", () => {
 				requestedBy: { ownerId: ben.ownerId, username: "ben", circle: family.id, circleName: "Family" },
 				onTimeout: "deny",
 			});
-			expect((await ana.browser.json("/api/notifications")).body.notifications[0]).toMatchObject({ title: "ben asked your Pim" });
+			expect((await ana.browser.json("/api/notifications")).body.notifications[0]).toMatchObject({ title: "ben asked your agent" });
 			faux.setResponses([toolUse("send_to_user", { message: "Ana said yes: lunch is on her calendar." })]);
 			expect((await ana.browser.json(`/api/approvals/${asked.id}/approve`, { method: "POST", json: {} })).body).toMatchObject({ status: "approved" });
 			expect(created).toEqual([{ title: "Lunch with Ben", day: "friday" }]);
@@ -1536,18 +1536,18 @@ describe("circles and visits", () => {
 				["calendar_find_events", "ran"],
 			]);
 
-			// The boundary is in Ana's Pim, at each call: a tool turned off is refused even to a Pim that was told of it, and nobody outside the circle gets anything.
+			// The boundary is in Ana's space, at each call: a tool turned off is refused even to a space that was told of it, and nobody outside the circle gets anything.
 			await setPermission(ana.browser, family.id, "calendar", "find_events", "off");
 			const call = (guest: { ownerId: string; username: string }) =>
 				runInDurableObject(env.Pim.getByName(ana.ownerId), (instance: Pim) =>
 					instance.guestCall(guest, { tool: "calendar_find_events", args: { day: "tuesday" }, session, callId: "c1" }),
 				);
 			expect(await call({ ownerId: ben.ownerId, username: "ben" })).toEqual({ text: "ana doesn't let you use calendar_find_events.", isError: true });
-			expect(await call({ ownerId: cyd.ownerId, username: "cyd" })).toEqual({ text: "ana doesn't share their Pim with you.", isError: true });
+			expect(await call({ ownerId: cyd.ownerId, username: "cyd" })).toEqual({ text: "ana doesn't share their space with you.", isError: true });
 			await ana.browser.json(`/api/circles/${family.id}`, { method: "PUT", json: { enabled: false } });
 			expect((await say(ben.browser, session, "Still there?")).status).toBe(403);
 
-			// Taken out of the circle, Ben's Pim knows, and the visit can't go on.
+			// Taken out of the circle, Ben's space knows, and the visit can't go on.
 			await ana.browser.json(`/api/circles/${family.id}`, { method: "PUT", json: { enabled: true } });
 			expect((await ana.browser.json(`/api/circles/${family.id}/members/${ben.ownerId}`, { method: "DELETE" })).status).toBe(200);
 			expect((await ben.browser.json("/api/visits")).body.visits[0]).toMatchObject({ available: false, session });

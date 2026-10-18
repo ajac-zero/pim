@@ -5,7 +5,7 @@ import puppeteer, { type Browser, type ElementHandle, type Page } from "@cloudfl
  * share, as people share one browser across their tasks. It is opened when
  * an agent first needs it and closes itself after `IDLE_MS` without use, so
  * it costs browser time only while someone is browsing. Its session ID is
- * kept in the Pim's meta, so a Pim that wakes again goes on with the same
+ * kept in the space's meta, so a space that wakes again goes on with the same
  * pages. The browser starts signed in nowhere; the person can take it over
  * (Live View, where Browser Run offers it) to sign in or solve a check, and
  * the agents carry on in the same pages afterwards.
@@ -156,7 +156,7 @@ export class PimBrowser {
 		return this.#binding !== undefined;
 	}
 
-	/** Whether a browser is open, as far as this Pim knows; it may have closed itself since. */
+	/** Whether a browser is open, as far as this space knows; it may have closed itself since. */
 	get open(): boolean {
 		return this.#meta.get(SESSION_KEY) !== null;
 	}
@@ -294,9 +294,9 @@ export class PimBrowser {
 		return run;
 	}
 
-	/** The connected browser: the one this Pim has open, or a new one when `start` allows. */
+	/** The connected browser: the one this space has open, or a new one when `start` allows. */
 	async #browserFor(start: boolean): Promise<Browser | undefined> {
-		if (!this.#binding) throw new Error("This Pim has no browser.");
+		if (!this.#binding) throw new Error("This space has no browser.");
 		if (this.#browser?.connected) return this.#browser;
 		this.#browser = undefined;
 		const sessionId = this.#meta.get(SESSION_KEY);

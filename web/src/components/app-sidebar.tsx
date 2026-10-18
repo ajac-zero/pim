@@ -327,7 +327,7 @@ export function AppSidebar({
   );
 }
 
-/** Your chats, a section for each of your agents, and the Pims shared with you. */
+/** Your chats, a section for each of your agents, and the spaces shared with you. */
 function ChatsPanel({
   awaitingApproval,
   onNavigate,
@@ -355,7 +355,7 @@ function ChatsPanel({
       list: [] as Session[],
     }));
     for (const session of sessions ?? []) {
-      // Conversations with others' Pims are listed under Shared with you.
+      // Conversations with others' spaces are listed under Shared with you.
       if (session.visit) continue;
       const section =
         all.find((candidate) => candidate.agent.id === session.agent?.id) ??
@@ -686,7 +686,7 @@ function AgentSectionList({
   );
 }
 
-/** Someone else's Pim, shared with you: opens your conversation with it, started on first use. */
+/** Someone else's space, shared with you: opens your conversation with it, started on first use. */
 function VisitRow({
   visit,
   active,

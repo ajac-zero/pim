@@ -2,7 +2,7 @@ import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore 
 import type { PimStore } from "./store";
 
 /**
- * pi-ai's credential store over Pim's SQLite. pi-ai refreshes OAuth tokens
+ * pi-ai's credential store over the space's SQLite. pi-ai refreshes OAuth tokens
  * inside `modify`, and some providers rotate the refresh token on every
  * refresh, so two refreshes must never overlap: each provider's writes run
  * one after another, even across the awaits inside them.

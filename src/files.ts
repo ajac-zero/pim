@@ -3,9 +3,9 @@ import { WorkerJavaScriptBackend } from "@cloudflare/computer/backends/worker-ja
 import { HttpError } from "./http";
 
 /**
- * The person's files: a folder in their Pim that they and their agents
- * share. It is a `@cloudflare/computer` Workspace kept in the Pim's own
- * SQLite, so files count toward the Pim's storage and go with it when the
+ * The person's files: a folder in their space that they and their agents
+ * share. It is a `@cloudflare/computer` Workspace kept in the space's own
+ * SQLite, so files count toward the space's storage and go with it when the
  * account is deleted. Everything here, and every file tool, stays under
  * `FILES_ROOT`; the Workspace's other paths are its own.
  */
@@ -25,7 +25,7 @@ export function codeLoader(env: object): WorkerLoader | null {
 /**
  * The Workspace's backends: JavaScript in a fresh Dynamic Worker for each
  * run, which reads and writes the files under `FILES_ROOT` and nothing
- * else. It has no network, so nothing leaves the Pim except through
+ * else. It has no network, so nothing leaves the space except through
  * Pim's own tools and their approvals.
  */
 export function codeBackends(env: object): WorkerJavaScriptBackend[] {

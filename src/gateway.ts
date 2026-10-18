@@ -13,7 +13,7 @@ import { PimThemes } from "./themes";
  * Serves a Pim: everyone's web app, sign-in, API and app callbacks, on one
  * hostname.
  *
- * - `/api/*`: the signed-in person's own Pim. The request names its owner:
+ * - `/api/*`: the signed-in person's own space. The request names its owner:
  *   browsers by their session's cookie, other clients by their API
  *   token, which is `pim_<owner>_<secret>`. Either is checked against that
  *   owner's own sign-in before anything else.
@@ -22,7 +22,7 @@ import { PimThemes } from "./themes";
  *   anyone signs in.
  * - `/auth/*`: registration (./accounts.ts) and sign-in (./auth): passkeys, and
  *   accounts at Google, GitHub or a single sign-on provider.
- * - `/mcp`: the person's Pim as an MCP server (./mcp-server.ts), for MCP
+ * - `/mcp`: the person's space as an MCP server (./mcp-server.ts), for MCP
  *   clients such as Claude or ChatGPT, opened by an OAuth access token or an
  *   API token. `/oauth/*` and `/.well-known/*` sign those clients in, and
  *   `/authorize` is the app's page where the person lets them
@@ -128,35 +128,35 @@ const mcpAccess: McpAccess = {
 
 const under = (pathname: string, prefix: string) => pathname === prefix || pathname.startsWith(`${prefix}/`);
 
-/** Hands a request to an owner's Pim, `path` being its path in the Pim's API. */
+/** Hands a request to an owner's space, `path` being its path in the space's API. */
 export async function toAgent(request: Request, env: Env, owner: string, path: string): Promise<Response> {
 	const agent = await getAgentByName(env.Pim, owner);
 	const url = new URL(request.url);
 	url.pathname = path;
-	// Bodies are small JSON; buffering them lets the Pim answer without reading one.
+	// Bodies are small JSON; buffering them lets the space answer without reading one.
 	const forwarded = new Request(url, request.body === null ? request : new Request(request, { body: await request.arrayBuffer() }));
-	// The Pim checks it is the one this owner's requests are for.
+	// The space checks it is the one this owner's requests are for.
 	forwarded.headers.set(OWNER_HEADER, owner);
 	try {
 		return await agent.fetch(forwarded);
 	} catch (error) {
-		// The Pim's instance ended under the request (a restart, or an erasure, after which a retry gets 410).
+		// The space's instance ended under the request (a restart, or an erasure, after which a retry gets 410).
 		if ((error as { durableObjectReset?: boolean })?.durableObjectReset) {
-			return Response.json({ error: "Pim restarted while answering. Try again." }, { status: 503 });
+			return Response.json({ error: "The space restarted while answering. Try again." }, { status: 503 });
 		}
 		throw error;
 	}
 }
 
-/** Paths of the API answered before the Pim: an authorized request for `path` under `/api`. */
+/** Paths of the API answered before the space: an authorized request for `path` under `/api`. */
 export type ApiExtension = (path: string, request: Request) => Promise<Response | undefined>;
 
 /**
  * An app's callback or event delivery: `/mcp/callback/<owner>` (GET, the
- * OAuth sign-in's redirect, which the Pim matches against the callback URL
+ * OAuth sign-in's redirect, which the space matches against the callback URL
  * it gave), `/mcp/callback/apps` (GET, the same for the apps extensions
  * implement, whose `state` starts with the owner), or
- * `/mcp/events/<owner>/<watch>` (POST, which the Pim answers as `/mcp/events/<watch>`).
+ * `/mcp/events/<owner>/<watch>` (POST, which the space answers as `/mcp/events/<watch>`).
  * Also `/mcp/client/<owner>` (GET): Pim's client metadata document for that
  * owner's sign-ins, for services that take one instead of registering clients.
  */
@@ -191,7 +191,7 @@ async function serveApp(request: Request, env: Env, pathname: string): Promise<R
 
 /**
  * An image a model provider fetches: `/images/<owner>/<id>?expires=…&signature=…`,
- * which the Pim checks and answers as `/public-images/<id>`.
+ * which the space checks and answers as `/public-images/<id>`.
  */
 async function serveImage(request: Request, env: Env, pathname: string): Promise<Response> {
 	const match = /^\/images\/([^/]+)\/([\w-]+)$/.exec(pathname);
@@ -288,7 +288,7 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 		const answered = await extension(path, request);
 		if (answered) return withCors(answered);
 	}
-	// The Pim accepts sockets on any path; keep them on one.
+	// The space accepts sockets on any path; keep them on one.
 	const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
 	if (upgrade !== (path === "/ws")) {
 		return withCors(fail(upgrade ? 404 : 426, upgrade ? "WebSockets connect at /api/ws" : "/api/ws expects a WebSocket upgrade"));

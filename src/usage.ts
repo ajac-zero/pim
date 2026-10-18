@@ -10,7 +10,7 @@ import type { Models } from "@earendil-works/pi-ai/models";
 import { HttpError } from "./http";
 
 /**
- * What this Pim has used, by UTC day, and the limits on it. Members have
+ * What this space has used, by UTC day, and the limits on it. Members have
  * the limits the deployment's `PIM_LIMIT_*` variables set, if any (see
  * ./deployment.ts); the admin has none, and can change anyone's.
  *
@@ -29,7 +29,7 @@ export type Limits = {
 	readonly sessions: number | null;
 	/** Pending scheduled tasks. */
 	readonly schedules: number | null;
-	/** The Pim's database, in bytes. */
+	/** The space's database, in bytes. */
 	readonly storageBytes: number | null;
 	/** Artifacts kept. */
 	readonly artifacts: number | null;
@@ -145,7 +145,7 @@ export function wrapStreams(models: Models, wrap: (stream: StreamFn) => StreamFn
 export const utcDay = (now: number) => new Date(now).toISOString().slice(0, 10);
 
 /** Wording pi-ai classifies as a non-retryable quota error, so a run stops at once instead of retrying. */
-export const QUOTA_MESSAGE = "Pim usage quota exceeded";
+export const QUOTA_MESSAGE = "Space usage quota exceeded";
 
 /** A model request, counted on the UTC day it was sent; its tokens are added to that day when it ends. */
 export type ModelReservation = { readonly day: string; readonly provider: string; readonly model: string };

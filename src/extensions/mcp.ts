@@ -18,7 +18,7 @@ import { json, type PimServices, text } from "./services";
  * Remote MCP servers as pi tools: the apps the user connects (calendar, mail,
  * notes...). The `agents` SDK's MCP client owns connections, OAuth and
  * reconnecting after a wake; this module turns its catalog into a pi
- * extension, which the Pim reinstalls whenever the catalog changes. pi
+ * extension, which the space reinstalls whenever the catalog changes. pi
  * picks up the new tools from the next request, as a live reload.
  */
 
@@ -217,7 +217,7 @@ export function mcpActions(bridge: McpBridge): GatedAction[] {
 	return [call as GatedAction];
 }
 
-/** Each connected app's tools are a pi extension of their own; a chat selects those of the apps its Pim works with. */
+/** Each connected app's tools are a pi extension of their own; a chat selects those of the apps its agent works with. */
 export const APP_PREFIX = "pim.app.";
 export const appExtensionName = (serverId: string) => `${APP_PREFIX}${serverId}`;
 
@@ -297,7 +297,7 @@ export function mcpExtensions(
 
 	const listApps = defineTool({
 		name: "list_apps",
-		description: "List the apps this Pim works with, whether each is connected, and their tools.",
+		description: "List the apps this agent works with, whether each is connected, and their tools.",
 		parameters: Type.Object({}),
 		replay: "safe",
 		async execute(_args, api) {
@@ -320,7 +320,7 @@ export function mcpExtensions(
 	const connectApp = defineTool({
 		name: "connect_app",
 		description:
-			"Connect one of the apps this Pim works with that isn't connected yet, giving you its tools. If the person must sign in first, you get a link to give them. Only the apps listed in connected_apps can be connected.",
+			"Connect one of the apps this agent works with that isn't connected yet, giving you its tools. If the person must sign in first, you get a link to give them. Only the apps listed in connected_apps can be connected.",
 		parameters: Type.Object({ app: Type.String({ description: "The app's id or name, as connected_apps lists it." }) }),
 		replay: "safe",
 		async execute({ app: wanted }, api) {

@@ -118,7 +118,7 @@ describe("files", () => {
 		expect((await api("/files?path=/workspace/old")).status).toBe(404);
 	});
 
-	it("count toward the Pim's storage, which refuses more once full", async () => {
+	it("count toward the space's storage, which refuses more once full", async () => {
 		await setLimits({ storageBytes: 1 });
 		expect((await upload("/workspace/big.bin", new Uint8Array(10))).status).toBe(429);
 		await setLimits(null);

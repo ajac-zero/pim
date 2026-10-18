@@ -24,7 +24,7 @@ import {
 
 /**
  * Sharing, as a dialog over whatever is open: circles of people who may
- * message your Pim from their own, what each circle may use, the requests
+ * message your space from their own, what each circle may use, the requests
  * they're waiting on, and what they did.
  */
 export function SharingDialog({

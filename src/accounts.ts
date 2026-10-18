@@ -14,12 +14,12 @@ import { usernameProblem } from "./usernames";
  * view of everyone. ./gateway.ts decides whose request it is and calls in
  * here; ./directory.ts keeps the accounts.
  *
- * Every person has their own Pim and Auth Durable Objects, named after their
+ * Every person's space has its own Pim and Auth Durable Objects, named after their
  * owner ID, so one person's sessions, tokens, credentials and data are never
  * in another's.
  */
 
-/** How long a Worker trusts what it read about an account. Suspensions reach the Pim at once regardless. */
+/** How long a Worker trusts what it read about an account. Suspensions reach the space at once regardless. */
 const ACCOUNT_CACHE_MS = 30_000;
 const accounts = new Map<string, { account: Account | null; at: number }>();
 
@@ -117,7 +117,7 @@ export function sites(env: Env): Sites {
 
 /**
  * Deletes an account: it stops opening anything at once, then the Directory
- * erases the Pim and its sign-in, now if it can and on its alarm until it
+ * erases the space and its sign-in, now if it can and on its alarm until it
  * has. Done only once both were checked empty. Safe to run again, to retry a
  * deletion that hasn't finished.
  */
@@ -248,7 +248,7 @@ async function register(request: Request, env: Env, now: number): Promise<Respon
 	);
 }
 
-/** `/api/account`: the person's account, answered here because the Pim doesn't know about accounts. */
+/** `/api/account`: the person's account, answered here because the space doesn't know about accounts. */
 export function accountApi(env: Env, account: Account, site: AuthSite, request: Request, viaSession: boolean): ApiExtension {
 	return async (path) => {
 		if (path !== "/account" && !path.startsWith("/account/")) return undefined;
@@ -328,8 +328,8 @@ function signInProviders(env: Env, origin: string) {
 /**
  * The parts of a person's API that need the whole instance, answered here:
  * adding someone to a circle by username (only the Directory knows whose
- * Pim a username is), their profile, other people's, and the gallery of
- * published agents. Everything else is their own Pim's.
+ * space a username is), their profile, other people's, and the gallery of
+ * published agents. Everything else is their own space's.
  */
 export function socialApi(env: Env, account: Account, request: Request): ApiExtension {
 	return async (path) => {
@@ -408,7 +408,7 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				}
 				return undefined;
 			}
-			// A deleted agent leaves the gallery too; the Pim deletes it after.
+			// A deleted agent leaves the gallery too; the space deletes it after.
 			const deleted = /^\/agents\/([^/]+)$/.exec(path);
 			if (deleted && request.method === "DELETE") await gallery(env).unpublish(account.ownerId, decodeURIComponent(deleted[1]!));
 		} catch (error) {
@@ -519,7 +519,7 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 				const status = action === "/suspend" ? "suspended" : "active";
 				const reason = (await body()).reason;
 				const updated = await dir.setStatus(account.ownerId, status, typeof reason === "string" ? reason : null);
-				// The Pim stops at once, whatever other Workers still have cached.
+				// The space stops at once, whatever other Workers still have cached.
 				await (await pim()).setStatus(status);
 				forget(account.ownerId);
 				log(status === "suspended" ? "suspended" : "unsuspended", { owner: account.ownerId, username, reason, by: admin.ownerId });

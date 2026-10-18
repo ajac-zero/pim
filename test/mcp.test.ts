@@ -13,7 +13,7 @@ import { faux, type Pim } from "./worker";
 /**
  * Real MCP servers, built with the official server SDK, answering the
  * Pim's MCP client in-process: requests to their URLs are routed to them.
- * One Pim for the file; the tests build on each other's connected apps.
+ * One space for the file; the tests build on each other's connected apps.
  */
 
 const created: { title: string; day: string }[] = [];
@@ -166,7 +166,7 @@ describe("connected apps (MCP)", () => {
 		expect(status).toBe(201);
 		expect(body).toMatchObject({ id: "calendar", state: "ready" });
 
-		// Connected, but no Pim works with it yet.
+		// Connected, but no agent works with it yet.
 		expect((await api("/mcp")).body.servers).toEqual([expect.objectContaining({ id: "calendar", agents: [] })]);
 		await majordomoApps(["test.ledger/calendar"]);
 		const apps = (await api("/mcp")).body.servers;
@@ -324,12 +324,12 @@ describe("connected apps (MCP)", () => {
 		expect((await api("/mcp/notes", { method: "DELETE" })).status).toBe(404);
 	});
 
-	it("gives a chat only the apps its Pim lists, and lets the model connect only those", async () => {
+	it("gives a chat only the apps its agent lists, and lets the model connect only those", async () => {
 		const weather = "https://weather.example.test/mcp";
 		const books = (await post("/agents", { name: "Books", blueprint: "test.ledger/budget" })).body;
 		const budget = (await post("/sessions", { agent: books.id })).body.id;
 
-		// The default Pim doesn't list Weather: the model can't connect it from there.
+		// The default agent doesn't list Weather: the model can't connect it from there.
 		let refused = "";
 		faux.setResponses([
 			toolUse("connect_app", { app: "Weather" }),
@@ -342,7 +342,7 @@ describe("connected apps (MCP)", () => {
 		expect(refused).toContain("This agent doesn't work with Weather; its apps are Calendar, Notes.");
 		expect((await api("/mcp")).body.servers.map((server: { id: string }) => server.id)).toEqual(["calendar"]);
 
-		// The Budget Pim's definition lists it: connecting it needs no approval, as its Pim already chose it.
+		// The Budget agent's definition lists it: connecting it needs no approval, as its agent already chose it.
 		let connected = "";
 		let system = "";
 		faux.setResponses([
@@ -392,7 +392,7 @@ describe("connected apps (MCP)", () => {
 		]);
 	});
 
-	it("gives apps a sign-in callback that names this Pim's owner, so it comes back to this Pim", async () => {
+	it("gives apps a sign-in callback that names this space's owner, so it comes back to this space", async () => {
 		const callbacks = await runInDurableObject(env.Pim.getByName(OWNER), (_instance: Pim, state) =>
 			state.storage.sql.exec("SELECT callback_url FROM cf_agents_mcp_servers").toArray().map((row) => row.callback_url),
 		);

@@ -2,7 +2,7 @@ import { HttpError } from "./http";
 import type { PimStore } from "./store";
 
 /**
- * The person's own settings, kept in their Pim's database. Until the person
+ * The person's own settings, kept in their space's database. Until the person
  * changes them, the approval policy is the one the admin chose for everyone
  * (see ./instance.ts), and the time zone is the Pim's default.
  */

@@ -362,7 +362,7 @@ export function createOptMem(options: OptMemOptions) {
 
 export type OptMem = ReturnType<typeof createOptMem>;
 
-/** On a dashboard: the newest memories. Memory is shared by every Pim, so every Pim's dashboard shows the same. */
+/** On a dashboard: the newest memories. Memory is shared by every agent, so every agent's dashboard shows the same. */
 export function memoryWidgets(store: OptMemStore) {
 	return definePimExtension({
 		id: "pim.memory",
@@ -372,7 +372,7 @@ export function memoryWidgets(store: OptMemStore) {
 			recent: {
 				title: { en: "Remembered lately", es: "Recordado últimamente" },
 				description: "The five newest memories.",
-				empty: { en: "Nothing remembered yet. Tell your Pim about yourself.", es: "Aún no recuerda nada. Cuéntale a tu Pim sobre ti." },
+				empty: { en: "Nothing remembered yet. Tell your agents about yourself.", es: "Aún no recuerda nada. Cuéntales a tus agentes sobre ti." },
 				load: () => ({
 					kind: "list",
 					// Forgotten ones keep their place in the log, empty: skip them.

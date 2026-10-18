@@ -51,11 +51,11 @@ export type PimServices = {
 	teamMember(session: string): ApprovalMember | null;
 	/**
 	 * The widgets a chat can show with its messages: Pim's own, and those of
-	 * the extensions its Pim builds on and uses, that describe themselves to
-	 * the model. None in a visit, which talks with someone else's Pim.
+	 * the extensions its agent builds on and uses, that describe themselves to
+	 * the model. None in a visit, which talks with someone else's space.
 	 */
 	widgetsFor(session: string): { ref: string; description: string }[];
-	/** Loads one of them, or one kept from a tool's result, for the chat's Pim, as the person will see it with the message. */
+	/** Loads one of them, or one kept from a tool's result, for this space, as the person will see it with the message. */
 	showWidget(session: string, ref: string): Promise<ShownWidget>;
 	/** Keeps what an app tool's result shows, for the chat to put under a message: its ref, `tool:<id>`. */
 	keepWidget(session: string, widget: ToolWidget): string;

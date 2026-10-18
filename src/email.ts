@@ -28,7 +28,7 @@ export function mailerFrom(env: Env): Mailer | null {
 	};
 }
 
-/** Emails one person's Pim sends them in a UTC day, so a runaway schedule can't flood an inbox. */
+/** Emails one person's space sends them in a UTC day, so a runaway schedule can't flood an inbox. */
 export const EMAILS_PER_DAY = 50;
 /** Confirmation codes one person can have sent in a UTC day, so Pim can't be used to pester someone else's inbox. */
 const CODES_PER_DAY = 5;
@@ -66,7 +66,7 @@ function today(): number {
 
 /**
  * The person's confirmed address, a code waiting to confirm another, and
- * sending them email, kept in their Pim's database.
+ * sending them email, kept in their space's database.
  */
 export class Email {
 	readonly #store: PimStore;

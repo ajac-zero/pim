@@ -1,21 +1,21 @@
 # Extensions
 
-An extension is what a deployment adds to everyone's Pims: blueprints for agents to build on, abilities (tools, prompt sections, background work, and actions that ask first), widgets for their dashboards, and color themes for the web app. Its admin chooses them in code, in [`pim.config.ts`](../pim.config.ts), and deploys; people choose among what's there. Nothing is loaded at runtime.
+An extension is what a deployment adds to everyone's spaces: blueprints for agents to build on, abilities (tools, prompt sections, background work, and actions that ask first), widgets for their dashboards, and color themes for the web app. Its admin chooses them in code, in [`pim.config.ts`](../pim.config.ts), and deploys; people choose among what's there. Nothing is loaded at runtime.
 
 Pim's own blueprint is an extension too, [`pim.assistant`](../src/extensions/assistant.ts), written with the same API. A deployment can leave it out, and a person can move their majordomo to another blueprint. So are Pim's own color themes, [`pim.themes`](../src/extensions/themes/index.ts), which every deployment has.
 
-Pim is the platform and a person's own space; an agent is what they create and chat with; a blueprint is what an extension defines in code for agents to build on; a template is an agent shared through the gallery.
+Pim is the platform; a space is one person's own part of it; an agent is what they create and chat with; a blueprint is what an extension defines in code for agents to build on; a template is an agent shared through the gallery.
 
 ## Three layers
 
 | Layer | What it is | Where |
 | --- | --- | --- |
-| Core | How every Pim works: talking through `send_to_user`, approvals, honesty, time. No Pim's instructions change it | The `preamble` section in [`src/extensions/agents.ts`](../src/extensions/agents.ts) |
-| Abilities | Tools, prompt sections, hooks and background tasks, plus actions that ask first and widgets. Pim's own (goals, schedules, memory, artifacts, teams, the web) are every Pim's; an extension's go only to the agents that use it | `src/extensions/`, and extensions' `ability` |
+| Core | How every space works: talking through `send_to_user`, approvals, honesty, time. No space's instructions change it | The `preamble` section in [`src/extensions/agents.ts`](../src/extensions/agents.ts) |
+| Abilities | Tools, prompt sections, hooks and background tasks, plus actions that ask first and widgets. Pim's own (goals, schedules, memory, artifacts, teams, the web) are every space's; an extension's go only to the agents that use it | `src/extensions/`, and extensions' `ability` |
 | Blueprints | A name, instructions, the abilities it uses, the apps it works with, a dashboard and starters, defined by an extension in code; agents build on one | Extensions in `pim.config.ts` |
 | Agents | What a person talks with: a name and their own instructions and apps on top of a blueprint. Stored data, made in the app or by the agent | Your agents |
 
-A person's Pim stores the blueprint its agents build on as `blueprint`, such as `pim.assistant/pim`; the agent editor's **Based on blueprint** chooses it. At every request its chats get the core preamble, then an `agent` section with the agent's name, the blueprint's instructions, and the person's own instructions, which win. They also get the abilities the blueprint uses: its own extension's, and those it lists in `abilities`. Edits to the extension reach every agent built on it at the next deploy, and an agent that changes its blueprint gets the new abilities in its chats from their next message: they aren't copies. Published agents and the default agent template keep their blueprint; a copy whose blueprint this deployment doesn't have builds on the default blueprint.
+A person's space stores the blueprint its agents build on as `blueprint`, such as `pim.assistant/pim`; the agent editor's **Based on blueprint** chooses it. At every request its chats get the core preamble, then an `agent` section with the agent's name, the blueprint's instructions, and the person's own instructions, which win. They also get the abilities the blueprint uses: its own extension's, and those it lists in `abilities`. Edits to the extension reach every agent built on it at the next deploy, and an agent that changes its blueprint gets the new abilities in its chats from their next message: they aren't copies. Published agents and the default agent template keep their blueprint; a copy whose blueprint this deployment doesn't have builds on the default blueprint.
 
 ## Writing one
 
@@ -108,7 +108,7 @@ People then make agents built on it: Your agents → New agent → Based on blue
 - `timeZone`: the person's, as it is when read.
 - `notify(title, body)`: a notification in the app, pushed to their devices and webhook.
 
-It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps`, `tasks`; see [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable#extensions)), plus `actions`. The ability is installed under the extension's id and selected only in the chats of Pims that use it, and in their team members' conversations.
+It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps`, `tasks`; see [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable#extensions)), plus `actions`. The ability is installed under the extension's id and selected only in the chats of spaces that use it, and in their team members' conversations.
 
 - **Actions ask first.** Each `GatedAction` becomes a tool that files an approval and returns at once. `run` runs only once the person approves, or their approval policy approves it. Actions are listed in Settings → Permissions with Pim's own, where they can be turned Off, Ask or On.
 - **Names are checked.** An ability whose tool or action has the name of one of Pim's tools, or of another extension's, stops the agent with an error. pi would let the later tool replace the earlier one, so an extension could otherwise stand in for `send_to_user` or a tool that asks first. Prefix your tools' names with your extension's.
@@ -176,13 +176,13 @@ export const music = definePimExtension({
 });
 ```
 
-- **Sign-in.** `signIn` gets the `callbackUrl`, a `state` and the app's secrets, and returns the URL to send the person to, with anything to keep until they return (`pending`, such as a PKCE verifier). They come back to `callbackUrl`, which is this Pim's `/mcp/callback/apps` for everyone, so it can be registered as the redirect URI; `state` tells the Worker whose Pim it is. `callback` gets the URL they came back to and returns their credential, any JSON; throw to fail with a reason the person sees. A service with another flow, such as Plaid's Hosted Link, implements `signIn` and `callback` itself.
-- **Credentials** stay in the person's own Pim, never in exports, and go with their account. One with `expiresAt` (ms) is renewed with `refresh` a minute before it expires, once however many calls want it; without `refresh`, or when it fails, the app shows as failed and the person connects it again.
+- **Sign-in.** `signIn` gets the `callbackUrl`, a `state` and the app's secrets, and returns the URL to send the person to, with anything to keep until they return (`pending`, such as a PKCE verifier). They come back to `callbackUrl`, which is this Pim's `/mcp/callback/apps` for everyone, so it can be registered as the redirect URI; `state` tells the Worker whose space it is. `callback` gets the URL they came back to and returns their credential, any JSON; throw to fail with a reason the person sees. A service with another flow, such as Plaid's Hosted Link, implements `signIn` and `callback` itself.
+- **Credentials** stay in the person's own space, never in exports, and go with their account. One with `expiresAt` (ms) is renewed with `refresh` a minute before it expires, once however many calls want it; without `refresh`, or when it fails, the app shows as failed and the person connects it again.
 - **Tools** are named `<connection>_<name>`, like an MCP app's, and get the person's `credential` and the app's `secrets`. A thrown error comes back to the model as the tool's error.
 
 ## Widgets
 
-A widget is data of a kind the web app knows how to draw. `load` runs in the person's own Pim, the Durable Object that holds their agents, when their dashboard is opened. No extension code runs in the browser.
+A widget is data of a kind the web app knows how to draw. `load` runs in the person's own space, held by the Durable Object `Pim`, when their dashboard is opened. No extension code runs in the browser.
 
 | Kind | Items | Drawn as |
 | --- | --- | --- |
@@ -194,12 +194,12 @@ A `link` is `{ chat }` or `{ artifact }`: the item opens it.
 `load` gets:
 
 - `agent`: the agent whose dashboard it is (`id`, `name`, `majordomo`).
-- `chatOf(session)`: the person's chat that a conversation is, or works for, when that chat is this Pim's, by the id a `link` takes; null otherwise. A team member's conversation works for the chat that gave it its task. Use it to show only what belongs to this Pim, and to link to the chat.
-- `ofAgent(session)`: whether a conversation is, or works for, one of this Pim's chats, including one since deleted. Use it for what outlives the chat it came from, such as a task that starts new chats.
+- `chatOf(session)`: the person's chat that a conversation is, or works for, when that chat is this space's, by the id a `link` takes; null otherwise. A team member's conversation works for the chat that gave it its task. Use it to show only what belongs to this space, and to link to the chat.
+- `ofAgent(session)`: whether a conversation is, or works for, one of this space's chats, including one since deleted. Use it for what outlives the chat it came from, such as a task that starts new chats.
 - `timeZone`: the person's.
 - `data`: the data of the extension that brings the widget.
 
-A widget that throws shows as failed, with the error logged; the dashboard's other widgets still load. The built-in widgets are `pim.schedule/upcoming`, `pim.goals/active`, `pim.memory/recent` and `pim.artifacts/recent`. Memory is shared by every Pim, so `pim.memory/recent` shows the same everywhere.
+A widget that throws shows as failed, with the error logged; the dashboard's other widgets still load. The built-in widgets are `pim.schedule/upcoming`, `pim.goals/active`, `pim.memory/recent` and `pim.artifacts/recent`. Memory is shared by every agent in a space, so `pim.memory/recent` shows the same everywhere in that space.
 
 ### In chat
 
@@ -253,7 +253,7 @@ People pick a theme in Settings → General, under Appearance; previews show its
 
 - **Configuration and secrets** per extension, beyond an app's `secrets`: read a deployment's keys with `import { env } from "cloudflare:workers"` for now; per-person settings have no form.
 - **Routes** for an extension's webhooks.
-- **Choosing Pim's own abilities per Pim**: memory, goals and the rest are every Pim's.
+- **Choosing Pim's own abilities per space**: memory, goals and the rest are every space's.
 - **Widget actions** beyond opening a chat or an artifact, more kinds, and arranging a dashboard.
 - **Theme-specific shapes and spacing**, and translated theme names.
 - **Widgets with arguments** in chat, such as one goal, and interfaces the model composes itself from a catalog of components.

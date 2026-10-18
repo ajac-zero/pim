@@ -4,13 +4,13 @@ import type { McpCallResult, McpToolInfo } from "./mcp";
 /**
  * The person's connections to apps extensions implement themselves (see
  * `NativeAppDefinition`): one per app, with its sign-in and credential, in
- * this Pim's database. The Pim's bridge lists them and their tools beside
+ * this space's database. The space's bridge lists them and their tools beside
  * the MCP servers', so everything else treats both alike.
  *
  * Sign-in: `connect` asks the app where to send the person, with a `state`
  * of `<owner>.<nonce>`; they come back to `/mcp/callback/apps`, one address
  * for everyone (which services like Spotify need registered), and the Worker
- * finds their Pim by the owner in `state`.
+ * finds their space by the owner in `state`.
  */
 
 const SCHEMA = `

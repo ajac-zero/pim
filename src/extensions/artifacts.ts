@@ -5,10 +5,10 @@ import { HttpError } from "../http";
 import { definePimExtension } from "./define";
 import { text } from "./services";
 
-/** What the artifact tools need from the Pim. */
+/** What the artifact tools need from the space. */
 export type ArtifactServices = {
 	readonly artifacts: ArtifactStore;
-	/** Throws once the Pim is being erased: work still under way then writes nothing. */
+	/** Throws once the space is being erased: work still under way then writes nothing. */
 	assertOpen(): void;
 };
 
@@ -143,7 +143,7 @@ export function artifactsExtension({ artifacts, assertOpen }: ArtifactServices) 
 	return defineExtension({ name: "pim.artifacts", tools: [create, update, read, list] });
 }
 
-/** On a dashboard: what the Pim made most recently. Artifacts made outside any chat are the majordomo's. */
+/** On a dashboard: what the space made most recently. Artifacts made outside any chat are the majordomo's. */
 export function artifactsWidgets(artifacts: ArtifactStore) {
 	return definePimExtension({
 		id: "pim.artifacts",
@@ -152,7 +152,7 @@ export function artifactsWidgets(artifacts: ArtifactStore) {
 		widgets: {
 			recent: {
 				title: { en: "Recently made", es: "Hecho recientemente" },
-				description: "The artifacts this chat's Pim changed most recently, each opening the artifact.",
+				description: "The artifacts changed most recently in this space, each opening the artifact.",
 				empty: { en: "Nothing made yet. Ask for a document, a checklist or a small page.", es: "Nada hecho aún. Pide un documento, una lista o una página pequeña." },
 				load: ({ agent, chatOf }) => ({
 					kind: "list",

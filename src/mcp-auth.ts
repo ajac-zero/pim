@@ -1,7 +1,7 @@
 import { AuthorizationError, getOAuthApi, type OAuthHelpers, OAuthProvider, type OAuthProviderOptions } from "@cloudflare/workers-oauth-provider";
 
 /**
- * Signing MCP clients in to a person's Pim, so Claude, ChatGPT and others
+ * Signing MCP clients in to a person's space, so Claude, ChatGPT and others
  * connect to `/mcp` (./mcp-server.ts) with the person's consent instead of a
  * pasted token. Pim is the OAuth authorization server for its own MCP
  * server, and @cloudflare/workers-oauth-provider speaks the protocol, as the
@@ -16,12 +16,12 @@ import { AuthorizationError, getOAuthApi, type OAuthHelpers, OAuthProvider, type
  * Pim owns the part with the person: the app's `/authorize` page
  * (web/src/routes/authorize.tsx), which shows who is asking and where access
  * goes, and asks through `/auth/authorize` here, signed in to the app. A grant
- * opens one person's Pim, named by its props. Access tokens last an hour; a
+ * opens one person's space, named by its props. Access tokens last an hour; a
  * grant lasts 30 days from its last refresh, so a client in use stays
  * connected, and Settings lists and disconnects them (`/auth/connections`).
  */
 
-/** What a grant opens: one person's Pim. */
+/** What a grant opens: one person's space. */
 export type McpGrant = { readonly owner: string };
 
 /** The MCP server for whoever a grant or API token names, and the API tokens it also takes. */
@@ -127,7 +127,7 @@ async function describe(oauth: OAuthHelpers, request: Request, origin: string): 
 	return new Response(JSON.stringify(body), { headers: consent.headers });
 }
 
-/** The person's answer: a grant of their Pim to the client, or a refusal, and where the browser goes next. */
+/** The person's answer: a grant of their space to the client, or a refusal, and where the browser goes next. */
 async function answer(oauth: OAuthHelpers, request: Request, owner: string): Promise<Response> {
 	const body = (await request.json().catch(() => null)) as { handle?: unknown; allow?: unknown } | null;
 	if (typeof body?.handle !== "string") return Response.json({ error: "handle is required" }, { status: 400 });

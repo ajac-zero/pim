@@ -94,7 +94,7 @@ export function scheduleExtension(services: PimServices) {
 	return defineExtension({ name: SCHEDULE_EXTENSION, tools: [scheduleTask, listScheduled, cancelScheduled] });
 }
 
-/** On a dashboard: the Pim's scheduled tasks, soonest first. */
+/** On a dashboard: the space's scheduled tasks, soonest first. */
 export function scheduleWidgets(listSchedules: PimServices["listSchedules"]) {
 	return definePimExtension({
 		id: SCHEDULE_EXTENSION,
@@ -103,7 +103,7 @@ export function scheduleWidgets(listSchedules: PimServices["listSchedules"]) {
 		widgets: {
 			upcoming: {
 				title: { en: "Coming up", es: "Próximamente" },
-				description: "The next scheduled tasks of this chat's Pim, soonest first, with when each runs.",
+				description: "The next scheduled tasks in this space, soonest first, with when each runs.",
 				empty: { en: "Nothing scheduled. Ask for a reminder or a recurring check-in.", es: "Nada programado. Pide un recordatorio o un seguimiento periódico." },
 				load: async ({ chatOf, ofAgent }) => ({
 					kind: "list",

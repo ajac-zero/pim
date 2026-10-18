@@ -14,7 +14,7 @@ import { faux, type Pim } from "./worker";
 /**
  * A "Travel" MCP server, built with the official server SDK, that serves
  * skills (io.modelcontextprotocol/skills) and events (draft MCP Events),
- * answering the Pim in-process. One Pim for the file.
+ * answering the space in-process. One space for the file.
  */
 
 const SERVER_URL = "https://travel.example.test/mcp";

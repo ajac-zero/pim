@@ -388,7 +388,7 @@ describe("artifacts", () => {
 		expect((await callTool("artifact_create", { title: "Too much", kind: "html", content: "x".repeat(11) })).isError).toBe(true);
 		expect((await callTool("artifact_create", { title: "Just fits", kind: "html", content: "x".repeat(10) })).isError).toBe(false);
 
-		// The whole Pim's storage: a write that would go over is refused before it's made, not after.
+		// The whole space's storage: a write that would go over is refused before it's made, not after.
 		const size = await runInDurableObject(agent(), (_instance: Pim, state) => state.storage.sql.databaseSize);
 		await setLimits({ storageBytes: size + 20_000 });
 		const over = await callTool("artifact_create", { title: "Overflow", kind: "html", content: "y".repeat(40_000) });

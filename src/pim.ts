@@ -148,7 +148,7 @@ function shownWidgets(result: string): ShownWidget[] {
  */
 export const OWNER_HEADER = "x-pim-owner";
 
-/** Where apps' sign-ins return, as `/mcp/callback/<owner>`, so the Worker knows whose Pim the callback is for. */
+/** Where apps' sign-ins return, as `/mcp/callback/<owner>`, so the Worker knows whose space the callback is for. */
 export const MCP_CALLBACK_PATH = "/mcp/callback";
 /**
  * Where sign-ins to the apps extensions implement return, the same for
@@ -158,9 +158,9 @@ export const MCP_CALLBACK_PATH = "/mcp/callback";
 export const APPS_CALLBACK_PATH = `${MCP_CALLBACK_PATH}/apps`;
 /** Pim's client metadata document for sign-ins that take one, as `/mcp/client/<owner>`: it names that owner's callback. */
 export const MCP_CLIENT_PATH = "/mcp/client";
-/** Where the Worker sends `/mcp`: this Pim as an MCP server (./mcp-server.ts). */
+/** Where the Worker sends `/mcp`: this space as an MCP server (./mcp-server.ts). */
 export const MCP_SERVER_PATH = "/mcp-server";
-/** Where apps deliver event webhooks, as `/mcp/events/<owner>/<watch id>`; signed, so served without the API token. The Pim sees `/mcp/events/<watch id>`. */
+/** Where apps deliver event webhooks, as `/mcp/events/<owner>/<watch id>`; signed, so served without the API token. The space sees `/mcp/events/<watch id>`. */
 export const MCP_EVENTS_PATH = "/mcp/events/";
 const WATCH_REFRESH_CALLBACK = "refreshAppWatch";
 /** How long an approval waits for the user under the `auto` policy before it is granted, so background work never stalls. */
@@ -202,24 +202,24 @@ export type ToolPermissionInfo = ResolvedPermission & {
 	readonly choices: readonly ToolPermission[];
 };
 
-/** Whether the Pim works: a suspended one answers nothing and runs nothing until its operator lifts it. */
+/** Whether the space works: a suspended one answers nothing and runs nothing until its operator lifts it. */
 export type OwnerStatus = "active" | "suspended";
 
-/** What registration tells a Pim about its owner when it provisions it. */
+/** What registration tells a space about its owner when it provisions it. */
 export type OwnerProfile = { readonly ownerId: string; readonly username: string };
 /** How long an erasure waits for runs to stop and apps to unsubscribe before wiping anyway. */
 const ERASE_COURTESY_MS = 3_000;
 /** `pim_meta` keys of the models chosen through the API: for chats, and the utility model. */
 const MODEL_KEY = "model";
 const UTILITY_MODEL_KEY = "utility_model";
-/** `pim_meta` keys the Worker sets: the owner's profile, a suspension, the Pim's own limits. */
+/** `pim_meta` keys the Worker sets: the owner's profile, a suspension, the space's own limits. */
 const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
-/** Tools of the Pim the person talks with that its team members don't get, though their extensions stay. */
+/** Tools of the space the person talks with that its team members don't get, though their extensions stay. */
 const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, RENAME_AGENT, MANAGE_APPS, WRITE_SKILL]);
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
-/** The admin's apps, as this Pim last read them from the gallery, and how long before it reads them again. */
+/** The admin's apps, as this space last read them from the gallery, and how long before it reads them again. */
 const CUSTOM_APPS_KEY = "custom_apps";
 const CUSTOM_APPS_TTL_MS = 60_000;
 const AGENT_SECTION_KEY = "pim_section";
@@ -275,9 +275,9 @@ function errorMessage(error: unknown): string {
 }
 
 /**
- * The Pim. A deployment has exactly one instance, owned by the person who
- * deployed it. Its SQLite database holds pi's conversations, tasks and
- * transcripts, plus Pim's memories, goals, approvals and notifications.
+ * The person's space, named by their owner ID. Its SQLite database holds
+ * pi's conversations, tasks and transcripts, plus the space's memories,
+ * goals, approvals and notifications.
  *
  * pi-durable runs every model turn and tool call as a durable task, and the
  * `PiHarness` lifecycle job wakes the object after an eviction so runs
@@ -285,9 +285,9 @@ function errorMessage(error: unknown): string {
  */
 export class Pim extends DurableAgent<Env> {
 	readonly store = new PimStore(this.ctx.storage.sql);
-	/** People this Pim's owner shares it with, in circles. */
+	/** People this space's owner shares it with, in circles. */
 	readonly circles = new CircleStore(this.ctx.storage.sql);
-	/** Pims shared with this Pim's owner, and their conversations with them. */
+	/** Spaces shared with this space's owner, and their conversations with them. */
 	readonly visits = new VisitStore(this.ctx.storage.sql);
 	/** The owner's agents: each with its own instructions, the majordomo first. */
 	readonly agents = new AgentStore(this.ctx.storage.sql, () => {
@@ -360,7 +360,7 @@ export class Pim extends DurableAgent<Env> {
 	/** Extensions' own data, each apart from the others'. */
 	readonly extensionData = new ExtensionDataStore(this.ctx.storage.sql);
 	#abilities: Map<string, Ability> | undefined;
-	/** What this Pim has used, and its limits. */
+	/** What this space has used, and its limits. */
 	readonly usage = new UsageMeter({
 		sql: this.ctx.storage.sql,
 		limits: () => this.limits(),
@@ -409,7 +409,7 @@ export class Pim extends DurableAgent<Env> {
 		],
 		tools: () => [...this.mcp.listTools(), ...this.nativeApps.tools()],
 		call: async (serverId, name, args) => {
-			// Work still under way on a Pim being erased acts on nobody's behalf.
+			// Work still under way on a space being erased acts on nobody's behalf.
 			this.#assertOpen();
 			if (this.nativeApps.has(serverId)) return this.nativeApps.call(serverId, name, args);
 			return this.mcp.callTool({ serverId, name, arguments: args });
@@ -583,7 +583,7 @@ export class Pim extends DurableAgent<Env> {
 			if (url === null) return await this.nativeApps.connect(app.ref, id);
 			const result = await this.addMcpServer(name, url, {
 				id,
-				// The owner in the path tells the Worker whose Pim the sign-in returns to.
+				// The owner in the path tells the Worker whose space the sign-in returns to.
 				callbackPath: `${MCP_CALLBACK_PATH}/${this.name}`,
 			});
 			if (result.state === "ready") {
@@ -848,7 +848,7 @@ export class Pim extends DurableAgent<Env> {
 		return deploymentSettings(this.env);
 	}
 
-	/** The deployment's limits for members, with this Pim's own where the admin set them. */
+	/** The deployment's limits for members, with this space's own where the admin set them. */
 	limits(): Limits {
 		const own = this.store.meta(LIMITS_KEY);
 		return { ...this.deployment().limits, ...(own === undefined ? {} : (JSON.parse(own) as Partial<Limits>)) };
@@ -951,9 +951,9 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	async utility(task: UtilityTask, input: string): Promise<string> {
 		this.#assertOpen();
-		if (this.status() !== "active") throw new HttpError(403, "This Pim is suspended");
+		if (this.status() !== "active") throw new HttpError(403, "This space is suspended");
 		const model = await this.utilityModel();
-		if (!model) throw new HttpError(503, "This Pim has no utility model");
+		if (!model) throw new HttpError(503, "This space has no utility model");
 		const answer = await this.modelCatalog().completeSimple(
 			model,
 			{ systemPrompt: task.instructions, messages: [{ role: "user", content: input, timestamp: Date.now() }] },
@@ -1000,7 +1000,7 @@ export class Pim extends DurableAgent<Env> {
 		const pim = this;
 		return {
 			store: this.store,
-			// Read at each use: the person can change these while the Pim runs.
+			// Read at each use: the person can change these while the space runs.
 			get timeZone() {
 				return pim.settings().timeZone;
 			},
@@ -1081,7 +1081,7 @@ export class Pim extends DurableAgent<Env> {
 		from: "user" | "pim" | "approval",
 	): Promise<PiReceipt> {
 		this.#assertOpen();
-		if (this.status() !== "active") throw new HttpError(403, "This Pim is suspended");
+		if (this.status() !== "active") throw new HttpError(403, "This space is suspended");
 		// Checked and counted before the first await, so concurrent submissions can't all pass the same check.
 		let run: string | undefined;
 		if (from !== "approval") {
@@ -1201,7 +1201,7 @@ export class Pim extends DurableAgent<Env> {
 		return { ...result, text: replies.length > 0 ? replies.join("\n\n") : undefined, replies };
 	}
 
-	/** What this Pim holds: its database, and the images sent to it. */
+	/** What this space holds: its database, and the images sent to it. */
 	storedBytes(): number {
 		return this.ctx.storage.sql.databaseSize + this.images.bytes();
 	}
@@ -1210,7 +1210,7 @@ export class Pim extends DurableAgent<Env> {
 		const { storageBytes } = this.limits();
 		const stored = this.storedBytes();
 		if (storageBytes === null || stored < storageBytes) return null;
-		return `Pim storage quota exceeded: this Pim holds ${stored} bytes, over its ${storageBytes}. Delete chats or memories to make room.`;
+		return `Space storage quota exceeded: this space holds ${stored} bytes, over its ${storageBytes}. Delete chats or memories to make room.`;
 	}
 
 	// Background work
@@ -1287,7 +1287,7 @@ export class Pim extends DurableAgent<Env> {
 		return id;
 	}
 
-	/** This Pim as an MCP server (./mcp-server.ts): its clients talk with the majordomo, in a new chat or one they started before. */
+	/** This space as an MCP server (./mcp-server.ts): its clients talk with the majordomo, in a new chat or one they started before. */
 	#mcpServer(request: Request): Promise<Response> {
 		const majordomo = this.agents.majordomo();
 		return serveMcp(request, {
@@ -1460,7 +1460,7 @@ export class Pim extends DurableAgent<Env> {
 		auto?: AutoApproval,
 		options: { inTurn?: boolean } = {},
 	): Promise<Approval> {
-		// An approval's timer can outlive the Pim's erasure; its action must not run.
+		// An approval's timer can outlive the space's erasure; its action must not run.
 		this.#assertOpen();
 		const approval = this.store.approval(id);
 		if (!approval) throw new HttpError(404, `No approval ${id}`);
@@ -1486,7 +1486,7 @@ export class Pim extends DurableAgent<Env> {
 		const decided = this.store.approval(id)!;
 		this.broadcastMessage({ type: "approval", approval: this.#publicApproval(decided) });
 		if (decided.requestedBy) {
-			// A guest asked: the outcome continues their visit, in their own Pim, on their own usage.
+			// A guest asked: the outcome continues their visit, in their own space, on their own usage.
 			try {
 				await (await this.#pimOf(decided.requestedBy.ownerId)).visitAnswer(
 					this.name,
@@ -1681,40 +1681,40 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	// Circles: people the owner lets message this Pim, from their own Pims.
+	// Circles: people the owner lets message this space, from their own spaces.
 
-	/** This Pim's owner, as guests know them; null before registration provisioned it. */
+	/** This space's owner, as guests know them; null before registration provisioned it. */
 	#me(): Guest | null {
 		const profile = this.profile();
 		return profile === null ? null : { ownerId: this.name, username: profile.username };
 	}
 
-	/** Another person's Pim, to call. */
+	/** Another person's space, to call. */
 	#pimOf(ownerId: string) {
 		return getAgentByName(this.env.Pim, ownerId);
 	}
 
 	/**
 	 * Puts someone in a circle, moving them from any other, and tells their
-	 * Pim it may visit this one. The Worker calls it, having resolved
+	 * space it may visit this one. The Worker calls it, having resolved
 	 * their username.
 	 */
 	async addCircleMember(circleId: string, guest: Guest): Promise<Member> {
 		this.#assertOpen();
 		this.#circle(circleId);
 		const me = this.#me();
-		if (me === null) throw new HttpError(400, "This Pim has no owner to share it yet");
+		if (me === null) throw new HttpError(400, "This space has no owner to share it yet");
 		if (guest.ownerId === this.name) throw new HttpError(400, "You can't add yourself to a circle");
 		const known = this.circles.member(guest.ownerId);
 		if (!known && this.circles.members().length >= MAX_MEMBERS) {
 			throw new HttpError(429, `Your circles can hold up to ${MAX_MEMBERS} people.`);
 		}
-		// Told first: someone in a circle whose Pim doesn't know of it couldn't use it.
+		// Told first: someone in a circle whose space doesn't know of it couldn't use it.
 		if (!known) await (await this.#pimOf(guest.ownerId)).shareReceived(me);
 		return this.circles.addMember(circleId, guest);
 	}
 
-	/** Takes someone out of the circles; their Pim is told, and their next call is refused either way. */
+	/** Takes someone out of the circles; their space is told, and their next call is refused either way. */
 	async removeCircleMember(ownerId: string): Promise<boolean> {
 		this.#assertOpen();
 		if (!this.circles.removeMember(ownerId)) return false;
@@ -1732,16 +1732,16 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	/** Whether a guest may use this Pim now, and through which circle; or why not. */
+	/** Whether a guest may use this space now, and through which circle; or why not. */
 	#guestAccess(guest: Guest): { ok: true; circle: Circle; member: Member } | { ok: false; reason: string } {
 		const host = this.profile()?.username ?? "This person";
 		if (this.#closed()) return { ok: false, reason: `${host}'s account was deleted.` };
 		if (this.status() !== "active") return { ok: false, reason: `${host}'s account is suspended.` };
 		const member = this.circles.member(guest.ownerId);
-		if (!member) return { ok: false, reason: `${host} doesn't share their Pim with you.` };
+		if (!member) return { ok: false, reason: `${host} doesn't share their space with you.` };
 		const circle = this.circles.circle(member.circle);
-		if (!circle) return { ok: false, reason: `${host} doesn't share their Pim with you.` };
-		if (!circle.enabled) return { ok: false, reason: `${host} has paused sharing their Pim with their "${circle.name}" circle.` };
+		if (!circle) return { ok: false, reason: `${host} doesn't share their space with you.` };
+		if (!circle.enabled) return { ok: false, reason: `${host} has paused sharing their space with their "${circle.name}" circle.` };
 		return { ok: true, circle, member };
 	}
 
@@ -1757,8 +1757,8 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * What a guest's Pim may know of this one and use: called by the guest's
-	 * own Pim before each of their turns. Nothing but what the guest's circle
+	 * What a guest's space may know of this one and use: called by the guest's
+	 * own space before each of their turns. Nothing but what the guest's circle
 	 * was given.
 	 */
 	async guestBrief(guest: Guest): Promise<BriefResult> {
@@ -1774,7 +1774,7 @@ export class Pim extends DurableAgent<Env> {
 				circle: access.circle.name,
 				timeZone: this.settings().timeZone,
 				memory: memory
-					? `<memory>\n${lines.length === 0 ? `${me.username}'s Pim remembers nothing yet.` : `What ${me.username}'s Pim remembers, oldest first; later memories override earlier ones:\n${lines.join("\n")}`}\n</memory>`
+					? `<memory>\n${lines.length === 0 ? `${me.username}'s space remembers nothing yet.` : `What ${me.username}'s space remembers, oldest first; later memories override earlier ones:\n${lines.join("\n")}`}\n</memory>`
 					: null,
 				tools: this.#guestTools(access.circle.id).map(({ server, tool, permission, name }) => ({
 					name,
@@ -1789,9 +1789,9 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * A guest's tool call, from their own Pim: the hard boundary. The guest's
+	 * A guest's tool call, from their own space: the hard boundary. The guest's
 	 * circle and the tool's permission are checked here at every call, as
-	 * they are now, whatever the guest's Pim was told before. `on` runs it,
+	 * they are now, whatever the guest's space was told before. `on` runs it,
 	 * `ask` files an approval for the owner and answers at once (the decision
 	 * goes to the guest's conversation later), anything else is refused.
 	 */
@@ -1806,13 +1806,13 @@ export class Pim extends DurableAgent<Env> {
 		const log = (outcome: "ran" | "asked" | "refused", summary: string) =>
 			this.circles.logActivity({ username: guest.username, circle: circle.id, tool: call.tool, outcome, summary });
 		if (!this.circles.countCall(guest.ownerId)) {
-			return { text: `${guest.username} has used today's ${GUEST_CALLS_PER_DAY} calls to ${host}'s Pim. It resets at midnight UTC.`, isError: true };
+			return { text: `${guest.username} has used today's ${GUEST_CALLS_PER_DAY} calls to ${host}'s space. It resets at midnight UTC.`, isError: true };
 		}
 
 		if (call.tool === "recall") {
 			if (resolvePermission(this.store, circle.id, "", MEMORY_TOOL, "off", null).permission !== "on") {
 				log("refused", "recall");
-				return { text: `${host} doesn't let you read their Pim's memory.`, isError: true };
+				return { text: `${host} doesn't let you read their space's memory.`, isError: true };
 			}
 			const pattern = typeof call.args.pattern === "string" ? call.args.pattern : "";
 			log("ran", `recall ${JSON.stringify(pattern)}`);
@@ -1836,7 +1836,7 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * Files an approval for a guest's call. The owner is notified; it is denied
 	 * if they don't answer within a day, never approved by a timeout. The same
-	 * call again (a replay in the guest's Pim) finds the request it filed.
+	 * call again (a replay in the guest's space) finds the request it filed.
 	 */
 	async #askForGuest(
 		guest: Guest,
@@ -1872,7 +1872,7 @@ export class Pim extends DurableAgent<Env> {
 			const notification = this.store.addNotification({
 				id: crypto.randomUUID(),
 				session: null,
-				title: `${guest.username} asked your Pim`,
+				title: `${guest.username} asked your agent`,
 				body: `${guest.username} (${circle.name}) wants: ${summary}`,
 			});
 			// Open apps show the request itself, from the approval just broadcast; this reaches the others.
@@ -1883,7 +1883,7 @@ export class Pim extends DurableAgent<Env> {
 		};
 	}
 
-	/** A guest approval's outcome, as the guest's Pim reads it. */
+	/** A guest approval's outcome, as the guest's space reads it. */
 	#guestOutcome(approval: Approval): string {
 		const host = this.#me()?.username ?? "The owner";
 		const note = approval.note ? `\n${host}'s note: ${approval.note}` : "";
@@ -2164,7 +2164,7 @@ export class Pim extends DurableAgent<Env> {
 		return this.#extensions;
 	}
 
-	/** The extensions' abilities, built once for this Pim, by extension id. */
+	/** The extensions' abilities, built once for this space, by extension id. */
 	get abilities(): Map<string, Ability> {
 		if (this.#abilities) return this.#abilities;
 		const pim = this;
@@ -2345,24 +2345,24 @@ export class Pim extends DurableAgent<Env> {
 		return this.agents.get(copy.id)!;
 	}
 
-	// Visits: Pims shared with this one's owner, and their conversations with them.
+	// Visits: spaces shared with this one's owner, and their conversations with them.
 
-	/** From a host's Pim: its owner put this Pim's owner in a circle. */
+	/** From a host's space: its owner put this space's owner in a circle. */
 	async shareReceived(host: Guest): Promise<void> {
 		this.#assertOpen();
-		if (this.status() !== "active") throw new Error("This Pim is suspended");
+		if (this.status() !== "active") throw new Error("This space is suspended");
 		if (!this.visits.shared(host)) return;
 		const notification = this.store.addNotification({
 			id: crypto.randomUUID(),
 			session: null,
-			title: `${host.username} shared their Pim with you`,
-			body: `You can message ${host.username}'s Pim now. Find it under Shared with you.`,
+			title: `${host.username} shared their space with you`,
+			body: `You can message ${host.username}'s space now. Find it under Shared with you.`,
 		});
 		await this.deliverNotification(notification);
 		this.broadcastMessage({ type: "visits" });
 	}
 
-	/** From a host's Pim: this Pim's owner is no longer in its circles. */
+	/** From a host's space: this space's owner is no longer in its circles. */
 	async shareRevoked(hostOwnerId: string): Promise<void> {
 		if (this.#closed()) return;
 		this.visits.revoked(hostOwnerId);
@@ -2370,7 +2370,7 @@ export class Pim extends DurableAgent<Env> {
 		this.broadcastMessage({ type: "visits" });
 	}
 
-	/** From a host's Pim: the owner decided on something this Pim's owner asked for; it continues the visit. */
+	/** From a host's space: the owner decided on something this space's owner asked for; it continues the visit. */
 	async visitAnswer(hostOwnerId: string, session: string, message: string, operationId: string): Promise<void> {
 		this.#assertOpen();
 		const share = this.visits.share(hostOwnerId);
@@ -2382,19 +2382,19 @@ export class Pim extends DurableAgent<Env> {
 	/** A visit's conversation, started on first use. */
 	async startVisit(username: string): Promise<string> {
 		const share = this.visits.byUsername(username);
-		if (!share) throw new HttpError(404, `${username} doesn't share their Pim with you`);
-		if (share.revoked) throw new HttpError(403, `${username} no longer shares their Pim with you`);
+		if (!share) throw new HttpError(404, `${username} doesn't share their space with you`);
+		if (share.revoked) throw new HttpError(403, `${username} no longer shares their space with you`);
 		if (share.session !== null && !this.store.deletedSessions().has(share.session)) return share.session;
 		const { id } = await this.harness.sessions.create();
 		await this.harness.session(id).setModel(this.chosenModel());
-		this.store.touchSession(id, `${username}'s Pim`);
+		this.store.touchSession(id, `${username}'s space`);
 		this.visits.setSession(share.ownerId, id);
 		await this.#refreshVisit(share.ownerId);
 		return id;
 	}
 
 	/**
-	 * Asks the host's Pim what this visit may use now, and gives the visit's
+	 * Asks the host's space what this visit may use now, and gives the visit's
 	 * conversation exactly that: its own extension, and nothing of the
 	 * owner's. Refused, the visit can't go on.
 	 */
@@ -2402,7 +2402,7 @@ export class Pim extends DurableAgent<Env> {
 		const share = this.visits.share(hostOwnerId);
 		const me = this.#me();
 		if (!share || share.session === null || me === null) throw new HttpError(404, "No such visit");
-		if (share.revoked) throw new HttpError(403, `${share.username} no longer shares their Pim with you`);
+		if (share.revoked) throw new HttpError(403, `${share.username} no longer shares their space with you`);
 		const result = (await (await this.#pimOf(hostOwnerId)).guestBrief(me)) as BriefResult;
 		if (!result.ok) {
 			this.visits.setBrief(hostOwnerId, null);
@@ -2417,13 +2417,13 @@ export class Pim extends DurableAgent<Env> {
 		await conversation.configure({ extensions: [extension, messaging, snapshot.extension(TELEMETRY_EXTENSION)!] }, BACKGROUND_CONTEXT);
 	}
 
-	/** Installs (or replaces) a visit's extension; its tools call the host's Pim. */
+	/** Installs (or replaces) a visit's extension; its tools call the host's space. */
 	#installVisit(brief: GuestBrief, visitor: string) {
 		const host = brief.host.ownerId;
 		const extension = visitExtension(brief, visitor, async (tool, args, session, callId) => {
 			this.#assertOpen();
 			const me = this.#me();
-			if (me === null) return { text: "This Pim can't visit others.", isError: true };
+			if (me === null) return { text: "This space can't visit others.", isError: true };
 			return (await this.#pimOf(host)).guestCall(me, { tool, args, session, callId });
 		});
 		this.registry.install(extension);
@@ -2439,13 +2439,13 @@ export class Pim extends DurableAgent<Env> {
 			.map(({ tool }) => ({ name: tool.name, description: tool.description, requiresApproval: gated.has(tool.name) }));
 	}
 
-	// Hosting: what the Worker in front tells the Pim about its owner.
+	// Hosting: what the Worker in front tells the space about its owner.
 
-	/** Set while `deleteEverything` runs: the Pim takes nothing new. */
+	/** Set while `deleteEverything` runs: the space takes nothing new. */
 	#erasing = false;
 
 	/**
-	 * Whether the Pim is erased, or being erased. An erased Pim keeps
+	 * Whether the space is erased, or being erased. An erased space keeps
 	 * only its mark and refuses everything: requests, sockets, alarms and the
 	 * Worker's own writes. The check is here, in the one object every
 	 * request reaches, so a request a Worker authorized before the deletion
@@ -2456,17 +2456,17 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	#assertOpen(): void {
-		if (this.#closed()) throw new HttpError(410, "This Pim was erased");
+		if (this.#closed()) throw new HttpError(410, "This space was erased");
 	}
 
-	/** Every request comes through the Worker, which names the owner it resolved: it must be this Pim's. */
+	/** Every request comes through the Worker, which names the owner it resolved: it must be this space's. */
 	override async fetch(request: Request): Promise<Response> {
 		if (request.headers.get(OWNER_HEADER) !== this.name) {
 			console.error(JSON.stringify({ event: "pim.misrouted", agent: this.name }));
-			return Response.json({ error: "This request is not for this Pim" }, { status: 421 });
+			return Response.json({ error: "This request is not for this space" }, { status: 421 });
 		}
-		if (this.#closed()) return Response.json({ error: "This Pim was erased" }, { status: 410 });
-		if (this.status() !== "active") return Response.json({ error: "This Pim is suspended" }, { status: 403 });
+		if (this.#closed()) return Response.json({ error: "This space was erased" }, { status: 410 });
+		if (this.status() !== "active") return Response.json({ error: "This space is suspended" }, { status: 403 });
 		await this.#refreshCustomApps();
 		return super.fetch(request);
 	}
@@ -2481,7 +2481,7 @@ export class Pim extends DurableAgent<Env> {
 		return super.alarm();
 	}
 
-	/** Records who owns this Pim. */
+	/** Records who owns this space. */
 	async provision(profile: OwnerProfile): Promise<void> {
 		this.#assertOpen();
 		if (profile.ownerId !== this.name) throw new Error(`Owner ${profile.ownerId} is not this agent's (${this.name})`);
@@ -2503,7 +2503,7 @@ export class Pim extends DurableAgent<Env> {
 		return settings;
 	}
 
-	/** Suspends or restores the Pim. Suspending stops its runs and closes its sockets; its data stays. */
+	/** Suspends or restores the space. Suspending stops its runs and closes its sockets; its data stays. */
 	async setStatus(status: OwnerStatus): Promise<void> {
 		this.#assertOpen();
 		if (status === "active") this.store.deleteMeta(STATUS_KEY);
@@ -2514,7 +2514,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	/** This Pim's own limits, over the deployment's; null goes back to the deployment's. */
+	/** This space's own limits, over the deployment's; null goes back to the deployment's. */
 	async setLimits(limits: Partial<Limits> | null): Promise<Limits> {
 		this.#assertOpen();
 		if (limits === null) this.store.deleteMeta(LIMITS_KEY);
@@ -2582,9 +2582,9 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * What of the person's data this Pim still holds; nothing once
+	 * What of the person's data this space still holds; nothing once
 	 * `deleteEverything` has run. A deletion counts as done only when this
-	 * says so, since destroying the Pim ends the call that asked for it.
+	 * says so, since destroying the space ends the call that asked for it.
 	 */
 	async remainingData(): Promise<string[]> {
 		const remaining = this.store.remainingData();
@@ -2596,13 +2596,13 @@ export class Pim extends DurableAgent<Env> {
 		return remaining;
 	}
 
-	/** Whether the Pim is erased, and what of the person's data it still holds; a finished deletion is both. */
+	/** Whether the space is erased, and what of the person's data it still holds; a finished deletion is both. */
 	async erasure(): Promise<{ sealed: boolean; remaining: string[] }> {
 		return { sealed: this.store.erasedAt() !== null, remaining: await this.remainingData() };
 	}
 
 	/**
-	 * Erases the Pim: stops its runs, ends apps' event subscriptions,
+	 * Erases the space: stops its runs, ends apps' event subscriptions,
 	 * closes its sockets, wipes its storage (alarms included), then marks it
 	 * erased, flushes the mark, and ends this instance, so nothing that was
 	 * under way here can write afterwards. Later instances find the mark and
@@ -2629,14 +2629,14 @@ export class Pim extends DurableAgent<Env> {
 		await this.ctx.storage.deleteAll();
 		this.store.markErased(Date.now());
 		await this.ctx.storage.sync();
-		this.ctx.abort("This Pim was erased");
+		this.ctx.abort("This space was erased");
 	}
 
 	// HTTP API
 
 	async onRequest(request: Request): Promise<Response> {
 		// Checked again here, not only in `fetch`: erasure may have begun while the request was on its way in.
-		if (this.#closed()) return Response.json({ error: "This Pim was erased" }, { status: 410 });
+		if (this.#closed()) return Response.json({ error: "This space was erased" }, { status: 410 });
 		return dispatch(this.#routes, request, new URL(request.url).pathname);
 	}
 
@@ -2692,7 +2692,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/** The browser, or 404 where this deployment has none. */
 	#browserIn(): PimBrowser {
-		if (!this.browser.available) throw new HttpError(404, "This Pim has no browser");
+		if (!this.browser.available) throw new HttpError(404, "This space has no browser");
 		return this.browser;
 	}
 
@@ -2720,7 +2720,7 @@ export class Pim extends DurableAgent<Env> {
 				tools: this.tools(),
 			}),
 		],
-		// This Pim as an MCP server, for MCP clients such as Claude or ChatGPT.
+		// This space as an MCP server, for MCP clients such as Claude or ChatGPT.
 		...(["POST", "GET", "DELETE"] as const).map((method): Route => [method, MCP_SERVER_PATH, (_params, request) => this.#mcpServer(request)]),
 
 		// Sessions: separate conversations, each with its own transcript and runs.
@@ -3125,7 +3125,7 @@ export class Pim extends DurableAgent<Env> {
 					if (refusal) throw new HttpError(429, refusal);
 					const { storageBytes } = this.limits();
 					if (storageBytes !== null && body.byteLength > storageBytes - this.storedBytes()) {
-						throw new HttpError(429, `Pim storage quota exceeded: there is room for ${Math.max(0, storageBytes - this.storedBytes())} more bytes.`);
+						throw new HttpError(429, `Space storage quota exceeded: there is room for ${Math.max(0, storageBytes - this.storedBytes())} more bytes.`);
 					}
 					return noStore(await this.files.write(url.searchParams.get("path"), body), 201);
 				}),
@@ -3584,7 +3584,7 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 
-		// Circles: who may message this Pim from their own, and what each circle may use.
+		// Circles: who may message this space from their own, and what each circle may use.
 		["GET", "/circles", () => ({ circles: this.#describeCircles() })],
 		[
 			"POST",
@@ -3630,7 +3630,7 @@ export class Pim extends DurableAgent<Env> {
 		],
 		["GET", "/circles/activity", () => ({ activity: this.circles.activity() })],
 
-		// Visits: Pims shared with this one's owner.
+		// Visits: spaces shared with this one's owner.
 		[
 			"GET",
 			"/visits",
@@ -3656,7 +3656,7 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 		["GET", "/mcp", () => ({ servers: this.#describeApps() })],
-		// Where the person comes back from signing in to an app its extension implements; the Worker found this Pim by its `state`.
+		// Where the person comes back from signing in to an app its extension implements; the Worker found this space by its `state`.
 		[
 			"GET",
 			APPS_CALLBACK_PATH,

@@ -12,7 +12,7 @@ export type Session = {
   busy: boolean;
   createdAt: number | null;
   updatedAt: number | null;
-  /** A conversation with someone else's Pim, shared with you; null for your own chats. */
+  /** A conversation with someone else's space, shared with you; null for your own chats. */
   visit?: { username: string; available: boolean } | null;
   /** The agent of yours it talks with: the one it was started with, or your default one. Null in a visit. */
   agent?: { id: string; name: string } | null;
@@ -333,7 +333,7 @@ export type Approval = {
   onTimeout?: "approve" | "deny";
   /** Who decided: the user, the timeout, "always approve", or the majordomo for the user. */
   decidedBy?: "user" | "timeout" | "always" | "majordomo" | null;
-  /** Someone in one of your circles asked, from their own Pim; null when your Pim asked. */
+  /** Someone in one of your circles asked, from their own space; null when your space asked. */
   requestedBy?: {
     ownerId: string;
     username: string;
@@ -349,7 +349,7 @@ export type Approval = {
   } | null;
 };
 
-/** One of your circles: people who may message your Pim, and what they may use. */
+/** One of your circles: people who may message your space, and what they may use. */
 export type Circle = {
   id: string;
   name: string;
@@ -369,7 +369,7 @@ export type GuestActivity = {
   summary: string;
 };
 
-/** Someone else's Pim, shared with you. */
+/** Someone else's space, shared with you. */
 export type Visit = {
   ownerId: string;
   username: string;
@@ -968,7 +968,7 @@ export const pim = {
     ),
   visits: () =>
     call<{ visits: Visit[] }>("/visits").then((body) => body.visits),
-  /** Your conversation with a Pim shared with you, started if new. */
+  /** Your conversation with a space shared with you, started if new. */
   startVisit: (username: string) =>
     call<{ session: string }>(`/visits/${encodeURIComponent(username)}`, {
       method: "POST",

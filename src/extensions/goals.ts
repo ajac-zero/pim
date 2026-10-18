@@ -84,7 +84,7 @@ export function goalsExtension({ store }: PimServices) {
 	});
 }
 
-/** On a dashboard: the Pim's active goals, newest first, each with its progress and next step. */
+/** On a dashboard: the space's active goals, newest first, each with its progress and next step. */
 export function goalsWidgets(store: PimStore) {
 	return definePimExtension({
 		id: "pim.goals",
@@ -93,7 +93,7 @@ export function goalsWidgets(store: PimStore) {
 		widgets: {
 			active: {
 				title: { en: "Goals", es: "Metas" },
-				description: "The active goals of this chat's Pim, each with its progress and next step.",
+				description: "The active goals in this space, each with its progress and next step.",
 				empty: { en: "No goals yet. Ask to start tracking one.", es: "Aún no hay metas. Pide empezar a seguir una." },
 				load: ({ chatOf }) => ({
 					kind: "progress",

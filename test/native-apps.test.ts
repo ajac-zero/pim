@@ -82,7 +82,7 @@ describe("apps extensions implement", () => {
 			expect.objectContaining({ id: "bank", app: "test.ledger/bank", state: "authenticating", authUrl: started.body.authUrl, tools: [] }),
 		]);
 
-		// A state nobody started finds no sign-in; one naming nobody finds no Pim.
+		// A state nobody started finds no sign-in; one naming nobody finds no space.
 		expect((await exports.default.fetch(url(`/mcp/callback/apps?state=${OWNER}.forged&code=good`))).status).toBe(400);
 		expect((await exports.default.fetch(url("/mcp/callback/apps?state=o_nobody.x&code=good"))).status).toBe(404);
 

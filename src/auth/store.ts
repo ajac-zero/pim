@@ -3,12 +3,12 @@ import { base64UrlEncode } from "./encoding";
 import type { PublicKey } from "./webauthn";
 
 /**
- * Who may use one person's Pim: their passkeys and linked accounts (Google,
+ * Who may use one person's space: their passkeys and linked accounts (Google,
  * GitHub, single sign-on), whether they ever had either, the one-time setup
  * code that adds one without them, recovery codes, device links and API
  * tokens. A passkey or a linked account is a credential: a session names
  * the one it was made with, and ends when it goes. It lives in its own Durable Object,
- * one per owner and apart from the Pim, so signing in never wakes the
+ * one per owner and apart from the space, so signing in never wakes the
  * agent. One object also makes "use the setup code once" a single step.
  */
 
@@ -20,7 +20,7 @@ export type Passkey = {
 	readonly lastUsedAt: number;
 };
 
-/** An account at another provider that signs in to this Pim. */
+/** An account at another provider that signs in to this space. */
 export type LinkedIdentity = {
 	readonly id: string;
 	/** Which button signs in with it: `google`, `github` or `oidc`. */
@@ -309,7 +309,7 @@ export class Auth extends DurableObject<Env> {
 	 * A new link to add a device, issued for the credential (a passkey or a
 	 * linked identity) that signed in the browser asking. It works once, for
 	 * `DEVICE_LINK_MS`, and only while that credential is still one of this
-	 * Pim's: removing it voids the links it issued. Making a new link voids
+	 * space's: removing it voids the links it issued. Making a new link voids
 	 * that credential's older ones, so only the latest is live. Only its
 	 * digest is kept. It is separate from the setup code, so issuing one never
 	 * replaces a link registration or the operator gave out.
@@ -421,7 +421,7 @@ export class Auth extends DurableObject<Env> {
 		return this.ctx.storage.sql.exec("DELETE FROM auth_tokens WHERE id = ?", id).rowsWritten > 0;
 	}
 
-	/** Whether `token` is one of this Pim's; notes when it was used, at most once a minute. */
+	/** Whether `token` is one of this space's; notes when it was used, at most once a minute. */
 	async checkToken(token: string, now: number): Promise<boolean> {
 		const hash = await digestHex(token);
 		const row = this.ctx.storage.sql.exec("SELECT last_used_at FROM auth_tokens WHERE hash = ?", hash).toArray()[0];

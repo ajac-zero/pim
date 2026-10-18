@@ -40,7 +40,7 @@ export function majordomoRole(majordomo: Agent): string {
 - Suggest apps that would help with what they care about. When something they tell you would go better with one of this Pim's apps (look with \`find_app\`), mention it in a sentence: what it would let you do for them. One app at a time, only when it fits what you're talking about. If they want it, add it with \`manage_apps\`, which connects it for all their agents. If they turn one down, note that they don't want it, and never suggest that app again unless they bring it up.`;
 }
 
-/** What the majordomo's tool needs from the Pim. */
+/** What the majordomo's tool needs from the space. */
 export type MajordomoHost = {
 	/** The agent a chat is with, or null for a conversation that is no chat of the person's. */
 	chatAgent(session: string): Agent | null;
@@ -90,7 +90,7 @@ export function majordomoExtension(host: MajordomoHost) {
 	return defineExtension({ name: MAJORDOMO_EXTENSION, tools: [sendToAgent] });
 }
 
-/** What a review needs from the Pim: who reviews, and applying the decision. */
+/** What a review needs from the space: who reviews, and applying the decision. */
 export type ReviewHost = {
 	majordomo(): Agent;
 	/** Applies the majordomo's decision on the approval its review conversation is for, and says what came of it. */

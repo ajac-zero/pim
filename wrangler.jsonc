@@ -20,7 +20,7 @@
   "ai": { "binding": "AI", "remote": true },
   "durable_objects": {
     "bindings": [
-      // Everyone's agent, one per person, named by their owner ID.
+      // Each person's space, one per person, named by their owner ID.
       { "name": "Pim", "class_name": "Pim" },
       // Each person's passkeys, recovery codes and API tokens.
       { "name": "Auth", "class_name": "Auth" },
@@ -40,7 +40,7 @@
   // The agents' web browser (Browser Run): one Chrome per person while they use it. The free plan
   // allows 10 minutes of browser time a day; the paid plan includes 10 hours a month.
   "browser": { "binding": "BROWSER" },
-  // MCP clients' sign-ins to people's Pims: registered clients, grants and hashed tokens
+  // MCP clients' sign-ins to people's spaces: registered clients, grants and hashed tokens
   // (src/mcp-auth.ts). Deploying creates the namespace.
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
   // Images people send in chats; their messages keep only the images' URLs. Deploying creates the

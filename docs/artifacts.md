@@ -5,7 +5,7 @@ Artifacts are documents and small interactive pages the agent makes for its owne
 ## What they are
 
 - **Kinds.** `html` is one self-contained document, with its CSS and JavaScript inline. `markdown` is a document.
-- **Where they live.** In the owner's Pim Durable Object, in `pim_artifacts` and `pim_artifact_versions` ([`src/artifacts.ts`](../src/artifacts.ts)). Every request for one goes through the owner's gateway and agent, like the rest of the API. Nothing is cached outside the agent, and there is no index across owners.
+- **Where they live.** In the Durable Object `Pim` holding the owner's space, in `pim_artifacts` and `pim_artifact_versions` ([`src/artifacts.ts`](../src/artifacts.ts)). Every request for one goes through the owner's gateway and agent, like the rest of the API. Nothing is cached outside the agent, and there is no index across owners.
 - **Versions are append-only.** Each change adds a version, and nothing rewrites one, so a version number and its `sha256` always name the same bytes. Restoring an older version adds a new one with the old content (`source: "restore"`, `restoredFrom`).
 - **Every write names its base version.** The agent (`base_version`) and the person (`baseVersion`) both say which version they changed. If it's no longer the latest, the write is refused with `409`, so neither overwrites the other unseen. A write hashes its content first, then rechecks the latest version and every limit and stores it with nothing awaited in between, so two writes that race can't both pass a check meant for one, and the caps can't be overshot. A refused write changes nothing, not even the title.
 - **Owner-wide.** An artifact records the chat it was made in, but deleting that chat doesn't delete the artifact.
@@ -19,7 +19,7 @@ Artifacts are documents and small interactive pages the agent makes for its owne
 | `artifact_read` | `{ id, version?, offset? }`: the source of the latest or a given version, 60,000 characters at a time |
 | `artifact_list` | Every artifact's id, title, kind, latest version and size |
 
-`artifact_create` and `artifact_update` answer with a reference (`{ artifact: { id, title, kind, version, sha256, size } }`), never the content. The web app shows that answer as the artifact. A replayed call (after an eviction) returns the version it made instead of making another. The tools need no approval: they change nothing outside the owner's own Pim.
+`artifact_create` and `artifact_update` answer with a reference (`{ artifact: { id, title, kind, version, sha256, size } }`), never the content. The web app shows that answer as the artifact. A replayed call (after an eviction) returns the version it made instead of making another. The tools need no approval: they change nothing outside the owner's own space.
 
 ## The API
 
@@ -69,7 +69,7 @@ Each limit is checked against the stored versions before anything is written. Th
 | `artifactVersions` | Versions one artifact keeps. At the limit, it takes no new versions: delete it, or make a new one | |
 | `artifactBytes` | One version's size, in UTF-8 bytes | 1,000,000 (a SQLite row is at most 2 MB) |
 | `artifactStorageBytes` | All versions of all artifacts | 10,000,000 (an export holds them all in memory, and the chats that made them hold their text again) |
-| `storageBytes` | The whole Pim: a write is refused if it wouldn't fit | |
+| `storageBytes` | The whole space: a write is refused if it wouldn't fit | |
 
 ## Export and deletion
 
@@ -94,7 +94,7 @@ Each limit is checked against the stored versions before anything is written. Th
 | Racing writes: an edit and a restore on the same base give one version and a `409`; two creates that don't both fit give one and a `429`, under a limit and under the hard cap | "take one of two writes racing on the same version…", "export in full near their total cap…" |
 | Markdown: the hostile corpus above leaves no loading, running or submitting element or attribute; only `http(s)`, `mailto` and `#` links; raw HTML and images only as text; task lists, tables and code still render | `web/src/components/chat/markdown.test.tsx` |
 | Export near the total cap, and the cap holding with no limits set | "export in full near their total cap…" |
-| Another person's Pim returns `404` for the artifact; anonymous `401` | `test/people.test.ts`: "are shown only to their owner" |
+| Another person's space returns `404` for the artifact; anonymous `401` | `test/people.test.ts`: "are shown only to their owner" |
 | Fresh requests refused: signed out `401`, passkey removed `401`, suspended `403`, deleted `410` on frame, download and metadata; account export has every version; erased | "stop showing when the browser signs out, its passkey is removed…" |
 | A tool call or a restore under way during the erasure leaves nothing | "keeps an artifact the model asks for during the erasure…", "refuses an artifact restore in the agent's handler…" |
 | In a real browser: the card and viewer render on desktop and a 390 px phone; the page's own script runs; a hostile artifact can't read cookies or storage, reach the parent or the API, fetch or load remote resources, open windows or submit forms (it can still navigate itself away, which the app notices); leaving is noticed; restore and delete work; Markdown loads nothing remote; signing out unmounts every frame | Browser acceptance against the local preview, recorded in the pull request |

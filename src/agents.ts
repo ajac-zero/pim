@@ -208,7 +208,7 @@ export function agentInput(body: Record<string, unknown>, partial?: Agent): Agen
 /** What an extension brings, by name: `<extension>/<name>`. */
 const REF = /^[a-z0-9][a-z0-9.-]*\/[a-z0-9][a-z0-9.-]*$/;
 
-/** A blueprint as given: `<extension>/<blueprint>`, or null. Whether it is installed is the Pim's to check. */
+/** A blueprint as given: `<extension>/<blueprint>`, or null. Whether it is installed is the space's to check. */
 function blueprintInput(value: unknown): string | null {
 	if (value === null) return null;
 	if (typeof value !== "string" || !REF.test(value)) {
@@ -217,7 +217,7 @@ function blueprintInput(value: unknown): string | null {
 	return value;
 }
 
-/** Skills as given: names of the person's skills. Whether each exists is the Pim's to check. */
+/** Skills as given: names of the person's skills. Whether each exists is the space's to check. */
 function skillsInput(value: unknown): string[] {
 	if (!Array.isArray(value) || value.length > MAX_AGENT_SKILLS || value.some((name) => typeof name !== "string" || !SKILL_NAME.test(name))) {
 		throw new HttpError(400, `skills must be a list of up to ${MAX_AGENT_SKILLS} skill names, such as weekly-report`);

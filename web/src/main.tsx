@@ -9,7 +9,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { RouteError } from "~/components/route-error";
 import { deviceCode } from "~/lib/auth";
-import { SignInRequired } from "~/lib/pim-api";
+import { NoAddress, SignInRequired } from "~/lib/pim-api";
 import { registerServiceWorker } from "~/lib/push";
 import { routeTree } from "~/routeTree.gen";
 import "~/styles/app.css";
@@ -29,7 +29,9 @@ const queryClient = new QueryClient({
   mutationCache: new MutationCache({ onError }),
   defaultOptions: {
     queries: {
-      retry: (count, error) => !(error instanceof SignInRequired) && count < 2,
+      retry: (count, error) =>
+        !(error instanceof SignInRequired || error instanceof NoAddress) &&
+        count < 2,
       staleTime: 10_000,
     },
   },

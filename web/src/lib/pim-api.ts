@@ -713,11 +713,23 @@ export class SignInRequired extends Error {
   }
 }
 
-/** Pim answers only at its own address: one opened at another goes there. */
-export function followMove(response: Response, body: { url?: unknown } | null) {
+/** The deployment hasn't set `PIM_PUBLIC_URL`, so Pim answers nothing yet. */
+export class NoAddress extends Error {}
+
+/**
+ * Pim answers only at its own address: one opened at another goes there,
+ * and one without an address yet throws `NoAddress`.
+ */
+export function checkAddress(
+  response: Response,
+  body: { url?: unknown; missing?: unknown; error?: string } | null,
+) {
   if (response.status === 421 && typeof body?.url === "string") {
     const { pathname, search, hash } = window.location;
     window.location.replace(new URL(pathname + search + hash, body.url));
+  }
+  if (response.status === 503 && body?.missing === "PIM_PUBLIC_URL") {
+    throw new NoAddress(body.error);
   }
 }
 
@@ -732,10 +744,10 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new SignInRequired();
   }
   const body = (await response.json().catch(() => null)) as
-    | (T & { error?: string; url?: unknown })
+    | (T & { error?: string; url?: unknown; missing?: unknown })
     | null;
   if (!response.ok) {
-    followMove(response, body);
+    checkAddress(response, body);
     throw new ApiError(
       response.status,
       body?.error ?? `Pim answered ${response.status}`,

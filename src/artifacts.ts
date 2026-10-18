@@ -58,6 +58,9 @@ export type ArtifactVersionInfo = {
 
 export type ArtifactVersion = ArtifactVersionInfo & { readonly artifact: string; readonly content: string };
 
+/** Whose data an artifact keeps: the person using it (`own`), or everyone using it (`shared`). */
+export type DataScope = "own" | "shared";
+
 /** The limits artifacts count against; null is none (the hard caps still apply). */
 export type ArtifactLimits = {
 	readonly artifacts: number | null;
@@ -75,6 +78,13 @@ export type ArtifactLimits = {
 export const MAX_ARTIFACT_BYTES = 1_000_000;
 export const MAX_ARTIFACT_STORAGE_BYTES = 10_000_000;
 export const MAX_TITLE_LENGTH = 200;
+/**
+ * What one artifact, and all of them, may keep through the bridge, keys and
+ * values together, in UTF-8 bytes: an export holds it all in memory too.
+ */
+export const MAX_ARTIFACT_DATA_BYTES = 1_000_000;
+export const MAX_ARTIFACT_DATA_TOTAL_BYTES = 10_000_000;
+const MAX_DATA_KEY_LENGTH = 200;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS pim_artifacts (
@@ -102,6 +112,26 @@ CREATE TABLE IF NOT EXISTS pim_artifact_versions (
 -- Never pruned, since any id may still be replayed. One row (about 100 bytes) exists per artifact that was made and
 -- then deleted, and each is made by a model request: the daily request limit caps the rate, and the rows count
 -- in the database size the storage quota refuses new artifacts against. (A deletion needs no room.)
+-- What an artifact keeps through the bridge: text under keys, kept across its versions and deleted with it. Scope
+-- \`own\` is what it keeps for the person using it (window.pim.storage); \`shared\`, what everyone using it sees.
+CREATE TABLE IF NOT EXISTS pim_artifact_data (
+	artifact TEXT NOT NULL,
+	scope TEXT NOT NULL,
+	key TEXT NOT NULL,
+	value TEXT NOT NULL,
+	size INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY (artifact, scope, key)
+);
+-- What the person let one version of an artifact use through the bridge: the model, or an app's tool. A new
+-- version, which is new code, asks again.
+CREATE TABLE IF NOT EXISTS pim_artifact_grants (
+	artifact TEXT NOT NULL,
+	sha256 TEXT NOT NULL,
+	capability TEXT NOT NULL,
+	granted_at INTEGER NOT NULL,
+	PRIMARY KEY (artifact, sha256, capability)
+);
 CREATE TABLE IF NOT EXISTS pim_artifact_deleted (
 	id TEXT PRIMARY KEY,
 	deleted_at INTEGER NOT NULL
@@ -149,6 +179,13 @@ export function checkContent(kind: ArtifactKind, content: string): void {
 	if (kind === "svg" && !SVG_START.test(content)) throw new HttpError(400, "An SVG artifact must be one <svg> element, starting with <svg.");
 	if (kind === "mermaid" && content.trim() === "") throw new HttpError(400, "A Mermaid artifact needs a diagram.");
 	if (kind === "jsx") compileJsx(content);
+}
+
+function checkKey(key: unknown): string {
+	if (typeof key !== "string" || key === "" || key.length > MAX_DATA_KEY_LENGTH) {
+		throw new HttpError(400, `A key must be text of 1 to ${MAX_DATA_KEY_LENGTH} characters.`);
+	}
+	return key;
 }
 
 /** Search-and-replace edits, each matching exactly once, applied in order. */
@@ -365,8 +402,90 @@ export class ArtifactStore {
 		// The fence first, then the deletion, with nothing awaited between: if the fence can't be written, nothing is deleted.
 		this.#sql.exec("INSERT OR IGNORE INTO pim_artifact_deleted (id, deleted_at) VALUES (?, ?)", id, Date.now());
 		this.#sql.exec("DELETE FROM pim_artifact_versions WHERE artifact = ?", id);
+		this.#sql.exec("DELETE FROM pim_artifact_data WHERE artifact = ?", id);
+		this.#sql.exec("DELETE FROM pim_artifact_grants WHERE artifact = ?", id);
 		this.#sql.exec("DELETE FROM pim_artifacts WHERE id = ?", id);
 		return true;
+	}
+
+	/** A value the artifact kept, or null. */
+	dataGet(id: string, scope: DataScope, key: string): string | null {
+		const [row] = this.#sql
+			.exec("SELECT value FROM pim_artifact_data WHERE artifact = ? AND scope = ? AND key = ?", id, scope, checkKey(key))
+			.toArray();
+		return row ? String(row.value) : null;
+	}
+
+	/** The keys the artifact kept, those starting with `prefix` if given, in order. */
+	dataKeys(id: string, scope: DataScope, prefix = ""): string[] {
+		return this.#sql
+			.exec(
+				"SELECT key FROM pim_artifact_data WHERE artifact = ? AND scope = ? AND substr(key, 1, ?) = ? ORDER BY key",
+				id,
+				scope,
+				prefix.length,
+				prefix,
+			)
+			.toArray()
+			.map((row) => String(row.key));
+	}
+
+	/** Keeps a value under a key for the artifact, within its room and the Pim's. */
+	dataSet(id: string, scope: DataScope, key: string, value: string): void {
+		checkKey(key);
+		if (typeof value !== "string") throw new HttpError(400, "An artifact can keep only text: use JSON.stringify for anything else.");
+		const size = utf8Bytes(key) + utf8Bytes(value);
+		const [old] = this.#sql.exec("SELECT size FROM pim_artifact_data WHERE artifact = ? AND scope = ? AND key = ?", id, scope, key).toArray();
+		const replaced = old ? Number(old.size) : 0;
+		const used = this.dataBytes(id, scope) - replaced;
+		if (used + size > MAX_ARTIFACT_DATA_BYTES) {
+			throw new HttpError(413, `An artifact can keep up to ${MAX_ARTIFACT_DATA_BYTES} bytes; this would make ${used + size}.`);
+		}
+		const all = Number(this.#sql.exec("SELECT COALESCE(SUM(size), 0) AS total FROM pim_artifact_data").one().total) - replaced;
+		if (all + size > MAX_ARTIFACT_DATA_TOTAL_BYTES) {
+			throw new HttpError(429, `Artifacts can keep up to ${MAX_ARTIFACT_DATA_TOTAL_BYTES} bytes in all; ${all} are used. Delete an artifact first.`);
+		}
+		const room = this.#storageRoom();
+		if (room !== null && size > room) throw new HttpError(429, `Pim storage quota exceeded: there is room for ${Math.max(0, room)} more bytes.`);
+		this.#sql.exec(
+			"INSERT INTO pim_artifact_data (artifact, scope, key, value, size, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (artifact, scope, key) DO UPDATE SET value = excluded.value, size = excluded.size, updated_at = excluded.updated_at",
+			id,
+			scope,
+			key,
+			value,
+			size,
+			Date.now(),
+		);
+	}
+
+	dataDelete(id: string, scope: DataScope, key: string): void {
+		this.#sql.exec("DELETE FROM pim_artifact_data WHERE artifact = ? AND scope = ? AND key = ?", id, scope, checkKey(key));
+	}
+
+	/** Bytes the artifact keeps through the bridge, in one scope. */
+	dataBytes(id: string, scope: DataScope): number {
+		return Number(
+			this.#sql.exec("SELECT COALESCE(SUM(size), 0) AS total FROM pim_artifact_data WHERE artifact = ? AND scope = ?", id, scope).one().total,
+		);
+	}
+
+	/** Everything the artifact keeps in a scope, by key. */
+	data(id: string, scope: DataScope): Record<string, string> {
+		return Object.fromEntries(
+			this.#sql
+				.exec("SELECT key, value FROM pim_artifact_data WHERE artifact = ? AND scope = ? ORDER BY key", id, scope)
+				.toArray()
+				.map((row) => [String(row.key), String(row.value)]),
+		);
+	}
+
+	/** Whether the person let this version (by its hash) use `capability`. */
+	granted(id: string, sha: string, capability: string): boolean {
+		return this.#sql.exec("SELECT 1 FROM pim_artifact_grants WHERE artifact = ? AND sha256 = ? AND capability = ?", id, sha, capability).toArray().length > 0;
+	}
+
+	grant(id: string, sha: string, capability: string): void {
+		this.#sql.exec("INSERT OR IGNORE INTO pim_artifact_grants (artifact, sha256, capability, granted_at) VALUES (?, ?, ?, ?)", id, sha, capability, Date.now());
 	}
 
 	/** Every artifact with every version, for the owner's export. */
@@ -377,6 +496,7 @@ export class ArtifactStore {
 				.exec("SELECT * FROM pim_artifact_versions WHERE artifact = ? ORDER BY version", artifact.id)
 				.toArray()
 				.map((row) => ({ ...versionInfo(row), content: String(row.content) })),
+			data: this.data(artifact.id, "own"),
 		}));
 	}
 }
@@ -431,9 +551,27 @@ export const RUNTIME_PATH = "/artifact-runtime/";
 
 const escapeHtml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+/**
+ * The bridge an artifact reaches Pim through: `window.pim`, whose calls are
+ * messages to the app that shows it, which asks Pim and the person (see
+ * `ArtifactFrame` in the web app). It answers only messages from that app,
+ * the frame's parent. Added before the artifact's own scripts, so they find it.
+ */
+export const BRIDGE_SCRIPT = `<script>(()=>{let next=0;const waiting=new Map();addEventListener("message",(event)=>{if(event.source!==parent)return;const data=event.data;if(!data||data.type!=="pim:reply"||!waiting.has(data.id))return;const [resolve,reject]=waiting.get(data.id);waiting.delete(data.id);if(data.error!==undefined)reject(new Error(String(data.error)));else resolve(data.value)});const call=(op,args)=>new Promise((resolve,reject)=>{const id=++next;waiting.set(id,[resolve,reject]);parent.postMessage({type:"pim:call",id,op,args},"*")});window.pim=Object.freeze({storage:Object.freeze({get:(key)=>call("storage.get",{key}),set:(key,value)=>call("storage.set",{key,value}),delete:(key)=>call("storage.delete",{key}),list:(prefix)=>call("storage.list",{prefix})}),ask:(prompt)=>call("model.ask",{prompt}),tools:Object.freeze({call:(name,input)=>call("tools.call",{name,input})})})})()</script>`;
+
+/**
+ * An HTML artifact with the bridge added first: after its doctype, so the
+ * page keeps standards mode, and before everything else of its own.
+ */
+function withBridge(content: string): string {
+	const doctype = /^\s*<!doctype[^>]*>/i.exec(content);
+	return doctype ? doctype[0] + BRIDGE_SCRIPT + content.slice(doctype[0].length) : BRIDGE_SCRIPT + content;
+}
+
 const PAGE_HEAD =
 	'<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
-	"<style>html,body{margin:0;background:#fff}body{font:14px/1.5 system-ui,sans-serif}</style>";
+	"<style>html,body{margin:0;background:#fff}body{font:14px/1.5 system-ui,sans-serif}</style>" +
+	BRIDGE_SCRIPT;
 
 /**
  * The page a framed version is shown as: an HTML artifact as it is; an SVG
@@ -446,7 +584,7 @@ export function framePage(kind: ArtifactKind, content: string, origin: string): 
 		new Response(body + RESIZE_SCRIPT, { headers: artifactHeaders(origin, "text/html; charset=utf-8", { runtime }) });
 	switch (kind) {
 		case "html":
-			return html(content);
+			return html(withBridge(content));
 		case "svg":
 			return html(`${PAGE_HEAD}<style>svg{display:block;max-width:100%;height:auto;margin:0 auto}</style></head><body>${content}</body></html>`);
 		case "mermaid":

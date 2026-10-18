@@ -123,7 +123,7 @@ import { type Role, TEAM_EXTENSION, type TeamRun, TeamStore, teamExtension } fro
 import { CHAT_REPORT, DECIDE_APPROVAL, MAJORDOMO_EXTENSION, introduction, majordomoExtension, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension } from "./majordomo";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { projectEntries } from "./transcript";
-import { conversationText, IMPROVE_PROMPT, NAME_CHAT, SUMMARIZE_CHAT, type UtilityTask } from "./utility";
+import { ARTIFACT_ASK, conversationText, IMPROVE_PROMPT, NAME_CHAT, SUMMARIZE_CHAT, type UtilityTask } from "./utility";
 import { type Limits, parseLimits, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
 
@@ -2708,6 +2708,72 @@ export class Pim extends DurableAgent<Env> {
 		return artifact;
 	}
 
+	/**
+	 * An app tool an artifact may call, by its pi name: one the owner lets
+	 * run without asking. A tool that asks first can't be used from an
+	 * artifact, since nothing there could show the person what it's about to do.
+	 */
+	#artifactTool(name: unknown) {
+		const servers = new Map(this.apps.servers().map((server) => [server.id, server]));
+		for (const tool of this.apps.tools()) {
+			const server = servers.get(tool.serverId);
+			if (!server || toolName(server.id, tool.name) !== name) continue;
+			if (server.state !== "ready") throw new HttpError(503, `${server.name} isn't connected right now.`);
+			if (appToolPermission(this.store, server, tool).permission !== "on") {
+				throw new HttpError(403, `${server.name}'s ${tool.name} asks you before it runs, or is off, so an artifact can't use it.`);
+			}
+			return { server, tool, label: `${server.name}: ${tool.annotations?.title ?? tool.name}` };
+		}
+		throw new HttpError(404, `No app tool ${String(name)}`);
+	}
+
+	/**
+	 * One call an artifact made through the bridge, as the app relays it.
+	 * Storage is the artifact's own and needs no permission; the model and
+	 * app tools need the person's, given to this version (`needs` asks for it).
+	 */
+	async #artifactBridge(
+		artifact: string,
+		version: { sha256: string },
+		op: unknown,
+		args: Record<string, unknown>,
+	): Promise<{ value: unknown } | { needs: { capability: string; label: string } }> {
+		switch (op) {
+			case "storage.get":
+				return { value: this.artifacts.dataGet(artifact, "own", args.key as string) };
+			case "storage.list":
+				return { value: this.artifacts.dataKeys(artifact, "own", typeof args.prefix === "string" ? args.prefix : "") };
+			case "storage.set":
+				this.#assertOpen();
+				this.artifacts.dataSet(artifact, "own", args.key as string, args.value as string);
+				return { value: null };
+			case "storage.delete":
+				this.#assertOpen();
+				this.artifacts.dataDelete(artifact, "own", args.key as string);
+				return { value: null };
+			case "model.ask": {
+				const prompt = args.prompt;
+				if (typeof prompt !== "string" || prompt.trim() === "") throw new HttpError(400, "pim.ask needs a prompt");
+				if (prompt.length > 20_000) throw new HttpError(413, "A prompt can be at most 20,000 characters");
+				if (!this.artifacts.granted(artifact, version.sha256, "model")) return { needs: { capability: "model", label: "model" } };
+				return { value: await this.utility(ARTIFACT_ASK, prompt) };
+			}
+			case "tools.call": {
+				const { server, tool, label } = this.#artifactTool(args.name);
+				const capability = `tool:${toolName(server.id, tool.name)}`;
+				if (!this.artifacts.granted(artifact, version.sha256, capability)) return { needs: { capability, label } };
+				const input = args.input ?? {};
+				if (typeof input !== "object" || Array.isArray(input)) throw new HttpError(400, "A tool's input must be an object");
+				this.#assertOpen();
+				const result = await this.apps.call(server.id, tool.name, input as Record<string, unknown>);
+				if (result.isError) throw new HttpError(502, toText(result));
+				return { value: toText(result) };
+			}
+			default:
+				throw new HttpError(400, `There is no pim.${String(op)}`);
+		}
+	}
+
 	#artifactVersion(id: string, version: string) {
 		const artifact = this.#artifact(id);
 		const found = VERSION.test(version) ? this.artifacts.version(artifact.id, Number(version)) : undefined;
@@ -3110,6 +3176,32 @@ export class Pim extends DurableAgent<Env> {
 				this.#artifactRequest(url, () => {
 					const { artifact, found } = this.#artifactVersion(id!, version!);
 					return framePage(artifact.kind, found.content, url.origin);
+				}),
+		],
+		[
+			"POST",
+			"/artifacts/:id/versions/:version/bridge",
+			({ id, version }, request, url) =>
+				this.#artifactRequest(url, async () => {
+					const { artifact, found } = this.#artifactVersion(id!, version!);
+					const { op, args } = await readJson<{ op: string; args: Record<string, unknown> }>(request);
+					return noStore(await this.#artifactBridge(artifact.id, found, op, args && typeof args === "object" ? args : {}));
+				}),
+		],
+		[
+			"POST",
+			"/artifacts/:id/versions/:version/grants",
+			({ id, version }, request, url) =>
+				this.#artifactRequest(url, async () => {
+					const { artifact, found } = this.#artifactVersion(id!, version!);
+					const { capability } = await readJson<{ capability: string }>(request);
+					if (capability !== "model") {
+						if (typeof capability !== "string" || !capability.startsWith("tool:")) throw new HttpError(400, "capability must be model or tool:<name>");
+						this.#artifactTool(capability.slice("tool:".length));
+					}
+					this.#assertOpen();
+					this.artifacts.grant(artifact.id, found.sha256, capability);
+					return noStore({ granted: capability }, 201);
 				}),
 		],
 		[

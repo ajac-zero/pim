@@ -2,10 +2,11 @@ import type { Message } from "@earendil-works/pi-ai";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vitest";
-import { MAX_ARTIFACT_STORAGE_BYTES } from "../src/artifacts";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { BRIDGE_SCRIPT, MAX_ARTIFACT_STORAGE_BYTES } from "../src/artifacts";
 import type { Limits } from "../src/usage";
 import { api, apiUrl, connect, OWNER, post, ROOT, say, TOKEN, toolUse } from "./helpers";
-import { faux, type Pim } from "./worker";
+import { faux, type Pim, utility } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
 const setLimits = (limits: Partial<Limits> | null) => runInDurableObject(agent(), (instance: Pim) => instance.setLimits(limits));
@@ -93,9 +94,11 @@ describe("artifacts", () => {
 		expect(response.headers.get("x-content-type-options")).toBe("nosniff");
 		expect(response.headers.get("referrer-policy")).toBe("no-referrer");
 		const body = await response.text();
-		// The artifact as it was made, then the one script that reports its height.
-		expect(body.startsWith(PAGE)).toBe(true);
-		expect(body.slice(PAGE.length)).toMatch(/^<script>.*pim:artifact-height.*<\/script>$/);
+		// The artifact as it was made, with the bridge after its doctype, then the one script that reports its height.
+		const doctype = "<!doctype html>";
+		const page = doctype + BRIDGE_SCRIPT + PAGE.slice(doctype.length);
+		expect(body.startsWith(page)).toBe(true);
+		expect(body.slice(page.length)).toMatch(/^<script>.*pim:artifact-height.*<\/script>$/);
 	});
 
 	it("download as plain-text attachments with safe names and the same sandbox", async () => {
@@ -169,8 +172,8 @@ export default function App() {
 		const page = await frame.text();
 		const sources = [...page.matchAll(/<script src="([^"]+)"><\/script>/g)].map((match) => match[1]);
 		expect(sources).toEqual(["https://pim.test/artifact-runtime/react.js", "https://pim.test/artifact-runtime/recharts.js", "https://pim.test/artifact-runtime/tailwind.js"]);
-		// The page closes only its own scripts: those, the component, and the height script. Its strings can't close one.
-		expect(page.match(/<\/script>/g)).toHaveLength(5);
+		// The page closes only its own scripts: the bridge, those, the component, and the height script. Its strings can't close one.
+		expect(page.match(/<\/script>/g)).toHaveLength(6);
 		expect(page).toContain("<\\/script><script>parent.x=1<\\/script> <\\!-- <script>");
 		expect(page).not.toContain("useState<number>");
 		expect((await raw(`/artifacts/${id}/versions/1/download`)).headers.get("content-disposition")).toMatch(/-v1\.jsx"/);
@@ -184,6 +187,44 @@ export default function App() {
 			expect(refused).toMatchObject({ isError: true, text: expect.stringContaining(error) });
 		}
 		expect((await api("/artifacts")).body.artifacts.filter((artifact: { kind: string }) => artifact.kind === "jsx")).toHaveLength(1);
+	});
+
+	it("keep their own data through the bridge, and ask the model only once the person allows the version", async () => {
+		const made = await makePage();
+		const bridge = (op: string, args: unknown, version = 1) => post(`/artifacts/${made.id}/versions/${version}/bridge`, { op, args });
+		// The page gets the bridge first, after its doctype, so it stays in standards mode and its scripts find it.
+		const page = await (await raw(`/artifacts/${made.id}/versions/1/frame`)).text();
+		expect(page).toMatch(/^<!doctype html><script>.*window\.pim=.*<\/script><html><head><title>Tip<\/title>/);
+
+		expect((await bridge("storage.get", { key: "tips" })).body).toEqual({ value: null });
+		expect((await bridge("storage.set", { key: "tips", value: "[10,15]" })).body).toEqual({ value: null });
+		await bridge("storage.set", { key: "tip:last", value: "15" });
+		await bridge("storage.set", { key: "other", value: "x" });
+		expect((await bridge("storage.list", { prefix: "tip" })).body).toEqual({ value: ["tip:last", "tips"] });
+		expect((await bridge("storage.set", { key: "n", value: 5 })).status).toBe(400);
+		expect((await bridge("storage.set", { key: "", value: "x" })).status).toBe(400);
+		expect((await bridge("storage.set", { key: "big", value: "x".repeat(1_000_000) })).status).toBe(413);
+		await bridge("storage.delete", { key: "other" });
+		// Kept across versions, and in the export.
+		await callTool("artifact_update", { id: made.id, base_version: 1, content: "<p>Second</p>" });
+		expect((await bridge("storage.get", { key: "tips" }, 2)).body).toEqual({ value: "[10,15]" });
+		const exported = JSON.parse(await (await raw("/export")).text());
+		expect(exported.artifacts.find((artifact: { id: string }) => artifact.id === made.id).data).toEqual({ "tip:last": "15", tips: "[10,15]" });
+
+		// The model: asked for permission, then answered, and only for the version allowed.
+		expect((await bridge("model.ask", { prompt: "A tip tip" })).body).toEqual({ needs: { capability: "model", label: "model" } });
+		expect((await post(`/artifacts/${made.id}/versions/1/grants`, { capability: "model" })).status).toBe(201);
+		utility.setResponses([fauxAssistantMessage("Round up.")]);
+		expect((await bridge("model.ask", { prompt: "A tip tip" })).body).toEqual({ value: "Round up." });
+		expect((await bridge("model.ask", { prompt: "A tip tip" }, 2)).body).toMatchObject({ needs: { capability: "model" } });
+		expect((await post(`/artifacts/${made.id}/versions/1/grants`, { capability: "everything" })).status).toBe(400);
+		expect((await bridge("fetch", {})).status).toBe(400);
+
+		// Deleting the artifact deletes what it kept.
+		await api(`/artifacts/${made.id}`, { method: "DELETE" });
+		await runInDurableObject(agent(), (instance: Pim) => {
+			expect(instance.artifacts.dataBytes(made.id, "own")).toBe(0);
+		});
 	});
 
 	it("refuse an API token in the address, which WebSockets still use", async () => {

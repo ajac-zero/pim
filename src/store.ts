@@ -401,6 +401,8 @@ export class PimStore {
 			pim_artifacts: "artifacts",
 			pim_artifact_versions: "artifact versions",
 			pim_artifact_deleted: "deleted artifact ids",
+			pim_artifact_data: "what artifacts keep",
+			pim_artifact_grants: "what artifacts may use",
 			pi_entries: "conversations",
 		};
 		const existing = new Set(

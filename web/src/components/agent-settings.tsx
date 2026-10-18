@@ -250,7 +250,10 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
           size="sm"
           onClick={() => {
             onClose();
-            navigate({ to: "/new", search: { agent: agent.id } });
+            navigate({
+              to: "/agents/$agentId",
+              params: { agentId: agent.id },
+            });
           }}
         >
           <MessageCircle /> {t("chatWithAgent")}

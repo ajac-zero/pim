@@ -82,10 +82,7 @@ export function MobileNav({
         search={(prev) => ({ ...prev, panel: undefined })}
         onClick={onShowList}
         // An open chat counts as being in your chats, as the rail shows it.
-        active={
-          showing(undefined) ||
-          (!list && (pathname.startsWith("/chat/") || pathname === "/new"))
-        }
+        active={showing(undefined) || (!list && pathname.startsWith("/chat/"))}
         icon={<MessageCircle className="size-5" />}
         label={t("chats")}
         count={awaitingApproval.size}

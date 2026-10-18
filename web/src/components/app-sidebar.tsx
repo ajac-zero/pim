@@ -85,11 +85,11 @@ export function sessionTitle(session: Pick<Session, "title">, t: T) {
   return session.title ?? t("newChat");
 }
 
-/** Opens an empty draft; the session is created when its first message is sent. */
+/** Opens the majordomo's dashboard, where a chat starts with its first message. */
 export function useNewChat(onDone?: () => void) {
   const navigate = useNavigate();
   return () => {
-    navigate({ to: "/new" });
+    navigate({ to: "/" });
     onDone?.();
   };
 }
@@ -645,8 +645,8 @@ function AgentSectionList({
               className="rounded-md p-1 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
               onClick={() => {
                 navigate({
-                  to: "/new",
-                  search: agent.majordomo ? {} : { agent: agent.id },
+                  to: "/agents/$agentId",
+                  params: { agentId: agent.id },
                 });
                 onNavigate?.();
               }}

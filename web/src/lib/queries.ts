@@ -73,14 +73,20 @@ export const artifactVersionQuery = (
   id: string,
   version: number,
   from?: ArtifactFrom,
+  path?: string,
 ) =>
   queryOptions({
-    queryKey: !from
-      ? ["artifacts", id, "versions", version]
-      : "host" in from
-        ? ["shared-artifacts", from.host, id, "versions", version]
-        : ["published-artifacts", id, "versions", version],
-    queryFn: () => pim.artifactVersion(id, version, from),
+    queryKey: [
+      ...(!from
+        ? ["artifacts", id]
+        : "host" in from
+          ? ["shared-artifacts", from.host, id]
+          : ["published-artifacts", id]),
+      "versions",
+      version,
+      ...(path ? [path] : []),
+    ],
+    queryFn: () => pim.artifactVersion(id, version, from, path),
     retry: false,
   });
 

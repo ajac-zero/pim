@@ -189,6 +189,74 @@ export default function App() {
 		expect((await api("/artifacts")).body.artifacts.filter((artifact: { kind: string }) => artifact.kind === "jsx")).toHaveLength(1);
 	});
 
+	it("span several files: a page's scripts, styles and images, and an app's modules, data and styles, put inline when shown", async () => {
+		// An image from the person's files, copied in.
+		const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+		expect((await raw("/files/content?path=/workspace/dot.png", { method: "PUT", body: png })).status).toBeLessThan(300);
+		const page = `<!doctype html><html><head><link rel="stylesheet" href="./style.css"><link rel="stylesheet" href="https://example.com/x.css"></head>
+<body><img src="images/dot.png"><p id="out"></p><script type="application/json" id="data" src="data.json"></script><script src="app.js"></script><script src="missing.js"></script></body></html>`;
+		const made = await callTool("artifact_create", {
+			title: "Several",
+			kind: "html",
+			content: page,
+			files: [
+				{ path: "app.js", content: 'document.getElementById("out").textContent = JSON.parse(document.getElementById("data").textContent).name + "</script>";' },
+				{ path: "style.css", content: "body{background:url(images/dot.png)} p{color:red} /* </style><script>x</script> */" },
+				{ path: "data.json", content: '{"name":"Ada"}' },
+				{ path: "images/dot.png", from_file: "/workspace/dot.png" },
+			],
+		});
+		expect(made.isError).toBe(false);
+		const { id, files } = JSON.parse(made.text).artifact;
+		expect(files).toEqual(["app.js", "data.json", "images/dot.png", "index.html", "style.css"]);
+		const dot = `data:image/png;base64,${btoa(String.fromCharCode(...png))}`;
+		const html = await (await raw(`/artifacts/${id}/versions/1/frame`)).text();
+		expect(html).toContain(`<img src="${dot}">`);
+		expect(html).toContain(`<style>body{background:url("${dot}")} p{color:red} /* <\\/style><script>x</script> */</style>`);
+		expect(html).toContain('<link rel="stylesheet" href="https://example.com/x.css">');
+		expect(html).toContain('<script type="application/json" id="data">{"name":"Ada"}</script>');
+		expect(html).toContain('+ "<\\/script>";</script>');
+		expect(html).toContain('<script src="missing.js"></script>');
+		// The model reads one file at a time, and the person downloads each.
+		const read = await callTool("artifact_read", { id, path: "app.js" });
+		expect(read.text).toContain("Its files: app.js");
+		expect((await callTool("artifact_read", { id, path: "images/dot.png" })).text).toContain("image/png file of 7 bytes");
+		expect((await api(`/artifacts/${id}/versions/1?path=data.json`)).body).toMatchObject({ path: "data.json", content: '{"name":"Ada"}' });
+		const download = await raw(`/artifacts/${id}/versions/1/download?path=images/dot.png`);
+		expect(download.headers.get("content-disposition")).toContain('-v1-dot.png"');
+		expect(new Uint8Array(await download.arrayBuffer())).toEqual(png);
+
+		// A change to one file keeps the others, and deleting one takes it out.
+		const edited = await callTool("artifact_update", { id, base_version: 1, path: "data.json", edits: [{ find: "Ada", replace: "Bo" }], delete_files: ["images/dot.png"] });
+		expect(JSON.parse(edited.text).artifact).toMatchObject({ version: 2, files: ["app.js", "data.json", "index.html", "style.css"] });
+		expect(await (await raw(`/artifacts/${id}/versions/2/frame`)).text()).toContain('{"name":"Bo"}');
+		expect((await callTool("artifact_update", { id, base_version: 2, delete_files: ["index.html"] })).text).toContain("main file");
+		expect((await callTool("artifact_create", { title: "Doc", kind: "markdown", content: "# Hi", files: [{ path: "a.md", content: "x" }] })).text).toContain("Only HTML and JSX");
+		expect((await callTool("artifact_create", { title: "Bad path", kind: "html", content: "<p>", files: [{ path: "../up.js", content: "x" }] })).isError).toBe(true);
+
+		// An app of modules: components, JSON, CSS and an image, compiled into one script.
+		const app = await callTool("artifact_create", {
+			title: "App",
+			kind: "jsx",
+			content: 'import Chart from "./components/Chart";\nimport rows from "./data.json";\nimport "./app.css";\nexport default function App() { return <Chart rows={rows} />; }',
+			files: [
+				{ path: "components/Chart.tsx", content: 'import logo from "../logo.png";\nimport { LineChart } from "recharts";\nexport default function Chart({ rows }: { rows: number[] }) { return <div><img src={logo} />{rows.length}<LineChart data={[]} /></div>; }' },
+				{ path: "data.json", content: "[1, 2, 3]" },
+				{ path: "app.css", content: ".x{color:red}" },
+				{ path: "logo.png", from_file: "/workspace/dot.png" },
+			],
+		});
+		expect(app.isError).toBe(false);
+		const appPage = await (await raw(`/artifacts/${JSON.parse(app.text).artifact.id}/versions/1/frame`)).text();
+		expect(appPage).toContain("https://pim.test/artifact-runtime/recharts.js");
+		expect(appPage).toContain('"components/Chart.tsx": [function');
+		expect(appPage).toContain(`module.exports = ${JSON.stringify(dot)};`);
+		expect(appPage).toContain('{"./components/Chart":"components/Chart.tsx","./data.json":"data.json","./app.css":"app.css"}');
+		expect(appPage).not.toContain("rows: number[]");
+		const broken = await callTool("artifact_create", { title: "Broken", kind: "jsx", content: 'import Missing from "./Missing";\nexport default () => <Missing />;' });
+		expect(broken.text).toContain('imports "./Missing", which isn\'t one of the artifact\'s files');
+	});
+
 	it("keep their own data through the bridge, and ask the model only once the person allows the version", async () => {
 		const made = await makePage();
 		const bridge = (op: string, args: unknown, version = 1) => post(`/artifacts/${made.id}/versions/${version}/bridge`, { op, args });

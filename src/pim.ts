@@ -26,10 +26,13 @@ import {
 	type ArtifactSummary,
 	ArtifactStore,
 	artifactHeaders,
-	checkContent,
+	checkFiles,
+	checkPath,
 	checkTitle,
 	type DataScope,
 	downloadName,
+	fileType,
+	isTextType,
 	framePage,
 	type LoadedFiles,
 	readFiles,
@@ -513,7 +516,13 @@ export class Pim extends DurableAgent<Env> {
 			);
 			this.registry.install(approvalsExtension(services, this.#ownActions));
 			this.registry.install(webExtension({ ai: this.env.AI, searchProvider: this.deployment().webSearch }));
-			this.registry.install(artifactsExtension({ artifacts: this.artifacts, assertOpen: () => this.#assertOpen() }));
+			this.registry.install(
+				artifactsExtension({
+					artifacts: this.artifacts,
+					assertOpen: () => this.#assertOpen(),
+					readFile: async (path) => new Uint8Array(await new Response((await this.files.read(path)).body).arrayBuffer()),
+				}),
+			);
 			this.registry.install(filesExtension(this.#files));
 			this.#installBrowser(services);
 			// Restored connections reconnect in the background after a wake; give them a moment.
@@ -3305,15 +3314,22 @@ export class Pim extends DurableAgent<Env> {
 			({ id }, request, url) =>
 				this.#artifactRequest(url, async () => {
 					const artifact = this.#artifact(id!);
-					const { baseVersion, content, title } = await readJson<{ baseVersion: number; content: string; title: string }>(request);
+					const { baseVersion, content, title, path } = await readJson<{ baseVersion: number; content: string; title: string; path: string }>(request);
 					if (!Number.isSafeInteger(baseVersion)) throw new HttpError(400, "baseVersion must be a version number");
 					if (typeof content !== "string") throw new HttpError(400, "content must be a string");
-					checkContent(artifact.kind, content);
+					const file = path === undefined ? ENTRY_FILES[artifact.kind] : checkPath(path);
+					// Checked with the version's other files, when it's based on the latest; append refuses it otherwise.
+					if (baseVersion === artifact.version) {
+						const files = new Map(await this.artifacts.read(artifact.id, artifact.version));
+						if (path !== undefined && !files.has(file)) throw new HttpError(404, `Version ${artifact.version} has no file ${file}`);
+						files.set(file, { type: fileType(file), bytes: new TextEncoder().encode(content) });
+						checkFiles(artifact.kind, files);
+					}
 					const name = title === undefined ? undefined : checkTitle(title);
 					this.#assertOpen();
 					const { version, changed } = await this.artifacts.append(artifact.id, {
 						baseVersion: baseVersion!,
-						content,
+						files: { [file]: content },
 						source: "person",
 						...(name !== undefined ? { title: name } : {}),
 					});
@@ -3341,8 +3357,12 @@ export class Pim extends DurableAgent<Env> {
 			({ id, version }, _request, url) =>
 				this.#artifactRequest(url, async () => {
 					const { artifact, found } = this.#artifactVersion(id!, version!);
-					const content = await this.artifacts.text(artifact.id, found.version);
-					return noStore({ id: artifact.id, title: artifact.title, kind: artifact.kind, latest: artifact.version, ...found, content });
+					const path = url.searchParams.get("path") ?? ENTRY_FILES[artifact.kind];
+					const file = found.files.find((candidate) => candidate.path === path);
+					if (!file) throw new HttpError(404, `Version ${found.version} has no file ${path}`);
+					// Only text is sent as content: anything else, the file's download has.
+					const content = isTextType(file.type) ? await this.artifacts.text(artifact.id, found.version, path) : null;
+					return noStore({ id: artifact.id, title: artifact.title, kind: artifact.kind, latest: artifact.version, ...found, path, content });
 				}),
 		],
 		[
@@ -3470,12 +3490,15 @@ export class Pim extends DurableAgent<Env> {
 			({ id, version }, _request, url) =>
 				this.#artifactRequest(url, async () => {
 					const { artifact, found } = this.#artifactVersion(id!, version!);
-					// Plain text, whatever the kind: the file is for saving, and a browser that shows it
-					// anyway shows its source, still under the sandbox. Its name keeps the extension.
-					const headers = artifactHeaders(url.origin, "text/plain; charset=utf-8");
-					const { ascii, utf8 } = downloadName(artifact.title, found.version, artifact.kind);
+					const path = url.searchParams.get("path") ?? ENTRY_FILES[artifact.kind];
+					const file = found.files.find((candidate) => candidate.path === path);
+					if (!file) throw new HttpError(404, `Version ${found.version} has no file ${path}`);
+					// Plain text, whatever the kind, or bytes to save: the file is for saving, and a browser that
+					// shows it anyway shows its source, still under the sandbox. Its name keeps the extension.
+					const headers = artifactHeaders(url.origin, isTextType(file.type) ? "text/plain; charset=utf-8" : "application/octet-stream");
+					const { ascii, utf8 } = downloadName(artifact.title, found.version, artifact.kind, path === ENTRY_FILES[artifact.kind] ? undefined : path);
 					headers.set("content-disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(utf8)}`);
-					return new Response(await this.artifacts.text(artifact.id, found.version), { headers });
+					return new Response((await this.artifacts.read(artifact.id, found.version, [path])).get(path)!.bytes, { headers });
 				}),
 		],
 		// Files: the person's, which their agents read and write too (see ./files.ts).

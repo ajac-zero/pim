@@ -46,6 +46,7 @@ import { Input } from "~/components/ui/input";
 import {
   ApiError,
   type ArtifactDetail,
+  type ArtifactKind,
   artifactDownloadUrl,
   pim,
 } from "~/lib/pim-api";
@@ -75,6 +76,8 @@ function ArtifactPage() {
   const [view, setView] = useState<"preview" | "source">("preview");
   // The source being edited, from the latest version; null when not editing.
   const [draft, setDraft] = useState<string | null>(null);
+  // The file the source view shows and the editor changes; the main one when unset.
+  const [file, setFile] = useState<string>();
   const preview = useRef<HTMLDivElement>(null);
   const [printing, setPrinting] = useState(false);
   const donePrinting = useCallback(() => setPrinting(false), []);
@@ -100,7 +103,7 @@ function ArtifactPage() {
     };
   }, [listed, askedFor, wanted, refetch]);
   const source = useQuery({
-    ...artifactVersionQuery(artifactId, version ?? 0),
+    ...artifactVersionQuery(artifactId, version ?? 0, undefined, file),
     enabled: (view === "source" || draft !== null) && listed === true,
   });
   // Another version, or another artifact, isn't the one being edited.
@@ -108,10 +111,15 @@ function ArtifactPage() {
   useEffect(() => {
     setDraft(null);
   }, [artifactId, version]);
+  // Another artifact starts at its main file.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new artifact shows its main file
+  useEffect(() => {
+    setFile(undefined);
+  }, [artifactId]);
 
   const save = useMutation({
     mutationFn: ({ base, content }: { base: number; content: string }) =>
-      pim.saveArtifact(artifactId, base, content),
+      pim.saveArtifact(artifactId, base, content, file),
     onSuccess: async (saved) => {
       setDraft(null);
       if (!saved.changed) {
@@ -203,6 +211,9 @@ function ArtifactPage() {
     );
   }
   const isLatest = version === artifact.version;
+  // The file the source view shows, with the version's files.
+  const shown = source.data;
+  const shownFile = shown?.files.find((entry) => entry.path === shown.path);
 
   return (
     <main className="flex min-h-0 flex-1 flex-col">
@@ -269,7 +280,14 @@ function ArtifactPage() {
               ))}
             </div>
             <Button asChild size="sm" variant="outline" className="h-8">
-              <a href={artifactDownloadUrl(artifactId, version)} download>
+              <a
+                href={artifactDownloadUrl(
+                  artifactId,
+                  version,
+                  view === "source" ? source.data?.path : undefined,
+                )}
+                download
+              >
                 <Download className="size-3.5" />
                 {t("download")}
               </a>
@@ -291,11 +309,14 @@ function ArtifactPage() {
                 size="sm"
                 variant="outline"
                 className="h-8"
-                disabled={!source.data && source.isFetching}
+                disabled={
+                  (!source.data && source.isFetching) ||
+                  source.data?.content === null
+                }
                 onClick={async () => {
                   const latest =
                     source.data ?? (await source.refetch()).data ?? null;
-                  if (latest) setDraft(latest.content);
+                  if (latest?.content != null) setDraft(latest.content);
                 }}
               >
                 <Pencil className="size-3.5" />
@@ -359,6 +380,27 @@ function ArtifactPage() {
         </Button>
       </header>
       <div className="flex min-h-0 flex-1 flex-col gap-2 p-2 md:p-3">
+        {(view === "source" || draft !== null) &&
+          shown &&
+          shown.files.length > 1 && (
+            <label className="flex items-center gap-2 text-sm">
+              <span className="text-muted-foreground">
+                {t("artifactFiles", { count: shown.files.length })}
+              </span>
+              <select
+                value={shown.path}
+                disabled={draft !== null}
+                onChange={(event) => setFile(event.target.value)}
+                className="h-8 max-w-72 rounded-xl border bg-background px-2 font-mono text-xs"
+              >
+                {shown.files.map((entry) => (
+                  <option key={entry.path} value={entry.path}>
+                    {entry.path}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
         {draft !== null ? (
           <textarea
             value={draft}
@@ -379,10 +421,18 @@ function ArtifactPage() {
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto scrollbar-thin">
-            {source.data ? (
+            {shown?.content === null ? (
+              <p className="text-muted-foreground text-sm">
+                {t("artifactBinaryFile", {
+                  path: shown.path,
+                  type: shownFile?.type ?? "",
+                  size: formatBytes(shownFile?.size ?? 0, formatNumber),
+                })}
+              </p>
+            ) : shown ? (
               <CodeBlock
-                code={source.data.content}
-                language={ARTIFACT_LANGUAGES[artifact.kind]}
+                code={shown.content ?? ""}
+                language={languageOf(shown.path, artifact.kind)}
               />
             ) : (
               <p className="text-muted-foreground text-sm">
@@ -585,6 +635,27 @@ function ShareMenu({ artifact }: { artifact: ArtifactDetail }) {
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+/** The language a file's source is highlighted as, by its extension. */
+function languageOf(path: string, kind: ArtifactKind) {
+  const extension = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+  const languages = {
+    html: "html",
+    htm: "html",
+    css: "css",
+    js: "javascript",
+    mjs: "javascript",
+    jsx: "jsx",
+    ts: "typescript",
+    tsx: "tsx",
+    json: "json",
+    md: "markdown",
+    svg: "xml",
+  } as const;
+  return extension in languages
+    ? languages[extension as keyof typeof languages]
+    : ARTIFACT_LANGUAGES[kind];
 }
 
 /** What's selected in an element, as the person last left it there; kept when focus moves elsewhere. */

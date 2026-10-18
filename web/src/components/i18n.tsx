@@ -512,6 +512,9 @@ const translations = {
     artifactDeny: "Don't allow",
     artifactDenied: "You didn't allow it.",
     artifactPrint: "Print or save as PDF",
+    artifactFiles: "Files: {count}",
+    artifactBinaryFile:
+      "{path} isn't text ({type}, {size}): download it to see it.",
     artifactShare: "Share",
     artifactShared: "Shared",
     artifactShareHint:
@@ -1367,6 +1370,9 @@ const translations = {
     artifactDeny: "No permitir",
     artifactDenied: "No lo permitiste.",
     artifactPrint: "Imprimir o guardar como PDF",
+    artifactFiles: "Archivos: {count}",
+    artifactBinaryFile:
+      "{path} no es texto ({type}, {size}): descárgalo para verlo.",
     artifactShare: "Compartir",
     artifactShared: "Compartido",
     artifactShareHint:

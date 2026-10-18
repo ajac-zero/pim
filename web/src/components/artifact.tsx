@@ -376,7 +376,7 @@ function MarkdownArtifact({
       )}
       style={fill ? undefined : { maxHeight }}
     >
-      <Markdown text={data.content} untrusted />
+      <Markdown text={data.content ?? ""} untrusted />
     </div>
   );
 }

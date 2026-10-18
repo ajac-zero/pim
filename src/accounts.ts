@@ -3,6 +3,7 @@ import { configuredProviders, PROVIDER_IDS, providerName, providerSecrets } from
 import { type AuthSite, clearCookie, fromAnotherSite, ownedCode, SESSION_COOKIE, type Sites, userHandle } from "./auth";
 import type { ApiExtension } from "./gateway";
 import { deploymentSettings, readDeployment } from "./deployment";
+import { framePage } from "./artifacts";
 import { HttpError } from "./http";
 import { parseLimits, UNLIMITED } from "./usage";
 import { type Account, type AccountStatus, type CleanupResult, PENDING_MS, type RegistrationPolicy } from "./directory";
@@ -49,6 +50,9 @@ function log(event: string, fields: Record<string, unknown>): void {
 
 const json = (body: unknown, status = 200, headers?: HeadersInit) => Response.json(body, { status, headers });
 const fail = (status: number, error: string) => json({ error }, status);
+/** An answer that carries an artifact or what it keeps, which no cache may keep. */
+const noStore = (value: unknown, status = 200) =>
+	Response.json(value, { status, headers: { "cache-control": "no-store, private", "x-content-type-options": "nosniff" } });
 
 /** The client's address, as Cloudflare reports it. */
 export const clientIp = (request: Request) => request.headers.get("CF-Connecting-IP") ?? "unknown";
@@ -390,6 +394,73 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				return undefined;
 			}
 
+			// Artifacts published to everyone: read from the gallery, run with the viewer's own Pim.
+			if (path === "/published-artifacts" || path.startsWith("/published-artifacts/") || /^\/artifacts\/[^/]+(\/publish)?$/.test(path)) {
+				if (new URL(request.url).searchParams.has("token")) return fail(400, "Send the API token in the Authorization header, not the address");
+			}
+			if (route === "GET /published-artifacts") {
+				const url = new URL(request.url);
+				return noStore({ artifacts: await gallery(env).publishedArtifacts({ query: url.searchParams.get("q") ?? undefined }) });
+			}
+			const published = /^\/published-artifacts\/([^/]+)(?:\/(use)|\/versions\/(\d+)(?:\/(frame|bridge|grants))?)?$/.exec(path);
+			if (published) {
+				const [, id, use, version, part] = published;
+				const found = await gallery(env).publishedArtifact(decodeURIComponent(id!));
+				if (!found) return fail(404, "No such artifact. It may have been unpublished.");
+				if (!use && !version && request.method === "GET") return noStore(found);
+				if (use && request.method === "POST") {
+					const content = await gallery(env).publishedContent(found.id);
+					if (content === null) return fail(404, "No such artifact. It may have been unpublished.");
+					const artifact = await (await pim()).adoptArtifact({ title: found.title, kind: found.kind, content });
+					if (found.author !== account.username) await gallery(env).artifactUsed(found.id);
+					log("published_artifact_used", { owner: account.ownerId, artifact: found.id });
+					return noStore(artifact, 201);
+				}
+				if (!version) return undefined;
+				if (Number(version) !== found.version) return fail(404, `Only version ${found.version} is published`);
+				if (request.method === "GET" && (!part || part === "frame")) {
+					const content = await gallery(env).publishedContent(found.id);
+					if (content === null) return fail(404, "No such artifact. It may have been unpublished.");
+					if (part === "frame") return framePage(found.kind, content, new URL(request.url).origin);
+					return noStore({ ...found, latest: found.version, content });
+				}
+				if (request.method === "POST" && part === "bridge") {
+					const { op, args } = await body();
+					const answer = (await (await pim()).publishedArtifactCall(found, {
+						op,
+						args: args && typeof args === "object" ? (args as Record<string, unknown>) : {},
+					})) as { ok: true; answer: unknown } | { ok: false; status: number; reason: string };
+					if (!answer.ok) return fail(answer.status, answer.reason);
+					return noStore(answer.answer);
+				}
+				if (request.method === "POST" && part === "grants") {
+					const answer = await (await pim()).publishedArtifactGrant(found, (await body()).capability);
+					if (!answer.ok) return fail(answer.status, answer.reason);
+					return noStore({ granted: answer.granted }, 201);
+				}
+				return undefined;
+			}
+			const publishArtifact = /^\/artifacts\/([^/]+)\/publish$/.exec(path);
+			if (publishArtifact) {
+				const id = decodeURIComponent(publishArtifact[1]!);
+				if (request.method === "GET") {
+					const found = await gallery(env).publishedArtifactOf(account.ownerId, id);
+					return found ? noStore(found) : fail(404, "Not published");
+				}
+				if (request.method === "POST") {
+					const artifact = await (await pim()).artifactToPublish(id);
+					if (!artifact) return fail(404, `No artifact ${id}`);
+					const done = await gallery(env).publishArtifact(account.ownerId, account.username, artifact);
+					log("artifact_published", { owner: account.ownerId, artifact: done.id });
+					return noStore(done, 201);
+				}
+				if (request.method === "DELETE") return noStore({ deleted: await gallery(env).unpublishArtifact(account.ownerId, id) });
+				return undefined;
+			}
+			// A deleted artifact leaves the gallery too; the Pim deletes it after.
+			const deletedArtifact = /^\/artifacts\/([^/]+)$/.exec(path);
+			if (deletedArtifact && request.method === "DELETE") await gallery(env).unpublishArtifact(account.ownerId, decodeURIComponent(deletedArtifact[1]!));
+
 			const publish = /^\/agents\/([^/]+)\/publish$/.exec(path);
 			if (publish) {
 				const id = decodeURIComponent(publish[1]!);
@@ -465,6 +536,13 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 				const removed = await gallery(env).remove(decodeURIComponent(template[1]!));
 				if (!removed) return fail(404, "No such template");
 				log("template_removed", { template: template[1], by: admin.ownerId });
+				return json({ deleted: true });
+			}
+			const publishedArtifact = /^\/admin\/published-artifacts\/([^/]+)$/.exec(path);
+			if (publishedArtifact && request.method === "DELETE") {
+				const removed = await gallery(env).removeArtifact(decodeURIComponent(publishedArtifact[1]!));
+				if (!removed) return fail(404, "No such artifact");
+				log("published_artifact_removed", { artifact: publishedArtifact[1], by: admin.ownerId });
 				return json({ deleted: true });
 			}
 			if (route === "POST /apps") {

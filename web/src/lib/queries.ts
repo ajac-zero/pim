@@ -1,5 +1,5 @@
 import { queryOptions } from "@tanstack/react-query";
-import { admin, pim } from "~/lib/pim-api";
+import { type ArtifactFrom, admin, pim } from "~/lib/pim-api";
 
 /** Pim's lists. Live changes arrive on the socket and invalidate these. */
 
@@ -72,14 +72,37 @@ export const artifactQuery = (id: string) =>
 export const artifactVersionQuery = (
   id: string,
   version: number,
-  host?: string,
+  from?: ArtifactFrom,
 ) =>
   queryOptions({
-    queryKey: host
-      ? ["shared-artifacts", host, id, "versions", version]
-      : ["artifacts", id, "versions", version],
-    queryFn: () => pim.artifactVersion(id, version, host),
+    queryKey: !from
+      ? ["artifacts", id, "versions", version]
+      : "host" in from
+        ? ["shared-artifacts", from.host, id, "versions", version]
+        : ["published-artifacts", id, "versions", version],
+    queryFn: () => pim.artifactVersion(id, version, from),
     retry: false,
+  });
+
+/** Artifacts people published for everyone, matching `query` if given. */
+export const publishedArtifactsQuery = (query = "") =>
+  queryOptions({
+    queryKey: ["published-artifacts", "list", query],
+    queryFn: () => pim.publishedArtifacts(query),
+  });
+
+export const publishedArtifactQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["published-artifacts", id],
+    queryFn: () => pim.publishedArtifact(id),
+    retry: false,
+  });
+
+/** What you published of one of your artifacts, or null. */
+export const artifactPublicationQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["artifacts", id, "publication"],
+    queryFn: () => pim.artifactPublication(id),
   });
 
 /** Artifacts people shared with you, from their Pims. */

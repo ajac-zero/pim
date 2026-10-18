@@ -491,6 +491,23 @@ export type SharedArtifact = Omit<Artifact, "session"> & {
   host: string;
 };
 
+/** An artifact someone published for everyone on this Pim: a copy of one of its versions. */
+export type PublishedArtifact = {
+  id: string;
+  author: string;
+  authorName: string | null;
+  /** Which of the author's artifacts it copies, and which version. */
+  artifactId: string;
+  version: number;
+  title: string;
+  kind: ArtifactKind;
+  sha256: string;
+  size: number;
+  publishedAt: number;
+  /** How many people made it their own. */
+  uses: number;
+};
+
 export type ArtifactVersion = ArtifactVersionInfo & {
   id: string;
   title: string;
@@ -540,18 +557,26 @@ export type ArtifactReference = {
   size: number;
 };
 
-/** Where an artifact is in the API: one of yours, or one `host` (their username) shared with you. */
-const artifactRoot = (id: string, host?: string) =>
-  host
-    ? `/shared-artifacts/${encodeURIComponent(host)}/${encodeURIComponent(id)}`
-    : `/artifacts/${encodeURIComponent(id)}`;
+/** Whose an artifact is, when it isn't yours: one `host` (their username) shares with you, or one published to everyone. */
+export type ArtifactFrom = { host: string } | { published: true };
 
-const artifactPath = (id: string, version: number, host?: string) =>
-  `/api${artifactRoot(id, host)}/versions/${version}`;
+/** Where an artifact is in the API. */
+const artifactRoot = (id: string, from?: ArtifactFrom) =>
+  !from
+    ? `/artifacts/${encodeURIComponent(id)}`
+    : "host" in from
+      ? `/shared-artifacts/${encodeURIComponent(from.host)}/${encodeURIComponent(id)}`
+      : `/published-artifacts/${encodeURIComponent(id)}`;
+
+const artifactPath = (id: string, version: number, from?: ArtifactFrom) =>
+  `/api${artifactRoot(id, from)}/versions/${version}`;
 
 /** The sandboxed page a framed artifact's version is shown in. */
-export const artifactFrameUrl = (id: string, version: number, host?: string) =>
-  `${artifactPath(id, version, host)}/frame`;
+export const artifactFrameUrl = (
+  id: string,
+  version: number,
+  from?: ArtifactFrom,
+) => `${artifactPath(id, version, from)}/frame`;
 
 /** Where the browser downloads a version, as a file. */
 export const artifactDownloadUrl = (id: string, version: number) =>
@@ -1068,12 +1093,40 @@ export const pim = {
   artifacts: () => call<{ artifacts: Artifact[]; bytes: number }>("/artifacts"),
   artifact: (id: string) =>
     call<ArtifactDetail>(`/artifacts/${encodeURIComponent(id)}`),
-  artifactVersion: (id: string, version: number, host?: string) =>
-    call<ArtifactVersion>(`${artifactRoot(id, host)}/versions/${version}`),
+  artifactVersion: (id: string, version: number, from?: ArtifactFrom) =>
+    call<ArtifactVersion>(`${artifactRoot(id, from)}/versions/${version}`),
   sharedArtifacts: () =>
     call<{ artifacts: SharedArtifact[] }>("/shared-artifacts"),
   sharedArtifact: (host: string, id: string) =>
-    call<SharedArtifact>(artifactRoot(id, host)),
+    call<SharedArtifact>(artifactRoot(id, { host })),
+  publishedArtifacts: (query = "") =>
+    call<{ artifacts: PublishedArtifact[] }>(
+      `/published-artifacts${query ? `?q=${encodeURIComponent(query)}` : ""}`,
+    ).then((body) => body.artifacts),
+  publishedArtifact: (id: string) =>
+    call<PublishedArtifact>(artifactRoot(id, { published: true })),
+  /** What you published of one of your artifacts; null when you haven't. */
+  artifactPublication: (id: string) =>
+    call<PublishedArtifact>(
+      `/artifacts/${encodeURIComponent(id)}/publish`,
+    ).catch((failure) => {
+      if (failure instanceof ApiError && failure.status === 404) return null;
+      throw failure;
+    }),
+  publishArtifact: (id: string) =>
+    call<PublishedArtifact>(`/artifacts/${encodeURIComponent(id)}/publish`, {
+      method: "POST",
+    }),
+  unpublishArtifact: (id: string) =>
+    call<{ deleted: boolean }>(`/artifacts/${encodeURIComponent(id)}/publish`, {
+      method: "DELETE",
+    }),
+  /** Makes a published artifact one of yours. */
+  adoptArtifact: (id: string) =>
+    call<Artifact>(`${artifactRoot(id, { published: true })}/use`, {
+      method: "POST",
+    }),
+
   setArtifactCircles: (id: string, circles: string[]) =>
     call<ArtifactDetail>(`/artifacts/${encodeURIComponent(id)}/circles`, {
       method: "PUT",
@@ -1095,20 +1148,20 @@ export const pim = {
     version: number,
     op: string,
     args: unknown,
-    host?: string,
+    from?: ArtifactFrom,
   ) =>
     call<{ value: unknown } | { needs: { capability: string; label: string } }>(
-      `${artifactRoot(id, host)}/versions/${version}/bridge`,
+      `${artifactRoot(id, from)}/versions/${version}/bridge`,
       { method: "POST", body: JSON.stringify({ op, args }) },
     ),
   grantArtifact: (
     id: string,
     version: number,
     capability: string,
-    host?: string,
+    from?: ArtifactFrom,
   ) =>
     call<{ granted: string }>(
-      `${artifactRoot(id, host)}/versions/${version}/grants`,
+      `${artifactRoot(id, from)}/versions/${version}/grants`,
       { method: "POST", body: JSON.stringify({ capability }) },
     ),
   deleteArtifact: (id: string) =>
@@ -1160,6 +1213,12 @@ export type SignInProviderSettings = {
 };
 
 export const admin = {
+  /** Takes a published artifact down, for everyone. */
+  removePublishedArtifact: (id: string) =>
+    call<{ deleted: boolean }>(
+      `/admin/published-artifacts/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
   /** Google, GitHub and a custom single sign-on provider, and which the deployment turns on. */
   signInProviders: () =>
     call<{ providers: SignInProviderSettings[] }>("/admin/sign-in").then(

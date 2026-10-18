@@ -19,7 +19,7 @@ import {
 import { type AgentMcpOAuthProvider, Agent as DurableAgent, type Connection, type ConnectionContext, DurableObjectOAuthClientProvider, getAgentByName, type Schedule, type WSMessage } from "agents";
 import { type PiModel, PiHarness, type PiOperationResult, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { createAI } from "agents/models/pi-ai";
-import { type ArtifactSummary, ArtifactStore, artifactHeaders, checkContent, checkTitle, type DataScope, downloadName, framePage } from "./artifacts";
+import { type ArtifactKind, type ArtifactSummary, ArtifactStore, artifactHeaders, checkContent, checkTitle, type DataScope, downloadName, framePage } from "./artifacts";
 import { digestHex } from "./auth/store";
 import { Email, type Mailer, mailerFrom } from "./email";
 import { ImageStore, userInput } from "./images";
@@ -118,7 +118,7 @@ import {
 	type ToolPermission,
 } from "./store";
 import { type Agent, type AgentInput, AgentStore, agentInput, type TeamMember } from "./agents";
-import type { AgentIcon } from "./gallery";
+import type { AgentIcon, ArtifactToPublish } from "./gallery";
 import { type Role, TEAM_EXTENSION, type TeamRun, TeamStore, teamExtension } from "./team";
 import { CHAT_REPORT, DECIDE_APPROVAL, MAJORDOMO_EXTENSION, introduction, majordomoExtension, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension } from "./majordomo";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
@@ -2383,6 +2383,57 @@ export class Pim extends DurableAgent<Env> {
 	async setAgentPublished(id: string, template: string | null): Promise<void> {
 		this.#assertOpen();
 		if (this.agents.get(id)) this.agents.setPublished(id, template);
+	}
+
+	/** The latest version of one of the owner's artifacts, for the Worker to publish to the gallery. */
+	async artifactToPublish(id: string): Promise<ArtifactToPublish | null> {
+		this.#assertOpen();
+		const artifact = ARTIFACT_ID.test(id) ? this.artifacts.get(id) : undefined;
+		const latest = artifact && this.artifacts.version(artifact.id);
+		if (!artifact || !latest) return null;
+		return { id: artifact.id, version: latest.version, title: artifact.title, kind: artifact.kind, content: latest.content, sha256: latest.sha256, size: latest.size };
+	}
+
+	/**
+	 * A bridge call from an artifact someone published, which the owner opened
+	 * from the gallery. Like an artifact shared with them, it keeps what it
+	 * keeps for them here (under `gallery/<id>`), and uses their model and
+	 * tools once they allow its version. It keeps nothing for everyone.
+	 */
+	async publishedArtifactCall(
+		published: { id: string; sha256: string },
+		call: { op: unknown; args: Record<string, unknown> },
+	): Promise<{ ok: true; answer: unknown } | { ok: false; status: number; reason: string }> {
+		try {
+			const shared = async () => {
+				throw new HttpError(400, "A published artifact keeps nothing for everyone: pim.shared works only in artifacts shared with circles.");
+			};
+			return { ok: true, answer: await this.#artifactBridge(`gallery/${published.id}`, published.sha256, call.op, call.args, shared) };
+		} catch (error) {
+			if (error instanceof HttpError) return { ok: false, status: error.status, reason: error.message };
+			throw error;
+		}
+	}
+
+	/** Lets the owner's model or a tool be used by a published artifact's version they opened. */
+	async publishedArtifactGrant(
+		published: { id: string; sha256: string },
+		capability: unknown,
+	): Promise<{ ok: true; granted: string } | { ok: false; status: number; reason: string }> {
+		try {
+			return { ok: true, granted: this.#grantArtifact(`gallery/${published.id}`, published.sha256, capability) };
+		} catch (error) {
+			if (error instanceof HttpError) return { ok: false, status: error.status, reason: error.message };
+			throw error;
+		}
+	}
+
+	/** Makes a published artifact one of the owner's: a new artifact with its content, theirs to change. */
+	async adoptArtifact(published: { title: string; kind: ArtifactKind; content: string }): Promise<ArtifactSummary> {
+		this.#assertOpen();
+		const id = crypto.randomUUID();
+		await this.artifacts.create({ id, title: published.title, kind: published.kind, content: published.content, session: null });
+		return this.artifacts.get(id)!;
 	}
 
 	/** Makes a published template one of the owner's agents: a copy of it, theirs to change. */

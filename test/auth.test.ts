@@ -22,7 +22,7 @@ beforeEach(async () => {
 });
 
 /** This Worker as deployed `ago` milliseconds before now. */
-function deployed(ago: number, vars: Partial<Env> = {}): Env {
+function deployed(ago: number, vars: Record<string, unknown> = {}): Env {
 	return { ...env, ...vars, CF_VERSION_METADATA: { ...env.CF_VERSION_METADATA, timestamp: new Date(Date.now() - ago).toISOString() } };
 }
 
@@ -175,20 +175,41 @@ describe("claiming a fresh Pim", () => {
 	it("gives the admin no limits, and members the deployment's", async () => {
 		const ana = await person("ana", fresh());
 		const ben = await person("ben", fresh());
-		// As if the deployment set PIM_LIMITS.
-		const dailyRuns = (owner: string) =>
+		// As if the deployment set PIM_LIMIT_DAILY_RUNS, or set it to something Pim can't read.
+		const dailyRuns = (owner: string, value: string) =>
 			runInDurableObject(env.Pim.getByName(owner), (instance: Pim) => {
-				const deployment = (instance as unknown as { env: { PIM_LIMITS: string } }).env;
-				const before = deployment.PIM_LIMITS;
-				deployment.PIM_LIMITS = '{"dailyRuns": 5}';
+				const deployment = (instance as unknown as { env: Record<string, unknown> }).env;
+				deployment.PIM_LIMIT_DAILY_RUNS = value;
 				try {
 					return instance.limits().dailyRuns;
 				} finally {
-					deployment.PIM_LIMITS = before;
+					delete deployment.PIM_LIMIT_DAILY_RUNS;
 				}
 			});
-		expect(await dailyRuns(ana.owner)).toBeNull();
-		expect(await dailyRuns(ben.owner)).toBe(5);
+		expect(await dailyRuns(ana.owner, "5")).toBeNull();
+		expect(await dailyRuns(ben.owner, "5")).toBe(5);
+		// A typo never lifts a limit.
+		expect(await dailyRuns(ben.owner, "5O")).toBe(0);
+	});
+
+	it("shows the admin the deployment's variables, and what's wrong with any", async () => {
+		const ana = await person("ana", fresh());
+		const ben = await person("ben", fresh());
+		const shown = await ana.browser.json<{ settings: Record<string, unknown>; variables: { name: string; value: string | null; problem: string | null }[] }>(
+			"/api/admin/deployment",
+		);
+		expect(shown.status).toBe(200);
+		// The tests' Worker sets these (vitest.config.ts); the rest take their defaults.
+		expect(shown.body.settings).toMatchObject({ registration: "open", approvalPolicy: "auto", model: "@cf/zai-org/glm-5.3", maxAccounts: null });
+		expect(shown.body.variables).toContainEqual({ name: "PIM_REGISTRATION", value: "open", problem: null });
+		expect(shown.body.variables).toContainEqual({ name: "PIM_LIMIT_DAILY_RUNS", value: null, problem: null });
+		const typo = new Browser(deployed(24 * 60 * 60 * 1000, { PIM_MAX_ACCOUNTS: "lots" }));
+		typo.cookies = ana.browser.cookies;
+		const misread = await typo.json<typeof shown.body>("/api/admin/deployment");
+		expect(misread.body.variables).toContainEqual({ name: "PIM_MAX_ACCOUNTS", value: "lots", problem: "PIM_MAX_ACCOUNTS must be a whole number" });
+		expect(misread.body.settings.maxAccounts).toBe(0);
+		// Only the admin sees them.
+		expect((await ben.browser.fetch("/api/admin/deployment")).status).toBe(403);
 	});
 });
 

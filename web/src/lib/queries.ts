@@ -113,6 +113,10 @@ export const dashboardQuery = (id: string, locale: string) =>
     retry: false,
   });
 
+/** How this deployment runs for everyone: the admin's view. */
+export const deploymentQuery = () =>
+  queryOptions({ queryKey: ["deployment"], queryFn: admin.deployment });
+
 /** The agent everyone who joins starts with: the admin's view. */
 export const defaultAgentQuery = () =>
   queryOptions({ queryKey: ["default-agent"], queryFn: admin.defaultAgent });

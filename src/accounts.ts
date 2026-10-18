@@ -2,6 +2,7 @@ import { getAgentByName } from "agents";
 import { configuredProviders, PROVIDER_IDS, providerName, providerSecrets } from "./auth/oauth";
 import { type AuthSite, clearCookie, fromAnotherSite, ownedCode, SESSION_COOKIE, type Sites, userHandle } from "./auth";
 import type { ApiExtension } from "./gateway";
+import { deploymentSettings, readDeployment } from "./deployment";
 import { HttpError } from "./http";
 import { parseLimits, UNLIMITED } from "./usage";
 import { type Account, type AccountStatus, type CleanupResult, PENDING_MS, type RegistrationPolicy } from "./directory";
@@ -58,20 +59,9 @@ export async function limited(limiter: RateLimit | undefined, key: string): Prom
 	return !(await limiter.limit({ key })).success;
 }
 
-function integerVar(value: string | undefined, fallback: number | null): number | null {
-	if (value === undefined || value.trim() === "") return fallback;
-	const parsed = Number(value);
-	return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
-}
-
 function registrationPolicy(env: Env): RegistrationPolicy {
-	const given: string = env.PIM_REGISTRATION;
-	const mode = given === "open" || given === "closed" ? given : "invite";
-	return {
-		mode,
-		maxAccounts: integerVar(env.PIM_MAX_ACCOUNTS, null),
-		perAddressPerDay: integerVar(env.PIM_REGISTRATIONS_PER_ADDRESS, 3) ?? 3,
-	};
+	const { registration, maxAccounts, registrationsPerAddress } = deploymentSettings(env);
+	return { mode: registration, maxAccounts, perAddressPerDay: registrationsPerAddress };
 }
 
 /** Whether this version of the Worker was deployed less than `CLAIM_WINDOW_MS` ago. */
@@ -81,7 +71,7 @@ function claimWindowOpen(env: Env, now: number): boolean {
 }
 
 /** This Pim's address: `PIM_PUBLIC_URL`, or the one the request came to. */
-export const pimOrigin = (request: Request, env: Env) => (env.PIM_PUBLIC_URL ? new URL(env.PIM_PUBLIC_URL).origin : new URL(request.url).origin);
+export const pimOrigin = (request: Request, env: Env) => deploymentSettings(env).publicUrl ?? new URL(request.url).origin;
 
 /** A person's sign-in, as ./auth uses it. */
 export function siteFor(env: Env, account: Account): AuthSite {
@@ -454,6 +444,7 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 				});
 			}
 			if (route === "GET /sign-in") return json({ providers: signInProviders(env, url.origin) });
+			if (route === "GET /deployment") return json(readDeployment(env));
 			if (route === "GET /default-agent") return json({ agent: await gallery(env).defaultAgent() });
 			if (route === "PUT /default-agent") {
 				const id = (await body()).agent;

@@ -413,6 +413,39 @@ export type Limits = {
   artifactStorageBytes: number | null;
 };
 
+/** How this deployment runs for everyone, from its variables. */
+export type DeploymentSettings = {
+  registration: "invite" | "open" | "closed";
+  /** Null: no cap. */
+  maxAccounts: number | null;
+  registrationsPerAddress: number;
+  /** For anyone who hasn't chosen their own. */
+  approvalPolicy: ApprovalPolicy;
+  timeZone: string;
+  model: string;
+  /** Empty: any model. */
+  models: string[];
+  /** Null: side jobs are off. */
+  utilityModel: string | null;
+  /** Null: the default model. */
+  memoryModel: string | null;
+  memoryLines: number;
+  webSearch: "exa" | "ceramic" | "linkup" | null;
+  /** Members' limits; null for none. */
+  limits: Limits;
+  /** Null: learned from requests. */
+  publicUrl: string | null;
+  /** Null: no email. */
+  emailFrom: string | null;
+};
+
+/** One of the deployment's variables: as set (null when it isn't), and why Pim can't read it, if it can't. */
+export type DeploymentVariable = {
+  name: string;
+  value: string | null;
+  problem: string | null;
+};
+
 export type ArtifactKind = "html" | "markdown";
 
 /** An artifact, as its latest version. */
@@ -1053,6 +1086,11 @@ export const admin = {
   signInProviders: () =>
     call<{ providers: SignInProviderSettings[] }>("/admin/sign-in").then(
       (body) => body.providers,
+    ),
+  /** How this deployment runs, and the variables that say so. */
+  deployment: () =>
+    call<{ settings: DeploymentSettings; variables: DeploymentVariable[] }>(
+      "/admin/deployment",
     ),
   members: () =>
     call<{ accounts: Member[] }>("/admin/accounts?limit=500").then(

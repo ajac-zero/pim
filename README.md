@@ -59,7 +59,7 @@ This repository is the agent, its API, and its web app ([`web/`](web)): chat, ap
 | Skills | `write_skill` (gated), `read_skill`, `read_skill_file` | Your agents write down how you want work that comes up again done, with your approval, and load it before doing that work. Apps publish skills too, over the MCP Skills extension, checked against the app's digests. See [Skills](#skills). |
 | App events | `list_app_events`, `watch_app_event` (gated), `list_watches`, `stop_watch` | Apps notify Pim when something happens (draft MCP Events, webhooks); each event starts a run with the watch's instruction. |
 | The web | `fetch_url`, `web_search` (opt-in) | `web_search` is billed by AI Gateway, so it is off until `PIM_WEB_SEARCH` names a provider. |
-| Time | `current_time` | Shows UTC and the user's `PIM_TIME_ZONE`. |
+| Time | `current_time` | Shows UTC and the person's time zone. |
 
 The chat never displays raw tool calls, their arguments or results, working notes, or reasoning, including while a run streams. These remain in the durable transcript for debugging. Approval requests and generated artifacts keep their dedicated user-facing cards; a busy indicator shows when Pim is working.
 
@@ -76,7 +76,7 @@ The button copies this repository to your GitHub account and deploys it to your 
 - **The first account** can be made that way for 15 minutes after a deploy, and it is the admin's. Until you make it, whoever opens the URL first could, so open it right after deploying. Missed the 15 minutes? The sign-in screen has the Worker write a one-time setup link to its logs, which only someone signed in to your Cloudflare account can read. In the dashboard, open Workers & Pages, then `pim`, then Observability, and open the link in the log that starts with "Pim setup link". It works once, for an hour.
 - **Inviting people.** Settings → Members → Invite someone makes a link that lets one person join. With `PIM_REGISTRATION` set to `open`, anyone who finds the address can; `closed` lets nobody in.
 - **More passkeys** (your phone, another browser) come from Settings.
-- **Google, GitHub or single sign-on** (optional). Passkeys always work, and need no setup. To let people also sign in with Google, GitHub, or any OpenID Connect provider (Microsoft, GitLab, Authentik, Keycloak, Pocket ID...), make an OAuth app there and add its client ID and secret as the Worker's secrets: in the dashboard (Workers & Pages → `pim` → Settings → Variables and Secrets) or with `wrangler secret put`. They work once saved, with no redeploy. Google takes `PIM_GOOGLE_CLIENT_ID` and `PIM_GOOGLE_CLIENT_SECRET`; GitHub `PIM_GITHUB_CLIENT_ID` and `PIM_GITHUB_CLIENT_SECRET`; single sign-on `PIM_OIDC_ISSUER`, `PIM_OIDC_CLIENT_ID`, `PIM_OIDC_CLIENT_SECRET`, and optionally `PIM_OIDC_NAME` for its button. Use secrets, not plain variables, even for the IDs: a deploy replaces variables set in the dashboard. The app's callback URL is `https://<your Pim>/auth/oauth/<google|github|oidc>/callback`; Settings → Members shows it, and which providers are on. People then link that account in Settings, or use it instead of a passkey when they join. It never makes an account by itself: someone who never joined, or never linked that account, isn't let in. An account at a provider signs in to one person on the Pim, matched by the provider's user ID, not by email.
+- **Google, GitHub or single sign-on** (optional). Passkeys always work, and need no setup. To let people also sign in with Google, GitHub, or any OpenID Connect provider (Microsoft, GitLab, Authentik, Keycloak, Pocket ID...), make an OAuth app there and add its client ID and secret as the Worker's secrets: in the dashboard (Workers & Pages → `pim` → Settings → Variables and Secrets) or with `wrangler secret put`. They work once saved, with no redeploy. Google takes `PIM_GOOGLE_CLIENT_ID` and `PIM_GOOGLE_CLIENT_SECRET`; GitHub `PIM_GITHUB_CLIENT_ID` and `PIM_GITHUB_CLIENT_SECRET`; single sign-on `PIM_OIDC_ISSUER`, `PIM_OIDC_CLIENT_ID`, `PIM_OIDC_CLIENT_SECRET`, and optionally `PIM_OIDC_NAME` for its button. The app's callback URL is `https://<your Pim>/auth/oauth/<google|github|oidc>/callback`; Settings → Members shows it, and which providers are on. People then link that account in Settings, or use it instead of a passkey when they join. It never makes an account by itself: someone who never joined, or never linked that account, isn't let in. An account at a provider signs in to one person on the Pim, matched by the provider's user ID, not by email.
 - **Lost every passkey?** Each person got ten recovery codes when they joined; one, with their username, adds a new passkey. The admin can make anyone a setup link in Settings, and gets one for themselves from the logs, as above.
 
 Sessions last 30 days, and removing a passkey, or unlinking an account, signs out the browsers it signed in. API tokens for other clients are made in Settings (`POST /auth/tokens` from a signed-in browser) and revoked there. Passkeys belong to the hostname the app is served from, so moving Pim to another domain means creating new ones.
@@ -91,23 +91,28 @@ pnpm run deploy        # builds web/ first
 
 Open the URL `wrangler deploy` prints to set it up. With the CLI, `pnpm wrangler tail` shows setup links as the sign-in screen asks for them.
 
-Configuration lives in `vars` in `wrangler.jsonc`:
+`wrangler.jsonc` is the same for every deployment, so deploy it as it is. What's yours is a variable you set in the dashboard (Workers & Pages → `pim` → Settings → Variables and Secrets), not in `wrangler.jsonc`: `keep_vars` keeps them through deploys, and saving one there applies it at once. Leave any of them unset for its default (in [`src/deployment.ts`](src/deployment.ts)). The admin sees what each is, and any Pim can't read, in Settings → Deployment:
 
-| Var | Default | Meaning |
+| Variable | Default | Meaning |
 | --- | --- | --- |
-| `PIM_MODEL` | `@cf/zai-org/glm-5.3` | Model for new sessions: a Workers AI id or an AI Gateway catalog id |
-| `PIM_TIME_ZONE` | `UTC` | IANA time zone for anyone who hasn't set theirs; joining sets the browser's |
-| `PIM_WEB_SEARCH` | empty | `exa`, `ceramic`, or `linkup` enables `web_search` |
-| `PIM_MEMORY_MODEL` | empty | Model that compresses memories; empty uses `PIM_MODEL`, never the ChatGPT plan |
-| `PIM_UTILITY_MODEL` | `@cf/ibm-granite/granite-4.0-h-micro` | Small Workers AI model for side jobs, such as naming chats (see [Utility model](#utility-model)); empty turns them off. Each person can choose another in Settings |
-| `PIM_MEMORY_LINES` | `96` | Lines of long-term memory in every prompt (about 8k tokens) |
-| `PIM_PUBLIC_URL` | empty | This Pim's public URL, for apps' callbacks and the links it makes; empty uses the address requests come to |
-| `PIM_APPROVAL_POLICY` | `majordomo` | Who answers approvals: `majordomo` sends other agents' requests to each person's majordomo, which decides or asks them; `auto` approves what nobody answers after 30 seconds; `explicit` waits for the person however long. Each person can change theirs in Settings |
-| `PIM_MODELS` | empty | Workers AI or AI Gateway models sessions may use besides `PIM_MODEL`, comma-separated; empty allows any |
-| `PIM_LIMITS` | empty | Usage limits for members as JSON, such as `{"dailyTokens": 2000000, "dailyRuns": 500}`; empty is none. The admin has none. Every limit is in [`src/usage.ts`](src/usage.ts) |
+| `PIM_PUBLIC_URL` | unset | This Pim's public URL, such as `https://pim.example.com`, for apps' callbacks and the links it makes. Unset, each person's Pim uses the address their requests come to |
 | `PIM_REGISTRATION` | `invite` | How people join once there is an admin: `invite` (links the admin makes), `open` or `closed` |
-| `PIM_MAX_ACCOUNTS` | empty | Accounts allowed in all; empty for no cap |
+| `PIM_MAX_ACCOUNTS` | unset | Accounts allowed in all; unset for no cap |
 | `PIM_REGISTRATIONS_PER_ADDRESS` | `3` | Accounts one IP address may make in a day |
+| `PIM_MODEL` | `@cf/zai-org/glm-5.3` | Model for new sessions: a Workers AI id or an AI Gateway catalog id |
+| `PIM_MODELS` | unset | Workers AI or AI Gateway models sessions may use besides `PIM_MODEL`, comma-separated; unset allows any |
+| `PIM_UTILITY_MODEL` | `@cf/ibm-granite/granite-4.0-h-micro` | Small Workers AI model for side jobs, such as naming chats (see [Utility model](#utility-model)); `off` turns them off. Each person can choose another in Settings |
+| `PIM_MEMORY_MODEL` | unset | Model that compresses memories; unset uses `PIM_MODEL`, never the ChatGPT plan |
+| `PIM_MEMORY_LINES` | `96` | Lines of long-term memory in every prompt (about 8k tokens) |
+| `PIM_WEB_SEARCH` | unset | `exa`, `ceramic`, or `linkup` enables `web_search` |
+| `PIM_APPROVAL_POLICY` | `majordomo` | Who answers approvals: `majordomo` sends other agents' requests to each person's majordomo, which decides or asks them; `auto` approves what nobody answers after 30 seconds; `explicit` waits for the person however long. Each person can change theirs in Settings |
+| `PIM_TIME_ZONE` | `UTC` | IANA time zone for anyone who hasn't set theirs; joining sets the browser's |
+| `PIM_LIMIT_DAILY_TOKENS`, `PIM_LIMIT_DAILY_MODEL_REQUESTS`, `PIM_LIMIT_DAILY_RUNS`, `PIM_LIMIT_SESSIONS`, `PIM_LIMIT_SCHEDULES`, `PIM_LIMIT_STORAGE_BYTES`, `PIM_LIMIT_ARTIFACTS`, `PIM_LIMIT_ARTIFACT_VERSIONS`, `PIM_LIMIT_ARTIFACT_BYTES`, `PIM_LIMIT_ARTIFACT_STORAGE_BYTES` | unset | Members' usage limits, one each, as whole numbers; unset is none. The admin has none. What each counts is in [`src/usage.ts`](src/usage.ts) |
+| `PIM_EMAIL_FROM` | unset | The address Pim emails from (see [Email](#email)) |
+
+A variable Pim can't read counts as its default, except a limit or a cap on accounts, which counts as 0, so a typo never lifts it. Settings → Deployment says which and why.
+
+Attach your domain in the dashboard too (Workers & Pages → `pim` → Settings → Domains & Routes): deploys leave it alone.
 
 `ratelimits` in `wrangler.jsonc` slow down sign-in attempts from one address and API requests from one person; leave them out and nothing is slowed down. Their namespace IDs must be unique in your Cloudflare account.
 
@@ -124,7 +129,7 @@ Pim can email each person, when they ask for it or for something worth keeping, 
 "send_email": [{ "name": "EMAIL" }],
 ```
 
-and set `PIM_EMAIL_FROM` in `vars` to an address on that domain, such as `pim@example.com`. Each person then adds their address in Settings and confirms it with a code Pim emails there; Pim only ever emails that one address, at most 50 times a day.
+and set `PIM_EMAIL_FROM` in the dashboard to an address on that domain, such as `pim@example.com`. Each person then adds their address in Settings and confirms it with a code Pim emails there; Pim only ever emails that one address, at most 50 times a day.
 
 ### The browser
 
@@ -144,7 +149,7 @@ in `wrangler.jsonc`. [Dynamic Workers](https://developers.cloudflare.com/dynamic
 
 Pim sends [OpenTelemetry](https://opentelemetry.io/) traces of what the agents do to any backend that takes OTLP over HTTP as JSON: Langfuse, Arize Phoenix, Honeycomb, Grafana, Jaeger, or an OpenTelemetry Collector. They follow the [semantic conventions for generative AI](https://github.com/open-telemetry/semantic-conventions-genai): each run of a conversation is an `invoke_agent` span, each model request in it a `chat` span with the model, finish reason and tokens, and each tool call an `execute_tool` span. Work a tool call starts in another conversation is that call's child, so one trace holds everything a message led to: a team member's task, a chat the majordomo started with another agent, and the majordomo's review of an approval request, with its decision.
 
-Set the endpoint in `vars` and its key as a secret, with the standard OpenTelemetry variables:
+Set the endpoint as a variable in the dashboard, like the settings above, and its key as a secret, with the standard OpenTelemetry variables:
 
 | Variable | Meaning |
 | --- | --- |
@@ -154,8 +159,6 @@ Set the endpoint in `vars` and its key as a secret, with the standard OpenTeleme
 | `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | `true` adds prompts, messages, and tool arguments and results. They are people's private conversations: set it only for a backend that may hold them |
 
 Each span's `gen_ai.conversation.id` is its conversation's id; for a chat, the one in `/chat/<id>`. Spans go out every few seconds and whenever a person's agents go idle; any not yet sent are lost if their Pim is evicted.
-
-`PIM_TIME_ZONE` and `PIM_APPROVAL_POLICY` are defaults: each person's own choices in Settings (`PUT /settings`) take their place.
 
 For local development, run `pnpm dev`: the Worker and the built web app at `http://localhost:8787` (use `localhost`: passkeys don't work on an IP address). Its first 15 minutes count as just deployed, so the first account you make is the admin, and setup links show up in the terminal. For the web app with hot reload, make an API token in Settings and run `PIM_API_TOKEN=... pnpm dev:web` (port 3000), which signs in with it. The `AI` binding is remote, so `wrangler dev` needs a Cloudflare login, and model calls bill that account. `pnpm preview` runs the same Pim with no Cloudflare login and a stand-in model, at the same address.
 
@@ -282,7 +285,8 @@ The admin runs the Pim under `/admin`, from a signed-in browser only: an API tok
 | GET | `/admin/accounts` | `?status=&after=&limit=` | Accounts, by username |
 | GET | `/admin/accounts/:username` | | The account, its usage, and its cleanup job if one is queued |
 | POST | `/admin/accounts/:username/suspend`, `…/unsuspend` | `{ reason? }` | Stops the account at once, or restores it; not your own |
-| PUT | `/admin/accounts/:username/limits` | `{ limits }` or `{ limits: null }` | One person's limits over `PIM_LIMITS` |
+| GET | `/admin/deployment` | | `{ settings, variables: [{ name, value, problem }] }`: how the deployment runs, from its variables, and why Pim can't read any it can't (Settings → Deployment) |
+| PUT | `/admin/accounts/:username/limits` | `{ limits }` or `{ limits: null }` | One person's limits over the deployment's |
 | POST | `/admin/accounts/:username/setup-link` | | `{ setupUrl, expiresAt }`: adds a passkey once, within an hour |
 | DELETE | `/admin/accounts/:username` | `{ reason? }` | Deletes it as its owner would; not your own |
 | POST | `/admin/invites` | `{ count?, note? }` | `{ codes, links }`: single-use invite links, up to 100 |
@@ -347,7 +351,7 @@ OpenAI only redirects a sign-in to a loopback address (`http://127.0.0.1:1455/..
 3. `POST /chatgpt/callback` with `{ url }`. Pim exchanges the code (with PKCE), checks the ID token against OpenAI's keys, and stores the tokens in its database.
 4. `PUT /model` with one of `GET /model`'s choices, such as `{ "provider": "openai", "id": "gpt-6.1-sol" }`.
 
-Pim registers with OpenAI as one agent host (a `urn:uuid:` ID it keeps) and refreshes the token itself, one refresh at a time, since OpenAI rotates refresh tokens. Memory compression stays on `PIM_MODEL`, so background work doesn't spend the plan. pi-ai sends these requests the way the flow requires: `store: false`, streaming, and no `temperature` or `max_output_tokens`.
+Pim registers with OpenAI as one agent host (a `urn:uuid:` ID it keeps) and refreshes the token itself, one refresh at a time, since OpenAI rotates refresh tokens. Memory compression stays on `PIM_MEMORY_MODEL`, or `PIM_MODEL`, so background work doesn't spend the plan. pi-ai sends these requests the way the flow requires: `store: false`, streaming, and no `temperature` or `max_output_tokens`.
 
 ## Utility model
 

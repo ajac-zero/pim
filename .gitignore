@@ -4,5 +4,4 @@ node_modules/
 .dev.vars.*
 .amp/in/
 .amp/portals/*
-wrangler.prod.jsonc
 docs/deployments/

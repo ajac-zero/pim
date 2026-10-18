@@ -2,9 +2,9 @@ import { HttpError } from "./http";
 import type { PimStore } from "./store";
 
 /**
- * The person's own settings, kept in their Pim's database. The time zone
- * and approval policy fall back to the deployment's variables until the
- * person changes them.
+ * The person's own settings, kept in their Pim's database. Until the person
+ * changes them, the approval policy is the one the admin chose for everyone
+ * (see ./instance.ts), and the time zone is the Pim's default.
  */
 
 /**
@@ -38,29 +38,21 @@ export function validTimeZone(zone: string): boolean {
 	}
 }
 
-function defaults(env: Env): Settings {
-	const policy: string | undefined = env.PIM_APPROVAL_POLICY;
-	return {
-		timeZone: env.PIM_TIME_ZONE && validTimeZone(env.PIM_TIME_ZONE) ? env.PIM_TIME_ZONE : "UTC",
-		approvalPolicy: APPROVAL_POLICIES.find((known) => known === policy) ?? "majordomo",
-		notifyWebhook: null,
-	};
-}
-
 function stored(store: PimStore): Partial<Settings> {
 	const json = store.meta(SETTINGS_KEY);
 	return json === undefined ? {} : (JSON.parse(json) as Partial<Settings>);
 }
 
-export function readSettings(store: PimStore, env: Env): Settings {
-	return { ...defaults(env), ...stored(store) };
+/** The person's settings, over `defaults` for those they never set. */
+export function readSettings(store: PimStore, defaults: Settings): Settings {
+	return { ...defaults, ...stored(store) };
 }
 
 /**
  * Applies a partial update from the API. `null` for a field goes back to the
- * deployment's default; anything invalid is refused before anything changes.
+ * default; anything invalid is refused before anything changes.
  */
-export function updateSettings(store: PimStore, env: Env, update: Record<string, unknown>): Settings {
+export function updateSettings(store: PimStore, defaults: Settings, update: Record<string, unknown>): Settings {
 	const next: Record<string, unknown> = { ...stored(store) };
 	for (const [key, value] of Object.entries(update)) {
 		if (value === null) {
@@ -85,5 +77,5 @@ export function updateSettings(store: PimStore, env: Env, update: Record<string,
 		next[key] = value;
 	}
 	store.setMeta(SETTINGS_KEY, JSON.stringify(next));
-	return readSettings(store, env);
+	return readSettings(store, defaults);
 }

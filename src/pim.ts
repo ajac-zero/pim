@@ -103,6 +103,7 @@ import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import { CODE_BACKEND, codeBackends, codeLoader, FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { PimBrowser } from "./browser";
+import { type DeploymentSettings, deploymentSettings } from "./deployment";
 import { dispatch, HttpError, readJson, type Route } from "./http";
 import type { ClientMessage, PublicApproval, ServerMessage, ToolInfo } from "./protocol";
 import { generateVapidKeys, type PushSubscription, sendPush, validSubscription, type VapidKeys } from "./push";
@@ -123,7 +124,7 @@ import { CHAT_REPORT, DECIDE_APPROVAL, MAJORDOMO_EXTENSION, introduction, majord
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { projectEntries } from "./transcript";
 import { conversationText, IMPROVE_PROMPT, NAME_CHAT, SUMMARIZE_CHAT, type UtilityTask } from "./utility";
-import { deploymentLimits, type Limits, parseLimits, UsageMeter } from "./usage";
+import { type Limits, parseLimits, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
 
 const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
@@ -306,7 +307,7 @@ export class Pim extends DurableAgent<Env> {
 		sql: this.ctx.storage.sql,
 		bucket: this.env.IMAGES,
 		owner: () => this.name,
-		publicOrigin: () => this.env.PIM_PUBLIC_URL || this.store.meta("public_origin"),
+		publicOrigin: () => this.deployment().publicUrl ?? this.store.meta("public_origin"),
 		meta: { get: (key) => this.store.meta(key), set: (key, value) => this.store.setMeta(key, value) },
 	});
 	/** What the agent made for its owner, with every version. */
@@ -341,7 +342,7 @@ export class Pim extends DurableAgent<Env> {
 	readonly memory = createOptMem({
 		sql: this.ctx.storage.sql,
 		timeZone: () => this.settings().timeZone,
-		viewLines: Number(this.env.PIM_MEMORY_LINES) || undefined,
+		viewLines: this.deployment().memoryLines,
 		compressionModel: () => this.memoryModel(),
 	});
 	/** Traces of the agents' runs, model requests and tool calls, for the deployment's OpenTelemetry backend (./telemetry.ts). */
@@ -376,7 +377,7 @@ export class Pim extends DurableAgent<Env> {
 			return app && isNativeApp(app) ? app : undefined;
 		},
 		secrets: (app) => this.#secrets(app),
-		callbackUrl: () => `${this.env.PIM_PUBLIC_URL || this.store.meta("public_origin")}${APPS_CALLBACK_PATH}`,
+		callbackUrl: () => `${this.deployment().publicUrl ?? this.store.meta("public_origin")}${APPS_CALLBACK_PATH}`,
 		owner: () => this.name,
 		changed: () => this.#installApps(),
 	});
@@ -432,7 +433,7 @@ export class Pim extends DurableAgent<Env> {
 		bridge: this.apps,
 		store: this.store,
 		catalog: this.catalog,
-		publicUrl: () => this.env.PIM_PUBLIC_URL || this.store.meta("public_origin"),
+		publicUrl: () => this.deployment().publicUrl ?? this.store.meta("public_origin"),
 		owner: () => this.name,
 		scheduleRefresh: (id, at) => this.#scheduleWatchRefresh(id, at),
 		submit: async (session, content, operationId) => {
@@ -490,7 +491,7 @@ export class Pim extends DurableAgent<Env> {
 				reviewExtension({ majordomo: () => this.agents.majordomo(), decide: (conversation, decision, note) => this.#reviewDecision(conversation, decision, note) }),
 			);
 			this.registry.install(approvalsExtension(services, this.#ownActions));
-			this.registry.install(webExtension({ ai: this.env.AI, searchProvider: this.env.PIM_WEB_SEARCH }));
+			this.registry.install(webExtension({ ai: this.env.AI, searchProvider: this.deployment().webSearch }));
 			this.registry.install(artifactsExtension({ artifacts: this.artifacts, assertOpen: () => this.#assertOpen() }));
 			this.registry.install(filesExtension(this.#files));
 			this.#installBrowser(services);
@@ -836,23 +837,33 @@ export class Pim extends DurableAgent<Env> {
 
 	/** The person's settings: their own, else the deployment's. */
 	settings(): Settings {
-		return readSettings(this.store, this.env);
+		return readSettings(this.store, this.#defaultSettings());
 	}
 
-	/** The deployment's limits (`PIM_LIMITS`), with this Pim's own where its operator set them. */
+	#defaultSettings(): Settings {
+		const { timeZone, approvalPolicy } = this.deployment();
+		return { timeZone, approvalPolicy, notifyWebhook: null };
+	}
+
+	/** How this deployment runs for everyone, from its variables (see ./deployment.ts). */
+	deployment(): DeploymentSettings {
+		return deploymentSettings(this.env);
+	}
+
+	/** The deployment's limits for members, with this Pim's own where the admin set them. */
 	limits(): Limits {
 		const own = this.store.meta(LIMITS_KEY);
-		return { ...deploymentLimits(this.env.PIM_LIMITS), ...(own === undefined ? {} : (JSON.parse(own) as Partial<Limits>)) };
+		return { ...this.deployment().limits, ...(own === undefined ? {} : (JSON.parse(own) as Partial<Limits>)) };
 	}
 
 	/**
-	 * Platform models besides the default that sessions may use: `PIM_MODELS`,
-	 * comma-separated. Empty allows any Workers AI or AI Gateway model, as a
-	 * deployment that doesn't mind the cost; one with members lists the ones it pays for.
+	 * Platform models besides the default that sessions may use: `PIM_MODELS`.
+	 * None allows any Workers AI or AI Gateway model, as a deployment that
+	 * doesn't mind the cost; one with members lists the ones it pays for.
 	 */
-	#allowedModels(): string[] | null {
-		const list = (this.env.PIM_MODELS ?? "").split(",").map((id) => id.trim()).filter(Boolean);
-		return list.length === 0 ? null : list;
+	#allowedModels(): readonly string[] | null {
+		const { models } = this.deployment();
+		return models.length === 0 ? null : models;
 	}
 
 	/** How this deployment sends email (`EMAIL` and `PIM_EMAIL_FROM`); null when it can't. */
@@ -862,7 +873,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/** The deployment's model (`PIM_MODEL`), used whenever no other is chosen. */
 	protected defaultModel(): PiModel {
-		return this.ai(this.env.PIM_MODEL);
+		return this.ai(this.deployment().model);
 	}
 
 	/** The model every session uses: the one chosen through the API, or the default. */
@@ -904,21 +915,22 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * The model that compresses memories: `PIM_MEMORY_MODEL`, else `PIM_MODEL`
-	 * on Workers AI. Never the chosen model, so background work does not spend
-	 * a ChatGPT plan.
+	 * The model that compresses memories: `PIM_MEMORY_MODEL`, else `PIM_MODEL`.
+	 * Never the chosen model, so background work does not spend a ChatGPT plan.
 	 */
 	protected memoryModel(): ModelRef | undefined {
-		const model = this.ai(this.env.PIM_MEMORY_MODEL || this.env.PIM_MODEL);
+		const { memoryModel, model: fallback } = this.deployment();
+		const model = this.ai(memoryModel ?? fallback);
 		return { provider: model.provider, modelId: model.id };
 	}
 
 	/**
 	 * The deployment's utility model (`PIM_UTILITY_MODEL` on Workers AI), for
-	 * side jobs such as naming chats (see ./utility.ts). Empty turns them off.
+	 * side jobs such as naming chats (see ./utility.ts). `off` turns them off.
 	 */
 	protected defaultUtilityModel(): Model<Api> | undefined {
-		return this.env.PIM_UTILITY_MODEL ? this.ai(this.env.PIM_UTILITY_MODEL) : undefined;
+		const { utilityModel } = this.deployment();
+		return utilityModel ? this.ai(utilityModel) : undefined;
 	}
 
 	/**
@@ -1018,7 +1030,7 @@ export class Pim extends DurableAgent<Env> {
 				return pim.mailer() !== null;
 			},
 			sendEmail: (mail) => {
-				const origin = this.env.PIM_PUBLIC_URL || this.store.meta("public_origin");
+				const origin = this.deployment().publicUrl ?? this.store.meta("public_origin");
 				const link = origin ? `\n\n—\nFrom your Pim: ${new URL(`/chat/${this.store.publicId(mail.session)}`, origin)}` : "";
 				return this.email.send({ ...mail, text: `${mail.text}${link}` });
 			},
@@ -1334,7 +1346,7 @@ export class Pim extends DurableAgent<Env> {
 		const subscriptions = this.store.pushSubscriptions();
 		if (subscriptions.length === 0) return;
 		const keys = await this.#vapidKeys();
-		const subject = this.env.PIM_PUBLIC_URL || this.store.meta("public_origin") || "https://pim.invalid";
+		const subject = (this.deployment().publicUrl ?? this.store.meta("public_origin")) || "https://pim.invalid";
 		// A push message holds about 4 KB; the full text is in the app.
 		const message = { id, session, title: title.slice(0, 120), body: body.slice(0, 500) };
 		await Promise.all(
@@ -2488,7 +2500,7 @@ export class Pim extends DurableAgent<Env> {
 	async applySettings(update: Record<string, unknown>): Promise<Settings> {
 		this.#assertOpen();
 		const before = this.settings().approvalPolicy;
-		const settings = updateSettings(this.store, this.env, update);
+		const settings = updateSettings(this.store, this.#defaultSettings(), update);
 		// The approval tools say how a request is decided: they must say it the new way.
 		if (settings.approvalPolicy !== before) this.#reinstallApprovals();
 		return settings;

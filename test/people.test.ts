@@ -937,7 +937,7 @@ describe("artifacts", () => {
 
 		// A new version replaces the shared one.
 		faux.setResponses([toolUse("artifact_update", { id, base_version: 1, content: "<p>List 2</p>" }), toolUse("send_to_user", { message: "Done." })]);
-		await dee.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Change it", wait: true } });
+		await dee.browser.json(`/api/sessions/${await rootOf(dee.browser)}/messages`, { method: "POST", json: { content: "Change it", wait: true } });
 		expect((await eli.browser.fetch(`${theirs(1)}/frame`)).status).toBe(404);
 		expect(await (await eli.browser.fetch(`${theirs(2)}/frame`)).text()).toContain("List 2");
 
@@ -981,7 +981,7 @@ describe("artifacts", () => {
 
 		// The author's next version isn't published until they publish again, which a new grant needs.
 		faux.setResponses([toolUse("artifact_update", { id, base_version: 1, content: "<p>Tip calculator 2</p>" }), toolUse("send_to_user", { message: "Done." })]);
-		await gus.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Change it", wait: true } });
+		await gus.browser.json(`/api/sessions/${await rootOf(gus.browser)}/messages`, { method: "POST", json: { content: "Change it", wait: true } });
 		expect(await (await hal.browser.fetch(`${root}/versions/1/frame`)).text()).not.toContain("Tip calculator 2");
 		expect((await gus.browser.json(`/api/artifacts/${id}/publish`, { method: "POST" })).body).toMatchObject({ id: published.id, version: 2 });
 		expect((await hal.browser.fetch(`${root}/versions/1/frame`)).status).toBe(404);
@@ -1011,7 +1011,7 @@ describe("artifacts", () => {
 		expect((await gus.browser.json(`/api/artifacts/${id}/publish`, { method: "POST", json: { public: false } })).body.link).toBeNull();
 		expect((await anonymous(link)).status).toBe(404);
 		faux.setResponses([toolUse("artifact_create", { title: "Notes", kind: "markdown", content: "# Notes" }), toolUse("send_to_user", { message: "Made it." })]);
-		await gus.browser.json("/api/sessions/1/messages", { method: "POST", json: { content: "Make notes", wait: true } });
+		await gus.browser.json(`/api/sessions/${await rootOf(gus.browser)}/messages`, { method: "POST", json: { content: "Make notes", wait: true } });
 		const notes = (await gus.browser.json("/api/artifacts")).body.artifacts[0].id;
 		expect((await gus.browser.json(`/api/artifacts/${notes}/publish`, { method: "POST", json: { public: true } })).status).toBe(400);
 

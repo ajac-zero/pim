@@ -93,7 +93,7 @@ function publication(env: Env, published: PublishedArtifact) {
 /**
  * A request to the content origin. It answers only `/p/<id>`, a published
  * artifact its author lets anyone with the link see, as the same sandboxed
- * page Pim frames, whose bridge refuses every call (no Pim is there to
+ * page Pim frames, whose bridge refuses every call (no space is there to
  * answer), and the runtime scripts such pages load. Nothing else.
  */
 export async function servePublicArtifact(request: Request, env: Env, pathname: string): Promise<Response> {
@@ -427,7 +427,7 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				return undefined;
 			}
 
-			// Artifacts published to everyone: read from the gallery, run with the viewer's own Pim.
+			// Artifacts published to everyone: read from the gallery, run with the viewer's own space.
 			if (path === "/published-artifacts" || path.startsWith("/published-artifacts/") || /^\/artifacts\/[^/]+(\/publish)?$/.test(path)) {
 				if (new URL(request.url).searchParams.has("token")) return fail(400, "Send the API token in the Authorization header, not the address");
 			}
@@ -495,7 +495,7 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				if (request.method === "DELETE") return noStore({ deleted: await gallery(env).unpublishArtifact(account.ownerId, id) });
 				return undefined;
 			}
-			// A deleted artifact leaves the gallery too; the Pim deletes it after.
+			// A deleted artifact leaves the gallery too; the owner's space deletes it after.
 			const deletedArtifact = /^\/artifacts\/([^/]+)$/.exec(path);
 			if (deletedArtifact && request.method === "DELETE") await gallery(env).unpublishArtifact(account.ownerId, decodeURIComponent(deletedArtifact[1]!));
 

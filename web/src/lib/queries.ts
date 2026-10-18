@@ -111,7 +111,7 @@ export const artifactPublicationQuery = (id: string) =>
     queryFn: () => pim.artifactPublication(id),
   });
 
-/** Artifacts people shared with you, from their Pims. */
+/** Artifacts people shared with you, from their spaces. */
 export const sharedArtifactsQuery = () =>
   queryOptions({
     queryKey: ["shared-artifacts"],

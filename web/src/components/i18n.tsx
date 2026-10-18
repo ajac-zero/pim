@@ -622,6 +622,9 @@ const translations = {
     deploymentPublicUrl: "Public URL",
     deploymentPublicUrlHint:
       "Pim answers only here. Passkeys belong to it, so changing it means everyone makes new ones.",
+    deploymentContentOrigin: "Public artifact links",
+    deploymentContentOriginHint:
+      "Another address, routed to this Worker, where published artifacts open for anyone with their link.",
     deploymentEmailFrom: "Emails from",
     limitDailyTokens: "Tokens a day",
     limitDailyModelRequests: "Model requests a day",
@@ -1451,6 +1454,9 @@ const translations = {
     deploymentPublicUrl: "URL pública",
     deploymentPublicUrlHint:
       "Pim solo responde aquí. Las llaves de acceso le pertenecen, así que cambiarla obliga a todos a crear nuevas.",
+    deploymentContentOrigin: "Enlaces públicos de artefactos",
+    deploymentContentOriginHint:
+      "Otra dirección, dirigida a este Worker, donde los artefactos publicados se abren para cualquiera con su enlace.",
     deploymentEmailFrom: "Envía correos desde",
     limitDailyTokens: "Tokens al día",
     limitDailyModelRequests: "Peticiones al modelo al día",

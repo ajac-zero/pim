@@ -166,6 +166,12 @@ export function DeploymentSection() {
           settings.publicUrl ?? "",
           "deploymentPublicUrlHint",
         )}
+        {row(
+          "PIM_CONTENT_ORIGIN",
+          "deploymentContentOrigin",
+          off(settings.contentOrigin),
+          "deploymentContentOriginHint",
+        )}
         {row("PIM_EMAIL_FROM", "deploymentEmailFrom", off(settings.emailFrom))}
       </Group>
     </div>

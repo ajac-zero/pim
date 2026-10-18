@@ -484,7 +484,7 @@ You can let others on your Pim message your agent from their own space. Sharing 
 - **Ask means you decide.** A call to a tool set to Ask files an approval that names who asked and through which circle, and notifies you. Their conversation goes on; your decision arrives in it later as a message. Unanswered, it is denied after a day: a guest's request is never approved by a timeout. **Always approve for Family** sets the tool to On for that circle.
 - **Limits.** Up to 20 circles and 200 people in them. Each guest can make 200 calls into your space a day, so your apps' own limits stay yours. Sharing → Recent activity lists what guests used, asked for, or were refused.
 - **Taking it back.** Remove someone, or turn a circle off, and their next turn is refused. Deleting a circle forgets its permissions.
-- **Artifacts too.** Share an artifact with circles from its page, and their people find its latest version under Artifacts → Shared with you, running in their own Pim with their own model and data; what it keeps for everyone (`pim.shared`) stays in yours. See [docs/artifacts.md](docs/artifacts.md#sharing).
+- **Artifacts too.** Share an artifact with circles from its page, and their people find its latest version under Artifacts → Shared with you, running in their own space with their own model and data; what it keeps for everyone (`pim.shared`) stays in yours. See [docs/artifacts.md](docs/artifacts.md#sharing).
 
 ## Develop
 

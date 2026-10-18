@@ -504,6 +504,7 @@ const translations = {
     artifactNavigated:
       "This artifact tried to open another page, so Pim stopped showing it. Anything it put in that page's address may have been sent.",
     artifactShowAgain: "Show it again",
+    artifactPrint: "Print or save as PDF",
     artifactEditSource: "Edit",
     artifactSaveVersion: "Save as version {version}",
     artifactSaved: "Saved as version {version}",
@@ -1324,6 +1325,7 @@ const translations = {
     artifactNavigated:
       "Este artefacto intentó abrir otra página, así que Pim dejó de mostrarlo. Lo que pusiera en la dirección de esa página puede haberse enviado.",
     artifactShowAgain: "Mostrarlo de nuevo",
+    artifactPrint: "Imprimir o guardar como PDF",
     artifactEditSource: "Editar",
     artifactSaveVersion: "Guardar como versión {version}",
     artifactSaved: "Guardado como versión {version}",

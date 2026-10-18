@@ -1,11 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import {
   ARTIFACT_LANGUAGES,
   ArtifactCaution,
   ArtifactPreview,
+  ArtifactPrint,
   formatBytes,
 } from "~/components/artifact";
 import { useI18n } from "~/components/i18n";
@@ -15,6 +22,7 @@ import {
   Download,
   History,
   Pencil,
+  Printer,
   Trash2,
   X,
 } from "~/components/icons";
@@ -49,6 +57,8 @@ function ArtifactPage() {
   // The source being edited, from the latest version; null when not editing.
   const [draft, setDraft] = useState<string | null>(null);
   const preview = useRef<HTMLDivElement>(null);
+  const [printing, setPrinting] = useState(false);
+  const donePrinting = useCallback(() => setPrinting(false), []);
   const {
     data: artifact,
     error,
@@ -245,6 +255,17 @@ function ArtifactPage() {
                 {t("download")}
               </a>
             </Button>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-8"
+              aria-label={t("artifactPrint")}
+              title={t("artifactPrint")}
+              disabled={printing}
+              onClick={() => setPrinting(true)}
+            >
+              <Printer className="size-4" />
+            </Button>
             {isLatest ? (
               <Button
                 size="sm"
@@ -352,6 +373,15 @@ function ArtifactPage() {
         )}
         {isLatest && draft === null && (
           <AskPim artifact={artifact} preview={preview} />
+        )}
+        {printing && (
+          <ArtifactPrint
+            id={artifactId}
+            version={version}
+            kind={artifact.kind}
+            title={artifact.title}
+            onDone={donePrinting}
+          />
         )}
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
           <ArtifactCaution />

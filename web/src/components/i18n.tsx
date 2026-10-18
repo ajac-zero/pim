@@ -77,7 +77,6 @@ const translations = {
     basedOnNothingOption: "None: only its own instructions",
     basedOnHint:
       "Its habits, the tools it gets beyond Pim's own, and its dashboard. Your instructions go on top.",
-    agentDashboard: "{name}'s dashboard",
     showChatsOf: "Show {name}'s chats",
     hideChatsOf: "Hide {name}'s chats",
     noDashboard:
@@ -905,7 +904,6 @@ const translations = {
     basedOnNothingOption: "Ninguno: solo sus propias instrucciones",
     basedOnHint:
       "Sus hábitos, las herramientas que recibe además de las de Pim, y su panel. Tus instrucciones van encima.",
-    agentDashboard: "Panel de {name}",
     showChatsOf: "Mostrar los chats de {name}",
     hideChatsOf: "Ocultar los chats de {name}",
     noDashboard:

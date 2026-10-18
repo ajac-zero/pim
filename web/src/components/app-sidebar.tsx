@@ -554,7 +554,7 @@ function RailDialogLink({
   );
 }
 
-/** An agent's dashboard, settings, new-chat button, and chats. */
+/** An agent's name, settings, new-chat button, and chats. */
 function AgentSectionList({
   section: { agent, list },
   activeId,
@@ -575,19 +575,10 @@ function AgentSectionList({
     <section className="mb-3" aria-label={agent.name}>
       <div className="group/section flex items-center gap-1 pr-1">
         <span className="flex min-w-0 flex-1 items-center">
-          <Link
-            to="/agents/$agentId"
-            params={{ agentId: agent.id }}
-            onClick={onNavigate}
-            className="min-w-0 truncate rounded-md px-2 py-1.5 font-medium text-muted-foreground text-xs hover:text-foreground"
-            activeProps={{ className: "bg-sidebar-accent text-foreground" }}
-            title={t("agentDashboard", { name: agent.name })}
-          >
-            <span className="flex items-center gap-1">
-              <AgentIcon agent={agent} className="size-4" />
-              <span className="truncate">{agent.name}</span>
-            </span>
-          </Link>
+          <span className="flex min-w-0 items-center gap-1 px-2 py-1.5 font-medium text-muted-foreground text-xs">
+            <AgentIcon agent={agent} className="size-4" />
+            <span className="truncate">{agent.name}</span>
+          </span>
           <button
             type="button"
             className="shrink-0 rounded-md p-1 text-muted-foreground hover:text-foreground"

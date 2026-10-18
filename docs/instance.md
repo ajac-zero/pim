@@ -108,7 +108,7 @@ What the fence stops, each covered by a test in `test/people.test.ts` ("erasure 
 
 ## Before inviting people
 
-1. **Domain.** Passkeys belong to the hostname, so pick the address people will use before anyone joins: moving later means everyone makes new passkeys and reconnects their apps. Attach it to the Worker and set `PIM_PUBLIC_URL` to it, both in the dashboard.
+1. **Domain.** Passkeys belong to the hostname, so pick the address people will use before anyone joins: moving later means everyone makes new passkeys and reconnects their apps. Attach it to the Worker in the dashboard and deploy with `PIM_PUBLIC_URL` set to it.
 2. **OpenAI:** for people outside your household, confirm with OpenAI that they may use ChatGPT-plan sign-in through your Pim.
 3. **Data residency:** agents are created without a jurisdiction. Choosing one (for example `eu`) must happen before anyone joins, because an object can't move.
 4. **Policy:** `PIM_REGISTRATION`, the `PIM_LIMIT_*` variables and `PIM_MODELS` for what you're willing to pay for.

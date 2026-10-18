@@ -31,7 +31,7 @@ beforeAll(async () => {
 	OWNER = registered.account.ownerId;
 	await directory.activate(OWNER);
 	const agent = await getAgentByName(env.Pim, OWNER);
-	await agent.provision({ ownerId: OWNER, username: "tester", publicUrl: "https://pim.test" });
+	await agent.provision({ ownerId: OWNER, username: "tester" });
 	TOKEN = (await env.Auth.getByName(OWNER).createToken(OWNER, "tests", Date.now())).token;
 	ROOT = (await api("/")).body.rootSession;
 });

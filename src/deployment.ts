@@ -3,13 +3,14 @@ import { APPROVAL_POLICIES, type ApprovalPolicy, validTimeZone } from "./setting
 import { LIMIT_NAMES, type Limits } from "./usage";
 
 /**
- * How this deployment runs for everyone on it: who may join, which models
- * people's agents use, what members may spend, and who answers approvals for
- * people who haven't chosen. Each is a variable set in the Cloudflare
- * dashboard (Workers & Pages → pim → Settings → Variables and Secrets), not
- * in wrangler.jsonc, whose `keep_vars` keeps them through deploys. One left
- * unset takes the default here. The admin sees them all, and any that Pim
- * can't read, in Settings → Deployment.
+ * How this deployment runs for everyone on it: its address, who may join,
+ * which models people's agents use, what members may spend, and who answers
+ * approvals for people who haven't chosen. The address, `PIM_PUBLIC_URL`, is
+ * fixed when deploying, in wrangler.jsonc or with `wrangler deploy --var`.
+ * The rest are variables set in the Cloudflare dashboard (Workers & Pages →
+ * pim → Settings → Variables and Secrets), which wrangler.jsonc's `keep_vars`
+ * keeps through deploys; one left unset takes the default here. The admin
+ * sees them all, and any that Pim can't read, in Settings → Deployment.
  */
 export type DeploymentSettings = {
 	/** `PIM_REGISTRATION`: how people join once there is an admin. */
@@ -36,7 +37,7 @@ export type DeploymentSettings = {
 	readonly webSearch: SearchProvider | null;
 	/** `PIM_LIMIT_*`: members' limits; the admin has none. */
 	readonly limits: Limits;
-	/** `PIM_PUBLIC_URL`: the address people use; null learns it from requests. */
+	/** `PIM_PUBLIC_URL`: the only address this Pim answers at; null, when unset or unreadable, and it answers nowhere. */
 	readonly publicUrl: string | null;
 	/** `PIM_EMAIL_FROM`: the address Pim emails from; null sends no email. */
 	readonly emailFrom: string | null;
@@ -77,12 +78,12 @@ function oneOf<T extends string>(choices: readonly T[]) {
 export function readDeployment(env: object): Deployment {
 	const vars = env as Record<string, unknown>;
 	const variables: DeploymentVariable[] = [];
-	function variable<T>(name: string, fallback: T, parse: (value: string) => T, unreadable: T = fallback): T {
+	function variable<T>(name: string, fallback: T, parse: (value: string) => T, unreadable: T = fallback, required = false): T {
 		const given = vars[name];
 		const text = given === undefined || given === null ? "" : (typeof given === "string" ? given : JSON.stringify(given)).trim();
 		const value = text === "" ? null : text;
 		if (value === null) {
-			variables.push({ name, value, problem: null });
+			variables.push({ name, value, problem: required ? `${name} must be set` : null });
 			return fallback;
 		}
 		try {
@@ -115,11 +116,17 @@ export function readDeployment(env: object): Deployment {
 	});
 	const webSearch = variable<SearchProvider | null>("PIM_WEB_SEARCH", null, oneOf(SEARCH_PROVIDERS));
 	const limits = Object.fromEntries(LIMIT_NAMES.map((name) => [name, variable<number | null>(limitVariable(name), null, count, 0)])) as unknown as Limits;
-	const publicUrl = variable<string | null>("PIM_PUBLIC_URL", null, (value) => {
-		const url = URL.parse(value);
-		if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) throw new Error("must be a URL, such as https://pim.example.com");
-		return url.origin;
-	});
+	const publicUrl = variable<string | null>(
+		"PIM_PUBLIC_URL",
+		null,
+		(value) => {
+			const url = URL.parse(value);
+			if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) throw new Error("must be a URL, such as https://pim.example.com");
+			return url.origin;
+		},
+		null,
+		true,
+	);
 	const emailFrom = variable<string | null>("PIM_EMAIL_FROM", null, (value) => {
 		if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) throw new Error("must be an email address, such as pim@example.com");
 		return value;

@@ -1387,13 +1387,13 @@ describe("erasure boundaries", () => {
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ text: "Written by a stale gateway" }),
 		});
-		expect((await toAgent(write, env, stale, "/memory/log", true)).status).toBe(410);
+		expect((await toAgent(write, env, stale, "/memory/log")).status).toBe(410);
 		const socket = new Request(`${ORIGIN}/api/ws`, { headers: { Upgrade: "websocket" } });
-		expect((await toAgent(socket, env, stale, "/ws", true)).status).toBe(410);
+		expect((await toAgent(socket, env, stale, "/ws")).status).toBe(410);
 		const callback = new Request(`${ORIGIN}/mcp/events/watch-1`, { method: "POST", body: "{}" });
-		expect((await toAgent(callback, env, stale, "/mcp/events/watch-1", false)).status).toBe(410);
+		expect((await toAgent(callback, env, stale, "/mcp/events/watch-1")).status).toBe(410);
 		const writes: ((instance: Pim) => Promise<unknown>)[] = [
-			(instance) => instance.provision({ ownerId: fay.ownerId, username: "eb-stale", publicUrl: ORIGIN }),
+			(instance) => instance.provision({ ownerId: fay.ownerId, username: "eb-stale" }),
 			(instance) => instance.applySettings({ timeZone: "Asia/Tokyo" }),
 			(instance) => instance.setLimits({ dailyRuns: 1 }),
 			(instance) => instance.submitTo("1", "Hello", {}, "pim"),

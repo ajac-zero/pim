@@ -163,7 +163,8 @@ export function DeploymentSection() {
         {row(
           "PIM_PUBLIC_URL",
           "deploymentPublicUrl",
-          off(settings.publicUrl, "deploymentPublicUrlLearned"),
+          settings.publicUrl ?? "",
+          "deploymentPublicUrlHint",
         )}
         {row("PIM_EMAIL_FROM", "deploymentEmailFrom", off(settings.emailFrom))}
       </Group>
@@ -216,7 +217,7 @@ function Row({
           {variable.value === null && ` · ${t("deploymentDefault")}`}
         </span>
       </dt>
-      <dd className="min-w-0 break-words text-sm sm:max-w-[50%] sm:text-right">
+      <dd className="min-w-0 break-words text-sm sm:max-w-[50%] sm:shrink-0 sm:text-right">
         {value}
         {variable.problem && (
           <span className="block text-destructive text-xs">

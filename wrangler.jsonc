@@ -52,11 +52,15 @@
     { "name": "AUTH_LIMITER", "namespace_id": "71420101", "simple": { "limit": 30, "period": 60 } },
     { "name": "API_LIMITER", "namespace_id": "71420102", "simple": { "limit": 600, "period": 60 } }
   ],
-  // How a Pim runs (who may join, its models, members' limits, who answers approvals, its address)
-  // is each deployment's own, so it isn't here: set those variables in the dashboard (Workers & Pages
-  // → pim → Settings → Variables and Secrets), and this keeps them through deploys. Each has a
-  // default in src/deployment.ts; the README lists them, and the admin sees them in Settings →
-  // Deployment. OpenTelemetry traces are set the same way: see Traces in the README.
+  // The address people will use, such as https://pim.example.com, fixed with every deploy. Pim
+  // answers nowhere until it's set, and only there once it is: passkeys belong to it. Set it here
+  // in your copy, or with `wrangler deploy --var PIM_PUBLIC_URL:https://pim.example.com`.
+  "vars": { "PIM_PUBLIC_URL": "" },
+  // The rest of how a Pim runs (who may join, its models, members' limits, who answers approvals)
+  // is set in the dashboard (Workers & Pages → pim → Settings → Variables and Secrets), and this
+  // keeps those variables through deploys. Each has a default in src/deployment.ts; the README
+  // lists them, and the admin sees them all in Settings → Deployment. OpenTelemetry traces are set
+  // the same way: see Traces in the README.
   "keep_vars": true,
   // Signing in with Google, GitHub or your own OpenID Connect provider, besides passkeys, is off
   // until you add an OAuth app's client ID and secret as secrets (dashboard → Workers & Pages →

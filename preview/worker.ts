@@ -209,6 +209,14 @@ async function devSignIn(request: Request, env: Env, ctx: ExecutionContext, user
 
 export default {
 	fetch(request, env, ctx): Promise<Response> {
+		// The preview is reached under other names too, such as an orb's portal: it is the same Pim at each.
+		const url = new URL(request.url);
+		const home = new URL(env.PIM_PUBLIC_URL);
+		if (url.origin !== home.origin) {
+			const sameSite = request.headers.get("origin") === url.origin;
+			request = new Request(new URL(url.pathname + url.search, home), request);
+			if (sameSite) request.headers.set("origin", home.origin);
+		}
 		const signIn = request.method === "GET" ? DEV_SIGN_IN.exec(new URL(request.url).pathname) : null;
 		if (signIn) return devSignIn(request, env, ctx, decodeURIComponent(signIn[1]!).toLowerCase());
 		return serve(request, env, ctx);

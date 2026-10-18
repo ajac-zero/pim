@@ -5,12 +5,12 @@ import { LIMIT_NAMES, type Limits } from "./usage";
 /**
  * How this deployment runs for everyone on it: its address, who may join,
  * which models people's agents use, what members may spend, and who answers
- * approvals for people who haven't chosen. The address, `PIM_PUBLIC_URL`, is
- * fixed when deploying, in wrangler.jsonc or with `wrangler deploy --var`.
- * The rest are variables set in the Cloudflare dashboard (Workers & Pages →
- * pim → Settings → Variables and Secrets), which wrangler.jsonc's `keep_vars`
- * keeps through deploys; one left unset takes the default here. The admin
- * sees them all, and any that Pim can't read, in Settings → Deployment.
+ * approvals for people who haven't chosen. Each is a variable set in the
+ * Cloudflare dashboard (Workers & Pages → pim → Settings → Variables and
+ * Secrets), not in wrangler.jsonc, whose `keep_vars` keeps them through
+ * deploys. One left unset takes the default here, except the address, which
+ * has none. The admin sees them all, and any that Pim can't read, in
+ * Settings → Deployment.
  */
 export type DeploymentSettings = {
 	/** `PIM_REGISTRATION`: how people join once there is an admin. */

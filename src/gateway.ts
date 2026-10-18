@@ -220,10 +220,13 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 	const { pathname, origin } = new URL(request.url);
 	if (pathname === "/health") return withCors(Response.json({ name: "pim", ok: true }));
 
-	// Passkeys, sessions and apps' callbacks all belong to one address, fixed when deploying.
+	// Passkeys, sessions and apps' callbacks all belong to one address, which the deployment sets.
 	const { publicUrl } = deploymentSettings(env);
 	if (!publicUrl) {
-		return fail(503, `This Pim has no address yet. Deploy it with PIM_PUBLIC_URL set to the address people will use, such as ${origin}.`);
+		return fail(
+			503,
+			`This Pim has no address yet. In the Cloudflare dashboard, open this Worker's Settings → Variables and Secrets, and add PIM_PUBLIC_URL, the address people will use, such as ${origin}.`,
+		);
 	}
 	// The web app goes to the address it names; nothing is served at any other.
 	if (origin !== publicUrl) return Response.json({ error: `This Pim is at ${publicUrl}`, url: publicUrl }, { status: 421 });

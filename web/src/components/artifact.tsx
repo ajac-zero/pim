@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import {
+  Code,
   Download,
   FileCode2,
   FileText,
@@ -296,6 +297,7 @@ export function ArtifactIcon({
     markdown: FileText,
     svg: ImageIcon,
     mermaid: Workflow,
+    jsx: Code,
   }[kind];
   return <Icon className={className} />;
 }
@@ -306,6 +308,7 @@ export const ARTIFACT_KIND_NAMES: Record<ArtifactKind, string> = {
   markdown: "Markdown",
   svg: "SVG",
   mermaid: "Mermaid",
+  jsx: "React",
 };
 
 /** The language an artifact's source is highlighted as. */
@@ -314,6 +317,7 @@ export const ARTIFACT_LANGUAGES = {
   markdown: "markdown",
   svg: "xml",
   mermaid: "mermaid",
+  jsx: "tsx",
 } as const satisfies Record<ArtifactKind, string>;
 
 /**

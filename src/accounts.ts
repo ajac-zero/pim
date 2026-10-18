@@ -102,7 +102,7 @@ export async function servePublicArtifact(request: Request, env: Env, pathname: 
 	const id = /^\/p\/(pa_[0-9a-f]{16})$/.exec(pathname)?.[1];
 	const found = id ? await gallery(env).publicArtifact(id) : null;
 	if (!found) return new Response("Not found", { status: 404, headers: { "cache-control": "no-store" } });
-	const page = framePage(found.kind, await readFiles(env.BLOBS, found.owner, found.files), contentOrigin(env)!);
+	const page = framePage(found.kind, await readFiles(env.ARTIFACTS, found.owner, found.files), contentOrigin(env)!);
 	page.headers.set("x-robots-tag", "noindex");
 	return page;
 }
@@ -454,7 +454,7 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				if (request.method === "GET" && (!part || part === "frame")) {
 					const stored = await gallery(env).publishedFiles(found.id);
 					if (stored === null) return fail(404, "No such artifact. It may have been unpublished.");
-					const files = await readFiles(env.BLOBS, stored.owner, stored.files);
+					const files = await readFiles(env.ARTIFACTS, stored.owner, stored.files);
 					if (part === "frame") return framePage(found.kind, files, new URL(request.url).origin);
 					return noStore({ ...found, latest: found.version, files: stored.files, content: textOf(files.get(ENTRY_FILES[found.kind])!.bytes) });
 				}

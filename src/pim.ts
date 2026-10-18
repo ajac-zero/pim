@@ -328,7 +328,7 @@ export class Pim extends DurableAgent<Env> {
 	});
 	/** What the agent made for its owner, with every version. */
 	readonly artifacts = new ArtifactStore(this.ctx.storage.sql, () => this.limits(), {
-		bucket: this.env.BLOBS,
+		bucket: this.env.ARTIFACTS,
 		owner: () => this.name,
 		storageRoom: () => {
 			const { storageBytes } = this.limits();
@@ -1885,7 +1885,7 @@ export class Pim extends DurableAgent<Env> {
 			throw new HttpError(404, `Only the latest version, ${found.artifact.version}, is shared`);
 		}
 		const files = found.files as ArtifactFile[];
-		const load = () => readFiles(this.env.BLOBS, share.ownerId, files);
+		const load = () => readFiles(this.env.ARTIFACTS, share.ownerId, files);
 		return { share, me, host, artifact: found.artifact, files, load, key: `${share.ownerId}/${found.artifact.id}` };
 	}
 
@@ -2462,7 +2462,7 @@ export class Pim extends DurableAgent<Env> {
 	/** Makes a published artifact one of the owner's: a new artifact with copies of its files, theirs to change. */
 	async adoptArtifact(published: { title: string; kind: ArtifactKind; owner: string; files: readonly ArtifactFile[] }): Promise<ArtifactSummary> {
 		this.#assertOpen();
-		const loaded = await readFiles(this.env.BLOBS, published.owner, published.files);
+		const loaded = await readFiles(this.env.ARTIFACTS, published.owner, published.files);
 		const entry = ENTRY_FILES[published.kind];
 		const files = Object.fromEntries([...loaded].filter(([path]) => path !== entry).map(([path, file]) => [path, file.bytes]));
 		const id = crypto.randomUUID();

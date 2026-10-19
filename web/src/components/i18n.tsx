@@ -242,6 +242,8 @@ const translations = {
       "Pim answers only at that address, and passkeys belong to it, so choose one you'll keep. A custom domain must be attached to the Worker first.",
     copy: "Copy",
     copyMessage: "Copy message",
+    copyConversation: "Copy conversation as Markdown",
+    couldNotCopyConversation: "Couldn't copy the conversation. Try again.",
     deleteChat: "Delete",
     confirmDeleteChat: "Confirm",
     copyResponse: "Copy response",
@@ -1084,6 +1086,9 @@ const translations = {
       "Pim solo responde en esa dirección y las llaves de acceso le pertenecen, así que elige una que vayas a conservar. Un dominio propio debe estar conectado al Worker antes.",
     copy: "Copiar",
     copyMessage: "Copiar mensaje",
+    copyConversation: "Copiar conversación como Markdown",
+    couldNotCopyConversation:
+      "No se pudo copiar la conversación. Inténtalo de nuevo.",
     deleteChat: "Eliminar",
     confirmDeleteChat: "Confirmar",
     copyResponse: "Copiar respuesta",

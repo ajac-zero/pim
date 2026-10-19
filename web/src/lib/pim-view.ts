@@ -8,12 +8,13 @@ import type {
   EntryRecord,
   MessageChange,
 } from "@earendil-works/pi-durable";
-import type {
-  FunctionCallItem,
-  FunctionCallOutputItem,
-  MessageItem,
-  ORItem,
-  ReasoningItem,
+import {
+  type FunctionCallItem,
+  type FunctionCallOutputItem,
+  type MessageItem,
+  messageText,
+  type ORItem,
+  type ReasoningItem,
 } from "~/lib/openresponses";
 import { DELIVERY_REMINDER, INTRODUCTION } from "../../../src/transcript";
 
@@ -670,4 +671,47 @@ export function layoutThread(
     }
   }
   return rows;
+}
+
+/** The readable conversation as Markdown, never the agent's private working transcript. */
+export function conversationMarkdown(
+  entries: readonly ThreadEntry[],
+  agent: string,
+): string {
+  const refused = new Set(
+    entries.flatMap((entry) =>
+      entry.kind === "item" &&
+      entry.item.type === "function_call_output" &&
+      entry.item.status === "incomplete"
+        ? [entry.item.call_id]
+        : [],
+    ),
+  );
+  // Names are headings, not Markdown supplied by the conversation.
+  const name = agent
+    .replace(/[\r\n]+/g, " ")
+    .replace(/[\\`*_{}[\]<>()#!|]/g, "\\$&");
+  return layoutThread(entries, {
+    shown: () => false,
+    refused: (call) => refused.has(call.call_id),
+  })
+    .map((row) => {
+      if (row.kind === "sent") {
+        const email = row.sent.channel === "email" ? " (email)" : "";
+        return `## Agent: ${name}${email}\n\n${row.sent.message}`;
+      }
+      const { entry } = row;
+      if (entry.kind === "notice") {
+        return `## System\n\n${entry.notice.text || entry.notice.title}`;
+      }
+      const item = entry.item as MessageItem;
+      const images =
+        typeof item.content === "string"
+          ? []
+          : item.content
+              .filter((part) => part.type === "input_image")
+              .map(() => "[Attached image]");
+      return `## User\n\n${[messageText(item), ...images].filter(Boolean).join("\n\n")}`;
+    })
+    .join("\n\n---\n\n");
 }

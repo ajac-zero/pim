@@ -23,6 +23,7 @@ import {
   useAwaitingApproval,
 } from "~/components/app-sidebar";
 import { AppsDialog } from "~/components/apps-dialog";
+import { CopyConversation } from "~/components/chat/copy-conversation";
 import { SummaryToggle } from "~/components/chat/summary";
 import { DiscoverDialog } from "~/components/discover-dialog";
 import { I18nProvider, useI18n } from "~/components/i18n";
@@ -374,7 +375,12 @@ function AppLayout() {
           inChat && (
             <div className="flex h-13 shrink-0 items-center gap-2 border-sidebar-border border-b px-4 md:hidden">
               <MobileTitle />
-              {sessionId && <SummaryToggle className="ml-auto" />}
+              {sessionId && (
+                <div className="ml-auto flex shrink-0 gap-2">
+                  <CopyConversation sessionId={sessionId} />
+                  <SummaryToggle />
+                </div>
+              )}
             </div>
           )
         )}

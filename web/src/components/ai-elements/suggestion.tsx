@@ -20,7 +20,8 @@ export const Suggestions = ({
     )}
     {...props}
   >
-    <div className={cn("flex w-max flex-nowrap items-center gap-2", className)}>
+    {/* Room inside the scrolling viewport for the chips' shadows. */}
+    <div className="flex w-max flex-nowrap items-center gap-2 px-1 py-3">
       {children}
     </div>
     <ScrollBar className="hidden" orientation="horizontal" />

@@ -1,5 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+/* The fade a streaming reply's new words come in with. */
+@import "streamdown/styles.css";
 
 /* Pixeloid 0.4 by GGBotNet, bundled under the SIL Open Font License.
    See public/licenses/pixeloid.txt and https://ggbot.itch.io/pixeloid-font. */
@@ -29,6 +31,14 @@
 
 /* Required for Streamdown's markdown-rendering utility classes (chat markdown). */
 @source "../../node_modules/streamdown/dist/*.js";
+
+/* Without motion, a streaming reply's words show as they arrive. */
+@media (prefers-reduced-motion: reduce) {
+  [data-sd-animate],
+  [data-sd-animate-marker]::marker {
+    animation: none;
+  }
+}
 
 @custom-variant dark (&:is(.dark *));
 

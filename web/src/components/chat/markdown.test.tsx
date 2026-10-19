@@ -200,7 +200,7 @@ describe("chats an agent names", () => {
   // An artifact's id, say: no chat of the person's.
   const other = "0b5e8f9c-1d2e-4f3a-8b7c-6d5e4f3a2b1c";
 
-  async function render(text: string, path = "/") {
+  async function render(text: string, path = "/", streaming = false) {
     const queryClient = new QueryClient();
     queryClient.setQueryData(sessionsQuery().queryKey, [
       {
@@ -217,7 +217,7 @@ describe("chats an agent names", () => {
     const root = createRootRoute({
       component: () => (
         <>
-          <Markdown text={text} />
+          <Markdown text={text} streaming={streaming} />
           <Outlet />
         </>
       ),
@@ -237,13 +237,14 @@ describe("chats an agent names", () => {
   }
 
   it("links a chat by its id, bare, in backticks or as its address, and shows its title", async () => {
+    const links = (html: string) =>
+      [...html.matchAll(/<a [^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].map(
+        ([, href, text]) => [href, String(text).replace(/<[^>]+>/g, "")],
+      );
     const html = await render(
       `Asked Scout in chat ${chat}, also \`${chat}\` and /chat/${chat}. See [the plan](/chat/${chat}) and artifact ${other}.`,
     );
-    const links = [
-      ...html.matchAll(/<a [^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g),
-    ].map(([, href, text]) => [href, String(text).replace(/<[^>]+>/g, "")]);
-    expect(links).toEqual([
+    expect(links(html)).toEqual([
       [`/chat/${chat}`, "Autumn trip"],
       [`/chat/${chat}`, "Autumn trip"],
       [`/chat/${chat}`, "Autumn trip"],
@@ -251,6 +252,13 @@ describe("chats an agent names", () => {
     ]);
     // An id that isn't a chat stays as it was written.
     expect(html).toContain(`artifact ${other}.`);
+    // Also while the message streams in, with its words in spans of their own.
+    const streamed = await render(`chat ${chat} and /chat/${chat}`, "/", true);
+    expect(streamed).toContain("data-sd-animate");
+    expect(links(streamed)).toEqual([
+      [`/chat/${chat}`, "Autumn trip"],
+      [`/chat/${chat}`, "Autumn trip"],
+    ]);
   });
 
   it("opens an artifact an agent links to beside the chat, in this window, even by an address it made up", async () => {

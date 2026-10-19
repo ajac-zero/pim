@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { memo, type ReactNode } from "react";
+import { isValidElement, memo, type ReactNode } from "react";
 import type { BundledLanguage } from "shiki";
 import {
   defaultRehypePlugins,
@@ -168,6 +168,15 @@ function ArtifactLink({
   );
 }
 
+/** The text in `node`, through the spans a streaming message's words are in. */
+function textOf(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join("");
+  return isValidElement<{ children?: ReactNode }>(node)
+    ? textOf(node.props.children)
+    : "";
+}
+
 /**
  * A chat an agent's message names: its agent's icon and its title, opening
  * it in a tab of its own. An id that names none of the person's chats stays
@@ -185,7 +194,7 @@ function ChatLink({ id, children }: { id: string; children: ReactNode }) {
         chat.agent ? candidate.id === chat.agent.id : candidate.majordomo,
       );
   const title = chat.title ?? t("newChat");
-  const bare = typeof children === "string" && BARE_CHAT.test(children);
+  const bare = BARE_CHAT.test(textOf(children));
   return (
     <Link
       to="/chat/$sessionId"
@@ -334,7 +343,11 @@ export const Markdown = memo(function Markdown({
 }: {
   text: string;
   className?: string;
-  /** Disables copy affordances and incomplete-code-fence hooks while true. */
+  /**
+   * While true, copy affordances and incomplete-code-fence hooks are off, and
+   * new words fade in one after another. Pim sends a reply being written a
+   * few times a second, so without the fade each batch would appear at once.
+   */
   streaming?: boolean;
   /**
    * For text kept and shown again, such as a Markdown artifact: raw HTML is
@@ -353,6 +366,7 @@ export const Markdown = memo(function Markdown({
     >
       <Streamdown
         isAnimating={streaming}
+        animated
         skipHtml={untrusted}
         {...(untrusted
           ? { rehypePlugins: untrustedRehypePlugins }

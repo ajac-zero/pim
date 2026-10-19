@@ -148,9 +148,6 @@ export const AssistantMessage = memo(function AssistantMessage({
     >
       <div className="w-fit min-w-0 max-w-full md:max-w-[85%] rounded-2xl bg-muted px-4 py-3">
         <Markdown text={text} streaming={streaming} />
-        {streaming && (
-          <span className="ml-0.5 inline-block h-4 w-2 animate-pulse rounded-sm bg-foreground/70 align-text-bottom" />
-        )}
         {attachments}
         {notified && !streaming && (
           <p className="mt-1.5 flex items-center gap-1.5 text-muted-foreground text-xs">

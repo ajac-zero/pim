@@ -110,7 +110,7 @@ export function artifactsExtension({ artifacts, assertOpen, readFile }: Artifact
 
 	const create = defineTool({
 		name: "artifact_create",
-		description: `Make an artifact: a document or small interactive page (an app, a chart, a game, a report) the user can open, keep, and get new versions of. Use it for anything the user will look at or use again, rather than pasting long HTML into the chat. content is its main file. ${HOW_IT_RUNS}`,
+		description: `Make an artifact: a document or small interactive page (an app, a chart, a game, a report) the user can open, keep, and get new versions of. Use it for anything the user will look at or use again, rather than pasting long HTML into the chat. To point the user to an artifact in a message, link it as [its title](/artifacts/<id>): it opens beside the chat. content is its main file. ${HOW_IT_RUNS}`,
 		parameters: Type.Object({
 			title: Type.String({ minLength: 1, maxLength: 200 }),
 			kind: Type.Union(ARTIFACT_KINDS.map((kind) => Type.Literal(kind))),

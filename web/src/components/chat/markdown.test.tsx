@@ -2,7 +2,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
   createRootRoute,
+  createRoute,
   createRouter,
+  Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -198,7 +200,7 @@ describe("chats an agent names", () => {
   // An artifact's id, say: no chat of the person's.
   const other = "0b5e8f9c-1d2e-4f3a-8b7c-6d5e4f3a2b1c";
 
-  async function render(text: string) {
+  async function render(text: string, path = "/") {
     const queryClient = new QueryClient();
     queryClient.setQueryData(sessionsQuery().queryKey, [
       {
@@ -212,9 +214,19 @@ describe("chats an agent names", () => {
       },
     ] as never);
     queryClient.setQueryData(agentsQuery().queryKey, []);
+    const root = createRootRoute({
+      component: () => (
+        <>
+          <Markdown text={text} />
+          <Outlet />
+        </>
+      ),
+    });
     const router = createRouter({
-      routeTree: createRootRoute({ component: () => <Markdown text={text} /> }),
-      history: createMemoryHistory(),
+      routeTree: root.addChildren([
+        createRoute({ getParentRoute: () => root, path: "/chat/$sessionId" }),
+      ]),
+      history: createMemoryHistory({ initialEntries: [path] }),
     });
     await router.load();
     return renderToStaticMarkup(
@@ -239,5 +251,25 @@ describe("chats an agent names", () => {
     ]);
     // An id that isn't a chat stays as it was written.
     expect(html).toContain(`artifact ${other}.`);
+  });
+
+  it("opens an artifact an agent links to beside the chat, in this window, even by an address it made up", async () => {
+    const links = (html: string) =>
+      [...html.matchAll(/<a [^>]*>[\s\S]*?<\/a>/g)].map(([tag]) => [
+        /href="([^"]*)"/.exec(tag)?.[1]?.replaceAll("&amp;", "&"),
+        tag.includes('target="_blank"'),
+      ]);
+    const text = `See [the plan](/artifacts/${other}), [version 2](/artifacts/${other}?v=2), [it](artifact://${other}) and [elsewhere](https://other.example/artifacts/${other}).`;
+    expect(links(await render(text, `/chat/${chat}`))).toEqual([
+      [`/chat/${chat}?artifact=${other}`, false],
+      [`/chat/${chat}?artifact=${other}&v=2`, false],
+      [`/chat/${chat}?artifact=${other}`, false],
+      [`https://other.example/artifacts/${other}`, true],
+    ]);
+    // Outside a chat, on the artifact's own page.
+    expect(links(await render(text))[0]).toEqual([
+      `/artifacts/${other}`,
+      false,
+    ]);
   });
 });

@@ -89,11 +89,13 @@ import {
 	PimExtensions,
 	type ShownWidget,
 	shownWidgets,
+	type Widget,
 	type WidgetContext,
 	localize,
 	widgetMarkdown,
 } from "./extensions/define";
 import { goalsExtension, goalsWidgets } from "./extensions/goals";
+import { dashboardExtension, MAX_DASHBOARD, UPDATE_DASHBOARD } from "./extensions/dashboard";
 import {
 	APP_PREFIX,
 	appExtensionName,
@@ -153,6 +155,8 @@ const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 
 /** Pim's own widgets: every chat can show them. */
 const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory", "pim.artifacts"];
+/** How a dashboard names an artifact pinned to it: `artifact:<id>`. */
+const PINNED_ARTIFACT = "artifact:";
 
 /**
  * Set by the Worker on every request it forwards: the owner it resolved,
@@ -514,6 +518,16 @@ export class Pim extends DurableAgent<Env> {
 				}),
 			);
 			this.registry.install(filesExtension(this.#files));
+			this.registry.install(
+				dashboardExtension({
+					agentOf: (session) => {
+						if (this.visits.bySession(session)) return null;
+						const { agent, member } = this.#roleOf(session);
+						return member ? null : agent;
+					},
+					change: (agent, changes) => this.#changeDashboard(agent, changes),
+				}),
+			);
 			this.#installImageGeneration();
 			this.#installBrowser(services);
 			// Restored connections reconnect in the background after a wake; give them a moment.
@@ -2494,17 +2508,94 @@ export class Pim extends DurableAgent<Env> {
 		return input;
 	}
 
+	/** What an agent's dashboard shows: its own, once it has been changed, or else its blueprint's. */
+	#dashboardItems(agent: Agent): readonly string[] {
+		if (agent.dashboard) return agent.dashboard;
+		return (agent.blueprint === null ? undefined : this.extensions.blueprint(agent.blueprint))?.dashboard ?? [];
+	}
+
+	/** The artifact a dashboard item pins: undefined for a widget, null for an artifact since deleted. */
+	#pinnedArtifact(item: string) {
+		if (!item.startsWith(PINNED_ARTIFACT)) return undefined;
+		return this.artifacts.get(item.slice(PINNED_ARTIFACT.length)) ?? null;
+	}
+
 	/**
-	 * An agent's dashboard: the widgets of the blueprint it builds on, each
-	 * loaded for this agent. One that fails shows as failed; the others still load.
+	 * An agent's dashboard: each widget loaded for this agent, and each pinned
+	 * artifact as its latest version, which the app runs. A widget that fails
+	 * shows as failed; the others still load. A widget no installed extension
+	 * brings anymore, and an artifact since deleted, are left out.
 	 */
 	async #dashboard(agent: Agent, locale: string) {
 		const blueprint = agent.blueprint === null ? undefined : this.extensions.blueprint(agent.blueprint);
-		const widgets = await Promise.all((blueprint?.dashboard ?? []).map((ref) => this.#loadWidget(agent, ref)));
+		const items = await Promise.all(
+			this.#dashboardItems(agent).map(async (item) => {
+				const artifact = this.#pinnedArtifact(item);
+				if (artifact !== undefined) {
+					return artifact && { id: item, title: artifact.title, artifact: { id: artifact.id, kind: artifact.kind, version: artifact.version } };
+				}
+				if (!this.extensions.widget(item)) return null;
+				const widget = await this.#loadWidget(agent, item);
+				return { ...widget, title: localize(widget.title, locale), empty: localize(widget.empty, locale) };
+			}),
+		);
 		return {
 			agent: { id: agent.id, name: agent.name, description: agent.description, majordomo: agent.majordomo, blueprint: agent.blueprint, icon: agent.icon, symbol: agent.symbol, color: agent.color },
 			starters: (blueprint?.starters ?? []).map((starter) => localize(starter, locale)),
-			widgets: widgets.map((widget) => ({ ...widget, title: localize(widget.title, locale), empty: localize(widget.empty, locale) })),
+			widgets: items.filter((item) => item !== null),
+		};
+	}
+
+	/**
+	 * Sets what an agent's dashboard shows, in order. Each item must be on it
+	 * already, a widget the agent can show, or one of the person's artifacts;
+	 * anything else is refused, with the reason.
+	 */
+	#setDashboard(agent: Agent, items: readonly string[]): string[] {
+		const current = this.#dashboardItems(agent);
+		const widgets = this.#widgetsFor(agent.blueprint);
+		const next = [...new Set(items)];
+		for (const item of next) {
+			if (current.includes(item) || widgets.some(({ ref }) => ref === item) || this.#pinnedArtifact(item)) continue;
+			throw new HttpError(
+				400,
+				`${item} is neither one of your artifacts (as ${PINNED_ARTIFACT}<id>) nor a widget this dashboard can show. Widgets it can show: ${widgets.map(({ ref }) => ref).join(", ")}.`,
+			);
+		}
+		if (next.length > MAX_DASHBOARD) throw new HttpError(400, `A dashboard shows at most ${MAX_DASHBOARD} things: take some off first.`);
+		this.agents.setDashboard(agent.id, next);
+		return next;
+	}
+
+	/**
+	 * `update_dashboard`: pins artifacts, by id, and widgets, by name, after
+	 * what's there; unpins others. Answers with what the dashboard shows then
+	 * and the widgets it could also show, for the model.
+	 */
+	#changeDashboard(agent: Agent, { pin, unpin }: { pin: readonly string[]; unpin: readonly string[] }) {
+		const widgets = this.#widgetsFor(agent.blueprint);
+		// A widget by its name, or an artifact by its id, with or without the prefix.
+		const item = (given: string) => {
+			const name = given.trim();
+			if (name.startsWith(PINNED_ARTIFACT) || widgets.some(({ ref }) => ref === name) || this.extensions.widget(name)) return name;
+			return `${PINNED_ARTIFACT}${name}`;
+		};
+		const current = this.#dashboardItems(agent);
+		const removed = new Set(unpin.map(item));
+		const missing = [...removed].filter((name) => !current.includes(name));
+		if (missing.length > 0) throw new Error(`Not on your dashboard: ${missing.join(", ")}. Call ${UPDATE_DASHBOARD} with nothing to see what is.`);
+		// What's gone from under it, a deleted artifact or an uninstalled widget, goes with this change.
+		const kept = current.filter((name) => !removed.has(name) && (this.#pinnedArtifact(name) ?? this.extensions.widget(name)));
+		const next = this.#setDashboard({ ...agent, dashboard: kept }, [...kept, ...pin.map(item)]);
+		const titled = (name: string) => {
+			const artifact = this.#pinnedArtifact(name);
+			if (artifact) return { artifact: artifact.id, title: artifact.title };
+			return { widget: name, title: localize(this.extensions.widget(name)!.title, "en") };
+		};
+		return {
+			dashboard: next.map(titled),
+			...(next.length === 0 ? { note: "Your dashboard is empty." } : {}),
+			widgets_you_could_pin: widgets.filter(({ ref }) => !next.includes(ref)).map(({ ref, widget }) => ({ name: ref, title: localize(widget.title, "en") })),
 		};
 	}
 
@@ -2534,22 +2625,22 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
+	/** The widgets an agent built on `blueprint` can show: Pim's own, and those of the extensions it builds on and uses. */
+	#widgetsFor(blueprint: string | null): { ref: string; widget: Widget }[] {
+		const extensions = new Set([...BUILT_IN_WIDGETS, ...(blueprint ? [blueprint.slice(0, blueprint.indexOf("/"))] : []), ...this.extensions.abilitiesOf(blueprint)]);
+		return this.extensions
+			.list()
+			.flatMap((extension) => (extensions.has(extension.id) ? Object.entries(extension.widgets ?? {}).map(([name, widget]) => ({ ref: `${extension.id}/${name}`, widget })) : []));
+	}
+
 	/**
-	 * The widgets a chat can show with its messages: Pim's own, and those of
-	 * the extensions its agent builds on and uses, each with a description for
-	 * the model. None in a visit, or in a team member's conversation.
+	 * The widgets a chat can show with its messages: those its agent can show
+	 * that have a description for the model. None in a visit, or in a team
+	 * member's conversation.
 	 */
 	#chatWidgets(session: string): { ref: string; description: string }[] {
 		if (this.visits.bySession(session) || this.#tasks.of(session)) return [];
-		const blueprint = this.agents.ofSession(session).blueprint;
-		const extensions = new Set([...BUILT_IN_WIDGETS, ...(blueprint ? [blueprint.slice(0, blueprint.indexOf("/"))] : []), ...this.extensions.abilitiesOf(blueprint)]);
-		return this.extensions.list().flatMap((extension) =>
-			extensions.has(extension.id)
-				? Object.entries(extension.widgets ?? {}).flatMap(([name, widget]) =>
-						widget.description ? [{ ref: `${extension.id}/${name}`, description: widget.description }] : [],
-					)
-				: [],
-		);
+		return this.#widgetsFor(this.agents.ofSession(session).blueprint).flatMap(({ ref, widget }) => (widget.description ? [{ ref, description: widget.description }] : []));
 	}
 
 	/** The agent a chat talks with; none in a visit, which talks with someone else's. */
@@ -4206,6 +4297,15 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 		["GET", "/agents/:agent/dashboard", ({ agent }, _request, url) => this.#dashboard(this.#agent(agent!), url.searchParams.get("locale") ?? "en")],
+		[
+			"PUT",
+			"/agents/:agent/dashboard",
+			async ({ agent }, request) => {
+				const { items } = await readJson<{ items?: unknown }>(request);
+				if (!Array.isArray(items) || items.some((item) => typeof item !== "string")) throw new HttpError(400, "items must be a list of a dashboard's items");
+				return { items: this.#setDashboard(this.#agent(agent!), items as string[]) };
+			},
+		],
 		[
 			"GET",
 			"/extensions",

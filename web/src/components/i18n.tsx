@@ -80,7 +80,9 @@ const translations = {
     showChatsOf: "Show {name}'s chats",
     hideChatsOf: "Hide {name}'s chats",
     noDashboard:
-      "This agent has no dashboard. Agents based on a blueprint an extension brings get its dashboard.",
+      "Nothing here yet. Ask {name} to put something on this page, like a chart of your spending or today's headlines.",
+    dashboardRemove: "Remove {title} from this page",
+    dashboardOpen: "Open {title}",
     widgetFailed: "This couldn't load. Try again later.",
     stopEveryonesDefault: "Stop",
     everyonesDefaultSet: "People who join now get a copy of {name}.",
@@ -941,7 +943,9 @@ const translations = {
     showChatsOf: "Mostrar los chats de {name}",
     hideChatsOf: "Ocultar los chats de {name}",
     noDashboard:
-      "Este agente no tiene panel. Los agentes basados en un esquema que trae una extensión tienen su panel.",
+      "Aún no hay nada aquí. Pídele a {name} que ponga algo en esta página, como un gráfico de tus gastos o los titulares de hoy.",
+    dashboardRemove: "Quitar {title} de esta página",
+    dashboardOpen: "Abrir {title}",
     widgetFailed: "No se pudo cargar. Inténtalo más tarde.",
     stopEveryonesDefault: "Quitar",
     everyonesDefaultSet: "Quien se una ahora recibirá una copia de {name}.",

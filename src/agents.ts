@@ -58,6 +58,12 @@ export type Agent = {
 	readonly color: string | null;
 	/** The person's majordomo: the one that talks in chats started without choosing an agent. There is one, always the same, and it can't be deleted. */
 	readonly majordomo: boolean;
+	/**
+	 * What its dashboard shows, in order: widgets as `<extension>/<widget>` and
+	 * the person's artifacts as `artifact:<id>`. Null until it's changed: the
+	 * blueprint's dashboard.
+	 */
+	readonly dashboard: readonly string[] | null;
 	readonly createdAt: number;
 	readonly updatedAt: number;
 };
@@ -107,7 +113,8 @@ CREATE TABLE IF NOT EXISTS pim_agents (
 	symbol TEXT,
 	color TEXT,
 	introduced INTEGER NOT NULL DEFAULT 0,
-	skills TEXT NOT NULL DEFAULT '[]'
+	skills TEXT NOT NULL DEFAULT '[]',
+	dashboard TEXT
 );
 CREATE TABLE IF NOT EXISTS pim_agent_icons (
 	agent TEXT PRIMARY KEY,
@@ -162,6 +169,7 @@ const agentOf = (row: Row, directory: () => readonly DirectoryApp[]): Agent => (
 	symbol: row.symbol === null ? null : String(row.symbol),
 	color: row.color === null ? null : String(row.color),
 	majordomo: Number(row.is_default) === 1,
+	dashboard: row.dashboard === null ? null : (JSON.parse(String(row.dashboard)) as string[]),
 	createdAt: Number(row.created_at),
 	updatedAt: Number(row.updated_at),
 });
@@ -300,6 +308,7 @@ export class AgentStore {
 		// Accounts from before majordomos already have the agent they talk with: it becomes theirs as it is.
 		if (!columns.includes("introduced")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN introduced INTEGER NOT NULL DEFAULT 1");
 		if (!columns.includes("skills")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN skills TEXT NOT NULL DEFAULT '[]'");
+		if (!columns.includes("dashboard")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN dashboard TEXT");
 	}
 
 	/** The majordomo first, then the others as they were made. */
@@ -373,6 +382,12 @@ export class AgentStore {
 		if (input.blueprint !== undefined) this.#sql.exec("UPDATE pim_agents SET blueprint = ? WHERE id = ?", input.blueprint, id);
 		if (input.symbol !== undefined) this.#sql.exec("UPDATE pim_agents SET symbol = ? WHERE id = ?", input.symbol, id);
 		if (input.color !== undefined) this.#sql.exec("UPDATE pim_agents SET color = ? WHERE id = ?", input.color, id);
+		return this.get(id)!;
+	}
+
+	/** Sets what its dashboard shows, checked by the space. */
+	setDashboard(id: string, items: readonly string[]): Agent {
+		this.#sql.exec("UPDATE pim_agents SET dashboard = ? WHERE id = ?", JSON.stringify(items), id);
 		return this.get(id)!;
 	}
 

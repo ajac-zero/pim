@@ -545,7 +545,7 @@ export const PromptInputTextarea = ({
   return (
     <textarea
       className={cn(
-        "field-sizing-content max-h-[220px] min-h-9 w-full resize-none bg-transparent px-1.5 py-1.5",
+        "field-sizing-content max-h-48 min-h-6 w-full resize-none bg-transparent p-0",
         "text-[15px] leading-6 outline-none placeholder:text-muted-foreground",
         "disabled:opacity-50 scrollbar-thin",
         className,

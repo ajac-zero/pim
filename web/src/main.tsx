@@ -42,7 +42,9 @@ const router = createRouter({
   context: { queryClient },
   defaultPreload: "intent",
   defaultPreloadStaleTime: 0,
-  scrollRestoration: true,
+  // A chat keeps its own place (see `Thread`). The router's would put the
+  // last chat's offset on the next one, whose transcript has the same element.
+  scrollRestoration: ({ location }) => !location.pathname.startsWith("/chat/"),
   defaultErrorComponent: RouteError,
 });
 

@@ -38,6 +38,9 @@ export const ConversationContent = ({
   ...props
 }: ConversationContentProps) => (
   <StickToBottom.Content
+    // Scrollable from its first render, rather than once `StickToBottom`'s
+    // own effect runs, so effects inside it can set where it's scrolled to.
+    scrollClassName="overflow-auto"
     className={cn("flex flex-col gap-5 p-4", className)}
     {...props}
   />

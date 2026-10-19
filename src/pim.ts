@@ -571,6 +571,8 @@ export class Pim extends DurableAgent<Env> {
 
 	/** pi agent-event watches, by connection id. In memory: rebuilt in `onStart`. */
 	readonly #watches = new Map<string, AgentEventStream>();
+	/** Each connection's latest watch request: one that finishes setting up after a newer one is dropped. */
+	readonly #watchRequests = new Map<string, object>();
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -4515,14 +4517,16 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	async onClose(connection: Connection): Promise<void> {
+		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
 	}
 
 	async onError(connection: Connection): Promise<void> {
+		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
 	}
 
-	async #command(connection: Connection, session: string, message: ClientMessage): Promise<JsonValue> {
+	async #command(connection: Connection<SocketState>, session: string, message: ClientMessage): Promise<JsonValue> {
 		const handle = this.harness.session(session);
 		switch (message.type) {
 			case "submit": {
@@ -4545,14 +4549,35 @@ export class Pim extends DurableAgent<Env> {
 			case "resync":
 				await this.#watch(connection, session);
 				return null;
+			case "follow":
+				await this.#watch(connection, this.#session(message.session));
+				return null;
+			case "snapshot": {
+				const stream = await this.harness.session(await this.#session(message.session)).events();
+				await stream.stop();
+				return stream.snapshot as unknown as JsonValue;
+			}
 			default:
 				throw new Error(`Unknown message type ${JSON.stringify((message as { type: unknown }).type)}`);
 		}
 	}
 
-	async #watch(connection: Connection, session: string): Promise<void> {
+	/**
+	 * Sends a session's snapshot on the socket, then its events, in place of
+	 * what the socket followed. A socket can switch quickly, as someone flips
+	 * through chats: only its latest request is kept.
+	 */
+	async #watch(connection: Connection<SocketState>, which: string | Promise<string>): Promise<void> {
+		const request = {};
+		this.#watchRequests.set(connection.id, request);
+		const session = await which;
 		await this.#unwatch(connection.id);
 		const stream = await this.harness.session(session).events();
+		if (this.#watchRequests.get(connection.id) !== request) {
+			await stream.stop();
+			return;
+		}
+		connection.setState({ session });
 		this.#watches.set(connection.id, stream);
 		const id = this.store.publicId(session);
 		this.#send(connection, { type: "events", session: id, events: [stream.snapshot] });

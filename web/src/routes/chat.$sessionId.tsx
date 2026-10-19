@@ -1,6 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, notFound, useNavigate } from "@tanstack/react-router";
-import { type CSSProperties, useEffect, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { useNewChat } from "~/components/app-sidebar";
 import { ArtifactView } from "~/components/artifact-view";
@@ -36,7 +42,9 @@ export const Route = createFileRoute("/chat/$sessionId")({
       ...(Number.isSafeInteger(v) && v > 0 && { v }),
     };
   },
-  loader: async ({ context, params }) => {
+  loader: async ({ context, params, preload }) => {
+    // The pointer rests on a link to this chat (the router preloads on intent).
+    if (preload) pimClient.warm(params.sessionId);
     const sessions = await context.queryClient.ensureQueryData(sessionsQuery());
     if (!sessions.some((session) => session.id === params.sessionId)) {
       // A session created moments ago may not be in a cached list yet.
@@ -87,7 +95,8 @@ function ChatPage() {
 
   // The socket outlives this page, so notifications and approvals keep
   // arriving elsewhere in the app; it switches when another chat opens.
-  useEffect(() => {
+  // Before paint, so a chat shown before appears at once, as it was left.
+  useLayoutEffect(() => {
     pimClient.open(sessionId);
     showTab(sessionId);
   }, [sessionId]);
@@ -95,6 +104,7 @@ function ChatPage() {
   const followed = usePimClient((state) => state.session);
   const view = usePimClient((state) => state.view);
   const loaded = usePimClient((state) => state.loaded);
+  const synced = usePimClient((state) => state.synced);
   const pending = usePimClient((state) => state.pending);
   const connection = usePimClient((state) => state.connection);
   const ready = followed === sessionId;
@@ -147,11 +157,13 @@ function ChatPage() {
          * for it rather than sitting under it: at the right, or on top on phones. */}
         <div className="flex min-h-0 flex-1 flex-col md:flex-row">
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-            {/* Until its snapshot arrives a chat would look empty; a message
-             * just sent is already worth showing. */}
+            {/* Until its snapshot arrives a chat opened for the first time
+             * would look empty; a message just sent is already worth showing. */}
             {ready && (loaded || pending !== null) ? (
               <Thread
+                key={sessionId}
                 sessionId={sessionId}
+                synced={synced}
                 visit={session?.visit?.username}
                 view={view}
                 pending={pending}

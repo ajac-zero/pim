@@ -267,6 +267,8 @@ export type Extensions = {
   extensions: InstalledExtension[];
   /** What new agents are based on when not told otherwise. */
   defaultBlueprint: string | null;
+  /** The logo at the top of the sidebar (`logo` in `pim.config.ts`); null for Pim's own mark. */
+  logo: string | null;
 };
 
 /** An agent someone published for others to make their own. */

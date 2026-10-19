@@ -4159,6 +4159,7 @@ export class Pim extends DurableAgent<Env> {
 					widgets: Object.keys(extension.widgets ?? {}).map((widget) => `${extension.id}/${widget}`),
 				})),
 				defaultBlueprint: this.extensions.defaultBlueprint,
+				logo: this.pimConfig().logo ?? null,
 			}),
 		],
 		[

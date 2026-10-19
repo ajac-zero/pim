@@ -238,7 +238,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | GET | `/skills/:name/versions/:version` | | One version, with its `description`, `instructions` and `files` |
 | POST | `/skills/:name/restore` | `{ version, baseVersion }` | Adds that version's content as the newest (`201` with the skill); `409` when `baseVersion` is no longer the latest |
 | GET | `/agents/:id/dashboard` | `?locale=` | `{ agent, starters, widgets: [{ id, title, empty, kind, items } \| { id, title, empty, failed: true }] }`: the dashboard of the blueprint it builds on, loaded for this agent (see [docs/extensions.md](docs/extensions.md)) |
-| GET | `/extensions` | | `{ extensions: [{ id, name, description, blueprints: [{ ref, name, description, apps }], widgets }], defaultBlueprint }`: what this deployment installed |
+| GET | `/extensions` | | `{ extensions: [{ id, name, description, blueprints: [{ ref, name, description, apps }], widgets }], defaultBlueprint, logo }`: what this deployment installed, and its sidebar logo (null for Pim's own) |
 | GET | `/app-directory` | | `{ apps: [{ ref, name, description, url, custom }] }`: the apps you can connect, the extensions' then the admin's (`custom: true`). Agents list apps by `ref` |
 | POST | `/sessions` | `{ title?, agent? }` | A new session with that agent, or the majordomo; sessions list their `agent` (null in a visit) |
 | GET | `/sessions/:id/tasks` | | `{ tasks: [{ id, parent, agent: { id, name, member }, from: { id, name, member }, task, state, result, createdAt, updatedAt }] }`: the [tasks](#tasks) the chat led to, oldest first, as a tree by `parent`; `state` is `working`, `auth-required`, `completed`, `failed` or `canceled` |

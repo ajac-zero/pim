@@ -288,6 +288,8 @@ export type PimConfig = {
 	readonly defaultBlueprint: string | null;
 	/** The theme people see until they pick another: a theme's id, Pim's own or an extension's. */
 	readonly defaultTheme: string;
+	/** The logo at the top of the web app's sidebar: an https or `data:` image URL, square, that works on light and dark. Without one, Pim's own mark. */
+	readonly logo?: string;
 };
 
 /** Identity function that types an extension. */

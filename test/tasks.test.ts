@@ -498,6 +498,30 @@ describe("the majordomo", () => {
 		expect((await post(`/approvals/${rent.id}/approve`)).status).toBe(409);
 		expect(sent).toEqual([]);
 		expect(handed).toBeDefined();
+
+		// Deleting the agent doing a task cancels it too: no other agent takes it over.
+		const mover = (await post("/agents", { name: "Mover", instructions: "Move money." })).body;
+		let told = "";
+		scripts({
+			lead: [
+				() => toolUse("delegate", { tasks: [{ to: "Mover", task: "Move the savings." }] }),
+				() => toolUse("send_to_user", { message: "Mover is on it." }),
+				(context) => {
+					told = lastUserText(context.messages);
+					return toolUse("send_to_user", { message: "Mover is gone." });
+				},
+			],
+			Mover: [() => toolUse("http_request", { method: "POST", url: "https://hooks.example.test/move" })],
+		});
+		await say("Move my savings.");
+		const move = await pendingApproval();
+		const moving = (await tasksOf(ROOT)).at(-1)!;
+		expect((await api(`/agents/${mover.id}`, { method: "DELETE" })).body).toEqual({ deleted: true });
+		await settled();
+		expect((await api<Approval>(`/approvals/${move.id}`)).body.status).toBe("denied");
+		expect((await tasksOf(ROOT)).at(-1)).toMatchObject({ id: moving.id, state: "canceled", result: "Its agent was deleted." });
+		expect(told).toContain(`Task ${moving.id} for Mover was canceled: Its agent was deleted.`);
+		expect(sent).toEqual([]);
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
 	});
 

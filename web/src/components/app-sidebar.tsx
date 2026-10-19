@@ -464,7 +464,12 @@ function ChatsPanel({
 
       {view !== "agents" && (
         <div className="flex justify-start px-3 pb-3">
-          <Button variant="ghost" size="lg" onClick={newChat}>
+          <Button
+            variant="ghost"
+            size="lg"
+            className="px-2 has-[>svg]:px-2"
+            onClick={newChat}
+          >
             <SquarePen className="size-4.5" />
             {t("newChat")}
           </Button>

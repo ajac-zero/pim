@@ -1,5 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate } from "@tanstack/react-router";
+import {
+  Link,
+  useCanGoBack,
+  useNavigate,
+  useRouter,
+} from "@tanstack/react-router";
 import {
   type FormEvent,
   useCallback,
@@ -87,6 +92,8 @@ export function ArtifactView({
 }) {
   const { t, formatDate, formatNumber } = useI18n();
   const queryClient = useQueryClient();
+  const router = useRouter();
+  const canGoBack = useCanGoBack();
   const [view, setView] = useState<"preview" | "source">("preview");
   // The source being edited, from the latest version; null when not editing.
   const [draft, setDraft] = useState<string | null>(null);
@@ -224,18 +231,30 @@ export function ArtifactView({
   return (
     <div className="@container flex min-h-0 flex-1 flex-col">
       <header className="flex h-13 shrink-0 items-center gap-2 border-b px-4">
-        {!onClose && (
-          <Button
-            asChild
-            size="icon"
-            variant="ghost"
-            className="size-8 shrink-0"
-          >
-            <Link to="/artifacts" aria-label={t("allArtifacts")}>
+        {/* Back where the person came from, such as their chat; to the list when the page was opened on its own. */}
+        {!onClose &&
+          (canGoBack ? (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-8 shrink-0"
+              aria-label={t("back")}
+              onClick={() => router.history.back()}
+            >
               <ArrowLeft className="size-4" />
-            </Link>
-          </Button>
-        )}
+            </Button>
+          ) : (
+            <Button
+              asChild
+              size="icon"
+              variant="ghost"
+              className="size-8 shrink-0"
+            >
+              <Link to="/artifacts" aria-label={t("allArtifacts")}>
+                <ArrowLeft className="size-4" />
+              </Link>
+            </Button>
+          ))}
         <h1 className="min-w-0 flex-1 truncate font-semibold">
           {artifact.title}
         </h1>

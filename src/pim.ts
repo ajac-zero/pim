@@ -3009,6 +3009,12 @@ export class Pim extends DurableAgent<Env> {
 		return record.session === null ? record : { ...record, session: this.store.publicId(record.session) };
 	}
 
+	/** An artifact as it leaves the space. One a task made belongs to the chat the task began in, where the person can open it beside the chat. */
+	#publicArtifact<T extends { readonly session: string | null }>(artifact: T): T {
+		const session = artifact.session === null ? null : (this.#tasks.of(artifact.session)?.root ?? artifact.session);
+		return this.#publicSession({ ...artifact, session });
+	}
+
 	/** An approval as it leaves the space. A guest's conversation is in the guest's own space, so it has none here. */
 	#publicApproval(approval: Approval): PublicApproval {
 		return {
@@ -3473,14 +3479,14 @@ export class Pim extends DurableAgent<Env> {
 
 		// Artifacts: what the agent made, every version kept. Their bytes are never kept by the browser,
 		// and HTML in them runs only sandboxed (see ./artifacts.ts).
-		["GET", "/artifacts", (_params, _request, url) => this.#artifactRequest(url, () => noStore({ artifacts: this.artifacts.list().map((artifact) => this.#publicSession(artifact)), bytes: this.artifacts.totalBytes() }))],
+		["GET", "/artifacts", (_params, _request, url) => this.#artifactRequest(url, () => noStore({ artifacts: this.artifacts.list().map((artifact) => this.#publicArtifact(artifact)), bytes: this.artifacts.totalBytes() }))],
 		[
 			"GET",
 			"/artifacts/:id",
 			({ id }, _request, url) =>
 				this.#artifactRequest(url, () => {
 					const artifact = this.#artifact(id!);
-					return noStore({ ...this.#publicSession(artifact), history: this.artifacts.versions(artifact.id), circles: this.artifacts.circlesOf(artifact.id) });
+					return noStore({ ...this.#publicArtifact(artifact), history: this.artifacts.versions(artifact.id), circles: this.artifacts.circlesOf(artifact.id) });
 				}),
 		],
 		[

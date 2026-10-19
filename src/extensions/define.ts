@@ -113,6 +113,16 @@ export type Widget = {
 /** A widget as loaded for one space: on a dashboard, or kept with a message. Its text is in every language it has. */
 export type ShownWidget = { readonly id: string; readonly title: Text; readonly empty: Text } & (WidgetContent | { readonly failed: true });
 
+/** The widgets a `send_to_user` result says went with the message; none in a plain "Sent." */
+export function shownWidgets(result: string): ShownWidget[] {
+	try {
+		const parsed = JSON.parse(result) as { widgets?: unknown };
+		return Array.isArray(parsed.widgets) ? (parsed.widgets as ShownWidget[]) : [];
+	} catch {
+		return [];
+	}
+}
+
 /**
  * A shown widget as Markdown, for where it can't be drawn: an email, or an
  * API client's reply. Times are UTC, in ISO 8601.

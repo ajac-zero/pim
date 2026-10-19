@@ -9,6 +9,12 @@ export const sessionsQuery = () =>
 export const majordomoQuery = () =>
   queryOptions({ queryKey: ["agents", "majordomo"], queryFn: pim.majordomo });
 
+export const chatLinkQuery = (session: string) =>
+  queryOptions({
+    queryKey: ["chat-link", session],
+    queryFn: () => pim.chatLink(session),
+  });
+
 export const approvalsQuery = () =>
   queryOptions({ queryKey: ["approvals"], queryFn: () => pim.approvals() });
 

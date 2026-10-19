@@ -30,7 +30,7 @@ import {
   ConversationContent,
   ConversationScrollButton,
 } from "~/components/ui/conversation";
-import { SentWidgets } from "~/components/widgets";
+import { SentWidgets, shownWidgets } from "~/components/widgets";
 import type {
   FunctionCallItem,
   FunctionCallOutputItem,
@@ -271,7 +271,9 @@ export const Thread = memo(function Thread({
                   row.sent.widgets.length > 0 ? (
                     <SentWidgets
                       requested={row.sent.widgets.length}
-                      output={outputs.get(row.call.call_id)?.output}
+                      widgets={shownWidgets(
+                        outputs.get(row.call.call_id)?.output,
+                      )}
                     />
                   ) : null
                 }

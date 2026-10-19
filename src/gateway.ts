@@ -20,6 +20,8 @@ import { PimThemes } from "./themes";
  * - `/api/themes`, `/api/themes.css`: public, the color themes of Pim's
  *   own and of the deployment's extensions, which the app needs before
  *   anyone signs in.
+ * - `/api/shared/<owner>/<link>`: public, what a chat's public link shows
+ *   (./chat-links.ts), which the app's page at `/shared/<owner>/<link>` draws.
  * - `/auth/*`: registration (./accounts.ts) and sign-in (./auth): passkeys, and
  *   accounts at Google, GitHub or a single sign-on provider.
  * - `/mcp`: the person's space as an MCP server (./mcp-server.ts), for MCP
@@ -204,6 +206,28 @@ async function serveImage(request: Request, env: Env, pathname: string): Promise
 	return toAgent(request, env, account.ownerId, `/public-images/${match[2]}`);
 }
 
+/**
+ * A chat's public link: `/api/shared/<owner>/<link>`, the copy of the chat
+ * the link shows, for anyone who has it, with no token. The owner's space
+ * answers it as `/shared/<link>`. Every way it isn't there, including an
+ * account that is suspended or gone, is the same `404`.
+ */
+async function serveSharedChat(request: Request, env: Env, pathname: string): Promise<Response> {
+	const notFound = () => Response.json({ error: "This link doesn't exist, or was turned off." }, { status: 404, headers: { "cache-control": "no-store" } });
+	if (request.method !== "GET" && request.method !== "HEAD") return fail(405, `${pathname} takes GET`);
+	// Nobody signs in to read it, so it is slowed down per address.
+	if (await limited(env.API_LIMITER, `public:${clientIp(request)}`)) return fail(429, "Too many requests. Slow down a little.");
+	const match = /^\/api\/shared\/([^/]+)\/([^/]+)$/.exec(pathname);
+	const account = match ? await resolveAccount(env, decodeURIComponent(match[1]!)) : null;
+	if (!account || closed(account)) return notFound();
+	const answer = await toAgent(new Request(request.url, { method: "GET" }), env, account.ownerId, `/shared/${match![2]}`);
+	if (!answer.ok) return answer.status >= 500 ? answer : notFound();
+	// The copy changes only when its owner updates the link, so browsers and caches may keep it a minute.
+	return new Response(answer.body, {
+		headers: { "content-type": "application/json", "cache-control": "public, max-age=60", "x-robots-tag": "noindex" },
+	});
+}
+
 let deployedThemes: PimThemes | undefined;
 
 /** The color themes, listed (`/themes`) or as the stylesheet the app loads before it draws (`/themes.css`). */
@@ -270,6 +294,16 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 	}
 
 	if (under(pathname, "/images")) return serveImage(request, env, pathname);
+
+	if (under(pathname, "/api/shared")) return withCors(await serveSharedChat(request, env, pathname));
+	if (under(pathname, "/shared")) {
+		// The app's page for a chat's public link, which search engines should leave out.
+		const asset = await env.ASSETS.fetch(request);
+		const page = new Response(asset.body, asset);
+		page.headers.set("X-Robots-Tag", "noindex");
+		page.headers.set("Referrer-Policy", "no-referrer");
+		return page;
+	}
 
 	if (under(pathname, "/mcp")) {
 		const app = await serveApp(request, env, pathname);

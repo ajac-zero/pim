@@ -141,17 +141,16 @@ export function shownWidgets(output: unknown): ShownWidget[] | null {
 
 /**
  * A message's widgets, as they were when Pim sent it. Until the call's
- * result arrives, a placeholder for each one asked for.
+ * result arrives (`widgets` is null), a placeholder for each one asked for.
  */
 export function SentWidgets({
   requested,
-  output,
+  widgets,
 }: {
   requested: number;
-  output: unknown;
+  widgets: readonly ShownWidget[] | null;
 }) {
   const { locale } = useI18n();
-  const widgets = shownWidgets(output);
   return (
     <div
       className={cn(

@@ -10,6 +10,7 @@ import {
 import { toast } from "sonner";
 import { useNewChat } from "~/components/app-sidebar";
 import { ArtifactView } from "~/components/artifact-view";
+import { ChatLinkMenu } from "~/components/chat/chat-link";
 import { Composer } from "~/components/chat/composer";
 import { CopyConversation } from "~/components/chat/copy-conversation";
 import { SummaryBox, SummaryToggle } from "~/components/chat/summary";
@@ -175,6 +176,7 @@ function ChatPage() {
             </span>
           )}
           <CopyConversation sessionId={sessionId} />
+          <ChatLinkMenu sessionId={sessionId} />
           <SummaryToggle className="shrink-0 self-center" />
         </header>
         {/* The summary box takes a column of its own, so the thread makes room

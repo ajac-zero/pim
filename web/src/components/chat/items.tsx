@@ -186,11 +186,14 @@ export const AssistantMessage = memo(function AssistantMessage({
   streaming,
   notified,
   attachments,
+  untrusted,
 }: {
   item: MessageItem;
   /** When it was sent, in ms. */
   at: number;
   streaming?: boolean;
+  /** Shown outside the person's own app, as a public link's copy is: as `Markdown`'s untrusted text. */
+  untrusted?: boolean;
   /** Pim also alerted the person's devices with it. */
   notified?: boolean;
   /** What goes with the message, under its text: its widgets. */
@@ -204,7 +207,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   // the time and actions don't push the thread when it finishes.
   return (
     <div data-speaker="assistant" className="group/assistant w-full min-w-0">
-      <Markdown text={text} streaming={streaming} />
+      <Markdown text={text} streaming={streaming} untrusted={untrusted} />
       {attachments}
       <div className="mt-1 flex h-7 items-center gap-1.5 text-muted-foreground text-xs">
         {!streaming && (

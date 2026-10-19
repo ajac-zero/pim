@@ -212,6 +212,25 @@ export type ShownWidget = {
   empty: ExtensionText;
 } & WidgetContent;
 
+/** A chat's public link, as its owner sees it: `messages` counts what the copy holds, as of `sharedAt`. */
+export type ChatLink = {
+  id: string;
+  url: string;
+  sharedAt: number;
+  messages: number;
+};
+
+/** What a chat's public link shows: a copy of the chat as it was when the link was made or last updated (src/chat-links.ts). */
+export type SharedChat = {
+  title: string | null;
+  agent: { name: string; symbol: string | null; color: string | null };
+  sharedAt: number;
+  messages: (
+    | { role: "user"; text: string; images: number; at: number }
+    | { role: "agent"; text: string; widgets: ShownWidget[]; at: number }
+  )[];
+};
+
 /** One card of a dashboard, loaded by the extension that brings it, in the kind the app draws. */
 export type Widget = {
   id: string;
@@ -995,6 +1014,22 @@ export const pim = {
     }),
   deleteSession: (id: string) =>
     call<{ deleted: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
+  chatLink: (id: string) =>
+    call<{ link: ChatLink | null }>(`/sessions/${id}/link`).then(
+      (body) => body.link,
+    ),
+  /** Makes the chat's public link show the chat as it is now: a new link, or the one it has. */
+  shareChat: (id: string) =>
+    call<{ link: ChatLink }>(`/sessions/${id}/link`, { method: "PUT" }).then(
+      (body) => body.link,
+    ),
+  unshareChat: (id: string) =>
+    call<{ deleted: boolean }>(`/sessions/${id}/link`, { method: "DELETE" }),
+  /** What a chat's public link shows; anyone can read it, signed in or not. */
+  sharedChat: (owner: string, link: string) =>
+    call<SharedChat>(
+      `/shared/${encodeURIComponent(owner)}/${encodeURIComponent(link)}`,
+    ),
   // Side jobs on the utility model.
   regenerateTitle: (id: string) =>
     call<Session>(`/sessions/${id}/title`, { method: "POST" }),

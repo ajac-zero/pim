@@ -111,7 +111,7 @@ Rich results render as muted cards with the bubble radius:
 
 ### Composer
 
-The composer is a single rounded field at the bottom of the transcript with a hairline border and no fill change. It has a muted circular `+` on the left, the placeholder "Message <agent name>", and a primary circular send button on the right, which becomes stop while the agent works.
+The composer is a single rounded field at the bottom of the transcript with a hairline border and no fill change. The text takes its full width on top, with the placeholder "Message <agent name>", and grows up to eight lines before it scrolls. Below it is a row of controls: a muted circular `+` on the left, and on the right a primary circular send button, which becomes stop while the agent works. New composer controls go in that row.
 
 On an agent's dashboard, the composer stays at the same bottom position as in a chat, with suggested first messages above the field. The header and widgets scroll independently above it, so starting a chat does not move the prompt bar.
 

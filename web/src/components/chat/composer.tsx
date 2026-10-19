@@ -195,6 +195,12 @@ function ComposerInner({
 
       <PromptInput
         onSubmit={handleSubmit}
+        // The whole field is the input: a click on its empty space, such as
+        // the controls row, focuses the text.
+        onClick={(event) => {
+          if (!(event.target as Element).closest("button, a, textarea"))
+            textareaRef.current?.focus();
+        }}
         accept={IMAGE_TYPES.join(",")}
         multiple
         maxFiles={seesImages ? MAX_IMAGES : 0}
@@ -212,7 +218,7 @@ function ComposerInner({
         )}
       >
         {prefix && artifact && (
-          <div className="px-3 pt-3">
+          <div className="px-4 pt-3">
             <span className="inline-flex max-w-full items-center gap-2 rounded-full bg-muted py-1 pr-1 pl-3 text-sm">
               <ArtifactIcon
                 kind={artifact.kind}
@@ -237,7 +243,7 @@ function ComposerInner({
           </div>
         )}
         {files.length > 0 && (
-          <ul className="flex flex-wrap gap-2 px-3 pt-3">
+          <ul className="flex flex-wrap gap-2 px-4 pt-3">
             {files.map((file) => (
               <li key={file.id} className="group/image relative">
                 <img
@@ -259,23 +265,10 @@ function ComposerInner({
             ))}
           </ul>
         )}
-        <div className="flex items-end gap-1.5 p-2.5 pl-2.5">
-          <Button
-            type="button"
-            size="icon"
-            variant="ghost"
-            aria-label={t("attachImages")}
-            title={t("attachImages")}
-            disabled={disabled}
-            onClick={() =>
-              seesImages
-                ? controller.attachments.openFileDialog()
-                : cantSeeImages()
-            }
-            className="size-9 shrink-0 rounded-full bg-muted text-muted-foreground"
-          >
-            <Plus className="size-4.5" />
-          </Button>
+        {/* The text takes the full width, with its padding outside the scrolling
+            box so scrolled lines stop short of the border; the controls sit in a
+            row below it, which has room for more of them. */}
+        <div className="px-4 pt-3.5 pb-1">
           <PromptInputTextarea
             ref={textareaRef}
             id={inputId}
@@ -295,39 +288,59 @@ function ComposerInner({
             placeholder={placeholder ?? t("messagePim")}
             disabled={disabled || improve.isPending}
             autoFocus={autoFocus && !touchInput}
-            className="self-center"
           />
-
-          {(hasText || improve.isPending) && (
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              aria-label={t("improvePrompt")}
-              title={t("improvePrompt")}
-              disabled={!canImprove}
-              onClick={() => improve.mutate(text.trim())}
-              className="size-9 shrink-0 rounded-full text-muted-foreground"
-            >
-              {improve.isPending ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Sparkles className="size-4" />
-              )}
-            </Button>
-          )}
-
-          <PromptInputSubmit
-            status={showStop ? "streaming" : preparing ? "submitted" : "ready"}
-            onStop={onStop}
-            disabled={!showStop && !canSend}
+        </div>
+        <div className="flex items-center gap-1.5 p-2.5 pt-1">
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            aria-label={t("attachImages")}
+            title={t("attachImages")}
+            disabled={disabled}
+            onClick={() =>
+              seesImages
+                ? controller.attachments.openFileDialog()
+                : cantSeeImages()
+            }
+            className="size-9 shrink-0 rounded-full bg-muted text-muted-foreground"
           >
-            {showStop ? (
-              <Square className="size-4 fill-current" />
-            ) : preparing ? undefined : (
-              <ArrowUp className="size-5" />
+            <Plus className="size-4.5" />
+          </Button>
+          <div className="ml-auto flex items-center gap-1.5">
+            {(hasText || improve.isPending) && (
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                aria-label={t("improvePrompt")}
+                title={t("improvePrompt")}
+                disabled={!canImprove}
+                onClick={() => improve.mutate(text.trim())}
+                className="size-9 shrink-0 rounded-full text-muted-foreground"
+              >
+                {improve.isPending ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Sparkles className="size-4" />
+                )}
+              </Button>
             )}
-          </PromptInputSubmit>
+
+            <PromptInputSubmit
+              status={
+                showStop ? "streaming" : preparing ? "submitted" : "ready"
+              }
+              onStop={onStop}
+              disabled={!showStop && !canSend}
+            >
+              {showStop ? (
+                <Square className="size-4 fill-current" />
+              ) : preparing ? undefined : (
+                <ArrowUp className="size-5" />
+              )}
+            </PromptInputSubmit>
+          </div>
         </div>
       </PromptInput>
 

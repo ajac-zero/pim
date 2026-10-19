@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, useParams } from "@tanstack/react-router";
 import { memo, type ReactNode } from "react";
 import type { BundledLanguage } from "shiki";
 import {
@@ -30,6 +30,13 @@ const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const CHAT_MENTION = new RegExp(`(?:/chat/)?\\b(${UUID})\\b`, "gi");
 /** A link to a chat in this app. */
 const CHAT_HREF = new RegExp(`^(https?://[^/]+)?/chat/(${UUID})$`, "i");
+/** A link to an artifact in this app, perhaps to one of its versions. */
+const ARTIFACT_HREF = new RegExp(
+  `^(https?://[^/]+)?/artifacts/(${UUID})(?:\\?v=(\\d+))?$`,
+  "i",
+);
+/** An artifact named by an address an agent made up, such as `artifact://<id>`, which browsers can't open. */
+const ARTIFACT_SCHEME = new RegExp(`^artifacts?:(?://)?(${UUID})$`, "i");
 /** Link text that is only the chat's id or address, which its title reads better than. */
 const BARE_CHAT = new RegExp(`^(?:(?:https?://[^/\\s]+)?/chat/)?${UUID}$`, "i");
 
@@ -66,6 +73,9 @@ function remarkChatLinks() {
     return nodes;
   };
   const visit = (node: MdastNode) => {
+    const artifact =
+      node.type === "link" && ARTIFACT_SCHEME.exec(node.url ?? "");
+    if (artifact) node.url = `/artifacts/${artifact[1]}`;
     // Text already in a link stays that link's.
     if (!node.children || node.type === "link" || node.type === "linkReference")
       return;
@@ -90,18 +100,72 @@ const chatRemarkPlugins: PluggableList = [
   remarkChatLinks as Pluggable,
 ];
 
+/** Whether a link's origin, when it names one, is this app's. */
+function inApp(origin: string | undefined): boolean {
+  return (
+    !origin || (typeof location !== "undefined" && origin === location.origin)
+  );
+}
+
 /** The chat a link goes to, when it goes to one in this app. */
 function chatOf(href: string | undefined): string | undefined {
   const match = href ? CHAT_HREF.exec(href) : null;
-  if (!match) return undefined;
-  const [, origin, id] = match;
-  if (
-    origin &&
-    (typeof location === "undefined" || origin !== location.origin)
-  ) {
-    return undefined;
-  }
-  return id?.toLowerCase();
+  if (!match || !inApp(match[1])) return undefined;
+  return match[2]?.toLowerCase();
+}
+
+/** The artifact a link goes to, and which version, when it goes to one in this app. */
+function artifactOf(
+  href: string | undefined,
+): { id: string; version?: number } | undefined {
+  const match = href ? ARTIFACT_HREF.exec(href) : null;
+  if (!match?.[2] || !inApp(match[1])) return undefined;
+  return {
+    id: match[2].toLowerCase(),
+    ...(match[3] ? { version: Number(match[3]) } : {}),
+  };
+}
+
+const LINK_CLASS =
+  "text-link underline underline-offset-2 transition-colors hover:decoration-foreground";
+
+/**
+ * An artifact an agent's message links to, opened in the canvas beside the
+ * chat the message is in, like the artifact's own card; on its own page
+ * where there's no chat around it.
+ */
+function ArtifactLink({
+  id,
+  version,
+  children,
+}: {
+  id: string;
+  version?: number;
+  children: ReactNode;
+}) {
+  const sessionId = useParams({
+    strict: false,
+    select: (params) => params.sessionId,
+  });
+  return sessionId ? (
+    <Link
+      to="/chat/$sessionId"
+      params={{ sessionId }}
+      search={{ artifact: id, v: version }}
+      className={LINK_CLASS}
+    >
+      {children}
+    </Link>
+  ) : (
+    <Link
+      to="/artifacts/$artifactId"
+      params={{ artifactId: id }}
+      search={{ v: version }}
+      className={LINK_CLASS}
+    >
+      {children}
+    </Link>
+  );
 }
 
 /**
@@ -139,7 +203,7 @@ function ChatLink({ id, children }: { id: string; children: ReactNode }) {
           return;
         showTab(id, true);
       }}
-      className="text-link underline underline-offset-2 transition-colors hover:decoration-foreground"
+      className={LINK_CLASS}
     >
       {agent && (
         <AgentIcon
@@ -324,6 +388,10 @@ export const Markdown = memo(function Markdown({
           a: ({ href, children }) =>
             !untrusted && chatOf(href) ? (
               <ChatLink id={chatOf(href) as string}>{children}</ChatLink>
+            ) : !untrusted && artifactOf(href) ? (
+              <ArtifactLink {...(artifactOf(href) as { id: string })}>
+                {children}
+              </ArtifactLink>
             ) : untrusted && !safeLink(href) ? (
               <span>{children}</span>
             ) : (
@@ -331,7 +399,7 @@ export const Markdown = memo(function Markdown({
                 href={href}
                 target="_blank"
                 rel="noreferrer noopener"
-                className="text-link underline underline-offset-2 transition-colors hover:decoration-foreground"
+                className={LINK_CLASS}
               >
                 {children}
               </a>

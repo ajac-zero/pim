@@ -88,6 +88,7 @@ describe("scheduled tasks", () => {
 		// Deleting the chat that scheduled it leaves it running, still on the agent's dashboard.
 		expect((await api(`/sessions/${origin}`, { method: "DELETE" })).status).toBe(200);
 		expect((await api("/schedules")).body.schedules).toMatchObject([{ id: schedule.id }]);
+		await api(`/agents/${coach.id}/dashboard`, { method: "PUT", body: JSON.stringify({ items: ["pim.schedule/upcoming"] }) });
 		const board = (await api(`/agents/${coach.id}/dashboard`)).body;
 		const upcoming = board.widgets.find((shown: { id: string }) => shown.id === "pim.schedule/upcoming").items;
 		expect(upcoming).toEqual([{ title: "Daily plan", time: expect.any(String) }]);

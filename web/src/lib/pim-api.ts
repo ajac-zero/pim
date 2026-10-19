@@ -252,7 +252,16 @@ export type Dashboard = {
   >;
   /** Messages to start a chat with. */
   starters: string[];
-  widgets: Widget[];
+  /** What it shows, in order: widgets, and artifacts pinned to it. */
+  widgets: (Widget | PinnedArtifact)[];
+};
+
+/** One of the person's artifacts pinned to a dashboard, shown as its latest version. */
+export type PinnedArtifact = {
+  /** `artifact:<id>`, as the dashboard names it. */
+  id: string;
+  title: string;
+  artifact: { id: string; kind: ArtifactKind; version: number };
 };
 
 export type AgentInput = {
@@ -959,6 +968,12 @@ export const pim = {
     call<Dashboard>(
       `/agents/${id}/dashboard?locale=${encodeURIComponent(locale)}`,
     ),
+  /** Sets what an agent's dashboard shows, in order, by the ids it gives them. */
+  setDashboard: (id: string, items: string[]) =>
+    call<{ items: string[] }>(`/agents/${id}/dashboard`, {
+      method: "PUT",
+      body: JSON.stringify({ items }),
+    }),
   publishAgent: (id: string) =>
     call<Template>(`/agents/${id}/publish`, { method: "POST" }),
   unpublishAgent: (id: string) =>

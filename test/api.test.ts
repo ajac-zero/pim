@@ -85,6 +85,35 @@ describe("agent", () => {
 });
 
 describe("conversation", () => {
+	it("tracks unread replies without notifications and acknowledges only replies the client saw", async () => {
+		const { id } = (await post("/sessions", { title: "Unread replies" })).body;
+		const listed = async () => (await api("/sessions")).body.sessions.find((session: { id: string }) => session.id === id);
+		expect(await listed()).toMatchObject({ unread: false, responseAt: null });
+		const { socket, received } = await connect();
+		try {
+			faux.setResponses([toolUse("send_to_user", { message: "First reply." })]);
+			await say("First", id);
+			const first = await listed();
+			expect(first).toMatchObject({ unread: true, responseAt: expect.any(Number) });
+			await vi.waitFor(() => expect(received.some((message) => message.type === "sessions")).toBe(true));
+			expect((await post(`/sessions/${id}/read`, { responseAt: first.responseAt })).body.unread).toBe(false);
+			faux.setResponses([toolUse("send_to_user", { message: "Second reply." })]);
+			await say("Second", id);
+			const second = await listed();
+			expect(second.responseAt).toBeGreaterThan(first.responseAt);
+			// A slow acknowledgement from another device cannot swallow the newer reply.
+			expect((await post(`/sessions/${id}/read`, { responseAt: first.responseAt })).body.unread).toBe(true);
+			expect((await post(`/sessions/${id}/read`, { responseAt: second.responseAt })).body.unread).toBe(false);
+			expect((await post(`/sessions/${id}/read`, { responseAt: first.responseAt })).body.unread).toBe(false);
+			for (const responseAt of [-1, 1.5, "now", null]) {
+				expect((await post(`/sessions/${id}/read`, { responseAt })).status).toBe(400);
+			}
+			expect((await post("/sessions/missing/read", { responseAt: 0 })).status).toBe(404);
+		} finally {
+			socket.close();
+		}
+	});
+
 	it("answers a message and keeps the transcript", async () => {
 		faux.setResponses([toolUse("send_to_user", { message: "Paris." })]);
 		const answer = await say("What is the capital of France?");

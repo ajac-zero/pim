@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, notFound, useNavigate } from "@tanstack/react-router";
 import {
   type CSSProperties,
@@ -21,7 +21,7 @@ import { Loader2, Users } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
 import { useElementHeight } from "~/hooks/use-element-size";
-import { CHATGPT_PROVIDER, type UserContent } from "~/lib/pim-api";
+import { CHATGPT_PROVIDER, pim, type UserContent } from "~/lib/pim-api";
 import { pimClient, usePimClient } from "~/lib/pim-client";
 import { modelQuery, sessionsQuery } from "~/lib/queries";
 import { showTab, useTabs } from "~/lib/tabs";
@@ -108,6 +108,28 @@ function ChatPage() {
   const pending = usePimClient((state) => state.pending);
   const connection = usePimClient((state) => state.connection);
   const ready = followed === sessionId;
+
+  const queryClient = useQueryClient();
+  const { mutate: markRead } = useMutation({
+    mutationFn: ({ id, responseAt }: { id: string; responseAt: number }) =>
+      pim.readSession(id, responseAt),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onError: (error) => toast.error(error.message),
+  });
+  const responseAt = session?.responseAt;
+  const unread = session?.unread;
+  useEffect(() => {
+    // Wait for the transcript, not just its route. A hidden tab hasn't seen the reply.
+    if (!ready || !loaded || view.running || !unread || responseAt == null)
+      return;
+    const read = () => {
+      if (document.visibilityState === "visible")
+        markRead({ id: sessionId, responseAt });
+    };
+    read();
+    document.addEventListener("visibilitychange", read);
+    return () => document.removeEventListener("visibilitychange", read);
+  }, [ready, loaded, view.running, unread, responseAt, sessionId, markRead]);
 
   // Switching chats reconnects in a moment, which would flash the label and
   // squeeze the tabs; only a connection that stays down is worth showing.

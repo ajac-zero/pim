@@ -12,6 +12,8 @@ export type Session = {
   busy: boolean;
   createdAt: number | null;
   updatedAt: number | null;
+  responseAt: number | null;
+  unread: boolean;
   /** A conversation with someone else's space, shared with you; null for your own chats. */
   visit?: { username: string; available: boolean } | null;
   /** The agent of yours it talks with: the one it was started with, or your default one. Null in a visit. */
@@ -851,6 +853,11 @@ export const pim = {
     call<Session>("/sessions", {
       method: "POST",
       body: JSON.stringify(options),
+    }),
+  readSession: (id: string, responseAt: number) =>
+    call<Session>(`/sessions/${id}/read`, {
+      method: "POST",
+      body: JSON.stringify({ responseAt }),
     }),
   agents: () =>
     call<{ agents: Agent[] }>("/agents").then((body) => body.agents),

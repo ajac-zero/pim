@@ -48,7 +48,7 @@ type MdastNode = {
 };
 
 /**
- * Makes the chats an agent names into links: an id, bare or in backticks,
+ * Makes the chats a message names into links: an id, bare or in backticks,
  * and a `/chat/<id>` address. An id that turns out not to be a chat (an
  * artifact's or an approval's) is shown as text again by `ChatLink`.
  */
@@ -127,6 +127,7 @@ function remarkBreaks() {
 const bubbleRemarkPlugins: PluggableList = [
   ...Object.values(defaultRemarkPlugins),
   remarkBreaks as Pluggable,
+  remarkChatLinks as Pluggable,
 ];
 
 /** Whether a link's origin, when it names one, is this app's. */
@@ -207,11 +208,19 @@ function textOf(node: ReactNode): string {
 }
 
 /**
- * A chat an agent's message names: its agent's icon and its title, opening
- * it in a tab of its own. An id that names none of the person's chats stays
- * as it was written.
+ * A chat a message names: its agent's icon and its title, opening it in a
+ * tab of its own. An id that names none of the person's chats stays as it
+ * was written.
  */
-function ChatLink({ id, children }: { id: string; children: ReactNode }) {
+function ChatLink({
+  id,
+  className = LINK_CLASS,
+  children,
+}: {
+  id: string;
+  className?: string;
+  children: ReactNode;
+}) {
   const { t } = useI18n();
   const { data: sessions } = useQuery(sessionsQuery());
   const { data: agents } = useQuery(agentsQuery());
@@ -241,7 +250,7 @@ function ChatLink({ id, children }: { id: string; children: ReactNode }) {
           return;
         showTab(id, true);
       }}
-      className={LINK_CLASS}
+      className={className}
     >
       {agent && (
         <AgentIcon
@@ -479,8 +488,11 @@ export const Markdown = memo(function Markdown({
           ),
           hr: () => <hr className={cn("my-6", tone.line)} />,
           a: ({ href, children }) =>
-            !safe && chatOf(href) ? (
-              <ChatLink id={chatOf(href) as string}>{children}</ChatLink>
+            // A person may name their own chats too; untrusted text may not.
+            (!safe || bubble) && chatOf(href) ? (
+              <ChatLink id={chatOf(href) as string} className={tone.link}>
+                {children}
+              </ChatLink>
             ) : !safe && artifactOf(href) ? (
               <ArtifactLink {...(artifactOf(href) as { id: string })}>
                 {children}

@@ -4166,6 +4166,8 @@ export class Pim extends DurableAgent<Env> {
 			"/agents/:agent",
 			async ({ agent: id }) => {
 				this.#agent(id!);
+				// Its tasks, and its team's, stop with it: no other agent takes them over.
+				for (const task of this.#tasks.open()) if (task.agent === id) await this.#cancelTask(task, "Its agent was deleted.");
 				this.agents.delete(id!);
 				return { deleted: true };
 			},

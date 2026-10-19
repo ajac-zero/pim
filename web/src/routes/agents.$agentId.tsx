@@ -30,57 +30,62 @@ function DashboardPage() {
   if (!data) return null;
   const { agent, starters, widgets } = data;
   return (
-    <main className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-      <div className="mx-auto w-full max-w-4xl px-4 py-8 md:py-12">
-        <header className="mb-6 flex items-center gap-3">
-          {agent.icon === null && agent.symbol === null ? (
-            <span
-              className={cn(
-                "flex size-10 shrink-0 items-center justify-center rounded-xl font-semibold text-lg",
-                tileClass(agent.color),
-              )}
-            >
-              {agent.name.slice(0, 1).toUpperCase()}
-            </span>
-          ) : (
-            <AgentIcon agent={agent} tile className="size-10 rounded-xl" />
-          )}
-          <div className="min-w-0">
-            <h1 className="flex items-center gap-2 font-semibold text-2xl">
-              <span className="truncate">{agent.name}</span>
-              {agent.majordomo && (
-                <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
-                  {t("majordomoBadge")}
-                </span>
-              )}
-            </h1>
-            {agent.description && (
-              <p className="truncate text-muted-foreground text-sm">
-                {agent.description}
-              </p>
+    <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
+        <div className="mx-auto w-full max-w-4xl px-4 py-8 md:py-12">
+          <header className="mb-6 flex items-center gap-3">
+            {agent.icon === null && agent.symbol === null ? (
+              <span
+                className={cn(
+                  "flex size-10 shrink-0 items-center justify-center rounded-xl font-semibold text-lg",
+                  tileClass(agent.color),
+                )}
+              >
+                {agent.name.slice(0, 1).toUpperCase()}
+              </span>
+            ) : (
+              <AgentIcon agent={agent} tile className="size-10 rounded-xl" />
             )}
-          </div>
-        </header>
-        <Composer
-          onSend={start}
-          busy={false}
-          disabled={starting}
-          placeholder={t("messageAgent", { name: agent.name })}
-          promptSuggestions={starters}
-          disclaimer={null}
-        />
-        {widgets.length === 0 ? (
-          <div className="mt-8 flex flex-col items-center gap-2 rounded-xl border border-dashed px-4 py-10 text-center text-muted-foreground text-sm">
-            <Bot className="size-5" />
-            {t("noDashboard")}
-          </div>
-        ) : (
-          <div className="mt-8 grid gap-3 md:grid-cols-2">
-            {widgets.map((widget) => (
-              <WidgetCard key={widget.id} widget={widget} />
-            ))}
-          </div>
-        )}
+            <div className="min-w-0">
+              <h1 className="flex items-center gap-2 font-semibold text-2xl">
+                <span className="truncate">{agent.name}</span>
+                {agent.majordomo && (
+                  <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
+                    {t("majordomoBadge")}
+                  </span>
+                )}
+              </h1>
+              {agent.description && (
+                <p className="truncate text-muted-foreground text-sm">
+                  {agent.description}
+                </p>
+              )}
+            </div>
+          </header>
+          {widgets.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed px-4 py-10 text-center text-muted-foreground text-sm">
+              <Bot className="size-5" />
+              {t("noDashboard")}
+            </div>
+          ) : (
+            <div className="grid gap-3 md:grid-cols-2">
+              {widgets.map((widget) => (
+                <WidgetCard key={widget.id} widget={widget} />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="mr-2.5 flex shrink-0 justify-center px-4 pb-2">
+        <div className="w-full max-w-3xl">
+          <Composer
+            onSend={start}
+            busy={false}
+            disabled={starting}
+            placeholder={t("messageAgent", { name: agent.name })}
+            promptSuggestions={starters}
+          />
+        </div>
       </div>
     </main>
   );

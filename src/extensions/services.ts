@@ -47,7 +47,7 @@ export type PimServices = {
 	approvalFiled(approval: Approval, isNew: boolean): Promise<string | null>;
 	/** The user's permission for the tool that filed the approval: `on` approves it without asking. */
 	permission(approval: Approval): ToolPermission;
-	/** The team member a conversation is, and the chat it works for; null for a chat of the person's. */
+	/** The agent at work on a task in a conversation, and the chat the work began in; null for a chat of the person's. */
 	teamMember(session: string): ApprovalMember | null;
 	/**
 	 * The widgets a chat can show with its messages: Pim's own, and those of

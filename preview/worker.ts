@@ -19,7 +19,7 @@ export { Auth, Directory, Gallery } from "../src/index";
  * - A stand-in model, so chats answer. It echoes what you say through
  *   `send_to_user`, and calls a tool when told to: `/tool create_goal {"title": "Run a 5k"}`.
  *   After a tool runs, it sends the tool's result. Memory compression gets a short summary.
- *   A team member answers in plain text, the majordomo introduces itself with a stock greeting,
+ *   An agent at work on a task answers in plain text, the majordomo introduces itself with a stock greeting,
  *   and it asks the person about every approval it reviews.
  *   The utility model titles a chat with the first words of its last message, appends a
  *   line to a prompt it improves, and writes a placeholder summary.

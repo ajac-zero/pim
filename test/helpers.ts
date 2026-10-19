@@ -1,5 +1,5 @@
 import type { JsonValue, Message } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { getAgentByName } from "agents";
 import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
@@ -107,6 +107,56 @@ export function textOf(message: TranscriptMessage): string {
 
 export const toolUse = (name: string, args: Record<string, JsonValue>) =>
 	fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
+
+type Context = Parameters<FauxResponseFactory>[0];
+
+/**
+ * Who a request is from, by its prompt: an agent at work on a task, by name;
+ * the majordomo reviewing an approval; or the agent a chat is with (`lead`).
+ */
+export function speaker(context: Context): string {
+	const prompt = systemPrompt(context.messages);
+	if (/the majordomo of one person/.test(prompt)) return "review";
+	return /You are \\"([^"\\]+)\\", working on a task/.exec(prompt)?.[1] ?? "lead";
+}
+
+/**
+ * Answers each request with the script of whoever asked, in order: agents
+ * work at the same time, so the order of their requests isn't fixed. The
+ * agent a chat is with answers with its own script, by name, if it has one,
+ * or else with `lead`'s.
+ */
+export function scripts(byRole: Record<string, ((context: Context) => ReturnType<FauxResponseFactory>)[]>) {
+	const count = Object.values(byRole).reduce((sum, list) => sum + list.length, 0);
+	const route = (context: Context) => {
+		const agent = /In this conversation you are \\"([^"\\]+)\\"/.exec(systemPrompt(context.messages))?.[1];
+		const role = speaker(context) === "lead" && agent !== undefined && agent in byRole ? agent : speaker(context);
+		const next = byRole[role]?.shift();
+		if (!next) throw new Error(`No response left for ${role}`);
+		return next(context);
+	};
+	faux.setResponses(Array.from({ length: count }, () => route));
+}
+
+/** Waits until every scripted response is used, the chat's tasks are done, and the chat is idle: the work begun there is over. */
+export async function settled(session = ROOT) {
+	await vi.waitFor(
+		async () => {
+			expect(faux.getPendingResponseCount()).toBe(0);
+			const { tasks } = (await api<{ tasks: { state: string }[] }>(`/sessions/${session}/tasks`)).body;
+			expect(tasks.filter((task) => task.state === "working" || task.state === "auth-required")).toEqual([]);
+			const { sessions } = (await api<{ sessions: { id: string; busy: boolean }[] }>("/sessions")).body;
+			expect(sessions.find((info) => info.id === session)?.busy).toBe(false);
+		},
+		{ timeout: 10_000 },
+	);
+}
+
+/** The text of a chat's messages from `role`, in order. */
+export async function messagesOf(session: string, role: "user" | "assistant" | "tool") {
+	const { messages } = (await api<{ messages: TranscriptMessage[] }>(`/sessions/${session}/messages`)).body;
+	return messages.filter((message) => message.role === role).map(textOf);
+}
 
 afterEach(() => {
 	vi.restoreAllMocks();

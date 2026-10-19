@@ -13,8 +13,8 @@ import {
 	agentInput,
 	agentInstructions,
 } from "../agents";
-import { majordomoRole, SEND_TO_AGENT } from "../majordomo";
-import { memberInstructions, memberPreamble, type Role } from "../team";
+import { majordomoRole } from "../majordomo";
+import { DELEGATE, memberInstructions, type Role, taskPreamble } from "../tasks";
 import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";
 import type { DirectoryApp } from "./app-directory";
 import type { BlueprintDefinition } from "./define";
@@ -191,7 +191,7 @@ function agentsSection(self: Agent, host: AgentsHost): string {
 					`- ${agent.name}${agent.id === self.id ? " (you)" : ""}${agent.majordomo ? " (their majordomo)" : ""}${agent.description ? `: ${agent.description}` : ""} [id: ${agent.id}]`,
 			),
 		self.majordomo
-			? `Hand work to these with \`${SEND_TO_AGENT}\`. When none of them is right for it, such as a coding helper or a trip planner, make one with \`${CREATE_AGENT}\` without asking first, then send it the task. Each is in the sidebar too, with the chats you start with it, for the person to read and carry on.`
+			? `Hand work to these with \`${DELEGATE}\`. When none of them is right for it, such as a coding helper or a trip planner, make one with \`${CREATE_AGENT}\` without asking first, then hand it the task. Each is in the sidebar too, with its own chats, for the person to talk with it directly.`
 			: `When the person wants ongoing help of the kind another of these is for, tell them to start a chat with it from the sidebar. When they want ongoing help none of these covers, such as a coding helper or a trip planner, make one with \`${CREATE_AGENT}\` without asking first, then tell them it's in the sidebar. Don't make one for a one-off question: answer it yourself.`,
 		...(blueprints.length > 1
 			? [
@@ -223,8 +223,8 @@ Rules that always hold:
 - Times: call \`current_time\` when the time matters.`;
 
 /**
- * How every agent works, and the agent each chat talks as, or the team member it
- * is (`roleOf` its session). An agent's instructions are those of the
+ * How every agent works, and the agent each chat talks as, or the agent or
+ * team member at work on a task (`roleOf` its session). An agent's instructions are those of the
  * blueprint it builds on (`blueprintOf`), then the person's own.
  */
 export function agentExtension(
@@ -245,7 +245,7 @@ export function agentExtension(
 			team: Type.Optional(
 				Type.Array(Member, {
 					maxItems: MAX_TEAM,
-					description: "Members it hands parts of its work to with `delegate`, all working at once, such as a planner's researchers.",
+					description: `Members it hands parts of its work to with \`${DELEGATE}\`, all working at once, such as a planner's researchers.`,
 				}),
 			),
 			blueprint: Type.Optional(Type.String({ description: "The blueprint it builds on, such as pim.assistant/pim; the default blueprint if left out." })),
@@ -337,8 +337,8 @@ export function agentExtension(
 			section(
 				"preamble",
 				({ conversationId }) => {
-					const { agent, member } = roleOf(String(conversationId));
-					return member ? memberPreamble(agent, member) : PREAMBLE;
+					const { agent, member, from } = roleOf(String(conversationId));
+					return from === null ? PREAMBLE : taskPreamble(member?.name ?? agent.name, from);
 				},
 				{ tag: false },
 			),
@@ -350,8 +350,8 @@ export function agentExtension(
 				return agentInstructions(agent, blueprintOf(agent), agent.majordomo ? majordomoRole(agent) : undefined);
 			}),
 			section("your_agents", ({ conversationId }) => {
-				const { agent, member } = roleOf(String(conversationId));
-				return member ? undefined : agentsSection(agent, agents);
+				const { agent, from } = roleOf(String(conversationId));
+				return from === null ? agentsSection(agent, agents) : undefined;
 			}),
 		],
 		tools: [currentTime, createAgent, ...(editing === "off" ? [] : [updateAgent]), ...(ownToolPermission(services.store, MANAGE_APPS).permission === "off" ? [] : [manageApps])],

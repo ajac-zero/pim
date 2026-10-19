@@ -138,8 +138,8 @@ import {
 } from "./store";
 import { type Agent, type AgentInput, AgentStore, agentInput, type TeamMember } from "./agents";
 import type { AgentIcon, ArtifactToPublish } from "./gallery";
-import { type Role, TEAM_EXTENSION, TeamStore, teamExtension } from "./team";
-import { DECIDE_APPROVAL, MAJORDOMO_EXTENSION, introduction, majordomoExtension, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension } from "./majordomo";
+import { type Delegate, type Role, TASKS_EXTENSION, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
+import { DECIDE_APPROVAL, introduction, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension } from "./majordomo";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { projectEntries } from "./transcript";
 import { ARTIFACT_ASK, conversationText, IMPROVE_PROMPT, NAME_CHAT, SUMMARIZE_CHAT, type UtilityTask } from "./utility";
@@ -317,8 +317,8 @@ export class Pim extends DurableAgent<Env> {
 	}, () => this.appDirectory());
 	/** The skills the owner's agents wrote for work they do again. */
 	readonly skills = new SkillStore(this.ctx.storage.sql);
-	/** The tasks the agents' teams were given, each in a conversation of its own. */
-	readonly team = new TeamStore(this.ctx.storage.sql);
+	/** The tasks agents handed each other, each in a conversation of its own (./tasks.ts). */
+	readonly #tasks = new TaskStore(this.ctx.storage.sql);
 	/** Images the person sent, in R2; their messages keep their URLs. */
 	readonly images = new ImageStore({
 		sql: this.ctx.storage.sql,
@@ -498,18 +498,11 @@ export class Pim extends DurableAgent<Env> {
 			this.registry.install(scheduleExtension(services));
 			this.registry.install(messagingExtension(services));
 			this.registry.install(
-				teamExtension({
+				tasksExtension({
 					roleOf: (session) => this.#roleOf(session),
-					runs: this.team,
-					memberAgent: (member, agent) => this.#memberAgent(member, agent),
-					ask: (conversation, task, operation) => this.#askMember(conversation, task, operation),
-				}),
-			);
-			this.registry.install(
-				majordomoExtension({
-					chatAgent: (session) => (this.team.run(session) || this.visits.bySession(session) ? null : this.agents.ofSession(session)),
-					agents: () => this.agents.list(),
-					sendToAgent: (handoff) => this.#sendToAgent(handoff),
+					delegates: (session) => this.#delegates(session),
+					start: (requester, batch, tasks) => this.#startTasks(requester, batch, tasks),
+					tasks: this.#tasks,
 				}),
 			);
 			this.registry.install(
@@ -822,11 +815,11 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Extensions only some conversations select: abilities, by the agents that
-	 * use them; apps, by the agents that list them; the majordomo's own, by its
-	 * chats; and reviews', by the majordomo's reviews.
+	 * use them; apps, by the agents that list them; and reviews', by the
+	 * majordomo's reviews.
 	 */
 	#perPim(name: string): boolean {
-		return this.abilities.has(name) || name.startsWith(APP_PREFIX) || name === MAJORDOMO_EXTENSION || name === REVIEW_EXTENSION;
+		return this.abilities.has(name) || name.startsWith(APP_PREFIX) || name === REVIEW_EXTENSION;
 	}
 
 	/** pi's run policy, shared by every session. */
@@ -834,8 +827,8 @@ export class Pim extends DurableAgent<Env> {
 		const registry = this.registry;
 		const perPim = (name: string) => this.#perPim(name);
 		return {
-			// Every extension but visits', abilities', apps' and the majordomo's: a visit's own conversation selects its
-			// extension, and the chats of agents that use an ability or list an app, or of the majordomo, select it.
+			// Every extension but visits', abilities', apps' and reviews': a visit's own conversation selects its
+			// extension, the chats of agents that use an ability or list an app select it, and reviews select theirs.
 			get extensions() {
 				return registry
 					.snapshot()
@@ -1068,8 +1061,8 @@ export class Pim extends DurableAgent<Env> {
 			approvalFiled: (approval, isNew) => this.#approvalFiled(approval, isNew),
 			permission: (approval) => this.#approvalPermission(approval),
 			teamMember: (session) => {
-				const run = this.team.run(session);
-				return run ? { name: run.member, session: run.session } : null;
+				const task = this.#tasks.of(session);
+				return task && task.kind !== "review" ? { name: task.member ?? this.#roleOf(session).agent.name, session: task.root } : null;
 			},
 			widgetsFor: (session) => this.#chatWidgets(session),
 			showWidget: async (session, ref) => {
@@ -1079,7 +1072,7 @@ export class Pim extends DurableAgent<Env> {
 				return { id: ref, title, empty: "", ...content };
 			},
 			keepWidget: (session, widget) => this.store.keepWidget(session, widget),
-			keptWidgets: (session) => (this.visits.bySession(session) || this.team.run(session) ? [] : this.store.keptWidgets(session)),
+			keptWidgets: (session) => (this.visits.bySession(session) || this.#tasks.of(session) ? [] : this.store.keptWidgets(session)),
 		};
 	}
 
@@ -1097,25 +1090,27 @@ export class Pim extends DurableAgent<Env> {
 		for (const connection of this.getConnections<SocketState>()) {
 			if (connection.state?.session) await this.#watch(connection, connection.state.session);
 		}
+		void this.#resumeTasks().catch((error) => console.warn("resuming tasks failed", error));
 	}
 
 	/**
 	 * Every message into a session goes through here, so the session list
 	 * knows its activity; the user's first message also names it. A new run
 	 * (from the user, a schedule or an app) counts against the daily limit;
-	 * an approval's outcome continues the run that asked, so it does not.
+	 * an approval's outcome, or tasks' answers, continue work already
+	 * counted, so they do not.
 	 */
 	async submitTo(
 		session: string,
 		content: UserInput,
 		options: { operationId?: string; whenBusy?: "followUp" | "steer" },
-		from: "user" | "pim" | "approval",
+		from: "user" | "pim" | "approval" | "task",
 	): Promise<PiReceipt> {
 		this.#assertOpen();
 		if (this.status() !== "active") throw new HttpError(403, "This space is suspended");
 		// Checked and counted before the first await, so concurrent submissions can't all pass the same check.
 		let run: string | undefined;
-		if (from !== "approval") {
+		if (from !== "approval" && from !== "task") {
 			const storage = this.#storageRefusal();
 			const reserved = storage === null ? this.usage.reserveRun() : ({ ok: false, refusal: storage } as const);
 			if (!reserved.ok) {
@@ -1304,7 +1299,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/** Starts a chat with `agent`, within the person's limit on chats. */
-	async #startChat(agent: Agent, title: string | undefined, handoff?: { from: string; key: string }): Promise<string> {
+	async #startChat(agent: Agent, title: string | undefined): Promise<string> {
 		const { sessions } = this.limits();
 		if (sessions !== null) {
 			const hidden = this.#hiddenSessions();
@@ -1313,7 +1308,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 		const { id } = await this.harness.sessions.create();
 		await this.harness.session(id).setModel(this.chosenModel());
-		this.agents.setSession(id, agent.id, handoff);
+		this.agents.setSession(id, agent.id);
 		this.store.touchSession(id, title);
 		return id;
 	}
@@ -1332,14 +1327,25 @@ export class Pim extends DurableAgent<Env> {
 						throw new HttpError(404, `No conversation ${conversation} with ${majordomo.name}: leave out conversation to start one.`);
 					}
 				}
-				// A message to a chat still busy with an earlier one is answered after it.
-				const receipt = await this.submitTo(session, userInput(message), { operationId: crypto.randomUUID(), whenBusy: "followUp" }, "user");
+				// Tasks the majordomo hands out answer in updates, later: the client hears what it says of them too, while it waits.
+				const updates = this.#listenForUpdates(session);
+				const replies: string[] = [];
 				const id = this.store.publicId(session);
 				try {
-					return { conversation: id, reply: await this.#withReplies(await this.harness.wait(receipt.operationId, { session, signal })) };
+					// A message to a chat still busy with an earlier one is answered after it.
+					const receipt = await this.submitTo(session, userInput(message), { operationId: crypto.randomUUID(), whenBusy: "followUp" }, "user");
+					let result = await this.#withReplies(await this.harness.wait(receipt.operationId, { session, signal }));
+					replies.push(...result.replies);
+					while (result.status === "done" && (updates.pending() || this.#tasks.awaitsAnswers(session))) {
+						result = await this.#withReplies(await this.harness.wait(await updates.next(signal), { session, signal }));
+						replies.push(...result.replies);
+					}
+					return { conversation: id, reply: { ...result, replies } };
 				} catch (error) {
-					if (signal.aborted) return { conversation: id, reply: null };
-					throw error;
+					if (!signal.aborted) throw error;
+					return { conversation: id, reply: replies.length === 0 ? null : { status: "done", replies: [...replies, `${majordomo.name} is still waiting on some of this work. Ask again in a little while, in this conversation.`] } };
+				} finally {
+					updates.close();
 				}
 			},
 		});
@@ -1429,6 +1435,8 @@ export class Pim extends DurableAgent<Env> {
 			await this.schedule(new Date(Date.now() + REVIEW_MS), REVIEW_EXPIRY_CALLBACK, { id: approval.id });
 			void this.keepAliveWhile(() => this.#review(reviewing));
 		}
+		// A task's agent waits now, for the majordomo or the person.
+		await this.#taskWaits(approval.session);
 		if (this.store.approval(approval.id)?.review) return null;
 		if (isNew) {
 			this.broadcastMessage({ type: "approval", approval: this.#publicApproval(approval) });
@@ -1538,6 +1546,8 @@ export class Pim extends DurableAgent<Env> {
 		if (call) {
 			// What it approved may have changed the agent, such as its apps: the turn goes on with the tools it has now.
 			await this.#selectAbilities(approval.session);
+			const task = this.#tasks.of(approval.session);
+			if (task && this.#tasks.setState(task.id, "working")) this.#tasksChanged(task.root);
 			await this.harness.resumeTask(approval.session, call);
 		}
 		return decided;
@@ -2039,8 +2049,8 @@ export class Pim extends DurableAgent<Env> {
 	async #review(approval: Approval): Promise<void> {
 		const call = `review:${approval.id}`;
 		try {
-			let run = this.team.byCall(call);
-			if (!run) {
+			let review = this.#tasks.at(call, 0);
+			if (!review) {
 				const majordomo = this.agents.majordomo();
 				const { id } = await this.harness.sessions.create();
 				await this.harness.session(id).setModel(this.chosenModel());
@@ -2052,12 +2062,22 @@ export class Pim extends DurableAgent<Env> {
 					.map(({ tool }) => tool);
 				await (await this.harness.conversation(id)).configure({ extensions, tools }, BACKGROUND_CONTEXT);
 				const chat = approval.member?.session ?? approval.session;
-				this.team.start({ kind: "review", conversation: id, call, position: 0, session: chat, agent: majordomo.id, member: majordomo.name, task: approval.summary });
-				run = this.team.run(id)!;
+				review = this.#tasks.start({
+					kind: "review",
+					conversation: id,
+					requester: null,
+					parent: null,
+					root: chat,
+					batch: call,
+					position: 0,
+					agent: majordomo.id,
+					member: null,
+					task: approval.summary,
+				});
 			}
-			await this.#submit(run.conversation, this.#reviewRequest(approval), { operationId: call }, "review");
-			const result = await this.harness.wait(call, { session: run.conversation });
-			this.team.setStatus(run.conversation, result.status === "done" ? "done" : "failed");
+			await this.#submit(review.conversation, this.#reviewRequest(approval), { operationId: call }, "review");
+			const result = await this.harness.wait(call, { session: review.conversation });
+			this.#tasks.finish(review.id, result.status === "done" ? "completed" : "failed", result.text?.trim() || result.reason || "");
 		} catch (error) {
 			console.warn(`the majordomo's review of ${approval.id} failed`, error);
 		}
@@ -2066,13 +2086,10 @@ export class Pim extends DurableAgent<Env> {
 
 	/** What the majordomo reads to decide: who asks, for what, and in what chat. */
 	#reviewRequest(approval: Approval): string {
-		const asker = approval.member
-			? `${approval.member.name}, a member of an agent's team`
-			: (() => {
-					const agent = this.agents.ofSession(approval.session);
-					const chat = this.agents.handedBy(approval.session) ? "in a chat you started with it for the person" : "in a chat the person has with it";
-					return `${agent.name}${agent.description ? ` (${agent.description})` : ""}, ${chat}`;
-				})();
+		const { agent, member, from } = this.#roleOf(approval.session);
+		const asker = member
+			? `${member.name}, a member of ${agent.name}'s team, working on a task ${from} handed it`
+			: `${agent.name}${agent.description ? ` (${agent.description})` : ""}, ${from === null ? "in a chat the person has with it" : `working on a task ${from} handed it for the person`}`;
 		const args = JSON.stringify(approval.args, null, 2);
 		return [
 			`[Approval review ${approval.id}] ${asker}, asks for approval.`,
@@ -2084,9 +2101,9 @@ export class Pim extends DurableAgent<Env> {
 
 	/** The majordomo's decision, from its review. Once the person is asked, or decides, it is theirs. */
 	async #reviewDecision(conversation: string, decision: "approve" | "deny" | "escalate", note: string): Promise<string> {
-		const run = this.team.run(conversation);
-		if (run?.kind !== "review") return "This conversation reviews no approval.";
-		const id = run.call.slice("review:".length);
+		const review = this.#tasks.of(conversation);
+		if (review?.kind !== "review") return "This conversation reviews no approval.";
+		const id = review.batch.slice("review:".length);
 		const approval = this.store.approval(id);
 		if (approval?.status !== "pending" || approval.review?.status !== "reviewing") return "It's no longer yours to decide: the person has it.";
 		if (decision === "escalate") {
@@ -2124,80 +2141,249 @@ export class Pim extends DurableAgent<Env> {
 		await this.#escalate(payload.id, null);
 	}
 
-	// The owner's agents, and their teams.
+	// The owner's agents, and the tasks they hand each other (./tasks.ts).
 
-	/** The agent a conversation talks as, and the team member it is, if it is one. A review talks as the majordomo. */
+	/** The agent a conversation talks as, the team member it is, if it is one, and who handed it its task. A review talks as the majordomo. */
 	#roleOf(session: string): Role {
-		const run = this.team.run(session);
-		if (!run) return { agent: this.agents.ofSession(session), member: null };
-		if (run.kind === "review") return { agent: this.agents.majordomo(), member: null };
-		const agent = this.agents.get(run.agent) ?? this.agents.majordomo();
+		const task = this.#tasks.of(session);
+		if (!task) return { agent: this.agents.ofSession(session), member: null, from: null };
+		if (task.kind === "review") return { agent: this.agents.majordomo(), member: null, from: null };
+		const agent = this.agents.get(task.agent) ?? this.agents.majordomo();
+		const from = this.#roleOf(task.requester!);
+		const fromName = from.member?.name ?? from.agent.name;
+		if (task.kind === "agent") return { agent, member: null, from: fromName };
 		// A member taken off the team since keeps working on what it was given, with no instructions of its own.
-		const member = agent.team.find((candidate) => candidate.name === run.member) ?? { name: run.member, instructions: "", tools: null };
-		return { agent, member };
+		const member = agent.team.find((candidate) => candidate.name === task.member) ?? { name: task.member!, instructions: "", tools: null };
+		return { agent, member, from: fromName };
 	}
 
 	/**
-	 * A member's conversation leaves out what only the agent the person talks
-	 * with does: talking to them, scheduling work and watching apps' events
-	 * (both come back to the conversation that asked), and handing out tasks.
-	 * A member with a list of tools gets only those.
+	 * Whom a conversation can hand tasks to: the majordomo, the person's
+	 * other agents; an agent, the members of its team. A member hands out none.
 	 */
-	#memberAgent(member: TeamMember, agent: Agent): AgentChange {
+	#delegates(session: string): Delegate[] {
+		if (this.visits.bySession(session)) return [];
+		const { agent, member } = this.#roleOf(session);
+		if (member || this.#tasks.of(session)?.kind === "review") return [];
+		const others = agent.majordomo ? this.agents.list().filter((other) => !other.majordomo) : [];
+		return [...others.map((other) => ({ agent: other, member: null })), ...agent.team.map((teammate) => ({ agent, member: teammate }))];
+	}
+
+	/**
+	 * A task's conversation leaves out what only an agent the person talks
+	 * with does: talking to them, scheduling work and watching apps' events
+	 * (both come back to the conversation that asked), and changing agents,
+	 * apps and skills. A member hands out no tasks, and one with a list of
+	 * tools gets only those.
+	 */
+	#taskAgent(agent: Agent, member: TeamMember | null): AgentChange {
 		const snapshot = this.registry.snapshot();
-		const removed = [MESSAGING_EXTENSION, SCHEDULE_EXTENSION, TEAM_EXTENSION].flatMap((name) => snapshot.extension(name) ?? []);
-		// Members work with their agent's abilities and apps too.
+		const removed = [MESSAGING_EXTENSION, SCHEDULE_EXTENSION, ...(member ? [TASKS_EXTENSION] : [])].flatMap((name) => snapshot.extension(name) ?? []);
+		// It works with its agent's abilities and apps.
 		const added = [...this.extensions.abilitiesOf(agent.blueprint), ...this.#appExtensionsOf(agent)].flatMap((name) => snapshot.extension(name) ?? []);
 		const extensions = { add: added, remove: removed };
 		const kept = snapshot
 			.tools()
 			.filter(({ extension, tool }) => !removed.includes(extension) && !LEAD_ONLY_TOOLS.has(tool.name))
 			.filter(({ extension }) => !this.#perPim(extension.name) || added.includes(extension));
-		if (member.tools) return { extensions, tools: kept.filter(({ tool }) => member.tools!.includes(tool.name)).map(({ tool }) => tool) };
+		if (member?.tools) return { extensions, tools: kept.filter(({ tool }) => member.tools!.includes(tool.name)).map(({ tool }) => tool) };
 		const leadOnly = snapshot.tools().filter(({ tool }) => LEAD_ONLY_TOOLS.has(tool.name));
 		return { extensions, ...(leadOnly.length > 0 ? { tools: { remove: leadOnly.map(({ tool }) => tool) } } : {}) };
 	}
 
 	/**
-	 * The majordomo's handoff: its message goes into a chat of the person's
-	 * with the agent as though they had sent it, a new chat or one the
-	 * majordomo started before, and the agent answers there as it would
-	 * answer them. What it sent comes back to the majordomo.
+	 * Gives out tasks a conversation hands out, each in a new conversation of
+	 * its own or that of the earlier task it continues, and doesn't wait for
+	 * them: their answers come back in an update (see `#deliver`). A replayed
+	 * call finds the tasks it gave, and gives them again only where giving
+	 * didn't finish.
 	 */
-	async #sendToAgent({ from, agent, message, chat, key }: { from: string; agent: Agent; message: string; chat: string | undefined; key: string }): Promise<string> {
-		let session = this.agents.byHandoff(key);
-		if (!session && chat !== undefined) {
-			const named = await this.#session(chat).catch(() => undefined);
-			if (named === undefined || this.agents.ofSession(named).id !== agent.id) return `No chat ${chat} with ${agent.name}: leave out chat to start one.`;
-			session = named;
+	async #startTasks(requester: string, batch: string, given: { to: Delegate; task: string; continues: Task | null }[]): Promise<Task[]> {
+		const asking = this.#tasks.of(requester);
+		const root = asking?.root ?? requester;
+		const started: Task[] = [];
+		for (const [position, { to, task, continues }] of given.entries()) {
+			let record = this.#tasks.at(batch, position);
+			if (!record) {
+				const conversation = continues?.conversation ?? (await this.#taskConversation(to));
+				record = this.#tasks.start({
+					kind: to.member ? "member" : "agent",
+					conversation,
+					requester,
+					parent: asking && asking.kind !== "review" ? asking.id : null,
+					root,
+					batch,
+					position,
+					agent: to.agent.id,
+					member: to.member?.name ?? null,
+					task,
+				});
+			}
+			// Submitting the same operation again is a no-op: a replay gives the task once.
+			await this.#submit(record.conversation, task, { operationId: `task:${record.id}`, whenBusy: "followUp" }, "task");
+			this.#watchTask(record.conversation, `task:${record.id}`);
+			started.push(record);
 		}
-		const operation = `handoff:${key}`;
+		this.#tasksChanged(root);
+		return started;
+	}
+
+	/** A new conversation for a task, as the agent or member it is for. */
+	async #taskConversation({ agent, member }: Delegate): Promise<string> {
+		const { id } = await this.harness.sessions.create();
+		await this.harness.session(id).setModel(this.chosenModel());
+		await (await this.harness.conversation(id)).configure(this.#taskAgent(agent, member), BACKGROUND_CONTEXT);
+		if (!member) this.agents.setSession(id, agent.id);
+		return id;
+	}
+
+	/**
+	 * Waits, in memory, for an input to a task's conversation to settle, which
+	 * may finish the task. Nothing keeps the space up for it: a run keeps it
+	 * up, and after a restart `onStart` waits again (`#resumeTasks`).
+	 */
+	#watchTask(conversation: string, operation: string): void {
+		void this.harness
+			.wait(operation, { session: conversation })
+			.then((result) => this.#taskSettled(conversation, result))
+			.catch((error) => console.warn(`waiting for ${operation} failed`, error));
+	}
+
+	/**
+	 * A task is done once its agent has answered its latest input and waits
+	 * for no task it handed out: its answer is that last turn's. A run that
+	 * ended unanswered fails it.
+	 */
+	async #taskSettled(conversation: string, result: PiOperationResult): Promise<void> {
+		const task = this.#tasks.of(conversation);
+		if (!task || task.kind === "review" || TERMINAL_STATES.has(task.state)) return;
+		if (result.operationId !== task.operation || this.#tasks.waitsOnTasks(conversation)) return;
+		const done = result.status === "done";
+		const answer = done ? result.text?.trim() || "(It gave no answer.)" : `It didn't finish: ${result.reason ?? "unanswered"}.`;
+		if (!this.#tasks.finish(task.id, done ? "completed" : "failed", answer)) return;
+		this.#tasksChanged(task.root);
+		await this.#deliver(task.batch);
+	}
+
+	/**
+	 * Gives a conversation the answers of tasks it handed out together, once
+	 * none of them is working: in one message, which wakes it. Those waiting
+	 * for the person are named, and answered in a later update of their own.
+	 */
+	async #deliver(batch: string): Promise<void> {
+		const tasks = this.#tasks.inBatch(batch);
+		const requester = tasks[0]?.requester;
+		if (!requester || tasks.some((task) => task.state === "working")) return;
+		const done = this.#tasks.unanswered(batch);
+		if (done.length === 0) return;
+		// No one is left to tell: the chat that asked was deleted, or the task that asked was canceled.
+		if (this.store.deletedSessions().has(requester) || this.#tasks.of(requester)?.state === "canceled") {
+			this.#tasks.drop(batch);
+			return;
+		}
+		const operation = `task-update:${done.map((task) => task.id).join(",")}`;
+		this.#tasks.giving(
+			done.map((task) => task.id),
+			operation,
+		);
+		await this.#giveUpdate(requester, batch, operation);
+	}
+
+	/** Submits an update `#deliver` marked as being given; again after a restart, which gives it once. */
+	async #giveUpdate(requester: string, batch: string, operation: string): Promise<void> {
+		const tasks = this.#tasks.inBatch(batch);
+		const by = (task: Task) => ({ task, by: task.member ?? this.agents.get(task.agent)?.name ?? "An agent" });
+		const text = taskUpdate(
+			tasks.filter((task) => task.update === operation).map(by),
+			tasks.filter((task) => task.state === "auth-required").map(by),
+		);
 		try {
-			session ??= await this.#startChat(agent, undefined, { from, key });
-			await this.submitTo(session, message, { operationId: operation, whenBusy: "followUp" }, "user");
+			await this.submitTo(requester, text, { operationId: operation, whenBusy: "followUp" }, "task");
 		} catch (error) {
-			return `It couldn't be sent: ${errorMessage(error)}`;
+			console.warn(`giving ${operation} failed`, error);
+			return;
 		}
-		const result = await this.#withReplies(await this.harness.wait(operation, { session }));
-		const id = this.store.publicId(session);
-		const where = `Chat ${id} with ${agent.name}, at /chat/${id}.`;
-		if (result.status !== "done") return `${where}\n${agent.name} didn't finish: ${result.reason ?? "unanswered"}.`;
-		const answer = result.replies.length > 0 ? result.replies.join("\n\n") : "(It sent nothing.)";
-		return `${where}\n${agent.name} answered:\n${answer}`;
+		this.#tasks.given(operation);
+		// An agent at work on a task of its own goes on with the answers, and finishes its task once it has them all.
+		const asking = this.#tasks.of(requester);
+		if (asking && asking.kind !== "review" && !TERMINAL_STATES.has(asking.state)) {
+			this.#tasks.setOperation(asking.id, operation);
+			this.#watchTask(requester, operation);
+		}
+		for (const listener of this.#updateListeners.get(requester) ?? []) listener(operation);
 	}
 
-	/** Gives a member its task and waits for its answer. */
-	async #askMember(conversation: string, task: string, operation: string): Promise<{ ok: boolean; text: string }> {
-		await this.#submit(conversation, task, { operationId: operation }, "member");
-		return this.#memberAnswer(conversation, operation);
+	/** After a restart: waits again for open tasks, and gives updates that may not have been given. */
+	async #resumeTasks(): Promise<void> {
+		for (const task of this.#tasks.open()) this.#watchTask(task.conversation, task.operation);
+		for (const { batch, operation } of this.#tasks.beingGiven()) {
+			const requester = this.#tasks.inBatch(batch)[0]?.requester;
+			if (requester) await this.#giveUpdate(requester, batch, operation);
+		}
 	}
 
-	/** What a member answered to an operation, once it settles. */
-	async #memberAnswer(conversation: string, operation: string): Promise<{ ok: boolean; text: string }> {
-		const result = await this.harness.wait(operation, { session: conversation });
-		return result.status === "done"
-			? { ok: true, text: result.text?.trim() || "(It gave no answer.)" }
-			: { ok: false, text: `It didn't finish: ${result.reason ?? "unanswered"}.` };
+	/** A task's agent waits for the person's decision on an approval: it is `auth-required` until the decision. */
+	async #taskWaits(session: string): Promise<void> {
+		const task = this.#tasks.of(session);
+		if (!task || task.kind === "review" || !this.#tasks.setState(task.id, "auth-required")) return;
+		this.#tasksChanged(task.root);
+		await this.#deliver(task.batch);
+	}
+
+	/**
+	 * Cancels a task not yet done, and the tasks it handed out: their agents
+	 * stop, and their approval requests are denied. Its requester hears it
+	 * was canceled, as it would hear its answer.
+	 */
+	async #cancelTask(task: Task, reason: string): Promise<void> {
+		if (!this.#tasks.finish(task.id, "canceled", reason)) return;
+		for (const handed of this.#tasks.byRequester(task.conversation)) await this.#cancelTask(handed, "The task it was part of was canceled.");
+		for (const approval of this.store.approvals("pending")) {
+			if (approval.session !== task.conversation || !this.store.decideApproval(approval.id, "denied", reason, "user")) continue;
+			this.broadcastMessage({ type: "approval", approval: this.#publicApproval(this.store.approval(approval.id)!) });
+		}
+		await this.harness.session(task.conversation).abort();
+		this.#tasksChanged(task.root);
+		await this.#deliver(task.batch);
+	}
+
+	/** Open apps show a chat's tasks anew. */
+	#tasksChanged(root: string): void {
+		this.broadcastMessage({ type: "tasks", session: this.store.publicId(root) });
+	}
+
+	/** Who waits for updates to a conversation, as the MCP server does for its client. */
+	readonly #updateListeners = new Map<string, Set<(operation: string) => void>>();
+
+	/** Collects the updates given to `session` from now on, in order, until closed. */
+	#listenForUpdates(session: string): { pending(): boolean; next(signal: AbortSignal): Promise<string>; close(): void } {
+		const queue: string[] = [];
+		let wake: (() => void) | null = null;
+		const listener = (operation: string) => {
+			queue.push(operation);
+			wake?.();
+		};
+		const listeners = this.#updateListeners.get(session) ?? new Set();
+		listeners.add(listener);
+		this.#updateListeners.set(session, listeners);
+		return {
+			pending: () => queue.length > 0,
+			next: async (signal) => {
+				while (queue.length === 0) {
+					signal.throwIfAborted();
+					await new Promise<void>((resolve, reject) => {
+						wake = resolve;
+						signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+					});
+					wake = null;
+				}
+				return queue.shift()!;
+			},
+			close: () => {
+				listeners.delete(listener);
+				if (listeners.size === 0) this.#updateListeners.delete(session);
+			},
+		};
 	}
 
 	#agent(id: string): Agent {
@@ -2264,18 +2450,17 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Gives a chat the abilities its agent uses and the apps it lists, and a
-	 * chat with the majordomo the majordomo's own extension, as they
+	 * Gives a chat the abilities its agent uses and the apps it lists, as they
 	 * are now, before its next run: its agent, the agent's blueprint, the extensions or
 	 * the connected apps may have changed since.
-	 * Visits choose their own extensions, and team members get theirs when
-	 * made. A chat whose selection is unchanged isn't written to.
+	 * Visits choose their own extensions, and tasks' conversations get theirs
+	 * when made. A chat whose selection is unchanged isn't written to.
 	 */
 	async #selectAbilities(session: string): Promise<void> {
-		if (this.visits.bySession(session) || this.team.run(session)) return;
+		if (this.visits.bySession(session) || this.#tasks.of(session)) return;
 		const agent = this.agents.ofSession(session);
 		// Apps last: their tools come and go, and pi only appends cheaply at the end.
-		const wanted = [...(agent.majordomo ? [MAJORDOMO_EXTENSION] : []), ...this.extensions.abilitiesOf(agent.blueprint), ...this.#appExtensionsOf(agent)];
+		const wanted = [...this.extensions.abilitiesOf(agent.blueprint), ...this.#appExtensionsOf(agent)];
 		const key = wanted.join(" ");
 		if ((this.agents.abilities(session) ?? "") === key) return;
 		const snapshot = this.registry.snapshot();
@@ -2319,8 +2504,8 @@ export class Pim extends DurableAgent<Env> {
 	async #loadWidget(agent: Agent, ref: string): Promise<ShownWidget> {
 		const widget = this.extensions.widget(ref)!;
 		const deleted = this.store.deletedSessions();
-		// A team member's conversation works for the chat that gave it its task.
-		const chatFor = (session: string) => this.team.run(session)?.session ?? session;
+		// A task's conversation works for the chat the work began in.
+		const chatFor = (session: string) => this.#tasks.of(session)?.root ?? session;
 		const ofAgent = (session: string) => {
 			const chat = chatFor(session);
 			return !this.visits.bySession(chat) && this.agents.ofSession(chat).id === agent.id;
@@ -2347,7 +2532,7 @@ export class Pim extends DurableAgent<Env> {
 	 * the model. None in a visit, or in a team member's conversation.
 	 */
 	#chatWidgets(session: string): { ref: string; description: string }[] {
-		if (this.visits.bySession(session) || this.team.run(session)) return [];
+		if (this.visits.bySession(session) || this.#tasks.of(session)) return [];
 		const blueprint = this.agents.ofSession(session).blueprint;
 		const extensions = new Set([...BUILT_IN_WIDGETS, ...(blueprint ? [blueprint.slice(0, blueprint.indexOf("/"))] : []), ...this.extensions.abilitiesOf(blueprint)]);
 		return this.extensions.list().flatMap((extension) =>
@@ -2763,9 +2948,35 @@ export class Pim extends DurableAgent<Env> {
 		return dispatch(this.#routes, request, new URL(request.url).pathname);
 	}
 
-	/** Conversations that aren't the person's chats: deleted ones, and team members' at work. */
+	/** A task as the API shows it: who does it for whom, and how it went. */
+	#publicTask(task: Task) {
+		const by = (conversation: string) => {
+			const { agent, member } = this.#roleOf(conversation);
+			return { id: agent.id, name: member?.name ?? agent.name, member: member !== null };
+		};
+		return {
+			id: task.id,
+			parent: task.parent,
+			agent: by(task.conversation),
+			from: by(task.requester!),
+			task: task.task,
+			state: task.state,
+			result: task.result,
+			createdAt: task.createdAt,
+			updatedAt: task.updatedAt,
+		};
+	}
+
+	/** One of the tasks the work begun in a chat led to; 404 for any other. */
+	async #taskOf(session: string, id: string): Promise<Task> {
+		const task = this.#tasks.get(id);
+		if (!task || task.kind === "review" || task.root !== (await this.#session(session))) throw new HttpError(404, `No task ${id}`);
+		return task;
+	}
+
+	/** Conversations that aren't the person's chats: deleted ones, and tasks'. */
 	#hiddenSessions(): Set<string> {
-		return new Set([...this.store.deletedSessions(), ...this.team.conversations()]);
+		return new Set([...this.store.deletedSessions(), ...this.#tasks.conversations()]);
 	}
 
 	/** The session a public id names (see `PimStore.publicId`), if it is one of the person's chats. */
@@ -3035,8 +3246,9 @@ export class Pim extends DurableAgent<Env> {
 				await this.images.deleteSession(id);
 				const visit = this.visits.bySession(id);
 				if (visit) this.visits.setSession(visit.ownerId, null);
-				// Nothing keeps working in a chat the user can no longer see.
+				// Nothing keeps working in a chat the user can no longer see, nor in the tasks it handed out.
 				await this.harness.session(id).abort();
+				for (const task of this.#tasks.byRequester(id)) await this.#cancelTask(task, "Its chat was deleted.");
 				const services = this.services();
 				// A task that starts new chats goes on without the chat that scheduled it.
 				for (const schedule of await services.listSchedules()) {
@@ -3105,21 +3317,27 @@ export class Pim extends DurableAgent<Env> {
 				}
 			},
 		],
-		// What a chat's agent handed its team, and each member's conversation, read-only.
+		// The tasks the work begun in a chat led to, as a tree by `parent`, and each task's conversation, read-only.
 		[
 			"GET",
-			"/sessions/:session/team",
-			async ({ session }) => ({
-				runs: this.team.ofSession(await this.#session(session!)).map((run) => ({ ...run, conversation: this.store.publicId(run.conversation), session })),
-			}),
+			"/sessions/:session/tasks",
+			async ({ session }) => ({ tasks: this.#tasks.ofRoot(await this.#session(session!)).map((task) => this.#publicTask(task)) }),
 		],
 		[
 			"GET",
-			"/sessions/:session/team/:conversation",
-			async ({ session, conversation }) => {
-				const run = this.team.run(this.store.sessionOf(conversation!) ?? "");
-				if (!run || run.session !== (await this.#session(session!))) throw new HttpError(404, `No team task ${conversation}`);
-				return { ...run, conversation, session, messages: projectEntries(await this.harness.session(run.conversation).messages()) };
+			"/sessions/:session/tasks/:task",
+			async ({ session, task: id }) => {
+				const task = await this.#taskOf(session!, id!);
+				return { ...this.#publicTask(task), messages: projectEntries(await this.harness.session(task.conversation).messages()) };
+			},
+		],
+		[
+			"POST",
+			"/sessions/:session/tasks/:task/cancel",
+			async ({ session, task: id }) => {
+				const task = await this.#taskOf(session!, id!);
+				await this.#cancelTask(task, "The person canceled it.");
+				return this.#publicTask(this.#tasks.get(task.id)!);
 			},
 		],
 		[

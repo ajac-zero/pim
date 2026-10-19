@@ -195,6 +195,21 @@ describe("untrusted Markdown", () => {
   });
 });
 
+describe("finished Markdown", () => {
+  it("keeps a lone * as written, in a reply and in untrusted text", () => {
+    for (const untrusted of [false, true]) {
+      const text = renderToStaticMarkup(
+        <Markdown
+          text={"Pick the *early one.\n\n_Sent from Pim._"}
+          untrusted={untrusted}
+        />,
+      ).replace(/<[^>]*>/g, "");
+      expect(text).toContain("Pick the *early one.");
+      expect(text.match(/\*/g)).toHaveLength(1);
+    }
+  });
+});
+
 describe("a person's message in their bubble", () => {
   const html = renderToStaticMarkup(
     <Markdown

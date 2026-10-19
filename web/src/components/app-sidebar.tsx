@@ -19,6 +19,7 @@ import {
   ChevronDown,
   Compass,
   Folder,
+  ListFilter,
   MessagesSquare,
   MoreHorizontal,
   Pencil,
@@ -53,6 +54,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import { Input } from "~/components/ui/input";
@@ -62,6 +65,12 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
+import {
+  type ChatView,
+  flatChats,
+  type InboxOrder,
+  useChatListPreferences,
+} from "~/lib/chat-list";
 import { type Agent, pim, type Session, type Visit } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import {
@@ -311,7 +320,7 @@ export function AppSidebar({
         <div
           inert={collapsed}
           className={cn(
-            "flex w-64 shrink-0 flex-col transition-opacity duration-200",
+            "flex min-w-0 flex-1 flex-col transition-opacity duration-200",
             collapsed && "opacity-0",
           )}
         >
@@ -322,7 +331,7 @@ export function AppSidebar({
   );
 }
 
-/** Your chats, a section for each of your agents, and the spaces shared with you. */
+/** Chats grouped by agent, in one inbox, or only with the majordomo. */
 function ChatsPanel({
   awaitingApproval,
   onNavigate,
@@ -339,6 +348,20 @@ function ChatsPanel({
   const params = useParams({ strict: false }) as { sessionId?: string };
   const activeId = params.sessionId;
   const newChat = useNewChat(onNavigate);
+  const { view, order, set } = useChatListPreferences();
+  const viewLabels = {
+    agents: t("agentsView"),
+    inbox: t("inboxView"),
+    majordomo: t("majordomoView"),
+  };
+  const flat = flatChats(
+    sessions ?? [],
+    agents?.find((agent) => agent.majordomo)?.id,
+    view === "majordomo" ? "majordomo" : "inbox",
+    order,
+    search,
+    t("newChat"),
+  );
   const shownVisits = (visits ?? []).filter((visit) =>
     visit.username.toLowerCase().includes(search.toLowerCase()),
   );
@@ -379,6 +402,60 @@ function ChatsPanel({
         </SidebarPanelAction>
       </SidebarPanelHeader>
 
+      <div className="flex items-center justify-between gap-1 px-3 pb-1">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label={t("chatView")}
+              className="flex min-w-0 items-center gap-1 rounded-full px-2 py-1.5 text-muted-foreground text-xs hover:bg-sidebar-accent hover:text-foreground"
+            >
+              <span className="truncate">{viewLabels[view]}</span>
+              <ChevronDown className="size-3.5 shrink-0" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            <DropdownMenuRadioGroup
+              value={view}
+              onValueChange={(value) => set({ view: value as ChatView })}
+            >
+              {(["agents", "inbox", "majordomo"] as const).map((value) => (
+                <DropdownMenuRadioItem key={value} value={value}>
+                  {viewLabels[value]}
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        {view === "inbox" && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-label={t("sortChats")}
+                title={t(order === "unread" ? "unreadFirst" : "recentActivity")}
+                className="shrink-0 rounded-full p-1.5 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+              >
+                <ListFilter className="size-4" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuRadioGroup
+                value={order}
+                onValueChange={(value) => set({ order: value as InboxOrder })}
+              >
+                <DropdownMenuRadioItem value="recent">
+                  {t("recentActivity")}
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="unread">
+                  {t("unreadFirst")}
+                </DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+      </div>
+
       {/* Search */}
       <div className="px-3 pt-1 pb-2">
         <div className="relative">
@@ -396,7 +473,7 @@ function ChatsPanel({
         aria-label={t("chats")}
         className="flex-1 overflow-y-auto px-3 pb-2 scrollbar-thin"
       >
-        {shownVisits.length > 0 && (
+        {view === "agents" && shownVisits.length > 0 && (
           <div className="mb-3">
             <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
               {t("sharedWithYou")}
@@ -413,28 +490,52 @@ function ChatsPanel({
             </ul>
           </div>
         )}
-        {search && shownSections.length === 0 && shownVisits.length === 0 && (
+        {view === "agents" &&
+          search &&
+          shownSections.length === 0 &&
+          shownVisits.length === 0 && (
+            <p className="px-2 py-6 text-center text-muted-foreground text-sm">
+              {t("noChatsMatch")}
+            </p>
+          )}
+        {view === "agents" ? (
+          shownSections.map((section) => (
+            <AgentSectionList
+              key={section.agent.id}
+              section={section}
+              activeId={activeId}
+              awaitingApproval={awaitingApproval}
+              onNavigate={onNavigate}
+            />
+          ))
+        ) : flat.length === 0 ? (
           <p className="px-2 py-6 text-center text-muted-foreground text-sm">
-            {t("noChatsMatch")}
+            {t(search ? "noChatsMatch" : "noChatsYet")}
           </p>
+        ) : (
+          <ul className="space-y-px">
+            {flat.map((session) => (
+              <SessionRow
+                key={session.id}
+                session={session}
+                active={session.id === activeId}
+                awaitingApproval={awaitingApproval.has(session.id)}
+                onNavigate={onNavigate}
+                showAgent={view === "inbox"}
+              />
+            ))}
+          </ul>
         )}
-        {shownSections.map((section) => (
-          <AgentSectionList
-            key={section.agent.id}
-            section={section}
-            activeId={activeId}
-            awaitingApproval={awaitingApproval}
-            onNavigate={onNavigate}
-          />
-        ))}
-        <AgentSettingsDialog>
-          <button
-            type="button"
-            className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-muted-foreground text-xs hover:bg-sidebar-accent hover:text-foreground"
-          >
-            <Plus className="size-3.5" /> {t("newAgent")}
-          </button>
-        </AgentSettingsDialog>
+        {view === "agents" && (
+          <AgentSettingsDialog>
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-muted-foreground text-xs hover:bg-sidebar-accent hover:text-foreground"
+            >
+              <Plus className="size-3.5" /> {t("newAgent")}
+            </button>
+          </AgentSettingsDialog>
+        )}
       </nav>
     </>
   );
@@ -772,11 +873,13 @@ function SessionRow({
   active,
   awaitingApproval,
   onNavigate,
+  showAgent = false,
 }: {
   session: Session;
   active: boolean;
   awaitingApproval: boolean;
   onNavigate?: () => void;
+  showAgent?: boolean;
 }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
@@ -869,9 +972,25 @@ function SessionRow({
           active && "bg-sidebar-accent",
         )}
       >
-        <span className={cn("truncate", !session.title && "italic")}>
-          {title}
+        <span className="min-w-0 flex-1">
+          <span className={cn("block truncate", !session.title && "italic")}>
+            {title}
+          </span>
+          {showAgent && (
+            <span className="block truncate text-muted-foreground text-xs">
+              {session.visit
+                ? `@${session.visit.username}`
+                : session.agent?.name}
+            </span>
+          )}
         </span>
+        {session.unread && (
+          <span
+            className="size-1.5 shrink-0 rounded-full bg-link"
+            role="img"
+            aria-label={t("unreadResponse")}
+          />
+        )}
         {session.busy && (
           <span
             className="size-1.5 shrink-0 animate-pulse rounded-full bg-primary"

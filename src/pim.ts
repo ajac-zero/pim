@@ -1028,6 +1028,11 @@ export class Pim extends DurableAgent<Env> {
 		const pim = this;
 		return {
 			store: this.store,
+			responseSent: (session, at) => {
+				if (this.store.deletedSessions().has(session)) return;
+				this.store.recordResponse(session, at);
+				this.broadcastMessage({ type: "sessions" });
+			},
 			// Read at each use: the person can change these while the space runs.
 			get timeZone() {
 				return pim.settings().timeZone;
@@ -3181,6 +3186,8 @@ export class Pim extends DurableAgent<Env> {
 						title: info?.title ?? null,
 						createdAt: info?.createdAt ?? null,
 						updatedAt: info?.updatedAt ?? null,
+						responseAt: info?.responseAt ?? null,
+						unread: info?.unread ?? false,
 						visit: visit ? { username: visit.username, available: !visit.revoked } : null,
 						agent: this.#agentRef(session.id),
 					};
@@ -3197,6 +3204,18 @@ export class Pim extends DurableAgent<Env> {
 				const agent = agentId === undefined ? this.agents.majordomo() : this.#agent(agentId);
 				const id = await this.#startChat(agent, typeof title === "string" && title.trim() !== "" ? clipTitle(title) : undefined);
 				return { ...this.#sessionInfo(id), agent: this.#agentRef(id) };
+			},
+		],
+		[
+			"POST",
+			"/sessions/:session/read",
+			async ({ session }, request) => {
+				const id = await this.#session(session!);
+				const { responseAt } = await readJson<{ responseAt: number }>(request);
+				if (typeof responseAt !== "number" || !Number.isSafeInteger(responseAt) || responseAt < 0) throw new HttpError(400, "responseAt must be a non-negative integer");
+				this.store.readSession(id, responseAt);
+				this.broadcastMessage({ type: "sessions" });
+				return this.#sessionInfo(id);
 			},
 		],
 		[

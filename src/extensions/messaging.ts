@@ -72,8 +72,9 @@ export function messagingExtension(services: PimServices) {
 				if ("error" in emailed) return text(`Not sent: ${emailed.error}`, true);
 				sent = `Emailed it to ${emailed.to}.`;
 			}
-			// The chat moves up the list; a deleted one stays deleted.
-			if (!services.store.deletedSessions().has(session)) services.store.touchSession(session);
+			// Replaying a delivered reply must not make it unread again.
+			const responseAt = await api.memo("responseAt", Math.max(Date.now(), (services.store.sessionInfo(session)?.responseAt ?? 0) + 1), context);
+			services.responseSent(session, responseAt);
 			if (notify) {
 				const id = await api.memo("notification", crypto.randomUUID(), context);
 				const known = services.store.notification(id);

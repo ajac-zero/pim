@@ -142,6 +142,8 @@ export type SessionInfo = {
 	readonly title: string | null;
 	readonly createdAt: number;
 	readonly updatedAt: number;
+	readonly responseAt: number | null;
+	readonly unread: boolean;
 };
 
 type Row = Record<string, SqlStorageValue>;
@@ -434,6 +436,8 @@ export class PimStore {
 		if (!sessionColumns.includes("deleted_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN deleted_at INTEGER");
 		if (!sessionColumns.includes("summary")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN summary TEXT");
 		if (!sessionColumns.includes("summary_of")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN summary_of TEXT");
+		if (!sessionColumns.includes("response_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN response_at INTEGER");
+		if (!sessionColumns.includes("read_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN read_at INTEGER");
 	}
 
 	// Goals
@@ -752,7 +756,14 @@ export class PimStore {
 	sessionInfo(id: string): SessionInfo | undefined {
 		const [row] = this.#sql.exec("SELECT * FROM pim_sessions WHERE id = ?", id).toArray();
 		return row
-			? { id, title: row.title === null ? null : String(row.title), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) }
+			? {
+				id,
+				title: row.title === null ? null : String(row.title),
+				createdAt: Number(row.created_at),
+				updatedAt: Number(row.updated_at),
+				responseAt: row.response_at === null ? null : Number(row.response_at),
+				unread: Number(row.response_at ?? 0) > Number(row.read_at ?? 0),
+			}
 			: undefined;
 	}
 
@@ -769,6 +780,16 @@ export class PimStore {
 			now,
 			now,
 		);
+	}
+
+	/** A delivered reply is unread until a client acknowledges that reply, not a later one. */
+	recordResponse(id: string, at: number): void {
+		this.touchSession(id);
+		this.#sql.exec("UPDATE pim_sessions SET response_at = MAX(COALESCE(response_at, 0), ?) WHERE id = ?", at, id);
+	}
+
+	readSession(id: string, through: number): void {
+		this.#sql.exec("UPDATE pim_sessions SET read_at = MAX(COALESCE(read_at, 0), MIN(COALESCE(response_at, 0), ?)) WHERE id = ?", through, id);
 	}
 
 	/** pi cannot delete a conversation, so a deleted session is only hidden: from the list and from the API. */

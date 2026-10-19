@@ -230,8 +230,9 @@ describe("the majordomo", () => {
 			Scout: [
 				(context) => {
 					scoutSaw = { prompt: systemPrompt(context.messages), tools: tools(context), message: lastUserText(context.messages) };
-					return fauxAssistantMessage("May: mild and before the crowds.");
+					return toolUse("artifact_create", { title: "Lisbon by month", kind: "markdown", content: "# May" });
 				},
+				() => fauxAssistantMessage("May: mild and before the crowds."),
 			],
 		});
 		expect(await say("When should I go to Lisbon?")).toMatchObject({ status: "done", replies: ["I asked Scout."] });
@@ -254,6 +255,9 @@ describe("the majordomo", () => {
 		// It is no chat, and the person's chat has only what they said and the update.
 		expect(await chats()).toEqual(before);
 		expect(await messagesOf(ROOT, "user")).toEqual(expect.arrayContaining(["When should I go to Lisbon?", results[0]]));
+		// What Scout made belongs to the chat its task began in, so it opens beside that chat.
+		const made = (await api<{ artifacts: { title: string; session: string | null }[] }>("/artifacts")).body.artifacts;
+		expect(made.find((artifact) => artifact.title === "Lisbon by month")?.session).toBe(ROOT);
 
 		// It follows up in the task's conversation, only on a task it handed out, and only to agents that exist.
 		scripts({

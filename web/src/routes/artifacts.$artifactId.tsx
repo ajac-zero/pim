@@ -24,6 +24,8 @@ function ArtifactPage() {
             to: "/artifacts/$artifactId",
             params: { artifactId },
             search: { v: version },
+            // Back leaves the artifact rather than stepping through its versions.
+            replace: true,
           })
         }
         onDeleted={() => void navigate({ to: "/artifacts" })}

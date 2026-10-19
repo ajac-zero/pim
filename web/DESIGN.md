@@ -97,7 +97,7 @@ On narrow screens there is no sidebar. A bar of icons along the bottom, in the s
 ### Messages
 
 - **Agent messages** are plain text on the canvas, without a bubble or icon, using the transcript's whole width so tables, code, and long formatted answers have room. A faint hairline separates an agent's consecutive messages.
-- **User messages** are `--bubble` bubbles with `--bubble-foreground` text, aligned right.
+- **User messages** are `--bubble` bubbles with `--bubble-foreground` text, aligned right. Their Markdown renders as in agent messages, except that line breaks stay as typed and headings are bold text. Links, code, and table lines take the bubble's text color.
 - **Message times** are small muted text under each message: left-aligned under an agent's, right-aligned under a user's bubble. A message from another day shows its date too.
 - **Hover actions** (copy, retry) are bare icons beside the message's time and appear only on hover or keyboard focus.
 - **Timestamps** ("Today 10:01 AM") and **system events** ("Approved: rename the agent", "Scheduled check-in") are centered muted text, never bubbles. A referenced object shows its icon inline and is clickable.

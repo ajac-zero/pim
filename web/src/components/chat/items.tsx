@@ -153,8 +153,8 @@ export const UserMessage = memo(function UserMessage({
         </div>
       )}
       {text.length > 0 && (
-        <div className="min-w-0 max-w-[88%] md:max-w-[80%] whitespace-pre-wrap break-words rounded-2xl bg-bubble px-4 py-3 text-[15px] text-bubble-foreground leading-6">
-          {text}
+        <div className="min-w-0 max-w-[88%] md:max-w-[80%] rounded-2xl bg-bubble px-4 py-3 text-bubble-foreground">
+          <Markdown text={text} bubble />
         </div>
       )}
       {/* Under the message, like an agent's, mirrored to the right. */}

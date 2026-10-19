@@ -195,6 +195,40 @@ describe("untrusted Markdown", () => {
   });
 });
 
+describe("a person's message in their bubble", () => {
+  const html = renderToStaticMarkup(
+    <Markdown
+      bubble
+      text={[
+        "# Packing",
+        "Passport",
+        "Charger",
+        "",
+        "Pick the **cheaper** train, the *early one has too many changes.",
+        "",
+        "![map](https://example.com/map.png) [the route](https://maps.example.com/)",
+      ].join("\n")}
+    />,
+  );
+
+  it("keeps its line breaks and the Markdown it closes, and leaves a lone * as typed", () => {
+    expect(html).toMatch(/Passport<br\/?>\s*Charger/);
+    expect(html).toMatch(/font-semibold[^>]*>cheaper</);
+    expect(html).not.toContain("**");
+    const text = html.replace(/<[^>]*>/g, "");
+    expect(text).toContain("the *early one has too many changes.");
+    // One `*`, the one typed: nothing added to close it.
+    expect(text.match(/\*/g)).toHaveLength(1);
+  });
+
+  it("shows headings as bold text, and loads nothing from elsewhere", () => {
+    expect(html).not.toMatch(/<h[1-6]/);
+    expect(html).toContain('<p class="my-3 font-semibold">Packing</p>');
+    expect(elements(html).map((element) => element.tag)).not.toContain("img");
+    expect(html).toContain('href="https://maps.example.com/"');
+  });
+});
+
 describe("chats an agent names", () => {
   const chat = "7af6a6ec-9d58-489a-b2be-512eda1cb34b";
   // An artifact's id, say: no chat of the person's.

@@ -100,6 +100,35 @@ const chatRemarkPlugins: PluggableList = [
   remarkChatLinks as Pluggable,
 ];
 
+/**
+ * Keeps the line breaks a person typed. Markdown joins lines that aren't
+ * separated by a blank one, which suits a model's writing but not a message
+ * typed with Shift+Enter between its lines.
+ */
+function remarkBreaks() {
+  const visit = (node: MdastNode) => {
+    if (!node.children) return;
+    node.children = node.children.flatMap((child): MdastNode[] => {
+      if (child.type !== "text" || !child.value?.includes("\n")) {
+        visit(child);
+        return [child];
+      }
+      return child.value
+        .split("\n")
+        .flatMap((line, index): MdastNode[] => [
+          ...(index > 0 ? [{ type: "break" }] : []),
+          ...(line ? [{ type: "text", value: line }] : []),
+        ]);
+    });
+  };
+  return (tree: MdastNode) => visit(tree);
+}
+
+const bubbleRemarkPlugins: PluggableList = [
+  ...Object.values(defaultRemarkPlugins),
+  remarkBreaks as Pluggable,
+];
+
 /** Whether a link's origin, when it names one, is this app's. */
 function inApp(origin: string | undefined): boolean {
   return (
@@ -335,11 +364,30 @@ const untrustedComponents = {
   },
 };
 
+/** Colors for text on the canvas or a card, and for text in a person's bubble, which takes them from the bubble's own. */
+const TONES = {
+  page: {
+    link: LINK_CLASS,
+    code: "bg-foreground/[0.06] text-destructive",
+    quote: "border-border text-muted-foreground",
+    line: "border-border",
+    head: "bg-muted/50",
+  },
+  bubble: {
+    link: "underline underline-offset-2",
+    code: "bg-current/15",
+    quote: "border-current/40 opacity-80",
+    line: "border-current/25",
+    head: "bg-current/10",
+  },
+};
+
 export const Markdown = memo(function Markdown({
   text,
   className,
   streaming,
   untrusted,
+  bubble,
 }: {
   text: string;
   className?: string;
@@ -355,7 +403,21 @@ export const Markdown = memo(function Markdown({
    * nothing from elsewhere, and links only go to web or mail addresses.
    */
   untrusted?: boolean;
+  /**
+   * For what a person wrote, in their bubble: shown as `untrusted` text is,
+   * with their line breaks kept, headings as bold paragraphs, and colors
+   * from the bubble. Markdown that isn't closed, such as a lone `*`, stays
+   * as typed.
+   */
+  bubble?: boolean;
 }) {
+  const safe = untrusted || bubble;
+  const tone = bubble ? TONES.bubble : TONES.page;
+  const heading = (props: object) => (
+    <p className="my-3 font-semibold">
+      {(props as { children?: ReactNode }).children}
+    </p>
+  );
   return (
     <div
       className={cn(
@@ -367,12 +429,17 @@ export const Markdown = memo(function Markdown({
       <Streamdown
         isAnimating={streaming}
         animated
-        skipHtml={untrusted}
-        {...(untrusted
-          ? { rehypePlugins: untrustedRehypePlugins }
+        // Streaming mode closes unclosed Markdown, as a reply being written needs; a finished message keeps what was typed.
+        mode={bubble ? "static" : "streaming"}
+        skipHtml={safe}
+        {...(safe
+          ? {
+              rehypePlugins: untrustedRehypePlugins,
+              ...(bubble ? { remarkPlugins: bubbleRemarkPlugins } : {}),
+            }
           : { remarkPlugins: chatRemarkPlugins })}
         components={{
-          ...(untrusted ? untrustedComponents : {}),
+          ...(safe ? untrustedComponents : {}),
           h1: ({ children }) => (
             <h1 className="mt-6 mb-3 font-semibold text-2xl">{children}</h1>
           ),
@@ -385,6 +452,17 @@ export const Markdown = memo(function Markdown({
           h4: ({ children }) => (
             <h4 className="mt-4 mb-2 font-semibold">{children}</h4>
           ),
+          // Headings are too loud in a bubble.
+          ...(bubble
+            ? {
+                h1: heading,
+                h2: heading,
+                h3: heading,
+                h4: heading,
+                h5: heading,
+                h6: heading,
+              }
+            : {}),
           p: ({ children }) => <p className="my-3">{children}</p>,
           ul: ({ children }) => (
             <ul className="my-3 list-disc space-y-1.5 pl-6">{children}</ul>
@@ -394,53 +472,61 @@ export const Markdown = memo(function Markdown({
           ),
           li: ({ children }) => <li className="pl-1">{children}</li>,
           blockquote: ({ children }) => (
-            <blockquote className="my-3 border-border border-l-2 pl-4 text-muted-foreground">
+            <blockquote className={cn("my-3 border-l-2 pl-4", tone.quote)}>
               {children}
             </blockquote>
           ),
-          hr: () => <hr className="my-6 border-border" />,
+          hr: () => <hr className={cn("my-6", tone.line)} />,
           a: ({ href, children }) =>
-            !untrusted && chatOf(href) ? (
+            !safe && chatOf(href) ? (
               <ChatLink id={chatOf(href) as string}>{children}</ChatLink>
-            ) : !untrusted && artifactOf(href) ? (
+            ) : !safe && artifactOf(href) ? (
               <ArtifactLink {...(artifactOf(href) as { id: string })}>
                 {children}
               </ArtifactLink>
-            ) : untrusted && !safeLink(href) ? (
+            ) : safe && !safeLink(href) ? (
               <span>{children}</span>
             ) : (
               <a
                 href={href}
                 target="_blank"
                 rel="noreferrer noopener"
-                className={LINK_CLASS}
+                className={tone.link}
               >
                 {children}
               </a>
             ),
           table: ({ children }) => (
-            <div className="my-4 max-w-full overflow-x-auto rounded-xl border scrollbar-thin">
+            <div
+              className={cn(
+                "my-4 max-w-full overflow-x-auto rounded-xl border scrollbar-thin",
+                tone.line,
+              )}
+            >
               <table className="w-full border-collapse text-sm">
                 {children}
               </table>
             </div>
           ),
           thead: ({ children }) => (
-            <thead className="bg-muted/50 text-left">{children}</thead>
+            <thead className={cn("text-left", tone.head)}>{children}</thead>
           ),
           th: ({ children }) => (
             <th className="px-3 py-2 font-semibold">{children}</th>
           ),
           td: ({ children }) => (
             // A line above each body cell: between rows, and under the header, but not under the table's border.
-            <td className="border-border border-t px-3 py-2">{children}</td>
+            <td className={cn("border-t px-3 py-2", tone.line)}>{children}</td>
           ),
           // Inline `code` spans (single backticks). Fenced blocks are
           // handled separately below by `code`, so this only ever receives
           // inline content.
           inlineCode: ({ children, ...props }) => (
             <code
-              className="rounded-md bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[0.875em] text-destructive"
+              className={cn(
+                "rounded-md px-1.5 py-0.5 font-mono text-[0.875em]",
+                tone.code,
+              )}
               {...props}
             >
               {children}

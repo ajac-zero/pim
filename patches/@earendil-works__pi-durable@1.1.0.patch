@@ -1,0 +1,194 @@
+diff --git a/dist/harness/harness.js b/dist/harness/harness.js
+index fda8aa1e318bdecd77d11ca019217d6c43cfef01..c305ff5311d4f332aa83b1cadff77a7828d461b0 100644
+--- a/dist/harness/harness.js
++++ b/dist/harness/harness.js
+@@ -166,6 +166,10 @@ class HarnessImpl extends SessionImpl {
+     abortTask(id, context) {
+         return this.#tasks.abort(id, context);
+     }
++    resumeTask(id, context) {
++        this.#tasks.resume();
++        return this.#tasks.resumeTask(id, context);
++    }
+     waitForTask(id, context) {
+         this.#tasks.resume();
+         return this.#tasks.waitForTask(id, context);
+diff --git a/dist/harness/scheduler.js b/dist/harness/scheduler.js
+index 6cfe05a35de48c02e98ad07806fb74f2ee80de59..c73723dde187ff67827be0bea9c677566227d2cd 100644
+--- a/dist/harness/scheduler.js
++++ b/dist/harness/scheduler.js
+@@ -62,6 +62,11 @@ export class TaskScheduler {
+      * one of their tasks fails.
+      */
+     #failFastChecks = new Set();
++    /**
++     * Tasks `resumeTask()` was asked to wake before they suspended: each is woken as it suspends. Kept in memory only,
++     * since a task cut off before suspending runs again after reopen anyway.
++     */
++    #resumeRequested = new Set();
+     #reconcileScheduled = false;
+     #cascadePending = false;
+     #unsubscribeRegistry = () => { };
+@@ -152,6 +157,26 @@ export class TaskScheduler {
+             await awaitWithContext(marked.run.done, context);
+         return marked.result;
+     }
++    /**
++     * Wake a suspended task: one `waiting` on no task, which waits for nothing but this call, such as a tool call held
++     * for a person's decision. It becomes `pending` and runs the phase of its checkpoint. A task that is live but not
++     * suspended yet is woken as soon as it suspends.
++     */
++    async resumeTask(id, context) {
++        return this.#session.commitWith(async (tx) => {
++            const current = await tx.task(id);
++            if (current === undefined)
++                throw new Error(`Task ${id} does not exist`);
++            if (current.state.status === "terminal" || current.state.status === "completing")
++                return "terminal";
++            if (isSuspended(current)) {
++                tx.setTask(withState(current, { status: "pending", checkpoint: current.state.checkpoint }));
++                return "resumed";
++            }
++            this.#resumeRequested.add(id);
++            return "requested";
++        }, context);
++    }
+     async waitForTask(id, context) {
+         // Check and register on the line so no terminal publication falls between them.
+         const found = await this.#session.readOnLine(async () => {
+@@ -223,6 +248,7 @@ export class TaskScheduler {
+                 failed.push(record.id);
+             if (record.state.status === "terminal") {
+                 this.#live.delete(record.id);
++                this.#resumeRequested.delete(record.id);
+                 this.#failedMigrations.delete(record.id);
+                 this.#failFastChecks.delete(record.id);
+                 if (this.#conversationOwners.has(record.id))
+@@ -671,6 +697,9 @@ export class TaskScheduler {
+                 for (const record of [...this.#live.values()]) {
+                     if (this.#invocations.has(record.id) || this.#waitingOn(record, owned).length > 0)
+                         continue;
++                    // A suspended task runs only once woken, or to abort.
++                    if (isSuspended(record) && !record.abortRequested)
++                        continue;
+                     if (record.state.status === "completing")
+                         continue;
+                     const runnable = record;
+@@ -770,6 +799,8 @@ export class TaskScheduler {
+             return { kind: "running" };
+         if (record.state.status === "completing")
+             return { kind: "completing" };
++        if (isSuspended(record) && !record.abortRequested)
++            return { kind: "suspended" };
+         const on = this.#waitingOn(record, owned);
+         if (on.length > 0)
+             return { kind: "waiting", on };
+@@ -943,6 +974,11 @@ export class TaskScheduler {
+     async #commitState(tx, invocation, current, next) {
+         if (next.status === "waiting")
+             await this.#validateWait(tx, invocation, current, next.on, next.policy);
++        // Woken before it suspended: it runs again at once.
++        if (next.status === "waiting" && next.on.length === 0 && this.#resumeRequested.delete(current.id)) {
++            tx.setTask(withState(current, { status: "pending", checkpoint: next.checkpoint }));
++            return;
++        }
+         if (next.status === "terminal") {
+             const overlay = overlayOf(tx);
+             await this.#loadScopes(false);
+@@ -1187,6 +1223,10 @@ export class TaskScheduler {
+     }
+ }
+ /** A live owner's durable cancellation intent: its abort mark, or a held outcome other than `completed`. */
++/** A task `waiting` on no task: suspended until `resumeTask()` wakes it. */
++function isSuspended(record) {
++    return record.state.status === "waiting" && record.state.on.length === 0;
++}
+ function cancellationIntent(record) {
+     return record.state.status !== "terminal" && (record.abortRequested || failedOutcome(record));
+ }
+diff --git a/dist/harness/tool.js b/dist/harness/tool.js
+index 4a4c7f8a183971670752709803ea6b67a5d7a6ae..7cd7ad117352b21d8ce4bfa27ac74bd0f0b0cde0 100644
+--- a/dist/harness/tool.js
++++ b/dist/harness/tool.js
+@@ -225,6 +225,11 @@ async function run(runtime, call, tool, args, context) {
+         // is already in the result entry.
+         ending = { status: "failed", message: `Tool ${call.name} threw` };
+     }
++    if (ending === COMPLETED && result?.control?.suspend === true) {
++        if (tool.replay === "safe")
++            return suspend(runtime, args, progress, context, () => (ended = true));
++        result = harnessError("tool_error", `Tool ${call.name} cannot suspend: it is not replay-safe`);
++    }
+     ended = true;
+     reported.output.end();
+     // Details still waiting for a progress commit settle with the terminal commit, the final flush.
+@@ -241,6 +246,29 @@ async function run(runtime, call, tool, args, context) {
+     for (const waiter of pending)
+         waiter.resolve();
+ }
++/**
++ * Suspend the call: commit it `waiting` on no task, at its `execute` phase, so `Harness.resumeTask()` makes it pending
++ * and the tool runs again as on recovery. No result entry is written; the slot keeps what the call reported so far.
++ */
++async function suspend(runtime, args, progress, context, end) {
++    end();
++    const pending = await progress.stop();
++    try {
++        await runtime.commit(async () => ({
++            status: "waiting",
++            checkpoint: { phase: "execute", arguments: args, replay: "safe" },
++            on: [],
++            policy: "allSettled",
++        }), context);
++    }
++    catch (error) {
++        for (const waiter of pending)
++            waiter.reject(error);
++        throw error;
++    }
++    for (const waiter of pending)
++        waiter.resolve();
++}
+ /**
+  * Throttled commits of what the tool reported into its `pi.live.tools` slot, each writing only what changed since the
+  * last one.
+diff --git a/dist/harness/types.d.ts b/dist/harness/types.d.ts
+index b8c1e3749a808e9c91a8d9e0e987b0680cdcbe67..062306b662d0d96f680715263279ec9754f6086e 100644
+--- a/dist/harness/types.d.ts
++++ b/dist/harness/types.d.ts
+@@ -83,6 +83,12 @@ export type ToolControl = {
+     readonly addTools?: readonly string[];
+     readonly terminate?: true;
+     readonly handoff?: string;
++    /**
++     * Suspend the call instead of settling it: no result is written, the run waits, and nothing runs until
++     * `Harness.resumeTask()` wakes the call's task, which then executes the tool again. Only a `replay: "safe"` tool
++     * may suspend; its rerun finds what it was waiting for and returns its result. The rest of the result is ignored.
++     */
++    readonly suspend?: true;
+ };
+ /** Remark about a call for the model and the UI, such as truncation or a spill path; never part of the tool's data. */
+ export type ToolDiagnostic = {
+@@ -424,6 +430,10 @@ export type TaskInspection = {
+         readonly kind: "waiting";
+         readonly on: readonly TaskId[];
+     }
++    /** Waits for nothing but `Harness.resumeTask()`, such as a tool call that suspended. */
++     | {
++        readonly kind: "suspended";
++    }
+     /** Outcome held until its ordinary owned work drains. */
+      | {
+         readonly kind: "completing";
+@@ -530,6 +540,11 @@ export interface Harness extends Session {
+      * definition cannot take it settles as `orphaned` instead.
+      */
+     abortTask(id: TaskId, context: Context): Promise<"marked" | "terminal">;
++    /**
++     * Wake a suspended task (one `waiting` on no task, such as a tool call that suspended): it runs again from its
++     * checkpoint. A live task that has not suspended yet is woken as soon as it does (`requested`).
++     */
++    resumeTask(id: TaskId, context: Context): Promise<"resumed" | "requested" | "terminal">;
+     /** Resolve with the terminal receipt; cancelling `context` cancels only this wait. */
+     waitForTask<R>(id: TaskId<R>, context: Context): Promise<SettledTask<R>>;
+     /** Resolve when the ordinary ownership scope of every ownerless conversation has no live non-background task. */

@@ -1,0 +1,95 @@
+diff --git a/dist/harness/pi/index.d.ts b/dist/harness/pi/index.d.ts
+index 36ac5754a0615b307e0ad69362bc1a19cff08069..cf133a42382d3c313bea7ac17d3550f65e25b75c 100644
+--- a/dist/harness/pi/index.d.ts
++++ b/dist/harness/pi/index.d.ts
+@@ -12,6 +12,7 @@ import {
+   EntryRecord,
+   Extension,
+   Harness,
++  TaskId,
+   ToolRegistration,
+   UserInput
+ } from "@earendil-works/pi-durable";
+@@ -202,6 +203,14 @@ declare class PiHarness extends LifecycleCapability {
+   messages(options?: PiSessionOptions): Promise<EntryRecord[]>;
+   /** Submissions pi has not settled yet, oldest first. */
+   pending(options?: PiSessionOptions): Promise<PiPendingOperation[]>;
++  /**
++   * Wake a task that suspended, such as a tool call held for a person's
++   * decision, and the session's wake job with it.
++   */
++  resumeTask(
++    session: PiSessionId,
++    taskId: TaskId
++  ): Promise<"resumed" | "requested" | "terminal">;
+   /** The opened pi Harness, for anything the interface does not cover. */
+   pi(): Promise<Harness>;
+   /** @internal */
+diff --git a/dist/harness/pi/index.js b/dist/harness/pi/index.js
+index 74e18490d21addac297ac627880e316b326795db..d598e005742751ef51d3c1d7fa25daf2deeb8faf 100644
+--- a/dist/harness/pi/index.js
++++ b/dist/harness/pi/index.js
+@@ -273,6 +273,14 @@ function wakeJobId(session) {
+ function sessionOfJob(payload) {
+ 	return typeof payload === "object" && payload !== null && "session" in payload && typeof payload.session === "string" ? payload.session : void 0;
+ }
++/**
++* Whether a session's live tasks are only suspended ones and tasks waiting on
++* others: nothing can happen until something wakes a suspended task, so the
++* wake job can end and the object sleep.
++*/
++function suspendedOnly(tasks) {
++	return tasks.some((task) => task.state.kind === "suspended") && tasks.every((task) => task.state.kind === "suspended" || task.state.kind === "waiting");
++}
+ /** pi-durable's stored reference to a pi-ai model. */
+ function modelRef(model) {
+ 	return {
+@@ -387,6 +395,17 @@ var PiHarness = class extends LifecycleCapability {
+ 			status: record.status === "queued" ? "queued" : "running"
+ 		}));
+ 	}
++	/**
++	* Wake a task that suspended, such as a tool call held for a person's
++	* decision, and the session's wake job with it, so the object stays up
++	* while the run goes on.
++	*/
++	async resumeTask(session, taskId) {
++		const { pi } = await _assertClassBrand(_PiHarness_brand, this, _open).call(this);
++		const result = await pi.resumeTask(taskId, BG);
++		await _assertClassBrand(_PiHarness_brand, this, _wake).call(this, session);
++		return result;
++	}
+ 	/** The opened pi Harness, for anything the interface does not cover. */
+ 	async pi() {
+ 		return (await _assertClassBrand(_PiHarness_brand, this, _open).call(this)).pi;
+@@ -486,6 +505,7 @@ async function _wakeStep(session) {
+ 	if (!conversation) return void 0;
+ 	const tasks = (await pi.inspect(BG)).tasks.filter((task) => task.record.conversationId === conversation.id);
+ 	if (tasks.length === 0) return _classPrivateFieldGet2(_admitting, this).has(session) ? heartbeat : void 0;
++	if (suspendedOnly(tasks)) return void 0;
+ 	const wakeAt = await _assertClassBrand(_PiHarness_brand, this, _longWait).call(this, pi, conversation.id, BG);
+ 	if (wakeAt !== void 0) return { rescheduleAt: wakeAt };
+ 	if (tasks.every((task) => task.record.background)) return heartbeat;
+@@ -498,8 +518,14 @@ async function _wakeStep(session) {
+ 	return heartbeat;
+ }
+ async function _waitForIdle(conversation) {
++	const { pi } = await _assertClassBrand(_PiHarness_brand, this, _open).call(this);
+ 	const budget = new AbortController();
+ 	const timer = setTimeout(() => budget.abort(), _classPrivateFieldGet2(_waitBudgetMs, this));
++	const check = setInterval(() => {
++		pi.inspect(BG).then((inspection) => {
++			if (suspendedOnly(inspection.tasks.filter((task) => task.record.conversationId === conversation.id))) budget.abort();
++		}, () => {});
++	}, _classPrivateFieldGet2(_heartbeatMs, this));
+ 	try {
+ 		await conversation.waitForIdle(withAbortSignal(budget.signal, BG));
+ 	} catch (error) {
+@@ -509,6 +535,7 @@ async function _waitForIdle(conversation) {
+ 		});
+ 	} finally {
+ 		clearTimeout(timer);
++		clearInterval(check);
+ 	}
+ }
+ /**

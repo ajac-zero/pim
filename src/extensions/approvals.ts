@@ -54,13 +54,14 @@ export function ownToolPermission(store: PimStore, name: string): ResolvedPermis
 
 /**
  * An action with effects outside the conversation. The model can only ask
- * for it: calling the tool files an approval request and returns at once.
- * The Pim runs `run` once the user approves, and the decision, with the
- * result, comes back to the conversation as a message, so a request can wait
- * as long as the user takes. Under the `auto` policy an unanswered request is
- * approved after a while, so autonomous work never stalls. Calls to a tool the
- * user lets run without asking are approved at once, within the turn. A call
- * interrupted by an eviction replays and finds its request.
+ * for it: calling the tool files an approval request and waits for the
+ * decision. The call is suspended meanwhile, so it holds no memory and a
+ * request can wait as long as the user takes. The Pim runs `run` once the
+ * user approves, and the decision wakes the call, which returns it with the
+ * result. Under the `auto` policy an unanswered request is approved after a
+ * while, so autonomous work never stalls. Calls to a tool the user lets run
+ * without asking are approved at once. A call woken or interrupted runs
+ * again and finds its request.
  */
 export type GatedAction<P extends TSchema = TSchema> = {
 	readonly name: string;
@@ -91,14 +92,15 @@ export function approvalNote(services: PimServices, explicit = false): string {
 	const timeout = explicit ? null : services.approvalTimeoutMs;
 	const unanswered =
 		timeout === null ? "the request waits for their answer, however long" : `with no answer in ${describeWait(timeout)} it is approved automatically`;
-	return `Requires the user's approval: calling this asks them and returns at once; ${unanswered}. Their decision, with the action's result, arrives later in this conversation as a message starting with "[Approval". Don't call it again meanwhile.`;
+	return `Requires the user's approval: calling this asks them and waits for their decision; ${unanswered}. The call returns their decision, with the action's result.`;
 }
 
 /**
  * Files an approval request for the gated action `action` from inside a tool
- * call, and says what became of it: run at once when the user lets the tool
- * run without asking, else asked. Replay-safe: a replayed call finds the
- * request it already filed.
+ * call, and returns its outcome: at once when the user lets the tool run
+ * without asking, else once they decide. Until then the call is suspended;
+ * the decision wakes it, and the call runs again and finds the request it
+ * filed, decided. Replay-safe for the same reason.
  */
 export async function fileApproval(
 	services: PimServices,
@@ -122,7 +124,8 @@ export async function fileApproval(
 		onTimeout: timeout === null ? "deny" : "approve",
 		...request,
 	});
-	return text(await services.approvalFiled(approval, known === undefined));
+	const outcome = await services.approvalFiled(approval, known === undefined);
+	return outcome === null ? { control: { suspend: true } } : text(outcome);
 }
 
 function gatedTool(action: GatedAction, services: PimServices, permission: ToolPermission) {

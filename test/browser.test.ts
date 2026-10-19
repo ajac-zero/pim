@@ -2,7 +2,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Approval } from "../src/store";
-import { api, apiUrl, decisionRun, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
 import { faux } from "./worker";
 
 /** A page with a form whose button changes the page, so a click shows in what's read after. */
@@ -63,23 +63,21 @@ describe("the browser", () => {
 		const order = refOf(page, "button", "Order");
 
 		// Typing asks, naming the field as the page labels it.
-		faux.setResponses([toolUse("browser_type", { ref: name, text: "Ada" }), toolUse("send_to_user", { message: "Asked." })]);
-		await say("Put my name in.");
+		faux.setResponses([toolUse("browser_type", { ref: name, text: "Ada" }), toolUse("send_to_user", { message: "Typed." })]);
+		const naming = say("Put my name in.");
 		const typing = await pendingApproval();
 		expect(typing.summary).toBe("On a page the agent wrote, type “Ada” into the text box “Name”");
-		faux.setResponses([toolUse("send_to_user", { message: "Typed." })]);
 		await post<Approval>(`/approvals/${typing.id}/approve`);
-		expect(await decisionRun(typing)).toMatchObject({ status: "done" });
+		expect(await naming).toMatchObject({ status: "done", replies: ["Typed."] });
 
-		// So does clicking; the page as it is after comes back with the decision.
-		faux.setResponses([toolUse("browser_click", { ref: order }), toolUse("send_to_user", { message: "Asked." })]);
-		await say("Order it.");
+		// So does clicking; the page as it is after comes back with the decision, as the call's result.
+		faux.setResponses([toolUse("browser_click", { ref: order }), toolUse("send_to_user", { message: "Ordered." })]);
+		const ordering = say("Order it.");
 		const clicking = await pendingApproval();
 		expect(clicking.summary).toBe("On a page the agent wrote, click the button “Order”");
-		faux.setResponses([toolUse("send_to_user", { message: "Ordered." })]);
 		const decided = await post<Approval>(`/approvals/${clicking.id}/approve`);
 		expect(decided.body.result).toContain("# Ordered for Ada");
-		expect(await decisionRun(clicking)).toMatchObject({ status: "done" });
+		expect(await ordering).toMatchObject({ status: "done", replies: ["Ordered."] });
 
 		// The person can see where it is.
 		expect((await api("/browser")).body).toEqual({ available: true, page: { url: FORM, title: "Orders" } });

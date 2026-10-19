@@ -110,7 +110,7 @@ People then make agents built on it: Your agents → New agent → Based on blue
 
 It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps`, `tasks`; see [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable#extensions)), plus `actions`. The ability is installed under the extension's id and selected only in the chats of spaces that use it, and in their team members' conversations.
 
-- **Actions ask first.** Each `GatedAction` becomes a tool that files an approval and returns at once. `run` runs only once the person approves, or their approval policy approves it. Actions are listed in Settings → Permissions with Pim's own, where they can be turned Off, Ask or On.
+- **Actions ask first.** Each `GatedAction` becomes a tool that files an approval and waits, suspended, for the decision. `run` runs only once the person approves, or their approval policy approves it, and the call returns the decision with its result. Actions are listed in Settings → Permissions with Pim's own, where they can be turned Off, Ask or On.
 - **Names are checked.** An ability whose tool or action has the name of one of Pim's tools, or of another extension's, stops the agent with an error. pi would let the later tool replace the earlier one, so an extension could otherwise stand in for `send_to_user` or a tool that asks first. Prefix your tools' names with your extension's.
 - **Code-level trust.** An ability runs in the person's agent, with what the context gives it and whatever its code can reach, such as `fetch`. Install only extensions you would merge into Pim itself.
 

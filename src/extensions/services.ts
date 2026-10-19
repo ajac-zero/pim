@@ -39,12 +39,12 @@ export type PimServices = {
 	 */
 	readonly approvalTimeoutMs: number | null;
 	/**
-	 * Takes a just-filed approval (`isNew`) or one a replayed call found, and
-	 * returns what the model reads: the outcome, when it is decided already
-	 * or the user lets the tool run without asking; else that the user was
-	 * asked, and is told once, with the decision to come as a message.
+	 * Takes a just-filed approval (`isNew`) or one a call woken by its
+	 * decision found, and returns the outcome the model reads when it is
+	 * decided already or the user lets the tool run without asking. Else it
+	 * asks the user, once, and returns null: the call waits for the decision.
 	 */
-	approvalFiled(approval: Approval, isNew: boolean): Promise<string>;
+	approvalFiled(approval: Approval, isNew: boolean): Promise<string | null>;
 	/** The user's permission for the tool that filed the approval: `on` approves it without asking. */
 	permission(approval: Approval): ToolPermission;
 	/** The team member a conversation is, and the chat it works for; null for a chat of the person's. */

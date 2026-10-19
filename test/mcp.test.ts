@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { Approval } from "../src/store";
 import { MANAGE_APPS, UPDATE_AGENT } from "../src/extensions/agents";
-import { api, apiUrl, decisionRun, lastUserText, OWNER, pendingApproval, post, say, systemPrompt, toolUse, url } from "./helpers";
+import { api, apiUrl, OWNER, pendingApproval, post, say, systemPrompt, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /**
@@ -200,25 +200,25 @@ describe("connected apps (MCP)", () => {
 		expect(system).toContain("## Calendar [id: test.ledger/calendar]\\nTimes are in Eastern time.");
 	});
 
-	it("runs a tool that changes things once the user approves, and tells the conversation", async () => {
+	it("runs a tool that changes things once the user approves, and returns the result to the call", async () => {
 		let reported = "";
-		faux.setResponses([toolUse("calendar_create_event", { title: "Lunch with Ana", day: "friday" }), toolUse("send_to_user", { message: "Asked." })]);
-		await say("Book lunch with Ana on Friday.");
+		faux.setResponses([
+			toolUse("calendar_create_event", { title: "Lunch with Ana", day: "friday" }),
+			(context) => {
+				reported = toolResults(context.messages);
+				return toolUse("send_to_user", { message: "Booked." });
+			},
+		]);
+		const turn = say("Book lunch with Ana on Friday.");
 		const approval = await pendingApproval();
 		expect(created).toEqual([]);
 		expect(approval.summary).toBe('Calendar: create_event {"title":"Lunch with Ana","day":"friday"}');
 
-		faux.setResponses([
-			(context) => {
-				reported = lastUserText(context.messages);
-				return toolUse("send_to_user", { message: "Booked." });
-			},
-		]);
 		const decided = await post<Approval>(`/approvals/${approval.id}/approve`);
 		expect(decided.body).toMatchObject({ status: "approved", result: 'Created "Lunch with Ana" on friday.' });
 		expect(created).toEqual([{ title: "Lunch with Ana", day: "friday" }]);
-		expect(await decisionRun(approval)).toMatchObject({ status: "done", text: "Booked." });
-		expect(reported).toContain('Created "Lunch with Ana" on friday.');
+		expect(await turn).toMatchObject({ status: "done", text: "Booked." });
+		expect(reported).toContain('Created \\"Lunch with Ana\\" on friday.');
 	});
 
 	it("follows each app's approval policy", async () => {
@@ -264,7 +264,7 @@ describe("connected apps (MCP)", () => {
 			chosen: "on",
 			changed: true,
 		});
-		faux.setResponses([toolUse("calendar_create_event", { title: "Run", day: "monday" }), toolUse("send_to_user", { message: "Asked." })]);
+		faux.setResponses([toolUse("calendar_create_event", { title: "Run", day: "monday" }), toolUse("send_to_user", { message: "Not added." })]);
 		const turn = say("Add a run on Monday.");
 		const approval = await pendingApproval();
 		expect(approval.summary).toBe('Calendar: create_event {"title":"Run","day":"monday"}');
@@ -496,6 +496,9 @@ describe("connected apps (MCP)", () => {
 		const agent = (await post("/agents", { name: "Researcher", instructions: "Research carefully." })).body;
 		const session = (await post("/sessions", { agent: agent.id })).body.id;
 		let found = "";
+		let tools: string[] = [];
+		let outcome = "";
+		let result = "";
 		faux.setResponses([
 			toolUse("find_app", { app: "firecrawl" }),
 			(context) => {
@@ -506,13 +509,22 @@ describe("connected apps (MCP)", () => {
 				found += toolResults(context.messages);
 				return toolUse(MANAGE_APPS, { add: [app] });
 			},
-			toolUse("send_to_user", { message: "Please approve the connection." }),
+			// Once approved, the call returns, and the turn goes on with the app's tools.
+			(context) => {
+				tools = offered(context.messages);
+				outcome = toolResults(context.messages);
+				return toolUse("firecrawl_search", { query: "turbines" });
+			},
+			(context) => {
+				result = toolResults(context.messages);
+				return toolUse("send_to_user", { message: "Searched." });
+			},
 		]);
-		await say("Connect Firecrawl and search for turbines", session);
+		const turn = say("Connect Firecrawl and search for turbines", session);
+		const approval = await pendingApproval();
 		// The directory's apps only: one this Pim doesn't offer is refused before anyone is asked.
 		expect(found).toContain("- Firecrawl [id: test.ledger/firecrawl]: Crawls web pages.");
 		expect(found).toContain("This Pim offers no app test.ledger/nope");
-		const approval = await pendingApproval();
 		expect(approval).toMatchObject({ action: MANAGE_APPS, tool: null, expiresAt: null, onTimeout: "deny", summary: "Researcher: add and connect Firecrawl" });
 		await new Promise((resolve) => setTimeout(resolve, 1_600));
 		expect((await api(`/approvals/${approval.id}`)).body.status).toBe("pending");
@@ -525,19 +537,8 @@ describe("connected apps (MCP)", () => {
 		expect(permission).toMatchObject({ permission: "ask", choices: ["off", "ask"] });
 		// A pending edit applies only its app delta, not a stale snapshot of the agent.
 		await api(`/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ instructions: "Cite sources." }) });
-		let tools: string[] = [];
-		let outcome = "";
-		let result = "";
-		faux.setResponses([
-			(context) => {
-				tools = offered(context.messages);
-				outcome = lastUserText(context.messages);
-				return toolUse("firecrawl_search", { query: "turbines" });
-			},
-			(context) => { result = toolResults(context.messages); return toolUse("send_to_user", { message: "Searched." }); },
-		]);
 		expect((await post(`/approvals/${approval.id}/approve`)).body.result).toContain("Connected Firecrawl.");
-		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
+		expect(await turn).toMatchObject({ status: "done", replies: ["Searched."] });
 		expect(tools).toContain("firecrawl_search");
 		expect(outcome).toContain("Connected Firecrawl.");
 		expect(result).toContain("No notes match turbines.");
@@ -549,13 +550,12 @@ describe("connected apps (MCP)", () => {
 		expect(servers).toEqual([expect.objectContaining({ id: "firecrawl", state: "ready", agents: ["Researcher", "Other researcher"] })]);
 
 		// Removing it from this agent does not disconnect it or remove it from another agent.
-		faux.setResponses([toolUse(MANAGE_APPS, { remove: [app] }), toolUse("send_to_user", { message: "Waiting." })]);
-		await say("Stop working with Firecrawl", session);
+		faux.setResponses([toolUse(MANAGE_APPS, { remove: [app] }), toolUse("send_to_user", { message: "Removed." })]);
+		const removing = say("Stop working with Firecrawl", session);
 		const removal = await pendingApproval();
 		expect(removal.summary).toBe("Researcher: remove Firecrawl");
-		faux.setResponses([toolUse("send_to_user", { message: "Removed." })]);
 		await post(`/approvals/${removal.id}/approve`);
-		expect(await decisionRun(removal)).toMatchObject({ status: "done" });
+		expect(await removing).toMatchObject({ status: "done", replies: ["Removed."] });
 		expect((await api(`/agents/${agent.id}`)).body.apps).toEqual([]);
 		expect((await api(`/agents/${other.id}`)).body.apps).toEqual([app]);
 		expect((await api("/mcp")).body.servers.find((server: { id: string }) => server.id === "firecrawl")).toMatchObject({ state: "ready", approval: "writes" });
@@ -574,14 +574,13 @@ describe("connected apps (MCP)", () => {
 		const app = "test.ledger/down";
 		const agent = (await post("/agents", { name: "App manager" })).body;
 		const session = (await post("/sessions", { agent: agent.id })).body.id;
-		faux.setResponses([toolUse(MANAGE_APPS, { add: [app] }), toolUse("send_to_user", { message: "Waiting." })]);
-		await say("Add this server", session);
+		faux.setResponses([toolUse(MANAGE_APPS, { add: [app] }), toolUse("send_to_user", { message: "Understood." })]);
+		const adding = say("Add this server", session);
 		const approval = await pendingApproval();
 		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: MANAGE_APPS, permission: "off" }) });
 		expect((await post(`/approvals/${approval.id}/approve`)).status).toBe(403);
-		faux.setResponses([toolUse("send_to_user", { message: "Understood." })]);
 		await post(`/approvals/${approval.id}/deny`);
-		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
+		expect(await adding).toMatchObject({ status: "done", replies: ["Understood."] });
 		expect((await api(`/agents/${agent.id}`)).body.apps).toEqual([]);
 		let tools: string[] = [];
 		let result = "";
@@ -590,23 +589,27 @@ describe("connected apps (MCP)", () => {
 				tools = offered(context.messages);
 				return toolUse(UPDATE_AGENT, { add_apps: [app], instructions: "Keep it short." });
 			},
-			toolUse("send_to_user", { message: "Waiting." }),
+			toolUse("send_to_user", { message: "Edited." }),
 		]);
-		await say("Try the old edit tool", session);
+		const editing = say("Try the old edit tool", session);
+		const edit = await pendingApproval();
 		expect(tools).not.toContain(MANAGE_APPS);
 		expect(tools).toContain(UPDATE_AGENT);
-		const edit = await pendingApproval();
-		faux.setResponses([toolUse("send_to_user", { message: "Edited." })]);
 		await post(`/approvals/${edit.id}/approve`);
-		expect(await decisionRun(edit)).toMatchObject({ status: "done" });
+		expect(await editing).toMatchObject({ status: "done", replies: ["Edited."] });
 		expect((await api(`/agents/${agent.id}`)).body).toMatchObject({ apps: [], instructions: "Keep it short." });
 		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: MANAGE_APPS, permission: null }) });
-		faux.setResponses([toolUse(MANAGE_APPS, { add: [app] }), toolUse("send_to_user", { message: "Waiting." })]);
-		await say("Try the unavailable server again", session);
+		faux.setResponses([
+			toolUse(MANAGE_APPS, { add: [app] }),
+			(context) => {
+				result = toolResults(context.messages);
+				return toolUse("send_to_user", { message: "Connection failed." });
+			},
+		]);
+		const retrying = say("Try the unavailable server again", session);
 		const retry = await pendingApproval();
-		faux.setResponses([(context) => { result = lastUserText(context.messages); return toolUse("send_to_user", { message: "Connection failed." }); }]);
 		await post(`/approvals/${retry.id}/approve`);
-		expect(await decisionRun(retry)).toMatchObject({ status: "done" });
+		expect(await retrying).toMatchObject({ status: "done", replies: ["Connection failed."] });
 		expect(result).toContain("was added, but connecting failed");
 		expect(result).toContain("Use connect_app to retry");
 		expect((await api(`/agents/${agent.id}`)).body.apps).toEqual([app]);

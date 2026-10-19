@@ -6,7 +6,7 @@ import { checkToolNames, PimExtensions } from "../src/extensions/define";
 import { themes as ownThemes } from "../src/extensions/themes";
 import { nord } from "../src/extensions/themes/nord";
 import { PimThemes, type Theme, type ThemeList } from "../src/themes";
-import { api, apiUrl, decisionRun, lastUserText, pendingApproval, post, ROOT, say, systemPrompt, toolUse } from "./helpers";
+import { api, apiUrl, lastUserText, pendingApproval, post, ROOT, say, systemPrompt, toolUse } from "./helpers";
 import { faux, ledger, outbox } from "./worker";
 
 type Agent = { id: string; name: string; blueprint: string | null; majordomo: boolean };
@@ -309,13 +309,12 @@ describe("extensions", () => {
 		expect(offered(member)).not.toContain("send_to_user");
 
 		// An action asks first; approved, it runs with the extension's data.
-		faux.setResponses([toolUse("ledger_pay_bill", { name: "Rent" }), toolUse("send_to_user", { message: "Asked." })]);
-		await say("Pay the rent.", chat);
+		faux.setResponses([toolUse("ledger_pay_bill", { name: "Rent" }), toolUse("send_to_user", { message: "Paid." })]);
+		const paying = say("Pay the rent.", chat);
 		const approval = await pendingApproval();
 		expect(approval).toMatchObject({ action: "ledger_pay_bill", summary: "Pay Rent", session: chat });
-		faux.setResponses([fauxAssistantMessage("Paid.")]);
 		expect((await post(`/approvals/${approval.id}/approve`)).body).toMatchObject({ status: "approved", result: "Paid Rent." });
-		await vi.waitFor(async () => expect((await decisionRun(approval)).status).toBe("done"));
+		expect(await paying).toMatchObject({ status: "done", replies: ["Paid."] });
 		expect(widget(await dashboard(books), "test.ledger/bills").items).toEqual([]);
 		// It is one of the tools Settings sets the permission of.
 		const permissions = (await api("/permissions")).body.tools.map((tool: { tool: string }) => tool.tool);

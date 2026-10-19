@@ -68,6 +68,7 @@ import {
   accountQuery,
   agentsQuery,
   approvalsQuery,
+  extensionsQuery,
   notificationsQuery,
   profileQuery,
   sessionsQuery,
@@ -75,6 +76,7 @@ import {
 } from "~/lib/queries";
 import { closeTab } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
+import { version } from "../../../package.json";
 
 type T = ReturnType<typeof useI18n>["t"];
 
@@ -212,14 +214,7 @@ export function AppSidebar({
           aria-label={t("navigation")}
           className="flex w-16 shrink-0 flex-col items-center gap-1 bg-sidebar-accent/40 py-3"
         >
-          <Link
-            to="/"
-            className="mb-2 flex size-10 items-center justify-center rounded-xl transition-colors hover:bg-sidebar-accent"
-            aria-label="Pim"
-          >
-            {/* The logo is the wordmark, so no "Pim" label beside it. */}
-            <PimMark className="h-4 w-8" />
-          </Link>
+          <SidebarLogo />
           <RailPanel
             {...railPanel}
             panel="notifications"
@@ -480,6 +475,36 @@ function RailItem({
         className={SIDEBAR_TOOLTIP_CLASS}
       >
         {count > 0 ? `${label} (${count})` : label}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/**
+ * The deployment's logo (`logo` in `pim.config.ts`), or Pim's own mark, at the
+ * top of the rail. It goes nowhere; hovering it shows which Pim this is.
+ */
+function SidebarLogo() {
+  const { data, isPending } = useQuery(extensionsQuery());
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div className="mb-2 flex size-10 items-center justify-center">
+          {/* Nothing until the logo is known, so Pim's mark doesn't flash before another. */}
+          {isPending ? null : data?.logo ? (
+            <img src={data.logo} alt="" className="size-8 object-contain" />
+          ) : (
+            <PimMark className="h-4 w-8" />
+          )}
+        </div>
+      </TooltipTrigger>
+      <TooltipContent
+        side="right"
+        sideOffset={12}
+        showArrow={false}
+        className={SIDEBAR_TOOLTIP_CLASS}
+      >
+        v{version}
       </TooltipContent>
     </Tooltip>
   );

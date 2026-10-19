@@ -176,7 +176,7 @@ export type Agent = {
 };
 
 /** Where a widget's item leads. */
-export type WidgetLink = { chat: string } | { artifact: string };
+export type WidgetLink = { chat: string } | { artifact: string; chat?: string };
 
 export type WidgetListItem = {
   title: string;

@@ -44,8 +44,12 @@ import {
 } from "~/lib/pim-view";
 import { approvalsQuery } from "~/lib/queries";
 
-/** Tools whose answer names an artifact version, shown as the artifact itself. */
-const ARTIFACT_TOOLS = new Set(["artifact_create", "artifact_update"]);
+/** Tools whose answer names an artifact version, shown as the artifact itself: one made, changed or shown again. */
+const ARTIFACT_TOOLS = new Set([
+  "artifact_create",
+  "artifact_update",
+  "artifact_show",
+]);
 
 /** What each model problem tells the person; never the provider's own text. */
 const PROBLEM_TEXT: Record<ModelProblem, TranslationKey> = {

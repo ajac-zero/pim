@@ -199,7 +199,7 @@ A `link` is `{ chat }` or `{ artifact }`: the item opens it. `{ artifact, chat }
 - `timeZone`: the person's.
 - `data`: the data of the extension that brings the widget.
 
-A widget that throws shows as failed, with the error logged; the dashboard's other widgets still load. The built-in widgets are `pim.schedule/upcoming`, `pim.goals/active`, `pim.memory/recent` and `pim.artifacts/recent`. Memory is shared by every agent in a space, so `pim.memory/recent` shows the same everywhere in that space.
+A widget that throws shows as failed, with the error logged; the dashboard's other widgets still load. The built-in widgets are `pim.schedule/upcoming`, `pim.goals/active`, `pim.memory/recent` and `pim.artifacts/recent`. Memory is shared by every agent in a space, so `pim.memory/recent` shows the same everywhere in that space. `pim.artifacts/recent` is only for dashboards: it shows what the agent's own chats made, so in a chat an agent shows an artifact with `artifact_show`.
 
 ### In chat
 

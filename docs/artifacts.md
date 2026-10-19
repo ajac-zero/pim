@@ -21,9 +21,10 @@ Artifacts are documents, small interactive pages, React apps, drawings and diagr
 | `artifact_create` | `{ title, kind, content, files? }`: a new artifact at version 1. `content` is its main file; `files` its others, each `{ path, content }` or `{ path, from_file }` (a path in the person's files to copy) |
 | `artifact_update` | `{ id, base_version, path?, edits \| content, files?, delete_files?, title? }`: a new version. `edits` (find-and-replace pairs, each matching exactly once) or `content` change one file, the main one unless `path` names another; `files` adds or replaces whole files; `delete_files` removes them. Files it doesn't mention stay. The same files again make no version |
 | `artifact_read` | `{ id, version?, path?, offset? }`: one file of the latest or a given version, the main one unless `path` names another, 60,000 characters at a time, with the list of its files |
-| `artifact_list` | Every artifact's id, title, kind, latest version, size and files |
+| `artifact_show` | `{ id, version? }`: shows the latest or a given version in the chat, as the block that opens it, changing nothing. For one made in another chat, such as on a task for another agent |
+| `artifact_list` | `{ query? }`: every artifact's id, title, kind, latest version, size and files, from every chat; with `query`, those whose title has all its words |
 
-`artifact_create` and `artifact_update` answer with a reference (`{ artifact: { id, title, kind, version, sha256, size } }`), never the content. The web app shows that answer as the artifact. A replayed call (after an eviction) returns the version it made instead of making another. The tools need no approval: they change nothing outside the owner's own space.
+`artifact_create`, `artifact_update` and `artifact_show` answer with a reference (`{ artifact: { id, title, kind, version, sha256, size } }`), never the content. The web app shows that answer as the artifact. A replayed call (after an eviction) returns the version it made instead of making another. The tools need no approval: they change nothing outside the owner's own space.
 
 ## The API
 

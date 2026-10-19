@@ -110,7 +110,7 @@ export function artifactsExtension({ artifacts, assertOpen, readFile }: Artifact
 
 	const create = defineTool({
 		name: "artifact_create",
-		description: `Make an artifact: a document or small interactive page (an app, a chart, a game, a report) the user can open, keep, and get new versions of. Use it for anything the user will look at or use again, rather than pasting long HTML into the chat. To point the user to an artifact in a message, link it as [its title](/artifacts/<id>): it opens beside the chat. content is its main file. ${HOW_IT_RUNS}`,
+		description: `Make an artifact: a document or small interactive page (an app, a chart, a game, a report) the user can open, keep, and get new versions of. Use it for anything the user will look at or use again, rather than pasting long HTML into the chat. content is its main file. ${HOW_IT_RUNS}`,
 		parameters: Type.Object({
 			title: Type.String({ minLength: 1, maxLength: 200 }),
 			kind: Type.Union(ARTIFACT_KINDS.map((kind) => Type.Literal(kind))),
@@ -224,14 +224,34 @@ export function artifactsExtension({ artifacts, assertOpen, readFile }: Artifact
 		},
 	});
 
+	const show = defineTool({
+		name: "artifact_show",
+		description:
+			"Show the user an artifact that already exists, such as one made in another chat, as the card in this chat that opens it beside the chat: the latest version, or the one asked for. It changes nothing; don't make a new version just to show one. Find its id with artifact_list.",
+		parameters: Type.Object({
+			id: Type.String(),
+			version: Type.Optional(Type.Integer({ minimum: 1 })),
+		}),
+		replay: "safe",
+		async execute({ id, version }) {
+			const found = artifacts.version(id, version);
+			if (!found) return text(version === undefined ? `No artifact ${id}.` : `No version ${version} of artifact ${id}.`, true);
+			const summary = artifacts.get(id)!;
+			return reference(found, summary.title, summary.kind, `Showed version ${found.version}. The user sees it in the chat.`);
+		},
+	});
+
 	const list = defineTool({
 		name: "artifact_list",
-		description: "List the user's artifacts: id, title, kind, latest version and size, most recently changed first.",
-		parameters: Type.Object({}),
+		description: "List the user's artifacts, made in any chat: id, title, kind, latest version and size, most recently changed first. Give query to find ones by title.",
+		parameters: Type.Object({
+			query: Type.Optional(Type.String({ description: "Words the title has, in any case and order." })),
+		}),
 		replay: "safe",
-		async execute() {
-			const all = artifacts.list();
-			if (all.length === 0) return text("No artifacts yet.");
+		async execute({ query }) {
+			const words = (query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+			const all = artifacts.list().filter((artifact) => words.every((word) => artifact.title.toLowerCase().includes(word)));
+			if (all.length === 0) return text(words.length > 0 ? `No artifact's title has ${words.join(" and ")}.` : "No artifacts yet.");
 			return text(
 				all
 					.map(
@@ -243,12 +263,17 @@ export function artifactsExtension({ artifacts, assertOpen, readFile }: Artifact
 		},
 	});
 
-	return defineExtension({ name: "pim.artifacts", tools: [create, update, read, list] });
+	return defineExtension({ name: "pim.artifacts", tools: [create, update, read, show, list] });
 }
 
 const KIND_NAMES: Record<ArtifactKind, string> = { html: "HTML", markdown: "Markdown", svg: "SVG", mermaid: "Diagram", jsx: "App" };
 
-/** On a dashboard: what the space made most recently. Artifacts made outside any chat are the majordomo's. */
+/**
+ * On a dashboard: what the space made most recently. Artifacts made outside
+ * any chat are the majordomo's. It has no description, so agents don't show
+ * it in chats: it leaves out what other agents' chats made, so an agent
+ * shows one artifact with `artifact_show` instead.
+ */
 export function artifactsWidgets(artifacts: ArtifactStore) {
 	return definePimExtension({
 		id: "pim.artifacts",
@@ -257,7 +282,6 @@ export function artifactsWidgets(artifacts: ArtifactStore) {
 		widgets: {
 			recent: {
 				title: { en: "Recently made", es: "Hecho recientemente" },
-				description: "The artifacts changed most recently in this space, each opening the artifact beside the chat it was made in.",
 				empty: { en: "Nothing made yet. Ask for a document, a checklist or a small page.", es: "Nada hecho aún. Pide un documento, una lista o una página pequeña." },
 				load: ({ agent, chatOf }) => ({
 					kind: "list",

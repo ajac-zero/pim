@@ -1,17 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Link,
-  useCanGoBack,
-  useNavigate,
-  useRouter,
-} from "@tanstack/react-router";
-import {
-  type FormEvent,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { Link, useCanGoBack, useRouter } from "@tanstack/react-router";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
   ARTIFACT_LANGUAGES,
@@ -22,7 +11,6 @@ import {
 import { useI18n } from "~/components/i18n";
 import {
   ArrowLeft,
-  ArrowUp,
   ChevronDown,
   Code,
   Download,
@@ -51,7 +39,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
-import { Input } from "~/components/ui/input";
 import {
   ApiError,
   type ArtifactDetail,
@@ -72,7 +59,7 @@ import { cn } from "~/lib/utils";
  * An artifact with its versions: a preview or its source, the person's own
  * edits, sharing, and the rest in a menu. It fills its own page, or the
  * canvas beside the chat it was made in (`onClose`), where the chat's
- * composer takes the place of the box that asks Pim for changes.
+ * composer takes the place of the button that starts a chat about changes.
  */
 export function ArtifactView({
   artifactId,
@@ -99,7 +86,6 @@ export function ArtifactView({
   const [draft, setDraft] = useState<string | null>(null);
   // The file the source view shows and the editor changes; the main one when unset.
   const [file, setFile] = useState<string>();
-  const preview = useRef<HTMLDivElement>(null);
   const [printing, setPrinting] = useState(false);
   const donePrinting = useCallback(() => setPrinting(false), []);
   const {
@@ -369,6 +355,26 @@ export function ArtifactView({
                 {t("artifactRestore")}
               </Button>
             )}
+            {!onClose && isLatest && (
+              <Button
+                asChild
+                size="sm"
+                variant="outline"
+                className="h-8 @max-2xl:w-8 @max-2xl:px-0"
+              >
+                <Link
+                  to="/"
+                  search={{ prompt: `/artifacts/${artifact.id}\n\n` }}
+                  aria-label={t("chatWithAgent")}
+                  title={t("artifactAsk")}
+                >
+                  <MessageCircle className="size-3.5" />
+                  <span className="hidden @2xl:inline">
+                    {t("chatWithAgent")}
+                  </span>
+                </Link>
+              </Button>
+            )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -498,7 +504,7 @@ export function ArtifactView({
             className="min-h-0 flex-1 resize-none rounded-lg border bg-background p-3 font-mono text-sm leading-6 outline-none scrollbar-thin focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20"
           />
         ) : view === "preview" ? (
-          <div ref={preview} className="min-h-0 flex-1">
+          <div className="min-h-0 flex-1">
             <ArtifactPreview
               id={artifactId}
               version={version}
@@ -528,9 +534,6 @@ export function ArtifactView({
               </p>
             )}
           </div>
-        )}
-        {!onClose && isLatest && draft === null && (
-          <AskPim artifact={artifact} preview={preview} />
         )}
         {printing && (
           <ArtifactPrint
@@ -727,131 +730,4 @@ function languageOf(path: string, kind: ArtifactKind) {
   return extension in languages
     ? languages[extension as keyof typeof languages]
     : ARTIFACT_LANGUAGES[kind];
-}
-
-/** What's selected in an element, as the person last left it there; kept when focus moves elsewhere. */
-function useSelectionIn(
-  container: React.RefObject<HTMLElement | null>,
-  reset: unknown,
-) {
-  const [selected, setSelected] = useState("");
-  // biome-ignore lint/correctness/useExhaustiveDependencies: another version starts with nothing selected
-  useEffect(() => {
-    setSelected("");
-  }, [reset]);
-  useEffect(() => {
-    const onChange = () => {
-      const selection = document.getSelection();
-      const text = selection?.toString().trim() ?? "";
-      if (
-        text &&
-        selection?.anchorNode &&
-        container.current?.contains(selection.anchorNode)
-      ) {
-        setSelected(text.replace(/\s+/g, " ").slice(0, 500));
-      }
-    };
-    document.addEventListener("selectionchange", onChange);
-    return () => document.removeEventListener("selectionchange", onChange);
-  }, [container]);
-  return [selected, setSelected] as const;
-}
-
-/**
- * Asks the agent to change the artifact, in the chat it was made in (or a
- * new one, if that chat is gone), about what's selected in a Markdown
- * artifact if anything is, then opens that chat.
- */
-function AskPim({
-  artifact,
-  preview,
-}: {
-  artifact: ArtifactDetail;
-  preview: React.RefObject<HTMLDivElement | null>;
-}) {
-  const { t } = useI18n();
-  const navigate = useNavigate();
-  const [request, setRequest] = useState("");
-  const [selected, setSelected] = useSelectionIn(
-    preview,
-    `${artifact.id}:${artifact.version}`,
-  );
-  const ask = useMutation({
-    mutationFn: async (text: string) => {
-      let session = artifact.session;
-      if (session) {
-        try {
-          await pim.send(session, text);
-          return session;
-        } catch (failure) {
-          if (!(failure instanceof ApiError && failure.status === 404)) {
-            throw failure;
-          }
-        }
-      }
-      session = (await pim.createSession()).id;
-      await pim.send(session, text);
-      return session;
-    },
-    onSuccess: (session) =>
-      void navigate({
-        to: "/chat/$sessionId",
-        params: { sessionId: session },
-        search: { artifact: artifact.id },
-      }),
-    onError: (failure) => toast.error(failure.message),
-  });
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    const wanted = request.trim();
-    if (!wanted || ask.isPending) return;
-    const message = t("artifactAskMessage", {
-      title: artifact.title,
-      id: artifact.id,
-      version: artifact.version,
-      request: wanted,
-    });
-    ask.mutate(
-      selected
-        ? `${message}\n\n${t("artifactAskAboutMessage", { text: selected })}`
-        : message,
-    );
-  };
-  return (
-    <form onSubmit={submit} className="flex flex-col gap-1.5">
-      {selected && (
-        <span className="flex max-w-full items-center gap-1 self-start rounded-full bg-muted py-0.5 pr-1 pl-3 text-muted-foreground text-xs">
-          <span className="truncate">
-            {t("artifactAskAbout", { text: selected })}
-          </span>
-          <button
-            type="button"
-            aria-label={t("artifactAskClear")}
-            onClick={() => setSelected("")}
-            className="rounded-full p-0.5 hover:bg-accent"
-          >
-            <X className="size-3" />
-          </button>
-        </span>
-      )}
-      <div className="flex items-center gap-2">
-        <Input
-          value={request}
-          onChange={(event) => setRequest(event.target.value)}
-          placeholder={t("artifactAskPlaceholder")}
-          aria-label={t("artifactAskPlaceholder")}
-          maxLength={2000}
-        />
-        <Button
-          type="submit"
-          size="icon"
-          className="size-10 shrink-0 rounded-full"
-          aria-label={t("sendMessage")}
-          disabled={!request.trim() || ask.isPending}
-        >
-          <ArrowUp className="size-4" />
-        </Button>
-      </div>
-    </form>
-  );
 }

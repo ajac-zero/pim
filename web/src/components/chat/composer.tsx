@@ -2,6 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
+import { ArtifactIcon } from "~/components/artifact";
 import { useI18n } from "~/components/i18n";
 import {
   ArrowUp,
@@ -21,7 +22,7 @@ import {
   usePromptInputController,
 } from "~/components/ui/prompt-input";
 import { pim, type UserContent } from "~/lib/pim-api";
-import { modelQuery } from "~/lib/queries";
+import { artifactQuery, modelQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 export interface ComposerProps {
@@ -35,6 +36,8 @@ export interface ComposerProps {
   disclaimer?: ReactNode;
   autoFocus?: boolean;
   promptSuggestions?: string[];
+  /** Editable text to start a new message with; nothing is sent automatically. */
+  initialInput?: string;
   /** Keeps unsent text under this key, such as the chat's id, while other chats are open. */
   draftKey?: string;
 }
@@ -63,7 +66,10 @@ const MAX_SENT_BYTES = 1_000_000;
 export function Composer(props: ComposerProps) {
   return (
     <PromptInputProvider
-      initialInput={props.draftKey ? drafts.get(props.draftKey) : undefined}
+      initialInput={
+        (props.draftKey ? drafts.get(props.draftKey) : undefined) ??
+        props.initialInput
+      }
     >
       <ComposerInner {...props} />
     </PromptInputProvider>
@@ -84,6 +90,18 @@ function ComposerInner({
   const { t } = useI18n();
   const controller = usePromptInputController();
   const text = controller.textInput.value;
+  // The reference stays in the message sent to Pim, but reads as a titled chip.
+  const reference =
+    /^\/artifacts\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\?v=\d+)?(?:\n\n|$)/i.exec(
+      text,
+    );
+  const { data: artifact } = useQuery({
+    ...artifactQuery(reference?.[1]?.toLowerCase() ?? ""),
+    enabled: Boolean(reference),
+  });
+  // Missing or unknown references stay editable as text.
+  const prefix = artifact && reference ? reference[0] : "";
+  const inputText = text.slice(prefix.length);
   useEffect(() => {
     if (!draftKey) return;
     if (text) drafts.set(draftKey, text);
@@ -94,6 +112,11 @@ function ComposerInner({
   const inputId = useId();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const touchInput = window.matchMedia("(pointer: coarse)").matches;
+  useEffect(() => {
+    if (!autoFocus || touchInput) return;
+    const input = textareaRef.current;
+    if (input) input.setSelectionRange(input.value.length, input.value.length);
+  }, [autoFocus, touchInput]);
   const [preparing, setPreparing] = useState(false);
   const files = controller.attachments.files;
   const hasText = text.trim().length > 0;
@@ -182,6 +205,31 @@ function ComposerInner({
           "focus-within:border-ring/60",
         )}
       >
+        {prefix && artifact && (
+          <div className="px-3 pt-3">
+            <span className="inline-flex max-w-full items-center gap-2 rounded-full bg-muted py-1 pr-1 pl-3 text-sm">
+              <ArtifactIcon
+                kind={artifact.kind}
+                className="size-4 shrink-0 text-muted-foreground"
+              />
+              <span className="truncate">{artifact.title}</span>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="size-6 shrink-0 rounded-full text-muted-foreground"
+                aria-label={t("removeArtifact", { name: artifact.title })}
+                disabled={disabled || improve.isPending}
+                onClick={() => {
+                  controller.textInput.setInput(inputText);
+                  textareaRef.current?.focus();
+                }}
+              >
+                <X className="size-3" />
+              </Button>
+            </span>
+          </div>
+        )}
         {files.length > 0 && (
           <ul className="flex flex-wrap gap-2 px-3 pt-3">
             {files.map((file) => (
@@ -225,6 +273,19 @@ function ComposerInner({
           <PromptInputTextarea
             ref={textareaRef}
             id={inputId}
+            value={inputText}
+            onChange={(event) =>
+              controller.textInput.setInput(
+                (prefix ? `${prefix.trimEnd()}\n\n` : "") +
+                  event.currentTarget.value,
+              )
+            }
+            onKeyDown={(event) => {
+              if (prefix && !inputText && event.key === "Backspace") {
+                event.preventDefault();
+                controller.textInput.setInput("");
+              }
+            }}
             placeholder={placeholder ?? t("messagePim")}
             disabled={disabled || improve.isPending}
             autoFocus={autoFocus && !touchInput}

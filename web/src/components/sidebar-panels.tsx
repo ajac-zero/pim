@@ -293,11 +293,6 @@ export function ArtifactsPanel({ onNavigate }: { onNavigate?: () => void }) {
   const { t, formatDate } = useI18n();
   const { data } = useQuery(artifactsQuery());
   const { data: shared } = useQuery(sharedArtifactsQuery());
-  const { data: sessions } = useQuery(sessionsQuery());
-  const openArtifact = useSearch({
-    strict: false,
-    select: (search: { artifact?: string }) => search.artifact,
-  });
   return (
     <>
       <SidebarPanelHeader title={t("artifacts")} />
@@ -320,40 +315,19 @@ export function ArtifactsPanel({ onNavigate }: { onNavigate?: () => void }) {
               />
             </>
           );
-          // An artifact opens beside the chat it was made in, while that chat is there.
-          const chat = sessions?.some(
-            (session) => session.id === artifact.session,
-          )
-            ? artifact.session
-            : null;
           return (
             <li key={artifact.id}>
-              {chat ? (
-                <Link
-                  to="/chat/$sessionId"
-                  params={{ sessionId: chat }}
-                  search={{ artifact: artifact.id }}
-                  onClick={onNavigate}
-                  className={cn(
-                    ROW_CLASS,
-                    openArtifact === artifact.id && "bg-sidebar-accent",
-                  )}
-                >
-                  {row}
-                </Link>
-              ) : (
-                <Link
-                  to="/artifacts/$artifactId"
-                  params={{ artifactId: artifact.id }}
-                  search={{ v: artifact.version }}
-                  onClick={onNavigate}
-                  className={ROW_CLASS}
-                  activeOptions={{ includeSearch: false }}
-                  activeProps={{ className: "bg-sidebar-accent" }}
-                >
-                  {row}
-                </Link>
-              )}
+              <Link
+                to="/artifacts/$artifactId"
+                params={{ artifactId: artifact.id }}
+                search={{ v: artifact.version }}
+                onClick={onNavigate}
+                className={ROW_CLASS}
+                activeOptions={{ includeSearch: false }}
+                activeProps={{ className: "bg-sidebar-accent" }}
+              >
+                {row}
+              </Link>
             </li>
           );
         })}

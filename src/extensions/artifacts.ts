@@ -35,7 +35,7 @@ const READ_CHARS = 60_000;
 
 const HOW_IT_RUNS =
 	"An HTML artifact is a page, index.html: put its CSS in <style> and its JavaScript in <script>, or in files of its own (see files). " +
-	"It runs in a sandbox: fetch, forms, and anything from the web (scripts, stylesheets, fonts, images) are blocked, and so are cookies, localStorage and alert(). " +
+	"It runs in a sandbox: fetch and XMLHttpRequest are blocked, even for its own files and data: URLs, and so are forms, anything from the web (scripts, stylesheets, fonts, images), cookies, localStorage and alert(). " +
 	"That doesn't stop it sending data out: it can still navigate itself away, so treat what it contains, and what the user types into it, as possibly visible to others. " +
 	"Don't put passwords, codes or personal details in an artifact unless the user asks. " +
 	"Images must be inline (data: URLs or SVG) or files of its own. It shows in the chat and on a full screen, including on phones, so make it responsive. " +
@@ -50,7 +50,7 @@ const HOW_IT_RUNS =
 	"The user is asked once per version before ask or a tool first runs; tools that ask before they run can't be used. Show a message when a call fails. " +
 	`A jsx artifact is a React app, App.jsx: \`export default function App() { ... }\`, with hooks from "react". It may import ${JSX_MODULES.map((name) => `"${name}"`).join(", ")} (charts and icons), and its own files, and is styled with Tailwind classes. It's compiled when you save it: a compile error comes back to you to fix. ` +
 	"HTML and JSX artifacts can have more files than the main one, by relative path (\"app.js\", \"components/Chart.jsx\", \"data.json\", \"images/logo.png\"): " +
-	"a page loads its own with <script src=\"app.js\">, <link rel=\"stylesheet\" href=\"style.css\"> and <img src=\"images/logo.png\">, and reads data from <script type=\"application/json\" id=\"data\" src=\"data.json\"> (JSON.parse(document.getElementById(\"data\").textContent)); " +
+	"a page loads its own with <script src=\"app.js\">, <link rel=\"stylesheet\" href=\"style.css\"> and <img src=\"images/logo.png\">, and reads data from <script type=\"application/json\" id=\"data\" src=\"data.json\"> (JSON.parse(document.getElementById(\"data\").textContent)), and keeps markup it reuses in <template> elements in index.html, not files of its own; " +
 	"an app imports them: import Chart from \"./components/Chart\", import rows from \"./data.json\", import \"./styles.css\", import logo from \"./logo.png\" (a URL). " +
 	"Give a file's content as text, or from_file: a path in the user's files (/workspace/...) to copy, for an image or a dataset the user has. Split a large app into files, and change one with edits and path.";
 
@@ -257,7 +257,7 @@ export function artifactsWidgets(artifacts: ArtifactStore) {
 		widgets: {
 			recent: {
 				title: { en: "Recently made", es: "Hecho recientemente" },
-				description: "The artifacts changed most recently in this space, each opening the artifact.",
+				description: "The artifacts changed most recently in this space, each opening the artifact beside the chat it was made in.",
 				empty: { en: "Nothing made yet. Ask for a document, a checklist or a small page.", es: "Nada hecho aún. Pide un documento, una lista o una página pequeña." },
 				load: ({ agent, chatOf }) => ({
 					kind: "list",
@@ -266,12 +266,15 @@ export function artifactsWidgets(artifacts: ArtifactStore) {
 						.filter((artifact) => (artifact.session === null ? agent.majordomo : chatOf(artifact.session) !== null))
 						.sort((a, b) => b.updatedAt - a.updatedAt)
 						.slice(0, 5)
-						.map((artifact) => ({
-							title: artifact.title,
-							detail: `${KIND_NAMES[artifact.kind]} · v${artifact.version}`,
-							time: new Date(artifact.updatedAt).toISOString(),
-							link: { artifact: artifact.id },
-						})),
+						.map((artifact) => {
+							const chat = artifact.session === null ? null : chatOf(artifact.session);
+							return {
+								title: artifact.title,
+								detail: `${KIND_NAMES[artifact.kind]} · v${artifact.version}`,
+								time: new Date(artifact.updatedAt).toISOString(),
+								link: chat === null ? { artifact: artifact.id } : { artifact: artifact.id, chat },
+							};
+						}),
 				}),
 			},
 		},

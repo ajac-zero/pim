@@ -189,7 +189,7 @@ A widget is data of a kind the web app knows how to draw. `load` runs in the per
 | `list` | `{ title, detail?, time?, link? }` | Rows. `time` is ISO 8601, shown in the person's language and time zone |
 | `progress` | `{ title, value, max, detail?, link? }` | A bar with `value/max`, and the detail under it |
 
-A `link` is `{ chat }` or `{ artifact }`: the item opens it.
+A `link` is `{ chat }` or `{ artifact }`: the item opens it. `{ artifact, chat }` opens the artifact beside that chat.
 
 `load` gets:
 

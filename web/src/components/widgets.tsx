@@ -189,11 +189,13 @@ function ItemLink({
   children: ReactNode;
 }) {
   const className = cn(ROW, link && "hover:bg-muted");
-  if (link && "chat" in link) {
+  // An artifact with a chat opens beside it, in the canvas.
+  if (link?.chat) {
     return (
       <Link
         to="/chat/$sessionId"
         params={{ sessionId: link.chat }}
+        search={"artifact" in link ? { artifact: link.artifact } : {}}
         className={className}
       >
         {children}

@@ -145,7 +145,7 @@ describe("extensions", () => {
 		// Memory is shared by every agent; a forgotten memory is gone from it.
 		expect(widget(board, "pim.memory/recent").items.map((item: { title: string }) => item.title)).toEqual(["Prefers morning runs"]);
 		const artifact = widget(board, "pim.artifacts/recent").items;
-		expect(artifact).toMatchObject([{ title: "Training plan", link: { artifact: expect.any(String) } }]);
+		expect(artifact).toMatchObject([{ title: "Training plan", link: { artifact: expect.any(String), chat } }]);
 
 		// The default agent's dashboard shows its own chats' things, not the coach's.
 		const home = await dashboard(mine);

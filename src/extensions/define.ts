@@ -28,8 +28,8 @@ export { oauth2 } from "./native-apps";
 /** Text an extension shows people: one string, or one per language, with English always there. */
 export type Text = string | { readonly en: string; readonly [locale: string]: string };
 
-/** Where a widget's item leads: one of the person's chats, or an artifact. */
-export type WidgetLink = { readonly chat: string } | { readonly artifact: string };
+/** Where a widget's item leads: one of the person's chats, or an artifact, beside the chat it names, if any. */
+export type WidgetLink = { readonly chat: string } | { readonly artifact: string; readonly chat?: string };
 
 export type ListItem = {
 	readonly title: string;

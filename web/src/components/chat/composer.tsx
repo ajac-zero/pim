@@ -173,18 +173,24 @@ function ComposerInner({
   const showSuggestions = promptSuggestions.length > 0 && !hasContent && !busy;
 
   return (
-    <div className="w-full">
+    <div className="relative w-full">
       {showSuggestions && (
-        <Suggestions className="mb-3 px-1">
-          {promptSuggestions.map((suggestion) => (
-            <Suggestion
-              key={suggestion}
-              suggestion={suggestion}
-              disabled={disabled}
-              onClick={send}
-            />
-          ))}
-        </Suggestions>
+        // They float over what's above the composer, which scrolls on beneath them, so they take none of its room.
+        // Radix positions the scroll area itself, so a wrapper places it.
+        <div className="pointer-events-none absolute inset-x-0 bottom-full z-10">
+          <Suggestions>
+            {promptSuggestions.map((suggestion) => (
+              <Suggestion
+                key={suggestion}
+                suggestion={suggestion}
+                disabled={disabled}
+                onClick={send}
+                variant="outline"
+                className="pointer-events-auto shadow-[0_4px_14px_-4px_rgb(0_0_0/0.2)]"
+              />
+            ))}
+          </Suggestions>
+        </div>
       )}
 
       <PromptInput

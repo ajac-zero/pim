@@ -75,7 +75,8 @@ function DashboardPage() {
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-        <div className="mx-auto w-full max-w-4xl px-4 py-8 md:py-12">
+        {/* Bottom room so the last card scrolls clear of the suggestions floating over it. */}
+        <div className="mx-auto w-full max-w-4xl px-4 pt-8 pb-20 md:pt-12">
           <header className="mb-6 flex items-center gap-3">
             {agent.icon === null && agent.symbol === null ? (
               <span

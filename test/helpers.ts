@@ -75,12 +75,6 @@ export async function pendingApproval() {
 	});
 }
 
-/** The run an approval's decision started in its conversation, once settled. */
-export async function decisionRun(approval: Approval) {
-	const { body } = await api(`/sessions/${approval.session}/operations/${encodeURIComponent(`approval:${approval.id}`)}`);
-	return body as { status: string; replies: string[]; text?: string };
-}
-
 /** Opens the WebSocket and collects every message the server sends. */
 export async function connect(session?: string) {
 	const query = new URLSearchParams({ token: TOKEN, ...(session ? { session } : {}) });

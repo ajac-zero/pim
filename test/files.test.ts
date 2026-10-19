@@ -4,7 +4,7 @@ import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Approval } from "../src/store";
 import type { Limits } from "../src/usage";
-import { api, apiUrl, decisionRun, OWNER, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, OWNER, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
@@ -120,16 +120,15 @@ describe("files", () => {
 		const before = await storedObjects();
 		await upload("/workspace/old/scan.pdf", PDF);
 		expect(await storedObjects()).toBe(before + 1);
-		faux.setResponses([toolUse("file_delete", { path: "/workspace/old", recursive: true }), toolUse("send_to_user", { message: "Asked." })]);
-		await say("Clean up the old folder.");
+		faux.setResponses([toolUse("file_delete", { path: "/workspace/old", recursive: true }), toolUse("send_to_user", { message: "Deleted." })]);
+		const cleaning = say("Clean up the old folder.");
 		const approval = await pendingApproval();
 		expect(approval.summary).toBe("Delete /workspace/old and everything in it");
 		expect((await raw("/files/content?path=/workspace/old/draft.txt")).status).toBe(200);
 
-		faux.setResponses([toolUse("send_to_user", { message: "Deleted." })]);
 		const decided = await post<Approval>(`/approvals/${approval.id}/approve`);
 		expect(decided.body.status).toBe("approved");
-		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
+		expect(await cleaning).toMatchObject({ status: "done", replies: ["Deleted."] });
 		expect((await api("/files?path=/workspace/old")).status).toBe(404);
 		expect(await storedObjects()).toBe(before);
 	});

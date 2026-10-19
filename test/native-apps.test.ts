@@ -2,7 +2,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { api, decisionRun, OWNER, pendingApproval, post, ROOT, say, toolUse, url } from "./helpers";
+import { api, OWNER, pendingApproval, post, ROOT, say, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /**
@@ -123,13 +123,12 @@ describe("apps extensions implement", () => {
 		expect(transcript).toContain('{\\"title\\":\\"Savings\\",\\"detail\\":\\"900\\"}');
 
 		// A tool that doesn't only read asks first, and runs with the approval.
-		faux.setResponses([toolUse("bank_transfer", { amount: 5 }), toolUse("send_to_user", { message: "Asked." })]);
-		await say("Move 5 to savings");
+		faux.setResponses([toolUse("bank_transfer", { amount: 5 }), toolUse("send_to_user", { message: "Moved." })]);
+		const moving = say("Move 5 to savings");
 		const approval = await pendingApproval();
 		expect(approval).toMatchObject({ action: "mcp_call", summary: 'Bank: transfer {"amount":5}' });
-		faux.setResponses([toolUse("send_to_user", { message: "Moved." })]);
 		expect((await post(`/approvals/${approval.id}/approve`)).body.result).toBe("Moved 5.");
-		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
+		expect(await moving).toMatchObject({ status: "done", replies: ["Moved."] });
 	});
 
 	it("renew a credential about to expire before using it, once", async () => {

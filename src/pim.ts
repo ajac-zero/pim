@@ -14,6 +14,7 @@ import {
 	Harness,
 	type HarnessSettings,
 	type ModelRef,
+	type TaskId,
 	ROOT_CONVERSATION_ID,
 } from "@earendil-works/pi-durable";
 import { type AgentMcpOAuthProvider, Agent as DurableAgent, type Connection, type ConnectionContext, DurableObjectOAuthClientProvider, getAgentByName, type Schedule, type WSMessage } from "agents";
@@ -137,8 +138,8 @@ import {
 } from "./store";
 import { type Agent, type AgentInput, AgentStore, agentInput, type TeamMember } from "./agents";
 import type { AgentIcon, ArtifactToPublish } from "./gallery";
-import { type Role, TEAM_EXTENSION, type TeamRun, TeamStore, teamExtension } from "./team";
-import { CHAT_REPORT, DECIDE_APPROVAL, MAJORDOMO_EXTENSION, introduction, majordomoExtension, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension } from "./majordomo";
+import { type Role, TEAM_EXTENSION, TeamStore, teamExtension } from "./team";
+import { DECIDE_APPROVAL, MAJORDOMO_EXTENSION, introduction, majordomoExtension, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension } from "./majordomo";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { projectEntries } from "./transcript";
 import { ARTIFACT_ASK, conversationText, IMPROVE_PROMPT, NAME_CHAT, SUMMARIZE_CHAT, type UtilityTask } from "./utility";
@@ -1096,8 +1097,6 @@ export class Pim extends DurableAgent<Env> {
 		for (const connection of this.getConnections<SocketState>()) {
 			if (connection.state?.session) await this.#watch(connection, connection.state.session);
 		}
-		// Members' answers after an approval that an eviction kept from their chats.
-		for (const { run, operation } of this.team.reports()) void this.#report(run, operation);
 	}
 
 	/**
@@ -1408,15 +1407,16 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * What a gated tool call returns once its approval is filed. A decided
-	 * approval (a replayed call) returns its outcome; a tool the user lets run
-	 * without asking runs now, and the turn goes on with its result. Otherwise
-	 * the user is asked, once: the request goes to their open apps and devices,
-	 * and an `auto` approval's timeout is set. Under the `majordomo` policy,
-	 * another agent's request goes to the majordomo instead, which asks the
-	 * user only if it must (see `#review`). The decision comes back later as
-	 * a message (see `decideApproval`), so the turn need not wait for it.
+	 * approval (the call its decision woke) returns its outcome; a tool the
+	 * user lets run without asking runs now, and the turn goes on with its
+	 * result. Otherwise the user is asked, once: the request goes to their
+	 * open apps and devices, and an `auto` approval's timeout is set. Under the
+	 * `majordomo` policy, another agent's request goes to the majordomo
+	 * instead, which asks the user only if it must (see `#review`). Then it
+	 * returns null, and the call waits, suspended, until the decision wakes it
+	 * (see `decideApproval`).
 	 */
-	async #approvalFiled(approval: Approval, isNew: boolean): Promise<string> {
+	async #approvalFiled(approval: Approval, isNew: boolean): Promise<string | null> {
 		if (approval.status !== "pending") return this.#outcome(approval);
 		if (this.#approvalPermission(approval) === "on") {
 			return this.#outcome(await this.decideApproval(approval.id, "approve", undefined, "always", { inTurn: true }));
@@ -1429,10 +1429,7 @@ export class Pim extends DurableAgent<Env> {
 			await this.schedule(new Date(Date.now() + REVIEW_MS), REVIEW_EXPIRY_CALLBACK, { id: approval.id });
 			void this.keepAliveWhile(() => this.#review(reviewing));
 		}
-		if (this.store.approval(approval.id)?.review) {
-			const { name } = this.agents.majordomo();
-			return `[Approval ${approval.id}] Asked ${name}, the person's majordomo, who decides for them or asks them: ${approval.summary}. The decision, with the result, will arrive in this conversation as a message starting with "[Approval ${approval.id}]". Don't call it again; go on with anything that doesn't depend on it.`;
-		}
+		if (this.store.approval(approval.id)?.review) return null;
 		if (isNew) {
 			this.broadcastMessage({ type: "approval", approval: this.#publicApproval(approval) });
 			const notification = this.store.addNotification({
@@ -1447,7 +1444,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 		// Again on a replay: an approval filed before timeouts were scheduled gets one too. Deciding twice is refused.
 		if (approval.expiresAt !== null) await this.schedule(new Date(approval.expiresAt), APPROVAL_EXPIRY_CALLBACK, { id: approval.id });
-		return `[Approval ${approval.id}] Asked the user: ${approval.summary}. Their decision, with the result, will arrive in this conversation as a message starting with "[Approval ${approval.id}]". Don't call it again; go on with anything that doesn't depend on it.`;
+		return null;
 	}
 
 	/** How long approvals filed under `policy` wait before they are approved; null waits for the user however long. */
@@ -1481,9 +1478,10 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Applies a decision (made without the user, with `auto`). An approved
-	 * action runs here. The outcome goes to the requesting conversation as a
-	 * message, joining its run if one is going; decided `inTurn`, the tool
-	 * call that filed it returns the outcome itself.
+	 * action runs here. The decision wakes the tool call that filed it, which
+	 * waits suspended, and the call returns the outcome; decided `inTurn`, the
+	 * call returns it at once. A request whose call no longer waits, because
+	 * its chat was stopped, deleted or reset, is denied without running.
 	 */
 	async decideApproval(
 		id: string,
@@ -1499,6 +1497,12 @@ export class Pim extends DurableAgent<Env> {
 		if (decision === "approve" && this.actions.find((action) => action.name === approval.action)?.explicitApproval) {
 			if (auto) throw new HttpError(400, "This action requires an explicit decision for each request");
 			if (this.#approvalPermission(approval) === "off") throw new HttpError(403, "This capability is turned off");
+		}
+		const call = approval.requestedBy || options.inTurn ? undefined : await this.#waitingCall(approval);
+		const stopped = call === null;
+		if (stopped) {
+			decision = "deny";
+			note = "Its chat stopped before the decision, so nothing ran.";
 		}
 		if (!this.store.decideApproval(id, decision === "approve" ? "approved" : "denied", note ?? null, auto ?? "user")) {
 			throw new HttpError(409, `Approval ${id} is already ${approval.status}`);
@@ -1531,21 +1535,24 @@ export class Pim extends DurableAgent<Env> {
 			}
 			return decided;
 		}
-		if (!options.inTurn) {
-			const operation = `approval:${id}`;
-			await this.submitTo(approval.session, this.#outcome(decided), { operationId: operation, whenBusy: "steer" }, "approval");
-			// A member whose task already ended answers its agent's chat once it has gone on; one still at work answers the task.
-			const run = this.team.run(approval.session);
-			if (run && run.status !== "running") {
-				this.team.setStatus(run.conversation, "running");
-				this.team.setReport(run.conversation, operation);
-				void this.#report(run, operation);
-			}
-			// What an agent says next in a chat the majordomo started reaches the majordomo too.
-			const from = this.agents.handedBy(approval.session);
-			if (from) void this.#forwardHandoff(approval.session, from, operation);
+		if (call) {
+			// What it approved may have changed the agent, such as its apps: the turn goes on with the tools it has now.
+			await this.#selectAbilities(approval.session);
+			await this.harness.resumeTask(approval.session, call);
 		}
 		return decided;
+	}
+
+	/** The task of the tool call waiting for `approval`'s decision, or null when none is. */
+	async #waitingCall(approval: Approval): Promise<TaskId | null> {
+		const { tasks } = await (await this.harness.pi()).inspect(BACKGROUND_CONTEXT);
+		const call = tasks.find(
+			({ record }) =>
+				record.kind === "pi.tool" &&
+				String(record.conversationId) === approval.session &&
+				(record.input as { callId?: unknown }).callId === approval.callId,
+		);
+		return call?.record.id ?? null;
 	}
 
 	/**
@@ -2179,53 +2186,10 @@ export class Pim extends DurableAgent<Env> {
 		return `${where}\n${agent.name} answered:\n${answer}`;
 	}
 
-	/**
-	 * Passes on what an agent said in a chat the majordomo started, after the
-	 * decision on its approval request, to the majordomo's chat, once.
-	 */
-	async #forwardHandoff(session: string, from: string, operation: string): Promise<void> {
-		try {
-			await this.keepAliveWhile(async () => {
-				const { replies } = await this.#withReplies(await this.harness.wait(operation, { session }));
-				if (replies.length === 0 || this.store.deletedSessions().has(from) || this.store.deletedSessions().has(session)) return;
-				const { name } = this.agents.ofSession(session);
-				await this.submitTo(
-					from,
-					`${CHAT_REPORT} ${name}] In chat ${this.store.publicId(session)}, after the decision on its approval request, ${name} said:\n${replies.join("\n\n")}`,
-					{ operationId: `handoff-report:${operation}`, whenBusy: "followUp" },
-					"pim",
-				);
-			});
-		} catch (error) {
-			console.warn(`passing on what was said in ${session} failed`, error);
-		}
-	}
-
 	/** Gives a member its task and waits for its answer. */
 	async #askMember(conversation: string, task: string, operation: string): Promise<{ ok: boolean; text: string }> {
 		await this.#submit(conversation, task, { operationId: operation }, "member");
 		return this.#memberAnswer(conversation, operation);
-	}
-
-	/** Passes a member's answer after an approval's decision to the chat it works for, once. */
-	async #report(run: TeamRun, operation: string): Promise<void> {
-		try {
-			await this.keepAliveWhile(async () => {
-				const { ok, text } = await this.#memberAnswer(run.conversation, operation);
-				this.team.setStatus(run.conversation, ok ? "done" : "failed");
-				if (!this.store.deletedSessions().has(run.session)) {
-					await this.submitTo(
-						run.session,
-						`[Team: ${run.member}] After the person's decision, ${run.member} answered:\n${text}`,
-						{ operationId: `team-report:${run.conversation}:${operation}`, whenBusy: "followUp" },
-						"pim",
-					);
-				}
-				this.team.setReport(run.conversation, null);
-			});
-		} catch (error) {
-			console.warn(`passing on ${run.member}'s answer failed`, error);
-		}
 	}
 
 	/** What a member answered to an operation, once it settles. */

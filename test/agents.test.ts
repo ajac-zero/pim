@@ -1,12 +1,12 @@
 import type { JsonValue, Message } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { AgentStore } from "../src/agents";
 import { TeamStore } from "../src/team";
 import { CREATE_AGENT, RENAME_AGENT, UPDATE_AGENT } from "../src/extensions/agents";
 import { WRITE_SKILL } from "../src/extensions/skills";
-import { api, apiUrl, decisionRun, lastUserText, pendingApproval, post, ROOT, say, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, pendingApproval, post, ROOT, say, TOKEN, toolUse } from "./helpers";
 import { faux } from "./worker";
 
 /** The prompt sections sent last: pi sends the whole prompt once, then only what changed. */
@@ -170,17 +170,16 @@ describe("the owner's agents", () => {
 
 		faux.setResponses([
 			toolUse(RENAME_AGENT, { agent: target.id, name: "  Quill  " }),
-			toolUse("send_to_user", { message: "Waiting for approval." }),
+			toolUse("send_to_user", { message: "Renamed." }),
 		]);
-		await say("Rename the assistant you just made to Quill", session);
+		const renaming = say("Rename the assistant you just made to Quill", session);
 		const approval = await pendingApproval();
 		expect(approval.summary).toBe('Rename "Draft helper" to "Quill"');
 		expect((await api(`/agents/${target.id}`)).body.name).toBe("Draft helper");
 		// Approval changes only the name, retaining edits made while it was waiting.
 		await api(`/agents/${target.id}`, { method: "PUT", body: JSON.stringify({ instructions: "Use short paragraphs." }) });
-		faux.setResponses([toolUse("send_to_user", { message: "Renamed." })]);
 		await post(`/approvals/${approval.id}/approve`);
-		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
+		expect(await renaming).toMatchObject({ status: "done", replies: ["Renamed."] });
 		expect((await api(`/agents/${target.id}`)).body).toEqual({
 			...target, name: "Quill", instructions: "Use short paragraphs.", updatedAt: expect.any(Number),
 		});
@@ -197,12 +196,11 @@ describe("the owner's agents", () => {
 
 		// The same tool can rename the agent in this chat; denying it leaves the name alone.
 		for (const decision of ["deny", "approve"]) {
-			faux.setResponses([toolUse(RENAME_AGENT, { agent: creator.id, name: "Atlas" }), toolUse("send_to_user", { message: "Waiting." })]);
-			await say("Call yourself Atlas", session);
+			faux.setResponses([toolUse(RENAME_AGENT, { agent: creator.id, name: "Atlas" }), toolUse("send_to_user", { message: "Understood." })]);
+			const asking = say("Call yourself Atlas", session);
 			const request = await pendingApproval();
-			faux.setResponses([toolUse("send_to_user", { message: "Understood." })]);
 			await post(`/approvals/${request.id}/${decision}`);
-			expect(await decisionRun(request)).toMatchObject({ status: "done" });
+			expect(await asking).toMatchObject({ status: "done", replies: ["Understood."] });
 			expect((await api(`/agents/${creator.id}`)).body.name).toBe(decision === "approve" ? "Atlas" : "Organizer");
 		}
 		// Renaming has its own permission, separate from changing instructions and apps.
@@ -252,19 +250,24 @@ describe("the owner's agents", () => {
 			],
 			remove_members: ["Fact checker"],
 		};
+		let prompt = "";
 		faux.setResponses([
 			toolUse(UPDATE_AGENT, { set_members: [{ name: "Editor", instructions: "" }] }),
 			record,
 			toolUse(UPDATE_AGENT, { instructions: "Write short." }),
 			record,
 			toolUse(UPDATE_AGENT, edit),
-			record,
+			// The turn goes on as the agent is now.
+			(context) => {
+				prompt = system(context.messages);
+				return toolUse("send_to_user", { message: "Done." });
+			},
 		]);
 		await say("Bring on a researcher", session);
 		expect(results[0]).toContain("Editor's instructions is required");
 		await say("Again?", session);
 		expect(results[1]).toContain("That changes nothing.");
-		await say("Please", session);
+		const asking = say("Please", session);
 		const approval = await pendingApproval();
 		expect(approval.summary).toBe(
 			"Ghostwriter changes its instructions, adds Researcher to its team, changes Editor on its team, removes Fact checker from its team",
@@ -272,15 +275,8 @@ describe("the owner's agents", () => {
 		// Nothing changes until the person says yes.
 		expect((await api(`/agents/${writer.id}`)).body.instructions).toBe("Write short.");
 
-		let prompt = "";
-		faux.setResponses([
-			(context) => {
-				prompt = system(context.messages);
-				return toolUse("send_to_user", { message: "Done." });
-			},
-		]);
 		await post(`/approvals/${approval.id}/approve`);
-		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
+		expect(await asking).toMatchObject({ status: "done", replies: ["Done."] });
 		expect((await api(`/agents/${writer.id}`)).body).toMatchObject({
 			instructions: "Write long.",
 			apps: ["test.ledger/docs"],
@@ -317,16 +313,15 @@ describe("the owner's agents", () => {
 		await say("Keep my notes with it", session);
 		expect(results[1]).toContain("../notes.md is not a supporting file's path");
 
-		faux.setResponses([toolUse(WRITE_SKILL, skill), toolUse("send_to_user", { message: "Asked." })]);
-		await say("Try again", session);
+		faux.setResponses([toolUse(WRITE_SKILL, skill), toolUse("send_to_user", { message: "Saved." })]);
+		const saving = say("Try again", session);
 		const approval = await pendingApproval();
 		expect(approval.summary).toBe("Coach saves a new skill: weekly-plan");
 		// The person reads what they approve.
 		expect(approval.args).toMatchObject({ instructions: skill.instructions, description: skill.description, files: skill.files });
 		expect((await api("/skills")).body.skills).toEqual([]);
-		faux.setResponses([toolUse("send_to_user", { message: "Saved." })]);
 		await post(`/approvals/${approval.id}/approve`);
-		expect(await decisionRun(approval)).toMatchObject({ status: "done" });
+		expect(await saving).toMatchObject({ status: "done", replies: ["Saved."] });
 		expect((await api("/skills")).body.skills).toEqual([
 			{ name: "weekly-plan", description: skill.description, version: 1, author: "Coach", restoredFrom: null, createdAt: expect.any(Number), updatedAt: expect.any(Number), agents: [{ id: coach.id, name: "Coach" }] },
 		]);
@@ -360,27 +355,29 @@ describe("the owner's agents", () => {
 		expect(prompt).toContain("You have no skills yet.");
 		expect(prompt).not.toContain("weekly-plan");
 
-		// Two rewrites of the same version: the one approved second finds the skill changed and changes nothing.
+		// Two rewrites of the same version, in two chats: the one approved second finds the skill changed and changes nothing.
+		let told = "";
+		const { files: _kept, ...rewrite } = skill;
+		const rewriting: Record<string, Promise<unknown>> = {};
 		for (const [message, instructions] of [["Make it 5%", "Add 5% distance."], ["No, 20%", "Add 20% distance."]]) {
-			const { files: _kept, ...rewrite } = skill;
-			faux.setResponses([toolUse(WRITE_SKILL, { ...rewrite, instructions: instructions!, base_version: 1 }), toolUse("send_to_user", { message: "Asked." })]);
-			await say(message!, session);
+			faux.setResponses([toolUse(WRITE_SKILL, { ...rewrite, instructions: instructions!, base_version: 1 })]);
+			rewriting[instructions!] = say(message!, (await post("/sessions", { agent: coach.id })).body.id);
+			await vi.waitFor(async () => expect((await api("/approvals?status=pending")).body.approvals).toHaveLength(Object.keys(rewriting).length));
 		}
 		const pending = (await api("/approvals?status=pending")).body.approvals;
 		const [five, twenty] = ["Add 5% distance.", "Add 20% distance."].map((wanted) => pending.find((request: { args: { instructions: string } }) => request.args.instructions === wanted));
 		expect(twenty.summary).toBe("Coach rewrites the skill weekly-plan");
-		let told = "";
+		faux.setResponses([toolUse("send_to_user", { message: "Saved." })]);
+		await post(`/approvals/${twenty.id}/approve`);
+		expect(await rewriting["Add 20% distance."]).toMatchObject({ status: "done", replies: ["Saved."] });
 		faux.setResponses([
-			toolUse("send_to_user", { message: "Saved." }),
 			(context) => {
-				told = lastUserText(context.messages);
+				told = JSON.stringify(context.messages.findLast((m) => m.role === "toolResult")?.content);
 				return toolUse("send_to_user", { message: "Kept 20%." });
 			},
 		]);
-		for (const request of [twenty, five]) {
-			await post(`/approvals/${request.id}/approve`);
-			expect(await decisionRun(request)).toMatchObject({ status: "done" });
-		}
+		await post(`/approvals/${five.id}/approve`);
+		expect(await rewriting["Add 5% distance."]).toMatchObject({ status: "done", replies: ["Kept 20%."] });
 		expect(told).toContain("is at version 2 now, not 1");
 		expect((await api("/skills/weekly-plan")).body).toMatchObject({
 			instructions: "Add 20% distance.",

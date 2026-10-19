@@ -1,12 +1,11 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { type FauxResponseFactory, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
-import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { Approval } from "../src/store";
-import { api, decisionRun, lastUserText, OWNER, pendingApproval, post, ROOT, say, systemPrompt, TOKEN, toolUse, url } from "./helpers";
-import { faux, type Pim, spans } from "./worker";
+import { api, lastUserText, pendingApproval, post, ROOT, say, systemPrompt, TOKEN, toolUse, url } from "./helpers";
+import { faux, spans } from "./worker";
 
 type Context = Parameters<FauxResponseFactory>[0];
 
@@ -133,7 +132,7 @@ describe("an agent's team", () => {
 		expect(results).toContain("has no team: do the work yourself.");
 	});
 
-	it("shows a member's approval in the agent's chat, and brings the member's answer after the decision there", async () => {
+	it("shows a member's approval in the agent's chat, and the member answers with its result once it is decided", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
 		const realFetch = globalThis.fetch;
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -142,46 +141,36 @@ describe("an agent's team", () => {
 		});
 		const agent = (await post("/agents", { ...planner, name: "Booker" })).body;
 		const session = (await post("/sessions", { agent: agent.id })).body.id;
+		let result = "";
+		let answers = "";
 		scripts({
 			lead: [
 				() => toolUse("delegate", { tasks: [{ member: "Researcher", task: "Book the hotel." }] }),
-				() => toolUse("send_to_user", { message: "Waiting on your approval for the hotel." }),
+				(context) => {
+					answers = toolResult(context.messages);
+					return toolUse("send_to_user", { message: "Your hotel is booked: confirmation 77." });
+				},
 			],
 			Researcher: [
 				() => toolUse("http_request", { method: "POST", url: "https://hooks.example.test/hotel" }),
-				() => fauxAssistantMessage("Waiting for approval to book the hotel."),
-			],
-		});
-		await say("Book my hotel.", session);
-		const approval = await pendingApproval();
-		const run = (await api(`/sessions/${session}/team`)).body.runs[0];
-		expect(approval).toMatchObject({ session: run.conversation, member: { name: "Researcher", session } });
-		const notifications = (await api("/notifications")).body.notifications;
-		expect(notifications).toContainEqual(expect.objectContaining({ title: "Pim needs your approval", session }));
-
-		let decision = "";
-		let report = "";
-		scripts({
-			Researcher: [
 				(context) => {
-					decision = lastUserText(context.messages);
+					result = toolResult(context.messages);
 					return fauxAssistantMessage("Booked: confirmation 77.");
 				},
 			],
-			lead: [
-				(context) => {
-					report = lastUserText(context.messages);
-					return fauxAssistantMessage("Told them.");
-				},
-			],
 		});
+		const said = say("Book my hotel.", session);
+		const approval = await pendingApproval();
+		const run = (await api(`/sessions/${session}/team`)).body.runs[0];
+		expect(approval).toMatchObject({ session: run.conversation, member: { name: "Researcher", session } });
+		expect(run.status).toBe("running");
+		const notifications = (await api("/notifications")).body.notifications;
+		expect(notifications).toContainEqual(expect.objectContaining({ title: "Pim needs your approval", session }));
+
 		expect((await post<Approval>(`/approvals/${approval.id}/approve`)).body.status).toBe("approved");
-		// The report's operation is named for the member's conversation by pi's number for it.
-		const member = await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.store.sessionOf(run.conversation));
-		const reported = await api(`/sessions/${session}/operations/${encodeURIComponent(`team-report:${member}:approval:${approval.id}`)}`);
-		expect(reported.body.status).toBe("done");
-		expect(decision).toContain(`[Approval ${approval.id}] The user approved`);
-		expect(report).toBe("[Team: Researcher] After the person's decision, Researcher answered:\nBooked: confirmation 77.");
+		expect(await said).toMatchObject({ status: "done", replies: ["Your hotel is booked: confirmation 77."] });
+		expect(result).toContain(`[Approval ${approval.id}] The user approved`);
+		expect(answers).toContain("Booked: confirmation 77.");
 		expect((await api(`/sessions/${session}/team`)).body.runs[0].status).toBe("done");
 	});
 });
@@ -334,37 +323,34 @@ describe("the majordomo", () => {
 		expect((await exports.default.fetch(url("/mcp"), { method: "POST" })).status).toBe(401);
 	});
 
-	it("hears what an agent says in a chat it started once an approval there is decided", async () => {
+	it("hears what an agent did in a chat it started once an approval there is decided, in the agent's one answer", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
 		vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("booked", { status: 201 }));
 		const concierge = (await post("/agents", { name: "Concierge", instructions: "Book what the person asks for." })).body;
+		let handedBack = "";
 		scripts({
 			lead: [
 				() => toolUse("send_to_agent", { agent: "Concierge", message: "Book the hotel." }),
-				() => toolUse("send_to_user", { message: "Concierge asked you to approve the booking." }),
+				(context) => {
+					handedBack = toolResult(context.messages);
+					return toolUse("send_to_user", { message: "Your hotel is booked." });
+				},
 			],
 			Concierge: [
 				() => toolUse("http_request", { method: "POST", url: "https://hooks.example.test/hotel" }),
-				() => toolUse("send_to_user", { message: "Waiting for your approval." }),
+				() => toolUse("send_to_user", { message: "Booked." }),
 			],
 		});
-		await say("Book my hotel.");
+		const said = say("Book my hotel.");
 		const approval = await pendingApproval();
 		expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === approval.session).agent.id).toBe(concierge.id);
 
-		let forwarded = "";
-		scripts({
-			Concierge: [() => toolUse("send_to_user", { message: "Booked." })],
-			lead: [
-				(context) => {
-					forwarded = lastUserText(context.messages);
-					return fauxAssistantMessage("Noted.");
-				},
-			],
-		});
 		await post(`/approvals/${approval.id}/approve`);
-		expect((await decisionRun(approval)).replies).toEqual(["Booked."]);
-		await vi.waitFor(() => expect(forwarded).toBe(`[Chat with Concierge] In chat ${approval.session}, after the decision on its approval request, Concierge said:\nBooked.`));
+		expect(await said).toMatchObject({ status: "done", replies: ["Your hotel is booked."] });
+		expect(handedBack).toContain("Concierge answered:\\nBooked.");
+		// It hears it once, from send_to_agent: nothing else comes to its chat.
+		const messages = (await api(`/sessions/${ROOT}/messages`)).body.messages as { role: string; parts: { text?: string }[] }[];
+		expect(messages.filter((message) => message.role === "user").map((message) => message.parts[0]?.text).at(-1)).toBe("Book my hotel.");
 	});
 
 	it("decides other agents' approvals for the person, or asks them, under the majordomo policy", async () => {
@@ -390,9 +376,8 @@ describe("the majordomo", () => {
 		scripts({
 			lead: [
 				() => toolUse("http_request", { method: "POST", url: "https://hooks.example.test/hotel" }),
-				() => toolUse("send_to_user", { message: "Asked." }),
 				(context) => {
-					outcome = lastUserText(context.messages);
+					outcome = toolResult(context.messages);
 					return toolUse("send_to_user", { message: "Booked." });
 				},
 			],
@@ -408,15 +393,11 @@ describe("the majordomo", () => {
 				() => fauxAssistantMessage("Approved."),
 			],
 		});
-		await say("Book the hotel.", chat);
-		const approved = await vi.waitFor(async () => {
-			const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=approved")).body.approvals;
-			expect(approval).toBeDefined();
-			return approval!;
-		});
+		// The call waits for the review's decision, and the turn goes on with it.
+		expect(await say("Book the hotel.", chat)).toMatchObject({ status: "done", replies: ["Booked."] });
+		const [approved] = (await api<{ approvals: Approval[] }>("/approvals?status=approved")).body.approvals;
 		expect(approved).toMatchObject({ decidedBy: "majordomo", note: "They asked for this hotel.", result: "HTTP 201 Created\nbooked" });
 		expect(sent).toEqual(["https://hooks.example.test/hotel"]);
-		expect((await decisionRun(approved)).status).toBe("done");
 		expect(outcome).toContain(`${name}, the user's majordomo, approved it for them: POST https://hooks.example.test/hotel`);
 		expect(outcome).toContain(`${name}'s note: They asked for this hotel.`);
 		expect(review.prompt).toContain(`You are \\"${name}\\", the majordomo of one person`);
@@ -453,14 +434,14 @@ describe("the majordomo", () => {
 		scripts({
 			lead: [
 				() => toolUse("http_request", { method: "POST", url: "https://hooks.example.test/pay" }),
-				() => toolUse("send_to_user", { message: "Asked." }),
+				() => toolUse("send_to_user", { message: "Not paid." }),
 			],
 			review: [
 				() => toolUse("decide_approval", { decision: "escalate", note: "It's a payment: your call." }),
 				() => fauxAssistantMessage("Asked them."),
 			],
 		});
-		await say("Pay the deposit.", chat);
+		const paying = say("Pay the deposit.", chat);
 		const escalated = await vi.waitFor(async () => {
 			const approval = await pendingApproval();
 			expect(approval.review).toEqual({ status: "escalated", note: "It's a payment: your call." });
@@ -471,22 +452,20 @@ describe("the majordomo", () => {
 			expect.objectContaining({ title: `${name} needs your approval`, body: "POST https://hooks.example.test/pay\nIt's a payment: your call.", session: chat }),
 		]);
 		expect(sent).toEqual(["https://hooks.example.test/hotel"]);
-		scripts({ lead: [() => toolUse("send_to_user", { message: "Not paid." })] });
 		expect((await post<Approval>(`/approvals/${escalated.id}/deny`)).body).toMatchObject({ status: "denied", decidedBy: "user" });
-		expect((await decisionRun(escalated)).status).toBe("done");
+		expect(await paying).toMatchObject({ status: "done", replies: ["Not paid."] });
 
 		// The majordomo's own requests, in its chats with the person, go straight to them.
 		scripts({
 			lead: [
 				() => toolUse("http_request", { method: "POST", url: "https://hooks.example.test/own" }),
-				() => toolUse("send_to_user", { message: "Asked you." }),
+				() => toolUse("send_to_user", { message: "Fine." }),
 			],
 		});
-		await say("Call the hook.");
+		const calling = say("Call the hook.");
 		const own = await pendingApproval();
 		expect(own).toMatchObject({ review: null, expiresAt: null });
-		scripts({ lead: [() => toolUse("send_to_user", { message: "Fine." })] });
 		await post(`/approvals/${own.id}/deny`);
-		expect((await decisionRun(own)).status).toBe("done");
+		expect(await calling).toMatchObject({ status: "done", replies: ["Fine."] });
 	});
 });

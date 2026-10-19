@@ -10,9 +10,8 @@ import { MAX_TEAM, type Agent, type TeamMember } from "./agents";
  * agent tells the person what came of it: members never talk to the person.
  *
  * A member asking for the person's approval files it as an agent does, shown in
- * the chat it works for (see `ApprovalMember`). The decision goes to the
- * member's own conversation, and what the member answers then comes back to
- * that chat as a message starting with "[Team".
+ * the chat it works for (see `ApprovalMember`), and waits for the decision,
+ * which its call returns; then it answers its task as usual.
  */
 
 /** How a member's task went: running, answered, or not (failed, aborted). */
@@ -52,7 +51,6 @@ CREATE TABLE IF NOT EXISTS pim_team_runs (
 	member TEXT NOT NULL,
 	task TEXT NOT NULL,
 	status TEXT NOT NULL,
-	report TEXT,
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
 	kind TEXT NOT NULL DEFAULT 'member'
@@ -109,18 +107,6 @@ export class TeamStore {
 		this.#sql.exec("UPDATE pim_team_runs SET status = ?, updated_at = ? WHERE conversation = ?", status, Date.now(), conversation);
 	}
 
-	/** A member's answer after the person decided an approval, still to be passed on to its chat; null once it is. */
-	setReport(conversation: string, operation: string | null): void {
-		this.#sql.exec("UPDATE pim_team_runs SET report = ? WHERE conversation = ?", operation, conversation);
-	}
-
-	reports(): { run: TeamRun; operation: string }[] {
-		return this.#sql
-			.exec("SELECT * FROM pim_team_runs WHERE report IS NOT NULL")
-			.toArray()
-			.map((row) => ({ run: runOf(row), operation: String(row.report) }));
-	}
-
 	run(conversation: string): TeamRun | undefined {
 		const [row] = this.#sql.exec("SELECT * FROM pim_team_runs WHERE conversation = ?", conversation).toArray();
 		return row ? runOf(row) : undefined;
@@ -174,7 +160,7 @@ export function memberPreamble(agent: Agent, member: TeamMember): string {
 
 - Your final answer, as plain text, is all ${agent.name} sees of your work: make it complete and self-contained, with what you found or did and anything left open.
 - You never talk to the person. ${agent.name} does, with what you report.
-- Tools that change things outside this conversation need the person's approval: calling one asks them and returns at once. Don't call it again. If the rest of the task depends on the decision, say in your answer what you are waiting for: the decision arrives later in this conversation as a message starting with "[Approval", and what you answer after it goes to ${agent.name}.
+- Tools that change things outside this conversation need the person's approval: calling one asks them and waits for their decision, which the call returns with the action's result. Don't call it again.
 - Be honest about what you did. Never claim an action happened unless a tool result says so.`;
 }
 
@@ -189,7 +175,7 @@ function roster(agent: Agent): string {
 		`You lead a team. Hand its members tasks with \`${DELEGATE}\`: they work at the same time, each in a conversation of its own, and the call returns all their answers.`,
 		...agent.team.map((member) => `- ${member.name}: ${gist(member.instructions)}`),
 		"Give them the parts of the work that can go on at once, each with everything it needs: a member knows only its task. Then combine what they bring back. They never talk to the person; you do.",
-		'A member that asks for the person\'s approval answers once it is decided, in a message starting with "[Team".',
+		"A member that asks for the person's approval waits for the decision before it answers.",
 	].join("\n");
 }
 

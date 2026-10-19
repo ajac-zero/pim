@@ -14,6 +14,7 @@ import {
   Mail,
   RotateCcw,
   ShieldCheck,
+  Workflow,
   X,
   Zap,
 } from "~/components/icons";
@@ -212,6 +213,7 @@ const NOTICE_ICONS = {
   approval: ShieldCheck,
   schedule: Bell,
   event: Zap,
+  task: Workflow,
   reset: RotateCcw,
 } as const;
 

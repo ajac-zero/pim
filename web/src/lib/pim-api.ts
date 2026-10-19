@@ -80,16 +80,23 @@ export type TranscriptMessage = {
   error?: string;
 };
 
-/** A task an agent handed a member of its team, in the member's own conversation. */
-export type TeamRun = {
-  conversation: string;
-  /** Tasks handed out together share it. */
-  call: string;
-  session: string;
-  agent: string;
-  member: string;
+/** Who works on a task, or asked for it: an agent, or a member of an agent's team. */
+export type TaskAgent = { id: string; name: string; member: boolean };
+
+/**
+ * A task one agent handed another, in a conversation of its own. The tasks a
+ * chat led to form a tree by `parent`.
+ */
+export type AgentTask = {
+  id: string;
+  /** The task its requester was working on when it handed this one out; null when the chat's agent did. */
+  parent: string | null;
+  agent: TaskAgent;
+  from: TaskAgent;
   task: string;
-  status: "running" | "done" | "failed";
+  state: "working" | "auth-required" | "completed" | "failed" | "canceled";
+  /** Its answer, or why it didn't finish, once done. */
+  result: string | null;
   createdAt: number;
   updatedAt: number;
 };
@@ -340,7 +347,7 @@ export type Approval = {
     circle: string;
     circleName: string;
   } | null;
-  /** A member of an agent's team asked, working for the chat `session` names; the approval's own `session` is the member's. */
+  /** An agent at work on a task asked, for the chat `session` names; the approval's own `session` is the task's conversation. */
   member?: { name: string; session: string } | null;
   /** The majordomo has it first: deciding, or it asked you, with what it said. Null when you were asked directly. */
   review?: {
@@ -771,6 +778,7 @@ export type ServerMessage =
   | { type: "approval"; approval: Approval }
   | { type: "visits" }
   | { type: "sessions" }
+  | { type: "tasks"; session: string }
   | { type: "result"; id: string; result: unknown }
   | { type: "error"; id?: string; message: string };
 
@@ -925,16 +933,20 @@ export const pim = {
     call<Template>(`/agents/${id}/publish`, { method: "POST" }),
   unpublishAgent: (id: string) =>
     call<{ deleted: boolean }>(`/agents/${id}/publish`, { method: "DELETE" }),
-  /** What a chat's agent handed its team, newest first. */
-  teamRuns: (session: string) =>
-    call<{ runs: TeamRun[] }>(`/sessions/${session}/team`).then(
-      (body) => body.runs,
+  /** The tasks a chat led to, oldest first. */
+  tasks: (session: string) =>
+    call<{ tasks: AgentTask[] }>(`/sessions/${session}/tasks`).then(
+      (body) => body.tasks,
     ),
-  /** A team member's conversation, read-only. */
-  teamRun: (session: string, conversation: string) =>
-    call<TeamRun & { messages: TranscriptMessage[] }>(
-      `/sessions/${session}/team/${conversation}`,
+  /** A task's conversation, read-only. */
+  task: (session: string, id: string) =>
+    call<AgentTask & { messages: TranscriptMessage[] }>(
+      `/sessions/${session}/tasks/${id}`,
     ),
+  cancelTask: (session: string, id: string) =>
+    call<AgentTask>(`/sessions/${session}/tasks/${id}/cancel`, {
+      method: "POST",
+    }),
   profile: () => call<Profile>("/profile"),
   setProfile: (change: { displayName: string | null; bio: string | null }) =>
     call<Profile>("/profile", { method: "PUT", body: JSON.stringify(change) }),

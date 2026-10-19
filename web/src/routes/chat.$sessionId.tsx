@@ -7,7 +7,7 @@ import { ArtifactView } from "~/components/artifact-view";
 import { Composer } from "~/components/chat/composer";
 import { SummaryBox, SummaryToggle } from "~/components/chat/summary";
 import { ChatTabs } from "~/components/chat/tabs";
-import { TeamPanel } from "~/components/chat/team";
+import { TaskPanel } from "~/components/chat/tasks";
 import { Thread } from "~/components/chat/thread";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
@@ -179,9 +179,8 @@ function ChatPage() {
                 className="pointer-events-auto w-full max-w-3xl"
               >
                 {session?.agent && (
-                  <TeamPanel
+                  <TaskPanel
                     sessionId={sessionId}
-                    agentName={session.agent.name}
                     running={ready && view.running}
                   />
                 )}

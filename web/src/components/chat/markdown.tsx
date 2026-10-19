@@ -419,7 +419,7 @@ export const Markdown = memo(function Markdown({
               </a>
             ),
           table: ({ children }) => (
-            <div className="my-4 max-w-full overflow-x-auto rounded-xl bg-background scrollbar-thin">
+            <div className="my-4 max-w-full overflow-x-auto rounded-xl border scrollbar-thin">
               <table className="w-full border-collapse text-sm">
                 {children}
               </table>
@@ -429,21 +429,18 @@ export const Markdown = memo(function Markdown({
             <thead className="bg-muted/50 text-left">{children}</thead>
           ),
           th: ({ children }) => (
-            <th className="border-border border-b px-3 py-2 font-semibold">
-              {children}
-            </th>
+            <th className="px-3 py-2 font-semibold">{children}</th>
           ),
           td: ({ children }) => (
-            <td className="border-border border-b px-3 py-2 last:border-b-0">
-              {children}
-            </td>
+            // A line above each body cell: between rows, and under the header, but not under the table's border.
+            <td className="border-border border-t px-3 py-2">{children}</td>
           ),
           // Inline `code` spans (single backticks). Fenced blocks are
           // handled separately below by `code`, so this only ever receives
           // inline content.
           inlineCode: ({ children, ...props }) => (
             <code
-              className="rounded-md bg-background/80 px-1.5 py-0.5 font-mono text-[0.875em] text-destructive"
+              className="rounded-md bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[0.875em] text-destructive"
               {...props}
             >
               {children}

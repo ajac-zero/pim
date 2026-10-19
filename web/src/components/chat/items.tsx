@@ -60,16 +60,69 @@ function useCopy(text: string) {
   return { copied, copy };
 }
 
+/** When a message was said: the time, with the date when it wasn't today. */
+function MessageTime({ at }: { at: number }) {
+  const { formatDate } = useI18n();
+  const date = new Date(at);
+  const now = new Date();
+  const options: Intl.DateTimeFormatOptions =
+    date.toDateString() === now.toDateString()
+      ? { timeStyle: "short" }
+      : date.getFullYear() === now.getFullYear()
+        ? { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
+        : { dateStyle: "medium", timeStyle: "short" };
+  return (
+    <time
+      dateTime={date.toISOString()}
+      title={formatDate(date, { dateStyle: "full", timeStyle: "short" })}
+      className="shrink-0 tabular-nums"
+    >
+      {formatDate(date, options)}
+    </time>
+  );
+}
+
+/** A message's copy button, shown while the message is hovered or focused. */
+function CopyAction({
+  text,
+  label,
+  className,
+}: {
+  text: string;
+  label: string;
+  className: string;
+}) {
+  const { copied, copy } = useCopy(text);
+  return (
+    <Actions className={cn("opacity-0 transition-opacity", className)}>
+      <Action
+        size="icon"
+        className="size-7 text-muted-foreground"
+        onClick={copy}
+        aria-label={label}
+      >
+        {copied ? (
+          <Check className="size-3.5" />
+        ) : (
+          <Copy className="size-3.5" />
+        )}
+      </Action>
+    </Actions>
+  );
+}
+
 /* ------------------------------ user message ----------------------------- */
 
 export const UserMessage = memo(function UserMessage({
   item,
+  at,
 }: {
   item: MessageItem;
+  /** When it was sent, in ms. */
+  at: number;
 }) {
   const { t } = useI18n();
   const text = messageText(item);
-  const { copied, copy } = useCopy(text);
   const images =
     typeof item.content === "string"
       ? []
@@ -84,7 +137,7 @@ export const UserMessage = memo(function UserMessage({
   return (
     <div
       data-speaker="user"
-      className="group/user relative flex w-full flex-col items-end gap-1.5 pr-9"
+      className="group/user flex w-full flex-col items-end gap-1.5"
     >
       {images.length > 0 && (
         <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
@@ -100,24 +153,21 @@ export const UserMessage = memo(function UserMessage({
         </div>
       )}
       {text.length > 0 && (
-        <div className="max-w-[88%] md:max-w-[80%] whitespace-pre-wrap break-words rounded-2xl bg-bubble px-4 py-3 text-[15px] text-bubble-foreground leading-6">
-          {text}
+        // Its time and copy button sit beside the bubble, in the space its alignment leaves.
+        <div className="flex w-full items-end justify-end gap-2">
+          <div className="flex shrink-0 items-center gap-1 pb-1.5 text-muted-foreground text-xs">
+            <CopyAction
+              text={text}
+              label={t("copyMessage")}
+              className="group-has-focus-visible/user:opacity-100 group-hover/user:opacity-100"
+            />
+            <MessageTime at={at} />
+          </div>
+          <div className="min-w-0 max-w-[88%] md:max-w-[80%] whitespace-pre-wrap break-words rounded-2xl bg-bubble px-4 py-3 text-[15px] text-bubble-foreground leading-6">
+            {text}
+          </div>
         </div>
       )}
-      <Actions className="absolute top-2 right-0 gap-0.5 opacity-0 transition-opacity group-focus-within/user:opacity-100 group-hover/user:opacity-100">
-        <Action
-          size="icon"
-          className="size-7 text-muted-foreground"
-          onClick={copy}
-          aria-label={t("copyMessage")}
-        >
-          {copied ? (
-            <Check className="size-3.5" />
-          ) : (
-            <Copy className="size-3.5" />
-          )}
-        </Action>
-      </Actions>
     </div>
   );
 });
@@ -126,11 +176,14 @@ export const UserMessage = memo(function UserMessage({
 
 export const AssistantMessage = memo(function AssistantMessage({
   item,
+  at,
   streaming,
   notified,
   attachments,
 }: {
   item: MessageItem;
+  /** When it was sent, in ms. */
+  at: number;
   streaming?: boolean;
   /** Pim also alerted the person's devices with it. */
   notified?: boolean;
@@ -139,39 +192,33 @@ export const AssistantMessage = memo(function AssistantMessage({
 }) {
   const { t } = useI18n();
   const text = messageText(item);
-  const { copied, copy } = useCopy(text);
 
+  // No bubble: an agent's message has the transcript's whole width for its
+  // text, tables and code. Its footer keeps its height while it streams, so
+  // the time and actions don't push the thread when it finishes.
   return (
-    <div
-      data-speaker="assistant"
-      className="group/assistant relative w-full pr-9"
-    >
-      <div className="w-fit min-w-0 max-w-full md:max-w-[85%] rounded-2xl bg-muted px-4 py-3">
-        <Markdown text={text} streaming={streaming} />
-        {attachments}
-        {notified && !streaming && (
-          <p className="mt-1.5 flex items-center gap-1.5 text-muted-foreground text-xs">
-            <Bell className="size-3.5 shrink-0" />
-            {t("alsoNotified")}
-          </p>
+    <div data-speaker="assistant" className="group/assistant w-full min-w-0">
+      <Markdown text={text} streaming={streaming} />
+      {attachments}
+      <div className="mt-1 flex h-7 items-center gap-1.5 text-muted-foreground text-xs">
+        {!streaming && (
+          <>
+            <MessageTime at={at} />
+            {notified && (
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span aria-hidden>·</span>
+                <Bell className="size-3.5 shrink-0" />
+                <span className="truncate">{t("alsoNotified")}</span>
+              </span>
+            )}
+            <CopyAction
+              text={text}
+              label={t("copyResponse")}
+              className="group-has-focus-visible/assistant:opacity-100 group-hover/assistant:opacity-100"
+            />
+          </>
         )}
       </div>
-      {!streaming && (
-        <Actions className="absolute top-0 right-0 gap-0.5 opacity-0 transition-opacity group-focus-within/assistant:opacity-100 group-hover/assistant:opacity-100">
-          <Action
-            size="icon"
-            className="size-7 text-muted-foreground"
-            onClick={copy}
-            aria-label={t("copyResponse")}
-          >
-            {copied ? (
-              <Check className="size-3.5" />
-            ) : (
-              <Copy className="size-3.5" />
-            )}
-          </Action>
-        </Actions>
-      )}
     </div>
   );
 });
@@ -584,7 +631,7 @@ function ApprovalResult({ result }: { result: string }) {
 
 export function ThinkingDot() {
   return (
-    <div className="flex w-fit items-center gap-1 rounded-2xl bg-muted px-4 py-3 text-muted-foreground">
+    <div className="flex h-6 w-fit items-center gap-1 text-muted-foreground">
       <span className="size-1.5 animate-pulse rounded-full bg-current motion-reduce:animate-none" />
       <span className="size-1.5 animate-pulse rounded-full bg-current [animation-delay:150ms] motion-reduce:animate-none" />
       <span className="size-1.5 animate-pulse rounded-full bg-current [animation-delay:300ms] motion-reduce:animate-none" />

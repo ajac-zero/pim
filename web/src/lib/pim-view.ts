@@ -37,7 +37,14 @@ export type PimNotice = {
 };
 
 export type ThreadEntry =
-  | { key: string; kind: "item"; item: ORItem; source: "user" | "agent" }
+  | {
+      key: string;
+      kind: "item";
+      item: ORItem;
+      source: "user" | "agent";
+      /** When it was said, in ms: when the person sent it, or when the agent finished writing it. */
+      at: number;
+    }
   | { key: string; kind: "notice"; notice: PimNotice };
 
 export type RunningTool = { callId: string; name: string; output: string };
@@ -223,18 +230,30 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
           kind: "item",
           source: "user",
           item: userItem(message.content, key),
+          at: message.timestamp,
         },
       ];
     }
-    case "assistant":
+    case "assistant": {
+      // Its timestamp is when the request started; a response being written has no duration yet.
+      const at = message.timestamp + (message.durationMs ?? 0);
       return message.content.flatMap((block, index): ThreadEntry[] => {
         // Empty text blocks are placeholders while a block starts.
         if (block.type === "text" && block.text === "") return [];
         const item = blockItem(block, `${key}:${index}`);
         return item
-          ? [{ key: `${key}:${index}`, kind: "item", source: "agent", item }]
+          ? [
+              {
+                key: `${key}:${index}`,
+                kind: "item",
+                source: "agent",
+                item,
+                at,
+              },
+            ]
           : [];
       });
+    }
     case "toolResult":
       return [
         {
@@ -248,6 +267,7 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
             output: textOf(message.content),
             status: message.isError ? "incomplete" : "completed",
           } satisfies FunctionCallOutputItem,
+          at: message.timestamp,
         },
       ];
     default:
@@ -584,7 +604,14 @@ export type ThreadRow =
   /** Something they said, a notice, or a user-facing approval or artifact. */
   | { kind: "entry"; key: string; entry: ThreadEntry }
   /** A message Pim sent them. */
-  | { kind: "sent"; key: string; call: FunctionCallItem; sent: Sent };
+  | {
+      kind: "sent";
+      key: string;
+      call: FunctionCallItem;
+      sent: Sent;
+      /** When it was sent, in ms. */
+      at: number;
+    };
 
 /**
  * Lays the thread out as the person reads it: what they said and what Pim sent
@@ -624,7 +651,13 @@ export function layoutThread(
           if (options.refused?.(call)) break;
           // Nothing to read until its message starts streaming.
           if (message.message === "") break;
-          rows.push({ kind: "sent", key: entry.key, call, sent: message });
+          rows.push({
+            kind: "sent",
+            key: entry.key,
+            call,
+            sent: message,
+            at: entry.at,
+          });
         } else if (options.shown(call)) own(entry);
         break;
       }

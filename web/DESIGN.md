@@ -20,8 +20,8 @@ Components use the tokens in [`src/styles/app.css`](src/styles/app.css), never r
 | --- | --- |
 | `--background` | Chat canvas and modals |
 | `--sidebar` | Sidebar, one step off the canvas |
-| `--muted` / `--secondary` | Agent message bubbles, cards in the transcript, search and input fills, selected rows, secondary buttons, chips |
-| `--border` | Hairline dividers between panes, outlines on fields and settings cards |
+| `--muted` / `--secondary` | Cards in the transcript, search and input fills, selected rows, secondary buttons, chips |
+| `--border` | Hairline dividers between panes and between an agent's consecutive messages, outlines on fields, tables and settings cards |
 | `--foreground` | Body text and titles |
 | `--muted-foreground` | Previews, timestamps, section labels, placeholders, system events |
 | `--primary` | Primary buttons, the send button |
@@ -46,7 +46,7 @@ A theme chooses colors and may choose bundled fonts and an icon set. Every theme
 - **Gronk:** neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles invert with it.
 - **Classics:** Catppuccin (Latte / Mocha), Solarized, Gruvbox (medium), Rosé Pine (Dawn / Main), One (Light / Dark), Everforest (medium), Nord (a light mode built from its Snow Storm palette), Dracula (Alucard / Dracula), and Ayu (Light / Mirage). Each uses the official palette, adjusted only in lightness where a pair missed contrast; each theme's header comment lists its deviations.
 - **Gronk:** neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles invert with it.
-- **Moose:** cool grays with black (light) or white (dark) buttons, white agent bubbles on a gray canvas in light mode, and sky-blue user bubbles.
+- **Moose:** cool grays with black (light) or white (dark) buttons, white cards on a gray canvas in light mode, and sky-blue user bubbles.
 
 Parody themes like Gronk and Moose are playful nods to apps that inspired Pim. Give them a spoof name and the inspiration's general palette, never its real name, logo, or other brand assets.
 
@@ -76,7 +76,7 @@ Use only regular and medium weight below title size. Show emphasis with color (f
 | Radius | Use |
 | --- | --- |
 | Full (pill) | Every button, chip, tag, status badge, toggle, the composer's circular buttons |
-| ~18px | Message bubbles, cards in the transcript, modals, the composer |
+| ~18px | User message bubbles, cards in the transcript, modals, the composer |
 | ~12px | Sidebar selection, search field, text inputs, settings cards |
 | ~10px | File and plugin icons |
 
@@ -96,9 +96,10 @@ On narrow screens there is no sidebar. A bar of icons along the bottom, in the s
 
 ### Messages
 
-- **Agent messages** are muted bubbles without icons, aligned left and up to ~85% of the transcript width. Consecutive messages stack with a small gap.
+- **Agent messages** are plain text on the canvas, without a bubble or icon, using the transcript's whole width so tables, code, and long formatted answers have room. A faint hairline separates an agent's consecutive messages.
 - **User messages** are `--bubble` bubbles with `--bubble-foreground` text, aligned right.
-- **Hover actions** (copy, retry) float as bare icons beside the bubble and appear only on hover.
+- **Message times** are small muted text: under an agent's message, and beside a user's bubble on its left. A message from another day shows its date too.
+- **Hover actions** (copy, retry) are bare icons beside the message's time and appear only on hover or keyboard focus.
 - **Timestamps** ("Today 10:01 AM") and **system events** ("Approved: rename the agent", "Scheduled check-in") are centered muted text, never bubbles. A referenced object shows its icon inline and is clickable.
 
 ### Cards in the transcript

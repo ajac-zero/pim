@@ -107,6 +107,8 @@ export const Thread = memo(function Thread({
         kind: "item",
         source: "user",
         item: userItem(pending),
+        // Sent just now; Pim's own time replaces it once it places the message.
+        at: Date.now(),
       });
     }
     return [...all, ...view.live];
@@ -212,7 +214,7 @@ export const Thread = memo(function Thread({
       initial={scrollPositions.has(sessionId) ? false : "instant"}
     >
       <ConversationContent
-        className="mx-auto min-h-full w-full max-w-3xl px-4 [&>[data-speaker=assistant]+[data-speaker=assistant]]:-mt-3 [&>[data-speaker=user]+[data-speaker=user]]:-mt-3"
+        className="mx-auto min-h-full w-full max-w-3xl px-4 [&>[data-speaker=assistant]+[data-speaker=assistant]]:-mt-2 [&>[data-speaker=assistant]+[data-speaker=assistant]]:border-border/60 [&>[data-speaker=assistant]+[data-speaker=assistant]]:border-t [&>[data-speaker=assistant]+[data-speaker=assistant]]:pt-4 [&>[data-speaker=user]+[data-speaker=user]]:-mt-3"
         style={{
           paddingTop: HEADER_INSET,
           paddingBottom:
@@ -240,6 +242,7 @@ export const Thread = memo(function Thread({
                   role: "assistant",
                   content: [{ type: "output_text", text: row.sent.message }],
                 }}
+                at={row.at}
                 streaming={liveKeys.has(row.key)}
                 notified={row.sent.notify}
                 attachments={
@@ -263,7 +266,13 @@ export const Thread = memo(function Thread({
           }
           const { item } = entry;
           if (item.type === "message") {
-            return <UserMessage key={entry.key} item={item as MessageItem} />;
+            return (
+              <UserMessage
+                key={entry.key}
+                item={item as MessageItem}
+                at={entry.at}
+              />
+            );
           }
           if (item.type === "function_call") {
             const call = item as FunctionCallItem;

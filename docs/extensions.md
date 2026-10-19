@@ -11,7 +11,7 @@ Pim is the platform; a space is one person's own part of it; an agent is what th
 | Layer | What it is | Where |
 | --- | --- | --- |
 | Core | How every space works: talking through `send_to_user`, approvals, honesty, time. No space's instructions change it | The `preamble` section in [`src/extensions/agents.ts`](../src/extensions/agents.ts) |
-| Abilities | Tools, prompt sections, hooks and background tasks, plus actions that ask first and widgets. Pim's own (goals, schedules, memory, artifacts, teams, the web) are every space's; an extension's go only to the agents that use it | `src/extensions/`, and extensions' `ability` |
+| Abilities | Tools, prompt sections, hooks and background tasks, plus actions that ask first and widgets. Pim's own (goals, schedules, memory, artifacts, tasks, the web) are every space's; an extension's go only to the agents that use it | `src/extensions/`, and extensions' `ability` |
 | Blueprints | A name, instructions, the abilities it uses, the apps it works with, a dashboard and starters, defined by an extension in code; agents build on one | Extensions in `pim.config.ts` |
 | Agents | What a person talks with: a name and their own instructions and apps on top of a blueprint. Stored data, made in the app or by the agent | Your agents |
 
@@ -108,7 +108,7 @@ People then make agents built on it: Your agents → New agent → Based on blue
 - `timeZone`: the person's, as it is when read.
 - `notify(title, body)`: a notification in the app, pushed to their devices and webhook.
 
-It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps`, `tasks`; see [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable#extensions)), plus `actions`. The ability is installed under the extension's id and selected only in the chats of spaces that use it, and in their team members' conversations.
+It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps`, `tasks`; see [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable#extensions)), plus `actions`. The ability is installed under the extension's id and selected only in the chats of agents that use it, and in the conversations of tasks they work on.
 
 - **Actions ask first.** Each `GatedAction` becomes a tool that files an approval and waits, suspended, for the decision. `run` runs only once the person approves, or their approval policy approves it, and the call returns the decision with its result. Actions are listed in Settings → Permissions with Pim's own, where they can be turned Off, Ask or On.
 - **Names are checked.** An ability whose tool or action has the name of one of Pim's tools, or of another extension's, stops the agent with an error. pi would let the later tool replace the earlier one, so an extension could otherwise stand in for `send_to_user` or a tool that asks first. Prefix your tools' names with your extension's.
@@ -194,7 +194,7 @@ A `link` is `{ chat }` or `{ artifact }`: the item opens it.
 `load` gets:
 
 - `agent`: the agent whose dashboard it is (`id`, `name`, `majordomo`).
-- `chatOf(session)`: the person's chat that a conversation is, or works for, when that chat is this space's, by the id a `link` takes; null otherwise. A team member's conversation works for the chat that gave it its task. Use it to show only what belongs to this space, and to link to the chat.
+- `chatOf(session)`: the person's chat that a conversation is, or works for, when that chat is this space's, by the id a `link` takes; null otherwise. A task's conversation works for the chat the work began in. Use it to show only what belongs to this space, and to link to the chat.
 - `ofAgent(session)`: whether a conversation is, or works for, one of this space's chats, including one since deleted. Use it for what outlives the chat it came from, such as a task that starts new chats.
 - `timeZone`: the person's.
 - `data`: the data of the extension that brings the widget.
@@ -209,7 +209,7 @@ A widget with a `description` can also go with a message. The model reads a `wid
 - **The model sees what was shown.** The tool's result holds the widgets' content, which the app draws from, so the model knows what the person is looking at.
 - **Mistakes come back to the model.** A widget the chat can't show refuses the whole message, and says which widgets it can show. Nothing reaches the person, and the model tries again within the turn.
 - **Text where they can't be drawn.** An email gets them as Markdown under the message, and so does an API client's `replies`.
-- **Not in visits or team members' conversations**: a guest never sees the host's data in a widget, and members don't talk to the person.
+- **Not in visits or tasks' conversations**: a guest never sees the host's data in a widget, and an agent at work on a task doesn't talk to the person.
 
 Leave out `description` for a widget that only makes sense on its dashboard.
 

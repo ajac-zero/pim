@@ -6,7 +6,7 @@ import { checkToolNames, PimExtensions } from "../src/extensions/define";
 import { themes as ownThemes } from "../src/extensions/themes";
 import { nord } from "../src/extensions/themes/nord";
 import { PimThemes, type Theme, type ThemeList } from "../src/themes";
-import { api, apiUrl, lastUserText, pendingApproval, post, ROOT, say, systemPrompt, toolUse } from "./helpers";
+import { api, apiUrl, lastUserText, pendingApproval, post, ROOT, say, scripts, settled, systemPrompt, toolUse } from "./helpers";
 import { faux, ledger, outbox } from "./worker";
 
 type Agent = { id: string; name: string; blueprint: string | null; majordomo: boolean };
@@ -104,14 +104,19 @@ describe("extensions", () => {
 			toolUse("schedule_task", { instruction: "Ask how the long run went.", label: "Long run check-in", delay_seconds: 3600 }),
 			toolUse("artifact_create", { title: "Training plan", kind: "markdown", content: "# Week 1" }),
 			toolUse("send_to_user", { message: "Set." }),
-			// The goal comes from a team member's conversation: it belongs to the chat the member works for.
-			toolUse("delegate", { tasks: [{ member: "Tracker", task: "Track a 10k goal." }] }),
-			toolUse("create_goal", { title: "Run a 10k", steps: ["Buy shoes", "Run 3x a week"] }),
-			fauxAssistantMessage("Tracking it."),
-			toolUse("send_to_user", { message: "Tracking it." }),
 		]);
 		await say("Plan my training and check in later.", chat);
+		// The goal comes from a team member's conversation: it belongs to the chat the member works for.
+		scripts({
+			lead: [
+				() => toolUse("delegate", { tasks: [{ to: "Tracker", task: "Track a 10k goal." }] }),
+				() => toolUse("send_to_user", { message: "Asked Tracker." }),
+				() => toolUse("send_to_user", { message: "Tracking it." }),
+			],
+			Tracker: [() => toolUse("create_goal", { title: "Run a 10k", steps: ["Buy shoes", "Run 3x a week"] }), () => fauxAssistantMessage("Tracking it.")],
+		});
 		await say("Track my 10k.", chat);
+		await settled(chat);
 		faux.setResponses([toolUse("create_goal", { title: "Learn Portuguese", steps: ["Find a tutor"] }), toolUse("send_to_user", { message: "ok" })]);
 		await say("I want to learn Portuguese.", ROOT);
 		await post("/memory/log", { text: "Prefers morning runs" });
@@ -296,15 +301,21 @@ describe("extensions", () => {
 		expect(systemPrompt(home.messages)).not.toContain("ledger_bills");
 
 		// A team member works with its agent's abilities.
-		faux.setResponses([
-			toolUse("delegate", { tasks: [{ member: "Clerk", task: "File the rent." }] }),
-			(context) => {
-				member = context;
-				return fauxAssistantMessage("Filed.");
-			},
-			toolUse("send_to_user", { message: "Filed." }),
-		]);
+		scripts({
+			lead: [
+				() => toolUse("delegate", { tasks: [{ to: "Clerk", task: "File the rent." }] }),
+				() => toolUse("send_to_user", { message: "Asked Clerk." }),
+				() => toolUse("send_to_user", { message: "Filed." }),
+			],
+			Clerk: [
+				(context) => {
+					member = context;
+					return fauxAssistantMessage("Filed.");
+				},
+			],
+		});
 		await say("File it.", chat);
+		await settled(chat);
 		expect(offered(member)).toContain("ledger_add_bill");
 		expect(offered(member)).not.toContain("send_to_user");
 

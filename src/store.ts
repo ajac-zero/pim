@@ -53,9 +53,9 @@ export type Approval = {
 	/** A guest who asked, from their own space, through one of the owner's circles; null when Pim asked for the owner. */
 	readonly requestedBy: ApprovalRequester | null;
 	/**
-	 * A member of a space's team asked: its `session` is then the member's own
-	 * conversation, where the decision goes, and the person sees the request
-	 * in the chat it works for.
+	 * An agent at work on a task asked, another agent or a member of a team:
+	 * its `session` is then the task's conversation, where the decision goes,
+	 * and the person sees the request in the chat the work began in.
 	 */
 	readonly member: ApprovalMember | null;
 	/**
@@ -68,7 +68,7 @@ export type Approval = {
 
 export type ApprovalReview = { readonly status: "reviewing" | "escalated"; readonly note: string | null };
 
-/** The team member whose call filed an approval, and the chat it was working for. */
+/** The agent at work on a task whose call filed an approval, by name, and the chat the work began in. */
 export type ApprovalMember = { readonly name: string; readonly session: string };
 
 /** A guest whose call filed an approval. Its `session` is then the guest's conversation, in the guest's space. */

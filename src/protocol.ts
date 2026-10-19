@@ -53,5 +53,7 @@ export type ServerMessage =
 	| { readonly type: "visits" }
 	/** The session list changed outside a run: a session got its title. */
 	| { readonly type: "sessions" }
+	/** The tasks the work begun in a chat led to changed: one was handed out, waits for an approval, or ended. */
+	| { readonly type: "tasks"; readonly session: string }
 	| { readonly type: "result"; readonly id: string; readonly result: JsonValue }
 	| { readonly type: "error"; readonly id?: string; readonly message: string };

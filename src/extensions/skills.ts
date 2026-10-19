@@ -3,7 +3,7 @@ import { defineExtension, defineTool, section } from "@earendil-works/pi-durable
 import { type AgentStore, agentInput } from "../agents";
 import { HttpError } from "../http";
 import { MAX_SKILL_DESCRIPTION, MAX_SKILL_FILE_CHARS, MAX_SKILL_FILES, MAX_SKILL_INSTRUCTIONS, type SkillStore } from "../skills";
-import type { Role } from "../team";
+import type { Role } from "../tasks";
 import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";
 import { type PimServices, text } from "./services";
 
@@ -105,9 +105,10 @@ export function skillsExtension(services: PimServices, roleOf: (session: string)
 		sections: [
 			// Rendered at each request, so a chat sees a skill from the step after it is saved.
 			section("your_skills", ({ conversationId }) => {
-				const { agent, member } = roleOf(String(conversationId));
+				const { agent, from } = roleOf(String(conversationId));
 				const mine = agent.skills.flatMap((name) => skills.get(name) ?? []);
-				const writes = !member && permission() !== "off";
+				// Only in a chat: in a task, an agent works for another and writes none.
+				const writes = from === null && permission() !== "off";
 				if (mine.length === 0 && !writes) return undefined;
 				return [
 					...(mine.length === 0

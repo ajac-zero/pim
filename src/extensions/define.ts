@@ -85,8 +85,8 @@ export type WidgetContext = {
 	/** The agent whose dashboard shows the widget. */
 	readonly agent: { readonly id: string; readonly name: string; readonly majordomo: boolean };
 	/**
-	 * The person's chat that a conversation is, or works for (a team member's
-	 * conversation works for the chat that gave it its task), when that chat
+	 * The person's chat that a conversation is, or works for (a task's
+	 * conversation works for the chat the work began in), when that chat
 	 * is this space's, by the id links use; null otherwise.
 	 */
 	chatOf(session: string): string | null;

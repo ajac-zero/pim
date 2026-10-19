@@ -117,9 +117,7 @@ CREATE TABLE IF NOT EXISTS pim_agent_icons (
 );
 CREATE TABLE IF NOT EXISTS pim_agent_sessions (
 	session TEXT PRIMARY KEY,
-	agent TEXT NOT NULL,
-	handed_by TEXT,
-	handoff TEXT
+	agent TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pim_session_abilities (
 	session TEXT PRIMARY KEY,
@@ -302,9 +300,6 @@ export class AgentStore {
 		// Accounts from before majordomos already have the agent they talk with: it becomes theirs as it is.
 		if (!columns.includes("introduced")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN introduced INTEGER NOT NULL DEFAULT 1");
 		if (!columns.includes("skills")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN skills TEXT NOT NULL DEFAULT '[]'");
-		const sessionColumns = this.#sql.exec("PRAGMA table_info(pim_agent_sessions)").toArray().map((row) => String(row.name));
-		if (!sessionColumns.includes("handed_by")) this.#sql.exec("ALTER TABLE pim_agent_sessions ADD COLUMN handed_by TEXT");
-		if (!sessionColumns.includes("handoff")) this.#sql.exec("ALTER TABLE pim_agent_sessions ADD COLUMN handoff TEXT");
 	}
 
 	/** The majordomo first, then the others as they were made. */
@@ -416,31 +411,9 @@ export class AgentStore {
 		this.#sql.exec("DELETE FROM pim_agent_icons WHERE agent = ?", id);
 	}
 
-	/**
-	 * Ties a chat to an agent. A chat the majordomo started for the person
-	 * also records the majordomo's chat it came from and the handoff's key,
-	 * so a retried handoff finds the same chat.
-	 */
-	setSession(session: string, agent: string, handoff?: { from: string; key: string }): void {
-		this.#sql.exec(
-			"INSERT INTO pim_agent_sessions (session, agent, handed_by, handoff) VALUES (?, ?, ?, ?) ON CONFLICT (session) DO UPDATE SET agent = excluded.agent",
-			session,
-			agent,
-			handoff?.from ?? null,
-			handoff?.key ?? null,
-		);
-	}
-
-	/** The majordomo's chat a chat was started from, if the majordomo started it. */
-	handedBy(session: string): string | undefined {
-		const [row] = this.#sql.exec("SELECT handed_by FROM pim_agent_sessions WHERE session = ?", session).toArray();
-		return row?.handed_by == null ? undefined : String(row.handed_by);
-	}
-
-	/** The chat a handoff started, if it has. */
-	byHandoff(key: string): string | undefined {
-		const [row] = this.#sql.exec("SELECT session FROM pim_agent_sessions WHERE handoff = ?", key).toArray();
-		return row ? String(row.session) : undefined;
+	/** Ties a chat, or a task's conversation, to the agent it is with. */
+	setSession(session: string, agent: string): void {
+		this.#sql.exec("INSERT INTO pim_agent_sessions (session, agent) VALUES (?, ?) ON CONFLICT (session) DO UPDATE SET agent = excluded.agent", session, agent);
 	}
 
 	/** The agent a chat was started with, or the majordomo for a chat tied to none. */

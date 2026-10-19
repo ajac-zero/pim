@@ -23,9 +23,9 @@ import { BatchSpanProcessor, type ReadableSpan, type SpanExporter, TracerProvide
  * Each run of a conversation is an `invoke_agent` span; each model request
  * in it a `chat` span, and each tool call an `execute_tool` span. Work a
  * tool call starts in another conversation is a child of that call: a task
- * handed to a team member, a chat the majordomo starts with another agent,
- * or the majordomo's review of an approval request. So one trace holds
- * everything a message to an agent led to.
+ * handed to another agent or a team member, or the majordomo's review of an
+ * approval request. So one trace holds everything a message to an agent led
+ * to, up to the tasks' answers, which come back later in a trace of their own.
  *
  * Off unless the deployment sets an OTLP endpoint. Prompts, messages and
  * tool arguments and results are recorded only when

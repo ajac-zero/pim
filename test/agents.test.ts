@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { AgentStore } from "../src/agents";
-import { TeamStore } from "../src/team";
+import { TaskStore } from "../src/tasks";
 import { CREATE_AGENT, RENAME_AGENT, UPDATE_AGENT } from "../src/extensions/agents";
 import { WRITE_SKILL } from "../src/extensions/skills";
 import { api, apiUrl, pendingApproval, post, ROOT, say, TOKEN, toolUse } from "./helpers";
@@ -413,7 +413,7 @@ describe("a database from when agents were personas", () => {
 	it("is renamed in place, keeping its agents, icons, chats, team runs, and the apps it listed by URL that the directory has", async () => {
 		await runInDurableObject(env.Pim.getByName("legacy"), async (_instance, state) => {
 			const sql = state.storage.sql;
-			for (const table of ["pim_agents", "pim_agent_icons", "pim_agent_sessions", "pim_team_runs"]) sql.exec(`DROP TABLE ${table}`);
+			for (const table of ["pim_agents", "pim_agent_icons", "pim_agent_sessions", "pim_tasks"]) sql.exec(`DROP TABLE IF EXISTS ${table}`);
 			sql.exec(`CREATE TABLE pim_personas (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, instructions TEXT NOT NULL, apps TEXT NOT NULL,
 				source TEXT, published TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, is_default INTEGER NOT NULL DEFAULT 0, team TEXT NOT NULL DEFAULT '[]', base TEXT)`);
 			sql.exec(`INSERT INTO pim_personas VALUES ('p_1', 'Coach', 'Runs', 'Be brief.', '[{"name":"Runs","url":"https://mcp.strava.example/mcp"},{"name":"Gone","url":"https://gone.example/mcp"}]', NULL, NULL, 1, 1, 1, '[]', 'test.ledger/budget')`);
@@ -437,7 +437,7 @@ describe("a database from when agents were personas", () => {
 			// Its default agent is its majordomo, already named: nobody is asked to name theirs again.
 			expect(agents.introduced()).toBe(true);
 			expect(agents.ofSession("9").id).toBe("p_1");
-			expect(new TeamStore(sql).run("c1")).toMatchObject({ kind: "member", agent: "p_1", member: "Editor" });
+			expect(new TaskStore(sql).of("c1")).toMatchObject({ kind: "member", agent: "p_1", member: "Editor", requester: "9", root: "9", state: "completed" });
 			// Starting again changes nothing.
 			expect(new AgentStore(sql, () => { throw new Error("unused"); }, directory).list()).toHaveLength(1);
 		});

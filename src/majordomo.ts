@@ -3,17 +3,15 @@ import { defineExtension, defineTool, section } from "@earendil-works/pi-durable
 import { type Agent, agentInput } from "./agents";
 import { text } from "./extensions/services";
 import { HttpError } from "./http";
+import { DELEGATE } from "./tasks";
 import { INTRODUCTION } from "./transcript";
 
 /**
  * The majordomo: the one agent the person comes to first, for almost
  * anything, and the one that knows them best. It doesn't do the work itself.
- * It hands tasks to the person's other agents with `send_to_agent`, making
- * new ones (or ones with teams) when none fits, and tells the person what
- * came of them. Each handoff is a chat of the person's own with that agent:
- * the majordomo's message is in it as though the person had sent it, the
- * agent answers there as it would answer them, and the person can read it
- * and carry on in it.
+ * It hands tasks to the person's other agents with `delegate` (see
+ * ./tasks.ts), making new ones (or ones with teams) when none fits, and tells
+ * the person what came of them once their answers arrive.
  *
  * It is also the person's face to their agents. Under the `majordomo`
  * approval policy, another agent's approval request goes to it first: a
@@ -21,8 +19,6 @@ import { INTRODUCTION } from "./transcript";
  * approves, denies, or escalates to the person with `decide_approval`.
  */
 
-export const MAJORDOMO_EXTENSION = "pim.majordomo";
-export const SEND_TO_AGENT = "send_to_agent";
 export const REVIEW_EXTENSION = "pim.review";
 export const DECIDE_APPROVAL = "decide_approval";
 
@@ -31,60 +27,10 @@ export function majordomoRole(majordomo: Agent): string {
 	return `You are the person's majordomo, ${majordomo.name}: the agent they come to first and most, for almost anything, and the one that knows them best.
 
 - Get to know them. Record what you learn about them, their people, routines and preferences with \`note\`, even when it comes up in passing, and use it, so they never have to tell you twice.
-- Don't do the work yourself. Talking with them, remembering, and keeping track of goals and schedules are yours. Anything else that takes real effort (research, writing, working in their apps) goes to one of their agents with \`${SEND_TO_AGENT}\`. When none of them fits, make one with \`create_agent\`, with a team when the work has parts that can go on at once, then send it the task. Answer a quick question yourself.
-- \`${SEND_TO_AGENT}\` starts a chat between the person and that agent, with your message in it as though they had written it; they see it among their chats and can carry on in it. The agent knows only its own instructions, the person's memory and your message: write it as the person would, with everything it needs. To follow up, send again with the same \`chat\`. Then tell the person what came of it in your own words, and where to find the chat.
+- Don't do the work yourself. Talking with them, remembering, and keeping track of goals and schedules are yours. Anything else that takes real effort (research, writing, working in their apps) goes to one of their agents with \`${DELEGATE}\`. When none of them fits, make one with \`create_agent\`, with a team when the work has parts that can go on at once, then hand it the task. Answer a quick question yourself.
+- While their agents work, you stay free: tell the person briefly what you handed out, and end your turn. When the answers arrive, tell them what came of it in your own words. They can read each task's conversation from this chat.
 - You are the person's face to their agents: when the person lets you, their approval requests come to you first, and you decide those you're sure about for them.
 - Suggest apps that would help with what they care about. When something they tell you would go better with one of this Pim's apps (look with \`find_app\`), mention it in a sentence: what it would let you do for them. One app at a time, only when it fits what you're talking about. If they want it, add it with \`manage_apps\`, which connects it for all their agents. If they turn one down, note that they don't want it, and never suggest that app again unless they bring it up.`;
-}
-
-/** What the majordomo's tool needs from the space. */
-export type MajordomoHost = {
-	/** The agent a chat is with, or null for a conversation that is no chat of the person's. */
-	chatAgent(session: string): Agent | null;
-	/** The person's agents. */
-	agents(): readonly Agent[];
-	/**
-	 * Sends `message` into `chat`, or a new chat with `agent`, as the person,
-	 * from the majordomo's chat `from`, and says what came of it. `key` makes
-	 * a retried call find the chat it started.
-	 */
-	sendToAgent(handoff: { from: string; agent: Agent; message: string; chat: string | undefined; key: string }): Promise<string>;
-};
-
-/**
- * The majordomo's own tool: handing tasks to the person's other agents, in
- * chats the person sees. Only chats with the majordomo select it. It has no
- * section: one after the memory's would have pi send the memory view again
- * whenever the memories listed after it change.
- */
-export function majordomoExtension(host: MajordomoHost) {
-	const sendToAgent = defineTool({
-		name: SEND_TO_AGENT,
-		description:
-			"Send a message to one of the person's agents, listed in your prompt, as the person: it starts a chat between them and that agent, which the person sees, or continues one you started. Returns the chat's id and what the agent answered. Call it once per agent; calls in the same turn run at the same time.",
-		parameters: Type.Object({
-			agent: Type.String({ description: "The agent's id or name, as your_agents lists it." }),
-			message: Type.String({ minLength: 1, maxLength: 20_000, description: "What the person would write to it: the task, what you already know, and what to answer with." }),
-			chat: Type.Optional(Type.String({ description: "The id of a chat you started with this agent before, to continue it. Leave it out to start a new one." })),
-		}),
-		// A rerun after an eviction finds the chat it started and its message, and waits again.
-		replay: "safe",
-		async execute(args, api, context) {
-			const from = String(api.conversationId);
-			if (!host.chatAgent(from)?.majordomo) return text("Only the majordomo, in its own chats, sends messages to agents.", true);
-			const given = args.agent.trim();
-			const others = host.agents().filter((agent) => !agent.majordomo);
-			const agent = others.find((candidate) => candidate.id === given || candidate.name.toLowerCase() === given.toLowerCase());
-			if (!agent) {
-				const known = others.map((candidate) => candidate.name).join(", ") || "none yet";
-				return text(`No agent called ${given}. Their agents: ${known}. Make one with create_agent first.`, true);
-			}
-			const key = await api.memo("handoff", crypto.randomUUID(), context);
-			return text(await host.sendToAgent({ from, agent, message: args.message, chat: args.chat?.trim() || undefined, key }));
-		},
-	});
-
-	return defineExtension({ name: MAJORDOMO_EXTENSION, tools: [sendToAgent] });
 }
 
 /** What a review needs from the space: who reviews, and applying the decision. */

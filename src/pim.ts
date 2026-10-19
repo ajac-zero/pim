@@ -2313,9 +2313,13 @@ export class Pim extends DurableAgent<Env> {
 		for (const listener of this.#updateListeners.get(requester) ?? []) listener(operation);
 	}
 
-	/** After a restart: waits again for open tasks, and gives updates that may not have been given. */
+	/** After a restart: waits again for open tasks, gives a task that may not have been given, and updates that may not have been. */
 	async #resumeTasks(): Promise<void> {
-		for (const task of this.#tasks.open()) this.#watchTask(task.conversation, task.operation);
+		for (const task of this.#tasks.open()) {
+			// Giving the same operation again is a no-op: this gives a task only if the restart came between recording and giving it.
+			if (task.operation === `task:${task.id}`) await this.#submit(task.conversation, task.task, { operationId: task.operation, whenBusy: "followUp" }, "task");
+			this.#watchTask(task.conversation, task.operation);
+		}
 		for (const { batch, operation } of this.#tasks.beingGiven()) {
 			const requester = this.#tasks.inBatch(batch)[0]?.requester;
 			if (requester) await this.#giveUpdate(requester, batch, operation);

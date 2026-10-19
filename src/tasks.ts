@@ -227,9 +227,9 @@ export class TaskStore {
 		return this.#sql.exec("SELECT * FROM pim_tasks WHERE root = ? AND kind != 'review' ORDER BY created_at, position", root).toArray().map(taskOf);
 	}
 
-	/** Tasks not yet done, for picking up again after a restart. */
+	/** Tasks agents handed out not yet done, for picking up again after a restart; reviews, which Pim waits for itself, aren't among them. */
 	open(): Task[] {
-		return this.#sql.exec("SELECT * FROM pim_tasks WHERE state IN ('working', 'auth-required') ORDER BY created_at").toArray().map(taskOf);
+		return this.#sql.exec("SELECT * FROM pim_tasks WHERE state IN ('working', 'auth-required') AND kind != 'review' ORDER BY created_at").toArray().map(taskOf);
 	}
 
 	/**

@@ -191,6 +191,14 @@ export const Thread = memo(function Thread({
     [entries, approvalsByCall, outputs],
   );
 
+  // A reply being written in the chat shows the work going on by itself.
+  const replying = rows.some(
+    (row) =>
+      row.kind === "sent" &&
+      row.sent.channel === "chat" &&
+      liveKeys.has(row.key),
+  );
+
   const empty =
     !view.running &&
     unplaced.length === 0 &&
@@ -300,7 +308,7 @@ export const Thread = memo(function Thread({
           </div>
         )}
 
-        {view.running && <ThinkingDot />}
+        {view.running && !replying && <ThinkingDot />}
 
         {view.retry && (
           <div className="flex items-center justify-center gap-2 text-muted-foreground text-[13px]">

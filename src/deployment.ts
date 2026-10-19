@@ -33,6 +33,8 @@ export type DeploymentSettings = {
 	readonly memoryModel: string | null;
 	/** `PIM_MEMORY_LINES`: lines of long-term memory in every prompt. */
 	readonly memoryLines: number;
+	/** `PIM_IMAGE_MODEL`: Workers AI text-to-image model that `generate_image` draws with; null (`off`) leaves agents without it. */
+	readonly imageModel: string | null;
 	/** `PIM_WEB_SEARCH`: provider of `web_search`, billed through AI Gateway; null leaves agents without it. */
 	readonly webSearch: SearchProvider | null;
 	/** `PIM_LIMIT_*`: members' limits; the admin has none. */
@@ -122,6 +124,11 @@ export function readDeployment(env: object): Deployment {
 		if (lines < 8) throw new Error("must be at least 8");
 		return lines;
 	});
+	const imageModel = variable<string | null>("PIM_IMAGE_MODEL", "@cf/black-forest-labs/flux-2-klein-4b", (value) => {
+		if (value === "off") return null;
+		if (!value.startsWith("@cf/")) throw new Error("must be a Workers AI text-to-image model, such as @cf/black-forest-labs/flux-2-klein-4b, or off");
+		return model(value);
+	});
 	const webSearch = variable<SearchProvider | null>("PIM_WEB_SEARCH", null, oneOf(SEARCH_PROVIDERS));
 	const limits = Object.fromEntries(LIMIT_NAMES.map((name) => [name, variable<number | null>(limitVariable(name), null, count, 0)])) as unknown as Limits;
 	const publicUrl = variable<string | null>("PIM_PUBLIC_URL", null, origin, null, true);
@@ -147,6 +154,7 @@ export function readDeployment(env: object): Deployment {
 			utilityModel,
 			memoryModel,
 			memoryLines,
+			imageModel,
 			webSearch,
 			limits,
 			publicUrl,

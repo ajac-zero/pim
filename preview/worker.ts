@@ -5,6 +5,7 @@ import type { ModelRef } from "@earendil-works/pi-durable";
 import type { PiModel } from "agents/harness/pi";
 import { ownedCode } from "../src/auth";
 import { deploymentSettings } from "../src/deployment";
+import type { ImageModel } from "../src/extensions/image-generation";
 import { serve } from "../src/gateway";
 import { Pim as RealPim } from "../src/pim";
 import { INTRODUCTION } from "../src/transcript";
@@ -22,7 +23,7 @@ export { Auth, Directory, Gallery } from "../src/index";
  *   An agent at work on a task answers in plain text, the majordomo introduces itself with a stock greeting,
  *   and it asks the person about every approval it reviews.
  *   The utility model titles a chat with the first words of its last message, appends a
- *   line to a prompt it improves, and writes a placeholder summary.
+ *   line to a prompt it improves, and writes a placeholder summary. `generate_image` draws Pim's icon.
  * - `GET /__dev/sign-in/<username>?returnTo=/path` signs the browser in as
  *   that person, making the account if it's new, with a passkey made here.
  */
@@ -162,6 +163,14 @@ export class Pim extends RealPim {
 
 	protected override defaultUtilityModel(): Model<Api> {
 		return preview.getModel(UTILITY_MODEL)!;
+	}
+
+	/** A stand-in image model, which draws Pim's icon whatever it's asked for. */
+	protected override imageModel(): ImageModel {
+		return {
+			id: "preview-image",
+			generate: async () => new Uint8Array(await (await this.env.ASSETS.fetch("http://assets/icon-512.png")).arrayBuffer()),
+		};
 	}
 }
 

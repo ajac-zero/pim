@@ -5,6 +5,8 @@ import { InMemorySpanExporter, type SpanExporter } from "@opentelemetry/sdk-trac
 import type { PiModel } from "agents/harness/pi";
 import { Pim as RealPim } from "../src/pim";
 import type { Mail, Mailer } from "../src/email";
+import { deploymentSettings } from "../src/deployment";
+import { type ImageModel, workersAiImageModel } from "../src/extensions/image-generation";
 import { type Api, type Model, Type } from "@earendil-works/pi-ai";
 import { defineTool, section } from "@earendil-works/pi-durable";
 import { defineAppTool, defineGatedAction, definePimExtension, oauth2, type PimConfig } from "../src/extensions/define";
@@ -25,6 +27,18 @@ export const spans = new InMemorySpanExporter();
 
 /** Every email the test agents sent, in order: tests read it as an inbox. */
 export const outbox: Mail[] = [];
+
+/** What the test agents asked Workers AI's image model for, as it read each request's multipart form. */
+export const paintings: { model: string; fields: Record<string, string> }[] = [];
+
+/** A stand-in for Workers AI's `AI.run` with an image model: it reads the form FLUX.2 takes, and answers a 1×1 PNG, as JSON. */
+const imageAi = {
+	async run(model: string, input: { multipart: { body: ReadableStream; contentType: string } }) {
+		const form = await new Response(input.multipart.body, { headers: { "content-type": input.multipart.contentType } }).formData();
+		paintings.push({ model, fields: Object.fromEntries([...form].map(([name, value]) => [name, String(value)])) });
+		return { image: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" };
+	},
+} as unknown as Ai;
 
 type Bill = { name: string; amount: number; due: string; paid: boolean };
 
@@ -224,5 +238,10 @@ export class Pim extends RealPim {
 
 	protected override defaultUtilityModel(): Model<Api> {
 		return utility.getModel();
+	}
+
+	/** The deployment's default image model, on the stand-in for Workers AI. */
+	protected override imageModel(): ImageModel {
+		return workersAiImageModel(imageAi, deploymentSettings(this.env).imageModel!);
 	}
 }

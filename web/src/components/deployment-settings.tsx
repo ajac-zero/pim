@@ -125,6 +125,12 @@ export function DeploymentSection() {
           off(settings.memoryModel, "deploymentSameAsDefault"),
         )}
         {row(
+          "PIM_IMAGE_MODEL",
+          "deploymentImageModel",
+          off(settings.imageModel),
+          "deploymentImageModelHint",
+        )}
+        {row(
           "PIM_WEB_SEARCH",
           "deploymentWebSearch",
           off(settings.webSearch),

@@ -16,6 +16,8 @@ import {
   AssistantMessage,
   EmailedMessage,
   EventNotice,
+  GeneratedImage,
+  generatedImagePath,
   ThinkingDot,
   UserMessage,
 } from "~/components/chat/items";
@@ -50,6 +52,19 @@ const ARTIFACT_TOOLS = new Set([
   "artifact_update",
   "artifact_show",
 ]);
+
+/** The tool whose answer names an image it saved to your files, shown as the image. */
+const IMAGE_TOOL = "generate_image";
+
+/** The description a `generate_image` call drew from, for the image's alt text. */
+function promptOf(call: FunctionCallItem): string | undefined {
+  try {
+    const { prompt } = JSON.parse(call.arguments) as { prompt?: unknown };
+    return typeof prompt === "string" ? prompt : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** What each model problem tells the person; never the provider's own text. */
 const PROBLEM_TEXT: Record<ModelProblem, TranslationKey> = {
@@ -180,17 +195,24 @@ export const Thread = memo(function Thread({
     [view.live],
   );
 
-  /* Only user-facing approvals and artifacts are drawn from tool calls. */
+  /*
+   * Only user-facing approvals, artifacts and images are drawn from tool
+   * calls. An image a visit's agent made is in that space's files, which
+   * this app can't open.
+   */
   const rows = useMemo(
     () =>
       layoutThread(entries, {
         shown: (call) =>
           approvalsByCall.has(call.call_id) ||
           (ARTIFACT_TOOLS.has(call.name) &&
-            artifactReference(outputs.get(call.call_id)?.output) !== null),
+            artifactReference(outputs.get(call.call_id)?.output) !== null) ||
+          (!visit &&
+            call.name === IMAGE_TOOL &&
+            generatedImagePath(outputs.get(call.call_id)?.output) !== null),
         refused: (call) => outputs.get(call.call_id)?.status === "incomplete",
       }),
-    [entries, approvalsByCall, outputs],
+    [entries, approvalsByCall, outputs, visit],
   );
 
   // A reply being written in the chat shows the work going on by itself.
@@ -290,6 +312,18 @@ export const Thread = memo(function Thread({
                   reference={artifact}
                   sessionId={sessionId}
                   live={synced && !shownWith.current?.keys.has(entry.key)}
+                />
+              );
+            }
+            const image =
+              call.name === IMAGE_TOOL &&
+              generatedImagePath(outputs.get(call.call_id)?.output);
+            if (image && !visit) {
+              return (
+                <GeneratedImage
+                  key={entry.key}
+                  path={image}
+                  prompt={promptOf(call)}
                 />
               );
             }

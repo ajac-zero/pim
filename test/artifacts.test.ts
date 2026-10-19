@@ -67,6 +67,17 @@ describe("artifacts", () => {
 		const part = await callTool("artifact_read", { id: made.id, offset: PAGE.length - 10 });
 		expect(part.text).toContain(PAGE.slice(-10));
 		expect(part.text).not.toContain("<!doctype");
+
+		// Found by words of its title, and shown again as the same reference, changing nothing.
+		await makePage("<p>Notes</p>", "Meeting notes");
+		const found = await callTool("artifact_list", { query: "CALCULATOR tip" });
+		expect(found.text).toContain(made.id);
+		expect(found.text).not.toContain("Meeting notes");
+		expect((await callTool("artifact_list", { query: "robot" })).text).toBe("No artifact's title has robot.");
+		const shown = await callTool("artifact_show", { id: made.id });
+		expect(JSON.parse(shown.text).artifact).toEqual({ ...made, title: "Tip calculator", kind: "html" });
+		expect((await api(`/artifacts/${made.id}`)).body).toMatchObject({ version: 1, history: [expect.anything()] });
+		expect((await callTool("artifact_show", { id: made.id, version: 2 })).isError).toBe(true);
 	});
 
 	it("are described to the model without promising they can't send data out", async () => {

@@ -179,6 +179,9 @@ function usePimEvents() {
       onSessions: () => {
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
       },
+      onTasks: (session) => {
+        queryClient.invalidateQueries({ queryKey: ["tasks", session] });
+      },
       onVisits: () => {
         queryClient.invalidateQueries({ queryKey: ["visits"] });
         queryClient.invalidateQueries({ queryKey: ["sessions"] });

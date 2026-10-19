@@ -445,14 +445,11 @@ export function taskUpdate(done: readonly { task: Task; by: string }[], waiting:
 			: task.state === "canceled"
 				? `Task ${task.id} for ${by} was canceled: ${task.result}`
 				: `${by} didn't finish task ${task.id}: ${task.result}`;
+	const headline = ({ task, by }: { task: Task; by: string }) =>
+		`${by} ${task.state === "completed" ? "answered" : task.state === "canceled" ? "was canceled" : "didn't finish"}`;
 	return [
-		`${TASK_UPDATE} ${done.map(({ task, by }) => `${by}: ${clip(task.task)}`).join("; ")}`,
+		`${TASK_UPDATE} ${done.map(headline).join("; ")}`,
 		...done.map(({ task, by }) => outcome(task, by)),
 		...waiting.map(({ task, by }) => `${by} is waiting for the person's approval on task ${task.id}; its answer will come in a later update.`),
 	].join("\n\n");
 }
-
-const clip = (task: string) => {
-	const line = task.trim().split(/\r?\n/)[0] ?? "";
-	return line.length > 80 ? `${line.slice(0, 79)}…` : line;
-};

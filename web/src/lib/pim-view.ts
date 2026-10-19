@@ -25,9 +25,9 @@ import { DELIVERY_REMINDER, INTRODUCTION } from "../../../src/transcript";
  * function_call / function_call_output.
  */
 
-/** Something Pim fed itself: an approval decision, a scheduled task, an app event, a reset. */
+/** Something Pim fed itself: an approval decision, a scheduled task, an app event, tasks' answers, a reset. */
 export type PimNotice = {
-  kind: "approval" | "schedule" | "event" | "reset";
+  kind: "approval" | "schedule" | "event" | "task" | "reset";
   /** One line, without the machine prefix. */
   title: string;
   /** The full text Pim received. */
@@ -118,6 +118,7 @@ const NOTICE_PREFIXES: ReadonlyArray<[RegExp, PimNotice["kind"]]> = [
   [/^\[Approval ([^\]]+)\]\s*/, "approval"],
   [/^\[Scheduled task[^\]]*\]\s*/, "schedule"],
   [/^\[App event\]\s*/, "event"],
+  [/^\[Task update\]\s*/, "task"],
 ];
 
 function textOf(content: Message["content"]): string {

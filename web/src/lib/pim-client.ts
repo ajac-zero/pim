@@ -40,6 +40,8 @@ export type ClientHandlers = {
   onActivity?: (session: string) => void;
   /** The session list changed outside a run: a chat got its title. */
   onSessions?: () => void;
+  /** The tasks a chat led to changed. */
+  onTasks?: (session: string) => void;
 };
 
 const MAX_BACKOFF_MS = 15_000;
@@ -155,6 +157,9 @@ class PimClient {
         return;
       case "sessions":
         this.handlers.onSessions?.();
+        return;
+      case "tasks":
+        this.handlers.onTasks?.(message.session);
         return;
       default:
         return;

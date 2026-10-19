@@ -93,6 +93,7 @@ function ComposerInner({
   const seesImages = model?.model.images ?? false;
   const inputId = useId();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const touchInput = window.matchMedia("(pointer: coarse)").matches;
   const [preparing, setPreparing] = useState(false);
   const files = controller.attachments.files;
   const hasText = text.trim().length > 0;
@@ -112,6 +113,13 @@ function ComposerInner({
 
   const cantSeeImages = () =>
     toast.info(t("modelCantSeeImages", { model: model?.model.name ?? "" }));
+
+  const send = (content: UserContent) => {
+    // Dismiss the phone's keyboard, including when sending opens a new chat.
+    if (touchInput) textareaRef.current?.blur();
+    onSend(content);
+    if (!touchInput) queueMicrotask(() => textareaRef.current?.focus());
+  };
 
   const handleSubmit = async (message: PromptInputMessage) => {
     // Throwing tells PromptInput not to clear the text, so Enter on a
@@ -136,8 +144,7 @@ function ComposerInner({
         setPreparing(false);
       }
     }
-    onSend(content);
-    queueMicrotask(() => textareaRef.current?.focus());
+    send(content);
   };
 
   const showSuggestions = promptSuggestions.length > 0 && !hasContent && !busy;
@@ -151,7 +158,7 @@ function ComposerInner({
               key={suggestion}
               suggestion={suggestion}
               disabled={disabled}
-              onClick={(value) => onSend(value)}
+              onClick={send}
             />
           ))}
         </Suggestions>
@@ -220,7 +227,7 @@ function ComposerInner({
             id={inputId}
             placeholder={placeholder ?? t("messagePim")}
             disabled={disabled || improve.isPending}
-            autoFocus={autoFocus}
+            autoFocus={autoFocus && !touchInput}
             className="self-center"
           />
 

@@ -15,12 +15,16 @@ import { cn } from "~/lib/utils";
  * blueprint it is based on, each loaded for this agent.
  */
 export const Route = createFileRoute("/agents/$agentId")({
+  validateSearch: (search: Record<string, unknown>): { prompt?: string } => ({
+    ...(typeof search.prompt === "string" && { prompt: search.prompt }),
+  }),
   component: DashboardPage,
 });
 
 function DashboardPage() {
   const { t, locale } = useI18n();
   const { agentId } = Route.useParams();
+  const { prompt } = Route.useSearch();
   const { data, error, refetch } = useQuery(dashboardQuery(agentId, locale));
   const { start, starting } = useStartChat(agentId);
 
@@ -79,6 +83,9 @@ function DashboardPage() {
       <div className="mr-2.5 flex shrink-0 justify-center px-4 pb-2">
         <div className="w-full max-w-3xl">
           <Composer
+            key={`${agentId}:${prompt ?? ""}`}
+            initialInput={prompt}
+            autoFocus={Boolean(prompt)}
             onSend={start}
             busy={false}
             disabled={starting}

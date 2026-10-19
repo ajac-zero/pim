@@ -533,10 +533,12 @@ export const PromptInputTextarea = ({
   const controlledProps = controller
     ? {
         onChange: (e: ChangeEvent<HTMLTextAreaElement>) => {
-          controller.textInput.setInput(e.currentTarget.value);
+          if (props.value === undefined) {
+            controller.textInput.setInput(e.currentTarget.value);
+          }
           onChange?.(e);
         },
-        value: controller.textInput.value,
+        value: props.value ?? controller.textInput.value,
       }
     : { onChange };
 

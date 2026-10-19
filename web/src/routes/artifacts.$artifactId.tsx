@@ -9,7 +9,7 @@ export const Route = createFileRoute("/artifacts/$artifactId")({
   component: ArtifactPage,
 });
 
-/** An artifact on a page of its own, for one whose chat is gone or that was opened from elsewhere. */
+/** An artifact on a page of its own, opened from the Artifacts list or a direct link. */
 function ArtifactPage() {
   const { artifactId } = Route.useParams();
   const { v } = Route.useSearch();

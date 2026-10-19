@@ -6,6 +6,9 @@ import { agentsQuery } from "~/lib/queries";
  * open dialog (`?dialog=settings`) and a sign-in error (`#auth-error=…`).
  */
 export const Route = createFileRoute("/")({
+  validateSearch: (search: Record<string, unknown>): { prompt?: string } => ({
+    ...(typeof search.prompt === "string" && { prompt: search.prompt }),
+  }),
   loader: async ({ context }) => {
     const agents = await context.queryClient.fetchQuery(agentsQuery());
     // Pim makes the majordomo the first time its agents are listed.

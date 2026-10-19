@@ -16,7 +16,11 @@ import {
   type ORItem,
   type ReasoningItem,
 } from "~/lib/openresponses";
-import { DELIVERY_REMINDER, INTRODUCTION } from "../../../src/transcript";
+import {
+  DELIVERY_REMINDER,
+  INTRODUCTION,
+  NOTICE_PREFIXES,
+} from "../../../src/transcript";
 
 /**
  * Folds Pim's WebSocket stream (pi's agent events: a snapshot, then one batch
@@ -121,13 +125,6 @@ export const EMPTY_VIEW: SessionView = {
   retry: null,
   error: null,
 };
-
-const NOTICE_PREFIXES: ReadonlyArray<[RegExp, PimNotice["kind"]]> = [
-  [/^\[Approval ([^\]]+)\]\s*/, "approval"],
-  [/^\[Scheduled task[^\]]*\]\s*/, "schedule"],
-  [/^\[App event\]\s*/, "event"],
-  [/^\[Task update\]\s*/, "task"],
-];
 
 function textOf(content: Message["content"]): string {
   if (typeof content === "string") return content;

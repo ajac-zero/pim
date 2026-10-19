@@ -88,6 +88,7 @@ import {
 	type PimConfig,
 	PimExtensions,
 	type ShownWidget,
+	shownWidgets,
 	type WidgetContext,
 	localize,
 	widgetMarkdown,
@@ -138,6 +139,7 @@ import {
 	type ToolPermission,
 } from "./store";
 import { type Agent, type AgentInput, AgentStore, agentInput, type TeamMember } from "./agents";
+import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessages } from "./chat-links";
 import type { AgentIcon, ArtifactToPublish } from "./gallery";
 import { type Delegate, type Role, TASKS_EXTENSION, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension } from "./majordomo";
@@ -152,15 +154,6 @@ const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 /** Pim's own widgets: every chat can show them. */
 const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory", "pim.artifacts"];
 
-/** The widgets a `send_to_user` result says went with the message; none in a plain "Sent." */
-function shownWidgets(result: string): ShownWidget[] {
-	try {
-		const parsed = JSON.parse(result) as { widgets?: unknown };
-		return Array.isArray(parsed.widgets) ? (parsed.widgets as ShownWidget[]) : [];
-	} catch {
-		return [];
-	}
-}
 /**
  * Set by the Worker on every request it forwards: the owner it resolved,
  * which must be the agent's own name. A request routed to the wrong agent is
@@ -318,6 +311,8 @@ export class Pim extends DurableAgent<Env> {
 	}, () => this.appDirectory());
 	/** The skills the owner's agents wrote for work they do again. */
 	readonly skills = new SkillStore(this.ctx.storage.sql);
+	/** Public links to the owner's chats, each with the copy of its chat it shows. */
+	readonly chatLinks = new ChatLinkStore(this.ctx.storage.sql);
 	/** The tasks agents handed each other, each in a conversation of its own (./tasks.ts). */
 	readonly #tasks = new TaskStore(this.ctx.storage.sql);
 	/** Images the person sent, in R2; their messages keep their URLs. */
@@ -3007,6 +3002,12 @@ export class Pim extends DurableAgent<Env> {
 		return session;
 	}
 
+	/** A chat's public link as its owner sees it, with its address; null without one. */
+	#chatLink(session: string) {
+		const link = this.chatLinks.of(session);
+		return link ? { ...link, url: `${this.deployment().publicUrl}/shared/${this.name}/${link.id}` } : null;
+	}
+
 	/** A session's name and activity, under its public id. */
 	#sessionInfo(session: string) {
 		const info = this.store.sessionInfo(session);
@@ -3260,6 +3261,39 @@ export class Pim extends DurableAgent<Env> {
 				return { summary };
 			},
 		],
+		// Public links to chats (./chat-links.ts): a copy of the chat as it is now, for anyone with the link.
+		["GET", "/sessions/:session/link", async ({ session }) => ({ link: this.#chatLink(await this.#session(session!)) })],
+		[
+			"PUT",
+			"/sessions/:session/link",
+			async ({ session }) => {
+				const id = await this.#session(session!);
+				if (this.visits.bySession(id)) throw new HttpError(400, "A chat with someone else's agent can't have a public link");
+				const agent = this.agents.ofSession(id);
+				const chat: SharedChat = {
+					title: this.store.sessionInfo(id)?.title ?? null,
+					agent: { name: agent.name, symbol: agent.symbol, color: agent.color },
+					sharedAt: Date.now(),
+					messages: sharedMessages(await this.harness.session(id).messages()),
+				};
+				if (chat.messages.length === 0) throw new HttpError(409, "This chat has nothing to share yet");
+				if (new TextEncoder().encode(JSON.stringify(chat)).byteLength > MAX_SHARED_BYTES) throw new HttpError(413, "This chat is too long for a public link");
+				this.#assertOpen();
+				this.chatLinks.save(id, chat);
+				return { link: this.#chatLink(id) };
+			},
+		],
+		["DELETE", "/sessions/:session/link", async ({ session }) => ({ deleted: this.chatLinks.delete(await this.#session(session!)) })],
+		// What a chat's link shows. The Worker serves it to anyone who has the link, with no token.
+		[
+			"GET",
+			"/shared/:link",
+			({ link }) => {
+				const chat = LINK_ID.test(link!) ? this.chatLinks.chat(link!) : undefined;
+				if (!chat) throw new HttpError(404, "No such link");
+				return chat;
+			},
+		],
 		[
 			"POST",
 			"/prompts/improve",
@@ -3276,6 +3310,7 @@ export class Pim extends DurableAgent<Env> {
 			async ({ session }) => {
 				const id = await this.#session(session!);
 				this.store.deleteSession(id);
+				this.chatLinks.delete(id);
 				await this.images.deleteSession(id);
 				const visit = this.visits.bySession(id);
 				if (visit) this.visits.setSession(visit.ownerId, null);

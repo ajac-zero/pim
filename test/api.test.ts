@@ -1,5 +1,5 @@
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, type FauxResponseFactory, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, type FauxResponseFactory, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
@@ -277,6 +277,76 @@ describe("conversation", () => {
 		faux.setResponses([toolUse("send_to_user", { message: "Back." })]);
 		expect((await say("hello again")).text).toBe("Back.");
 		expect(await listed()).toContain(ROOT);
+	});
+
+	it("makes a public link to a chat: a copy of what the person read, as it was, for anyone with the link until it's turned off", async () => {
+		const chat = (await post("/sessions")).body.id;
+		expect((await api(`/sessions/${chat}/link`, { method: "PUT" })).status).toBe(409);
+		faux.setResponses([
+			fauxAssistantMessage([fauxThinking("They want Lisbon."), fauxText("Private working note."), fauxToolCall("create_goal", { title: "Visit Lisbon", steps: ["Book a flight"] })], {
+				stopReason: "toolUse",
+			}),
+			// Refused: nothing reached the person.
+			toolUse("send_to_user", { message: "Never sent.", widgets: ["test.nothing/here"] }),
+			toolUse("send_to_user", { message: "Lisbon it is.", widgets: ["pim.goals/active"] }),
+		]);
+		const content = [
+			{ type: "text", text: "Plan a trip to Lisbon" },
+			{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+		];
+		expect((await post(`/sessions/${chat}/messages`, { content, wait: true })).status).toBe(200);
+
+		const { status, body: made } = await api(`/sessions/${chat}/link`, { method: "PUT" });
+		expect(status).toBe(200);
+		const { link } = made as { link: { id: string; url: string; sharedAt: number; messages: number } };
+		expect(link).toEqual({ id: expect.stringMatching(/^[0-9a-z]{22}$/), url: `https://pim.test/shared/${OWNER}/${link.id}`, sharedAt: expect.any(Number), messages: 2 });
+		expect((await api(`/sessions/${chat}/link`)).body).toEqual({ link });
+
+		// Anyone can read it: no token, no cookie.
+		const read = () => exports.default.fetch(url(`/api/shared/${OWNER}/${link.id}`));
+		const response = await read();
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-robots-tag")).toBe("noindex");
+		const shared = (await response.json()) as any;
+		const agent = ((await api("/sessions")).body.sessions as { id: string; agent: { name: string } }[]).find((session) => session.id === chat)!.agent;
+		expect(shared).toEqual({
+			title: "Plan a trip to Lisbon",
+			agent: { name: agent.name, symbol: null, color: null },
+			sharedAt: link.sharedAt,
+			messages: [
+				{ role: "user", text: "Plan a trip to Lisbon", images: 1, at: expect.any(Number) },
+				{ role: "agent", text: "Lisbon it is.", widgets: [expect.objectContaining({ id: "pim.goals/active", kind: "progress" })], at: expect.any(Number) },
+			],
+		});
+		const goal = shared.messages[1].widgets[0].items.find((item: { title: string }) => item.title === "Visit Lisbon");
+		// The widget is as it was sent, without links into the owner's chats.
+		expect(goal).toEqual({ title: "Visit Lisbon", value: 0, max: 1, detail: "Book a flight" });
+		// Nothing private, and no image, is in it.
+		const raw = JSON.stringify(shared);
+		for (const hidden of ["They want Lisbon", "Private working note", "create_goal", "Never sent", "iVBORw0KGgo", "/images/", chat]) expect(raw).not.toContain(hidden);
+
+		// It stays as it was when made, until its owner updates it, which keeps its address.
+		faux.setResponses([toolUse("send_to_user", { message: "Book early." })]);
+		await say("Any tips?", chat);
+		expect(((await (await read()).json()) as any).messages).toHaveLength(2);
+		const updated = (await api(`/sessions/${chat}/link`, { method: "PUT" })).body.link;
+		expect(updated).toMatchObject({ id: link.id, messages: 4 });
+		expect(((await (await read()).json()) as any).messages.slice(2).map((message: { text: string }) => message.text)).toEqual(["Any tips?", "Book early."]);
+
+		// Every other address is the same 404: another owner, another id, or a path that isn't a link.
+		const other = (await exports.default.fetch(url(`/api/shared/o_${"a".repeat(26)}/${link.id}`))).status;
+		const wrong = (await exports.default.fetch(url(`/api/shared/${OWNER}/${"a".repeat(22)}`))).status;
+		const partial = (await exports.default.fetch(url(`/api/shared/${link.id}`), { headers: { Authorization: `Bearer ${TOKEN}` } })).status;
+		expect([other, wrong, partial]).toEqual([404, 404, 404]);
+
+		// Turning it off, or deleting the chat, ends it.
+		expect((await api(`/sessions/${chat}/link`, { method: "DELETE" })).body).toEqual({ deleted: true });
+		expect((await read()).status).toBe(404);
+		expect((await api(`/sessions/${chat}/link`)).body).toEqual({ link: null });
+		const again = (await api(`/sessions/${chat}/link`, { method: "PUT" })).body.link;
+		expect(again.id).not.toBe(link.id);
+		await api(`/sessions/${chat}`, { method: "DELETE" });
+		expect((await exports.default.fetch(url(`/api/shared/${OWNER}/${again.id}`))).status).toBe(404);
 	});
 
 	it("returns a receipt without waiting, and the operation settles later", async () => {

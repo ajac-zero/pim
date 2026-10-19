@@ -244,6 +244,24 @@ const translations = {
     copyMessage: "Copy message",
     copyConversation: "Copy conversation as Markdown",
     couldNotCopyConversation: "Couldn't copy the conversation. Try again.",
+    chatLink: "Public link",
+    chatLinkOn: "Public link: on",
+    chatLinkHint:
+      "Anyone with the link can read this chat as it is now, without signing in. What's said later stays private.",
+    chatLinkSharedAt:
+      "Anyone with the link can read this chat as it was on {date}. What's said after stays private until you update it.",
+    chatLinkCreate: "Create public link",
+    chatLinkCopied: "Public link copied.",
+    chatLinkUpdate: "Update to include new messages",
+    chatLinkUpdated: "The link now shows the chat as it is.",
+    chatLinkTurnOff: "Turn off link",
+    chatLinkTurnedOff: "The link no longer works.",
+    sharedChatAt: "Shared {date}",
+    sharedChatGone:
+      "This link doesn't work anymore. Whoever shared it may have turned it off.",
+    sharedChatImages: "Images not shared: {count}",
+    sharedChatFooter:
+      "A copy of a conversation on Pim, as it was when it was shared.",
     deleteChat: "Delete",
     confirmDeleteChat: "Confirm",
     copyResponse: "Copy response",
@@ -1088,6 +1106,24 @@ const translations = {
     copyConversation: "Copiar conversación como Markdown",
     couldNotCopyConversation:
       "No se pudo copiar la conversación. Inténtalo de nuevo.",
+    chatLink: "Enlace público",
+    chatLinkOn: "Enlace público: activado",
+    chatLinkHint:
+      "Cualquiera con el enlace puede leer este chat tal como está ahora, sin iniciar sesión. Lo que se diga después sigue siendo privado.",
+    chatLinkSharedAt:
+      "Cualquiera con el enlace puede leer este chat tal como estaba el {date}. Lo que se dijo después sigue siendo privado hasta que lo actualices.",
+    chatLinkCreate: "Crear enlace público",
+    chatLinkCopied: "Enlace público copiado.",
+    chatLinkUpdate: "Actualizar con los mensajes nuevos",
+    chatLinkUpdated: "El enlace ahora muestra el chat tal como está.",
+    chatLinkTurnOff: "Desactivar enlace",
+    chatLinkTurnedOff: "El enlace ya no funciona.",
+    sharedChatAt: "Compartido el {date}",
+    sharedChatGone:
+      "Este enlace ya no funciona. Quien lo compartió puede haberlo desactivado.",
+    sharedChatImages: "Imágenes no compartidas: {count}",
+    sharedChatFooter:
+      "Una copia de una conversación en Pim, tal como estaba cuando se compartió.",
     deleteChat: "Eliminar",
     confirmDeleteChat: "Confirmar",
     copyResponse: "Copiar respuesta",

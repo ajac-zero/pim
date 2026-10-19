@@ -394,6 +394,7 @@ export class PimStore {
 			pim_app_watches: "watches",
 			pim_sessions: "chats",
 			pim_session_ids: "chat ids",
+			pim_chat_links: "public links to chats",
 			pim_credentials: "credentials",
 			pim_app_connections: "app connections",
 			pim_tool_widgets: "widgets from apps' results",

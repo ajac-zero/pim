@@ -23,6 +23,7 @@ import {
   useAwaitingApproval,
 } from "~/components/app-sidebar";
 import { AppsDialog } from "~/components/apps-dialog";
+import { ChatLinkMenu } from "~/components/chat/chat-link";
 import { CopyConversation } from "~/components/chat/copy-conversation";
 import { SummaryToggle } from "~/components/chat/summary";
 import { DiscoverDialog } from "~/components/discover-dialog";
@@ -82,22 +83,28 @@ export const Route = createRootRouteWithContext<RouterContext>()({
 });
 
 function Root() {
-  // Letting an MCP client in is a page of its own, between the client and the person.
-  const alone = useRouterState({
-    select: (state) => state.location.pathname === "/authorize",
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
   });
+  // Letting an MCP client in is a page of its own, between the client and the person.
+  const alone = pathname === "/authorize";
   return (
     <I18nProvider>
       <ThemeProvider>
-        <SignedIn>
-          {alone ? (
-            <Outlet />
-          ) : (
-            <Introduced>
-              <AppLayout />
-            </Introduced>
-          )}
-        </SignedIn>
+        {/* A chat's public link is for anyone, signed in or not. */}
+        {pathname.startsWith("/shared/") ? (
+          <Outlet />
+        ) : (
+          <SignedIn>
+            {alone ? (
+              <Outlet />
+            ) : (
+              <Introduced>
+                <AppLayout />
+              </Introduced>
+            )}
+          </SignedIn>
+        )}
         <Toaster position="top-center" />
       </ThemeProvider>
     </I18nProvider>
@@ -378,6 +385,7 @@ function AppLayout() {
               {sessionId && (
                 <div className="ml-auto flex shrink-0 gap-2">
                   <CopyConversation sessionId={sessionId} />
+                  <ChatLinkMenu sessionId={sessionId} />
                   <SummaryToggle />
                 </div>
               )}

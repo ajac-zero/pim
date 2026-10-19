@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { memo, type ReactNode, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Markdown } from "~/components/chat/markdown";
@@ -44,7 +45,7 @@ import {
   type MessageItem,
   messageText,
 } from "~/lib/openresponses";
-import { type Approval, pim } from "~/lib/pim-api";
+import { type Approval, FILES_ROOT, fileContentUrl, pim } from "~/lib/pim-api";
 import type { PimNotice } from "~/lib/pim-view";
 import { agentsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -631,6 +632,58 @@ function ApprovalResult({ result }: { result: string }) {
     </div>
   );
 }
+
+/* ---------------------------- generated images --------------------------- */
+
+/** The image `generate_image` saved, by its path in your files; null for an answer that isn't one (an error). */
+export function generatedImagePath(output: unknown): string | null {
+  if (typeof output !== "string") return null;
+  try {
+    const path = (JSON.parse(output) as { image?: { path?: unknown } }).image
+      ?.path;
+    return typeof path === "string" && path.startsWith(`${FILES_ROOT}/`)
+      ? path
+      : null;
+  } catch {
+    // Not JSON: an error the tool reported.
+    return null;
+  }
+}
+
+/** An image an agent made, from your files, opening the file. */
+export const GeneratedImage = memo(function GeneratedImage({
+  path,
+  prompt,
+}: {
+  path: string;
+  /** What the agent asked for: the image's description. */
+  prompt?: string;
+}) {
+  const { t } = useI18n();
+  const [missing, setMissing] = useState(false);
+  if (missing) {
+    return (
+      <p className="mb-4 w-fit rounded-2xl border px-3 py-2.5 text-muted-foreground text-sm">
+        {t("generatedImageDeleted")}
+      </p>
+    );
+  }
+  return (
+    <Link
+      to="/files"
+      search={{ path }}
+      title={prompt}
+      className="mb-4 block w-fit max-w-full overflow-hidden rounded-2xl border transition-opacity hover:opacity-90"
+    >
+      <img
+        src={fileContentUrl(path)}
+        alt={prompt ?? path.slice(path.lastIndexOf("/") + 1)}
+        onError={() => setMissing(true)}
+        className="block max-h-96 max-w-full object-contain sm:max-w-sm"
+      />
+    </Link>
+  );
+});
 
 /* ------------------------------- indicators ------------------------------ */
 

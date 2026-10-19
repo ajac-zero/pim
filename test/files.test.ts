@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Approval } from "../src/store";
 import type { Limits } from "../src/usage";
 import { api, apiUrl, OWNER, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
-import { faux, type Pim } from "./worker";
+import { faux, paintings, type Pim } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
 const setLimits = (limits: Partial<Limits> | null) => runInDurableObject(agent(), (instance: Pim) => instance.setLimits(limits));
@@ -234,5 +234,31 @@ describe("files", () => {
 		await callTool("run_javascript", { command: `import { writeFile } from "node:fs/promises"; export default () => writeFile("out/chart.png", "redrawn");` });
 		expect(await storedObjects()).toBe(before);
 		expect(await (await raw("/files/content?path=/workspace/out/chart.png")).text()).toBe("redrawn");
+	});
+
+	it("include the images agents make, each counted as a model request", async () => {
+		const model = "@cf/black-forest-labs/flux-2-klein-4b";
+		const requests = async () =>
+			(await api("/usage")).body.today.models.find((entry: { provider: string; model: string }) => entry.provider === "cloudflare" && entry.model === model)?.requests ?? 0;
+		const before = { paintings: paintings.length, requests: await requests() };
+
+		const made = await callTool("generate_image", { prompt: "A red fox asleep in snow, watercolor", shape: "portrait" });
+		expect(made.isError).toBe(false);
+		const { image } = JSON.parse(made.text);
+		// Named by the time, with the extension of what the model drew.
+		expect(image).toMatchObject({ model, type: "image/png", bytes: PNG.byteLength });
+		expect(image.path).toMatch(/^\/workspace\/images\/[\dT-]+Z\.png$/);
+		expect(new Uint8Array(await (await raw(`/files/content?path=${encodeURIComponent(image.path)}`)).arrayBuffer())).toEqual(PNG);
+		expect(paintings.slice(before.paintings)).toEqual([{ model, fields: { prompt: "A red fox asleep in snow, watercolor", width: "768", height: "1280" } }]);
+		expect(await requests()).toBe(before.requests + 1);
+
+		// A path the agent names gets the extension it lacks; one outside the files is refused before anything is drawn.
+		expect(JSON.parse((await callTool("generate_image", { prompt: "A lighthouse", path: "/workspace/cards/lighthouse" })).text).image.path).toBe(
+			"/workspace/cards/lighthouse.png",
+		);
+		const outside = await callTool("generate_image", { prompt: "A lighthouse", path: "/etc/lighthouse.png" });
+		expect(outside).toMatchObject({ isError: true, text: expect.stringContaining("not one of the person's files") });
+		expect(paintings.length).toBe(before.paintings + 2);
+		expect(await requests()).toBe(before.requests + 2);
 	});
 });

@@ -441,6 +441,8 @@ export type DeploymentSettings = {
   /** Null: the default model. */
   memoryModel: string | null;
   memoryLines: number;
+  /** Null: agents can't make images. */
+  imageModel: string | null;
   webSearch: "exa" | "ceramic" | "linkup" | null;
   /** Members' limits; null for none. */
   limits: Limits;

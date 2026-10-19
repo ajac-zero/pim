@@ -161,7 +161,7 @@ export function isText(bytes: Uint8Array): boolean {
 }
 
 /** An image's type, from its first bytes, for the types models take; else null. */
-function imageType(bytes: Uint8Array): string | null {
+export function imageType(bytes: Uint8Array): string | null {
 	const starts = (...values: number[]) => values.every((value, index) => bytes[index] === value);
 	const ascii = (from: number, to: number) => String.fromCharCode(...bytes.subarray(from, to));
 	if (starts(0x89, 0x50, 0x4e, 0x47)) return "image/png";

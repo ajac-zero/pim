@@ -19,7 +19,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { type AgentMcpOAuthProvider, Agent as DurableAgent, type Connection, type ConnectionContext, DurableObjectOAuthClientProvider, getAgentByName, type Schedule, type WSMessage } from "agents";
 import { type PiModel, PiHarness, type PiOperationResult, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
-import { createAI } from "agents/models/pi-ai";
+import { CLOUDFLARE_PROVIDER_ID, createAI } from "agents/models/pi-ai";
 import {
 	ENTRY_FILES,
 	type ArtifactFile,
@@ -74,6 +74,7 @@ import pimConfig from "../pim.config";
 import { artifactsExtension, artifactsWidgets } from "./extensions/artifacts";
 import { type FileServices, fileDeleteAction, filesExtension } from "./extensions/files";
 import { browserClickAction, browserExtension, browserTypeAction } from "./extensions/browser";
+import { type ImageModel, imageGenerationExtension, workersAiImageModel } from "./extensions/image-generation";
 import { appDirectory, type CustomApp, type DirectoryApp } from "./extensions/app-directory";
 import { ExtensionDataStore } from "./extensions/data";
 import { NativeApps } from "./extensions/native-apps";
@@ -518,6 +519,7 @@ export class Pim extends DurableAgent<Env> {
 				}),
 			);
 			this.registry.install(filesExtension(this.#files));
+			this.#installImageGeneration();
 			this.#installBrowser(services);
 			// Restored connections reconnect in the background after a wake; give them a moment.
 			await this.mcp.waitForConnections({ timeout: 5_000 });
@@ -4454,6 +4456,31 @@ export class Pim extends DurableAgent<Env> {
 					const target = path ?? `${FILES_ROOT}/screenshots/${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
 					return (await this.files.write(target, png)).path;
 				},
+			}),
+		);
+	}
+
+	/** The model `generate_image` draws with: `PIM_IMAGE_MODEL` on Workers AI, or null when it's off. */
+	protected imageModel(): ImageModel | null {
+		const { imageModel } = this.deployment();
+		return imageModel ? workersAiImageModel(this.env.AI, imageModel) : null;
+	}
+
+	/** `generate_image`, where the deployment has an image model. Each image counts as a model request. */
+	#installImageGeneration(): void {
+		const model = this.imageModel();
+		if (!model) return;
+		this.registry.install(
+			imageGenerationExtension({
+				model,
+				reserve: () => {
+					this.#assertOpen();
+					const storage = this.#storageRefusal();
+					if (storage) return storage;
+					const reserved = this.usage.reserveModel(CLOUDFLARE_PROVIDER_ID, model.id);
+					return reserved.ok ? null : reserved.refusal;
+				},
+				save: async (path, bytes) => (await this.files.write(path, bytes)).path,
 			}),
 		);
 	}

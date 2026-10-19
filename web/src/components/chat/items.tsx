@@ -75,7 +75,7 @@ function MessageTime({ at }: { at: number }) {
     <time
       dateTime={date.toISOString()}
       title={formatDate(date, { dateStyle: "full", timeStyle: "short" })}
-      className="shrink-0 tabular-nums"
+      className="shrink-0 tabular-nums opacity-0 transition-opacity motion-reduce:transition-none group-has-focus-visible/user:opacity-100 group-hover/user:opacity-100 group-has-focus-visible/assistant:opacity-100 group-hover/assistant:opacity-100"
     >
       {formatDate(date, options)}
     </time>
@@ -94,7 +94,12 @@ function CopyAction({
 }) {
   const { copied, copy } = useCopy(text);
   return (
-    <Actions className={cn("opacity-0 transition-opacity", className)}>
+    <Actions
+      className={cn(
+        "opacity-0 transition-opacity motion-reduce:transition-none",
+        className,
+      )}
+    >
       <Action
         size="icon"
         className="size-7 text-muted-foreground"

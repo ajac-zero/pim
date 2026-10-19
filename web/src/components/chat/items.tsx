@@ -153,21 +153,21 @@ export const UserMessage = memo(function UserMessage({
         </div>
       )}
       {text.length > 0 && (
-        // Its time and copy button sit beside the bubble, in the space its alignment leaves.
-        <div className="flex w-full items-end justify-end gap-2">
-          <div className="flex shrink-0 items-center gap-1 pb-1.5 text-muted-foreground text-xs">
-            <CopyAction
-              text={text}
-              label={t("copyMessage")}
-              className="group-has-focus-visible/user:opacity-100 group-hover/user:opacity-100"
-            />
-            <MessageTime at={at} />
-          </div>
-          <div className="min-w-0 max-w-[88%] md:max-w-[80%] whitespace-pre-wrap break-words rounded-2xl bg-bubble px-4 py-3 text-[15px] text-bubble-foreground leading-6">
-            {text}
-          </div>
+        <div className="min-w-0 max-w-[88%] md:max-w-[80%] whitespace-pre-wrap break-words rounded-2xl bg-bubble px-4 py-3 text-[15px] text-bubble-foreground leading-6">
+          {text}
         </div>
       )}
+      {/* Under the message, like an agent's, mirrored to the right. */}
+      <div className="-mt-0.5 flex h-7 items-center gap-1.5 text-muted-foreground text-xs">
+        {text.length > 0 && (
+          <CopyAction
+            text={text}
+            label={t("copyMessage")}
+            className="group-has-focus-visible/user:opacity-100 group-hover/user:opacity-100"
+          />
+        )}
+        <MessageTime at={at} />
+      </div>
     </div>
   );
 });

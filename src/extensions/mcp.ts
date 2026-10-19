@@ -49,7 +49,7 @@ export type McpToolInfo = {
 	readonly name: string;
 	readonly description?: string;
 	readonly inputSchema: Record<string, unknown>;
-	readonly annotations?: { readonly readOnlyHint?: boolean; readonly title?: string };
+	readonly annotations?: { readonly readOnlyHint?: boolean; readonly destructiveHint?: boolean; readonly title?: string };
 };
 
 type McpContent =
@@ -116,6 +116,7 @@ export function toolName(serverId: string, name: string): string {
 }
 
 export function needsApproval(tool: McpToolInfo, approval: McpApproval): boolean {
+	if (tool.annotations?.destructiveHint === true) return true;
 	if (approval === "all") return true;
 	if (approval === "none") return false;
 	return tool.annotations?.readOnlyHint !== true;
@@ -151,7 +152,8 @@ export function appToolPermission(
 	audience: string = OWNER,
 ): ResolvedPermission {
 	const fallback = audience !== OWNER ? "off" : needsApproval(tool, server.approval) ? "ask" : "on";
-	return resolvePermission(store, audience, server.id, tool.name, fallback, toolDefinition(tool));
+	const resolved = resolvePermission(store, audience, server.id, tool.name, fallback, toolDefinition(tool));
+	return tool.annotations?.destructiveHint === true && resolved.permission === "on" ? { ...resolved, permission: "ask" } : resolved;
 }
 
 /** An app tool's permission as the app and the user's choice are now; undefined while its app doesn't offer it. */
@@ -262,7 +264,7 @@ export function mcpExtensions(
 		tools.push(
 			defineTool({
 				name,
-				description: gated ? `${description} ${approvalNote(services)}` : description,
+				description: gated ? `${description} ${approvalNote(services, tool.annotations?.destructiveHint === true)}` : description,
 				// MCP input schemas are JSON Schema, which pi validates as given.
 				parameters: { type: "object", ...tool.inputSchema } as unknown as TSchema,
 				// Filing an approval is replay-safe; a direct call is only if the app says it is read-only.
@@ -275,12 +277,13 @@ export function mcpExtensions(
 					if (now === undefined) return text(`${server.name} doesn't offer ${tool.name} right now.`, true);
 					if (now === "off") return text(`The user turned off ${name}. Do not try it another way.`, true);
 					if (gated || now === "ask") {
+						const risky = bridge.tools().some((info) => info.serverId === server.id && info.name === tool.name && info.annotations?.destructiveHint === true);
 						return fileApproval(services, api, context, {
 							action: "mcp_call",
-							tool: name,
+							tool: risky ? null : name,
 							args: call,
 							summary: summarizeCall(server.name, tool.name, call.arguments),
-						});
+						}, risky);
 					}
 					const result = await bridge.call(server.id, tool.name, call.arguments);
 					const content = toContent(result);

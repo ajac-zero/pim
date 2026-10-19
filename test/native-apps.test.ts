@@ -122,13 +122,18 @@ describe("apps extensions implement", () => {
 		expect(transcript).toContain('\\"title\\":\\"Balances\\"');
 		expect(transcript).toContain('{\\"title\\":\\"Savings\\",\\"detail\\":\\"900\\"}');
 
-		// A tool that doesn't only read asks first, and runs with the approval.
+		// A flagged risky tool asks even when assigned and the app otherwise trusts all calls.
+		await api("/mcp/bank", { method: "PUT", body: JSON.stringify({ approval: "none" }) });
+		expect((await api("/permissions", { method: "PUT", body: JSON.stringify({ app: "bank", tool: "transfer", permission: "on" }) })).status).toBe(400);
+		expect((await api("/permissions")).body.tools.find((tool: { name: string }) => tool.name === "bank_transfer")).toMatchObject({ permission: "ask", choices: ["off", "ask"] });
 		faux.setResponses([toolUse("bank_transfer", { amount: 5 }), toolUse("send_to_user", { message: "Moved." })]);
 		const moving = say("Move 5 to savings");
 		const approval = await pendingApproval();
-		expect(approval).toMatchObject({ action: "mcp_call", summary: 'Bank: transfer {"amount":5}' });
+		expect(approval).toMatchObject({ action: "mcp_call", summary: 'Bank: transfer {"amount":5}', expiresAt: null, onTimeout: "deny" });
+		expect((await post(`/approvals/${approval.id}/approve`, { always: true })).status).toBe(400);
 		expect((await post(`/approvals/${approval.id}/approve`)).body.result).toBe("Moved 5.");
 		expect(await moving).toMatchObject({ status: "done", replies: ["Moved."] });
+		await api("/mcp/bank", { method: "PUT", body: JSON.stringify({ approval: "writes" }) });
 	});
 
 	it("renew a credential about to expire before using it, once", async () => {

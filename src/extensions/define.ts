@@ -75,9 +75,9 @@ export type AbilityContext = {
 /**
  * What an extension adds to the chats of agents that use it: a pi extension
  * (tools, prompt sections, hooks, wraps, background tasks), plus actions
- * with effects outside the conversation. Each action is a tool that files an
- * approval and runs only once the person says yes, under Settings → Tool
- * permissions like Pim's own.
+ * with effects outside the conversation. Assignment auto-approves routine
+ * actions unless the person chose Ask or Off. Actions marked explicitApproval
+ * always wait for the person's own decision.
  */
 export type Ability = Omit<Extension, "name"> & { readonly actions?: readonly GatedAction[] };
 
@@ -209,8 +209,10 @@ export type AppTool = {
 	readonly description: string;
 	/** Its arguments' JSON Schema, such as a TypeBox `Type.Object`. */
 	readonly parameters: TSchema;
-	/** It only reads: it runs without asking under the default approval policy. Anything else asks first. */
+	/** It only reads: it runs without asking under the default approval policy. */
 	readonly readOnly?: boolean;
+	/** A risky action that needs the person's decision on every call, even when its app is assigned. */
+	readonly destructive?: boolean;
 	execute(args: Record<string, unknown>, context: AppToolContext): Promise<string | AppToolResult>;
 };
 

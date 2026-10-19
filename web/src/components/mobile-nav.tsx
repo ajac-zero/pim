@@ -8,6 +8,7 @@ import { type ReactNode, useState } from "react";
 import {
   type SidebarPanel,
   useNavigationState,
+  useNewChat,
 } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
 import {
@@ -16,18 +17,19 @@ import {
   CalendarClock,
   Compass,
   Folder,
-  House,
   MessagesSquare,
   MoreHorizontal,
   ScrollText,
   Settings,
   Shapes,
+  SquarePen,
   Users,
 } from "~/components/icons";
 import {
   ProfilePopover,
   ProfilePopoverTrigger,
 } from "~/components/profile-popover";
+import { Button } from "~/components/ui/button";
 import { Sheet, SheetContent, SheetTitle } from "~/components/ui/sheet";
 import { cn } from "~/lib/utils";
 
@@ -41,7 +43,7 @@ const MORE_PANELS: readonly (SidebarPanel | undefined)[] = [
 /**
  * The navigation on narrow screens, in place of the sidebar: a bar of icons
  * along the bottom of every page, as the rail is beside every page. Chats, notifications and artifacts fill the screen with
- * their list (`list`), Home opens your majordomo's dashboard, and More opens
+ * their list (`list`), New chat opens your majordomo's dashboard, and More opens
  * a sheet with the rest: files, skills, schedules, the dialogs and your
  * profile.
  */
@@ -62,20 +64,23 @@ export function MobileNav({
   });
   const [moreOpen, setMoreOpen] = useState(false);
   const navigation = useNavigationState();
+  const newChat = useNewChat(onHideList);
   const { awaitingApproval, guestRequests, unreadNotifications } = navigation;
   const showing = (shown?: SidebarPanel) => list && panel === shown;
 
   return (
     <nav
       aria-label={t("navigation")}
-      className="flex shrink-0 items-center border-sidebar-border border-t bg-sidebar px-2 py-1 md:hidden"
+      className="grid shrink-0 grid-cols-5 items-center border-sidebar-border border-t bg-sidebar px-2 py-1 md:hidden"
     >
       <NavItem
-        to="/"
-        onClick={onHideList}
-        active={!list && pathname.startsWith("/agents/")}
-        icon={<House className="size-5" />}
-        label={t("home")}
+        to="."
+        search={(prev) => ({ ...prev, panel: "notifications" })}
+        onClick={onShowList}
+        active={showing("notifications")}
+        icon={<Bell className="size-5" />}
+        label={t("notifications")}
+        count={unreadNotifications}
       />
       <NavItem
         to="."
@@ -87,15 +92,14 @@ export function MobileNav({
         label={t("chats")}
         count={awaitingApproval.size}
       />
-      <NavItem
-        to="."
-        search={(prev) => ({ ...prev, panel: "notifications" })}
-        onClick={onShowList}
-        active={showing("notifications")}
-        icon={<Bell className="size-5" />}
-        label={t("notifications")}
-        count={unreadNotifications}
-      />
+      <Button
+        onClick={newChat}
+        size="icon-lg"
+        className="size-11 justify-self-center"
+        aria-label={t("newChat")}
+      >
+        <SquarePen className="size-5" />
+      </Button>
       <NavItem
         to="."
         search={(prev) => ({ ...prev, panel: "artifacts" })}
@@ -132,7 +136,7 @@ export function MobileNav({
 }
 
 const NAV_ITEM_CLASS =
-  "flex h-12 min-w-0 flex-1 items-center justify-center text-muted-foreground";
+  "flex h-12 min-w-0 items-center justify-center text-muted-foreground";
 
 /** An icon in the bar, on a pill when it's what the screen shows, with a dot while something waits there. */
 function NavIcon({

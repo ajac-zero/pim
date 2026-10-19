@@ -111,7 +111,7 @@ People then make agents built on it: Your agents → New agent → Based on blue
 
 It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps`, `tasks`; see [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable#extensions)), plus `actions`. The ability is installed under the extension's id and selected only in the chats of agents that use it, and in the conversations of tasks they work on.
 
-- **Actions ask first.** Each `GatedAction` becomes a tool that files an approval and waits, suspended, for the decision. `run` runs only once the person approves, or their approval policy approves it, and the call returns the decision with its result. Actions are listed in Settings → Permissions with Pim's own, where they can be turned Off, Ask or On.
+- **Assigned actions run without a prompt.** Each `GatedAction` files an approval, which is approved immediately for an agent whose blueprint includes the ability, unless the person chose Ask or Off. Mark risky actions `explicitApproval: true`: every call waits for the person's decision, with no timeout or Always approve. Other requests follow the person's approval policy. Actions are listed in Settings → Permissions with Pim's own.
 - **Names are checked.** An ability whose tool or action has the name of one of Pim's tools, or of another extension's, stops the agent with an error. pi would let the later tool replace the earlier one, so an extension could otherwise stand in for `send_to_user` or a tool that asks first. Prefix your tools' names with your extension's.
 - **Code-level trust.** An ability runs in the person's agent, with what the context gives it and whatever its code can reach, such as `fetch`. Install only extensions you would merge into Pim itself.
 
@@ -123,6 +123,8 @@ It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps
 An extension's `apps` are what people on the deployment can connect: remote MCP servers, each with an `id`, a `name`, a `description` and an https `url`, or apps the extension implements itself (see [below](#apps-without-an-mcp-server)). An app's optional `icon` is its logo, an https or `data:` square image URL, drawn as is on light and dark themes; without one it shows its initial. Each is named `<extension>/<id>`, and that name is what blueprints, agents and templates list, never the URL. Besides the extensions' apps, the admin can add their own in Apps (`custom/<id>`; no extension may be called `custom`), and each gets the icon URL they give, or else its site's, looked up when it's added; they can change it later. Together they are the directory, and nothing outside it can be connected.
 
 Each person connects an app once, with their own account, from Apps in the sidebar, an agent's card in Your agents, or by asking an agent, whose `connect_app` connects only the apps that agent lists. Every agent of theirs that lists it then works with that one connection. A chat gets the tools and instructions of the connected apps its agent lists: the blueprint's `apps`, then the agent's own. Apps connected for another agent stay out of it. With `manage_apps` enabled (Off / Ask in Tool permissions), an agent can request additions and removals to its own app list, by name, as `find_app` finds them in the directory. Each request requires explicit chat approval, even under the auto approval policy, and approval connects additions automatically. Removal affects only the agent's own list, not blueprint apps or shared connections. `update_agent` cannot change apps.
+
+Assignment auto-approves routine tools in the agent's chats and tasks. Explicit Ask and Off choices, changed-tool reapproval, an app's `all` policy and circles' separate permissions still apply. MCP tools marked `destructiveHint: true` always require the person's own decision; native app tools use `destructive: true` for the same protection. These tools cannot be set to On or approved by a timeout.
 
 Most MCP servers let Pim register itself when someone signs in. For one that doesn't, such as GitHub's, register an OAuth client with the service whose redirect URL is this Pim's `/mcp/callback`, and name the Worker's environment variables holding it in the app's `client`: `client: { id: "GITHUB_CLIENT_ID", secret: "GITHUB_CLIENT_SECRET" }`. Pim signs everyone in with that client, and offers the app only once they're set. [`popular-apps.ts`](../src/extensions/popular-apps.ts), the apps Pim brings, has one.
 
@@ -160,7 +162,7 @@ export const music = definePimExtension({
 					name: "now_playing",
 					description: "What's playing now.",
 					parameters: Type.Object({}),
-					// Read-only tools run without asking under the default policy; the rest ask first.
+					// Read-only tools run without asking even outside an assigned agent's calls.
 					readOnly: true,
 					async execute(_args, { credential }) {
 						const playing = await (await fetch("https://api.music.example/now", { headers: { authorization: `Bearer ${credential.accessToken}` } })).json();

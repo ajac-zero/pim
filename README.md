@@ -6,6 +6,8 @@ A deployment is a Pim for you and the people you invite: family, friends, a smal
 
 This repository is the agent, its API, and its web app ([`web/`](web)): chat, approvals, notifications and settings, signed in with a passkey, or with Google, GitHub or your own single sign-on when you set those up. One Worker serves all of it, for everyone, at one address. Mobile apps and messaging bridges can use the same API with an API token, and Claude, ChatGPT and other MCP clients can talk with your majordomo at `/mcp` (see [Talking with Pim from other apps](#talking-with-pim-from-other-apps)).
 
+The copy button in a chat's header copies the conversation as Markdown, with separate headings for the user, the named agent and system notices. It becomes available when the chat finishes loading and the agent finishes replying. Message formatting stays intact; attached images are marked with a placeholder, and private reasoning and tool activity are left out.
+
 **Vocabulary:** Pim is the platform; a space is one person's own part of it, with their agents, conversations, memories and files; an agent is what you create and chat with; a blueprint is what an extension defines in code for agents to build on; a template is an agent shared through the gallery.
 
 ## How it works

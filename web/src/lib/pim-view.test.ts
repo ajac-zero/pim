@@ -2,6 +2,7 @@ import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import type { FunctionCallItem } from "~/lib/openresponses";
 import {
+  conversationMarkdown,
   EMPTY_STREAM,
   layoutThread,
   noticeOf,
@@ -565,6 +566,82 @@ describe("layoutThread", () => {
         (call) => ["http_request", "artifact_create"].includes(call.name),
       ),
     ).toEqual(["entry 1", "entry 2:1", "entry 2:3"]);
+  });
+});
+
+describe("conversationMarkdown", () => {
+  it("copies the whole readable conversation with distinct speakers and unchanged Markdown", () => {
+    const send = (id: string, message: string, extra = {}) => ({
+      type: "toolCall",
+      id,
+      name: "send_to_user",
+      arguments: { message, ...extra },
+    });
+    const entries = run([
+      snapshot({
+        entries: [
+          user(1, "Explain **this**.\n\n```ts\nconst n = 3;\n```"),
+          user(2, INTRODUCTION),
+          assistant(3, [
+            { type: "thinking", thinking: "Private reasoning" },
+            { type: "text", text: "Private draft" },
+            send("failed", "Never delivered"),
+          ]),
+          toolResult(4, "failed", "Private error", true),
+          user(5, "[Scheduled task] Check progress."),
+          assistant(6, [send("reply", "A [link](https://example.com).")]),
+          toolResult(7, "reply", "Sent."),
+          assistant(8, [
+            send("mail", "The full report.", { channel: "email" }),
+          ]),
+          user(9, "One more question."),
+          assistant(10, [send("last", "The last answer.")]),
+        ],
+      }),
+    ]).view.entries;
+    expect(conversationMarkdown(entries, "Ada")).toBe(
+      [
+        "## User\n\nExplain **this**.\n\n```ts\nconst n = 3;\n```",
+        "## System\n\n[Scheduled task] Check progress.",
+        "## Agent: Ada\n\nA [link](https://example.com).",
+        "## Agent: Ada (email)\n\nThe full report.",
+        "## User\n\nOne more question.",
+        "## Agent: Ada\n\nThe last answer.",
+      ].join("\n\n---\n\n"),
+    );
+  });
+
+  it("marks image-only messages and keeps Markdown in agent names out of headings", () => {
+    const entries = run([
+      snapshot({
+        entries: [
+          {
+            ...user(1, ""),
+            model: [
+              {
+                role: "user",
+                content: [
+                  { type: "image", mimeType: "image/png", data: "abc" },
+                ],
+                timestamp: 0,
+              },
+            ],
+          },
+          assistant(2, [
+            {
+              type: "toolCall",
+              id: "reply",
+              name: "send_to_user",
+              arguments: { message: "A photo." },
+            },
+          ]),
+        ],
+      }),
+    ]).view.entries;
+    expect(conversationMarkdown(entries, "A*B\n# C")).toBe(
+      "## User\n\n[Attached image]\n\n---\n\n## Agent: A\\*B \\# C\n\nA photo.",
+    );
+    expect(conversationMarkdown([], "Ada")).toBe("");
   });
 });
 

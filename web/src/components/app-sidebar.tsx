@@ -463,7 +463,7 @@ function ChatsPanel({
       </div>
 
       {view !== "agents" && (
-        <div className="flex justify-end px-3 pb-3">
+        <div className="flex justify-start px-3 pb-3">
           <Button variant="ghost" size="lg" onClick={newChat}>
             <SquarePen className="size-4.5" />
             {t("newChat")}
@@ -989,7 +989,7 @@ function SessionRow({
         {session.unread && (
           <span
             className={cn(
-              "size-1.5 shrink-0 rounded-full bg-link",
+              "order-first size-1.5 shrink-0 rounded-full bg-link",
               showAgent && "motion-safe:animate-pulse",
             )}
             role="img"

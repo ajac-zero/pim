@@ -144,6 +144,19 @@ function ComposerInner({
 
   return (
     <div className="w-full">
+      {showSuggestions && (
+        <Suggestions className="mb-3 px-1">
+          {promptSuggestions.map((suggestion) => (
+            <Suggestion
+              key={suggestion}
+              suggestion={suggestion}
+              disabled={disabled}
+              onClick={(value) => onSend(value)}
+            />
+          ))}
+        </Suggestions>
+      )}
+
       <PromptInput
         onSubmit={handleSubmit}
         accept={IMAGE_TYPES.join(",")}
@@ -243,19 +256,6 @@ function ComposerInner({
           </PromptInputSubmit>
         </div>
       </PromptInput>
-
-      {showSuggestions && (
-        <Suggestions className="mt-3 px-1">
-          {promptSuggestions.map((suggestion) => (
-            <Suggestion
-              key={suggestion}
-              suggestion={suggestion}
-              disabled={disabled}
-              onClick={(value) => onSend(value)}
-            />
-          ))}
-        </Suggestions>
-      )}
 
       {disclaimer !== null && (
         <p className="flex items-center justify-center gap-1.5 px-2 pt-2 pb-1 text-center text-muted-foreground text-xs">

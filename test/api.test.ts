@@ -367,6 +367,43 @@ describe("conversation", () => {
 		socket.close();
 	});
 
+	it("moves a socket to another session with follow, and reads another's snapshot without following it", async () => {
+		const { body: first } = await post("/sessions");
+		const { body: second } = await post("/sessions");
+		const { socket, received } = await connect(first.id);
+		await vi.waitFor(() => expect(received.some((message) => message.type === "events")).toBe(true));
+
+		socket.send(JSON.stringify({ type: "follow", id: "f1", session: "999" }));
+		await vi.waitFor(() => expect(received.at(-1)).toEqual({ type: "error", id: "f1", message: "No session 999" }));
+		// Flipping through chats: the last one asked for is followed.
+		socket.send(JSON.stringify({ type: "follow", id: "f2", session: first.id }));
+		socket.send(JSON.stringify({ type: "follow", id: "f3", session: second.id }));
+		await vi.waitFor(() => expect(received.filter((message) => message.type === "result").map((message) => message.id).sort()).toEqual(["f2", "f3"]));
+		const snapshots = received.filter((message) => message.type === "events" && message.events[0].type === "snapshot");
+		expect(snapshots.at(-1).session).toBe(second.id);
+
+		received.length = 0;
+		faux.setResponses([toolUse("send_to_user", { message: "In the first." }), toolUse("send_to_user", { message: "In the second." })]);
+		await say("one", first.id);
+		await say("two", second.id);
+		const followed = received.filter((message) => message.type === "events");
+		expect(followed.flatMap((message) => message.events).some((event) => event.type === "run_end")).toBe(true);
+		expect(new Set(followed.map((message) => message.session))).toEqual(new Set([second.id]));
+
+		// Another session's snapshot comes back as the result, and the socket keeps following the second.
+		received.length = 0;
+		socket.send(JSON.stringify({ type: "snapshot", id: "s1", session: first.id }));
+		await vi.waitFor(() => expect(received).toHaveLength(1));
+		const { result } = received[0];
+		expect(received[0]).toMatchObject({ type: "result", id: "s1", result: { type: "snapshot" } });
+		expect(JSON.stringify(result.entries)).toContain("In the first.");
+		expect(JSON.stringify(result.entries)).not.toContain("In the second.");
+		faux.setResponses([toolUse("send_to_user", { message: "Still the second." })]);
+		await say("three", second.id);
+		expect(new Set(received.filter((message) => message.type === "events").map((message) => message.session))).toEqual(new Set([second.id]));
+		socket.close();
+	});
+
 	it("refuses a socket for a session that does not exist", async () => {
 		const { received } = await connect("999");
 		await vi.waitFor(() => expect(received).toEqual([{ type: "error", message: "No session 999" }]));

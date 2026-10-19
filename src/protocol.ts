@@ -3,8 +3,9 @@ import type { AgentEvent, UserInput } from "@earendil-works/pi-durable";
 import type { Approval, Notification } from "./store";
 
 /**
- * The WebSocket protocol at `/ws?session=<id>`. A socket
- * follows one session; notifications and approvals are sent to every socket.
+ * The WebSocket protocol at `/ws?session=<id>`. A socket follows one
+ * session at a time, and can switch with `follow`; notifications and
+ * approvals are sent to every socket.
  * UIs can import these types from `pim/src/protocol`.
  */
 
@@ -35,7 +36,11 @@ export type ClientMessage =
 	| { readonly type: "abort"; readonly id?: string; readonly operationId?: string }
 	| { readonly type: "reset"; readonly id?: string; readonly handoff?: string }
 	/** Ask for a fresh snapshot. */
-	| { readonly type: "resync"; readonly id?: string };
+	| { readonly type: "resync"; readonly id?: string }
+	/** Follow another session on this socket, starting with its snapshot, without connecting again. */
+	| { readonly type: "follow"; readonly id?: string; readonly session: string }
+	/** Another session's `snapshot` event, as the `result`, without following it: to open it current. */
+	| { readonly type: "snapshot"; readonly id?: string; readonly session: string };
 
 /** Server → client. */
 export type ServerMessage =

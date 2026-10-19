@@ -79,6 +79,7 @@ const NEAR_BOTTOM = 70;
 
 export const Thread = memo(function Thread({
   sessionId,
+  synced,
   visit,
   view,
   pending,
@@ -86,6 +87,8 @@ export const Thread = memo(function Thread({
   composerCardHeight,
 }: {
   sessionId: string;
+  /** Whether `view` is current, rather than the chat as it was last left. */
+  synced: boolean;
   /** The username whose space this conversation is with, when it's someone else's. */
   visit?: string;
   view: SessionView;
@@ -110,9 +113,14 @@ export const Thread = memo(function Thread({
   }, [view.entries, view.live, pending]);
 
   // The entries the chat had when it was shown: an artifact made after them,
-  // while the person watches, opens in the canvas by itself.
+  // while the person watches, opens in the canvas by itself. A chat shown as
+  // it was left counts from its snapshot, which has what was made meanwhile.
   const shownWith = useRef<{ session: string; keys: Set<string> } | null>(null);
-  if (view.entries.length > 0 && shownWith.current?.session !== sessionId) {
+  if (
+    synced &&
+    view.entries.length > 0 &&
+    shownWith.current?.session !== sessionId
+  ) {
     shownWith.current = {
       session: sessionId,
       keys: new Set(view.entries.map((entry) => entry.key)),
@@ -191,9 +199,10 @@ export const Thread = memo(function Thread({
   return (
     <Conversation
       className="scrollbar-thin"
-      initial={scrollPositions.has(sessionId) ? false : "smooth"}
+      // A chat opens where it was left, already there: gliding down through
+      // the whole transcript reads as loading.
+      initial={scrollPositions.has(sessionId) ? false : "instant"}
     >
-      <ScrollMemory sessionId={sessionId} loaded={rows.length > 0} />
       <ConversationContent
         className="mx-auto min-h-full w-full max-w-3xl px-4 [&>[data-speaker=assistant]+[data-speaker=assistant]]:-mt-3 [&>[data-speaker=user]+[data-speaker=user]]:-mt-3"
         style={{
@@ -263,7 +272,7 @@ export const Thread = memo(function Thread({
                   key={entry.key}
                   reference={artifact}
                   sessionId={sessionId}
-                  live={!shownWith.current?.keys.has(entry.key)}
+                  live={synced && !shownWith.current?.keys.has(entry.key)}
                 />
               );
             }
@@ -353,6 +362,8 @@ export const Thread = memo(function Thread({
           </div>
         )}
       </ConversationContent>
+      {/* After the content, whose scroller its effects need. */}
+      <ScrollMemory sessionId={sessionId} loaded={rows.length > 0} />
 
       <ConversationScrollButton
         bottomOffset={
@@ -376,12 +387,13 @@ function ScrollMemory({
   const { scrollRef } = useStickToBottomContext();
 
   // Only the first render with the transcript restores; `loaded` doesn't turn false again.
+  // A chat read to the bottom goes there before it paints, not a frame later.
   // biome-ignore lint/correctness/useExhaustiveDependencies: the session is fixed for this thread.
   useLayoutEffect(() => {
-    const top = scrollPositions.get(sessionId);
-    if (loaded && top !== undefined && scrollRef.current) {
-      scrollRef.current.scrollTop = top;
-    }
+    const scroller = scrollRef.current;
+    if (!loaded || !scroller) return;
+    scroller.scrollTop =
+      scrollPositions.get(sessionId) ?? scroller.scrollHeight;
   }, [loaded]);
 
   useEffect(() => {

@@ -310,14 +310,14 @@ The admin runs the Pim under `/admin`, from a signed-in browser only: an API tok
 
 ### WebSocket
 
-Connect to `wss://<host>/api/ws?session=<id>` (add `&token=...` without a passkey session); without `session`, the socket follows the root session. Each socket follows one session. Message types are in [`src/protocol.ts`](src/protocol.ts).
+Connect to `wss://<host>/api/ws?session=<id>` (add `&token=...` without a passkey session); without `session`, the socket follows the root session. Each socket follows one session at a time; `follow` moves it to another, starting again with that session's snapshot, and `snapshot` returns another session's snapshot without following it. Message types are in [`src/protocol.ts`](src/protocol.ts).
 
 - Server → client:
   - `hello`: the session and tools.
   - `events`: pi's [agent events](https://github.com/earendil-works/pi/tree/main/packages/durable#agent-events-experimental). The first batch starts with a `snapshot` that replaces client state.
   - `notification` and `approval`: sent to every socket.
   - `result` and `error`: replies to commands that carried an `id`.
-- Client → server: `submit`, `abort`, `reset`, `resync`.
+- Client → server: `submit`, `abort`, `reset`, `resync`, `follow`, `snapshot`.
 
 To fold events into a chat view, see the reducer in Cloudflare's [pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi/src/view.ts).
 

@@ -1,3 +1,4 @@
+import type { AgentEvent } from "@earendil-works/pi-durable";
 import { useSyncExternalStore } from "react";
 import {
   type Approval,
@@ -8,6 +9,7 @@ import {
 } from "~/lib/pim-api";
 import {
   EMPTY_STREAM,
+  reduce,
   reduceAll,
   type SessionView,
   type StreamState,
@@ -17,6 +19,11 @@ import {
  * The live connection to the session on screen. It lives outside React so
  * it survives route changes, and reconnects with backoff: Pim's socket
  * starts every connection with a snapshot, so there is nothing to resume.
+ * Opening another chat moves the open socket to it rather than connecting
+ * again, and a chat opened before shows as it was left until its snapshot
+ * arrives, so switching between chats doesn't wait on the network. A chat
+ * about to be opened is warmed: its snapshot is fetched without following
+ * it, so it opens as it is now rather than as it was left.
  */
 
 export type ConnectionState = "connecting" | "open" | "closed";
@@ -25,8 +32,10 @@ export type ClientState = {
   session: string | null;
   connection: ConnectionState;
   view: SessionView;
-  /** Whether the followed session's snapshot has arrived, so `view` shows it. */
+  /** Whether `view` shows the followed session: as its snapshot has it, or as it was left. */
   loaded: boolean;
+  /** Whether the followed session's snapshot has arrived, so `view` is current. */
+  synced: boolean;
   /** A message sent but not yet in the transcript. */
   pending: UserContent | null;
 };
@@ -45,6 +54,12 @@ export type ClientHandlers = {
 };
 
 const MAX_BACKOFF_MS = 15_000;
+/** How many chats' last views are kept, most recently followed first. */
+const REMEMBERED_VIEWS = 10;
+/** A chat warmed this recently, and not opened and left since, isn't fetched again: the pointer can pass over a tab many times. */
+const WARM_INTERVAL_MS = 5_000;
+/** Warming asks for a snapshot with this before the session as the command's id. */
+const WARM_ID = "warm:";
 
 class PimClient {
   #state: ClientState = {
@@ -52,9 +67,14 @@ class PimClient {
     connection: "closed",
     view: EMPTY_STREAM.view,
     loaded: false,
+    synced: false,
     pending: null,
   };
   #stream: StreamState = EMPTY_STREAM;
+  /** The last stream state of chats followed before, by session. */
+  #remembered = new Map<string, StreamState>();
+  /** When each chat was last warmed. */
+  #warmed = new Map<string, number>();
   #socket: WebSocket | null = null;
   #retry: ReturnType<typeof setTimeout> | null = null;
   #attempt = 0;
@@ -78,16 +98,53 @@ class PimClient {
   /** Follows `session`, dropping whatever was followed before. */
   open(session: string) {
     if (this.#state.session === session && this.#socket) return;
-    this.close();
-    this.#stream = EMPTY_STREAM;
-    this.#set({
+    // The chat left behind starts to age: it can be warmed again at once.
+    if (this.#state.session) this.#warmed.delete(this.#state.session);
+    const remembered = this.#remembered.get(session);
+    this.#stream = remembered ?? EMPTY_STREAM;
+    const following = {
       session,
-      view: EMPTY_STREAM.view,
-      loaded: false,
+      view: this.#stream.view,
+      loaded: remembered !== undefined,
+      synced: false,
       pending: null,
-      connection: "connecting",
-    });
+    };
+    const socket = this.#socket;
+    if (socket?.readyState === WebSocket.OPEN) {
+      // The old session's events still on their way are dropped: they name it.
+      this.#set(following);
+      socket.send(JSON.stringify({ type: "follow", session }));
+      return;
+    }
+    this.close();
+    this.#set({ ...following, connection: "connecting" });
     this.#connect();
+  }
+
+  /**
+   * Fetches a chat's snapshot ahead of opening it, as the pointer rests on
+   * a link to it, over the socket that's already open.
+   */
+  warm(session: string) {
+    const socket = this.#socket;
+    if (session === this.#state.session) return;
+    if (socket?.readyState !== WebSocket.OPEN) return;
+    if (Date.now() - (this.#warmed.get(session) ?? 0) < WARM_INTERVAL_MS) {
+      return;
+    }
+    this.#warmed.set(session, Date.now());
+    socket.send(
+      JSON.stringify({ type: "snapshot", id: `${WARM_ID}${session}`, session }),
+    );
+  }
+
+  #remember(session: string, stream: StreamState) {
+    this.#remembered.delete(session);
+    this.#remembered.set(session, stream);
+    if (this.#remembered.size > REMEMBERED_VIEWS) {
+      const [oldest] = this.#remembered.keys();
+      if (oldest !== undefined) this.#remembered.delete(oldest);
+    }
   }
 
   close() {
@@ -130,19 +187,39 @@ class PimClient {
     switch (message.type) {
       case "events": {
         if (message.session !== this.#state.session) return;
+        // Until the snapshot, events may be from an earlier follow of this session.
+        if (!this.#state.synced && message.events[0]?.type !== "snapshot") {
+          return;
+        }
         const before = this.#stream.view;
         this.#stream = reduceAll(this.#stream, message.events);
         const view = this.#stream.view;
+        this.#remember(message.session, this.#stream);
         // The sent message is in the transcript now, or the run started with it.
         const placed =
           view.entries.length > before.entries.length || view.running;
         this.#set({
           view,
           loaded: true,
+          synced: true,
           ...(placed && this.#state.pending !== null ? { pending: null } : {}),
         });
         if (before.running !== view.running) {
           this.handlers.onActivity?.(message.session);
+        }
+        return;
+      }
+      case "result": {
+        if (!message.id.startsWith(WARM_ID)) return;
+        const session = message.id.slice(WARM_ID.length);
+        const stream = reduce(EMPTY_STREAM, message.result as AgentEvent);
+        // The live stream of the chat on screen is newer than any snapshot.
+        if (session === this.#state.session && this.#state.synced) return;
+        this.#remember(session, stream);
+        // Opened before its own snapshot came: show the warm one meanwhile.
+        if (session === this.#state.session) {
+          this.#stream = stream;
+          this.#set({ view: stream.view, loaded: true });
         }
         return;
       }

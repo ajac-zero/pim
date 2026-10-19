@@ -249,7 +249,12 @@ describe("chats an agent names", () => {
   // An artifact's id, say: no chat of the person's.
   const other = "0b5e8f9c-1d2e-4f3a-8b7c-6d5e4f3a2b1c";
 
-  async function render(text: string, path = "/", streaming = false) {
+  async function render(
+    text: string,
+    path = "/",
+    streaming = false,
+    bubble = false,
+  ) {
     const queryClient = new QueryClient();
     queryClient.setQueryData(sessionsQuery().queryKey, [
       {
@@ -266,7 +271,7 @@ describe("chats an agent names", () => {
     const root = createRootRoute({
       component: () => (
         <>
-          <Markdown text={text} streaming={streaming} />
+          <Markdown text={text} streaming={streaming} bubble={bubble} />
           <Outlet />
         </>
       ),
@@ -308,6 +313,15 @@ describe("chats an agent names", () => {
       [`/chat/${chat}`, "Autumn trip"],
       [`/chat/${chat}`, "Autumn trip"],
     ]);
+
+    // A person's own message names chats the same way, and still links nowhere else in the app.
+    const typed = await render(
+      `Like in ${chat}, see [export](/api/account/export)`,
+      "/",
+      false,
+      true,
+    );
+    expect(links(typed)).toEqual([[`/chat/${chat}`, "Autumn trip"]]);
   });
 
   it("opens an artifact an agent links to beside the chat, in this window, even by an address it made up", async () => {

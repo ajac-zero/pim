@@ -13,18 +13,22 @@ import { DELIVERY_REMINDER, INTRODUCTION } from "../../../src/transcript";
 
 /* Event and entry builders. Casts keep fixtures to the fields the view reads. */
 
-const user = (id: number, text: string): EntryRecord =>
+const user = (id: number, text: string, timestamp = 0): EntryRecord =>
   ({
     id,
     kind: "pi.message",
-    model: [{ role: "user", content: [{ type: "text", text }], timestamp: 0 }],
+    model: [{ role: "user", content: [{ type: "text", text }], timestamp }],
   }) as unknown as EntryRecord;
 
-const assistant = (id: number, content: unknown[]): EntryRecord =>
+const assistant = (
+  id: number,
+  content: unknown[],
+  fields: Record<string, unknown> = {},
+): EntryRecord =>
   ({
     id,
     kind: "pi.message",
-    model: [{ role: "assistant", content }],
+    model: [{ role: "assistant", content, ...fields }],
   }) as unknown as EntryRecord;
 
 const toolResult = (
@@ -400,6 +404,33 @@ describe("layoutThread", () => {
         assistant(6, [{ type: "text", text: "Told them." }]),
       ]),
     ).toEqual(["entry 1", "sent 4:0: It's sunny."]);
+  });
+
+  it("times the person's message by when they sent it, and an agent's by when it finished writing it", () => {
+    const rows = layoutThread(
+      run([
+        snapshot({
+          entries: [
+            user(1, "Weather?", 1_000),
+            // The request started at 2 s and took 3.5 s.
+            assistant(2, [send("m", "It's sunny.")], {
+              timestamp: 2_000,
+              durationMs: 3_500,
+            }),
+          ],
+        }),
+      ]).view.entries,
+      { shown: () => false },
+    );
+    expect(
+      rows.map((row) =>
+        row.kind === "sent"
+          ? row.at
+          : row.entry.kind === "item"
+            ? row.entry.at
+            : null,
+      ),
+    ).toEqual([1_000, 5_500]);
   });
 
   it("never uses private text or tool activity as a fallback when no message was sent", () => {

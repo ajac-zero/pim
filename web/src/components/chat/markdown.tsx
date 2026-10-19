@@ -406,8 +406,7 @@ export const Markdown = memo(function Markdown({
   /**
    * For what a person wrote, in their bubble: shown as `untrusted` text is,
    * with their line breaks kept, headings as bold paragraphs, and colors
-   * from the bubble. Markdown that isn't closed, such as a lone `*`, stays
-   * as typed.
+   * from the bubble.
    */
   bubble?: boolean;
 }) {
@@ -429,8 +428,10 @@ export const Markdown = memo(function Markdown({
       <Streamdown
         isAnimating={streaming}
         animated
-        // Streaming mode closes unclosed Markdown, as a reply being written needs; a finished message keeps what was typed.
-        mode={bubble ? "static" : "streaming"}
+        // Streaming mode closes unclosed Markdown, as a reply still being
+        // written needs. Finished text keeps what was written, so a lone `*`
+        // doesn't get a second one added at its end.
+        mode={streaming ? "streaming" : "static"}
         skipHtml={safe}
         {...(safe
           ? {

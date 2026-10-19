@@ -405,7 +405,6 @@ const translations = {
       "This browser can't receive push notifications. On an iPhone or iPad, add Pim to your Home Screen first.",
     openChat: "Open chat",
     pending: "Pending",
-    pimCanMakeMistakes: "Pim can make mistakes. Check important info.",
     preferences: "Preferences",
     queuedMessages: "Queued messages: {count}",
     reload: "Reload",
@@ -1269,8 +1268,6 @@ const translations = {
       "Este navegador no puede recibir notificaciones push. En un iPhone o iPad, primero agrega Pim a tu pantalla de inicio.",
     openChat: "Abrir chat",
     pending: "Pendiente",
-    pimCanMakeMistakes:
-      "Pim puede cometer errores. Verifica la información importante.",
     preferences: "Preferencias",
     queuedMessages: "Mensajes en cola: {count}",
     reload: "Recargar",

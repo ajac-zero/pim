@@ -5,12 +5,18 @@ import { AgentIcon, tileClass } from "~/components/agent-icon";
 import { ArtifactPreview } from "~/components/artifact";
 import { Composer } from "~/components/chat/composer";
 import { useI18n } from "~/components/i18n";
-import { Bot, Maximize2, X } from "~/components/icons";
+import { Bot, ChevronDown, Maximize2, X } from "~/components/icons";
 import { RouteError } from "~/components/route-error";
 import { Button } from "~/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "~/components/ui/dropdown-menu";
 import { WidgetCard, WidgetHeader } from "~/components/widgets";
 import { type PinnedArtifact, pim } from "~/lib/pim-api";
-import { dashboardQuery } from "~/lib/queries";
+import { agentsQuery, dashboardQuery } from "~/lib/queries";
 import { useStartChat } from "~/lib/start-chat";
 import { cn } from "~/lib/utils";
 
@@ -29,11 +35,12 @@ export const Route = createFileRoute("/agents/$agentId")({
 
 function DashboardPage() {
   const { t, locale } = useI18n();
+  const navigate = useNavigate();
   const { agentId } = Route.useParams();
   const { prompt } = Route.useSearch();
+  const { data: agents } = useQuery(agentsQuery());
   const { data, error, refetch } = useQuery(dashboardQuery(agentId, locale));
   const { start, starting } = useStartChat(agentId);
-  const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   if (error) {
@@ -41,6 +48,7 @@ function DashboardPage() {
   }
   if (!data) return null;
   const { agent, starters, widgets } = data;
+  const otherAgents = (agents ?? []).filter((choice) => choice.id !== agentId);
   const remove = async (id: string) => {
     try {
       await pim.setDashboard(
@@ -92,7 +100,41 @@ function DashboardPage() {
             )}
             <div className="min-w-0">
               <h1 className="flex items-center gap-2 font-semibold text-2xl">
-                <span className="truncate">{agent.name}</span>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      disabled={starting || otherAgents.length === 0}
+                      className="flex min-h-11 min-w-0 items-center gap-2 rounded-full text-left outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <span className="truncate">{agent.name}</span>
+                      {otherAgents.length > 0 && (
+                        <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+                      )}
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    align="start"
+                    className="w-48 max-w-[calc(100vw-2rem)]"
+                  >
+                    {otherAgents.map((choice) => (
+                      <DropdownMenuItem
+                        key={choice.id}
+                        onSelect={() => {
+                          navigate({
+                            to: "/agents/$agentId",
+                            params: { agentId: choice.id },
+                            search: (prev) => prev,
+                          });
+                        }}
+                        className="min-h-9 pointer-coarse:min-h-11"
+                      >
+                        <AgentIcon agent={choice} tile className="size-6" />
+                        <span className="truncate">{choice.name}</span>
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
                 {agent.majordomo && (
                   <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
                     {t("majordomoBadge")}
@@ -171,6 +213,7 @@ function DashboardPage() {
         <div className="w-full max-w-3xl">
           <Composer
             key={`${agentId}:${prompt ?? ""}`}
+            draftKey={`new-chat:${prompt ?? ""}`}
             initialInput={prompt}
             autoFocus={Boolean(prompt)}
             onSend={start}

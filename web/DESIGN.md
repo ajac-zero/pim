@@ -90,7 +90,7 @@ The app has two panes, a sidebar and the content, separated by a hairline divide
 - **Chat header.** The open chats as folder tabs on a shelf in the sidebar's tone. A tab shows the agent's icon, the chat's title, and a mark when the chat is working or waiting for an approval; the close button takes the mark's place on hover. The open chat's tab is the canvas's tone, with 12px top corners and bottom corners that flare into the shelf, so it runs into the transcript with no line between them. The others are muted text on the shelf. A chat opened from the sidebar replaces the preview tab, whose title is italic, until you send a message in it or double-click its tab. With a single chat open there are no tabs: its agent's icon and title sit on the canvas. On narrow screens there are no tabs.
 - **Transcript.** It has a readable max width (~720px) and wide gutters.
 
-On narrow screens there is no sidebar. A bar of icons along the bottom, in the sidebar's tone with a hairline above it, takes its place: Home (the majordomo's dashboard), chats, notifications, artifacts, and More. The chosen icon sits on a muted pill, and a dot marks one with something waiting. Chats, notifications and artifacts fill the screen with their panel; choosing a row opens it. More opens a bottom sheet with your profile, then files, skills and schedules, then Discover, Apps, Sharing and Settings. The bar stays on every page, as the rail does; in a chat it sits below the composer, under a header line with the agent's icon and the chat's title, and the chats icon is the chosen one.
+On narrow screens there is no sidebar. A bar along the bottom, in the sidebar's tone with a hairline above it, takes its place: notifications, chats, a centered primary New chat icon button, artifacts, and More. New chat opens the majordomo's dashboard, where sending the first message starts a chat. The chosen panel's icon sits on a muted pill, and a dot marks one with something waiting. Chats, notifications and artifacts fill the screen with their panel; choosing a row opens it. More opens a bottom sheet with your profile, then files, skills and schedules, then Discover, Apps, Sharing and Settings. The bar stays on every page, as the rail does; in a chat it sits below the composer, under a header line with the agent's icon and the chat's title, and the chats icon is the chosen one.
 
 ## Components
 
@@ -114,6 +114,8 @@ Rich results render as muted cards with the bubble radius:
 The composer is a single rounded field at the bottom of the transcript with a hairline border and no fill change. It has a muted circular `+` on the left, the placeholder "Message <agent name>", and a primary circular send button on the right, which becomes stop while the agent works.
 
 On an agent's dashboard, the composer stays at the same bottom position as in a chat, with suggested first messages above the field. The header and widgets scroll independently above it, so starting a chat does not move the prompt bar.
+
+The agent's name in the dashboard header is a compact dropdown with a small chevron. It lists only your other agents with their icons, without a selection indicator. With no other agents, the name has no dropdown. Choosing another updates the dashboard and composer without starting a chat, keeping unsent text; the first message starts the chat with the selected agent.
 
 On touch-first devices, sending dismisses the keyboard, and opening a chat does not focus the input automatically. On desktop, sending keeps the input focused for the next message.
 

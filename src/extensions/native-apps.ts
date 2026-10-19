@@ -98,7 +98,10 @@ export class NativeApps {
 				name: tool.name,
 				description: tool.description,
 				inputSchema: tool.parameters as unknown as Record<string, unknown>,
-				...(tool.readOnly ? { annotations: { readOnlyHint: true } } : {}),
+				...(tool.readOnly || tool.destructive ? { annotations: {
+					...(tool.readOnly ? { readOnlyHint: true } : {}),
+					...(tool.destructive ? { destructiveHint: true } : {}),
+				} } : {}),
 			}));
 		});
 	}

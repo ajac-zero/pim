@@ -353,6 +353,7 @@ describe("extensions", () => {
 			},
 		]);
 		await say("Rent is 1850, due November 1st.", chat);
+		expect((await api("/approvals")).body.approvals).toContainEqual(expect.objectContaining({ action: "ledger_add_bill", status: "approved", decidedBy: "always" }));
 		expect(offered(seen)).toEqual(expect.arrayContaining(["ledger_add_bill", "ledger_pay_bill", "create_goal", "send_to_user"]));
 		// Its section is in the prompt, with the extension's data as the tool left it.
 		expect(systemPrompt(seen.messages)).toContain("Rent: 1850");

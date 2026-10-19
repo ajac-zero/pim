@@ -32,7 +32,7 @@ export interface ComposerProps {
   busy: boolean;
   disabled?: boolean;
   placeholder?: string;
-  /** Below the input; null hides it. */
+  /** Optional context below the input, such as whose agent this chat visits. */
   disclaimer?: ReactNode;
   autoFocus?: boolean;
   promptSuggestions?: string[];
@@ -331,9 +331,9 @@ function ComposerInner({
         </div>
       </PromptInput>
 
-      {disclaimer !== null && (
+      {disclaimer != null && (
         <p className="flex items-center justify-center gap-1.5 px-2 pt-2 pb-1 text-center text-muted-foreground text-xs">
-          {disclaimer ?? t("pimCanMakeMistakes")}
+          {disclaimer}
         </p>
       )}
     </div>

@@ -200,7 +200,19 @@ describe("connected apps (MCP)", () => {
 		expect(system).toContain("## Calendar [id: test.ledger/calendar]\\nTimes are in Eastern time.");
 	});
 
-	it("runs a tool that changes things once the user approves, and returns the result to the call", async () => {
+	it("auto-approves routine tools of an assigned app without notifying the person", async () => {
+		const notifications = (await api("/notifications")).body.notifications.length;
+		faux.setResponses([toolUse("calendar_create_event", { title: "Read", day: "tuesday" }), toolUse("send_to_user", { message: "Added." })]);
+		expect(await say("Add reading on Tuesday.")).toMatchObject({ status: "done", text: "Added." });
+		expect(created).toEqual([{ title: "Read", day: "tuesday" }]);
+		expect((await api("/approvals")).body.approvals).toEqual([
+			expect.objectContaining({ status: "approved", decidedBy: "always", action: "mcp_call", result: 'Created "Read" on tuesday.' }),
+		]);
+		expect((await api("/notifications")).body.notifications).toHaveLength(notifications);
+	});
+
+	it("keeps an explicit Ask choice for an assigned tool and returns its approved result", async () => {
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ app: "calendar", tool: "create_event", permission: "ask" }) });
 		let reported = "";
 		faux.setResponses([
 			toolUse("calendar_create_event", { title: "Lunch with Ana", day: "friday" }),
@@ -211,14 +223,15 @@ describe("connected apps (MCP)", () => {
 		]);
 		const turn = say("Book lunch with Ana on Friday.");
 		const approval = await pendingApproval();
-		expect(created).toEqual([]);
+		expect(created).toEqual([{ title: "Read", day: "tuesday" }]);
 		expect(approval.summary).toBe('Calendar: create_event {"title":"Lunch with Ana","day":"friday"}');
 
 		const decided = await post<Approval>(`/approvals/${approval.id}/approve`);
 		expect(decided.body).toMatchObject({ status: "approved", result: 'Created "Lunch with Ana" on friday.' });
-		expect(created).toEqual([{ title: "Lunch with Ana", day: "friday" }]);
+		expect(created).toEqual([{ title: "Read", day: "tuesday" }, { title: "Lunch with Ana", day: "friday" }]);
 		expect(await turn).toMatchObject({ status: "done", text: "Booked." });
 		expect(reported).toContain('Created \\"Lunch with Ana\\" on friday.');
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ app: "calendar", tool: "create_event", permission: null }) });
 	});
 
 	it("follows each app's approval policy", async () => {
@@ -232,6 +245,12 @@ describe("connected apps (MCP)", () => {
 
 		const strict = await api("/mcp/calendar", { method: "PUT", body: JSON.stringify({ approval: "all" }) });
 		expect(strict.body.tools.map((tool: { requiresApproval: boolean }) => tool.requiresApproval)).toEqual([true, true]);
+		faux.setResponses([toolUse("calendar_find_events", { day: "wednesday" }), toolUse("send_to_user", { message: "Not checked." })]);
+		const checking = say("Check Wednesday.");
+		const approval = await pendingApproval();
+		expect(approval.summary).toBe('Calendar: find_events {"day":"wednesday"}');
+		await post(`/approvals/${approval.id}/deny`);
+		await checking;
 		await api("/mcp/calendar", { method: "PUT", body: JSON.stringify({ approval: "writes" }) });
 	});
 

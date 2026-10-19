@@ -1520,7 +1520,7 @@ export class Pim extends DurableAgent<Env> {
 		this.#assertOpen();
 		const approval = this.store.approval(id);
 		if (!approval) throw new HttpError(404, `No approval ${id}`);
-		if (decision === "approve" && this.actions.find((action) => action.name === approval.action)?.explicitApproval) {
+		if (decision === "approve" && this.#requiresExplicitApproval(approval)) {
 			if (auto) throw new HttpError(400, "This action requires an explicit decision for each request");
 			if (this.#approvalPermission(approval) === "off") throw new HttpError(403, "This capability is turned off");
 		}
@@ -1592,7 +1592,7 @@ export class Pim extends DurableAgent<Env> {
 		const approval = this.store.approval(id);
 		if (!approval) throw new HttpError(404, `No approval ${id}`);
 		if (approval.status !== "pending") throw new HttpError(409, `Approval ${id} is already ${approval.status}`);
-		if (this.actions.find((action) => action.name === approval.action)?.explicitApproval) {
+		if (this.#requiresExplicitApproval(approval)) {
 			throw new HttpError(400, "This action requires an explicit decision for each request");
 		}
 		const { app, tool } = this.#approvalTool(approval);
@@ -1627,16 +1627,36 @@ export class Pim extends DurableAgent<Env> {
 		return { app: "", tool: approval.action };
 	}
 
+	/** Risky tools always need the person's decision, even when assigned to an agent. */
+	#requiresExplicitApproval(approval: Approval): boolean {
+		if (approval.action !== "mcp_call") return this.actions.some((action) => action.name === approval.action && action.explicitApproval);
+		if (approval.tool === null) return true;
+		const { app, tool } = this.#approvalTool(approval);
+		return this.apps.tools().some((info) => info.serverId === app && info.name === tool && info.annotations?.destructiveHint === true);
+	}
+
 	/** The permission of the tool that filed an approval, for whoever asked; `ask` for an app tool that is gone. */
 	#approvalPermission(approval: Approval): ToolPermission {
 		const { app, tool } = this.#approvalTool(approval);
 		if (app === "") {
-			const permission = ownToolPermission(this.store, tool).permission;
-			return permission === "on" && this.actions.find((action) => action.name === tool)?.explicitApproval ? "ask" : permission;
+			const resolved = ownToolPermission(this.store, tool);
+			if (this.#requiresExplicitApproval(approval)) return resolved.permission === "off" ? "off" : "ask";
+			if (!approval.requestedBy && resolved.chosen === null) {
+				const assigned = this.extensions.abilitiesOf(this.#roleOf(approval.session).agent.blueprint);
+				if (assigned.some((id) => this.abilities.get(id)?.actions?.some((action) => action.name === tool))) return "on";
+			}
+			return resolved.permission;
 		}
 		const server = this.apps.servers().find((candidate) => candidate.id === app);
 		const info = this.apps.tools().find((candidate) => candidate.serverId === app && candidate.name === tool);
-		return server && info ? appToolPermission(this.store, server, info, approval.requestedBy?.circle ?? OWNER).permission : "ask";
+		if (!server || !info) return "ask";
+		const resolved = appToolPermission(this.store, server, info, approval.requestedBy?.circle ?? OWNER);
+		if (this.#requiresExplicitApproval(approval)) return resolved.permission === "off" ? "off" : "ask";
+		if (!approval.requestedBy && resolved.chosen === null && server.approval !== "all") {
+			const assigned = this.#appsOf(this.#roleOf(approval.session).agent);
+			if (assigned.some((app) => serverFor([server], app))) return "on";
+		}
+		return resolved.permission;
 	}
 
 	/** A circle, or 404. */
@@ -1688,7 +1708,7 @@ export class Pim extends DurableAgent<Env> {
 					name: toolName(server.id, tool.name),
 					description: tool.description ?? tool.annotations?.title ?? null,
 					readOnly: tool.annotations?.readOnlyHint === true,
-					choices: TOOL_PERMISSIONS,
+					choices: tool.annotations?.destructiveHint === true ? ["off", "ask"] as const : TOOL_PERMISSIONS,
 					...appToolPermission(this.store, server, tool, audience),
 				},
 			];
@@ -1715,6 +1735,9 @@ export class Pim extends DurableAgent<Env> {
 		} else {
 			const info = this.apps.tools().find((candidate) => candidate.serverId === app && candidate.name === tool);
 			if (!info) throw new HttpError(404, `No tool ${tool} in the app ${app}`);
+			if (permission === "on" && info.annotations?.destructiveHint === true) {
+				throw new HttpError(400, "This tool can only be off or ask: every call requires explicit approval");
+			}
 			definition = toolDefinition(info);
 		}
 		if (permission === null) this.store.clearToolPermission(audience, app, tool);
@@ -2054,7 +2077,7 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	#reviewable(approval: Approval): boolean {
 		if (this.settings().approvalPolicy !== "majordomo" || approval.requestedBy) return false;
-		if (this.actions.find((action) => action.name === approval.action)?.explicitApproval) return false;
+		if (this.#requiresExplicitApproval(approval)) return false;
 		return approval.member !== null || !this.agents.ofSession(approval.session).majordomo;
 	}
 

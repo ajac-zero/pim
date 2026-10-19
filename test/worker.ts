@@ -8,7 +8,7 @@ import type { Mail, Mailer } from "../src/email";
 import { deploymentSettings } from "../src/deployment";
 import { type ImageModel, workersAiImageModel } from "../src/extensions/image-generation";
 import { type Api, type Model, Type } from "@earendil-works/pi-ai";
-import { defineTool, section } from "@earendil-works/pi-durable";
+import { section } from "@earendil-works/pi-durable";
 import { defineAppTool, defineGatedAction, definePimExtension, oauth2, type PimConfig } from "../src/extensions/define";
 
 export { default, Auth, Directory, Gallery } from "../src/index";
@@ -55,22 +55,22 @@ export const ledger = definePimExtension({
 	ability: ({ data }) => {
 		const bills = () => data.list<Bill>("bill:").map(({ value }) => value);
 		return {
-			tools: [
-				defineTool({
-					name: "ledger_add_bill",
-					description: "Record a bill to pay.",
-					parameters: Type.Object({ name: Type.String(), amount: Type.Number(), due: Type.String() }),
-					async execute({ name, amount, due }) {
-						data.put(`bill:${name}`, { name, amount, due, paid: false });
-						return { content: [{ type: "text", text: `Recorded ${name}.` }] };
-					},
-				}),
-			],
 			sections: [section("ledger_bills", () => bills().map((bill) => `${bill.name}: ${bill.amount}${bill.paid ? " (paid)" : ""}`).join("\n") || "No bills.")],
 			actions: [
 				defineGatedAction({
+					name: "ledger_add_bill",
+					description: "Record a bill to pay.",
+					parameters: Type.Object({ name: Type.String(), amount: Type.Number(), due: Type.String() }),
+					summarize: ({ name }) => `Record ${name}`,
+					async run({ name, amount, due }) {
+						data.put(`bill:${name}`, { name, amount, due, paid: false });
+						return `Recorded ${name}.`;
+					},
+				}),
+				defineGatedAction({
 					name: "ledger_pay_bill",
 					description: "Pay a recorded bill.",
+					explicitApproval: true,
 					parameters: Type.Object({ name: Type.String() }),
 					summarize: ({ name }) => `Pay ${name}`,
 					async run({ name }) {
@@ -161,6 +161,7 @@ export const ledger = definePimExtension({
 				defineAppTool({
 					name: "transfer",
 					description: "Move money between the person's accounts.",
+					destructive: true,
 					parameters: Type.Object({ amount: Type.Number() }),
 					async execute({ amount }) {
 						return `Moved ${amount}.`;

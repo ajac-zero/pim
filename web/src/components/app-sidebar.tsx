@@ -45,7 +45,6 @@ import {
   NotificationsPanel,
   SchedulesPanel,
   SIDEBAR_TOOLTIP_CLASS,
-  SidebarPanelAction,
   SidebarPanelHeader,
   SkillsPanel,
 } from "~/components/sidebar-panels";
@@ -397,24 +396,18 @@ function ChatsPanel({
   return (
     <>
       <SidebarPanelHeader title={t("chats")}>
-        <SidebarPanelAction label={t("newChat")} onClick={newChat}>
-          <SquarePen className="size-4.5" />
-        </SidebarPanelAction>
-      </SidebarPanelHeader>
-
-      <div className="flex items-center justify-between gap-1 px-3 pb-1">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
               type="button"
               aria-label={t("chatView")}
-              className="flex min-w-0 items-center gap-1 rounded-full px-2 py-1.5 text-muted-foreground text-xs hover:bg-sidebar-accent hover:text-foreground"
+              title={`${t("chatView")}: ${viewLabels[view]}`}
+              className="flex size-10 items-center justify-center rounded-full text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
             >
-              <span className="truncate">{viewLabels[view]}</span>
-              <ChevronDown className="size-3.5 shrink-0" />
+              <MoreHorizontal className="size-4.5 rotate-90" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
+          <DropdownMenuContent align="end">
             <DropdownMenuRadioGroup
               value={view}
               onValueChange={(value) => set({ view: value as ChatView })}
@@ -427,6 +420,19 @@ function ChatsPanel({
             </DropdownMenuRadioGroup>
           </DropdownMenuContent>
         </DropdownMenu>
+      </SidebarPanelHeader>
+
+      {/* Search and inbox sorting share a row. */}
+      <div className="flex items-center gap-2 px-3 pt-1 pb-2">
+        <div className="relative min-w-0 flex-1">
+          <Search className="-translate-y-1/2 absolute top-1/2 left-2.5 size-4 text-muted-foreground" />
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={t("searchChats")}
+            className="h-8 truncate border-transparent bg-sidebar-accent/60 pl-8 text-sm shadow-none focus-visible:border-sidebar-border focus-visible:bg-sidebar-accent/60 focus-visible:ring-0"
+          />
+        </div>
         {view === "inbox" && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -434,7 +440,7 @@ function ChatsPanel({
                 type="button"
                 aria-label={t("sortChats")}
                 title={t(order === "unread" ? "unreadFirst" : "recentActivity")}
-                className="shrink-0 rounded-full p-1.5 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+                className="flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
               >
                 <ListFilter className="size-4" />
               </button>
@@ -456,18 +462,19 @@ function ChatsPanel({
         )}
       </div>
 
-      {/* Search */}
-      <div className="px-3 pt-1 pb-2">
-        <div className="relative">
-          <Search className="-translate-y-1/2 absolute top-1/2 left-2.5 size-4 text-muted-foreground" />
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={t("searchChats")}
-            className="h-8 border-transparent bg-sidebar-accent/60 pl-8 text-sm shadow-none focus-visible:border-sidebar-border focus-visible:bg-sidebar-accent/60 focus-visible:ring-0"
-          />
+      {view !== "agents" && (
+        <div className="px-3 pb-3">
+          <Button
+            variant="secondary"
+            size="lg"
+            className="w-full"
+            onClick={newChat}
+          >
+            <SquarePen className="size-4.5" />
+            {t("newChat")}
+          </Button>
         </div>
-      </div>
+      )}
 
       <nav
         aria-label={t("chats")}
@@ -986,7 +993,10 @@ function SessionRow({
         </span>
         {session.unread && (
           <span
-            className="size-1.5 shrink-0 rounded-full bg-link"
+            className={cn(
+              "size-1.5 shrink-0 rounded-full bg-link",
+              showAgent && "order-first motion-safe:animate-pulse",
+            )}
             role="img"
             aria-label={t("unreadResponse")}
           />

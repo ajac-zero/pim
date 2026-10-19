@@ -159,7 +159,7 @@ Import utility icons from `src/components/icons.tsx`, not directly from an icon 
 
 ## Motion
 
-Motion is quick and subtle: 150–200ms ease-out fades and small rises for new messages, popovers, and modals. Avoid bouncing, sliding panels, and looping animation except progress indicators. Respect `prefers-reduced-motion`.
+Motion is quick and subtle: 150–200ms ease-out fades and small rises for new messages, popovers, and modals. Avoid bouncing, sliding panels, and looping animation except progress indicators and the gentle pulse of unread reply dots in Inbox. Respect `prefers-reduced-motion`.
 
 ## Writing
 

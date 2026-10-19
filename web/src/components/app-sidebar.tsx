@@ -467,7 +467,7 @@ function ChatsPanel({
           <Button
             variant="ghost"
             size="lg"
-            className="px-2 has-[>svg]:px-2"
+            className="w-full justify-start px-2 has-[>svg]:px-2"
             onClick={newChat}
           >
             <SquarePen className="size-4.5" />

@@ -114,6 +114,8 @@ The composer is a single rounded field at the bottom of the transcript with a ha
 
 On an agent's dashboard, the composer stays at the same bottom position as in a chat, with suggested first messages above the field. The header and widgets scroll independently above it, so starting a chat does not move the prompt bar.
 
+On touch-first devices, sending dismisses the keyboard, and opening a chat does not focus the input automatically. On desktop, sending keeps the input focused for the next message.
+
 ### Buttons
 
 | Variant | Look | Use |

@@ -644,8 +644,9 @@ const translations = {
     browserDone: "Done",
     browserKeyboard: "Type into the page",
     browserConnecting: "Connecting to the browser on your computer…",
-    browserGone:
-      "The browser isn't open: your agents open it when they need it. You can close this tab.",
+    browserGone: "The browser closed. Reload this page to open it again.",
+    browserAsleep:
+      "Your computer is asleep. Take over wakes it and opens this page again.",
     noFilePreview: "There's no preview for this file. Download it to open it.",
     deleteFileNamed: "Delete {name}",
     deleteFileConfirm:
@@ -1636,7 +1637,9 @@ const translations = {
     browserKeyboard: "Escribir en la página",
     browserConnecting: "Conectando con el navegador de tu computadora…",
     browserGone:
-      "El navegador no está abierto: tus agentes lo abren cuando lo necesitan. Puedes cerrar esta pestaña.",
+      "El navegador se cerró. Recarga esta página para abrirlo de nuevo.",
+    browserAsleep:
+      "Tu computadora está dormida. Tomar el control la despierta y vuelve a abrir esta página.",
     noFilePreview:
       "Este archivo no tiene vista previa. Descárgalo para abrirlo.",
     deleteFileNamed: "Eliminar {name}",

@@ -147,9 +147,10 @@ describe("the browser", () => {
 	});
 
 	it("lets the person take it over, with their own mouse and keyboard, where the agents go on", async () => {
-		// A closed browser has nothing to take over.
-		const nothing = await takeOver();
-		expect((await nothing.closed).code).toBe(4004);
+		// A browser that isn't running opens for the person to take over.
+		const opened = await takeOver();
+		await vi.waitFor(() => expect(opened.heard.find((message) => message.type === "frame")).toBeDefined());
+		opened.socket.close();
 
 		await callTool("browser_open", { url: PLACED });
 		const live = await takeOver();

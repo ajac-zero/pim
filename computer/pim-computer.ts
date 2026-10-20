@@ -587,7 +587,7 @@ function localBrowser(executable: string, profile: string, headful: boolean, log
 			...(headful ? [] : ["--headless=new"]),
 			// Chrome's sandbox can't run as root, as in a container.
 			...(process.getuid?.() === 0 ? ["--no-sandbox"] : []),
-			"about:blank",
+			// No page to open: it opens the pages it had (`keepSessions`), which another page would join each time.
 		];
 		log(`Starting the browser: ${executable}`);
 		const started = spawn(executable, args, { stdio: ["ignore", "ignore", "pipe"] });

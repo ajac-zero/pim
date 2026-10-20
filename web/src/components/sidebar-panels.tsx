@@ -166,7 +166,7 @@ function RowText({ title, meta }: { title: string; meta: ReactNode }) {
   );
 }
 
-/** Unseen notifications, kept in place until you leave the panel. */
+/** Unread notifications, with opened ones kept in place until you leave the panel. */
 export function NotificationsPanel({
   onNavigate,
 }: {
@@ -241,32 +241,6 @@ function NotificationRow({
 }) {
   const { formatDate } = useI18n();
   const unread = notification.readAt === null;
-  const row = useRef<HTMLLIElement>(null);
-  useEffect(() => {
-    if (!unread || !row.current) return;
-    let visible = false;
-    const readVisible = () => {
-      if (visible && document.visibilityState === "visible") {
-        observer.disconnect();
-        document.removeEventListener("visibilitychange", readVisible);
-        onSeen(notification.id);
-      }
-    };
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        visible =
-          entry?.isIntersecting === true && entry.intersectionRatio === 1;
-        readVisible();
-      },
-      { threshold: 1 },
-    );
-    observer.observe(row.current);
-    document.addEventListener("visibilitychange", readVisible);
-    return () => {
-      observer.disconnect();
-      document.removeEventListener("visibilitychange", readVisible);
-    };
-  }, [notification.id, unread, onSeen]);
   const content = (
     <>
       <span className="min-w-0 flex-1">
@@ -292,12 +266,13 @@ function NotificationRow({
     </>
   );
   return (
-    <li ref={row}>
+    <li>
       {notification.session ? (
         <Link
           to="/chat/$sessionId"
           params={{ sessionId: notification.session }}
           onClick={() => {
+            if (unread) onSeen(notification.id);
             onNavigate?.();
           }}
           className={cn(ROW_CLASS, "items-start gap-2")}

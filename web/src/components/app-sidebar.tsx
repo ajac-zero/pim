@@ -95,11 +95,21 @@ export function sessionTitle(session: Pick<Session, "title">, t: T) {
   return session.title ?? t("newChat");
 }
 
-/** Opens the majordomo's dashboard, where a chat starts with its first message. */
+/**
+ * Opens the dashboard of the agent in the open chat, or the majordomo's
+ * anywhere else, where a chat starts with its first message.
+ */
 export function useNewChat(onDone?: () => void) {
   const navigate = useNavigate();
+  const { sessionId } = useParams({ strict: false }) as { sessionId?: string };
+  const { data: sessions } = useQuery(sessionsQuery());
+  const agent = sessions?.find((session) => session.id === sessionId)?.agent;
   return () => {
-    navigate({ to: "/" });
+    if (agent) {
+      navigate({ to: "/agents/$agentId", params: { agentId: agent.id } });
+    } else {
+      navigate({ to: "/" });
+    }
     onDone?.();
   };
 }

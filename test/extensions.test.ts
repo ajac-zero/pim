@@ -6,7 +6,7 @@ import { checkToolNames, PimExtensions } from "../src/extensions/define";
 import { themes as ownThemes } from "../src/extensions/themes";
 import { nord } from "../src/extensions/themes/nord";
 import { PimThemes, type Theme, type ThemeList } from "../src/themes";
-import { api, apiUrl, lastUserText, pendingApproval, post, ROOT, say, scripts, settled, systemPrompt, toolUse } from "./helpers";
+import { api, apiUrl, lastUserText, pendingApproval, post, ROOT, say, scripts, settled, systemPrompt, TOKEN, toolUse } from "./helpers";
 import { faux, ledger, outbox } from "./worker";
 
 type Agent = { id: string; name: string; blueprint: string | null; majordomo: boolean };
@@ -204,6 +204,12 @@ describe("extensions", () => {
 			},
 			(context) => {
 				results.push(lastToolResult(context.messages));
+				// A dashboard shows an artifact's widget, so it gets one first.
+				return toolUse("artifact_update", { id: made, base_version: 1, files: [{ path: "widget.html", content: "<!doctype html><p>Subway opens</p>" }] });
+			},
+			() => toolUse("update_dashboard", { pin: [made, "pim.goals/active"] }),
+			(context) => {
+				results.push(lastToolResult(context.messages));
 				// Another blueprint's widget, and an artifact that isn't there: refused, and nothing changes.
 				return toolUse("update_dashboard", { pin: ["pim.schedule/upcoming", "test.ledger/bills"] });
 			},
@@ -222,7 +228,8 @@ describe("extensions", () => {
 		]);
 		await say("Put today's NYC headlines on my dashboard.", chat);
 
-		const [pinned, otherBlueprint, unknown, unpinned] = results;
+		const [noWidget, pinned, otherBlueprint, unknown, unpinned] = results;
+		expect(noWidget).toMatchObject({ isError: true, text: expect.stringContaining("Headlines has no widget") });
 		expect(pinned!.isError).toBe(false);
 		expect(JSON.parse(pinned!.text)).toMatchObject({
 			dashboard: [
@@ -240,9 +247,14 @@ describe("extensions", () => {
 		// Pinning what's there already moves nothing.
 		expect(JSON.parse(unpinned!.text).dashboard).toEqual([{ artifact: made, title: "Headlines" }]);
 
-		// The dashboard runs the artifact's latest version; it's this agent's alone.
-		expect((await dashboard(scout)).widgets).toEqual([{ id: `artifact:${made}`, title: "Headlines", artifact: { id: made, kind: "html", version: 1 } }]);
+		// The dashboard runs the widget of the artifact's latest version; it's this agent's alone.
+		expect((await dashboard(scout)).widgets).toEqual([{ id: `artifact:${made}`, title: "Headlines", artifact: { id: made, kind: "html", version: 2, widget: true } }]);
 		expect((await dashboard(other)).widgets).toEqual([]);
+		const frame = async (path: string) =>
+			(await exports.default.fetch(new Request(apiUrl(`/artifacts/${made}/versions/${path}`), { headers: { Authorization: `Bearer ${TOKEN}` } }))).text();
+		expect(await frame("2/frame?view=widget")).toContain("<p>Subway opens</p>");
+		expect(await frame("2/frame")).toContain("Second Avenue subway opens");
+		expect(await frame("1/frame?view=widget")).toContain("no widget");
 
 		// The person reorders and takes things off; they can't add what the agent couldn't.
 		const put = (items: string[]) => api(`/agents/${scout.id}/dashboard`, { method: "PUT", body: JSON.stringify({ items }) });

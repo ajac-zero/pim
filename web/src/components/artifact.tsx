@@ -34,6 +34,8 @@ const MAX_MESSAGES_PER_SECOND = 20;
 /** `pim.chat(text)`: a message for the person to send, answered here, never by Pim. */
 const DRAFT_OP = "chat.draft";
 const MAX_DRAFT = 2000;
+/** `pim.open()`: from a dashboard's widget, opens the full artifact, answered here too. */
+const OPEN_OP = "app.open";
 
 /** A call the page makes through its bridge (`window.pim`), and the answer it's sent. */
 const CALL_MESSAGE = "pim:call";
@@ -118,6 +120,8 @@ export function ArtifactFrame({
   eager = false,
   from,
   onDraft,
+  widget = false,
+  onOpen,
 }: {
   id: string;
   version: number;
@@ -129,6 +133,10 @@ export function ArtifactFrame({
    * Without it, as everywhere but a dashboard, the call fails.
    */
   onDraft?: (text: string) => void;
+  /** Shows the version's widget, its small view for a dashboard, instead of the artifact. */
+  widget?: boolean;
+  /** What the page's `pim.open()` does; without it, the call fails. */
+  onOpen?: () => void;
   /** The tallest it grows to its page's height; ignored when `fill`. */
   maxHeight?: number;
   /** Fills its container instead of following its page's height. */
@@ -144,11 +152,17 @@ export function ArtifactFrame({
   const [attempt, setAttempt] = useState(0);
   // Loads of the frame now shown; a new version or a retry starts again.
   const loads = useRef({ key: "", count: 0 });
-  const key = `${id}:${version}:${attempt}`;
+  const key = `${id}:${version}:${widget}:${attempt}`;
   const bridge = useBridge(id, version, from);
   // The bridge as it is now, for the listener, which stays the same.
   const call = useRef(bridge.call);
   call.current = async (op, args) => {
+    if (op === OPEN_OP) {
+      if (!onOpen)
+        throw new Error("pim.open works only in a dashboard's widget.");
+      onOpen();
+      return null;
+    }
     if (op !== DRAFT_OP) return bridge.call(op, args);
     if (!onDraft) throw new Error("pim.chat works only on a dashboard.");
     const text = (args as { text?: unknown }).text;
@@ -296,7 +310,7 @@ export function ArtifactFrame({
         key={key}
         ref={frame}
         title={title}
-        src={artifactFrameUrl(id, version, from)}
+        src={artifactFrameUrl(id, version, from, widget)}
         sandbox="allow-scripts"
         referrerPolicy="no-referrer"
         loading={eager ? "eager" : "lazy"}

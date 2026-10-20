@@ -39,6 +39,17 @@ export type ArtifactSource = "agent" | "person" | "restore";
 /** Each kind's main file, which every version has: the page, the document, the drawing, the diagram or the component. */
 export const ENTRY_FILES: Record<ArtifactKind, string> = { html: "index.html", markdown: "README.md", svg: "image.svg", mermaid: "diagram.mmd", jsx: "App.jsx" };
 
+/**
+ * The file a page or an app may have beside its main one for its widget: a
+ * small view of it, which a dashboard shows as a tile, as a phone's home
+ * screen shows an app's widget. It shares the artifact's other files, data
+ * and permissions.
+ */
+export const WIDGET_FILES: Partial<Record<ArtifactKind, string>> = { html: "widget.html", jsx: "Widget.jsx" };
+
+/** Whether a version has a widget. */
+export const hasWidget = (kind: ArtifactKind, files: readonly { path: string }[]) => files.some((file) => file.path === WIDGET_FILES[kind]);
+
 /** One file of a version, as the version lists it. */
 export type ArtifactFile = {
 	readonly path: string;
@@ -334,7 +345,10 @@ export function checkFiles(kind: ArtifactKind, files: LoadedFiles): void {
 	const content = textOf(main.bytes);
 	if (kind === "svg" && !SVG_START.test(content)) throw new HttpError(400, "An SVG artifact must be one <svg> element, starting with <svg.");
 	if (kind === "mermaid" && content.trim() === "") throw new HttpError(400, "A Mermaid artifact needs a diagram.");
-	if (kind === "jsx") compileJsxApp(files, entry);
+	if (kind === "jsx") {
+		compileJsxApp(files, entry);
+		if (files.has(WIDGET_FILES.jsx!)) compileJsxApp(files, WIDGET_FILES.jsx!);
+	}
 }
 
 function checkKey(key: unknown): string {
@@ -1004,7 +1018,7 @@ const escapeHtml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "
  * frame shares with the app: otherwise Back would undo them one by one
  * instead of leaving the artifact. A link the page handles itself is left alone.
  */
-export const BRIDGE_SCRIPT = `<script>(()=>{let next=0;const waiting=new Map();const alone=parent===window;if(!alone){const replace=history.replaceState.bind(history);history.pushState=(state,title,url)=>replace(state,title,url);addEventListener("click",(event)=>{const link=event.target instanceof Element?event.target.closest("a[href]"):null;if(event.defaultPrevented||!link||typeof link.href!=="string"||(link.target&&link.target!=="_self"))return;const [page,hash]=link.href.split("#");if(hash===undefined||page!==location.href.split("#")[0])return;event.preventDefault();location.replace(link.href)})}addEventListener("message",(event)=>{if(event.source!==parent)return;const data=event.data;if(!data||data.type!=="pim:reply"||!waiting.has(data.id))return;const [resolve,reject]=waiting.get(data.id);waiting.delete(data.id);if(data.error!==undefined)reject(new Error(String(data.error)));else resolve(data.value)});const call=(op,args)=>alone?Promise.reject(new Error("Pim isn't here: this page is open on its own.")):new Promise((resolve,reject)=>{const id=++next;waiting.set(id,[resolve,reject]);parent.postMessage({type:"pim:call",id,op,args},"*")});const store=(scope)=>Object.freeze({get:(key)=>call(scope+".get",{key}),set:(key,value)=>call(scope+".set",{key,value}),delete:(key)=>call(scope+".delete",{key}),list:(prefix)=>call(scope+".list",{prefix})});window.pim=Object.freeze({storage:store("storage"),shared:store("shared"),ask:(prompt)=>call("model.ask",{prompt}),tools:Object.freeze({call:(name,input)=>call("tools.call",{name,input})}),chat:(text)=>call("chat.draft",{text})})})()</script>`;
+export const BRIDGE_SCRIPT = `<script>(()=>{let next=0;const waiting=new Map();const alone=parent===window;if(!alone){const replace=history.replaceState.bind(history);history.pushState=(state,title,url)=>replace(state,title,url);addEventListener("click",(event)=>{const link=event.target instanceof Element?event.target.closest("a[href]"):null;if(event.defaultPrevented||!link||typeof link.href!=="string"||(link.target&&link.target!=="_self"))return;const [page,hash]=link.href.split("#");if(hash===undefined||page!==location.href.split("#")[0])return;event.preventDefault();location.replace(link.href)})}addEventListener("message",(event)=>{if(event.source!==parent)return;const data=event.data;if(!data||data.type!=="pim:reply"||!waiting.has(data.id))return;const [resolve,reject]=waiting.get(data.id);waiting.delete(data.id);if(data.error!==undefined)reject(new Error(String(data.error)));else resolve(data.value)});const call=(op,args)=>alone?Promise.reject(new Error("Pim isn't here: this page is open on its own.")):new Promise((resolve,reject)=>{const id=++next;waiting.set(id,[resolve,reject]);parent.postMessage({type:"pim:call",id,op,args},"*")});const store=(scope)=>Object.freeze({get:(key)=>call(scope+".get",{key}),set:(key,value)=>call(scope+".set",{key,value}),delete:(key)=>call(scope+".delete",{key}),list:(prefix)=>call(scope+".list",{prefix})});window.pim=Object.freeze({storage:store("storage"),shared:store("shared"),ask:(prompt)=>call("model.ask",{prompt}),tools:Object.freeze({call:(name,input)=>call("tools.call",{name,input})}),chat:(text)=>call("chat.draft",{text}),open:()=>call("app.open",{})})})()</script>`;
 
 /**
  * An HTML artifact with the bridge added first: after its doctype, so the
@@ -1025,10 +1039,12 @@ const PAGE_HEAD =
  * one in a page that fits it to the frame; a Mermaid one as its source, in
  * text, which the Mermaid runtime draws; a JSX one compiled, after the React
  * runtime and the modules it imports. Each ends with the height script.
+ * With `widget`, the page is its widget file instead of its main one.
  */
-export function framePage(kind: ArtifactKind, files: LoadedFiles, origin: string): Response {
-	const main = files.get(ENTRY_FILES[kind]);
-	if (!main) throw new HttpError(404, `The artifact has no ${ENTRY_FILES[kind]}`);
+export function framePage(kind: ArtifactKind, files: LoadedFiles, origin: string, options: { widget?: boolean } = {}): Response {
+	const entry = options.widget ? WIDGET_FILES[kind] : ENTRY_FILES[kind];
+	const main = entry === undefined ? undefined : files.get(entry);
+	if (!main) throw new HttpError(404, options.widget ? "The artifact has no widget" : `The artifact has no ${entry}`);
 	const content = textOf(main.bytes);
 	const html = (body: string, runtime = false) =>
 		new Response(body + RESIZE_SCRIPT, { headers: artifactHeaders(origin, "text/html; charset=utf-8", { runtime }) });
@@ -1044,7 +1060,7 @@ export function framePage(kind: ArtifactKind, files: LoadedFiles, origin: string
 				true,
 			);
 		case "jsx": {
-			const { code, runtimes } = compileJsxApp(files, ENTRY_FILES[kind]);
+			const { code, runtimes } = compileJsxApp(files, entry!);
 			const scripts = [...runtimes, "tailwind"].map((name) => `<script src="${origin}${RUNTIME_PATH}${name}.js"></script>`).join("");
 			return html(
 				`${PAGE_HEAD}</head><body><div id="root"></div>${scripts}<script>__pimMount(function (require, module, exports) {\n${inlineScript(code)}\n})</script></body></html>`,

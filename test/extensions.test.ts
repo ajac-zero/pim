@@ -153,7 +153,7 @@ describe("extensions", () => {
 
 		// The default agent's dashboard, set by the person, shows its own chats' things, not the coach's.
 		expect((await dashboard(mine)).widgets).toEqual([]);
-		expect((await api(`/agents/${mine.id}/dashboard`, { method: "PUT", body: JSON.stringify({ items: builtIn }) })).body).toEqual({ items: builtIn });
+		expect((await api(`/agents/${mine.id}/dashboard`, { method: "PUT", body: JSON.stringify({ items: builtIn }) })).body).toEqual({ items: builtIn, sizes: {} });
 		const home = await dashboard(mine);
 		expect(widget(home, "pim.goals/active").items.map((item: { title: string }) => item.title)).toEqual(["Learn Portuguese"]);
 		expect(widget(home, "pim.schedule/upcoming").items).toEqual([]);
@@ -207,7 +207,7 @@ describe("extensions", () => {
 				// A dashboard shows an artifact's widget, so it gets one first.
 				return toolUse("artifact_update", { id: made, base_version: 1, files: [{ path: "widget.html", content: "<!doctype html><p>Subway opens</p>" }] });
 			},
-			() => toolUse("update_dashboard", { pin: [made, "pim.goals/active"] }),
+			() => toolUse("update_dashboard", { pin: [made, "pim.goals/active"], sizes: { [made]: "small" } }),
 			(context) => {
 				results.push(lastToolResult(context.messages));
 				// Another blueprint's widget, and an artifact that isn't there: refused, and nothing changes.
@@ -233,7 +233,7 @@ describe("extensions", () => {
 		expect(pinned!.isError).toBe(false);
 		expect(JSON.parse(pinned!.text)).toMatchObject({
 			dashboard: [
-				{ artifact: made, title: "Headlines" },
+				{ artifact: made, title: "Headlines", size: "small" },
 				{ widget: "pim.goals/active", title: "Goals" },
 			],
 		});
@@ -244,11 +244,11 @@ describe("extensions", () => {
 		]);
 		expect(otherBlueprint).toMatchObject({ isError: true, text: expect.stringContaining("test.ledger/bills is neither one of your artifacts") });
 		expect(unknown).toMatchObject({ isError: true, text: expect.stringContaining("artifact:a-made-up-id is neither") });
-		// Pinning what's there already moves nothing.
-		expect(JSON.parse(unpinned!.text).dashboard).toEqual([{ artifact: made, title: "Headlines" }]);
+		// Pinning what's there already moves nothing, and it keeps its size.
+		expect(JSON.parse(unpinned!.text).dashboard).toEqual([{ artifact: made, title: "Headlines", size: "small" }]);
 
 		// The dashboard runs the widget of the artifact's latest version; it's this agent's alone.
-		expect((await dashboard(scout)).widgets).toEqual([{ id: `artifact:${made}`, title: "Headlines", artifact: { id: made, kind: "html", version: 2, widget: true } }]);
+		expect((await dashboard(scout)).widgets).toEqual([{ id: `artifact:${made}`, title: "Headlines", size: "small", artifact: { id: made, kind: "html", version: 2, widget: true } }]);
 		expect((await dashboard(other)).widgets).toEqual([]);
 		const frame = async (path: string) =>
 			(await exports.default.fetch(new Request(apiUrl(`/artifacts/${made}/versions/${path}`), { headers: { Authorization: `Bearer ${TOKEN}` } }))).text();
@@ -256,11 +256,20 @@ describe("extensions", () => {
 		expect(await frame("2/frame")).toContain("Second Avenue subway opens");
 		expect(await frame("1/frame?view=widget")).toContain("no widget");
 
-		// The person reorders and takes things off; they can't add what the agent couldn't.
-		const put = (items: string[]) => api(`/agents/${scout.id}/dashboard`, { method: "PUT", body: JSON.stringify({ items }) });
-		expect((await put(["pim.memory/recent", `artifact:${made}`])).status).toBe(200);
+		// The person reorders, resizes and takes things off; they can't add what the agent couldn't.
+		const put = (items: string[], sizes?: Record<string, string>) => api(`/agents/${scout.id}/dashboard`, { method: "PUT", body: JSON.stringify({ items, sizes }) });
+		expect((await put(["pim.memory/recent", `artifact:${made}`])).body).toEqual({ items: ["pim.memory/recent", `artifact:${made}`], sizes: { [`artifact:${made}`]: "small" } });
 		expect((await dashboard(scout)).widgets.map((shown: { id: string }) => shown.id)).toEqual(["pim.memory/recent", `artifact:${made}`]);
 		expect((await put(["test.ledger/bills"])).status).toBe(400);
+		// Only an artifact's widget comes in sizes, and only those three; a refused size changes nothing.
+		expect((await put(["pim.memory/recent", `artifact:${made}`], { "pim.memory/recent": "large" })).status).toBe(400);
+		expect((await put(["pim.memory/recent", `artifact:${made}`], { [`artifact:${made}`]: "huge" })).status).toBe(400);
+		expect((await put(["pim.memory/recent", `artifact:${made}`], { [`artifact:${made}`]: "large" })).status).toBe(200);
+		expect((await dashboard(scout)).widgets[1].size).toBe("large");
+		// Taken off and pinned again, it starts at the default size.
+		expect((await put(["pim.memory/recent"])).body.sizes).toEqual({});
+		expect((await put(["pim.memory/recent", `artifact:${made}`])).body.sizes).toEqual({});
+		expect((await dashboard(scout)).widgets[1].size).toBe("medium");
 
 		// A deleted artifact leaves the dashboard.
 		expect((await api(`/artifacts/${made}`, { method: "DELETE" })).status).toBe(200);

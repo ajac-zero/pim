@@ -106,7 +106,7 @@ import {
 	widgetMarkdown,
 } from "./extensions/define";
 import { goalsExtension, goalsWidgets } from "./extensions/goals";
-import { dashboardExtension, MAX_DASHBOARD, UPDATE_DASHBOARD } from "./extensions/dashboard";
+import { DEFAULT_WIDGET_SIZE, dashboardExtension, MAX_DASHBOARD, UPDATE_DASHBOARD, WIDGET_SIZES, type WidgetSize } from "./extensions/dashboard";
 import {
 	agentAudience,
 	agentToolPermission,
@@ -2724,7 +2724,8 @@ export class Pim extends DurableAgent<Env> {
 				if (artifact !== undefined) {
 					if (!artifact) return null;
 					const widget = hasWidget(artifact.kind, this.artifacts.version(artifact.id)!.files);
-					return { id: item, title: artifact.title, artifact: { id: artifact.id, kind: artifact.kind, version: artifact.version, widget } };
+					const size = agent.dashboardSizes[item] ?? DEFAULT_WIDGET_SIZE;
+					return { id: item, title: artifact.title, size, artifact: { id: artifact.id, kind: artifact.kind, version: artifact.version, widget } };
 				}
 				if (!this.extensions.widget(item)) return null;
 				const widget = await this.#loadWidget(agent, item);
@@ -2742,9 +2743,10 @@ export class Pim extends DurableAgent<Env> {
 	 * Sets what an agent's dashboard shows, in order. Each item must be on it
 	 * already, a widget the agent can show, or one of the person's artifacts
 	 * with a widget, which is what the dashboard shows of it; anything else is
-	 * refused, with the reason.
+	 * refused, with the reason. `sizes` changes the size of artifacts' widgets,
+	 * by item; the others keep theirs.
 	 */
-	#setDashboard(agent: Agent, items: readonly string[]): string[] {
+	#setDashboard(agent: Agent, items: readonly string[], sizes: Readonly<Record<string, unknown>> = {}) {
 		const current = this.#dashboardItems(agent);
 		const widgets = this.#widgetsFor(agent.blueprint);
 		const next = [...new Set(items)];
@@ -2764,16 +2766,23 @@ export class Pim extends DurableAgent<Env> {
 			);
 		}
 		if (next.length > MAX_DASHBOARD) throw new HttpError(400, `A dashboard shows at most ${MAX_DASHBOARD} things: take some off first.`);
-		this.agents.setDashboard(agent.id, next);
-		return next;
+		for (const [item, size] of Object.entries(sizes)) {
+			if (!next.includes(item) || !item.startsWith(PINNED_ARTIFACT)) throw new HttpError(400, `Only an artifact's widget on the dashboard has a size, and ${item} isn't one.`);
+			if (!WIDGET_SIZES.includes(size as WidgetSize)) throw new HttpError(400, `A widget's size is ${WIDGET_SIZES.join(", ")}.`);
+		}
+		// Kept only for what's still on it, and only where it isn't the default.
+		const merged = { ...agent.dashboardSizes, ...(sizes as Record<string, WidgetSize>) };
+		const kept = Object.fromEntries(next.flatMap((item) => (merged[item] && merged[item] !== DEFAULT_WIDGET_SIZE ? [[item, merged[item]]] : [])));
+		this.agents.setDashboard(agent.id, next, kept);
+		return { items: next, sizes: kept };
 	}
 
 	/**
 	 * `update_dashboard`: pins artifacts, by id, and widgets, by name, after
-	 * what's there; unpins others. Answers with what the dashboard shows then
-	 * and the widgets it could also show, for the model.
+	 * what's there; unpins others; sizes artifacts' widgets. Answers with what
+	 * the dashboard shows then and the widgets it could also show, for the model.
 	 */
-	#changeDashboard(agent: Agent, { pin, unpin }: { pin: readonly string[]; unpin: readonly string[] }) {
+	#changeDashboard(agent: Agent, { pin, unpin, sizes }: { pin: readonly string[]; unpin: readonly string[]; sizes: Readonly<Record<string, WidgetSize>> }) {
 		const widgets = this.#widgetsFor(agent.blueprint);
 		// A widget by its name, or an artifact by its id, with or without the prefix.
 		const item = (given: string) => {
@@ -2787,16 +2796,17 @@ export class Pim extends DurableAgent<Env> {
 		if (missing.length > 0) throw new Error(`Not on your dashboard: ${missing.join(", ")}. Call ${UPDATE_DASHBOARD} with nothing to see what is.`);
 		// What's gone from under it, a deleted artifact or an uninstalled widget, goes with this change.
 		const kept = current.filter((name) => !removed.has(name) && (this.#pinnedArtifact(name) ?? this.extensions.widget(name)));
-		const next = this.#setDashboard({ ...agent, dashboard: kept }, [...kept, ...pin.map(item)]);
+		const sized = Object.fromEntries(Object.entries(sizes).map(([name, size]) => [item(name), size]));
+		const next = this.#setDashboard({ ...agent, dashboard: kept }, [...kept, ...pin.map(item)], sized);
 		const titled = (name: string) => {
 			const artifact = this.#pinnedArtifact(name);
-			if (artifact) return { artifact: artifact.id, title: artifact.title };
+			if (artifact) return { artifact: artifact.id, title: artifact.title, size: next.sizes[name] ?? DEFAULT_WIDGET_SIZE };
 			return { widget: name, title: localize(this.extensions.widget(name)!.title, "en") };
 		};
 		return {
-			dashboard: next.map(titled),
-			...(next.length === 0 ? { note: "Your dashboard is empty." } : {}),
-			widgets_you_could_pin: widgets.filter(({ ref }) => !next.includes(ref)).map(({ ref, widget }) => ({ name: ref, title: localize(widget.title, "en") })),
+			dashboard: next.items.map(titled),
+			...(next.items.length === 0 ? { note: "Your dashboard is empty." } : {}),
+			widgets_you_could_pin: widgets.filter(({ ref }) => !next.items.includes(ref)).map(({ ref, widget }) => ({ name: ref, title: localize(widget.title, "en") })),
 		};
 	}
 
@@ -4565,9 +4575,10 @@ export class Pim extends DurableAgent<Env> {
 			"PUT",
 			"/agents/:agent/dashboard",
 			async ({ agent }, request) => {
-				const { items } = await readJson<{ items?: unknown }>(request);
+				const { items, sizes } = await readJson<{ items?: unknown; sizes?: unknown }>(request);
 				if (!Array.isArray(items) || items.some((item) => typeof item !== "string")) throw new HttpError(400, "items must be a list of a dashboard's items");
-				return { items: this.#setDashboard(this.#agent(agent!), items as string[]) };
+				if (sizes !== undefined && (typeof sizes !== "object" || sizes === null || Array.isArray(sizes))) throw new HttpError(400, "sizes must be an object of widget sizes by item");
+				return this.#setDashboard(this.#agent(agent!), items as string[], (sizes ?? {}) as Record<string, unknown>);
 			},
 		],
 		[

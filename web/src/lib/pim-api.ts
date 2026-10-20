@@ -703,6 +703,10 @@ export const fileContentUrl = (path: string, download = false) =>
  */
 export type ComputerStatus = {
   state: "none" | "offline" | "online";
+  /** Whether Pim started it: it sleeps when unused and wakes when needed, so offline is asleep. */
+  managed: boolean;
+  /** Whether this Pim starts computers for people, so you needn't bring one. */
+  startable?: boolean;
   pairedAt: number | null;
   /** What it said about itself when it last connected. */
   computer: {
@@ -1085,6 +1089,12 @@ export const pim = {
   /** Pairs a computer in place of any other; its token is shown only now. */
   pairComputer: () =>
     call<ComputerStatus & { token: string }>("/computer", { method: "POST" }),
+  /** Has Pim start a computer for you; it connects once it has booted. */
+  startComputer: () =>
+    call<ComputerStatus>("/computer", {
+      method: "POST",
+      body: JSON.stringify({ managed: true }),
+    }),
   removeComputer: () => call<ComputerStatus>("/computer", { method: "DELETE" }),
   browser: () => call<BrowserStatus>("/browser"),
   closeBrowser: () =>

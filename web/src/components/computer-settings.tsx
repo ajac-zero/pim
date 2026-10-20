@@ -47,7 +47,11 @@ export function ComputerSection() {
     ...computerQuery(),
     // While a new token waits for its computer, look now and then too, in case the socket missed it.
     refetchInterval: (query) =>
-      token && query.state.data?.state !== "online" ? 5_000 : false,
+      (token || query.state.data?.managed) &&
+      !query.state.data?.computer &&
+      query.state.data?.state !== "online"
+        ? 5_000
+        : false,
   });
   const settle = (next: ComputerStatus) => {
     queryClient.setQueryData(["computer"], next);
@@ -59,6 +63,11 @@ export function ComputerSection() {
       setToken(made);
       settle(next);
     },
+    onError: (error) => toast.error(error.message),
+  });
+  const start = useMutation({
+    mutationFn: pim.startComputer,
+    onSuccess: settle,
     onError: (error) => toast.error(error.message),
   });
   const remove = useMutation({
@@ -74,14 +83,22 @@ export function ComputerSection() {
   const shown = token ? commands(token) : null;
 
   return (
-    <Section title={t("computer")} description={t("computerDescription")}>
+    <Section
+      title={t("computer")}
+      description={t(
+        status.startable
+          ? "computerDescriptionStartable"
+          : "computerDescription",
+      )}
+    >
       {status.state !== "none" && (
         <div className="flex items-center gap-3 rounded-2xl border bg-muted/20 px-4 py-3">
           <Server className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-2">
               <span className="truncate font-medium text-sm">
-                {machine?.hostname ?? t("computerWaiting")}
+                {machine?.hostname ??
+                  t(status.managed ? "computerStarting" : "computerWaiting")}
               </span>
               {machine && (
                 <Badge
@@ -90,19 +107,20 @@ export function ComputerSection() {
                 >
                   {status.state === "online"
                     ? t("computerOnline")
-                    : t("computerOffline")}
+                    : t(status.managed ? "computerAsleep" : "computerOffline")}
                 </Badge>
               )}
             </span>
             <span className="block truncate text-muted-foreground text-xs">
               {machine
                 ? [
+                    ...(status.managed ? [t("computerStartedByPim")] : []),
                     `${machine.platform} ${machine.arch}`,
                     machine.user,
                     t("computerFilesIn", { folder: machine.root }),
                     ...(machine.browser ? [] : [t("computerNoBrowser")]),
                   ].join(" · ")
-                : t("computerPairedOn", {
+                : t(status.managed ? "computerStartedOn" : "computerPairedOn", {
                     date: formatDate(new Date(status.pairedAt ?? 0), {
                       dateStyle: "medium",
                     }),
@@ -116,7 +134,10 @@ export function ComputerSection() {
             aria-label={t("removeComputer")}
             disabled={remove.isPending}
             onClick={() => {
-              if (window.confirm(t("removeComputerConfirm"))) remove.mutate();
+              const confirm = status.managed
+                ? "removeStartedComputerConfirm"
+                : "removeComputerConfirm";
+              if (window.confirm(t(confirm))) remove.mutate();
             }}
           >
             {remove.isPending ? (
@@ -127,7 +148,7 @@ export function ComputerSection() {
           </Button>
         </div>
       )}
-      {status.state === "offline" && !shown && (
+      {status.state === "offline" && !status.managed && !shown && (
         <p className="text-[13px] text-muted-foreground">
           {t("computerOfflineHint")}
         </p>
@@ -151,12 +172,25 @@ export function ComputerSection() {
         </div>
       )}
       {status.state === "none" ? (
-        <Button onClick={() => pair.mutate()} disabled={pair.isPending}>
-          {pair.isPending && <Loader2 className="animate-spin" />}
-          {t("connectComputer")}
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          {status.startable && (
+            <Button onClick={() => start.mutate()} disabled={start.isPending}>
+              {start.isPending && <Loader2 className="animate-spin" />}
+              {t("startComputer")}
+            </Button>
+          )}
+          <Button
+            variant={status.startable ? "secondary" : "default"}
+            onClick={() => pair.mutate()}
+            disabled={pair.isPending}
+          >
+            {pair.isPending && <Loader2 className="animate-spin" />}
+            {t(status.startable ? "connectOwnComputer" : "connectComputer")}
+          </Button>
+        </div>
       ) : (
-        !shown && (
+        !shown &&
+        !status.managed && (
           <Button
             variant="secondary"
             onClick={() => {

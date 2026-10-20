@@ -25,10 +25,16 @@ import { cn } from "~/lib/utils";
  * The open chats, as tabs in the chat's header. Each shows its agent, its
  * title, and whether it is working or waiting for an approval, so chats in
  * the background stay in view with the sidebar collapsed. With only one
- * open, it shows that chat's title instead. A chat dragged here from the
- * sidebar opens in a new tab.
+ * open, it shows that chat's title instead. While a chat is `dropping` into
+ * the page, a new tab shows where it will go.
  */
-export function ChatTabs({ activeId }: { activeId: string }) {
+export function ChatTabs({
+  activeId,
+  dropping,
+}: {
+  activeId: string;
+  dropping: boolean;
+}) {
   const { t } = useI18n();
   const navigate = useNavigate();
   const tabs = useTabs();
@@ -56,28 +62,6 @@ export function ChatTabs({ activeId }: { activeId: string }) {
     );
   };
 
-  // A chat dragged over the tabs shows where its new tab will go.
-  const [dropping, setDropping] = useState(false);
-  const dropZone = {
-    onDragOver: (event: DragEvent) => {
-      if (!event.dataTransfer.types.includes(CHAT_DRAG_TYPE)) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "copy";
-      setDropping(true);
-    },
-    onDragLeave: (event: DragEvent) => {
-      if (!event.currentTarget.contains(event.relatedTarget as Node | null))
-        setDropping(false);
-    },
-    onDrop: (event: DragEvent) => {
-      setDropping(false);
-      const session = event.dataTransfer.getData(CHAT_DRAG_TYPE);
-      if (!session) return;
-      event.preventDefault();
-      openTab(session);
-      navigate({ to: "/chat/$sessionId", params: { sessionId: session } });
-    },
-  };
   const newTab = (
     <>
       <Plus className="size-4 shrink-0" />
@@ -127,12 +111,9 @@ export function ChatTabs({ activeId }: { activeId: string }) {
   );
   if (open.length <= 1) {
     const session = sessions?.find((candidate) => candidate.id === activeId);
-    if (!session) return <div className="flex-1" {...dropZone} />;
+    if (!session) return <div className="flex-1" />;
     return (
-      <div
-        className="flex min-w-0 flex-1 items-center gap-2 pl-4 text-[15px]"
-        {...dropZone}
-      >
+      <div className="flex min-w-0 flex-1 items-center gap-2 pl-4 text-[15px]">
         {iconOf(session, "bg-muted")}
         <span className="truncate">{sessionTitle(session, t)}</span>
         {statusOf(session)}
@@ -149,7 +130,6 @@ export function ChatTabs({ activeId }: { activeId: string }) {
     <nav
       aria-label={t("openChats")}
       className="h-full min-w-0 flex-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none]"
-      {...dropZone}
     >
       {/* The padding leaves room for the open tab's flared corners. */}
       <ul className="flex h-full items-end gap-1 px-2">
@@ -219,4 +199,34 @@ export function ChatTabs({ activeId }: { activeId: string }) {
       </ul>
     </nav>
   );
+}
+
+/**
+ * Lets a chat dragged from the sidebar be dropped anywhere on the page it
+ * returns props for, to open in a new tab. `dropping` is true while one is over it.
+ */
+export function useChatDrop() {
+  const navigate = useNavigate();
+  const [dropping, setDropping] = useState(false);
+  const dropZone = {
+    onDragOver: (event: DragEvent) => {
+      if (!event.dataTransfer.types.includes(CHAT_DRAG_TYPE)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      setDropping(true);
+    },
+    onDragLeave: (event: DragEvent) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+        setDropping(false);
+    },
+    onDrop: (event: DragEvent) => {
+      setDropping(false);
+      const session = event.dataTransfer.getData(CHAT_DRAG_TYPE);
+      if (!session) return;
+      event.preventDefault();
+      openTab(session);
+      navigate({ to: "/chat/$sessionId", params: { sessionId: session } });
+    },
+  };
+  return { dropping, dropZone };
 }

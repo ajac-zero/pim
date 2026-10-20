@@ -1,6 +1,6 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { type ShownWidget, shownWidgets } from "./extensions/define";
-import { SEND_TO_USER } from "./extensions/messaging";
+import { plainReply, SEND_TO_USER } from "./extensions/messaging";
 import { DELIVERY_REMINDER, INTRODUCTION, NOTICE_PREFIXES } from "./transcript";
 
 /**
@@ -89,7 +89,8 @@ export function sharedMessages(entries: readonly EntryRecord[]): SharedMessage[]
 				const result = results.get(part.id);
 				const { message: text, channel } = part.arguments as { message?: unknown; channel?: unknown };
 				if (!result || result.isError || typeof text !== "string" || text.trim() === "" || channel === "email") continue;
-				messages.push({ role: "agent", text, widgets: shownWidgets(result.text).map(unlinked), at: message.timestamp + (message.durationMs ?? 0) });
+				// Its cards as text: their images' copies are the owner's.
+				messages.push({ role: "agent", text: plainReply(text), widgets: shownWidgets(result.text).map(unlinked), at: message.timestamp + (message.durationMs ?? 0) });
 			}
 		}
 	}

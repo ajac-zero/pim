@@ -24,6 +24,7 @@ import {
   UserMessage,
   WorkedSteps,
 } from "~/components/chat/items";
+import { sentImages } from "~/components/chat/reply-blocks";
 import {
   TASK_POLL_MS,
   TaskCard,
@@ -314,6 +315,11 @@ export const Thread = memo(function Thread({
                 }}
                 at={row.at}
                 streaming={liveKeys.has(row.key)}
+                images={
+                  outputs.has(row.call.call_id)
+                    ? sentImages(outputs.get(row.call.call_id)?.output)
+                    : null
+                }
                 attachments={
                   row.sent.widgets.length > 0 ? (
                     <SentWidgets

@@ -4,6 +4,7 @@ import { memo, type ReactNode, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AppIcon } from "~/components/app-icon";
 import { Markdown } from "~/components/chat/markdown";
+import { ReplyImages } from "~/components/chat/reply-blocks";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
   Bell,
@@ -201,6 +202,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   streaming,
   attachments,
   untrusted,
+  images = {},
 }: {
   item: MessageItem;
   /** When it was sent, in ms. */
@@ -210,6 +212,8 @@ export const AssistantMessage = memo(function AssistantMessage({
   untrusted?: boolean;
   /** What goes with the message, under its text: its widgets. */
   attachments?: ReactNode;
+  /** The copies Pim keeps of the images its cards show, by their addresses on the web; null until they're kept. */
+  images?: Readonly<Record<string, string>> | null;
 }) {
   const { t } = useI18n();
   const text = messageText(item);
@@ -219,7 +223,9 @@ export const AssistantMessage = memo(function AssistantMessage({
   // the time and actions don't push the thread when it finishes.
   return (
     <div data-speaker="assistant" className="group/assistant w-full min-w-0">
-      <Markdown text={text} streaming={streaming} untrusted={untrusted} />
+      <ReplyImages images={images} streaming={streaming ?? false}>
+        <Markdown text={text} streaming={streaming} untrusted={untrusted} />
+      </ReplyImages>
       {attachments}
       <div className="mt-1 flex h-7 items-center gap-1.5 text-muted-foreground text-xs">
         {!streaming && (

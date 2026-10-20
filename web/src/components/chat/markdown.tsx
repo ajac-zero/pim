@@ -13,6 +13,7 @@ type PluggableList = NonNullable<StreamdownProps["rehypePlugins"]>;
 type Pluggable = PluggableList[number];
 
 import { AgentIcon } from "~/components/agent-icon";
+import { REPLY_BLOCKS, ReplyBlock } from "~/components/chat/reply-blocks";
 import { useI18n } from "~/components/i18n";
 import {
   CodeBlock,
@@ -573,11 +574,9 @@ export const Markdown = memo(function Markdown({
           code: ({ className, children }) => {
             const match = /language-(\w+)/.exec(className ?? "");
             const language = (match?.[1] ?? "text") as BundledLanguage;
-            return (
-              <CodeBlock
-                code={String(children).replace(/\n$/, "")}
-                language={language}
-              >
+            const source = String(children).replace(/\n$/, "");
+            const code = (
+              <CodeBlock code={source} language={language}>
                 <CodeBlockHeader>
                   <CodeBlockTitle>
                     <CodeBlockFilename>{language}</CodeBlockFilename>
@@ -585,6 +584,12 @@ export const Markdown = memo(function Markdown({
                   <CodeBlockCopyButton />
                 </CodeBlockHeader>
               </CodeBlock>
+            );
+            // An agent's cards are drawn; anyone else's are code.
+            return !safe && REPLY_BLOCKS.has(language) ? (
+              <ReplyBlock source={source} fallback={code} />
+            ) : (
+              code
             );
           },
           // No `pre` override: Streamdown's default `pre` component flattens

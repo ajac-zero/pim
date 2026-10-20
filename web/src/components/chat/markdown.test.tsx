@@ -10,6 +10,7 @@ import {
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { Markdown, UNTRUSTED_SCHEMA } from "~/components/chat/markdown";
+import { ReplyImages } from "~/components/chat/reply-blocks";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
 
 /** Everything Markdown or raw HTML could use to load, run or send something. */
@@ -263,6 +264,38 @@ describe("an agent's Markdown", () => {
     expect(loads).toContain(own);
     expect(new Set(loads)).toEqual(new Set([own]));
     expect(html).toContain("[tracker]");
+  });
+
+  it("draws cards with Pim's copies of their images, and never the images' own addresses", () => {
+    const html = renderToStaticMarkup(
+      <ReplyImages
+        images={{ "https://shop.example/vest.png": own }}
+        streaming={false}
+      >
+        <Markdown
+          text={`Found:\n\n\`\`\`cards\n${JSON.stringify([
+            {
+              title: "Dog vest",
+              url: "https://shop.example/vest",
+              image: "https://shop.example/vest.png",
+              meta: "Shop · $20",
+            },
+            { title: "Lead", image: "https://shop.example/lead.png" },
+          ])}\n\`\`\``}
+        />
+      </ReplyImages>,
+    );
+    const sources = elements(html).flatMap((element) =>
+      element.tag === "img"
+        ? element.attributes.filter((a) => a.name === "src").map((a) => a.value)
+        : [],
+    );
+    expect(sources).toEqual([own]);
+    expect(html).toContain('href="https://shop.example/vest"');
+    expect(html).toContain("Shop · $20 · shop.example");
+    expect(html).toContain("Lead");
+    expect(html).not.toContain("shop.example/lead.png");
+    expect(html).not.toContain("```");
   });
 });
 

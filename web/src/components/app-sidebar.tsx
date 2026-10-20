@@ -77,6 +77,7 @@ import {
   accountQuery,
   agentsQuery,
   approvalsQuery,
+  computerQuery,
   extensionsQuery,
   notificationsQuery,
   profileQuery,
@@ -164,9 +165,12 @@ export function useNavigationState() {
   // Sharing, Discover and your profile are with the other people on this Pim.
   const { data: account } = useQuery(accountQuery());
   const { data: profile } = useQuery({ ...profileQuery(), enabled: !!account });
+  // Your files are on your computer: without one, there are none to show.
+  const { data: computer } = useQuery(computerQuery());
   return {
     account,
     profile,
+    hasComputer: !!computer && computer.state !== "none",
     // Alone on this Pim, there is nobody to share with or discover.
     withOthers: !!account && !account.alone,
     awaitingApproval: useAwaitingApproval(),
@@ -226,6 +230,7 @@ export function AppSidebar({
   const {
     account,
     profile,
+    hasComputer,
     withOthers,
     awaitingApproval,
     guestRequests,
@@ -271,12 +276,14 @@ export function AppSidebar({
             icon={<Shapes className="size-4.5" />}
             label={t("artifacts")}
           />
-          <RailPanel
-            {...railPanel}
-            panel="files"
-            icon={<Folder className="size-4.5" />}
-            label={t("files")}
-          />
+          {hasComputer && (
+            <RailPanel
+              {...railPanel}
+              panel="files"
+              icon={<Folder className="size-4.5" />}
+              label={t("files")}
+            />
+          )}
           <RailPanel
             {...railPanel}
             panel="skills"

@@ -71,6 +71,9 @@ export const filesQuery = (path: string) =>
     retry: false,
   });
 
+export const computerQuery = () =>
+  queryOptions({ queryKey: ["computer"], queryFn: pim.computer });
+
 export const browserQuery = () =>
   queryOptions({ queryKey: ["browser"], queryFn: pim.browser });
 

@@ -31,7 +31,7 @@ import {
 import { accountQuery, majordomoQuery, settingsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
-function Section({
+export function Section({
   title,
   description,
   children,
@@ -51,7 +51,7 @@ function Section({
   );
 }
 
-function CopyButton({ text }: { text: string }) {
+export function CopyButton({ text }: { text: string }) {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   return (

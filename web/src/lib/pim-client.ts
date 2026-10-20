@@ -51,6 +51,8 @@ export type ClientHandlers = {
   onSessions?: () => void;
   /** The tasks a chat led to changed. */
   onTasks?: (session: string) => void;
+  /** Your computer was connected or removed, came online or went offline. */
+  onComputer?: () => void;
 };
 
 const MAX_BACKOFF_MS = 15_000;
@@ -253,6 +255,9 @@ class PimClient {
         return;
       case "tasks":
         this.handlers.onTasks?.(message.session);
+        return;
+      case "computer":
+        this.handlers.onComputer?.();
         return;
       default:
         return;

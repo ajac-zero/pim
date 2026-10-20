@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
@@ -50,6 +51,19 @@ export default defineConfig(({ mode }) => {
                 account: null,
               }),
             );
+          });
+        },
+      },
+      {
+        // pim-computer, which people download from their Pim to connect a computer (../computer).
+        name: "pim-computer",
+        generateBundle() {
+          this.emitFile({
+            type: "asset",
+            fileName: "pim-computer.ts",
+            source: readFileSync(
+              new URL("../computer/pim-computer.ts", import.meta.url),
+            ),
           });
         },
       },

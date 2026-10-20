@@ -697,6 +697,26 @@ export const FILES_ROOT = "/workspace";
 export const fileContentUrl = (path: string, download = false) =>
   `/api/files/content?path=${encodeURIComponent(path)}${download ? "&download" : ""}`;
 
+/**
+ * Your computer, which your agents run commands on and keep your files on:
+ * none connected, paired but not connected now, or connected.
+ */
+export type ComputerStatus = {
+  state: "none" | "offline" | "online";
+  pairedAt: number | null;
+  /** What it said about itself when it last connected. */
+  computer: {
+    agent: string;
+    hostname: string;
+    platform: string;
+    arch: string;
+    user: string;
+    /** The folder on it that holds your files. */
+    root: string;
+    connectedAt: number;
+  } | null;
+};
+
 /** The browser your agents share: whether this Pim has one, and the page it shows when it's open. */
 export type BrowserStatus = {
   available: boolean;
@@ -892,6 +912,7 @@ export type ServerMessage =
   | { type: "visits" }
   | { type: "sessions" }
   | { type: "tasks"; session: string }
+  | { type: "computer" }
   | { type: "result"; id: string; result: unknown }
   | { type: "error"; id?: string; message: string };
 
@@ -1023,6 +1044,11 @@ export const pim = {
     call<{ deleted: boolean }>(`/files?path=${encodeURIComponent(path)}`, {
       method: "DELETE",
     }),
+  computer: () => call<ComputerStatus>("/computer"),
+  /** Pairs a computer in place of any other; its token is shown only now. */
+  pairComputer: () =>
+    call<ComputerStatus & { token: string }>("/computer", { method: "POST" }),
+  removeComputer: () => call<ComputerStatus>("/computer", { method: "DELETE" }),
   browser: () => call<BrowserStatus>("/browser"),
   /** A Live View link to use the browser yourself; it carries its own access. */
   takeOverBrowser: () =>

@@ -29,6 +29,7 @@ import {
   Trash2,
   Upload,
 } from "~/components/icons";
+import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -53,6 +54,7 @@ import {
 import {
   agentsQuery,
   artifactsQuery,
+  computerQuery,
   filesQuery,
   notificationsQuery,
   schedulesQuery,
@@ -373,9 +375,10 @@ export function ArtifactsPanel({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 /**
- * Your files, which your agents read and write too: one folder at a time,
- * folders first. Opening a file shows it beside the sidebar; uploads go to
- * the folder showing.
+ * Your files, on your computer, which your agents read and write too: one
+ * folder at a time, folders first. Opening a file shows it beside the
+ * sidebar; uploads go to the folder showing. Without a computer online,
+ * it says why there are none to show.
  */
 export function FilesPanel({ onNavigate }: { onNavigate?: () => void }) {
   const { t } = useI18n();
@@ -385,7 +388,12 @@ export function FilesPanel({ onNavigate }: { onNavigate?: () => void }) {
   const [folder, setFolder] = useState(
     () => (open && parentOf(open)) || FILES_ROOT,
   );
-  const { data, error } = useQuery(filesQuery(folder));
+  const { data: computer } = useQuery(computerQuery());
+  const online = computer?.state === "online";
+  const { data, error } = useQuery({
+    ...filesQuery(folder),
+    enabled: online,
+  });
   // A folder deleted meanwhile leaves you at the top.
   useEffect(() => {
     if (error instanceof ApiError && error.status === 404)
@@ -409,7 +417,7 @@ export function FilesPanel({ onNavigate }: { onNavigate?: () => void }) {
         <SidebarPanelAction
           label={t("uploadFiles")}
           onClick={() => input.current?.click()}
-          disabled={upload.isPending}
+          disabled={upload.isPending || !online}
         >
           <Upload className="size-4.5" />
         </SidebarPanelAction>
@@ -425,7 +433,30 @@ export function FilesPanel({ onNavigate }: { onNavigate?: () => void }) {
           }}
         />
       </SidebarPanelHeader>
-      {parent !== null && (
+      {computer && !online && (
+        <div className="space-y-3 px-5 py-1">
+          <p className="text-muted-foreground text-xs">
+            {computer.state === "none"
+              ? t("noComputerFiles")
+              : t("computerOfflineFiles")}
+          </p>
+          {computer.state === "none" && (
+            <Button asChild size="sm" variant="secondary">
+              <Link
+                to="."
+                search={(prev) => ({
+                  ...prev,
+                  dialog: "settings",
+                  tab: "computer",
+                })}
+              >
+                {t("connectComputer")}
+              </Link>
+            </Button>
+          )}
+        </div>
+      )}
+      {online && parent !== null && (
         <button
           type="button"
           onClick={() => setFolder(parent)}
@@ -444,6 +475,7 @@ export function FilesPanel({ onNavigate }: { onNavigate?: () => void }) {
       <PanelList
         label={t("files")}
         empty={
+          online &&
           data?.entries.length === 0 &&
           t(folder === FILES_ROOT ? "noFiles" : "emptyFolder")
         }

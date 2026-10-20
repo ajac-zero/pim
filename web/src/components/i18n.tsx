@@ -591,6 +591,33 @@ const translations = {
     fileDeleted: "{name} deleted",
     fileMissing: "This file isn't there anymore.",
     allFiles: "All files",
+    computer: "Computer",
+    settingsComputer: "Computer",
+    computerDescription:
+      "Connect a computer of yours, such as a server, a VM or a box at home, and your agents run commands and keep your files there. Files shows its folder.",
+    computerWaiting: "Waiting for its first connection",
+    computerOnline: "Online",
+    computerOffline: "Offline",
+    computerFilesIn: "files in {folder}",
+    computerPairedOn: "Token made {date}",
+    removeComputer: "Remove computer",
+    removeComputerConfirm:
+      "Remove this computer? Its token stops working, and your agents can't use it anymore. Your files stay on it.",
+    computerOfflineHint:
+      "Start pim-computer on it again to bring it back. Lost its token? Make a new one.",
+    computerTokenOnce:
+      "Run one of these on the computer. They hold its token, shown only now: it lets that computer connect to your space, and nothing else.",
+    computerWithNode: "With Node.js 22.18 or later, on Linux or macOS:",
+    computerWithDocker: "Or with Docker:",
+    computerWaitingToConnect: "Waiting for it to connect…",
+    connectComputer: "Connect a computer",
+    newComputerToken: "New token",
+    newComputerTokenConfirm:
+      "Make a new token? The one the computer has now stops working.",
+    computerOfflineFiles:
+      "Your computer is offline, so your files can't be shown. Start pim-computer on it again.",
+    noComputerFiles:
+      "Your files live on your computer. Connect one, and your agents can keep files and run commands there.",
     browser: "Browser",
     summaryAndBrowser: "Summary and browser",
     browserPicture: "What the browser shows: {title}",
@@ -1533,6 +1560,33 @@ const translations = {
     fileDeleted: "{name} eliminado",
     fileMissing: "Este archivo ya no está.",
     allFiles: "Todos los archivos",
+    computer: "Computadora",
+    settingsComputer: "Computadora",
+    computerDescription:
+      "Conecta una computadora tuya, como un servidor, una máquina virtual o un equipo en casa, y tus agentes ejecutarán comandos y guardarán tus archivos allí. Archivos muestra su carpeta.",
+    computerWaiting: "Esperando su primera conexión",
+    computerOnline: "En línea",
+    computerOffline: "Sin conexión",
+    computerFilesIn: "archivos en {folder}",
+    computerPairedOn: "Token creado el {date}",
+    removeComputer: "Quitar computadora",
+    removeComputerConfirm:
+      "¿Quitar esta computadora? Su token deja de funcionar y tus agentes ya no pueden usarla. Tus archivos se quedan en ella.",
+    computerOfflineHint:
+      "Vuelve a iniciar pim-computer en ella para reconectarla. ¿Perdiste su token? Crea uno nuevo.",
+    computerTokenOnce:
+      "Ejecuta uno de estos en la computadora. Llevan su token, que solo se muestra ahora: permite que esa computadora se conecte a tu espacio, y nada más.",
+    computerWithNode: "Con Node.js 22.18 o posterior, en Linux o macOS:",
+    computerWithDocker: "O con Docker:",
+    computerWaitingToConnect: "Esperando a que se conecte…",
+    connectComputer: "Conectar una computadora",
+    newComputerToken: "Nuevo token",
+    newComputerTokenConfirm:
+      "¿Crear un token nuevo? El que tiene la computadora ahora deja de funcionar.",
+    computerOfflineFiles:
+      "Tu computadora está sin conexión, así que no se pueden mostrar tus archivos. Vuelve a iniciar pim-computer en ella.",
+    noComputerFiles:
+      "Tus archivos viven en tu computadora. Conecta una, y tus agentes podrán guardar archivos y ejecutar comandos allí.",
     browser: "Navegador",
     summaryAndBrowser: "Resumen y navegador",
     browserPicture: "Lo que muestra el navegador: {title}",

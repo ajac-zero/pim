@@ -202,6 +202,7 @@ const ROW_ICON_CLASS =
 function MoreSheet({
   account,
   profile,
+  hasComputer,
   withOthers,
   guestRequests,
   open,
@@ -291,7 +292,8 @@ function MoreSheet({
           <Contact className={ROW_ICON_CLASS} />,
           t("agents"),
         )}
-        {panelRow("files", <Folder className={ROW_ICON_CLASS} />, t("files"))}
+        {hasComputer &&
+          panelRow("files", <Folder className={ROW_ICON_CLASS} />, t("files"))}
         {panelRow(
           "skills",
           <ScrollText className={ROW_ICON_CLASS} />,

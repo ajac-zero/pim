@@ -18,6 +18,7 @@ import {
   Check,
   ChevronDown,
   Compass,
+  ExternalLink,
   Folder,
   ListFilter,
   MessagesSquare,
@@ -82,7 +83,7 @@ import {
   sessionsQuery,
   visitsQuery,
 } from "~/lib/queries";
-import { closeTab } from "~/lib/tabs";
+import { closeTab, openTab } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 import { version } from "../../../package.json";
 
@@ -1034,6 +1035,19 @@ function SessionRow({
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" side="right">
+          {/* Tabs show only on wider screens. */}
+          <DropdownMenuItem
+            className="max-md:hidden"
+            onClick={() => {
+              openTab(session.id);
+              navigate({
+                to: "/chat/$sessionId",
+                params: { sessionId: session.id },
+              });
+            }}
+          >
+            <ExternalLink className="size-4" /> {t("openInNewTab")}
+          </DropdownMenuItem>
           <DropdownMenuItem
             onClick={() => {
               setDraft(title);

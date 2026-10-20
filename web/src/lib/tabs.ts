@@ -1,27 +1,27 @@
 import { useSyncExternalStore } from "react";
 
 /**
- * The chats open as tabs above the transcript, kept in this browser. A chat
- * opened from the sidebar takes over the preview tab, so browsing chats
- * doesn't pile up tabs; it keeps its own tab once you send a message in it
- * or double-click the tab. Closing a tab only takes it off the strip.
+ * The chats open as tabs above the transcript, kept in this browser. They
+ * work like a browser's tabs: a chat opened from the sidebar shows in the
+ * current tab, in place of the chat it showed, and only "Open in new tab"
+ * gives a chat a tab of its own. Closing a tab only takes it off the strip.
  */
 
-export type Tab = {
-  session: string;
-  /** Kept tabs stay; the one tab that isn't is the preview tab. */
-  kept: boolean;
-};
+export type Tab = { session: string };
 
 const STORAGE_KEY = "pim-tabs";
 
 let tabs: Tab[] = read();
+/** The chat this window showed last, whose tab is the current one. */
+let current: string | undefined;
 const listeners = new Set<() => void>();
 
 function read(): Tab[] {
   try {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
-    return Array.isArray(stored) ? stored : [];
+    return Array.isArray(stored)
+      ? stored.map(({ session }: Tab) => ({ session }))
+      : [];
   } catch {
     return [];
   }
@@ -55,23 +55,21 @@ export function useTabs() {
 }
 
 /**
- * Shows a chat in a tab: its own tab when it has one, otherwise the preview
- * tab, which it takes over. With `keep`, the chat keeps its tab.
+ * Shows a chat: in its own tab when it has one, otherwise in the current
+ * tab, in place of the chat shown there. With no current tab, it gets a new one.
  */
-export function showTab(session: string, keep = false) {
-  const index = tabs.findIndex((tab) => tab.session === session);
-  if (index !== -1) {
-    if (keep && !tabs[index]?.kept) {
-      update(tabs.with(index, { session, kept: true }));
-    }
-    return;
-  }
-  const preview = tabs.findIndex((tab) => !tab.kept);
-  if (keep || preview === -1) {
-    update([...tabs, { session, kept: keep }]);
-  } else {
-    update(tabs.with(preview, { session, kept: false }));
-  }
+export function showTab(session: string) {
+  const previous = current;
+  current = session;
+  if (tabs.some((tab) => tab.session === session)) return;
+  const index = tabs.findIndex((tab) => tab.session === previous);
+  update(index === -1 ? [...tabs, { session }] : tabs.with(index, { session }));
+}
+
+/** Gives a chat a tab of its own, after the others, unless it has one. */
+export function openTab(session: string) {
+  if (tabs.some((tab) => tab.session === session)) return;
+  update([...tabs, { session }]);
 }
 
 /** Takes a chat's tab off the strip and returns the chat to show in its place, if any. */

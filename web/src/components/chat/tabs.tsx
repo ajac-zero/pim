@@ -12,7 +12,7 @@ import { useI18n } from "~/components/i18n";
 import { X } from "~/components/icons";
 import type { Session } from "~/lib/pim-api";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
-import { closeTab, pruneTabs, showTab, useTabs } from "~/lib/tabs";
+import { closeTab, pruneTabs, useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
 /**
@@ -133,14 +133,9 @@ export function ChatTabs({ activeId }: { activeId: string }) {
                 to="/chat/$sessionId"
                 params={{ sessionId: session.id }}
                 aria-current={active ? "page" : undefined}
-                title={[
-                  title,
-                  session.agent?.name ?? session.visit?.username,
-                  !tab.kept && t("keepTabOpen"),
-                ]
+                title={[title, session.agent?.name ?? session.visit?.username]
                   .filter(Boolean)
                   .join(" · ")}
-                onDoubleClick={() => showTab(session.id, true)}
                 onAuxClick={(event) => {
                   // A middle click closes the tab, as in a browser.
                   if (event.button !== 1) return;
@@ -150,9 +145,7 @@ export function ChatTabs({ activeId }: { activeId: string }) {
                 className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-t-xl pr-8 pl-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
               >
                 {iconOf(session, "bg-background")}
-                <span className={cn("truncate", !tab.kept && "italic")}>
-                  {title}
-                </span>
+                <span className="truncate">{title}</span>
               </Link>
               {status && (
                 <span className="pointer-events-none absolute right-2 flex size-6 items-center justify-center transition-opacity group-hover/tab:opacity-0 group-has-[button:focus-visible]/tab:opacity-0">

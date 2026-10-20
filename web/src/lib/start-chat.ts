@@ -4,7 +4,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { pim, type UserContent } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
-import { showTab } from "~/lib/tabs";
+import { openTab } from "~/lib/tabs";
 
 /**
  * Starts a chat with an agent (the majordomo when `agent` is undefined)
@@ -21,7 +21,7 @@ export function useStartChat(agent: string | undefined) {
     try {
       const session = await pim.createSession(agent ? { agent } : {});
       await queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      showTab(session.id, true);
+      openTab(session.id);
       pimClient.open(session.id);
       await navigate({
         to: "/chat/$sessionId",

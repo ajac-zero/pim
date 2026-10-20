@@ -1,4 +1,5 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
@@ -6,13 +7,23 @@ import { ArtifactIcon } from "~/components/artifact";
 import { useI18n } from "~/components/i18n";
 import {
   ArrowUp,
+  Check,
   Loader2,
   Plus,
   Sparkles,
   Square,
   X,
 } from "~/components/icons";
+import { ModelLogo } from "~/components/model-logo";
 import { Button } from "~/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "~/components/ui/dropdown-menu";
 import {
   PromptInput,
   type PromptInputMessage,
@@ -21,7 +32,19 @@ import {
   PromptInputTextarea,
   usePromptInputController,
 } from "~/components/ui/prompt-input";
-import { pim, type UserContent } from "~/lib/pim-api";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "~/components/ui/tooltip";
+import {
+  CHATGPT_PROVIDER,
+  type ModelInfo,
+  type ModelSettings,
+  pim,
+  type UserContent,
+} from "~/lib/pim-api";
 import { artifactQuery, modelQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
@@ -326,6 +349,7 @@ function ComposerInner({
                 )}
               </Button>
             )}
+            {model && <ModelPicker settings={model} />}
 
             <PromptInputSubmit
               status={
@@ -350,6 +374,110 @@ function ComposerInner({
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * The model, as its logo beside Send, with its name on hover. Pim has one
+ * model for every chat, so choosing here does what Settings → Model does; the
+ * menu says so, and links there for more models.
+ */
+function ModelPicker({ settings }: { settings: ModelSettings }) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const choose = useMutation({
+    mutationFn: pim.chooseModel,
+    onSuccess: ({ model }) => {
+      queryClient.setQueryData<ModelSettings>(["model"], (old) =>
+        old ? { ...old, model } : old,
+      );
+      queryClient.invalidateQueries({ queryKey: ["model"] });
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const current = settings.model;
+  // A provider someone added, if the model runs on one.
+  const providerOf = (choice: ModelInfo) =>
+    settings.providers.find(
+      (provider) => provider.provider === choice.provider,
+    );
+  const logo = (choice: ModelInfo, className: string) => (
+    <ModelLogo
+      model={choice}
+      custom={Boolean(providerOf(choice))}
+      className={className}
+    />
+  );
+  return (
+    <DropdownMenu>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                aria-label={t("chooseModel", { model: current.name })}
+                disabled={choose.isPending}
+                className="size-9 shrink-0 rounded-full text-muted-foreground"
+              >
+                {choose.isPending ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  logo(current, "size-4.5")
+                )}
+              </Button>
+            </DropdownMenuTrigger>
+          </TooltipTrigger>
+          <TooltipContent side="top" sideOffset={6} showArrow={false}>
+            {current.name}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+      <DropdownMenuContent
+        align="end"
+        side="top"
+        className="w-72 max-w-[calc(100vw-2rem)]"
+      >
+        <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
+          {t("modelForEveryChat")}
+        </DropdownMenuLabel>
+        {settings.choices.map((choice) => {
+          const selected =
+            choice.provider === current.provider && choice.id === current.id;
+          return (
+            <DropdownMenuItem
+              key={`${choice.provider}/${choice.id}`}
+              onSelect={() => {
+                if (!selected) choose.mutate(choice);
+              }}
+              className="min-h-11 gap-3"
+            >
+              {logo(choice, "size-5 text-foreground")}
+              <span className="min-w-0 flex-1">
+                <span className="block truncate">{choice.name}</span>
+                <span className="block truncate text-muted-foreground text-xs">
+                  {choice.provider === CHATGPT_PROVIDER
+                    ? "ChatGPT"
+                    : (providerOf(choice)?.name ?? "Workers AI")}
+                </span>
+              </span>
+              {selected && <Check className="size-4 text-primary" />}
+            </DropdownMenuItem>
+          );
+        })}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem asChild>
+          <Link
+            to="."
+            search={(prev) => ({ ...prev, dialog: "settings", tab: "model" })}
+          >
+            {t("moreModels")}
+          </Link>
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

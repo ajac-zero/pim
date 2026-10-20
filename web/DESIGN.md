@@ -111,7 +111,7 @@ Rich results render as muted cards with the bubble radius:
 
 ### Composer
 
-The composer is a single rounded field at the bottom of the transcript with a hairline border and no fill change. The text takes its full width on top, with the placeholder "Message <agent name>", and grows up to eight lines before it scrolls. Below it is a row of controls: a muted circular `+` on the left, and on the right a primary circular send button, which becomes stop while the agent works. New composer controls go in that row.
+The composer is a single rounded field at the bottom of the transcript with a hairline border and no fill change. The text takes its full width on top, with the placeholder "Message <agent name>", and grows up to eight lines before it scrolls. Below it is a row of controls: a muted circular `+` on the left, and on the right the model's logo as a ghost icon button, with the model's name as its tooltip, then a primary circular send button, which becomes stop while the agent works. The logo opens a menu of the models you can choose, under a label saying the choice is for every chat: each with its logo, its name and the provider's name below, a check on the current one, and a link to Settings → Model for more. Logos are their makers' marks in one color (`ModelLogo` in `src/components/model-logo.tsx`). New composer controls go in that row.
 
 On an agent's dashboard, the composer stays at the same bottom position as in a chat, with suggested first messages above the field. The header and widgets scroll independently above it, so starting a chat does not move the prompt bar.
 

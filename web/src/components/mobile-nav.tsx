@@ -43,7 +43,8 @@ const MORE_PANELS: readonly (SidebarPanel | undefined)[] = [
 /**
  * The navigation on narrow screens, in place of the sidebar: a bar of icons
  * along the bottom of every page, as the rail is beside every page. Chats, notifications and artifacts fill the screen with
- * their list (`list`), New chat opens your majordomo's dashboard, and More opens
+ * their list (`list`), New chat opens the open chat's agent's dashboard (your
+ * majordomo's anywhere else), and More opens
  * a sheet with the rest: files, skills, schedules, the dialogs and your
  * profile.
  */

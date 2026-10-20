@@ -354,6 +354,11 @@ const translations = {
     taskDone: "Done",
     taskDidntFinish: "Didn't finish",
     taskCanceled: "Canceled",
+    taskActivityWorking: "is working",
+    taskActivityWaiting: "is waiting for you",
+    taskActivityDone: "finished",
+    taskActivityDidntFinish: "didn't finish",
+    taskActivityCanceled: "stopped",
     taskReadOnly:
       "{agent} works on this for {from} and answers it, not you. This is what it did.",
     cancelTask: "Cancel task",
@@ -1279,6 +1284,11 @@ const translations = {
     taskDone: "Lista",
     taskDidntFinish: "No terminó",
     taskCanceled: "Cancelada",
+    taskActivityWorking: "está trabajando",
+    taskActivityWaiting: "te espera",
+    taskActivityDone: "terminó",
+    taskActivityDidntFinish: "no terminó",
+    taskActivityCanceled: "se detuvo",
     taskReadOnly:
       "{agent} hace esto para {from} y le responde a él, no a ti. Esto es lo que hizo.",
     cancelTask: "Cancelar tarea",

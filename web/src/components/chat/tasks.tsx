@@ -9,7 +9,6 @@ import {
   ChevronRight,
   Loader2,
   ShieldAlert,
-  Workflow,
   Wrench,
   X,
 } from "~/components/icons";
@@ -64,12 +63,8 @@ export function TaskCard({
 }) {
   const { t, formatDate } = useI18n();
   return (
-    <section className="rounded-2xl bg-muted p-4" aria-label={t("tasks")}>
-      <div className="mb-2 flex items-center gap-1.5 text-muted-foreground text-[13px]">
-        <Workflow className="size-3.5" />
-        {t("tasks")}
-      </div>
-      <ul className="space-y-3">
+    <section className="rounded-2xl bg-muted p-2" aria-label={t("tasks")}>
+      <ul className="space-y-1">
         {taskRows(tasks).map(({ task, depth }) => {
           const completion = completions.get(task.id);
           const delegatedAt = new Date(task.createdAt);
@@ -85,48 +80,49 @@ export function TaskCard({
                 type="button"
                 onClick={() => onView(task.id)}
                 aria-label={t("viewTaskBy", { agent: task.agent.name })}
-                className="flex w-full items-start gap-2 rounded-xl p-1 text-left hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+                className="flex w-full items-center gap-3 rounded-xl p-3 text-left hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
               >
-                <span className="mt-1">
+                <span className="shrink-0">
                   <TaskState state={task.state} />
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                    <span className="font-medium text-sm">
+                  <span className="flex flex-wrap items-baseline gap-x-1 text-[15px]">
+                    <span className="max-w-full truncate font-medium">
                       {task.agent.name}
                     </span>
-                    <span className="text-muted-foreground text-xs">
-                      {t(stateKey[task.state])}
+                    <span className="text-muted-foreground">
+                      {t(activityKey[task.state])}
                     </span>
                   </span>
                   <span
-                    className="mt-0.5 block truncate text-muted-foreground text-sm"
+                    className="mt-0.5 block truncate text-[13px] text-muted-foreground"
                     title={task.task}
                   >
                     {task.task}
                   </span>
                 </span>
-                <ChevronRight className="mt-1 size-3.5 shrink-0 text-muted-foreground" />
-              </button>
-              <div className="mt-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pl-6 text-muted-foreground text-xs">
                 <time
+                  className="shrink-0 text-muted-foreground text-xs tabular-nums"
                   dateTime={delegatedAt.toISOString()}
-                  title={formatDate(delegatedAt, {
-                    dateStyle: "full",
-                    timeStyle: "short",
+                  title={t("taskDelegated", {
+                    time: formatDate(delegatedAt, {
+                      dateStyle: "full",
+                      timeStyle: "short",
+                    }),
                   })}
                 >
-                  {t("taskDelegated", {
-                    time: formatDate(delegatedAt, { timeStyle: "short" }),
-                  })}
+                  {formatDate(delegatedAt, { timeStyle: "short" })}
                 </time>
-                {completion && (
+                <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+              </button>
+              {completion && (
+                <div className="pb-2 pl-[2.375rem] text-xs">
                   <TaskJump target={`task-update-${completion}`}>
                     {t("jumpToCompletion")}
                     <ArrowDownIcon className="size-3" />
                   </TaskJump>
-                )}
-              </div>
+                </div>
+              )}
             </li>
           );
         })}
@@ -203,6 +199,14 @@ const stateKey = {
   completed: "taskDone",
   failed: "taskDidntFinish",
   canceled: "taskCanceled",
+} as const;
+
+const activityKey = {
+  working: "taskActivityWorking",
+  "auth-required": "taskActivityWaiting",
+  completed: "taskActivityDone",
+  failed: "taskActivityDidntFinish",
+  canceled: "taskActivityCanceled",
 } as const;
 
 function TaskState({ state }: { state: AgentTask["state"] }) {

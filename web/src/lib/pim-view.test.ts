@@ -1,6 +1,7 @@
 import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import type { FunctionCallItem } from "~/lib/openresponses";
+import type { AgentTask } from "~/lib/pim-api";
 import {
   conversationMarkdown,
   EMPTY_STREAM,
@@ -9,6 +10,7 @@ import {
   reduceAll,
   type StreamState,
   type ThreadEntry,
+  taskHistory,
 } from "~/lib/pim-view";
 import { DELIVERY_REMINDER, INTRODUCTION } from "../../../src/transcript";
 
@@ -946,6 +948,94 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
       run([event({ type: "run_start", inputs: [] })], state).view.error,
     ).toBeNull();
   });
+});
+
+it("keeps handoffs anchored while linking each answer to its own notice, not an earlier mention of waiting", () => {
+  const task = (id: string, parent: string | null = null): AgentTask => ({
+    id,
+    parent,
+    agent: { id, name: id, member: parent !== null },
+    from: { id: "lead", name: "Lead", member: false },
+    task: `Work for ${id}`,
+    state: "completed",
+    result: "An answer.",
+    createdAt: 100,
+    updatedAt: 200,
+  });
+  const tasks = [
+    task("research"),
+    task("writer"),
+    task("child", "research"),
+    task("later"),
+    task("unrelated"),
+  ];
+  const handoff = (id: number, call: string) =>
+    assistant(id, [
+      { type: "toolCall", id: call, name: "delegate", arguments: {} },
+    ]);
+  const entries = run([
+    snapshot({
+      entries: [
+        user(1, "Plan Lisbon."),
+        handoff(2, "first"),
+        toolResult(
+          3,
+          "first",
+          "Task research: Researcher is on it.\nTask writer: Writer is on it.",
+        ),
+        user(4, "Mostly outdoors."),
+        user(
+          5,
+          "[Task update] Researcher answered\n\nResearcher finished task research:\nMay is mild.\n\nWriter is waiting for the person's approval on task writer; its answer will come in a later update.",
+          500,
+        ),
+        handoff(6, "second"),
+        toolResult(7, "second", "Task later: Researcher is on it."),
+        user(
+          8,
+          "[Task update] Writer was canceled\n\nTask writer for Writer was canceled: Canceled by the person.",
+        ),
+        user(
+          9,
+          "[Task update] Researcher didn't finish\n\nResearcher didn't finish task later: It didn't finish: unanswered.",
+        ),
+      ],
+    }),
+  ]).view.entries;
+  const history = taskHistory(entries, tasks);
+  expect(history.delegations.get("first")?.map((task) => task.id)).toEqual([
+    "research",
+    "writer",
+    "child",
+  ]);
+  expect(history.delegations.get("second")?.map((task) => task.id)).toEqual([
+    "later",
+  ]);
+  expect([...history.completions]).toEqual([
+    ["research", "5"],
+    ["writer", "8"],
+    ["later", "9"],
+  ]);
+  expect(history.notices.get("5")?.map((task) => task.id)).toEqual([
+    "research",
+  ]);
+  expect(entries.find((entry) => entry.key === "5")?.at).toBe(500);
+  expect(
+    layoutThread(entries, {
+      shown: (call) => history.delegations.has(call.call_id),
+    }).map((row) => row.key),
+  ).toEqual(["1", "2:0", "4", "5", "6:0", "8", "9"]);
+  const beforeAnswers = taskHistory(entries.slice(0, 4), tasks);
+  expect(
+    beforeAnswers.delegations.get("first")?.map((task) => task.id),
+  ).toEqual(["research", "writer", "child"]);
+  expect(beforeAnswers.completions.size).toBe(0);
+  expect(
+    taskHistory(
+      entries.filter((entry) => entry.key !== "2:0"),
+      tasks,
+    ).notices.get("5"),
+  ).toEqual([]);
 });
 
 describe("noticeOf", () => {

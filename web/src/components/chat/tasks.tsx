@@ -1,8 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
+import { useStickToBottomContext } from "use-stick-to-bottom";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import {
+  ArrowDownIcon,
   Check,
   ChevronRight,
   Loader2,
@@ -23,7 +25,7 @@ import { type AgentTask, pim } from "~/lib/pim-api";
 import { cn } from "~/lib/utils";
 
 /** How often a chat with tasks at work looks again, besides the server's `tasks` message. */
-const POLL_MS = 5_000;
+export const TASK_POLL_MS = 5_000;
 
 const OPEN_STATES = new Set<AgentTask["state"]>(["working", "auth-required"]);
 
@@ -50,99 +52,148 @@ export function taskRows(tasks: readonly AgentTask[]): Row[] {
   return rows;
 }
 
-/**
- * The tasks the work begun in this chat led to, as a tree above the
- * composer: who does each, for whom, and how it is going. Open while any is
- * at work; a task opens read-only, where one not done can be canceled.
- */
-export function TaskPanel({
-  sessionId,
-  running,
+/** A handoff stays where it happened, with each task's current state and a link to its later answer. */
+export function TaskCard({
+  tasks,
+  completions,
+  onView,
 }: {
-  sessionId: string;
-  /** The chat's agent is at work: it may hand out tasks. */
-  running: boolean;
+  tasks: readonly AgentTask[];
+  completions: ReadonlyMap<string, string>;
+  onView: (id: string) => void;
 }) {
-  const { t } = useI18n();
-  const { data: tasks = [] } = useQuery({
-    queryKey: ["tasks", sessionId],
-    queryFn: () => pim.tasks(sessionId),
-    refetchInterval: (query) =>
-      running || query.state.data?.some((task) => task.state === "working")
-        ? POLL_MS
-        : false,
-  });
-  const rows = useMemo(() => taskRows(tasks), [tasks]);
-  const open = tasks.filter((task) => OPEN_STATES.has(task.state)).length;
-  // Expanded while work goes on, unless the person folded it; folded once it is all done, unless they opened it.
-  const [shown, setShown] = useState<boolean | null>(null);
-  const expanded = shown ?? open > 0;
-  const [viewing, setViewing] = useState<string | null>(null);
-  const viewed = tasks.find((task) => task.id === viewing);
-  if (rows.length === 0) return null;
+  const { t, formatDate } = useI18n();
   return (
-    <>
-      <section
-        className="mb-2 rounded-2xl bg-muted px-3 py-2"
-        aria-label={t("tasks")}
-      >
-        <button
-          type="button"
-          onClick={() => setShown(!expanded)}
-          aria-expanded={expanded}
-          className="flex w-full items-center gap-1.5 text-[13px] text-muted-foreground transition-colors hover:text-foreground"
-        >
-          <Workflow className="size-3.5" />
-          <span>{t("tasks")}</span>
-          <span>·</span>
-          <span>
-            {open > 0
-              ? t("tasksOpen", { count: open })
-              : t("tasksDone", { count: rows.length })}
-          </span>
-          <ChevronRight
-            className={cn(
-              "ml-auto size-3.5 transition-transform",
-              expanded && "rotate-90",
-            )}
-          />
-        </button>
-        {expanded && (
-          <ul className="mt-1.5 max-h-48 space-y-0.5 overflow-y-auto">
-            {rows.map(({ task, depth }) => (
-              <li key={task.id}>
-                <button
-                  type="button"
-                  onClick={() => setViewing(task.id)}
-                  title={task.task}
-                  style={{ paddingLeft: `${0.5 + depth * 1.25}rem` }}
-                  className="flex w-full items-center gap-2 rounded-xl py-1.5 pr-2 text-left text-sm transition-colors hover:bg-accent"
-                >
+    <section className="rounded-2xl bg-muted p-4" aria-label={t("tasks")}>
+      <div className="mb-2 flex items-center gap-1.5 text-muted-foreground text-[13px]">
+        <Workflow className="size-3.5" />
+        {t("tasks")}
+      </div>
+      <ul className="space-y-3">
+        {taskRows(tasks).map(({ task, depth }) => {
+          const completion = completions.get(task.id);
+          const delegatedAt = new Date(task.createdAt);
+          return (
+            <li
+              key={task.id}
+              id={`task-start-${task.id}`}
+              tabIndex={-1}
+              style={{ marginLeft: `${depth * 1.25}rem` }}
+              className="rounded-xl outline-none"
+            >
+              <button
+                type="button"
+                onClick={() => onView(task.id)}
+                aria-label={t("viewTaskBy", { agent: task.agent.name })}
+                className="flex w-full items-start gap-2 rounded-xl p-1 text-left hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+              >
+                <span className="mt-1">
                   <TaskState state={task.state} />
-                  <span className="shrink-0 font-medium">
-                    {task.agent.name}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                    <span className="font-medium text-sm">
+                      {task.agent.name}
+                    </span>
+                    <span className="text-muted-foreground text-xs">
+                      {t(stateKey[task.state])}
+                    </span>
                   </span>
-                  <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                  <span
+                    className="mt-0.5 block truncate text-muted-foreground text-sm"
+                    title={task.task}
+                  >
                     {task.task}
                   </span>
-                  <span className="shrink-0 text-muted-foreground text-xs">
-                    {t(stateKey[task.state])}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-      <Sheet
-        open={viewing !== null}
-        onOpenChange={(next) => !next && setViewing(null)}
-      >
-        <SheetContent className="w-full sm:max-w-lg">
-          {viewed && <TaskTranscript sessionId={sessionId} task={viewed} />}
-        </SheetContent>
-      </Sheet>
-    </>
+                </span>
+                <ChevronRight className="mt-1 size-3.5 shrink-0 text-muted-foreground" />
+              </button>
+              <div className="mt-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pl-6 text-muted-foreground text-xs">
+                <time
+                  dateTime={delegatedAt.toISOString()}
+                  title={formatDate(delegatedAt, {
+                    dateStyle: "full",
+                    timeStyle: "short",
+                  })}
+                >
+                  {t("taskDelegated", {
+                    time: formatDate(delegatedAt, { timeStyle: "short" }),
+                  })}
+                </time>
+                {completion && (
+                  <TaskJump target={`task-update-${completion}`}>
+                    {t("jumpToCompletion")}
+                    <ArrowDownIcon className="size-3" />
+                  </TaskJump>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+/** A transcript link releases the bottom lock and moves focus to the other end of the task's history. */
+export function TaskJump({
+  target,
+  children,
+}: {
+  target: string;
+  children: ReactNode;
+}) {
+  const { stopScroll, contentRef } = useStickToBottomContext();
+  return (
+    <a
+      href={`#${target}`}
+      className="inline-flex items-center gap-1 rounded-full text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+      onClick={(event) => {
+        const element = contentRef.current?.querySelector<HTMLElement>(
+          `#${CSS.escape(target)}`,
+        );
+        if (!element) return;
+        event.preventDefault();
+        stopScroll();
+        const reduced = window.matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+        element.scrollIntoView({
+          block: "center",
+          behavior: reduced ? "instant" : "smooth",
+        });
+        element.focus({ preventScroll: true });
+        if (!reduced)
+          element.animate(
+            [
+              { outline: "2px solid var(--ring)", outlineOffset: "4px" },
+              { outline: "2px solid transparent", outlineOffset: "4px" },
+            ],
+            { duration: 1200, easing: "ease-out" },
+          );
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+/** A task card opens its read-only conversation. */
+export function TaskSheet({
+  sessionId,
+  task,
+  onClose,
+}: {
+  sessionId: string;
+  task: AgentTask | null;
+  onClose: () => void;
+}) {
+  return (
+    <Sheet open={task !== null} onOpenChange={(next) => !next && onClose()}>
+      <SheetContent className="w-full sm:max-w-lg">
+        {task && <TaskTranscript sessionId={sessionId} task={task} />}
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -187,7 +238,7 @@ function TaskTranscript({
   const { data } = useQuery({
     queryKey: ["tasks", sessionId, task.id],
     queryFn: () => pim.task(sessionId, task.id),
-    refetchInterval: OPEN_STATES.has(task.state) ? POLL_MS : false,
+    refetchInterval: OPEN_STATES.has(task.state) ? TASK_POLL_MS : false,
   });
   const cancel = useMutation({
     mutationFn: () => pim.cancelTask(sessionId, task.id),

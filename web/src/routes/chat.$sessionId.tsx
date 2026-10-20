@@ -15,7 +15,6 @@ import { Composer } from "~/components/chat/composer";
 import { CopyConversation } from "~/components/chat/copy-conversation";
 import { SummaryBox, SummaryToggle } from "~/components/chat/summary";
 import { ChatTabs, useChatDrop } from "~/components/chat/tabs";
-import { TaskPanel } from "~/components/chat/tasks";
 import { Thread } from "~/components/chat/thread";
 import { useI18n } from "~/components/i18n";
 import { ExternalLink, Loader2, Users } from "~/components/icons";
@@ -224,12 +223,6 @@ function ChatPage() {
                 ref={composerCardRef}
                 className="pointer-events-auto w-full max-w-3xl"
               >
-                {session?.agent && (
-                  <TaskPanel
-                    sessionId={sessionId}
-                    running={ready && view.running}
-                  />
-                )}
                 <Composer
                   key={sessionId}
                   draftKey={sessionId}

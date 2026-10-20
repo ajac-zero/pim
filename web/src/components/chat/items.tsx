@@ -91,7 +91,7 @@ function MessageTime({ at }: { at: number }) {
     <time
       dateTime={date.toISOString()}
       title={formatDate(date, { dateStyle: "full", timeStyle: "short" })}
-      className="shrink-0 tabular-nums opacity-0 transition-opacity motion-reduce:transition-none group-has-focus-visible/user:opacity-100 group-hover/user:opacity-100 group-has-focus-visible/assistant:opacity-100 group-hover/assistant:opacity-100"
+      className="shrink-0 tabular-nums opacity-0 transition-opacity motion-reduce:transition-none group-has-focus-visible/user:opacity-100 group-hover/user:opacity-100 group-has-focus-visible/assistant:opacity-100 group-hover/assistant:opacity-100 group-has-focus-visible/notice:opacity-100 group-hover/notice:opacity-100 group-focus-visible/notice:opacity-100"
     >
       {formatDate(date, options)}
     </time>
@@ -282,16 +282,27 @@ const NOTICE_ICONS = {
  */
 export const EventNotice = memo(function EventNotice({
   notice,
+  id,
+  at,
+  children,
 }: {
   notice: PimNotice;
+  id?: string;
+  at?: number;
+  children?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const Icon = NOTICE_ICONS[notice.kind];
   return (
-    <div className="flex w-full flex-col items-center">
+    <div
+      id={id}
+      tabIndex={id ? -1 : undefined}
+      className="group/notice flex w-full flex-col items-center rounded-xl outline-none"
+    >
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
         className="inline-flex max-w-full items-center gap-1.5 px-3 py-1 text-muted-foreground text-[13px] transition-colors hover:text-foreground"
       >
         <Icon className="size-3.5 shrink-0" />
@@ -303,10 +314,18 @@ export const EventNotice = memo(function EventNotice({
           )}
         />
       </button>
+      {at !== undefined && notice.kind === "task" && (
+        <div className="h-4 text-muted-foreground text-xs">
+          <MessageTime at={at} />
+        </div>
+      )}
       {open && (
-        <pre className="mt-2 max-h-64 w-full overflow-y-auto whitespace-pre-wrap rounded-xl border bg-muted/50 p-3 font-mono text-xs leading-relaxed [overflow-wrap:anywhere]">
-          {notice.text}
-        </pre>
+        <div className="mt-2 w-full space-y-3 rounded-xl border bg-muted/50 p-3">
+          <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap font-mono text-xs leading-relaxed [overflow-wrap:anywhere]">
+            {notice.text}
+          </pre>
+          {children}
+        </div>
       )}
     </div>
   );

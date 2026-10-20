@@ -209,10 +209,26 @@ class PimClient {
         }
         return;
       }
+      case "progress": {
+        if (message.session !== this.#state.session) return;
+        const lines = { ...this.#stream.view.lines };
+        for (const call of message.calls) lines[call] = message.text;
+        this.#stream = {
+          ...this.#stream,
+          view: { ...this.#stream.view, lines },
+        };
+        this.#remember(message.session, this.#stream);
+        this.#set({ view: this.#stream.view });
+        return;
+      }
       case "result": {
         if (!message.id.startsWith(WARM_ID)) return;
         const session = message.id.slice(WARM_ID.length);
-        const stream = reduce(EMPTY_STREAM, message.result as AgentEvent);
+        // Onto what was remembered, so the lines written while it was open stay.
+        const stream = reduce(
+          this.#remembered.get(session) ?? EMPTY_STREAM,
+          message.result as AgentEvent,
+        );
         // The live stream of the chat on screen is newer than any snapshot.
         if (session === this.#state.session && this.#state.synced) return;
         this.#remember(session, stream);

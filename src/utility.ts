@@ -15,21 +15,36 @@ export type UtilityTask = {
 	readonly clean?: (answer: string) => string;
 };
 
+/** An answer's first line without what small models add all the same: a label, quotes, a full stop. */
+function line(answer: string, label: RegExp): string {
+	return answer
+		.trim()
+		.split(/\r?\n/)[0]!
+		.trim()
+		.replace(label, "")
+		.replace(/^["'“‘*]+|["'”’*]+$/g, "")
+		.replace(/[.。]+$/, "")
+		.trim();
+}
+
 /** A chat's title, from its first message or the conversation so far. */
 export const NAME_CHAT: UtilityTask = {
 	instructions:
 		"You name chats. Reply with only a title of 2 to 5 words for the conversation you are given, in its language. No quotes, no ending punctuation, nothing else.",
 	maxTokens: 32,
-	// Small models add quotes, a label or a full stop all the same.
-	clean: (answer) =>
-		answer
-			.trim()
-			.split(/\r?\n/)[0]!
-			.trim()
-			.replace(/^title\s*:\s*/i, "")
-			.replace(/^["'“‘*]+|["'”’*]+$/g, "")
-			.replace(/[.。]+$/, "")
-			.trim(),
+	clean: (answer) => line(answer, /^title\s*:\s*/i),
+};
+
+/** What an agent is doing now, in a few words, for the person waiting on it (see ./progress.ts). */
+export const DESCRIBE_WORK: UtilityTask = {
+	instructions: [
+		"You tell a person what their AI assistant is doing right now, while they wait for its answer.",
+		"You are given their request, what the assistant found so far, its notes and the tools it is calling now.",
+		'Reply with only one line of 3 to 8 words, in the language of the request, starting with a verb in the present progressive, such as "Comparing flight prices for May".',
+		"Say what it is doing for them, not how: no tool names, code or quotes, no ending punctuation, and not the same as the previous line.",
+	].join(" "),
+	maxTokens: 32,
+	clean: (answer) => line(answer, /^line\s*:\s*/i).slice(0, 120),
 };
 
 /** What the person is about to send, rewritten so their agent can act on it. */

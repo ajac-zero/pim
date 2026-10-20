@@ -2,20 +2,35 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { memo, type ReactNode, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { AppIcon } from "~/components/app-icon";
 import { Markdown } from "~/components/chat/markdown";
-import { useI18n } from "~/components/i18n";
+import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
   Bell,
+  Blocks,
+  Brain,
+  CalendarClock,
   Check,
   CheckCheck,
   ChevronDown,
   ChevronRight,
+  Contact,
   Copy,
+  Folder,
+  Globe,
+  ImageIcon,
+  Lightbulb,
+  ListChecks,
   Loader2,
+  type LucideIcon,
   Mail,
+  Monitor,
   RotateCcw,
+  Search,
+  Shapes,
   ShieldCheck,
   Workflow,
+  Wrench,
   X,
   Zap,
 } from "~/components/icons";
@@ -46,7 +61,7 @@ import {
   messageText,
 } from "~/lib/openresponses";
 import { type Approval, FILES_ROOT, fileContentUrl, pim } from "~/lib/pim-api";
-import type { PimNotice } from "~/lib/pim-view";
+import type { PimNotice, WorkStep } from "~/lib/pim-view";
 import { agentsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
@@ -682,10 +697,157 @@ export const GeneratedImage = memo(function GeneratedImage({
 
 export function ThinkingDot() {
   return (
-    <div className="flex h-6 w-fit items-center gap-1 text-muted-foreground">
+    <div
+      data-thinking
+      className="flex h-6 w-fit items-center gap-1 text-muted-foreground"
+    >
       <span className="size-1.5 animate-pulse rounded-full bg-current motion-reduce:animate-none" />
       <span className="size-1.5 animate-pulse rounded-full bg-current [animation-delay:150ms] motion-reduce:animate-none" />
       <span className="size-1.5 animate-pulse rounded-full bg-current [animation-delay:300ms] motion-reduce:animate-none" />
     </div>
   );
 }
+
+/** How the steps that use a tool are named and marked, by the tool's name; other tools get a wrench and their name. */
+const TOOL_STEPS: ReadonlyArray<[RegExp, TranslationKey, LucideIcon]> = [
+  [/^web_search$/, "stepSearchingWeb", Search],
+  [/^fetch_url$/, "stepReadingPage", Globe],
+  [/^http_request$/, "stepWebRequest", Globe],
+  [/^browser_/, "stepUsingBrowser", Monitor],
+  [/^artifact_/, "stepArtifact", Shapes],
+  [/^generate_image$/, "stepImage", ImageIcon],
+  [/^(note|recall|zoom|forget|optmem)$/, "stepMemory", Brain],
+  [/_goals?$/, "stepGoals", ListChecks],
+  [/scheduled?_task/, "stepSchedule", CalendarClock],
+  [/^(mcp_call|list_apps|connect_app|find_app)$/, "stepApps", Blocks],
+  [/^file_/, "stepFiles", Folder],
+  [/^delegate$/, "stepDelegating", Contact],
+];
+
+/** The connected app a tool belongs to, by the tool's name as the agent calls it. */
+export type ToolApps = ReadonlyMap<
+  string,
+  { name: string; icon: string | null }
+>;
+
+/**
+ * A step as the person reads it, and its mark: a lightbulb for a heading of
+ * the agent's reasoning, an app's own icon for its tools, a symbol for Pim's.
+ */
+function stepView(
+  step: WorkStep,
+  apps: ToolApps,
+  t: (key: TranslationKey, values?: Record<string, string>) => string,
+): { text: string; mark: string; icon: ReactNode } {
+  // Level with the first line of the step's text.
+  const iconClass = "mt-[3px] size-3.5 shrink-0";
+  if (step.tool === null) {
+    return {
+      text: step.text ?? "",
+      mark: "thought",
+      icon: <Lightbulb className={iconClass} />,
+    };
+  }
+  const app = apps.get(step.tool);
+  if (app) {
+    return {
+      text: step.text ?? t("stepUsing", { tool: app.name }),
+      mark: `app:${app.name}`,
+      icon: <AppIcon name={app.name} icon={app.icon} className={iconClass} />,
+    };
+  }
+  const known = TOOL_STEPS.find(([pattern]) => pattern.test(step.tool ?? ""));
+  const Icon = known?.[2] ?? Wrench;
+  return {
+    text:
+      step.text ??
+      (known
+        ? t(known[1])
+        : t("stepUsing", { tool: step.tool.replaceAll("_", " ") })),
+    mark: known?.[1] ?? "tool",
+    icon: <Icon className={iconClass} />,
+  };
+}
+
+/** "42s", "2m 5s", "1h 3m". */
+function duration(ms: number): string {
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+/**
+ * The agent's work as a list of its steps: growing as it goes (`live`),
+ * then folded before the message it led to into one line with how long it
+ * took, which opens to the steps again.
+ */
+export const WorkedSteps = memo(function WorkedSteps({
+  steps,
+  ms,
+  live,
+  apps,
+}: {
+  steps: WorkStep[];
+  ms: number | null;
+  live: boolean;
+  apps: ToolApps;
+}) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  // A tool used again and again is one step.
+  const views = steps
+    .map((step) => stepView(step, apps, t))
+    .filter(
+      (view, index, all) =>
+        view.text !== all[index - 1]?.text ||
+        view.mark !== all[index - 1]?.mark,
+    );
+  const list = (
+    <ol
+      aria-live={live ? "polite" : undefined}
+      className={cn(
+        "space-y-1.5 text-muted-foreground text-[13px]",
+        !live && "mt-2 border-l pl-3",
+      )}
+    >
+      {views.map((view, index) => (
+        <li
+          // biome-ignore lint/suspicious/noArrayIndexKey: the steps only grow, in order.
+          key={index}
+          className="flex gap-2 duration-300 animate-in fade-in-0 motion-reduce:animate-none"
+        >
+          {view.icon}
+          <span className="min-w-0">{view.text}</span>
+        </li>
+      ))}
+    </ol>
+  );
+  if (live) {
+    return (
+      <div data-work className="w-full">
+        {list}
+      </div>
+    );
+  }
+  return (
+    <div data-work className="w-full">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="inline-flex items-center gap-1 text-muted-foreground text-[13px] transition-colors hover:text-foreground"
+      >
+        {ms === null ? t("worked") : t("workedFor", { time: duration(ms) })}
+        <ChevronRight
+          className={cn(
+            "size-3 shrink-0 transition-transform",
+            open && "rotate-90",
+          )}
+        />
+      </button>
+      {open && list}
+    </div>
+  );
+});

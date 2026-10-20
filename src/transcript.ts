@@ -16,6 +16,15 @@ export const NOTICE_PREFIXES = [
 ] as const;
 
 /**
+ * The headings of a model's summarized reasoning, in order. OpenAI's models
+ * summarize theirs as sections that each start with a bold line, such as
+ * "**Comparing flight prices**"; raw reasoning from other models has none.
+ */
+export function reasoningHeadings(thinking: string): string[] {
+	return [...thinking.matchAll(/^\*\*([^*\n]+)\*\*[ \t]*$/gm)].map((match) => match[1]!.trim()).filter((heading) => heading !== "");
+}
+
+/**
  * A display-ready transcript message, projected from pi's entries for the
  * REST API. Streaming clients receive pi's own agent events instead and fold
  * them the same way.

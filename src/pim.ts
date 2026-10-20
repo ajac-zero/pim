@@ -157,9 +157,10 @@ import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessag
 import type { AgentIcon, ArtifactToPublish } from "./gallery";
 import { type Delegate, type Role, TASKS_EXTENSION, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension, withPreferences } from "./majordomo";
+import { Progress } from "./progress";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { projectEntries } from "./transcript";
-import { ARTIFACT_ASK, conversationText, IMPROVE_PROMPT, NAME_CHAT, SUMMARIZE_CHAT, type UtilityTask } from "./utility";
+import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, SUMMARIZE_CHAT, type UtilityTask } from "./utility";
 import { type Limits, parseLimits, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
 
@@ -407,6 +408,15 @@ export class Pim extends DurableAgent<Env> {
 		idOf: (conversation) => this.store.publicId(conversation),
 	});
 	readonly registry = this.telemetry.instrument(createRegistry());
+	/** What agents are doing, in a few words, for those who have their chats open (see ./progress.ts). */
+	readonly #progress = new Progress({
+		watched: (session) => this.#watchers(session).length > 0,
+		describe: (input) => this.utility(DESCRIBE_WORK, input),
+		show: (session, line, calls) => {
+			for (const connection of this.#watchers(session)) this.#send(connection, { type: "progress", session: this.store.publicId(session), text: line, calls });
+		},
+		keepAliveWhile: (work) => this.keepAliveWhile(work),
+	});
 	#extensions: PimExtensions | undefined;
 	/** Extensions' own data, each apart from the others'. */
 	readonly extensionData = new ExtensionDataStore(this.ctx.storage.sql);
@@ -516,6 +526,7 @@ export class Pim extends DurableAgent<Env> {
 			const services = this.services();
 			this.#migrateAlwaysApproved();
 			this.registry.install(this.telemetry.extension());
+			this.registry.install(this.#progress.extension());
 			this.registry.install(this.#agentExtension(services));
 			this.registry.install(this.#skillsExtension(services));
 			this.registry.install(goalsExtension(services));
@@ -5009,6 +5020,11 @@ export class Pim extends DurableAgent<Env> {
 		if (!stream) return;
 		this.#watches.delete(connectionId);
 		await stream.stop();
+	}
+
+	/** The sockets following `session`. */
+	#watchers(session: string): Connection<SocketState>[] {
+		return [...this.getConnections<SocketState>()].filter((connection) => connection.state?.session === session);
 	}
 
 	#send(connection: Connection, message: ServerMessage): void {

@@ -51,6 +51,14 @@ export type ServerMessage =
 	 * that replaces the client's state.
 	 */
 	| { readonly type: "events"; readonly session: string; readonly events: readonly AgentEvent[] }
+	/**
+	 * What the agent of the socket's session is doing, in a few words from
+	 * the utility model, while it works with a model that doesn't summarize
+	 * its own reasoning: one line for the step that made the tool calls
+	 * `calls`, in place of their tools' names. Lines aren't stored: a socket
+	 * that connects later doesn't get them.
+	 */
+	| { readonly type: "progress"; readonly session: string; readonly text: string; readonly calls: readonly string[] }
 	| { readonly type: "notification"; readonly notification: Notification }
 	/** An approval was requested or decided. */
 	| { readonly type: "approval"; readonly approval: PublicApproval }

@@ -161,7 +161,7 @@ async function majordomoApps(apps: string[]) {
 }
 
 describe("connected apps (MCP)", () => {
-	it("connects an app and offers its tools, gating the ones that change things", async () => {
+	it("connects an app and switches its tools on for the agents that work with it", async () => {
 		const { status, body } = await post("/mcp", { app: "test.ledger/calendar" });
 		expect(status).toBe(201);
 		expect(body).toMatchObject({ id: "calendar", state: "ready" });
@@ -174,12 +174,17 @@ describe("connected apps (MCP)", () => {
 			expect.objectContaining({ id: "calendar", name: "Calendar", state: "ready", approval: "writes", agents: ["Majordomo"] }),
 		]);
 		expect(apps[0].tools).toEqual([
-			{ name: "calendar_find_events", description: "Find events on a day.", permission: "on", requiresApproval: false },
-			{ name: "calendar_create_event", description: "Create an event.", permission: "ask", requiresApproval: true },
+			{ name: "calendar_find_events", description: "Find events on a day." },
+			{ name: "calendar_create_event", description: "Create an event." },
 		]);
-		const tools = new Map((await api("/")).body.tools.map((tool: { name: string }) => [tool.name, tool]));
-		expect(tools.get("calendar_create_event")).toMatchObject({ requiresApproval: true });
-		expect(tools.get("calendar_find_events")).toMatchObject({ requiresApproval: false });
+		const [agent] = (await api("/agents")).body.agents;
+		expect((await api(`/permissions?agent=${agent.id}`)).body.tools).toEqual([
+			expect.objectContaining({ app: "calendar", tool: "find_events", permission: "on", chosen: null, choices: ["off", "on"] }),
+			expect.objectContaining({ app: "calendar", tool: "create_event", permission: "on", chosen: null, choices: ["off", "on"] }),
+		]);
+		// Settings' permissions are Pim's own tools: an app's are each agent's.
+		expect((await api("/permissions")).body.tools.some((tool: { app: string | null }) => tool.app !== null)).toBe(false);
+		expect((await api("/permissions", { method: "PUT", body: JSON.stringify({ app: "calendar", tool: "create_event", permission: "on" }) })).status).toBe(400);
 	});
 
 	it("calls a read-only tool directly, with the app's instructions in the prompt", async () => {
@@ -200,116 +205,107 @@ describe("connected apps (MCP)", () => {
 		expect(system).toContain("## Calendar [id: test.ledger/calendar]\\nTimes are in Eastern time.");
 	});
 
-	it("auto-approves routine tools of an assigned app without notifying the person", async () => {
+	it("runs a tool switched on for the agent without asking or notifying the person", async () => {
 		const notifications = (await api("/notifications")).body.notifications.length;
 		faux.setResponses([toolUse("calendar_create_event", { title: "Read", day: "tuesday" }), toolUse("send_to_user", { message: "Added." })]);
 		expect(await say("Add reading on Tuesday.")).toMatchObject({ status: "done", text: "Added." });
 		expect(created).toEqual([{ title: "Read", day: "tuesday" }]);
-		expect((await api("/approvals")).body.approvals).toEqual([
-			expect.objectContaining({ status: "approved", decidedBy: "always", action: "mcp_call", result: 'Created "Read" on tuesday.' }),
-		]);
+		expect((await api("/approvals")).body.approvals).toEqual([]);
 		expect((await api("/notifications")).body.notifications).toHaveLength(notifications);
 	});
 
-	it("keeps an explicit Ask choice for an assigned tool and returns its approved result", async () => {
-		await api("/permissions", { method: "PUT", body: JSON.stringify({ app: "calendar", tool: "create_event", permission: "ask" }) });
-		let reported = "";
+	it("switches each tool off or on for one agent, held to the tool it was switched on for", async () => {
+		const [majordomo] = (await api("/agents")).body.agents;
+		const planner = (await post("/agents", { name: "Planner", apps: ["test.ledger/calendar"] })).body;
+		const plannerChat = (await post("/sessions", { agent: planner.id })).body.id;
+		const set = (agent: string, tool: string, permission: string | null) =>
+			api("/permissions", { method: "PUT", body: JSON.stringify({ agent, app: "calendar", tool, permission }) });
+		const tools: Record<string, string[]> = {};
+		const record = (key: string) => (context: { messages: Message[] }) => {
+			tools[key] = offered(context.messages);
+			return toolUse("send_to_user", { message: "ok" });
+		};
+		expect((await set(majordomo.id, "create_event", "ask")).status).toBe(400);
+		expect((await set(majordomo.id, "delete_event", "off")).status).toBe(404);
+
+		// Off for the majordomo: its chats aren't offered the tool, and the Planner's still are.
+		expect((await set(majordomo.id, "create_event", "off")).body).toMatchObject({ permission: "off", chosen: "off", default: "on" });
+		faux.setResponses([record("majordomo"), record("planner")]);
+		await say("Anything to add?");
+		await say("Anything to add?", plannerChat);
+		expect(tools.majordomo).toContain("calendar_find_events");
+		expect(tools.majordomo).not.toContain("calendar_create_event");
+		expect(tools.planner).toContain("calendar_create_event");
+
+		// Switched off while a turn runs, a call made with the tools it began with is refused.
+		await set(majordomo.id, "create_event", null);
+		let refused = "";
 		faux.setResponses([
-			toolUse("calendar_create_event", { title: "Lunch with Ana", day: "friday" }),
+			async () => {
+				await set(majordomo.id, "create_event", "off");
+				return toolUse("calendar_create_event", { title: "Nap", day: "monday" });
+			},
 			(context) => {
-				reported = toolResults(context.messages);
-				return toolUse("send_to_user", { message: "Booked." });
+				refused = toolResults(context.messages);
+				return toolUse("send_to_user", { message: "I can't." });
 			},
 		]);
-		const turn = say("Book lunch with Ana on Friday.");
-		const approval = await pendingApproval();
-		expect(created).toEqual([{ title: "Read", day: "tuesday" }]);
-		expect(approval.summary).toBe('Calendar: create_event {"title":"Lunch with Ana","day":"friday"}');
+		await say("Add a nap on Monday.");
+		expect(refused).toContain("The person switched calendar_create_event off for this agent.");
+		expect(created.some((event) => event.title === "Nap")).toBe(false);
 
-		const decided = await post<Approval>(`/approvals/${approval.id}/approve`);
-		expect(decided.body).toMatchObject({ status: "approved", result: 'Created "Lunch with Ana" on friday.' });
-		expect(created).toEqual([{ title: "Read", day: "tuesday" }, { title: "Lunch with Ana", day: "friday" }]);
-		expect(await turn).toMatchObject({ status: "done", text: "Booked." });
-		expect(reported).toContain('Created \\"Lunch with Ana\\" on friday.');
-		await api("/permissions", { method: "PUT", body: JSON.stringify({ app: "calendar", tool: "create_event", permission: null }) });
+		// Switched on, it is held to its definition: an app that changes the tool gets it switched off until the person looks again.
+		await set(majordomo.id, "create_event", "on");
+		await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) =>
+			instance.store.setToolPermission(`agent:${majordomo.id}`, "calendar", "create_event", "on", '{"description":"Create a draft."}'),
+		);
+		const [, changed] = (await api(`/permissions?agent=${majordomo.id}`)).body.tools;
+		expect(changed).toMatchObject({ tool: "create_event", permission: "off", chosen: "on", changed: true });
+
+		// Back to the default; deleting an agent forgets its switches.
+		expect((await set(majordomo.id, "create_event", null)).body).toMatchObject({ permission: "on", chosen: null, changed: false });
+		await set(planner.id, "find_events", "off");
+		expect((await api(`/agents/${planner.id}`, { method: "DELETE" })).status).toBe(200);
+		await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => {
+			expect(instance.store.toolPermissions(`agent:${planner.id}`)).toEqual([]);
+		});
 	});
 
-	it("follows each app's approval policy", async () => {
+	it("switches off by default the tools of an app that asks before every call, and what the person had turned off or to asking", async () => {
+		const [agent] = (await api("/agents")).body.agents;
+		const switches = async () =>
+			Object.fromEntries(
+				(await api(`/permissions?agent=${agent.id}`)).body.tools.map((tool: { tool: string; permission: string }) => [tool.tool, tool.permission]),
+			);
 		expect((await api("/mcp/calendar", { method: "PUT", body: JSON.stringify({ approval: "sometimes" }) })).status).toBe(400);
-		const updated = await api("/mcp/calendar", { method: "PUT", body: JSON.stringify({ approval: "none" }) });
-		expect(updated.body.tools.map((tool: { requiresApproval: boolean }) => tool.requiresApproval)).toEqual([false, false]);
+		await api("/mcp/calendar", { method: "PUT", body: JSON.stringify({ approval: "all" }) });
+		expect(await switches()).toEqual({ find_events: "off", create_event: "off" });
 
+		// Switched on by the person, it runs without asking even so.
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ agent: agent.id, app: "calendar", tool: "create_event", permission: "on" }) });
 		faux.setResponses([toolUse("calendar_create_event", { title: "Gym", day: "saturday" }), toolUse("send_to_user", { message: "Done." })]);
 		await say("Add gym on Saturday.");
 		expect(created.at(-1)).toEqual({ title: "Gym", day: "saturday" });
-
-		const strict = await api("/mcp/calendar", { method: "PUT", body: JSON.stringify({ approval: "all" }) });
-		expect(strict.body.tools.map((tool: { requiresApproval: boolean }) => tool.requiresApproval)).toEqual([true, true]);
-		faux.setResponses([toolUse("calendar_find_events", { day: "wednesday" }), toolUse("send_to_user", { message: "Not checked." })]);
-		const checking = say("Check Wednesday.");
-		const approval = await pendingApproval();
-		expect(approval.summary).toBe('Calendar: find_events {"day":"wednesday"}');
-		await post(`/approvals/${approval.id}/deny`);
-		await checking;
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ agent: agent.id, app: "calendar", tool: "create_event", permission: null }) });
 		await api("/mcp/calendar", { method: "PUT", body: JSON.stringify({ approval: "writes" }) });
-	});
 
-	it("lets the user turn each tool off, on, or back to asking", async () => {
-		const setPermission = (tool: string, permission: string | null) =>
-			api("/permissions", { method: "PUT", body: JSON.stringify({ app: "calendar", tool, permission }) });
-		const offered = async () => (await api("/")).body.tools.map((tool: { name: string }) => tool.name);
-		expect((await setPermission("create_event", "sometimes")).status).toBe(400);
-		expect((await setPermission("delete_event", "on")).status).toBe(404);
-
-		// Off: the model is no longer offered the tool.
-		expect((await setPermission("find_events", "off")).body).toMatchObject({ permission: "off", chosen: "off", default: "on" });
-		expect(await offered()).not.toContain("calendar_find_events");
-
-		// On: a tool that changes things runs without an approval.
-		expect((await setPermission("create_event", "on")).body).toMatchObject({ permission: "on", changed: false });
-		faux.setResponses([toolUse("calendar_create_event", { title: "Swim", day: "sunday" }), toolUse("send_to_user", { message: "Done." })]);
-		const approvals = (await api("/approvals")).body.approvals.length;
-		await say("Add swimming on Sunday.");
-		expect(created.at(-1)).toEqual({ title: "Swim", day: "sunday" });
-		expect((await api("/approvals")).body.approvals).toHaveLength(approvals);
-
-		// The app changes the tool after the user let it run: Pim asks again, even with the tools already built.
-		await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) =>
-			instance.store.setToolPermission("", "calendar", "create_event", "on", '{"description":"Create a draft."}'),
-		);
-		const permissions = (await api("/permissions")).body.tools;
-		expect(permissions.find((info: { name: string }) => info.name === "calendar_create_event")).toMatchObject({
-			permission: "ask",
-			chosen: "on",
-			changed: true,
+		// What the person chose for every agent before each had switches: On stays on, Ask and Off are off.
+		await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => {
+			instance.store.setToolPermission("", "calendar", "find_events", "off", null);
+			instance.store.setToolPermission("", "calendar", "create_event", "ask", null);
 		});
-		faux.setResponses([toolUse("calendar_create_event", { title: "Run", day: "monday" }), toolUse("send_to_user", { message: "Not added." })]);
-		const turn = say("Add a run on Monday.");
-		const approval = await pendingApproval();
-		expect(approval.summary).toBe('Calendar: create_event {"title":"Run","day":"monday"}');
-		await post(`/approvals/${approval.id}/deny`);
-		await turn;
-		expect(created.at(-1)).toEqual({ title: "Swim", day: "sunday" });
-
-		// Back to the defaults.
-		expect((await setPermission("find_events", null)).body).toMatchObject({ permission: "on", chosen: null });
-		expect((await setPermission("create_event", null)).body).toMatchObject({ permission: "ask", chosen: null, changed: false });
-		expect(await offered()).toContain("calendar_find_events");
-	});
-
-	it("keeps an app tool the user always approved before tool permissions", async () => {
+		expect(await switches()).toEqual({ find_events: "off", create_event: "off" });
 		await runInDurableObject(env.Pim.getByName(OWNER), (_instance: Pim, state) => {
+			state.storage.sql.exec("DELETE FROM pim_tool_permissions");
 			state.storage.sql.exec("INSERT INTO pim_always_approved (tool, created_at) VALUES ('calendar_create_event', 1)");
 		});
-		// Rebuilding the apps' tools moves it over.
-		await api("/mcp/calendar", { method: "PUT", body: JSON.stringify({ approval: "writes" }) });
-		const permissions = (await api("/permissions")).body.tools;
-		expect(permissions.find((info: { name: string }) => info.name === "calendar_create_event")).toMatchObject({
-			permission: "on",
-			chosen: "on",
-			changed: false,
+		// Rebuilding the apps' tools moves a tool always approved before permissions over: on, even for an app that asks first.
+		await api("/mcp/calendar", { method: "PUT", body: JSON.stringify({ approval: "all" }) });
+		expect(await switches()).toEqual({ find_events: "off", create_event: "on" });
+		await runInDurableObject(env.Pim.getByName(OWNER), (_instance: Pim, state) => {
+			state.storage.sql.exec("DELETE FROM pim_tool_permissions");
 		});
-		await api("/permissions", { method: "PUT", body: JSON.stringify({ app: "calendar", tool: "create_event", permission: null }) });
+		await api("/mcp/calendar", { method: "PUT", body: JSON.stringify({ approval: "writes" }) });
 	});
 
 	it("lets an artifact call a tool that runs without asking, once the person allows its version", async () => {

@@ -33,6 +33,16 @@ const translations = {
       "This agent's chats can use only these apps, and those of the blueprint it's based on. You connect each app once, for all your agents.",
     noAppsOffered:
       "This Pim offers no apps yet. Its admin can add them in Apps.",
+    noAgentApps: "No apps yet. Choose some with Edit.",
+    toolsOn: "{on} of {count} on",
+    toolsOf: "{name}'s tools",
+    agentToolsHint:
+      "{name} uses the tools that are on without asking you first, and can't use those that are off.",
+    useTool: "Let it use {tool}",
+    destructiveTool: "Can delete",
+    agentToolChanged:
+      "The app changed this tool since you turned it on, so it's off until you turn it on again.",
+    majordomoPreferences: "How {name} works with you",
     appName: "App",
     appUrl: "MCP server URL",
     uploadIcon: "Upload image",
@@ -42,7 +52,6 @@ const translations = {
     lookIcon: "Icon",
     lookEmoji: "Emoji",
     lookImage: "Image",
-    anyEmoji: "Or type any emoji",
     agentColor: "Color",
     defaultColor: "Default",
     colorGray: "Gray",
@@ -922,6 +931,16 @@ const translations = {
       "Los chats de este agente solo pueden usar estas apps y las del esquema en el que se basa. Conectas cada app una vez, para todos tus agentes.",
     noAppsOffered:
       "Este Pim aún no ofrece apps. Su administrador puede agregarlas en Apps.",
+    noAgentApps: "Aún no tiene apps. Elígelas con Editar.",
+    toolsOn: "{on} de {count} activadas",
+    toolsOf: "Herramientas de {name}",
+    agentToolsHint:
+      "{name} usa sin preguntarte las herramientas activadas, y no puede usar las desactivadas.",
+    useTool: "Permitir usar {tool}",
+    destructiveTool: "Puede borrar",
+    agentToolChanged:
+      "La app cambió esta herramienta desde que la activaste, así que está desactivada hasta que la actives de nuevo.",
+    majordomoPreferences: "Cómo trabaja {name} contigo",
     appName: "App",
     appUrl: "URL del servidor MCP",
     uploadIcon: "Subir imagen",
@@ -931,7 +950,6 @@ const translations = {
     lookIcon: "Icono",
     lookEmoji: "Emoji",
     lookImage: "Imagen",
-    anyEmoji: "O escribe cualquier emoji",
     agentColor: "Color",
     defaultColor: "Predeterminado",
     colorGray: "Gris",

@@ -2,7 +2,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { api, OWNER, pendingApproval, post, ROOT, say, toolUse, url } from "./helpers";
+import { api, OWNER, post, ROOT, say, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /**
@@ -93,16 +93,13 @@ describe("apps extensions implement", () => {
 		expect(grants.at(-1)).toMatchObject({ grant_type: "authorization_code", code: "good" });
 		const [bank] = (await api("/mcp")).body.servers;
 		expect(bank).toMatchObject({ state: "ready", authUrl: null, approval: "writes" });
-		expect(bank.tools).toEqual([
-			expect.objectContaining({ name: "bank_balance", permission: "on" }),
-			expect.objectContaining({ name: "bank_transfer", permission: "ask" }),
-		]);
+		expect(bank.tools.map((tool: { name: string }) => tool.name)).toEqual(["bank_balance", "bank_transfer"]);
 		// Finished once: the same return can't sign in again.
 		expect((await exports.default.fetch(url(`/mcp/callback/apps?state=${params.state}&code=good`))).status).toBe(400);
 		expect((await post("/mcp", { app: "test.ledger/bank" })).status).toBe(409);
 	});
 
-	it("run their tools with the person's credential, show results as widgets, and ask before the rest", async () => {
+	it("run their tools with the person's credential, show results as widgets, and leave destructive ones off until switched on", async () => {
 		const [agent] = (await api("/agents")).body.agents;
 		await api(`/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ apps: ["test.ledger/bank"] }) });
 		let read = "";
@@ -122,17 +119,24 @@ describe("apps extensions implement", () => {
 		expect(transcript).toContain('\\"title\\":\\"Balances\\"');
 		expect(transcript).toContain('{\\"title\\":\\"Savings\\",\\"detail\\":\\"900\\"}');
 
-		// A flagged risky tool asks even when assigned and the app otherwise trusts all calls.
+		// A tool the app flags destructive is off, even when the app otherwise trusts all calls, until the person switches it on.
 		await api("/mcp/bank", { method: "PUT", body: JSON.stringify({ approval: "none" }) });
-		expect((await api("/permissions", { method: "PUT", body: JSON.stringify({ app: "bank", tool: "transfer", permission: "on" }) })).status).toBe(400);
-		expect((await api("/permissions")).body.tools.find((tool: { name: string }) => tool.name === "bank_transfer")).toMatchObject({ permission: "ask", choices: ["off", "ask"] });
-		faux.setResponses([toolUse("bank_transfer", { amount: 5 }), toolUse("send_to_user", { message: "Moved." })]);
-		const moving = say("Move 5 to savings");
-		const approval = await pendingApproval();
-		expect(approval).toMatchObject({ action: "mcp_call", summary: 'Bank: transfer {"amount":5}', expiresAt: null, onTimeout: "deny" });
-		expect((await post(`/approvals/${approval.id}/approve`, { always: true })).status).toBe(400);
-		expect((await post(`/approvals/${approval.id}/approve`)).body.result).toBe("Moved 5.");
-		expect(await moving).toMatchObject({ status: "done", replies: ["Moved."] });
+		const transfer = async () =>
+			(await api(`/permissions?agent=${agent.id}`)).body.tools.find((tool: { name: string }) => tool.name === "bank_transfer");
+		expect(await transfer()).toMatchObject({ permission: "off", destructive: true });
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ agent: agent.id, app: "bank", tool: "transfer", permission: "on" }) });
+		expect(await transfer()).toMatchObject({ permission: "on", chosen: "on" });
+		let moved = "";
+		faux.setResponses([
+			toolUse("bank_transfer", { amount: 5 }),
+			(context) => {
+				moved = lastToolResult(context.messages);
+				return toolUse("send_to_user", { message: "Moved." });
+			},
+		]);
+		expect(await say("Move 5 to savings")).toMatchObject({ status: "done", replies: ["Moved."] });
+		expect(moved).toContain("Moved 5.");
+		expect((await api("/approvals")).body.approvals).toEqual([]);
 		await api("/mcp/bank", { method: "PUT", body: JSON.stringify({ approval: "writes" }) });
 	});
 

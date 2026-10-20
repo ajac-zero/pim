@@ -42,7 +42,7 @@ type HelpWith = (typeof MAJORDOMO_HELP_WITH)[number];
 /** How many things in their own words they can add to what they'd like a hand with, as the API allows. */
 const MAX_OTHER_HELP = 6;
 
-const toneKey = {
+export const toneKey = {
   warm: "toneWarm",
   formal: "toneFormal",
   playful: "tonePlayful",
@@ -390,7 +390,7 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
  * back. A question that takes several answers shows one per answer and a
  * last one to add another. `box` matches `Check`.
  */
-function WriteYourOwn({
+export function WriteYourOwn({
   shape,
   value,
   onChange,
@@ -513,7 +513,13 @@ function CheckMark({ checked }: { checked: boolean }) {
 }
 
 /** One multiple-choice question: a label over its choices. */
-function Question({ label, children }: { label: string; children: ReactNode }) {
+export function Question({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
   return (
     <fieldset className="mt-6">
       <legend className="font-medium text-sm">{label}</legend>
@@ -523,7 +529,7 @@ function Question({ label, children }: { label: string; children: ReactNode }) {
 }
 
 /** A choice that can be picked, or picked again to clear it. */
-function Chip({
+export function Chip({
   selected,
   onSelect,
   label,
@@ -558,7 +564,7 @@ function Chip({
  * How much the majordomo handles on its own, as a bar of three steps: each
  * step fills the bar up to it. Choosing the chosen one again clears it.
  */
-function InvolvementBar({
+export function InvolvementBar({
   label,
   value,
   onChange,

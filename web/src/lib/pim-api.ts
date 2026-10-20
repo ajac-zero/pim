@@ -105,7 +105,20 @@ export type AgentTask = {
   updatedAt: number;
 };
 
-export type MajordomoState = { agent: Agent; introduced: boolean };
+export type MajordomoState = {
+  agent: Agent;
+  introduced: boolean;
+  /** How it talks and how much it handles on its own, read from its instructions. */
+  preferences: MajordomoPreferences;
+};
+
+/** How the majordomo talks with you and how much it handles on its own, as at setup. */
+export type MajordomoPreferences = {
+  tone: (typeof MAJORDOMO_TONES)[number] | null;
+  /** How it should talk, in your words. */
+  customTone: string | null;
+  involvement: (typeof MAJORDOMO_INVOLVEMENT)[number] | null;
+};
 
 /** How the majordomo talks. */
 export const MAJORDOMO_TONES = ["warm", "formal", "playful", "brief"] as const;
@@ -734,6 +747,8 @@ export type ToolPermissionInfo = {
   description: string | null;
   /** The app says the tool only reads. */
   readOnly: boolean;
+  /** The app says the tool may delete or overwrite things. */
+  destructive: boolean;
   permission: ToolPermission;
   /** What applies when you haven't chosen. */
   default: ToolPermission;
@@ -997,6 +1012,12 @@ export const pim = {
   /** Your majordomo, and whether you named it yet. */
   majordomo: () => call<MajordomoState>("/majordomo"),
   /** Names your majordomo, once, and has it open your first chat, whose id it returns. */
+  /** Changes how your majordomo talks and how much it handles on its own. */
+  setMajordomoPreferences: (preferences: MajordomoPreferences) =>
+    call<MajordomoState>("/majordomo/preferences", {
+      method: "PUT",
+      body: JSON.stringify(preferences),
+    }),
   setUpMajordomo: (setup: MajordomoSetup) =>
     call<MajordomoState & { session: string }>("/majordomo", {
       method: "POST",
@@ -1119,6 +1140,21 @@ export const pim = {
     call<{ tools: ToolPermissionInfo[] }>(
       `/permissions${circle ? `?circle=${encodeURIComponent(circle)}` : ""}`,
     ).then((body) => body.tools),
+  /** Whether an agent may use each tool of the connected apps it works with: on or off. */
+  agentPermissions: (agent: string) =>
+    call<{ tools: ToolPermissionInfo[] }>(
+      `/permissions?agent=${encodeURIComponent(agent)}`,
+    ).then((body) => body.tools),
+  setAgentPermission: (
+    agent: string,
+    app: string,
+    tool: string,
+    permission: "on" | "off" | null,
+  ) =>
+    call<ToolPermissionInfo>("/permissions", {
+      method: "PUT",
+      body: JSON.stringify({ agent, app, tool, permission }),
+    }),
   setPermission: (
     circle: string | null,
     app: string | null,

@@ -1,17 +1,25 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { Dialog } from "radix-ui";
-import { type FormEvent, type ReactNode, useState } from "react";
+import {
+  type FormEvent,
+  type ReactNode,
+  useEffect,
+  useId,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import {
   AgentIcon,
-  AgentLookPicker,
+  CompactLookPicker,
   type LookChoice,
 } from "~/components/agent-icon";
 import { AppIcon } from "~/components/app-icon";
 import { useI18n } from "~/components/i18n";
 import {
+  AlertCircle,
   Bot,
+  ChevronDown,
   Globe,
   MessageCircle,
   Pencil,
@@ -21,8 +29,25 @@ import {
   Users,
   X,
 } from "~/components/icons";
+import {
+  Chip,
+  InvolvementBar,
+  Question,
+  toneKey,
+  WriteYourOwn,
+} from "~/components/majordomo-setup";
 import { Button } from "~/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "~/components/ui/collapsible";
 import { Input } from "~/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "~/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -30,19 +55,25 @@ import {
   SelectTrigger,
   SelectValue,
 } from "~/components/ui/select";
+import { Switch } from "~/components/ui/switch";
 import {
   type Agent,
   type AgentInput,
   admin,
+  MAJORDOMO_TONES,
+  type MajordomoPreferences,
   pim,
   type TeamMember,
+  type ToolPermissionInfo,
 } from "~/lib/pim-api";
 import {
   accountQuery,
+  agentPermissionsQuery,
   appDirectoryQuery,
   appsQuery,
   defaultAgentQuery,
   extensionsQuery,
+  majordomoQuery,
 } from "~/lib/queries";
 
 const EMPTY: AgentInput = {
@@ -165,175 +196,241 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
     );
   }
   return (
-    <article className="rounded-xl border px-4 py-3" aria-label={agent.name}>
-      <div className="flex items-start gap-3">
-        <AgentIcon agent={agent} tile className="size-8 rounded-lg" />
-        <div className="min-w-0 flex-1">
-          <h2 className="flex items-center gap-2 font-medium">
-            <Link
-              to="/agents/$agentId"
-              params={{ agentId: agent.id }}
-              onClick={onClose}
-              className="truncate underline-offset-2 hover:underline"
-            >
-              {agent.name}
-            </Link>
-            {agent.majordomo && (
-              <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
-                {t("majordomoBadge")}
-              </span>
+    <>
+      <article className="rounded-xl border px-4 py-3" aria-label={agent.name}>
+        <div className="flex items-start gap-3">
+          <AgentIcon agent={agent} tile className="size-8 rounded-lg" />
+          <div className="min-w-0 flex-1">
+            <h2 className="flex items-center gap-2 font-medium">
+              <Link
+                to="/agents/$agentId"
+                params={{ agentId: agent.id }}
+                onClick={onClose}
+                className="truncate underline-offset-2 hover:underline"
+              >
+                {agent.name}
+              </Link>
+              {agent.majordomo && (
+                <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
+                  {t("majordomoBadge")}
+                </span>
+              )}
+            </h2>
+            {agent.description && (
+              <p className="text-muted-foreground text-sm">
+                {agent.description}
+              </p>
             )}
-          </h2>
-          {agent.description && (
-            <p className="text-muted-foreground text-sm">{agent.description}</p>
-          )}
-          <p className="mt-1 flex flex-wrap gap-x-3 text-muted-foreground text-xs">
-            <BuildsOn blueprint={agent.blueprint} />
-            {agent.source && (
-              <span>
-                {t("fromTemplateBy")}{" "}
-                <Link
-                  to="/people/$username"
-                  params={{ username: agent.source.author }}
-                  className="underline underline-offset-2 hover:text-foreground"
-                >
-                  @{agent.source.author}
-                </Link>
-              </span>
-            )}
-            {agent.published && (
-              <span className="flex items-center gap-1 text-success">
-                <Globe className="size-3" /> {t("published")}
-              </span>
-            )}
-            {forEveryone && (
-              <span className="flex items-center gap-1 text-primary">
-                <Users className="size-3" /> {t("everyonesDefault")}
-                <button
-                  type="button"
-                  className="underline underline-offset-2 hover:text-foreground"
-                  onClick={() => choose.mutate(false)}
-                  disabled={choose.isPending}
-                >
-                  {t("stopEveryonesDefault")}
-                </button>
-              </span>
-            )}
-          </p>
+            <p className="mt-1 flex flex-wrap gap-x-3 text-muted-foreground text-xs">
+              <BuildsOn blueprint={agent.blueprint} />
+              {agent.source && (
+                <span>
+                  {t("fromTemplateBy")}{" "}
+                  <Link
+                    to="/people/$username"
+                    params={{ username: agent.source.author }}
+                    className="underline underline-offset-2 hover:text-foreground"
+                  >
+                    @{agent.source.author}
+                  </Link>
+                </span>
+              )}
+              {agent.published && (
+                <span className="flex items-center gap-1 text-success">
+                  <Globe className="size-3" /> {t("published")}
+                </span>
+              )}
+              {forEveryone && (
+                <span className="flex items-center gap-1 text-primary">
+                  <Users className="size-3" /> {t("everyonesDefault")}
+                  <button
+                    type="button"
+                    className="underline underline-offset-2 hover:text-foreground"
+                    onClick={() => choose.mutate(false)}
+                    disabled={choose.isPending}
+                  >
+                    {t("stopEveryonesDefault")}
+                  </button>
+                </span>
+              )}
+            </p>
+          </div>
         </div>
-      </div>
-      {agent.instructions && (
-        <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-sm">
-          {agent.instructions}
-        </p>
-      )}
-      <PimApps agent={agent} />
-      {agent.team.length > 0 && (
-        <ul
-          className="mt-2 flex flex-wrap gap-1.5"
-          aria-label={t("teamOf", { name: agent.name })}
-        >
-          {agent.team.map((member) => (
-            <li
-              key={member.name}
-              className="flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-0.5 text-xs"
-              title={member.instructions}
-            >
-              <Bot className="size-3 text-muted-foreground" />
-              {member.name}
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button
-          size="sm"
-          onClick={() => {
-            onClose();
-            navigate({
-              to: "/agents/$agentId",
-              params: { agentId: agent.id },
-            });
-          }}
-        >
-          <MessageCircle /> {t("chatWithAgent")}
-        </Button>
-        <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
-          <Pencil /> {t("edit")}
-        </Button>
-        {/* Alone on this Pim, there is nobody to publish for, unless it already is. */}
-        {account && (!account.alone || agent.published) && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => publish.mutate(true)}
-            disabled={publish.isPending}
-          >
-            <Globe /> {t(agent.published ? "updatePublished" : "publish")}
-          </Button>
+        {agent.instructions && (
+          <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-sm">
+            {agent.instructions}
+          </p>
         )}
-        {account && agent.published && (
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => publish.mutate(false)}
-            disabled={publish.isPending}
+        {agent.team.length > 0 && (
+          <ul
+            className="mt-2 flex flex-wrap gap-1.5"
+            aria-label={t("teamOf", { name: agent.name })}
           >
-            {t("unpublish")}
-          </Button>
-        )}
-        {isAdmin && everyones !== undefined && !forEveryone && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => choose.mutate(true)}
-            disabled={choose.isPending}
-          >
-            <Users /> {t("makeEveryonesDefault")}
-          </Button>
-        )}
-        <span className="ml-auto">
-          {agent.majordomo ? null : confirming ? (
-            <span className="flex items-center gap-1">
-              <Button
-                size="sm"
-                variant="destructive"
-                onClick={() => remove.mutate()}
-                disabled={remove.isPending}
+            {agent.team.map((member) => (
+              <li
+                key={member.name}
+                className="flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-0.5 text-xs"
+                title={member.instructions}
               >
-                {t("deleteAgent")}
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setConfirming(false)}
-              >
-                {t("cancel")}
-              </Button>
-            </span>
-          ) : (
+                <Bot className="size-3 text-muted-foreground" />
+                {member.name}
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            onClick={() => {
+              onClose();
+              navigate({
+                to: "/agents/$agentId",
+                params: { agentId: agent.id },
+              });
+            }}
+          >
+            <MessageCircle /> {t("chatWithAgent")}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
+            <Pencil /> {t("edit")}
+          </Button>
+          {/* Alone on this Pim, there is nobody to publish for, unless it already is. */}
+          {account && (!account.alone || agent.published) && (
             <Button
-              size="icon-sm"
-              variant="ghost"
-              className="text-muted-foreground"
-              aria-label={t("deleteAgentNamed", { name: agent.name })}
-              title={t("deleteAgentNamed", { name: agent.name })}
-              onClick={() => setConfirming(true)}
+              size="sm"
+              variant="outline"
+              onClick={() => publish.mutate(true)}
+              disabled={publish.isPending}
             >
-              <Trash2 />
+              <Globe /> {t(agent.published ? "updatePublished" : "publish")}
             </Button>
           )}
-        </span>
-      </div>
-    </article>
+          {account && agent.published && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => publish.mutate(false)}
+              disabled={publish.isPending}
+            >
+              {t("unpublish")}
+            </Button>
+          )}
+          {isAdmin && everyones !== undefined && !forEveryone && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => choose.mutate(true)}
+              disabled={choose.isPending}
+            >
+              <Users /> {t("makeEveryonesDefault")}
+            </Button>
+          )}
+          <span className="ml-auto">
+            {agent.majordomo ? null : confirming ? (
+              <span className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  onClick={() => remove.mutate()}
+                  disabled={remove.isPending}
+                >
+                  {t("deleteAgent")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setConfirming(false)}
+                >
+                  {t("cancel")}
+                </Button>
+              </span>
+            ) : (
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                className="text-muted-foreground"
+                aria-label={t("deleteAgentNamed", { name: agent.name })}
+                title={t("deleteAgentNamed", { name: agent.name })}
+                onClick={() => setConfirming(true)}
+              >
+                <Trash2 />
+              </Button>
+            )}
+          </span>
+        </div>
+      </article>
+      {agent.majordomo && <MajordomoPreferencesSection agent={agent} />}
+      <AgentApps agent={agent} />
+    </>
   );
 }
 
 /**
- * The apps an agent works with: those of the blueprint it is based on, then its own,
- * each connectable from here unless it already is.
+ * How the majordomo talks with you and how much it handles on its own, as
+ * at setup: each choice is saved as it is made.
  */
-function PimApps({ agent }: { agent: Agent }) {
+function MajordomoPreferencesSection({ agent }: { agent: Agent }) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const { data } = useQuery(majordomoQuery());
+  const save = useMutation({
+    mutationFn: pim.setMajordomoPreferences,
+    onSuccess: (state) => {
+      queryClient.setQueryData(majordomoQuery().queryKey, state);
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  if (!data) return null;
+  // What was just chosen shows while it saves.
+  const preferences =
+    save.isPending && save.variables ? save.variables : data.preferences;
+  const change = (next: Partial<MajordomoPreferences>) =>
+    save.mutate({ ...preferences, ...next });
+  return (
+    <section aria-label={t("majordomoPreferences", { name: agent.name })}>
+      <Question label={t("toneLabel", { name: agent.name })}>
+        {MAJORDOMO_TONES.map((choice) => (
+          <Chip
+            key={choice}
+            selected={preferences.tone === choice}
+            onSelect={() =>
+              change({
+                tone: preferences.tone === choice ? null : choice,
+                customTone: null,
+              })
+            }
+          >
+            {t(toneKey[choice])}
+          </Chip>
+        ))}
+        <WriteYourOwn
+          shape="pill"
+          value={preferences.customTone}
+          onChange={(customTone) =>
+            change({
+              customTone,
+              ...(customTone !== null ? { tone: null } : {}),
+            })
+          }
+        />
+      </Question>
+      <InvolvementBar
+        label={t("involvementLabel", { name: agent.name })}
+        value={preferences.involvement}
+        onChange={(involvement) => change({ involvement })}
+      />
+    </section>
+  );
+}
+
+/**
+ * The apps an agent works with: those of the blueprint it is based on, then
+ * its own, each connectable from here unless it already is. A connected
+ * app's tools each have a switch: on, the agent uses the tool without
+ * asking; off, it can't use it.
+ */
+function AgentApps({ agent }: { agent: Agent }) {
   const { t } = useI18n();
   const { data: extensions } = useQuery(extensionsQuery());
   const blueprint = extensions?.extensions
@@ -345,6 +442,7 @@ function PimApps({ agent }: { agent: Agent }) {
   ].flatMap((ref) => directory.find((app) => app.ref === ref) ?? []);
   const queryClient = useQueryClient();
   const { data: connected = [] } = useQuery(appsQuery());
+  const { data: tools = [] } = useQuery(agentPermissionsQuery(agent.id));
   const connect = useMutation({
     mutationFn: (ref: string) => pim.connectApp(ref),
     onSuccess: (result) => {
@@ -355,43 +453,151 @@ function PimApps({ agent }: { agent: Agent }) {
     },
     onError: (error) => toast.error(error.message),
   });
-  if (apps.length === 0) return null;
+  const set = useMutation({
+    mutationFn: ({ info, on }: { info: ToolPermissionInfo; on: boolean }) =>
+      pim.setAgentPermission(
+        agent.id,
+        info.app ?? "",
+        info.tool,
+        on ? "on" : "off",
+      ),
+    onSuccess: (next) =>
+      queryClient.setQueryData(
+        agentPermissionsQuery(agent.id).queryKey,
+        (all) =>
+          all?.map((info) =>
+            info.app === next.app && info.tool === next.tool ? next : info,
+          ),
+      ),
+    onError: (error) => toast.error(error.message),
+  });
   return (
-    <ul className="mt-2 flex flex-wrap gap-1.5" aria-label={t("suggestedApps")}>
-      {apps.map((app) => {
-        const known = connected.some(
-          (server) => server.app === app.ref && server.state === "ready",
-        );
-        return (
-          <li
-            key={app.ref}
-            className="flex items-center gap-1.5 rounded-full border py-0.5 pr-1 pl-2.5 text-xs"
-            title={app.description || app.name}
+    <section className="mt-6 space-y-2" aria-label={t("suggestedApps")}>
+      <h3 className="text-[13px] text-muted-foreground">
+        {t("suggestedApps")}
+      </h3>
+      {apps.length === 0 ? (
+        <p className="text-muted-foreground text-sm">{t("noAgentApps")}</p>
+      ) : (
+        <ul className="divide-y overflow-hidden rounded-xl border">
+          {apps.map((app) => {
+            const server = connected.find(
+              (candidate) => candidate.app === app.ref,
+            );
+            const ready = server?.state === "ready";
+            const own = ready
+              ? tools.filter((info) => info.app === server.id)
+              : [];
+            return (
+              <li key={app.ref}>
+                <Collapsible>
+                  <div className="flex items-center gap-3 px-3 py-2.5">
+                    <AppIcon
+                      name={app.name}
+                      icon={app.icon}
+                      className="size-6 text-xs"
+                    />
+                    <span className="min-w-0 flex-1 truncate text-sm">
+                      {app.name}
+                    </span>
+                    {ready ? (
+                      <CollapsibleTrigger className="group flex items-center gap-1 rounded-md text-[13px] text-muted-foreground hover:text-foreground">
+                        {t("toolsOn", {
+                          on: own.filter((info) => info.permission === "on")
+                            .length,
+                          count: own.length,
+                        })}
+                        <ChevronDown className="size-4 transition-transform group-data-[state=open]:rotate-180" />
+                      </CollapsibleTrigger>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => connect.mutate(app.ref)}
+                        disabled={connect.isPending}
+                      >
+                        {t("connect")}
+                      </Button>
+                    )}
+                  </div>
+                  <CollapsibleContent>
+                    <ul
+                      className="divide-y border-t bg-muted/20"
+                      aria-label={t("toolsOf", { name: app.name })}
+                    >
+                      {own.map((info) => (
+                        <AgentToolRow
+                          key={info.tool}
+                          info={info}
+                          pending={
+                            set.isPending &&
+                            set.variables?.info.app === info.app &&
+                            set.variables.info.tool === info.tool
+                          }
+                          onChange={(on) => set.mutate({ info, on })}
+                        />
+                      ))}
+                    </ul>
+                  </CollapsibleContent>
+                </Collapsible>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {apps.length > 0 && (
+        <p className="text-muted-foreground text-xs">
+          {t("agentToolsHint", { name: agent.name })}
+        </p>
+      )}
+    </section>
+  );
+}
+
+/** One of an app's tools, with its switch for the agent. */
+function AgentToolRow({
+  info,
+  pending,
+  onChange,
+}: {
+  info: ToolPermissionInfo;
+  pending: boolean;
+  onChange: (on: boolean) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <li className="flex items-center gap-3 py-2.5 pr-3 pl-12">
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-2">
+          <span className="truncate font-mono text-[13px]">{info.tool}</span>
+          {info.destructive && (
+            <span className="shrink-0 rounded-full bg-secondary px-2 text-[11px] text-muted-foreground">
+              {t("destructiveTool")}
+            </span>
+          )}
+        </span>
+        {info.description && (
+          <span
+            className="block truncate text-muted-foreground text-xs"
+            title={info.description}
           >
-            <AppIcon
-              name={app.name}
-              icon={app.icon}
-              className="size-4 text-[9px]"
-            />
-            {app.name}
-            {known ? (
-              <span className="px-1.5 text-muted-foreground">
-                {t("connected")}
-              </span>
-            ) : (
-              <button
-                type="button"
-                className="rounded-full bg-primary px-2 py-0.5 text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
-                onClick={() => connect.mutate(app.ref)}
-                disabled={connect.isPending}
-              >
-                {t("connect")}
-              </button>
-            )}
-          </li>
-        );
-      })}
-    </ul>
+            {info.description}
+          </span>
+        )}
+        {info.changed && (
+          <span className="mt-1 flex items-start gap-1.5 text-muted-foreground text-xs">
+            <AlertCircle className="mt-px size-3.5 shrink-0" />
+            {t("agentToolChanged")}
+          </span>
+        )}
+      </span>
+      <Switch
+        checked={info.permission === "on"}
+        onCheckedChange={onChange}
+        disabled={pending}
+        aria-label={t("useTool", { tool: info.tool })}
+      />
+    </li>
   );
 }
 
@@ -479,6 +685,15 @@ function AgentForm({
     color: agent?.color ?? null,
     image: agent?.icon != null ? "saved" : null,
   });
+  const nameId = useId();
+  // An image chosen but not uploaded yet shows from the browser.
+  const [preview, setPreview] = useState<string>();
+  useEffect(() => {
+    if (!(look.image instanceof Blob)) return setPreview(undefined);
+    const url = URL.createObjectURL(look.image);
+    setPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [look.image]);
   const { data: directory } = useQuery(appDirectoryQuery());
   // Each member row keeps a key of its own while edited, so removing one doesn't shift the others' inputs.
   const [value, setValue] = useState<
@@ -556,17 +771,55 @@ function AgentForm({
       className="space-y-5 [&_legend]:text-[13px] [&_legend]:text-muted-foreground [&_label>span]:font-normal [&_label>span]:text-[13px] [&_label>span]:text-muted-foreground [&_textarea]:rounded-xl"
       aria-label={agent ? t("editAgent") : t("newAgent")}
     >
-      <AgentLookPicker agent={agent} value={look} onChange={setLook} />
-      <label className="block space-y-1">
-        <span className="font-medium text-sm">{t("agentName")}</span>
-        <Input
-          value={value.name}
-          onChange={(event) => setValue({ ...value, name: event.target.value })}
-          placeholder={t("agentNamePlaceholder")}
-          maxLength={60}
-          required
-        />
-      </label>
+      <div className="space-y-1">
+        <label
+          htmlFor={nameId}
+          className="block font-normal text-[13px] text-muted-foreground"
+        >
+          {t("agentName")}
+        </label>
+        {/* How it looks is chosen from its icon, beside its name, as at setup. */}
+        <div className="flex items-center gap-2">
+          <Popover>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                aria-label={t("changeLook")}
+                title={t("changeLook")}
+                className="relative shrink-0 rounded-xl outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40"
+              >
+                <AgentIcon
+                  agent={{
+                    id: agent?.id ?? "",
+                    icon: look.image === "saved" ? (agent?.icon ?? null) : null,
+                    symbol: look.symbol,
+                    color: look.color,
+                  }}
+                  src={preview}
+                  tile
+                  className="size-9 rounded-xl"
+                />
+                <span className="-right-1.5 -bottom-1.5 absolute flex size-4.5 items-center justify-center rounded-full bg-background shadow-sm ring-1 ring-border">
+                  <Pencil className="size-2.5" />
+                </span>
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-auto p-3">
+              <CompactLookPicker value={look} onChange={setLook} />
+            </PopoverContent>
+          </Popover>
+          <Input
+            id={nameId}
+            value={value.name}
+            onChange={(event) =>
+              setValue({ ...value, name: event.target.value })
+            }
+            placeholder={t("agentNamePlaceholder")}
+            maxLength={60}
+            required
+          />
+        </div>
+      </div>
       <label className="block space-y-1">
         <span className="font-medium text-sm">{t("agentDescription")}</span>
         <Input

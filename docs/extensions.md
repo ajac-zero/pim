@@ -245,7 +245,7 @@ export const brand = definePimExtension({
 });
 ```
 
-- **Every token, in each mode.** `light` and `dark` give every token in [`THEME_TOKENS`](../src/themes.ts) a CSS color; `bubble` and `bubble-foreground` are optional and follow the primary. A missing or unknown token fails with the reason, like any mistake in `pim.config.ts`.
+- **Every token, in each mode.** `light` and `dark` give every token in [`THEME_TOKENS`](../src/themes.ts) a CSS color; `bubble` and `bubble-foreground` are optional and follow the secondary surface and its foreground. Bubble fills should stay close to the canvas, with text meeting WCAG AA contrast (4.5:1). A missing or unknown token fails with the reason, like any mistake in `pim.config.ts`.
 - **Ids are the deployment's.** A theme's id is lowercase letters, digits and hyphens, unique across every extension, Pim's own included. Prefix yours with your extension's name.
 - **Code colors** are a theme Shiki bundles, by name, or one recolored from it: `{ base, background, foreground, colors }`, mapping each of the base's colors to yours. A name Shiki doesn't ship leaves that theme's code uncolored.
 - **Fonts** are optional: `fonts: { ui: "pixel", code: "pixel" }` chooses Pixeloid Sans (regular and bold) for interface text and Pixeloid Mono for monospace text. Each role independently accepts `"system"` (the default) or `"pixel"`. Font files ship with the web app; missing characters use the fallback stack. Themes do not fetch fonts from third parties.

@@ -26,7 +26,7 @@ Components use the tokens in [`src/styles/app.css`](src/styles/app.css), never r
 | `--muted-foreground` | Previews, timestamps, section labels, placeholders, system events |
 | `--primary` | Primary buttons, the send button |
 | `--primary-foreground` | Text and icons on primary |
-| `--bubble` / `--bubble-foreground` | User message bubbles; the primary colors unless a theme sets them |
+| `--bubble` / `--bubble-foreground` | Quiet user message surfaces; the secondary colors unless a theme sets them |
 | `--agent-<color>` | An agent's icon and its tinted tile, one per color the API accepts |
 
 Semantic colors, used only for their meaning:
@@ -43,14 +43,14 @@ A theme chooses colors and may choose bundled fonts and an icon set. Every theme
 
 - **Tokyo Night** (the default in `pim.config.ts`): "Night" navy for dark mode and the "Day" palette for light mode, with text darkened for contrast. Its blue is the primary.
 - **Pixel:** Tokyo Night's palettes with Pixeloid Sans (regular and bold) for interface text, Pixeloid Mono for code, and pixel-outline icons. Other themes keep system fonts and Lucide icons unless they explicitly choose another bundled style.
-- **Gronk:** neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles invert with it.
+- **Gronk:** neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles stay near the canvas in both modes.
 - **Classics:** Catppuccin (Latte / Mocha), Solarized, Gruvbox (medium), Rosé Pine (Dawn / Main), One (Light / Dark), Everforest (medium), Nord (a light mode built from its Snow Storm palette), Dracula (Alucard / Dracula), and Ayu (Light / Mirage). Each uses the official palette, adjusted only in lightness where a pair missed contrast; each theme's header comment lists its deviations.
-- **Gronk:** neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles invert with it.
-- **Moose:** cool grays with black (light) or white (dark) buttons, white cards on a gray canvas in light mode, and sky-blue user bubbles.
+- **Gronk:** neutral grays, with a near-black primary in light mode that inverts to near-white in dark mode. User bubbles stay near the canvas in both modes.
+- **Moose:** cool grays with black (light) or white (dark) buttons, white cards on a gray canvas in light mode, and softly blue user bubbles.
 
 Parody themes like Gronk and Moose are playful nods to apps that inspired Pim. Give them a spoof name and the inspiration's general palette, never its real name, logo, or other brand assets.
 
-In every theme the sidebar is one step off the canvas, bubbles and fills are one step from the canvas, and body text on the canvas meets WCAG AA contrast (4.5:1).
+In every theme the sidebar is one step off the canvas, bubbles and fills are one step from the canvas, and body text on the canvas and in bubbles meets WCAG AA contrast (4.5:1). Bubble fills stay within 2:1 contrast of the canvas rather than using the primary action's solid color.
 
 Themes are data an extension brings (see [docs/extensions.md](../docs/extensions.md#themes)); Pim's own are the `pim.themes` extension in [`src/extensions/themes/`](../src/extensions/themes/), one file each. To add one, copy a file there, give every token a value in `light` and `dark`, name its Shiki code themes, and list it in that folder's `index.ts`. When Shiki ships only a dark code theme, make the light one by recoloring it: map each of its colors (`web/src/lib/themes.test.ts` checks none is left). Agent colors should take the theme's own hues, and none should match the primary, since "no color" means primary.
 
@@ -97,7 +97,7 @@ On narrow screens there is no sidebar. A bar along the bottom, in the sidebar's 
 ### Messages
 
 - **Agent messages** are plain text on the canvas, without a bubble or icon, using the transcript's whole width so tables, code, and long formatted answers have room. A faint hairline separates an agent's consecutive messages.
-- **User messages** are `--bubble` bubbles with `--bubble-foreground` text, aligned right. Their Markdown renders as in agent messages, except that line breaks stay as typed and headings are bold text. Links, code, and table lines take the bubble's text color.
+- **User messages** are `--bubble` bubbles with `--bubble-foreground` text, aligned right. Their Markdown renders as in agent messages, except that line breaks stay as typed and headings are bold text. Links, inline code, quotes and tables keep the bubble's text color at full opacity. Inline code and table headers use a wash of the canvas color so their fills do not weaken text contrast.
 - **Message times** are small muted text under each message: left-aligned under an agent's, right-aligned under a user's bubble. They fade in and out with the copy button on hover or keyboard focus, keeping their space when hidden. A message from another day shows its date too.
 - **Hover actions** (copy, retry) are bare icons beside the message's time and appear only on hover or keyboard focus.
 - **Timestamps** ("Today 10:01 AM") and **system events** ("Approved: rename the agent", "Scheduled check-in") are centered muted text, never bubbles. A referenced object shows its icon inline and is clickable.

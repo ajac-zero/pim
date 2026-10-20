@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon, tileClass } from "~/components/agent-icon";
 import { ArtifactFrame, ArtifactIcon } from "~/components/artifact";
@@ -55,6 +55,17 @@ function DashboardPage() {
   const { data, error, refetch } = useQuery(dashboardQuery(agentId, locale));
   const { start, sent } = useStartChat(agentId);
   const queryClient = useQueryClient();
+  // The room the widgets' scrollbar takes, if any (overlay scrollbars take none), which the composer leaves too, so the two line up.
+  const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
+  const [gutter, setGutter] = useState(0);
+  useEffect(() => {
+    if (!scroller) return;
+    const observer = new ResizeObserver(() =>
+      setGutter(scroller.offsetWidth - scroller.clientWidth),
+    );
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, [scroller]);
 
   if (error) {
     return <RouteError error={error} reset={() => refetch()} />;
@@ -108,6 +119,7 @@ function DashboardPage() {
       {sent !== null && <StartingChat content={sent} />}
       {/* Kept while the chat starts, in case it can't. */}
       <div
+        ref={setScroller}
         className={cn(
           "min-h-0 flex-1 overflow-y-auto scrollbar-thin",
           sent !== null && "hidden",
@@ -219,8 +231,12 @@ function DashboardPage() {
           )}
         </div>
       </div>
-      <div className="mr-2.5 flex shrink-0 justify-center px-4 pb-2">
-        <div className="w-full max-w-3xl">
+      {/* As wide as the widgets above it, which have the same width and padding. */}
+      <div
+        className="flex shrink-0 justify-center pb-2"
+        style={{ marginRight: gutter }}
+      >
+        <div className="w-full max-w-4xl px-4">
           <Composer
             key={`${agentId}:${prompt ?? ""}`}
             draftKey={`new-chat:${prompt ?? ""}`}

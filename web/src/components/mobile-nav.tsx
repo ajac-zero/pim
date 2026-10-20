@@ -16,6 +16,7 @@ import {
   Blocks,
   CalendarClock,
   Compass,
+  Contact,
   Folder,
   MessagesSquare,
   MoreHorizontal,
@@ -35,6 +36,7 @@ import { cn } from "~/lib/utils";
 
 /** The panels that live under More rather than in the bar. */
 const MORE_PANELS: readonly (SidebarPanel | undefined)[] = [
+  "agents",
   "files",
   "skills",
   "schedules",
@@ -45,7 +47,7 @@ const MORE_PANELS: readonly (SidebarPanel | undefined)[] = [
  * along the bottom of every page, as the rail is beside every page. Chats, notifications and artifacts fill the screen with
  * their list (`list`), New chat opens the dashboard of the open chat's agent
  * or stays on the open dashboard (your majordomo's anywhere else), and More opens
- * a sheet with the rest: files, skills, schedules, the dialogs and your
+ * a sheet with the rest: agents, files, skills, schedules, the dialogs and your
  * profile.
  */
 export function MobileNav({
@@ -284,6 +286,11 @@ function MoreSheet({
           </ProfilePopover>
         )}
         <div className="mx-3 my-1 h-px bg-border" />
+        {panelRow(
+          "agents",
+          <Contact className={ROW_ICON_CLASS} />,
+          t("agents"),
+        )}
         {panelRow("files", <Folder className={ROW_ICON_CLASS} />, t("files"))}
         {panelRow(
           "skills",

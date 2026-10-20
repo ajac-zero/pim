@@ -5,8 +5,10 @@ import {
   useParams,
   useSearch,
 } from "@tanstack/react-router";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, type Ref, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { AgentIcon } from "~/components/agent-icon";
+import { AgentSettingsDialog } from "~/components/agent-settings";
 import {
   ARTIFACT_KIND_NAMES,
   ArtifactIcon,
@@ -22,8 +24,10 @@ import {
   FileIcon,
   Folder,
   MoreHorizontal,
+  Plus,
   Repeat,
   ScrollText,
+  Settings,
   Trash2,
   Upload,
 } from "~/components/icons";
@@ -40,6 +44,7 @@ import {
 } from "~/components/ui/tooltip";
 import { baseName, parentOf } from "~/lib/files";
 import {
+  type Agent,
   ApiError,
   FILES_ROOT,
   type FileEntry,
@@ -49,6 +54,7 @@ import {
   pim,
 } from "~/lib/pim-api";
 import {
+  agentsQuery,
   artifactsQuery,
   filesQuery,
   notificationsQuery,
@@ -93,17 +99,20 @@ export function SidebarPanelAction({
   label,
   onClick,
   disabled,
+  ref,
   children,
 }: {
   label: string;
   onClick: () => void;
   disabled?: boolean;
+  ref?: Ref<HTMLButtonElement>;
   children: ReactNode;
 }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <button
+          ref={ref}
           type="button"
           className="flex size-10 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground disabled:opacity-50"
           onClick={onClick}
@@ -564,6 +573,91 @@ function FileRow({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+    </li>
+  );
+}
+
+/**
+ * Your agents, each opening its dashboard, with its settings a click away
+ * and a new one from the header.
+ */
+export function AgentsPanel({ onNavigate }: { onNavigate?: () => void }) {
+  const { t } = useI18n();
+  const { data: agents } = useQuery(agentsQuery());
+  const [creating, setCreating] = useState(false);
+  const newAgent = useRef<HTMLButtonElement>(null);
+  return (
+    <>
+      <SidebarPanelHeader title={t("agents")}>
+        <SidebarPanelAction
+          ref={newAgent}
+          label={t("newAgent")}
+          onClick={() => setCreating(true)}
+        >
+          <Plus className="size-4.5" />
+        </SidebarPanelAction>
+        <AgentSettingsDialog
+          open={creating}
+          onOpenChange={setCreating}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            newAgent.current?.focus();
+          }}
+        />
+      </SidebarPanelHeader>
+      <PanelList label={t("agents")} empty={false}>
+        {agents?.map((agent) => (
+          <AgentRow key={agent.id} agent={agent} onNavigate={onNavigate} />
+        ))}
+      </PanelList>
+    </>
+  );
+}
+
+function AgentRow({
+  agent,
+  onNavigate,
+}: {
+  agent: Agent;
+  onNavigate?: () => void;
+}) {
+  const { t } = useI18n();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settings = useRef<HTMLButtonElement>(null);
+  return (
+    <li className="group/row relative">
+      <Link
+        to="/agents/$agentId"
+        params={{ agentId: agent.id }}
+        onClick={onNavigate}
+        className={cn(ROW_CLASS, "pr-8")}
+        activeOptions={{ includeSearch: false }}
+        activeProps={{ className: "bg-sidebar-accent" }}
+      >
+        <AgentIcon agent={agent} tile className="size-8 rounded-[10px]" />
+        <RowText
+          title={agent.name}
+          meta={agent.majordomo ? t("majordomoBadge") : agent.description}
+        />
+      </Link>
+      <button
+        ref={settings}
+        type="button"
+        onClick={() => setSettingsOpen(true)}
+        className="-translate-y-1/2 absolute top-1/2 right-1.5 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-foreground focus:opacity-100 group-hover/row:opacity-100 pointer-coarse:opacity-100"
+        aria-label={t("agentSettings", { name: agent.name })}
+      >
+        <Settings className="size-4" />
+      </button>
+      <AgentSettingsDialog
+        agent={agent}
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          settings.current?.focus();
+        }}
+      />
     </li>
   );
 }

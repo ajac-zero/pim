@@ -6,7 +6,7 @@ const MAX_PAGE_CHARS = 20_000;
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
 /** How many of a page's images `fetch_url` lists. */
-const MAX_PAGE_IMAGES = 8;
+const MAX_PAGE_IMAGES = 12;
 
 function decodeEntities(html: string): string {
 	return html.replace(/&(#x?[0-9a-f]+|\w+);/gi, (match, name: string) => {
@@ -48,7 +48,8 @@ export function pageImages(html: string, base: string): string[] {
 	for (const [, attributes = ""] of html.matchAll(/<img\b([^>]*)>/gi)) found.push(attribute(attributes, "src") ?? "");
 	const images = found.flatMap((value) => {
 		const url = URL.parse(value.trim(), base);
-		return url && (url.protocol === "https:" || url.protocol === "http:") ? [url.href] : [];
+		// A drawing is no image Pim shows: SVG can carry scripts.
+		return url && (url.protocol === "https:" || url.protocol === "http:") && !url.pathname.toLowerCase().endsWith(".svg") ? [url.href] : [];
 	});
 	return [...new Set(images)].slice(0, MAX_PAGE_IMAGES);
 }

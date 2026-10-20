@@ -10,12 +10,15 @@ import { type ComputerStatus, pim } from "~/lib/pim-api";
 import { computerQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
-/** The commands that start pim-computer with `token`: with Node.js, or in a container. */
+/**
+ * The commands that start pim-computer with `token`: with Node.js, or in a
+ * container, which installs Chromium the first time, for the agents' browser.
+ */
 function commands(token: string) {
   const origin = window.location.origin;
   return {
     node: `curl -fsSLO ${origin}/pim-computer.ts\nPIM_URL=${origin} PIM_COMPUTER_TOKEN=${token} node pim-computer.ts`,
-    docker: `docker run -d --name pim-computer --restart unless-stopped \\\n  -e PIM_URL=${origin} -e PIM_COMPUTER_TOKEN=${token} \\\n  -e PIM_COMPUTER_ROOT=/workspace -v pim-files:/workspace \\\n  node:24 sh -c 'curl -fsSLO $PIM_URL/pim-computer.ts && exec node pim-computer.ts'`,
+    docker: `docker run -d --name pim-computer --restart unless-stopped \\\n  -e PIM_URL=${origin} -e PIM_COMPUTER_TOKEN=${token} \\\n  -e PIM_COMPUTER_ROOT=/workspace -v pim-files:/workspace \\\n  node:24 sh -c 'command -v chromium || (apt-get update && apt-get install -y --no-install-recommends chromium fonts-noto-color-emoji); curl -fsSLO $PIM_URL/pim-computer.ts && exec node pim-computer.ts'`,
   };
 }
 
@@ -97,6 +100,7 @@ export function ComputerSection() {
                     `${machine.platform} ${machine.arch}`,
                     machine.user,
                     t("computerFilesIn", { folder: machine.root }),
+                    ...(machine.browser ? [] : [t("computerNoBrowser")]),
                   ].join(" · ")
                 : t("computerPairedOn", {
                     date: formatDate(new Date(status.pairedAt ?? 0), {

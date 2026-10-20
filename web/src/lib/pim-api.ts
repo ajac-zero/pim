@@ -713,6 +713,8 @@ export type ComputerStatus = {
     user: string;
     /** The folder on it that holds your files. */
     root: string;
+    /** The Chrome your agents browse with there, or null where it has none. */
+    browser: string | null;
     connectedAt: number;
   } | null;
 };
@@ -725,6 +727,41 @@ export type BrowserStatus = {
 
 /** A picture of the page the browser shows. */
 export const BROWSER_SCREENSHOT_URL = "/api/browser/screenshot";
+
+/** Where the app takes the browser over: a socket that hears the page and sends what the person does. */
+export const BROWSER_LIVE_PATH = "/api/browser/live";
+
+/** What the browser's socket says: the page as a picture, which page it is, or what went wrong. */
+export type BrowserLiveMessage =
+  | { type: "frame"; data: string; width: number; height: number }
+  | { type: "page"; url: string; title: string }
+  | { type: "error"; message: string };
+
+/** What the person does in the browser, in DevTools' terms (src/browser.ts's `BrowserInput`). */
+export type BrowserInput =
+  | {
+      type: "mouse";
+      event: "mousePressed" | "mouseReleased" | "mouseMoved" | "mouseWheel";
+      x: number;
+      y: number;
+      button?: "none" | "left" | "middle" | "right";
+      clickCount?: number;
+      deltaX?: number;
+      deltaY?: number;
+      modifiers?: number;
+    }
+  | {
+      type: "key";
+      event: "keyDown" | "keyUp";
+      key: string;
+      code: string;
+      text?: string;
+      keyCode?: number;
+      modifiers?: number;
+    }
+  | { type: "text"; text: string }
+  | { type: "navigate"; url: string }
+  | { type: "back" | "forward" | "reload" };
 
 export type DayUsage = {
   day: string;
@@ -1050,9 +1087,6 @@ export const pim = {
     call<ComputerStatus & { token: string }>("/computer", { method: "POST" }),
   removeComputer: () => call<ComputerStatus>("/computer", { method: "DELETE" }),
   browser: () => call<BrowserStatus>("/browser"),
-  /** A Live View link to use the browser yourself; it carries its own access. */
-  takeOverBrowser: () =>
-    call<{ url: string }>("/browser/live", { method: "POST" }),
   closeBrowser: () =>
     call<{ closed: boolean }>("/browser", { method: "DELETE" }),
   removeAgentIcon: (id: string) =>

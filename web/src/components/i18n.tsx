@@ -599,6 +599,7 @@ const translations = {
     computerOnline: "Online",
     computerOffline: "Offline",
     computerFilesIn: "files in {folder}",
+    computerNoBrowser: "no browser: install Chrome there",
     computerPairedOn: "Token made {date}",
     removeComputer: "Remove computer",
     removeComputerConfirm:
@@ -624,6 +625,17 @@ const translations = {
     takeOverBrowser: "Take over",
     closeBrowser: "Turn off browser",
     browserClosed: "Browser closed",
+    browserTabTitle: "{title} · Browser",
+    browserBack: "Back",
+    browserForward: "Forward",
+    browserReload: "Reload",
+    browserAddress: "Address",
+    browserAddressPlaceholder: "Go to an address",
+    browserDone: "Done",
+    browserKeyboard: "Type into the page",
+    browserConnecting: "Connecting to the browser on your computer…",
+    browserGone:
+      "The browser isn't open: your agents open it when they need it. You can close this tab.",
     noFilePreview: "There's no preview for this file. Download it to open it.",
     deleteFileNamed: "Delete {name}",
     deleteFileConfirm:
@@ -1568,6 +1580,7 @@ const translations = {
     computerOnline: "En línea",
     computerOffline: "Sin conexión",
     computerFilesIn: "archivos en {folder}",
+    computerNoBrowser: "sin navegador: instala Chrome allí",
     computerPairedOn: "Token creado el {date}",
     removeComputer: "Quitar computadora",
     removeComputerConfirm:
@@ -1593,6 +1606,17 @@ const translations = {
     takeOverBrowser: "Tomar el control",
     closeBrowser: "Apagar el navegador",
     browserClosed: "Navegador cerrado",
+    browserTabTitle: "{title} · Navegador",
+    browserBack: "Atrás",
+    browserForward: "Adelante",
+    browserReload: "Recargar",
+    browserAddress: "Dirección",
+    browserAddressPlaceholder: "Ir a una dirección",
+    browserDone: "Listo",
+    browserKeyboard: "Escribir en la página",
+    browserConnecting: "Conectando con el navegador de tu computadora…",
+    browserGone:
+      "El navegador no está abierto: tus agentes lo abren cuando lo necesitan. Puedes cerrar esta pestaña.",
     noFilePreview:
       "Este archivo no tiene vista previa. Descárgalo para abrirlo.",
     deleteFileNamed: "Eliminar {name}",

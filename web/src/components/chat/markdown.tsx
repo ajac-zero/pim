@@ -22,7 +22,7 @@ import {
   CodeBlockTitle,
 } from "~/components/ui/code-block";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
-import { showTab } from "~/lib/tabs";
+import { openTab } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
@@ -248,7 +248,7 @@ function ChatLink({
           event.altKey
         )
           return;
-        showTab(id, true);
+        openTab(id);
       }}
       className={className}
     >

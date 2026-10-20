@@ -149,8 +149,6 @@ function ChatPage() {
     useElementHeight<HTMLDivElement>();
 
   const send = (content: UserContent) => {
-    // A chat you've written in keeps its tab.
-    showTab(sessionId, true);
     pimClient.send(content).catch((error: Error) => toast.error(error.message));
   };
   const stop = () => {

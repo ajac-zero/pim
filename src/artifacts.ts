@@ -1075,6 +1075,27 @@ export function framePage(kind: ArtifactKind, files: LoadedFiles, origin: string
 	}
 }
 
+/**
+ * The page a diagram in an agent's message is drawn in: framed and sandboxed
+ * as artifacts are, with nothing of anyone's in it. The app that frames it
+ * posts it the diagram's Mermaid source and its light or dark mode, which
+ * only the frame's parent may; the page draws it on a transparent
+ * background, reports its height, and says if it can't (see the Mermaid
+ * runtime, web/src/artifact-runtime/mermaid.ts).
+ */
+export function diagramPage(origin: string): Response {
+	const page =
+		'<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+		"<style>html,body{margin:0;background:transparent}body{font:14px/1.5 system-ui,sans-serif}pre.mermaid{margin:0;overflow-x:auto}pre.mermaid svg{display:block;margin:0 auto}</style></head><body>" +
+		`<script src="${origin}${RUNTIME_PATH}mermaid.js"></script>` +
+		`<script>addEventListener("message",(event)=>{const data=event.data;if(event.source!==parent||!data||data.type!=="pim:diagram"||typeof data.source!=="string")return;__pimDiagram(data.source,data.dark===true)})</script>` +
+		"</body></html>";
+	const headers = artifactHeaders(origin, "text/html; charset=utf-8", { runtime: true });
+	// The same for everyone: browsers may keep it.
+	headers.set("cache-control", "public, max-age=3600");
+	return new Response(page, { headers });
+}
+
 /** What an attribute names, as one of the artifact's files, if it is one: relative to the main file, without a query or fragment. */
 function ownFile(files: LoadedFiles, reference: string | null) {
 	if (!reference || /^[a-z][a-z0-9+.-]*:|^\/\/|^#/i.test(reference.trim())) return undefined;

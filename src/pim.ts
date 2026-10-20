@@ -202,6 +202,8 @@ const REVIEW_EXPIRY_CALLBACK = "expireReview";
 const MEMORY_TOOL = "memory";
 /** How long a guest's request waits for the owner before it is denied. */
 const GUEST_APPROVAL_MS = 24 * 60 * 60 * 1000;
+/** How long a chat goes without activity before it is archived: listed apart, not deleted. */
+const ARCHIVE_AFTER_MS = 2 * 24 * 60 * 60 * 1000;
 
 /** A circle's name as given: trimmed, not empty, not long. */
 function circleName(name: unknown): string {
@@ -3386,9 +3388,11 @@ export class Pim extends DurableAgent<Env> {
 			"/sessions",
 			async () => {
 				const hidden = this.#hiddenSessions();
+				const archiveBefore = Date.now() - ARCHIVE_AFTER_MS;
 				const sessions = (await this.harness.sessions.list()).filter((session) => !hidden.has(session.id)).map((session) => {
 					const info = this.store.sessionInfo(session.id);
 					const visit = this.visits.bySession(session.id);
+					const unread = info?.unread ?? false;
 					return {
 						id: this.store.publicId(session.id),
 						busy: session.busy,
@@ -3396,7 +3400,9 @@ export class Pim extends DurableAgent<Env> {
 						createdAt: info?.createdAt ?? null,
 						updatedAt: info?.updatedAt ?? null,
 						responseAt: info?.responseAt ?? null,
-						unread: info?.unread ?? false,
+						unread,
+						// A chat still working, or with a reply not yet read, stays in the list however old it is.
+						archived: !session.busy && !unread && info !== undefined && info.updatedAt < archiveBefore,
 						visit: visit ? { username: visit.username, available: !visit.revoked } : null,
 						agent: this.#agentRef(session.id),
 					};

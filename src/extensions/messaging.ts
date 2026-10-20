@@ -11,7 +11,7 @@ export const MESSAGING_EXTENSION = "pim.messaging";
 /** How many widgets one message can carry. */
 export const MAX_WIDGETS = 4;
 
-/** A notification's title when the model gives none: the message's first line. */
+/** An email's subject when the model gives none: the message's first line. */
 function headline(message: string): string {
 	const line = message.trim().split(/\r?\n/)[0]!.replace(/^[#>*\-\s]+/, "").trim();
 	return line.length > 120 ? `${line.slice(0, 119)}…` : line || "Pim";
@@ -21,10 +21,6 @@ export function messagingExtension(services: PimServices) {
 	const fields = {
 		message: Type.String({ minLength: 1, maxLength: 20_000, description: "What they read, in Markdown." }),
 		complete: Type.Optional(Type.Boolean({ description: "Finish this turn (default true). Set false only for a progress update; send the final answer in a separate call with no other tools." })),
-		notify: Type.Optional(Type.Boolean({ description: "Also alert their devices. Use it sparingly." })),
-		title: Type.Optional(
-			Type.String({ maxLength: 120, description: "A short headline: the email's subject, or the alert's; else the message's first line." }),
-		),
 		widgets: Type.Optional(
 			Type.Array(Type.String(), {
 				maxItems: MAX_WIDGETS,
@@ -35,6 +31,9 @@ export function messagingExtension(services: PimServices) {
 	};
 	const withEmail = Type.Object({
 		...fields,
+		title: Type.Optional(
+			Type.String({ maxLength: 120, description: "The email's subject; else the message's first line." }),
+		),
 		channel: Type.Optional(
 			Type.Union([Type.Literal("chat"), Type.Literal("email")], {
 				description:
@@ -45,12 +44,12 @@ export function messagingExtension(services: PimServices) {
 	const sendToUser = defineTool({
 		name: SEND_TO_USER,
 		description:
-			"Send the person a message. It is the only way they see anything you write: the rest of your text is private working notes. Set notify to also alert their phone and browsers, for something they should see soon even if they are not looking at this conversation.",
+			"Send the person a message. It is the only way they see anything you write: the rest of your text is private working notes.",
 		// Email is a channel only where the deployment can send it.
 		parameters: services.emailEnabled ? withEmail : (Type.Object(fields) as unknown as typeof withEmail),
 		replay: "safe",
 		async execute(args, api, context) {
-			const { message, channel, notify, title } = args;
+			const { message, channel, title } = args;
 			const session = String(api.conversationId);
 			const headed = title?.trim() || headline(message);
 			// A widget this chat can't show is a mistake the model can fix: say so, and send nothing.
@@ -74,15 +73,8 @@ export function messagingExtension(services: PimServices) {
 			}
 			// Replaying a delivered reply must not make it unread again.
 			const responseAt = await api.memo("responseAt", Math.max(Date.now(), (services.store.sessionInfo(session)?.responseAt ?? 0) + 1), context);
-			services.responseSent(session, responseAt);
-			if (notify) {
-				const id = await api.memo("notification", crypto.randomUUID(), context);
-				const known = services.store.notification(id);
-				const notification = services.store.addNotification({ id, session, title: headed, body: message });
-				// A replayed call stored it already; deliver only once.
-				if (!known) await services.notify(notification);
-				sent = `${sent} Their devices were alerted.`;
-			}
+			// A reply that went to their inbox needs no push.
+			await services.responseSent(session, responseAt, channel === "email" ? undefined : message);
 			// What the widgets showed goes back to the model too, so it knows what the person saw; the app draws it from here.
 			return { ...text(shown.length === 0 ? sent : JSON.stringify({ sent, widgets: shown })), ...(args.complete === false ? {} : { control: { terminate: true as const } }) };
 		},

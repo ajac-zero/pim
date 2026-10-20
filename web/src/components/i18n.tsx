@@ -400,7 +400,7 @@ const translations = {
     notifications: "Notifications",
     pushNotifications: "Push notifications",
     pushDescription:
-      "Get Pim's notifications on this device, even when the app is closed.",
+      "Get your agents' replies and Pim's notifications on this device when you aren't looking at the chat, even with the app closed.",
     pushBlocked:
       "Notifications are blocked for this site. Allow them in your browser's settings.",
     pushUnsupported:
@@ -418,7 +418,6 @@ const translations = {
     saveName: "Save name",
     searchChats: "Search chats",
     sendMessage: "Send message",
-    alsoNotified: "Also sent to your devices",
     emailTitle: "Email",
     emailDescription:
       "Pim emails you here when you ask it to, or for something you'll want to keep, like a report.",
@@ -1292,7 +1291,7 @@ const translations = {
     scheduleCancelled: "Programación cancelada",
     pushNotifications: "Notificaciones push",
     pushDescription:
-      "Recibe las notificaciones de Pim en este dispositivo, incluso con la app cerrada.",
+      "Recibe las respuestas de tus agentes y las notificaciones de Pim en este dispositivo cuando no estás viendo el chat, incluso con la app cerrada.",
     pushBlocked:
       "Las notificaciones están bloqueadas para este sitio. Permítelas en los ajustes de tu navegador.",
     pushUnsupported:
@@ -1310,7 +1309,6 @@ const translations = {
     saveName: "Guardar nombre",
     searchChats: "Buscar chats",
     sendMessage: "Enviar mensaje",
-    alsoNotified: "También enviado a tus dispositivos",
     emailTitle: "Correo",
     emailDescription:
       "Pim te escribe aquí cuando se lo pides, o para algo que querrás guardar, como un informe.",

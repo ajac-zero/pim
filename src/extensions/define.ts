@@ -68,7 +68,7 @@ export type AbilityContext = {
 	readonly data: ExtensionData;
 	/** The person's IANA time zone, as it is when read. */
 	readonly timeZone: string;
-	/** Tells the person: a notification in the app, pushed to their devices and webhook. */
+	/** Tells the person: a notification in the app, pushed to their devices. */
 	notify(title: string, body: string): Promise<void>;
 };
 

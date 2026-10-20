@@ -210,11 +210,10 @@ describe("settings", () => {
 			timeZone: "America/New_York",
 			approvalPolicy: "auto",
 			approvalTimeoutSeconds: 1.5,
-			notifyWebhook: null,
 		});
 		const put = (body: unknown) => api("/settings", { method: "PUT", body: JSON.stringify(body) });
 		expect((await put({ timeZone: "Mars/Olympus" })).status).toBe(400);
-		expect((await put({ notifyWebhook: "http://insecure.example" })).status).toBe(400);
+		expect((await put({ notifyWebhook: "https://hooks.example" })).status).toBe(400);
 		expect((await put({ theme: "dark" })).status).toBe(400);
 		expect((await put({ timeZone: "Asia/Tokyo" })).body).toMatchObject({ timeZone: "Asia/Tokyo" });
 		expect((await api("/")).body).toMatchObject({ timeZone: "Asia/Tokyo" });

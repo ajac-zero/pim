@@ -147,7 +147,7 @@ describe("sending to the person", () => {
 		]);
 		const { body } = await post(`/sessions/${ROOT}/messages`, { content: "How's the flight price?", wait: true });
 		expect(body).toMatchObject({ status: "done", text: "On it.\n\nYour flight is **$80** cheaper.", replies: ["On it.", "Your flight is **$80** cheaper."] });
-		// Without notify, nothing else hears of it.
+		// A reply is not a notification.
 		expect((await api("/notifications?unread=true")).body.notifications).toEqual([]);
 
 		// Private final text prompts an explicit send; it is never passed off as the answer.
@@ -238,16 +238,15 @@ describe("sending to the person", () => {
 		expect((await api("/email", { method: "DELETE" })).body).toEqual({ available: true, address: null, pending: null });
 	});
 
-	it("alerts the person's devices with notify, on every connected socket", async () => {
+	it("tells every connected socket about a notification", async () => {
 		const { body: other } = await post("/sessions");
 		// Sockets on different sessions both receive it.
 		const root = await connect();
 		const elsewhere = await connect(other.id);
 
-		faux.setResponses([
-			toolUse("send_to_user", { message: "Your flight is $80 cheaper.", notify: true, title: "Price drop" }),
-		]);
-		await say("Tell me if anything changes.");
+		await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) =>
+			instance.deliverNotification(instance.store.addNotification({ id: crypto.randomUUID(), session: "1", title: "Price drop", body: "Your flight is $80 cheaper." })),
+		);
 
 		for (const { received } of [root, elsewhere]) {
 			await vi.waitFor(() => expect(received.some((message) => message.type === "notification")).toBe(true));
@@ -345,6 +344,40 @@ describe("web push", () => {
 		} finally {
 			fetched.mockRestore();
 		}
+	});
+
+	it("pushes a reply nobody has read, and not one that was read", async () => {
+		const phone = await browser("https://push.example/phone");
+		expect((await api("/push/subscription", { method: "PUT", body: JSON.stringify(phone.subscription) })).status).toBe(200);
+		const { body: chat } = await post("/sessions", { title: "Lisbon trip" });
+		const stub = env.Pim.getByName(OWNER);
+		/** Runs the reply checks still due, as their alarm would, and returns what reached the phone. */
+		const runChecks = async () => {
+			const fetched = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 201 }));
+			try {
+				await runInDurableObject(stub, async (instance: Pim) => {
+					for (const schedule of await instance.listSchedules()) {
+						if (schedule.callback !== "pushReply") continue;
+						await instance.pushReply(schedule.payload as never);
+						await instance.cancelSchedule(schedule.id);
+					}
+				});
+				return Promise.all((fetched.mock.calls as [[string, RequestInit]]).map(([, init]) => phone.decrypt(new Uint8Array(init.body as ArrayBuffer))));
+			} finally {
+				fetched.mockRestore();
+			}
+		};
+
+		faux.setResponses([toolUse("send_to_user", { message: "Booked the 9:40 to Lisbon." })]);
+		await say("Book the train.", chat.id);
+		expect(await runChecks()).toEqual([{ id: expect.any(String), session: chat.id, title: "Lisbon trip", body: "Booked the 9:40 to Lisbon.", reply: true }]);
+
+		// Read on another device before the check: nothing to push.
+		faux.setResponses([toolUse("send_to_user", { message: "Seat 42A." })]);
+		await say("Which seat?", chat.id);
+		const { responseAt } = (await api("/sessions")).body.sessions.find((session: { id: string }) => session.id === chat.id);
+		await post(`/sessions/${chat.id}/read`, { responseAt });
+		expect(await runChecks()).toEqual([]);
 	});
 
 	it("rejects subscriptions that are not https push subscriptions", async () => {

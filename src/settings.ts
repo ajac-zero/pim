@@ -23,8 +23,6 @@ export type Settings = {
 	/** IANA time zone the person lives in. */
 	readonly timeZone: string;
 	readonly approvalPolicy: ApprovalPolicy;
-	/** URL that receives notifications as JSON POSTs, or null. */
-	readonly notifyWebhook: string | null;
 };
 
 const SETTINGS_KEY = "settings";
@@ -43,9 +41,10 @@ function stored(store: PimStore): Partial<Settings> {
 	return json === undefined ? {} : (JSON.parse(json) as Partial<Settings>);
 }
 
-/** The person's settings, over `defaults` for those they never set. */
+/** The person's settings, over `defaults` for those they never set. A setting Pim no longer has is ignored. */
 export function readSettings(store: PimStore, defaults: Settings): Settings {
-	return { ...defaults, ...stored(store) };
+	const own = Object.entries(stored(store)).filter(([key]) => key in defaults);
+	return { ...defaults, ...Object.fromEntries(own) };
 }
 
 /**
@@ -65,11 +64,6 @@ export function updateSettings(store: PimStore, defaults: Settings, update: Reco
 				break;
 			case "approvalPolicy":
 				if (!APPROVAL_POLICIES.includes(value as ApprovalPolicy)) throw new HttpError(400, `approvalPolicy must be one of ${APPROVAL_POLICIES.join(", ")}`);
-				break;
-			case "notifyWebhook":
-				if (typeof value !== "string" || !/^https:\/\/[^\s]+$/.test(value) || value.length > 2048) {
-					throw new HttpError(400, "notifyWebhook must be an https URL");
-				}
 				break;
 			default:
 				throw new HttpError(400, `Unknown setting ${key}`);

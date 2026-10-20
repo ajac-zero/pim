@@ -19,14 +19,18 @@ export type ScheduledTaskPayload = {
  */
 export type PimServices = {
 	readonly store: PimStore;
-	/** Records a delivered reply and refreshes connected clients' conversation lists. */
-	responseSent(session: string, at: number): void;
+	/**
+	 * Records a delivered reply and refreshes connected clients' conversation
+	 * lists. With `alert`, the reply's text, it is also pushed to the person's
+	 * devices if no client has read it a few seconds later.
+	 */
+	responseSent(session: string, at: number, alert?: string): Promise<void>;
 	/** IANA time zone the user lives in, for reading and writing times; it follows their settings. */
 	readonly timeZone: string;
 	schedule(when: Date | number | string, payload: ScheduledTaskPayload): Promise<Schedule<ScheduledTaskPayload>>;
 	listSchedules(): Promise<Schedule<ScheduledTaskPayload>[]>;
 	cancelSchedule(id: string): Promise<boolean>;
-	/** Deliver a stored notification to the user's connected clients and webhook. */
+	/** Deliver a stored notification to the user's connected clients and devices. */
 	notify(notification: Notification): Promise<void>;
 	/** This deployment can send email; each person must also confirm an address. */
 	readonly emailEnabled: boolean;

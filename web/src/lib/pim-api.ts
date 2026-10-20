@@ -438,7 +438,6 @@ export type PimSettings = {
   approvalPolicy: ApprovalPolicy;
   /** Null: approvals wait for an answer however long. */
   approvalTimeoutSeconds: number | null;
-  notifyWebhook: string | null;
 };
 
 export type Limits = {

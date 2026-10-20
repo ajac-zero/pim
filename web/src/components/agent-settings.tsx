@@ -88,7 +88,7 @@ const EMPTY: AgentInput = {
 function AgentPageFrame({ children }: { children: ReactNode }) {
   return (
     <main className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-      <div className="mx-auto w-full max-w-[768px] px-6 py-8 md:py-12">
+      <div className="mx-auto w-full max-w-4xl px-4 py-6 md:px-8">
         {children}
       </div>
     </main>
@@ -289,7 +289,7 @@ export function AgentSettingsPage({ agent }: { agent: Agent }) {
       </div>
       {agent.majordomo && <MajordomoPreferencesSection agent={agent} />}
       <AgentApps agent={agent} />
-      <section className="mt-10" aria-label={t("agentDetails")}>
+      <section className="mt-8" aria-label={t("agentDetails")}>
         <h2 className="mb-3 text-[13px] text-muted-foreground">
           {t("agentDetails")}
         </h2>
@@ -324,7 +324,7 @@ function MajordomoPreferencesSection({ agent }: { agent: Agent }) {
     save.mutate({ ...preferences, ...next });
   return (
     <section
-      className="mt-8"
+      className="mt-6"
       aria-label={t("majordomoPreferences", { name: agent.name })}
     >
       <Question label={t("toneLabel", { name: agent.name })}>
@@ -420,7 +420,7 @@ function AgentApps({ agent }: { agent: Agent }) {
     onError: (error) => toast.error(error.message),
   });
   return (
-    <section className="mt-10 space-y-2" aria-label={t("suggestedApps")}>
+    <section className="mt-8 space-y-2" aria-label={t("suggestedApps")}>
       <div className="flex items-center justify-between gap-2">
         <h2 className="text-[13px] text-muted-foreground">
           {t("suggestedApps")}

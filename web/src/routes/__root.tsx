@@ -87,8 +87,9 @@ function Root() {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
-  // Letting an MCP client in is a page of its own, between the client and the person.
-  const alone = pathname === "/authorize";
+  // Letting an MCP client in is a page of its own, between the client and the person,
+  // and so is taking the agents' browser over.
+  const alone = pathname === "/authorize" || pathname === "/browser";
   return (
     <I18nProvider>
       <ThemeProvider>

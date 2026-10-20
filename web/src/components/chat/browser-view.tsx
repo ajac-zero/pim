@@ -14,7 +14,8 @@ import { BROWSER_SCREENSHOT_URL, type BrowserStatus, pim } from "~/lib/pim-api";
 /**
  * The browser your agents share, in the box beside a chat while it's open:
  * expand its dropdown for a picture that keeps up with them, and take it
- * over to sign in or finish something yourself.
+ * over, on a page of its own (routes/browser.tsx), to sign in or finish
+ * something yourself.
  */
 export function BrowserView({
   page,
@@ -26,20 +27,6 @@ export function BrowserView({
 }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const takeOver = useMutation({
-    // The tab opens on the click, so no popup blocker stops it; the link comes after.
-    mutationFn: async (tab: Window | null) => {
-      try {
-        const { url } = await pim.takeOverBrowser();
-        if (tab) tab.location.href = url;
-        else window.open(url, "_blank", "noopener");
-      } catch (error) {
-        tab?.close();
-        throw error;
-      }
-    },
-    onError: (error) => toast.error(error.message),
-  });
   const close = useMutation({
     mutationFn: pim.closeBrowser,
     onSuccess: () => toast.success(t("browserClosed")),
@@ -69,17 +56,12 @@ export function BrowserView({
             className="w-full rounded-lg border bg-background"
           />
           <div className="grid grid-cols-[3fr_1fr] gap-2">
-            <Button
-              className="w-full"
-              disabled={takeOver.isPending}
-              onClick={() => {
-                const tab = window.open("", "_blank");
-                if (tab) tab.opener = null;
-                takeOver.mutate(tab);
-              }}
-            >
-              <ExternalLink className="size-4" />
-              {t("takeOverBrowser")}
+            <Button className="w-full" asChild>
+              {/* A page of its own, beside the chat, where the person uses the browser. */}
+              <a href="/browser" target="_blank" rel="noopener">
+                <ExternalLink className="size-4" />
+                {t("takeOverBrowser")}
+              </a>
             </Button>
             <Action
               tooltip={t("closeBrowser")}

@@ -122,6 +122,9 @@ Then set `PIM_PUBLIC_URL` in the dashboard as above (from the CLI, `pnpm wrangle
 | `PIM_TIME_ZONE` | `UTC` | IANA time zone for anyone who hasn't set theirs; joining sets the browser's |
 | `PIM_LIMIT_DAILY_TOKENS`, `PIM_LIMIT_DAILY_MODEL_REQUESTS`, `PIM_LIMIT_DAILY_RUNS`, `PIM_LIMIT_SESSIONS`, `PIM_LIMIT_SCHEDULES`, `PIM_LIMIT_STORAGE_BYTES`, `PIM_LIMIT_ARTIFACTS`, `PIM_LIMIT_ARTIFACT_VERSIONS`, `PIM_LIMIT_ARTIFACT_BYTES`, `PIM_LIMIT_ARTIFACT_STORAGE_BYTES` | unset | Members' usage limits, one each, as whole numbers; unset is none. The admin has none. What each counts is in [`src/usage.ts`](src/usage.ts) |
 | `PIM_EMAIL_FROM` | unset | The address Pim emails from (see [Email](#email)) |
+| `PIM_FLY_APP`, `PIM_FLY_IMAGE` | unset | The Fly.io app and image of the computers Pim starts for people who don't bring one (see [Computers Pim starts](#computers-pim-starts)); unset, it starts none |
+| `PIM_FLY_REGION` | unset | The Fly.io region they run in; unset lets Fly choose |
+| `PIM_FLY_MEMORY_MB`, `PIM_FLY_DISK_GB` | `2048`, `10` | Each one's memory, and its disk |
 
 A variable Pim can't read counts as its default, except a limit or a cap on accounts, which counts as 0, so a typo never lifts it. Settings → Deployment says which and why.
 
@@ -158,6 +161,22 @@ It keeps the files in `~/pim` (`PIM_COMPUTER_ROOT` or `--root` sets another fold
 The computer's Chrome is the agents' browser: `pim-computer` finds Google Chrome or Chromium where it's usually installed (`PIM_CHROME` or `--chrome` names another), starts it headless when an agent first needs it (`--headful` shows its window instead), and lets the space drive it over the DevTools protocol through its connection. Its profile, in `~/.pim-computer/browser`, keeps what you signed in to between runs, including sign-ins that last only for the session. It quits after half an hour with nobody using it. Settings → Computer says when a computer has no browser. A space has one computer: a new token replaces the old one and disconnects it, and removing the computer in Settings forgets its token.
 
 Commands run as the user who started `pim-computer`, with the files folder as their working directory, for up to two minutes unless the agent asks for up to ten; what comes back is the exit code and up to 64 KB of each of its outputs. `shell` is a gated action, so each command asks first unless Settings → Tool permissions sets it to On. File calls never reach outside the folder, through `..` or a link. Anything the user can do, an approved command can, so give it a machine, VM or container meant for it. Files on the computer don't count toward the space's storage. A space that kept files in Pim before this moves them to its computer the first time one connects, renaming any whose name is taken there to `name (from Pim).ext`.
+
+### Computers Pim starts
+
+Pim can start a computer for each person who doesn't bring one: a [Fly Machine](https://fly.io/docs/machines/) that runs [`computer/Dockerfile`](computer/Dockerfile)'s image, with Node.js, Chromium and `pim-computer`, which connects as any other computer does. Settings → Computer then offers **Start a computer for me** beside connecting one's own. Its whole disk persists, so what agents and the person install there, such as Tailscale, stays across restarts. Pim suspends it after 15 minutes unused, memory and all, and starts it again the moment an agent or the person needs it, which takes a few seconds; a program left running on it pauses while it sleeps. Removing it in Settings, or deleting the account, deletes the machine with everything on it.
+
+To turn it on, make a Fly app for the machines, build the image into it, and give Pim a token for it:
+
+```sh
+fly apps create pim-computers
+fly auth docker
+docker build -t registry.fly.io/pim-computers:latest computer
+docker push registry.fly.io/pim-computers:latest
+fly tokens create deploy -a pim-computers   # then: pnpm wrangler secret put FLY_API_TOKEN
+```
+
+and set `PIM_FLY_APP` to `pim-computers` and `PIM_FLY_IMAGE` to `registry.fly.io/pim-computers:latest` in the dashboard. Fly bills each machine by its size while it runs; a suspended one costs only its storage (see [Fly's pricing](https://fly.io/docs/about/pricing/)). Each one gets `PIM_URL` and its own computer token in its environment, which anyone who can read the Fly app can see.
 
 ### Traces
 

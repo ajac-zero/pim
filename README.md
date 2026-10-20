@@ -66,7 +66,7 @@ The globe button beside it makes a public link to the chat: a copy of the conver
 | Connected apps | `connect_app`, `list_apps`, `find_app`, plus each app's tools | The apps this Pim offers: remote MCP servers, with OAuth sign-in, which you connect once for all your agents. A chat works only with the apps its agent lists, and each of their tools is on or off for that agent: on, it runs without asking. See [Connected apps](#connected-apps). |
 | Skills | `write_skill` (gated), `read_skill`, `read_skill_file` | Your agents write down how you want work that comes up again done, with your approval, and load it before doing that work. Apps publish skills too, over the MCP Skills extension, checked against the app's digests. See [Skills](#skills). |
 | App events | `list_app_events`, `watch_app_event` (gated), `list_watches`, `stop_watch` | Apps notify Pim when something happens (draft MCP Events, webhooks); each event starts a run with the watch's instruction. |
-| The web | `fetch_url`, `web_search` (opt-in) | `web_search` is billed by AI Gateway, so it is off until `PIM_WEB_SEARCH` names a provider. |
+| The web | `fetch_url` | Reads a page by its address. Searching the web is an app's, such as Exa or Firecrawl, which each person connects (see [Connected apps](#connected-apps)). |
 | Time | `current_time` | Shows UTC and the person's time zone. |
 
 The chat never displays raw tool calls, their arguments or results, working notes, or reasoning, including while a run streams. These remain in the durable transcript for debugging. Approval requests and generated artifacts keep their dedicated user-facing cards; a busy indicator shows when Pim is working.
@@ -114,7 +114,6 @@ Then set `PIM_PUBLIC_URL` in the dashboard as above (from the CLI, `pnpm wrangle
 | `PIM_MEMORY_MODEL` | unset | Model that compresses memories; unset uses `PIM_MODEL`, never the ChatGPT plan |
 | `PIM_MEMORY_LINES` | `96` | Lines of long-term memory in every prompt (about 8k tokens) |
 | `PIM_IMAGE_MODEL` | `@cf/black-forest-labs/flux-2-klein-4b` | Workers AI text-to-image model `generate_image` draws with, such as `@cf/black-forest-labs/flux-1-schnell` or `@cf/leonardo/lucid-origin`; `off` leaves agents without it |
-| `PIM_WEB_SEARCH` | unset | `exa`, `ceramic`, or `linkup` enables `web_search` |
 | `PIM_APPROVAL_POLICY` | `majordomo` | Who answers approvals: `majordomo` sends other agents' requests to each person's majordomo, which decides or asks them; `auto` approves what nobody answers after 30 seconds; `explicit` waits for the person however long. Each person can change theirs in Settings |
 | `PIM_TIME_ZONE` | `UTC` | IANA time zone for anyone who hasn't set theirs; joining sets the browser's |
 | `PIM_LIMIT_DAILY_TOKENS`, `PIM_LIMIT_DAILY_MODEL_REQUESTS`, `PIM_LIMIT_DAILY_RUNS`, `PIM_LIMIT_SESSIONS`, `PIM_LIMIT_SCHEDULES`, `PIM_LIMIT_STORAGE_BYTES`, `PIM_LIMIT_ARTIFACTS`, `PIM_LIMIT_ARTIFACT_VERSIONS`, `PIM_LIMIT_ARTIFACT_BYTES`, `PIM_LIMIT_ARTIFACT_STORAGE_BYTES` | unset | Members' usage limits, one each, as whole numbers; unset is none. The admin has none. What each counts is in [`src/usage.ts`](src/usage.ts) |
@@ -395,7 +394,7 @@ Besides Workers AI and the ChatGPT plan, Pim runs on any server that speaks Open
 - **Models.** Adding a provider reads its models from `<address>/models`, and saving it again reads them again, such as after loading another model in LM Studio. A server that lists more than 50, as OpenAI's and OpenRouter's do, needs the ones to offer named, and a server that can't list its models can be given them by name. What a model can do comes from the server's list where it says (OpenRouter's context length and input types, vLLM's `max_model_len`, llama.cpp's served context `n_ctx`), else from pi-ai's catalog when it knows the model by that id, else a 128,000-token context and text only. A chat that outgrows a model's real context is compacted and tried again.
 - **Keys.** Pim keeps a provider's key in your space, or for the admin's in the gallery, sends it only to that provider, and never shows it again: Settings shows only that there is one. A server without a key, as local ones usually are, is sent a placeholder.
 
-A Pim on Cloudflare can only reach providers on the public internet; one running on your own machine reaches `localhost` too. Pim says everything with tool calls, so a model needs dependable tool calling and a large context: llama.cpp needs `--jinja` and a `-c` well above the 8k tokens of memory every prompt carries, and LM Studio a context length well above its default. Image generation and web search stay on Workers AI and AI Gateway.
+A Pim on Cloudflare can only reach providers on the public internet; one running on your own machine reaches `localhost` too. Pim says everything with tool calls, so a model needs dependable tool calling and a large context: llama.cpp needs `--jinja` and a `-c` well above the 8k tokens of memory every prompt carries, and LM Studio a context length well above its default. Image generation stays on Workers AI.
 
 ## Utility model
 

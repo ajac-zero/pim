@@ -1,6 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
-import { defineExtension, defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
-import { webSearchTool } from "agents/websearch/pi";
+import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { text } from "./services";
 
 const MAX_PAGE_CHARS = 20_000;
@@ -47,15 +46,8 @@ const fetchUrl = defineTool({
 	},
 });
 
-export const SEARCH_PROVIDERS = ["exa", "ceramic", "linkup"] as const;
-export type SearchProvider = (typeof SEARCH_PROVIDERS)[number];
-
 /**
- * `fetch_url` always; `web_search` only when a provider is configured,
- * since searches are billed to the account's AI Gateway.
+ * Reading a page the agent already has the address of. Searching is an
+ * app's, such as Exa or Firecrawl, which each person connects.
  */
-export function webExtension(options: { ai: Ai; searchProvider: SearchProvider | null }) {
-	const tools: ToolRegistration[] = [fetchUrl as ToolRegistration];
-	if (options.searchProvider) tools.push(webSearchTool({ binding: options.ai, provider: options.searchProvider }) as ToolRegistration);
-	return defineExtension({ name: "pim.web", tools });
-}
+export const webExtension = defineExtension({ name: "pim.web", tools: [fetchUrl] });

@@ -703,8 +703,6 @@ const translations = {
     deploymentSameAsDefault: "The default model",
     deploymentImageModel: "Image model",
     deploymentImageModelHint: "Makes the images agents draw, on Workers AI.",
-    deploymentWebSearch: "Web search",
-    deploymentWebSearchHint: "Billed through AI Gateway.",
     deploymentEveryone: "For everyone",
     deploymentEveryoneHint: "Until each person chooses their own.",
     deploymentApprovals: "When an agent asks before acting",
@@ -1633,8 +1631,6 @@ const translations = {
     deploymentImageModel: "Modelo de imágenes",
     deploymentImageModelHint:
       "Hace las imágenes que dibujan los agentes, en Workers AI.",
-    deploymentWebSearch: "Búsqueda web",
-    deploymentWebSearchHint: "Se cobra a través de AI Gateway.",
     deploymentEveryone: "Para todos",
     deploymentEveryoneHint: "Hasta que cada persona elija lo suyo.",
     deploymentApprovals: "Cuando un agente pregunta antes de actuar",

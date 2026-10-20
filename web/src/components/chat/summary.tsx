@@ -44,11 +44,17 @@ function useSummaryOpen(): [boolean, (open: boolean) => void] {
   return [open, setOpen];
 }
 
-/** The header button that shows or hides the summary box; a dot says the agents' browser is open in it. */
-export function SummaryToggle({ className }: { className?: string }) {
+/** The header button that shows or hides the summary box; a dot says the chat's browser window is open in it. */
+export function SummaryToggle({
+  sessionId,
+  className,
+}: {
+  sessionId: string;
+  className?: string;
+}) {
   const { t } = useI18n();
   const [open, setOpen] = useSummaryOpen();
-  const { data: browser } = useQuery(browserQuery());
+  const { data: browser } = useQuery(browserQuery(sessionId));
   const label = browser?.page ? t("summaryAndBrowser") : t("summary");
   return (
     <Button
@@ -110,7 +116,7 @@ export function SummaryBox({
     enabled: open && !visit,
   });
   const browser = useQuery({
-    ...browserQuery(),
+    ...browserQuery(sessionId),
     enabled: open,
     refetchInterval: BROWSER_REFRESH_MS,
   });
@@ -158,7 +164,13 @@ export function SummaryBox({
         {tasks.data && tasks.data.length > 0 && (
           <TaskList sessionId={sessionId} tasks={tasks.data} />
         )}
-        {page && <BrowserView page={page} updatedAt={browser.dataUpdatedAt} />}
+        {page && (
+          <BrowserView
+            sessionId={sessionId}
+            page={page}
+            updatedAt={browser.dataUpdatedAt}
+          />
+        )}
       </div>
     </aside>
   );

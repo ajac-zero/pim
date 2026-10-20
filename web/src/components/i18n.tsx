@@ -644,7 +644,7 @@ const translations = {
     browserDone: "Done",
     browserKeyboard: "Type into the page",
     browserConnecting: "Connecting to the browser on your computer…",
-    browserGone: "The browser closed. Reload this page to open it again.",
+    browserGone: "This window closed. Reload this page to open it again.",
     browserAsleep:
       "Your computer is asleep. Take over wakes it and opens this page again.",
     noFilePreview: "There's no preview for this file. Download it to open it.",
@@ -1637,7 +1637,7 @@ const translations = {
     browserKeyboard: "Escribir en la página",
     browserConnecting: "Conectando con el navegador de tu computadora…",
     browserGone:
-      "El navegador se cerró. Recarga esta página para abrirlo de nuevo.",
+      "Esta ventana se cerró. Recarga esta página para abrirla de nuevo.",
     browserAsleep:
       "Tu computadora está dormida. Tomar el control la despierta y vuelve a abrir esta página.",
     noFilePreview:

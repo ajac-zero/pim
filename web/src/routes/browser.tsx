@@ -23,6 +23,10 @@ import {
 } from "~/lib/pim-api";
 
 export const Route = createFileRoute("/browser")({
+  // The chat whose window this takes over.
+  validateSearch: (search: Record<string, unknown>): { session?: string } => ({
+    ...(typeof search.session === "string" && { session: search.session }),
+  }),
   component: BrowserPage,
 });
 
@@ -47,14 +51,16 @@ function modifiers(event: {
 const BUTTONS = ["left", "middle", "right"] as const;
 
 /**
- * Taking the agents' browser over, in a tab of its own: the page it shows,
- * streamed from the person's computer as pictures, with their mouse,
- * keyboard and address bar going to it, to sign in or get past a check.
- * The agents go on in the same pages after. A hidden text field takes the
+ * Taking a chat's window in the agents' browser over (`?session=`), in a
+ * tab of its own: the page it shows, streamed from the person's computer
+ * as pictures, with their mouse, keyboard and address bar going to it, to
+ * sign in or get past a check. The chat's agent goes on in the same page
+ * after. A hidden text field takes the
  * keyboard, so phones bring theirs up when the page is tapped.
  */
 function BrowserPage() {
   const { t } = useI18n();
+  const { session } = Route.useSearch();
   const socket = useRef<WebSocket | null>(null);
   const keys = useRef<HTMLTextAreaElement | null>(null);
   const [frame, setFrame] = useState<Frame | null>(null);
@@ -68,7 +74,7 @@ function BrowserPage() {
   useEffect(() => {
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     const live = new WebSocket(
-      `${scheme}://${location.host}${BROWSER_LIVE_PATH}`,
+      `${scheme}://${location.host}${BROWSER_LIVE_PATH}${session ? `?session=${encodeURIComponent(session)}` : ""}`,
     );
     socket.current = live;
     live.addEventListener("message", (event) => {
@@ -88,7 +94,7 @@ function BrowserPage() {
     });
     live.addEventListener("close", () => setStatus("closed"));
     return () => live.close();
-  }, []);
+  }, [session]);
 
   useEffect(() => {
     if (!error) return;

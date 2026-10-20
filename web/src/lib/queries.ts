@@ -74,8 +74,12 @@ export const filesQuery = (path: string) =>
 export const computerQuery = () =>
   queryOptions({ queryKey: ["computer"], queryFn: pim.computer });
 
-export const browserQuery = () =>
-  queryOptions({ queryKey: ["browser"], queryFn: pim.browser });
+/** A chat's window in the agents' browser: its own, or that of a task it handed out. */
+export const browserQuery = (sessionId: string) =>
+  queryOptions({
+    queryKey: ["browser", sessionId],
+    queryFn: () => pim.browser(sessionId),
+  });
 
 export const artifactQuery = (id: string) =>
   queryOptions({

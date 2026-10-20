@@ -16,7 +16,7 @@ export const BROWSER_EXTENSION = "pim.browser";
 export const BROWSER_CLICK = "browser_click";
 export const BROWSER_TYPE = "browser_type";
 
-const SHARED = `The browser is the Chrome on the person's computer, which their agents share; it keeps its pages between your steps, and what the person signed in to there stays signed in. If a page needs the person (signing in, a check that they're human, payment details), stop and ask them to take over: in the box beside the chat, under its summary, they choose Take over and tell you when they're done. Never ask them for passwords or codes in the chat.`;
+const SHARED = `The browser is the Chrome on the person's computer. You have a window of your own in it, which keeps its page between your steps; other agents and chats have theirs, and what the person signed in to there is signed in in every window. If a page needs the person (signing in, a check that they're human, payment details), stop and ask them to take over: in the box beside the chat, under its summary, they choose Take over and tell you when they're done. Never ask them for passwords or codes in the chat.`;
 
 const Ref = Type.Integer({ minimum: 1, description: "The element's number, from the page as browser_open or browser_read last showed it: 12 for [12 button “Search”]." });
 const ClickArgs = Type.Object({ ref: Ref });
@@ -45,8 +45,8 @@ export function browserClickAction(browser: PimBrowser): GatedAction {
 		internal: true,
 		parameters: ClickArgs,
 		summarize: ({ ref }) => `Click [${ref}] in the browser`,
-		async run({ ref }) {
-			return describePage(await browser.click(ref));
+		async run({ ref }, { session }) {
+			return describePage(await browser.click(session, ref));
 		},
 	}) as GatedAction;
 }
@@ -59,8 +59,8 @@ export function browserTypeAction(browser: PimBrowser): GatedAction {
 		internal: true,
 		parameters: TypeArgs,
 		summarize: ({ ref, text }) => `Type “${text}” into [${ref}] in the browser`,
-		async run({ ref, text, submit }) {
-			return describePage(await browser.type(ref, text, submit === true));
+		async run({ ref, text, submit }, { session }) {
+			return describePage(await browser.type(session, ref, text, submit === true));
 		},
 	}) as GatedAction;
 }
@@ -68,12 +68,12 @@ export function browserTypeAction(browser: PimBrowser): GatedAction {
 export function browserExtension(services: PimServices, { browser, saveScreenshot }: BrowserServices) {
 	const browserOpen = defineTool({
 		name: "browser_open",
-		description: `Open a web page in the browser and read it: its text, with what can be clicked or typed into numbered like [12 link “Prices”]. Use it for pages fetch_url can't read (built by JavaScript) and for anything you need to click through. ${SHARED}`,
+		description: `Open a web page in your window of the browser and read it: its text, with what can be clicked or typed into numbered like [12 link “Prices”]. Use it for pages fetch_url can't read (built by JavaScript) and for anything you need to click through. ${SHARED}`,
 		parameters: Type.Object({ url: Type.String({ pattern: "^(https?://|data:text/html)", description: "An http(s) address, or a data:text/html URL for HTML of your own." }) }),
 		replay: "safe",
-		async execute({ url }) {
+		async execute({ url }, api) {
 			try {
-				return text(describePage(await browser.visit(url)));
+				return text(describePage(await browser.visit(String(api.conversationId), url)));
 			} catch (error) {
 				return failure(error);
 			}
@@ -82,13 +82,13 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 
 	const browserRead = defineTool({
 		name: "browser_read",
-		description: "Read the page the browser shows now, as browser_open does: after waiting for it to change, or after the person took over.",
+		description: "Read the page your window shows now, as browser_open does: after waiting for it to change, or after the person took over.",
 		parameters: Type.Object({}),
 		replay: "safe",
-		async execute() {
+		async execute(_args, api) {
 			try {
-				const view = await browser.read();
-				return view ? text(describePage(view)) : text("The browser is closed. Open a page with browser_open.", true);
+				const view = await browser.read(String(api.conversationId));
+				return view ? text(describePage(view)) : text("Your window is closed. Open a page with browser_open.", true);
 			} catch (error) {
 				return failure(error);
 			}
@@ -102,13 +102,13 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 
 	const browserClick = defineTool({
 		name: BROWSER_CLICK,
-		description: `Click a link, button or other element on the browser's page, by its number, and read the page it leads to.${permissions.click === "ask" ? ` ${approvalNote(services)}` : ""}`,
+		description: `Click a link, button or other element on your window's page, by its number, and read the page it leads to.${permissions.click === "ask" ? ` ${approvalNote(services)}` : ""}`,
 		parameters: ClickArgs,
 		replay: "safe",
 		async execute(args, api, context) {
 			let summary: string;
 			try {
-				const element = await browser.describe(args.ref);
+				const element = await browser.describe(String(api.conversationId), args.ref);
 				if (!element) return text(`There is no [${args.ref}] on the page now. Read the page again with browser_read and use a number it shows.`, true);
 				summary = `On ${element.host}, click ${element.label}`;
 			} catch (error) {
@@ -121,13 +121,13 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 
 	const browserType = defineTool({
 		name: BROWSER_TYPE,
-		description: `Type into a field on the browser's page, by its number, replacing what it held, and press Enter after if \`submit\`; then read the page. Never type passwords or payment details: the person does that when they take over.${permissions.type === "ask" ? ` ${approvalNote(services)}` : ""}`,
+		description: `Type into a field on your window's page, by its number, replacing what it held, and press Enter after if \`submit\`; then read the page. Never type passwords or payment details: the person does that when they take over.${permissions.type === "ask" ? ` ${approvalNote(services)}` : ""}`,
 		parameters: TypeArgs,
 		replay: "safe",
 		async execute(args, api, context) {
 			let summary: string;
 			try {
-				const element = await browser.describe(args.ref);
+				const element = await browser.describe(String(api.conversationId), args.ref);
 				if (!element) return text(`There is no [${args.ref}] on the page now. Read the page again with browser_read and use a number it shows.`, true);
 				summary = `On ${element.host}, type “${args.text}” into ${element.label}${args.submit ? " and press Enter" : ""}`;
 			} catch (error) {
@@ -140,15 +140,15 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 
 	const browserScreenshot = defineTool({
 		name: "browser_screenshot",
-		description: "Save a picture of the browser's page to the person's files, to show them or keep. Returns where it was saved.",
+		description: "Save a picture of your window's page to the person's files, to show them or keep. Returns where it was saved.",
 		parameters: Type.Object({
 			path: Type.Optional(Type.String({ description: "Where to save the PNG, under /workspace. Defaults to /workspace/screenshots/, named by the time." })),
 		}),
 		replay: "safe",
-		async execute({ path }) {
+		async execute({ path }, api) {
 			try {
-				const png = await browser.screenshot();
-				if (!png) return text("The browser is closed. Open a page with browser_open.", true);
+				const png = await browser.screenshot(String(api.conversationId));
+				if (!png) return text("Your window is closed. Open a page with browser_open.", true);
 				return text(`Saved to ${await saveScreenshot(path, png)}.`);
 			} catch (error) {
 				return failure(error);
@@ -158,12 +158,12 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 
 	const browserClose = defineTool({
 		name: "browser_close",
-		description: "Close the browser when you're done with it, with its pages; what's signed in there stays. It also closes itself after half an hour unused.",
+		description: "Close your window when you're done with it; what's signed in there stays, and other windows go on.",
 		parameters: Type.Object({}),
 		replay: "safe",
-		async execute() {
-			await browser.close();
-			return text("The browser is closed.");
+		async execute(_args, api) {
+			await browser.close(String(api.conversationId));
+			return text("Your window is closed.");
 		},
 	});
 

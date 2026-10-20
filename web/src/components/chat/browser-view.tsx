@@ -9,18 +9,20 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "~/components/ui/collapsible";
-import { BROWSER_SCREENSHOT_URL, type BrowserStatus, pim } from "~/lib/pim-api";
+import { type BrowserStatus, browserScreenshotUrl, pim } from "~/lib/pim-api";
 
 /**
- * The browser your agents share, in the box beside a chat while it's open:
- * expand its dropdown for a picture that keeps up with them, and take it
- * over, on a page of its own (routes/browser.tsx), to sign in or finish
- * something yourself.
+ * The chat's window in the browser your agents share, in the box beside
+ * the chat while it's open: expand its dropdown for a picture that keeps up
+ * with them, and take it over, on a page of its own (routes/browser.tsx),
+ * to sign in or finish something yourself.
  */
 export function BrowserView({
+  sessionId,
   page,
   updatedAt,
 }: {
+  sessionId: string;
   page: NonNullable<BrowserStatus["page"]>;
   /** When the status was last fetched: the picture is fetched again with it. */
   updatedAt: number;
@@ -28,7 +30,7 @@ export function BrowserView({
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const close = useMutation({
-    mutationFn: pim.closeBrowser,
+    mutationFn: () => pim.closeBrowser(sessionId),
     onSuccess: () => toast.success(t("browserClosed")),
     onError: (error) => toast.error(error.message),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["browser"] }),
@@ -56,7 +58,7 @@ export function BrowserView({
             </p>
           ) : (
             <img
-              src={`${BROWSER_SCREENSHOT_URL}?at=${updatedAt}`}
+              src={browserScreenshotUrl(sessionId, updatedAt)}
               alt={t("browserPicture", { title })}
               className="w-full rounded-lg border bg-background"
             />
@@ -64,7 +66,11 @@ export function BrowserView({
           <div className="grid grid-cols-[3fr_1fr] gap-2">
             <Button className="w-full" asChild>
               {/* A page of its own, beside the chat, where the person uses the browser. */}
-              <a href="/browser" target="_blank" rel="noopener">
+              <a
+                href={`/browser?session=${encodeURIComponent(sessionId)}`}
+                target="_blank"
+                rel="noopener"
+              >
                 <ExternalLink className="size-4" />
                 {t("takeOverBrowser")}
               </a>

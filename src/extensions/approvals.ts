@@ -69,8 +69,8 @@ export type GatedAction<P extends TSchema = TSchema> = {
 	readonly parameters: P;
 	/** One line the user reads to decide. */
 	summarize(args: Static<P>): string;
-	/** Performs the action after approval; the text is reported to the model. */
-	run(args: Static<P>): Promise<string>;
+	/** Performs the action after approval, for the chat (`session`) that asked; the text is reported to the model. */
+	run(args: Static<P>, request: { readonly session: string }): Promise<string>;
 	/** Not a tool of its own: other tools file approvals for it (such as MCP tool calls). */
 	readonly internal?: boolean;
 	/** Every call needs the person's decision: no timeout or always-approve permission. */

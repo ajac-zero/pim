@@ -403,7 +403,7 @@ function AppLayout() {
                 <div className="ml-auto flex shrink-0 gap-2">
                   <CopyConversation sessionId={sessionId} />
                   <ChatLinkMenu sessionId={sessionId} />
-                  <SummaryToggle />
+                  <SummaryToggle sessionId={sessionId} />
                 </div>
               )}
             </div>

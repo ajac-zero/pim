@@ -208,7 +208,10 @@ function ChatPage() {
           )}
           <CopyConversation sessionId={sessionId} />
           <ChatLinkMenu sessionId={sessionId} />
-          <SummaryToggle className="shrink-0 self-center" />
+          <SummaryToggle
+            sessionId={sessionId}
+            className="shrink-0 self-center"
+          />
         </header>
         {/* The summary box takes a column of its own, so the thread makes room
          * for it rather than sitting under it: at the right, or on top on phones. */}

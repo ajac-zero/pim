@@ -1716,7 +1716,7 @@ export class Pim extends DurableAgent<Env> {
 			let result: string;
 			try {
 				result = action
-					? await this.keepAliveWhile(() => action.run(approval.args as never))
+					? await this.keepAliveWhile(() => action.run(approval.args as never, { session: approval.session }))
 					: `The action ${approval.action} is no longer available.`;
 			} catch (error) {
 				result = `The action failed: ${errorMessage(error)}`;
@@ -3307,7 +3307,7 @@ export class Pim extends DurableAgent<Env> {
 		// so they go first, and the browser on the person's computer quits.
 		await this.images.deleteAll();
 		await this.artifacts.deleteAllFiles();
-		await this.browser.close().catch(() => undefined);
+		await this.browser.quit().catch(() => undefined);
 		await this.#removeMachine().catch((error) => console.error("removing the computer's machine", error));
 		await this.ctx.storage.deleteAll();
 		this.store.markErased(Date.now());
@@ -3417,6 +3417,17 @@ export class Pim extends DurableAgent<Env> {
 	#artifactRequest(url: URL, answer: () => Response | Promise<Response>): Response | Promise<Response> {
 		if (url.searchParams.has("token")) throw new HttpError(400, "Send the API token in the Authorization header, not the address");
 		return answer();
+	}
+
+	/**
+	 * The window a chat (`?session=`, the root chat without one) shows in
+	 * the browser: its own, or that of a task it handed out, whichever was
+	 * used last, so the person sees, and takes over, where work is going on.
+	 */
+	async #browserWindow(url: URL): Promise<string> {
+		const requested = url.searchParams.get("session");
+		const chat = requested ? await this.#session(requested) : ROOT_SESSION;
+		return this.browser.lastUsed([chat, ...this.#tasks.ofRoot(chat).map((task) => task.conversation)]);
 	}
 
 	/** The browser, or 404 while the person has no computer for it to run on. */
@@ -4223,17 +4234,18 @@ export class Pim extends DurableAgent<Env> {
 					return noStore({ deleted: true });
 				}),
 		],
-		// The agents' browser (see ./browser.ts): what it shows, a picture of it, closing it. Taking it over is a socket.
+		// The agents' browser (see ./browser.ts): what a chat's window shows, a picture of it, closing it. Taking it over is a socket.
 		[
 			"GET",
 			"/browser",
-			async () => noStore({ available: this.browser.available, page: this.browser.available ? await this.browser.current() : null }),
+			async (_params, _request, url) =>
+				noStore({ available: this.browser.available, page: this.browser.available ? await this.browser.current(await this.#browserWindow(url)) : null }),
 		],
 		[
 			"GET",
 			"/browser/screenshot",
-			async () => {
-				const png = await this.#browserIn().screenshot();
+			async (_params, _request, url) => {
+				const png = await this.#browserIn().screenshot(await this.#browserWindow(url));
 				if (!png) throw new HttpError(404, "The browser is closed");
 				return new Response(png, { headers: { "content-type": "image/png", "cache-control": "no-store, private", "x-content-type-options": "nosniff" } });
 			},
@@ -4241,8 +4253,8 @@ export class Pim extends DurableAgent<Env> {
 		[
 			"DELETE",
 			"/browser",
-			async () => {
-				await this.#browserIn().close();
+			async (_params, _request, url) => {
+				await this.#browserIn().close(await this.#browserWindow(url));
 				return noStore({ closed: true });
 			},
 		],
@@ -5074,28 +5086,29 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Someone takes the browser over on this socket: it gets the page as
-	 * pictures, and its mouse and keyboard go to the page. It closes when
-	 * the browser does. One that isn't running starts, waking the computer
-	 * if it's asleep.
+	 * Someone takes a chat's window over on this socket (`?session=`, as the
+	 * socket's state): it gets the page as pictures, and its mouse and
+	 * keyboard go to the page. It closes when the window does. One that
+	 * isn't open opens where it was, waking the computer if it's asleep.
 	 */
-	async #watchBrowser(connection: Connection): Promise<boolean> {
+	async #watchBrowser(connection: Connection<SocketState>, request?: Request): Promise<boolean> {
 		const send = (message: BrowserLiveMessage) => {
 			if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify(message));
 		};
-		let watching: boolean;
 		try {
-			watching = this.browser.available && (await this.browser.watch(connection.id, {
+			if (!this.browser.available) throw new Error("This space has no browser: connect a computer in Settings → Computer.");
+			if (request) connection.setState({ session: await this.#browserWindow(new URL(request.url)) });
+			await this.browser.watch(connection.state?.session ?? ROOT_SESSION, connection.id, {
 				frame: (frame) => send({ type: "frame", ...frame }),
 				page: (page) => send({ type: "page", ...page }),
-				closed: () => connection.close(4000, "The browser closed"),
-			}));
+				closed: () => connection.close(4000, "The window closed"),
+			});
+			return true;
 		} catch (error) {
 			send({ type: "error", message: errorMessage(error) });
-			watching = false;
+			connection.close(4004, "The window couldn't open");
+			return false;
 		}
-		if (!watching) connection.close(4004, "The browser couldn't open");
-		return watching;
 	}
 
 	async onConnect(connection: Connection<SocketState>, ctx: ConnectionContext): Promise<void> {
@@ -5104,7 +5117,7 @@ export class Pim extends DurableAgent<Env> {
 			return;
 		}
 		if (this.#isBrowserWatcher(connection)) {
-			await this.#watchBrowser(connection);
+			await this.#watchBrowser(connection, ctx.request);
 			return;
 		}
 		const requested = new URL(ctx.request.url).searchParams.get("session");
@@ -5128,7 +5141,7 @@ export class Pim extends DurableAgent<Env> {
 			// A space that slept since forgot who was watching: they go on where they were.
 			if (!this.browser.watching(connection.id) && !(await this.#watchBrowser(connection))) return;
 			try {
-				await this.browser.input(JSON.parse(raw) as BrowserInput);
+				await this.browser.input(connection.id, JSON.parse(raw) as BrowserInput);
 			} catch (error) {
 				if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify({ type: "error", message: errorMessage(error) } satisfies BrowserLiveMessage));
 			}

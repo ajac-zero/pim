@@ -17,15 +17,14 @@ import { SummaryBox, SummaryToggle } from "~/components/chat/summary";
 import { ChatTabs, useChatDrop } from "~/components/chat/tabs";
 import { TaskPanel } from "~/components/chat/tasks";
 import { Thread } from "~/components/chat/thread";
-import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
 import { ExternalLink, Loader2, Users } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
 import { useElementHeight } from "~/hooks/use-element-size";
-import { CHATGPT_PROVIDER, pim, type UserContent } from "~/lib/pim-api";
+import { pim, type UserContent } from "~/lib/pim-api";
 import { pimClient, usePimClient } from "~/lib/pim-client";
-import { modelQuery, sessionsQuery } from "~/lib/queries";
+import { sessionsQuery } from "~/lib/queries";
 import { showTab, useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
@@ -92,8 +91,6 @@ function ChatPage() {
     });
   const { data: sessions } = useQuery(sessionsQuery());
   const session = sessions?.find((candidate) => candidate.id === sessionId);
-  const { data: model } = useQuery(modelQuery());
-  const onPlan = model?.model.provider === CHATGPT_PROVIDER;
 
   // The socket outlives this page, so notifications and approvals keep
   // arriving elsewhere in the app; it switches when another chat opens.
@@ -252,19 +249,6 @@ function ChatPage() {
                       <>
                         <Users className="size-3.5 shrink-0" />
                         {t("visitBanner", { username: session.visit.username })}
-                      </>
-                    ) : onPlan ? (
-                      <>
-                        <ChatGPTLogo className="size-3.5" />
-                        {t("usingChatGPTPlan")} ·
-                        <a
-                          href={CHATGPT_USAGE_URL}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="underline underline-offset-2 hover:text-foreground"
-                        >
-                          {t("manageUsage")}
-                        </a>
                       </>
                     ) : undefined
                   }

@@ -714,7 +714,6 @@ const translations = {
     limitArtifactStorageBytes: "Bytes in all artifacts",
     useYourChatGPTPlan: "Use your ChatGPT plan",
     usesChatGPTPlan: "Uses your ChatGPT plan",
-    usingChatGPTPlan: "Using ChatGPT plan",
     usingYourPlanBody:
       "Pim's requests to OpenAI models now use your ChatGPT plan. You can review and cap Pim's usage in ChatGPT settings.",
     usingYourPlanTitle: "You're using your ChatGPT plan",
@@ -1623,7 +1622,6 @@ const translations = {
     limitArtifactStorageBytes: "Bytes en todos los artefactos",
     useYourChatGPTPlan: "Usa tu plan de ChatGPT",
     usesChatGPTPlan: "Usa tu plan de ChatGPT",
-    usingChatGPTPlan: "Usando el plan de ChatGPT",
     usingYourPlanBody:
       "Las solicitudes de Pim a modelos de OpenAI ahora usan tu plan de ChatGPT. Puedes revisar y limitar el uso de Pim en la configuración de ChatGPT.",
     usingYourPlanTitle: "Estás usando tu plan de ChatGPT",

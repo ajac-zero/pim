@@ -244,6 +244,28 @@ describe("a person's message in their bubble", () => {
   });
 });
 
+describe("an agent's Markdown", () => {
+  const own = "/api/images/3f1beb2b-bded-4fda-96cc-1af7192f24b6";
+  const html = renderToStaticMarkup(
+    <Markdown text={`${HOSTILE}\n\n![kept](${own})`} />,
+  );
+
+  it("loads no image but Pim's own", () => {
+    const loads = elements(html).flatMap((element) =>
+      element.attributes
+        .filter(
+          (a) =>
+            ["src", "srcset", "poster", "data"].includes(a.name) ||
+            (a.name === "href" && element.tag !== "a"),
+        )
+        .map((a) => a.value),
+    );
+    expect(loads).toContain(own);
+    expect(new Set(loads)).toEqual(new Set([own]));
+    expect(html).toContain("[tracker]");
+  });
+});
+
 describe("chats an agent names", () => {
   const chat = "7af6a6ec-9d58-489a-b2be-512eda1cb34b";
   // An artifact's id, say: no chat of the person's.

@@ -300,6 +300,11 @@ export class PimBrowser {
 		this.#letGoLater();
 	}
 
+	/** Whether someone is taking the browser over now. */
+	watched(): boolean {
+		return this.#screencast !== undefined;
+	}
+
 	/** Whether `id` is watching, as far as this instance knows: a space that woke again has forgotten. */
 	watching(id: string): boolean {
 		return this.#watchers.has(id) && this.#screencast !== undefined;

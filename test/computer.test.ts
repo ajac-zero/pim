@@ -81,7 +81,7 @@ let token = "";
 
 describe("a space without a computer", () => {
 	it("has no files, and no tools that need them", async () => {
-		expect(await status()).toEqual({ state: "none", pairedAt: null, computer: null });
+		expect(await status()).toEqual({ state: "none", managed: false, pairedAt: null, computer: null, startable: true });
 		expect((await api("/files")).status).toBe(404);
 		const tools = await offeredTools();
 		expect(tools).toContain("send_to_user");
@@ -284,10 +284,69 @@ describe("the computer", () => {
 	it("is removed with its tools, and its token stops working; its files stay on it", async () => {
 		expect((await raw("/computer", { method: "DELETE" })).status).toBe(200);
 		expect((await computer.closed).code).toBe(4409);
-		expect(await status()).toEqual({ state: "none", pairedAt: null, computer: null });
+		expect(await status()).toEqual({ state: "none", managed: false, pairedAt: null, computer: null, startable: true });
 		expect((await opens("/computer/connect", token)).status).toBe(401);
 		expect(await offeredTools()).not.toContain("file_read");
 		expect((await api("/files")).status).toBe(404);
 		expect(await fs.readFile(`${ROOT}/trips/lisbon.md`, "utf8")).toContain("Lisbon");
+	});
+});
+
+describe("a computer Pim starts", () => {
+	it("starts on Fly.io, sleeps when unused, wakes when needed, and goes with everything on it", async () => {
+		const fly: { method: string; path: string; body: Record<string, unknown> | undefined }[] = [];
+		const root = `/tmp/computer-${crypto.randomUUID()}`;
+		let machineToken = "";
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const url = new URL(input instanceof Request ? input.url : String(input));
+			if (url.host !== "api.machines.dev") throw new Error(`This test reaches only Fly.io, not ${url}`);
+			const method = init?.method ?? "GET";
+			fly.push({ method, path: `${url.pathname}${url.search}`, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+			return Response.json(method === "POST" && url.pathname === "/v1/apps/pim-computers/machines" ? { id: "m-1", state: "created" } : {});
+		});
+
+		expect(await status()).toMatchObject({ state: "none", startable: true });
+		const started = await post<Record<string, unknown>>("/computer", { managed: true });
+		expect(started.status).toBe(201);
+		expect(started.body).toMatchObject({ state: "offline", managed: true });
+		// Its token goes to the machine, and nowhere else.
+		expect(started.body.token).toBeUndefined();
+		const create = fly[0]!;
+		expect(create).toMatchObject({ method: "POST", path: "/v1/apps/pim-computers/machines" });
+		expect(create.body?.config).toMatchObject({
+			image: "registry.fly.io/pim-computers:latest",
+			rootfs: { persist: "always", size_gb: 10 },
+			env: { PIM_URL: "https://pim.test", PIM_COMPUTER_TOKEN: expect.stringMatching(new RegExp(`^pimc_${OWNER}_`)) },
+		});
+		machineToken = (create.body?.config as { env: { PIM_COMPUTER_TOKEN: string } }).env.PIM_COMPUTER_TOKEN;
+		// Another can't be paired in its place, by the person or with a new token.
+		expect((await post("/computer")).status).toBe(409);
+
+		// The machine boots and connects. Unused, it's put to sleep, and its connection goes.
+		const first = await connectComputer(machineToken, root);
+		expect(await offeredTools()).toContain("shell");
+		await runInDurableObject(agent(), (instance: Pim) => instance.sleepComputer());
+		expect(fly.slice(-2)).toMatchObject([
+			{ method: "POST", path: "/v1/apps/pim-computers/machines/m-1/suspend" },
+			{ method: "GET", path: "/v1/apps/pim-computers/machines/m-1/wait?state=suspended&timeout=60" },
+		]);
+		expect((await first.closed).code).toBe(4000);
+		expect(await status()).toMatchObject({ state: "offline", managed: true });
+
+		// Needed, it's started, and once it has connected, what was asked of it is done.
+		const uploading = upload("/workspace/notes.md", "Woke up");
+		await vi.waitFor(() => expect(fly.at(-1)).toMatchObject({ method: "POST", path: "/v1/apps/pim-computers/machines/m-1/start" }));
+		const second = await connectComputer(machineToken, root);
+		expect((await uploading).status).toBe(201);
+		expect(await fs.readFile(`${root}/notes.md`, "utf8")).toBe("Woke up");
+		// Just used, it stays awake.
+		await runInDurableObject(agent(), (instance: Pim) => instance.sleepComputer());
+		expect(fly.at(-1)?.path).toMatch(/\/start$/);
+
+		// Removing it removes the machine, with everything on it.
+		expect((await raw("/computer", { method: "DELETE" })).status).toBe(200);
+		expect(fly.at(-1)).toMatchObject({ method: "DELETE", path: "/v1/apps/pim-computers/machines/m-1?force=true" });
+		expect((await second.closed).code).toBe(4409);
+		expect(await status()).toMatchObject({ state: "none", managed: false });
 	});
 });

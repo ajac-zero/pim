@@ -16,6 +16,7 @@ export default defineConfig({
 			// The secrets of the test extension's bank app, and the client registered for its Forge app.
 			// A content origin, so public artifact links are on.
 			// Traces with their content, so the tests check what an operator who opts in would see.
+			// Computers Pim starts on Fly.io, whose API the tests stand in for.
 			// A local Chrome, which the tests' computers browse with (test/helpers.ts's `testBrowser`).
 			miniflare: {
 				browserRendering: { binding: "BROWSER" },
@@ -31,6 +32,9 @@ export default defineConfig({
 					TEST_FORGE_CLIENT_ID: "forge-client",
 					TEST_FORGE_CLIENT_SECRET: "forge-secret",
 					OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "true",
+					PIM_FLY_APP: "pim-computers",
+					PIM_FLY_IMAGE: "registry.fly.io/pim-computers:latest",
+					FLY_API_TOKEN: "fly-test-token",
 				},
 			},
 		}),

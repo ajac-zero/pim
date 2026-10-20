@@ -138,7 +138,8 @@ import { CREATE_AGENT, agentExtension, MANAGE_APPS, manageAppsAction, RENAME_AGE
 import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
-import { COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer } from "./computer";
+import { COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerStatus } from "./computer";
+import { FlyMachines } from "./fly";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
 import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
@@ -209,6 +210,11 @@ const REVIEW_EXPIRY_CALLBACK = "expireReview";
 /** How long a reply may stay unread before it is pushed: time for an open chat to mark it read. */
 const REPLY_PUSH_DELAY_SECONDS = 10;
 const REPLY_PUSH_CALLBACK = "pushReply";
+/** How long a computer Pim started may go unused before it's put to sleep. */
+const COMPUTER_IDLE_MS = 15 * 60 * 1000;
+const COMPUTER_SLEEP_CALLBACK = "sleepComputer";
+/** When the next check that the computer is unused is due, if one is scheduled. */
+const COMPUTER_SLEEP_CHECK_KEY = "computer_sleep_check";
 
 /** A circle's permission row for reading the owner's memory. */
 const MEMORY_TOOL = "memory";
@@ -368,7 +374,15 @@ export class Pim extends DurableAgent<Env> {
 		},
 	});
 	/** The person's computer, which their agents use, if they connected one (see ./computer.ts). */
-	readonly computer = new Computer({ meta: this.store, sockets: () => [...this.getConnections(COMPUTER_TAG)] });
+	readonly computer = new Computer({
+		meta: this.store,
+		sockets: () => [...this.getConnections(COMPUTER_TAG)],
+		wake: async () => {
+			const machine = this.computer.machine();
+			if (machine) await this.#fly()?.start(machine);
+		},
+		used: () => void this.#sleepLater(COMPUTER_IDLE_MS),
+	});
 	/** The person's files, on their computer, which they and their agents share (see ./files.ts). */
 	readonly files = new Files(this.computer);
 	readonly #files: FileServices = { computer: this.computer, assertOpen: () => this.#assertOpen() };
@@ -3292,6 +3306,7 @@ export class Pim extends DurableAgent<Env> {
 		await this.images.deleteAll();
 		await this.artifacts.deleteAllFiles();
 		await this.browser.close().catch(() => undefined);
+		await this.#removeMachine().catch((error) => console.error("removing the computer's machine", error));
 		await this.ctx.storage.deleteAll();
 		this.store.markErased(Date.now());
 		await this.ctx.storage.sync();
@@ -4143,22 +4158,29 @@ export class Pim extends DurableAgent<Env> {
 					return new Response((await this.artifacts.read(artifact.id, found.version, [path])).get(path)!.bytes, { headers });
 				}),
 		],
-		// The person's computer (see ./computer.ts): whether one is connected, pairing one, and removing it.
-		["GET", "/computer", () => noStore(this.computer.status())],
+		// The person's computer (see ./computer.ts): whether one is connected, pairing one or starting one, and removing it.
+		["GET", "/computer", () => noStore({ ...this.computer.status(), startable: this.#fly() !== null })],
 		[
 			"POST",
 			"/computer",
-			async () => {
+			async (_params, request) => {
 				this.#assertOpen();
-				const token = await this.computer.pair(this.name, Date.now());
-				this.#computerChanged();
-				return noStore({ ...this.computer.status(), token }, 201);
+				const body = await request.text();
+				const { managed } = (body ? JSON.parse(body) : {}) as { managed?: unknown };
+				if (this.computer.machine()) throw new HttpError(409, "Pim started this computer: remove it to connect another.");
+				if (managed !== true) {
+					const token = await this.computer.pair(this.name, Date.now());
+					this.#computerChanged();
+					return noStore({ ...this.computer.status(), token }, 201);
+				}
+				return noStore(await this.#startComputer(), 201);
 			},
 		],
 		[
 			"DELETE",
 			"/computer",
-			() => {
+			async () => {
+				await this.#removeMachine();
 				this.computer.forget();
 				this.#computerChanged();
 				return noStore(this.computer.status());
@@ -4923,6 +4945,74 @@ export class Pim extends DurableAgent<Env> {
 		this.registry.install(filesExtension(this.#files));
 		this.#installImageGeneration();
 		this.#reinstallApprovals();
+	}
+
+	/** Where this deployment starts computers for people (./fly.ts), or null where it starts none. */
+	#fly(): FlyMachines | null {
+		const { computers, publicUrl } = this.deployment();
+		const token = (this.env as unknown as { FLY_API_TOKEN?: string }).FLY_API_TOKEN;
+		return computers && publicUrl && token ? new FlyMachines(computers, token) : null;
+	}
+
+	/**
+	 * Starts a computer for the person, in place of any they connected: a
+	 * machine that runs pim-computer with a token of its own, which nobody
+	 * sees. It connects once it has started.
+	 */
+	async #startComputer(): Promise<ComputerStatus> {
+		const fly = this.#fly();
+		if (!fly) throw new HttpError(404, "This Pim doesn't start computers. Connect one of your own.");
+		const token = await this.computer.pair(this.name, Date.now());
+		try {
+			const machine = await fly.create(`pim-${this.name.replace(/_/g, "-")}-${Date.now().toString(36)}`, {
+				PIM_URL: this.deployment().publicUrl!,
+				PIM_COMPUTER_TOKEN: token,
+			});
+			this.computer.setMachine(machine);
+		} catch (error) {
+			this.computer.forget();
+			throw error;
+		}
+		this.#computerChanged();
+		void this.#sleepLater(COMPUTER_IDLE_MS);
+		return this.computer.status();
+	}
+
+	/** Removes the machine of a computer Pim started, with everything on it. */
+	async #removeMachine(): Promise<void> {
+		const machine = this.computer.machine();
+		if (!machine) return;
+		const fly = this.#fly();
+		if (!fly) throw new HttpError(503, "This Pim no longer reaches the computers it started; its admin can remove the machine on Fly.io.");
+		await fly.destroy(machine);
+	}
+
+	/** Checks, `delay` from now, whether the computer Pim started has gone unused; once at a time. */
+	async #sleepLater(delay: number): Promise<void> {
+		// A check that's long overdue was lost, and another takes its place.
+		const due = Number(this.store.meta(COMPUTER_SLEEP_CHECK_KEY) ?? 0);
+		if (!this.computer.machine() || due > Date.now() - 60_000) return;
+		this.store.setMeta(COMPUTER_SLEEP_CHECK_KEY, String(Date.now() + delay));
+		await this.schedule(Math.ceil(delay / 1000), COMPUTER_SLEEP_CALLBACK);
+	}
+
+	/**
+	 * Puts the computer Pim started to sleep once it has gone unused for
+	 * `COMPUTER_IDLE_MS`: its machine is suspended, memory and all, and it
+	 * wakes when it's next needed. One in use is checked again later.
+	 */
+	async sleepComputer(): Promise<void> {
+		this.store.deleteMeta(COMPUTER_SLEEP_CHECK_KEY);
+		const machine = this.computer.machine();
+		if (this.#closed() || !machine || this.computer.status().state !== "online") return;
+		const idle = Date.now() - this.computer.usedAt();
+		if (idle < COMPUTER_IDLE_MS || this.computer.busy() || this.browser.watched()) {
+			await this.#sleepLater(Math.max(COMPUTER_IDLE_MS - idle, 60_000));
+			return;
+		}
+		await this.#fly()?.suspend(machine);
+		this.computer.slept();
+		this.broadcastMessage({ type: "computer" });
 	}
 
 	/** The browser's tools, while the person has a computer; clicking and typing follow their permissions. */

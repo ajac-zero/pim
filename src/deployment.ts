@@ -42,22 +42,6 @@ export type DeploymentSettings = {
 	readonly contentOrigin: string | null;
 	/** `PIM_EMAIL_FROM`: the address Pim emails from; null sends no email. */
 	readonly emailFrom: string | null;
-	/** `PIM_FLY_*`: the Fly.io Machines Pim starts as computers for people who don't bring one; null when it starts none. */
-	readonly computers: FlyComputers | null;
-};
-
-/** Where and how Pim starts computers on Fly.io (src/fly.ts); the API token is the `FLY_API_TOKEN` secret. */
-export type FlyComputers = {
-	/** `PIM_FLY_APP`: the Fly app the machines are in. */
-	readonly app: string;
-	/** `PIM_FLY_IMAGE`: the image they run, built from computer/Dockerfile. */
-	readonly image: string;
-	/** `PIM_FLY_REGION`: where they run; null lets Fly choose. */
-	readonly region: string | null;
-	/** `PIM_FLY_MEMORY_MB`: each one's memory. */
-	readonly memoryMb: number;
-	/** `PIM_FLY_DISK_GB`: each one's disk, which keeps everything on it. */
-	readonly diskGb: number;
 };
 
 /** One variable as the deployment set it, and what's wrong with it, if anything. */
@@ -154,29 +138,6 @@ export function readDeployment(env: object): Deployment {
 		if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) throw new Error("must be an email address, such as pim@example.com");
 		return value;
 	});
-	const flyApp = variable<string | null>("PIM_FLY_APP", null, (value) => {
-		if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(value)) throw new Error("must be a Fly app's name, such as pim-computers");
-		return value;
-	});
-	const flyImage = variable<string | null>("PIM_FLY_IMAGE", null, (value) => {
-		if (/\s/.test(value)) throw new Error("must be an image, such as registry.fly.io/pim-computers:latest");
-		return value;
-	});
-	const flyRegion = variable<string | null>("PIM_FLY_REGION", null, (value) => {
-		if (!/^[a-z]{3}$/.test(value)) throw new Error("must be a Fly region, such as iad");
-		return value;
-	});
-	const flyMemory = variable("PIM_FLY_MEMORY_MB", 2048, (value) => {
-		const memory = count(value);
-		if (memory < 1024 || memory % 256 !== 0) throw new Error("must be a multiple of 256, at least 1024");
-		return memory;
-	});
-	const flyDisk = variable("PIM_FLY_DISK_GB", 10, (value) => {
-		const disk = count(value);
-		if (disk < 2) throw new Error("must be at least 2");
-		return disk;
-	});
-	const computers = flyApp && flyImage ? { app: flyApp, image: flyImage, region: flyRegion, memoryMb: flyMemory, diskGb: flyDisk } : null;
 	return {
 		settings: {
 			registration,
@@ -194,7 +155,6 @@ export function readDeployment(env: object): Deployment {
 			publicUrl,
 			contentOrigin,
 			emailFrom,
-			computers,
 		},
 		variables,
 	};

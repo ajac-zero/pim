@@ -4,7 +4,8 @@ import type { Message } from "@earendil-works/pi-ai";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
-import type { ExecArgs, ExecResult } from "../computer/pim-computer";
+import { type ExecArgs, type ExecResult, Link, type Machine } from "../computer/pim-computer";
+import { IDLE_MS } from "../src/computer";
 import type { Approval } from "../src/store";
 import { api, apiUrl, connectTestComputer, opens, OWNER, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
 import { faux, paintings, type Pim } from "./worker";
@@ -293,60 +294,95 @@ describe("the computer", () => {
 });
 
 describe("a computer Pim starts", () => {
-	it("starts on Fly.io, sleeps when unused, wakes when needed, and goes with everything on it", async () => {
-		const fly: { method: string; path: string; body: Record<string, unknown> | undefined }[] = [];
+	it("is a Sprite, set up once, woken when needed and let go when unused, and removed with everything on it", async () => {
+		const requests: string[] = [];
+		const launches: { cmd: string[]; letGo: boolean; closed: boolean }[] = [];
 		const root = `/tmp/computer-${crypto.randomUUID()}`;
-		let machineToken = "";
+		/** A frame of an exec's output: its stream, then its bytes. */
+		const frame = (stream: number, text: string) => {
+			const bytes = new TextEncoder().encode(text);
+			const framed = new Uint8Array(bytes.byteLength + 1);
+			framed[0] = stream;
+			framed.set(bytes, 1);
+			return framed;
+		};
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-			const url = new URL(input instanceof Request ? input.url : String(input));
-			if (url.host !== "api.machines.dev") throw new Error(`This test reaches only Fly.io, not ${url}`);
-			const method = init?.method ?? "GET";
-			fly.push({ method, path: `${url.pathname}${url.search}`, body: init?.body ? JSON.parse(String(init.body)) : undefined });
-			return Response.json(method === "POST" && url.pathname === "/v1/apps/pim-computers/machines" ? { id: "m-1", state: "created" } : {});
+			const request = new Request(input, init);
+			const url = new URL(request.url);
+			if (url.host !== "api.sprites.dev") throw new Error(`This test reaches only Sprites, not ${url}`);
+			expect(request.headers.get("Authorization")).toBe("Bearer sprites-test-token");
+			requests.push(`${request.method} ${url.pathname}`);
+			if (url.pathname === "/v1/sprites" && request.method === "POST") return Response.json({ name: (await request.json<{ name: string }>()).name, status: "cold" }, { status: 201 });
+			if (!url.pathname.endsWith("/exec")) return new Response(null, { status: 204 });
+			const cmd = url.searchParams.getAll("cmd");
+			const { 0: client, 1: server } = new WebSocketPair();
+			server.binaryType = "arraybuffer";
+			server.accept();
+			if (!cmd.some((arg) => arg.includes("--stdio"))) {
+				// Setting it up, which succeeds.
+				server.send(Uint8Array.of(3, 0));
+				return new Response(null, { status: 101, webSocket: client });
+			}
+			// pim-computer --stdio: the real Link, over the test's folder, a line at a time.
+			await fs.mkdir(root, { recursive: true });
+			const machine: Machine = {
+				root: await fs.realpath(root),
+				exec: async () => {
+					throw new Error("This test's computer runs no commands.");
+				},
+			};
+			const launch = { cmd, letGo: false, closed: false };
+			launches.push(launch);
+			const link = new Link(machine, (message) => server.send(frame(1, `${message}\n`)));
+			server.addEventListener("message", (event) => {
+				const data = new Uint8Array(event.data as ArrayBuffer);
+				if (data[0] === 4) launch.letGo = true;
+				else for (const line of new TextDecoder().decode(data.subarray(1)).split("\n")) if (line) link.receive(line);
+			});
+			server.addEventListener("close", () => {
+				launch.closed = true;
+				link.close();
+			});
+			const hello = { type: "hello", version: 1, agent: "pim-computer/test", hostname: "sprite", platform: "linux", arch: "x64", user: "sprite", root: machine.root, browser: null };
+			server.send(frame(1, `${JSON.stringify(hello)}\n`));
+			return new Response(null, { status: 101, webSocket: client });
 		});
 
 		expect(await status()).toMatchObject({ state: "none", startable: true });
 		const started = await post<Record<string, unknown>>("/computer", { managed: true });
 		expect(started.status).toBe(201);
-		expect(started.body).toMatchObject({ state: "offline", managed: true });
-		// Its token goes to the machine, and nowhere else.
+		// It's set up, then woken once, so it says what it is.
+		expect(started.body).toMatchObject({ state: "online", managed: true, computer: { hostname: "sprite" } });
 		expect(started.body.token).toBeUndefined();
-		const create = fly[0]!;
-		expect(create).toMatchObject({ method: "POST", path: "/v1/apps/pim-computers/machines" });
-		expect(create.body?.config).toMatchObject({
-			image: "registry.fly.io/pim-computers:latest",
-			rootfs: { persist: "always", size_gb: 10 },
-			env: { PIM_URL: "https://pim.test", PIM_COMPUTER_TOKEN: expect.stringMatching(new RegExp(`^pimc_${OWNER}_`)) },
-		});
-		machineToken = (create.body?.config as { env: { PIM_COMPUTER_TOKEN: string } }).env.PIM_COMPUTER_TOKEN;
-		// Another can't be paired in its place, by the person or with a new token.
+		const name = new RegExp(`^GET /v1/sprites/pim-${OWNER.replace("_", "-")}-[0-9a-z]+/exec$`);
+		expect(requests).toEqual(["POST /v1/sprites", expect.stringMatching(name), expect.stringMatching(name)]);
+		const sprite = requests[1]!.slice("GET ".length, -"/exec".length);
+		// pim-computer comes from this Pim.
+		expect(launches[0]!.cmd.at(-1)).toBe("https://pim.test");
+		// Another can't be paired in its place.
 		expect((await post("/computer")).status).toBe(409);
-
-		// The machine boots and connects. Unused, it's put to sleep, and its connection goes.
-		const first = await connectComputer(machineToken, root);
 		expect(await offeredTools()).toContain("shell");
-		await runInDurableObject(agent(), (instance: Pim) => instance.sleepComputer());
-		expect(fly.slice(-2)).toMatchObject([
-			{ method: "POST", path: "/v1/apps/pim-computers/machines/m-1/suspend" },
-			{ method: "GET", path: "/v1/apps/pim-computers/machines/m-1/wait?state=suspended&timeout=60" },
-		]);
-		expect((await first.closed).code).toBe(4000);
-		expect(await status()).toMatchObject({ state: "offline", managed: true });
 
-		// Needed, it's started, and once it has connected, what was asked of it is done.
-		const uploading = upload("/workspace/notes.md", "Woke up");
-		await vi.waitFor(() => expect(fly.at(-1)).toMatchObject({ method: "POST", path: "/v1/apps/pim-computers/machines/m-1/start" }));
-		const second = await connectComputer(machineToken, root);
-		expect((await uploading).status).toBe(201);
-		expect(await fs.readFile(`${root}/notes.md`, "utf8")).toBe("Woke up");
-		// Just used, it stays awake.
-		await runInDurableObject(agent(), (instance: Pim) => instance.sleepComputer());
-		expect(fly.at(-1)?.path).toMatch(/\/start$/);
+		// What's asked of it is done there, through pim-computer's input and output.
+		expect((await upload("/workspace/notes.md", "Started")).status).toBe(201);
+		expect(await (await raw(`/files/content?path=${encodeURIComponent("/workspace/notes.md")}`)).text()).toBe("Started");
 
-		// Removing it removes the machine, with everything on it.
+		// Just used, the space holds on to it; unused, it lets go, and the Sprite sleeps.
+		await runInDurableObject(agent(), (instance: Pim) => instance.computer.letGoIfIdle());
+		expect(launches[0]).toMatchObject({ letGo: false, closed: false });
+		await runInDurableObject(agent(), (instance: Pim) => instance.computer.letGoIfIdle(Date.now() + IDLE_MS));
+		await vi.waitFor(() => expect(launches[0]).toMatchObject({ letGo: true, closed: true }));
+		expect(await status()).toMatchObject({ state: "offline", managed: true, computer: { hostname: "sprite" } });
+
+		// Needed, it's woken again, and what was asked of it is done.
+		expect((await upload("/workspace/notes.md", "Woke up")).status).toBe(201);
+		expect(launches.length).toBe(2);
+		expect(await (await raw(`/files/content?path=${encodeURIComponent("/workspace/notes.md")}`)).text()).toBe("Woke up");
+
+		// Removing it removes the Sprite, with everything on it.
 		expect((await raw("/computer", { method: "DELETE" })).status).toBe(200);
-		expect(fly.at(-1)).toMatchObject({ method: "DELETE", path: "/v1/apps/pim-computers/machines/m-1?force=true" });
-		expect((await second.closed).code).toBe(4409);
+		expect(requests.at(-1)).toBe(`DELETE ${sprite}`);
+		await vi.waitFor(() => expect(launches[1]).toMatchObject({ letGo: true, closed: true }));
 		expect(await status()).toMatchObject({ state: "none", managed: false });
 	});
 });

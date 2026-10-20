@@ -122,9 +122,6 @@ Then set `PIM_PUBLIC_URL` in the dashboard as above (from the CLI, `pnpm wrangle
 | `PIM_TIME_ZONE` | `UTC` | IANA time zone for anyone who hasn't set theirs; joining sets the browser's |
 | `PIM_LIMIT_DAILY_TOKENS`, `PIM_LIMIT_DAILY_MODEL_REQUESTS`, `PIM_LIMIT_DAILY_RUNS`, `PIM_LIMIT_SESSIONS`, `PIM_LIMIT_SCHEDULES`, `PIM_LIMIT_STORAGE_BYTES`, `PIM_LIMIT_ARTIFACTS`, `PIM_LIMIT_ARTIFACT_VERSIONS`, `PIM_LIMIT_ARTIFACT_BYTES`, `PIM_LIMIT_ARTIFACT_STORAGE_BYTES` | unset | Members' usage limits, one each, as whole numbers; unset is none. The admin has none. What each counts is in [`src/usage.ts`](src/usage.ts) |
 | `PIM_EMAIL_FROM` | unset | The address Pim emails from (see [Email](#email)) |
-| `PIM_FLY_APP`, `PIM_FLY_IMAGE` | unset | The Fly.io app and image of the computers Pim starts for people who don't bring one (see [Computers Pim starts](#computers-pim-starts)); unset, it starts none |
-| `PIM_FLY_REGION` | unset | The Fly.io region they run in; unset lets Fly choose |
-| `PIM_FLY_MEMORY_MB`, `PIM_FLY_DISK_GB` | `2048`, `10` | Each one's memory, and its disk |
 
 A variable Pim can't read counts as its default, except a limit or a cap on accounts, which counts as 0, so a typo never lifts it. Settings → Deployment says which and why.
 
@@ -164,19 +161,17 @@ Commands run as the user who started `pim-computer`, with the files folder as th
 
 ### Computers Pim starts
 
-Pim can start a computer for each person who doesn't bring one: a [Fly Machine](https://fly.io/docs/machines/) that runs [`computer/Dockerfile`](computer/Dockerfile)'s image, with Node.js, Chromium and `pim-computer`, which connects as any other computer does. Settings → Computer then offers **Start a computer for me** beside connecting one's own. Its whole disk persists, so what agents and the person install there, such as Tailscale, stays across restarts. Pim suspends it after 15 minutes unused, memory and all, and starts it again the moment an agent or the person needs it, which takes a few seconds; a program left running on it pauses while it sleeps. Removing it in Settings, or deleting the account, deletes the machine with everything on it.
+Pim can start a computer for each person who doesn't bring one: a [Fly.io Sprite](https://sprites.dev), a Linux VM with Node.js, which Pim sets up once with Google Chrome. Settings → Computer then offers **Start a computer for me** beside connecting one's own. Its whole disk persists, so what agents and the person install there, such as Tailscale, stays.
 
-To turn it on, make a Fly app for the machines, build the image into it, and give Pim a token for it:
+It runs only while it's in use. The space starts `pim-computer --stdio` on it through the Sprites API when an agent or the person needs it, which wakes the Sprite in a few seconds, and talks to it over that command's input and output; five minutes after the last use, with nobody watching its browser, the space lets go, and the Sprite sleeps. Programs left running there are paused, then stopped, once it sleeps; its files and installed software stay. Nothing on it listens on a port: only the Sprites token reaches it. Removing it in Settings, or deleting the account, deletes the Sprite with everything on it.
+
+To turn it on, make a Sprites token for your organization at [sprites.dev](https://sprites.dev) and give it to Pim:
 
 ```sh
-fly apps create pim-computers
-fly auth docker
-docker build -t registry.fly.io/pim-computers:latest computer
-docker push registry.fly.io/pim-computers:latest
-fly tokens create deploy -a pim-computers   # then: pnpm wrangler secret put FLY_API_TOKEN
+pnpm wrangler secret put SPRITES_TOKEN
 ```
 
-and set `PIM_FLY_APP` to `pim-computers` and `PIM_FLY_IMAGE` to `registry.fly.io/pim-computers:latest` in the dashboard. Fly bills each machine by its size while it runs; a suspended one costs only its storage (see [Fly's pricing](https://fly.io/docs/about/pricing/)). Each one gets `PIM_URL` and its own computer token in its environment, which anyone who can read the Fly app can see.
+Sprites bill for the CPU, memory and storage they use while running, and only for storage while asleep (see [Sprites' pricing](https://sprites.dev)). The token can create and delete every Sprite in the organization, so give Pim an organization of its own.
 
 ### Traces
 

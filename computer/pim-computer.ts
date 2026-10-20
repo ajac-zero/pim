@@ -18,6 +18,10 @@
  *
  * Settings take flags too: `--url`, `--token`, `--root`, `--chrome`. The token can also
  * be in a file named by `PIM_COMPUTER_TOKEN_FILE`.
+ *
+ * With `--stdio`, it connects nowhere: it speaks the same messages, a line
+ * each, over its input and output. The space starts it so on a computer Pim
+ * started (src/sprites.ts), and it quits when its input ends.
  */
 
 import { Buffer } from "node:buffer";
@@ -674,6 +678,7 @@ Options (or the environment variables in brackets):
   --root <folder>   The folder your files are kept in (PIM_COMPUTER_ROOT; ~/pim unless set)
   --chrome <path>   The Chrome or Chromium your agents browse with (PIM_CHROME; found where it usually is unless set)
   --headful         Show the browser's window rather than running it headless (PIM_BROWSER_HEADFUL=1)
+  --stdio           Speak with the space over standard input and output, as Pim starts it on computers it starts
 
 The browser keeps its profile, with what you sign in to there, in ~/.pim-computer/browser.`;
 
@@ -681,26 +686,34 @@ async function main(): Promise<void> {
 	const { parseArgs } = await import("node:util");
 	const os = await import("node:os");
 	const { values } = parseArgs({
-		options: { url: { type: "string" }, token: { type: "string" }, root: { type: "string" }, chrome: { type: "string" }, headful: { type: "boolean" }, help: { type: "boolean" } },
+		options: {
+			url: { type: "string" },
+			token: { type: "string" },
+			root: { type: "string" },
+			chrome: { type: "string" },
+			headful: { type: "boolean" },
+			stdio: { type: "boolean" },
+			help: { type: "boolean" },
+		},
 	});
 	const env = process.env;
 	const tokenFile = env.PIM_COMPUTER_TOKEN_FILE;
 	const url = values.url ?? env.PIM_URL;
 	const token = values.token ?? env.PIM_COMPUTER_TOKEN ?? (tokenFile ? (await fs.readFile(tokenFile, "utf8")).trim() : undefined);
-	if (values.help || !url || !token) {
+	if (values.help || (!values.stdio && (!url || !token))) {
 		console.log(USAGE);
 		process.exit(values.help ? 0 : 1);
 	}
 	const folder = path.resolve(values.root ?? env.PIM_COMPUTER_ROOT ?? path.join(os.homedir(), "pim"));
 	await fs.mkdir(folder, { recursive: true });
 	const root = await fs.realpath(folder);
-	const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
+	// Standard output is the space's, with --stdio.
+	const log = (line: string) => (values.stdio ? console.error : console.log)(`${new Date().toISOString()} ${line}`);
 	const chrome = values.chrome ?? env.PIM_CHROME ?? (await findChrome());
 	const headful = values.headful === true || env.PIM_BROWSER_HEADFUL === "1";
 	const browser = chrome ? localBrowser(chrome, path.join(os.homedir(), ".pim-computer", "browser"), headful, log) : undefined;
 	if (!chrome) log("No Chrome or Chromium found, so your agents have no browser here. Install one, or name it with --chrome.");
 	const machine: Machine = { root, exec: (args, cwd) => runCommand(args, cwd, root), ...(browser ? { browser } : {}) };
-	const address = new URL("/api/computer/connect", url.replace(/^http/, "ws"));
 	const hello = {
 		type: "hello",
 		version: 1,
@@ -714,6 +727,30 @@ async function main(): Promise<void> {
 		shell: env.SHELL || "/bin/bash",
 		browser: chrome ?? null,
 	};
+	const logRun = (message: string) => {
+		if (message.startsWith('{"type":"call"') && message.includes('"op":"exec"')) {
+			const call = JSON.parse(message) as { args?: { command?: unknown } };
+			log(`Running: ${String(call.args?.command)}`);
+		}
+	};
+	if (values.stdio) {
+		const link = new Link(machine, (message) => process.stdout.write(`${message}\n`));
+		process.stdout.write(`${JSON.stringify(hello)}\n`);
+		const { createInterface } = await import("node:readline");
+		const lines = createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
+		lines.on("line", (line) => {
+			logRun(line);
+			link.receive(line);
+		});
+		// The space let go: the browser quits, so what's signed in there is saved, and so does this.
+		lines.on("close", async () => {
+			link.close();
+			await browser?.stop().catch(() => undefined);
+			process.exit(0);
+		});
+		return;
+	}
+	const address = new URL("/api/computer/connect", url!.replace(/^http/, "ws"));
 	let wait = 1_000;
 	const connect = () => {
 		// Node's WebSocket (undici) takes headers, so the token stays out of the address.
@@ -731,10 +768,7 @@ async function main(): Promise<void> {
 		});
 		socket.addEventListener("message", (event) => {
 			if (typeof event.data !== "string" || event.data === "pong") return;
-			if (event.data.startsWith('{"type":"call"') && event.data.includes('"op":"exec"')) {
-				const call = JSON.parse(event.data) as { args?: { command?: unknown } };
-				log(`Running: ${String(call.args?.command)}`);
-			}
+			logRun(event.data);
 			link.receive(event.data);
 		});
 		socket.addEventListener("close", (event) => {

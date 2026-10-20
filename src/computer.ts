@@ -3,6 +3,7 @@ import type { Connection } from "agents";
 import type { ExecArgs, ExecResult } from "../computer/pim-computer";
 import { digestHex } from "./auth/store";
 import { HttpError } from "./http";
+import type { SpriteLink } from "./sprites";
 
 /**
  * The person's computer: a machine of theirs (a server, a VM, a box at home)
@@ -19,6 +20,10 @@ import { HttpError } from "./http";
  * that use it are offered while it is paired, so a computer that drops off
  * for a moment doesn't change what agents can do, and they hear it's offline
  * when they try.
+ *
+ * A computer Pim started (./sprites.ts) has no token: the space starts
+ * pim-computer there when it's needed, which wakes it, and lets go of it
+ * once it has gone unused for `IDLE_MS`, so it sleeps.
  */
 
 /** Where the space takes the computer's connection, behind the Worker's `/api/computer/connect`. */
@@ -39,16 +44,13 @@ export const MAX_COMMAND_MS = 600_000;
 /** How much of each of a command's outputs comes back. */
 const COMMAND_OUTPUT_BYTES = 64_000;
 
-/** How long a computer Pim started may take to wake and connect. */
+/** How long a computer Pim started may take to wake and start pim-computer. */
 const WAKE_MS = 90_000;
-/** How often the computer's use is written down, at most. */
-const USE_RECORD_MS = 60_000;
-/** The close code of the connection of a computer Pim put to sleep: it connects again once it wakes. */
-const SLEEPING = 4000;
+/** How long a computer Pim started goes unused before the space lets go of it, and it sleeps. */
+export const IDLE_MS = 5 * 60_000;
 
 const TOKEN_KEY = "computer_token";
 const MACHINE_KEY = "computer_machine";
-const USED_AT_KEY = "computer_used_at";
 const PAIRED_AT_KEY = "computer_paired_at";
 const INFO_KEY = "computer_info";
 
@@ -75,7 +77,7 @@ export type ComputerState = "none" | "offline" | "online";
 
 export type ComputerStatus = {
 	readonly state: ComputerState;
-	/** Whether Pim started it (./fly.ts): it sleeps when unused, and wakes when it's needed. */
+	/** Whether Pim started it (./sprites.ts): it sleeps when unused, and wakes when it's needed. */
 	readonly managed: boolean;
 	readonly pairedAt: number | null;
 	readonly computer: ComputerInfo | null;
@@ -108,19 +110,23 @@ export class Computer {
 	readonly #pending = new Map<string, Pending>();
 	/** The DevTools connection to the computer's browser, of which there is one at a time. */
 	#browser: { channel: number; transport: BrowserTransport } | null = null;
-	/** Starts the machine of a computer Pim started, when a call finds it asleep. */
-	readonly #wake: () => Promise<void>;
-	/** Hears that the computer was used, at most once every `USE_RECORD_MS`. */
-	readonly #used: () => void;
+	/** Starts pim-computer on the computer Pim started, which wakes it, when a call finds it asleep. */
+	readonly #wake: () => Promise<SpriteLink>;
+	/** Whether the space is using the computer in a way it doesn't see itself, such as someone watching its browser. */
+	readonly #inUse: () => boolean;
+	/** pim-computer on the computer Pim started, while the space holds on to it. */
+	#link: SpriteLink | null = null;
 	#waking: Promise<void> | undefined;
-	#arrivals: (() => void)[] = [];
+	/** What waits for pim-computer on the computer Pim started to say what it is, or to stop before it has. */
+	#arrivals: ((hello: boolean) => void)[] = [];
 	#usedAt = 0;
+	#idle: ReturnType<typeof setTimeout> | undefined;
 
-	constructor(options: { meta: Meta; sockets: () => Connection[]; wake: () => Promise<void>; used: () => void }) {
+	constructor(options: { meta: Meta; sockets: () => Connection[]; wake: () => Promise<SpriteLink>; inUse: () => boolean }) {
 		this.#meta = options.meta;
 		this.#sockets = options.sockets;
 		this.#wake = options.wake;
-		this.#used = options.used;
+		this.#inUse = options.inUse;
 	}
 
 	/** The machine of the computer Pim started, or null for one the person brought. */
@@ -128,14 +134,11 @@ export class Computer {
 		return this.#meta.meta(MACHINE_KEY) ?? null;
 	}
 
-	/** The computer is the machine Pim started, `id`. */
-	setMachine(id: string): void {
-		this.#meta.setMeta(MACHINE_KEY, id);
-	}
-
-	/** When it was last used: called, or its browser driven. */
-	usedAt(): number {
-		return Math.max(this.#usedAt, Number(this.#meta.meta(USED_AT_KEY) ?? 0));
+	/** The computer is now the machine Pim started, `name`, in place of any other. */
+	started(name: string, now: number): void {
+		this.forget();
+		this.#meta.setMeta(MACHINE_KEY, name);
+		this.#meta.setMeta(PAIRED_AT_KEY, String(now));
 	}
 
 	/** Whether it's doing something for the space now: answering a call, or with its browser connected. */
@@ -144,26 +147,34 @@ export class Computer {
 	}
 
 	#use(): void {
-		const now = Date.now();
-		const recorded = Number(this.#meta.meta(USED_AT_KEY) ?? 0);
-		this.#usedAt = now;
-		if (now - recorded < USE_RECORD_MS) return;
-		this.#meta.setMeta(USED_AT_KEY, String(now));
-		this.#used();
+		this.#usedAt = Date.now();
 	}
 
-	/** Its machine was put to sleep: its connection goes, and it connects again when it wakes. */
-	slept(): void {
-		for (const socket of this.#sockets()) socket.close(SLEEPING, "The computer went to sleep");
+	/**
+	 * Lets go of the computer Pim started once it has gone unused for
+	 * `IDLE_MS` (by `now`), so it sleeps; one in use is looked at again later.
+	 */
+	letGoIfIdle(now = Date.now()): void {
+		clearTimeout(this.#idle);
+		const link = this.#link;
+		if (!link || link.readyState !== WebSocket.OPEN) return;
+		const idle = now - this.#usedAt;
+		if (idle < IDLE_MS || this.busy() || this.#inUse()) {
+			this.#idle = setTimeout(() => this.letGoIfIdle(), Math.max(IDLE_MS - idle, 60_000));
+			return;
+		}
+		this.#link = null;
+		link.close();
 		this.#failPending();
 	}
 
-	/** Whether a computer is paired, online or not. */
+	/** Whether a computer is paired, online or not: one the person brought, with its token, or one Pim started. */
 	paired(): boolean {
-		return this.#meta.meta(TOKEN_KEY) !== undefined;
+		return this.#meta.meta(TOKEN_KEY) !== undefined || this.machine() !== null;
 	}
 
-	#socket(): Connection | undefined {
+	#socket(): Pick<Connection, "send"> | undefined {
+		if (this.#link?.readyState === WebSocket.OPEN) return this.#link;
 		return this.#sockets().find((socket) => socket.readyState === WebSocket.OPEN);
 	}
 
@@ -195,13 +206,14 @@ export class Computer {
 		this.#meta.deleteMeta(PAIRED_AT_KEY);
 		this.#meta.deleteMeta(INFO_KEY);
 		this.#meta.deleteMeta(MACHINE_KEY);
-		this.#meta.deleteMeta(USED_AT_KEY);
-		this.#usedAt = 0;
 		this.disconnect("The computer was removed");
 	}
 
 	disconnect(reason: string): void {
 		for (const socket of this.#sockets()) socket.close(REPLACED, reason);
+		this.#link?.close();
+		this.#link = null;
+		clearTimeout(this.#idle);
 		this.#failPending();
 	}
 
@@ -219,7 +231,9 @@ export class Computer {
 
 	/** The connection closed: calls waiting on it fail now rather than at their timeouts. */
 	disconnected(): void {
-		if (!this.#socket()) this.#failPending();
+		if (this.#socket()) return;
+		for (const arrival of this.#arrivals.splice(0)) arrival(false);
+		this.#failPending();
 	}
 
 	#failPending(): void {
@@ -252,7 +266,7 @@ export class Computer {
 				connectedAt: Date.now(),
 			};
 			this.#meta.setMeta(INFO_KEY, JSON.stringify(info));
-			for (const arrived of this.#arrivals.splice(0)) arrived();
+			for (const arrived of this.#arrivals.splice(0)) arrived(true);
 			return;
 		}
 		if (message.type === "cdp" || message.type === "cdp_closed") {
@@ -274,7 +288,7 @@ export class Computer {
 	/** Calls the computer and waits for its answer; one Pim started wakes first, if it's asleep. */
 	async call<T = unknown>(op: string, args: Record<string, unknown>, timeoutMs = FILE_CALL_MS, counts = true): Promise<T> {
 		if (!this.paired()) throw new HttpError(404, "No computer is connected. The person can connect one in Settings → Computer.");
-		if (!this.#socket() && this.machine()) await this.#wakeUp();
+		await this.wake();
 		const socket = this.#socket();
 		if (!socket) throw new HttpError(503, "The computer is offline: pim-computer isn't connected. Ask the person to start it again.");
 		if (counts) this.#use();
@@ -289,19 +303,34 @@ export class Computer {
 		});
 	}
 
-	/** Starts the machine and waits for it to connect, once for every call that finds it asleep. */
-	#wakeUp(): Promise<void> {
+	/**
+	 * Wakes the computer Pim started, if it's asleep, by starting
+	 * pim-computer there, and waits until it says what it is; once for every
+	 * call that finds it asleep.
+	 */
+	wake(): Promise<void> {
+		if (this.#socket() || !this.machine()) return Promise.resolve();
 		this.#waking ??= (async () => {
 			const arrived = new Promise<boolean>((resolve) => {
 				const timer = setTimeout(() => resolve(false), WAKE_MS);
-				this.#arrivals.push(() => {
+				this.#arrivals.push((hello) => {
 					clearTimeout(timer);
-					resolve(true);
+					resolve(hello);
 				});
 			});
-			// A machine that's already starting says so; it connects all the same.
-			await this.#wake().catch((error) => console.warn("waking the computer", error));
-			if (!(await arrived)) throw new HttpError(504, "The computer didn't wake up. Try again in a minute.");
+			try {
+				this.#link = await this.#wake();
+			} catch (error) {
+				for (const arrival of this.#arrivals.splice(0)) arrival(false);
+				throw error;
+			}
+			if (!(await arrived)) {
+				this.#link?.close();
+				this.#link = null;
+				throw new HttpError(504, "The computer didn't wake up. Try again in a minute.");
+			}
+			this.#use();
+			this.letGoIfIdle();
 		})().finally(() => {
 			this.#waking = undefined;
 		});

@@ -25,6 +25,13 @@ export const permissionsQuery = (circle?: string) =>
     queryFn: () => pim.permissions(circle),
   });
 
+/** Whether an agent may use each tool of its connected apps. */
+export const agentPermissionsQuery = (agent: string) =>
+  queryOptions({
+    queryKey: ["permissions", "agent", agent],
+    queryFn: () => pim.agentPermissions(agent),
+  });
+
 export const circlesQuery = () =>
   queryOptions({ queryKey: ["circles"], queryFn: pim.circles });
 

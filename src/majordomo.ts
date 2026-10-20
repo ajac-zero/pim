@@ -146,12 +146,7 @@ export function majordomoSetup(body: Record<string, unknown>): MajordomoSetup {
 	if (!Array.isArray(helpWith) || helpWith.some((area) => typeof area !== "string" || !Object.hasOwn(HELP_WITH, area))) {
 		throw new HttpError(400, `helpWith must list some of ${Object.keys(HELP_WITH).join(", ")}`);
 	}
-	const customTone = line(body.customTone, "customTone", 120);
-	const instructions = [
-		choice(body.tone, "tone", TONES),
-		customTone && `Talk with them the way they asked, in their words: ${customTone}`,
-		choice(body.involvement, "involvement", INVOLVEMENT),
-	].filter((part) => part !== null);
+	const instructions = preferenceLines(body);
 	const others = body.otherHelp ?? [];
 	if (!Array.isArray(others) || others.length > MAX_OTHER_HELP) throw new HttpError(400, `otherHelp must list at most ${MAX_OTHER_HELP} things`);
 	const otherHelp = [...new Set(others.map((other) => line(other, "otherHelp", 120)).filter((other) => other !== null))];
@@ -161,10 +156,49 @@ export function majordomoSetup(body: Record<string, unknown>): MajordomoSetup {
 		color,
 		yourName: line(body.yourName, "yourName", 80),
 		helpWith: [...Object.keys(HELP_WITH).filter((area) => helpWith.includes(area)).map((area) => HELP_WITH[area]!), ...otherHelp],
-		instructions: instructions.join("\n"),
+		instructions,
 		locale: locale as string | null,
 		title: line(body.title, "title", 100),
 	};
+}
+
+/** How the majordomo talks with the person and how much it handles on its own, as they chose: lines of its instructions. */
+export type MajordomoPreferences = {
+	readonly tone: string | null;
+	/** How it should talk, in their words. */
+	readonly customTone: string | null;
+	readonly involvement: string | null;
+};
+
+const CUSTOM_TONE = "Talk with them the way they asked, in their words: ";
+
+/** The instructions' lines for the preferences given, checked; none for those left out. */
+function preferenceLines(body: Record<string, unknown>): string {
+	const customTone = line(body.customTone, "customTone", 120);
+	return [choice(body.tone, "tone", TONES), customTone && `${CUSTOM_TONE}${customTone}`, choice(body.involvement, "involvement", INVOLVEMENT)]
+		.filter((part) => part !== null)
+		.join("\n");
+}
+
+/** Whether a line of the instructions is one a preference wrote, and which. */
+function preferenceOf(text: string): Partial<MajordomoPreferences> | null {
+	const tone = Object.keys(TONES).find((key) => TONES[key] === text);
+	if (tone) return { tone };
+	if (text.startsWith(CUSTOM_TONE)) return { customTone: text.slice(CUSTOM_TONE.length) };
+	const involvement = Object.keys(INVOLVEMENT).find((key) => INVOLVEMENT[key] === text);
+	return involvement ? { involvement } : null;
+}
+
+/** The preferences the majordomo's instructions hold, read back from the lines they wrote. */
+export function majordomoPreferences(instructions: string): MajordomoPreferences {
+	const found = instructions.split("\n").map(preferenceOf);
+	return Object.assign({ tone: null, customTone: null, involvement: null }, ...found.filter((part) => part !== null));
+}
+
+/** The majordomo's instructions with the preferences given in place of those they held, before what the person wrote themselves. */
+export function withPreferences(instructions: string, body: Record<string, unknown>): string {
+	const own = instructions.split("\n").filter((text) => preferenceOf(text) === null);
+	return [preferenceLines(body), own.join("\n").trim()].filter((part) => part !== "").join("\n");
 }
 
 /** What it remembers from the setup, one memory each. */

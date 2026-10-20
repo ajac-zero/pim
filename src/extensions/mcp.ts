@@ -3,14 +3,7 @@ import { defineExtension, defineTool, section, type ToolRegistration } from "@ea
 import { OWNER, type PimStore, type ToolPermission } from "../store";
 import type { AppCatalog } from "./app-catalog";
 import { type DirectoryApp, describeFound, findApps } from "./app-directory";
-import {
-	approvalNote,
-	defineGatedAction,
-	fileApproval,
-	type GatedAction,
-	type ResolvedPermission,
-	resolvePermission,
-} from "./approvals";
+import { defineGatedAction, type GatedAction, type ResolvedPermission, resolvePermission } from "./approvals";
 import type { ToolWidget } from "./define";
 import { json, type PimServices, text } from "./services";
 
@@ -156,11 +149,23 @@ export function appToolPermission(
 	return tool.annotations?.destructiveHint === true && resolved.permission === "on" ? { ...resolved, permission: "ask" } : resolved;
 }
 
-/** An app tool's permission as the app and the user's choice are now; undefined while its app doesn't offer it. */
-function currentPermission(bridge: McpBridge, store: PimStore, serverId: string, name: string): ToolPermission | undefined {
-	const server = bridge.servers().find((candidate) => candidate.id === serverId);
-	const tool = bridge.tools().find((candidate) => candidate.serverId === serverId && candidate.name === name);
-	return server && tool ? appToolPermission(store, server, tool).permission : undefined;
+/** Whom one of the owner's agents' switches are given to, in the permissions an audience holds. */
+export const agentAudience = (agentId: string) => `agent:${agentId}`;
+
+/**
+ * An app tool's switch in one of the owner's agents: on, the agent uses it
+ * without asking; off, it isn't offered the tool. The person's choice for
+ * that agent, held to the tool as it was when they switched it on, as a
+ * circle's is; else what they chose for every agent before switches were
+ * each agent's (asking counts as off); else on, unless the app marks the
+ * tool destructive or asks before every call.
+ */
+export function agentToolPermission(store: PimStore, agentId: string, server: McpServerInfo, tool: McpToolInfo): ResolvedPermission {
+	const definition = toolDefinition(tool);
+	const before = resolvePermission(store, OWNER, server.id, tool.name, "on", definition);
+	const fallback =
+		before.chosen !== null ? (before.permission === "on" ? "on" : "off") : tool.annotations?.destructiveHint === true || server.approval === "all" ? "off" : "on";
+	return resolvePermission(store, agentAudience(agentId), server.id, tool.name, fallback, definition);
 }
 
 function clip(value: string, limit: number): string {
@@ -247,6 +252,8 @@ export function mcpExtensions(
 	appsOf: (session: string) => readonly DirectoryApp[],
 	/** Every app the person can connect. */
 	directory: () => readonly DirectoryApp[],
+	/** Whether a conversation's agent may use an app's tool, as its switch is now. */
+	permissionIn: (session: string, server: McpServerInfo, tool: McpToolInfo) => ToolPermission,
 ) {
 	const all = bridge.servers();
 	const servers = new Map(all.map((server) => [server.id, server]));
@@ -254,36 +261,25 @@ export function mcpExtensions(
 	for (const tool of bridge.tools()) {
 		const server = servers.get(tool.serverId);
 		if (!server || server.state !== "ready") continue;
-		const { permission } = appToolPermission(services.store, server, tool);
-		if (permission === "off") continue;
 		const name = toolName(server.id, tool.name);
-		const gated = permission === "ask";
-		const description = `[${server.name}] ${tool.description ?? tool.annotations?.title ?? tool.name}`;
 		const tools = byServer.get(server.id) ?? [];
 		byServer.set(server.id, tools);
 		tools.push(
 			defineTool({
 				name,
-				description: gated ? `${description} ${approvalNote(services, tool.annotations?.destructiveHint === true)}` : description,
+				description: `[${server.name}] ${tool.description ?? tool.annotations?.title ?? tool.name}`,
 				// MCP input schemas are JSON Schema, which pi validates as given.
 				parameters: { type: "object", ...tool.inputSchema } as unknown as TSchema,
-				// Filing an approval is replay-safe; a direct call is only if the app says it is read-only.
-				replay: gated || tool.annotations?.readOnlyHint === true ? "safe" : "unsafe",
-				async execute(args, api, context) {
+				// A call is replay-safe only if the app says the tool only reads.
+				replay: tool.annotations?.readOnlyHint === true ? "safe" : "unsafe",
+				async execute(args, api) {
 					const call = { server: server.id, tool: tool.name, arguments: (args ?? {}) as Record<string, unknown> };
-					// Checked again as the app and the user's choice are now: a tool turned off, or changed by its app, since
-					// these tools were built is refused or asked about. Never looser than when built, for replay's sake.
-					const now = currentPermission(bridge, services.store, server.id, tool.name);
-					if (now === undefined) return text(`${server.name} doesn't offer ${tool.name} right now.`, true);
-					if (now === "off") return text(`The user turned off ${name}. Do not try it another way.`, true);
-					if (gated || now === "ask") {
-						const risky = bridge.tools().some((info) => info.serverId === server.id && info.name === tool.name && info.annotations?.destructiveHint === true);
-						return fileApproval(services, api, context, {
-							action: "mcp_call",
-							tool: risky ? null : name,
-							args: call,
-							summary: summarizeCall(server.name, tool.name, call.arguments),
-						}, risky);
+					// Checked again as the app and the agent's switch are now: a tool switched off, or changed by its app,
+					// since the conversation's tools were chosen is refused.
+					const now = bridge.tools().find((candidate) => candidate.serverId === server.id && candidate.name === tool.name);
+					if (!now) return text(`${server.name} doesn't offer ${tool.name} right now.`, true);
+					if (permissionIn(String(api.conversationId), server, now) === "off") {
+						return text(`The person switched ${name} off for this agent. Do not try it another way.`, true);
 					}
 					const result = await bridge.call(server.id, tool.name, call.arguments);
 					const content = toContent(result);

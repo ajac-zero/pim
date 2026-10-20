@@ -107,6 +107,8 @@ import {
 import { goalsExtension, goalsWidgets } from "./extensions/goals";
 import { dashboardExtension, MAX_DASHBOARD, UPDATE_DASHBOARD } from "./extensions/dashboard";
 import {
+	agentAudience,
+	agentToolPermission,
 	APP_PREFIX,
 	appExtensionName,
 	appToolPermission,
@@ -154,7 +156,7 @@ import { type Agent, type AgentInput, AgentStore, agentInput, type TeamMember } 
 import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessages } from "./chat-links";
 import type { AgentIcon, ArtifactToPublish } from "./gallery";
 import { type Delegate, type Role, TASKS_EXTENSION, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
-import { DECIDE_APPROVAL, introduction, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension } from "./majordomo";
+import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension, withPreferences } from "./majordomo";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { projectEntries } from "./transcript";
 import { ARTIFACT_ASK, conversationText, IMPROVE_PROMPT, NAME_CHAT, SUMMARIZE_CHAT, type UtilityTask } from "./utility";
@@ -230,6 +232,8 @@ export type ToolPermissionInfo = ResolvedPermission & {
 	readonly description: string | null;
 	/** The app says the tool only reads. */
 	readonly readOnly: boolean;
+	/** The app says the tool may delete or overwrite things. */
+	readonly destructive: boolean;
 	/** The permissions it can have. */
 	readonly choices: readonly ToolPermission[];
 };
@@ -759,6 +763,7 @@ export class Pim extends DurableAgent<Env> {
 			this.#appExtras(services),
 			(session) => this.#appsOf(this.#roleOf(session).agent),
 			() => this.appDirectory(),
+			(session, server, tool) => agentToolPermission(this.store, this.#roleOf(session).agent.id, server, tool).permission,
 		);
 	}
 
@@ -1759,10 +1764,6 @@ export class Pim extends DurableAgent<Env> {
 		if (!server || !info) return "ask";
 		const resolved = appToolPermission(this.store, server, info, approval.requestedBy?.circle ?? OWNER);
 		if (this.#requiresExplicitApproval(approval)) return resolved.permission === "off" ? "off" : "ask";
-		if (!approval.requestedBy && resolved.chosen === null && server.approval !== "all") {
-			const assigned = this.#appsOf(this.#roleOf(approval.session).agent);
-			if (assigned.some((app) => serverFor([server], app))) return "on";
-		}
 		return resolved.permission;
 	}
 
@@ -1775,59 +1776,91 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Every tool a permission can be set for, for the owner (`OWNER`) or a
-	 * circle, with the permission that applies. A circle has its own row for
-	 * memory, and none for Pim's tools that change its setup.
+	 * circle, with the permission that applies: for the owner, Pim's own tools
+	 * that act on the world, since each agent has its own switches for its
+	 * apps' tools; for a circle, its row for memory and every app's tools.
 	 */
 	toolPermissions(audience: string = OWNER): ToolPermissionInfo[] {
-		const own: ToolPermissionInfo[] =
-			audience === OWNER
-				? this.#ownGatedActions().map((action) => ({
-						app: null,
-						appName: null,
-						tool: action.name,
-						name: action.name,
-						description: action.description,
-						readOnly: false,
-						choices: action.explicitApproval ? ["off", "ask"] : TOOL_PERMISSIONS,
-						...ownToolPermission(this.store, action.name),
-					}))
-				: [
-						{
-							app: null,
-							appName: null,
-							tool: MEMORY_TOOL,
-							name: MEMORY_TOOL,
-							description: "Read what Pim remembers about you: its memory view, and searching every memory.",
-							readOnly: true,
-							choices: ["off", "on"],
-							...resolvePermission(this.store, audience, "", MEMORY_TOOL, "off", null),
-						},
-					];
+		if (audience === OWNER) {
+			return this.#ownGatedActions().map((action) => ({
+				app: null,
+				appName: null,
+				tool: action.name,
+				name: action.name,
+				description: action.description,
+				readOnly: false,
+				destructive: false,
+				choices: action.explicitApproval ? ["off", "ask"] : TOOL_PERMISSIONS,
+				...ownToolPermission(this.store, action.name),
+			}));
+		}
+		const memory: ToolPermissionInfo = {
+			app: null,
+			appName: null,
+			tool: MEMORY_TOOL,
+			name: MEMORY_TOOL,
+			description: "Read what Pim remembers about you: its memory view, and searching every memory.",
+			readOnly: true,
+			destructive: false,
+			choices: ["off", "on"],
+			...resolvePermission(this.store, audience, "", MEMORY_TOOL, "off", null),
+		};
 		const servers = new Map(this.apps.servers().map((server) => [server.id, server]));
 		const apps = this.apps.tools().flatMap((tool) => {
 			const server = servers.get(tool.serverId);
 			if (!server) return [];
-			return [
-				{
-					app: server.id,
-					appName: server.name,
-					tool: tool.name,
-					name: toolName(server.id, tool.name),
-					description: tool.description ?? tool.annotations?.title ?? null,
-					readOnly: tool.annotations?.readOnlyHint === true,
-					choices: tool.annotations?.destructiveHint === true ? ["off", "ask"] as const : TOOL_PERMISSIONS,
-					...appToolPermission(this.store, server, tool, audience),
-				},
-			];
+			const choices = tool.annotations?.destructiveHint === true ? (["off", "ask"] as const) : TOOL_PERMISSIONS;
+			return [{ ...this.#appToolInfo(server, tool), choices, ...appToolPermission(this.store, server, tool, audience) }];
 		});
-		return [...own, ...apps];
+		return [memory, ...apps];
+	}
+
+	/** What a permission row says about an app's tool, besides the permission. */
+	#appToolInfo(server: McpServerInfo, tool: McpToolInfo) {
+		return {
+			app: server.id,
+			appName: server.name,
+			tool: tool.name,
+			name: toolName(server.id, tool.name),
+			description: tool.description ?? tool.annotations?.title ?? null,
+			readOnly: tool.annotations?.readOnlyHint === true,
+			destructive: tool.annotations?.destructiveHint === true,
+		};
+	}
+
+	/** The tools of the connected apps an agent works with, each with its switch for that agent. */
+	agentToolPermissions(agent: Agent): ToolPermissionInfo[] {
+		const servers = this.apps.servers();
+		const tools = this.apps.tools();
+		return this.#appsOf(agent).flatMap((app) => {
+			const server = serverFor(servers, app);
+			if (!server) return [];
+			return tools
+				.filter((tool) => tool.serverId === server.id)
+				.map((tool) => ({ ...this.#appToolInfo(server, tool), choices: ["off", "on"] as const, ...agentToolPermission(this.store, agent.id, server, tool) }));
+		});
+	}
+
+	/**
+	 * Switches an app's tool on or off for one agent, or back to its default
+	 * (null). Switched on, it is held to the tool's definition now. The agent's
+	 * conversations see it from their next request.
+	 */
+	setAgentToolPermission(agent: Agent, app: string, tool: string, permission: ToolPermission | null): ToolPermissionInfo {
+		if (permission === "ask") throw new HttpError(400, "An agent's app tools are either on or off");
+		const found = this.agentToolPermissions(agent).find((info) => info.app === app && info.tool === tool);
+		if (!found) throw new HttpError(404, `${agent.name} has no tool ${tool} in the app ${app}`);
+		const info = this.apps.tools().find((candidate) => candidate.serverId === app && candidate.name === tool)!;
+		if (permission === null) this.store.clearToolPermission(agentAudience(agent.id), app, tool);
+		else this.store.setToolPermission(agentAudience(agent.id), app, tool, permission, toolDefinition(info));
+		return this.agentToolPermissions(agent).find((candidate) => candidate.app === app && candidate.tool === tool)!;
 	}
 
 	/**
 	 * Sets the permission of a tool for the owner (`OWNER`) or a circle: one of
-	 * Pim's own (`app` empty) or an app's; null goes back to its default. An app
-	 * tool's choice is tied to its definition now. The model sees the change
-	 * from its next request; a guest, from their next call.
+	 * Pim's own (`app` empty), or, for a circle, an app's; null goes back to its
+	 * default. An app tool's choice is tied to its definition now. The model sees
+	 * the change from its next request; a guest, from their next call.
 	 */
 	setToolPermission(audience: string, app: string, tool: string, permission: ToolPermission | null): ToolPermissionInfo {
 		if (audience !== OWNER) this.#circle(audience);
@@ -1840,6 +1873,7 @@ export class Pim extends DurableAgent<Env> {
 				throw new HttpError(400, "This tool can only be off or ask: every change requires explicit approval");
 			}
 		} else {
+			if (audience === OWNER) throw new HttpError(400, "An app's tools are switched on or off for each agent");
 			const info = this.apps.tools().find((candidate) => candidate.serverId === app && candidate.name === tool);
 			if (!info) throw new HttpError(404, `No tool ${tool} in the app ${app}`);
 			if (permission === "on" && info.annotations?.destructiveHint === true) {
@@ -2322,21 +2356,27 @@ export class Pim extends DurableAgent<Env> {
 	 * with does: talking to them, scheduling work and watching apps' events
 	 * (both come back to the conversation that asked), and changing agents,
 	 * apps and skills. A member hands out no tasks, and one with a list of
-	 * tools gets only those.
+	 * tools gets only those. App tools switched off for its agent are left out.
 	 */
 	#taskAgent(agent: Agent, member: TeamMember | null): AgentChange {
 		const snapshot = this.registry.snapshot();
+		const off = this.#switchedOff(agent);
 		const removed = [MESSAGING_EXTENSION, SCHEDULE_EXTENSION, ...(member ? [TASKS_EXTENSION] : [])].flatMap((name) => snapshot.extension(name) ?? []);
 		// It works with its agent's abilities and apps.
 		const added = [...this.extensions.abilitiesOf(agent.blueprint), ...this.#appExtensionsOf(agent)].flatMap((name) => snapshot.extension(name) ?? []);
 		const extensions = { add: added, remove: removed };
 		const kept = snapshot
 			.tools()
-			.filter(({ extension, tool }) => !removed.includes(extension) && !LEAD_ONLY_TOOLS.has(tool.name))
+			.filter(({ extension, tool }) => !removed.includes(extension) && !LEAD_ONLY_TOOLS.has(tool.name) && !off.has(tool.name))
 			.filter(({ extension }) => !this.#perPim(extension.name) || added.includes(extension));
 		if (member?.tools) return { extensions, tools: kept.filter(({ tool }) => member.tools!.includes(tool.name)).map(({ tool }) => tool) };
-		const leadOnly = snapshot.tools().filter(({ tool }) => LEAD_ONLY_TOOLS.has(tool.name));
-		return { extensions, ...(leadOnly.length > 0 ? { tools: { remove: leadOnly.map(({ tool }) => tool) } } : {}) };
+		const left = snapshot.tools().filter(({ tool }) => LEAD_ONLY_TOOLS.has(tool.name) || off.has(tool.name));
+		return { extensions, ...(left.length > 0 ? { tools: { remove: left.map(({ tool }) => tool) } } : {}) };
+	}
+
+	/** The names of the app tools switched off for an agent, which its conversations aren't offered. */
+	#switchedOff(agent: Agent): Set<string> {
+		return new Set(this.agentToolPermissions(agent).flatMap((info) => (info.permission === "off" ? [info.name] : [])));
 	}
 
 	/**
@@ -2602,9 +2642,10 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Gives a chat the abilities its agent uses and the apps it lists, as they
-	 * are now, before its next run: its agent, the agent's blueprint, the extensions or
-	 * the connected apps may have changed since.
+	 * Gives a chat the abilities its agent uses and the apps it lists, less
+	 * the app tools switched off for the agent, as they are now, before its next
+	 * run: its agent, the agent's blueprint, the extensions, the connected apps
+	 * or the switches may have changed since.
 	 * Visits choose their own extensions, and tasks' conversations get theirs
 	 * when made. A chat whose selection is unchanged isn't written to.
 	 */
@@ -2613,11 +2654,16 @@ export class Pim extends DurableAgent<Env> {
 		const agent = this.agents.ofSession(session);
 		// Apps last: their tools come and go, and pi only appends cheaply at the end.
 		const wanted = [...this.extensions.abilitiesOf(agent.blueprint), ...this.#appExtensionsOf(agent)];
-		const key = wanted.join(" ");
+		const off = [...this.#switchedOff(agent)];
+		const key = [...wanted, ...off.map((name) => `-${name}`)].join(" ");
 		if ((this.agents.abilities(session) ?? "") === key) return;
 		const snapshot = this.registry.snapshot();
 		const add = wanted.flatMap((name) => snapshot.extension(name) ?? []);
-		await (await this.harness.conversation(session)).configure({ extensions: add.length > 0 ? { add } : null }, BACKGROUND_CONTEXT);
+		const remove = snapshot.tools().flatMap(({ tool }) => (off.includes(tool.name) ? [tool] : []));
+		await (await this.harness.conversation(session)).configure(
+			{ extensions: add.length > 0 ? { add } : null, tools: remove.length > 0 ? { remove } : null },
+			BACKGROUND_CONTEXT,
+		);
 		this.agents.setAbilities(session, key);
 	}
 
@@ -4285,6 +4331,9 @@ export class Pim extends DurableAgent<Env> {
 			"GET",
 			"/permissions",
 			(_params, _request, url) => {
+				// One of the owner's agents: the switches of its apps' tools.
+				const agent = url.searchParams.get("agent");
+				if (agent !== null) return { tools: this.agentToolPermissions(this.#agent(agent)) };
 				const circle = url.searchParams.get("circle");
 				if (circle !== null) this.#circle(circle);
 				return { tools: this.toolPermissions(circle ?? OWNER) };
@@ -4294,12 +4343,19 @@ export class Pim extends DurableAgent<Env> {
 			"PUT",
 			"/permissions",
 			async (_params, request) => {
-				const { circle, app, tool, permission } = await readJson<{
+				const { agent, circle, app, tool, permission } = await readJson<{
+					agent: string | null;
 					circle: string | null;
 					app: string | null;
 					tool: string;
 					permission: ToolPermission | null;
 				}>(request);
+				if (agent !== null && agent !== undefined) {
+					if (typeof agent !== "string") throw new HttpError(400, "agent must be an agent's id");
+					if (typeof app !== "string" || typeof tool !== "string") throw new HttpError(400, "app and tool name an app's tool");
+					if (permission !== null && permission !== "on" && permission !== "off") throw new HttpError(400, "permission must be on, off, or null for the default");
+					return this.setAgentToolPermission(this.#agent(agent), app, tool, permission);
+				}
 				if (circle !== null && circle !== undefined && typeof circle !== "string") throw new HttpError(400, "circle must be a circle's id");
 				if (app !== null && app !== undefined && (typeof app !== "string" || app === "")) {
 					throw new HttpError(400, "app must be an app's id, or null for Pim's own tools");
@@ -4315,7 +4371,25 @@ export class Pim extends DurableAgent<Env> {
 		// The owner's agents, the majordomo first.
 		["GET", "/agents", () => ({ agents: this.agents.list() })],
 		// The majordomo, and whether the person has named it yet.
-		["GET", "/majordomo", () => ({ agent: this.agents.majordomo(), introduced: this.agents.introduced() })],
+		[
+			"GET",
+			"/majordomo",
+			() => {
+				const agent = this.agents.majordomo();
+				return { agent, introduced: this.agents.introduced(), preferences: majordomoPreferences(agent.instructions) };
+			},
+		],
+		[
+			"PUT",
+			"/majordomo/preferences",
+			async (_params, request) => {
+				// How it talks and how much it handles on its own, as at setup: lines of its instructions, in place of those it had.
+				const majordomo = this.agents.majordomo();
+				const instructions = withPreferences(majordomo.instructions, await readJson<Record<string, unknown>>(request));
+				const agent = this.agents.update(majordomo.id, agentInput({ instructions }, majordomo));
+				return { agent, introduced: this.agents.introduced(), preferences: majordomoPreferences(agent.instructions) };
+			},
+		],
 		[
 			"POST",
 			"/majordomo",
@@ -4497,6 +4571,7 @@ export class Pim extends DurableAgent<Env> {
 				// Its tasks, and its team's, stop with it: no other agent takes them over.
 				for (const task of this.#tasks.open()) if (task.agent === id) await this.#cancelTask(task, "Its agent was deleted.");
 				this.agents.delete(id!);
+				this.store.clearAudience(agentAudience(id!));
 				return { deleted: true };
 			},
 		],
@@ -4802,17 +4877,10 @@ export class Pim extends DurableAgent<Env> {
 			app: directory.find((app) => serverFor([server], app))?.ref ?? null,
 			// The person's agents that list the app: only their chats get its tools.
 			agents: agents.filter((agent) => agent.servers.has(server.id)).map((agent) => agent.name),
+			// Each agent has its own switches for them (`GET /permissions?agent=`).
 			tools: catalog
 				.filter((tool) => tool.serverId === server.id)
-				.map((tool) => {
-					const { permission } = appToolPermission(this.store, server, tool);
-					return {
-						name: toolName(server.id, tool.name),
-						description: tool.description ?? null,
-						permission,
-						requiresApproval: permission === "ask",
-					};
-				}),
+				.map((tool) => ({ name: toolName(server.id, tool.name), description: tool.description ?? null })),
 		}));
 	}
 

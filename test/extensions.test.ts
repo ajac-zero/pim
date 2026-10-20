@@ -324,6 +324,21 @@ describe("extensions", () => {
 		// Once: after that it is edited like any agent.
 		expect((await post("/majordomo", { name: "Jeeves" })).status).toBe(409);
 
+		// Its preferences read back from those lines, and change them in place, keeping what the person wrote themselves.
+		expect((await api("/majordomo")).body.preferences).toEqual({ tone: "formal", customTone: "Like a gentle aunt", involvement: "close" });
+		await api(`/agents/${first.id}`, { method: "PUT", body: JSON.stringify({ instructions: `${named.agent.instructions}\nNever book flights before 9.` }) });
+		const changePreferences = (body: unknown) => api("/majordomo/preferences", { method: "PUT", body: JSON.stringify(body) });
+		expect((await changePreferences({ tone: "grumpy" })).status).toBe(400);
+		const changed = (await changePreferences({ tone: "brief", customTone: null, involvement: "hands_off" })).body;
+		expect(changed.preferences).toEqual({ tone: "brief", customTone: null, involvement: "hands_off" });
+		expect(changed.agent.instructions).not.toContain("formally");
+		expect(changed.agent.instructions).not.toContain("gentle aunt");
+		expect(changed.agent.instructions).toContain("Talk with them briefly");
+		expect(changed.agent.instructions).toContain("Take as much off their hands");
+		expect(changed.agent.instructions).toMatch(/\nNever book flights before 9\.$/);
+		expect((await changePreferences({})).body.agent.instructions).toBe("Never book flights before 9.");
+		await changePreferences({ tone: "formal", customTone: "Like a gentle aunt", involvement: "close" });
+
 		// The title can't move, and the majordomo can't be deleted.
 		const other = (await post("/agents", { name: "Planner" })).body as Agent;
 		expect((await post(`/agents/${other.id}/default`)).status).toBe(404);

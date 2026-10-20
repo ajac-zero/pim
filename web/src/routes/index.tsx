@@ -10,7 +10,8 @@ export const Route = createFileRoute("/")({
     ...(typeof search.prompt === "string" && { prompt: search.prompt }),
   }),
   loader: async ({ context }) => {
-    const agents = await context.queryClient.fetchQuery(agentsQuery());
+    // The agents already loaded will do: the majordomo stays the same one.
+    const agents = await context.queryClient.ensureQueryData(agentsQuery());
     // Pim makes the majordomo the first time its agents are listed.
     const majordomo = agents.find((agent) => agent.majordomo);
     if (majordomo === undefined) throw new Error("No majordomo");

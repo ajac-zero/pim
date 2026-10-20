@@ -46,8 +46,11 @@ function DashboardPage() {
   if (error) {
     return <RouteError error={error} reset={() => refetch()} />;
   }
-  if (!data) return null;
-  const { agent, starters, widgets } = data;
+  // The header and composer show as soon as the agent is known, from the
+  // agents the sidebar already has; widgets and starters follow when loaded.
+  const agent = data?.agent ?? agents?.find((choice) => choice.id === agentId);
+  if (!agent) return null;
+  const widgets = data?.widgets ?? [];
   const otherAgents = (agents ?? []).filter((choice) => choice.id !== agentId);
   const remove = async (id: string) => {
     try {
@@ -148,7 +151,7 @@ function DashboardPage() {
               )}
             </div>
           </header>
-          {widgets.length === 0 ? (
+          {!data ? null : widgets.length === 0 ? (
             <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed px-4 py-10 text-center text-muted-foreground text-sm">
               <Bot className="size-5" />
               {t("noDashboard", { name: agent.name })}
@@ -220,7 +223,7 @@ function DashboardPage() {
             busy={false}
             disabled={starting}
             placeholder={t("messageAgent", { name: agent.name })}
-            promptSuggestions={starters}
+            promptSuggestions={data?.starters}
           />
         </div>
       </div>

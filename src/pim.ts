@@ -1189,9 +1189,14 @@ export class Pim extends DurableAgent<Env> {
 					{ status: result.authSuccess ? 200 : 400, headers: { "content-type": "text/html; charset=utf-8" } },
 				),
 		});
-		// Sockets survive hibernation and restarts; their watches do not.
+		// Sockets survive hibernation and restarts; their watches do not. They
+		// are restored without holding up startup, which answers no request
+		// until it ends: each loads its chat's events, which takes long for a
+		// long chat. A watch the socket asks for meanwhile replaces its restored one.
 		for (const connection of this.getConnections<SocketState>()) {
-			if (connection.state?.session) await this.#watch(connection, connection.state.session);
+			if (connection.state?.session) {
+				void this.#watch(connection, connection.state.session).catch((error) => console.warn("restoring a watch failed", error));
+			}
 		}
 		void this.#resumeTasks().catch((error) => console.warn("resuming tasks failed", error));
 	}

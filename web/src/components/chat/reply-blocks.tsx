@@ -3,22 +3,29 @@ import { cn } from "~/lib/utils";
 
 /**
  * Blocks an agent's message draws with the app's own components instead of
- * as code: a ```cards fence is a JSON array of things it found. Pim checks
- * each block when the message is sent and keeps copies of its images; the
- * send's result maps each image's address on the web to its copy here.
+ * as code, each fence a JSON array: ```cards, things it found, as rows with
+ * their images; ```gallery, images in a grid. Pim checks each block when the
+ * message is sent and keeps copies of its images; the send's result maps
+ * each image's address on the web to its copy here.
  */
 
-/** Something a message shows it found, as the agent wrote it. */
-type Card = {
-  title: string;
+/** Something a block shows, as the agent wrote it. */
+type Item = {
+  title?: string;
   url?: string;
   image?: string;
   meta?: string;
   text?: string;
+  caption?: string;
 };
 
-/** The languages of the fences drawn here. */
-export const REPLY_BLOCKS = new Set(["cards"]);
+/** The fences drawn here, and the field each of their items needs. */
+const KINDS = { cards: "title", gallery: "image" } as const;
+type Kind = keyof typeof KINDS;
+
+export function isReplyBlock(language: string): language is Kind {
+  return Object.hasOwn(KINDS, language);
+}
 
 type ReplyContext = {
   /** Each image's copy by its address on the web; null until the send's result comes. */
@@ -58,15 +65,12 @@ export function sentImages(output: unknown): Record<string, string> {
 
 const WEB_ADDRESS = /^https?:\/\//i;
 
-function isCard(value: unknown): value is Card {
-  const card = value as Card | null;
+function isItem(kind: Kind, value: unknown): value is Item {
+  if (typeof value !== "object" || value === null) return false;
+  const item = value as Record<string, unknown>;
   return (
-    typeof card === "object" &&
-    card !== null &&
-    typeof card.title === "string" &&
-    (["url", "image", "meta", "text"] as const).every(
-      (key) => card[key] === undefined || typeof card[key] === "string",
-    )
+    typeof item[KINDS[kind]] === "string" &&
+    Object.values(item).every((field) => typeof field === "string")
   );
 }
 
@@ -98,22 +102,80 @@ function arrayItems(source: string): unknown[] | null {
 
 /** A fenced block drawn here; `fallback`, its code, when its source isn't one. */
 export function ReplyBlock({
+  kind,
   source,
   fallback,
 }: {
+  kind: Kind;
   source: string;
   fallback: ReactNode;
 }) {
   const { images, streaming } = useContext(Reply);
-  const cards = arrayItems(source)?.filter(isCard) ?? [];
-  if (cards.length === 0) return streaming ? <Placeholder /> : fallback;
+  const items = arrayItems(source)?.filter((item) => isItem(kind, item)) ?? [];
+  if (items.length === 0) return streaming ? <Placeholder /> : fallback;
+  if (kind === "gallery") return <Gallery items={items} images={images} />;
   return (
     <div className="my-4 divide-y divide-border/60">
-      {cards.map((card, index) => (
-        // Cards have no ids: their order is all a block gives.
+      {items.map((card, index) => (
+        // Items have no ids: their order is all a block gives.
         // biome-ignore lint/suspicious/noArrayIndexKey: see above
         <CardRow key={index} card={card} images={images} />
       ))}
+    </div>
+  );
+}
+
+/** Images in a grid, two across, each with its caption, linking to the page it's from. */
+function Gallery({
+  items,
+  images,
+}: {
+  items: Item[];
+  images: ReplyContext["images"];
+}) {
+  // Once the copies are kept, an image Pim couldn't load is left out.
+  const shown = images
+    ? items.filter((item) => item.image && images[item.image])
+    : items;
+  if (shown.length === 0) return null;
+  return (
+    <div className={cn("my-4 grid gap-3", shown.length > 1 && "grid-cols-2")}>
+      {shown.map((item, index) => {
+        const copy = item.image ? images?.[item.image] : undefined;
+        const picture = copy ? (
+          <img
+            src={copy}
+            alt={item.caption ?? ""}
+            className="aspect-[5/4] w-full rounded-2xl bg-muted object-cover"
+          />
+        ) : (
+          <div className="aspect-[5/4] w-full animate-pulse rounded-2xl bg-muted" />
+        );
+        const link = item.url && WEB_ADDRESS.test(item.url) ? item.url : null;
+        return (
+          // biome-ignore lint/suspicious/noArrayIndexKey: as for cards
+          <figure key={index} className="min-w-0">
+            {link ? (
+              <a
+                href={link}
+                target="_blank"
+                rel="noreferrer noopener"
+                aria-label={item.caption ?? new URL(link).hostname}
+                className="block"
+              >
+                {picture}
+              </a>
+            ) : (
+              picture
+            )}
+            {item.caption && (
+              <figcaption className="mt-1.5 truncate text-[13px] text-muted-foreground">
+                {item.caption}
+              </figcaption>
+            )}
+          </figure>
+        );
+      })}
     </div>
   );
 }
@@ -126,7 +188,7 @@ function CardRow({
   card,
   images,
 }: {
-  card: Card;
+  card: Item;
   images: ReplyContext["images"];
 }) {
   const link = card.url && WEB_ADDRESS.test(card.url) ? card.url : undefined;

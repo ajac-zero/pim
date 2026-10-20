@@ -13,76 +13,96 @@ export const MAX_WIDGETS = 4;
 
 /** How many images one message can show, in all its blocks. */
 export const MAX_REPLY_IMAGES = 12;
-/** How many cards one block can hold. */
-const MAX_CARDS = 10;
+/** Something a reply shows, as the agent wrote it in a block. */
+export type ReplyItem = { title?: string; url?: string; image?: string; meta?: string; text?: string; caption?: string };
 
-/** Something a reply shows it found, such as a product, a place or a page: drawn by the app as a row with its image. */
-export type ReplyCard = { title: string; url?: string; image?: string; meta?: string; text?: string };
+/**
+ * The fenced blocks of a reply's Markdown that the app draws itself, each a
+ * JSON array of items: `cards`, things the agent found, such as products,
+ * places or pages, as rows with their images; `gallery`, images in a grid.
+ */
+const KINDS = {
+	cards: { fields: ["title", "url", "image", "meta", "text"], required: "title", max: 10, shape: "{ title, url?, image?, meta?, text? }" },
+	gallery: { fields: ["image", "caption", "url"], required: "image", max: 8, shape: "{ image, caption?, url? }" },
+} as const;
+type ReplyKind = keyof typeof KINDS;
 
-/** A fenced block of a reply's Markdown that the app draws itself. */
-export type ReplyBlock = { kind: "cards"; cards: ReplyCard[] };
+export type ReplyBlock = { kind: ReplyKind; items: ReplyItem[] };
 
-/** A ```cards fence, alone on its lines. */
-const BLOCK = /^```(cards)[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*$/gm;
+/** A block's fence, alone on its lines. */
+const BLOCK = /^```(cards|gallery)[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*$/gm;
 const WEB_ADDRESS = /^https?:\/\/\S+$/i;
+/** How long each text field may be; the addresses are any length. */
+const TEXT_LIMITS: Record<string, number> = { title: 200, meta: 200, caption: 200, text: 1000 };
 
-function readCard(value: unknown): ReplyCard | string {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return "each card must be an object";
-	const card = value as Record<string, unknown>;
-	const unknown = Object.keys(card).filter((key) => !["title", "url", "image", "meta", "text"].includes(key));
-	if (unknown.length > 0) return `a card has no ${unknown.join(", ")}`;
-	if (typeof card.title !== "string" || card.title.trim() === "" || card.title.length > 200) return "each card needs a title of at most 200 characters";
-	for (const key of ["url", "image"] as const) {
-		if (card[key] !== undefined && (typeof card[key] !== "string" || !WEB_ADDRESS.test(card[key]))) return `a card's ${key} must be an http(s) address`;
+function readItem(kind: ReplyKind, value: unknown): ReplyItem | string {
+	const { fields, required } = KINDS[kind];
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return "each item must be an object";
+	const item = value as Record<string, unknown>;
+	const unknown = Object.keys(item).filter((key) => !(fields as readonly string[]).includes(key));
+	if (unknown.length > 0) return `an item has no ${unknown.join(", ")}`;
+	if (item[required] === undefined) return `each item needs its ${required}`;
+	for (const [key, field] of Object.entries(item)) {
+		if (typeof field !== "string" || field.trim() === "") return `an item's ${key} must be text`;
+		if (key === "url" || key === "image") {
+			if (!WEB_ADDRESS.test(field)) return `an item's ${key} must be an http(s) address`;
+		} else if (field.length > TEXT_LIMITS[key]!) return `an item's ${key} must be at most ${TEXT_LIMITS[key]} characters`;
 	}
-	if (card.meta !== undefined && (typeof card.meta !== "string" || card.meta.length > 200)) return "a card's meta must be text of at most 200 characters";
-	if (card.text !== undefined && (typeof card.text !== "string" || card.text.length > 1000)) return "a card's text must be at most 1000 characters";
-	return card as ReplyCard;
+	return item as ReplyItem;
 }
 
 /**
  * The blocks a reply's Markdown draws, or what's wrong with one, for the
- * model to fix: a ```cards block is a JSON array of cards.
+ * model to fix.
  */
 export function replyBlocks(message: string): ReplyBlock[] | { error: string } {
 	const blocks: ReplyBlock[] = [];
-	for (const [, , body] of message.matchAll(BLOCK)) {
+	for (const [, name, body] of message.matchAll(BLOCK)) {
+		const kind = name as ReplyKind;
+		const { max, shape } = KINDS[kind];
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(body!);
 		} catch {
-			return { error: "a ```cards block must be a JSON array of { title, url?, image?, meta?, text? }" };
+			parsed = null;
 		}
-		if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > MAX_CARDS) return { error: `a \`\`\`cards block must be a JSON array of 1 to ${MAX_CARDS} cards` };
-		const cards = parsed.map(readCard);
-		const wrong = cards.find((card) => typeof card === "string");
-		if (wrong !== undefined) return { error: `in a \`\`\`cards block, ${wrong}` };
-		blocks.push({ kind: "cards", cards: cards as ReplyCard[] });
+		if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > max) {
+			return { error: `a \`\`\`${kind} block must be a JSON array of 1 to ${max} items, each ${shape}` };
+		}
+		const items = parsed.map((item) => readItem(kind, item));
+		const wrong = items.find((item) => typeof item === "string");
+		if (wrong !== undefined) return { error: `in a \`\`\`${kind} block, ${wrong}` };
+		blocks.push({ kind, items: items as ReplyItem[] });
 	}
 	return blocks;
 }
 
 /** The images a reply's blocks show, each once. */
 export function blockImages(blocks: readonly ReplyBlock[]): string[] {
-	return [...new Set(blocks.flatMap((block) => block.cards.flatMap((card) => (card.image ? [card.image] : []))))];
+	return [...new Set(blocks.flatMap((block) => block.items.flatMap((item) => (item.image ? [item.image] : []))))];
+}
+
+/** A block as a list of links. */
+function blockMarkdown({ kind, items }: ReplyBlock): string {
+	return items
+		.map((item) => {
+			if (kind === "gallery") return `- [${item.caption ?? "Image"}](${item.url ?? item.image})`;
+			const title = item.url ? `[${item.title}](${item.url})` : item.title;
+			const head = [`**${title}**`, item.meta].filter(Boolean).join(" · ");
+			return item.text ? `- ${head}\n  ${item.text.replace(/\s*\n\s*/g, " ")}` : `- ${head}`;
+		})
+		.join("\n");
 }
 
 /**
  * A reply as plain Markdown, for where its blocks can't be drawn: an email,
- * a push notification, an API client's reply or a chat's public copy. Cards
- * become a list of links.
+ * a push notification, an API client's reply or a chat's public copy. Its
+ * blocks become lists of links.
  */
 export function plainReply(message: string): string {
 	return message.replace(BLOCK, (fence) => {
 		const blocks = replyBlocks(fence);
-		if ("error" in blocks || blocks.length === 0) return fence;
-		return blocks[0]!.cards
-			.map((card) => {
-				const title = card.url ? `[${card.title}](${card.url})` : card.title;
-				const head = [`**${title}**`, card.meta].filter(Boolean).join(" · ");
-				return card.text ? `- ${head}\n  ${card.text.replace(/\s*\n\s*/g, " ")}` : `- ${head}`;
-			})
-			.join("\n");
+		return "error" in blocks || blocks.length === 0 ? fence : blockMarkdown(blocks[0]!);
 	});
 }
 
@@ -99,7 +119,8 @@ export function messagingExtension(services: PimServices) {
 			maxLength: 20_000,
 			description:
 				"What they read, in Markdown. To show things you found, such as products, places or pages, put a ```cards block in it, alone on its lines: a JSON array of { title, url?, image?, meta?, text? }, where meta is a short line such as its maker and price. " +
-				"A card's image must be an address a tool's result in this chat gave you, such as a page's image from fetch_url, never one you made up; Pim shows a copy of it.",
+				"To show pictures, such as an image search's results, put a ```gallery block: a JSON array of { image, caption?, url? }, where url is the page it's from. " +
+				"An image must be an address a tool's result in this chat gave you, such as a page's image from fetch_url, never one you made up; Pim shows a copy of it.",
 		}),
 		complete: Type.Optional(Type.Boolean({ description: "Finish this turn (default true). Set false only for a progress update; send the final answer in a separate call with no other tools." })),
 		widgets: Type.Optional(

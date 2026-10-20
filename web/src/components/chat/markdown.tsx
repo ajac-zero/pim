@@ -13,7 +13,7 @@ type PluggableList = NonNullable<StreamdownProps["rehypePlugins"]>;
 type Pluggable = PluggableList[number];
 
 import { AgentIcon } from "~/components/agent-icon";
-import { REPLY_BLOCKS, ReplyBlock } from "~/components/chat/reply-blocks";
+import { isReplyBlock, ReplyBlock } from "~/components/chat/reply-blocks";
 import { useI18n } from "~/components/i18n";
 import {
   CodeBlock,
@@ -585,9 +585,9 @@ export const Markdown = memo(function Markdown({
                 </CodeBlockHeader>
               </CodeBlock>
             );
-            // An agent's cards are drawn; anyone else's are code.
-            return !safe && REPLY_BLOCKS.has(language) ? (
-              <ReplyBlock source={source} fallback={code} />
+            // An agent's cards and galleries are drawn; anyone else's are code.
+            return !safe && isReplyBlock(language) ? (
+              <ReplyBlock kind={language} source={source} fallback={code} />
             ) : (
               code
             );

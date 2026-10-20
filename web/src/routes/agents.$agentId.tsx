@@ -1,13 +1,14 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import type { ReactNode } from "react";
 import { toast } from "sonner";
 import { AgentIcon, tileClass } from "~/components/agent-icon";
-import { ArtifactPreview } from "~/components/artifact";
+import { ArtifactFrame, ArtifactIcon } from "~/components/artifact";
 import { Composer } from "~/components/chat/composer";
 import { ChatTabs } from "~/components/chat/tabs";
 import { Thread } from "~/components/chat/thread";
 import { useI18n } from "~/components/i18n";
-import { Bot, ChevronDown, Maximize2, X } from "~/components/icons";
+import { Bot, ChevronDown, X } from "~/components/icons";
 import { RouteError } from "~/components/route-error";
 import { Button } from "~/components/ui/button";
 import {
@@ -16,7 +17,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
-import { WidgetCard, WidgetHeader } from "~/components/widgets";
+import { WidgetCard } from "~/components/widgets";
 import { type PinnedArtifact, pim, type UserContent } from "~/lib/pim-api";
 import { EMPTY_STREAM } from "~/lib/pim-view";
 import { agentsQuery, dashboardQuery } from "~/lib/queries";
@@ -26,9 +27,9 @@ import { cn } from "~/lib/utils";
 
 /**
  * An agent's dashboard: start a chat with it, above what it shows: widgets,
- * each loaded for this agent, and artifacts the agent pinned there, running
- * as their latest version. A pinned artifact's `pim.chat(text)` puts a
- * message about it in the composer, for the person to send.
+ * each loaded for this agent, and artifacts the agent pinned there, each as
+ * the widget of its latest version. A pinned artifact's `pim.chat(text)` puts
+ * a message about it in the composer, for the person to send.
  */
 export const Route = createFileRoute("/agents/$agentId")({
   validateSearch: (search: Record<string, unknown>): { prompt?: string } => ({
@@ -171,46 +172,12 @@ function DashboardPage() {
             <div className="grid gap-3 md:grid-cols-2">
               {widgets.map((item) =>
                 "artifact" in item ? (
-                  // Artifacts take the whole width: a chart or a feed needs it more than a list does.
-                  <section
+                  <PinnedWidget
                     key={item.id}
-                    className="group flex min-w-0 flex-col rounded-2xl bg-muted px-4 py-4 md:col-span-2"
-                    aria-label={item.title}
-                  >
-                    <WidgetHeader
-                      title={item.title}
-                      actions={
-                        <>
-                          <Button
-                            asChild
-                            variant="ghost"
-                            size="icon"
-                            className="size-7 rounded-full text-muted-foreground"
-                          >
-                            <Link
-                              to="/artifacts/$artifactId"
-                              params={{ artifactId: item.artifact.id }}
-                              aria-label={t("dashboardOpen", {
-                                title: item.title,
-                              })}
-                              title={t("dashboardOpen", { title: item.title })}
-                            >
-                              <Maximize2 className="size-4" />
-                            </Link>
-                          </Button>
-                          {removeButton(item.id, item.title)}
-                        </>
-                      }
-                    />
-                    <ArtifactPreview
-                      id={item.artifact.id}
-                      version={item.artifact.version}
-                      kind={item.artifact.kind}
-                      title={item.title}
-                      maxHeight={480}
-                      onDraft={draft(item)}
-                    />
-                  </section>
+                    pinned={item}
+                    actions={removeButton(item.id, item.title)}
+                    onDraft={draft(item)}
+                  />
                 ) : (
                   <WidgetCard
                     key={item.id}
@@ -239,6 +206,72 @@ function DashboardPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+/**
+ * A pinned artifact, as a phone's home screen shows an app: its widget, a
+ * small view that runs live in a tile of a fixed size, with its title under
+ * it, and the whole artifact a tap away, from the title or the widget's
+ * `pim.open()`. One without a widget, pinned before artifacts had them, is a
+ * tile that opens it.
+ */
+function PinnedWidget({
+  pinned,
+  actions,
+  onDraft,
+}: {
+  pinned: PinnedArtifact;
+  actions: ReactNode;
+  onDraft: (text: string) => void;
+}) {
+  const { t } = useI18n();
+  const navigate = useNavigate();
+  const { artifact, title } = pinned;
+  const open = () =>
+    void navigate({
+      to: "/artifacts/$artifactId",
+      params: { artifactId: artifact.id },
+    });
+  return (
+    <section className="group flex min-w-0 flex-col gap-1.5" aria-label={title}>
+      <div className="h-45 overflow-hidden rounded-2xl bg-muted">
+        {artifact.widget ? (
+          <ArtifactFrame
+            id={artifact.id}
+            version={artifact.version}
+            title={title}
+            widget
+            fill
+            className="rounded-none border-0"
+            onDraft={onDraft}
+            onOpen={open}
+          />
+        ) : (
+          <Link
+            to="/artifacts/$artifactId"
+            params={{ artifactId: artifact.id }}
+            className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground transition-colors hover:bg-secondary"
+          >
+            <ArtifactIcon kind={artifact.kind} className="size-6" />
+            <span className="text-[13px]">{t("dashboardNoWidget")}</span>
+          </Link>
+        )}
+      </div>
+      <div className="flex min-h-7 items-center gap-2 px-1">
+        <Link
+          to="/artifacts/$artifactId"
+          params={{ artifactId: artifact.id }}
+          title={t("dashboardOpen", { title })}
+          className="min-w-0 flex-1 truncate rounded-full text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {title}
+        </Link>
+        <div className="-my-1 -mr-1.5 flex shrink-0 items-center transition-opacity focus-within:opacity-100 group-hover:opacity-100 [@media(hover:hover)]:opacity-0">
+          {actions}
+        </div>
+      </div>
+    </section>
   );
 }
 

@@ -35,6 +35,7 @@ import {
 	fileType,
 	isTextType,
 	framePage,
+	hasWidget,
 	type LoadedFiles,
 	readFiles,
 	textOf as fileText,
@@ -2721,7 +2722,9 @@ export class Pim extends DurableAgent<Env> {
 			this.#dashboardItems(agent).map(async (item) => {
 				const artifact = this.#pinnedArtifact(item);
 				if (artifact !== undefined) {
-					return artifact && { id: item, title: artifact.title, artifact: { id: artifact.id, kind: artifact.kind, version: artifact.version } };
+					if (!artifact) return null;
+					const widget = hasWidget(artifact.kind, this.artifacts.version(artifact.id)!.files);
+					return { id: item, title: artifact.title, artifact: { id: artifact.id, kind: artifact.kind, version: artifact.version, widget } };
 				}
 				if (!this.extensions.widget(item)) return null;
 				const widget = await this.#loadWidget(agent, item);
@@ -2737,15 +2740,24 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Sets what an agent's dashboard shows, in order. Each item must be on it
-	 * already, a widget the agent can show, or one of the person's artifacts;
-	 * anything else is refused, with the reason.
+	 * already, a widget the agent can show, or one of the person's artifacts
+	 * with a widget, which is what the dashboard shows of it; anything else is
+	 * refused, with the reason.
 	 */
 	#setDashboard(agent: Agent, items: readonly string[]): string[] {
 		const current = this.#dashboardItems(agent);
 		const widgets = this.#widgetsFor(agent.blueprint);
 		const next = [...new Set(items)];
 		for (const item of next) {
-			if (current.includes(item) || widgets.some(({ ref }) => ref === item) || this.#pinnedArtifact(item)) continue;
+			if (current.includes(item) || widgets.some(({ ref }) => ref === item)) continue;
+			const artifact = this.#pinnedArtifact(item);
+			if (artifact) {
+				if (hasWidget(artifact.kind, this.artifacts.version(artifact.id)!.files)) continue;
+				throw new HttpError(
+					400,
+					`${artifact.title} has no widget, the small view of it a dashboard shows: add widget.html to a page, or Widget.jsx to an app, with artifact_update, then pin it. Only html and jsx artifacts have widgets.`,
+				);
+			}
 			throw new HttpError(
 				400,
 				`${item} is neither one of your artifacts (as ${PINNED_ARTIFACT}<id>) nor a widget this dashboard can show. Widgets it can show: ${widgets.map(({ ref }) => ref).join(", ")}.`,
@@ -3934,7 +3946,9 @@ export class Pim extends DurableAgent<Env> {
 			({ id, version }, _request, url) =>
 				this.#artifactRequest(url, async () => {
 					const { artifact, found } = this.#artifactVersion(id!, version!);
-					return framePage(artifact.kind, await this.artifacts.read(artifact.id, found.version), url.origin);
+					// A dashboard shows an artifact's widget, a page of its own (`?view=widget`).
+					const widget = url.searchParams.get("view") === "widget";
+					return framePage(artifact.kind, await this.artifacts.read(artifact.id, found.version), url.origin, { widget });
 				}),
 		],
 		[

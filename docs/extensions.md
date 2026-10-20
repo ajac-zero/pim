@@ -202,7 +202,7 @@ A `link` is `{ chat }` or `{ artifact }`: the item opens it. `{ artifact, chat }
 - `timeZone`: the person's.
 - `data`: the data of the extension that brings the widget.
 
-A blueprint's `dashboard` is where its agents' dashboards start. An agent changes its own with `update_dashboard`, when the person asks: it pins widgets it can show (Pim's own, and those of the extensions it builds on and uses) and artifacts it made, which run there as their latest version, and the person takes things off. From the first change on, the agent's dashboard is its own, and a change to the blueprint's no longer reaches it. Pim's own blueprint starts empty. A widget no installed extension brings anymore is left off.
+A blueprint's `dashboard` is where its agents' dashboards start. An agent changes its own with `update_dashboard`, when the person asks: it pins widgets it can show (Pim's own, and those of the extensions it builds on and uses) and artifacts it made, which show there as the [widget](artifacts.md#widgets) of their latest version, and the person takes things off. From the first change on, the agent's dashboard is its own, and a change to the blueprint's no longer reaches it. Pim's own blueprint starts empty. A widget no installed extension brings anymore is left off.
 
 A widget that throws shows as failed, with the error logged; the dashboard's other widgets still load. The built-in widgets are `pim.schedule/upcoming`, `pim.goals/active`, `pim.memory/recent` and `pim.artifacts/recent`. Memory is shared by every agent in a space, so `pim.memory/recent` shows the same everywhere in that space. `pim.artifacts/recent` is only for dashboards: it shows what the agent's own chats made, so in a chat an agent shows an artifact with `artifact_show`.
 

@@ -276,7 +276,13 @@ export type PinnedArtifact = {
   /** `artifact:<id>`, as the dashboard names it. */
   id: string;
   title: string;
-  artifact: { id: string; kind: ArtifactKind; version: number };
+  /** `widget`: whether its latest version has a widget, the small view a dashboard shows. */
+  artifact: {
+    id: string;
+    kind: ArtifactKind;
+    version: number;
+    widget: boolean;
+  };
 };
 
 export type AgentInput = {
@@ -657,7 +663,8 @@ export const artifactFrameUrl = (
   id: string,
   version: number,
   from?: ArtifactFrom,
-) => `${artifactPath(id, version, from)}/frame`;
+  widget = false,
+) => `${artifactPath(id, version, from)}/frame${widget ? "?view=widget" : ""}`;
 
 /** Where the browser downloads a version's file: its main one, unless `path` names another. */
 export const artifactDownloadUrl = (

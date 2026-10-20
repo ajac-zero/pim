@@ -196,8 +196,20 @@ export default function App() {
 		] as const) {
 			const refused = await callTool("artifact_create", { title: "Bad", kind: "jsx", content });
 			expect(refused).toMatchObject({ isError: true, text: expect.stringContaining(error) });
+			// A widget is compiled and refused the same way, beside a main file that's fine.
+			const widget = await callTool("artifact_create", { title: "Bad", kind: "jsx", content: source, files: [{ path: "Widget.jsx", content }] });
+			expect(widget).toMatchObject({ isError: true, text: expect.stringContaining(error) });
 		}
 		expect((await api("/artifacts")).body.artifacts.filter((artifact: { kind: string }) => artifact.kind === "jsx")).toHaveLength(1);
+
+		// An app's widget is a page of its own, compiled from Widget.jsx with only the modules it imports.
+		const widgetSource = 'import { Sparkles } from "lucide-react";\nexport default function Widget() { return <p><Sparkles />tiny-widget</p>; }';
+		expect((await callTool("artifact_update", { id, base_version: 1, files: [{ path: "Widget.jsx", content: widgetSource }] })).isError).toBe(false);
+		const widgetPage = await (await raw(`/artifacts/${id}/versions/2/frame?view=widget`)).text();
+		expect(widgetPage).toContain("tiny-widget");
+		expect(widgetPage).toContain("https://pim.test/artifact-runtime/lucide.js");
+		expect(widgetPage).not.toContain("recharts.js");
+		expect(await (await raw(`/artifacts/${id}/versions/2/frame`)).text()).not.toContain("tiny-widget");
 	});
 
 	it("span several files: a page's scripts, styles and images, and an app's modules, data and styles, put inline when shown", async () => {

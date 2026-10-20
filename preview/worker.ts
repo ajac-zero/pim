@@ -1,5 +1,5 @@
 import type { Api, Message, Model } from "@earendil-works/pi-ai";
-import { createModels, createProvider, type Models } from "@earendil-works/pi-ai/models";
+import { createProvider, type MutableModels } from "@earendil-works/pi-ai/models";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import type { ModelRef } from "@earendil-works/pi-durable";
 import type { PiModel } from "agents/harness/pi";
@@ -145,11 +145,10 @@ function previewProvider() {
 const preview = previewProvider();
 
 export class Pim extends RealPim {
-	/** The stand-in model, and the real ChatGPT plan, for chatting with a real model. */
-	protected override models(): Models {
-		const models = createModels({ credentials: this.credentials });
+	/** The stand-in model, besides the real providers: the ChatGPT plan, and those people add, such as a model on this machine. */
+	protected override models(): MutableModels {
+		const models = super.models();
 		models.setProvider(preview.provider);
-		models.setProvider(this.chatgpt.provider());
 		return models;
 	}
 

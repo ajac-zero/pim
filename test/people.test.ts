@@ -8,7 +8,7 @@ import { Auth } from "../src/auth";
 import type { Directory, RegistrationPolicy } from "../src/directory";
 import { toAgent } from "../src/gateway";
 import { z } from "zod";
-import { faux, Pim } from "./worker";
+import { completionStream, faux, Pim } from "./worker";
 import { Authenticator } from "./webauthn";
 
 /**
@@ -1122,6 +1122,50 @@ describe("the admin", () => {
 		expect((await admin("/api/admin/accounts/quinn/limits", { method: "PUT", json: { limits: { dailyRuns: "lots" } } })).status).toBe(400);
 		await admin("/api/admin/accounts/quinn/limits", { method: "PUT", json: { limits: null } });
 		expect((await quinn.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: null });
+	});
+
+	it("adds model providers everyone can use, without showing anyone their keys", async () => {
+		const ann = await person("provider-ann");
+		const gpu = { name: "Team GPU", url: "https://gpu.example.test/v1", key: "team-key" };
+		const realFetch = globalThis.fetch;
+		const chats: { authorization: string | null; model: string }[] = [];
+		const server = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			if (!request.url.startsWith(gpu.url)) return realFetch(input, init);
+			if (request.headers.get("authorization") !== `Bearer ${gpu.key}`) return Response.json({ error: "unauthorized" }, { status: 401 });
+			if (request.url.endsWith("/models")) return Response.json({ data: [{ id: "team-model" }] });
+			const { model } = await request.json<{ model: string }>();
+			chats.push({ authorization: request.headers.get("authorization"), model });
+			return completionStream(model, "Hello from the team GPU");
+		});
+		try {
+			expect((await ann.browser.json("/api/admin/providers", { method: "POST", json: gpu })).status).toBe(403);
+			const added = await admin("/api/admin/providers", { method: "POST", json: gpu });
+			expect(added).toMatchObject({ status: 201, body: { provider: { id: "team-gpu", hasKey: true, models: [{ id: "team-model" }] } } });
+
+			// Ann didn't add it, and can use it.
+			const model = (await ann.browser.json("/api/model")).body;
+			expect(model.providers).toEqual([expect.objectContaining({ id: "team-gpu", provider: "shared:team-gpu", shared: true, hasKey: true })]);
+			expect(model.choices).toContainEqual({ provider: "shared:team-gpu", id: "team-model", name: "team-model", images: false });
+			expect((await ann.browser.json("/api/model", { method: "PUT", json: { provider: "shared:team-gpu", id: "team-model" } })).status).toBe(200);
+			const answer = await ann.browser.json(`/api/sessions/${await rootOf(ann.browser)}/messages`, { method: "POST", json: { content: "Hello?", wait: true } });
+			expect(answer.body.text).toBe("Hello from the team GPU");
+			expect(chats).toEqual([{ authorization: "Bearer team-key", model: "team-model" }]);
+			for (const shown of [added.body, model]) expect(JSON.stringify(shown)).not.toContain(gpu.key);
+			// Only the admin changes it; Ann's own changes are to her own providers.
+			expect((await ann.browser.json("/api/admin/providers/team-gpu", { method: "PUT", json: { name: "Mine" } })).status).toBe(403);
+			expect((await ann.browser.json("/api/providers/team-gpu", { method: "PUT", json: { name: "Mine" } })).status).toBe(404);
+			expect((await admin("/api/admin/providers/team-gpu", { method: "PUT", json: { name: "Shared GPU" } })).body.provider).toMatchObject({ name: "Shared GPU", hasKey: true });
+		} finally {
+			server.mockRestore();
+		}
+
+		// Taken away, Ann's chats go back to the default model.
+		expect((await admin("/api/admin/providers/team-gpu", { method: "DELETE" })).body).toEqual({ deleted: true });
+		const after = (await ann.browser.json("/api/model")).body;
+		expect(after.providers).toEqual([]);
+		expect(after.model.id).toBe("faux-model");
+		expect((await admin("/api/admin/providers/team-gpu", { method: "DELETE" })).status).toBe(404);
 	});
 
 	it("adds apps everyone can connect, which each person signs in to once for all their agents", async () => {

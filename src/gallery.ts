@@ -2,6 +2,7 @@ import { ASSISTANT_BLUEPRINT } from "./extensions/assistant";
 import { DurableObject } from "cloudflare:workers";
 import pimConfig from "../pim.config";
 import { HttpError } from "./http";
+import { type CustomProvider, MAX_PROVIDERS, type ProviderInput, prepareProvider } from "./providers";
 import type { TeamMember } from "./agents";
 import { appDirectory, type CustomApp, type DirectoryApp, findSiteIcon, storedApps } from "./extensions/app-directory";
 import { APP_CATEGORIES, type AppCategory } from "./extensions/define";
@@ -190,6 +191,11 @@ CREATE TABLE IF NOT EXISTS apps (
 	category TEXT,
 	created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS providers (
+	id TEXT PRIMARY KEY,
+	provider TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
 `;
 
 type Row = Record<string, SqlStorageValue>;
@@ -372,6 +378,37 @@ export class Gallery extends DurableObject<Env> {
 	/** Takes an app the admin added out of the directory. People's connections to it stay until they remove them. */
 	removeCustomApp(id: string): boolean {
 		return this.#sql("DELETE FROM apps WHERE id = ?", id).rowsWritten > 0;
+	}
+
+	/** The model providers the admin added for everyone, with their keys, for people's spaces to call (./providers.ts). */
+	sharedProviders(): CustomProvider[] {
+		return this.#sql("SELECT provider FROM providers ORDER BY created_at, id")
+			.toArray()
+			.map((row) => JSON.parse(String(row.provider)) as CustomProvider);
+	}
+
+	/** The admin adds a model provider everyone on this Pim can use, or changes one; it reads the provider's models again. Null when there's no such provider. */
+	async putSharedProvider(id: string | null, input: ProviderInput): Promise<CustomProvider | null> {
+		const providers = this.sharedProviders();
+		const existing = id === null ? null : (providers.find((provider) => provider.id === id) ?? null);
+		if (id !== null && !existing) return null;
+		if (!existing && providers.length >= MAX_PROVIDERS) throw new HttpError(400, `This Pim can share up to ${MAX_PROVIDERS} providers.`);
+		const provider = await prepareProvider(input, existing, new Set(providers.map((candidate) => candidate.id)));
+		// Reading the models took a while: another may have been added, or this one removed, since.
+		const now = this.sharedProviders().some((candidate) => candidate.id === provider.id);
+		if (now !== (existing !== null)) throw new HttpError(409, existing ? "That provider was just removed." : "Another provider was just added: try again.");
+		this.#sql(
+			"INSERT INTO providers (id, provider, created_at) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider",
+			provider.id,
+			JSON.stringify(provider),
+			Date.now(),
+		);
+		return provider;
+	}
+
+	/** Takes a provider away from everyone; their chats on its models go back to the default model. */
+	removeSharedProvider(id: string): boolean {
+		return this.#sql("DELETE FROM providers WHERE id = ?", id).rowsWritten > 0;
 	}
 
 	profile(username: string): Profile {

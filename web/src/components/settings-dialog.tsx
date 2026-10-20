@@ -10,14 +10,13 @@ import {
   TokensSection,
 } from "~/components/account-settings";
 import { AddDevice } from "~/components/add-device";
-import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
+import { ChatGPTLogo } from "~/components/chatgpt-logo";
 import { DeploymentSection } from "~/components/deployment-settings";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
   AlertCircle,
   Bell,
   Check,
-  ExternalLink,
   KeyRound,
   Loader2,
   LogOut,
@@ -26,6 +25,7 @@ import {
   MessageCircle,
   Monitor,
   Moon,
+  Server,
   Settings,
   ShieldCheck,
   SlidersHorizontal,
@@ -37,6 +37,7 @@ import {
   X,
 } from "~/components/icons";
 import { MembersSection } from "~/components/members";
+import { ProvidersSection } from "~/components/model-providers";
 import { ProviderLogo } from "~/components/provider-buttons";
 import { SignInMethodsSection } from "~/components/sign-in-methods";
 import { useTheme } from "~/components/theme";
@@ -80,7 +81,6 @@ import { accountQuery, emailQuery, modelQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 /** Shown once, the first time Pim is connected to a ChatGPT plan. */
-const WELCOMED_KEY = "pim-chatgpt-welcomed";
 
 export const SETTINGS_TABS = [
   "general",
@@ -123,7 +123,7 @@ export function SettingsDialog({
         <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
         <Dialog.Content
           aria-describedby={undefined}
-          className="fixed inset-0 z-50 flex flex-col overflow-hidden bg-background data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:inset-auto sm:top-1/2 sm:left-1/2 sm:h-[min(720px,calc(100dvh-2rem))] sm:w-[calc(100%-2rem)] sm:max-w-4xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:flex-row sm:rounded-2xl sm:border sm:shadow-xl"
+          className="fixed inset-0 z-50 flex flex-col overflow-clip bg-background data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:inset-auto sm:top-1/2 sm:left-1/2 sm:h-[min(720px,calc(100dvh-2rem))] sm:w-[calc(100%-2rem)] sm:max-w-4xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:flex-row sm:rounded-2xl sm:border sm:shadow-xl"
         >
           <SettingsTabs initial={tab ?? "general"} />
           {/* On narrow screens the tabs scroll sideways beneath it. */}
@@ -189,7 +189,6 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
         )}
         {tab === "model" && model && (
           <>
-            <ChatGPTCard settings={model} />
             <section className="mt-10 space-y-3">
               <h2 className="font-medium text-muted-foreground text-sm">
                 {t("model")}
@@ -197,6 +196,10 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
               <ModelChoices settings={model} />
               <UtilityModelSelect settings={model} />
             </section>
+            <ProvidersSection
+              settings={model}
+              admin={account?.role === "admin"}
+            />
           </>
         )}
         {tab === "notifications" && (
@@ -225,6 +228,23 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
       </div>
     </>
   );
+}
+
+/** The provider someone added that a model runs on, if it isn't Workers AI or the ChatGPT plan. */
+const providerOf = (settings: ModelSettings, choice: ModelInfo) =>
+  settings.providers.find((provider) => provider.provider === choice.provider);
+
+/** Where a model runs, as its row says. */
+function runsOn(
+  settings: ModelSettings,
+  choice: ModelInfo,
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  if (choice.provider === CHATGPT_PROVIDER) return t("usesChatGPTPlan");
+  const provider = providerOf(settings, choice);
+  return provider
+    ? t("runsOnProvider", { provider: provider.name })
+    : t("runsOnWorkersAI");
 }
 
 function ModelChoices({ settings }: { settings: ModelSettings }) {
@@ -266,7 +286,11 @@ function ModelChoices({ settings }: { settings: ModelSettings }) {
                   <ChatGPTLogo className="size-5 shrink-0" />
                 ) : (
                   <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-muted font-medium text-muted-foreground text-xs">
-                    CF
+                    {providerOf(settings, choice) ? (
+                      <Server className="size-4" />
+                    ) : (
+                      "CF"
+                    )}
                   </span>
                 )}
                 <span className="min-w-0 flex-1">
@@ -274,7 +298,7 @@ function ModelChoices({ settings }: { settings: ModelSettings }) {
                     {choice.name}
                   </span>
                   <span className="block truncate text-muted-foreground text-xs">
-                    {plan ? t("usesChatGPTPlan") : t("runsOnWorkersAI")}
+                    {runsOn(settings, choice, t)}
                     {choice.images && ` · ${t("seesImages")}`}
                   </span>
                 </span>
@@ -288,7 +312,7 @@ function ModelChoices({ settings }: { settings: ModelSettings }) {
           );
         })}
       </ul>
-      {!settings.chatgpt.connected && (
+      {!settings.chatgpt.connected && settings.providers.length === 0 && (
         <p className="text-[13px] text-muted-foreground">
           {t("connectForMoreModels")}
         </p>
@@ -341,9 +365,7 @@ function UtilityModelSelect({ settings }: { settings: ModelSettings }) {
             >
               {choice.name}
               <span className="text-muted-foreground">
-                {choice.provider === CHATGPT_PROVIDER
-                  ? ` · ${t("usesChatGPTPlan")}`
-                  : ` · ${t("runsOnWorkersAI")}`}
+                {` · ${runsOn(settings, choice, t)}`}
               </span>
             </SelectItem>
           ))}
@@ -353,161 +375,6 @@ function UtilityModelSelect({ settings }: { settings: ModelSettings }) {
         {t("utilityModelHint")}
       </span>
     </label>
-  );
-}
-
-function ChatGPTCard({ settings }: { settings: ModelSettings }) {
-  const { t } = useI18n();
-  const queryClient = useQueryClient();
-  // Set while a sign-in waits for the address the browser lands on.
-  const [waiting, setWaiting] = useState(false);
-  const [address, setAddress] = useState("");
-  const [welcome, setWelcome] = useState(false);
-  const { connected, email } = settings.chatgpt;
-
-  const start = useMutation({
-    mutationFn: async () => {
-      // Opened now, while the click still counts, so popup blockers allow it.
-      const tab = window.open("", "_blank");
-      try {
-        const { url } = await pim.chatgptLogin();
-        if (tab) tab.location.href = url;
-        else window.location.href = url;
-      } catch (error) {
-        tab?.close();
-        throw error;
-      }
-    },
-    onSuccess: () => setWaiting(true),
-    onError: (error) => toast.error(error.message),
-  });
-  const finish = useMutation({
-    mutationFn: () => pim.chatgptCallback(address),
-    onSuccess: () => {
-      setWaiting(false);
-      setAddress("");
-      queryClient.invalidateQueries({ queryKey: ["model"] });
-      if (!localStorage.getItem(WELCOMED_KEY)) setWelcome(true);
-    },
-    onError: (error) => toast.error(error.message),
-  });
-  const disconnect = useMutation({
-    mutationFn: pim.chatgptLogout,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["model"] }),
-    onError: (error) => toast.error(error.message),
-  });
-
-  if (welcome) {
-    return (
-      <section className="flex flex-col items-center gap-3 rounded-xl border bg-card px-6 py-8 text-center shadow-xs">
-        <ChatGPTLogo className="size-8" />
-        <h2 className="font-semibold text-lg">{t("usingYourPlanTitle")}</h2>
-        <p className="max-w-md text-muted-foreground text-sm">
-          {t("usingYourPlanBody")}
-        </p>
-        <Button
-          onClick={() => {
-            localStorage.setItem(WELCOMED_KEY, "1");
-            setWelcome(false);
-          }}
-        >
-          {t("gotIt")}
-        </Button>
-      </section>
-    );
-  }
-
-  return (
-    <section className="mt-10 rounded-2xl border bg-muted/20 p-5">
-      <div className="flex items-start gap-3">
-        <ChatGPTLogo className="mt-0.5 size-6 shrink-0" />
-        <div className="min-w-0 flex-1">
-          <h2 className="font-semibold">{t("useYourChatGPTPlan")}</h2>
-          <p className="mt-1 text-muted-foreground text-sm">
-            {connected
-              ? t("connectedAs", { email: email ?? t("yourAccount") })
-              : t("chatGPTPlanPitch")}
-          </p>
-        </div>
-      </div>
-
-      {connected ? (
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          <Button variant="outline" asChild>
-            <a href={CHATGPT_USAGE_URL} target="_blank" rel="noreferrer">
-              {t("manageUsage")} <ExternalLink className="size-3.5" />
-            </a>
-          </Button>
-          <Button
-            variant="ghost"
-            onClick={() => disconnect.mutate()}
-            disabled={disconnect.isPending}
-          >
-            {t("disconnect")}
-          </Button>
-        </div>
-      ) : waiting ? (
-        <form
-          className="mt-4 space-y-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (address.trim()) finish.mutate();
-          }}
-        >
-          <p className="text-muted-foreground text-sm">
-            {t("chatGPTWhyPaste")}
-          </p>
-          <ol className="list-decimal space-y-1 pl-5 text-sm">
-            <li>{t("chatGPTStepApprove")}</li>
-            <li>{t("chatGPTStepCopy")}</li>
-            <li>{t("chatGPTStepPaste")}</li>
-          </ol>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Input
-              value={address}
-              onChange={(event) => setAddress(event.target.value)}
-              placeholder="http://127.0.0.1:1455/auth/callback?code=…"
-              aria-label={t("pasteAddress")}
-              className="h-9 flex-1 font-mono text-xs"
-              autoFocus
-            />
-            <div className="flex gap-2">
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => {
-                  setWaiting(false);
-                  setAddress("");
-                }}
-              >
-                {t("cancel")}
-              </Button>
-              <Button
-                type="submit"
-                disabled={!address.trim() || finish.isPending}
-              >
-                {finish.isPending && (
-                  <Loader2 className="size-4 animate-spin" />
-                )}
-                {t("connect")}
-              </Button>
-            </div>
-          </div>
-          <p className="text-muted-foreground text-xs">
-            {t("chatGPTAfterPaste")}
-          </p>
-        </form>
-      ) : (
-        <Button
-          className="mt-4"
-          onClick={() => start.mutate()}
-          disabled={start.isPending}
-        >
-          <ChatGPTLogo className="size-4" />
-          {t("continueWithChatGPT")}
-        </Button>
-      )}
-    </section>
   );
 }
 

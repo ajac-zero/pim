@@ -59,8 +59,6 @@ describe("agent", () => {
 		const tools = new Map((body.tools as { name: string; requiresApproval: boolean }[]).map((tool) => [tool.name, tool]));
 		expect(tools.get("http_request")?.requiresApproval).toBe(true);
 		expect(tools.get("note")?.requiresApproval).toBe(false);
-		// web_search costs money and is off unless configured.
-		expect(tools.has("web_search")).toBe(false);
 		expect(tools.has("fetch_url")).toBe(true);
 	});
 

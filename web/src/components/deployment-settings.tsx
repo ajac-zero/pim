@@ -130,12 +130,6 @@ export function DeploymentSection() {
           off(settings.imageModel),
           "deploymentImageModelHint",
         )}
-        {row(
-          "PIM_WEB_SEARCH",
-          "deploymentWebSearch",
-          off(settings.webSearch),
-          "deploymentWebSearchHint",
-        )}
       </Group>
       <Group
         title={t("deploymentEveryone")}

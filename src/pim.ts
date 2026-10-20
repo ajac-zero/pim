@@ -545,7 +545,7 @@ export class Pim extends DurableAgent<Env> {
 				reviewExtension({ majordomo: () => this.agents.majordomo(), decide: (conversation, decision, note) => this.#reviewDecision(conversation, decision, note) }),
 			);
 			this.registry.install(approvalsExtension(services, this.#ownActions));
-			this.registry.install(webExtension({ ai: this.env.AI, searchProvider: this.deployment().webSearch }));
+			this.registry.install(webExtension);
 			this.registry.install(
 				artifactsExtension({
 					artifacts: this.artifacts,

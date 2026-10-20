@@ -19,7 +19,7 @@ import { TaskPanel } from "~/components/chat/tasks";
 import { Thread } from "~/components/chat/thread";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
-import { Loader2, Plus, Users } from "~/components/icons";
+import { Loader2, Users } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
 import { useElementHeight } from "~/hooks/use-element-size";
@@ -157,7 +157,7 @@ function ChatPage() {
 
   const shelf = useTabs().length > 1;
   // A chat dragged from the sidebar onto the conversation opens in a new tab.
-  const { dropping, dropZone } = useChatDrop();
+  const dropZone = useChatDrop();
 
   return (
     <main ref={page} className="flex min-h-0 min-w-0 flex-1">
@@ -172,7 +172,7 @@ function ChatPage() {
             shelf && "bg-sidebar",
           )}
         >
-          <ChatTabs activeId={sessionId} dropping={dropping} />
+          <ChatTabs activeId={sessionId} />
           {reconnecting && (
             <span className="shrink-0 self-center text-muted-foreground text-[13px]">
               {t("connecting")}
@@ -186,12 +186,6 @@ function ChatPage() {
          * for it rather than sitting under it: at the right, or on top on phones. */}
         <div className="flex min-h-0 flex-1 flex-col md:flex-row">
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-            {dropping && (
-              <div className="pointer-events-none absolute inset-3 z-20 flex animate-in items-center justify-center gap-2 rounded-2xl border-2 border-muted-foreground/40 border-dashed bg-background/95 text-muted-foreground duration-150 fade-in">
-                <Plus className="size-5" />
-                {t("openInNewTab")}
-              </div>
-            )}
             {/* Until its snapshot arrives a chat opened for the first time
              * would look empty; a message just sent is already worth showing. */}
             {ready && (loaded || pending !== null) ? (

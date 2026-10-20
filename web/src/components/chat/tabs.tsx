@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { type DragEvent, useEffect, useRef, useState } from "react";
+import { type DragEvent, useEffect, useRef } from "react";
 import { AgentIcon } from "~/components/agent-icon";
 import {
   AwaitingApprovalMark,
@@ -9,7 +9,7 @@ import {
   useAwaitingApproval,
 } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
-import { Plus, X } from "~/components/icons";
+import { X } from "~/components/icons";
 import type { Session } from "~/lib/pim-api";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
 import {
@@ -25,16 +25,9 @@ import { cn } from "~/lib/utils";
  * The open chats, as tabs in the chat's header. Each shows its agent, its
  * title, and whether it is working or waiting for an approval, so chats in
  * the background stay in view with the sidebar collapsed. With only one
- * open, it shows that chat's title instead. While a chat is `dropping` into
- * the page, a new tab shows where it will go.
+ * open, it shows that chat's title instead.
  */
-export function ChatTabs({
-  activeId,
-  dropping,
-}: {
-  activeId: string;
-  dropping: boolean;
-}) {
+export function ChatTabs({ activeId }: { activeId: string }) {
   const { t } = useI18n();
   const navigate = useNavigate();
   const tabs = useTabs();
@@ -61,13 +54,6 @@ export function ChatTabs({
         : { to: "/" },
     );
   };
-
-  const newTab = (
-    <>
-      <Plus className="size-4 shrink-0" />
-      <span className="truncate">{t("openInNewTab")}</span>
-    </>
-  );
 
   const agentOf = (session: Session) =>
     session.visit
@@ -117,11 +103,6 @@ export function ChatTabs({
         {iconOf(session, "bg-muted")}
         <span className="truncate">{sessionTitle(session, t)}</span>
         {statusOf(session)}
-        {dropping && (
-          <span className="ml-2 flex h-8 min-w-0 items-center gap-2 rounded-lg border border-muted-foreground/40 border-dashed px-3 text-muted-foreground text-sm">
-            {newTab}
-          </span>
-        )}
       </div>
     );
   }
@@ -191,36 +172,21 @@ export function ChatTabs({
             </li>
           );
         })}
-        {dropping && (
-          <li className="flex h-10 w-56 min-w-28 shrink items-center gap-2 rounded-t-xl border border-muted-foreground/40 border-b-0 border-dashed px-3 text-muted-foreground text-sm">
-            {newTab}
-          </li>
-        )}
       </ul>
     </nav>
   );
 }
 
-/**
- * Lets a chat dragged from the sidebar be dropped anywhere on the page it
- * returns props for, to open in a new tab. `dropping` is true while one is over it.
- */
+/** Props that open a chat dragged from the sidebar and dropped on the element in a new tab. */
 export function useChatDrop() {
   const navigate = useNavigate();
-  const [dropping, setDropping] = useState(false);
-  const dropZone = {
+  return {
     onDragOver: (event: DragEvent) => {
-      if (!event.dataTransfer.types.includes(CHAT_DRAG_TYPE)) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "copy";
-      setDropping(true);
-    },
-    onDragLeave: (event: DragEvent) => {
-      if (!event.currentTarget.contains(event.relatedTarget as Node | null))
-        setDropping(false);
+      if (event.dataTransfer.types.includes(CHAT_DRAG_TYPE)) {
+        event.preventDefault();
+      }
     },
     onDrop: (event: DragEvent) => {
-      setDropping(false);
       const session = event.dataTransfer.getData(CHAT_DRAG_TYPE);
       if (!session) return;
       event.preventDefault();
@@ -228,5 +194,4 @@ export function useChatDrop() {
       navigate({ to: "/chat/$sessionId", params: { sessionId: session } });
     },
   };
-  return { dropping, dropZone };
 }

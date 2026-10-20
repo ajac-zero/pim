@@ -336,8 +336,12 @@ describe("a computer Pim starts", () => {
 			const link = new Link(machine, (message) => server.send(frame(1, `${message}\n`)));
 			server.addEventListener("message", (event) => {
 				const data = new Uint8Array(event.data as ArrayBuffer);
-				if (data[0] === 4) launch.letGo = true;
-				else for (const line of new TextDecoder().decode(data.subarray(1)).split("\n")) if (line) link.receive(line);
+				if (data[0] === 4) {
+					// Its input ended: it exits, as pim-computer does.
+					launch.letGo = true;
+					server.send(Uint8Array.of(3, 0));
+					server.close(1000);
+				} else for (const line of new TextDecoder().decode(data.subarray(1)).split("\n")) if (line) link.receive(line);
 			});
 			server.addEventListener("close", () => {
 				launch.closed = true;

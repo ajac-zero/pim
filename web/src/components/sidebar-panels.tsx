@@ -166,7 +166,7 @@ function RowText({ title, meta }: { title: string; meta: ReactNode }) {
   );
 }
 
-/** What Pim told you, newest first. Opening one marks it read. */
+/** Unseen notifications, kept in place until you leave the panel. */
 export function NotificationsPanel({
   onNavigate,
 }: {
@@ -175,9 +175,23 @@ export function NotificationsPanel({
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const { data: notifications } = useQuery(notificationsQuery());
-  const unread = (notifications ?? []).filter((n) => n.readAt === null);
+  const [seen, setSeen] = useState<Set<string>>(() => new Set());
+  const pending = (notifications ?? []).filter(
+    (n) => n.readAt === null || seen.has(n.id),
+  );
+  const { mutate: markSeen } = useMutation({
+    mutationFn: (id: string) => pim.markRead(id),
+    onMutate: (id) => setSeen((previous) => new Set(previous).add(id)),
+    onSettled: () =>
+      queryClient.invalidateQueries({ queryKey: ["notifications"] }),
+    onError: (error) => toast.error(error.message),
+  });
   const markAll = useMutation({
-    mutationFn: () => Promise.all(unread.map((n) => pim.markRead(n.id))),
+    mutationFn: () => Promise.all(pending.map((n) => pim.markRead(n.id))),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      setSeen(new Set());
+    },
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: ["notifications"] }),
     onError: (error) => toast.error(error.message),
@@ -185,7 +199,7 @@ export function NotificationsPanel({
   return (
     <>
       <SidebarPanelHeader title={t("notifications")}>
-        {unread.length > 0 && (
+        {pending.length > 0 && (
           <SidebarPanelAction
             label={t("markAllRead")}
             onClick={() => markAll.mutate()}
@@ -197,12 +211,17 @@ export function NotificationsPanel({
       </SidebarPanelHeader>
       <PanelList
         label={t("notifications")}
-        empty={notifications?.length === 0 && t("noNotifications")}
+        empty={
+          notifications !== undefined &&
+          pending.length === 0 &&
+          t("noNotifications")
+        }
       >
-        {notifications?.map((notification) => (
+        {pending.map((notification) => (
           <NotificationRow
             key={notification.id}
             notification={notification}
+            onSeen={markSeen}
             onNavigate={onNavigate}
           />
         ))}
@@ -213,76 +232,78 @@ export function NotificationsPanel({
 
 function NotificationRow({
   notification,
+  onSeen,
   onNavigate,
 }: {
   notification: PimNotification;
+  onSeen: (id: string) => void;
   onNavigate?: () => void;
 }) {
-  const { t, formatDate } = useI18n();
-  const queryClient = useQueryClient();
+  const { formatDate } = useI18n();
   const unread = notification.readAt === null;
-  const markRead = useMutation({
-    mutationFn: () => pim.markRead(notification.id),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["notifications"] }),
-    onError: (error) => toast.error(error.message),
-  });
-  const read = () => {
-    if (unread) markRead.mutate();
-  };
+  const row = useRef<HTMLLIElement>(null);
+  useEffect(() => {
+    if (!unread || !row.current) return;
+    let visible = false;
+    const readVisible = () => {
+      if (visible && document.visibilityState === "visible") {
+        observer.disconnect();
+        document.removeEventListener("visibilitychange", readVisible);
+        onSeen(notification.id);
+      }
+    };
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        visible =
+          entry?.isIntersecting === true && entry.intersectionRatio === 1;
+        readVisible();
+      },
+      { threshold: 1 },
+    );
+    observer.observe(row.current);
+    document.addEventListener("visibilitychange", readVisible);
+    return () => {
+      observer.disconnect();
+      document.removeEventListener("visibilitychange", readVisible);
+    };
+  }, [notification.id, unread, onSeen]);
   const content = (
     <>
-      <span
-        className={cn(
-          "mt-1.5 size-2 shrink-0 self-start rounded-full",
-          unread ? "bg-link" : "bg-transparent",
-        )}
-        aria-hidden
-      />
       <span className="min-w-0 flex-1">
-        {unread && <span className="sr-only">{t("unread")}: </span>}
-        <span
-          className={cn("block truncate", !unread && "text-muted-foreground")}
-        >
-          {notification.title}
-        </span>
-        {notification.body && (
-          <span className="line-clamp-2 text-muted-foreground text-xs">
-            {notification.body}
-          </span>
-        )}
-        <time className="mt-0.5 block text-muted-foreground text-xs">
-          {formatDate(new Date(notification.createdAt), {
+        <span className="block truncate">{notification.title}</span>
+        <time
+          dateTime={new Date(notification.createdAt).toISOString()}
+          title={formatDate(new Date(notification.createdAt), {
             dateStyle: "medium",
             timeStyle: "short",
+          })}
+          className="mt-0.5 block text-muted-foreground text-xs"
+        >
+          {formatDate(new Date(notification.createdAt), {
+            ...(new Date(notification.createdAt).toDateString() !==
+            new Date().toDateString()
+              ? { month: "short", day: "numeric" }
+              : {}),
+            hour: "numeric",
+            minute: "2-digit",
           })}
         </time>
       </span>
     </>
   );
   return (
-    <li>
+    <li ref={row}>
       {notification.session ? (
         <Link
           to="/chat/$sessionId"
           params={{ sessionId: notification.session }}
           onClick={() => {
-            read();
             onNavigate?.();
           }}
           className={cn(ROW_CLASS, "items-start gap-2")}
         >
           {content}
         </Link>
-      ) : unread ? (
-        <button
-          type="button"
-          onClick={read}
-          title={t("markRead")}
-          className={cn(ROW_CLASS, "items-start gap-2")}
-        >
-          {content}
-        </button>
       ) : (
         <div
           className={cn(ROW_CLASS, "items-start gap-2 hover:bg-transparent")}

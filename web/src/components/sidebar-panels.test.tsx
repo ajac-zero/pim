@@ -8,9 +8,14 @@ import {
 } from "@tanstack/react-router";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
-import { ArtifactsPanel } from "~/components/sidebar-panels";
+import {
+  ArtifactsPanel,
+  NotificationsPanel,
+} from "~/components/sidebar-panels";
+import { TooltipProvider } from "~/components/ui/tooltip";
 import {
   artifactsQuery,
+  notificationsQuery,
   sessionsQuery,
   sharedArtifactsQuery,
 } from "~/lib/queries";
@@ -54,5 +59,48 @@ it("opens artifacts on their own page even when their originating chat exists", 
   );
   const hrefs = [...html.matchAll(/href="([^"]*)"/g)].map(([, href]) => href);
   expect(hrefs).toEqual(["/artifacts/trip-plan?v=3"]);
+  client.clear();
+});
+
+it("shows only unseen notification titles, without their body previews", async () => {
+  const client = new QueryClient();
+  client.setQueryData(notificationsQuery().queryKey, [
+    {
+      id: "new",
+      session: "trip-chat",
+      title: "Your trip is ready",
+      body: "A long preview that belongs in the chat instead.",
+      createdAt: 0,
+      readAt: null,
+    },
+    {
+      id: "old",
+      session: null,
+      title: "Already seen",
+      body: "Old preview",
+      createdAt: 0,
+      readAt: 1,
+    },
+  ]);
+  const root = createRootRoute({ component: NotificationsPanel });
+  const router = createRouter({
+    routeTree: root.addChildren([
+      createRoute({ getParentRoute: () => root, path: "/" }),
+      createRoute({ getParentRoute: () => root, path: "/chat/$sessionId" }),
+    ]),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  await router.load();
+  const html = renderToStaticMarkup(
+    <QueryClientProvider client={client}>
+      <TooltipProvider>
+        <RouterProvider router={router} />
+      </TooltipProvider>
+    </QueryClientProvider>,
+  );
+  expect(html).toContain("Your trip is ready");
+  expect(html).toContain('href="/chat/trip-chat"');
+  expect(html).not.toContain("A long preview");
+  expect(html).not.toContain("Already seen");
   client.clear();
 });

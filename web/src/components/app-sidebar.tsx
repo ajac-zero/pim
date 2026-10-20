@@ -502,19 +502,17 @@ function ChatsPanel({
         )}
       </div>
 
-      {view !== "agents" && (
-        <div className="flex justify-start px-3 pb-3">
-          <Button
-            variant="ghost"
-            size="lg"
-            className="w-full justify-start px-2 has-[>svg]:px-2"
-            onClick={newChat}
-          >
-            <SquarePen className="size-4.5" />
-            {t("newChat")}
-          </Button>
-        </div>
-      )}
+      <div className="flex justify-start px-3 pb-3">
+        <Button
+          variant="ghost"
+          size="lg"
+          className="w-full justify-start rounded-lg px-2 hover:bg-sidebar-accent has-[>svg]:px-2"
+          onClick={newChat}
+        >
+          <SquarePen className="size-4.5" />
+          {t("newChat")}
+        </Button>
+      </div>
 
       <nav
         aria-label={t("chats")}
@@ -745,7 +743,7 @@ function RailDialogLink({
   );
 }
 
-/** An agent's name, settings, new-chat button, and chats. */
+/** An agent's name, settings, and chats. */
 function AgentSectionList({
   section: { agent, list, archived },
   activeId,
@@ -758,7 +756,6 @@ function AgentSectionList({
   onNavigate?: () => void;
 }) {
   const { t } = useI18n();
-  const navigate = useNavigate();
   const [open, setOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const optionsTrigger = useRef<HTMLButtonElement>(null);
@@ -820,31 +817,6 @@ function AgentSectionList({
             optionsTrigger.current?.focus();
           }}
         />
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              className="rounded-md p-1 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
-              onClick={() => {
-                navigate({
-                  to: "/agents/$agentId",
-                  params: { agentId: agent.id },
-                });
-                onNavigate?.();
-              }}
-              aria-label={t("newChatWith", { name: agent.name })}
-            >
-              <SquarePen className="size-3.5" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent
-            side="right"
-            showArrow={false}
-            className={SIDEBAR_TOOLTIP_CLASS}
-          >
-            {t("newChatWith", { name: agent.name })}
-          </TooltipContent>
-        </Tooltip>
       </div>
       {open &&
         (list.length === 0 ? (

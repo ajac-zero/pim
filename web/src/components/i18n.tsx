@@ -311,7 +311,6 @@ const translations = {
     noChatsYet: "No chats yet.",
     noRecentChats: "No recent chats.",
     archived: "Archived",
-    newChatWith: "New chat with {name}",
     team: "Team",
     teamHint:
       "Members your agent hands tasks to. They work at the same time, each with its own instructions, and answer your agent, never you.",
@@ -1202,7 +1201,6 @@ const translations = {
     noChatsYet: "Aún no hay chats.",
     noRecentChats: "No hay chats recientes.",
     archived: "Archivados",
-    newChatWith: "Nuevo chat con {name}",
     team: "Equipo",
     teamHint:
       "Miembros a los que tu agente da tareas. Trabajan a la vez, cada uno con sus propias instrucciones, y le responden a tu agente, nunca a ti.",

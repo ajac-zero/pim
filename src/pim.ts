@@ -72,6 +72,7 @@ import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
 import { skillTools } from "./extensions/app-skills";
 import { skillsExtension, WRITE_SKILL, writeSkillAction } from "./extensions/skills";
 import { SKILL_NAME, SkillStore } from "./skills";
+import { type SpriteLink, Sprites } from "./sprites";
 import {
 	approvalsExtension,
 	gatedTools,
@@ -139,7 +140,6 @@ import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidget
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import { COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerStatus } from "./computer";
-import { FlyMachines } from "./fly";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
 import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
@@ -210,11 +210,6 @@ const REVIEW_EXPIRY_CALLBACK = "expireReview";
 /** How long a reply may stay unread before it is pushed: time for an open chat to mark it read. */
 const REPLY_PUSH_DELAY_SECONDS = 10;
 const REPLY_PUSH_CALLBACK = "pushReply";
-/** How long a computer Pim started may go unused before it's put to sleep. */
-const COMPUTER_IDLE_MS = 15 * 60 * 1000;
-const COMPUTER_SLEEP_CALLBACK = "sleepComputer";
-/** When the next check that the computer is unused is due, if one is scheduled. */
-const COMPUTER_SLEEP_CHECK_KEY = "computer_sleep_check";
 
 /** A circle's permission row for reading the owner's memory. */
 const MEMORY_TOOL = "memory";
@@ -374,14 +369,21 @@ export class Pim extends DurableAgent<Env> {
 		},
 	});
 	/** The person's computer, which their agents use, if they connected one (see ./computer.ts). */
-	readonly computer = new Computer({
+	readonly computer: Computer = new Computer({
 		meta: this.store,
 		sockets: () => [...this.getConnections(COMPUTER_TAG)],
-		wake: async () => {
+		wake: (): Promise<SpriteLink> => {
+			const sprites = this.#sprites();
 			const machine = this.computer.machine();
-			if (machine) await this.#fly()?.start(machine);
+			if (!sprites || !machine) throw new HttpError(503, "This Pim no longer reaches the computer it started.");
+			return sprites.connect(
+				machine,
+				this.deployment().publicUrl!,
+				(line) => this.#computerSaid(line),
+				() => this.#computerDisconnected(),
+			);
 		},
-		used: () => void this.#sleepLater(COMPUTER_IDLE_MS),
+		inUse: () => this.browser.watched(),
 	});
 	/** The person's files, on their computer, which they and their agents share (see ./files.ts). */
 	readonly files = new Files(this.computer);
@@ -4159,7 +4161,7 @@ export class Pim extends DurableAgent<Env> {
 				}),
 		],
 		// The person's computer (see ./computer.ts): whether one is connected, pairing one or starting one, and removing it.
-		["GET", "/computer", () => noStore({ ...this.computer.status(), startable: this.#fly() !== null })],
+		["GET", "/computer", () => noStore({ ...this.computer.status(), startable: this.#sprites() !== null })],
 		[
 			"POST",
 			"/computer",
@@ -4947,72 +4949,35 @@ export class Pim extends DurableAgent<Env> {
 		this.#reinstallApprovals();
 	}
 
-	/** Where this deployment starts computers for people (./fly.ts), or null where it starts none. */
-	#fly(): FlyMachines | null {
-		const { computers, publicUrl } = this.deployment();
-		const token = (this.env as unknown as { FLY_API_TOKEN?: string }).FLY_API_TOKEN;
-		return computers && publicUrl && token ? new FlyMachines(computers, token) : null;
+	/** Where this deployment starts computers for people (./sprites.ts), or null where it starts none. */
+	#sprites(): Sprites | null {
+		const token = (this.env as unknown as { SPRITES_TOKEN?: string }).SPRITES_TOKEN;
+		return this.deployment().publicUrl && token ? new Sprites(token) : null;
 	}
 
 	/**
 	 * Starts a computer for the person, in place of any they connected: a
-	 * machine that runs pim-computer with a token of its own, which nobody
-	 * sees. It connects once it has started.
+	 * Sprite, set up and woken once, so it says what it is; then it sleeps
+	 * until it's needed.
 	 */
 	async #startComputer(): Promise<ComputerStatus> {
-		const fly = this.#fly();
-		if (!fly) throw new HttpError(404, "This Pim doesn't start computers. Connect one of your own.");
-		const token = await this.computer.pair(this.name, Date.now());
-		try {
-			const machine = await fly.create(`pim-${this.name.replace(/_/g, "-")}-${Date.now().toString(36)}`, {
-				PIM_URL: this.deployment().publicUrl!,
-				PIM_COMPUTER_TOKEN: token,
-			});
-			this.computer.setMachine(machine);
-		} catch (error) {
-			this.computer.forget();
-			throw error;
-		}
+		const sprites = this.#sprites();
+		if (!sprites) throw new HttpError(404, "This Pim doesn't start computers. Connect one of your own.");
+		const name = `pim-${this.name.replace(/_/g, "-")}-${Date.now().toString(36)}`;
+		await sprites.create(name);
+		this.computer.started(name, Date.now());
 		this.#computerChanged();
-		void this.#sleepLater(COMPUTER_IDLE_MS);
+		await this.computer.wake().catch((error) => console.warn("waking the new computer", error));
 		return this.computer.status();
 	}
 
-	/** Removes the machine of a computer Pim started, with everything on it. */
+	/** Removes the Sprite of a computer Pim started, with everything on it. */
 	async #removeMachine(): Promise<void> {
 		const machine = this.computer.machine();
 		if (!machine) return;
-		const fly = this.#fly();
-		if (!fly) throw new HttpError(503, "This Pim no longer reaches the computers it started; its admin can remove the machine on Fly.io.");
-		await fly.destroy(machine);
-	}
-
-	/** Checks, `delay` from now, whether the computer Pim started has gone unused; once at a time. */
-	async #sleepLater(delay: number): Promise<void> {
-		// A check that's long overdue was lost, and another takes its place.
-		const due = Number(this.store.meta(COMPUTER_SLEEP_CHECK_KEY) ?? 0);
-		if (!this.computer.machine() || due > Date.now() - 60_000) return;
-		this.store.setMeta(COMPUTER_SLEEP_CHECK_KEY, String(Date.now() + delay));
-		await this.schedule(Math.ceil(delay / 1000), COMPUTER_SLEEP_CALLBACK);
-	}
-
-	/**
-	 * Puts the computer Pim started to sleep once it has gone unused for
-	 * `COMPUTER_IDLE_MS`: its machine is suspended, memory and all, and it
-	 * wakes when it's next needed. One in use is checked again later.
-	 */
-	async sleepComputer(): Promise<void> {
-		this.store.deleteMeta(COMPUTER_SLEEP_CHECK_KEY);
-		const machine = this.computer.machine();
-		if (this.#closed() || !machine || this.computer.status().state !== "online") return;
-		const idle = Date.now() - this.computer.usedAt();
-		if (idle < COMPUTER_IDLE_MS || this.computer.busy() || this.browser.watched()) {
-			await this.#sleepLater(Math.max(COMPUTER_IDLE_MS - idle, 60_000));
-			return;
-		}
-		await this.#fly()?.suspend(machine);
-		this.computer.slept();
-		this.broadcastMessage({ type: "computer" });
+		const sprites = this.#sprites();
+		if (!sprites) throw new HttpError(503, "This Pim no longer reaches the computers it started; its admin can remove the Sprite on Fly.io.");
+		await sprites.destroy(machine);
 	}
 
 	/** The browser's tools, while the person has a computer; clicking and typing follow their permissions. */
@@ -5157,11 +5122,7 @@ export class Pim extends DurableAgent<Env> {
 
 	async onMessage(connection: Connection<SocketState>, raw: WSMessage): Promise<void> {
 		if (typeof raw !== "string") return;
-		if (this.#isComputer(connection)) {
-			this.computer.receive(raw);
-			if (raw.startsWith('{"type":"hello"')) this.#computerConnected();
-			return;
-		}
+		if (this.#isComputer(connection)) return this.#computerSaid(raw);
 		if (this.#isBrowserWatcher(connection)) {
 			// A space that slept since forgot who was watching: they go on where they were.
 			if (!this.browser.watching(connection.id) && !(await this.#watchBrowser(connection))) return;
@@ -5204,6 +5165,12 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#isBrowserWatcher(connection)) return this.browser.unwatch(connection.id);
 		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
+	}
+
+	/** A message from the computer: what it is, when it has just connected, or an answer. */
+	#computerSaid(raw: string): void {
+		this.computer.receive(raw);
+		if (raw.startsWith('{"type":"hello"')) this.#computerConnected();
 	}
 
 	/**

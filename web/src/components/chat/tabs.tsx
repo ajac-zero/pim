@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useRef } from "react";
+import { type DragEvent, useEffect, useRef, useState } from "react";
 import { AgentIcon } from "~/components/agent-icon";
 import {
   AwaitingApprovalMark,
@@ -9,17 +9,24 @@ import {
   useAwaitingApproval,
 } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
-import { X } from "~/components/icons";
+import { Plus, X } from "~/components/icons";
 import type { Session } from "~/lib/pim-api";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
-import { closeTab, pruneTabs, useTabs } from "~/lib/tabs";
+import {
+  CHAT_DRAG_TYPE,
+  closeTab,
+  openTab,
+  pruneTabs,
+  useTabs,
+} from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
 /**
  * The open chats, as tabs in the chat's header. Each shows its agent, its
  * title, and whether it is working or waiting for an approval, so chats in
  * the background stay in view with the sidebar collapsed. With only one
- * open, it shows that chat's title instead.
+ * open, it shows that chat's title instead. A chat dragged here from the
+ * sidebar opens in a new tab.
  */
 export function ChatTabs({ activeId }: { activeId: string }) {
   const { t } = useI18n();
@@ -48,6 +55,35 @@ export function ChatTabs({ activeId }: { activeId: string }) {
         : { to: "/" },
     );
   };
+
+  // A chat dragged over the tabs shows where its new tab will go.
+  const [dropping, setDropping] = useState(false);
+  const dropZone = {
+    onDragOver: (event: DragEvent) => {
+      if (!event.dataTransfer.types.includes(CHAT_DRAG_TYPE)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      setDropping(true);
+    },
+    onDragLeave: (event: DragEvent) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+        setDropping(false);
+    },
+    onDrop: (event: DragEvent) => {
+      setDropping(false);
+      const session = event.dataTransfer.getData(CHAT_DRAG_TYPE);
+      if (!session) return;
+      event.preventDefault();
+      openTab(session);
+      navigate({ to: "/chat/$sessionId", params: { sessionId: session } });
+    },
+  };
+  const newTab = (
+    <>
+      <Plus className="size-4 shrink-0" />
+      <span className="truncate">{t("openInNewTab")}</span>
+    </>
+  );
 
   const agentOf = (session: Session) =>
     session.visit
@@ -91,12 +127,20 @@ export function ChatTabs({ activeId }: { activeId: string }) {
   );
   if (open.length <= 1) {
     const session = sessions?.find((candidate) => candidate.id === activeId);
-    if (!session) return <div className="flex-1" />;
+    if (!session) return <div className="flex-1" {...dropZone} />;
     return (
-      <div className="flex min-w-0 flex-1 items-center gap-2 pl-4 text-[15px]">
+      <div
+        className="flex min-w-0 flex-1 items-center gap-2 pl-4 text-[15px]"
+        {...dropZone}
+      >
         {iconOf(session, "bg-muted")}
         <span className="truncate">{sessionTitle(session, t)}</span>
         {statusOf(session)}
+        {dropping && (
+          <span className="ml-2 flex h-8 min-w-0 items-center gap-2 rounded-lg border border-muted-foreground/40 border-dashed px-3 text-muted-foreground text-sm">
+            {newTab}
+          </span>
+        )}
       </div>
     );
   }
@@ -105,6 +149,7 @@ export function ChatTabs({ activeId }: { activeId: string }) {
     <nav
       aria-label={t("openChats")}
       className="h-full min-w-0 flex-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none]"
+      {...dropZone}
     >
       {/* The padding leaves room for the open tab's flared corners. */}
       <ul className="flex h-full items-end gap-1 px-2">
@@ -166,6 +211,11 @@ export function ChatTabs({ activeId }: { activeId: string }) {
             </li>
           );
         })}
+        {dropping && (
+          <li className="flex h-10 w-56 min-w-28 shrink items-center gap-2 rounded-t-xl border border-muted-foreground/40 border-b-0 border-dashed px-3 text-muted-foreground text-sm">
+            {newTab}
+          </li>
+        )}
       </ul>
     </nav>
   );

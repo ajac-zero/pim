@@ -83,7 +83,7 @@ import {
   sessionsQuery,
   visitsQuery,
 } from "~/lib/queries";
-import { closeTab, openTab } from "~/lib/tabs";
+import { CHAT_DRAG_TYPE, closeTab, openTab } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 import { version } from "../../../package.json";
 
@@ -985,6 +985,9 @@ function SessionRow({
         to="/chat/$sessionId"
         params={{ sessionId: session.id }}
         onClick={onNavigate}
+        onDragStart={(event) =>
+          event.dataTransfer.setData(CHAT_DRAG_TYPE, session.id)
+        }
         className={cn(
           "flex items-center gap-2 rounded-lg px-2 py-2 pr-8 text-sm transition-colors hover:bg-sidebar-accent",
           active && "bg-sidebar-accent",

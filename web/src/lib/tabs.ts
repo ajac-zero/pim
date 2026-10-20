@@ -4,10 +4,14 @@ import { useSyncExternalStore } from "react";
  * The chats open as tabs above the transcript, kept in this browser. They
  * work like a browser's tabs: a chat opened from the sidebar shows in the
  * current tab, in place of the chat it showed, and only "Open in new tab"
- * gives a chat a tab of its own. Closing a tab only takes it off the strip.
+ * or dragging the chat onto the tabs gives a chat a tab of its own. Closing
+ * a tab only takes it off the strip.
  */
 
 export type Tab = { session: string };
+
+/** The drag data type of a chat dragged from the sidebar; its value is the chat's id. */
+export const CHAT_DRAG_TYPE = "application/x-pim-chat";
 
 const STORAGE_KEY = "pim-tabs";
 

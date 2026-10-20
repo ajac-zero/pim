@@ -572,7 +572,6 @@ export type Sent = {
   message: string;
   /** Where it went: this conversation, or the person's inbox. */
   channel: "chat" | "email";
-  notify: boolean;
   title: string | null;
   /** The widgets asked to go with it, by name; what they showed comes in the call's result. */
   widgets: string[];
@@ -589,7 +588,6 @@ export function sentOf(call: FunctionCallItem): Sent | null {
   return {
     message: typeof args.message === "string" ? args.message : "",
     channel: args.channel === "email" ? "email" : "chat",
-    notify: args.notify === true,
     title: typeof args.title === "string" ? args.title : null,
     widgets: Array.isArray(args.widgets)
       ? args.widgets.filter((ref): ref is string => typeof ref === "string")

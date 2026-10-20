@@ -197,6 +197,9 @@ const APPROVAL_EXPIRY_CALLBACK = "expireApproval";
 /** How long the majordomo has to decide another agent's request before the person is asked anyway. */
 const REVIEW_MS = 5 * 60 * 1000;
 const REVIEW_EXPIRY_CALLBACK = "expireReview";
+/** How long a reply may stay unread before it is pushed: time for an open chat to mark it read. */
+const REPLY_PUSH_DELAY_SECONDS = 10;
+const REPLY_PUSH_CALLBACK = "pushReply";
 
 /** A circle's permission row for reading the owner's memory. */
 const MEMORY_TOOL = "memory";
@@ -966,7 +969,7 @@ export class Pim extends DurableAgent<Env> {
 
 	#defaultSettings(): Settings {
 		const { timeZone, approvalPolicy } = this.deployment();
-		return { timeZone, approvalPolicy, notifyWebhook: null };
+		return { timeZone, approvalPolicy };
 	}
 
 	/** How this deployment runs for everyone, from its variables (see ./deployment.ts). */
@@ -1126,10 +1129,14 @@ export class Pim extends DurableAgent<Env> {
 		const pim = this;
 		return {
 			store: this.store,
-			responseSent: (session, at) => {
+			responseSent: async (session, at, alert) => {
 				if (this.store.deletedSessions().has(session)) return;
 				this.store.recordResponse(session, at);
 				this.broadcastMessage({ type: "sessions" });
+				// A task's conversation is not one of the person's chats.
+				if (alert === undefined || this.#tasks.of(session) || this.store.pushSubscriptions().length === 0) return;
+				// Idempotent, so a replayed reply is checked once.
+				await this.schedule(REPLY_PUSH_DELAY_SECONDS, REPLY_PUSH_CALLBACK, { session, at, body: alert.slice(0, 500) }, { idempotent: true });
 			},
 			// Read at each use: the person can change these while the space runs.
 			get timeZone() {
@@ -1474,7 +1481,7 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#closed()) return;
 		const shown = this.#publicSession(notification);
 		if (options.sockets !== false) this.broadcastMessage({ type: "notification", notification: shown });
-		await Promise.all([this.#pushNotification(shown), this.#postWebhook(shown)]);
+		await this.#pushNotification(shown);
 	}
 
 	/** This deployment's VAPID keys, made the first time a browser asks to subscribe. */
@@ -1486,14 +1493,38 @@ export class Pim extends DurableAgent<Env> {
 		return keys;
 	}
 
-	/** Web Push to every browser that turned notifications on, even with the app closed. */
-	async #pushNotification({ id, session, title, body }: Notification): Promise<void> {
+	/**
+	 * Pushes a reply that no client has read since it was sent (see
+	 * `responseSent`): an open chat marks its replies read, on any device, so
+	 * only a person who isn't looking at the conversation is alerted. A later
+	 * reply in the chat has its own check.
+	 */
+	async pushReply(payload: { session: string; at: number; body: string }): Promise<void> {
+		const info = this.store.sessionInfo(payload.session);
+		if (this.#closed() || !info?.unread || info.responseAt !== payload.at || this.#hiddenSessions().has(payload.session)) return;
+		const session = this.store.publicId(payload.session);
+		await this.#pushNotification({
+			// The same reply pushed twice shows once.
+			id: `reply-${session}-${payload.at}`,
+			session,
+			title: info.title ?? this.#agentRef(payload.session)?.name ?? "Pim",
+			body: payload.body,
+			reply: true,
+		});
+	}
+
+	/**
+	 * Web Push to every browser that turned notifications on, even with the
+	 * app closed. A `reply` shows unless its own chat is on screen; anything
+	 * else shows only while the app is not, since the app shows it itself.
+	 */
+	async #pushNotification({ id, session, title, body, reply }: Pick<Notification, "id" | "session" | "title" | "body"> & { reply?: boolean }): Promise<void> {
 		const subscriptions = this.store.pushSubscriptions();
 		if (subscriptions.length === 0) return;
 		const keys = await this.#vapidKeys();
 		const subject = this.deployment().publicUrl ?? "https://pim.invalid";
 		// A push message holds about 4 KB; the full text is in the app.
-		const message = { id, session, title: title.slice(0, 120), body: body.slice(0, 500) };
+		const message = { id, session, title: title.slice(0, 120), body: body.slice(0, 500), ...(reply ? { reply } : {}) };
 		await Promise.all(
 			subscriptions.map(async (subscription) => {
 				try {
@@ -1503,22 +1534,6 @@ export class Pim extends DurableAgent<Env> {
 				}
 			}),
 		);
-	}
-
-	async #postWebhook(notification: Notification): Promise<void> {
-		const webhook = this.settings().notifyWebhook;
-		if (!webhook) return;
-		try {
-			const response = await fetch(webhook, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ notification }),
-				signal: AbortSignal.timeout(10_000),
-			});
-			if (!response.ok) console.warn(`notification webhook answered ${response.status}`);
-		} catch (error) {
-			console.warn("notification webhook failed", error);
-		}
 	}
 
 	/**

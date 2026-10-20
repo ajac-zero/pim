@@ -107,7 +107,7 @@ People then make agents built on it: Your agents → New agent → Based on blue
 
 - `data`: the extension's own data, JSON values by key (`get`, `put`, `delete`, `list(prefix)`). No other extension sees it. It goes with the person's export and is erased with their account.
 - `timeZone`: the person's, as it is when read.
-- `notify(title, body)`: a notification in the app, pushed to their devices and webhook.
+- `notify(title, body)`: a notification in the app, pushed to their devices.
 
 It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps`, `tasks`; see [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable#extensions)), plus `actions`. The ability is installed under the extension's id and selected only in the chats of agents that use it, and in the conversations of tasks they work on.
 

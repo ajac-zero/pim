@@ -334,7 +334,7 @@ describe("streaming a message Pim sends", () => {
               type: "toolCall",
               id: "c1",
               name: "send_to_user",
-              arguments: { notify: true, message: "Hel" },
+              arguments: { complete: false, message: "Hel" },
             },
           },
           {
@@ -358,7 +358,7 @@ describe("streaming a message Pim sends", () => {
       }),
     ]);
     expect(describeEntries(state.view.live)).toEqual([
-      'live:0 call c1 send_to_user({"notify":true,"message":"Hello there"})',
+      'live:0 call c1 send_to_user({"complete":false,"message":"Hello there"})',
     ]);
   });
 });

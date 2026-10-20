@@ -14,9 +14,15 @@ self.addEventListener("push", (event) => {
   if (!message?.title) return;
   event.waitUntil(
     (async () => {
-      // The app shows its own toast while it is on screen.
       const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-      if (windows.some((client) => client.visibilityState === "visible")) return;
+      const visible = windows.filter((client) => client.visibilityState === "visible");
+      // A reply shows unless its chat is on screen. Anything else the app
+      // shows as its own toast while it is on screen.
+      const chat = `/chat/${message.session}`;
+      const shown = message.reply
+        ? visible.some((client) => new URL(client.url).pathname === chat)
+        : visible.length > 0;
+      if (shown) return;
       await self.registration.showNotification(message.title, {
         body: message.body,
         icon: "/icon-192.png",

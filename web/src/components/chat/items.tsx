@@ -184,7 +184,6 @@ export const AssistantMessage = memo(function AssistantMessage({
   item,
   at,
   streaming,
-  notified,
   attachments,
   untrusted,
 }: {
@@ -194,8 +193,6 @@ export const AssistantMessage = memo(function AssistantMessage({
   streaming?: boolean;
   /** Shown outside the person's own app, as a public link's copy is: as `Markdown`'s untrusted text. */
   untrusted?: boolean;
-  /** Pim also alerted the person's devices with it. */
-  notified?: boolean;
   /** What goes with the message, under its text: its widgets. */
   attachments?: ReactNode;
 }) {
@@ -213,13 +210,6 @@ export const AssistantMessage = memo(function AssistantMessage({
         {!streaming && (
           <>
             <MessageTime at={at} />
-            {notified && (
-              <span className="flex min-w-0 items-center gap-1.5">
-                <span aria-hidden>·</span>
-                <Bell className="size-3.5 shrink-0" />
-                <span className="truncate">{t("alsoNotified")}</span>
-              </span>
-            )}
             <CopyAction
               text={text}
               label={t("copyResponse")}

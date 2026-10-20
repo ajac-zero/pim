@@ -266,7 +266,6 @@ export const Thread = memo(function Thread({
                 }}
                 at={row.at}
                 streaming={liveKeys.has(row.key)}
-                notified={row.sent.notify}
                 attachments={
                   row.sent.widgets.length > 0 ? (
                     <SentWidgets

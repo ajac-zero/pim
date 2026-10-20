@@ -125,7 +125,7 @@ describe("metering under concurrency", () => {
 	it("adds a request's tokens to the day it was sent, even when it ends after midnight", async () => {
 		await runInDurableObject(agent(), async (_instance: Pim, state) => {
 			let now = Date.UTC(2020, 0, 1, 23, 59, 59);
-			const meter = new UsageMeter({ sql: state.storage.sql, limits: () => UNLIMITED, planProviders: [], now: () => now });
+			const meter = new UsageMeter({ sql: state.storage.sql, limits: () => UNLIMITED, ownProvider: () => false, now: () => now });
 			const { catalog, open, finish } = heldCatalog();
 			const request = meter.meter(catalog).stream(MODEL, { messages: [] });
 			now += 60_000;

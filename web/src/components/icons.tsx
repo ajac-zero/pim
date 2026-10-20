@@ -204,6 +204,7 @@ export const Rocket = themedIcon(
 );
 export const RotateCcw = themedIcon(Lucide.RotateCcw, Pixel.Undo);
 export const Search = themedIcon(Lucide.Search, Pixel.Search);
+export const Server = themedIcon(Lucide.Server, Pixel.Server);
 export const Settings = themedIcon(Lucide.Settings, Pixel.Gear);
 export const Shapes = themedIcon(Lucide.Shapes, Pixel.Shapes);
 export const Shield = themedIcon(Lucide.Shield, Pixel.Shield);

@@ -6,6 +6,7 @@ import { deploymentSettings, readDeployment } from "./deployment";
 import { FRAMED_KINDS, framePage, RUNTIME_PATH, ENTRY_FILES, readFiles, textOf } from "./artifacts";
 import type { PublishedArtifact } from "./gallery";
 import { HttpError } from "./http";
+import { providerInfo } from "./providers";
 import { parseLimits, UNLIMITED } from "./usage";
 import { type Account, type AccountStatus, type CleanupResult, PENDING_MS, type RegistrationPolicy } from "./directory";
 import { usernameProblem } from "./usernames";
@@ -605,6 +606,23 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 			if (customApp && request.method === "DELETE") {
 				if (!(await gallery(env).removeCustomApp(decodeURIComponent(customApp[1]!)))) return fail(404, "No such app");
 				log("app_removed", { app: customApp[1], by: admin.ownerId });
+				return json({ deleted: true });
+			}
+			// Model providers for everyone (./providers.ts). People's spaces read them from the gallery.
+			const sharedProvider = /^\/admin\/providers\/([^/]+)$/.exec(path);
+			if (route === "POST /providers" || (sharedProvider && request.method === "PUT")) {
+				const id = sharedProvider ? decodeURIComponent(sharedProvider[1]!) : null;
+				const provider = await gallery(env)
+					.putSharedProvider(id, await body())
+					.catch((error: unknown) => rpcFailure(error));
+				if (provider instanceof Response) return provider;
+				if (!provider) return fail(404, "No such provider");
+				log(id ? "provider_changed" : "provider_added", { provider: provider.id, by: admin.ownerId });
+				return json({ provider: providerInfo(provider) }, id ? 200 : 201);
+			}
+			if (sharedProvider && request.method === "DELETE") {
+				if (!(await gallery(env).removeSharedProvider(decodeURIComponent(sharedProvider[1]!)))) return fail(404, "No such provider");
+				log("provider_removed", { provider: sharedProvider[1], by: admin.ownerId });
 				return json({ deleted: true });
 			}
 			if (route === "POST /invites") {

@@ -69,6 +69,8 @@ How the Pim runs for everyone is its variables, set in the Cloudflare dashboard 
 | DELETE | `/api/admin/templates/:id` | | Takes a published agent out of Discover |
 | POST | `/api/admin/apps` | `{ name, description?, url }` | Adds an app everyone can connect: a remote MCP server, named `custom/<id>` after its name (`201` with `{ app }`) |
 | DELETE | `/api/admin/apps/:id` | | Takes it out of the directory. People's connections to it stay until they disconnect them |
+| POST | `/api/admin/providers` | `{ name, url, key?, models? }` | Adds a model provider everyone can use: a server that speaks OpenAI's chat completions (`201` with `{ provider }`, never the key). See the README's Model providers |
+| PUT, DELETE | `/api/admin/providers/:id` | PUT: `{ name?, url?, key?, models? }` | Changes it and reads its models again, or takes it away from everyone |
 | GET, PUT, DELETE | `/api/admin/default-agent` | PUT: `{ agent }`, one of the admin's agents | The agent everyone who joins gets a copy of besides their majordomo (`{ agent }`, null for none). PUT copies the admin's agent as it is now; choosing again replaces it. DELETE goes back to none |
 | POST | `/api/admin/invites` | `{ count?, note? }` | Single-use invite codes and links (up to 100) |
 

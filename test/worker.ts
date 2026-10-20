@@ -1,4 +1,4 @@
-import { createModels, type Models } from "@earendil-works/pi-ai/models";
+import type { MutableModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import type { HarnessSettings, ModelRef } from "@earendil-works/pi-durable";
 import { InMemorySpanExporter, type SpanExporter } from "@opentelemetry/sdk-trace";
@@ -21,6 +21,20 @@ export const napper = fauxProvider({ provider: "napper", models: [{ id: "napper-
 
 /** The scripted utility model (src/utility.ts). With no responses set it fails, so a session keeps its first message's start. */
 export const utility = fauxProvider({ provider: "utility", models: [{ id: "utility-model" }] });
+
+/** A chat completions stream, as an OpenAI-compatible server sends it, that delivers `text` through send_to_user. */
+export function completionStream(model: string, text: string): Response {
+	const chunk = (choice: Record<string, unknown>) => ({ id: "chatcmpl-1", object: "chat.completion.chunk", created: 0, model, choices: [{ index: 0, ...choice }] });
+	const call = { index: 0, id: "call_1", type: "function", function: { name: "send_to_user", arguments: "" } };
+	const events = [
+		chunk({ delta: { role: "assistant", content: null, tool_calls: [call] }, finish_reason: null }),
+		chunk({ delta: { tool_calls: [{ index: 0, function: { arguments: JSON.stringify({ message: text }) } }] }, finish_reason: null }),
+		chunk({ delta: {}, finish_reason: "tool_calls" }),
+		{ id: "chatcmpl-1", object: "chat.completion.chunk", created: 0, model, choices: [], usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 } },
+	];
+	const body = `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`;
+	return new Response(body, { headers: { "content-type": "text/event-stream" } });
+}
 
 /** Every span the test agents' traces sent, as the deployment's OTLP backend would get them. */
 export const spans = new InMemorySpanExporter();
@@ -209,13 +223,12 @@ export class Pim extends RealPim {
 		return spans;
 	}
 
-	/** The scripted models, plus the real ChatGPT provider: tests script OpenAI over `fetch`. */
-	protected override models(): Models {
-		const models = createModels({ credentials: this.credentials });
+	/** The scripted models, besides the real providers: tests script OpenAI and people's own providers over `fetch`. */
+	protected override models(): MutableModels {
+		const models = super.models();
 		models.setProvider(faux.provider);
 		models.setProvider(napper.provider);
 		models.setProvider(utility.provider);
-		models.setProvider(this.chatgpt.provider());
 		return models;
 	}
 

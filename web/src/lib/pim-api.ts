@@ -799,6 +799,44 @@ export type ModelSettings = {
     choices: ModelInfo[];
   };
   chatgpt: ChatGPTStatus & { error: string | null };
+  /** Providers besides Workers AI and the ChatGPT plan: the admin's for everyone, then the person's own. */
+  providers: ModelProvider[];
+};
+
+/** A model on a provider someone added, with what Pim knows about it. */
+export type ProviderModelInfo = {
+  id: string;
+  name: string;
+  contextWindow: number;
+  maxTokens: number;
+  images: boolean;
+  reasoning: boolean;
+};
+
+/** A server that speaks OpenAI's chat completions, which the person or the admin added. Never its key. */
+export type ModelProvider = {
+  id: string;
+  /** Its models' `provider`: `own:<id>` or `shared:<id>`. */
+  provider: string;
+  name: string;
+  url: string;
+  hasKey: boolean;
+  /** The models named when it was added; null offers every model the server lists. */
+  chosen: string[] | null;
+  models: ProviderModelInfo[];
+  /** The admin's, for everyone on this Pim. */
+  shared: boolean;
+};
+
+/** A provider as adding or changing it answers. */
+export type SavedProvider = Omit<ModelProvider, "provider" | "shared">;
+
+/** Adding or changing a provider; a field left out stays as it was, and an empty key takes it away. */
+export type ProviderInput = {
+  name?: string;
+  url?: string;
+  key?: string;
+  models?: string[] | null;
 };
 
 /** OpenAI's provider id: models that run on the ChatGPT plan. */
@@ -1165,6 +1203,20 @@ export const pim = {
       method: "PUT",
       body: JSON.stringify(model),
     }),
+  addProvider: (input: ProviderInput) =>
+    call<{ provider: SavedProvider }>("/providers", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateProvider: (id: string, input: ProviderInput) =>
+    call<{ provider: SavedProvider }>(`/providers/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+  removeProvider: (id: string) =>
+    call<{ deleted: boolean }>(`/providers/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
   chatgptLogin: () =>
     call<{ url: string }>("/chatgpt/login", { method: "POST" }),
   chatgptCallback: (url: string) =>
@@ -1417,6 +1469,22 @@ export const admin = {
   /** Takes an app the admin added out of the directory, by its id (`custom/<id>`). */
   removeApp: (id: string) =>
     call<{ deleted: boolean }>(`/admin/apps/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      body: "{}",
+    }),
+  /** Model providers everyone on this Pim can use. */
+  addProvider: (input: ProviderInput) =>
+    call<{ provider: SavedProvider }>("/admin/providers", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateProvider: (id: string, input: ProviderInput) =>
+    call<{ provider: SavedProvider }>(
+      `/admin/providers/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify(input) },
+    ),
+  removeProvider: (id: string) =>
+    call<{ deleted: boolean }>(`/admin/providers/${encodeURIComponent(id)}`, {
       method: "DELETE",
       body: "{}",
     }),

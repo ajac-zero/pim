@@ -43,7 +43,7 @@ The globe button beside it makes a public link to the chat: a copy of the conver
 ```
 - **[pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable)** runs the agent. Every model turn and tool call is a durable task committed to the Durable Object's SQLite before anything is shown. If the object is evicted mid-run, the `agents` SDK's `PiHarness` alarm wakes it, and pi resumes where it stopped.
 - **One space per person.** The Worker reads whose request it is from the browser's session or the API token, and sends it to that person's Durable Object, which holds their memory, apps and agents in its SQLite database. A URL never chooses whose space answers. See [docs/instance.md](docs/instance.md).
-- **A model that can do the job.** Pim decides what to say and when, and says it with a tool call, so it needs a capable model. The default is GLM-5.3 on Workers AI (`@cf/zai-org/glm-5.3`), billed to your Cloudflare account, with no vendor keys. Any AI Gateway catalog model works too, such as `anthropic/claude-opus-4.8` (set `PIM_MODEL`), or OpenAI's through your ChatGPT plan.
+- **A model that can do the job.** Pim decides what to say and when, and says it with a tool call, so it needs a capable model. The default is GLM-5.3 on Workers AI (`@cf/zai-org/glm-5.3`), billed to your Cloudflare account, with no vendor keys. Any AI Gateway catalog model works too, such as `anthropic/claude-opus-4.8` (set `PIM_MODEL`), or OpenAI's through your ChatGPT plan, or any model on a server that speaks OpenAI's chat completions, which you or the admin add in Settings (see [Model providers](#model-providers)).
 - **Your ChatGPT plan**, optionally. Sign in with ChatGPT (Plus or Pro) and Pim runs on OpenAI's models, such as GPT-6.1 Sol, using the plan's included usage. See [ChatGPT plan](#chatgpt-plan).
 
 ## What the agent can do
@@ -198,13 +198,16 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | PUT | `/settings` | Any of `{ timeZone, approvalPolicy, notifyWebhook }`; `null` goes back to the deployment's | The settings |
 | GET | `/usage` | | `{ limits, today, history, storageBytes }`: model requests, tokens (the ChatGPT plan's apart) and runs by UTC day |
 | GET | `/export` | | Everything as one JSON download, without credentials |
-| GET | `/model` | | `{ model, default, choices, utility: { model, default, choices }, chatgpt: { connected, email, error } }`: the model every session uses, and the ones you can choose. Each says whether it sees images (`images`); a model that doesn't is told an image was left out. `utility` is the utility model: `PIM_UTILITY_MODEL` unless you chose another, and the deployment's default again while a chosen ChatGPT model's plan is disconnected |
+| GET | `/model` | | `{ model, default, choices, utility: { model, default, choices }, chatgpt: { connected, email, error }, providers }`: the model every session uses, and the ones you can choose. Each says whether it sees images (`images`); a model that doesn't is told an image was left out. `utility` is the utility model: `PIM_UTILITY_MODEL` unless you chose another, and the deployment's default again while a chosen ChatGPT model's plan is disconnected. `providers` are the [model providers](#model-providers) you can use, the admin's (`shared`) then yours, each with its models and `hasKey`, never the key |
 | PUT | `/model` | `{ provider, id }`, one of `choices` | Moves every session, and new ones, to that model |
 | PUT | `/model/utility` | `{ provider, id }`, one of `utility.choices` | Makes that model the utility model |
 | GET | `/chatgpt` | | `{ connected, email }` |
 | POST | `/chatgpt/login` | | `{ url }` to open in a browser, to sign in with ChatGPT |
 | POST | `/chatgpt/callback` | `{ url }`: the `http://127.0.0.1:1455/...` address the browser landed on | `{ connected, email }` |
 | DELETE | `/chatgpt` | | Disconnects; sessions on a ChatGPT model go back to the default |
+| POST | `/providers` | `{ name, url, key?, models? }` | Adds a [model provider](#model-providers) of your own, reading its models from `<url>/models` (`{ provider }`) |
+| PUT | `/providers/:id` | `{ name?, url?, key?, models? }` | Changes it and reads its models again; a key left out stays, an empty one is removed |
+| DELETE | `/providers/:id` | | Removes it; sessions on its models go back to the default |
 | GET | `/memory` | | `{ count, pendingCompressions, view }`: the view is what the model sees |
 | GET | `/memory/log` | `?q=regex` or `?before=id`, `?limit=` | Raw memories, newest first |
 | POST | `/memory/log` | `{ text }` (one line, ≤ 280 bytes) | Records a memory as the user |
@@ -318,6 +321,9 @@ The admin runs the Pim under `/admin`, from a signed-in browser only: an API tok
 | DELETE | `/admin/published-artifacts/:id` | | Takes a published artifact out of Discover |
 | POST | `/admin/apps` | `{ name, description?, url }` | Adds an app everyone can connect: a remote MCP server, named `custom/<id>` after its name (`201` with `{ app }`) |
 | DELETE | `/admin/apps/:id` | | Takes it out of the directory. People's connections to it stay until they disconnect them |
+| POST | `/admin/providers` | `{ name, url, key?, models? }` | Adds a [model provider](#model-providers) everyone can use (`201` with `{ provider }`) |
+| PUT | `/admin/providers/:id` | `{ name?, url?, key?, models? }` | Changes it and reads its models again |
+| DELETE | `/admin/providers/:id` | | Takes it away from everyone; their sessions on its models go back to the default |
 
 ### WebSocket
 
@@ -376,6 +382,16 @@ OpenAI only redirects a sign-in to a loopback address (`http://127.0.0.1:1455/..
 4. `PUT /model` with one of `GET /model`'s choices, such as `{ "provider": "openai", "id": "gpt-6.1-sol" }`.
 
 Pim registers with OpenAI as one agent host (a `urn:uuid:` ID it keeps) and refreshes the token itself, one refresh at a time, since OpenAI rotates refresh tokens. Memory compression stays on `PIM_MEMORY_MODEL`, or `PIM_MODEL`, so background work doesn't spend the plan. pi-ai sends these requests the way the flow requires: `store: false`, streaming, and no `temperature` or `max_output_tokens`.
+
+## Model providers
+
+Besides Workers AI and the ChatGPT plan, Pim runs on any server that speaks OpenAI's `/chat/completions`: a model on your own machine, such as llama.cpp's `llama-server`, LM Studio, Ollama or vLLM, or a provider's API used directly, such as OpenAI's, DeepSeek's, Groq's or OpenRouter's. Add one in Settings → Model → Providers with a name, its address (the part before `/chat/completions`, such as `http://localhost:1234/v1`), and its API key if it needs one. Its models then show among the models you can choose, and as utility models.
+
+- **Yours, or everyone's.** A provider you add is yours alone: only your agents use it, and its tokens count as yours, not against the deployment's daily token limit. The admin can add one for everyone instead (Everyone on this Pim can use it), so people who join can use it without bringing their own; its tokens count against the limits like Workers AI's. Only the admin changes or removes those. Removing a provider moves chats on its models back to the default model.
+- **Models.** Adding a provider reads its models from `<address>/models`, and saving it again reads them again, such as after loading another model in LM Studio. A server that lists more than 50, as OpenAI's and OpenRouter's do, needs the ones to offer named, and a server that can't list its models can be given them by name. What a model can do comes from the server's list where it says (OpenRouter's context length and input types, vLLM's `max_model_len`, llama.cpp's served context `n_ctx`), else from pi-ai's catalog when it knows the model by that id, else a 128,000-token context and text only. A chat that outgrows a model's real context is compacted and tried again.
+- **Keys.** Pim keeps a provider's key in your space, or for the admin's in the gallery, sends it only to that provider, and never shows it again: Settings shows only that there is one. A server without a key, as local ones usually are, is sent a placeholder.
+
+A Pim on Cloudflare can only reach providers on the public internet; one running on your own machine reaches `localhost` too. Pim says everything with tool calls, so a model needs dependable tool calling and a large context: llama.cpp needs `--jinja` and a `-c` well above the 8k tokens of memory every prompt carries, and LM Studio a context length well above its default. Image generation and web search stay on Workers AI and AI Gateway.
 
 ## Utility model
 

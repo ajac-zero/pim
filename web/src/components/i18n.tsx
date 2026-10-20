@@ -455,8 +455,7 @@ const translations = {
     chatGPTAfterPaste:
       "After this, Pim normally keeps the connection going on its own. If access expires or is revoked in ChatGPT, connect again the same way.",
     connect: "Connect",
-    connectForMoreModels:
-      "Connect your ChatGPT plan to choose OpenAI's models.",
+    connectForMoreModels: "Add a provider below to choose more models.",
     connectedAs:
       "Connected as {email}. Pim's requests to OpenAI models use your plan.",
     continueWithChatGPT: "Continue with ChatGPT",
@@ -492,6 +491,34 @@ const translations = {
     improvePrompt: "Improve prompt",
     pasteAddress: "Address the browser landed on",
     runsOnWorkersAI: "Runs on Workers AI",
+    providers: "Providers",
+    remove: "Remove",
+    providersHint:
+      "Where your models run. Add any server that speaks OpenAI's chat completions: a model on your own computer, such as LM Studio or llama.cpp, or a provider's API.",
+    workersAI: "Workers AI",
+    builtIn: "Built in to this Pim",
+    providerOn: "On",
+    chatGPTPlan: "ChatGPT plan",
+    addProvider: "Add provider",
+    providerName: "Name",
+    providerAddress: "Address",
+    providerAddressHint: "Where its API starts, before /chat/completions.",
+    providerKey: "API key",
+    providerKeyOptional: "Optional",
+    providerKeyKept: "Saved. Type a new one to replace it.",
+    removeKey: "Remove key",
+    keyRemoved: "The key is removed when you save.",
+    providerModels: "Models",
+    providerModelsHint:
+      "Separate them with commas. Leave empty to offer every model it lists.",
+    providerModelsAll: "Every model it lists",
+    providerForEveryone: "Everyone on this Pim can use it",
+    providerShared: "For everyone",
+    providerSaved: "Saved {name}.",
+    providerRemoved: "Removed {name}.",
+    removeProviderNamed: "Remove {name}",
+    editProviderNamed: "Edit {name}",
+    runsOnProvider: "Runs on {provider}",
     settings: "Settings",
     artifacts: "Artifacts",
     noArtifacts:
@@ -768,7 +795,7 @@ const translations = {
     usageModelRequests: "Model requests",
     usedOf: "{used} of {limit}",
     planTokensToday:
-      "Plus {tokens} tokens on your ChatGPT plan, which don't count here.",
+      "Plus {tokens} tokens on your ChatGPT plan and your own providers, which don't count here.",
     recoveryCodesLeft: "Recovery codes left: {count}",
     newRecoveryCodes: "New recovery codes",
     newRecoveryCodesBody:
@@ -1319,8 +1346,7 @@ const translations = {
     chatGPTAfterPaste:
       "Después, Pim normalmente mantiene la conexión por su cuenta. Si el acceso vence o se revoca en ChatGPT, vuelve a conectarte de la misma forma.",
     connect: "Conectar",
-    connectForMoreModels:
-      "Conecta tu plan de ChatGPT para elegir los modelos de OpenAI.",
+    connectForMoreModels: "Añade un proveedor abajo para elegir más modelos.",
     connectedAs:
       "Conectado como {email}. Las solicitudes de Pim a modelos de OpenAI usan tu plan.",
     continueWithChatGPT: "Continuar con ChatGPT",
@@ -1357,6 +1383,34 @@ const translations = {
     improvePrompt: "Mejorar mensaje",
     pasteAddress: "Dirección a la que llegó el navegador",
     runsOnWorkersAI: "Funciona con Workers AI",
+    providers: "Proveedores",
+    remove: "Eliminar",
+    providersHint:
+      "Dónde funcionan tus modelos. Añade cualquier servidor compatible con chat completions de OpenAI: un modelo en tu propio equipo, como LM Studio o llama.cpp, o la API de un proveedor.",
+    workersAI: "Workers AI",
+    builtIn: "Incluido en este Pim",
+    providerOn: "Activo",
+    chatGPTPlan: "Plan de ChatGPT",
+    addProvider: "Añadir proveedor",
+    providerName: "Nombre",
+    providerAddress: "Dirección",
+    providerAddressHint: "Donde empieza su API, antes de /chat/completions.",
+    providerKey: "Clave de API",
+    providerKeyOptional: "Opcional",
+    providerKeyKept: "Guardada. Escribe otra para reemplazarla.",
+    removeKey: "Quitar clave",
+    keyRemoved: "La clave se quita al guardar.",
+    providerModels: "Modelos",
+    providerModelsHint:
+      "Sepáralos con comas. Déjalo vacío para ofrecer todos los modelos que lista.",
+    providerModelsAll: "Todos los modelos que lista",
+    providerForEveryone: "Todos en este Pim pueden usarlo",
+    providerShared: "Para todos",
+    providerSaved: "{name} guardado.",
+    providerRemoved: "{name} eliminado.",
+    removeProviderNamed: "Eliminar {name}",
+    editProviderNamed: "Editar {name}",
+    runsOnProvider: "Funciona con {provider}",
     settings: "Configuración",
     artifacts: "Artefactos",
     noArtifacts:
@@ -1640,7 +1694,7 @@ const translations = {
     usageModelRequests: "Solicitudes al modelo",
     usedOf: "{used} de {limit}",
     planTokensToday:
-      "Más {tokens} tokens de tu plan de ChatGPT, que no cuentan aquí.",
+      "Más {tokens} tokens de tu plan de ChatGPT y tus propios proveedores, que no cuentan aquí.",
     recoveryCodesLeft: "Códigos de recuperación restantes: {count}",
     newRecoveryCodes: "Nuevos códigos de recuperación",
     newRecoveryCodesBody:

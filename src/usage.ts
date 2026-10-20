@@ -74,7 +74,7 @@ export type DayUsage = {
 	readonly day: string;
 	/** Tokens on models the deployment pays for. */
 	readonly tokens: number;
-	/** Tokens on the person's own plans (ChatGPT). */
+	/** Tokens on the person's own plans and providers (ChatGPT, providers they added). */
 	readonly planTokens: number;
 	readonly modelRequests: number;
 	readonly runs: number;
@@ -156,15 +156,15 @@ export type Reserved<T> = { readonly ok: true; readonly reservation: T } | { rea
 export class UsageMeter {
 	readonly #sql: SqlStorage;
 	readonly #limits: () => Limits;
-	/** Providers that bill the person's own plan, not the deployment. */
-	readonly #planProviders: ReadonlySet<string>;
+	/** Whether a provider bills the person, such as their own plan, not the deployment. */
+	readonly #ownProvider: (provider: string) => boolean;
 	readonly #now: () => number;
 	#pruned: string | undefined;
 
-	constructor(options: { sql: SqlStorage; limits: () => Limits; planProviders: Iterable<string>; now?: () => number }) {
+	constructor(options: { sql: SqlStorage; limits: () => Limits; ownProvider: (provider: string) => boolean; now?: () => number }) {
 		this.#sql = options.sql;
 		this.#limits = options.limits;
-		this.#planProviders = new Set(options.planProviders);
+		this.#ownProvider = options.ownProvider;
 		this.#now = options.now ?? Date.now;
 		this.#sql.exec(SCHEMA);
 	}
@@ -264,7 +264,7 @@ export class UsageMeter {
 		let planTokens = 0;
 		for (const model of models) {
 			const used = model.input + model.output + model.cacheRead + model.cacheWrite;
-			if (this.#planProviders.has(model.provider)) planTokens += used;
+			if (this.#ownProvider(model.provider)) planTokens += used;
 			else tokens += used;
 		}
 		const runs = Number(this.#sql.exec("SELECT runs FROM pim_usage_runs WHERE day = ?", day).toArray()[0]?.runs ?? 0);
@@ -305,7 +305,7 @@ export class UsageMeter {
 		if (limits.dailyModelRequests !== null && today.modelRequests >= limits.dailyModelRequests) {
 			return `${QUOTA_MESSAGE}: today's ${limits.dailyModelRequests} model requests are used up. It resets at midnight UTC.`;
 		}
-		if (limits.dailyTokens !== null && !this.#planProviders.has(provider) && today.tokens >= limits.dailyTokens) {
+		if (limits.dailyTokens !== null && !this.#ownProvider(provider) && today.tokens >= limits.dailyTokens) {
 			return `${QUOTA_MESSAGE}: today's ${limits.dailyTokens} tokens are used up. It resets at midnight UTC.`;
 		}
 		return null;

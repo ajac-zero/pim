@@ -1,7 +1,7 @@
 import { Workspace } from "@cloudflare/computer";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Api, JsonValue, Model } from "@earendil-works/pi-ai";
-import { createModels, type Models } from "@earendil-works/pi-ai/models";
+import { createModels, type Models, type MutableModels } from "@earendil-works/pi-ai/models";
 import type { SpanExporter } from "@opentelemetry/sdk-trace";
 import {
 	type AgentChange,
@@ -41,6 +41,16 @@ import {
 } from "./artifacts";
 import { digestHex } from "./auth/store";
 import { Email, type Mailer, mailerFrom } from "./email";
+import {
+	type CustomProvider,
+	MAX_PROVIDERS,
+	OWN_PROVIDER,
+	piProvider,
+	prepareProvider,
+	providerInfo,
+	type ProviderInput,
+	SHARED_PROVIDER,
+} from "./providers";
 import { ImageStore, userInput } from "./images";
 import { serveMcp } from "./mcp-server";
 import {
@@ -238,7 +248,12 @@ const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, 
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
 /** The admin's apps, as this space last read them from the gallery, and how long before it reads them again. */
 const CUSTOM_APPS_KEY = "custom_apps";
+/** How long what the admin shares through the gallery (apps and model providers) is used before it's read again. */
 const CUSTOM_APPS_TTL_MS = 60_000;
+/** The person's own model providers (./providers.ts), keys included. */
+const OWN_PROVIDERS_KEY = "own_providers";
+/** The admin's model providers, as last read from the gallery. */
+const SHARED_PROVIDERS_KEY = "shared_providers";
 const AGENT_SECTION_KEY = "pim_section";
 /** The day the person was last told a limit stopped background work. */
 const LIMIT_NOTICE_KEY = "limit_notice";
@@ -391,8 +406,8 @@ export class Pim extends DurableAgent<Env> {
 	readonly usage = new UsageMeter({
 		sql: this.ctx.storage.sql,
 		limits: () => this.limits(),
-		// The person's own plan: its tokens are theirs, not the deployment's.
-		planProviders: [CHATGPT_PROVIDER],
+		// The person's own plan and providers: their tokens are theirs, not the deployment's.
+		ownProvider: (provider) => provider === CHATGPT_PROVIDER || provider.startsWith(OWN_PROVIDER),
 	});
 	/** The person's connections to apps extensions implement themselves, with their sign-ins. */
 	readonly nativeApps = new NativeApps({
@@ -770,15 +785,22 @@ export class Pim extends DurableAgent<Env> {
 
 	#customAppsReadAt = 0;
 
-	/** Reads the admin's apps from the gallery again, at most once a minute unless `now`. */
+	/** Reads the admin's apps and model providers from the gallery again, at most once a minute unless `now`. */
 	async #refreshCustomApps(now = false): Promise<void> {
 		if (!now && Date.now() - this.#customAppsReadAt < CUSTOM_APPS_TTL_MS) return;
 		this.#customAppsReadAt = Date.now();
 		try {
-			const custom = JSON.stringify(await this.env.Gallery.getByName("gallery").customApps());
+			const gallery = this.env.Gallery.getByName("gallery");
+			const [apps, providers] = await Promise.all([gallery.customApps(), gallery.sharedProviders()]);
+			const custom = JSON.stringify(apps);
 			if (custom !== this.store.meta(CUSTOM_APPS_KEY)) this.store.setMeta(CUSTOM_APPS_KEY, custom);
+			const shared = JSON.stringify(providers);
+			if (shared !== (this.store.meta(SHARED_PROVIDERS_KEY) ?? "[]")) {
+				this.store.setMeta(SHARED_PROVIDERS_KEY, shared);
+				await this.#providersChanged();
+			}
 		} catch (error) {
-			console.warn("reading the admin's apps failed", error);
+			console.warn("reading the admin's apps and providers failed", error);
 		}
 	}
 
@@ -855,8 +877,8 @@ export class Pim extends DurableAgent<Env> {
 		};
 	}
 
-	/** The model catalog pi resolves sessions' models against: Workers AI, and the ChatGPT plan. */
-	protected models(): Models {
+	/** The model catalog pi resolves sessions' models against: Workers AI, and the ChatGPT plan. People's providers join it in `modelCatalog`. */
+	protected models(): MutableModels {
 		const models = createModels({ credentials: this.credentials });
 		models.setProvider(this.ai.provider);
 		models.setProvider(this.chatgpt.provider());
@@ -868,8 +890,71 @@ export class Pim extends DurableAgent<Env> {
 	 * once. Every request through it is metered, and gets the chat's images.
 	 */
 	modelCatalog(): Models {
-		this.#modelCatalog ??= this.images.resolving(this.usage.meter(this.models()));
+		if (!this.#modelCatalog) {
+			this.#models = this.models();
+			this.#syncProviders();
+			this.#modelCatalog = this.images.resolving(this.usage.meter(this.#models));
+		}
 		return this.#modelCatalog;
+	}
+
+	/** The catalog before metering, which providers are added to and taken from as they change. */
+	#models: MutableModels | undefined;
+
+	/** The model providers the person can use, by catalog id: the admin's, then their own. Keys included. */
+	customProviders(): { catalogId: string; shared: boolean; provider: CustomProvider }[] {
+		const read = (key: string) => JSON.parse(this.store.meta(key) ?? "[]") as CustomProvider[];
+		return [
+			...read(SHARED_PROVIDERS_KEY).map((provider) => ({ catalogId: `${SHARED_PROVIDER}${provider.id}`, shared: true, provider })),
+			...read(OWN_PROVIDERS_KEY).map((provider) => ({ catalogId: `${OWN_PROVIDER}${provider.id}`, shared: false, provider })),
+		];
+	}
+
+	/** Puts the providers as they are now in the catalog, which pi keeps, and takes out those that are gone. */
+	#syncProviders(): void {
+		const models = this.#models;
+		if (!models) return;
+		const current = this.customProviders();
+		const gone = models
+			.getProviders()
+			.map((provider) => provider.id)
+			.filter((id) => (id.startsWith(OWN_PROVIDER) || id.startsWith(SHARED_PROVIDER)) && !current.some((entry) => entry.catalogId === id));
+		for (const id of gone) models.deleteProvider(id);
+		for (const { catalogId, provider } of current) models.setProvider(piProvider(catalogId, provider));
+	}
+
+	/** After providers change: sessions and side jobs on a model that's gone go back to the defaults. */
+	async #providersChanged(): Promise<void> {
+		// A catalog not built yet will have them when it is.
+		if (this.#modelCatalog) this.#syncProviders();
+		const catalog = this.modelCatalog();
+		const missing = (key: string) => {
+			const json = this.store.meta(key);
+			if (json === undefined) return false;
+			const { provider, id } = JSON.parse(json) as { provider: string; id: string };
+			return (provider.startsWith(OWN_PROVIDER) || provider.startsWith(SHARED_PROVIDER)) && !catalog.getModel(provider, id);
+		};
+		if (missing(UTILITY_MODEL_KEY)) this.store.deleteMeta(UTILITY_MODEL_KEY);
+		if (missing(MODEL_KEY)) await this.chooseModel(null);
+	}
+
+	/** The person adds a model provider of their own, or changes one; its models are read from the server again. */
+	async #putOwnProvider(id: string | null, input: ProviderInput): Promise<CustomProvider> {
+		const own = () => JSON.parse(this.store.meta(OWN_PROVIDERS_KEY) ?? "[]") as CustomProvider[];
+		const providers = own();
+		const existing = id === null ? null : (providers.find((provider) => provider.id === id) ?? null);
+		if (id !== null && !existing) throw new HttpError(404, `No provider ${id}`);
+		if (!existing && providers.length >= MAX_PROVIDERS) throw new HttpError(400, `You can add up to ${MAX_PROVIDERS} providers.`);
+		const provider = await prepareProvider(input, existing, new Set(providers.map((candidate) => candidate.id)));
+		// Reading the models took a while: another may have been added, or this one removed, since.
+		const now = own();
+		if (now.some((candidate) => candidate.id === provider.id) !== (existing !== null)) {
+			throw new HttpError(409, existing ? "That provider was just removed." : "Another provider was just added: try again.");
+		}
+		const next = existing ? now.map((candidate) => (candidate.id === provider.id ? provider : candidate)) : [...now, provider];
+		this.store.setMeta(OWN_PROVIDERS_KEY, JSON.stringify(next));
+		await this.#providersChanged();
+		return provider;
 	}
 
 	/** The person's settings: their own, else the deployment's. */
@@ -2987,6 +3072,8 @@ export class Pim extends DurableAgent<Env> {
 			owner: this.profile(),
 			settings: this.settings(),
 			model: describeModel(this.chosenModel()),
+			// Without their keys, as everywhere.
+			providers: this.customProviders().flatMap(({ shared, provider }) => (shared ? [] : [providerInfo(provider)])),
 			sessions,
 			memory: { entries: this.memory.store.page(Number.MAX_SAFE_INTEGER) },
 			goals: this.store.goals().map((goal) => this.#publicSession(goal)),
@@ -3568,6 +3655,7 @@ export class Pim extends DurableAgent<Env> {
 			"GET",
 			"/model",
 			async () => {
+				await this.#refreshCustomApps(true);
 				const chatgpt = await this.chatgpt.status();
 				let chatgptModels: PiModel[] = [];
 				let chatgptError: string | null = null;
@@ -3580,7 +3668,9 @@ export class Pim extends DurableAgent<Env> {
 				}
 				const fallback = this.defaultModel();
 				const platform = (this.#allowedModels() ?? []).filter((id) => id !== fallback.id).map((id) => this.ai(id));
-				const choices = [fallback, ...platform, ...chatgptModels];
+				const providers = this.customProviders();
+				const custom = providers.flatMap(({ catalogId, provider }) => provider.models.flatMap((model) => this.modelCatalog().getModel(catalogId, model.id) ?? []));
+				const choices = [fallback, ...platform, ...chatgptModels, ...custom];
 				const utilityDefault = this.defaultUtilityModel();
 				const utility = await this.utilityModel();
 				const utilityChoices =
@@ -3596,6 +3686,8 @@ export class Pim extends DurableAgent<Env> {
 						choices: utilityChoices.map(describeModel),
 					},
 					chatgpt: { ...chatgpt, error: chatgptError },
+					// The providers the person can use besides Workers AI and the ChatGPT plan: the admin's, then their own.
+					providers: providers.map(({ catalogId, shared, provider }) => ({ ...providerInfo(provider), provider: catalogId, shared })),
 				};
 			},
 		],
@@ -3630,6 +3722,28 @@ export class Pim extends DurableAgent<Env> {
 				}
 				const model = await this.utilityModel();
 				return { model: model ? describeModel(model) : null };
+			},
+		],
+		// The person's own model providers (./providers.ts); the admin's are under /api/admin/providers.
+		[
+			"POST",
+			"/providers",
+			async (_params, request) => ({ provider: providerInfo(await this.#putOwnProvider(null, await readJson<ProviderInput>(request))) }),
+		],
+		[
+			"PUT",
+			"/providers/:id",
+			async ({ id }, request) => ({ provider: providerInfo(await this.#putOwnProvider(id!, await readJson<ProviderInput>(request))) }),
+		],
+		[
+			"DELETE",
+			"/providers/:id",
+			async ({ id }) => {
+				const providers = JSON.parse(this.store.meta(OWN_PROVIDERS_KEY) ?? "[]") as CustomProvider[];
+				if (!providers.some((provider) => provider.id === id)) throw new HttpError(404, `No provider ${id}`);
+				this.store.setMeta(OWN_PROVIDERS_KEY, JSON.stringify(providers.filter((provider) => provider.id !== id)));
+				await this.#providersChanged();
+				return { deleted: true };
 			},
 		],
 		// The address Pim emails the person at, confirmed with a code it sends there.

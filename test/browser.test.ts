@@ -2,7 +2,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Approval } from "../src/store";
-import { api, apiUrl, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, pairTestComputer, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
 import { faux } from "./worker";
 
 /** A page with a form whose button changes the page, so a click shows in what's read after. */
@@ -102,7 +102,8 @@ describe("the browser", () => {
 		expect(clicked).toContain("# Ordered for");
 	});
 
-	it("saves screenshots to the person's files, and shows them one", async () => {
+	it("saves screenshots to the person's files, on their computer, and shows them one", async () => {
+		await pairTestComputer();
 		expect((await api("/browser")).body).toEqual({ available: true, page: null });
 		expect((await callTool("browser_screenshot", {})).toLowerCase()).toContain("closed");
 		await callTool("browser_open", { url: FORM });

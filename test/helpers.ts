@@ -1,9 +1,11 @@
+import * as fs from "node:fs/promises";
 import type { JsonValue, Message } from "@earendil-works/pi-ai";
 import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { getAgentByName } from "agents";
 import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, expect, vi } from "vitest";
+import { type ExecArgs, type ExecResult, handle, type Machine } from "../computer/pim-computer";
 import type { Approval } from "../src/store";
 import type { TranscriptMessage } from "../src/transcript";
 import { faux } from "./worker";
@@ -163,3 +165,41 @@ afterEach(() => {
 	// Every scripted model response was used: the space did what the test expected.
 	expect(faux.getPendingResponseCount()).toBe(0);
 });
+
+/** Opens a WebSocket at `path` in the API with `token`. */
+export const opens = (path: string, token: string) =>
+	exports.default.fetch(new Request(apiUrl(path), { headers: { Upgrade: "websocket", Authorization: `Bearer ${token}` } }));
+
+/**
+ * A computer as pim-computer is one: its own `handle`, over a folder in this
+ * test's /tmp, connected with `token`. Commands go to `exec`: tests can't
+ * start processes.
+ */
+export async function connectTestComputer(token: string, root: string, exec: (args: ExecArgs) => Promise<ExecResult>) {
+	await fs.mkdir(root, { recursive: true });
+	const machine: Machine = { root: await fs.realpath(root), exec };
+	const response = await opens("/computer/connect", token);
+	expect(response.status).toBe(101);
+	const socket = response.webSocket!;
+	const closed = new Promise<CloseEvent>((resolve) => socket.addEventListener("close", resolve));
+	socket.addEventListener("message", (event) => {
+		const call = JSON.parse(event.data as string) as { type: string; id: string; op: string; args: Record<string, unknown> };
+		if (call.type !== "call") return;
+		handle(machine, call.op, call.args).then(
+			(result) => socket.send(JSON.stringify({ type: "reply", id: call.id, result })),
+			(error) => socket.send(JSON.stringify({ type: "reply", id: call.id, error: { message: error.message, code: error.code } })),
+		);
+	});
+	socket.accept();
+	socket.send(JSON.stringify({ type: "hello", version: 1, agent: "pim-computer/test", hostname: "test-box", platform: "linux", arch: "x64", user: "ada", root: machine.root }));
+	await vi.waitFor(async () => expect((await api("/computer")).body.state).toBe("online"));
+	return { socket, closed, root: machine.root };
+}
+
+/** Pairs a computer with the space and connects it, over a fresh folder; it runs no commands. */
+export async function pairTestComputer() {
+	const { body } = await post<{ token: string }>("/computer");
+	return connectTestComputer(body.token, `/tmp/computer-${crypto.randomUUID()}`, async () => {
+		throw new Error("This test's computer runs no commands.");
+	});
+}

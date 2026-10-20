@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { BRIDGE_SCRIPT, MAX_ARTIFACT_STORAGE_BYTES } from "../src/artifacts";
 import type { Limits } from "../src/usage";
-import { api, apiUrl, connect, OWNER, post, ROOT, say, TOKEN, toolUse, url } from "./helpers";
+import { api, apiUrl, connect, OWNER, pairTestComputer, post, ROOT, say, TOKEN, toolUse, url } from "./helpers";
 import { faux, type Pim, utility } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
@@ -219,7 +219,8 @@ export default function App() {
 	});
 
 	it("span several files: a page's scripts, styles and images, and an app's modules, data and styles, put inline when shown", async () => {
-		// An image from the person's files, copied in.
+		// An image from the person's files, on their computer, copied in.
+		await pairTestComputer();
 		const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
 		expect((await raw("/files/content?path=/workspace/dot.png", { method: "PUT", body: png })).status).toBeLessThan(300);
 		const page = `<!doctype html><html><head><link rel="stylesheet" href="./style.css"><link rel="stylesheet" href="https://example.com/x.css"></head>

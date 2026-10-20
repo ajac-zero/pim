@@ -11,7 +11,7 @@ import { HttpError } from "./http";
  * every later run that loads it.
  *
  * Besides its instructions (its SKILL.md), a skill can have supporting
- * files: references, templates, or scripts that `run_javascript` can run,
+ * files: references, templates, or scripts to run on the person's computer,
  * by paths such as `references/guide.md`. They are text, and go with each
  * version.
  *

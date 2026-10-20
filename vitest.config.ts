@@ -15,10 +15,8 @@ export default defineConfig({
 			// Approvals as they were before majordomos, so only the tests about them script a majordomo's review.
 			// The secrets of the test extension's bank app, and the client registered for its Forge app.
 			// A content origin, so public artifact links are on.
-			// A Worker Loader, which deployments add for `run_javascript` (the Workers Paid plan has it).
 			// Traces with their content, so the tests check what an operator who opts in would see.
 			miniflare: {
-				workerLoaders: { LOADER: {} },
 				bindings: {
 					PIM_PUBLIC_URL: "https://pim.test",
 					PIM_TIME_ZONE: "America/New_York",

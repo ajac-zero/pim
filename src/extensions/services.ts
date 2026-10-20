@@ -69,6 +69,15 @@ export type PimServices = {
 	keepWidget(session: string, widget: ToolWidget): string;
 	/** The refs of the widgets kept from tool results in a chat. */
 	keptWidgets(session: string): string[];
+	/** Of the images a reply would show, those no tool's result in its chat gave (send_to_user's own refusals aside). */
+	unseenImages(session: string, urls: readonly string[]): Promise<string[]>;
+	/**
+	 * Keeps copies of the images a reply shows, so the person's browser loads
+	 * them from Pim, not from elsewhere: each image's address here
+	 * (`/api/images/<id>`) by its address on the web, for those that are
+	 * images Pim takes and fit in the space's storage. None in a visit.
+	 */
+	keepImages(session: string, urls: readonly string[]): Promise<Record<string, string>>;
 };
 
 export function text(value: string, isError = false): ToolExecutionResult {

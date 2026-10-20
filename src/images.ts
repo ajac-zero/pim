@@ -154,6 +154,36 @@ export class ImageStore {
 		return { content: kept, ids };
 	}
 
+	/**
+	 * Keeps a copy of an image on the web for a reply in `session` to show:
+	 * its URL here, or null when the address doesn't give a PNG, JPEG, WebP or
+	 * GIF of at most `MAX_IMAGE_BYTES`, or of at most `room` bytes.
+	 */
+	async keepFrom(session: string, url: string, room: number | null): Promise<string | null> {
+		let response: Response;
+		try {
+			response = await fetch(url, {
+				headers: { accept: IMAGE_TYPES.join(", "), "user-agent": "pim-agent/0.1" },
+				redirect: "follow",
+				signal: AbortSignal.timeout(10_000),
+			});
+		} catch {
+			return null;
+		}
+		const type = (response.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+		const limit = Math.min(MAX_IMAGE_BYTES, room ?? MAX_IMAGE_BYTES);
+		if (!response.ok || !IMAGE_TYPES.includes(type) || Number(response.headers.get("content-length") ?? 0) > limit) {
+			await response.body?.cancel();
+			return null;
+		}
+		const bytes = new Uint8Array(await response.arrayBuffer());
+		if (bytes.byteLength === 0 || bytes.byteLength > limit) return null;
+		const id = crypto.randomUUID();
+		await this.#bucket.put(this.#key(id), bytes, { httpMetadata: { contentType: type } });
+		this.#sql.exec("INSERT INTO pim_images (id, session, type, bytes, created_at) VALUES (?, ?, ?, ?, ?)", id, session, type, bytes.byteLength, Date.now());
+		return `/api/images/${id}`;
+	}
+
 	/** One of the owner's images, or null. */
 	async read(id: string): Promise<{ body: ReadableStream; type: string } | null> {
 		const row = this.#sql.exec<{ type: string }>("SELECT type FROM pim_images WHERE id = ?", id).toArray()[0];

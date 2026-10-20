@@ -439,6 +439,54 @@ describe("conversation", () => {
 		expect(await refused("")).toBe(400);
 	});
 
+	it("shows cards with copies of the images a tool's result gave, and refuses images the model made up", async () => {
+		const png = Buffer.from("iVBORw0KGgo=", "base64");
+		const fetched: string[] = [];
+		const realFetch = globalThis.fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			if (!request.url.includes(".example.test")) return realFetch(input, init);
+			fetched.push(request.url);
+			if (request.url === "https://shop.example.test/vest") {
+				const page = `<html><head><meta property="og:image" content="/img/vest.png?w=400&amp;h=400"></head><body><h1>Dog vest</h1><img src="https://cdn.example.test/broken.png"></body></html>`;
+				return new Response(page, { headers: { "content-type": "text/html; charset=utf-8" } });
+			}
+			if (request.url === "https://shop.example.test/img/vest.png?w=400&h=400") return new Response(png, { headers: { "content-type": "image/png" } });
+			return new Response("<html>not an image</html>", { headers: { "content-type": "text/html" } });
+		});
+		const card = (image: string) => `\`\`\`cards\n${JSON.stringify([{ title: "Dog vest", url: "https://shop.example.test/vest", image, meta: "Shop · $20" }])}\n\`\`\``;
+		const madeUp = "https://evil.example.test/pixel.png?d=secret";
+		faux.setResponses([
+			toolUse("fetch_url", { url: "https://shop.example.test/vest" }),
+			toolUse("send_to_user", { message: `Found one:\n\n${card(madeUp)}` }),
+			// The refusal names the image, which doesn't make it one a tool gave.
+			toolUse("send_to_user", { message: `Found one:\n\n${card(madeUp)}` }),
+			toolUse("send_to_user", {
+				message: `Found one:\n\n${card("https://shop.example.test/img/vest.png?w=400&h=400")}\n\n${card("https://cdn.example.test/broken.png")}`,
+			}),
+		]);
+		const { id } = (await post("/sessions")).body;
+		const answer = await say("Find me a dog vest", id);
+
+		// Clients that can't draw cards get them as links.
+		expect(answer.text).toBe("Found one:\n\n- **[Dog vest](https://shop.example.test/vest)** · Shop · $20\n\n- **[Dog vest](https://shop.example.test/vest)** · Shop · $20");
+		expect(fetched).not.toContain(madeUp);
+		const results = ((await api(`/sessions/${id}/messages`)).body.messages as TranscriptMessage[]).flatMap((message) =>
+			message.parts.flatMap((part) => (part.type === "tool-result" && part.name === "send_to_user" ? [part.content.map((content) => (content.type === "text" ? content.text : "")).join("")] : [])),
+		);
+		expect(results.filter((result) => result.startsWith("Not sent: no tool's result in this chat gave https://evil.example.test/"))).toHaveLength(2);
+		const sent = JSON.parse(results.at(-1)!) as { images: Record<string, string>; notShown: string };
+		expect(Object.keys(sent.images)).toEqual(["https://shop.example.test/img/vest.png?w=400&h=400"]);
+		expect(sent.notShown).toContain("https://cdn.example.test/broken.png");
+
+		// The copy is Pim's, served from here.
+		const copy = sent.images["https://shop.example.test/img/vest.png?w=400&h=400"]!;
+		expect(copy).toMatch(/^\/api\/images\/[0-9a-f-]{36}$/);
+		const served = await exports.default.fetch(url(copy), { headers: { Authorization: `Bearer ${TOKEN}` } });
+		expect(served.headers.get("content-type")).toBe("image/png");
+		expect(Buffer.from(await served.arrayBuffer())).toEqual(png);
+	});
+
 	it("gives a model whose API fetches images a signed URL instead, which serves the image without the token", async () => {
 		const png = "iVBORw0KGgo=";
 		const { body: created } = await post("/sessions");

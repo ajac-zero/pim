@@ -129,7 +129,7 @@ import {
 	toolName,
 	toText,
 } from "./extensions/mcp";
-import { MESSAGING_EXTENSION, messagingExtension, SEND_TO_USER } from "./extensions/messaging";
+import { MESSAGING_EXTENSION, messagingExtension, plainReply, SEND_TO_USER } from "./extensions/messaging";
 import { createOptMem, memoryWidgets } from "./extensions/optmem";
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
 import { byteLength, ENTRY_BYTES, entryLine } from "./extensions/optmem/store";
@@ -1202,6 +1202,29 @@ export class Pim extends DurableAgent<Env> {
 			},
 			keepWidget: (session, widget) => this.store.keepWidget(session, widget),
 			keptWidgets: (session) => (this.visits.bySession(session) || this.#tasks.of(session) ? [] : this.store.keptWidgets(session)),
+			unseenImages: async (session, urls) => {
+				if (urls.length === 0) return [];
+				const results = (await this.harness.session(session).messages())
+					.flatMap((entry) => {
+						const message = entry.model?.[0];
+						// A refused send names the images it refused.
+						if (message?.role !== "toolResult" || message.toolName === SEND_TO_USER) return [];
+						return message.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
+					})
+					.join("\n");
+				return urls.filter((url) => !results.includes(url));
+			},
+			keepImages: async (session, urls) => {
+				// A guest's browser can't load the host's images.
+				if (this.visits.bySession(session)) return {};
+				const kept: Record<string, string> = {};
+				for (const url of urls) {
+					const { storageBytes } = this.limits();
+					const copy = await this.images.keepFrom(session, url, storageBytes === null ? null : storageBytes - this.storedBytes());
+					if (copy) kept[url] = copy;
+				}
+				return kept;
+			},
 		};
 	}
 
@@ -1352,9 +1375,9 @@ export class Pim extends DurableAgent<Env> {
 					if (!outcome || outcome.isError) continue;
 					// What went to their inbox is not a reply here.
 					if (typeof part.arguments.message !== "string" || part.arguments.channel === "email") continue;
-					// A client that can't draw widgets gets what they showed as text.
+					// A client that can't draw widgets or cards gets what they showed as text.
 					const widgets = shownWidgets(outcome.text);
-					replies.push([part.arguments.message, ...widgets.map((widget) => widgetMarkdown(widget))].join("\n\n"));
+					replies.push([plainReply(part.arguments.message), ...widgets.map((widget) => widgetMarkdown(widget))].join("\n\n"));
 				}
 			}
 		}

@@ -492,6 +492,9 @@ const translations = {
     taskFailed: "Something went wrong, so Pim couldn't finish. Try again.",
     model: "Model",
     modelChanged: "Pim now uses {model}",
+    chooseModel: "Model: {model}",
+    modelForEveryChat: "Model for every chat",
+    moreModels: "More models",
     utilityModel: "Utility model",
     utilityModelHint:
       "A quick model for small jobs: naming chats, improving prompts and summarizing chats.",
@@ -1397,6 +1400,9 @@ const translations = {
       "Algo salió mal, así que Pim no pudo terminar. Inténtalo de nuevo.",
     model: "Modelo",
     modelChanged: "Pim ahora usa {model}",
+    chooseModel: "Modelo: {model}",
+    modelForEveryChat: "Modelo para todos los chats",
+    moreModels: "Más modelos",
     utilityModel: "Modelo de utilidades",
     utilityModelHint:
       "Un modelo rápido para tareas pequeñas: nombrar chats, mejorar mensajes y resumir chats.",

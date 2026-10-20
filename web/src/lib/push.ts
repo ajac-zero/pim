@@ -24,12 +24,19 @@ export async function enablePush() {
     throw new Error("notifications-blocked");
   }
   const registration = await navigator.serviceWorker.ready;
-  const existing = await registration.pushManager.getSubscription();
+  const key = base64UrlToBytes(await pim.pushKey());
+  let existing = await registration.pushManager.getSubscription();
+  // A subscription made with another key, such as another account's on this
+  // browser, is refused by the push service for every message: replace it.
+  if (existing && !sameBytes(existing.options.applicationServerKey, key)) {
+    await existing.unsubscribe();
+    existing = null;
+  }
   const current =
     existing ??
     (await registration.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: base64UrlToBytes(await pim.pushKey()),
+      applicationServerKey: key,
     }));
   const { endpoint, keys } = current.toJSON();
   await pim.subscribePush({
@@ -44,6 +51,12 @@ export async function disablePush() {
   if (!current) return;
   await pim.unsubscribePush(current.endpoint);
   await current.unsubscribe();
+}
+
+function sameBytes(buffer: ArrayBuffer | null, bytes: Uint8Array) {
+  if (!buffer || buffer.byteLength !== bytes.length) return false;
+  const view = new Uint8Array(buffer);
+  return view.every((byte, index) => byte === bytes[index]);
 }
 
 function base64UrlToBytes(value: string) {

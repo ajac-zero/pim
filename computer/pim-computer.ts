@@ -8,13 +8,15 @@
  * open port. The calls are this file's `handle`. File calls name paths under
  * `/workspace`, which is the folder `--root` names here (`~/pim` unless set),
  * and never reach outside it, through `..` or a link. Commands run as the user
- * who runs this, with that folder as their working directory.
+ * who runs this, with that folder as their working directory. Where the
+ * computer has Chrome or Chromium, it is the agents' browser too: the space
+ * drives it over the DevTools protocol, through this connection (`Link`).
  *
  * Runs on Node.js 22.18 or later, with nothing to install:
  *
  *   PIM_URL=https://pim.example.com PIM_COMPUTER_TOKEN=pimc_… node pim-computer.ts
  *
- * Settings take flags too: `--url`, `--token`, `--root`. The token can also
+ * Settings take flags too: `--url`, `--token`, `--root`, `--chrome`. The token can also
  * be in a file named by `PIM_COMPUTER_TOKEN_FILE`.
  */
 
@@ -57,12 +59,108 @@ export type ExecResult = {
 
 export type ExecArgs = { readonly command: string; readonly cwd?: string; readonly timeoutMs?: number; readonly maxBytes?: number };
 
-/** Where this computer keeps the space's files, and how it runs commands (tests give their own). */
+/** Where this computer keeps the space's files, how it runs commands, and its browser (tests give their own). */
 export type Machine = {
 	/** The real path of the folder `/workspace` stands for. */
 	readonly root: string;
 	exec(args: ExecArgs, cwd: string): Promise<ExecResult>;
+	/** The browser the space's agents use, or none where this computer has no Chrome. */
+	readonly browser?: BrowserHost;
 };
+
+/**
+ * A Chrome on this computer, which the space drives over the DevTools
+ * protocol: its messages pass through this program unread, so the space
+ * works the browser as if it ran beside it.
+ */
+export type BrowserHost = {
+	/** Opens a DevTools connection to the browser, starting it first when it isn't running. */
+	connect(onMessage: (data: string) => void, onClose: () => void): Promise<BrowserChannel>;
+	/** Whether the browser is running, without starting it. */
+	running(): Promise<boolean>;
+	/** Quits the browser. Its profile stays, with what's signed in there. */
+	stop(): Promise<void>;
+};
+
+export type BrowserChannel = { send(data: string): void; close(): void };
+
+/**
+ * One connection to the space: answers its calls, and carries DevTools
+ * messages between it and the browser. The space has one DevTools
+ * connection at a time; opening another closes the one before, which may
+ * have been left by a space that went to sleep.
+ */
+export class Link {
+	readonly #machine: Machine;
+	readonly #send: (message: string) => void;
+	#channel: { id: number; browser: BrowserChannel } | null = null;
+	#next = 1;
+
+	constructor(machine: Machine, send: (message: string) => void) {
+		this.#machine = machine;
+		this.#send = send;
+	}
+
+	/** A message from the space: a call, which gets a reply, or a DevTools message for the browser. */
+	receive(raw: string): void {
+		let message: { type?: unknown; id?: unknown; op?: unknown; args?: unknown; channel?: unknown; data?: unknown };
+		try {
+			message = JSON.parse(raw);
+		} catch {
+			return;
+		}
+		if (message.type === "cdp") {
+			if (this.#channel && message.channel === this.#channel.id && typeof message.data === "string") this.#channel.browser.send(message.data);
+			return;
+		}
+		if (message.type !== "call" || typeof message.id !== "string" || typeof message.op !== "string") return;
+		const { id } = message;
+		this.#call(message.op, (message.args ?? {}) as Args).then(
+			(result) => this.#send(JSON.stringify({ type: "reply", id, result })),
+			(error: CallError) => this.#send(JSON.stringify({ type: "reply", id, error: { message: error.message, code: error.code } })),
+		);
+	}
+
+	/** The space went away: its DevTools connection closes, and the browser goes on running. */
+	close(): void {
+		this.#channel?.browser.close();
+		this.#channel = null;
+	}
+
+	async #call(op: string, args: Args): Promise<unknown> {
+		if (!op.startsWith("browser_")) return handle(this.#machine, op, args);
+		const browser = this.#machine.browser;
+		if (op === "browser_status") return { available: browser !== undefined, running: browser ? await browser.running() : false };
+		if (!browser) throw new CallError("This computer has no browser: install Google Chrome or Chromium there, or name one with PIM_CHROME, and restart pim-computer.", "ENOSYS");
+		switch (op) {
+			case "browser_connect": {
+				this.close();
+				const id = this.#next++;
+				const link = await browser.connect(
+					(data) => {
+						if (this.#channel?.id === id) this.#send(JSON.stringify({ type: "cdp", channel: id, data }));
+					},
+					() => {
+						if (this.#channel?.id !== id) return;
+						this.#channel = null;
+						this.#send(JSON.stringify({ type: "cdp_closed", channel: id }));
+					},
+				);
+				this.#channel = { id, browser: link };
+				return { channel: id };
+			}
+			case "browser_disconnect":
+				if (this.#channel?.id === args.channel) this.close();
+				return null;
+			case "browser_stop":
+				this.close();
+				await browser.stop();
+				return null;
+			default:
+				throw new CallError(`This computer doesn't know the call ${op}. Update pim-computer.`, "ENOSYS");
+		}
+	}
+}
 
 /** `/workspace/a/b` as a path relative to the root (`a/b`), or a refusal for anything outside it. */
 function relative(virtual: unknown): string {
@@ -399,6 +497,173 @@ async function runCommand({ command, timeoutMs = 120_000, maxBytes = 64_000 }: E
 	});
 }
 
+/** How long the browser runs with nobody connected to it before it quits; its profile stays. */
+const BROWSER_IDLE_MS = 30 * 60_000;
+
+/** Chrome or Chromium on this computer, where it's in the usual places or on the PATH. */
+async function findChrome(): Promise<string | undefined> {
+	const candidates =
+		process.platform === "darwin"
+			? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Chromium.app/Contents/MacOS/Chromium"]
+			: (process.env.PATH ?? "")
+					.split(path.delimiter)
+					.filter(Boolean)
+					.flatMap((folder) => ["google-chrome-stable", "google-chrome", "chromium", "chromium-browser", "chrome"].map((name) => path.join(folder, name)));
+	for (const candidate of candidates) {
+		try {
+			await fs.access(candidate, fs.constants.X_OK);
+			return candidate;
+		} catch {}
+	}
+	return undefined;
+}
+
+/**
+ * Chrome keeps the cookies of sign-ins that last only "for the session"
+ * when it restores the last session on starting, so it's set to; and a
+ * browser that was ended without quitting starts as if it had quit.
+ */
+async function keepSessions(profile: string): Promise<void> {
+	const file = path.join(profile, "Default", "Preferences");
+	let preferences: { session?: Record<string, unknown>; profile?: Record<string, unknown> } = {};
+	try {
+		preferences = JSON.parse(await fs.readFile(file, "utf8"));
+	} catch {}
+	preferences.session = { ...preferences.session, restore_on_startup: 1 };
+	preferences.profile = { ...preferences.profile, exit_type: "Normal", exited_cleanly: true };
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	await fs.writeFile(file, JSON.stringify(preferences));
+}
+
+/**
+ * The computer's own Chrome, with a profile of its own that keeps what's
+ * signed in there between runs. It starts when the space first connects to
+ * it, headless unless asked otherwise, and quits after `BROWSER_IDLE_MS`
+ * with nobody connected. A Chrome left running with the profile, by an
+ * earlier run of this program, is used as it is.
+ */
+function localBrowser(executable: string, profile: string, headful: boolean, log: (line: string) => void): BrowserHost {
+	let child: import("node:child_process").ChildProcess | undefined;
+	let starting: Promise<string> | undefined;
+	let connections = 0;
+	let idle: ReturnType<typeof setTimeout> | undefined;
+	const portFile = path.join(profile, "DevToolsActivePort");
+
+	/** The DevTools address of the browser running with the profile, or undefined when none is. */
+	const running = async (): Promise<string | undefined> => {
+		let lines: string[];
+		try {
+			lines = (await fs.readFile(portFile, "utf8")).split("\n");
+		} catch {
+			return undefined;
+		}
+		try {
+			const response = await fetch(`http://127.0.0.1:${lines[0]}/json/version`, { signal: AbortSignal.timeout(2_000) });
+			const { webSocketDebuggerUrl } = (await response.json()) as { webSocketDebuggerUrl: string };
+			return webSocketDebuggerUrl;
+		} catch {
+			return undefined;
+		}
+	};
+
+	const start = async (): Promise<string> => {
+		const { spawn } = await import("node:child_process");
+		await fs.mkdir(profile, { recursive: true });
+		await fs.rm(portFile, { force: true });
+		await keepSessions(profile);
+		const args = [
+			"--remote-debugging-port=0",
+			`--user-data-dir=${profile}`,
+			"--no-first-run",
+			"--no-default-browser-check",
+			"--password-store=basic",
+			"--use-mock-keychain",
+			"--disable-dev-shm-usage",
+			"--window-size=1280,800",
+			...(headful ? [] : ["--headless=new"]),
+			// Chrome's sandbox can't run as root, as in a container.
+			...(process.getuid?.() === 0 ? ["--no-sandbox"] : []),
+			"about:blank",
+		];
+		log(`Starting the browser: ${executable}`);
+		const started = spawn(executable, args, { stdio: ["ignore", "ignore", "pipe"] });
+		child = started;
+		let errors = "";
+		started.stderr!.on("data", (chunk: Buffer) => {
+			errors = (errors + chunk.toString("utf8")).slice(-2_000);
+		});
+		let exited = false;
+		started.on("exit", () => {
+			exited = true;
+			if (child === started) child = undefined;
+		});
+		for (let waited = 0; waited < 30_000; waited += 100) {
+			if (exited) throw new CallError(`The browser quit as it started: ${errors.trim() || "it said nothing"}`, "EBROWSER");
+			const address = await running();
+			if (address) return address;
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+		started.kill("SIGKILL");
+		throw new CallError("The browser didn't start within 30 seconds.", "EBROWSER");
+	};
+
+	const stop = async () => {
+		clearTimeout(idle);
+		const address = await running();
+		if (address) {
+			// Asked to quit, it saves the profile, cookies and all, and goes; it's ended if it hasn't after a while.
+			const socket = new WebSocket(address);
+			socket.addEventListener("open", () => socket.send(JSON.stringify({ id: 1, method: "Browser.close" })));
+			socket.addEventListener("error", () => {});
+			for (let waited = 0; waited < 15_000 && (child ? child.exitCode === null && child.signalCode === null : (await running()) !== undefined); waited += 200) {
+				await new Promise((resolve) => setTimeout(resolve, 200));
+			}
+		}
+		child?.kill("SIGKILL");
+		child = undefined;
+		await fs.rm(portFile, { force: true });
+	};
+
+	return {
+		running: async () => (await running()) !== undefined,
+		stop,
+		async connect(onMessage, onClose) {
+			clearTimeout(idle);
+			const address = (await running()) ?? (await (starting ??= start().finally(() => (starting = undefined))));
+			const socket = new WebSocket(address);
+			await new Promise<void>((resolve, reject) => {
+				socket.addEventListener("open", () => resolve(), { once: true });
+				socket.addEventListener("error", () => reject(new CallError("Couldn't connect to the browser.", "EBROWSER")), { once: true });
+			});
+			connections++;
+			let open = true;
+			const closed = () => {
+				if (!open) return;
+				open = false;
+				if (--connections === 0) {
+					clearTimeout(idle);
+					idle = setTimeout(() => {
+						log("Nobody has used the browser for a while, so it quits.");
+						void stop();
+					}, BROWSER_IDLE_MS);
+				}
+				onClose();
+			};
+			socket.addEventListener("message", (event) => onMessage(String(event.data)));
+			socket.addEventListener("close", closed);
+			return {
+				send: (data) => {
+					if (socket.readyState === WebSocket.OPEN) socket.send(data);
+				},
+				close: () => {
+					socket.close();
+					closed();
+				},
+			};
+		},
+	};
+}
+
 const USAGE = `pim-computer ${VERSION}: connects this machine to your Pim, for your agents to use.
 
   PIM_URL=https://pim.example.com PIM_COMPUTER_TOKEN=pimc_… node pim-computer.ts
@@ -406,12 +671,18 @@ const USAGE = `pim-computer ${VERSION}: connects this machine to your Pim, for y
 Options (or the environment variables in brackets):
   --url <address>   Your Pim's address (PIM_URL)
   --token <token>   The token from Settings → Computer (PIM_COMPUTER_TOKEN, or a file named by PIM_COMPUTER_TOKEN_FILE)
-  --root <folder>   The folder your files are kept in (PIM_COMPUTER_ROOT; ~/pim unless set)`;
+  --root <folder>   The folder your files are kept in (PIM_COMPUTER_ROOT; ~/pim unless set)
+  --chrome <path>   The Chrome or Chromium your agents browse with (PIM_CHROME; found where it usually is unless set)
+  --headful         Show the browser's window rather than running it headless (PIM_BROWSER_HEADFUL=1)
+
+The browser keeps its profile, with what you sign in to there, in ~/.pim-computer/browser.`;
 
 async function main(): Promise<void> {
 	const { parseArgs } = await import("node:util");
 	const os = await import("node:os");
-	const { values } = parseArgs({ options: { url: { type: "string" }, token: { type: "string" }, root: { type: "string" }, help: { type: "boolean" } } });
+	const { values } = parseArgs({
+		options: { url: { type: "string" }, token: { type: "string" }, root: { type: "string" }, chrome: { type: "string" }, headful: { type: "boolean" }, help: { type: "boolean" } },
+	});
 	const env = process.env;
 	const tokenFile = env.PIM_COMPUTER_TOKEN_FILE;
 	const url = values.url ?? env.PIM_URL;
@@ -423,7 +694,12 @@ async function main(): Promise<void> {
 	const folder = path.resolve(values.root ?? env.PIM_COMPUTER_ROOT ?? path.join(os.homedir(), "pim"));
 	await fs.mkdir(folder, { recursive: true });
 	const root = await fs.realpath(folder);
-	const machine: Machine = { root, exec: (args, cwd) => runCommand(args, cwd, root) };
+	const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
+	const chrome = values.chrome ?? env.PIM_CHROME ?? (await findChrome());
+	const headful = values.headful === true || env.PIM_BROWSER_HEADFUL === "1";
+	const browser = chrome ? localBrowser(chrome, path.join(os.homedir(), ".pim-computer", "browser"), headful, log) : undefined;
+	if (!chrome) log("No Chrome or Chromium found, so your agents have no browser here. Install one, or name it with --chrome.");
+	const machine: Machine = { root, exec: (args, cwd) => runCommand(args, cwd, root), ...(browser ? { browser } : {}) };
 	const address = new URL("/api/computer/connect", url.replace(/^http/, "ws"));
 	const hello = {
 		type: "hello",
@@ -436,13 +712,16 @@ async function main(): Promise<void> {
 		user: os.userInfo().username,
 		root: machine.root,
 		shell: env.SHELL || "/bin/bash",
+		browser: chrome ?? null,
 	};
 	let wait = 1_000;
-	const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
 	const connect = () => {
 		// Node's WebSocket (undici) takes headers, so the token stays out of the address.
 		const socket = new (WebSocket as unknown as new (url: URL, init: unknown) => WebSocket)(address, { headers: { Authorization: `Bearer ${token}` } });
 		let ping: ReturnType<typeof setInterval> | undefined;
+		const link = new Link(machine, (message) => {
+			if (socket.readyState === WebSocket.OPEN) socket.send(message);
+		});
 		socket.addEventListener("open", () => {
 			wait = 1_000;
 			log(`Connected to ${url}, with ${machine.root} as ${WORKSPACE}.`);
@@ -452,22 +731,15 @@ async function main(): Promise<void> {
 		});
 		socket.addEventListener("message", (event) => {
 			if (typeof event.data !== "string" || event.data === "pong") return;
-			let call: { type?: string; id?: string; op?: string; args?: Args };
-			try {
-				call = JSON.parse(event.data);
-			} catch {
-				return;
+			if (event.data.startsWith('{"type":"call"') && event.data.includes('"op":"exec"')) {
+				const call = JSON.parse(event.data) as { args?: { command?: unknown } };
+				log(`Running: ${String(call.args?.command)}`);
 			}
-			if (call.type !== "call" || typeof call.id !== "string" || typeof call.op !== "string") return;
-			if (call.op === "exec") log(`Running: ${String(call.args?.command)}`);
-			const { id } = call;
-			handle(machine, call.op, call.args ?? {}).then(
-				(result) => socket.send(JSON.stringify({ type: "reply", id, result })),
-				(error: CallError) => socket.send(JSON.stringify({ type: "reply", id, error: { message: error.message, code: error.code } })),
-			);
+			link.receive(event.data);
 		});
 		socket.addEventListener("close", (event) => {
 			clearInterval(ping);
+			link.close();
 			if (event.code === REPLACED) {
 				log("Another computer connected with this token, so this one stops.");
 				process.exit(1);

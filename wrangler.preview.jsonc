@@ -29,8 +29,6 @@
     { "binding": "BLOBS", "bucket_name": "pim-preview-blobs" },
     { "binding": "ARTIFACTS", "bucket_name": "pim-preview-artifacts" }
   ],
-  // The agents' browser: a Chrome on this machine, which wrangler downloads the first time.
-  "browser": { "binding": "BROWSER" },
   "durable_objects": {
     "bindings": [
       { "name": "Pim", "class_name": "Pim" },

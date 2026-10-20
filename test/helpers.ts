@@ -5,7 +5,7 @@ import { getAgentByName } from "agents";
 import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, expect, vi } from "vitest";
-import { type ExecArgs, type ExecResult, handle, type Machine } from "../computer/pim-computer";
+import { type BrowserHost, type ExecArgs, type ExecResult, Link, type Machine } from "../computer/pim-computer";
 import type { Approval } from "../src/store";
 import type { TranscriptMessage } from "../src/transcript";
 import { faux } from "./worker";
@@ -171,35 +171,83 @@ export const opens = (path: string, token: string) =>
 	exports.default.fetch(new Request(apiUrl(path), { headers: { Upgrade: "websocket", Authorization: `Bearer ${token}` } }));
 
 /**
- * A computer as pim-computer is one: its own `handle`, over a folder in this
- * test's /tmp, connected with `token`. Commands go to `exec`: tests can't
- * start processes.
+ * The tests' Chrome as a computer's browser: wrangler's local Chrome, which
+ * stands in for Browser Run, reached through its binding. Each connection
+ * is a DevTools socket to one session it keeps until stopped.
  */
-export async function connectTestComputer(token: string, root: string, exec: (args: ExecArgs) => Promise<ExecResult>) {
+export function testBrowser(): BrowserHost {
+	const binding = (env as unknown as { BROWSER: Fetcher }).BROWSER;
+	let session: string | undefined;
+	const open = async (id: string) => {
+		const response = await binding.fetch(`https://fake.host/v1/devtools/browser/${id}`, { headers: { Upgrade: "websocket" } });
+		const socket = response.webSocket!;
+		socket.accept();
+		return socket;
+	};
+	return {
+		async connect(onMessage, onClose) {
+			if (!session) {
+				const acquired = await binding.fetch("https://fake.host/v1/devtools/browser?keep_alive=600000", { method: "POST" });
+				session = ((await acquired.json()) as { sessionId: string }).sessionId;
+			}
+			const socket = await open(session);
+			socket.addEventListener("message", (event) => onMessage(String(event.data)));
+			socket.addEventListener("close", () => onClose());
+			return { send: (data) => socket.send(data), close: () => socket.close() };
+		},
+		running: async () => session !== undefined,
+		async stop() {
+			if (!session) return;
+			const socket = await open(session);
+			session = undefined;
+			socket.send(JSON.stringify({ id: 1, method: "Browser.close" }));
+			socket.close();
+		},
+	};
+}
+
+/**
+ * A computer as pim-computer is one: its own `Link`, over a folder in this
+ * test's /tmp, connected with `token`. Commands go to `exec`: tests can't
+ * start processes. Its browser, if it has one, is `testBrowser`'s.
+ */
+export async function connectTestComputer(token: string, root: string, exec: (args: ExecArgs) => Promise<ExecResult>, browser?: BrowserHost) {
 	await fs.mkdir(root, { recursive: true });
-	const machine: Machine = { root: await fs.realpath(root), exec };
+	const machine: Machine = { root: await fs.realpath(root), exec, ...(browser ? { browser } : {}) };
 	const response = await opens("/computer/connect", token);
 	expect(response.status).toBe(101);
 	const socket = response.webSocket!;
 	const closed = new Promise<CloseEvent>((resolve) => socket.addEventListener("close", resolve));
-	socket.addEventListener("message", (event) => {
-		const call = JSON.parse(event.data as string) as { type: string; id: string; op: string; args: Record<string, unknown> };
-		if (call.type !== "call") return;
-		handle(machine, call.op, call.args).then(
-			(result) => socket.send(JSON.stringify({ type: "reply", id: call.id, result })),
-			(error) => socket.send(JSON.stringify({ type: "reply", id: call.id, error: { message: error.message, code: error.code } })),
-		);
-	});
+	const link = new Link(machine, (message) => socket.send(message));
+	socket.addEventListener("message", (event) => link.receive(event.data as string));
+	socket.addEventListener("close", () => link.close());
 	socket.accept();
-	socket.send(JSON.stringify({ type: "hello", version: 1, agent: "pim-computer/test", hostname: "test-box", platform: "linux", arch: "x64", user: "ada", root: machine.root }));
+	socket.send(
+		JSON.stringify({
+			type: "hello",
+			version: 1,
+			agent: "pim-computer/test",
+			hostname: "test-box",
+			platform: "linux",
+			arch: "x64",
+			user: "ada",
+			root: machine.root,
+			browser: browser ? "chrome" : null,
+		}),
+	);
 	await vi.waitFor(async () => expect((await api("/computer")).body.state).toBe("online"));
 	return { socket, closed, root: machine.root };
 }
 
-/** Pairs a computer with the space and connects it, over a fresh folder; it runs no commands. */
+/** Pairs a computer with the space and connects it, over a fresh folder, with the tests' Chrome; it runs no commands. */
 export async function pairTestComputer() {
 	const { body } = await post<{ token: string }>("/computer");
-	return connectTestComputer(body.token, `/tmp/computer-${crypto.randomUUID()}`, async () => {
-		throw new Error("This test's computer runs no commands.");
-	});
+	return connectTestComputer(
+		body.token,
+		`/tmp/computer-${crypto.randomUUID()}`,
+		async () => {
+			throw new Error("This test's computer runs no commands.");
+		},
+		testBrowser(),
+	);
 }

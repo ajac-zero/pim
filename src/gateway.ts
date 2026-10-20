@@ -4,6 +4,7 @@ import { diagramPage } from "./artifacts";
 import { deploymentSettings } from "./deployment";
 import { accountApi, adminApi, clientIp, contentOrigin, handleRegistration, limited, resolveAccount, servePublicArtifact, siteFor, sites, socialApi } from "./accounts";
 import { COMPUTER_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
+import { BROWSER_LIVE_PATH } from "./browser";
 import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
@@ -355,7 +356,7 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 	}
 	// The space accepts sockets on any path; keep them on one.
 	const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
-	if (upgrade !== (path === "/ws")) {
+	if (upgrade !== (path === "/ws" || path === BROWSER_LIVE_PATH)) {
 		return withCors(fail(upgrade ? 404 : 426, upgrade ? "WebSockets connect at /api/ws" : "/api/ws expects a WebSocket upgrade"));
 	}
 	return withCors(await toAgent(request, env, account.ownerId, path));

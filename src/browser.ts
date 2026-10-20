@@ -1,29 +1,30 @@
-import puppeteer, { type Browser, type ElementHandle, type Page } from "@cloudflare/puppeteer";
+import puppeteer, { type Browser, type CDPSession, type ElementHandle, type Page } from "@cloudflare/puppeteer";
+import type { Computer } from "./computer";
 
 /**
- * The person's web browser: one Chrome on Browser Run that their agents
- * share, as people share one browser across their tasks. It is opened when
- * an agent first needs it and closes itself after `IDLE_MS` without use, so
- * it costs browser time only while someone is browsing. Its session ID is
- * kept in the space's meta, so a space that wakes again goes on with the same
- * pages. The browser starts signed in nowhere; the person can take it over
- * (Live View, where Browser Run offers it) to sign in or solve a check, and
- * the agents carry on in the same pages afterwards.
+ * The person's web browser: the Chrome on their computer (see ./computer.ts),
+ * which their agents share, as people share one browser across their tasks.
+ * The space drives it over the DevTools protocol, through the computer's
+ * connection; Chrome starts there when an agent first needs it, keeps its
+ * profile, so what the person signs in to stays signed in, and quits after
+ * a while unused. Browsing from the person's own machine, its address and
+ * its sign-ins, sites treat it as theirs.
  *
  * Pages are read as text with numbered references to what can be clicked
  * or typed into. A reference is stored on its element in the page, and
  * numbers keep counting up across pages and sessions, so a reference that
  * waited for the person's approval reaches the element it named or none.
+ *
+ * The person can take it over: watch its page as a stream of pictures
+ * (DevTools' screencast) and use it with their own mouse and keyboard, to
+ * sign in or get past a check; the agents go on in the same pages after.
  */
 
-/** How long the browser stays open without being used. Browser Run allows at most ten minutes. */
-const IDLE_MS = 600_000;
 /** How long a connection is kept between uses, before it is let go (the browser stays open). */
 const CONNECTION_IDLE_MS = 30_000;
 /** How much of a page's text an agent reads at once. */
 const MAX_PAGE_CHARS = 12_000;
 
-const SESSION_KEY = "browser_session";
 const NEXT_REF_KEY = "browser_next_ref";
 
 type Meta = { get(key: string): string | null; set(key: string, value: string | null): void };
@@ -33,6 +34,45 @@ export type PageView = { url: string; title: string; text: string };
 
 /** What a reference points to, for the person deciding whether to let an agent use it. */
 export type ElementDescription = { host: string; label: string };
+
+/** Where someone taking the browser over connects, behind the Worker's `/api/browser/live`. */
+export const BROWSER_LIVE_PATH = "/browser/live";
+/** The tag of the sockets of those taking the browser over. */
+export const BROWSER_TAG = "browser";
+
+/** What a socket taking the browser over hears. */
+export type BrowserLiveMessage =
+	| { type: "frame"; data: string; width: number; height: number }
+	| { type: "page"; url: string; title: string }
+	| { type: "error"; message: string };
+
+/** Someone watching the browser to take it over: they get its page as pictures, and hear when it goes. */
+export type Watcher = {
+	/** A JPEG of the page, base64, `width` by `height` CSS pixels. */
+	frame(frame: { data: string; width: number; height: number }): void;
+	/** The page the browser shows changed. */
+	page(page: { url: string; title: string }): void;
+	/** The browser closed, or its computer went offline. */
+	closed(): void;
+};
+
+/** What the person does in a browser they took over, in DevTools' terms. */
+export type BrowserInput =
+	| {
+			type: "mouse";
+			event: "mousePressed" | "mouseReleased" | "mouseMoved" | "mouseWheel";
+			x: number;
+			y: number;
+			button?: "none" | "left" | "middle" | "right";
+			clickCount?: number;
+			deltaX?: number;
+			deltaY?: number;
+			modifiers?: number;
+	  }
+	| { type: "key"; event: "keyDown" | "keyUp"; key: string; code: string; text?: string; keyCode?: number; modifiers?: number }
+	| { type: "text"; text: string }
+	| { type: "navigate"; url: string }
+	| { type: "back" | "forward" | "reload" };
 
 /**
  * Reads the page into lines of text, numbering what can be clicked or typed
@@ -139,26 +179,23 @@ const DESCRIBE = `((ref) => {
 })`;
 
 export class PimBrowser {
-	readonly #binding: BrowserRun | undefined;
+	readonly #computer: Computer;
 	readonly #meta: Meta;
 	#browser: Browser | undefined;
 	#idle: ReturnType<typeof setTimeout> | undefined;
 	/** One use of the browser at a time: agents and the app take turns with its page. */
 	#queue: Promise<unknown> = Promise.resolve();
+	readonly #watchers = new Map<string, Watcher>();
+	#screencast: { page: Page; session: CDPSession } | undefined;
 
-	constructor(binding: BrowserRun | undefined, meta: Meta) {
-		this.#binding = binding;
+	constructor(computer: Computer, meta: Meta) {
+		this.#computer = computer;
 		this.#meta = meta;
 	}
 
-	/** Whether this deployment has a browser (a `browser` binding). */
+	/** Whether the person has a browser: their computer's, while one is paired. */
 	get available(): boolean {
-		return this.#binding !== undefined;
-	}
-
-	/** Whether a browser is open, as far as this space knows; it may have closed itself since. */
-	get open(): boolean {
-		return this.#meta.get(SESSION_KEY) !== null;
+		return this.#computer.paired();
 	}
 
 	/** Goes to `url` and reads the page. */
@@ -170,7 +207,7 @@ export class PimBrowser {
 		});
 	}
 
-	/** The address and title of the page the browser shows, or null when it's closed. */
+	/** The address and title of the page the browser shows, or null when it's closed or its computer is offline. */
 	async current(): Promise<{ url: string; title: string } | null> {
 		return this.#use(false, async (page) => ({ url: page.url(), title: await page.title() }));
 	}
@@ -191,7 +228,7 @@ export class PimBrowser {
 
 	/** Clicks the element with a reference and reads the page it leads to. */
 	async click(ref: number): Promise<PageView> {
-		return this.#act(ref, async (page, element) => {
+		return this.#act(ref, async (_page, element) => {
 			await element.click();
 		});
 	}
@@ -215,35 +252,112 @@ export class PimBrowser {
 	}
 
 	/**
-	 * A link that lets the person watch and use the browser themselves, valid
-	 * to open for five minutes; null when the browser is closed. Throws where
-	 * Browser Run doesn't offer it, as on a local Chrome. The link carries its
-	 * own access token, so only the person gets it, never the model.
+	 * Starts sending the page to `watcher` as pictures, for the person to
+	 * take the browser over, under `id` (one per watching socket). False when
+	 * the browser is closed: there is nothing to take over.
 	 */
-	async liveView(): Promise<string | null> {
-		return this.#use(false, async (page) => {
+	async watch(id: string, watcher: Watcher): Promise<boolean> {
+		this.#watchers.set(id, watcher);
+		if (this.#screencast) {
+			const { page } = this.#screencast;
+			watcher.page({ url: page.url(), title: await page.title() });
+			return true;
+		}
+		const started = await this.#use(false, async (page) => {
 			const session = await page.createCDPSession();
-			try {
-				const { devtoolsFrontendUrl } = (await session.send("Cloudflare.getLiveView" as never, { mode: "tab", expiresInMs: 300_000 } as never)) as {
-					devtoolsFrontendUrl: string;
-				};
-				return devtoolsFrontendUrl;
-			} catch {
-				throw new Error("Taking over the browser needs Browser Run's Live View, which this browser doesn't offer.");
-			} finally {
-				await session.detach().catch(() => {});
-			}
+			this.#screencast = { page, session };
+			session.on("Page.screencastFrame", (event) => {
+				const { data, metadata, sessionId } = event as { data: string; metadata: { deviceWidth: number; deviceHeight: number }; sessionId: number };
+				for (const each of this.#watchers.values()) each.frame({ data, width: metadata.deviceWidth, height: metadata.deviceHeight });
+				session.send("Page.screencastFrameAck", { sessionId }).catch(() => {});
+			});
+			const tell = async () => {
+				const shown = { url: page.url(), title: await page.title().catch(() => "") };
+				for (const each of this.#watchers.values()) each.page(shown);
+			};
+			page.on("framenavigated", (frame) => {
+				if (frame === page.mainFrame()) void tell();
+			});
+			page.on("load", () => void tell());
+			await session.send("Page.startScreencast", { format: "jpeg", quality: 70, maxWidth: 1920, maxHeight: 1920 });
+			await tell();
+			return true;
 		});
+		if (!started) this.#watchers.delete(id);
+		return started === true;
 	}
 
-	/** Closes the browser, with its pages and whatever was signed in there. */
+	/** `id` stopped watching; with nobody watching, the pictures stop. */
+	async unwatch(id: string): Promise<void> {
+		if (!this.#watchers.delete(id) || this.#watchers.size > 0) return;
+		const screencast = this.#screencast;
+		this.#screencast = undefined;
+		if (!screencast) return;
+		await screencast.session.send("Page.stopScreencast").catch(() => {});
+		await screencast.session.detach().catch(() => {});
+		screencast.page.removeAllListeners("framenavigated");
+		screencast.page.removeAllListeners("load");
+		this.#letGoLater();
+	}
+
+	/** Whether `id` is watching, as far as this instance knows: a space that woke again has forgotten. */
+	watching(id: string): boolean {
+		return this.#watchers.has(id) && this.#screencast !== undefined;
+	}
+
+	/** What the person does in the browser they took over. */
+	async input(event: BrowserInput): Promise<void> {
+		const screencast = this.#screencast;
+		if (!screencast) return;
+		const { page, session } = screencast;
+		switch (event.type) {
+			case "mouse":
+				await session.send("Input.dispatchMouseEvent", {
+					type: event.event,
+					x: event.x,
+					y: event.y,
+					button: event.button ?? "none",
+					clickCount: event.clickCount ?? 0,
+					modifiers: event.modifiers ?? 0,
+					...(event.event === "mouseWheel" ? { deltaX: event.deltaX ?? 0, deltaY: event.deltaY ?? 0 } : {}),
+				});
+				return;
+			case "key":
+				await session.send("Input.dispatchKeyEvent", {
+					type: event.event === "keyDown" ? (event.text ? "keyDown" : "rawKeyDown") : "keyUp",
+					key: event.key,
+					code: event.code,
+					modifiers: event.modifiers ?? 0,
+					...(event.keyCode ? { windowsVirtualKeyCode: event.keyCode } : {}),
+					...(event.event === "keyDown" && event.text ? { text: event.text, unmodifiedText: event.text } : {}),
+				});
+				return;
+			case "text":
+				await session.send("Input.insertText", { text: event.text });
+				return;
+			case "navigate":
+				await page.goto(/^[a-z][a-z0-9+.-]*:/i.test(event.url) ? event.url : `https://${event.url}`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+				return;
+			case "back":
+				await page.goBack({ timeout: 10_000 });
+				return;
+			case "forward":
+				await page.goForward({ timeout: 10_000 });
+				return;
+			case "reload":
+				await page.reload({ timeout: 30_000 });
+				return;
+		}
+	}
+
+	/** Quits the browser, with its pages; what's signed in there stays in its profile. */
 	async close(): Promise<void> {
 		await this.#enqueue(async () => {
-			const sessionId = this.#meta.get(SESSION_KEY);
-			this.#meta.set(SESSION_KEY, null);
-			const browser = this.#browser ?? (sessionId ? await this.#connect(sessionId) : undefined);
+			const browser = this.#browser;
 			this.#browser = undefined;
-			await browser?.close().catch(() => {});
+			await browser?.disconnect().catch(() => {});
+			this.#ended();
+			if (this.#computer.status().state === "online") await this.#computer.stopBrowser();
 		});
 	}
 
@@ -269,8 +383,8 @@ export class PimBrowser {
 
 	/**
 	 * Runs `use` with the browser's page, one use at a time. With `start`, an
-	 * agent's visit opens the browser when none is open; otherwise a closed
-	 * browser answers null.
+	 * agent's visit starts the browser when it isn't running; otherwise a
+	 * closed browser, or one on a computer that's offline, answers null.
 	 */
 	#use<T>(start: true, use: (page: Page) => Promise<T>): Promise<T>;
 	#use<T>(start: false, use: (page: Page) => Promise<T>): Promise<T | null>;
@@ -280,6 +394,7 @@ export class PimBrowser {
 			if (!browser) return null;
 			const pages = await browser.pages();
 			const page = pages.find((candidate) => !candidate.isClosed()) ?? (await browser.newPage());
+			await this.#asItself(browser, page);
 			try {
 				return await use(page);
 			} finally {
@@ -294,37 +409,55 @@ export class PimBrowser {
 		return run;
 	}
 
-	/** The connected browser: the one this space has open, or a new one when `start` allows. */
+	/** The connected browser, or the computer's, started first when `start` allows. */
 	async #browserFor(start: boolean): Promise<Browser | undefined> {
-		if (!this.#binding) throw new Error("This space has no browser.");
+		if (!this.available) throw new Error("This space has no browser: the person can connect a computer in Settings → Computer.");
 		if (this.#browser?.connected) return this.#browser;
 		this.#browser = undefined;
-		const sessionId = this.#meta.get(SESSION_KEY);
-		if (sessionId) {
-			this.#browser = await this.#connect(sessionId);
-			// It closed itself after going unused, or Browser Run ended it.
-			if (!this.#browser) this.#meta.set(SESSION_KEY, null);
+		if (!start) {
+			const { running } = await this.#computer.browserStatus();
+			if (!running) return undefined;
 		}
-		if (!this.#browser && start) {
-			this.#browser = await puppeteer.launch(this.#binding as never, { keep_alive: IDLE_MS });
-			this.#meta.set(SESSION_KEY, this.#browser.sessionId());
-		}
-		return this.#browser;
+		const transport = await this.#computer.connectBrowser();
+		// The window's own size, so what the person sees when they take over is what the agents read.
+		const browser = await puppeteer.connect({ transport, defaultViewport: null });
+		browser.on("disconnected", () => {
+			if (this.#browser !== browser) return;
+			this.#browser = undefined;
+			this.#ended();
+		});
+		this.#browser = browser;
+		return browser;
 	}
 
-	async #connect(sessionId: string): Promise<Browser | undefined> {
-		try {
-			return await puppeteer.connect(this.#binding as never, sessionId);
-		} catch {
-			return undefined;
-		}
+	/**
+	 * Headless Chrome names itself `HeadlessChrome`, which sites turn away;
+	 * each page says it's the Chrome it is, for as long as the space is
+	 * connected to it.
+	 */
+	readonly #introduced = new WeakSet<Page>();
+	async #asItself(browser: Browser, page: Page): Promise<void> {
+		if (this.#introduced.has(page)) return;
+		this.#introduced.add(page);
+		const agent = await browser.userAgent();
+		if (agent.includes("HeadlessChrome")) await page.setUserAgent(agent.replace("HeadlessChrome", "Chrome"));
 	}
 
-	/** Lets the connection go after a while unused; the browser itself stays open until it idles out. */
+	/** The connection ended: anyone watching hears the browser is gone. */
+	#ended(): void {
+		this.#screencast = undefined;
+		const watchers = [...this.#watchers.values()];
+		this.#watchers.clear();
+		for (const watcher of watchers) watcher.closed();
+	}
+
+	/** Lets the connection go after a while unused, unless someone is watching; the browser itself stays open. */
 	#letGoLater(): void {
 		clearTimeout(this.#idle);
 		this.#idle = setTimeout(() => {
+			if (this.#screencast) return;
 			void this.#enqueue(async () => {
+				if (this.#screencast) return;
 				const browser = this.#browser;
 				this.#browser = undefined;
 				await browser?.disconnect().catch(() => {});

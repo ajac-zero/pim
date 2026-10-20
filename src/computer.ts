@@ -7,7 +7,8 @@ import { HttpError } from "./http";
 /**
  * The person's computer: a machine of theirs (a server, a VM, a box at home)
  * running `pim-computer` (../computer/pim-computer.ts), which their agents use
- * to run commands and keep files. Settings → Computer pairs one with the space
+ * to run commands, keep files and browse (its Chrome, driven over DevTools
+ * through the same connection: `connectBrowser`). Settings → Computer pairs one with the space
  * by making a token, `pimc_<owner>_<secret>`; the program connects out with it
  * to `/api/computer/connect` over a WebSocket, which the Worker hands to this
  * space as `COMPUTER_PATH`, and answers the space's calls on it. The space
@@ -56,6 +57,8 @@ export type ComputerInfo = {
 	readonly user: string;
 	/** The folder on it that is `/workspace`. */
 	readonly root: string;
+	/** The Chrome the agents browse with there, or null where it has none. */
+	readonly browser: string | null;
 	readonly connectedAt: number;
 };
 
@@ -73,6 +76,14 @@ type Meta = {
 	deleteMeta(key: string): void;
 };
 
+/** A DevTools connection to the computer's browser, as puppeteer's `ConnectionTransport`. */
+export type BrowserTransport = {
+	send(message: string): void;
+	close(): void;
+	onmessage?: (message: string) => void;
+	onclose?: () => void;
+};
+
 type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
 
 /** A failure the computer reported, with its code (`ENOENT`…), which the file tools read. */
@@ -84,6 +95,8 @@ export class Computer {
 	readonly #meta: Meta;
 	readonly #sockets: () => Connection[];
 	readonly #pending = new Map<string, Pending>();
+	/** The DevTools connection to the computer's browser, of which there is one at a time. */
+	#browser: { channel: number; transport: BrowserTransport } | null = null;
 
 	constructor(options: { meta: Meta; sockets: () => Connection[] }) {
 		this.#meta = options.meta;
@@ -151,6 +164,7 @@ export class Computer {
 	}
 
 	#failPending(): void {
+		this.#browserClosed();
 		for (const [id, pending] of this.#pending) {
 			clearTimeout(pending.timer);
 			pending.reject(new HttpError(503, "The computer disconnected before it answered."));
@@ -175,9 +189,17 @@ export class Computer {
 				arch: String(hello.arch ?? ""),
 				user: String(hello.user ?? ""),
 				root: String(hello.root ?? ""),
+				browser: typeof hello.browser === "string" ? hello.browser : null,
 				connectedAt: Date.now(),
 			};
 			this.#meta.setMeta(INFO_KEY, JSON.stringify(info));
+			return;
+		}
+		if (message.type === "cdp" || message.type === "cdp_closed") {
+			const browser = this.#browser;
+			if (!browser || browser.channel !== (message as { channel?: unknown }).channel) return;
+			if (message.type === "cdp_closed") this.#browserClosed();
+			else browser.transport.onmessage?.(String((message as { data?: unknown }).data));
 			return;
 		}
 		if (message.type !== "reply" || typeof message.id !== "string") return;
@@ -203,6 +225,45 @@ export class Computer {
 			this.#pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
 			socket.send(JSON.stringify({ type: "call", id, op, args }));
 		});
+	}
+
+	/** Whether the computer has a browser, and whether it's running; neither while the computer is offline. */
+	async browserStatus(): Promise<{ available: boolean; running: boolean }> {
+		if (!this.#socket()) return { available: false, running: false };
+		return this.call<{ available: boolean; running: boolean }>("browser_status", {});
+	}
+
+	/**
+	 * Connects to the computer's browser over DevTools, starting it there
+	 * first when it isn't running. Its messages go through the computer's
+	 * connection; a connection made before this one is closed.
+	 */
+	async connectBrowser(): Promise<BrowserTransport> {
+		const { channel } = await this.call<{ channel: number }>("browser_connect", {}, 60_000);
+		this.#browserClosed();
+		const transport: BrowserTransport = {
+			send: (data) => {
+				if (this.#browser?.channel === channel) this.#socket()?.send(JSON.stringify({ type: "cdp", channel, data }));
+			},
+			close: () => {
+				if (this.#browser?.channel !== channel) return;
+				this.#browser = null;
+				void this.call("browser_disconnect", { channel }).catch(() => undefined);
+			},
+		};
+		this.#browser = { channel, transport };
+		return transport;
+	}
+
+	/** Quits the computer's browser; its profile, with what's signed in there, stays. */
+	async stopBrowser(): Promise<void> {
+		await this.call("browser_stop", {});
+	}
+
+	#browserClosed(): void {
+		const browser = this.#browser;
+		this.#browser = null;
+		browser?.transport.onclose?.();
 	}
 
 	/** Runs a shell command on the computer. */

@@ -1,8 +1,8 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { exports } from "cloudflare:workers";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Approval } from "../src/store";
-import { api, apiUrl, pairTestComputer, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, opens, pairTestComputer, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
 import { faux } from "./worker";
 
 /** A page with a form whose button changes the page, so a click shows in what's read after. */
@@ -14,6 +14,13 @@ const FORM = `data:text/html;charset=utf-8,${encodeURIComponent(`<title>Orders</
 <button onclick="document.querySelector('h1').textContent = 'Ordered for ' + document.querySelector('#name').value">Order</button>
 <label><input type="checkbox" style="opacity:0">Extra bread</label>
 <button style="display:none">Hidden</button>`)}`;
+
+/** A page whose field and button are where the test clicks: the field at the top, the button 200 pixels down. */
+const PLACED = `data:text/html;charset=utf-8,${encodeURIComponent(`<title>Placed</title>
+<body style="margin:0">
+<input id="name" style="position:fixed;left:0;top:0;width:300px;height:60px">
+<button style="position:fixed;left:0;top:200px;width:300px;height:60px" onclick="document.querySelector('h1').textContent = 'Ordered for ' + document.querySelector('#name').value">Order</button>
+<h1 style="position:fixed;top:400px">Not yet</h1>`)}`;
 
 function lastToolResult(messages: readonly Message[]): string {
 	const result = messages.findLast((message) => message.role === "toolResult");
@@ -48,6 +55,24 @@ afterEach(async () => {
 	await api("/browser", { method: "DELETE" });
 	await setPermission("browser_click", null);
 	await setPermission("browser_type", null);
+});
+
+/** Takes the browser over, as the app does: a socket that hears the page as pictures, and sends the person's mouse and keyboard. */
+async function takeOver() {
+	const response = await opens("/browser/live", TOKEN);
+	const socket = response.webSocket!;
+	const heard: { type: string; [key: string]: unknown }[] = [];
+	const closed = new Promise<CloseEvent>((resolve) => socket.addEventListener("close", resolve));
+	socket.addEventListener("message", (event) => {
+		heard.push(JSON.parse(event.data as string));
+	});
+	socket.accept();
+	return { socket, heard, closed, send: (message: unknown) => socket.send(JSON.stringify(message)) };
+}
+
+// The browser is the computer's.
+beforeAll(async () => {
+	await pairTestComputer();
 });
 
 describe("the browser", () => {
@@ -103,7 +128,6 @@ describe("the browser", () => {
 	});
 
 	it("saves screenshots to the person's files, on their computer, and shows them one", async () => {
-		await pairTestComputer();
 		expect((await api("/browser")).body).toEqual({ available: true, page: null });
 		expect((await callTool("browser_screenshot", {})).toLowerCase()).toContain("closed");
 		await callTool("browser_open", { url: FORM });
@@ -115,12 +139,40 @@ describe("the browser", () => {
 		const shown = await exports.default.fetch(new Request(apiUrl("/browser/screenshot"), { headers: { Authorization: `Bearer ${TOKEN}` } }));
 		expect(shown.headers.get("content-type")).toBe("image/png");
 		await shown.body?.cancel();
-		// A local Chrome has no Live View to take it over with.
-		expect((await post("/browser/live")).status).toBe(501);
 
 		// Closing it ends the session: nothing is shown after.
 		await callTool("browser_close", {});
 		expect((await api("/browser")).body.page).toBeNull();
 		expect((await api("/browser/screenshot")).status).toBe(404);
+	});
+
+	it("lets the person take it over, with their own mouse and keyboard, where the agents go on", async () => {
+		// A closed browser has nothing to take over.
+		const nothing = await takeOver();
+		expect((await nothing.closed).code).toBe(4004);
+
+		await callTool("browser_open", { url: PLACED });
+		const live = await takeOver();
+		await vi.waitFor(() => expect(live.heard).toContainEqual({ type: "page", url: PLACED, title: "Placed" }));
+		await vi.waitFor(() => expect(live.heard.find((message) => message.type === "frame")).toBeDefined());
+		const frame = live.heard.find((message) => message.type === "frame")!;
+		expect(frame).toMatchObject({ width: expect.any(Number), height: expect.any(Number) });
+		expect(Buffer.from(String(frame.data), "base64").subarray(0, 2)).toEqual(Buffer.from([0xff, 0xd8]));
+
+		// The person clicks into the name field, types, and clicks Order, where the page shows them.
+		const click = (x: number, y: number) => {
+			live.send({ type: "mouse", event: "mousePressed", x, y, button: "left", clickCount: 1 });
+			live.send({ type: "mouse", event: "mouseReleased", x, y, button: "left", clickCount: 1 });
+		};
+		click(100, 30);
+		live.send({ type: "text", text: "Be" });
+		live.send({ type: "key", event: "keyDown", key: "a", code: "KeyA", text: "a", keyCode: 65 });
+		live.send({ type: "key", event: "keyUp", key: "a", code: "KeyA", keyCode: 65 });
+		click(100, 230);
+		await vi.waitFor(async () => expect(await callTool("browser_read", {})).toContain("# Ordered for Bea"));
+
+		// Closing the browser ends the takeover.
+		await api("/browser", { method: "DELETE" });
+		expect((await live.closed).code).toBe(4000);
 	});
 });

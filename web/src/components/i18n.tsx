@@ -309,6 +309,8 @@ const translations = {
     newChat: "New chat",
     noChatsMatch: "No chats match your search.",
     noChatsYet: "No chats yet.",
+    noRecentChats: "No recent chats.",
+    archived: "Archived",
     newChatWith: "New chat with {name}",
     team: "Team",
     teamHint:
@@ -1199,6 +1201,8 @@ const translations = {
     newChat: "Nuevo chat",
     noChatsMatch: "Ningún chat coincide con la búsqueda.",
     noChatsYet: "Aún no hay chats.",
+    noRecentChats: "No hay chats recientes.",
+    archived: "Archivados",
     newChatWith: "Nuevo chat con {name}",
     team: "Equipo",
     teamHint:

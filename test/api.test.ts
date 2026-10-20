@@ -114,6 +114,33 @@ describe("conversation", () => {
 		}
 	});
 
+	it("archives chats after two days without activity, except those with unread replies, until they are active again", async () => {
+		const quiet = (await post("/sessions", { title: "Quiet" })).body.id;
+		const unread = (await post("/sessions", { title: "Unread" })).body.id;
+		const archived = async () =>
+			Object.fromEntries(((await api("/sessions")).body.sessions as { id: string; archived: boolean }[]).map((s) => [s.id, s.archived]));
+		faux.setResponses([toolUse("send_to_user", { message: "Hi." })]);
+		await say("Hello", quiet);
+		const { responseAt } = (await api("/sessions")).body.sessions.find((s: { id: string }) => s.id === quiet);
+		await post(`/sessions/${quiet}/read`, { responseAt });
+		faux.setResponses([toolUse("send_to_user", { message: "Done." })]);
+		await say("Remind me", unread);
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			vi.setSystemTime(Date.now() + 47 * 60 * 60 * 1000);
+			expect(await archived()).toMatchObject({ [quiet]: false, [unread]: false });
+			vi.setSystemTime(Date.now() + 2 * 60 * 60 * 1000);
+			expect(await archived()).toMatchObject({ [quiet]: true, [unread]: false });
+			faux.setResponses([toolUse("send_to_user", { message: "Back." })]);
+			await say("I'm back", quiet);
+			expect((await archived())[quiet]).toBe(false);
+		} finally {
+			vi.useRealTimers();
+			// Their activity is now in the future, which would put them first in later tests' lists.
+			for (const id of [quiet, unread]) await api(`/sessions/${id}`, { method: "DELETE" });
+		}
+	});
+
 	it("answers a message and keeps the transcript", async () => {
 		faux.setResponses([toolUse("send_to_user", { message: "Paris." })]);
 		const answer = await say("What is the capital of France?");

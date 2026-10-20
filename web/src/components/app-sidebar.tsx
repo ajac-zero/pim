@@ -89,8 +89,11 @@ import { version } from "../../../package.json";
 
 type T = ReturnType<typeof useI18n>["t"];
 
-/** One of your agents in the sidebar, with its chats, most recent first. */
-type AgentSection = { agent: Agent; list: Session[] };
+/**
+ * One of your agents in the sidebar, with its chats, most recent first;
+ * `archived` says it has older ones, listed under Archived.
+ */
+type AgentSection = { agent: Agent; list: Session[]; archived: boolean };
 
 export function sessionTitle(session: Pick<Session, "title">, t: T) {
   return session.title ?? t("newChat");
@@ -370,11 +373,28 @@ function ChatsPanel({
     inbox: t("inboxView"),
     majordomo: t("majordomoView"),
   };
+  const current = useMemo(
+    () => (sessions ?? []).filter((session) => !session.archived),
+    [sessions],
+  );
+  const majordomoId = agents?.find((agent) => agent.majordomo)?.id;
+  const flatView = view === "majordomo" ? "majordomo" : "inbox";
   const flat = flatChats(
-    sessions ?? [],
-    agents?.find((agent) => agent.majordomo)?.id,
-    view === "majordomo" ? "majordomo" : "inbox",
+    current,
+    majordomoId,
+    flatView,
     order,
+    search,
+    t("newChat"),
+  );
+  // Archived chats are listed apart, most recent first; visits stay under Shared with you in the agents view.
+  const archived = flatChats(
+    (sessions ?? []).filter(
+      (session) => session.archived && !(view === "agents" && session.visit),
+    ),
+    majordomoId,
+    flatView,
+    "recent",
     search,
     t("newChat"),
   );
@@ -387,6 +407,7 @@ function ChatsPanel({
     const all = (agents ?? []).map((agent) => ({
       agent,
       list: [] as Session[],
+      archived: false,
     }));
     for (const session of sessions ?? []) {
       // Conversations with others' spaces are listed under Shared with you.
@@ -394,7 +415,9 @@ function ChatsPanel({
       const section =
         all.find((candidate) => candidate.agent.id === session.agent?.id) ??
         all.find((candidate) => candidate.agent.majordomo);
-      section?.list.push(session);
+      if (!section) continue;
+      if (session.archived) section.archived = true;
+      else section.list.push(session);
     }
     return all;
   }, [agents, sessions]);
@@ -517,7 +540,8 @@ function ChatsPanel({
         {view === "agents" &&
           search &&
           shownSections.length === 0 &&
-          shownVisits.length === 0 && (
+          shownVisits.length === 0 &&
+          archived.length === 0 && (
             <p className="px-2 py-6 text-center text-muted-foreground text-sm">
               {t("noChatsMatch")}
             </p>
@@ -533,9 +557,17 @@ function ChatsPanel({
             />
           ))
         ) : flat.length === 0 ? (
-          <p className="px-2 py-6 text-center text-muted-foreground text-sm">
-            {t(search ? "noChatsMatch" : "noChatsYet")}
-          </p>
+          (archived.length === 0 || !search) && (
+            <p className="px-2 py-6 text-center text-muted-foreground text-sm">
+              {t(
+                archived.length > 0
+                  ? "noRecentChats"
+                  : search
+                    ? "noChatsMatch"
+                    : "noChatsYet",
+              )}
+            </p>
+          )
         ) : (
           <ul className="space-y-px">
             {flat.map((session) => (
@@ -549,6 +581,15 @@ function ChatsPanel({
               />
             ))}
           </ul>
+        )}
+        {archived.length > 0 && (
+          <ArchivedChats
+            list={archived}
+            activeId={activeId}
+            searching={!!search}
+            awaitingApproval={awaitingApproval}
+            onNavigate={onNavigate}
+          />
         )}
         {view === "agents" && (
           <AgentSettingsDialog>
@@ -706,7 +747,7 @@ function RailDialogLink({
 
 /** An agent's name, settings, new-chat button, and chats. */
 function AgentSectionList({
-  section: { agent, list },
+  section: { agent, list, archived },
   activeId,
   awaitingApproval,
   onNavigate,
@@ -808,7 +849,7 @@ function AgentSectionList({
       {open &&
         (list.length === 0 ? (
           <p className="px-2 py-1 text-muted-foreground text-xs">
-            {t("noChatsYet")}
+            {t(archived ? "noRecentChats" : "noChatsYet")}
           </p>
         ) : (
           <ul className="space-y-px">
@@ -823,6 +864,67 @@ function AgentSectionList({
             ))}
           </ul>
         ))}
+    </section>
+  );
+}
+
+/**
+ * Chats with no activity for two days, folded away below the others. It
+ * opens while searching, and when the open chat is one of them.
+ */
+function ArchivedChats({
+  list,
+  activeId,
+  searching,
+  awaitingApproval,
+  onNavigate,
+}: {
+  list: Session[];
+  activeId?: string;
+  searching: boolean;
+  awaitingApproval: ReadonlySet<string>;
+  onNavigate?: () => void;
+}) {
+  const { t } = useI18n();
+  const holdsActive = list.some((session) => session.id === activeId);
+  const [open, setOpen] = useState(holdsActive);
+  const [shownFor, setShownFor] = useState(activeId);
+  if (shownFor !== activeId) {
+    setShownFor(activeId);
+    if (holdsActive) setOpen(true);
+  }
+  const expanded = open || searching;
+  return (
+    <section className="mb-3" aria-label={t("archived")}>
+      <button
+        type="button"
+        className="flex items-center gap-1 rounded-md px-2 py-1.5 font-medium text-muted-foreground text-xs hover:text-foreground"
+        onClick={() => setOpen(!expanded)}
+        aria-expanded={expanded}
+      >
+        {t("archived")}
+        <span className="font-normal">{list.length}</span>
+        <ChevronDown
+          className={cn(
+            "size-3.5 transition-transform",
+            !expanded && "-rotate-90",
+          )}
+        />
+      </button>
+      {expanded && (
+        <ul className="space-y-px">
+          {list.map((session) => (
+            <SessionRow
+              key={session.id}
+              session={session}
+              active={session.id === activeId}
+              awaitingApproval={awaitingApproval.has(session.id)}
+              onNavigate={onNavigate}
+              showAgent
+            />
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

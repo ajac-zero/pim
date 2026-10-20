@@ -723,15 +723,16 @@ export type ComputerStatus = {
   } | null;
 };
 
-/** The browser your agents share: whether this Pim has one, and the page it shows when it's open. */
+/** The browser your agents share: whether this Pim has one, and the page a chat's window shows when it's open. */
 export type BrowserStatus = {
   available: boolean;
   /** The page it shows; `asleep` while the computer Pim started sleeps, which taking it over wakes. */
   page: { url: string; title: string; asleep?: boolean } | null;
 };
 
-/** A picture of the page the browser shows. */
-export const BROWSER_SCREENSHOT_URL = "/api/browser/screenshot";
+/** A picture of the page a chat's window shows, as fetched at `at`. */
+export const browserScreenshotUrl = (sessionId: string, at: number) =>
+  `/api/browser/screenshot?session=${encodeURIComponent(sessionId)}&at=${at}`;
 
 /** Where the app takes the browser over: a socket that hears the page and sends what the person does. */
 export const BROWSER_LIVE_PATH = "/api/browser/live";
@@ -1097,9 +1098,13 @@ export const pim = {
       body: JSON.stringify({ managed: true }),
     }),
   removeComputer: () => call<ComputerStatus>("/computer", { method: "DELETE" }),
-  browser: () => call<BrowserStatus>("/browser"),
-  closeBrowser: () =>
-    call<{ closed: boolean }>("/browser", { method: "DELETE" }),
+  browser: (sessionId: string) =>
+    call<BrowserStatus>(`/browser?session=${encodeURIComponent(sessionId)}`),
+  closeBrowser: (sessionId: string) =>
+    call<{ closed: boolean }>(
+      `/browser?session=${encodeURIComponent(sessionId)}`,
+      { method: "DELETE" },
+    ),
   removeAgentIcon: (id: string) =>
     call<Agent>(`/agents/${id}/icon`, { method: "DELETE" }),
   deleteAgent: (id: string) =>

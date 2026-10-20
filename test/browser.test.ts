@@ -28,7 +28,7 @@ function lastToolResult(messages: readonly Message[]): string {
 	return result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 }
 
-async function callTool(name: string, args: Record<string, unknown>) {
+async function callTool(name: string, args: Record<string, unknown>, session?: string) {
 	let result = "";
 	faux.setResponses([
 		toolUse(name, args as never),
@@ -37,7 +37,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
 			return toolUse("send_to_user", { message: "Done." });
 		},
 	]);
-	await say(`Please use ${name}`);
+	await say(`Please use ${name}`, session);
 	return result;
 }
 
@@ -57,9 +57,9 @@ afterEach(async () => {
 	await setPermission("browser_type", null);
 });
 
-/** Takes the browser over, as the app does: a socket that hears the page as pictures, and sends the person's mouse and keyboard. */
-async function takeOver() {
-	const response = await opens("/browser/live", TOKEN);
+/** Takes a chat's window over, as the app does: a socket that hears the page as pictures, and sends the person's mouse and keyboard. */
+async function takeOver(session?: string) {
+	const response = await opens(`/browser/live${session ? `?session=${session}` : ""}`, TOKEN);
 	const socket = response.webSocket!;
 	const heard: { type: string; [key: string]: unknown }[] = [];
 	const closed = new Promise<CloseEvent>((resolve) => socket.addEventListener("close", resolve));
@@ -175,5 +175,32 @@ describe("the browser", () => {
 		// Closing the browser ends the takeover.
 		await api("/browser", { method: "DELETE" });
 		expect((await live.closed).code).toBe(4000);
+	});
+
+	it("gives each chat a window of its own, where its agent finds its page however others browse", async () => {
+		const other = (await post<{ id: string }>("/sessions", {})).body.id;
+		expect(await callTool("browser_open", { url: FORM })).toContain("Page: Orders");
+		const placed = await callTool("browser_open", { url: PLACED }, other);
+		expect(placed).toContain("Page: Placed");
+
+		// The first chat's page is where its agent left it, and so is the other's.
+		const orders = await callTool("browser_read", {});
+		expect(orders).toContain("Page: Orders");
+		expect((await api("/browser")).body.page).toEqual({ url: FORM, title: "Orders" });
+		expect((await api(`/browser?session=${other}`)).body.page).toEqual({ url: PLACED, title: "Placed" });
+
+		// The person takes over the other chat's window, and sees its page.
+		const live = await takeOver(other);
+		await vi.waitFor(() => expect(live.heard).toContainEqual({ type: "page", url: PLACED, title: "Placed" }));
+
+		// Clicking in the first chat's window reaches its form, not the page the other chat shows.
+		await setPermission("browser_click", "on");
+		expect(await callTool("browser_click", { ref: refOf(orders, "button", "Order") })).toContain("# Ordered for");
+
+		// Closing a chat's window ends its takeover, and leaves the other window as it was.
+		expect(await callTool("browser_close", {}, other)).toContain("Your window is closed");
+		expect((await live.closed).code).toBe(4000);
+		expect(await callTool("browser_read", {}, other)).toContain("Your window is closed");
+		expect(await callTool("browser_read", {})).toContain("Page: Orders");
 	});
 });

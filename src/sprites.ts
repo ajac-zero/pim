@@ -24,17 +24,25 @@ const STDERR = 2;
 const EXIT = 3;
 const STDIN_EOF = 4;
 
-/** How long pim-computer may go on once let go of: time to quit the browser, so what's signed in there is saved. */
+/** How many times a call is made when Sprites is unavailable. */
+const RETRIES = 3;
+
+/** How long pim-computer has to quit once its input ends: time to quit the browser, so what's signed in there is saved. */
+const QUIT_MS = 20_000;
+/** How long it may go on if the socket goes before it has quit. */
 const AFTER_DISCONNECT = "30s";
 
 /**
  * What a new Sprite gets once: Google Chrome, which the agents browse
  * with, and the emoji font pages use. Sprites have Node.js already.
+ * Downloads are tried again, as they fail now and then.
  */
 const SETUP = `set -e
 mkdir -p ~/pim ~/.pim-computer
+# The key bindings in .bashrc are for terminals: elsewhere, such as in agents' commands, they only warn.
+sed -i 's/^bind /[[ $- == *i* ]] \\&\\& bind /' ~/.bashrc || true
 if [ "$(dpkg --print-architecture)" = amd64 ] && ! command -v google-chrome-stable >/dev/null; then
-	curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+	curl -fsSL --retry 5 --retry-all-errors -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 	sudo apt-get update -qq
 	sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq /tmp/chrome.deb fonts-noto-color-emoji
 	rm -f /tmp/chrome.deb
@@ -55,6 +63,17 @@ export type SpriteLink = {
 	close(): void;
 };
 
+/** Splits the bytes of a stream into its lines, each of which goes to `line`. */
+function lines(line: (text: string) => void): (bytes: Uint8Array) => void {
+	const decoder = new TextDecoder();
+	let partial = "";
+	return (bytes) => {
+		const parts = (partial + decoder.decode(bytes, { stream: true })).split("\n");
+		partial = parts.pop() ?? "";
+		for (const part of parts) if (part) line(part);
+	};
+}
+
 export class Sprites {
 	readonly #token: string;
 
@@ -63,11 +82,18 @@ export class Sprites {
 	}
 
 	async #call(method: string, path: string, body?: unknown): Promise<Response> {
-		const response = await fetch(`${API}${path}`, {
-			method,
-			headers: { Authorization: `Bearer ${this.#token}`, "content-type": "application/json" },
-			...(body === undefined ? {} : { body: JSON.stringify(body) }),
-		});
+		let response: Response;
+		// Sprites answers 503 now and then, asking to be asked again.
+		for (let attempt = 1; ; attempt++) {
+			response = await fetch(`${API}${path}`, {
+				method,
+				headers: { Authorization: `Bearer ${this.#token}`, "content-type": "application/json" },
+				...(body === undefined ? {} : { body: JSON.stringify(body) }),
+			});
+			if (response.status !== 503 || attempt === RETRIES) break;
+			await response.body?.cancel();
+			await new Promise((resolve) => setTimeout(resolve, attempt * 2_000));
+		}
 		if (!response.ok && !(method === "DELETE" && response.status === 404)) {
 			const detail = (await response.text()).slice(0, 300);
 			console.error(JSON.stringify({ event: "sprites.failed", method, path, status: response.status, detail }));
@@ -96,7 +122,7 @@ export class Sprites {
 
 	/** Creates a Sprite named `name` and sets it up; one that can't be set up is removed. */
 	async create(name: string): Promise<void> {
-		await this.#call("POST", "/sprites", { name });
+		await this.#call("POST", "/sprites", { name, wait_for_capacity: true });
 		try {
 			const socket = await this.#exec(name, SETUP, []);
 			const { code, errors } = await new Promise<{ code: number; errors: string }>((resolve) => {
@@ -136,24 +162,20 @@ export class Sprites {
 	 */
 	async connect(name: string, pimUrl: string, receive: (line: string) => void, closed: () => void): Promise<SpriteLink> {
 		const socket = await this.#exec(name, LAUNCH, [pimUrl], { afterDisconnect: AFTER_DISCONNECT });
-		const decoder = new TextDecoder();
-		let partial = "";
 		let ended = false;
 		const end = () => {
 			if (ended) return;
 			ended = true;
 			closed();
 		};
+		const output = lines(receive);
+		const log = lines((line) => console.log(JSON.stringify({ event: "computer.log", name, line: line.slice(0, 500) })));
 		socket.addEventListener("message", (event) => {
 			if (typeof event.data === "string") return;
 			const frame = new Uint8Array(event.data as ArrayBuffer);
-			if (frame[0] === STDOUT) {
-				const lines = (partial + decoder.decode(frame.subarray(1), { stream: true })).split("\n");
-				partial = lines.pop() ?? "";
-				for (const line of lines) if (line) receive(line);
-			} else if (frame[0] === STDERR) {
-				console.log(JSON.stringify({ event: "computer.log", name, line: new TextDecoder().decode(frame.subarray(1)).trimEnd().slice(0, 500) }));
-			} else if (frame[0] === EXIT) {
+			if (frame[0] === STDOUT) output(frame.subarray(1));
+			else if (frame[0] === STDERR) log(frame.subarray(1));
+			else if (frame[0] === EXIT) {
 				socket.close(1000);
 				end();
 			}
@@ -173,12 +195,13 @@ export class Sprites {
 				socket.send(frame);
 			},
 			close() {
-				if (socket.readyState === WebSocket.OPEN) {
-					socket.send(Uint8Array.of(STDIN_EOF));
-					socket.close(1000, "Let go");
-				}
 				end();
+				if (socket.readyState !== WebSocket.OPEN) return;
+				// Its input ends, so it quits the browser and exits, which closes the socket; one that's slow to is let go of all the same.
+				socket.send(Uint8Array.of(STDIN_EOF));
+				setTimeout(() => socket.readyState === WebSocket.OPEN && socket.close(1000, "Let go"), QUIT_MS);
 			},
 		};
 	}
+
 }

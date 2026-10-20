@@ -3,6 +3,7 @@ import pimConfig from "../pim.config";
 import { diagramPage } from "./artifacts";
 import { deploymentSettings } from "./deployment";
 import { accountApi, adminApi, clientIp, contentOrigin, handleRegistration, limited, resolveAccount, servePublicArtifact, siteFor, sites, socialApi } from "./accounts";
+import { COMPUTER_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
 import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
@@ -30,6 +31,9 @@ import { PimThemes } from "./themes";
  *   API token. `/oauth/*` and `/.well-known/*` sign those clients in, and
  *   `/authorize` is the app's page where the person lets them
  *   (./mcp-auth.ts).
+ * - `/api/computer/connect`: the person's computer (./computer.ts), which
+ *   connects with its own token, `pimc_<owner>_<secret>`. The token opens only
+ *   this connection, and the owner's space checks it.
  * - `/mcp/callback/<owner>`, `/mcp/events/<owner>/<watch>`: public, for
  *   connected apps. Each is checked another way: the OAuth state, and the
  *   watch's signing secret.
@@ -229,6 +233,24 @@ async function serveSharedChat(request: Request, env: Env, pathname: string): Pr
 	});
 }
 
+/**
+ * The person's computer connecting: a WebSocket with the computer's token,
+ * which names its owner. The owner's space checks the token, so it opens
+ * nothing else, and an API token or a session doesn't open this.
+ */
+async function serveComputer(request: Request, env: Env): Promise<Response> {
+	const token = givenToken(request);
+	const owner = token ? computerTokenOwner(token) : null;
+	const account = owner ? await resolveAccount(env, owner) : null;
+	if (!account) return fail(401, "Unauthorized");
+	const refused = closed(account) ?? (await throttled(env, account));
+	if (refused) return refused;
+	const forwarded = new Request(request);
+	forwarded.headers.delete("Authorization");
+	forwarded.headers.set(COMPUTER_TOKEN_HEADER, token!);
+	return toAgent(forwarded, env, account.ownerId, COMPUTER_PATH);
+}
+
 let deployedThemes: PimThemes | undefined;
 
 /** The color themes, listed (`/themes`) or as the stylesheet the app loads before it draws (`/themes.css`). */
@@ -317,6 +339,7 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 	if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
 	const path = pathname.slice("/api".length) || "/";
 	if (path === "/health") return withCors(Response.json({ name: "pim", ok: true }));
+	if (path === "/computer/connect") return serveComputer(request, env);
 	const caller = await admit(request, env);
 	if (caller instanceof Response) return withCors(caller);
 	const { account, viaSession } = caller;

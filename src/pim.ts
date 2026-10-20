@@ -84,9 +84,9 @@ import {
 } from "./extensions/approvals";
 import pimConfig from "../pim.config";
 import { artifactsExtension, artifactsWidgets } from "./extensions/artifacts";
-import { type FileServices, fileDeleteAction, filesExtension } from "./extensions/files";
+import { type FileServices, fileDeleteAction, filesExtension, SHELL, shellAction } from "./extensions/files";
 import { browserClickAction, browserExtension, browserTypeAction } from "./extensions/browser";
-import { type ImageModel, imageGenerationExtension, workersAiImageModel } from "./extensions/image-generation";
+import { IMAGES_EXTENSION, type ImageModel, imageGenerationExtension, workersAiImageModel } from "./extensions/image-generation";
 import { appDirectory, type CustomApp, type DirectoryApp } from "./extensions/app-directory";
 import { ExtensionDataStore } from "./extensions/data";
 import { NativeApps } from "./extensions/native-apps";
@@ -138,7 +138,9 @@ import { CREATE_AGENT, agentExtension, MANAGE_APPS, manageAppsAction, RENAME_AGE
 import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
-import { CODE_BACKEND, codeBackends, codeLoader, FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
+import { COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer } from "./computer";
+import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
+import { LegacyFiles } from "./legacy-files";
 import { PimBrowser } from "./browser";
 import { type DeploymentSettings, deploymentSettings } from "./deployment";
 import { dispatch, HttpError, readJson, type Route } from "./http";
@@ -170,6 +172,8 @@ const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 
 /** Pim's own widgets: every chat can show them. */
 const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory", "pim.artifacts"];
+/** Pim's own actions that use the person's computer, offered only while one is paired. */
+const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL]);
 /** How a dashboard names an artifact pinned to it: `artifact:<id>`. */
 const PINNED_ARTIFACT = "artifact:";
 
@@ -363,21 +367,19 @@ export class Pim extends DurableAgent<Env> {
 			return storageBytes === null ? null : storageBytes - this.storedBytes();
 		},
 	});
-	#workspace: Workspace | undefined;
-	/** The person's files, which they and their agents share (see ./files.ts). */
-	readonly files = new Files({
-		workspace: () => this.#files.workspace(),
+	/** The person's computer, which their agents use, if they connected one (see ./computer.ts). */
+	readonly computer = new Computer({ meta: this.store, sockets: () => [...this.getConnections(COMPUTER_TAG)] });
+	/** The person's files, on their computer, which they and their agents share (see ./files.ts). */
+	readonly files = new Files(this.computer);
+	readonly #files: FileServices = { computer: this.computer, assertOpen: () => this.#assertOpen() };
+	#legacyWorkspace: Workspace | undefined;
+	/** Files kept in the space before they moved to the computer, until they move there (see ./legacy-files.ts). */
+	readonly legacyFiles = new LegacyFiles({
+		workspace: () => (this.#legacyWorkspace ??= new Workspace({ storage: this.ctx.storage, output: false })),
 		sql: this.ctx.storage.sql,
 		bucket: this.env.BLOBS,
 		owner: () => this.name,
 	});
-	readonly #files: FileServices = {
-		workspace: () => (this.#workspace ??= new Workspace({ storage: this.ctx.storage, output: false, backends: codeBackends(this.env) })),
-		files: this.files,
-		codeBackend: () => (codeLoader(this.env) ? CODE_BACKEND : null),
-		assertOpen: () => this.#assertOpen(),
-		storageRefusal: () => this.#storageRefusal(),
-	};
 	/** The browser the person's agents share (see ./browser.ts). */
 	readonly browser = new PimBrowser(this.env.BROWSER as BrowserRun | undefined, {
 		get: (key) => this.store.meta(key) || null,
@@ -514,9 +516,16 @@ export class Pim extends DurableAgent<Env> {
 		renameAgentAction(this.agents),
 		manageAppsAction(this.agents, this.apps, () => this.appDirectory()),
 		fileDeleteAction(this.#files),
+		shellAction(this.computer),
 		...(this.browser.available ? [browserClickAction(this.browser), browserTypeAction(this.browser)] : []),
 		writeSkillAction(this.skills, this.agents),
 	];
+
+	/** Pim's own actions whose tools agents are offered now: those that use the computer only while one is paired. */
+	#offeredActions(): GatedAction[] {
+		const computer = this.computer.paired();
+		return this.#ownActions.filter((action) => computer || !COMPUTER_ACTIONS.has(action.name));
+	}
 
 	/** Every action an approval can be for: Pim's own, and the extensions'. */
 	get actions(): readonly GatedAction[] {
@@ -545,13 +554,13 @@ export class Pim extends DurableAgent<Env> {
 			this.registry.install(
 				reviewExtension({ majordomo: () => this.agents.majordomo(), decide: (conversation, decision, note) => this.#reviewDecision(conversation, decision, note) }),
 			);
-			this.registry.install(approvalsExtension(services, this.#ownActions));
+			this.registry.install(approvalsExtension(services, this.#offeredActions()));
 			this.registry.install(webExtension);
 			this.registry.install(
 				artifactsExtension({
 					artifacts: this.artifacts,
 					assertOpen: () => this.#assertOpen(),
-					readFile: async (path) => new Uint8Array(await new Response((await this.files.read(path)).body).arrayBuffer()),
+					readFile: (path) => this.files.bytes(path),
 				}),
 			);
 			this.registry.install(filesExtension(this.#files));
@@ -624,6 +633,8 @@ export class Pim extends DurableAgent<Env> {
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
+		// The computer pings to keep its connection open; the answer doesn't wake the space.
+		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 		this.lifecycle.use(this.harness);
 		// A new, removed, signed-in or failed app changes the tools: pi uses the new set from the next request.
 		this.mcp.onServerStateChanged(() => {
@@ -1387,7 +1398,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/** What this space holds: its database, and in R2 the images sent to it, its stored files and its artifacts' files. */
 	storedBytes(): number {
-		return this.ctx.storage.sql.databaseSize + this.images.bytes() + this.files.storedBytes() + this.artifacts.fileBytes();
+		return this.ctx.storage.sql.databaseSize + this.images.bytes() + this.legacyFiles.storedBytes() + this.artifacts.fileBytes();
 	}
 
 	#storageRefusal(): string | null {
@@ -1765,7 +1776,8 @@ export class Pim extends DurableAgent<Env> {
 
 	/** Pim's own tools that ask first unless the user chooses otherwise; `mcp_call` is filed by the apps' tools. */
 	#ownGatedActions(): GatedAction[] {
-		return this.actions.filter((action) => action.name !== "mcp_call");
+		const offered = new Set(this.#offeredActions().map((action) => action.name));
+		return this.actions.filter((action) => action.name !== "mcp_call" && (offered.has(action.name) || !this.#ownActions.includes(action)));
 	}
 
 	/** The tool an approval was filed for, as permissions name it: by its app and the app's own name for it. */
@@ -3106,6 +3118,14 @@ export class Pim extends DurableAgent<Env> {
 		}
 		if (this.#closed()) return Response.json({ error: "This space was erased" }, { status: 410 });
 		if (this.status() !== "active") return Response.json({ error: "This space is suspended" }, { status: 403 });
+		if (new URL(request.url).pathname === COMPUTER_PATH) {
+			// The person's computer connects with its own token, which the Worker passes along unchecked.
+			if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return Response.json({ error: "Computers connect with a WebSocket" }, { status: 426 });
+			if (!(await this.computer.checkToken(request.headers.get(COMPUTER_TOKEN_HEADER)))) {
+				return Response.json({ error: "This isn't the token of this space's computer" }, { status: 401 });
+			}
+			return super.fetch(request);
+		}
 		await this.#refreshCustomApps();
 		return super.fetch(request);
 	}
@@ -3217,7 +3237,8 @@ export class Pim extends DurableAgent<Env> {
 			watches: this.appEvents.list(),
 			...(await this.artifacts.export().then(({ artifacts, files }) => ({ artifacts: artifacts.map((artifact) => this.#publicSession(artifact)), artifactFiles: files }))),
 			othersArtifactData: this.artifacts.othersData(),
-			files: await this.files.export(),
+			// Files the space still keeps; those on the person's computer are theirs already.
+			files: await this.legacyFiles.export(),
 			skills: this.skills.export(),
 			usage: this.usage.history(90),
 		});
@@ -4121,7 +4142,28 @@ export class Pim extends DurableAgent<Env> {
 					return new Response((await this.artifacts.read(artifact.id, found.version, [path])).get(path)!.bytes, { headers });
 				}),
 		],
-		// Files: the person's, which their agents read and write too (see ./files.ts).
+		// The person's computer (see ./computer.ts): whether one is connected, pairing one, and removing it.
+		["GET", "/computer", () => noStore(this.computer.status())],
+		[
+			"POST",
+			"/computer",
+			async () => {
+				this.#assertOpen();
+				const token = await this.computer.pair(this.name, Date.now());
+				this.#computerChanged();
+				return noStore({ ...this.computer.status(), token }, 201);
+			},
+		],
+		[
+			"DELETE",
+			"/computer",
+			() => {
+				this.computer.forget();
+				this.#computerChanged();
+				return noStore(this.computer.status());
+			},
+		],
+		// Files: the person's, on their computer, which their agents read and write too (see ./files.ts).
 		["GET", "/files", (_params, _request, url) => this.#artifactRequest(url, async () => noStore(await this.files.list(url.searchParams.get("path") ?? FILES_ROOT)))],
 		[
 			"GET",
@@ -4142,12 +4184,7 @@ export class Pim extends DurableAgent<Env> {
 					if (Number(request.headers.get("content-length") ?? 0) > MAX_UPLOAD_BYTES) throw new HttpError(413, tooLarge);
 					const body = new Uint8Array(await request.arrayBuffer());
 					if (body.byteLength > MAX_UPLOAD_BYTES) throw new HttpError(413, tooLarge);
-					const refusal = this.#storageRefusal();
-					if (refusal) throw new HttpError(429, refusal);
-					const { storageBytes } = this.limits();
-					if (storageBytes !== null && body.byteLength > storageBytes - this.storedBytes()) {
-						throw new HttpError(429, `Space storage quota exceeded: there is room for ${Math.max(0, storageBytes - this.storedBytes())} more bytes.`);
-					}
+					// Files are on the person's computer, so they don't count toward the space's storage.
 					return noStore(await this.files.write(url.searchParams.get("path"), body), 201);
 				}),
 		],
@@ -4872,7 +4909,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/** The person's skills in their agents' chats: rebuilt when whether `write_skill` asks first changes. */
 	#skillsExtension(services: PimServices) {
-		return skillsExtension(services, (session) => this.#roleOf(session), this.skills, codeLoader(this.env) !== null);
+		return skillsExtension(services, (session) => this.#roleOf(session), this.skills, this.computer.paired());
 	}
 
 	/** Rebuilds the extensions whose tools describe the approval policy, once pi's registry has been set up. */
@@ -4881,10 +4918,24 @@ export class Pim extends DurableAgent<Env> {
 		const services = this.services();
 		this.registry.install(this.#agentExtension(services));
 		this.registry.install(this.#skillsExtension(services));
-		this.registry.install(approvalsExtension(services, this.#ownActions));
+		this.registry.install(approvalsExtension(services, this.#offeredActions()));
 		this.#installBrowser(services);
 		this.#installAbilities(services);
 		this.#installApps();
+	}
+
+	/**
+	 * A computer was paired or removed: the tools that use it come or go, from
+	 * the next request, and open apps hear of it. Its connecting and dropping
+	 * off change no tools.
+	 */
+	#computerChanged(): void {
+		this.broadcastMessage({ type: "computer" });
+		if (!this.registry.snapshot().extension("pim.approvals")) return;
+		// Replaced in place, so chats begun before see the change, as they do an approval policy's.
+		this.registry.install(filesExtension(this.#files));
+		this.#installImageGeneration();
+		this.#reinstallApprovals();
 	}
 
 	/** The browser's tools, where this deployment has a browser; clicking and typing follow their permissions. */
@@ -4893,13 +4944,14 @@ export class Pim extends DurableAgent<Env> {
 		this.registry.install(
 			browserExtension(services, {
 				browser: this.browser,
-				saveScreenshot: async (path, png) => {
-					this.#assertOpen();
-					const refusal = this.#storageRefusal();
-					if (refusal) throw new Error(refusal);
-					const target = path ?? `${FILES_ROOT}/screenshots/${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
-					return (await this.files.write(target, png)).path;
-				},
+				// Screenshots go to the person's files, on their computer.
+				saveScreenshot: this.computer.paired()
+					? async (path, png) => {
+							this.#assertOpen();
+							const target = path ?? `${FILES_ROOT}/screenshots/${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
+							return (await this.files.write(target, png)).path;
+						}
+					: null,
 			}),
 		);
 	}
@@ -4914,13 +4966,16 @@ export class Pim extends DurableAgent<Env> {
 	#installImageGeneration(): void {
 		const model = this.imageModel();
 		if (!model) return;
+		// Images are saved to the person's files, on their computer: without one, the extension is there with no tool.
+		if (!this.computer.paired()) {
+			this.registry.install(defineExtension({ name: IMAGES_EXTENSION, tools: [] }));
+			return;
+		}
 		this.registry.install(
 			imageGenerationExtension({
 				model,
 				reserve: () => {
 					this.#assertOpen();
-					const storage = this.#storageRefusal();
-					if (storage) return storage;
 					const reserved = this.usage.reserveModel(CLOUDFLARE_PROVIDER_ID, model.id);
 					return reserved.ok ? null : reserved.refusal;
 				},
@@ -4962,7 +5017,20 @@ export class Pim extends DurableAgent<Env> {
 		return false;
 	}
 
+	/** The computer's connection is tagged, so the space finds it, and leaves it out of what it tells the app. */
+	override getConnectionTags(_connection: Connection, ctx: ConnectionContext): string[] {
+		return new URL(ctx.request.url).pathname === COMPUTER_PATH ? [COMPUTER_TAG] : [];
+	}
+
+	#isComputer(connection: Connection): boolean {
+		return connection.tags.includes(COMPUTER_TAG);
+	}
+
 	async onConnect(connection: Connection<SocketState>, ctx: ConnectionContext): Promise<void> {
+		if (this.#isComputer(connection)) {
+			this.computer.connected(connection);
+			return;
+		}
 		const requested = new URL(ctx.request.url).searchParams.get("session");
 		let session: string;
 		try {
@@ -4979,6 +5047,11 @@ export class Pim extends DurableAgent<Env> {
 
 	async onMessage(connection: Connection<SocketState>, raw: WSMessage): Promise<void> {
 		if (typeof raw !== "string") return;
+		if (this.#isComputer(connection)) {
+			this.computer.receive(raw);
+			if (raw.startsWith('{"type":"hello"')) this.#computerConnected();
+			return;
+		}
 		let message: ClientMessage;
 		try {
 			message = JSON.parse(raw) as ClientMessage;
@@ -5000,13 +5073,38 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	async onClose(connection: Connection): Promise<void> {
+		if (this.#isComputer(connection)) return this.#computerDisconnected();
 		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
 	}
 
 	async onError(connection: Connection): Promise<void> {
+		if (this.#isComputer(connection)) return this.#computerDisconnected();
 		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
+	}
+
+	/**
+	 * The computer connected and said what it is: open apps hear of it, and
+	 * files kept in the space before files moved to the computer move there.
+	 */
+	#computerConnected(): void {
+		this.broadcastMessage({ type: "computer" });
+		void this.keepAliveWhile(async () => {
+			try {
+				if (!(await this.legacyFiles.any())) return;
+				const moved = await this.legacyFiles.moveTo(this.files);
+				if (moved > 0) this.broadcastMessage({ type: "computer" });
+			} catch (error) {
+				// It goes on from where it stopped the next time the computer connects.
+				console.warn("moving files to the computer failed", error);
+			}
+		});
+	}
+
+	#computerDisconnected(): void {
+		this.computer.disconnected();
+		this.broadcastMessage({ type: "computer" });
 	}
 
 	async #command(connection: Connection<SocketState>, session: string, message: ClientMessage): Promise<JsonValue> {
@@ -5094,7 +5192,11 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
+	/** Tells every open app; the computer's connection speaks another protocol. */
 	broadcastMessage(message: ServerMessage): void {
-		this.broadcast(JSON.stringify(message));
+		this.broadcast(
+			JSON.stringify(message),
+			[...this.getConnections(COMPUTER_TAG)].map((connection) => connection.id),
+		);
 	}
 }

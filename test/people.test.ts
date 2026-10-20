@@ -730,9 +730,9 @@ describe("the account", () => {
 		await runInDurableObject(env.Pim.getByName(rita.ownerId), async (instance: Pim) => {
 			instance.store.putCredential("openai", JSON.stringify({ type: "oauth", access: "rita-access", refresh: "rita-refresh" }));
 			await instance.schedule(new Date(Date.now() + 60 * 60_000), "runScheduledTask", { session: "1", instruction: "Call the bank" });
-			// Images and files that aren't text are kept in R2, outside the space's storage.
+			// Images, and files kept before files moved to people's computers, are in R2, outside the space's storage.
 			await instance.images.keep("1", [{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }]);
-			await instance.files.write("/workspace/scan.pdf", new Uint8Array([0x25, 0x50, 0x44, 0x46, 0]));
+			await env.BLOBS.put(`${rita.ownerId}/files/scan`, new Uint8Array([0x25, 0x50, 0x44, 0x46, 0]));
 		});
 		expect((await holdings(rita.ownerId)).remaining).toEqual(
 			expect.arrayContaining(["credentials", "memories", "schedules", "owner profile", "images"]),

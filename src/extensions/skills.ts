@@ -71,11 +71,11 @@ export function writeSkillAction(skills: SkillStore, agents: Pick<AgentStore, "g
 	}) as GatedAction;
 }
 
-/** What a script in a skill is, where the deployment runs code: one that runs as it is, without rewriting. */
+/** What a script in a skill is, where the person has a computer: a file the agent saves there and runs with `shell`. */
 const SCRIPTS =
-	"A skill can carry scripts for run_javascript: each an ES module whose `export default async function (input)` does the work, which an agent runs by passing the file's content to run_javascript as `command`, with `input`.";
+	"A skill can carry scripts as supporting files: an agent that needs one writes it to a file under /workspace and runs it on the person's computer with shell.";
 
-/** `canRunCode`: the deployment offers `run_javascript`, so skills can carry scripts for it. */
+/** `canRunCode`: the person has a computer, where `shell` runs the scripts skills carry. */
 export function skillsExtension(services: PimServices, roleOf: (session: string) => Role, skills: SkillStore, canRunCode: boolean) {
 	const permission = () => ownToolPermission(services.store, WRITE_SKILL).permission;
 

@@ -73,9 +73,6 @@
   // Email to each person, off until set up: onboard a domain to Cloudflare Email Service,
   // uncomment this, and set PIM_EMAIL_FROM to an address on that domain.
   // "send_email": [{ "name": "EMAIL" }],
-  // Running agents' code over people's files (`run_javascript`) is off until you uncomment this. Dynamic
-  // Workers need the Workers Paid plan; each run is a fresh Worker with no network.
-  // "worker_loaders": [{ "binding": "LOADER" }],
   // When this version was deployed: whoever opens a Pim with no admin in the 15 minutes
   // after becomes its admin.
   "version_metadata": { "binding": "CF_VERSION_METADATA" },

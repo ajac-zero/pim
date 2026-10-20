@@ -68,5 +68,7 @@ export type ServerMessage =
 	| { readonly type: "sessions" }
 	/** The tasks the work begun in a chat led to changed: one was handed out, waits for an approval, or ended. */
 	| { readonly type: "tasks"; readonly session: string }
+	/** The person's computer was paired or removed, connected or dropped off, or its files changed under the app. */
+	| { readonly type: "computer" }
 	| { readonly type: "result"; readonly id: string; readonly result: JsonValue }
 	| { readonly type: "error"; readonly id?: string; readonly message: string };

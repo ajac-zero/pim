@@ -26,7 +26,11 @@ const TypeArgs = Type.Object({
 	submit: Type.Optional(Type.Boolean({ description: "Press Enter after typing, which usually sends the form." })),
 });
 
-export type BrowserServices = { readonly browser: PimBrowser; readonly saveScreenshot: (path: string | undefined, png: Uint8Array) => Promise<string> };
+export type BrowserServices = {
+	readonly browser: PimBrowser;
+	/** Saves a screenshot to the person's files, or null when they have none (no computer), which leaves out `browser_screenshot`. */
+	readonly saveScreenshot: ((path: string | undefined, png: Uint8Array) => Promise<string>) | null;
+};
 
 function failure(error: unknown) {
 	return text(error instanceof Error ? error.message : String(error), true);
@@ -145,7 +149,7 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 			try {
 				const png = await browser.screenshot();
 				if (!png) return text("The browser is closed. Open a page with browser_open.", true);
-				return text(`Saved to ${await saveScreenshot(path, png)}.`);
+				return text(`Saved to ${await saveScreenshot!(path, png)}.`);
 			} catch (error) {
 				return failure(error);
 			}
@@ -163,7 +167,7 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 		},
 	});
 
-	const tools: ToolRegistration[] = [browserOpen, browserRead, browserScreenshot, browserClose];
+	const tools: ToolRegistration[] = [browserOpen, browserRead, ...(saveScreenshot ? [browserScreenshot] : []), browserClose];
 	if (permissions.click !== "off") tools.push(browserClick);
 	if (permissions.type !== "off") tools.push(browserType);
 	return defineExtension({ name: BROWSER_EXTENSION, tools });

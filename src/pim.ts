@@ -519,7 +519,7 @@ export class Pim extends DurableAgent<Env> {
 			this.registry.install(this.#agentExtension(services));
 			this.registry.install(this.#skillsExtension(services));
 			this.registry.install(goalsExtension(services));
-			this.registry.install(scheduleExtension(services));
+			this.registry.install(scheduleExtension(services, (session) => this.#roleOf(session), (id) => this.agents.get(id)));
 			this.registry.install(messagingExtension(services));
 			this.registry.install(
 				tasksExtension({
@@ -1365,10 +1365,10 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Fired by `schedule_task` schedules: hands the instruction to the session
-	 * that made it, or to a new chat with its agent, and tells the person it
-	 * started with a notification that links to that chat. A firing a limit or
-	 * a suspension refuses is skipped, not retried; the person hears about the
-	 * limit once a day.
+	 * that made it, or to a new chat with its agent or the agent the majordomo
+	 * scheduled it for, and tells the person it started with a notification
+	 * that links to that chat. A firing a limit or a suspension refuses is
+	 * skipped, not retried; the person hears about the limit once a day.
 	 */
 	async runScheduledTask(payload: ScheduledTaskPayload, schedule: Schedule<ScheduledTaskPayload>): Promise<void> {
 		const label = payload.label ? ` "${payload.label}"` : "";
@@ -1405,7 +1405,9 @@ export class Pim extends DurableAgent<Env> {
 	async #scheduledChat(payload: ScheduledTaskPayload, schedule: Schedule<ScheduledTaskPayload>): Promise<string> {
 		const last = this.#scheduledChats()[schedule.id];
 		if (last?.time === schedule.time && !this.store.deletedSessions().has(last.session)) return last.session;
-		const id = await this.#startChat(this.agents.ofSession(payload.session), clipTitle(payload.label ?? payload.instruction));
+		// Work scheduled for an agent deleted since goes on with the agent of the chat that scheduled it.
+		const agent = (payload.agent && this.agents.get(payload.agent)) || this.agents.ofSession(payload.session);
+		const id = await this.#startChat(agent, clipTitle(payload.label ?? payload.instruction));
 		const live = new Set((await this.listSchedules()).map((scheduled) => scheduled.id));
 		// Read again after the awaits, and keep only schedules still pending, so the record stays one entry per task.
 		const chats = Object.fromEntries(Object.entries(this.#scheduledChats()).filter(([scheduled]) => live.has(scheduled)));

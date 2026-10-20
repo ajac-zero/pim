@@ -11,6 +11,8 @@ export type ScheduledTaskPayload = {
 	readonly label?: string;
 	/** Each firing starts a new chat with the scheduling chat's agent instead of continuing that chat. */
 	readonly newChat?: true;
+	/** The agent each new chat is with, when the majordomo scheduled the work for another of the person's agents. */
+	readonly agent?: string;
 };
 
 /**

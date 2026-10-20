@@ -271,11 +271,17 @@ export type Dashboard = {
   widgets: (Widget | PinnedArtifact)[];
 };
 
+/** The sizes a pinned artifact's widget comes in, as on a phone's home screen. */
+export const WIDGET_SIZES = ["small", "medium", "large"] as const;
+export type WidgetSize = (typeof WIDGET_SIZES)[number];
+
 /** One of the person's artifacts pinned to a dashboard, shown as its latest version. */
 export type PinnedArtifact = {
   /** `artifact:<id>`, as the dashboard names it. */
   id: string;
   title: string;
+  /** The size its widget is shown at. */
+  size: WidgetSize;
   /** `widget`: whether its latest version has a widget, the small view a dashboard shows. */
   artifact: {
     id: string;
@@ -663,8 +669,9 @@ export const artifactFrameUrl = (
   id: string,
   version: number,
   from?: ArtifactFrom,
-  widget = false,
-) => `${artifactPath(id, version, from)}/frame${widget ? "?view=widget" : ""}`;
+  widget?: WidgetSize,
+) =>
+  `${artifactPath(id, version, from)}/frame${widget ? `?view=widget&size=${widget}` : ""}`;
 
 /** Where the browser downloads a version's file: its main one, unless `path` names another. */
 export const artifactDownloadUrl = (
@@ -1038,12 +1045,19 @@ export const pim = {
     call<Dashboard>(
       `/agents/${id}/dashboard?locale=${encodeURIComponent(locale)}`,
     ),
-  /** Sets what an agent's dashboard shows, in order, by the ids it gives them. */
-  setDashboard: (id: string, items: string[]) =>
-    call<{ items: string[] }>(`/agents/${id}/dashboard`, {
-      method: "PUT",
-      body: JSON.stringify({ items }),
-    }),
+  /**
+   * Sets what an agent's dashboard shows, in order, by the ids it gives them,
+   * and the size of artifacts' widgets in `sizes`, by id; the others keep theirs.
+   */
+  setDashboard: (
+    id: string,
+    items: string[],
+    sizes: Record<string, WidgetSize> = {},
+  ) =>
+    call<{ items: string[]; sizes: Record<string, WidgetSize> }>(
+      `/agents/${id}/dashboard`,
+      { method: "PUT", body: JSON.stringify({ items, sizes }) },
+    ),
   publishAgent: (id: string) =>
     call<Template>(`/agents/${id}/publish`, { method: "POST" }),
   unpublishAgent: (id: string) =>

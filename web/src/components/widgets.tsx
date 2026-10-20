@@ -18,15 +18,20 @@ import { cn } from "~/lib/utils";
 export function WidgetCard({
   widget,
   actions,
+  className,
 }: {
   widget: Widget;
   /** Beside its title, such as taking it off a dashboard. */
   actions?: ReactNode;
+  className?: string;
 }) {
   const { t } = useI18n();
   return (
     <section
-      className="group flex min-w-0 flex-col rounded-2xl bg-muted px-4 py-4"
+      className={cn(
+        "group flex min-w-0 flex-col rounded-2xl bg-muted px-4 py-4",
+        className,
+      )}
       aria-label={widget.title}
     >
       <WidgetHeader title={widget.title} actions={actions} />

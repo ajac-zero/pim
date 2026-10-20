@@ -8,17 +8,25 @@ import { Composer } from "~/components/chat/composer";
 import { ChatTabs } from "~/components/chat/tabs";
 import { Thread } from "~/components/chat/thread";
 import { useI18n } from "~/components/i18n";
-import { Bot, ChevronDown, X } from "~/components/icons";
+import { Bot, ChevronDown, MoreHorizontal, X } from "~/components/icons";
 import { RouteError } from "~/components/route-error";
 import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import { WidgetCard } from "~/components/widgets";
-import { type PinnedArtifact, pim, type UserContent } from "~/lib/pim-api";
+import {
+  type PinnedArtifact,
+  pim,
+  type UserContent,
+  WIDGET_SIZES,
+  type WidgetSize,
+} from "~/lib/pim-api";
 import { EMPTY_STREAM } from "~/lib/pim-view";
 import { agentsQuery, dashboardQuery } from "~/lib/queries";
 import { useStartChat } from "~/lib/start-chat";
@@ -57,17 +65,24 @@ function DashboardPage() {
   if (!agent) return null;
   const widgets = data?.widgets ?? [];
   const otherAgents = (agents ?? []).filter((choice) => choice.id !== agentId);
-  const remove = async (id: string) => {
+  const change = async (
+    items: string[],
+    sizes: Record<string, WidgetSize> = {},
+  ) => {
     try {
-      await pim.setDashboard(
-        agentId,
-        widgets.filter((item) => item.id !== id).map((item) => item.id),
-      );
+      await pim.setDashboard(agentId, items, sizes);
     } catch (failure) {
       toast.error((failure as Error).message);
     }
     await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
   };
+  const remove = (id: string) =>
+    change(widgets.filter((item) => item.id !== id).map((item) => item.id));
+  const resize = (id: string, size: WidgetSize) =>
+    change(
+      widgets.map((item) => item.id),
+      { [id]: size },
+    );
   const removeButton = (id: string, title: string) => (
     <Button
       variant="ghost"
@@ -169,23 +184,37 @@ function DashboardPage() {
               {t("noDashboard", { name: agent.name })}
             </div>
           ) : (
-            <div className="grid gap-3 md:grid-cols-2">
-              {widgets.map((item) =>
-                "artifact" in item ? (
-                  <PinnedWidget
-                    key={item.id}
-                    pinned={item}
-                    actions={removeButton(item.id, item.title)}
-                    onDraft={draft(item)}
-                  />
-                ) : (
-                  <WidgetCard
-                    key={item.id}
-                    widget={item}
-                    actions={removeButton(item.id, item.title)}
-                  />
-                ),
-              )}
+            // Two columns on phones and four from a wide enough dashboard, as a phone's home screen
+            // has: `--cell` is a column's width, which a small widget's tile is as tall as.
+            <div className="@container">
+              <div className="grid grid-flow-row-dense grid-cols-2 gap-3 [--cell:calc((100cqw-0.75rem)/2)] @2xl:grid-cols-4 @2xl:[--cell:calc((100cqw-2.25rem)/4)]">
+                {widgets.map((item) =>
+                  "artifact" in item ? (
+                    <PinnedWidget
+                      key={item.id}
+                      pinned={item}
+                      actions={
+                        <>
+                          <SizeMenu
+                            title={item.title}
+                            size={item.size}
+                            onChange={(size) => void resize(item.id, size)}
+                          />
+                          {removeButton(item.id, item.title)}
+                        </>
+                      }
+                      onDraft={draft(item)}
+                    />
+                  ) : (
+                    <WidgetCard
+                      key={item.id}
+                      widget={item}
+                      className="col-span-2"
+                      actions={removeButton(item.id, item.title)}
+                    />
+                  ),
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -210,9 +239,24 @@ function DashboardPage() {
 }
 
 /**
+ * Where each size of widget goes in the grid, and how tall its tile is: a
+ * small one a square cell, a medium one two cells wide, and a large one two
+ * cells wide and two rows tall, as tall as two small ones with their titles
+ * (1.75rem, with 0.375rem above) and the gap between them.
+ */
+const SIZE_CLASSES: Record<WidgetSize, { cell: string; tile: string }> = {
+  small: { cell: "col-span-1", tile: "h-(--cell)" },
+  medium: { cell: "col-span-2", tile: "h-(--cell)" },
+  large: {
+    cell: "col-span-2 row-span-2",
+    tile: "h-[calc(2*var(--cell)+2.875rem)]",
+  },
+};
+
+/**
  * A pinned artifact, as a phone's home screen shows an app: its widget, a
- * small view that runs live in a tile of a fixed size, with its title under
- * it, and the whole artifact a tap away, from the title or the widget's
+ * small view that runs live in a tile of the size it's pinned at, with its
+ * title under it, and the whole artifact a tap away, from the title or the widget's
  * `pim.open()`. One without a widget, pinned before artifacts had them, is a
  * tile that opens it.
  */
@@ -234,14 +278,25 @@ function PinnedWidget({
       params: { artifactId: artifact.id },
     });
   return (
-    <section className="group flex min-w-0 flex-col gap-1.5" aria-label={title}>
-      <div className="h-45 overflow-hidden rounded-2xl bg-muted">
+    <section
+      className={cn(
+        "group flex min-w-0 flex-col gap-1.5",
+        SIZE_CLASSES[pinned.size].cell,
+      )}
+      aria-label={title}
+    >
+      <div
+        className={cn(
+          "overflow-hidden rounded-2xl bg-muted",
+          SIZE_CLASSES[pinned.size].tile,
+        )}
+      >
         {artifact.widget ? (
           <ArtifactFrame
             id={artifact.id}
             version={artifact.version}
             title={title}
-            widget
+            widget={pinned.size}
             fill
             className="rounded-none border-0"
             onDraft={onDraft}
@@ -254,7 +309,9 @@ function PinnedWidget({
             className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground transition-colors hover:bg-secondary"
           >
             <ArtifactIcon kind={artifact.kind} className="size-6" />
-            <span className="text-[13px]">{t("dashboardNoWidget")}</span>
+            <span className="text-center text-[13px]">
+              {t("dashboardNoWidget")}
+            </span>
           </Link>
         )}
       </div>
@@ -267,11 +324,60 @@ function PinnedWidget({
         >
           {title}
         </Link>
-        <div className="-my-1 -mr-1.5 flex shrink-0 items-center transition-opacity focus-within:opacity-100 group-hover:opacity-100 [@media(hover:hover)]:opacity-0">
+        <div className="-my-1 -mr-1.5 flex shrink-0 items-center transition-opacity focus-within:opacity-100 group-hover:opacity-100 has-data-[state=open]:opacity-100 [@media(hover:hover)]:opacity-0">
           {actions}
         </div>
       </div>
     </section>
+  );
+}
+
+/** Chooses the size of a pinned artifact's widget. */
+function SizeMenu({
+  title,
+  size,
+  onChange,
+}: {
+  title: string;
+  size: WidgetSize;
+  onChange: (size: WidgetSize) => void;
+}) {
+  const { t } = useI18n();
+  const names: Record<WidgetSize, string> = {
+    small: t("widgetSmall"),
+    medium: t("widgetMedium"),
+    large: t("widgetLarge"),
+  };
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7 rounded-full text-muted-foreground"
+          aria-label={t("widgetSize", { title })}
+          title={t("widgetSize", { title })}
+        >
+          <MoreHorizontal className="size-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-36">
+        <DropdownMenuRadioGroup
+          value={size}
+          onValueChange={(value) => onChange(value as WidgetSize)}
+        >
+          {WIDGET_SIZES.map((choice) => (
+            <DropdownMenuRadioItem
+              key={choice}
+              value={choice}
+              className="min-h-9 pointer-coarse:min-h-11"
+            >
+              {names[choice]}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

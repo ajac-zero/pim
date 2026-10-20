@@ -1,5 +1,6 @@
 import { type DirectoryApp, storedApps } from "./extensions/app-directory";
 import { ASSISTANT_BLUEPRINT } from "./extensions/assistant";
+import type { WidgetSize } from "./extensions/dashboard";
 import type { BlueprintDefinition } from "./extensions/define";
 import { HttpError } from "./http";
 import { SKILL_NAME } from "./skills";
@@ -64,6 +65,8 @@ export type Agent = {
 	 * blueprint's dashboard.
 	 */
 	readonly dashboard: readonly string[] | null;
+	/** The size of each artifact's widget on its dashboard, by item, where it isn't the default. */
+	readonly dashboardSizes: Readonly<Record<string, WidgetSize>>;
 	readonly createdAt: number;
 	readonly updatedAt: number;
 };
@@ -114,7 +117,8 @@ CREATE TABLE IF NOT EXISTS pim_agents (
 	color TEXT,
 	introduced INTEGER NOT NULL DEFAULT 0,
 	skills TEXT NOT NULL DEFAULT '[]',
-	dashboard TEXT
+	dashboard TEXT,
+	dashboard_sizes TEXT
 );
 CREATE TABLE IF NOT EXISTS pim_agent_icons (
 	agent TEXT PRIMARY KEY,
@@ -170,6 +174,7 @@ const agentOf = (row: Row, directory: () => readonly DirectoryApp[]): Agent => (
 	color: row.color === null ? null : String(row.color),
 	majordomo: Number(row.is_default) === 1,
 	dashboard: row.dashboard === null ? null : (JSON.parse(String(row.dashboard)) as string[]),
+	dashboardSizes: row.dashboard_sizes ? (JSON.parse(String(row.dashboard_sizes)) as Record<string, WidgetSize>) : {},
 	createdAt: Number(row.created_at),
 	updatedAt: Number(row.updated_at),
 });
@@ -309,6 +314,7 @@ export class AgentStore {
 		if (!columns.includes("introduced")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN introduced INTEGER NOT NULL DEFAULT 1");
 		if (!columns.includes("skills")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN skills TEXT NOT NULL DEFAULT '[]'");
 		if (!columns.includes("dashboard")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN dashboard TEXT");
+		if (!columns.includes("dashboard_sizes")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN dashboard_sizes TEXT");
 	}
 
 	/** The majordomo first, then the others as they were made. */
@@ -386,8 +392,8 @@ export class AgentStore {
 	}
 
 	/** Sets what its dashboard shows, checked by the space. */
-	setDashboard(id: string, items: readonly string[]): Agent {
-		this.#sql.exec("UPDATE pim_agents SET dashboard = ? WHERE id = ?", JSON.stringify(items), id);
+	setDashboard(id: string, items: readonly string[], sizes: Readonly<Record<string, WidgetSize>>): Agent {
+		this.#sql.exec("UPDATE pim_agents SET dashboard = ?, dashboard_sizes = ? WHERE id = ?", JSON.stringify(items), JSON.stringify(sizes), id);
 		return this.get(id)!;
 	}
 

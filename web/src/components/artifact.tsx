@@ -21,6 +21,7 @@ import {
   type ArtifactReference,
   artifactFrameUrl,
   pim,
+  type WidgetSize,
 } from "~/lib/pim-api";
 import { artifactQuery, artifactVersionQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -120,7 +121,7 @@ export function ArtifactFrame({
   eager = false,
   from,
   onDraft,
-  widget = false,
+  widget,
   onOpen,
 }: {
   id: string;
@@ -133,8 +134,8 @@ export function ArtifactFrame({
    * Without it, as everywhere but a dashboard, the call fails.
    */
   onDraft?: (text: string) => void;
-  /** Shows the version's widget, its small view for a dashboard, instead of the artifact. */
-  widget?: boolean;
+  /** Shows the version's widget, its small view for a dashboard, at this size, instead of the artifact. */
+  widget?: WidgetSize;
   /** What the page's `pim.open()` does; without it, the call fails. */
   onOpen?: () => void;
   /** The tallest it grows to its page's height; ignored when `fill`. */

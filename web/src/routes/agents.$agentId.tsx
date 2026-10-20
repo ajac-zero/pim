@@ -120,13 +120,14 @@ function DashboardPage() {
       {/* Kept while the chat starts, in case it can't. */}
       <div
         ref={setScroller}
+        // Reaches under the composer's rounded top corners, so widgets show around them.
         className={cn(
-          "min-h-0 flex-1 overflow-y-auto scrollbar-thin",
+          "-mb-4 min-h-0 flex-1 overflow-y-auto scrollbar-thin",
           sent !== null && "hidden",
         )}
       >
-        {/* Bottom room so the last card scrolls clear of the suggestions floating over it. */}
-        <div className="mx-auto w-full max-w-4xl px-4 pt-8 pb-20 md:pt-12">
+        {/* Bottom room so the last card scrolls clear of the composer's top and the suggestions floating over it. */}
+        <div className="mx-auto w-full max-w-4xl px-4 pt-8 pb-24 md:pt-12">
           <header className="mb-6 flex items-center gap-3">
             {agent.icon === null && agent.symbol === null ? (
               <span
@@ -232,8 +233,9 @@ function DashboardPage() {
         </div>
       </div>
       {/* As wide as the widgets above it, which have the same width and padding. */}
+      {/* Covers the widgets below its first 1rem, the composer's corner radius, where they show around its corners. */}
       <div
-        className="flex shrink-0 justify-center pb-2"
+        className="relative flex shrink-0 justify-center bg-[linear-gradient(to_bottom,transparent_1rem,var(--background)_1rem)] pb-2"
         style={{ marginRight: gutter }}
       >
         <div className="w-full max-w-4xl px-4">

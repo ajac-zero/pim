@@ -26,6 +26,8 @@ const CONNECTION_IDLE_MS = 30_000;
 const MAX_PAGE_CHARS = 12_000;
 
 const NEXT_REF_KEY = "browser_next_ref";
+/** The page the browser last showed, which it shows again when it starts, until it's closed. */
+const PAGE_KEY = "browser_page";
 
 type Meta = { get(key: string): string | null; set(key: string, value: string | null): void };
 
@@ -207,9 +209,24 @@ export class PimBrowser {
 		});
 	}
 
-	/** The address and title of the page the browser shows, or null when it's closed or its computer is offline. */
-	async current(): Promise<{ url: string; title: string } | null> {
-		return this.#use(false, async (page) => ({ url: page.url(), title: await page.title() }));
+	/**
+	 * The address and title of the page the browser shows, or null when
+	 * it's closed or its computer is offline. While a computer Pim started is
+	 * asleep, its browser isn't running, and this is the page it showed,
+	 * `asleep`: taking it over wakes the computer and opens it there again.
+	 */
+	async current(): Promise<{ url: string; title: string; asleep?: true } | null> {
+		const shown = await this.#use(false, async (page) => this.#shown(page.url(), await page.title()));
+		if (shown) return shown;
+		const status = this.#computer.status();
+		const last = this.#meta.get(PAGE_KEY);
+		return status.managed && status.state === "offline" && last ? { ...(JSON.parse(last) as { url: string; title: string }), asleep: true } : null;
+	}
+
+	/** Remembers the page the browser shows, for while it isn't running. */
+	#shown(url: string, title: string): { url: string; title: string } {
+		this.#meta.set(PAGE_KEY, JSON.stringify({ url, title }));
+		return { url, title };
 	}
 
 	/** Reads the page the browser shows now, or null when it's closed. */
@@ -253,8 +270,9 @@ export class PimBrowser {
 
 	/**
 	 * Starts sending the page to `watcher` as pictures, for the person to
-	 * take the browser over, under `id` (one per watching socket). False when
-	 * the browser is closed: there is nothing to take over.
+	 * take the browser over, under `id` (one per watching socket). A browser
+	 * that isn't running starts, waking its computer if it's asleep, and
+	 * opens the pages it had.
 	 */
 	async watch(id: string, watcher: Watcher): Promise<boolean> {
 		this.#watchers.set(id, watcher);
@@ -263,7 +281,7 @@ export class PimBrowser {
 			watcher.page({ url: page.url(), title: await page.title() });
 			return true;
 		}
-		const started = await this.#use(false, async (page) => {
+		await this.#use(true, async (page) => {
 			const session = await page.createCDPSession();
 			this.#screencast = { page, session };
 			session.on("Page.screencastFrame", (event) => {
@@ -279,12 +297,15 @@ export class PimBrowser {
 				if (frame === page.mainFrame()) void tell();
 			});
 			page.on("load", () => void tell());
+			// A page Chrome restored as it started isn't drawn, so it sends no pictures, until it's in front.
+			await page.bringToFront();
 			await session.send("Page.startScreencast", { format: "jpeg", quality: 70, maxWidth: 1920, maxHeight: 1920 });
 			await tell();
-			return true;
+		}).catch((error) => {
+			this.#watchers.delete(id);
+			throw error;
 		});
-		if (!started) this.#watchers.delete(id);
-		return started === true;
+		return true;
 	}
 
 	/** `id` stopped watching; with nobody watching, the pictures stop. */
@@ -362,6 +383,7 @@ export class PimBrowser {
 			this.#browser = undefined;
 			await browser?.disconnect().catch(() => {});
 			this.#ended();
+			this.#meta.set(PAGE_KEY, null);
 			if (this.#computer.status().state === "online") await this.#computer.stopBrowser();
 		});
 	}
@@ -383,7 +405,7 @@ export class PimBrowser {
 		const read = (await page.evaluate(`${READ_PAGE}(${JSON.stringify([first, MAX_PAGE_CHARS])})`)) as { text: string; truncated: boolean; next: number };
 		this.#meta.set(NEXT_REF_KEY, String(read.next));
 		const text = read.truncated ? `${read.text}\n[The page goes on; this is its first ${MAX_PAGE_CHARS} characters.]` : read.text;
-		return { url: page.url(), title: await page.title(), text };
+		return { ...this.#shown(page.url(), await page.title()), text };
 	}
 
 	/**

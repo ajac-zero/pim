@@ -5076,7 +5076,8 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * Someone takes the browser over on this socket: it gets the page as
 	 * pictures, and its mouse and keyboard go to the page. It closes when
-	 * the browser does; one that's closed has nothing to take over.
+	 * the browser does. One that isn't running starts, waking the computer
+	 * if it's asleep.
 	 */
 	async #watchBrowser(connection: Connection): Promise<boolean> {
 		const send = (message: BrowserLiveMessage) => {
@@ -5093,7 +5094,7 @@ export class Pim extends DurableAgent<Env> {
 			send({ type: "error", message: errorMessage(error) });
 			watching = false;
 		}
-		if (!watching) connection.close(4004, "The browser isn't open");
+		if (!watching) connection.close(4004, "The browser couldn't open");
 		return watching;
 	}
 

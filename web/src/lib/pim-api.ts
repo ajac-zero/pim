@@ -726,7 +726,8 @@ export type ComputerStatus = {
 /** The browser your agents share: whether this Pim has one, and the page it shows when it's open. */
 export type BrowserStatus = {
   available: boolean;
-  page: { url: string; title: string } | null;
+  /** The page it shows; `asleep` while the computer Pim started sleeps, which taking it over wakes. */
+  page: { url: string; title: string; asleep?: boolean } | null;
 };
 
 /** A picture of the page the browser shows. */

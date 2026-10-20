@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { type ExecArgs, type ExecResult, Link, type Machine } from "../computer/pim-computer";
 import { IDLE_MS } from "../src/computer";
 import type { Approval } from "../src/store";
-import { api, apiUrl, connectTestComputer, opens, OWNER, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, connectTestComputer, opens, OWNER, pendingApproval, post, say, TOKEN, testBrowser, toolUse } from "./helpers";
 import { faux, paintings, type Pim } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
@@ -296,8 +296,10 @@ describe("the computer", () => {
 describe("a computer Pim starts", () => {
 	it("is a Sprite, set up once, woken when needed and let go when unused, and removed with everything on it", async () => {
 		const requests: string[] = [];
-		const launches: { cmd: string[]; letGo: boolean; closed: boolean }[] = [];
+		const launches: { cmd: string[]; letGo: boolean; closed: boolean; server: WebSocket }[] = [];
 		const root = `/tmp/computer-${crypto.randomUUID()}`;
+		// Its Chrome, which goes on running in these tests where a Sprite's would quit and open its pages again.
+		const browser = testBrowser();
 		/** A frame of an exec's output: its stream, then its bytes. */
 		const frame = (stream: number, text: string) => {
 			const bytes = new TextEncoder().encode(text);
@@ -330,8 +332,9 @@ describe("a computer Pim starts", () => {
 				exec: async () => {
 					throw new Error("This test's computer runs no commands.");
 				},
+				browser,
 			};
-			const launch = { cmd, letGo: false, closed: false };
+			const launch = { cmd, letGo: false, closed: false, server };
 			launches.push(launch);
 			const link = new Link(machine, (message) => server.send(frame(1, `${message}\n`)));
 			server.addEventListener("message", (event) => {
@@ -347,7 +350,7 @@ describe("a computer Pim starts", () => {
 				launch.closed = true;
 				link.close();
 			});
-			const hello = { type: "hello", version: 1, agent: "pim-computer/test", hostname: "sprite", platform: "linux", arch: "x64", user: "sprite", root: machine.root, browser: null };
+			const hello = { type: "hello", version: 1, agent: "pim-computer/test", hostname: "sprite", platform: "linux", arch: "x64", user: "sprite", root: machine.root, browser: "chrome" };
 			server.send(frame(1, `${JSON.stringify(hello)}\n`));
 			return new Response(null, { status: 101, webSocket: client });
 		});
@@ -383,10 +386,24 @@ describe("a computer Pim starts", () => {
 		expect(launches.length).toBe(2);
 		expect(await (await raw(`/files/content?path=${encodeURIComponent("/workspace/notes.md")}`)).text()).toBe("Woke up");
 
+		// The agents browse there. Asleep, its browser isn't running: the person sees the page it showed, and taking it over wakes it there.
+		const notes = `data:text/html;charset=utf-8,${encodeURIComponent("<title>Notes</title><p>Woke up</p>")}`;
+		await callTool("browser_open", { url: notes });
+		// The Sprite goes away, as when it sleeps; its socket is the space's, so it's closed there.
+		await runInDurableObject(agent(), () => launches[1]!.server.close(1000));
+		await vi.waitFor(async () => expect((await api("/browser")).body.page).toEqual({ url: notes, title: "Notes", asleep: true }));
+		const watching = await opens("/browser/live", TOKEN);
+		const heard: { type: string }[] = [];
+		watching.webSocket!.addEventListener("message", (event) => heard.push(JSON.parse(event.data as string)));
+		watching.webSocket!.accept();
+		await vi.waitFor(() => expect(heard).toContainEqual({ type: "page", url: notes, title: "Notes" }));
+		expect(launches.length).toBe(3);
+		expect((await api("/browser")).body.page).toEqual({ url: notes, title: "Notes" });
+
 		// Removing it removes the Sprite, with everything on it.
 		expect((await raw("/computer", { method: "DELETE" })).status).toBe(200);
 		expect(requests.at(-1)).toBe(`DELETE ${sprite}`);
-		await vi.waitFor(() => expect(launches[1]).toMatchObject({ letGo: true, closed: true }));
+		await vi.waitFor(() => expect(launches[2]).toMatchObject({ letGo: true, closed: true }));
 		expect(await status()).toMatchObject({ state: "none", managed: false });
 	});
 });

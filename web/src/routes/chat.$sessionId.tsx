@@ -143,6 +143,27 @@ function ChatPage() {
     useElementHeight<HTMLDivElement>();
   const { ref: composerCardRef, height: composerCardHeight } =
     useElementHeight<HTMLDivElement>();
+  // The room the thread keeps for its scrollbar on each side (it keeps it on
+  // both, so it stays centered; overlay scrollbars take none), which the
+  // composer leaves too, so it stays centered under the messages.
+  const [stage, setStage] = useState<HTMLDivElement | null>(null);
+  const [gutter, setGutter] = useState(0);
+  useEffect(() => {
+    if (!stage) return;
+    const measure = () => {
+      const scroller = stage.querySelector<HTMLElement>(
+        ":scope > [role=log] > div",
+      );
+      setGutter(
+        scroller ? (scroller.offsetWidth - scroller.clientWidth) / 2 : 0,
+      );
+    };
+    measure();
+    // The thread comes and goes with the chat's snapshot.
+    const observer = new MutationObserver(measure);
+    observer.observe(stage, { childList: true });
+    return () => observer.disconnect();
+  }, [stage]);
 
   const send = (content: UserContent) => {
     pimClient.send(content).catch((error: Error) => toast.error(error.message));
@@ -181,7 +202,10 @@ function ChatPage() {
         {/* The summary box takes a column of its own, so the thread makes room
          * for it rather than sitting under it: at the right, or on top on phones. */}
         <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          <div
+            ref={setStage}
+            className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+          >
             {dropping && (
               <div className="pointer-events-none absolute inset-0 z-20 flex animate-in items-center justify-center bg-background/60 duration-150 fade-in">
                 <div className="flex animate-in flex-col items-center gap-1.5 rounded-xl border bg-popover px-4 py-3 text-popover-foreground text-sm shadow-[0_8px_30px_-6px_rgb(0_0_0/0.18)] duration-150 zoom-in-95">
@@ -217,11 +241,13 @@ function ChatPage() {
              * the thread's bottom padding, so the last message clears it. */}
             <div
               ref={composerOverlayRef}
-              className="pointer-events-none absolute right-2.5 bottom-0 left-0 z-10 flex justify-center bg-background px-4 pb-2"
+              style={{ left: gutter, right: gutter }}
+              className="pointer-events-none absolute bottom-0 z-10 flex justify-center bg-background pb-2"
             >
+              {/* As wide as a dashboard's, so a chat started there keeps it; messages sit 1rem inside it. */}
               <div
                 ref={composerCardRef}
-                className="pointer-events-auto w-full max-w-3xl"
+                className="pointer-events-auto w-full max-w-4xl px-4"
               >
                 <Composer
                   key={sessionId}

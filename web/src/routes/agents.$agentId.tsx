@@ -4,6 +4,8 @@ import { toast } from "sonner";
 import { AgentIcon, tileClass } from "~/components/agent-icon";
 import { ArtifactPreview } from "~/components/artifact";
 import { Composer } from "~/components/chat/composer";
+import { ChatTabs } from "~/components/chat/tabs";
+import { Thread } from "~/components/chat/thread";
 import { useI18n } from "~/components/i18n";
 import { Bot, ChevronDown, Maximize2, X } from "~/components/icons";
 import { RouteError } from "~/components/route-error";
@@ -15,9 +17,11 @@ import {
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import { WidgetCard, WidgetHeader } from "~/components/widgets";
-import { type PinnedArtifact, pim } from "~/lib/pim-api";
+import { type PinnedArtifact, pim, type UserContent } from "~/lib/pim-api";
+import { EMPTY_STREAM } from "~/lib/pim-view";
 import { agentsQuery, dashboardQuery } from "~/lib/queries";
 import { useStartChat } from "~/lib/start-chat";
+import { useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
 /**
@@ -40,7 +44,7 @@ function DashboardPage() {
   const { prompt } = Route.useSearch();
   const { data: agents } = useQuery(agentsQuery());
   const { data, error, refetch } = useQuery(dashboardQuery(agentId, locale));
-  const { start, starting } = useStartChat(agentId);
+  const { start, sent } = useStartChat(agentId);
   const queryClient = useQueryClient();
 
   if (error) {
@@ -85,7 +89,14 @@ function DashboardPage() {
     });
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
+      {sent !== null && <StartingChat content={sent} />}
+      {/* Kept while the chat starts, in case it can't. */}
+      <div
+        className={cn(
+          "min-h-0 flex-1 overflow-y-auto scrollbar-thin",
+          sent !== null && "hidden",
+        )}
+      >
         {/* Bottom room so the last card scrolls clear of the suggestions floating over it. */}
         <div className="mx-auto w-full max-w-4xl px-4 pt-8 pb-20 md:pt-12">
           <header className="mb-6 flex items-center gap-3">
@@ -107,7 +118,7 @@ function DashboardPage() {
                   <DropdownMenuTrigger asChild>
                     <button
                       type="button"
-                      disabled={starting || otherAgents.length === 0}
+                      disabled={otherAgents.length === 0}
                       className="flex min-h-11 min-w-0 items-center gap-2 rounded-full text-left outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       <span className="truncate">{agent.name}</span>
@@ -220,13 +231,44 @@ function DashboardPage() {
             initialInput={prompt}
             autoFocus={Boolean(prompt)}
             onSend={start}
-            busy={false}
-            disabled={starting}
+            busy={sent !== null}
+            disabled={sent !== null}
             placeholder={t("messageAgent", { name: agent.name })}
             promptSuggestions={data?.starters}
           />
         </div>
       </div>
     </main>
+  );
+}
+
+/**
+ * A chat Pim is still making, showing its first message where the chat's
+ * page will, so the message shows the moment it is sent. The chat's page
+ * takes its place once the chat exists, adding the chat's tab to the open
+ * ones shown here.
+ */
+function StartingChat({ content }: { content: UserContent }) {
+  const shelf = useTabs().length > 0;
+  return (
+    <>
+      <header
+        className={cn(
+          "hidden h-13 shrink-0 pr-4 md:flex",
+          shelf && "bg-sidebar",
+        )}
+      >
+        <ChatTabs activeId="" />
+      </header>
+      <div className="flex min-h-0 flex-1 flex-col">
+        <Thread
+          sessionId=""
+          synced={false}
+          view={EMPTY_STREAM.view}
+          pending={content}
+          composerHeight={0}
+        />
+      </div>
+    </>
   );
 }

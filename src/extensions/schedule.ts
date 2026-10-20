@@ -2,7 +2,9 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import type { Schedule } from "agents";
 import { definePimExtension } from "./define";
+import type { Agent } from "../agents";
 import type { PimStore } from "../store";
+import type { Role } from "../tasks";
 import { type PimServices, type ScheduledTaskPayload, json, text } from "./services";
 
 /** A schedule as the API and the model see it, its chat by its public id. */
@@ -17,12 +19,17 @@ export function describeSchedule(schedule: Schedule<ScheduledTaskPayload>, store
 		label: schedule.payload.label ?? null,
 		instruction: schedule.payload.instruction,
 		newChat: schedule.payload.newChat === true,
+		...(schedule.payload.agent ? { agent: schedule.payload.agent } : {}),
 	};
 }
 
 export const SCHEDULE_EXTENSION = "pim.schedule";
 
-export function scheduleExtension(services: PimServices) {
+/**
+ * Scheduling for later. The majordomo can also schedule work for another of
+ * the person's agents: each firing then starts a new chat with that agent.
+ */
+export function scheduleExtension(services: PimServices, roleOf: (session: string) => Role, agentOf: (id: string) => Agent | undefined) {
 	const scheduleTask = defineTool({
 		name: "schedule_task",
 		description:
@@ -39,11 +46,23 @@ export function scheduleExtension(services: PimServices) {
 						"Start a new chat with you each time it fires, instead of continuing this one: for recurring work read on its own, such as a daily briefing. The new chat doesn't see this conversation, so make the instruction complete.",
 				}),
 			),
+			agent: Type.Optional(
+				Type.String({
+					description:
+						"For the majordomo only: the id of another of the person's agents, from your_agents, to do the work. Each firing starts a new chat with that agent, as with new_chat, so write the instruction to it.",
+				}),
+			),
 		}),
 		replay: "safe",
-		async execute({ instruction, label, delay_seconds, at, cron, new_chat }, api, context) {
+		async execute({ instruction, label, delay_seconds, at, cron, new_chat, agent }, api, context) {
 			const given = [delay_seconds, at, cron].filter((value) => value !== undefined);
 			if (given.length !== 1) return text("Give exactly one of delay_seconds, at, or cron.", true);
+			const self = roleOf(String(api.conversationId));
+			const other = agent === self.agent.id ? undefined : agent;
+			if (other !== undefined) {
+				if (!self.agent.majordomo || self.member) return text("Only the majordomo schedules work for other agents. Leave out agent.", true);
+				if (!agentOf(other)) return text(`No agent has the id ${other}. Use an id from your_agents.`, true);
+			}
 			let when: Date | number | string;
 			if (at !== undefined) {
 				const date = new Date(at);
@@ -63,7 +82,8 @@ export function scheduleExtension(services: PimServices) {
 				session: String(api.conversationId),
 				instruction,
 				...(label ? { label } : {}),
-				...(new_chat ? { newChat: true } : {}),
+				...(new_chat || other ? { newChat: true } : {}),
+				...(other ? { agent: other } : {}),
 			};
 			const schedule = await services.schedule(when, payload);
 			await api.memo("schedule", schedule.id, context);
@@ -105,14 +125,15 @@ export function scheduleWidgets(listSchedules: PimServices["listSchedules"]) {
 				title: { en: "Coming up", es: "Próximamente" },
 				description: "The next scheduled tasks in this space, soonest first, with when each runs.",
 				empty: { en: "Nothing scheduled. Ask for a reminder or a recurring check-in.", es: "Nada programado. Pide un recordatorio o un seguimiento periódico." },
-				load: async ({ chatOf, ofAgent }) => ({
+				load: async ({ agent, chatOf, ofAgent }) => ({
 					kind: "list",
 					items: (await listSchedules())
 						.sort((a, b) => a.time - b.time)
 						.flatMap((schedule) => {
 							const chat = chatOf(schedule.payload.session);
-							// A task that starts new chats still shows once the chat that scheduled it is deleted, without a link.
-							if (chat === null && !(schedule.payload.newChat && ofAgent(schedule.payload.session))) return [];
+							// A task that starts new chats shows on the dashboard of the agent it starts them with, without a link unless that agent scheduled it.
+							const startsHere = schedule.payload.newChat && (schedule.payload.agent ? schedule.payload.agent === agent.id : ofAgent(schedule.payload.session));
+							if (chat === null && !startsHere) return [];
 							const title = schedule.payload.label ?? schedule.payload.instruction;
 							return [
 								{

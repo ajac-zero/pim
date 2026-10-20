@@ -111,6 +111,49 @@ describe("scheduled tasks", () => {
 		expect((await api(`/schedules/${schedule.id}`, { method: "DELETE" })).status).toBe(200);
 	});
 
+	it("lets only the majordomo schedule new chats with another agent", async () => {
+		const scout = (await post("/agents", { name: "Scout", instructions: "Find things to do in NYC." })).body;
+		const coach = (await post("/agents", { name: "Coach", instructions: "Coach me." })).body;
+		const training = (await post("/sessions", { agent: coach.id, title: "Training" })).body.id;
+		let refused = "";
+		faux.setResponses([
+			toolUse("schedule_task", { instruction: "Find this weekend's events.", cron: "0 9 * * 5", agent: scout.id }),
+			(context) => {
+				refused = JSON.stringify(context.messages.at(-1));
+				return toolUse("send_to_user", { message: "I can't." });
+			},
+		]);
+		await say("Have Scout look for events every Friday.", training);
+		expect(refused).toContain("Only the majordomo schedules work for other agents");
+		expect((await api("/schedules")).body.schedules).toEqual([]);
+
+		faux.setResponses([
+			toolUse("schedule_task", { instruction: "Find this weekend's events.", label: "Weekend events", cron: "0 9 * * 5", agent: scout.id }),
+			toolUse("send_to_user", { message: "Scout will look every Friday." }),
+		]);
+		await say("Have Scout look for events every Friday.");
+		const [schedule] = (await api("/schedules")).body.schedules;
+		expect(schedule).toMatchObject({ session: ROOT, newChat: true, agent: scout.id });
+		// It is on Scout's dashboard, which does the work, and not on Coach's.
+		for (const [agent, shown] of [[scout.id, 1], [coach.id, 0]] as const) {
+			await api(`/agents/${agent}/dashboard`, { method: "PUT", body: JSON.stringify({ items: ["pim.schedule/upcoming"] }) });
+			const board = (await api(`/agents/${agent}/dashboard`)).body;
+			expect(board.widgets.find((widget: { id: string }) => widget.id === "pim.schedule/upcoming").items).toHaveLength(shown);
+		}
+
+		faux.setResponses([fauxAssistantMessage("Found three.")]);
+		const operation = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			const [due] = await instance.listSchedules();
+			await instance.runScheduledTask(due!.payload as never, due as never);
+			return `schedule:${due!.id}:${due!.time}`;
+		});
+		const [chat] = (await api("/sessions")).body.sessions.filter((session: { title: string }) => session.title === "Weekend events");
+		expect(chat.agent).toMatchObject({ id: scout.id });
+		expect((await api(`/sessions/${chat.id}/operations/${encodeURIComponent(operation)}`)).body).toMatchObject({ status: "done" });
+		await post(`/notifications/${encodeURIComponent(operation)}/read`);
+		expect((await api(`/schedules/${schedule.id}`, { method: "DELETE" })).status).toBe(200);
+	});
+
 	it("rejects ambiguous or past times without scheduling anything", async () => {
 		let results = "";
 		faux.setResponses([

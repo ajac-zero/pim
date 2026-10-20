@@ -782,6 +782,8 @@ export type PimSchedule = {
   instruction: string;
   /** Each run starts a new chat with the same agent; it outlives the chat that scheduled it. */
   newChat: boolean;
+  /** The agent each new chat is with, when the majordomo scheduled it for another agent. */
+  agent?: string;
 };
 
 export type ModelInfo = {

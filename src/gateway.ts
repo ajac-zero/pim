@@ -1,5 +1,6 @@
 import { getAgentByName } from "agents";
 import pimConfig from "../pim.config";
+import { diagramPage } from "./artifacts";
 import { deploymentSettings } from "./deployment";
 import { accountApi, adminApi, clientIp, contentOrigin, handleRegistration, limited, resolveAccount, servePublicArtifact, siteFor, sites, socialApi } from "./accounts";
 import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER } from "./pim";
@@ -260,6 +261,8 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 	}
 	// The web app goes to the address it names; nothing is served at any other.
 	if (origin !== publicUrl) return Response.json({ error: `This Pim is at ${publicUrl}`, url: publicUrl }, { status: 421 });
+	// The page diagrams in agents' messages are drawn in, which holds nothing of anyone's.
+	if (pathname === "/api/diagram") return request.method === "GET" ? diagramPage(publicUrl) : fail(405, "/api/diagram takes GET");
 
 	if (under(pathname, "/auth") || under(pathname, "/oauth")) {
 		// Guessing at passkeys, recovery codes and tokens, and registering clients, is slowed down per address.

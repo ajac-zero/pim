@@ -120,6 +120,7 @@ export function messagingExtension(services: PimServices) {
 			description:
 				"What they read, in Markdown. To show things you found, such as products, places or pages, put a ```cards block in it, alone on its lines: a JSON array of { title, url?, image?, meta?, text? }, where meta is a short line such as its maker and price. " +
 				"To show pictures, such as an image search's results, put a ```gallery block: a JSON array of { image, caption?, url? }, where url is the page it's from. " +
+				"To draw a diagram, such as a flowchart, a sequence or a timeline, put a ```mermaid block of Mermaid source in it; the person sees it drawn. " +
 				"An image must be an address a tool's result in this chat gave you, such as a page's image from fetch_url, never one you made up; Pim shows a copy of it.",
 		}),
 		complete: Type.Optional(Type.Boolean({ description: "Finish this turn (default true). Set false only for a progress update; send the final answer in a separate call with no other tools." })),

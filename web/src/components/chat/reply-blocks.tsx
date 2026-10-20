@@ -1,10 +1,20 @@
-import { createContext, type ReactNode, useContext } from "react";
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import { useTheme } from "~/components/theme";
 import { cn } from "~/lib/utils";
 
 /**
- * Blocks an agent's message draws with the app's own components instead of
- * as code, each fence a JSON array: ```cards, things it found, as rows with
- * their images; ```gallery, images in a grid. Pim checks each block when the
+ * Blocks an agent's message draws instead of showing as code. ```cards
+ * and ```gallery fences are JSON arrays, drawn with the app's own
+ * components: things it found, as rows with their images, and images in a
+ * grid. A ```mermaid fence is a diagram, drawn in a sandboxed frame. Pim checks each block when the
  * message is sent and keeps copies of its images; the send's result maps
  * each image's address on the web to its copy here.
  */
@@ -233,5 +243,98 @@ function CardRow({
         {card.text && <p className="mt-1">{card.text}</p>}
       </div>
     </div>
+  );
+}
+
+/** The page diagrams are drawn in (see `diagramPage` in src/artifacts.ts). */
+const DIAGRAM_PAGE = "/api/diagram";
+const MAX_DIAGRAM_HEIGHT = 2000;
+/** At most this many height messages a second are taken, as for artifacts. */
+const MAX_MESSAGES_PER_SECOND = 20;
+
+/**
+ * A ```mermaid block, drawn in a sandboxed frame of its own as Mermaid
+ * artifacts are, never in the app's page: the app posts the frame its source
+ * once the message is whole. One Mermaid can't draw shows as its source.
+ */
+export function Diagram({
+  source,
+  fallback,
+}: {
+  source: string;
+  fallback: ReactNode;
+}) {
+  const { streaming } = useContext(Reply);
+  const { resolved } = useTheme();
+  const frame = useRef<HTMLIFrameElement>(null);
+  const [height, setHeight] = useState<number | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let windowStart = 0;
+    let count = 0;
+    const onMessage = (event: MessageEvent) => {
+      // The origin of a sandboxed page is "null": only the source tells.
+      if (!frame.current || event.source !== frame.current.contentWindow) {
+        return;
+      }
+      const data = event.data as { type?: unknown; height?: unknown } | null;
+      if (data?.type === "pim:diagram-failed") setFailed(true);
+      if (
+        data?.type !== "pim:diagram-height" ||
+        typeof data.height !== "number" ||
+        !Number.isFinite(data.height)
+      ) {
+        return;
+      }
+      const now = Date.now();
+      if (now - windowStart > 1000) {
+        windowStart = now;
+        count = 0;
+      }
+      if (++count > MAX_MESSAGES_PER_SECOND) return;
+      setHeight(
+        Math.min(Math.max(Math.ceil(data.height), 1), MAX_DIAGRAM_HEIGHT),
+      );
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  const dark = resolved === "dark";
+  const draw = useCallback(() => {
+    frame.current?.contentWindow?.postMessage(
+      { type: "pim:diagram", source, dark },
+      "*",
+    );
+  }, [source, dark]);
+  const loaded = useRef(false);
+  // Drawn again in the other mode; the first time, once the page loads.
+  useEffect(() => {
+    if (loaded.current) draw();
+  }, [draw]);
+
+  if (streaming) return <Placeholder />;
+  if (failed) return fallback;
+  return (
+    <iframe
+      ref={frame}
+      src={DIAGRAM_PAGE}
+      sandbox="allow-scripts"
+      title="Diagram"
+      onLoad={() => {
+        loaded.current = true;
+        draw();
+      }}
+      // The page's background is transparent only in the app's own mode.
+      style={{
+        height: height ?? undefined,
+        colorScheme: dark ? "dark" : "light",
+      }}
+      className={cn(
+        "my-4 block w-full border-0",
+        height === null && "h-24 animate-pulse rounded-2xl bg-muted",
+      )}
+    />
   );
 }

@@ -297,6 +297,23 @@ describe("an agent's Markdown", () => {
     expect(html).not.toContain("shop.example/lead.png");
     expect(html).not.toContain("```");
   });
+
+  it("draws a diagram only in a sandboxed frame, and anyone else's as code", () => {
+    const text = "```mermaid\nflowchart LR\n  A --> B\n```";
+    const found = elements(renderToStaticMarkup(<Markdown text={text} />));
+    const frames = found.filter((element) => element.tag === "iframe");
+    expect(frames.map((frame) => frame.attributes)).toEqual([
+      expect.arrayContaining([
+        { name: "src", value: "/api/diagram" },
+        { name: "sandbox", value: "allow-scripts" },
+      ]),
+    ]);
+    // Nothing draws it in the app's own page.
+    expect(found.some((element) => element.tag === "svg")).toBe(false);
+    const shared = renderToStaticMarkup(<Markdown text={text} untrusted />);
+    expect(shared).not.toContain("<iframe");
+    expect(shared).toContain("flowchart LR");
+  });
 });
 
 describe("chats an agent names", () => {

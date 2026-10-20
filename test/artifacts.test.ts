@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { BRIDGE_SCRIPT, MAX_ARTIFACT_STORAGE_BYTES } from "../src/artifacts";
 import type { Limits } from "../src/usage";
-import { api, apiUrl, connect, OWNER, post, ROOT, say, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, connect, OWNER, post, ROOT, say, TOKEN, toolUse, url } from "./helpers";
 import { faux, type Pim, utility } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
@@ -156,6 +156,12 @@ describe("artifacts", () => {
 		expect(page).toContain('<script src="https://pim.test/artifact-runtime/mermaid.js"></script>');
 		expect(page).not.toContain("<script>parent.x=1");
 		expect((await raw(`/artifacts/${mermaid}/versions/1/download`)).headers.get("content-disposition")).toMatch(/-v1\.mmd"/);
+
+		// A diagram in an agent's message is drawn in a page under the same sandbox, which holds nothing of anyone's: the app posts it the source.
+		const messageFrame = await exports.default.fetch(url("/api/diagram"));
+		expect(messageFrame.status).toBe(200);
+		expect(messageFrame.headers.get("content-security-policy")!.split(";").map((directive) => directive.trim())).toEqual(directives);
+		expect(await messageFrame.text()).toContain('<script src="https://pim.test/artifact-runtime/mermaid.js"></script>');
 
 		// Content its kind can't show is refused, to the model, before anything is kept.
 		const notSvg = await callTool("artifact_create", { title: "Bad", kind: "svg", content: "<div>hi</div>" });

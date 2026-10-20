@@ -389,7 +389,8 @@ export function FilesPanel({ onNavigate }: { onNavigate?: () => void }) {
     () => (open && parentOf(open)) || FILES_ROOT,
   );
   const { data: computer } = useQuery(computerQuery());
-  const online = computer?.state === "online";
+  // One Pim started wakes when it's asked for files.
+  const online = computer?.state === "online" || computer?.managed === true;
   const { data, error } = useQuery({
     ...filesQuery(folder),
     enabled: online,

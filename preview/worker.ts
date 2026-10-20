@@ -19,11 +19,13 @@ export { Auth, Directory, Gallery } from "../src/index";
  *
  * - A stand-in model, so chats answer. It echoes what you say through
  *   `send_to_user`, and calls a tool when told to: `/tool create_goal {"title": "Run a 5k"}`.
- *   After a tool runs, it sends the tool's result. Memory compression gets a short summary.
+ *   After a tool runs, it calls the next one if the message has more `/tool` lines, and
+ *   otherwise sends the last tool's result. Memory compression gets a short summary.
  *   An agent at work on a task answers in plain text, the majordomo introduces itself with a stock greeting,
  *   and it asks the person about every approval it reviews.
  *   The utility model titles a chat with the first words of its last message, appends a
- *   line to a prompt it improves, and writes a placeholder summary. `generate_image` draws Pim's icon.
+ *   line to a prompt it improves, writes a placeholder summary, and names the tools an
+ *   agent is calling as what it is doing. `generate_image` draws Pim's icon.
  * - `GET /__dev/sign-in/<username>?returnTo=/path` signs the browser in as
  *   that person, making the account if it's new, with a passkey made here.
  */
@@ -36,6 +38,20 @@ const textOf = (message: Message | undefined): string => {
 	if (!message || message.role === "assistant") return "";
 	if (typeof message.content === "string") return message.content;
 	return message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+};
+
+/** The tool calls a message asks for: one `/tool <name> {json}` per line, run one after another; a single one may span lines. */
+const directives = (text: string) => (/^\/tool\s/.test(text) ? text.split(/\n(?=\/tool\s)/).map((part) => /^\/tool\s+(\S+)\s*([\s\S]*)$/.exec(part.trim())) : []);
+
+/** A call to the tool `directive` asks for, or a message saying its JSON is wrong. */
+const call = (directive: RegExpExecArray | null) => {
+	const [, name, json] = directive ?? [];
+	try {
+		const args = json!.trim() === "" ? {} : JSON.parse(json!);
+		return fauxAssistantMessage(fauxToolCall(name!, args), { stopReason: "toolUse" });
+	} catch (error) {
+		return send(`That isn't JSON: ${String(error)}`);
+	}
 };
 
 const send = (message: string) =>
@@ -61,6 +77,10 @@ const answer: FauxResponseFactory = (context, _options, _state, model) => {
 		}
 		if (job.startsWith("You improve")) {
 			return fauxAssistantMessage(`${input}\n\nPlease be specific, and tell me what you need from me to get it right.`);
+		}
+		if (job.startsWith("You tell a person what their AI assistant is doing")) {
+			const tools = [...input.matchAll(/^- ([^\s:]+) \{/gm)].map((match) => match[1]!.replaceAll("_", " "));
+			return fauxAssistantMessage(`Working on it with ${tools.join(" and ") || "a tool"}`);
 		}
 		if (job.startsWith("You answer requests from a small app")) {
 			return fauxAssistantMessage(`The preview model got your request: ${input}`);
@@ -89,6 +109,11 @@ const answer: FauxResponseFactory = (context, _options, _state, model) => {
 			// A failed send would fail again: end the turn and let the harness report it. After a progress update, finish.
 			return last.isError ? fauxAssistantMessage(result) : send("Done.");
 		}
+		// The next tool the message asked for, if any is left.
+		const asked = messages.findLastIndex((message) => message.role === "user");
+		const calls = directives(textOf(messages[asked]).trim());
+		const done = messages.slice(asked).filter((message) => message.role === "toolResult").length;
+		if (done < calls.length) return call(calls[done]!);
 		return send(`\`${last.toolName}\` ${last.isError ? "failed" : "returned"}:\n\n${result || "(nothing)"}`);
 	}
 
@@ -100,16 +125,8 @@ const answer: FauxResponseFactory = (context, _options, _state, model) => {
 			`Hello${them ? `, ${them}` : ""}! I'm ${name}, your majordomo. Come to me for almost anything: I'll get to know you, set up agents for the bigger jobs, and look after what they need your approval for.\n\nTell me about yourself, as much or as little as you like. What keeps you busy these days?`,
 		);
 	}
-	const directive = /^\/tool\s+(\S+)\s*([\s\S]*)$/.exec(text);
-	if (directive) {
-		const [, name, json] = directive;
-		try {
-			const args = json!.trim() === "" ? {} : JSON.parse(json!);
-			return fauxAssistantMessage(fauxToolCall(name!, args), { stopReason: "toolUse" });
-		} catch (error) {
-			return send(`That isn't JSON: ${String(error)}`);
-		}
-	}
+	const [first] = directives(text);
+	if (first !== undefined) return call(first);
 	return send(`You said: ${text}\n\n_Preview model. Send \`/tool <name> {json}\` to call a tool._`);
 };
 

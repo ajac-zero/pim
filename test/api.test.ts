@@ -5,7 +5,7 @@ import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { StoredImage } from "../src/images";
 import type { TranscriptMessage } from "../src/transcript";
-import { api, apiUrl, connect, OWNER, post, ROOT, say, textOf, TOKEN, toolUse, url } from "./helpers";
+import { api, apiUrl, connect, lastUserText, OWNER, post, ROOT, say, textOf, TOKEN, toolUse, url } from "./helpers";
 import { faux, type Pim, utility } from "./worker";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -490,6 +490,45 @@ describe("conversation", () => {
 			.map((event) => event.entry.model[0].role)
 			.filter((role) => role !== "system");
 		expect(roles).toEqual(["user", "assistant", "toolResult"]);
+		socket.close();
+	});
+
+	it("tells whoever has a chat open what its agent is doing, in the utility model's words, unless the model's own headings say it", async () => {
+		// Named already, so the utility model only describes the work.
+		const { body: created } = await post("/sessions", { title: "Lisbon time" });
+		const { socket, received } = await connect(created.id);
+		await vi.waitFor(() => expect(received.some((message) => message.type === "events")).toBe(true));
+		const inputs: string[] = [];
+		utility.setResponses([
+			(context) => {
+				inputs.push(lastUserText(context.messages));
+				return fauxAssistantMessage('"Checking the time in Lisbon."');
+			},
+		]);
+		faux.setResponses([
+			// A summarized reasoning's heading describes this step: the app shows it, and no line is written.
+			fauxAssistantMessage([fauxThinking("**Finding the time zone**\n\nLisbon is on WET."), fauxToolCall("current_time", {})], { stopReason: "toolUse" }),
+			fauxAssistantMessage([fauxThinking("Now the local time, for the person."), fauxToolCall("current_time", { zone: "Europe/Lisbon" })], {
+				stopReason: "toolUse",
+			}),
+			toolUse("send_to_user", { message: "It's noon in Lisbon." }),
+		]);
+		await say("What time is it in Lisbon?", created.id);
+		// The line is for the step's own tool call, so the app shows it in that call's place.
+		const { messages } = (await api<{ messages: TranscriptMessage[] }>(`/sessions/${created.id}/messages`)).body;
+		const [, second] = messages.flatMap((message) => message.parts.flatMap((part) => (part.type === "tool-call" && part.name === "current_time" ? [part.id] : [])));
+		await vi.waitFor(() =>
+			expect(received.filter((message) => message.type === "progress")).toEqual([
+				{ type: "progress", session: created.id, text: "Checking the time in Lisbon", calls: [second] },
+			]),
+		);
+		// The request, what the agent found, its notes and its call: the step after the headed one.
+		expect(inputs).toHaveLength(1);
+		expect(inputs[0]).toContain("Their request: What time is it in Lisbon?");
+		expect(inputs[0]).toMatch(/Found so far:\n- current_time: \S/);
+		expect(inputs[0]).toContain("Its notes: Now the local time, for the person.");
+		expect(inputs[0]).toContain('- current_time {"zone":"Europe/Lisbon"}');
+		expect(inputs[0]).not.toContain("Finding the time zone");
 		socket.close();
 	});
 

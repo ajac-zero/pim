@@ -335,6 +335,7 @@ Connect to `wss://<host>/api/ws?session=<id>` (add `&token=...` without a passke
 - Server → client:
   - `hello`: the session and tools.
   - `events`: pi's [agent events](https://github.com/earendil-works/pi/tree/main/packages/durable#agent-events-experimental). The first batch starts with a `snapshot` that replaces client state.
+  - `progress`: what the session's agent is doing, in a few words from the utility model, for the tool calls `calls` (see [Utility model](#utility-model)).
   - `notification` and `approval`: sent to every socket.
   - `result` and `error`: replies to commands that carried an `id`.
 - Client → server: `submit`, `abort`, `reset`, `resync`, `follow`, `snapshot`.
@@ -403,6 +404,7 @@ Small jobs around a conversation go to one utility model rather than the chat's 
 - **Names chats.** A chat is called by the start of its first message at once, then by the few words the utility model picks. A rename in the meantime stays. Chat ⋯ → Regenerate names it again from the conversation so far.
 - **Improves prompts.** The ✨ button in the message box rewrites the draft in place so the agent can act on it.
 - **Summarizes chats.** The summary button in a chat's header opens a box at the top right with what the chat covered and the next steps; it stays open from chat to chat until closed. Nothing is written while it's closed, and a summary is kept until more is said.
+- **Says what an agent is doing.** While an agent works, the chat lists its steps above the dots, a few words each behind a mark for the kind of step (an app's tools get the app's icon), and adds one as it goes. A model that summarizes its own reasoning under headings, as OpenAI's do, says it itself: each heading is a step. Each tool call is a step too, named by the utility model, from the person's request, the results the agent just got, its notes, and the call with its arguments, which makes it the one job that sees the agent's tool calls ([`src/progress.ts`](src/progress.ts)). It writes one line at a time, at most one every five seconds, for the latest step, and only while someone has the chat open; a step it didn't describe, or any step without a utility model, shows the tool's name. Once the agent sends its message, the list folds into a "Worked for 42s" line that opens to it again. The utility model's lines aren't stored: after a reload the list shows the tools' names in their place.
 
 Each job is a task in [`src/utility.ts`](src/utility.ts): instructions, a cap on the answer for models that don't reason, and how to clean the answer. `Pim.utility(task, input)` runs one on the utility model, and `conversationText` gives it a chat as what each side said, without tool calls or the agent's private notes. A new feature adds a task there and a route that calls it.
 

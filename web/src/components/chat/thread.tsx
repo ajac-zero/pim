@@ -19,7 +19,9 @@ import {
   GeneratedImage,
   generatedImagePath,
   ThinkingDot,
+  type ToolApps,
   UserMessage,
+  WorkedSteps,
 } from "~/components/chat/items";
 import { CHATGPT_USAGE_URL } from "~/components/chatgpt-logo";
 import { type TranslationKey, useI18n } from "~/components/i18n";
@@ -44,7 +46,7 @@ import {
   type ThreadEntry,
   userItem,
 } from "~/lib/pim-view";
-import { approvalsQuery } from "~/lib/queries";
+import { appDirectoryQuery, approvalsQuery, appsQuery } from "~/lib/queries";
 
 /** Tools whose answer names an artifact version, shown as the artifact itself: one made, changed or shown again. */
 const ARTIFACT_TOOLS = new Set([
@@ -190,6 +192,23 @@ export const Thread = memo(function Thread({
       )
       .sort((a, b) => a.createdAt - b.createdAt);
   }, [approvals, placed, sessionId]);
+  /* The connected app of each app tool, for the steps that used it. */
+  const { data: connected } = useQuery(appsQuery());
+  const { data: directory } = useQuery(appDirectoryQuery());
+  const toolApps = useMemo<ToolApps>(
+    () =>
+      new Map(
+        (connected ?? []).flatMap((server) => {
+          const app = directory?.find((entry) => entry.ref === server.app);
+          const look = {
+            name: app?.name ?? server.name,
+            icon: app?.icon ?? null,
+          };
+          return server.tools.map((tool) => [tool.name, look] as const);
+        }),
+      ),
+    [connected, directory],
+  );
   const liveKeys = useMemo(
     () => new Set(view.live.map((entry) => entry.key)),
     [view.live],
@@ -211,8 +230,9 @@ export const Thread = memo(function Thread({
             call.name === IMAGE_TOOL &&
             generatedImagePath(outputs.get(call.call_id)?.output) !== null),
         refused: (call) => outputs.get(call.call_id)?.status === "incomplete",
+        work: { running: view.running, lines: view.lines },
       }),
-    [entries, approvalsByCall, outputs, visit],
+    [entries, approvalsByCall, outputs, visit, view.running, view.lines],
   );
 
   // A reply being written in the chat shows the work going on by itself.
@@ -236,7 +256,7 @@ export const Thread = memo(function Thread({
       initial={scrollPositions.has(sessionId) ? false : "instant"}
     >
       <ConversationContent
-        className="mx-auto min-h-full w-full max-w-3xl px-4 [&>[data-speaker=assistant]+[data-speaker=assistant]]:-mt-2 [&>[data-speaker=assistant]+[data-speaker=assistant]]:border-border/60 [&>[data-speaker=assistant]+[data-speaker=assistant]]:border-t [&>[data-speaker=assistant]+[data-speaker=assistant]]:pt-4 [&>[data-speaker=user]+[data-speaker=assistant]]:-mt-5 [&>[data-speaker=user]+[data-speaker=user]]:-mt-3"
+        className="mx-auto min-h-full w-full max-w-3xl px-4 [&>[data-speaker=assistant]+[data-speaker=assistant]]:-mt-2 [&>[data-speaker=assistant]+[data-speaker=assistant]]:border-border/60 [&>[data-speaker=assistant]+[data-speaker=assistant]]:border-t [&>[data-speaker=assistant]+[data-speaker=assistant]]:pt-4 [&>[data-speaker=user]+[data-speaker=assistant]]:-mt-5 [&>[data-speaker=user]+[data-speaker=user]]:-mt-3 [&>[data-speaker=user]+[data-work]]:-mt-5 [&>[data-work]+[data-speaker=assistant]]:-mt-2 [&>[data-work]+[data-thinking]]:-mt-3"
         style={{
           paddingTop: HEADER_INSET,
           paddingBottom:
@@ -276,6 +296,17 @@ export const Thread = memo(function Thread({
                     />
                   ) : null
                 }
+              />
+            );
+          }
+          if (row.kind === "work") {
+            return (
+              <WorkedSteps
+                key={row.key}
+                steps={row.steps}
+                ms={row.ms}
+                live={row.live}
+                apps={toolApps}
               />
             );
           }

@@ -427,7 +427,7 @@ describe("layoutThread", () => {
       rows.map((row) =>
         row.kind === "sent"
           ? row.at
-          : row.entry.kind === "item"
+          : row.kind === "entry" && row.entry.kind === "item"
             ? row.entry.at
             : null,
       ),
@@ -566,6 +566,100 @@ describe("layoutThread", () => {
         (call) => ["http_request", "artifact_create"].includes(call.name),
       ),
     ).toEqual(["entry 1", "entry 2:1", "entry 2:3"]);
+  });
+});
+
+describe("work rows", () => {
+  const search = {
+    type: "toolCall",
+    id: "s",
+    name: "web_search",
+    arguments: { query: "Private search terms" },
+  };
+  const send = (id: string, message: string) => ({
+    type: "toolCall",
+    id,
+    name: "send_to_user",
+    arguments: { message },
+  });
+  const entries = [
+    user(1, "Plan my trip.", 1_000),
+    assistant(
+      2,
+      [
+        {
+          type: "thinking",
+          thinking: "**Checking flights**\n\nPrivate detail about May.",
+        },
+        search,
+      ],
+      { timestamp: 2_000, durationMs: 1_000 },
+    ),
+    toolResult(3, "s", "Private result"),
+    // The request started at 4 s and took 3 s: the send went at 7 s.
+    assistant(4, [send("m", "Found flights.")], {
+      timestamp: 4_000,
+      durationMs: 3_000,
+    }),
+    toolResult(5, "m", "Sent."),
+    assistant(6, [search], { timestamp: 8_000, durationMs: 500 }),
+  ];
+  const rows = (running: boolean, lines: Record<string, string> = {}) =>
+    layoutThread(run([snapshot({ entries })]).view.entries, {
+      shown: () => false,
+      work: { running, lines },
+    });
+
+  it("folds the work before a message into its headings and tools, timed from the row before", () => {
+    expect(rows(false).slice(0, 3)).toEqual([
+      expect.objectContaining({ kind: "entry", key: "1" }),
+      {
+        kind: "work",
+        key: "work:2:0",
+        steps: [
+          { tool: null, text: "Checking flights" },
+          { tool: "web_search", text: null },
+        ],
+        ms: 6_000,
+        live: false,
+      },
+      expect.objectContaining({ kind: "sent", key: "4:0", at: 7_000 }),
+    ]);
+    // Never the reasoning's text, a tool's arguments or its results.
+    for (const secret of [
+      "Private detail",
+      "Private search",
+      "Private result",
+    ]) {
+      expect(JSON.stringify(rows(false))).not.toContain(secret);
+    }
+  });
+
+  it("lists the work after the last message as it goes, and folds it once the run is over", () => {
+    expect(rows(true).at(-1)).toEqual({
+      kind: "work",
+      key: "work:6:0",
+      steps: [{ tool: "web_search", text: null }],
+      ms: null,
+      live: true,
+    });
+    expect(rows(false).at(-1)).toEqual({
+      kind: "work",
+      key: "work:6:0",
+      steps: [{ tool: "web_search", text: null }],
+      ms: 1_500,
+      live: false,
+    });
+  });
+
+  it("shows the utility model's line in place of the tool call it describes", () => {
+    const work = rows(false, { s: "Looking for flights in May" })[1];
+    expect(work).toMatchObject({
+      steps: [
+        { tool: null, text: "Checking flights" },
+        { tool: "web_search", text: "Looking for flights in May" },
+      ],
+    });
   });
 });
 

@@ -864,6 +864,7 @@ export const CHATGPT_PROVIDER = "openai";
 export type ServerMessage =
   | { type: "hello"; session: string; tools: unknown[] }
   | { type: "events"; session: string; events: AgentEvent[] }
+  | { type: "progress"; session: string; text: string; calls: string[] }
   | { type: "notification"; notification: PimNotification }
   | { type: "approval"; approval: Approval }
   | { type: "visits" }

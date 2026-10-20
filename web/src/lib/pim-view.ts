@@ -20,6 +20,7 @@ import {
   DELIVERY_REMINDER,
   INTRODUCTION,
   NOTICE_PREFIXES,
+  reasoningHeadings,
 } from "../../../src/transcript";
 
 /**
@@ -50,7 +51,8 @@ export type ThreadEntry =
       /** When it was said, in ms: when the person sent it, or when the agent finished writing it. */
       at: number;
     }
-  | { key: string; kind: "notice"; notice: PimNotice };
+  /** `at` is when Pim gave it, except for a reset. */
+  | { key: string; kind: "notice"; notice: PimNotice; at?: number };
 
 export type RunningTool = { callId: string; name: string; output: string };
 
@@ -65,6 +67,11 @@ export type SessionView = {
   queued: number;
   retry: { at: number } | null;
   error: ViewError | null;
+  /**
+   * The utility model's line for each tool call it described, by call id
+   * (see src/progress.ts). Lines aren't stored: they last as long as the app.
+   */
+  lines: Readonly<Record<string, string>>;
 };
 
 /**
@@ -124,6 +131,7 @@ export const EMPTY_VIEW: SessionView = {
   queued: 0,
   retry: null,
   error: null,
+  lines: {},
 };
 
 function textOf(content: Message["content"]): string {
@@ -221,7 +229,8 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
       if (text === DELIVERY_REMINDER || text.startsWith(INTRODUCTION))
         return [];
       const notice = noticeOf(text);
-      if (notice) return [{ key, kind: "notice", notice }];
+      if (notice)
+        return [{ key, kind: "notice", notice, at: message.timestamp }];
       return [
         {
           key,
@@ -445,6 +454,7 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
             ? { at: event.generation.retry.at }
             : null,
           error: null,
+          lines: view.lines,
         },
       };
     }
@@ -595,6 +605,14 @@ export function sentOf(call: FunctionCallItem): Sent | null {
   };
 }
 
+/**
+ * One step of an agent's work the person doesn't read: a heading of its
+ * summarized reasoning (`text` alone), or a tool it called (`tool`), with
+ * the utility model's line for the call as `text` when there is one; the
+ * app names the others.
+ */
+export type WorkStep = { tool: string | null; text: string | null };
+
 /** One row of the chat as the person reads it. */
 export type ThreadRow =
   /** Something they said, a notice, or a user-facing approval or artifact. */
@@ -607,14 +625,50 @@ export type ThreadRow =
       sent: Sent;
       /** When it was sent, in ms. */
       at: number;
+    }
+  /** The work the agent did before the next row, or is doing now (`live`). */
+  | {
+      kind: "work";
+      key: string;
+      steps: WorkStep[];
+      /** How long it took, in ms; null while it goes on, or when it's unknown where it began. */
+      ms: number | null;
+      live: boolean;
     };
+
+/**
+ * The steps an assistant block shows: its reasoning's headings, or a tool it
+ * called other than to send, as the utility model's line for it if there is one.
+ */
+function stepsOf(
+  item: ORItem,
+  lines: Readonly<Record<string, string>>,
+): WorkStep[] {
+  if (item.type === "reasoning") {
+    return reasoningHeadings(
+      ((item as ReasoningItem).summary ?? [])
+        .map((part) => part.text)
+        .join("\n\n"),
+    ).map((text) => ({ tool: null, text }));
+  }
+  if (item.type === "function_call") {
+    const call = item as FunctionCallItem;
+    if (call.name === SEND_TO_USER) return [];
+    return [{ tool: call.name, text: lines[call.call_id] ?? null }];
+  }
+  return [];
+}
 
 /**
  * Lays the thread out as the person reads it: what they said and what Pim sent
  * them. `shown` picks user-facing approvals and artifacts, never raw tool calls.
  *
  * Only explicit send_to_user calls are presented as assistant text. Ordinary
- * assistant text, reasoning, and tool activity are private, even without a send.
+ * assistant text, raw reasoning, tool arguments and results are private, even
+ * without a send. With `work`, the agent's work before each row is a work row
+ * of its steps: its reasoning's headings, and the tools it used, or the
+ * utility model's `lines` for them. While it is `running`, the work after the
+ * last row is a live work row, which grows as it goes.
  */
 export function layoutThread(
   entries: readonly ThreadEntry[],
@@ -622,11 +676,36 @@ export function layoutThread(
     shown: (call: FunctionCallItem) => boolean;
     /** A `send_to_user` call the tool refused (an unknown widget, an email that couldn't go): nothing reached the person. */
     refused?: (call: FunctionCallItem) => boolean;
+    work?: { running: boolean; lines?: Readonly<Record<string, string>> };
   },
 ): ThreadRow[] {
   const rows: ThreadRow[] = [];
+  let steps: WorkStep[] = [];
+  let workKey = "";
+  /** When the last row was said, where the work after it began. */
+  let since: number | null = null;
+  /** When the work's latest step ended. */
+  let until: number | null = null;
+  const lines = options.work?.lines ?? {};
+  const fold = (end: number | null, live = false) => {
+    if (options.work && steps.length > 0) {
+      rows.push({
+        kind: "work",
+        key: `work:${workKey}`,
+        steps,
+        ms:
+          !live && since !== null && end !== null
+            ? Math.max(0, end - since)
+            : null,
+        live,
+      });
+    }
+    steps = [];
+  };
   const own = (entry: ThreadEntry) => {
+    fold(until);
     rows.push({ kind: "entry", key: entry.key, entry });
+    since = entry.at ?? null;
   };
   for (const entry of entries) {
     if (entry.kind === "notice") {
@@ -638,6 +717,11 @@ export function layoutThread(
       case "message":
       case "reasoning":
         if ((item as MessageItem).role === "user") own(entry);
+        else if (entry.source === "agent") {
+          if (steps.length === 0) workKey = entry.key;
+          steps.push(...stepsOf(item, lines));
+          until = entry.at;
+        }
         break;
       case "function_call": {
         const call = item as FunctionCallItem;
@@ -647,6 +731,7 @@ export function layoutThread(
           if (options.refused?.(call)) break;
           // Nothing to read until its message starts streaming.
           if (message.message === "") break;
+          fold(entry.at);
           rows.push({
             kind: "sent",
             key: entry.key,
@@ -654,17 +739,25 @@ export function layoutThread(
             sent: message,
             at: entry.at,
           });
+          since = entry.at;
         } else if (options.shown(call)) own(entry);
+        else {
+          if (steps.length === 0) workKey = entry.key;
+          steps.push(...stepsOf(item, lines));
+          until = entry.at;
+        }
         break;
       }
       case "function_call_output":
-        // Shown with its call.
+        // Shown with its call; the step it ends lasted until it came.
+        until = entry.at;
         break;
       default:
         // Unknown internal items are not a user-facing message either.
         break;
     }
   }
+  fold(until, options.work?.running);
   return rows;
 }
 
@@ -690,6 +783,7 @@ export function conversationMarkdown(
     shown: () => false,
     refused: (call) => refused.has(call.call_id),
   })
+    .flatMap((row) => (row.kind === "work" ? [] : [row]))
     .map((row) => {
       if (row.kind === "sent") {
         const email = row.sent.channel === "email" ? " (email)" : "";

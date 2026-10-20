@@ -285,7 +285,7 @@ export const Thread = memo(function Thread({
       initial={scrollPositions.has(sessionId) ? false : "instant"}
     >
       <ConversationContent
-        className="mx-auto min-h-full w-full max-w-4xl px-4 md:px-8 [&>[data-speaker=assistant]+[data-speaker=assistant]]:-mt-2 [&>[data-speaker=assistant]+[data-speaker=assistant]]:border-border/60 [&>[data-speaker=assistant]+[data-speaker=assistant]]:border-t [&>[data-speaker=assistant]+[data-speaker=assistant]]:pt-4 [&>[data-speaker=user]+[data-speaker=assistant]]:-mt-5 [&>[data-speaker=user]+[data-speaker=user]]:-mt-3 [&>[data-speaker=user]+[data-work]]:-mt-5 [&>[data-work]+[data-speaker=assistant]]:-mt-2 [&>[data-work]+[data-thinking]]:-mt-3"
+        className="mx-auto min-h-full w-full max-w-4xl px-4 md:px-8 [&>[data-speaker=assistant]+[data-notice=task]]:-mt-5 [&>[data-speaker=assistant]+[data-speaker=assistant]]:-mt-2 [&>[data-speaker=assistant]+[data-speaker=assistant]]:border-border/60 [&>[data-speaker=assistant]+[data-speaker=assistant]]:border-t [&>[data-speaker=assistant]+[data-speaker=assistant]]:pt-4 [&>[data-speaker=user]+[data-speaker=assistant]]:-mt-5 [&>[data-speaker=user]+[data-speaker=user]]:-mt-3 [&>[data-speaker=user]+[data-work]]:-mt-5 [&>[data-work]+[data-speaker=assistant]]:-mt-2 [&>[data-work]+[data-thinking]]:-mt-3"
         style={{
           paddingTop: HEADER_INSET,
           paddingBottom:

@@ -302,31 +302,39 @@ export const EventNotice = memo(function EventNotice({
   return (
     <div
       id={id}
+      data-notice={notice.kind}
       tabIndex={id ? -1 : undefined}
       className="group/notice flex w-full flex-col items-center rounded-xl outline-none"
     >
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-        className="inline-flex max-w-full items-center gap-1.5 px-3 py-1 text-muted-foreground text-[13px] transition-colors hover:text-foreground"
-      >
-        <Icon className="size-3.5 shrink-0" />
-        <span className="truncate">{notice.title}</span>
-        <ChevronRight
-          className={cn(
-            "size-3 shrink-0 transition-transform",
-            open && "rotate-90",
-          )}
-        />
-      </button>
-      {at !== undefined && notice.kind === "task" && (
-        <div className="h-4 text-muted-foreground text-xs">
-          <MessageTime at={at} />
-        </div>
-      )}
+      <div className="relative flex max-w-full justify-center">
+        <button
+          type="button"
+          onClick={() => setOpen((value) => !value)}
+          aria-expanded={open}
+          className="inline-flex max-w-full items-center gap-1.5 px-3 py-1 text-muted-foreground text-[13px] transition-colors hover:text-foreground"
+        >
+          <Icon className="size-3.5 shrink-0" />
+          <span className="truncate">{notice.title}</span>
+          <ChevronRight
+            className={cn(
+              "size-3 shrink-0 transition-transform",
+              open && "rotate-90",
+            )}
+          />
+        </button>
+        {at !== undefined && notice.kind === "task" && (
+          <div className="absolute top-full whitespace-nowrap text-muted-foreground text-xs">
+            <MessageTime at={at} />
+          </div>
+        )}
+      </div>
       {open && (
-        <div className="mt-2 w-full space-y-3 rounded-xl border bg-muted/50 p-3">
+        <div
+          className={cn(
+            "mt-2 w-full space-y-3 rounded-xl border bg-muted/50 p-3",
+            at !== undefined && notice.kind === "task" && "mt-5",
+          )}
+        >
           <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap font-mono text-xs leading-relaxed [overflow-wrap:anywhere]">
             {notice.text}
           </pre>

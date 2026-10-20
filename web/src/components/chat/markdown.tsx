@@ -384,10 +384,10 @@ const TONES = {
   },
   bubble: {
     link: "underline underline-offset-2",
-    code: "bg-current/15",
-    quote: "border-current/40 opacity-80",
+    code: "bg-background/50",
+    quote: "border-current/40",
     line: "border-current/25",
-    head: "bg-current/10",
+    head: "bg-background/50",
   },
 };
 

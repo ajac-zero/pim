@@ -57,7 +57,7 @@ export const THEME_TOKENS = [
 	"agent-pink",
 ] as const;
 
-/** Tokens a theme may leave out: user message bubbles follow the primary unless it sets them. */
+/** Tokens a theme may leave out: user message bubbles follow the secondary surface unless it sets them. */
 const OPTIONAL_TOKENS = ["bubble", "bubble-foreground"] as const;
 
 /** One mode's colors: any CSS color, by token. */

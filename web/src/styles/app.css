@@ -55,9 +55,9 @@
  * `data-theme`, like the previews in Settings, resolves them in its own colors.
  */
 :where(:root, [data-theme]) {
-  /* User message bubbles follow the primary unless a theme sets them. */
-  --bubble: var(--primary);
-  --bubble-foreground: var(--primary-foreground);
+  /* User message bubbles are reading surfaces, not primary actions. */
+  --bubble: var(--secondary);
+  --bubble-foreground: var(--secondary-foreground);
   --radius: 0.75rem;
 }
 

@@ -1,7 +1,7 @@
 import type { Theme } from "../../themes";
 
 /**
- * Moose: cool grays, black or white buttons, and sky-blue user bubbles; a
+ * Moose: cool grays, black or white buttons, and softly blue user bubbles; a
  * parody nod like Gronk.
  */
 export const moose: Theme = {
@@ -16,7 +16,7 @@ export const moose: Theme = {
 		"popover-foreground": "#111112",
 		primary: "#111112",
 		"primary-foreground": "#fcfcfc",
-		bubble: "#cbe5ff",
+		bubble: "#e1eaf3",
 		"bubble-foreground": "#111112",
 		secondary: "#e9eaeb",
 		"secondary-foreground": "#111112",
@@ -64,8 +64,8 @@ export const moose: Theme = {
 		"popover-foreground": "#fcfcfc",
 		primary: "#fcfcfc",
 		"primary-foreground": "#111112",
-		bubble: "#0074e8",
-		"bubble-foreground": "#ffffff",
+		bubble: "#243447",
+		"bubble-foreground": "#fcfcfc",
 		secondary: "#28292b",
 		"secondary-foreground": "#fcfcfc",
 		muted: "#252628",

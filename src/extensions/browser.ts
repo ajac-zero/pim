@@ -16,7 +16,7 @@ export const BROWSER_EXTENSION = "pim.browser";
 export const BROWSER_CLICK = "browser_click";
 export const BROWSER_TYPE = "browser_type";
 
-const SHARED = `The browser is one Chrome the person's agents share; it starts signed in nowhere, keeps its pages between your steps, and closes itself after ten minutes unused. If a page needs the person (signing in, a check that they're human, payment details), stop and ask them to take over: in the box beside the chat, under its summary, they choose Take over and tell you when they're done. Never ask them for passwords or codes in the chat.`;
+const SHARED = `The browser is the Chrome on the person's computer, which their agents share; it keeps its pages between your steps, and what the person signed in to there stays signed in. If a page needs the person (signing in, a check that they're human, payment details), stop and ask them to take over: in the box beside the chat, under its summary, they choose Take over and tell you when they're done. Never ask them for passwords or codes in the chat.`;
 
 const Ref = Type.Integer({ minimum: 1, description: "The element's number, from the page as browser_open or browser_read last showed it: 12 for [12 button “Search”]." });
 const ClickArgs = Type.Object({ ref: Ref });
@@ -28,8 +28,8 @@ const TypeArgs = Type.Object({
 
 export type BrowserServices = {
 	readonly browser: PimBrowser;
-	/** Saves a screenshot to the person's files, or null when they have none (no computer), which leaves out `browser_screenshot`. */
-	readonly saveScreenshot: ((path: string | undefined, png: Uint8Array) => Promise<string>) | null;
+	/** Saves a screenshot to the person's files, on their computer. */
+	readonly saveScreenshot: (path: string | undefined, png: Uint8Array) => Promise<string>;
 };
 
 function failure(error: unknown) {
@@ -149,7 +149,7 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 			try {
 				const png = await browser.screenshot();
 				if (!png) return text("The browser is closed. Open a page with browser_open.", true);
-				return text(`Saved to ${await saveScreenshot!(path, png)}.`);
+				return text(`Saved to ${await saveScreenshot(path, png)}.`);
 			} catch (error) {
 				return failure(error);
 			}
@@ -158,7 +158,7 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 
 	const browserClose = defineTool({
 		name: "browser_close",
-		description: "Close the browser when you're done with it, with its pages and anything signed in there. It also closes itself after ten minutes unused.",
+		description: "Close the browser when you're done with it, with its pages; what's signed in there stays. It also closes itself after half an hour unused.",
 		parameters: Type.Object({}),
 		replay: "safe",
 		async execute() {
@@ -167,7 +167,7 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 		},
 	});
 
-	const tools: ToolRegistration[] = [browserOpen, browserRead, ...(saveScreenshot ? [browserScreenshot] : []), browserClose];
+	const tools: ToolRegistration[] = [browserOpen, browserRead, browserScreenshot, browserClose];
 	if (permissions.click !== "off") tools.push(browserClick);
 	if (permissions.type !== "off") tools.push(browserType);
 	return defineExtension({ name: BROWSER_EXTENSION, tools });

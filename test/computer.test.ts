@@ -85,8 +85,12 @@ describe("a space without a computer", () => {
 		expect((await api("/files")).status).toBe(404);
 		const tools = await offeredTools();
 		expect(tools).toContain("send_to_user");
-		for (const tool of ["file_read", "file_write", "file_delete", "shell", "generate_image", "browser_screenshot"]) expect(tools).not.toContain(tool);
-		expect((await api("/permissions")).body.tools.map((permission: { name: string }) => permission.name)).not.toContain("shell");
+		for (const tool of ["file_read", "file_write", "file_delete", "shell", "generate_image", "browser_open", "browser_click", "browser_screenshot"]) {
+			expect(tools).not.toContain(tool);
+		}
+		const permissions = (await api("/permissions")).body.tools.map((permission: { name: string }) => permission.name);
+		for (const tool of ["shell", "browser_click"]) expect(permissions).not.toContain(tool);
+		expect((await api("/browser")).body).toEqual({ available: false, page: null });
 	});
 
 	it("keeps the files it had, and moves them to the computer once one connects", async () => {
@@ -130,7 +134,7 @@ describe("the computer", () => {
 		expect((await opens("/computer/connect", TOKEN)).status).toBe(401);
 		expect((await opens("/computer/connect", `${token.slice(0, -2)}xx`)).status).toBe(401);
 		const tools = await offeredTools();
-		for (const tool of ["file_read", "file_write", "file_edit", "file_search", "shell", "generate_image"]) expect(tools).toContain(tool);
+		for (const tool of ["file_read", "file_write", "file_edit", "file_search", "shell", "generate_image", "browser_open", "browser_click"]) expect(tools).toContain(tool);
 	});
 
 	it("keeps the files the person and their agents share", async () => {

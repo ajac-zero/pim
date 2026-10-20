@@ -16,7 +16,9 @@ export default defineConfig({
 			// The secrets of the test extension's bank app, and the client registered for its Forge app.
 			// A content origin, so public artifact links are on.
 			// Traces with their content, so the tests check what an operator who opts in would see.
+			// A local Chrome, which the tests' computers browse with (test/helpers.ts's `testBrowser`).
 			miniflare: {
+				browserRendering: { binding: "BROWSER" },
 				bindings: {
 					PIM_PUBLIC_URL: "https://pim.test",
 					PIM_TIME_ZONE: "America/New_York",

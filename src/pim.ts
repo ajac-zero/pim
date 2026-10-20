@@ -85,7 +85,7 @@ import {
 import pimConfig from "../pim.config";
 import { artifactsExtension, artifactsWidgets } from "./extensions/artifacts";
 import { type FileServices, fileDeleteAction, filesExtension, SHELL, shellAction } from "./extensions/files";
-import { browserClickAction, browserExtension, browserTypeAction } from "./extensions/browser";
+import { BROWSER_CLICK, BROWSER_EXTENSION, BROWSER_TYPE, browserClickAction, browserExtension, browserTypeAction } from "./extensions/browser";
 import { IMAGES_EXTENSION, type ImageModel, imageGenerationExtension, workersAiImageModel } from "./extensions/image-generation";
 import { appDirectory, type CustomApp, type DirectoryApp } from "./extensions/app-directory";
 import { ExtensionDataStore } from "./extensions/data";
@@ -141,7 +141,7 @@ import { webExtension } from "./extensions/web";
 import { COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer } from "./computer";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
-import { PimBrowser } from "./browser";
+import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
 import { type DeploymentSettings, deploymentSettings } from "./deployment";
 import { dispatch, HttpError, readJson, type Route } from "./http";
 import type { ClientMessage, PublicApproval, ServerMessage, ToolInfo } from "./protocol";
@@ -173,7 +173,7 @@ const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 /** Pim's own widgets: every chat can show them. */
 const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory", "pim.artifacts"];
 /** Pim's own actions that use the person's computer, offered only while one is paired. */
-const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL]);
+const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, BROWSER_CLICK, BROWSER_TYPE]);
 /** How a dashboard names an artifact pinned to it: `artifact:<id>`. */
 const PINNED_ARTIFACT = "artifact:";
 
@@ -381,7 +381,7 @@ export class Pim extends DurableAgent<Env> {
 		owner: () => this.name,
 	});
 	/** The browser the person's agents share (see ./browser.ts). */
-	readonly browser = new PimBrowser(this.env.BROWSER as BrowserRun | undefined, {
+	readonly browser = new PimBrowser(this.computer, {
 		get: (key) => this.store.meta(key) || null,
 		set: (key, value) => this.store.setMeta(key, value ?? ""),
 	});
@@ -517,7 +517,8 @@ export class Pim extends DurableAgent<Env> {
 		manageAppsAction(this.agents, this.apps, () => this.appDirectory()),
 		fileDeleteAction(this.#files),
 		shellAction(this.computer),
-		...(this.browser.available ? [browserClickAction(this.browser), browserTypeAction(this.browser)] : []),
+		browserClickAction(this.browser),
+		browserTypeAction(this.browser),
 		writeSkillAction(this.skills, this.agents),
 	];
 
@@ -3287,7 +3288,7 @@ export class Pim extends DurableAgent<Env> {
 		};
 		await Promise.race([courtesy().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, ERASE_COURTESY_MS))]);
 		// Images and stored files live outside this object's storage, in R2 under the owner's prefix,
-		// so they go first, and the browser closes with whatever was signed in there.
+		// so they go first, and the browser on the person's computer quits.
 		await this.images.deleteAll();
 		await this.artifacts.deleteAllFiles();
 		await this.browser.close().catch(() => undefined);
@@ -3401,9 +3402,9 @@ export class Pim extends DurableAgent<Env> {
 		return answer();
 	}
 
-	/** The browser, or 404 where this deployment has none. */
+	/** The browser, or 404 while the person has no computer for it to run on. */
 	#browserIn(): PimBrowser {
-		if (!this.browser.available) throw new HttpError(404, "This space has no browser");
+		if (!this.browser.available) throw new HttpError(404, "This space has no browser: connect a computer in Settings → Computer");
 		return this.browser;
 	}
 
@@ -4198,7 +4199,7 @@ export class Pim extends DurableAgent<Env> {
 					return noStore({ deleted: true });
 				}),
 		],
-		// The agents' browser (see ./browser.ts): what it shows, a picture of it, taking it over, closing it.
+		// The agents' browser (see ./browser.ts): what it shows, a picture of it, closing it. Taking it over is a socket.
 		[
 			"GET",
 			"/browser",
@@ -4211,20 +4212,6 @@ export class Pim extends DurableAgent<Env> {
 				const png = await this.#browserIn().screenshot();
 				if (!png) throw new HttpError(404, "The browser is closed");
 				return new Response(png, { headers: { "content-type": "image/png", "cache-control": "no-store, private", "x-content-type-options": "nosniff" } });
-			},
-		],
-		[
-			"POST",
-			"/browser/live",
-			async () => {
-				let url: string | null;
-				try {
-					url = await this.#browserIn().liveView();
-				} catch (error) {
-					throw new HttpError(501, error instanceof Error ? error.message : String(error));
-				}
-				if (!url) throw new HttpError(404, "The browser is closed");
-				return noStore({ url });
 			},
 		],
 		[
@@ -4938,20 +4925,20 @@ export class Pim extends DurableAgent<Env> {
 		this.#reinstallApprovals();
 	}
 
-	/** The browser's tools, where this deployment has a browser; clicking and typing follow their permissions. */
+	/** The browser's tools, while the person has a computer; clicking and typing follow their permissions. */
 	#installBrowser(services: PimServices): void {
-		if (!this.browser.available) return;
+		if (!this.browser.available) {
+			this.registry.install(defineExtension({ name: BROWSER_EXTENSION, tools: [] }));
+			return;
+		}
 		this.registry.install(
 			browserExtension(services, {
 				browser: this.browser,
-				// Screenshots go to the person's files, on their computer.
-				saveScreenshot: this.computer.paired()
-					? async (path, png) => {
-							this.#assertOpen();
-							const target = path ?? `${FILES_ROOT}/screenshots/${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
-							return (await this.files.write(target, png)).path;
-						}
-					: null,
+				saveScreenshot: async (path, png) => {
+					this.#assertOpen();
+					const target = path ?? `${FILES_ROOT}/screenshots/${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
+					return (await this.files.write(target, png)).path;
+				},
 			}),
 		);
 	}
@@ -5019,16 +5006,49 @@ export class Pim extends DurableAgent<Env> {
 
 	/** The computer's connection is tagged, so the space finds it, and leaves it out of what it tells the app. */
 	override getConnectionTags(_connection: Connection, ctx: ConnectionContext): string[] {
-		return new URL(ctx.request.url).pathname === COMPUTER_PATH ? [COMPUTER_TAG] : [];
+		const { pathname } = new URL(ctx.request.url);
+		return pathname === COMPUTER_PATH ? [COMPUTER_TAG] : pathname === BROWSER_LIVE_PATH ? [BROWSER_TAG] : [];
 	}
 
 	#isComputer(connection: Connection): boolean {
 		return connection.tags.includes(COMPUTER_TAG);
 	}
 
+	#isBrowserWatcher(connection: Connection): boolean {
+		return connection.tags.includes(BROWSER_TAG);
+	}
+
+	/**
+	 * Someone takes the browser over on this socket: it gets the page as
+	 * pictures, and its mouse and keyboard go to the page. It closes when
+	 * the browser does; one that's closed has nothing to take over.
+	 */
+	async #watchBrowser(connection: Connection): Promise<boolean> {
+		const send = (message: BrowserLiveMessage) => {
+			if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify(message));
+		};
+		let watching: boolean;
+		try {
+			watching = this.browser.available && (await this.browser.watch(connection.id, {
+				frame: (frame) => send({ type: "frame", ...frame }),
+				page: (page) => send({ type: "page", ...page }),
+				closed: () => connection.close(4000, "The browser closed"),
+			}));
+		} catch (error) {
+			send({ type: "error", message: errorMessage(error) });
+			watching = false;
+		}
+		if (!watching) connection.close(4004, "The browser isn't open");
+		return watching;
+	}
+
 	async onConnect(connection: Connection<SocketState>, ctx: ConnectionContext): Promise<void> {
 		if (this.#isComputer(connection)) {
 			this.computer.connected(connection);
+			return;
+		}
+		if (this.#isBrowserWatcher(connection)) {
+			await this.#watchBrowser(connection);
 			return;
 		}
 		const requested = new URL(ctx.request.url).searchParams.get("session");
@@ -5050,6 +5070,16 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#isComputer(connection)) {
 			this.computer.receive(raw);
 			if (raw.startsWith('{"type":"hello"')) this.#computerConnected();
+			return;
+		}
+		if (this.#isBrowserWatcher(connection)) {
+			// A space that slept since forgot who was watching: they go on where they were.
+			if (!this.browser.watching(connection.id) && !(await this.#watchBrowser(connection))) return;
+			try {
+				await this.browser.input(JSON.parse(raw) as BrowserInput);
+			} catch (error) {
+				if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify({ type: "error", message: errorMessage(error) } satisfies BrowserLiveMessage));
+			}
 			return;
 		}
 		let message: ClientMessage;
@@ -5074,12 +5104,14 @@ export class Pim extends DurableAgent<Env> {
 
 	async onClose(connection: Connection): Promise<void> {
 		if (this.#isComputer(connection)) return this.#computerDisconnected();
+		if (this.#isBrowserWatcher(connection)) return this.browser.unwatch(connection.id);
 		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
 	}
 
 	async onError(connection: Connection): Promise<void> {
 		if (this.#isComputer(connection)) return this.#computerDisconnected();
+		if (this.#isBrowserWatcher(connection)) return this.browser.unwatch(connection.id);
 		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
 	}
@@ -5192,11 +5224,11 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	/** Tells every open app; the computer's connection speaks another protocol. */
+	/** Tells every open app; the computer's connection, and those taking the browser over, speak other protocols. */
 	broadcastMessage(message: ServerMessage): void {
 		this.broadcast(
 			JSON.stringify(message),
-			[...this.getConnections(COMPUTER_TAG)].map((connection) => connection.id),
+			[...this.getConnections(COMPUTER_TAG), ...this.getConnections(BROWSER_TAG)].map((connection) => connection.id),
 		);
 	}
 }

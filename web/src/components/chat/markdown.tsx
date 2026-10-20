@@ -373,6 +373,29 @@ const untrustedComponents = {
   },
 };
 
+/** Where Pim serves its own images: those a person sent, and the copies Pim keeps of those an agent's reply shows. */
+const OWN_IMAGE = /^\/api\/images\/[\w-]+$/;
+
+/**
+ * An agent's message shows only Pim's own images. One from elsewhere would be
+ * fetched as soon as the message shows, and its address could carry what the
+ * agent read: a page it read could tell it to write such an image. Its alt
+ * text stands in.
+ */
+const agentComponents = {
+  img: (props: object) => {
+    const { src, alt } = props as { src?: unknown; alt?: unknown };
+    const label = typeof alt === "string" ? alt : "";
+    return typeof src === "string" && OWN_IMAGE.test(src) ? (
+      <img src={src} alt={label} className="my-3 max-w-full rounded-xl" />
+    ) : (
+      <span className="text-muted-foreground">[{label || "image"}]</span>
+    );
+  },
+  // A `<picture>`'s sources would load in place of its image.
+  source: () => null,
+};
+
 /** Colors for text on the canvas or a card, and for text in a person's bubble, which takes them from the bubble's own. */
 const TONES = {
   page: {
@@ -449,7 +472,7 @@ export const Markdown = memo(function Markdown({
             }
           : { remarkPlugins: chatRemarkPlugins })}
         components={{
-          ...(safe ? untrustedComponents : {}),
+          ...(safe ? untrustedComponents : agentComponents),
           h1: ({ children }) => (
             <h1 className="mt-6 mb-3 font-semibold text-2xl">{children}</h1>
           ),

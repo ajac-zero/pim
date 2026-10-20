@@ -4,35 +4,46 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { pim, type UserContent } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
+import { sessionsQuery } from "~/lib/queries";
 import { openTab } from "~/lib/tabs";
 
 /**
  * Starts a chat with an agent (the majordomo when `agent` is undefined)
  * with its first message: the chat is made only when there is something to
- * send, then opened, then sent to.
+ * send, then sent to and opened together. `sent` is that message from the moment
+ * it is sent, so the page can show it at once rather than after Pim has made
+ * the chat.
  */
 export function useStartChat(agent: string | undefined) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const [starting, setStarting] = useState(false);
+  const [sent, setSent] = useState<UserContent | null>(null);
 
   const start = async (content: UserContent) => {
-    setStarting(true);
+    setSent(content);
     try {
       const session = await pim.createSession(agent ? { agent } : {});
-      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      // The chat's page finds the chat in the list at once, rather than
+      // fetching the list, which sending's own refresh of it would cancel.
+      queryClient.setQueryData(
+        sessionsQuery().queryKey,
+        (sessions) => sessions && [session, ...sessions],
+      );
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
       openTab(session.id);
       pimClient.open(session.id);
-      await navigate({
-        to: "/chat/$sessionId",
-        params: { sessionId: session.id },
-      });
-      await pimClient.send(content);
+      await Promise.all([
+        pimClient.send(content),
+        navigate({
+          to: "/chat/$sessionId",
+          params: { sessionId: session.id },
+        }),
+      ]);
     } catch (error) {
       toast.error((error as Error).message);
-      setStarting(false);
+      setSent(null);
     }
   };
 
-  return { start, starting };
+  return { start, sent };
 }

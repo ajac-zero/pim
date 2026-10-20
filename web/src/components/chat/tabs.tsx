@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { type DragEvent, useEffect, useRef } from "react";
+import { type DragEvent, useEffect, useRef, useState } from "react";
 import { AgentIcon } from "~/components/agent-icon";
 import {
   AwaitingApprovalMark,
@@ -177,16 +177,45 @@ export function ChatTabs({ activeId }: { activeId: string }) {
   );
 }
 
-/** Props that open a chat dragged from the sidebar and dropped on the element in a new tab. */
+/**
+ * Lets a chat dragged from the sidebar be dropped on an element to open in a
+ * new tab: spread `dropZone` on it. `dropping` is true while one is over it.
+ */
 export function useChatDrop() {
   const navigate = useNavigate();
-  return {
+  const [dropping, setDropping] = useState(false);
+  // Entering a child fires its dragenter before the parent's dragleave, so
+  // counting them tells when the chat has left the element altogether.
+  const depth = useRef(0);
+  // An element removed under the pointer never sends its dragleave; the
+  // drag's end, wherever it lands, clears what is left.
+  useEffect(() => {
+    const reset = () => {
+      depth.current = 0;
+      setDropping(false);
+    };
+    window.addEventListener("dragend", reset);
+    return () => window.removeEventListener("dragend", reset);
+  }, []);
+  const carriesChat = (event: DragEvent) =>
+    event.dataTransfer.types.includes(CHAT_DRAG_TYPE);
+  const dropZone = {
+    onDragEnter: (event: DragEvent) => {
+      if (!carriesChat(event)) return;
+      depth.current++;
+      setDropping(true);
+    },
     onDragOver: (event: DragEvent) => {
-      if (event.dataTransfer.types.includes(CHAT_DRAG_TYPE)) {
-        event.preventDefault();
-      }
+      if (carriesChat(event)) event.preventDefault();
+    },
+    onDragLeave: (event: DragEvent) => {
+      if (!carriesChat(event)) return;
+      depth.current = Math.max(0, depth.current - 1);
+      if (depth.current === 0) setDropping(false);
     },
     onDrop: (event: DragEvent) => {
+      depth.current = 0;
+      setDropping(false);
       const session = event.dataTransfer.getData(CHAT_DRAG_TYPE);
       if (!session) return;
       event.preventDefault();
@@ -194,4 +223,5 @@ export function useChatDrop() {
       navigate({ to: "/chat/$sessionId", params: { sessionId: session } });
     },
   };
+  return { dropping, dropZone };
 }

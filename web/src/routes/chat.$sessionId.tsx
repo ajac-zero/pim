@@ -19,7 +19,7 @@ import { TaskPanel } from "~/components/chat/tasks";
 import { Thread } from "~/components/chat/thread";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
-import { Loader2, Users } from "~/components/icons";
+import { ExternalLink, Loader2, Users } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
 import { useElementHeight } from "~/hooks/use-element-size";
@@ -157,7 +157,7 @@ function ChatPage() {
 
   const shelf = useTabs().length > 1;
   // A chat dragged from the sidebar onto the conversation opens in a new tab.
-  const dropZone = useChatDrop();
+  const { dropping, dropZone } = useChatDrop();
 
   return (
     <main ref={page} className="flex min-h-0 min-w-0 flex-1">
@@ -186,6 +186,14 @@ function ChatPage() {
          * for it rather than sitting under it: at the right, or on top on phones. */}
         <div className="flex min-h-0 flex-1 flex-col md:flex-row">
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            {dropping && (
+              <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
+                <div className="flex animate-in flex-col items-center gap-1.5 rounded-xl border bg-popover px-4 py-3 text-popover-foreground text-sm shadow-[0_8px_30px_-6px_rgb(0_0_0/0.18)] duration-150 fade-in zoom-in-95">
+                  <ExternalLink className="size-4 text-muted-foreground" />
+                  {t("openInNewTab")}
+                </div>
+              </div>
+            )}
             {/* Until its snapshot arrives a chat opened for the first time
              * would look empty; a message just sent is already worth showing. */}
             {ready && (loaded || pending !== null) ? (

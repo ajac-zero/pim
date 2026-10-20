@@ -7,6 +7,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
 } from "react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 import { PimMark } from "~/components/app-sidebar";
@@ -23,9 +24,15 @@ import {
   UserMessage,
   WorkedSteps,
 } from "~/components/chat/items";
+import {
+  TASK_POLL_MS,
+  TaskCard,
+  TaskJump,
+  TaskSheet,
+} from "~/components/chat/tasks";
 import { CHATGPT_USAGE_URL } from "~/components/chatgpt-logo";
 import { type TranslationKey, useI18n } from "~/components/i18n";
-import { AlertCircle, Clock } from "~/components/icons";
+import { AlertCircle, ArrowUp, Clock } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import {
   Conversation,
@@ -38,12 +45,13 @@ import type {
   FunctionCallOutputItem,
   MessageItem,
 } from "~/lib/openresponses";
-import type { UserContent } from "~/lib/pim-api";
+import { pim, type UserContent } from "~/lib/pim-api";
 import {
   layoutThread,
   type ModelProblem,
   type SessionView,
   type ThreadEntry,
+  taskHistory,
   userItem,
 } from "~/lib/pim-view";
 import { appDirectoryQuery, approvalsQuery, appsQuery } from "~/lib/queries";
@@ -157,6 +165,17 @@ export const Thread = memo(function Thread({
     }
     return map;
   }, [entries]);
+  const { data: tasks = [] } = useQuery({
+    queryKey: ["tasks", sessionId],
+    queryFn: () => pim.tasks(sessionId),
+    enabled: !visit,
+    refetchInterval: (query) =>
+      view.running || query.state.data?.some((task) => task.state === "working")
+        ? TASK_POLL_MS
+        : false,
+  });
+  const history = useMemo(() => taskHistory(entries, tasks), [entries, tasks]);
+  const [viewingTask, setViewingTask] = useState<string | null>(null);
   /* A gated tool call renders as the approval it filed. */
   const { data: allApprovals } = useQuery(approvalsQuery());
   // Requests from people in your circles belong to their conversations, not yours.
@@ -215,7 +234,7 @@ export const Thread = memo(function Thread({
   );
 
   /*
-   * Only user-facing approvals, artifacts and images are drawn from tool
+   * Only user-facing approvals, tasks, artifacts and images are drawn from tool
    * calls. An image a visit's agent made is in that space's files, which
    * this app can't open.
    */
@@ -224,6 +243,7 @@ export const Thread = memo(function Thread({
       layoutThread(entries, {
         shown: (call) =>
           approvalsByCall.has(call.call_id) ||
+          history.delegations.has(call.call_id) ||
           (ARTIFACT_TOOLS.has(call.name) &&
             artifactReference(outputs.get(call.call_id)?.output) !== null) ||
           (!visit &&
@@ -232,7 +252,15 @@ export const Thread = memo(function Thread({
         refused: (call) => outputs.get(call.call_id)?.status === "incomplete",
         work: { running: view.running, lines: view.lines },
       }),
-    [entries, approvalsByCall, outputs, visit, view.running, view.lines],
+    [
+      entries,
+      approvalsByCall,
+      history.delegations,
+      outputs,
+      visit,
+      view.running,
+      view.lines,
+    ],
   );
 
   // A reply being written in the chat shows the work going on by itself.
@@ -316,7 +344,29 @@ export const Thread = memo(function Thread({
             if (entry.notice.approval && placed.has(entry.notice.approval)) {
               return <Fragment key={entry.key} />;
             }
-            return <EventNotice key={entry.key} notice={entry.notice} />;
+            return (
+              <EventNotice
+                key={entry.key}
+                notice={entry.notice}
+                id={
+                  entry.notice.kind === "task"
+                    ? `task-update-${entry.key}`
+                    : undefined
+                }
+                at={entry.at}
+              >
+                {(history.notices.get(entry.key)?.length ?? 0) > 0 && (
+                  <div className="flex flex-col items-center gap-2 text-xs">
+                    {history.notices.get(entry.key)?.map((task) => (
+                      <TaskJump key={task.id} target={`task-start-${task.id}`}>
+                        <ArrowUp className="size-3" />
+                        {t("backToTask", { agent: task.agent.name })}
+                      </TaskJump>
+                    ))}
+                  </div>
+                )}
+              </EventNotice>
+            );
           }
           const { item } = entry;
           if (item.type === "message") {
@@ -330,6 +380,17 @@ export const Thread = memo(function Thread({
           }
           if (item.type === "function_call") {
             const call = item as FunctionCallItem;
+            const delegated = history.delegations.get(call.call_id);
+            if (delegated) {
+              return (
+                <TaskCard
+                  key={entry.key}
+                  tasks={delegated}
+                  completions={history.completions}
+                  onView={setViewingTask}
+                />
+              );
+            }
             const approval = approvalsByCall.get(call.call_id);
             if (approval) {
               return <ApprovalBlock key={entry.key} approval={approval} />;
@@ -445,6 +506,11 @@ export const Thread = memo(function Thread({
           </div>
         )}
       </ConversationContent>
+      <TaskSheet
+        sessionId={sessionId}
+        task={tasks.find((task) => task.id === viewingTask) ?? null}
+        onClose={() => setViewingTask(null)}
+      />
       {/* After the content, whose scroller its effects need. */}
       <ScrollMemory sessionId={sessionId} loaded={rows.length > 0} />
 

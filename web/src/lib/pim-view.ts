@@ -16,6 +16,7 @@ import {
   type ORItem,
   type ReasoningItem,
 } from "~/lib/openresponses";
+import type { AgentTask } from "~/lib/pim-api";
 import {
   DELIVERY_REMINDER,
   INTRODUCTION,
@@ -55,6 +56,71 @@ export type ThreadEntry =
   | { key: string; kind: "notice"; notice: PimNotice; at?: number };
 
 export type RunningTool = { callId: string; name: string; output: string };
+
+/** Connects each handoff and its later answers, without treating a waiting task as answered. */
+export function taskHistory(
+  entries: readonly ThreadEntry[],
+  tasks: readonly AgentTask[],
+) {
+  const delegations = new Map<string, AgentTask[]>();
+  const notices = new Map<string, AgentTask[]>();
+  const completions = new Map<string, string>();
+  const calls = new Set(
+    entries.flatMap((entry) =>
+      entry.kind === "item" &&
+      entry.item.type === "function_call" &&
+      entry.item.name === "delegate"
+        ? [entry.item.call_id as string]
+        : [],
+    ),
+  );
+  for (const entry of entries) {
+    if (
+      entry.kind === "item" &&
+      entry.item.type === "function_call_output" &&
+      calls.has(entry.item.call_id as string)
+    ) {
+      const output = entry.item as FunctionCallOutputItem;
+      if (output.status === "incomplete" || typeof output.output !== "string")
+        continue;
+      // These lines are the delegate tool's receipt, not the model's arguments.
+      const ids = new Set(
+        [...output.output.matchAll(/^Task (\S+): /gm)].map((match) => match[1]),
+      );
+      const group = tasks.filter((task) => ids.has(task.id));
+      // Descendants work in their own transcripts, but belong under this handoff.
+      for (const task of group) {
+        group.push(...tasks.filter((child) => child.parent === task.id));
+      }
+      if (group.length > 0) delegations.set(output.call_id, group);
+    }
+    if (entry.kind === "notice" && entry.notice.kind === "task") {
+      const ids = new Set(
+        [
+          ...entry.notice.text.matchAll(
+            /^(?:.+ (?:finished|didn't finish) task (\S+):|Task (\S+) for .+ was canceled:)/gm,
+          ),
+        ].map((match) => match[1] ?? match[2]),
+      );
+      const answered = tasks.filter((task) => ids.has(task.id));
+      notices.set(entry.key, answered);
+      for (const task of answered) completions.set(task.id, entry.key);
+    }
+  }
+  const placed = new Set(
+    [...delegations.values()].flat().map((task) => task.id),
+  );
+  return {
+    delegations,
+    completions,
+    notices: new Map(
+      [...notices].map(([key, answered]) => [
+        key,
+        answered.filter((task) => placed.has(task.id)),
+      ]),
+    ),
+  };
+}
 
 export type SessionView = {
   /** The committed transcript, since the newest reset. */

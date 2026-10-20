@@ -4,7 +4,7 @@ import { useSyncExternalStore } from "react";
  * The chats open as tabs above the transcript, kept in this browser. They
  * work like a browser's tabs: a chat opened from the sidebar shows in the
  * current tab, in place of the chat it showed, and only "Open in new tab"
- * or dragging the chat onto the tabs gives a chat a tab of its own. Closing
+ * or dragging the chat onto the conversation gives a chat a tab of its own. Closing
  * a tab only takes it off the strip.
  */
 

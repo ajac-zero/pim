@@ -97,17 +97,23 @@ export function sessionTitle(session: Pick<Session, "title">, t: T) {
 }
 
 /**
- * Opens the dashboard of the agent in the open chat, or the majordomo's
- * anywhere else, where a chat starts with its first message.
+ * Opens the dashboard of the agent in the open chat, or of the agent whose
+ * dashboard is open, or the majordomo's anywhere else, where a chat starts
+ * with its first message.
  */
 export function useNewChat(onDone?: () => void) {
   const navigate = useNavigate();
-  const { sessionId } = useParams({ strict: false }) as { sessionId?: string };
+  const params = useParams({ strict: false }) as {
+    sessionId?: string;
+    agentId?: string;
+  };
   const { data: sessions } = useQuery(sessionsQuery());
-  const agent = sessions?.find((session) => session.id === sessionId)?.agent;
+  const agentId =
+    params.agentId ??
+    sessions?.find((session) => session.id === params.sessionId)?.agent?.id;
   return () => {
-    if (agent) {
-      navigate({ to: "/agents/$agentId", params: { agentId: agent.id } });
+    if (agentId) {
+      navigate({ to: "/agents/$agentId", params: { agentId } });
     } else {
       navigate({ to: "/" });
     }

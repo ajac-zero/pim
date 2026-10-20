@@ -6,10 +6,9 @@ import {
   useSearch,
 } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
-import { AgentSettingsDialog } from "~/components/agent-settings";
 import { useI18n } from "~/components/i18n";
 import {
   Bell,
@@ -18,13 +17,13 @@ import {
   Check,
   ChevronDown,
   Compass,
+  Contact,
   ExternalLink,
   Folder,
   ListFilter,
   MessagesSquare,
   MoreHorizontal,
   Pencil,
-  Plus,
   ScrollText,
   Search,
   Settings,
@@ -41,6 +40,7 @@ import {
   ProfilePopoverTrigger,
 } from "~/components/profile-popover";
 import {
+  AgentsPanel,
   ArtifactsPanel,
   FilesPanel,
   NotificationsPanel,
@@ -146,6 +146,7 @@ export function useAwaitingApproval() {
 /** What the sidebar can show beside the rail instead of your chats, named in the URL (`?panel=artifacts`). */
 export const SIDEBAR_PANELS = [
   "notifications",
+  "agents",
   "artifacts",
   "files",
   "skills",
@@ -180,7 +181,7 @@ export function useNavigationState() {
   };
 }
 
-/** The panel the URL names: notifications, your chats, artifacts, files, skills or schedules. */
+/** The panel the URL names: notifications, your chats, your agents, artifacts, files, skills or schedules. */
 export function SidebarPanelContent({
   awaitingApproval,
   onNavigate,
@@ -191,6 +192,8 @@ export function SidebarPanelContent({
   const { panel } = useSearch({ strict: false });
   return panel === "notifications" ? (
     <NotificationsPanel onNavigate={onNavigate} />
+  ) : panel === "agents" ? (
+    <AgentsPanel onNavigate={onNavigate} />
   ) : panel === "artifacts" ? (
     <ArtifactsPanel onNavigate={onNavigate} />
   ) : panel === "files" ? (
@@ -206,7 +209,7 @@ export function SidebarPanelContent({
 
 /**
  * The sidebar on wider screens: a rail of icons beside a panel. The icons at
- * the top choose what the panel shows (notifications, your chats, artifacts,
+ * the top choose what the panel shows (notifications, your chats, your agents, artifacts,
  * files, skills or schedules) while the open chat stays where it is; those at
  * the bottom open dialogs over it. Choosing the panel that's already showing
  * collapses the sidebar to the rail, and choosing any panel brings it back.
@@ -255,6 +258,12 @@ export function AppSidebar({
             icon={<MessagesSquare className="size-4.5" />}
             label={t("chats")}
             count={panel || collapsed ? awaitingApproval.size : 0}
+          />
+          <RailPanel
+            {...railPanel}
+            panel="agents"
+            icon={<Contact className="size-4.5" />}
+            label={t("agents")}
           />
           <RailPanel
             {...railPanel}
@@ -589,16 +598,6 @@ function ChatsPanel({
             onNavigate={onNavigate}
           />
         )}
-        {view === "agents" && (
-          <AgentSettingsDialog>
-            <button
-              type="button"
-              className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-muted-foreground text-xs hover:bg-sidebar-accent hover:text-foreground"
-            >
-              <Plus className="size-3.5" /> {t("newAgent")}
-            </button>
-          </AgentSettingsDialog>
-        )}
       </nav>
     </>
   );
@@ -743,7 +742,7 @@ function RailDialogLink({
   );
 }
 
-/** An agent's name, settings, and chats. */
+/** An agent's chats under its name, which shows or hides them. */
 function AgentSectionList({
   section: { agent, list, archived },
   activeId,
@@ -757,67 +756,26 @@ function AgentSectionList({
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(true);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const optionsTrigger = useRef<HTMLButtonElement>(null);
   return (
     <section className="mb-3" aria-label={agent.name}>
-      <div className="group/section flex items-center gap-1 pr-1">
-        <span className="flex min-w-0 flex-1 items-center">
-          <span className="flex min-w-0 items-center gap-1 px-2 py-1.5 font-medium text-muted-foreground text-xs">
-            <AgentIcon agent={agent} className="size-4" />
-            <span className="truncate">{agent.name}</span>
-          </span>
-          <button
-            type="button"
-            className="shrink-0 rounded-md p-1 text-muted-foreground hover:text-foreground"
-            onClick={() => setOpen(!open)}
-            aria-expanded={open}
-            aria-label={t(open ? "hideChatsOf" : "showChatsOf", {
-              name: agent.name,
-            })}
-          >
-            <ChevronDown
-              className={cn(
-                "size-3.5 transition-transform",
-                !open && "-rotate-90",
-              )}
-            />
-          </button>
-        </span>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              ref={optionsTrigger}
-              type="button"
-              className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
-              aria-label={t("agentOptions", { name: agent.name })}
-              title={t("agentOptions", { name: agent.name })}
-            >
-              <MoreHorizontal className="size-3.5" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="end"
-            side="bottom"
-            onCloseAutoFocus={(event) => {
-              if (settingsOpen) event.preventDefault();
-            }}
-          >
-            <DropdownMenuItem onSelect={() => setSettingsOpen(true)}>
-              <Settings className="size-4" /> {t("settings")}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-        <AgentSettingsDialog
-          agent={agent}
-          open={settingsOpen}
-          onOpenChange={setSettingsOpen}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            optionsTrigger.current?.focus();
-          }}
+      <button
+        type="button"
+        className="flex min-w-0 max-w-full items-center gap-1 rounded-md px-2 py-1.5 font-medium text-muted-foreground text-xs hover:text-foreground"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        aria-label={t(open ? "hideChatsOf" : "showChatsOf", {
+          name: agent.name,
+        })}
+      >
+        <AgentIcon agent={agent} className="size-4" />
+        <span className="truncate">{agent.name}</span>
+        <ChevronDown
+          className={cn(
+            "size-3.5 shrink-0 transition-transform",
+            !open && "-rotate-90",
+          )}
         />
-      </div>
+      </button>
       {open &&
         (list.length === 0 ? (
           <p className="px-2 py-1 text-muted-foreground text-xs">

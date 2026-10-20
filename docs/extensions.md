@@ -99,7 +99,7 @@ export default definePimConfig({
 });
 ```
 
-People then make agents built on it: Your agents → New agent → Based on blueprint: Budget, or `POST /api/agents` with `{ "name": "Household", "blueprint": "ledger/budget" }`.
+People then make agents built on it: Agents in the sidebar → New agent → Based on blueprint: Budget, or `POST /api/agents` with `{ "name": "Household", "blueprint": "ledger/budget" }`.
 
 ## Abilities
 

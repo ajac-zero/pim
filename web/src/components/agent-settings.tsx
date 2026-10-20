@@ -1,6 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { Dialog } from "radix-ui";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   type FormEvent,
   type ReactNode,
@@ -18,13 +17,14 @@ import { AppIcon } from "~/components/app-icon";
 import { useI18n } from "~/components/i18n";
 import {
   AlertCircle,
-  Bot,
+  Blocks,
   ChevronDown,
   Globe,
   MessageCircle,
   Pencil,
   Plus,
   Puzzle,
+  Search,
   Trash2,
   Users,
   X,
@@ -84,62 +84,46 @@ const EMPTY: AgentInput = {
   team: [],
 };
 
-/** The same agent controls wherever its settings are opened. */
-export function AgentSettingsDialog({
-  agent,
-  children,
-  open: controlledOpen,
-  onOpenChange,
-  onCloseAutoFocus,
-}: {
-  agent?: Agent;
-  children?: ReactNode;
-  open?: boolean;
-  onOpenChange?: (open: boolean) => void;
-  onCloseAutoFocus?: (event: Event) => void;
-}) {
-  const { t } = useI18n();
-  const [internalOpen, setInternalOpen] = useState(false);
-  const open = controlledOpen ?? internalOpen;
-  const setOpen = onOpenChange ?? setInternalOpen;
+/** The frame of an agent's pages: a readable column of the main content. */
+function AgentPageFrame({ children }: { children: ReactNode }) {
   return (
-    <Dialog.Root open={open} onOpenChange={setOpen}>
-      {children && <Dialog.Trigger asChild>{children}</Dialog.Trigger>}
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
-        <Dialog.Content
-          aria-describedby={undefined}
-          onCloseAutoFocus={onCloseAutoFocus}
-          className="fixed inset-x-0 bottom-0 z-50 max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-t-2xl bg-background p-5 shadow-xl data-[state=open]:animate-in data-[state=open]:fade-in-0 max-sm:data-[state=open]:slide-in-from-bottom-4 sm:inset-x-auto sm:top-1/2 sm:bottom-auto sm:left-1/2 sm:w-[calc(100%-2rem)] sm:max-w-xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-2xl sm:border sm:p-8"
-        >
-          <Dialog.Title className="mb-6 pr-8 font-semibold text-xl">
-            {agent ? t("agentSettings", { name: agent.name }) : t("newAgent")}
-          </Dialog.Title>
-          {agent ? (
-            <AgentCard agent={agent} onClose={() => setOpen(false)} />
-          ) : (
-            <AgentForm
-              onDone={() => setOpen(false)}
-              onCancel={() => setOpen(false)}
-            />
-          )}
-          <Dialog.Close className="absolute top-4 right-4 rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground">
-            <X className="size-4" />
-            <span className="sr-only">{t("close")}</span>
-          </Dialog.Close>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+    <main className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
+      <div className="mx-auto w-full max-w-[768px] px-6 py-8 md:py-12">
+        {children}
+      </div>
+    </main>
   );
 }
 
-function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
+/** Making an agent: once it exists, its page opens, where its apps are added. */
+export function NewAgentPage() {
+  const { t } = useI18n();
+  const navigate = useNavigate();
+  return (
+    <AgentPageFrame>
+      <h1 className="mb-8 font-semibold text-xl">{t("newAgent")}</h1>
+      <AgentForm
+        onDone={(saved) =>
+          navigate({
+            to: "/agents/$agentId/settings",
+            params: { agentId: saved.id },
+          })
+        }
+      />
+    </AgentPageFrame>
+  );
+}
+
+/**
+ * An agent's page: what it is and the actions on it, then how the majordomo
+ * works with you, the apps it works with and their tools, and its details,
+ * which save together.
+ */
+export function AgentSettingsPage({ agent }: { agent: Agent }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const { agentId } = useParams({ strict: false });
   const { data: account } = useQuery(accountQuery());
-  const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const isAdmin = account?.role === "admin";
   const { data: everyones } = useQuery({
@@ -168,8 +152,7 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
     onSuccess: () => {
       refresh();
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      onClose();
-      if (agentId === agent.id) navigate({ to: "/" });
+      navigate({ to: "/" });
     },
     onError: (error) => toast.error(error.message),
   });
@@ -186,182 +169,134 @@ function AgentCard({ agent, onClose }: { agent: Agent; onClose: () => void }) {
     onError: (error) => toast.error(error.message),
   });
 
-  if (editing) {
-    return (
-      <AgentForm
-        agent={agent}
-        onDone={() => setEditing(false)}
-        onCancel={() => setEditing(false)}
-      />
-    );
-  }
   return (
-    <>
-      <article className="rounded-xl border px-4 py-3" aria-label={agent.name}>
-        <div className="flex items-start gap-3">
-          <AgentIcon agent={agent} tile className="size-8 rounded-lg" />
-          <div className="min-w-0 flex-1">
-            <h2 className="flex items-center gap-2 font-medium">
-              <Link
-                to="/agents/$agentId"
-                params={{ agentId: agent.id }}
-                onClick={onClose}
-                className="truncate underline-offset-2 hover:underline"
-              >
-                {agent.name}
-              </Link>
-              {agent.majordomo && (
-                <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
-                  {t("majordomoBadge")}
-                </span>
-              )}
-            </h2>
-            {agent.description && (
-              <p className="text-muted-foreground text-sm">
-                {agent.description}
-              </p>
+    <AgentPageFrame>
+      <header className="flex items-start gap-3">
+        <AgentIcon agent={agent} tile className="size-10 rounded-xl" />
+        <div className="min-w-0 flex-1">
+          <h1 className="flex items-center gap-2 font-semibold text-xl">
+            <span className="truncate">{agent.name}</span>
+            {agent.majordomo && (
+              <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
+                {t("majordomoBadge")}
+              </span>
             )}
-            <p className="mt-1 flex flex-wrap gap-x-3 text-muted-foreground text-xs">
-              <BuildsOn blueprint={agent.blueprint} />
-              {agent.source && (
-                <span>
-                  {t("fromTemplateBy")}{" "}
-                  <Link
-                    to="/people/$username"
-                    params={{ username: agent.source.author }}
-                    className="underline underline-offset-2 hover:text-foreground"
-                  >
-                    @{agent.source.author}
-                  </Link>
-                </span>
-              )}
-              {agent.published && (
-                <span className="flex items-center gap-1 text-success">
-                  <Globe className="size-3" /> {t("published")}
-                </span>
-              )}
-              {forEveryone && (
-                <span className="flex items-center gap-1 text-primary">
-                  <Users className="size-3" /> {t("everyonesDefault")}
-                  <button
-                    type="button"
-                    className="underline underline-offset-2 hover:text-foreground"
-                    onClick={() => choose.mutate(false)}
-                    disabled={choose.isPending}
-                  >
-                    {t("stopEveryonesDefault")}
-                  </button>
-                </span>
-              )}
-            </p>
-          </div>
-        </div>
-        {agent.instructions && (
-          <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-sm">
-            {agent.instructions}
+          </h1>
+          <p className="mt-1 flex flex-wrap gap-x-3 text-muted-foreground text-xs">
+            <BuildsOn blueprint={agent.blueprint} />
+            {agent.source && (
+              <span>
+                {t("fromTemplateBy")}{" "}
+                <Link
+                  to="/people/$username"
+                  params={{ username: agent.source.author }}
+                  className="underline underline-offset-2 hover:text-foreground"
+                >
+                  @{agent.source.author}
+                </Link>
+              </span>
+            )}
+            {agent.published && (
+              <span className="flex items-center gap-1 text-success">
+                <Globe className="size-3" /> {t("published")}
+              </span>
+            )}
+            {forEveryone && (
+              <span className="flex items-center gap-1 text-primary">
+                <Users className="size-3" /> {t("everyonesDefault")}
+                <button
+                  type="button"
+                  className="underline underline-offset-2 hover:text-foreground"
+                  onClick={() => choose.mutate(false)}
+                  disabled={choose.isPending}
+                >
+                  {t("stopEveryonesDefault")}
+                </button>
+              </span>
+            )}
           </p>
-        )}
-        {agent.team.length > 0 && (
-          <ul
-            className="mt-2 flex flex-wrap gap-1.5"
-            aria-label={t("teamOf", { name: agent.name })}
-          >
-            {agent.team.map((member) => (
-              <li
-                key={member.name}
-                className="flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-0.5 text-xs"
-                title={member.instructions}
-              >
-                <Bot className="size-3 text-muted-foreground" />
-                {member.name}
-              </li>
-            ))}
-          </ul>
-        )}
-        <div className="mt-3 flex flex-wrap items-center gap-2">
+        </div>
+      </header>
+      <div className="mt-5 flex flex-wrap items-center gap-2">
+        <Button size="sm" asChild>
+          <Link to="/agents/$agentId" params={{ agentId: agent.id }}>
+            <MessageCircle /> {t("chatWithAgent")}
+          </Link>
+        </Button>
+        {/* Alone on this Pim, there is nobody to publish for, unless it already is. */}
+        {account && (!account.alone || agent.published) && (
           <Button
             size="sm"
-            onClick={() => {
-              onClose();
-              navigate({
-                to: "/agents/$agentId",
-                params: { agentId: agent.id },
-              });
-            }}
+            variant="outline"
+            onClick={() => publish.mutate(true)}
+            disabled={publish.isPending}
           >
-            <MessageCircle /> {t("chatWithAgent")}
+            <Globe /> {t(agent.published ? "updatePublished" : "publish")}
           </Button>
-          <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
-            <Pencil /> {t("edit")}
+        )}
+        {account && agent.published && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => publish.mutate(false)}
+            disabled={publish.isPending}
+          >
+            {t("unpublish")}
           </Button>
-          {/* Alone on this Pim, there is nobody to publish for, unless it already is. */}
-          {account && (!account.alone || agent.published) && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => publish.mutate(true)}
-              disabled={publish.isPending}
-            >
-              <Globe /> {t(agent.published ? "updatePublished" : "publish")}
-            </Button>
-          )}
-          {account && agent.published && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => publish.mutate(false)}
-              disabled={publish.isPending}
-            >
-              {t("unpublish")}
-            </Button>
-          )}
-          {isAdmin && everyones !== undefined && !forEveryone && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => choose.mutate(true)}
-              disabled={choose.isPending}
-            >
-              <Users /> {t("makeEveryonesDefault")}
-            </Button>
-          )}
-          <span className="ml-auto">
-            {agent.majordomo ? null : confirming ? (
-              <span className="flex items-center gap-1">
-                <Button
-                  size="sm"
-                  variant="destructive"
-                  onClick={() => remove.mutate()}
-                  disabled={remove.isPending}
-                >
-                  {t("deleteAgent")}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setConfirming(false)}
-                >
-                  {t("cancel")}
-                </Button>
-              </span>
-            ) : (
+        )}
+        {isAdmin && everyones !== undefined && !forEveryone && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => choose.mutate(true)}
+            disabled={choose.isPending}
+          >
+            <Users /> {t("makeEveryonesDefault")}
+          </Button>
+        )}
+        <span className="ml-auto">
+          {agent.majordomo ? null : confirming ? (
+            <span className="flex items-center gap-1">
               <Button
-                size="icon-sm"
-                variant="ghost"
-                className="text-muted-foreground"
-                aria-label={t("deleteAgentNamed", { name: agent.name })}
-                title={t("deleteAgentNamed", { name: agent.name })}
-                onClick={() => setConfirming(true)}
+                size="sm"
+                variant="destructive"
+                onClick={() => remove.mutate()}
+                disabled={remove.isPending}
               >
-                <Trash2 />
+                {t("deleteAgent")}
               </Button>
-            )}
-          </span>
-        </div>
-      </article>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setConfirming(false)}
+              >
+                {t("cancel")}
+              </Button>
+            </span>
+          ) : (
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              className="text-muted-foreground"
+              aria-label={t("deleteAgentNamed", { name: agent.name })}
+              title={t("deleteAgentNamed", { name: agent.name })}
+              onClick={() => setConfirming(true)}
+            >
+              <Trash2 />
+            </Button>
+          )}
+        </span>
+      </div>
       {agent.majordomo && <MajordomoPreferencesSection agent={agent} />}
       <AgentApps agent={agent} />
-    </>
+      <section className="mt-10" aria-label={t("agentDetails")}>
+        <h2 className="mb-3 text-[13px] text-muted-foreground">
+          {t("agentDetails")}
+        </h2>
+        {/* Saved, it starts again from what was saved. */}
+        <AgentForm key={agent.updatedAt} agent={agent} />
+      </section>
+    </AgentPageFrame>
   );
 }
 
@@ -388,7 +323,10 @@ function MajordomoPreferencesSection({ agent }: { agent: Agent }) {
   const change = (next: Partial<MajordomoPreferences>) =>
     save.mutate({ ...preferences, ...next });
   return (
-    <section aria-label={t("majordomoPreferences", { name: agent.name })}>
+    <section
+      className="mt-8"
+      aria-label={t("majordomoPreferences", { name: agent.name })}
+    >
       <Question label={t("toneLabel", { name: agent.name })}>
         {MAJORDOMO_TONES.map((choice) => (
           <Chip
@@ -426,9 +364,10 @@ function MajordomoPreferencesSection({ agent }: { agent: Agent }) {
 
 /**
  * The apps an agent works with: those of the blueprint it is based on, then
- * its own, each connectable from here unless it already is. A connected
- * app's tools each have a switch: on, the agent uses the tool without
- * asking; off, it can't use it.
+ * its own, which can be taken off. Apps are added from those already
+ * connected, and connected in Apps; one listed but not connected yet
+ * connects from here. A connected app's tools each have a switch: on, the
+ * agent uses the tool without asking; off, it can't use it.
  */
 function AgentApps({ agent }: { agent: Agent }) {
   const { t } = useI18n();
@@ -471,11 +410,27 @@ function AgentApps({ agent }: { agent: Agent }) {
       ),
     onError: (error) => toast.error(error.message),
   });
+  // Its own apps save as they change, apart from its other details.
+  const change = useMutation({
+    mutationFn: (own: string[]) => pim.updateAgent(agent.id, { apps: own }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      queryClient.invalidateQueries({ queryKey: ["permissions"] });
+    },
+    onError: (error) => toast.error(error.message),
+  });
   return (
-    <section className="mt-6 space-y-2" aria-label={t("suggestedApps")}>
-      <h3 className="text-[13px] text-muted-foreground">
-        {t("suggestedApps")}
-      </h3>
+    <section className="mt-10 space-y-2" aria-label={t("suggestedApps")}>
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-[13px] text-muted-foreground">
+          {t("suggestedApps")}
+        </h2>
+        <AddApp
+          listed={apps.map((app) => app.ref)}
+          full={agent.apps.length >= MAX_AGENT_APPS}
+          onAdd={(ref) => change.mutate([...agent.apps, ref])}
+        />
+      </div>
       {apps.length === 0 ? (
         <p className="text-muted-foreground text-sm">{t("noAgentApps")}</p>
       ) : (
@@ -519,6 +474,24 @@ function AgentApps({ agent }: { agent: Agent }) {
                         {t("connect")}
                       </Button>
                     )}
+                    {/* The blueprint's apps come with it: only the agent's own are taken off. */}
+                    {agent.apps.includes(app.ref) && (
+                      <Button
+                        size="icon-sm"
+                        variant="ghost"
+                        className="text-muted-foreground"
+                        aria-label={t("removeAppFrom", { name: app.name })}
+                        title={t("removeAppFrom", { name: app.name })}
+                        disabled={change.isPending}
+                        onClick={() =>
+                          change.mutate(
+                            agent.apps.filter((ref) => ref !== app.ref),
+                          )
+                        }
+                      >
+                        <X />
+                      </Button>
+                    )}
                   </div>
                   <CollapsibleContent>
                     <ul
@@ -551,6 +524,124 @@ function AgentApps({ agent }: { agent: Agent }) {
         </p>
       )}
     </section>
+  );
+}
+
+/** How many apps of its own an agent can have, as the API allows. */
+const MAX_AGENT_APPS = 10;
+
+/**
+ * Adds one of the apps you connected, found by its name or what it does.
+ * Apps not connected yet are connected in Apps, which it opens.
+ */
+function AddApp({
+  listed,
+  full,
+  onAdd,
+}: {
+  /** The apps the agent already works with, which aren't offered. */
+  listed: string[];
+  full: boolean;
+  onAdd: (ref: string) => void;
+}) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const { data: directory = [] } = useQuery(appDirectoryQuery());
+  const { data: connected = [] } = useQuery(appsQuery());
+  const yours = connected.flatMap((server) =>
+    server.app === null
+      ? []
+      : (directory.find((app) => app.ref === server.app) ?? []),
+  );
+  const query = search.trim().toLowerCase();
+  const offered = yours.filter(
+    (app) =>
+      !listed.includes(app.ref) &&
+      `${app.name} ${app.description}`.toLowerCase().includes(query),
+  );
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        // Each time it opens, it starts from all your apps.
+        if (!next) setSearch("");
+      }}
+    >
+      <PopoverTrigger asChild>
+        <Button size="sm" variant="secondary" disabled={full}>
+          <Plus /> {t("addApp")}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-80 p-2">
+        <div className="relative">
+          <Search className="-translate-y-1/2 absolute top-1/2 left-2.5 size-4 text-muted-foreground" />
+          <Input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder={t("searchYourApps")}
+            aria-label={t("searchYourApps")}
+            className="h-8 border-transparent bg-muted pl-8 text-sm shadow-none focus-visible:ring-0"
+            autoFocus
+          />
+        </div>
+        {offered.length === 0 ? (
+          <p className="px-2 py-3 text-muted-foreground text-sm">
+            {t(
+              yours.length === 0
+                ? "noConnectedApps"
+                : query
+                  ? "noAppsMatch"
+                  : "allAppsAdded",
+            )}
+          </p>
+        ) : (
+          <ul className="mt-1 max-h-64 overflow-y-auto">
+            {offered.map((app) => (
+              <li key={app.ref}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onAdd(app.ref);
+                    setOpen(false);
+                    setSearch("");
+                  }}
+                  className="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left hover:bg-accent"
+                >
+                  <AppIcon
+                    name={app.name}
+                    icon={app.icon}
+                    className="size-6 text-xs"
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm">{app.name}</span>
+                    {app.description && (
+                      <span className="block truncate text-muted-foreground text-xs">
+                        {app.description}
+                      </span>
+                    )}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="mt-1 border-t pt-1">
+          <Link
+            to="."
+            search={(prev) => ({ ...prev, dialog: "apps", tab: undefined })}
+            onClick={() => {
+              setOpen(false);
+              setSearch("");
+            }}
+            className="flex items-center gap-2 rounded-lg px-2 py-2 text-muted-foreground text-sm hover:bg-accent hover:text-foreground"
+          >
+            <Blocks className="size-4" /> {t("connectMoreApps")}
+          </Link>
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -667,15 +758,18 @@ function BaseSelect({
 /** The select's value for building on nothing: Radix needs a non-empty one. */
 const NOTHING = "-";
 
+/**
+ * An agent's details: how it looks, its name, what it's for, its blueprint,
+ * instructions and team. Its apps are chosen on its page, where they save as
+ * they change, so saving these leaves them as they are.
+ */
 function AgentForm({
   agent,
   onDone,
-  onCancel,
 }: {
   /** The agent to edit; left out, the form makes a new one. */
   agent?: Agent;
-  onDone: () => void;
-  onCancel: () => void;
+  onDone?: (saved: Agent) => void;
 }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
@@ -694,10 +788,9 @@ function AgentForm({
     setPreview(url);
     return () => URL.revokeObjectURL(url);
   }, [look.image]);
-  const { data: directory } = useQuery(appDirectoryQuery());
   // Each member row keeps a key of its own while edited, so removing one doesn't shift the others' inputs.
   const [value, setValue] = useState<
-    Omit<AgentInput, "team"> & {
+    Omit<AgentInput, "team" | "apps"> & {
       team: (Omit<TeamMember, "tools"> & { tools: string; key: string })[];
     }
   >({
@@ -705,7 +798,6 @@ function AgentForm({
     description: initial.description,
     instructions: initial.instructions,
     blueprint: initial.blueprint,
-    apps: initial.apps,
     team: initial.team.map((member) => ({
       ...member,
       tools: member.tools?.join(", ") ?? "",
@@ -715,15 +807,11 @@ function AgentForm({
   const save = useMutation({
     mutationFn: async () => {
       const { blueprint, ...rest } = value;
-      const input: AgentInput = {
+      const input: Omit<AgentInput, "apps"> = {
         ...rest,
         symbol: look.symbol,
         color: look.color,
         ...(blueprint === undefined ? {} : { blueprint }),
-        // An app this Pim no longer offers can't be saved: it is dropped.
-        apps: directory
-          ? value.apps.filter((ref) => directory.some((app) => app.ref === ref))
-          : value.apps,
         team: value.team.map(({ name, instructions, tools }) => {
           const names = tools
             .split(",")
@@ -734,19 +822,21 @@ function AgentForm({
       };
       const saved = agent
         ? await pim.updateAgent(agent.id, input)
-        : await pim.createAgent(input);
+        : await pim.createAgent({ ...input, apps: [] });
       // An uploaded image shows in place of the symbol, so it is sent, or taken away, once the agent exists.
       if (look.image instanceof Blob)
         await pim.setAgentIcon(saved.id, look.image);
       else if (look.image === null && saved.icon !== null) {
         await pim.removeAgentIcon(saved.id);
       }
+      return saved;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
+    onSuccess: async (saved) => {
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      onDone();
+      await queryClient.invalidateQueries({ queryKey: ["agents"] });
+      if (agent) toast.success(t("agentSaved"));
+      onDone?.(saved);
     },
     onError: (error) => toast.error(error.message),
   });
@@ -849,57 +939,6 @@ function AgentForm({
         />
       </label>
       <fieldset className="space-y-2">
-        <legend className="font-medium text-sm">{t("suggestedApps")}</legend>
-        <p className="text-muted-foreground text-xs">
-          {t("suggestedAppsHint")}
-        </p>
-        {directory?.length === 0 ? (
-          <p className="text-muted-foreground text-xs">{t("noAppsOffered")}</p>
-        ) : (
-          directory && (
-            <ul className="max-h-64 divide-y overflow-y-auto rounded-lg border">
-              {directory.map((app) => {
-                const checked = value.apps.includes(app.ref);
-                return (
-                  <li key={app.ref}>
-                    <label className="flex cursor-pointer items-start gap-3 px-3 py-2 has-disabled:cursor-not-allowed has-disabled:opacity-60">
-                      <input
-                        type="checkbox"
-                        className="mt-0.5 size-4 accent-primary"
-                        checked={checked}
-                        // Up to 10 apps an agent.
-                        disabled={!checked && value.apps.length >= 10}
-                        onChange={() =>
-                          setValue({
-                            ...value,
-                            apps: checked
-                              ? value.apps.filter((ref) => ref !== app.ref)
-                              : [...value.apps, app.ref],
-                          })
-                        }
-                      />
-                      <AppIcon
-                        name={app.name}
-                        icon={app.icon}
-                        className="size-6 text-xs"
-                      />
-                      <div className="min-w-0">
-                        <div className="text-sm">{app.name}</div>
-                        {app.description && (
-                          <div className="text-muted-foreground text-xs">
-                            {app.description}
-                          </div>
-                        )}
-                      </div>
-                    </label>
-                  </li>
-                );
-              })}
-            </ul>
-          )
-        )}
-      </fieldset>
-      <fieldset className="space-y-2">
         <legend className="font-medium text-sm">{t("team")}</legend>
         <p className="text-muted-foreground text-xs">{t("teamHint")}</p>
         {value.team.map((member) => (
@@ -984,10 +1023,7 @@ function AgentForm({
           </Button>
         )}
       </fieldset>
-      <div className="flex justify-between gap-2 border-t pt-5">
-        <Button type="button" variant="secondary" onClick={onCancel}>
-          {t("cancel")}
-        </Button>
+      <div className="flex justify-end gap-2 border-t pt-5">
         <Button type="submit" disabled={save.isPending || !value.name.trim()}>
           {t("save")}
         </Button>

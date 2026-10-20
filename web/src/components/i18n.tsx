@@ -29,11 +29,15 @@ const translations = {
     agentInstructionsPlaceholder:
       "How it should work: what to focus on, how to talk, what to ask before doing.",
     suggestedApps: "Apps it works with",
-    suggestedAppsHint:
-      "This agent's chats can use only these apps, and those of the blueprint it's based on. You connect each app once, for all your agents.",
     noAppsOffered:
       "This Pim offers no apps yet. Its admin can add them in Apps.",
-    noAgentApps: "No apps yet. Choose some with Edit.",
+    noAgentApps: "No apps yet.",
+    agentDetails: "Details",
+    agentSaved: "Saved.",
+    removeAppFrom: "Remove {name}",
+    searchYourApps: "Search your apps",
+    connectMoreApps: "Connect more apps",
+    allAppsAdded: "It already works with every app you connected.",
     toolsOn: "{on} of {count} on",
     toolsOf: "{name}'s tools",
     agentToolsHint:
@@ -233,6 +237,7 @@ const translations = {
     arguments: "Arguments",
     cancelRename: "Cancel rename",
     chatNotFound: "This chat doesn't exist.",
+    agentNotFound: "This agent doesn't exist.",
     chatOptions: "Chat options",
     chats: "Chats",
     close: "Close",
@@ -333,7 +338,6 @@ const translations = {
       "Tool names, separated by commas. Leave it empty for all of your agent's tools a member can have.",
     addMember: "Add member",
     removeTeamMember: "Remove member",
-    teamOf: "{name}'s team",
     teamWorking: "{count} working",
     tasks: "Tasks",
     tasksOpen: "{count} open",
@@ -927,11 +931,15 @@ const translations = {
     agentInstructionsPlaceholder:
       "Cómo debe trabajar: en qué enfocarse, cómo hablar, qué preguntar antes de actuar.",
     suggestedApps: "Apps con las que trabaja",
-    suggestedAppsHint:
-      "Los chats de este agente solo pueden usar estas apps y las del esquema en el que se basa. Conectas cada app una vez, para todos tus agentes.",
     noAppsOffered:
       "Este Pim aún no ofrece apps. Su administrador puede agregarlas en Apps.",
-    noAgentApps: "Aún no tiene apps. Elígelas con Editar.",
+    noAgentApps: "Aún no tiene apps.",
+    agentDetails: "Detalles",
+    agentSaved: "Guardado.",
+    removeAppFrom: "Quitar {name}",
+    searchYourApps: "Busca entre tus apps",
+    connectMoreApps: "Conectar más apps",
+    allAppsAdded: "Ya trabaja con todas las apps que conectaste.",
     toolsOn: "{on} de {count} activadas",
     toolsOf: "Herramientas de {name}",
     agentToolsHint:
@@ -1131,6 +1139,7 @@ const translations = {
     arguments: "Argumentos",
     cancelRename: "Cancelar cambio de nombre",
     chatNotFound: "Este chat no existe.",
+    agentNotFound: "Este agente no existe.",
     chatOptions: "Opciones del chat",
     chats: "Chats",
     close: "Cerrar",
@@ -1232,7 +1241,6 @@ const translations = {
       "Nombres de herramientas, separados por comas. Déjalo vacío para todas las herramientas de tu agente que un miembro puede tener.",
     addMember: "Añadir miembro",
     removeTeamMember: "Quitar miembro",
-    teamOf: "Equipo de {name}",
     teamWorking: "{count} trabajando",
     tasks: "Tareas",
     tasksOpen: "{count} abiertas",

@@ -334,6 +334,8 @@ describe("web push", () => {
 			const verifier = await crypto.subtle.importKey("raw", raw(publicKey), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
 			expect(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, verifier, raw(signature!), bytes(signing!))).toBe(true);
 			expect(JSON.parse(decoder.decode(raw(signing!.split(".")[1]!))).aud).toBe("https://push.example");
+			// A sleeping Android phone gets only high-urgency pushes right away.
+			expect((init.headers as Record<string, string>).Urgency).toBe("high");
 
 			// A browser the push service has dropped is forgotten.
 			fetched.mockResolvedValue(new Response(null, { status: 410 }));

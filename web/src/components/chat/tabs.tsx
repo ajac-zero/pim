@@ -91,11 +91,11 @@ export function ChatTabs({ activeId }: { activeId: string }) {
       <AwaitingApprovalMark className="ml-0" />
     ) : null;
 
-  // With one chat open there is nothing to switch between: its title, not a tab.
+  // A lone chat shows its title only while it is open, not on a dashboard.
   const open = tabs.filter((tab) =>
     sessions?.some((session) => session.id === tab.session),
   );
-  if (open.length <= 1) {
+  if (open.length <= 1 && activeId) {
     const session = sessions?.find((candidate) => candidate.id === activeId);
     if (!session) return <div className="flex-1" />;
     return (

@@ -1,6 +1,6 @@
 # Working on Pim
 
-Pim is one Cloudflare Worker (`src/`) that serves the API, passkey sign-in and the web app (`web/`, React). Each person's space is held by a Durable Object `Pim` (`src/pim.ts`) running on pi-durable. The README explains the product and its vocabulary. Use the same words: Pim is the platform; a space is one person's own part of it; an agent is what people chat with; a blueprint is what an extension defines; a template is an agent shared through the gallery.
+Pim is one Cloudflare Worker (`src/`) that serves the API, passkey sign-in and the web app (`web/`, React). Each person's space is held by a Durable Object `Pim` (`src/pim.ts`) running on pi-durable. The README pitches the product; `docs/reference.md` explains how it works and its vocabulary. Use the same words: Pim is the platform; a space is one person's own part of it; an agent is what people chat with; a blueprint is what an extension defines; a template is an agent shared through the gallery.
 
 ## Checks
 
@@ -25,7 +25,7 @@ Use the preview. `amp orb services ensure` starts it (`.amp/services.yaml`) at `
 
 - **Signing in:** open `/__dev/sign-in/<username>?returnTo=/path` in the browser. It makes the account if it's new (the first one is the admin) and sets the session cookie. For the API, `curl -c jar http://localhost:8787/__dev/sign-in/ada`, then make a token: `curl -b jar -X POST -H 'origin: http://localhost:8787' -H 'content-type: application/json' -d '{"name":"cli"}' http://localhost:8787/auth/tokens`, and send it as `Authorization: Bearer <token>`.
 - **The stand-in model** echoes each message through `send_to_user`. `/tool <name> {json}` makes it call that tool, and it then sends the tool's result. For example, `/tool http_request {"method": "GET", "url": "https://example.com"}` files an approval, and `/tool create_goal {"title": "Run a 5k", "steps": ["Run 2k"]}` makes a goal; several `/tool` lines in one message call one tool after another. Use it to reach approvals, artifacts, goals and widgets in the UI; behavior that depends on what a real model says belongs in tests with the faux model.
-- **Traces:** to see what the preview's agents did, put `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` in `.dev.vars` (and `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` for messages), run an OTLP backend there, such as Jaeger, and restart the preview. See the README's Traces section.
+- **Traces:** to see what the preview's agents did, put `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` in `.dev.vars` (and `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` for messages), run an OTLP backend there, such as Jaeger, and restart the preview. See Traces in `docs/reference.md`.
 - **Passkey screens:** to test the real WebAuthn flow, start Chrome with `--remote-debugging-port=9222`, run `node scripts/virtual-authenticator.mjs 9222` beside it, and drive that Chrome with `agent-browser --cdp 9222`.
 
 For UI changes, follow `web/DESIGN.md`. Sign in with `agent-browser` through the portal link or `http://localhost:8787/__dev/sign-in/ada`, set the viewport to 2x (`agent-browser set viewport 1280 800 2`), and inspect screenshots of every state you changed. `.agents/setup` installs Inter so screenshots look right.

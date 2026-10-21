@@ -95,7 +95,7 @@ Every framed artifact can use `window.pim`, whose calls return promises:
 | `pim.storage.get(key)`, `.set(key, text)`, `.delete(key)`, `.list(prefix?)` | Text the artifact keeps under keys (1 to 200 characters), across visits and versions, until it's deleted | None: it's the artifact's own, and nothing else can read it |
 | `pim.shared.get(key)`, `.set(key, text)`, `.delete(key)`, `.list(prefix?)` | The same, kept once for everyone the artifact is shared with, its owner included, in the owner's space: a tally, a sign-up sheet, a shared list. Separate from `pim.storage`, which stays each person's own. A published artifact opened from Discover keeps nothing for everyone, and these calls fail there | None, as for `pim.storage` |
 | `pim.ask(prompt)` | An answer from the utility model (`ARTIFACT_ASK` in [`src/utility.ts`](../src/utility.ts)), which has no tools and sees only the prompt (at most 20,000 characters). It counts toward the daily model limits | The person's, for this version |
-| `pim.chat(text)` | On a dashboard (see the README's [Your agents](../README.md#your-agents)), puts a message about the artifact in the box below it, with the artifact attached, for the person to send or change: a headline clicked becomes "Tell me more about…". It sends nothing, and the app answers it without asking Pim. Anywhere else, it fails | None: the person sends the message, or doesn't |
+| `pim.chat(text)` | On a dashboard (see [Your agents](reference.md#your-agents)), puts a message about the artifact in the box below it, with the artifact attached, for the person to send or change: a headline clicked becomes "Tell me more about…". It sends nothing, and the app answers it without asking Pim. Anywhere else, it fails | None: the person sends the message, or doesn't |
 | `pim.open()` | In a dashboard's [widget](#widgets), opens the whole artifact on its own page. The app answers it without asking Pim. Anywhere else, it fails | None: it only opens the artifact |
 | `pim.size` | In a dashboard's widget, the size it's shown at: `"small"`, `"medium"` or `"large"`, from the frame's address. Anywhere else, `null` | None |
 | `pim.tools.call(name, input)` | Runs an app tool, by its tool name, and answers with its result as text | The person's, for this version and this tool; only tools the owner lets run without asking (`on`). A tool that asks first can't be allowed or called: nothing in an artifact could show the person what it's about to do |
@@ -106,7 +106,7 @@ What an artifact gets back, it could send elsewhere, like anything else it shows
 
 ## Sharing
 
-An artifact can be shared with your circles (see [Sharing](../README.md#sharing)): Share on its page lists them. The people in those circles find it in Artifacts under Shared with you, as its latest version, which they can use and print but not change, see older versions of, or download. Stop sharing it, delete it, delete the circle, or take someone out of the circle, and their next look is refused.
+An artifact can be shared with your circles (see [Sharing](reference.md#sharing)): Share on its page lists them. The people in those circles find it in Artifacts under Shared with you, as its latest version, which they can use and print but not change, see older versions of, or download. Stop sharing it, delete it, delete the circle, or take someone out of the circle, and their next look is refused.
 
 - **It runs in their space.** Their app asks their own space, which asks yours (`guestArtifact`) and checks nothing itself: your space checks, at every request, that they're in a circle it's shared with and that the version is the latest. The page is framed and sandboxed as your own are.
 - **What it keeps for them is theirs.** `pim.storage` keeps their data in their own space, apart from yours and everyone else's. `pim.ask` uses their model and counts toward their limits, and `pim.tools.call` their apps' tools, under their permissions. Nothing of yours is reached but the artifact and its `pim.shared` data.
@@ -114,7 +114,7 @@ An artifact can be shared with your circles (see [Sharing](../README.md#sharing)
 
 ## Publishing
 
-An artifact can also be published for everyone on the Pim, from Share on its page, as agents are published (see the README). The Gallery keeps a copy of its latest version, which Discover lists. Publishing again replaces the copy with the latest version; until then, a new version stays the author's own.
+An artifact can also be published for everyone on the Pim, from Share on its page, as agents are published (see [Your agents](reference.md#your-agents)). The Gallery keeps a copy of its latest version, which Discover lists. Publishing again replaces the copy with the latest version; until then, a new version stays the author's own.
 
 - **Anyone signed in can open it.** It runs framed and sandboxed, as their own artifacts do. Like an artifact shared with them, what it keeps for them is in their own space (under `gallery/<id>`), and its model and tool calls are theirs, once they allow the published version. It keeps nothing for everyone: `pim.shared` fails.
 - **Make it your own** copies the published version into their artifacts, as a new artifact of theirs to change, and counts the use.

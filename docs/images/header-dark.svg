@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 740 150" width="740" height="150">
+  <title>Pim: pi • m[ulti]. pi: the minimal coding agent and harness Pim runs on. multi: many; players, agents, devices and models.</title>
+  <g transform="translate(0 27) scale(24)" shape-rendering="crispEdges">
+    <rect x="0" y="0" width="3" height="1" fill="#e48a7a"/>
+    <rect x="2" y="1" width="1" height="1" fill="#e48a7a"/>
+    <rect x="0" y="1" width="1" height="1" fill="#4f8eb3"/>
+    <rect x="0" y="2" width="2" height="1" fill="#4f8eb3"/>
+    <rect x="0" y="3" width="1" height="1" fill="#4f8eb3"/>
+    <rect x="3" y="2" width="1" height="2" fill="#eab65d"/>
+    <rect x="4" y="1" width="4" height="1" fill="#a88cd6"/>
+    <rect x="5" y="2" width="1" height="2" fill="#a88cd6"/>
+    <rect x="7" y="2" width="1" height="2" fill="#a88cd6"/>
+  </g>
+  <line x1="228" y1="22" x2="228" y2="130" stroke="#3d444d" stroke-width="2"/>
+  <g font-family="Georgia, 'Times New Roman', Times, serif">
+    <text x="256" y="62" font-size="40" font-style="italic" fill="#f0f6fc"><tspan font-weight="bold">pi</tspan><tspan fill="#9198a1" font-style="normal" font-size="30"> • </tspan><tspan font-weight="bold">m</tspan><tspan fill="#9198a1">[ulti]</tspan></text>
+    <text x="256" y="100" font-size="17" fill="#9198a1"><tspan font-style="italic" font-weight="bold" fill="#f0f6fc">pi:</tspan> the minimal coding agent and harness Pim runs on</text>
+    <text x="256" y="127" font-size="17" fill="#9198a1"><tspan font-style="italic" font-weight="bold" fill="#f0f6fc">multi:</tspan> many; players, agents, devices and models</text>
+  </g>
+</svg>

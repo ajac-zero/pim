@@ -287,8 +287,8 @@ export class ImageStore {
 
 	/**
 	 * Deletes everything under the owner's prefix: every image, including any
-	 * a lost write left unrecorded, and the space's stored files (see ./files.ts),
-	 * which share it.
+	 * a lost write left unrecorded, and the space's stored files (see
+	 * ./legacy-files.ts) and skills' files (see ./skills.ts), which share it.
 	 */
 	async deleteAll(): Promise<void> {
 		let cursor: string | undefined;

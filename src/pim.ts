@@ -348,7 +348,11 @@ export class Pim extends DurableAgent<Env> {
 		return { name: "Majordomo", description: "", instructions: "", apps: [], skills: [], contacts: [], blueprint: blueprint ? ref : null };
 	}, () => this.appDirectory());
 	/** The skills the owner's agents wrote for work they do again. */
-	readonly skills = new SkillStore(this.ctx.storage.sql, () => this.#storageRoom());
+	readonly skills = new SkillStore(this.ctx.storage.sql, {
+		storageRoom: () => this.#storageRoom(),
+		bucket: this.env.BLOBS,
+		owner: () => this.name,
+	});
 	/** Public links to the owner's chats, each with the copy of its chat it shows. */
 	readonly chatLinks = new ChatLinkStore(this.ctx.storage.sql);
 	/** Images the person sent, in R2; their messages keep their URLs. */
@@ -761,7 +765,7 @@ export class Pim extends DurableAgent<Env> {
 	#appExtras(services: PimServices) {
 		return {
 			catalog: this.catalog,
-			tools: [...skillTools(this.apps, this.catalog, (name) => this.skills.get(name)), ...eventTools(this.apps, this.catalog, this.appEvents, services)],
+			tools: [...skillTools(this.apps, this.catalog, this.skills), ...eventTools(this.apps, this.catalog, this.appEvents, services)],
 		};
 	}
 
@@ -1406,9 +1410,9 @@ export class Pim extends DurableAgent<Env> {
 		return { ...result, text: replies.length > 0 ? replies.join("\n\n") : undefined, replies };
 	}
 
-	/** What this space holds: its database, and in R2 the images sent to it, its stored files and its artifacts' files. */
+	/** What this space holds: its database, and in R2 the images sent to it, its stored files, and its artifacts' and skills' files. */
 	storedBytes(): number {
-		return this.ctx.storage.sql.databaseSize + this.images.bytes() + this.legacyFiles.storedBytes() + this.artifacts.fileBytes();
+		return this.ctx.storage.sql.databaseSize + this.images.bytes() + this.legacyFiles.storedBytes() + this.artifacts.fileBytes() + this.skills.fileBytes();
 	}
 
 	/** Bytes the space may still grow by, or null for no limit. */
@@ -3297,7 +3301,7 @@ export class Pim extends DurableAgent<Env> {
 			othersArtifactData: this.artifacts.othersData(),
 			// Files the space still keeps; those on the person's computer are theirs already.
 			files: await this.legacyFiles.export(),
-			skills: this.skills.export(),
+			...(await this.skills.export().then(({ skills, files }) => ({ skills, skillFiles: files }))),
 			usage: this.usage.history(90),
 		});
 	}
@@ -4623,6 +4627,19 @@ export class Pim extends DurableAgent<Env> {
 				return found;
 			},
 		],
+		// A supporting file's bytes, to show or, with `download`, to save.
+		[
+			"GET",
+			"/skills/:name/versions/:version/file",
+			({ name, version }, _request, url) =>
+				this.#artifactRequest(url, async () => {
+					const skill = this.#skill(name!);
+					if (!VERSION.test(version!) || !this.skills.version(skill.name, Number(version))) throw new HttpError(404, `No version ${version} of the skill ${name}`);
+					const { file, bytes } = await this.skills.read(skill.name, Number(version), url.searchParams.get("path") ?? "");
+					const type = isTextType(file.type) ? `${file.type}; charset=utf-8` : file.type;
+					return new Response(bytes, { headers: fileHeaders({ name: file.path.slice(file.path.lastIndexOf("/") + 1), size: file.size, type }, url.searchParams.has("download")) });
+				}),
+		],
 		[
 			"POST",
 			"/skills/:name/restore",
@@ -4632,19 +4649,19 @@ export class Pim extends DurableAgent<Env> {
 				if (!Number.isSafeInteger(version) || !Number.isSafeInteger(baseVersion)) {
 					throw new HttpError(400, "version and baseVersion must be version numbers");
 				}
-				this.skills.restore(skill.name, version!, baseVersion!);
+				await this.skills.restore(skill.name, version!, baseVersion!);
 				return Response.json(this.#describeSkill(skill.name), { status: 201 });
 			},
 		],
 		[
 			"DELETE",
 			"/skills/:name",
-			({ name }) => {
+			async ({ name }) => {
 				const skill = this.#skill(name!);
 				for (const agent of this.agents.list().filter((candidate) => candidate.skills.includes(skill.name))) {
 					this.agents.update(agent.id, agentInput({ skills: agent.skills.filter((other) => other !== skill.name) }, agent));
 				}
-				this.skills.delete(skill.name);
+				await this.skills.delete(skill.name);
 				return { deleted: skill.name };
 			},
 		],

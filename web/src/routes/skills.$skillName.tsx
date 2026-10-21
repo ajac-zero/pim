@@ -1,14 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useState } from "react";
 import type { BundledLanguage } from "shiki";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
+import { formatBytes } from "~/components/artifact";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import {
   ArrowLeft,
   Check,
   ChevronRight,
+  Download,
   FileIcon,
   History,
   RotateCcw,
@@ -29,7 +32,13 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { previewOf } from "~/lib/files";
-import { type Agent, ApiError, pim, type SkillVersion } from "~/lib/pim-api";
+import {
+  type Agent,
+  ApiError,
+  pim,
+  type SkillVersion,
+  skillFileUrl,
+} from "~/lib/pim-api";
 import { agentsQuery, skillQuery, skillVersionQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
@@ -272,7 +281,12 @@ function SkillPage() {
               </h2>
               <ul className="divide-y rounded-xl border">
                 {shown.files.map((file) => (
-                  <SkillFileRow key={file.path} file={file} />
+                  <SkillFileRow
+                    key={file.path}
+                    name={shown.name}
+                    version={shown.version}
+                    file={file}
+                  />
                 ))}
               </ul>
             </section>
@@ -283,8 +297,22 @@ function SkillPage() {
   );
 }
 
-/** A supporting file: its path, opening to its text. */
-function SkillFileRow({ file }: { file: SkillVersion["files"][number] }) {
+/** A supporting file: its path and size, opening to its text, or to a download for any other file. */
+function SkillFileRow({
+  name,
+  version,
+  file,
+}: {
+  name: string;
+  version: number;
+  file: SkillVersion["files"][number];
+}) {
+  const { t, formatNumber } = useI18n();
+  const [open, setOpen] = useState(false);
+  const textual =
+    file.type.startsWith("text/") ||
+    file.type === "application/json" ||
+    file.type === "image/svg+xml";
   const preview = previewOf(file.path);
   const language =
     preview.kind === "code"
@@ -292,19 +320,50 @@ function SkillFileRow({ file }: { file: SkillVersion["files"][number] }) {
       : preview.kind === "markdown"
         ? "markdown"
         : "text";
+  // Read when first opened: a version's files are its own, so they never change.
+  const content = useQuery({
+    queryKey: ["skills", name, "versions", version, "files", file.path],
+    enabled: open && textual,
+    staleTime: Number.POSITIVE_INFINITY,
+    retry: false,
+    queryFn: async () => {
+      const response = await fetch(skillFileUrl(name, version, file.path));
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new ApiError(response.status, t("fileMissing"));
+      }
+      return response.text();
+    },
+  });
   return (
     <li>
-      <Collapsible>
+      <Collapsible open={open} onOpenChange={setOpen}>
         <CollapsibleTrigger className="group flex w-full items-center gap-2 px-4 py-2.5 text-left text-[15px]">
           <FileIcon className="size-4 shrink-0 text-muted-foreground" />
           <span className="min-w-0 flex-1 truncate">{file.path}</span>
+          <span className="shrink-0 text-[13px] text-muted-foreground">
+            {formatBytes(file.size, formatNumber)}
+          </span>
           <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
         </CollapsibleTrigger>
-        <CollapsibleContent className="px-3 pb-3">
-          <CodeBlock
-            code={file.content}
-            language={language as BundledLanguage}
-          />
+        <CollapsibleContent className="space-y-2 px-3 pb-3">
+          {textual &&
+            (content.data !== undefined ? (
+              <CodeBlock
+                code={content.data}
+                language={language as BundledLanguage}
+              />
+            ) : (
+              <p className="px-1 text-muted-foreground text-sm">
+                {content.error?.message ?? t("loading")}
+              </p>
+            ))}
+          <Button asChild variant="outline" size="sm">
+            <a href={skillFileUrl(name, version, file.path, true)} download>
+              <Download />
+              {t("download")}
+            </a>
+          </Button>
         </CollapsibleContent>
       </Collapsible>
     </li>

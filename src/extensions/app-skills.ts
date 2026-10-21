@@ -2,7 +2,8 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
 import type { AppCatalog, AppSkill } from "./app-catalog";
 import type { McpBridge, McpResourceContent } from "./mcp";
-import type { Skill } from "../skills";
+import type { SkillStore } from "../skills";
+import { isTextType } from "../artifacts";
 import { text } from "./services";
 
 /**
@@ -13,7 +14,7 @@ import { text } from "./services";
  * origin is stated wherever it enters the model's context.
  *
  * Without an app, `read_skill` and `read_skill_file` read one of the
- * person's own skills instead (see ../skills.ts), found by `own`.
+ * person's own skills instead (see ../skills.ts), from `own`.
  */
 
 const MAX_SKILL_CHARS = 50_000;
@@ -76,7 +77,7 @@ function clip(value: string): string {
 	return value.length > MAX_SKILL_CHARS ? `${value.slice(0, MAX_SKILL_CHARS)}\n[... ${value.length - MAX_SKILL_CHARS} more characters]` : value;
 }
 
-export function skillTools(bridge: McpBridge, catalog: AppCatalog, own: (name: string) => Skill | undefined) {
+export function skillTools(bridge: McpBridge, catalog: AppCatalog, own: Pick<SkillStore, "get" | "read">) {
 	const app = (name: string) => {
 		const wanted = name.toLowerCase();
 		return bridge.servers().find((server) => server.id === wanted || server.name.toLowerCase() === wanted);
@@ -112,7 +113,7 @@ export function skillTools(bridge: McpBridge, catalog: AppCatalog, own: (name: s
 		replay: "safe",
 		async execute({ app: appName, skill: skillName }) {
 			if (appName === undefined) {
-				const skill = own(skillName);
+				const skill = own.get(skillName);
 				if (!skill) return text(`There is no skill named ${skillName} of the person's. An app's skill needs its app.`, true);
 				return text(
 					[
@@ -168,11 +169,13 @@ export function skillTools(bridge: McpBridge, catalog: AppCatalog, own: (name: s
 		replay: "safe",
 		async execute({ app: appName, skill: skillName, path }) {
 			if (appName === undefined) {
-				const skill = own(skillName);
+				const skill = own.get(skillName);
 				if (!skill) return text(`There is no skill named ${skillName} of the person's. An app's skill needs its app.`, true);
 				const file = skill.files.find((candidate) => candidate.path === path.replace(/^\.\//, ""));
 				if (!file) return text(`${skillName} has no file ${path}. Its files: ${skill.files.map((candidate) => candidate.path).join(", ") || "none"}.`, true);
-				return text(`${file.path} from the ${skill.name} skill, version ${skill.version}:\n\n${clip(file.content)}`);
+				const { bytes } = await own.read(skill.name, skill.version, file.path);
+				const body = isTextType(file.type) ? clip(new TextDecoder().decode(bytes)) : `(binary file, ${file.size} bytes, ${file.type})`;
+				return text(`${file.path} from the ${skill.name} skill, version ${skill.version}:\n\n${body}`);
 			}
 			try {
 				const { server, result } = await withSkill(appName, skillName, async (skill, serverId) => {

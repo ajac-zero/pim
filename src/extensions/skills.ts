@@ -61,7 +61,7 @@ export function writeSkillAction(skills: SkillStore, agents: Pick<AgentStore, "g
 		async run({ agent: id, name, description, instructions, files, base_version }) {
 			try {
 				const agent = agents.get(id);
-				const skill = skills.write({ name, description, instructions, files, baseVersion: base_version, author: agent?.name });
+				const skill = await skills.write({ name, description, instructions, files, baseVersion: base_version, author: agent?.name });
 				if (agent && !agent.skills.includes(name)) agents.update(id, agentInput({ skills: [...agent.skills, name] }, agent));
 				return `Saved the skill ${name}, version ${skill.version}${agent ? `, one of ${agent.name}'s skills` : ""}. It applies from the next step.`;
 			} catch (error) {
@@ -88,10 +88,10 @@ export function skillsExtension(services: PimServices, roleOf: (session: string)
 			const { agent } = roleOf(String(api.conversationId));
 			let summary: string;
 			try {
-				const checked = skills.check({ ...write, baseVersion: write.base_version });
+				await skills.check({ ...write, baseVersion: write.base_version });
 				// Checked now so a request the person would approve in vain is never filed.
-				if (!agent.skills.includes(checked.name)) agentInput({ skills: [...agent.skills, checked.name] }, agent);
-				summary = write.base_version === undefined ? `${agent.name} saves a new skill: ${checked.name}` : `${agent.name} rewrites the skill ${checked.name}`;
+				if (!agent.skills.includes(write.name)) agentInput({ skills: [...agent.skills, write.name] }, agent);
+				summary = write.base_version === undefined ? `${agent.name} saves a new skill: ${write.name}` : `${agent.name} rewrites the skill ${write.name}`;
 			} catch (error) {
 				return text(failure(error), true);
 			}

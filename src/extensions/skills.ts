@@ -106,7 +106,8 @@ export function skillsExtension(services: PimServices, roleOf: (session: string)
 			// Rendered at each request, so a chat sees a skill from the step after it is saved.
 			section("your_skills", ({ conversationId }) => {
 				const { agent, from } = roleOf(String(conversationId));
-				const mine = agent.skills.flatMap((name) => skills.get(name) ?? []);
+				const all = new Map(skills.list().map((skill) => [skill.name, skill]));
+				const mine = agent.skills.flatMap((name) => all.get(name) ?? []);
 				// Only in a chat: in a task, an agent works for another and writes none.
 				const writes = from === null && permission() !== "off";
 				if (mine.length === 0 && !writes) return undefined;

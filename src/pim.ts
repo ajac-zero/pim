@@ -881,7 +881,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/** Skills given through the API must be the person's. */
 	#checkSkills<T extends { skills: readonly string[] }>(input: T): T {
-		const missing = input.skills.find((name) => !this.skills.get(name));
+		const missing = input.skills.find((name) => !this.skills.has(name));
 		if (missing) throw new HttpError(400, `You have no skill ${missing}`);
 		return input;
 	}
@@ -4607,7 +4607,7 @@ export class Pim extends DurableAgent<Env> {
 			"GET",
 			"/skills",
 			() => ({
-				skills: this.skills.list().map(({ instructions: _instructions, files: _files, ...skill }) => ({ ...skill, agents: this.#skillAgents(skill.name) })),
+				skills: this.skills.list().map((skill) => ({ ...skill, agents: this.#skillAgents(skill.name) })),
 			}),
 		],
 		["GET", "/skills/:name", ({ name }) => this.#describeSkill(this.#skill(name!).name)],

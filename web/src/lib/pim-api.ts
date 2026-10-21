@@ -66,6 +66,8 @@ export type BundledAgent = {
   color: string | null;
   /** Its contacts, by name, among the agents that come with the template. */
   contacts: string[];
+  /** When its uploaded icon was published, or null without one. */
+  icon: number | null;
 };
 
 /** A conversation's message, as the REST API projects it. */

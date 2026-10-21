@@ -1801,7 +1801,9 @@ describe("profiles and published agents", () => {
 			color: "teal",
 		});
 		const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 7]);
+		const physioPng = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 8]);
 		await dee.browser.fetch(`/api/agents/${coach.id}/icon`, { method: "PUT", headers: { "content-type": "image/png" }, body: png });
+		await dee.browser.fetch(`/api/agents/${physio.id}/icon`, { method: "PUT", headers: { "content-type": "image/png" }, body: physioPng });
 		const published = await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "POST" });
 		expect(published).toMatchObject({
 			status: 201,
@@ -1832,10 +1834,13 @@ describe("profiles and published agents", () => {
 			instructions: "Plan two weeks at a time.",
 			contacts: ["Physio"],
 			bundle: [
-				{ name: "Physio", description: "Checks injury risk.", instructions: "Check every plan for injury risk.", symbol: "🩺", contacts: ["Dietitian"] },
-				{ name: "Dietitian", instructions: "Plan meals around training.", contacts: [] },
+				{ name: "Physio", description: "Checks injury risk.", instructions: "Check every plan for injury risk.", symbol: "🩺", contacts: ["Dietitian"], icon: expect.any(Number) },
+				{ name: "Dietitian", instructions: "Plan meals around training.", contacts: [], icon: null },
 			],
 		});
+		// Each agent that comes with it shows its own uploaded icon, by its place.
+		expect(new Uint8Array(await (await eli.browser.fetch(`/api/templates/${templateId}/agents/0/icon`)).arrayBuffer())).toEqual(physioPng);
+		expect((await eli.browser.fetch(`/api/templates/${templateId}/agents/1/icon`)).status).toBe(404);
 
 		// Made his own: a copy in Eli's agents, his to change, with copies of the agents that come with it; Dee's is untouched, and counts the use.
 		await eli.browser.json("/api/agents", { method: "POST", json: { name: "Physio", instructions: "Fix my knee." } });
@@ -1860,6 +1865,9 @@ describe("profiles and published agents", () => {
 		expect(mine.body.contacts).toEqual([named("Physio (Marathon coach)").id]);
 		expect(named("Physio (Marathon coach)")).toMatchObject({ contacts: [named("Dietitian").id], source: { template: templateId, author: "dee" } });
 		expect(named("Physio").contacts).toEqual([]);
+		// Their copies have their icons too.
+		expect(new Uint8Array(await (await eli.browser.fetch(`/api/agents/${named("Physio (Marathon coach)").id}/icon`)).arrayBuffer())).toEqual(physioPng);
+		expect((await eli.browser.fetch(`/api/agents/${named("Dietitian").id}/icon`)).status).toBe(404);
 		// The copy has its own icon: the picture, kept when the template's changes.
 		const copied = await eli.browser.fetch(`/api/agents/${mine.body.id}/icon`);
 		expect(new Uint8Array(await copied.arrayBuffer())).toEqual(png);
@@ -1908,7 +1916,9 @@ describe("profiles and published agents", () => {
 			})
 		).body;
 		const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 9]);
+		const cart = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 10]);
 		await operator.browser.fetch(`/api/agents/${helper.id}/icon`, { method: "PUT", headers: { "content-type": "image/png" }, body: png });
+		await operator.browser.fetch(`/api/agents/${shopper.id}/icon`, { method: "PUT", headers: { "content-type": "image/png" }, body: cart });
 		expect((await before.browser.json("/api/admin/default-agent", { method: "PUT", json: { agent: helper.id } })).status).toBe(403);
 		expect((await admin("/api/admin/default-agent", { method: "PUT", json: { agent: "p_nope" } })).status).toBe(404);
 		expect((await admin("/api/admin/default-agent", { method: "PUT", json: { agent: helper.id } })).body.agent).toMatchObject({
@@ -1937,6 +1947,7 @@ describe("profiles and published agents", () => {
 			source: { template: "default", author: "boss" },
 		});
 		expect(new Uint8Array(await (await otto.browser.fetch(`/api/agents/${copy.id}/icon`)).arrayBuffer())).toEqual(png);
+		expect(new Uint8Array(await (await otto.browser.fetch(`/api/agents/${shopperCopy.id}/icon`)).arrayBuffer())).toEqual(cart);
 		expect((await before.browser.json("/api/agents")).body.agents).toEqual([expect.objectContaining({ name: "Majordomo", majordomo: true })]);
 
 		// The copy is Otto's: the admin's later edits don't reach it, and his don't reach theirs.

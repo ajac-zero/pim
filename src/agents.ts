@@ -79,7 +79,7 @@ export type AgentInput = {
 	readonly color?: string | null;
 };
 
-export const MAX_AGENTS = 20;
+export const MAX_AGENTS = 50;
 export const MAX_ICON_BYTES = 256 * 1024;
 export const ICON_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 export const AGENT_COLORS = ["gray", "red", "orange", "amber", "green", "teal", "blue", "indigo", "violet", "pink"];

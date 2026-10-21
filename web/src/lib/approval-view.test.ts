@@ -74,6 +74,12 @@ describe("approvalView", () => {
         files: [
           { path: "scripts/paces.js", content: "export const easy = 1;" },
           { path: "references/notes.md", content: "Run easy.\nRest after." },
+          {
+            path: "templates/plan.docx",
+            from_file: "/workspace/plan.docx",
+            sha256: "ab12",
+            size: 9000,
+          },
         ],
       },
       summary: "Coach saves a new skill: weekly-plan",
@@ -90,6 +96,11 @@ describe("approvalView", () => {
         kind: "code",
         code: "Run easy.\nRest after.",
         language: "text",
+      },
+      {
+        name: "templates/plan.docx",
+        kind: "text",
+        text: "/workspace/plan.docx",
       },
     ]);
   });

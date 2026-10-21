@@ -139,11 +139,16 @@ export type SkillWrite = {
 	readonly restoredFrom?: number;
 };
 
+const encoder = new TextEncoder();
+
 export class SkillStore {
 	readonly #sql: SqlStorage;
+	/** Bytes the space may still grow by, or null for no limit. */
+	readonly #storageRoom: () => number | null;
 
-	constructor(sql: SqlStorage) {
+	constructor(sql: SqlStorage, storageRoom: () => number | null) {
 		this.#sql = sql;
+		this.#storageRoom = storageRoom;
 		this.#sql.exec(SCHEMA);
 	}
 
@@ -210,6 +215,10 @@ export class SkillStore {
 		if (files.reduce((total, file) => total + file.content.length, instructions.length) > MAX_SKILL_CHARS) {
 			throw new HttpError(400, `A skill's instructions and files together must be at most ${MAX_SKILL_CHARS} characters`);
 		}
+		// A version keeps all of it again, so each write needs room for the whole skill.
+		const size = [description, instructions, ...files.flatMap((file) => [file.path, file.content])].reduce((total, part) => total + encoder.encode(part).byteLength, 0);
+		const room = this.#storageRoom();
+		if (room !== null && size > room) throw new HttpError(429, `Space storage quota exceeded: there is room for ${Math.max(0, room)} more bytes.`);
 		return { ...write, description, instructions, files };
 	}
 

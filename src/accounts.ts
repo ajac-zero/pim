@@ -257,9 +257,9 @@ async function register(request: Request, env: Env, now: number): Promise<Respon
 		// Everyone gets a copy of the agent the admin chose, if they chose one, besides the majordomo they name next.
 		const everyone = await gallery(env).defaultAgent();
 		if (everyone) {
-			const { author, name, description, instructions, apps, team, blueprint, symbol, color } = everyone;
+			const { author, name, description, instructions, apps, contacts, bundle, blueprint, symbol, color } = everyone;
 			const image = everyone.icon ? await gallery(env).defaultAgentIcon() : null;
-			await pim.adoptEveryonesAgent({ author, name, description, instructions, apps, team, blueprint, symbol, color, image });
+			await pim.adoptEveryonesAgent({ author, name, description, instructions, apps, contacts, bundle, blueprint, symbol, color, image });
 		}
 		if (typeof body?.timeZone === "string") {
 			// The browser's zone, a good first guess; a bad one is just not applied.

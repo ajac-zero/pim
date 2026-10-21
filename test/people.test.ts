@@ -1787,20 +1787,19 @@ describe("profiles and published agents", () => {
 			bio: "Runs, cooks.",
 		});
 
-		const coach = (
-			await dee.browser.json("/api/agents", {
-				method: "POST",
-				json: {
-					name: "Marathon coach",
-					description: "Plans training weeks.",
-					instructions: "Plan one week at a time.",
-					apps: ["test.ledger/strava"],
-					team: [{ name: "Physio", instructions: "Check every plan for injury risk." }],
-					symbol: "🏃",
-					color: "teal",
-				},
-			})
-		).body;
+		const make = async (json: Record<string, unknown>) => (await dee.browser.json("/api/agents", { method: "POST", json })).body;
+		// The coach hands tasks to a physio, and the physio to a dietitian: both come with it.
+		const dietitian = await make({ name: "Dietitian", instructions: "Plan meals around training." });
+		const physio = await make({ name: "Physio", description: "Checks injury risk.", instructions: "Check every plan for injury risk.", symbol: "🩺", contacts: [dietitian.id] });
+		const coach = await make({
+			name: "Marathon coach",
+			description: "Plans training weeks.",
+			instructions: "Plan one week at a time.",
+			apps: ["test.ledger/strava"],
+			contacts: [physio.id],
+			symbol: "🏃",
+			color: "teal",
+		});
 		const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 7]);
 		await dee.browser.fetch(`/api/agents/${coach.id}/icon`, { method: "PUT", headers: { "content-type": "image/png" }, body: png });
 		const published = await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "POST" });
@@ -1829,9 +1828,17 @@ describe("profiles and published agents", () => {
 			bio: "Runs, cooks.",
 			templates: [expect.objectContaining({ id: templateId })],
 		});
-		expect((await eli.browser.json(`/api/templates/${templateId}`)).body).toMatchObject({ instructions: "Plan two weeks at a time." });
+		expect((await eli.browser.json(`/api/templates/${templateId}`)).body).toMatchObject({
+			instructions: "Plan two weeks at a time.",
+			contacts: ["Physio"],
+			bundle: [
+				{ name: "Physio", description: "Checks injury risk.", instructions: "Check every plan for injury risk.", symbol: "🩺", contacts: ["Dietitian"] },
+				{ name: "Dietitian", instructions: "Plan meals around training.", contacts: [] },
+			],
+		});
 
-		// Made his own: a copy in Eli's agents, his to change; Dee's is untouched, and counts the use.
+		// Made his own: a copy in Eli's agents, his to change, with copies of the agents that come with it; Dee's is untouched, and counts the use.
+		await eli.browser.json("/api/agents", { method: "POST", json: { name: "Physio", instructions: "Fix my knee." } });
 		const mine = await eli.browser.json(`/api/templates/${templateId}/use`, { method: "POST" });
 		expect(mine).toMatchObject({
 			status: 201,
@@ -1839,7 +1846,6 @@ describe("profiles and published agents", () => {
 				name: "Marathon coach",
 				instructions: "Plan two weeks at a time.",
 				apps: ["test.ledger/strava"],
-				team: [{ name: "Physio", instructions: "Check every plan for injury risk.", tools: null }],
 				symbol: "🏃",
 				color: "teal",
 				icon: expect.any(Number),
@@ -1847,6 +1853,13 @@ describe("profiles and published agents", () => {
 				published: null,
 			},
 		});
+		// The physio's copy takes a name of its own beside Eli's own physio, and each copy hands tasks to the copies of its contacts.
+		const eliAgents = (await eli.browser.json("/api/agents")).body.agents as { id: string; name: string; contacts: string[]; source: unknown }[];
+		const named = (name: string) => eliAgents.find((agent) => agent.name === name)!;
+		expect(eliAgents.map((agent) => agent.name)).toEqual(["Majordomo", "Physio", "Marathon coach", "Physio (Marathon coach)", "Dietitian"]);
+		expect(mine.body.contacts).toEqual([named("Physio (Marathon coach)").id]);
+		expect(named("Physio (Marathon coach)")).toMatchObject({ contacts: [named("Dietitian").id], source: { template: templateId, author: "dee" } });
+		expect(named("Physio").contacts).toEqual([]);
 		// The copy has its own icon: the picture, kept when the template's changes.
 		const copied = await eli.browser.fetch(`/api/agents/${mine.body.id}/icon`);
 		expect(new Uint8Array(await copied.arrayBuffer())).toEqual(png);
@@ -1863,7 +1876,7 @@ describe("profiles and published agents", () => {
 		// Unpublished, it's gone from the gallery; Eli keeps his copy.
 		expect((await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "DELETE" })).status).toBe(200);
 		expect((await eli.browser.json(`/api/templates/${templateId}`)).status).toBe(404);
-		expect((await eli.browser.json("/api/agents")).body.agents.map((agent: { name: string }) => agent.name)).toEqual(["Majordomo", "Marathon coach"]);
+		expect((await eli.browser.json("/api/agents")).body.agents.map((agent: { name: string }) => agent.name)).toEqual(["Majordomo", "Physio", "Marathon coach", "Physio (Marathon coach)", "Dietitian"]);
 
 		// Deleting a published agent unpublishes it; deleting the account takes the profile and everything published.
 		const again = (await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "POST" })).body.id;
@@ -1880,6 +1893,7 @@ describe("profiles and published agents", () => {
 
 	it("gives everyone who joins a copy of the agent the admin chose, theirs to change", async () => {
 		const before = await person("nell");
+		const shopper = (await admin("/api/agents", { method: "POST", json: { name: "Shopper", instructions: "Keep the shopping list." } })).body;
 		const helper = (
 			await admin("/api/agents", {
 				method: "POST",
@@ -1887,6 +1901,7 @@ describe("profiles and published agents", () => {
 					name: "Household helper",
 					description: "Keeps the house running.",
 					instructions: "Check the family calendar first.",
+					contacts: [shopper.id],
 					symbol: "house",
 					color: "amber",
 				},
@@ -1908,8 +1923,10 @@ describe("profiles and published agents", () => {
 		// A newcomer gets a copy besides the majordomo they are yet to name; whoever joined before doesn't.
 		const otto = await person("otto");
 		expect((await otto.browser.json("/api/majordomo")).body).toMatchObject({ agent: { name: "Majordomo", majordomo: true }, introduced: false });
-		const [, copy] = (await otto.browser.json("/api/agents")).body.agents;
+		const [, copy, shopperCopy] = (await otto.browser.json("/api/agents")).body.agents;
+		expect(shopperCopy).toMatchObject({ name: "Shopper", instructions: "Keep the shopping list.", source: { template: "default", author: "boss" } });
 		expect(copy).toMatchObject({
+			contacts: [shopperCopy.id],
 			name: "Household helper",
 			description: "Keeps the house running.",
 			instructions: "Check the family calendar first.",

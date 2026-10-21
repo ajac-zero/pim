@@ -22,18 +22,11 @@ import { SKILL_NAME } from "./skills";
  * One can be published as a template others make their own (see
  * ./gallery.ts); a copy made from a template remembers where it came from.
  *
- * An agent can have a team: named members with instructions of their own,
- * which it hands tasks to and which work in parallel (see ./team.ts). The
- * person talks only with the agent.
+ * An agent lists its contacts, as it lists its apps: others of the person's
+ * agents it hands tasks to (see ./tasks.ts). Every agent that works is one
+ * of the person's own, in the sidebar with its own page; the majordomo
+ * hands tasks to all of them without a list.
  */
-
-/** One of an agent's team: it does tasks the agent hands it, and answers the agent, never the person. */
-export type TeamMember = {
-	readonly name: string;
-	readonly instructions: string;
-	/** The tools it may use, by name; null for all the agent's tools a member can have. */
-	readonly tools: readonly string[] | null;
-};
 
 export type Agent = {
 	readonly id: string;
@@ -44,7 +37,8 @@ export type Agent = {
 	readonly apps: readonly string[];
 	/** The person's skills it uses, by name (see ./skills.ts). */
 	readonly skills: readonly string[];
-	readonly team: readonly TeamMember[];
+	/** The person's other agents it hands tasks to, by id; the majordomo's is empty, as it hands tasks to all of them. */
+	readonly contacts: readonly string[];
 	/** The blueprint it builds on, as `<extension>/<blueprint>`; null for none. */
 	readonly blueprint: string | null;
 	/** The template it was made from. */
@@ -77,7 +71,7 @@ export type AgentInput = {
 	readonly instructions: string;
 	readonly apps: readonly string[];
 	readonly skills: readonly string[];
-	readonly team: readonly TeamMember[];
+	readonly contacts: readonly string[];
 	/** Left out, a new agent builds on the deployment's default blueprint and an edited one keeps its own. */
 	readonly blueprint?: string | null;
 	/** Left out, a new agent has the default look and an edited one keeps its own. */
@@ -94,10 +88,6 @@ export const MAX_DESCRIPTION = 280;
 export const MAX_INSTRUCTIONS = 8000;
 export const MAX_APPS = 10;
 export const MAX_AGENT_SKILLS = 20;
-export const MAX_TEAM = 8;
-export const MAX_MEMBER_NAME = 40;
-export const MAX_MEMBER_TOOLS = 50;
-
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS pim_agents (
@@ -111,14 +101,14 @@ CREATE TABLE IF NOT EXISTS pim_agents (
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
 	is_default INTEGER NOT NULL DEFAULT 0,
-	team TEXT NOT NULL DEFAULT '[]',
 	blueprint TEXT,
 	symbol TEXT,
 	color TEXT,
 	introduced INTEGER NOT NULL DEFAULT 0,
 	skills TEXT NOT NULL DEFAULT '[]',
 	dashboard TEXT,
-	dashboard_sizes TEXT
+	dashboard_sizes TEXT,
+	contacts TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS pim_agent_icons (
 	agent TEXT PRIMARY KEY,
@@ -137,6 +127,14 @@ CREATE TABLE IF NOT EXISTS pim_session_abilities (
 `;
 
 type Row = Record<string, SqlStorageValue>;
+
+const newAgentId = () => `p_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+
+/** `name`, or, when one of the person's agents has it, the name with its former agent's after it, or a number. */
+export function freeName(name: string, of: string, taken: ReadonlySet<string>): string {
+	const candidates = [name, `${name} (${of})`.slice(0, MAX_NAME), ...Array.from({ length: MAX_AGENTS * 2 }, (_, n) => `${name.slice(0, MAX_NAME - 4)} ${n + 2}`)];
+	return candidates.find((candidate) => !taken.has(candidate.toLowerCase())) ?? name;
+}
 
 /**
  * Agents were once called personas: their tables, and a column, are renamed
@@ -165,7 +163,7 @@ const agentOf = (row: Row, directory: () => readonly DirectoryApp[]): Agent => (
 	instructions: String(row.instructions),
 	apps: storedApps(JSON.parse(String(row.apps)) as unknown[], directory),
 	skills: JSON.parse(String(row.skills)) as string[],
-	team: JSON.parse(String(row.team)) as TeamMember[],
+	contacts: JSON.parse(String(row.contacts)) as string[],
 	blueprint: row.blueprint === null ? null : String(row.blueprint),
 	source: row.source ? (JSON.parse(String(row.source)) as Agent["source"]) : null,
 	published: row.published === null ? null : String(row.published),
@@ -209,7 +207,7 @@ export function agentInput(body: Record<string, unknown>, partial?: Agent): Agen
 			),
 		],
 		skills: body.skills === undefined ? (partial?.skills ?? []) : skillsInput(body.skills),
-		team: body.team === undefined ? (partial?.team ?? []) : teamInput(body.team),
+		contacts: body.contacts === undefined ? (partial?.contacts ?? []) : contactsInput(body.contacts),
 		...(body.symbol === undefined ? {} : { symbol: symbolInput(body.symbol) }),
 		...(body.color === undefined ? {} : { color: colorInput(body.color) }),
 		...(body.blueprint === undefined ? {} : { blueprint: blueprintInput(body.blueprint) }),
@@ -251,26 +249,27 @@ function colorInput(value: unknown): string | null {
 	return value;
 }
 
-/** A team as given: up to `MAX_TEAM` members with distinct names, each with instructions. */
-function teamInput(value: unknown): TeamMember[] {
-	if (!Array.isArray(value) || value.length > MAX_TEAM) throw new HttpError(400, `team must be a list of up to ${MAX_TEAM} members`);
-	const names = new Set<string>();
-	return value.map((member) => {
-		const { name: given, instructions, tools } = (member ?? {}) as { name?: unknown; instructions?: unknown; tools?: unknown };
-		const name = text(given, "a team member's name", MAX_MEMBER_NAME, true);
-		if (names.has(name.toLowerCase())) throw new HttpError(400, `Two team members are called ${name}`);
-		names.add(name.toLowerCase());
-		if (tools !== undefined && tools !== null) {
-			if (!Array.isArray(tools) || tools.length > MAX_MEMBER_TOOLS || tools.some((tool) => typeof tool !== "string" || !/^[\w.-]{1,128}$/.test(tool))) {
-				throw new HttpError(400, `A team member's tools must be a list of up to ${MAX_MEMBER_TOOLS} tool names`);
-			}
-		}
-		return {
-			name,
-			instructions: text(instructions, `${name}'s instructions`, MAX_INSTRUCTIONS, true),
-			tools: tools === undefined || tools === null ? null : [...new Set(tools as string[])],
-		};
-	});
+/** Contacts as given: ids of the person's agents. Whether each is one, and not the agent itself, is the space's to check. */
+function contactsInput(value: unknown): string[] {
+	if (!Array.isArray(value) || value.length > MAX_AGENTS || value.some((id) => typeof id !== "string" || !/^p_\w{1,32}$/.test(id))) {
+		throw new HttpError(400, `contacts must be a list of up to ${MAX_AGENTS} of your agents' ids`);
+	}
+	return [...new Set(value as string[])];
+}
+
+/**
+ * Checks an agent's contacts: others of the person's agents, never the
+ * majordomo, which has none, as it hands tasks to all of them. `self` is the
+ * agent edited, or null for a new one.
+ */
+export function checkContacts(self: Agent | null, input: AgentInput, agents: readonly Agent[]): AgentInput {
+	if (input.contacts.length === 0) return input;
+	if (self?.majordomo) throw new HttpError(400, "Your majordomo hands tasks to all of your agents, so it has no contacts.");
+	for (const id of input.contacts) {
+		const contact = agents.find((agent) => agent.id === id);
+		if (!contact || contact.majordomo || contact.id === self?.id) throw new HttpError(400, `${id} isn't another of your agents: contacts can't include the agent itself or your majordomo`);
+	}
+	return input;
 }
 
 /**
@@ -305,7 +304,6 @@ export class AgentStore {
 		this.#sql.exec(SCHEMA);
 		const columns = this.#sql.exec("PRAGMA table_info(pim_agents)").toArray().map((row) => String(row.name));
 		if (!columns.includes("is_default")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0");
-		if (!columns.includes("team")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN team TEXT NOT NULL DEFAULT '[]'");
 		// Agents made before extensions all had the assistant's habits.
 		if (!columns.includes("blueprint")) this.#sql.exec(`ALTER TABLE pim_agents ADD COLUMN blueprint TEXT DEFAULT '${ASSISTANT_BLUEPRINT}'`);
 		if (!columns.includes("symbol")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN symbol TEXT");
@@ -315,12 +313,65 @@ export class AgentStore {
 		if (!columns.includes("skills")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN skills TEXT NOT NULL DEFAULT '[]'");
 		if (!columns.includes("dashboard")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN dashboard TEXT");
 		if (!columns.includes("dashboard_sizes")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN dashboard_sizes TEXT");
+		if (!columns.includes("contacts")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN contacts TEXT NOT NULL DEFAULT '[]'");
+		if (columns.includes("team")) this.#moveTeams();
 	}
 
-	/** The majordomo first, then the others as they were made. */
+	/**
+	 * Agents once had teams: members with a name and instructions, which
+	 * worked with their agent's apps and answered only it. Each member becomes
+	 * an agent of its own, with its instructions and its agent's blueprint,
+	 * apps, skills and app tool permissions, and one of its agent's contacts;
+	 * its tasks, done and not, become the new agent's. A member's list of
+	 * tools has no counterpart and is left behind.
+	 */
+	#moveTeams(): void {
+		const tables = new Set(this.#sql.exec("SELECT name FROM sqlite_master WHERE type = 'table'").toArray().map((row) => String(row.name)));
+		const taken = new Set(this.#sql.exec("SELECT name FROM pim_agents").toArray().map((row) => String(row.name).toLowerCase()));
+		for (const row of this.#sql.exec("SELECT * FROM pim_agents WHERE team != '[]'").toArray()) {
+			const team = JSON.parse(String(row.team)) as { name: string; instructions: string }[];
+			const contacts = JSON.parse(String(row.contacts)) as string[];
+			for (const member of team) {
+				const name = freeName(member.name, String(row.name), taken);
+				taken.add(name.toLowerCase());
+				const id = newAgentId();
+				const line = member.instructions.trim().split(/\r?\n/)[0] ?? "";
+				this.#sql.exec(
+					"INSERT INTO pim_agents (id, name, description, instructions, apps, skills, blueprint, color, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+					id,
+					name,
+					line.length > MAX_DESCRIPTION ? `${line.slice(0, MAX_DESCRIPTION - 1)}…` : line,
+					member.instructions,
+					row.apps,
+					row.skills,
+					row.blueprint,
+					row.color,
+					Date.now(),
+					Date.now(),
+				);
+				contacts.push(id);
+				if (tables.has("pim_tool_permissions")) {
+					this.#sql.exec(
+						"INSERT OR IGNORE INTO pim_tool_permissions (audience, app, tool, permission, definition, updated_at) SELECT ?, app, tool, permission, definition, updated_at FROM pim_tool_permissions WHERE audience = ?",
+						`agent:${id}`,
+						`agent:${row.id}`,
+					);
+				}
+				if (tables.has("pim_tasks")) {
+					this.#sql.exec("UPDATE pim_tasks SET kind = 'agent', agent = ?, member = NULL WHERE agent = ? AND member = ?", id, row.id, member.name);
+					this.#sql.exec("INSERT OR REPLACE INTO pim_agent_sessions (session, agent) SELECT DISTINCT conversation, agent FROM pim_tasks WHERE agent = ?", id);
+				}
+			}
+			this.#sql.exec("UPDATE pim_agents SET contacts = ?, team = '[]' WHERE id = ?", JSON.stringify(contacts), row.id);
+		}
+		// Tasks of members taken off their teams before, which no member is left to become, are their agent's.
+		if (tables.has("pim_tasks")) this.#sql.exec("UPDATE pim_tasks SET kind = 'agent' WHERE kind = 'member'");
+	}
+
+	/** The majordomo first, then the others in the order they were made. */
 	list(): Agent[] {
 		this.majordomo();
-		return this.#sql.exec(`${SELECT} ORDER BY p.is_default DESC, p.created_at, p.id`).toArray().map((row) => agentOf(row, this.#directory));
+		return this.#sql.exec(`${SELECT} ORDER BY p.is_default DESC, p.created_at, p.rowid`).toArray().map((row) => agentOf(row, this.#directory));
 	}
 
 	/** The majordomo, made from the starter the first time it is asked for. */
@@ -351,17 +402,17 @@ export class AgentStore {
 	}
 
 	#insert(input: AgentInput, source: Agent["source"], isDefault: boolean): Agent {
-		const id = `p_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+		const id = newAgentId();
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT INTO pim_agents (id, name, description, instructions, apps, skills, team, blueprint, symbol, color, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+			"INSERT INTO pim_agents (id, name, description, instructions, apps, skills, contacts, blueprint, symbol, color, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
 			id,
 			input.name,
 			input.description,
 			input.instructions,
 			JSON.stringify(input.apps),
 			JSON.stringify(input.skills),
-			JSON.stringify(input.team),
+			JSON.stringify(input.contacts),
 			input.blueprint === undefined ? (this.#starter().blueprint ?? null) : input.blueprint,
 			input.symbol ?? null,
 			input.color ?? null,
@@ -375,13 +426,13 @@ export class AgentStore {
 
 	update(id: string, input: AgentInput): Agent {
 		this.#sql.exec(
-			"UPDATE pim_agents SET name = ?, description = ?, instructions = ?, apps = ?, skills = ?, team = ?, updated_at = ? WHERE id = ?",
+			"UPDATE pim_agents SET name = ?, description = ?, instructions = ?, apps = ?, skills = ?, contacts = ?, updated_at = ? WHERE id = ?",
 			input.name,
 			input.description,
 			input.instructions,
 			JSON.stringify(input.apps),
 			JSON.stringify(input.skills),
-			JSON.stringify(input.team),
+			JSON.stringify(input.contacts),
 			Date.now(),
 			id,
 		);
@@ -401,9 +452,12 @@ export class AgentStore {
 		this.#sql.exec("UPDATE pim_agents SET published = ? WHERE id = ?", template, id);
 	}
 
-	/** Deletes it; its chats stay, with the majordomo. */
+	/** Deletes it; its chats stay, with the majordomo, and it leaves the contacts of the agents that had it. */
 	delete(id: string): void {
 		if (this.get(id)?.majordomo) throw new HttpError(400, "Your majordomo can't be deleted.");
+		for (const agent of this.list()) {
+			if (agent.contacts.includes(id)) this.#sql.exec("UPDATE pim_agents SET contacts = ? WHERE id = ?", JSON.stringify(agent.contacts.filter((other) => other !== id)), agent.id);
+		}
 		this.#sql.exec("DELETE FROM pim_agent_sessions WHERE agent = ?", id);
 		this.#sql.exec("DELETE FROM pim_agent_icons WHERE agent = ?", id);
 		this.#sql.exec("DELETE FROM pim_agents WHERE id = ?", id);

@@ -6,15 +6,16 @@ import {
 	MAX_DESCRIPTION,
 	MAX_INSTRUCTIONS,
 	MAX_NAME,
-	MAX_TEAM,
+	MAX_AGENTS,
 	type Agent,
 	type AgentInput,
 	type AgentStore,
 	agentInput,
 	agentInstructions,
+	checkContacts,
 } from "../agents";
 import { majordomoRole } from "../majordomo";
-import { DELEGATE, memberInstructions, type Role, taskPreamble } from "../tasks";
+import { DELEGATE, type Role, taskPreamble } from "../tasks";
 import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";
 import type { DirectoryApp } from "./app-directory";
 import type { BlueprintDefinition } from "./define";
@@ -26,65 +27,52 @@ export const UPDATE_AGENT = "update_agent";
 export const RENAME_AGENT = "rename_agent";
 export const MANAGE_APPS = "manage_apps";
 
-const Member = Type.Object({
-	name: Type.String(),
-	instructions: Type.String({ description: "Everything it needs to know: it starts each task knowing only these and the task." }),
-	tools: Type.Optional(Type.Array(Type.String(), { description: "The only tools it may use, by name; leave out for all a member can have." })),
-});
-
-/** What `update_agent` changes. Members are added and removed one by one: an agent doesn't see all of its team's instructions. */
+/** What `update_agent` changes. Contacts are added and removed by name. */
 const Changes = Type.Object({
 	description: Type.Optional(Type.String({ maxLength: MAX_DESCRIPTION })),
 	instructions: Type.Optional(Type.String({ maxLength: MAX_INSTRUCTIONS, description: "Your complete new instructions: they replace the old ones." })),
-	set_members: Type.Optional(Type.Array(Member, { maxItems: MAX_TEAM, description: "Team members to add, or to replace if one has the name." })),
-	remove_members: Type.Optional(Type.Array(Type.String(), { description: "Names of team members to remove." })),
+	add_contacts: Type.Optional(
+		Type.Array(Type.String(), { maxItems: MAX_AGENTS, description: `Names of the person's other agents to hand tasks to with \`${DELEGATE}\`.` }),
+	),
+	remove_contacts: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_AGENTS, description: "Names of contacts to stop handing tasks to." })),
 });
 type Changes = Static<typeof Changes>;
 
 const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
+/** The ids of the person's agents called `names`; throws for a name none of them has. */
+function agentIds(names: readonly string[], agents: readonly Agent[]): string[] {
+	return names.map((name) => {
+		const agent = agents.find((candidate) => same(candidate.name, name));
+		if (!agent) throw new Error(`The person has no agent called ${name}. Their agents: ${agents.map((candidate) => candidate.name).join(", ")}.`);
+		return agent.id;
+	});
+}
+
 /** An agent with `changes` made, checked as the API checks an edit; throws what it refuses. */
-function changed(agent: Agent, changes: Changes): AgentInput {
-	const set = changes.set_members ?? [];
-	const team = agent.team
-		.filter((member) => !changes.remove_members?.some((name) => same(name, member.name)))
-		// Replaced, a member keeps its name as it was written.
-		.map((member) => {
-			const given = set.find((candidate) => same(candidate.name, member.name));
-			return given ? { ...given, name: member.name } : member;
-		});
-	return agentInput(
-		{
-			description: changes.description,
-			instructions: changes.instructions,
-			team: [...team, ...set.filter((given) => !team.some((member) => same(member.name, given.name)))],
-		},
-		agent,
-	);
+function changed(agent: Agent, changes: Changes, agents: readonly Agent[]): AgentInput {
+	const added = agentIds(changes.add_contacts ?? [], agents);
+	const removed = agentIds(changes.remove_contacts ?? [], agents);
+	const contacts = [...agent.contacts.filter((id) => !removed.includes(id)), ...added.filter((id) => !agent.contacts.includes(id) && !removed.includes(id))];
+	return checkContacts(agent, agentInput({ description: changes.description, instructions: changes.instructions, contacts }, agent), agents);
 }
 
 /** What an edit changes, for the person to approve: empty if nothing. */
-function describeChanges(agent: Agent, next: AgentInput): string[] {
-	const names = (list: readonly { name: string }[]) => list.map((item) => item.name);
-	const missing = (from: readonly { name: string }[], to: readonly { name: string }[]) => names(from.filter((item) => !to.some((other) => same(other.name, item.name))));
-	const editedMembers = next.team.filter((member) => {
-		const before = agent.team.find((other) => same(other.name, member.name));
-		return before && JSON.stringify(before) !== JSON.stringify(member);
-	});
+function describeChanges(agent: Agent, next: AgentInput, agents: readonly Agent[]): string[] {
+	const name = (id: string) => agents.find((other) => other.id === id)?.name ?? id;
 	return [
 		...(next.description !== agent.description ? ["changes its description"] : []),
 		...(next.instructions !== agent.instructions ? ["changes its instructions"] : []),
-		...missing(next.team, agent.team).map((name) => `adds ${name} to its team`),
-		...names(editedMembers).map((name) => `changes ${name} on its team`),
-		...missing(agent.team, next.team).map((name) => `removes ${name} from its team`),
+		...next.contacts.filter((id) => !agent.contacts.includes(id)).map((id) => `adds ${name(id)} to its contacts, to hand tasks to`),
+		...agent.contacts.filter((id) => !next.contacts.includes(id)).map((id) => `removes ${name(id)} from its contacts`),
 	];
 }
 
 /** The approved edit of an agent, made to it as it is then. */
-export function updateAgentAction(agents: Pick<AgentStore, "get" | "update">): GatedAction {
+export function updateAgentAction(agents: Pick<AgentStore, "get" | "update" | "list">): GatedAction {
 	return defineGatedAction({
 		name: UPDATE_AGENT,
-		description: "An agent changes its own instructions, description or team.",
+		description: "An agent changes its own instructions, description or contacts.",
 		// Filed by the tool, which names the chat's agent.
 		internal: true,
 		parameters: Type.Object({ agent: Type.String(), ...Changes.properties }),
@@ -92,7 +80,7 @@ export function updateAgentAction(agents: Pick<AgentStore, "get" | "update">): G
 		async run({ agent: id, ...changes }) {
 			const agent = agents.get(id);
 			if (!agent) return "That agent no longer exists.";
-			const updated = agents.update(id, changed(agent, changes));
+			const updated = agents.update(id, changed(agent, changes, agents.list()));
 			return `${updated.name} is updated. The change applies from its next step.`;
 		},
 	}) as GatedAction;
@@ -223,8 +211,8 @@ Rules that always hold:
 - Times: call \`current_time\` when the time matters.`;
 
 /**
- * How every agent works, and the agent each chat talks as, or the agent or
- * team member at work on a task (`roleOf` its session). An agent's instructions are those of the
+ * How every agent works, and the agent each chat talks as, or the agent at
+ * work on a task (`roleOf` its session). An agent's instructions are those of the
  * blueprint it builds on (`blueprintOf`), then the person's own.
  */
 export function agentExtension(
@@ -242,10 +230,10 @@ export function agentExtension(
 			description: Type.String({ maxLength: MAX_DESCRIPTION, description: "One line, shown under its name." }),
 			instructions: Type.String({ maxLength: MAX_INSTRUCTIONS }),
 			apps: Type.Optional(Type.Array(Type.String({ description: "An app's id, from find_app." }), { maxItems: MAX_APPS })),
-			team: Type.Optional(
-				Type.Array(Member, {
-					maxItems: MAX_TEAM,
-					description: `Members it hands parts of its work to with \`${DELEGATE}\`, all working at once, such as a planner's researchers.`,
+			contacts: Type.Optional(
+				Type.Array(Type.String(), {
+					maxItems: MAX_AGENTS,
+					description: `Names of the person's other agents it hands parts of its work to with \`${DELEGATE}\`, such as a planner's researcher. Make those first.`,
 				}),
 			),
 			blueprint: Type.Optional(Type.String({ description: "The blueprint it builds on, such as pim.assistant/pim; the default blueprint if left out." })),
@@ -258,11 +246,13 @@ export function agentExtension(
 			const existing = agents.list().find((agent) => agent.name.toLowerCase() === args.name.trim().toLowerCase());
 			if (existing) return json({ exists: true, agent: { id: existing.id, name: existing.name, description: existing.description } });
 			try {
-				const { emoji, ...rest } = args;
-				const agent = agents.create({ ...rest, symbol: emoji });
+				const { emoji, contacts, ...rest } = args;
+				const all = agents.list();
+				const agent = agents.create({ ...rest, symbol: emoji, contacts: agentIds(contacts ?? [], all) });
+				const name = (id: string) => all.find((other) => other.id === id)?.name ?? id;
 				return json({
 					created: true,
-					agent: { id: agent.id, name: agent.name, description: agent.description, apps: agent.apps, team: agent.team.map((member) => member.name) },
+					agent: { id: agent.id, name: agent.name, description: agent.description, apps: agent.apps, contacts: agent.contacts.map(name) },
 				});
 			} catch (error) {
 				return text(error instanceof Error ? error.message : String(error), true);
@@ -273,14 +263,15 @@ export function agentExtension(
 	const editing = ownToolPermission(services.store, UPDATE_AGENT).permission;
 	const updateAgent = defineTool({
 		name: UPDATE_AGENT,
-		description: `Change yourself, the agent this chat is with: your description, your instructions, or your team. App changes use manage_apps instead. Do it when the person asks, or when a team would help with work you'll do again. Only the fields you give change.${editing === "ask" ? ` ${approvalNote(services)}` : ""}`,
+		description: `Change yourself, the agent this chat is with: your description, your instructions, or your contacts, the person's other agents you hand tasks to. App changes use manage_apps instead. Do it when the person asks, or when handing parts of work you'll do again to another agent would help. Only the fields you give change.${editing === "ask" ? ` ${approvalNote(services)}` : ""}`,
 		parameters: Changes,
 		replay: "safe",
 		async execute(changes, api, context) {
 			const { agent } = roleOf(String(api.conversationId));
 			let edits: string[];
 			try {
-				edits = describeChanges(agent, changed(agent, changes));
+				const all = agents.list();
+				edits = describeChanges(agent, changed(agent, changes, all), all);
 			} catch (error) {
 				return text(error instanceof Error ? error.message : String(error), true);
 			}
@@ -337,16 +328,15 @@ export function agentExtension(
 			section(
 				"preamble",
 				({ conversationId }) => {
-					const { agent, member, from } = roleOf(String(conversationId));
-					return from === null ? PREAMBLE : taskPreamble(member?.name ?? agent.name, from);
+					const { agent, from } = roleOf(String(conversationId));
+					return from === null ? PREAMBLE : taskPreamble(agent.name, from);
 				},
 				{ tag: false },
 			),
 			section("user_time_zone", () => services.timeZone),
 			// Rendered at each request, so a chat follows its agent's edits from the next one.
 			section("agent", ({ conversationId }) => {
-				const { agent, member } = roleOf(String(conversationId));
-				if (member) return memberInstructions(member);
+				const { agent } = roleOf(String(conversationId));
 				return agentInstructions(agent, blueprintOf(agent), agent.majordomo ? majordomoRole(agent) : undefined);
 			}),
 			section("your_agents", ({ conversationId }) => {

@@ -954,8 +954,8 @@ it("keeps handoffs anchored while linking each answer to its own notice, not an 
   const task = (id: string, parent: string | null = null): AgentTask => ({
     id,
     parent,
-    agent: { id, name: id, member: parent !== null },
-    from: { id: "lead", name: "Lead", member: false },
+    agent: { id, name: id },
+    from: { id: "lead", name: "Lead" },
     task: `Work for ${id}`,
     state: "completed",
     result: "An answer.",

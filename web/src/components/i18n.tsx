@@ -330,20 +330,16 @@ const translations = {
     noChatsYet: "No chats yet.",
     noRecentChats: "No recent chats.",
     archived: "Archived",
-    team: "Team",
-    teamHint:
-      "Members your agent hands tasks to. They work at the same time, each with its own instructions, and answer your agent, never you.",
-    memberName: "Member's name",
-    memberNamePlaceholder: "Researcher",
-    memberInstructions: "Its instructions",
-    memberInstructionsPlaceholder:
-      "What it does and how, such as: find facts and say where each came from.",
-    memberTools: "Tools it may use",
-    memberToolsHint:
-      "Tool names, separated by commas. Leave it empty for all of your agent's tools a member can have.",
-    addMember: "Add member",
-    removeTeamMember: "Remove member",
-    teamWorking: "{count} working",
+    contacts: "Contacts",
+    contactsHint:
+      "Your other agents this one hands tasks to. Each works in a conversation of its own and answers this agent, never you.",
+    majordomoContacts: "Your majordomo hands tasks to all of your agents.",
+    noContacts: "Make another agent to give this one someone to hand tasks to.",
+    handTasksTo: "Hand tasks to {name}",
+    comesWith: "Comes with",
+    comesWithHint:
+      "Agents it hands tasks to. Making it your own gives you a copy of each.",
+    contactsList: "Hands tasks to {names}",
     tasksWorking: "{count} working",
     tasksWaiting: "{count} waiting for you",
     tasks: "Tasks",
@@ -1318,20 +1314,16 @@ const translations = {
     noChatsYet: "Aún no hay chats.",
     noRecentChats: "No hay chats recientes.",
     archived: "Archivados",
-    team: "Equipo",
-    teamHint:
-      "Miembros a los que tu agente da tareas. Trabajan a la vez, cada uno con sus propias instrucciones, y le responden a tu agente, nunca a ti.",
-    memberName: "Nombre del miembro",
-    memberNamePlaceholder: "Investigador",
-    memberInstructions: "Sus instrucciones",
-    memberInstructionsPlaceholder:
-      "Qué hace y cómo, por ejemplo: busca datos y di de dónde sale cada uno.",
-    memberTools: "Herramientas que puede usar",
-    memberToolsHint:
-      "Nombres de herramientas, separados por comas. Déjalo vacío para todas las herramientas de tu agente que un miembro puede tener.",
-    addMember: "Añadir miembro",
-    removeTeamMember: "Quitar miembro",
-    teamWorking: "{count} trabajando",
+    contacts: "Contactos",
+    contactsHint:
+      "Tus otros agentes a los que este les pasa tareas. Cada uno trabaja en una conversación propia y le responde a este agente, nunca a ti.",
+    majordomoContacts: "Tu mayordomo les pasa tareas a todos tus agentes.",
+    noContacts: "Crea otro agente para que este tenga a quién pasarle tareas.",
+    handTasksTo: "Pasarle tareas a {name}",
+    comesWith: "Incluye",
+    comesWithHint:
+      "Agentes a los que les pasa tareas. Al hacerlo tuyo, recibes una copia de cada uno.",
+    contactsList: "Les pasa tareas a {names}",
     tasksWorking: "{count} trabajando",
     tasksWaiting: "{count} esperándote",
     tasks: "Tareas",

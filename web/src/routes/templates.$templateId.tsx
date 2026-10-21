@@ -112,21 +112,36 @@ function TemplatePage() {
           </ul>
         </section>
       )}
-      {template.team.length > 0 && (
+      {template.bundle.length > 0 && (
         <section className="mt-6 space-y-2">
           <h2 className="font-medium text-muted-foreground text-sm">
-            {t("team")}
+            {t("comesWith")}
           </h2>
+          <p className="text-muted-foreground text-xs">{t("comesWithHint")}</p>
           <ul className="divide-y rounded-xl border">
-            {template.team.map((member) => (
-              <li key={member.name} className="px-4 py-2.5 text-sm">
-                <span className="font-medium">{member.name}</span>
-                <p className="mt-0.5 whitespace-pre-wrap text-muted-foreground">
-                  {member.instructions}
+            {template.bundle.map((agent) => (
+              <li key={agent.name} className="px-4 py-3 text-sm">
+                <div className="flex items-center gap-3">
+                  <AgentIcon
+                    agent={{ id: agent.name, icon: null, ...agent }}
+                    tile
+                    className="size-8 rounded-lg"
+                  />
+                  <span className="min-w-0">
+                    <span className="block font-medium">{agent.name}</span>
+                    {agent.description && (
+                      <span className="block truncate text-muted-foreground text-xs">
+                        {agent.description}
+                      </span>
+                    )}
+                  </span>
+                </div>
+                <p className="mt-2 whitespace-pre-wrap text-muted-foreground">
+                  {agent.instructions}
                 </p>
-                {member.tools && (
-                  <p className="mt-1 font-mono text-muted-foreground text-xs">
-                    {member.tools.join(", ")}
+                {agent.contacts.length > 0 && (
+                  <p className="mt-1 text-muted-foreground text-xs">
+                    {t("contactsList", { names: agent.contacts.join(", ") })}
                   </p>
                 )}
               </li>

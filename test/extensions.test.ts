@@ -104,7 +104,8 @@ describe("extensions", () => {
 
 	it("shows each agent's dashboard, with what belongs to its chats", async () => {
 		const mine = ((await api("/agents")).body.agents as Agent[]).find((agent) => agent.majordomo)!;
-		const coach = (await post("/agents", { name: "Run coach", team: [{ name: "Tracker", instructions: "Track goals." }] })).body as Agent;
+		const tracker = (await post("/agents", { name: "Tracker", instructions: "Track goals." })).body as Agent;
+		const coach = (await post("/agents", { name: "Run coach", contacts: [tracker.id] })).body as Agent;
 		const chat = (await post("/sessions", { agent: coach.id })).body.id;
 		const builtIn = ["pim.schedule/upcoming", "pim.goals/active", "pim.memory/recent", "pim.artifacts/recent"];
 
@@ -115,7 +116,7 @@ describe("extensions", () => {
 			toolUse("send_to_user", { message: "Set." }),
 		]);
 		await say("Plan my training and check in later.", chat);
-		// The goal comes from a team member's conversation: it belongs to the chat the member works for.
+		// The goal comes from a contact's conversation: it belongs to the chat the work began in.
 		scripts({
 			lead: [
 				() => toolUse("delegate", { tasks: [{ to: "Tracker", task: "Track a 10k goal." }] }),
@@ -374,9 +375,10 @@ describe("extensions", () => {
 		expect(await agentOf(planning)).toEqual({ id: first.id, name: "Alfred" });
 	});
 
-	it("gives an agent's chats, and its team, the abilities of the blueprint it builds on, and only those", async () => {
+	it("gives an agent's chats, and its tasks, the abilities of the blueprint it builds on, and only those", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
-		const books = (await post("/agents", { name: "Books", blueprint: "test.ledger/budget", team: [{ name: "Clerk", instructions: "File bills." }] })).body as Agent;
+		const clerk = (await post("/agents", { name: "Clerk", instructions: "File bills.", blueprint: "test.ledger/budget" })).body as Agent;
+		const books = (await post("/agents", { name: "Books", blueprint: "test.ledger/budget", contacts: [clerk.id] })).body as Agent;
 		const chat = (await post("/sessions", { agent: books.id })).body.id;
 
 		let seen: Request = { messages: [] };
@@ -409,7 +411,7 @@ describe("extensions", () => {
 		expect(offered(home)).not.toContain("ledger_pay_bill");
 		expect(systemPrompt(home.messages)).not.toContain("ledger_bills");
 
-		// A team member works with its agent's abilities.
+		// A contact at work on a task works with its own blueprint's abilities.
 		scripts({
 			lead: [
 				() => toolUse("delegate", { tasks: [{ to: "Clerk", task: "File the rent." }] }),

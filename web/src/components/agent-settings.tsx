@@ -63,12 +63,12 @@ import {
   MAJORDOMO_TONES,
   type MajordomoPreferences,
   pim,
-  type TeamMember,
   type ToolPermissionInfo,
 } from "~/lib/pim-api";
 import {
   accountQuery,
   agentPermissionsQuery,
+  agentsQuery,
   appDirectoryQuery,
   appsQuery,
   defaultAgentQuery,
@@ -81,7 +81,7 @@ const EMPTY: AgentInput = {
   description: "",
   instructions: "",
   apps: [],
-  team: [],
+  contacts: [],
 };
 
 /** The frame of an agent's pages: a readable column of the main content. */
@@ -760,7 +760,7 @@ const NOTHING = "-";
 
 /**
  * An agent's details: how it looks, its name, what it's for, its blueprint,
- * instructions and team. Its apps are chosen on its page, where they save as
+ * instructions and contacts. Its apps are chosen on its page, where they save as
  * they change, so saving these leaves them as they are.
  */
 function AgentForm({
@@ -788,21 +788,12 @@ function AgentForm({
     setPreview(url);
     return () => URL.revokeObjectURL(url);
   }, [look.image]);
-  // Each member row keeps a key of its own while edited, so removing one doesn't shift the others' inputs.
-  const [value, setValue] = useState<
-    Omit<AgentInput, "team" | "apps"> & {
-      team: (Omit<TeamMember, "tools"> & { tools: string; key: string })[];
-    }
-  >({
+  const [value, setValue] = useState<Omit<AgentInput, "apps">>({
     name: initial.name,
     description: initial.description,
     instructions: initial.instructions,
     blueprint: initial.blueprint,
-    team: initial.team.map((member) => ({
-      ...member,
-      tools: member.tools?.join(", ") ?? "",
-      key: crypto.randomUUID(),
-    })),
+    contacts: initial.contacts,
   });
   const save = useMutation({
     mutationFn: async () => {
@@ -812,13 +803,6 @@ function AgentForm({
         symbol: look.symbol,
         color: look.color,
         ...(blueprint === undefined ? {} : { blueprint }),
-        team: value.team.map(({ name, instructions, tools }) => {
-          const names = tools
-            .split(",")
-            .map((tool) => tool.trim())
-            .filter(Boolean);
-          return { name, instructions, tools: names.length > 0 ? names : null };
-        }),
       };
       const saved = agent
         ? await pim.updateAgent(agent.id, input)
@@ -844,16 +828,6 @@ function AgentForm({
     event.preventDefault();
     save.mutate();
   };
-  const setMember = (
-    key: string,
-    member: Partial<{ name: string; instructions: string; tools: string }>,
-  ) =>
-    setValue({
-      ...value,
-      team: value.team.map((current) =>
-        current.key === key ? { ...current, ...member } : current,
-      ),
-    });
 
   return (
     <form
@@ -938,96 +912,77 @@ function AgentForm({
           className="w-full rounded-md border bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
         />
       </label>
-      <fieldset className="space-y-2">
-        <legend className="font-medium text-sm">{t("team")}</legend>
-        <p className="text-muted-foreground text-xs">{t("teamHint")}</p>
-        {value.team.map((member) => (
-          <div key={member.key} className="space-y-2 rounded-lg border p-3">
-            <div className="flex gap-2">
-              <Input
-                value={member.name}
-                onChange={(event) =>
-                  setMember(member.key, { name: event.target.value })
-                }
-                placeholder={t("memberNamePlaceholder")}
-                aria-label={t("memberName")}
-                maxLength={40}
-                required
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                aria-label={t("removeTeamMember")}
-                onClick={() =>
-                  setValue({
-                    ...value,
-                    team: value.team.filter(
-                      (other) => other.key !== member.key,
-                    ),
-                  })
-                }
-              >
-                <X />
-              </Button>
-            </div>
-            <textarea
-              value={member.instructions}
-              onChange={(event) =>
-                setMember(member.key, { instructions: event.target.value })
-              }
-              placeholder={t("memberInstructionsPlaceholder")}
-              aria-label={t("memberInstructions")}
-              maxLength={8000}
-              required
-              rows={3}
-              className="w-full rounded-md border bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-            />
-            <Input
-              value={member.tools}
-              onChange={(event) =>
-                setMember(member.key, { tools: event.target.value })
-              }
-              placeholder={t("memberTools")}
-              aria-label={t("memberTools")}
-              title={t("memberToolsHint")}
-            />
-          </div>
-        ))}
-        {value.team.length > 0 && (
-          <p className="text-muted-foreground text-xs">
-            {t("memberToolsHint")}
-          </p>
-        )}
-        {value.team.length < 8 && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() =>
-              setValue({
-                ...value,
-                team: [
-                  ...value.team,
-                  {
-                    name: "",
-                    instructions: "",
-                    tools: "",
-                    key: crypto.randomUUID(),
-                  },
-                ],
-              })
-            }
-          >
-            <Plus /> {t("addMember")}
-          </Button>
-        )}
-      </fieldset>
+      <ContactsField
+        agent={agent}
+        value={value.contacts}
+        onChange={(contacts) => setValue({ ...value, contacts })}
+      />
       <div className="flex justify-end gap-2 border-t pt-5">
         <Button type="submit" disabled={save.isPending || !value.name.trim()}>
           {t("save")}
         </Button>
       </div>
     </form>
+  );
+}
+
+/**
+ * The agents an agent hands tasks to: any of your others but your majordomo,
+ * each switched on or off. Your majordomo hands tasks to all of them.
+ */
+function ContactsField({
+  agent,
+  value,
+  onChange,
+}: {
+  agent?: Agent;
+  value: string[];
+  onChange: (contacts: string[]) => void;
+}) {
+  const { t } = useI18n();
+  const { data: agents } = useQuery(agentsQuery());
+  const others =
+    agents?.filter((other) => !other.majordomo && other.id !== agent?.id) ?? [];
+  return (
+    <fieldset className="space-y-2">
+      <legend className="font-medium text-sm">{t("contacts")}</legend>
+      <p className="text-muted-foreground text-xs">
+        {agent?.majordomo ? t("majordomoContacts") : t("contactsHint")}
+      </p>
+      {!agent?.majordomo &&
+        (others.length === 0 ? (
+          <p className="text-muted-foreground text-xs">{t("noContacts")}</p>
+        ) : (
+          <ul className="divide-y rounded-xl border">
+            {others.map((other) => (
+              <li
+                key={other.id}
+                className="flex items-center gap-3 px-3 py-2.5 text-sm"
+              >
+                <AgentIcon agent={other} tile className="size-8 rounded-lg" />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate">{other.name}</span>
+                  {other.description && (
+                    <span className="block truncate text-muted-foreground text-xs">
+                      {other.description}
+                    </span>
+                  )}
+                </span>
+                <Switch
+                  checked={value.includes(other.id)}
+                  onCheckedChange={(checked) =>
+                    onChange(
+                      checked
+                        ? [...value, other.id]
+                        : value.filter((id) => id !== other.id),
+                    )
+                  }
+                  aria-label={t("handTasksTo", { name: other.name })}
+                />
+              </li>
+            ))}
+          </ul>
+        ))}
+    </fieldset>
   );
 }

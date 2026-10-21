@@ -60,7 +60,7 @@ export function scheduleExtension(services: PimServices, roleOf: (session: strin
 			const self = roleOf(String(api.conversationId));
 			const other = agent === self.agent.id ? undefined : agent;
 			if (other !== undefined) {
-				if (!self.agent.majordomo || self.member) return text("Only the majordomo schedules work for other agents. Leave out agent.", true);
+				if (!self.agent.majordomo) return text("Only the majordomo schedules work for other agents. Leave out agent.", true);
 				if (!agentOf(other)) return text(`No agent has the id ${other}. Use an id from your_agents.`, true);
 			}
 			let when: Date | number | string;

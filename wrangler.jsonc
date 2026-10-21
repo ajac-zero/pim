@@ -41,8 +41,8 @@
   // (src/mcp-auth.ts). Deploying creates the namespace.
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
   // What each space keeps outside its database, under its owner's ID: images people send in
-  // chats (their messages keep only the images' URLs), and files that aren't text from before
-  // people's files moved to their computers (src/legacy-files.ts), in one bucket; artifacts' files (src/artifacts.ts) in another. Deploying
+  // chats (their messages keep only the images' URLs), skills' files (src/skills.ts), and files
+  // that aren't text from before people's files moved to their computers (src/legacy-files.ts), in one bucket; artifacts' files (src/artifacts.ts) in another. Deploying
   // creates the buckets, once R2 is turned on for the account (Dashboard → R2; it asks for a
   // payment method).
   "r2_buckets": [{ "binding": "BLOBS" }, { "binding": "ARTIFACTS" }],

@@ -632,9 +632,18 @@ export type SkillVersion = SkillVersionInfo & {
   name: string;
   description: string;
   instructions: string;
-  /** Supporting files, by their paths relative to the skill. */
-  files: { path: string; content: string }[];
+  /** Supporting files, by their paths relative to the skill, their sizes in bytes and their media types. */
+  files: { path: string; size: number; type: string }[];
 };
+
+/** Where the browser reads a skill's supporting file at a version, or downloads it. */
+export const skillFileUrl = (
+  name: string,
+  version: number,
+  path: string,
+  download = false,
+) =>
+  `/api/skills/${encodeURIComponent(name)}/versions/${version}/file?path=${encodeURIComponent(path)}${download ? "&download" : ""}`;
 
 /** A skill your agents wrote, as its latest version, and the agents that use it. */
 export type Skill = Omit<SkillVersion, "instructions" | "files"> & {

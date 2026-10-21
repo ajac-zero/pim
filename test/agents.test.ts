@@ -372,11 +372,12 @@ describe("the owner's agents", () => {
 		await post(`/approvals/${five.id}/approve`);
 		expect(await rewriting["Add 5% distance."]).toMatchObject({ status: "done", replies: ["Kept 20%."] });
 		expect(told).toContain("is at version 2 now, not 1");
+		const listed = [{ path: "scripts/paces.js", size: skill.files[0]!.content.length, type: "text/javascript" }];
 		expect((await api("/skills/weekly-plan")).body).toMatchObject({
 			instructions: "Add 20% distance.",
 			version: 2,
-			// A rewrite that gives no files keeps them.
-			files: skill.files,
+			// A rewrite that gives no files keeps them, stored once for both versions.
+			files: listed,
 			history: [
 				{ version: 2, author: "Coach", restoredFrom: null },
 				{ version: 1, author: "Coach", restoredFrom: null },
@@ -389,7 +390,12 @@ describe("the owner's agents", () => {
 		expect((await restore(1)).status).toBe(409);
 		const restored = await restore(2);
 		expect(restored.status).toBe(201);
-		expect(restored.body).toMatchObject({ instructions: skill.instructions, files: skill.files, version: 3, history: [{ version: 3, author: null, restoredFrom: 1 }, { version: 2 }, { version: 1 }] });
+		expect(restored.body).toMatchObject({ instructions: skill.instructions, files: listed, version: 3, history: [{ version: 3, author: null, restoredFrom: 1 }, { version: 2 }, { version: 1 }] });
+		const file = await exports.default.fetch(new Request(apiUrl("/skills/weekly-plan/versions/3/file?path=scripts/paces.js"), { headers: { Authorization: `Bearer ${TOKEN}` } }));
+		expect(file.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
+		expect(await file.text()).toBe(skill.files[0]!.content);
+		const stored = async () => (await env.BLOBS.list({ prefix: `${OWNER}/skills/` })).objects.map((object) => object.key);
+		expect(await stored()).toHaveLength(1);
 		// Each version keeps the whole skill, so one the space has no room for is refused before it is written.
 		const setLimits = (room: number | null) =>
 			runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.setLimits(room === null ? null : { storageBytes: instance.storedBytes() + room }));
@@ -403,10 +409,30 @@ describe("the owner's agents", () => {
 		expect((await api(`/agents/${chef.id}`, { method: "PUT", body: JSON.stringify({ skills: ["meal-prep"] }) })).status).toBe(400);
 		expect((await api(`/agents/${chef.id}`, { method: "PUT", body: JSON.stringify({ skills: ["weekly-plan"] }) })).body.skills).toEqual(["weekly-plan"]);
 		expect((await api("/skills/weekly-plan", { method: "DELETE" })).status).toBe(200);
+		expect(await stored()).toEqual([]);
 		expect((await api(`/agents/${coach.id}`)).body.skills).toEqual([]);
 		expect((await api(`/agents/${chef.id}`)).body.skills).toEqual([]);
 		expect((await api("/skills/weekly-plan")).status).toBe(404);
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
+	});
+
+	it("reads a skill saved before its files were in R2, and moves them there with its next version", async () => {
+		const script = "print('5k in 25:00')\n";
+		await runInDurableObject(env.Pim.getByName(OWNER), (_instance, state) => {
+			const files = JSON.stringify([{ path: "scripts/pace.py", content: script }]);
+			state.storage.sql.exec("INSERT INTO pim_skill_versions (name, version, description, instructions, files, author, restored_from, created_at) VALUES ('race-pace', 1, 'Race paces.', 'Run scripts/pace.py.', ?, 'Coach', NULL, 1)", files);
+			state.storage.sql.exec("INSERT INTO pim_skills (name, version, created_at) VALUES ('race-pace', 1, 1)");
+		});
+		// A file of a type it has no name for is text when it reads as text.
+		expect((await api("/skills/race-pace")).body.files).toEqual([{ path: "scripts/pace.py", size: script.length, type: "text/plain" }]);
+		const read = (version: number) =>
+			exports.default.fetch(new Request(apiUrl(`/skills/race-pace/versions/${version}/file?path=scripts/pace.py`), { headers: { Authorization: `Bearer ${TOKEN}` } })).then((response) => response.text());
+		expect(await read(1)).toBe(script);
+		expect((await post("/skills/race-pace/restore", { version: 1, baseVersion: 1 })).status).toBe(201);
+		expect(await read(2)).toBe(script);
+		expect((await env.BLOBS.list({ prefix: `${OWNER}/skills/` })).objects).toHaveLength(1);
+		expect((await api("/skills/race-pace", { method: "DELETE" })).status).toBe(200);
+		expect((await env.BLOBS.list({ prefix: `${OWNER}/skills/` })).objects).toEqual([]);
 	});
 });
 

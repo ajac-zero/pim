@@ -73,6 +73,8 @@ In chat, agents link to your files with Markdown such as `[Report](/workspace/re
 
 The chat never displays raw tool calls, their arguments or results, working notes, or reasoning, including while a run streams. These remain in the durable transcript for debugging. Approval requests and generated artifacts keep their dedicated user-facing cards; a busy indicator shows when Pim is working.
 
+File links in an agent's replies and generated images open in the same resizable canvas beside the chat as artifacts, or over the chat on narrow screens. Close the viewer to return to the full conversation. Files opened from the sidebar still have their own page.
+
 ## Deploy
 
 Pim's Durable Objects run on the Workers free plan, but the default model, GLM-5.3 on Workers AI, needs the Workers Paid plan or prepaid AI Gateway credits. For a free first look, set `PIM_MODEL` to `@cf/zai-org/glm-4.7-flash`, which runs on Workers AI's daily free allocation but is not good enough for real use; or connect a ChatGPT plan in Settings.

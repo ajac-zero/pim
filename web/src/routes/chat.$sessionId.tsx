@@ -17,12 +17,13 @@ import { SummaryBox, SummaryToggle } from "~/components/chat/summary";
 import { ChatTabs, useChatDrop } from "~/components/chat/tabs";
 import { TaskView } from "~/components/chat/tasks";
 import { Thread } from "~/components/chat/thread";
+import { FileView } from "~/components/file-view";
 import { useI18n } from "~/components/i18n";
 import { ExternalLink, Loader2, Users } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
 import { useElementHeight } from "~/hooks/use-element-size";
-import { pim, type UserContent } from "~/lib/pim-api";
+import { FILES_ROOT, pim, type UserContent } from "~/lib/pim-api";
 import { pimClient, usePimClient } from "~/lib/pim-client";
 import { sessionsQuery } from "~/lib/queries";
 import { showTab, useTabs } from "~/lib/tabs";
@@ -31,8 +32,13 @@ import { cn } from "~/lib/utils";
 /** The canvas's width, as a percentage of the page beside the sidebar, which the person can drag. */
 const CANVAS_WIDTH = { default: 56, min: 30, max: 75 };
 
-/** What the canvas beside the chat shows: an artifact and which of its versions, or one of the chat's tasks. */
-type ChatSearch = { artifact?: string; v?: number; task?: string };
+/** What the canvas beside the chat shows: an artifact version, a file, or one of the chat's tasks. */
+type ChatSearch = {
+  artifact?: string;
+  v?: number;
+  file?: string;
+  task?: string;
+};
 
 export const Route = createFileRoute("/chat/$sessionId")({
   validateSearch: (search: Record<string, unknown>): ChatSearch => {
@@ -41,6 +47,8 @@ export const Route = createFileRoute("/chat/$sessionId")({
       ...(typeof search.artifact === "string" &&
         search.artifact && { artifact: search.artifact }),
       ...(Number.isSafeInteger(v) && v > 0 && { v }),
+      ...(typeof search.file === "string" &&
+        search.file.startsWith(`${FILES_ROOT}/`) && { file: search.file }),
       ...(typeof search.task === "string" &&
         search.task && { task: search.task }),
     };
@@ -77,7 +85,7 @@ function SessionNotFound() {
 function ChatPage() {
   const { t } = useI18n();
   const { sessionId } = Route.useParams();
-  const { artifact, v, task } = Route.useSearch();
+  const { artifact, v, file, task } = Route.useSearch();
   const navigate = useNavigate();
   const page = useRef<HTMLElement>(null);
   const [canvasWidth, setCanvasWidth] = useStoredSize(
@@ -279,7 +287,7 @@ function ChatPage() {
               </div>
             </div>
           </div>
-          {ready && !artifact && !task && (
+          {ready && !artifact && !file && !task && (
             <SummaryBox
               sessionId={sessionId}
               entries={view.entries.length}
@@ -289,7 +297,7 @@ function ChatPage() {
           )}
         </div>
       </div>
-      {(artifact || task) && (
+      {(artifact || file || task) && (
         // The canvas: beside the chat, as wide as the person last made it, or over it on phones.
         <aside
           style={{ "--canvas-width": `${canvasWidth}%` } as CSSProperties}
@@ -321,6 +329,8 @@ function ChatPage() {
               onDeleted={() => showCanvas({})}
               onClose={() => showCanvas({})}
             />
+          ) : file ? (
+            <FileView key={file} path={file} onClose={() => showCanvas({})} />
           ) : (
             task && (
               <TaskView

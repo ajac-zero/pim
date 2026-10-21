@@ -362,23 +362,26 @@ describe("chats an agent names", () => {
     );
   }
 
-  it("opens workspace links in the file viewer, including sandbox addresses in older replies", () => {
+  it("opens workspace links in the file viewer, including sandbox addresses in older replies", async () => {
     const text = [
       "[Tailored Rx Resume JSON](sandbox:/workspace/Anibal-Angulo-STLabs-Agent-Evaluation.json)",
       "[Changes and follow-up notes](sandbox:/workspace/Anibal-Angulo-STLabs-Tailoring-Notes.md)",
       "[Report](/workspace/reports/notes%20%23%201.md)",
     ].join("\n\n");
     for (const streaming of [false, true]) {
-      const html = renderToStaticMarkup(
-        <Markdown text={text} streaming={streaming} />,
-      );
+      const html = await render(text, "/", streaming);
       const hrefs = elements(html).flatMap((element) =>
         element.attributes.filter((a) => a.name === "href").map((a) => a.value),
       );
-      expect(hrefs).toEqual([
-        "/files?path=%2Fworkspace%2FAnibal-Angulo-STLabs-Agent-Evaluation.json",
-        "/files?path=%2Fworkspace%2FAnibal-Angulo-STLabs-Tailoring-Notes.md",
-        "/files?path=%2Fworkspace%2Freports%2Fnotes%20%23%201.md",
+      expect(
+        hrefs.map((href) => {
+          const url = new URL(href, "https://pim.example");
+          return [url.pathname, url.searchParams.get("path")];
+        }),
+      ).toEqual([
+        ["/files", "/workspace/Anibal-Angulo-STLabs-Agent-Evaluation.json"],
+        ["/files", "/workspace/Anibal-Angulo-STLabs-Tailoring-Notes.md"],
+        ["/files", "/workspace/reports/notes # 1.md"],
       ]);
       expect(html).not.toContain("[blocked]");
     }
@@ -441,6 +444,32 @@ describe("chats an agent names", () => {
     // Outside a chat, on the artifact's own page.
     expect(links(await render(text))[0]).toEqual([
       `/artifacts/${other}`,
+      false,
+    ]);
+  });
+
+  it("opens file links beside the chat, but leaves external links and explicit downloads alone", async () => {
+    const links = (html: string) =>
+      [...html.matchAll(/<a [^>]*>[\s\S]*?<\/a>/g)].map(([tag]) => [
+        /href="([^"]*)"/.exec(tag)?.[1]?.replaceAll("&amp;", "&"),
+        tag.includes('target="_blank"'),
+      ]);
+    const text = [
+      "[notes](/files?path=%2Fworkspace%2Ftrip%20notes.md)",
+      "[code](/api/files/content?path=/workspace/route.py)",
+      "[external](https://other.example/files?path=/workspace/trip.md)",
+      "[download](/api/files/content?path=/workspace/trip.md&download)",
+      "[outside](/files?path=/etc/passwd)",
+    ].join(" ");
+    expect(links(await render(text, `/chat/${chat}`))).toEqual([
+      [`/chat/${chat}?file=%2Fworkspace%2Ftrip+notes.md`, false],
+      [`/chat/${chat}?file=%2Fworkspace%2Froute.py`, false],
+      ["https://other.example/files?path=/workspace/trip.md", true],
+      ["/api/files/content?path=/workspace/trip.md&download", true],
+      ["/files?path=/etc/passwd", true],
+    ]);
+    expect(links(await render(text))[0]).toEqual([
+      "/files?path=%2Fworkspace%2Ftrip+notes.md",
       false,
     ]);
   });

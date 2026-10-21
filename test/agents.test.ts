@@ -6,7 +6,7 @@ import { AgentStore } from "../src/agents";
 import { TaskStore } from "../src/tasks";
 import { CREATE_AGENT, RENAME_AGENT, UPDATE_AGENT } from "../src/extensions/agents";
 import { WRITE_SKILL } from "../src/extensions/skills";
-import { api, apiUrl, OWNER, pendingApproval, post, ROOT, say, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, OWNER, pairTestComputer, pendingApproval, post, ROOT, say, TOKEN, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /** The prompt sections sent last: pi sends the whole prompt once, then only what changed. */
@@ -413,6 +413,61 @@ describe("the owner's agents", () => {
 		expect((await api(`/agents/${coach.id}`)).body.skills).toEqual([]);
 		expect((await api(`/agents/${chef.id}`)).body.skills).toEqual([]);
 		expect((await api("/skills/weekly-plan")).status).toBe(404);
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
+	});
+
+	it("copies the person's files into a skill as they approved them, and back out to their computer", async () => {
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
+		await pairTestComputer();
+		const raw = (path: string, init: RequestInit = {}) => exports.default.fetch(new Request(apiUrl(path), { ...init, headers: { Authorization: `Bearer ${TOKEN}` } }));
+		const putFile = (path: string, bytes: Uint8Array) => raw(`/files/content?path=${path}`, { method: "PUT", body: bytes });
+		const template = new Uint8Array([0x50, 0x4b, 3, 4, 0, 0xff, 0xfe, 7]);
+		await putFile("/workspace/plan.docx", template);
+		const coach = (await post("/agents", { name: "Planner", instructions: "Plan." })).body;
+		const session = (await post("/sessions", { agent: coach.id })).body.id;
+		let told = "";
+		const record = (context: { messages: Message[] }) => {
+			told = JSON.stringify(context.messages.findLast((m) => m.role === "toolResult")?.content);
+			return toolUse("send_to_user", { message: "ok" });
+		};
+		const write = { name: "race-plan", description: "Plan a race.", instructions: "Fill in templates/plan.docx.", files: [{ path: "templates/plan.docx", from_file: "/workspace/plan.docx" }] };
+
+		// The request names the copy's hash; a file changed before approval is not copied.
+		faux.setResponses([toolUse(WRITE_SKILL, write), record]);
+		let saving = say("Remember this plan", session);
+		const first = await pendingApproval();
+		expect(first.args).toMatchObject({ files: [{ path: "templates/plan.docx", from_file: "/workspace/plan.docx", sha256: expect.stringMatching(/^[0-9a-f]{64}$/), size: 8 }] });
+		await putFile("/workspace/plan.docx", new Uint8Array([1, 2, 3]));
+		await post(`/approvals/${first.id}/approve`);
+		await saving;
+		expect(told).toContain("changed after the person approved copying it");
+		expect((await api("/skills/race-plan")).status).toBe(404);
+
+		await putFile("/workspace/plan.docx", template);
+		faux.setResponses([toolUse(WRITE_SKILL, write), record]);
+		saving = say("Try again", session);
+		await post(`/approvals/${(await pendingApproval()).id}/approve`);
+		await saving;
+		expect((await api("/skills/race-plan")).body.files).toEqual([{ path: "templates/plan.docx", size: 8, type: "application/octet-stream" }]);
+
+		// An agent reads that it isn't text, and copies it to the person's files as it is.
+		const results: string[] = [];
+		faux.setResponses([
+			toolUse("read_skill_file", { skill: "race-plan", path: "templates/plan.docx" }),
+			(context) => {
+				results.push(JSON.stringify(context.messages.findLast((m) => m.role === "toolResult")?.content));
+				return toolUse("read_skill_file", { skill: "race-plan", path: "templates/plan.docx", save_to: "/workspace/out/plan.docx" });
+			},
+			(context) => {
+				results.push(JSON.stringify(context.messages.findLast((m) => m.role === "toolResult")?.content));
+				return toolUse("send_to_user", { message: "Copied." });
+			},
+		]);
+		await say("Use the plan", session);
+		expect(results[0]).toContain("binary file, 8 bytes");
+		expect(results[1]).toContain("to /workspace/out/plan.docx (8 bytes)");
+		expect(new Uint8Array(await (await raw("/files/content?path=/workspace/out/plan.docx")).arrayBuffer())).toEqual(template);
+		await api("/skills/race-plan", { method: "DELETE" });
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
 	});
 

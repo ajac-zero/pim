@@ -536,7 +536,7 @@ export class Pim extends DurableAgent<Env> {
 		shellAction(this.computer),
 		browserClickAction(this.browser),
 		browserTypeAction(this.browser),
-		writeSkillAction(this.skills, this.agents),
+		writeSkillAction(this.skills, this.agents, this.files),
 	];
 
 	/** Pim's own actions whose tools agents are offered now: those that use the computer only while one is paired. */
@@ -765,7 +765,7 @@ export class Pim extends DurableAgent<Env> {
 	#appExtras(services: PimServices) {
 		return {
 			catalog: this.catalog,
-			tools: [...skillTools(this.apps, this.catalog, this.skills), ...eventTools(this.apps, this.catalog, this.appEvents, services)],
+			tools: [...skillTools(this.apps, this.catalog, this.skills, this.files), ...eventTools(this.apps, this.catalog, this.appEvents, services)],
 		};
 	}
 
@@ -4993,7 +4993,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/** The person's skills in their agents' chats: rebuilt when whether `write_skill` asks first changes. */
 	#skillsExtension(services: PimServices) {
-		return skillsExtension(services, (session) => this.#roleOf(session), this.skills, this.computer.paired());
+		return skillsExtension(services, (session) => this.#roleOf(session), this.skills, this.files, this.computer.paired());
 	}
 
 	/** Rebuilds the extensions whose tools describe the approval policy, once pi's registry has been set up. */

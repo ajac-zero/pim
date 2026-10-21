@@ -2,8 +2,10 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
 import type { AppCatalog, AppSkill } from "./app-catalog";
 import type { McpBridge, McpResourceContent } from "./mcp";
+import type { Files } from "../files";
 import type { SkillStore } from "../skills";
 import { isTextType } from "../artifacts";
+import { HttpError } from "../http";
 import { text } from "./services";
 
 /**
@@ -15,6 +17,10 @@ import { text } from "./services";
  *
  * Without an app, `read_skill` and `read_skill_file` read one of the
  * person's own skills instead (see ../skills.ts), from `own`.
+ *
+ * `read_skill_file` with `save_to` copies the file to the person's files
+ * instead of reading it out, so a script or a template, text or not, can
+ * be used on their computer as it is.
  */
 
 const MAX_SKILL_CHARS = 50_000;
@@ -77,7 +83,7 @@ function clip(value: string): string {
 	return value.length > MAX_SKILL_CHARS ? `${value.slice(0, MAX_SKILL_CHARS)}\n[... ${value.length - MAX_SKILL_CHARS} more characters]` : value;
 }
 
-export function skillTools(bridge: McpBridge, catalog: AppCatalog, own: Pick<SkillStore, "get" | "read">) {
+export function skillTools(bridge: McpBridge, catalog: AppCatalog, own: Pick<SkillStore, "get" | "read">, files: Pick<Files, "write">) {
 	const app = (name: string) => {
 		const wanted = name.toLowerCase();
 		return bridge.servers().find((server) => server.id === wanted || server.name.toLowerCase() === wanted);
@@ -160,20 +166,31 @@ export function skillTools(bridge: McpBridge, catalog: AppCatalog, own: Pick<Ski
 	const readSkillFile = defineTool({
 		name: "read_skill_file",
 		description:
-			"Read a supporting file of a skill, by its path relative to the skill, such as references/guide.md: one of yours by the skill's name alone, or an app's with the app's name.",
+			"Read a supporting file of a skill, by its path relative to the skill, such as references/guide.md: one of yours by the skill's name alone, or an app's with the app's name. With save_to, copy it to the person's files instead, to run or use it there.",
 		parameters: Type.Object({
 			app: Type.Optional(Type.String({ description: "The app that offers the skill; leave out for one of your skills." })),
 			skill: Type.String(),
 			path: Type.String(),
+			save_to: Type.Optional(Type.String({ description: "A path in the person's files, such as /workspace/scripts/convert.py, to copy the file to, replacing any file there." })),
 		}),
 		replay: "safe",
-		async execute({ app: appName, skill: skillName, path }) {
+		async execute({ app: appName, skill: skillName, path, save_to }) {
+			const save = async (bytes: Uint8Array, from: string) => {
+				try {
+					const saved = await files.write(save_to, bytes);
+					return text(`Copied ${from} to ${saved.path} (${saved.size} bytes).`);
+				} catch (error) {
+					if (error instanceof HttpError) return text(`Not copied: ${error.message}`, true);
+					throw error;
+				}
+			};
 			if (appName === undefined) {
 				const skill = own.get(skillName);
 				if (!skill) return text(`There is no skill named ${skillName} of the person's. An app's skill needs its app.`, true);
 				const file = skill.files.find((candidate) => candidate.path === path.replace(/^\.\//, ""));
 				if (!file) return text(`${skillName} has no file ${path}. Its files: ${skill.files.map((candidate) => candidate.path).join(", ") || "none"}.`, true);
 				const { bytes } = await own.read(skill.name, skill.version, file.path);
+				if (save_to !== undefined) return save(bytes, `${file.path} from the ${skill.name} skill, version ${skill.version},`);
 				const body = isTextType(file.type) ? clip(new TextDecoder().decode(bytes)) : `(binary file, ${file.size} bytes, ${file.type})`;
 				return text(`${file.path} from the ${skill.name} skill, version ${skill.version}:\n\n${body}`);
 			}
@@ -183,6 +200,7 @@ export function skillTools(bridge: McpBridge, catalog: AppCatalog, own: Pick<Ski
 					if (!uri) throw new VerificationError(`${path} is outside the skill.`);
 					return { uri, ...(await readFile(bridge, serverId, skill, uri)) };
 				});
+				if (save_to !== undefined) return save(result.bytes, `${path} from the ${skillName} skill of ${server.name}`);
 				const isText = result.content.text !== undefined || /^text\/|json|xml|yaml/.test(result.content.mimeType ?? "");
 				const body = isText
 					? clip(new TextDecoder().decode(result.bytes))

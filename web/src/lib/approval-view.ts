@@ -71,10 +71,13 @@ function fieldOf(name: string, value: unknown): ApprovalField {
   return { name, kind: "text", text: String(value) };
 }
 
-/** Files a request would save, such as a skill's supporting files. */
+/** Files a request would save, such as a skill's supporting files: text, or copies of the person's files. */
 function isFileList(
   value: unknown,
-): value is { path: string; content: string }[] {
+): value is ({ path: string } & (
+  | { content: string }
+  | { from_file: string }
+))[] {
   return (
     Array.isArray(value) &&
     value.length > 0 &&
@@ -82,7 +85,8 @@ function isFileList(
       (item) =>
         isRecord(item) &&
         typeof item.path === "string" &&
-        typeof item.content === "string",
+        (typeof item.content === "string" ||
+          typeof item.from_file === "string"),
     )
   );
 }
@@ -124,12 +128,18 @@ export function approvalView(
         )
         .flatMap(([name, value]): ApprovalField[] =>
           isFileList(value)
-            ? value.map((file) => ({
-                name: file.path,
-                kind: "code",
-                code: file.content,
-                language: languageOf(file.path),
-              }))
+            ? value.map(
+                (file): ApprovalField =>
+                  "content" in file
+                    ? {
+                        name: file.path,
+                        kind: "code",
+                        code: file.content,
+                        language: languageOf(file.path),
+                      }
+                    : // A copy shows where it comes from.
+                      { name: file.path, kind: "text", text: file.from_file },
+              )
             : [fieldOf(name, value)],
         )
     : [];

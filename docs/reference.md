@@ -289,9 +289,10 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | GET, PUT | `/profile` | PUT: `{ displayName, bio }` | How others on this Pim see you |
 | GET | `/people/:username` | | `{ username, displayName, bio, templates }`: someone, and the agent templates they published |
 | GET | `/templates` | `?q=` | `{ templates }`: shared agents, most used first, without their instructions |
-| GET | `/templates/:id` | | A published agent template in full, with the `symbol` and `color` it was published with, `icon`, the version of its uploaded icon or null, and the agents that come with it: `contacts`, its own by name, and `bundle`, each of them and theirs, with its name, description, instructions, apps, look and `contacts` |
+| GET | `/templates/:id` | | A published agent template in full, with the `symbol` and `color` it was published with, `icon`, the version of its uploaded icon or null, and the agents that come with it: `contacts`, its own by name, and `bundle`, each of them and theirs, with its name, description, instructions, apps, look, `contacts` and `icon`, the version of its uploaded icon or null |
 | GET | `/templates/:id/icon` | | Its uploaded icon; `404` without one |
-| POST | `/templates/:id/use` | | Makes it one of your agents: a copy, its look and icon too, with `source` saying where it came from, and a copy of each agent in its `bundle`, wired to each other as contacts |
+| GET | `/templates/:id/agents/:position/icon` | | The uploaded icon of the agent at `position` in its `bundle`; `404` without one |
+| POST | `/templates/:id/use` | | Makes it one of your agents: a copy, its look and icon too, with `source` saying where it came from, and a copy of each agent in its `bundle`, icons included, wired to each other as contacts |
 | POST, DELETE | `/agents/:id/publish` | | Publishes your agent (again, to update it), or takes it down |
 | GET | `/published-artifacts` | `?q=` | `{ artifacts }`: published artifacts, most used first, without their content |
 | GET | `/published-artifacts/:id`, `…/versions/:v`, `…/versions/:v/frame` | | One, its content, and its page; `v` must be the published version |
@@ -534,7 +535,7 @@ An agent lists its contacts, as it lists its apps: others of your agents it hand
 - **Every agent is yours to see.** A contact is one of your agents like any other, in the sidebar's Agents with its own page, chats, apps, skills and tool permissions. Choose an agent's contacts on its page, or ask it in chat: `update_agent` adds and removes contacts by name, and asks first under your approval policy, since a contact can use its own apps for the agent.
 - **Contacts answer the agent, never you.** At work on a task, an agent doesn't get `send_to_user`, scheduling or watching apps' events.
 - **Work doesn't go round in circles.** No agent is handed a task by one working, directly or not, on a task it handed out, and a chain of tasks ends three deep: an agent that far from your chat hands out none.
-- **Copies.** Publishing an agent publishes its contacts with it, and theirs, by name; the template's page lists each in full. Making it your own, or joining a Pim whose admin gives everyone that agent, gives you a copy of each, as contacts of the copies that had them. A copy called as one of your agents already is gets a name of its own, such as "Physio (Marathon coach)". Uploaded icons stay with the agent published, not its contacts.
+- **Copies.** Publishing an agent publishes its contacts with it, and theirs, by name; the template's page lists each in full. Making it your own, or joining a Pim whose admin gives everyone that agent, gives you a copy of each, as contacts of the copies that had them. A copy called as one of your agents already is gets a name of its own, such as "Physio (Marathon coach)". Each comes with its look, uploaded icon included.
 - **Teams before.** Agents once had teams: members with instructions of their own that worked with their agent's apps. Each became an agent of its own, with its agent's blueprint, apps, skills and app tool permissions, and one of its contacts; its tasks are the new agent's. A member's list of tools has no counterpart, and was dropped.
 
 ## Talking with Pim from other apps

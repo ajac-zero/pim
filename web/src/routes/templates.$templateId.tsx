@@ -119,11 +119,16 @@ function TemplatePage() {
           </h2>
           <p className="text-muted-foreground text-xs">{t("comesWithHint")}</p>
           <ul className="divide-y rounded-xl border">
-            {template.bundle.map((agent) => (
+            {template.bundle.map((agent, position) => (
               <li key={agent.name} className="px-4 py-3 text-sm">
                 <div className="flex items-center gap-3">
                   <AgentIcon
-                    agent={{ id: agent.name, icon: null, ...agent }}
+                    agent={{ id: agent.name, ...agent }}
+                    src={
+                      agent.icon === null
+                        ? undefined
+                        : `/api/templates/${template.id}/agents/${position}/icon?v=${agent.icon}`
+                    }
                     tile
                     className="size-8 rounded-lg"
                   />

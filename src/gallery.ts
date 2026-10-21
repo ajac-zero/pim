@@ -16,7 +16,8 @@ import type { ArtifactFile, ArtifactKind } from "./artifacts";
  * its name, description, instructions, suggested apps and look (its
  * symbol, color and uploaded icon), never their memory, conversations or
  * credentials. Its contacts come with it, and theirs: copies of the other
- * agents it hands tasks to, which whoever makes it their own gets too.
+ * agents it hands tasks to, with their looks and uploaded icons, which
+ * whoever makes it their own gets too.
  * Publishing again replaces it.
  *
  * People publish artifacts here too, the same way: a copy of one version,
@@ -45,6 +46,8 @@ export type BundledAgent = {
 	readonly color: string | null;
 	/** Its contacts, by name, among the agents that come with it. */
 	readonly contacts: readonly string[];
+	/** When its uploaded icon was published, to fetch it again when it changes; null without one. */
+	readonly icon: number | null;
 };
 
 /** An agent's contacts as the gallery keeps them: their names, and every agent that comes with it. */
@@ -97,7 +100,9 @@ export type DefaultAgent = Contacts & {
 export type AgentIcon = { readonly type: string; readonly data: ArrayBuffer };
 
 /** One of an author's agents as the gallery copies it. */
-export type PublishedAgent = Contacts & {
+export type PublishedAgent = Omit<Contacts, "bundle"> & {
+	/** The agents that come with it, each with its uploaded icon. */
+	readonly bundle: readonly (Omit<BundledAgent, "icon"> & { readonly image: AgentIcon | null })[];
 	readonly id: string;
 	readonly name: string;
 	readonly description: string;
@@ -183,6 +188,13 @@ CREATE TABLE IF NOT EXISTS default_agent (
 	apps TEXT NOT NULL,
 	updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS bundle_icons (
+	holder TEXT NOT NULL,
+	position INTEGER NOT NULL,
+	type TEXT NOT NULL,
+	data BLOB NOT NULL,
+	PRIMARY KEY (holder, position)
+);
 CREATE TABLE IF NOT EXISTS published_artifacts (
 	id TEXT PRIMARY KEY,
 	owner_id TEXT NOT NULL,
@@ -239,6 +251,7 @@ function contactsOf(row: Row, apps: readonly string[]): Contacts {
 			symbol: null,
 			color: optional(row.color),
 			contacts: [],
+			icon: null,
 		})),
 	};
 }
@@ -314,14 +327,18 @@ function optionalText(value: unknown, field: string, max: number): string | null
 	return trimmed === "" ? null : trimmed;
 }
 
-/** What the gallery keeps of an agent, in its columns' order from `name` to `icon_data`. */
-const copyOf = (agent: PublishedAgent) => [
+/**
+ * What the gallery keeps of an agent, in its columns' order from `name` to
+ * `icon_data`; the uploaded icons of the agents that come with it are kept
+ * apart (`#keepIcons`), and `published` is when, for the version of each.
+ */
+const copyOf = (agent: PublishedAgent, published: number) => [
 	agent.name,
 	agent.description,
 	agent.instructions,
 	JSON.stringify(agent.apps),
 	JSON.stringify(agent.contacts),
-	JSON.stringify(agent.bundle),
+	JSON.stringify(agent.bundle.map(({ image, ...bundled }): BundledAgent => ({ ...bundled, icon: image ? published : null }))),
 	agent.blueprint,
 	agent.symbol,
 	agent.color,
@@ -492,6 +509,7 @@ export class Gallery extends DurableObject<Env> {
 			if (count >= MAX_TEMPLATES) throw new HttpError(429, `You can publish up to ${MAX_TEMPLATES} agents.`);
 		}
 		const id = known ? String(known.id) : `t_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
+		const now = Date.now();
 		this.#sql(
 			`INSERT INTO templates (id, owner_id, username, agent_id, name, description, instructions, apps, contacts, bundle, blueprint, symbol, color, icon_type, icon_data, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET name = excluded.name, description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = '[]', contacts = excluded.contacts, bundle = excluded.bundle, blueprint = excluded.blueprint,
@@ -500,9 +518,10 @@ export class Gallery extends DurableObject<Env> {
 			ownerId,
 			username,
 			agent.id,
-			...copyOf(agent),
-			Date.now(),
+			...copyOf(agent, now),
+			now,
 		);
+		this.#keepIcons(id, agent);
 		return this.template(id)!;
 	}
 
@@ -511,9 +530,44 @@ export class Gallery extends DurableObject<Env> {
 		return iconOf(this.#sql("SELECT icon_type, icon_data FROM templates WHERE id = ?", id).toArray()[0]);
 	}
 
+	/**
+	 * The uploaded icons of the agents that come with a template, or with the
+	 * agent everyone starts with (`default`), by their place in its bundle.
+	 */
+	bundleIcons(holder: string): (AgentIcon | null)[] {
+		const icons: (AgentIcon | null)[] = [];
+		for (const row of this.#sql("SELECT position, type, data FROM bundle_icons WHERE holder = ?", holder).toArray()) {
+			icons[Number(row.position)] = { type: String(row.type), data: row.data as ArrayBuffer };
+		}
+		return Array.from(icons, (icon) => icon ?? null);
+	}
+
+	/** The uploaded icon of one of the agents that come with a template, if it has one. */
+	bundleIcon(holder: string, position: number): AgentIcon | null {
+		const [row] = this.#sql("SELECT type, data FROM bundle_icons WHERE holder = ? AND position = ?", holder, position).toArray();
+		return row ? { type: String(row.type), data: row.data as ArrayBuffer } : null;
+	}
+
+	/** Keeps the uploaded icons of the agents that come with what `holder` published, in place of those it had. */
+	#keepIcons(holder: string, agent: PublishedAgent): void {
+		this.#sql("DELETE FROM bundle_icons WHERE holder = ?", holder);
+		for (const [position, { image }] of agent.bundle.entries()) {
+			if (image) this.#sql("INSERT INTO bundle_icons (holder, position, type, data) VALUES (?, ?, ?, ?)", holder, position, image.type, image.data);
+		}
+	}
+
+	/** Forgets the icons of templates no longer published, and of an agent everyone starts with no longer chosen. */
+	#pruneIcons(): void {
+		this.#sql(
+			"DELETE FROM bundle_icons WHERE (holder = 'default' AND NOT EXISTS (SELECT 1 FROM default_agent)) OR (holder != 'default' AND holder NOT IN (SELECT id FROM templates))",
+		);
+	}
+
 	/** Takes one of the author's agents out of the gallery. False when it wasn't published. */
 	unpublish(ownerId: string, agentId: string): boolean {
-		return this.#sql("DELETE FROM templates WHERE owner_id = ? AND agent_id = ?", ownerId, agentId).rowsWritten > 0;
+		const removed = this.#sql("DELETE FROM templates WHERE owner_id = ? AND agent_id = ?", ownerId, agentId).rowsWritten > 0;
+		this.#pruneIcons();
+		return removed;
 	}
 
 	template(id: string): Template | null {
@@ -553,7 +607,9 @@ export class Gallery extends DurableObject<Env> {
 
 	/** The operator takes a template down. */
 	remove(id: string): boolean {
-		return this.#sql("DELETE FROM templates WHERE id = ?", id).rowsWritten > 0;
+		const removed = this.#sql("DELETE FROM templates WHERE id = ?", id).rowsWritten > 0;
+		this.#pruneIcons();
+		return removed;
 	}
 
 	/**
@@ -676,6 +732,7 @@ export class Gallery extends DurableObject<Env> {
 
 	/** The admin makes a copy of one of their agents the one everyone starts with. Choosing again replaces it. */
 	setDefaultAgent(ownerId: string, username: string, agent: PublishedAgent): DefaultAgent {
+		const now = Date.now();
 		this.#sql(
 			`INSERT INTO default_agent (id, owner_id, username, agent_id, name, description, instructions, apps, contacts, bundle, blueprint, symbol, color, icon_type, icon_data, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET owner_id = excluded.owner_id, username = excluded.username, agent_id = excluded.agent_id, name = excluded.name,
@@ -684,9 +741,10 @@ export class Gallery extends DurableObject<Env> {
 			ownerId,
 			username,
 			agent.id,
-			...copyOf(agent),
-			Date.now(),
+			...copyOf(agent, now),
+			now,
 		);
+		this.#keepIcons("default", agent);
 		return this.defaultAgent()!;
 	}
 
@@ -697,7 +755,9 @@ export class Gallery extends DurableObject<Env> {
 
 	/** Back to a plain agent for everyone who joins. False when none was chosen. */
 	clearDefaultAgent(): boolean {
-		return this.#sql("DELETE FROM default_agent").rowsWritten > 0;
+		const cleared = this.#sql("DELETE FROM default_agent").rowsWritten > 0;
+		this.#pruneIcons();
+		return cleared;
 	}
 
 	/** Forgets a person: their profile, everything they published (agents and artifacts), and the agent everyone starts with if it was theirs. Run when their account is deleted. */
@@ -706,6 +766,7 @@ export class Gallery extends DurableObject<Env> {
 		this.#sql("DELETE FROM published_artifacts WHERE owner_id = ?", ownerId);
 		this.#sql("DELETE FROM profiles WHERE owner_id = ?", ownerId);
 		this.#sql("DELETE FROM default_agent WHERE owner_id = ?", ownerId);
+		this.#pruneIcons();
 	}
 
 	/** Whether anything of the owner is left: a deletion is done only once nothing is. */

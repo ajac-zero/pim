@@ -2904,7 +2904,7 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * One of the owner's agents, with its uploaded icon, for the Worker to
 	 * publish to the gallery: with its contacts, and theirs, which come with
-	 * it, each by name.
+	 * it, each by name and with its own uploaded icon.
 	 */
 	async agentToPublish(id: string): Promise<PublishedAgent | null> {
 		this.#assertOpen();
@@ -2941,6 +2941,7 @@ export class Pim extends DurableAgent<Env> {
 				symbol: other.symbol,
 				color: other.color,
 				contacts: names(other.contacts),
+				image: this.agents.icon(other.id) ?? null,
 			})),
 			image: this.agents.icon(id) ?? null,
 		};
@@ -3021,7 +3022,8 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Copies an agent from the gallery into the owner's agents, and the agents
-	 * that come with it, each a contact of the copies that had it. A copy
+	 * that come with it, each with its uploaded icon and a contact of the
+	 * copies that had it. A copy
 	 * that comes with it and is called as one of the owner's agents already is
 	 * gets a name of its own, so that agents hand it tasks by its name.
 	 */
@@ -3045,7 +3047,7 @@ export class Pim extends DurableAgent<Env> {
 			const contacts = agent.contacts.flatMap((name) => copyOf.get(name.toLowerCase())?.id ?? []).filter((id) => id !== made[index]!.id);
 			if (contacts.length > 0) this.agents.update(made[index]!.id, agentInput({ contacts }, made[index]));
 		}
-		if (copy.image) this.agents.setIcon(made[0]!.id, copy.image.type, copy.image.data);
+		for (const [index, agent] of all.entries()) if (agent.image) this.agents.setIcon(made[index]!.id, agent.image.type, agent.image.data);
 		return this.agents.get(made[0]!.id)!;
 	}
 

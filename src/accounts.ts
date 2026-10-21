@@ -259,7 +259,9 @@ async function register(request: Request, env: Env, now: number): Promise<Respon
 		if (everyone) {
 			const { author, name, description, instructions, apps, contacts, bundle, blueprint, symbol, color } = everyone;
 			const image = everyone.icon ? await gallery(env).defaultAgentIcon() : null;
-			await pim.adoptEveryonesAgent({ author, name, description, instructions, apps, contacts, bundle, blueprint, symbol, color, image });
+			const icons = await gallery(env).bundleIcons("default");
+			const withIcons = bundle.map(({ icon: _icon, ...agent }, position) => ({ ...agent, image: icons[position] ?? null }));
+			await pim.adoptEveryonesAgent({ author, name, description, instructions, apps, contacts, bundle: withIcons, blueprint, symbol, color, image });
 		}
 		if (typeof body?.timeZone === "string") {
 			// The browser's zone, a good first guess; a bad one is just not applied.
@@ -406,13 +408,14 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				const url = new URL(request.url);
 				return json({ templates: await gallery(env).templates({ query: url.searchParams.get("q") ?? undefined }) });
 			}
-			const template = /^\/templates\/([^/]+)(\/use|\/icon)?$/.exec(path);
+			const template = /^\/templates\/([^/]+)(\/use|\/icon|\/agents\/(\d+)\/icon)?$/.exec(path);
 			if (template) {
 				const found = await gallery(env).template(decodeURIComponent(template[1]!));
 				if (!found) return fail(404, "No such template. It may have been unpublished.");
 				if (!template[2] && request.method === "GET") return json(found);
-				if (template[2] === "/icon" && request.method === "GET") {
-					const icon = await gallery(env).templateIcon(found.id);
+				if (template[2]?.endsWith("/icon") && request.method === "GET") {
+					// Its own icon, or that of one of the agents that come with it, by its place in `bundle`.
+					const icon = template[3] === undefined ? await gallery(env).templateIcon(found.id) : await gallery(env).bundleIcon(found.id, Number(template[3]));
 					if (!icon) return fail(404, "This template has no icon");
 					return new Response(icon.data, {
 						headers: { "content-type": icon.type, "x-content-type-options": "nosniff", "cache-control": "private, max-age=31536000, immutable" },
@@ -420,7 +423,9 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				}
 				if (template[2] === "/use" && request.method === "POST") {
 					const image = found.icon === null ? null : await gallery(env).templateIcon(found.id);
-					const agent = await (await pim()).adoptTemplate({ ...found, image });
+					const icons = await gallery(env).bundleIcons(found.id);
+					const bundle = found.bundle.map(({ icon: _icon, ...agent }, position) => ({ ...agent, image: icons[position] ?? null }));
+					const agent = await (await pim()).adoptTemplate({ ...found, bundle, image });
 					if (found.author !== account.username) await gallery(env).used(found.id);
 					log("template_used", { owner: account.ownerId, template: found.id });
 					return json(agent, 201);

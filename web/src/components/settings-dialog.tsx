@@ -52,7 +52,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "~/components/ui/select";
-import { Switch } from "~/components/ui/switch";
 import {
   auth,
   authError,
@@ -72,12 +71,7 @@ import {
   type ModelSettings,
   pim,
 } from "~/lib/pim-api";
-import {
-  disablePush,
-  enablePush,
-  pushEnabled,
-  pushSupported,
-} from "~/lib/push";
+import { enablePush, pushEnabled, pushSupported } from "~/lib/push";
 import { accountQuery, emailQuery, modelQuery } from "~/lib/queries";
 import { cn, modelName } from "~/lib/utils";
 
@@ -86,7 +80,6 @@ import { cn, modelName } from "~/lib/utils";
 export const SETTINGS_TABS = [
   "general",
   "model",
-  "notifications",
   "permissions",
   "account",
   "members",
@@ -97,7 +90,6 @@ export type SettingsTab = (typeof SETTINGS_TABS)[number];
 const TAB_LABELS: Record<SettingsTab, [TranslationKey, LucideIcon]> = {
   general: ["settingsGeneral", SlidersHorizontal],
   model: ["settingsModel", Sparkles],
-  notifications: ["settingsNotifications", Bell],
   permissions: ["settingsPermissions", ShieldCheck],
   account: ["settingsAccount", UserRound],
   members: ["settingsMembers", Users],
@@ -185,6 +177,8 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
         {tab === "general" && (
           <>
             <PreferencesSection />
+            <EmailSection />
+            <PushSection />
             <AppearanceSection />
           </>
         )}
@@ -201,12 +195,6 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
               settings={model}
               admin={account?.role === "admin"}
             />
-          </>
-        )}
-        {tab === "notifications" && (
-          <>
-            <EmailSection />
-            <PushSection />
           </>
         )}
         {tab === "permissions" && <ToolPermissionsSection />}
@@ -607,18 +595,24 @@ function PushSection() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const supported = pushSupported();
-  const { data: enabled = false } = useQuery({
+  const {
+    data: enabled = false,
+    error,
+    isFetching,
+    refetch,
+  } = useQuery({
     queryKey: ["push"],
     queryFn: pushEnabled,
     enabled: supported,
   });
-  const toggle = useMutation({
-    mutationFn: (on: boolean) => (on ? enablePush() : disablePush()),
+  const allow = useMutation({
+    mutationFn: enablePush,
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["push"] }),
     onError: (error) => {
       if (error.message !== "notifications-blocked") toast.error(error.message);
     },
   });
+  const granted = supported && Notification.permission === "granted";
   const blocked = supported && Notification.permission === "denied";
 
   return (
@@ -626,14 +620,35 @@ function PushSection() {
       <h2 className="font-medium text-muted-foreground text-sm">
         {t("pushNotifications")}
       </h2>
-      <div className="flex items-center gap-3 rounded-2xl border bg-muted/20 p-4">
-        <p className="min-w-0 flex-1 text-sm">{t("pushDescription")}</p>
-        <Switch
-          checked={enabled}
-          disabled={!supported || blocked || toggle.isPending}
-          onCheckedChange={(on) => toggle.mutate(on)}
-          aria-label={t("pushNotifications")}
-        />
+      <div className="space-y-3 rounded-2xl border bg-muted/20 p-4">
+        <p className="text-sm">{t("pushDescription")}</p>
+        {supported && !blocked && !granted && (
+          <Button disabled={allow.isPending} onClick={() => allow.mutate()}>
+            {t("pushAllow")}
+          </Button>
+        )}
+        {granted && (
+          <div className="space-y-2">
+            <p role="status" className="text-[13px] text-muted-foreground">
+              {t(
+                error
+                  ? "pushRegistrationFailed"
+                  : enabled
+                    ? "pushRegistered"
+                    : "pushRegistering",
+              )}
+            </p>
+            {error && (
+              <Button
+                variant="secondary"
+                disabled={isFetching}
+                onClick={() => void refetch()}
+              >
+                {t("tryAgain")}
+              </Button>
+            )}
+          </div>
+        )}
       </div>
       {(!supported || blocked) && (
         <p className="text-[13px] text-muted-foreground">

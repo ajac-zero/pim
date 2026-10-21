@@ -44,6 +44,7 @@ import { Toaster } from "~/components/ui/sonner";
 import { TooltipProvider } from "~/components/ui/tooltip";
 import { authSessionQuery } from "~/lib/auth";
 import { pimClient } from "~/lib/pim-client";
+import { pushEnabled, pushSupported } from "~/lib/push";
 import { agentsQuery, majordomoQuery, sessionsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
@@ -116,6 +117,12 @@ function SignedIn({ children }: { children: ReactNode }) {
   const { data, error, refetch } = useQuery(authSessionQuery());
   const queryClient = useQueryClient();
   const signedOut = data?.signedIn === false;
+  // Reconcile this device on opening or returning to Pim, not just in Settings.
+  useQuery({
+    queryKey: ["push"],
+    queryFn: pushEnabled,
+    enabled: data?.signedIn === true && pushSupported(),
+  });
   // An open socket would keep streaming after signing out. The sign-in screen takes the
   // app's place, which unmounts every artifact frame; what was read of artifacts goes too.
   useEffect(() => {

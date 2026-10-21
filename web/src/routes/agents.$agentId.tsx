@@ -54,6 +54,7 @@ function DashboardPage() {
   const { data: agents } = useQuery(agentsQuery());
   const { data, error, refetch } = useQuery(dashboardQuery(agentId, locale));
   const { start, sent } = useStartChat(agentId);
+  const shelf = useTabs().length > 0;
   const queryClient = useQueryClient();
   // The room the widgets' scrollbar takes, if any (overlay scrollbars take none), which the composer leaves too, so the two line up.
   const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
@@ -116,6 +117,16 @@ function DashboardPage() {
     });
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {(shelf || sent !== null) && (
+        <header
+          className={cn(
+            "hidden h-13 shrink-0 pr-4 md:flex",
+            shelf && "bg-sidebar",
+          )}
+        >
+          <ChatTabs activeId="" />
+        </header>
+      )}
       {sent !== null && <StartingChat content={sent} />}
       {/* Kept while the chat starts, in case it can't. */}
       <div
@@ -406,26 +417,15 @@ function SizeMenu({
  * ones shown here.
  */
 function StartingChat({ content }: { content: UserContent }) {
-  const shelf = useTabs().length > 0;
   return (
-    <>
-      <header
-        className={cn(
-          "hidden h-13 shrink-0 pr-4 md:flex",
-          shelf && "bg-sidebar",
-        )}
-      >
-        <ChatTabs activeId="" />
-      </header>
-      <div className="flex min-h-0 flex-1 flex-col">
-        <Thread
-          sessionId=""
-          synced={false}
-          view={EMPTY_STREAM.view}
-          pending={content}
-          composerHeight={0}
-        />
-      </div>
-    </>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <Thread
+        sessionId=""
+        synced={false}
+        view={EMPTY_STREAM.view}
+        pending={content}
+        composerHeight={0}
+      />
+    </div>
   );
 }

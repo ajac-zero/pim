@@ -41,6 +41,13 @@ export type SkillVersion = SkillVersionInfo & {
 	readonly files: readonly SkillFile[];
 };
 
+/** A skill as its latest version, without its instructions and files: what lists and prompts show of it. */
+export type SkillSummary = SkillVersionInfo & {
+	readonly name: string;
+	readonly description: string;
+	readonly updatedAt: number;
+};
+
 /** A skill as its latest version. */
 export type Skill = SkillVersion & {
 	readonly createdAt: number;
@@ -101,6 +108,18 @@ const versionOf = (row: Row): SkillVersion => ({
 const LATEST = `SELECT v.*, s.created_at AS skill_created_at FROM pim_skills s
 	JOIN pim_skill_versions v ON v.name = s.name AND v.version = s.version`;
 
+/** The latest versions without their text, which lists and every model request read, so skills' size doesn't weigh on them. */
+const SUMMARIES = `SELECT v.name, v.version, v.description, v.author, v.restored_from, v.created_at, s.created_at AS skill_created_at
+	FROM pim_skills s JOIN pim_skill_versions v ON v.name = s.name AND v.version = s.version`;
+
+const summaryOf = (row: Row): SkillSummary => ({
+	name: String(row.name),
+	description: String(row.description),
+	...versionInfo(row),
+	createdAt: Number(row.skill_created_at),
+	updatedAt: Number(row.created_at),
+});
+
 const skillOf = (row: Row): Skill => ({
 	...versionOf(row),
 	createdAt: Number(row.skill_created_at),
@@ -128,8 +147,13 @@ export class SkillStore {
 		this.#sql.exec(SCHEMA);
 	}
 
-	list(): Skill[] {
-		return this.#sql.exec(`${LATEST} ORDER BY s.name`).toArray().map(skillOf);
+	/** Every skill, by name, without its instructions and files. */
+	list(): SkillSummary[] {
+		return this.#sql.exec(`${SUMMARIES} ORDER BY s.name`).toArray().map(summaryOf);
+	}
+
+	has(name: string): boolean {
+		return this.#sql.exec("SELECT 1 FROM pim_skills WHERE name = ?", name).toArray().length > 0;
 	}
 
 	get(name: string): Skill | undefined {
@@ -171,7 +195,7 @@ export class SkillStore {
 		if (existing && write.baseVersion !== existing.version) {
 			throw new HttpError(409, `${write.name} is at version ${existing.version} now, not ${write.baseVersion}: read it again before rewriting it`);
 		}
-		if (!existing && this.list().length >= MAX_SKILLS) throw new HttpError(429, `The person can have up to ${MAX_SKILLS} skills.`);
+		if (!existing && Number(this.#sql.exec("SELECT COUNT(*) AS count FROM pim_skills").one().count) >= MAX_SKILLS) throw new HttpError(429, `The person can have up to ${MAX_SKILLS} skills.`);
 		const files = write.files ?? existing?.files ?? [];
 		if (files.length > MAX_SKILL_FILES) throw new HttpError(400, `A skill can have up to ${MAX_SKILL_FILES} supporting files`);
 		const paths = new Set<string>();

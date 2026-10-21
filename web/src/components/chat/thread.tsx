@@ -7,7 +7,6 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
-  useState,
 } from "react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 import { PimMark } from "~/components/app-sidebar";
@@ -25,12 +24,7 @@ import {
   WorkedSteps,
 } from "~/components/chat/items";
 import { sentImages } from "~/components/chat/reply-blocks";
-import {
-  TASK_POLL_MS,
-  TaskCard,
-  TaskJump,
-  TaskSheet,
-} from "~/components/chat/tasks";
+import { TASK_POLL_MS, TaskCard, TaskJump } from "~/components/chat/tasks";
 import { CHATGPT_USAGE_URL } from "~/components/chatgpt-logo";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import { AlertCircle, ArrowUp, Clock } from "~/components/icons";
@@ -176,7 +170,6 @@ export const Thread = memo(function Thread({
         : false,
   });
   const history = useMemo(() => taskHistory(entries, tasks), [entries, tasks]);
-  const [viewingTask, setViewingTask] = useState<string | null>(null);
   /* A gated tool call renders as the approval it filed. */
   const { data: allApprovals } = useQuery(approvalsQuery());
   // Requests from people in your circles belong to their conversations, not yours.
@@ -391,9 +384,9 @@ export const Thread = memo(function Thread({
               return (
                 <TaskCard
                   key={entry.key}
+                  sessionId={sessionId}
                   tasks={delegated}
                   completions={history.completions}
-                  onView={setViewingTask}
                 />
               );
             }
@@ -512,11 +505,6 @@ export const Thread = memo(function Thread({
           </div>
         )}
       </ConversationContent>
-      <TaskSheet
-        sessionId={sessionId}
-        task={tasks.find((task) => task.id === viewingTask) ?? null}
-        onClose={() => setViewingTask(null)}
-      />
       {/* After the content, whose scroller its effects need. */}
       <ScrollMemory sessionId={sessionId} loaded={rows.length > 0} />
 

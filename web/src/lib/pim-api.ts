@@ -844,9 +844,10 @@ export type ProviderModelInfo = {
   reasoning: boolean;
 };
 
-/** A server that speaks OpenAI's chat completions, which the person or the admin added. Never its key. */
+/** A built-in service or custom endpoint the person or admin added. Never its key. */
 export type ModelProvider = {
   id: string;
+  builtin?: string;
   /** Its models' `provider`: `own:<id>` or `shared:<id>`. */
   provider: string;
   name: string;
@@ -864,10 +865,17 @@ export type SavedProvider = Omit<ModelProvider, "provider" | "shared">;
 
 /** Adding or changing a provider; a field left out stays as it was, and an empty key takes it away. */
 export type ProviderInput = {
+  builtin?: string;
   name?: string;
   url?: string;
   key?: string;
   models?: string[] | null;
+};
+
+export type BuiltinProvider = {
+  id: string;
+  name: string;
+  models: ProviderModelInfo[];
 };
 
 /** OpenAI's provider id: models that run on the ChatGPT plan. */
@@ -1263,6 +1271,8 @@ export const pim = {
       method: "PUT",
       body: JSON.stringify(model),
     }),
+  builtinProviders: () =>
+    call<{ providers: BuiltinProvider[] }>("/providers/built-in"),
   addProvider: (input: ProviderInput) =>
     call<{ provider: SavedProvider }>("/providers", {
       method: "POST",

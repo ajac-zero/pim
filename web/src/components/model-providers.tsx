@@ -1,11 +1,19 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
 import { toast } from "sonner";
 import { CHATGPT_USAGE_URL, ChatGPTLogo } from "~/components/chatgpt-logo";
 import { useI18n } from "~/components/i18n";
 import { ExternalLink, Loader2, Plus, Server } from "~/components/icons";
+import { ModelProviderLogo } from "~/components/model-logo";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
 import { Switch } from "~/components/ui/switch";
 import {
   admin as adminApi,
@@ -14,12 +22,13 @@ import {
   type ProviderInput,
   pim,
 } from "~/lib/pim-api";
+import { modelName } from "~/lib/utils";
 
 const WELCOMED_KEY = "pim-chatgpt-welcomed";
 
 /**
  * Where the person's models run: Workers AI, built in; their ChatGPT plan;
- * and servers that speak OpenAI's chat completions, which the admin added
+ * and model services or custom endpoints, which the admin added
  * for everyone or the person added for themselves. Only the admin changes
  * the admin's.
  */
@@ -48,9 +57,10 @@ export function ProvidersSection({
       >
         <li>
           <Row
-            icon={<span className="font-medium text-xs">CF</span>}
+            icon={
+              <ModelProviderLogo provider="cloudflare" className="size-6" />
+            }
             title={t("workersAI")}
-            detail={t("builtIn")}
             actions={
               <span className="text-muted-foreground text-sm">
                 {t("providerOn")}
@@ -89,7 +99,7 @@ function Row({
 }: {
   icon: ReactNode;
   title: string;
-  detail: string;
+  detail?: string;
   actions?: ReactNode;
   children?: ReactNode;
 }) {
@@ -101,7 +111,11 @@ function Row({
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate font-medium text-sm">{title}</span>
-          <span className="block text-muted-foreground text-xs">{detail}</span>
+          {detail && (
+            <span className="block text-muted-foreground text-xs">
+              {detail}
+            </span>
+          )}
         </span>
         {actions && (
           <span className="flex shrink-0 items-center gap-1">{actions}</span>
@@ -135,7 +149,9 @@ function CustomProvider({
     onError: (error) => toast.error(error.message),
   });
   const host = URL.parse(provider.url)?.host ?? provider.url;
-  const models = provider.models.map((model) => model.name).join(", ");
+  const models = provider.models
+    .map((model) => modelName(model.name))
+    .join(", ");
   return (
     <Row
       icon={<Server className="size-4" />}
@@ -200,16 +216,38 @@ function ProviderForm({
   const [removeKey, setRemoveKey] = useState(false);
   const [models, setModels] = useState(provider?.chosen?.join(", ") ?? "");
   const [shared, setShared] = useState(false);
+  const [kind, setKind] = useState(
+    provider?.builtin ?? (provider ? "custom" : "anthropic"),
+  );
+  const [selected, setSelected] = useState<string[]>(provider?.chosen ?? []);
+  const [search, setSearch] = useState("");
+  const {
+    data: catalog,
+    error: catalogError,
+    isPending: catalogPending,
+  } = useQuery({
+    queryKey: ["builtin-providers"],
+    queryFn: pim.builtinProviders,
+  });
+  const builtin = kind !== "custom";
+  const preset = catalog?.providers.find((entry) => entry.id === kind);
+  const canSave = builtin
+    ? !!preset && selected.length > 0 && (!!key.trim() || !!provider?.hasKey)
+    : !!name.trim() && !!url.trim();
   const keyId = useId();
   const save = useMutation({
     mutationFn: () => {
       const input: ProviderInput = {
-        name: name.trim(),
-        url: url.trim(),
-        models: models
-          .split(",")
-          .map((id) => id.trim())
-          .filter(Boolean),
+        ...(builtin
+          ? { builtin: kind, models: selected }
+          : {
+              name: name.trim(),
+              url: url.trim(),
+              models: models
+                .split(",")
+                .map((id) => id.trim())
+                .filter(Boolean),
+            }),
         ...(key.trim() ? { key: key.trim() } : removeKey ? { key: "" } : {}),
       };
       const api = (provider ? provider.shared : shared) ? adminApi : pim;
@@ -226,7 +264,7 @@ function ProviderForm({
   });
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (name.trim() && url.trim()) save.mutate();
+    if (canSave) save.mutate();
   };
   const field = "h-9";
   return (
@@ -234,40 +272,86 @@ function ProviderForm({
       onSubmit={submit}
       className="mt-3 space-y-3 rounded-xl border bg-background p-4"
     >
-      <label className="block space-y-1">
+      <div className="space-y-1">
         <span className="text-[13px] text-muted-foreground">
-          {t("providerName")}
+          {t("providerService")}
         </span>
-        <Input
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          placeholder="LM Studio"
-          className={field}
-          required
-          autoFocus
-        />
-      </label>
-      <label className="block space-y-1">
-        <span className="text-[13px] text-muted-foreground">
-          {t("providerAddress")}
-        </span>
-        <Input
-          value={url}
-          onChange={(event) => setUrl(event.target.value)}
-          placeholder="http://localhost:1234/v1"
-          className={`${field} font-mono text-xs`}
-          required
-        />
-        <span className="block text-muted-foreground text-xs">
-          {t("providerAddressHint")}
-        </span>
-      </label>
+        <Select
+          value={kind}
+          disabled={!!provider}
+          onValueChange={(value) => {
+            setKind(value);
+            setSelected([]);
+            setSearch("");
+            setKey("");
+            setRemoveKey(false);
+          }}
+        >
+          <SelectTrigger className="w-full" aria-label={t("providerService")}>
+            <SelectValue placeholder={t("providerService")} />
+          </SelectTrigger>
+          <SelectContent>
+            {catalog?.providers.map((entry) => (
+              <SelectItem key={entry.id} value={entry.id}>
+                <ModelProviderLogo provider={entry.id} className="size-4" />
+                {entry.name}
+              </SelectItem>
+            ))}
+            <SelectItem value="custom">
+              <Server className="size-4" />
+              {t("providerCustom")}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+        {catalogError && (
+          <p className="text-destructive text-xs" role="alert">
+            {catalogError.message}
+          </p>
+        )}
+        {builtin && (
+          <p className="text-muted-foreground text-xs">
+            {t("providerApiBilling")}
+          </p>
+        )}
+      </div>
+      {!builtin && (
+        <>
+          <label className="block space-y-1">
+            <span className="text-[13px] text-muted-foreground">
+              {t("providerName")}
+            </span>
+            <Input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="LM Studio"
+              className={field}
+              required
+              autoFocus
+            />
+          </label>
+          <label className="block space-y-1">
+            <span className="text-[13px] text-muted-foreground">
+              {t("providerAddress")}
+            </span>
+            <Input
+              value={url}
+              onChange={(event) => setUrl(event.target.value)}
+              placeholder="http://localhost:1234/v1"
+              className={`${field} font-mono text-xs`}
+              required
+            />
+            <span className="block text-muted-foreground text-xs">
+              {t("providerAddressHint")}
+            </span>
+          </label>
+        </>
+      )}
       <div className="space-y-1">
         <span className="flex items-center justify-between">
           <label htmlFor={keyId} className="text-[13px] text-muted-foreground">
             {t("providerKey")}
           </label>
-          {provider?.hasKey && !removeKey && (
+          {!builtin && provider?.hasKey && !removeKey && (
             <button
               type="button"
               className="text-link text-xs hover:underline"
@@ -288,10 +372,13 @@ function ProviderForm({
           placeholder={
             provider?.hasKey && !removeKey
               ? t("providerKeyKept")
-              : t("providerKeyOptional")
+              : builtin
+                ? t("providerKey")
+                : t("providerKeyOptional")
           }
           className={field}
           autoComplete="off"
+          required={builtin && !provider?.hasKey}
         />
         {removeKey && !key && (
           <span className="block text-muted-foreground text-xs">
@@ -299,20 +386,83 @@ function ProviderForm({
           </span>
         )}
       </div>
-      <label className="block space-y-1">
-        <span className="text-[13px] text-muted-foreground">
-          {t("providerModels")}
-        </span>
-        <Input
-          value={models}
-          onChange={(event) => setModels(event.target.value)}
-          placeholder={t("providerModelsAll")}
-          className={field}
-        />
-        <span className="block text-muted-foreground text-xs">
-          {t("providerModelsHint")}
-        </span>
-      </label>
+      {builtin ? (
+        <fieldset className="space-y-2">
+          <legend className="text-[13px] text-muted-foreground">
+            {t("providerModels")} ·{" "}
+            {t("providerModelsSelected", { count: selected.length })}
+          </legend>
+          <Input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder={t("providerSearchModels")}
+            aria-label={t("providerSearchModels")}
+            className={field}
+          />
+          <div className="max-h-48 overflow-y-auto rounded-xl bg-muted/30 p-2">
+            {catalogPending && <Loader2 className="m-2 size-4 animate-spin" />}
+            {preset?.models
+              .filter((model) =>
+                `${model.name} ${model.id}`
+                  .toLowerCase()
+                  .includes(search.toLowerCase()),
+              )
+              .map((model) => (
+                <label
+                  key={model.id}
+                  className="flex cursor-pointer items-start gap-3 rounded-lg px-2 py-2 hover:bg-muted"
+                >
+                  <input
+                    type="checkbox"
+                    className="mt-1 accent-primary"
+                    checked={selected.includes(model.id)}
+                    disabled={
+                      !selected.includes(model.id) && selected.length >= 50
+                    }
+                    onChange={(event) =>
+                      setSelected(
+                        event.target.checked
+                          ? [...selected, model.id]
+                          : selected.filter((id) => id !== model.id),
+                      )
+                    }
+                  />
+                  <span className="min-w-0 text-sm">
+                    {modelName(model.name)}
+                  </span>
+                </label>
+              ))}
+            {preset &&
+              !preset.models.some((model) =>
+                `${model.name} ${model.id}`
+                  .toLowerCase()
+                  .includes(search.toLowerCase()),
+              ) && (
+                <p className="p-2 text-muted-foreground text-sm">
+                  {t("providerNoModels")}
+                </p>
+              )}
+          </div>
+          <p className="text-muted-foreground text-xs">
+            {t("providerChooseModels")}
+          </p>
+        </fieldset>
+      ) : (
+        <label className="block space-y-1">
+          <span className="text-[13px] text-muted-foreground">
+            {t("providerModels")}
+          </span>
+          <Input
+            value={models}
+            onChange={(event) => setModels(event.target.value)}
+            placeholder={t("providerModelsAll")}
+            className={field}
+          />
+          <span className="block text-muted-foreground text-xs">
+            {t("providerModelsHint")}
+          </span>
+        </label>
+      )}
       {admin && !provider && (
         <label className="flex items-center justify-between gap-3 text-sm">
           {t("providerForEveryone")}
@@ -323,10 +473,7 @@ function ProviderForm({
         <Button type="button" variant="ghost" onClick={onDone}>
           {t("cancel")}
         </Button>
-        <Button
-          type="submit"
-          disabled={!name.trim() || !url.trim() || save.isPending}
-        >
+        <Button type="submit" disabled={!canSave || save.isPending}>
           {save.isPending && <Loader2 className="size-4 animate-spin" />}
           {provider ? t("save") : t("add")}
         </Button>
@@ -404,7 +551,7 @@ function ChatGPTProvider({ settings }: { settings: ModelSettings }) {
       detail={
         connected
           ? t("connectedAs", { email: email ?? t("yourAccount") })
-          : t("chatGPTPlanPitch")
+          : undefined
       }
       actions={
         connected ? (

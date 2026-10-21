@@ -43,6 +43,7 @@ import {
 import { digestHex } from "./auth/store";
 import { Email, type Mailer, mailerFrom } from "./email";
 import {
+	builtinProviders,
 	type CustomProvider,
 	MAX_PROVIDERS,
 	OWN_PROVIDER,
@@ -3855,6 +3856,7 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 		// The person's own model providers (./providers.ts); the admin's are under /api/admin/providers.
+		["GET", "/providers/built-in", async () => ({ providers: await builtinProviders() })],
 		[
 			"POST",
 			"/providers",

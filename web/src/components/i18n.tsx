@@ -483,8 +483,6 @@ const translations = {
     view: "View",
     working: "Working",
     cancel: "Cancel",
-    chatGPTPlanPitch:
-      "Run Pim on OpenAI's models, such as GPT-6.1 Sol, with usage included in your ChatGPT Plus or Pro plan. When you're not connected, Pim uses its default model on Workers AI.",
     chatGPTWhyPaste:
       "OpenAI's sign-in for open-source apps can only send you back to an address on your own device (127.0.0.1), which Pim can't receive from the internet. So you carry that address over to Pim yourself, this once.",
     chatGPTStepApprove: "In the new tab, sign in to ChatGPT and approve Pim.",
@@ -533,13 +531,20 @@ const translations = {
     nothingToSummarize: "Nothing to summarize yet.",
     improvePrompt: "Improve prompt",
     pasteAddress: "Address the browser landed on",
-    runsOnWorkersAI: "Runs on Workers AI",
     providers: "Providers",
     remove: "Remove",
     providersHint:
-      "Where your models run. Add any server that speaks OpenAI's chat completions: a model on your own computer, such as LM Studio or llama.cpp, or a provider's API.",
+      "Where your models run. Connect a provider with your API key, or add a custom endpoint such as LM Studio or llama.cpp.",
+    providerService: "Provider",
+    providerCustom: "Custom endpoint",
+    providerApiBilling:
+      "Billed to this provider's API account, separately from any chat subscription.",
+    providerSearchModels: "Search models",
+    providerModelsSelected: "{count} selected",
+    providerChooseModels:
+      "Choose 1–50 models from Pim's catalog. Your account must have access to them. The key is checked when you use a model.",
+    providerNoModels: "No matching models.",
     workersAI: "Workers AI",
-    builtIn: "Built in to this Pim",
     providerOn: "On",
     chatGPTPlan: "ChatGPT plan",
     addProvider: "Add provider",
@@ -561,7 +566,6 @@ const translations = {
     providerRemoved: "Removed {name}.",
     removeProviderNamed: "Remove {name}",
     editProviderNamed: "Edit {name}",
-    runsOnProvider: "Runs on {provider}",
     settings: "Settings",
     artifacts: "Artifacts",
     noArtifacts:
@@ -738,7 +742,6 @@ const translations = {
     limitArtifactBytes: "Bytes in one artifact version",
     limitArtifactStorageBytes: "Bytes in all artifacts",
     useYourChatGPTPlan: "Use your ChatGPT plan",
-    usesChatGPTPlan: "Uses your ChatGPT plan",
     usingYourPlanBody:
       "Pim's requests to OpenAI models now use your ChatGPT plan. You can review and cap Pim's usage in ChatGPT settings.",
     usingYourPlanTitle: "You're using your ChatGPT plan",
@@ -1413,8 +1416,6 @@ const translations = {
     view: "Ver",
     working: "Trabajando",
     cancel: "Cancelar",
-    chatGPTPlanPitch:
-      "Usa los modelos de OpenAI, como GPT-6.1 Sol, con el uso incluido en tu plan ChatGPT Plus o Pro. Cuando no estás conectado, Pim usa su modelo predeterminado en Workers AI.",
     chatGPTWhyPaste:
       "El inicio de sesión de OpenAI para apps de código abierto solo puede devolverte a una dirección en tu propio dispositivo (127.0.0.1), que Pim no puede recibir desde internet. Por eso llevas tú esa dirección a Pim, esta única vez.",
     chatGPTStepApprove:
@@ -1465,13 +1466,20 @@ const translations = {
     nothingToSummarize: "Aún no hay nada que resumir.",
     improvePrompt: "Mejorar mensaje",
     pasteAddress: "Dirección a la que llegó el navegador",
-    runsOnWorkersAI: "Funciona con Workers AI",
     providers: "Proveedores",
     remove: "Eliminar",
     providersHint:
-      "Dónde funcionan tus modelos. Añade cualquier servidor compatible con chat completions de OpenAI: un modelo en tu propio equipo, como LM Studio o llama.cpp, o la API de un proveedor.",
+      "Dónde funcionan tus modelos. Conecta un proveedor con tu clave de API o añade un endpoint personalizado, como LM Studio o llama.cpp.",
+    providerService: "Proveedor",
+    providerCustom: "Endpoint personalizado",
+    providerApiBilling:
+      "Se factura a la cuenta de API del proveedor, por separado de cualquier suscripción de chat.",
+    providerSearchModels: "Buscar modelos",
+    providerModelsSelected: "{count} seleccionados",
+    providerChooseModels:
+      "Elige entre 1 y 50 modelos del catálogo de Pim. Tu cuenta debe tener acceso a ellos. La clave se comprueba al usar un modelo.",
+    providerNoModels: "No hay modelos que coincidan.",
     workersAI: "Workers AI",
-    builtIn: "Incluido en este Pim",
     providerOn: "Activo",
     chatGPTPlan: "Plan de ChatGPT",
     addProvider: "Añadir proveedor",
@@ -1493,7 +1501,6 @@ const translations = {
     providerRemoved: "{name} eliminado.",
     removeProviderNamed: "Eliminar {name}",
     editProviderNamed: "Editar {name}",
-    runsOnProvider: "Funciona con {provider}",
     settings: "Configuración",
     artifacts: "Artefactos",
     noArtifacts:
@@ -1671,7 +1678,6 @@ const translations = {
     limitArtifactBytes: "Bytes en una versión de artefacto",
     limitArtifactStorageBytes: "Bytes en todos los artefactos",
     useYourChatGPTPlan: "Usa tu plan de ChatGPT",
-    usesChatGPTPlan: "Usa tu plan de ChatGPT",
     usingYourPlanBody:
       "Las solicitudes de Pim a modelos de OpenAI ahora usan tu plan de ChatGPT. Puedes revisar y limitar el uso de Pim en la configuración de ChatGPT.",
     usingYourPlanTitle: "Estás usando tu plan de ChatGPT",

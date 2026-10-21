@@ -37,6 +37,7 @@ import {
   X,
 } from "~/components/icons";
 import { MembersSection } from "~/components/members";
+import { ModelProviderLogo } from "~/components/model-logo";
 import { ProvidersSection } from "~/components/model-providers";
 import { ProviderLogo } from "~/components/provider-buttons";
 import { SignInMethodsSection } from "~/components/sign-in-methods";
@@ -78,7 +79,7 @@ import {
   pushSupported,
 } from "~/lib/push";
 import { accountQuery, emailQuery, modelQuery } from "~/lib/queries";
-import { cn } from "~/lib/utils";
+import { cn, modelName } from "~/lib/utils";
 
 /** Shown once, the first time Pim is connected to a ChatGPT plan. */
 
@@ -234,19 +235,6 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
 const providerOf = (settings: ModelSettings, choice: ModelInfo) =>
   settings.providers.find((provider) => provider.provider === choice.provider);
 
-/** Where a model runs, as its row says. */
-function runsOn(
-  settings: ModelSettings,
-  choice: ModelInfo,
-  t: ReturnType<typeof useI18n>["t"],
-) {
-  if (choice.provider === CHATGPT_PROVIDER) return t("usesChatGPTPlan");
-  const provider = providerOf(settings, choice);
-  return provider
-    ? t("runsOnProvider", { provider: provider.name })
-    : t("runsOnWorkersAI");
-}
-
 function ModelChoices({ settings }: { settings: ModelSettings }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
@@ -289,18 +277,22 @@ function ModelChoices({ settings }: { settings: ModelSettings }) {
                     {providerOf(settings, choice) ? (
                       <Server className="size-4" />
                     ) : (
-                      "CF"
+                      <ModelProviderLogo
+                        provider="cloudflare"
+                        className="size-6"
+                      />
                     )}
                   </span>
                 )}
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-medium text-sm">
-                    {choice.name}
+                    {modelName(choice.name)}
                   </span>
-                  <span className="block truncate text-muted-foreground text-xs">
-                    {runsOn(settings, choice, t)}
-                    {choice.images && ` · ${t("seesImages")}`}
-                  </span>
+                  {choice.images && (
+                    <span className="block truncate text-muted-foreground text-xs">
+                      {t("seesImages")}
+                    </span>
+                  )}
                 </span>
                 {choose.isPending && choose.variables?.id === choice.id ? (
                   <Loader2 className="size-4 animate-spin text-muted-foreground" />
@@ -363,10 +355,7 @@ function UtilityModelSelect({ settings }: { settings: ModelSettings }) {
               key={`${choice.provider}/${choice.id}`}
               value={String(index)}
             >
-              {choice.name}
-              <span className="text-muted-foreground">
-                {` · ${runsOn(settings, choice, t)}`}
-              </span>
+              {modelName(choice.name)}
             </SelectItem>
           ))}
         </SelectContent>

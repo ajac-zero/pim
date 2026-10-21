@@ -1,18 +1,24 @@
-import type { Api, Model, Provider } from "@earendil-works/pi-ai";
+import type { Api, Model, Provider, StreamFunction, StreamOptions } from "@earendil-works/pi-ai";
+import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
+import { googleGenerativeAIApi } from "@earendil-works/pi-ai/api/google-generative-ai.lazy";
+import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
+import { mistralConversationsApi } from "@earendil-works/pi-ai/api/mistral-conversations.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { createProvider } from "@earendil-works/pi-ai/models";
 import { HttpError } from "./http";
 
 /**
- * Model providers people add in Settings → Model: any server that speaks
- * OpenAI's `/chat/completions`, such as a model on the deployment's own
- * machine (llama.cpp, LM Studio, Ollama, vLLM) or a provider's API used
- * directly (OpenAI, DeepSeek, Groq, OpenRouter...). A person's own are kept
+ * Model providers people add in Settings → Model: built-in services with
+ * native APIs, or servers that speak OpenAI's `/chat/completions`, such as
+ * llama.cpp, LM Studio, Ollama and vLLM. A person's own are kept
  * in their space and only they use them; the admin's are kept in the gallery
  * and everyone on the Pim can use them. Pim never shows a provider's key
  * again once it's given.
  *
- * Adding one reads its models from the server's `/models`. What Pim can't
+ * Built-in services use pi-ai's catalog and keep the chosen models' native
+ * definitions so a restart needs neither the catalog nor a network request.
+ * Custom endpoints read their models from the server's `/models`. What Pim can't
  * read there (a model's context window, its longest answer, whether it sees
  * images or reasons) comes from pi-ai's catalog when it knows a model by
  * that id, and otherwise from defaults that suit a text-only model.
@@ -26,11 +32,15 @@ export type ProviderModel = {
 	readonly maxTokens: number;
 	readonly images: boolean;
 	readonly reasoning: boolean;
+	/** A built-in model's full native definition as JSON, also safe to pass over Durable Object RPC. */
+	readonly native?: string;
 };
 
 /** A provider as it's kept: its key included. */
 export type CustomProvider = {
 	readonly id: string;
+	/** Absent on existing OpenAI-compatible endpoints. */
+	readonly builtin?: string;
 	readonly name: string;
 	readonly url: string;
 	readonly key: string | null;
@@ -43,7 +53,29 @@ export type CustomProvider = {
 export type ProviderInfo = Omit<CustomProvider, "key"> & { readonly hasKey: boolean };
 
 /** What adding or changing a provider gives; a missing field keeps what it was. */
-export type ProviderInput = { readonly name?: unknown; readonly url?: unknown; readonly key?: unknown; readonly models?: unknown };
+export type ProviderInput = { readonly builtin?: unknown; readonly name?: unknown; readonly url?: unknown; readonly key?: unknown; readonly models?: unknown };
+
+/** Known services need a key, not an address. Model definitions come from pi-ai. */
+const BUILTIN_PROVIDERS = [
+	{ id: "anthropic", name: "Anthropic", url: "https://api.anthropic.com" },
+	{ id: "openai", name: "OpenAI API", url: "https://api.openai.com/v1" },
+	{ id: "google", name: "Google Gemini", url: "https://generativelanguage.googleapis.com/v1beta" },
+	{ id: "openrouter", name: "OpenRouter", url: "https://openrouter.ai/api/v1" },
+	{ id: "deepseek", name: "DeepSeek", url: "https://api.deepseek.com" },
+	{ id: "mistral", name: "Mistral AI", url: "https://api.mistral.ai" },
+	{ id: "groq", name: "Groq", url: "https://api.groq.com/openai/v1" },
+	{ id: "xai", name: "xAI", url: "https://api.x.ai/v1" },
+] as const;
+
+/** The chat catalog for the built-in picker, without loading it at Worker startup. */
+export async function builtinProviders() {
+	const { getBuiltinModels } = await import("./provider-catalog");
+	return BUILTIN_PROVIDERS.map(({ id, name }) => ({
+		id,
+		name,
+		models: (getBuiltinModels(id) as Model<Api>[]).map((model) => describe(model.id, undefined, model)),
+	}));
+}
 
 /** Catalog ids: a person's own providers are `own:<id>`, the admin's `shared:<id>`. */
 export const OWN_PROVIDER = "own:";
@@ -126,12 +158,17 @@ function text(value: unknown, field: string, max: number): string | undefined {
 
 /**
  * Checks a new provider, or a change to `existing`, and reads its models
- * from the server again. `taken` are the ids already in use, for a new one's.
+ * from the built-in catalog or the server. `taken` are the ids already in use.
  */
 export async function prepareProvider(input: ProviderInput, existing: CustomProvider | null, taken: ReadonlySet<string>): Promise<CustomProvider> {
-	const name = text(input.name, "name", 60) || existing?.name;
+	const builtin = input.builtin === undefined ? existing?.builtin : text(input.builtin, "builtin", 40);
+	if (existing && builtin !== existing.builtin) throw new HttpError(400, "A provider's type cannot be changed. Add another provider instead.");
+	const preset = BUILTIN_PROVIDERS.find((provider) => provider.id === builtin);
+	if (builtin !== undefined && !preset) throw new HttpError(400, "Unknown built-in provider");
+	if (preset && input.url !== undefined) throw new HttpError(400, "A built-in provider's address cannot be changed");
+	const name = text(input.name, "name", 60) || existing?.name || preset?.name;
 	if (!name) throw new HttpError(400, "name is required");
-	const address = text(input.url, "url", 500) ?? existing?.url ?? "";
+	const address = preset?.url ?? text(input.url, "url", 500) ?? existing?.url ?? "";
 	const parsed = URL.parse(address);
 	if (!parsed || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
 		throw new HttpError(400, "url must be an http(s) address, such as http://localhost:1234/v1");
@@ -139,6 +176,7 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 	const url = parsed.href.replace(/\/+$/, "");
 	// A key left out stays; an empty one is taken away.
 	const key = input.key === null ? null : input.key === undefined ? (existing?.key ?? null) : text(input.key, "key", 2000) || null;
+	if (preset && !key) throw new HttpError(400, "An API key is required");
 	let chosen = existing?.chosen ?? null;
 	if (input.models !== undefined) {
 		if (input.models !== null && (!Array.isArray(input.models) || input.models.some((id) => typeof id !== "string" || !MODEL_ID.test(id.trim())))) {
@@ -147,6 +185,20 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 		const ids = [...new Set(((input.models ?? []) as string[]).map((id) => id.trim()))];
 		if (ids.length > MAX_CHOSEN) throw new HttpError(400, `Name at most ${MAX_CHOSEN} models`);
 		chosen = ids.length === 0 ? null : ids;
+	}
+	if (preset) {
+		const { getBuiltinModels } = await import("./provider-catalog");
+		const catalog = getBuiltinModels(preset.id) as Model<Api>[];
+		if (!chosen) throw new HttpError(400, "Choose at least one model");
+		const models = chosen.map((id) => {
+			const native = catalog.find((model) => model.id === id);
+			if (!native) throw new HttpError(400, `${preset.name} doesn't offer a model ${id} in Pim's catalog`);
+			return { ...describe(id, undefined, native), native: JSON.stringify(native) };
+		});
+		const base = existing?.id ?? preset.id;
+		let id = base;
+		if (!existing) for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
+		return { id, builtin: preset.id, name, url, key, chosen, models };
 	}
 
 	let listed: Record<string, unknown>[] | null = null;
@@ -183,14 +235,15 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 }
 
 export function providerInfo({ key, ...provider }: CustomProvider): ProviderInfo {
-	return { ...provider, hasKey: key !== null };
+	return { ...provider, models: provider.models.map(({ native, ...model }) => model), hasKey: key !== null };
 }
 
 /**
- * A provider's model as pi-ai calls it. Instructions go as a system message,
- * which every compatible server takes; OpenAI's reads it as the developer's.
+ * A provider's model as pi-ai calls it. Built-ins keep their native protocol;
+ * custom endpoints get system messages, which every compatible server takes.
  */
-export function providerModel(catalogId: string, provider: CustomProvider, model: ProviderModel): Model<"openai-completions"> {
+export function providerModel(catalogId: string, provider: CustomProvider, model: ProviderModel): Model<Api> {
+	if (model.native) return { ...JSON.parse(model.native) as Model<Api>, provider: catalogId };
 	return {
 		id: model.id,
 		name: model.name,
@@ -208,12 +261,55 @@ export function providerModel(catalogId: string, provider: CustomProvider, model
 
 /** A provider as pi-ai calls it, by its catalog id. A server without a key, as local ones usually are, is sent a placeholder. */
 export function piProvider(catalogId: string, provider: CustomProvider): Provider {
-	return createProvider({
+	const configured = createProvider({
 		id: catalogId,
 		name: provider.name,
 		baseUrl: provider.url,
-		auth: { apiKey: { name: `${provider.name} key`, resolve: async () => ({ auth: { apiKey: provider.key ?? "none" } }) } },
+		auth: {
+			apiKey: {
+				name: `${provider.name} key`,
+				resolve: async () => ({
+					auth: provider.builtin === "openrouter" ? { headers: { Authorization: `Bearer ${provider.key}` } } : { apiKey: provider.key ?? "none" },
+				}),
+			},
+		},
 		models: provider.models.map((model) => providerModel(catalogId, provider, model)),
-		api: openAICompletionsApi(),
+		api: {
+			"openai-completions": openAICompletionsApi(),
+			"openai-responses": openAIResponsesApi(),
+			"anthropic-messages": anthropicMessagesApi(),
+			"google-generative-ai": googleGenerativeAIApi(),
+			"mistral-conversations": mistralConversationsApi(),
+		},
 	});
+	if (!provider.builtin) return configured;
+	return {
+		...configured,
+		stream: nativeStream(configured.stream, provider.builtin),
+		streamSimple: nativeStream(configured.streamSimple, provider.builtin),
+	};
+}
+
+/**
+ * Adapters use the service's identity for reasoning and protocol quirks. Pim
+ * uses the connection's identity for auth, metering and saved conversations.
+ */
+function nativeStream<T extends StreamOptions>(stream: StreamFunction<Api, T>, builtin: string): StreamFunction<Api, T> {
+	return (model, context, options) => lazyStream(model, async () => (async function* () {
+		const native = { ...model, provider: builtin };
+		const transcript = {
+			...context,
+			messages: context.messages.map((message) => {
+				if (message.role !== "assistant") return message;
+				if (message.provider === model.provider) return { ...message, provider: builtin };
+				// ChatGPT's connection already uses `openai`; it is not this API account.
+				return message.provider === builtin ? { ...message, provider: `other:${builtin}` } : message;
+			}),
+		};
+		for await (const event of stream(native, transcript, options)) {
+			if (event.type === "done") yield { ...event, message: { ...event.message, provider: model.provider } };
+			else if (event.type === "error") yield { ...event, error: { ...event.error, provider: model.provider } };
+			else yield { ...event, partial: { ...event.partial, provider: model.provider } };
+		}
+	})());
 }

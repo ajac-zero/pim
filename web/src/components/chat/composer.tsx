@@ -39,14 +39,13 @@ import {
   TooltipTrigger,
 } from "~/components/ui/tooltip";
 import {
-  CHATGPT_PROVIDER,
   type ModelInfo,
   type ModelSettings,
   pim,
   type UserContent,
 } from "~/lib/pim-api";
 import { artifactQuery, modelQuery } from "~/lib/queries";
-import { cn } from "~/lib/utils";
+import { cn, modelName } from "~/lib/utils";
 
 export interface ComposerProps {
   onSend: (content: UserContent) => void;
@@ -455,13 +454,8 @@ function ModelPicker({ settings }: { settings: ModelSettings }) {
               className="min-h-11 gap-3"
             >
               {logo(choice, "size-5 text-foreground")}
-              <span className="min-w-0 flex-1">
-                <span className="block truncate">{choice.name}</span>
-                <span className="block truncate text-muted-foreground text-xs">
-                  {choice.provider === CHATGPT_PROVIDER
-                    ? "ChatGPT"
-                    : (providerOf(choice)?.name ?? "Workers AI")}
-                </span>
+              <span className="min-w-0 flex-1 truncate">
+                {modelName(choice.name)}
               </span>
               {selected && <Check className="size-4 text-primary" />}
             </DropdownMenuItem>

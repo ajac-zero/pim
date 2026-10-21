@@ -1,5 +1,8 @@
+import { createModels } from "@earendil-works/pi-ai/models";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { piProvider, prepareProvider } from "../src/providers";
 import { api, OWNER, post, say, toolUse } from "./helpers";
 import { completionStream, faux, type Pim } from "./worker";
 
@@ -9,11 +12,52 @@ import { completionStream, faux, type Pim } from "./worker";
  * and lists more models than Pim offers unasked.
  */
 
-type Call = { url: string; authorization: string | null; body: any };
+type Call = { url: string; authorization: string | null; headers?: Record<string, string>; body: any };
 
 let calls: Call[];
 
 const CLOUD_MODELS = [{ id: "gpt-4.1" }, ...Array.from({ length: 59 }, (_, n) => ({ id: `cloud-model-${n}` }))];
+
+const BUILTINS = [
+	["anthropic", "claude-sonnet-4-6", "https://api.anthropic.com/v1/messages", "x-api-key"],
+	["openai", "gpt-4.1", "https://api.openai.com/v1/responses", "authorization"],
+	["google", "gemini-2.5-flash", "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse", "x-goog-api-key"],
+	["openrouter", "anthropic/claude-sonnet-4.6", "https://openrouter.ai/api/v1/messages", "authorization"],
+	["openrouter", "openai/gpt-4.1", "https://openrouter.ai/api/v1/chat/completions", "authorization"],
+	["deepseek", "deepseek-flash", "https://api.deepseek.com/chat/completions", "authorization"],
+	["mistral", "mistral-large-latest", "https://api.mistral.ai/v1/chat/completions", "authorization"],
+	["groq", "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1/chat/completions", "authorization"],
+	["xai", "grok-4.3", "https://api.x.ai/v1/responses", "authorization"],
+] as const;
+
+/** Native provider streams that ask Pim to deliver a message, rather than just emit text. */
+function builtinStream(url: URL, model: string): Response {
+	const message = `Hello from ${url.host}`;
+	const args = JSON.stringify({ message });
+	let events: Record<string, unknown>[];
+	if (url.pathname.endsWith("/messages")) {
+		events = [
+			{ type: "message_start", message: { id: "msg_1", type: "message", role: "assistant", content: [], model, usage: { input_tokens: 10, output_tokens: 0 } } },
+			{ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_1", name: "send_to_user", input: {} } },
+			{ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: args } },
+			{ type: "content_block_stop", index: 0 },
+			{ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 3 } },
+			{ type: "message_stop" },
+		];
+	} else if (url.pathname.endsWith("/responses")) {
+		const item = { type: "function_call", id: "fc_1", call_id: "call_1", name: "send_to_user", arguments: args, status: "completed" };
+		events = [
+			{ type: "response.created", response: { id: "resp_1", status: "in_progress" } },
+			{ type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "", status: "in_progress" } },
+			{ type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_1", delta: args },
+			{ type: "response.output_item.done", output_index: 0, item },
+			{ type: "response.completed", response: { id: "resp_1", status: "completed", usage: { input_tokens: 10, output_tokens: 3, total_tokens: 13 } } },
+		];
+	} else if (url.host === "generativelanguage.googleapis.com") {
+		events = [{ candidates: [{ finishReason: "STOP", content: { role: "model", parts: [{ functionCall: { name: "send_to_user", args: { message } } }] } }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3, totalTokenCount: 13 } }];
+	} else return completionStream(model, message);
+	return new Response(events.map((event) => `${event.type ? `event: ${event.type}\n` : ""}data: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+}
 
 beforeEach(() => {
 	calls = [];
@@ -21,6 +65,11 @@ beforeEach(() => {
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		const request = new Request(input, init);
 		const url = new URL(request.url);
+		if (BUILTINS.some((entry) => new URL(entry[2]).origin === url.origin)) {
+			const body = await request.json<{ model: string }>();
+			calls.push({ url: request.url, authorization: request.headers.get("authorization"), headers: Object.fromEntries(request.headers), body });
+			return builtinStream(url, body.model);
+		}
 		if (url.origin !== "http://localhost:1234" && url.origin !== "https://models.test") return realFetch(input, init);
 		const body = request.method === "POST" ? await request.json<{ model: string }>() : null;
 		const authorization = request.headers.get("authorization");
@@ -48,6 +97,76 @@ beforeEach(() => {
 const put = (path: string, body: unknown) => api(path, { method: "PUT", body: JSON.stringify(body) });
 
 describe("A person's own model providers", () => {
+	it("keeps readable history but never replays another OpenAI connection's encrypted reasoning", async () => {
+		const provider = await prepareProvider({ builtin: "openai", key: "sk-test-key", models: ["gpt-4.1"] }, null, new Set());
+		const models = createModels();
+		models.setProvider(piProvider("own:openai", provider));
+		const model = models.getModel("own:openai", "gpt-4.1")!;
+		const messages = ["openai", "own:openai", "own:openai-2"].map((source, index) => ({
+			...fauxAssistantMessage([
+				{ type: "thinking", thinking: "", thinkingSignature: JSON.stringify({ type: "reasoning", id: `rs_${index}`, encrypted_content: `encrypted-${index}`, summary: [] }) },
+				{ type: "text", text: `Answer ${index}` },
+			]),
+			provider: source,
+			api: model.api,
+			model: model.id,
+		}));
+		const result = await models.completeSimple(model, { messages });
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.provider).toBe("own:openai");
+		const input = calls.at(-1)!.body.input;
+		expect(input.filter((item: { type: string }) => item.type === "reasoning")).toEqual([
+			{ type: "reasoning", id: "rs_1", encrypted_content: "encrypted-1", summary: [] },
+		]);
+		for (let n = 0; n < 3; n++) expect(JSON.stringify(input)).toContain(`Answer ${n}`);
+	});
+
+	it.each(BUILTINS)("connects %s with a key and chosen models, and delivers messages through its native API (%s)", async (builtin, id, endpoint, header) => {
+		const catalog = await api("/providers/built-in");
+		expect(catalog.status).toBe(200);
+		expect(catalog.body.providers.map((provider: { id: string }) => provider.id)).toEqual(["anthropic", "openai", "google", "openrouter", "deepseek", "mistral", "groq", "xai"]);
+		expect(catalog.body.providers.find((provider: { id: string }) => provider.id === builtin).models).toContainEqual(expect.objectContaining({ id }));
+		const added = await post("/providers", { builtin, key: "sk-test-builtin-secret", models: [id] });
+		expect(added).toMatchObject({ status: 200, body: { provider: { id: builtin, builtin, hasKey: true, chosen: [id], models: [expect.objectContaining({ id })] } } });
+		const settings = (await api("/model")).body;
+		expect(settings.choices).toContainEqual(expect.objectContaining({ provider: `own:${builtin}`, id }));
+		expect(settings.chatgpt.connected).toBe(false);
+		expect(JSON.stringify(settings)).not.toContain("sk-test-builtin-secret");
+		expect((await put("/model", { provider: `own:${builtin}`, id })).status).toBe(200);
+		const session = (await post("/sessions", { title: "Provider test" })).body.id;
+		expect((await say("Hello?", session)).text).toBe(`Hello from ${new URL(endpoint).host}`);
+		const actual = new URL(calls.at(-1)!.url);
+		const expected = new URL(endpoint);
+		expect(`${actual.origin}${actual.pathname}`).toBe(`${expected.origin}${expected.pathname}`);
+		expect(calls.at(-1)?.headers?.[header]).toBe(header === "authorization" ? "Bearer sk-test-builtin-secret" : "sk-test-builtin-secret");
+		if (builtin === "xai") expect(calls.at(-1)?.body.include).toContain("reasoning.encrypted_content");
+		expect((await put(`/providers/${builtin}`, { name: "My provider" })).body.provider).toMatchObject({ name: "My provider", hasKey: true });
+		expect((await say("And again?", session)).text).toBe(`Hello from ${new URL(endpoint).host}`);
+		expect((await api(`/providers/${builtin}`, { method: "DELETE" })).status).toBe(200);
+		expect((await api("/model")).body.model.id).toBe("faux-model");
+	});
+
+	it("requires a known service, key and catalog models, and never accepts an address override", async () => {
+		for (const input of [
+			{ builtin: "unknown", key: "secret", models: ["gpt-4.1"] },
+			{ builtin: "openai", models: ["gpt-4.1"] },
+			{ builtin: "openai", key: "secret", models: [] },
+			{ builtin: "openai", key: "secret", models: ["not-a-model"] },
+			{ builtin: "openai", key: "secret", models: ["gpt-4.1"], url: "https://models.test/v1" },
+		]) expect((await post("/providers", input)).status).toBe(400);
+		const added = await post("/providers", { builtin: "openai", key: "first-key", models: ["gpt-4.1"] });
+		expect(added.status).toBe(200);
+		expect((await post("/providers", { builtin: "openai", key: "second-key", models: ["gpt-4.1"] })).body.provider.id).toBe("openai-2");
+		expect((await put("/providers/openai", { builtin: "groq" })).status).toBe(400);
+		expect((await put("/providers/openai", { key: "" })).status).toBe(400);
+		expect((await put("/providers/openai", { key: "replacement-key" })).status).toBe(200);
+		await put("/model", { provider: "own:openai", id: "gpt-4.1" });
+		const session = (await post("/sessions", { title: "Replacement key" })).body.id;
+		expect((await say("Hello?", session)).text).toBe("Hello from api.openai.com");
+		expect(calls.at(-1)?.authorization).toBe("Bearer replacement-key");
+		for (const id of ["openai", "openai-2"]) await api(`/providers/${id}`, { method: "DELETE" });
+	});
+
 	it("offer the models their server lists, run chats on them, and go away with the choice of one", async () => {
 		const added = await post("/providers", { name: "Home server", url: "http://localhost:1234/v1/" });
 		expect(added.status).toBe(200);
@@ -72,6 +191,7 @@ describe("A person's own model providers", () => {
 			{ provider: "own:home-server", id: "served-model", name: "served-model", images: false },
 		]);
 
+		const before = await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.usage.today());
 		expect((await put("/model", { provider: "own:home-server", id: "vision-model" })).status).toBe(200);
 		expect((await say("Hello?")).text).toBe("Hello from home");
 		const chat = calls.at(-1)!;
@@ -81,7 +201,7 @@ describe("A person's own model providers", () => {
 		expect(chat.body.messages[0].role).toBe("system");
 		// The person pays for their own provider: its tokens don't count against the deployment's limit.
 		const today = await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.usage.today());
-		expect(today.planTokens).toBe(13);
+		expect(today.planTokens - before.planTokens).toBe(13);
 
 		expect((await api("/providers/home-server", { method: "DELETE" })).body).toEqual({ deleted: true });
 		const after = (await api("/model")).body;

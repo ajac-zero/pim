@@ -1168,6 +1168,40 @@ describe("the admin", () => {
 		expect((await admin("/api/admin/providers/team-gpu", { method: "DELETE" })).status).toBe(404);
 	});
 
+	it("shares a built-in service with members without sharing its key or their own connections", async () => {
+		const member = await person("builtin-member");
+		const model = "llama-3.3-70b-versatile";
+		const input = { builtin: "groq", key: "shared-groq-key", models: [model] };
+		expect((await member.browser.json("/api/admin/providers", { method: "POST", json: input })).status).toBe(403);
+		const added = await admin("/api/admin/providers", { method: "POST", json: input });
+		expect(added).toMatchObject({ status: 201, body: { provider: { id: "groq", builtin: "groq", hasKey: true } } });
+		const settings = (await member.browser.json("/api/model")).body;
+		expect(settings.choices).toContainEqual(expect.objectContaining({ provider: "shared:groq", id: model }));
+		expect(JSON.stringify([added.body, settings])).not.toContain(input.key);
+		expect((await member.browser.json("/api/providers", { method: "POST", json: { ...input, key: "own-groq-key" } })).status).toBe(200);
+		expect((await admin("/api/model")).body.providers.some((provider: { provider: string }) => provider.provider === "own:groq")).toBe(false);
+		const realFetch = globalThis.fetch;
+		const keys: (string | null)[] = [];
+		const server = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			if (request.url !== "https://api.groq.com/openai/v1/chat/completions") return realFetch(input, init);
+			keys.push(request.headers.get("authorization"));
+			return completionStream(model, "Hello from Groq");
+		});
+		try {
+			for (const provider of ["shared:groq", "own:groq"]) {
+				expect((await member.browser.json("/api/model", { method: "PUT", json: { provider, id: model } })).status).toBe(200);
+				const answer = await member.browser.json(`/api/sessions/${await rootOf(member.browser)}/messages`, { method: "POST", json: { content: "Hello?", wait: true } });
+				expect(answer.body.text).toBe("Hello from Groq");
+			}
+			expect(keys).toEqual(["Bearer shared-groq-key", "Bearer own-groq-key"]);
+		} finally {
+			server.mockRestore();
+			await admin("/api/admin/providers/groq", { method: "DELETE" });
+			await member.browser.json("/api/providers/groq", { method: "DELETE" });
+		}
+	});
+
 	it("adds apps everyone can connect, which each person signs in to once for all their agents", async () => {
 		const uma = await person("app-uma");
 		const crm = { name: "Acme CRM", description: "Customers and deals.", url: "https://crm.example.test/mcp" };

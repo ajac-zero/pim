@@ -50,6 +50,8 @@ The globe button beside it makes a public link to the chat: a copy of the conver
 
 ## What the agent can do
 
+In chat, agents link to your files with Markdown such as `[Report](/workspace/report.csv)`, which opens Pim's file viewer. Older replies using `sandbox:/workspace/...` open there too; they don't need to be regenerated. Files still belong to your space and require sign-in.
+
 | Capability | Tools | How |
 | --- | --- | --- |
 | Long-term memory | `note`, `recall`, `zoom`, `forget` | OptMem-style: an append-only log, compressed in the background into a tree of summaries. Every conversation sees a fixed-size view of it. See [Memory](#memory). |

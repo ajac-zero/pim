@@ -180,6 +180,11 @@ function usePimEvents() {
       onNotification: (notification) => {
         queryClient.invalidateQueries({ queryKey: ["notifications"] });
         toast(notification.title, {
+          icon: notification.agent ? (
+            <AgentIcon agent={notification.agent} tile className="size-5" />
+          ) : (
+            <img src="/icon-192.png" alt="" className="size-5 rounded-sm" />
+          ),
           description: notification.body,
           action: {
             label: t("view"),

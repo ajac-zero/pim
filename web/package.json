@@ -7,7 +7,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite dev --port 3000",
-    "build": "vite build && node scripts/build-artifact-runtimes.mjs",
+    "build": "vite build && node scripts/build-artifact-runtimes.mjs && node scripts/build-notification-symbols.mjs",
     "typecheck": "tsr generate && tsc --noEmit",
     "test": "vitest run",
     "lint": "biome check .",

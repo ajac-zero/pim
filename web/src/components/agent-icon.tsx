@@ -52,7 +52,7 @@ import type { Agent } from "~/lib/pim-api";
 import { cn } from "~/lib/utils";
 
 /** The icons an agent can show, by the name the API keeps. The first is the default. */
-const ICONS: Record<string, LucideIcon> = {
+export const ICONS: Record<string, LucideIcon> = {
   bot: Bot,
   sparkles: Sparkles,
   rocket: Rocket,

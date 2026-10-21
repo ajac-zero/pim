@@ -348,7 +348,7 @@ export class Pim extends DurableAgent<Env> {
 		return { name: "Majordomo", description: "", instructions: "", apps: [], skills: [], contacts: [], blueprint: blueprint ? ref : null };
 	}, () => this.appDirectory());
 	/** The skills the owner's agents wrote for work they do again. */
-	readonly skills = new SkillStore(this.ctx.storage.sql);
+	readonly skills = new SkillStore(this.ctx.storage.sql, () => this.#storageRoom());
 	/** Public links to the owner's chats, each with the copy of its chat it shows. */
 	readonly chatLinks = new ChatLinkStore(this.ctx.storage.sql);
 	/** Images the person sent, in R2; their messages keep their URLs. */
@@ -363,10 +363,7 @@ export class Pim extends DurableAgent<Env> {
 	readonly artifacts = new ArtifactStore(this.ctx.storage.sql, () => this.limits(), {
 		bucket: this.env.ARTIFACTS,
 		owner: () => this.name,
-		storageRoom: () => {
-			const { storageBytes } = this.limits();
-			return storageBytes === null ? null : storageBytes - this.storedBytes();
-		},
+		storageRoom: () => this.#storageRoom(),
 	});
 	/** The person's computer, which their agents use, if they connected one (see ./computer.ts). */
 	readonly computer: Computer = new Computer({
@@ -1412,6 +1409,12 @@ export class Pim extends DurableAgent<Env> {
 	/** What this space holds: its database, and in R2 the images sent to it, its stored files and its artifacts' files. */
 	storedBytes(): number {
 		return this.ctx.storage.sql.databaseSize + this.images.bytes() + this.legacyFiles.storedBytes() + this.artifacts.fileBytes();
+	}
+
+	/** Bytes the space may still grow by, or null for no limit. */
+	#storageRoom(): number | null {
+		const { storageBytes } = this.limits();
+		return storageBytes === null ? null : storageBytes - this.storedBytes();
 	}
 
 	#storageRefusal(): string | null {

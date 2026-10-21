@@ -6,8 +6,8 @@ import { AgentStore } from "../src/agents";
 import { TaskStore } from "../src/tasks";
 import { CREATE_AGENT, RENAME_AGENT, UPDATE_AGENT } from "../src/extensions/agents";
 import { WRITE_SKILL } from "../src/extensions/skills";
-import { api, apiUrl, pendingApproval, post, ROOT, say, TOKEN, toolUse } from "./helpers";
-import { faux } from "./worker";
+import { api, apiUrl, OWNER, pendingApproval, post, ROOT, say, TOKEN, toolUse } from "./helpers";
+import { faux, type Pim } from "./worker";
 
 /** The prompt sections sent last: pi sends the whole prompt once, then only what changed. */
 const system = (messages: readonly Message[]) => JSON.stringify(messages.filter((message) => message.role === "system").at(-1));
@@ -390,6 +390,14 @@ describe("the owner's agents", () => {
 		const restored = await restore(2);
 		expect(restored.status).toBe(201);
 		expect(restored.body).toMatchObject({ instructions: skill.instructions, files: skill.files, version: 3, history: [{ version: 3, author: null, restoredFrom: 1 }, { version: 2 }, { version: 1 }] });
+		// Each version keeps the whole skill, so one the space has no room for is refused before it is written.
+		const setLimits = (room: number | null) =>
+			runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.setLimits(room === null ? null : { storageBytes: instance.storedBytes() + room }));
+		await setLimits(50);
+		const refused = await restore(3);
+		expect(refused).toMatchObject({ status: 429, body: { error: expect.stringContaining("storage quota") } });
+		await setLimits(null);
+		expect((await api("/skills/weekly-plan")).body.version).toBe(3);
 
 		// The person gives skills to agents and deletes them.
 		expect((await api(`/agents/${chef.id}`, { method: "PUT", body: JSON.stringify({ skills: ["meal-prep"] }) })).status).toBe(400);

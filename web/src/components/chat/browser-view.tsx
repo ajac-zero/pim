@@ -1,13 +1,19 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useI18n } from "~/components/i18n";
-import { ExternalLink, X } from "~/components/icons";
+import { ChevronRight, ExternalLink, Power } from "~/components/icons";
+import { Action } from "~/components/ui/actions";
 import { Button } from "~/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "~/components/ui/collapsible";
 import { BROWSER_SCREENSHOT_URL, type BrowserStatus, pim } from "~/lib/pim-api";
 
 /**
  * The browser your agents share, in the box beside a chat while it's open:
- * the page it shows, as a picture that keeps up with them, and taking it
+ * expand its dropdown for a picture that keeps up with them, and take it
  * over to sign in or finish something yourself.
  */
 export function BrowserView({
@@ -42,49 +48,53 @@ export function BrowserView({
   });
   const title = page.title || hostOf(page.url);
   return (
-    <section aria-labelledby="browser-view" className="border-t">
-      <div className="flex items-center gap-2 px-4 pt-2.5">
-        <h2 id="browser-view" className="text-[13px] text-muted-foreground">
-          {t("browser")}
+    <Collapsible asChild>
+      <section aria-labelledby="browser-view" className="border-t">
+        <h2 id="browser-view">
+          <CollapsibleTrigger className="group flex w-full items-center gap-2 px-4 py-3.5 text-left text-[13px] text-muted-foreground hover:text-foreground">
+            <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
+            {t("browser")}
+          </CollapsibleTrigger>
         </h2>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="ml-auto size-7 rounded-full text-muted-foreground"
-          aria-label={t("closeBrowser")}
-          title={t("closeBrowser")}
-          disabled={close.isPending}
-          onClick={() => close.mutate()}
-        >
-          <X className="size-4" />
-        </Button>
-      </div>
-      <div className="space-y-3 px-4 pb-4">
-        <div className="min-w-0">
-          <p className="truncate font-medium text-sm">{title}</p>
-          <p className="truncate text-muted-foreground text-xs">
-            {hostOf(page.url)}
-          </p>
-        </div>
-        <img
-          src={`${BROWSER_SCREENSHOT_URL}?at=${updatedAt}`}
-          alt={t("browserPicture", { title })}
-          className="w-full rounded-lg border bg-background"
-        />
-        <Button
-          className="w-full"
-          disabled={takeOver.isPending}
-          onClick={() => {
-            const tab = window.open("", "_blank");
-            if (tab) tab.opener = null;
-            takeOver.mutate(tab);
-          }}
-        >
-          <ExternalLink className="size-4" />
-          {t("takeOverBrowser")}
-        </Button>
-      </div>
-    </section>
+        <CollapsibleContent className="space-y-3 px-4 pb-4">
+          <div className="min-w-0">
+            <p className="truncate font-medium text-sm">{title}</p>
+            <p className="truncate text-muted-foreground text-xs">
+              {hostOf(page.url)}
+            </p>
+          </div>
+          <img
+            src={`${BROWSER_SCREENSHOT_URL}?at=${updatedAt}`}
+            alt={t("browserPicture", { title })}
+            className="w-full rounded-lg border bg-background"
+          />
+          <div className="grid grid-cols-[3fr_1fr] gap-2">
+            <Button
+              className="w-full"
+              disabled={takeOver.isPending}
+              onClick={() => {
+                const tab = window.open("", "_blank");
+                if (tab) tab.opener = null;
+                takeOver.mutate(tab);
+              }}
+            >
+              <ExternalLink className="size-4" />
+              {t("takeOverBrowser")}
+            </Button>
+            <Action
+              tooltip={t("closeBrowser")}
+              variant="destructive"
+              size="default"
+              className="w-full bg-destructive text-white hover:bg-destructive/85"
+              disabled={close.isPending}
+              onClick={() => close.mutate()}
+            >
+              <Power className="size-4" />
+            </Action>
+          </div>
+        </CollapsibleContent>
+      </section>
+    </Collapsible>
   );
 }
 

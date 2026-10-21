@@ -1,10 +1,20 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { BrowserView } from "~/components/chat/browser-view";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
-import { AlertCircle, ListChecks, Loader2 } from "~/components/icons";
+import {
+  AlertCircle,
+  ChevronRight,
+  ListChecks,
+  Loader2,
+} from "~/components/icons";
 import { Button } from "~/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "~/components/ui/collapsible";
 import { pim } from "~/lib/pim-api";
 import { browserQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -64,8 +74,9 @@ export function SummaryToggle({ className }: { className?: string }) {
 /**
  * A box beside a chat (above it on phones) with a quick summary of it and
  * its next steps, from the utility model, and below it, while it's open,
- * the browser the person's agents share. The thread makes room for it. Nothing is written while it is closed. Open,
- * it asks again only when the chat has settled with new entries (`entries`),
+ * the browser the person's agents share. The thread makes room for it. Nothing is
+ * written until the summary dropdown is open. While open, it asks again only
+ * when the chat has settled with new entries (`entries`),
  * and Pim writes a new summary only if something more was said.
  */
 export function SummaryBox({
@@ -79,10 +90,11 @@ export function SummaryBox({
 }) {
   const { t } = useI18n();
   const [open] = useSummaryOpen();
+  const [summaryOpen, setSummaryOpen] = useState(false);
   const summary = useQuery({
     queryKey: ["summary", sessionId, entries],
     queryFn: () => pim.summary(sessionId),
-    enabled: open && settled && entries > 0,
+    enabled: open && summaryOpen && settled && entries > 0,
     staleTime: Number.POSITIVE_INFINITY,
     placeholderData: keepPreviousData,
     retry: false,
@@ -98,36 +110,41 @@ export function SummaryBox({
   return (
     <aside className="order-first flex max-h-[45%] shrink-0 flex-col px-3 pt-3 pb-2 md:order-none md:max-h-none md:w-80 md:pb-3 md:pl-0">
       <div className="fade-in-0 min-h-0 animate-in overflow-y-auto rounded-[18px] border bg-muted/40 duration-150">
-        <h2 className="flex items-center gap-2 px-4 pt-3.5 pb-1 text-[13px] text-muted-foreground">
-          {t("summary")}
-          {summary.isFetching && summary.data !== undefined && (
-            <Loader2
-              className="size-3 animate-spin"
-              aria-label={t("summarizing")}
-            />
-          )}
-        </h2>
-        <div className="px-4 pb-4 text-sm">
-          {entries === 0 || summary.data === null ? (
-            <p className="text-muted-foreground">{t("nothingToSummarize")}</p>
-          ) : summary.data !== undefined ? (
-            <Markdown
-              text={summary.data}
-              untrusted
-              className="text-sm leading-relaxed [&_h1]:text-sm [&_h2]:text-sm [&_h3]:text-sm"
-            />
-          ) : summary.error ? (
-            <p className="flex items-start gap-2 text-destructive">
-              <AlertCircle className="mt-0.5 size-4 shrink-0" />
-              {summary.error.message}
-            </p>
-          ) : (
-            <p className="flex items-center gap-2 text-muted-foreground">
-              <Loader2 className="size-4 animate-spin" />
-              {t("summarizing")}
-            </p>
-          )}
-        </div>
+        <Collapsible open={summaryOpen} onOpenChange={setSummaryOpen}>
+          <h2>
+            <CollapsibleTrigger className="group flex w-full items-center gap-2 px-4 py-3.5 text-left text-[13px] text-muted-foreground hover:text-foreground">
+              <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
+              {t("summary")}
+              {summary.isFetching && summary.data !== undefined && (
+                <Loader2
+                  className="size-3 animate-spin"
+                  aria-label={t("summarizing")}
+                />
+              )}
+            </CollapsibleTrigger>
+          </h2>
+          <CollapsibleContent className="px-4 pb-4 text-sm">
+            {entries === 0 || summary.data === null ? (
+              <p className="text-muted-foreground">{t("nothingToSummarize")}</p>
+            ) : summary.data !== undefined ? (
+              <Markdown
+                text={summary.data}
+                untrusted
+                className="text-sm leading-relaxed [&_h1]:text-sm [&_h2]:text-sm [&_h3]:text-sm"
+              />
+            ) : summary.error ? (
+              <p className="flex items-start gap-2 text-destructive">
+                <AlertCircle className="mt-0.5 size-4 shrink-0" />
+                {summary.error.message}
+              </p>
+            ) : (
+              <p className="flex items-center gap-2 text-muted-foreground">
+                <Loader2 className="size-4 animate-spin" />
+                {t("summarizing")}
+              </p>
+            )}
+          </CollapsibleContent>
+        </Collapsible>
         {page && <BrowserView page={page} updatedAt={browser.dataUpdatedAt} />}
       </div>
     </aside>

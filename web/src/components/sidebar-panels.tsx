@@ -243,6 +243,15 @@ function NotificationRow({
   const unread = notification.readAt === null;
   const content = (
     <>
+      {notification.agent ? (
+        <AgentIcon agent={notification.agent} tile className="size-8" />
+      ) : (
+        <img
+          src="/icon-192.png"
+          alt=""
+          className="size-8 shrink-0 rounded-lg"
+        />
+      )}
       <span className="min-w-0 flex-1">
         <span className="block truncate">{notification.title}</span>
         <time
@@ -275,16 +284,12 @@ function NotificationRow({
             if (unread) onSeen(notification.id);
             onNavigate?.();
           }}
-          className={cn(ROW_CLASS, "items-start gap-2")}
+          className={ROW_CLASS}
         >
           {content}
         </Link>
       ) : (
-        <div
-          className={cn(ROW_CLASS, "items-start gap-2 hover:bg-transparent")}
-        >
-          {content}
-        </div>
+        <div className={cn(ROW_CLASS, "hover:bg-transparent")}>{content}</div>
       )}
     </li>
   );

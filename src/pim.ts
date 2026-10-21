@@ -1522,9 +1522,9 @@ export class Pim extends DurableAgent<Env> {
 
 	async deliverNotification(notification: Notification, options: { sockets?: boolean } = {}): Promise<void> {
 		if (this.#closed()) return;
-		const shown = this.#publicSession(notification);
+		const shown = this.#publicNotification(notification);
 		if (options.sockets !== false) this.broadcastMessage({ type: "notification", notification: shown });
-		await this.#pushNotification(shown);
+		await this.#pushNotification(notification);
 	}
 
 	/** This deployment's VAPID keys, made the first time a browser asks to subscribe. */
@@ -1545,11 +1545,10 @@ export class Pim extends DurableAgent<Env> {
 	async pushReply(payload: { session: string; at: number; body: string }): Promise<void> {
 		const info = this.store.sessionInfo(payload.session);
 		if (this.#closed() || !info?.unread || info.responseAt !== payload.at || this.#hiddenSessions().has(payload.session)) return;
-		const session = this.store.publicId(payload.session);
 		await this.#pushNotification({
 			// The same reply pushed twice shows once.
-			id: `reply-${session}-${payload.at}`,
-			session,
+			id: `reply-${this.store.publicId(payload.session)}-${payload.at}`,
+			session: payload.session,
 			title: info.title ?? this.#agentRef(payload.session)?.name ?? "Pim",
 			body: payload.body,
 			reply: true,
@@ -1561,13 +1560,14 @@ export class Pim extends DurableAgent<Env> {
 	 * app closed. A `reply` shows unless its own chat is on screen; anything
 	 * else shows only while the app is not, since the app shows it itself.
 	 */
-	async #pushNotification({ id, session, title, body, reply }: Pick<Notification, "id" | "session" | "title" | "body"> & { reply?: boolean }): Promise<void> {
+	async #pushNotification(notification: Pick<Notification, "id" | "session" | "title" | "body"> & { reply?: boolean }): Promise<void> {
 		const subscriptions = this.store.pushSubscriptions();
 		if (subscriptions.length === 0) return;
 		const keys = await this.#vapidKeys();
 		const subject = this.deployment().publicUrl ?? "https://pim.invalid";
+		const { id, session, title, body, reply, agent } = this.#publicNotification(notification);
 		// A push message holds about 4 KB; the full text is in the app.
-		const message = { id, session, title: title.slice(0, 120), body: body.slice(0, 500), ...(reply ? { reply } : {}) };
+		const message = { id, session, agent, title: title.slice(0, 120), body: body.slice(0, 500), ...(reply ? { reply } : {}) };
 		await Promise.all(
 			subscriptions.map(async (subscription) => {
 				try {
@@ -3347,6 +3347,14 @@ export class Pim extends DurableAgent<Env> {
 		return record.session === null ? record : { ...record, session: this.store.publicId(record.session) };
 	}
 
+	/** Notifications carry the look of their chat's agent, but no private instructions or settings. */
+	#publicNotification<T extends { readonly session: string | null }>(notification: T) {
+		const agent = notification.session !== null && !this.visits.bySession(notification.session) && this.store.sessionInfo(notification.session)
+			? this.agents.ofSession(notification.session)
+			: null;
+		return { ...this.#publicSession(notification), agent: agent ? { id: agent.id, icon: agent.icon, symbol: agent.symbol, color: agent.color } : null };
+	}
+
 	/** An artifact as it leaves the space. One a task made belongs to the chat the task began in, where the person can open it beside the chat. */
 	#publicArtifact<T extends { readonly session: string | null }>(artifact: T): T {
 		const session = artifact.session === null ? null : (this.#tasks.of(artifact.session)?.root ?? artifact.session);
@@ -4827,7 +4835,7 @@ export class Pim extends DurableAgent<Env> {
 			"GET",
 			"/notifications",
 			(_params, _request, url) => ({
-				notifications: this.store.notifications({ unread: url.searchParams.get("unread") === "true" }).map((notification) => this.#publicSession(notification)),
+				notifications: this.store.notifications({ unread: url.searchParams.get("unread") === "true" }).map((notification) => this.#publicNotification(notification)),
 			}),
 		],
 		[
@@ -4836,7 +4844,7 @@ export class Pim extends DurableAgent<Env> {
 			({ id }) => {
 				if (!this.store.notification(id!)) throw new HttpError(404, `No notification ${id}`);
 				this.store.markNotificationRead(id!);
-				return this.#publicSession(this.store.notification(id!)!);
+				return this.#publicNotification(this.store.notification(id!)!);
 			},
 		],
 	];

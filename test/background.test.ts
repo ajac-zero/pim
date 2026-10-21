@@ -282,26 +282,28 @@ describe("sending to the person", () => {
 	});
 
 	it("tells every connected socket about a notification", async () => {
-		const { body: other } = await post("/sessions");
+		const { body: agent } = await post("/agents", { name: "Travel", instructions: "Plan trips.", symbol: "plane", color: "teal" });
+		const { body: other } = await post("/sessions", { agent: agent.id });
 		// Sockets on different sessions both receive it.
 		const root = await connect();
 		const elsewhere = await connect(other.id);
 
 		await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) =>
-			instance.deliverNotification(instance.store.addNotification({ id: crypto.randomUUID(), session: "1", title: "Price drop", body: "Your flight is $80 cheaper." })),
+			instance.deliverNotification(instance.store.addNotification({ id: crypto.randomUUID(), session: instance.store.sessionOf(other.id)!, title: "Price drop", body: "Your flight is $80 cheaper." })),
 		);
 
 		for (const { received } of [root, elsewhere]) {
 			await vi.waitFor(() => expect(received.some((message) => message.type === "notification")).toBe(true));
 		}
 		const pushed = root.received.find((message) => message.type === "notification");
-		expect(pushed.notification).toMatchObject({ title: "Price drop", body: "Your flight is $80 cheaper.", session: ROOT });
+		const look = { id: agent.id, icon: null, symbol: "plane", color: "teal" };
+		expect(pushed.notification).toMatchObject({ title: "Price drop", body: "Your flight is $80 cheaper.", session: other.id, agent: look });
 
 		expect((await api("/notifications?unread=true")).body.notifications).toHaveLength(1);
-		await post(`/notifications/${pushed.notification.id}/read`);
+		expect((await post(`/notifications/${pushed.notification.id}/read`)).body.agent).toEqual(look);
 		expect((await api("/notifications?unread=true")).body.notifications).toEqual([]);
 		expect((await api("/notifications")).body.notifications).toContainEqual(
-			expect.objectContaining({ id: pushed.notification.id, readAt: expect.any(Number) }),
+			expect.objectContaining({ id: pushed.notification.id, readAt: expect.any(Number), agent: look }),
 		);
 		root.socket.close();
 		elsewhere.socket.close();
@@ -394,7 +396,8 @@ describe("web push", () => {
 	it("pushes a reply nobody has read, and not one that was read", async () => {
 		const phone = await browser("https://push.example/phone");
 		expect((await api("/push/subscription", { method: "PUT", body: JSON.stringify(phone.subscription) })).status).toBe(200);
-		const { body: chat } = await post("/sessions", { title: "Lisbon trip" });
+		const { body: agent } = await post("/agents", { name: "Planner", instructions: "Plan trips.", symbol: "🚂", color: "orange" });
+		const { body: chat } = await post("/sessions", { title: "Lisbon trip", agent: agent.id });
 		const stub = env.Pim.getByName(OWNER);
 		/** Runs the reply checks still due, as their alarm would, and returns what reached the phone. */
 		const runChecks = async () => {
@@ -415,7 +418,7 @@ describe("web push", () => {
 
 		faux.setResponses([toolUse("send_to_user", { message: "Booked the 9:40 to Lisbon." })]);
 		await say("Book the train.", chat.id);
-		expect(await runChecks()).toEqual([{ id: expect.any(String), session: chat.id, title: "Lisbon trip", body: "Booked the 9:40 to Lisbon.", reply: true }]);
+		expect(await runChecks()).toEqual([{ id: expect.any(String), session: chat.id, title: "Lisbon trip", body: "Booked the 9:40 to Lisbon.", reply: true, agent: { id: agent.id, icon: null, symbol: "🚂", color: "orange" } }]);
 
 		// Read on another device before the check: nothing to push.
 		faux.setResponses([toolUse("send_to_user", { message: "Seat 42A." })]);

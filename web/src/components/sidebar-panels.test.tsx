@@ -68,6 +68,7 @@ it("shows only unseen notification titles, without their body previews", async (
     {
       id: "new",
       session: "trip-chat",
+      agent: { id: "planner", icon: 42, symbol: null, color: null },
       title: "Your trip is ready",
       body: "A long preview that belongs in the chat instead.",
       createdAt: 0,
@@ -76,10 +77,20 @@ it("shows only unseen notification titles, without their body previews", async (
     {
       id: "old",
       session: null,
+      agent: null,
       title: "Already seen",
       body: "Old preview",
       createdAt: 0,
       readAt: 1,
+    },
+    {
+      id: "system",
+      session: null,
+      agent: null,
+      title: "Account notice",
+      body: "A system notice.",
+      createdAt: 0,
+      readAt: null,
     },
   ]);
   const root = createRootRoute({ component: NotificationsPanel });
@@ -100,6 +111,8 @@ it("shows only unseen notification titles, without their body previews", async (
   );
   expect(html).toContain("Your trip is ready");
   expect(html).toContain('href="/chat/trip-chat"');
+  expect(html).toContain('src="/api/agents/planner/icon?v=42"');
+  expect(html).toContain('src="/icon-192.png"');
   expect(html).not.toContain("A long preview");
   expect(html).not.toContain("Already seen");
   client.clear();

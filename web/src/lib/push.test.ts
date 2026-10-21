@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { enablePush, pushEnabled } from "~/lib/push";
 
@@ -141,4 +143,123 @@ describe("push registration", () => {
       expect(registered).toBeNull();
     },
   );
+});
+
+describe("push alerts", () => {
+  const worker = readFileSync(
+    new URL("../../public/sw.js", import.meta.url),
+    "utf8",
+  );
+
+  async function push(
+    agent: unknown,
+    fetchImage: typeof fetch,
+    visible = false,
+  ) {
+    let receive: (event: unknown) => void = () => {};
+    let finished: Promise<void> | undefined;
+    let alert: { title: string; options: NotificationOptions } | undefined;
+    runInNewContext(worker, {
+      self: {
+        addEventListener: (type: string, listener: typeof receive) => {
+          if (type === "push") receive = listener;
+        },
+        clients: {
+          matchAll: async () =>
+            visible ? [{ visibilityState: "visible" }] : [],
+        },
+        registration: {
+          showNotification: async (
+            title: string,
+            options: NotificationOptions,
+          ) => {
+            alert = { title, options };
+          },
+        },
+      },
+      fetch: fetchImage,
+      Uint8Array,
+      btoa,
+    });
+    receive({
+      data: {
+        json: () => ({
+          id: "notice",
+          session: "trip",
+          title: "Price drop",
+          body: "$80 cheaper",
+          agent,
+        }),
+      },
+      waitUntil: (promise: Promise<void>) => {
+        finished = promise;
+      },
+    });
+    await finished;
+    return alert;
+  }
+
+  it("shows the agent's private uploaded image and keeps the chat destination", async () => {
+    const image = vi.fn<typeof fetch>();
+    const alert = await push({ id: "planner", icon: 42 }, image);
+    expect(alert).toEqual({
+      title: "Price drop",
+      options: {
+        body: "$80 cheaper",
+        icon: "/api/agents/planner/icon?v=42",
+        tag: "notice",
+        data: { url: "/chat/trip" },
+      },
+    });
+  });
+
+  it.each(["plane", "🏃", null, "constructor"])(
+    "shows the agent's symbol %s as an SVG",
+    async (symbol) => {
+      const image = vi.fn<typeof fetch>().mockResolvedValue(
+        Response.json({
+          symbols: {
+            plane: '<svg data-symbol="plane"/>',
+            bot: '<svg data-symbol="bot"/>',
+          },
+          colors: { teal: "#118c74", primary: "#2e6bd6" },
+        }),
+      );
+      const alert = await push(
+        { id: "planner", icon: null, symbol, color: "teal" },
+        image,
+      );
+      const icon = alert?.options.icon ?? "";
+      const svg = decodeURIComponent(icon.slice(icon.indexOf(",") + 1));
+      expect(icon).toMatch(/^data:image\/svg\+xml,/);
+      expect(svg).toContain('color="#118c74"');
+      expect(svg).toContain(
+        symbol === "🏃"
+          ? "🏃</text>"
+          : `data-symbol="${symbol === "plane" ? "plane" : "bot"}"`,
+      );
+    },
+  );
+
+  it("keeps system and older pushes working with Pim's icon", async () => {
+    const image = vi.fn<typeof fetch>();
+    expect((await push(null, image))?.options.icon).toBe("/icon-192.png");
+    expect((await push(undefined, image))?.options.icon).toBe("/icon-192.png");
+    expect(image).not.toHaveBeenCalled();
+  });
+
+  it("still alerts when its icon cannot be loaded", async () => {
+    const image = vi.fn<typeof fetch>().mockRejectedValue(new Error("Offline"));
+    expect(
+      (await push({ id: "planner", icon: null }, image))?.options.icon,
+    ).toBe("/icon-192.png");
+  });
+
+  it("does not load an icon or show a duplicate alert while the app is visible", async () => {
+    const image = vi.fn<typeof fetch>();
+    expect(
+      await push({ id: "planner", icon: 42 }, image, true),
+    ).toBeUndefined();
+    expect(image).not.toHaveBeenCalled();
+  });
 });

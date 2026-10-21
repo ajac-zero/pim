@@ -775,6 +775,7 @@ export type ToolPermissionInfo = {
 export type PimNotification = {
   id: string;
   session: string | null;
+  agent: Pick<Agent, "id" | "icon" | "symbol" | "color"> | null;
   title: string;
   body: string;
   createdAt: number;

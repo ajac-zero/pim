@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
 import { memo, type ReactNode, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AppIcon } from "~/components/app-icon";
 import { Markdown } from "~/components/chat/markdown";
 import { ReplyImages } from "~/components/chat/reply-blocks";
+import { FileLink } from "~/components/file-link";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
   Bell,
@@ -710,9 +710,8 @@ export const GeneratedImage = memo(function GeneratedImage({
     );
   }
   return (
-    <Link
-      to="/files"
-      search={{ path }}
+    <FileLink
+      path={path}
       title={prompt}
       className="mb-4 block w-fit max-w-full overflow-hidden rounded-2xl border transition-opacity hover:opacity-90"
     >
@@ -722,7 +721,7 @@ export const GeneratedImage = memo(function GeneratedImage({
         onError={() => setMissing(true)}
         className="block max-h-96 max-w-full object-contain sm:max-w-sm"
       />
-    </Link>
+    </FileLink>
   );
 });
 

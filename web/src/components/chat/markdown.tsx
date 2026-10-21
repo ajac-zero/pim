@@ -18,6 +18,7 @@ import {
   isReplyBlock,
   ReplyBlock,
 } from "~/components/chat/reply-blocks";
+import { FileLink } from "~/components/file-link";
 import { useI18n } from "~/components/i18n";
 import {
   CodeBlock,
@@ -176,6 +177,18 @@ function artifactOf(
 
 const LINK_CLASS =
   "text-link underline underline-offset-2 transition-colors hover:decoration-foreground";
+
+/** A file-viewer or content link in this app; explicit downloads stay downloads. */
+function fileOf(href: string | undefined): string | undefined {
+  const match = href
+    ? /^(https?:\/\/[^/]+)?\/(?:files|api\/files\/content)\?([^#]*)/.exec(href)
+    : null;
+  if (!match || !inApp(match[1])) return undefined;
+  const search = new URLSearchParams(match[2]);
+  if (search.has("download")) return undefined;
+  const path = search.get("path");
+  return path?.startsWith(`${FILES_ROOT}/`) ? path : undefined;
+}
 
 /**
  * An artifact an agent's message links to, opened in the canvas beside the
@@ -538,6 +551,10 @@ export const Markdown = memo(function Markdown({
               <ArtifactLink {...(artifactOf(href) as { id: string })}>
                 {children}
               </ArtifactLink>
+            ) : !safe && fileOf(href) ? (
+              <FileLink path={fileOf(href) as string} className={tone.link}>
+                {children}
+              </FileLink>
             ) : safe && !safeLink(href) ? (
               <span>{children}</span>
             ) : (

@@ -15,6 +15,7 @@ import { Composer } from "~/components/chat/composer";
 import { CopyConversation } from "~/components/chat/copy-conversation";
 import { SummaryBox, SummaryToggle } from "~/components/chat/summary";
 import { ChatTabs, useChatDrop } from "~/components/chat/tabs";
+import { TaskView } from "~/components/chat/tasks";
 import { Thread } from "~/components/chat/thread";
 import { useI18n } from "~/components/i18n";
 import { ExternalLink, Loader2, Users } from "~/components/icons";
@@ -30,8 +31,8 @@ import { cn } from "~/lib/utils";
 /** The canvas's width, as a percentage of the page beside the sidebar, which the person can drag. */
 const CANVAS_WIDTH = { default: 56, min: 30, max: 75 };
 
-/** An artifact open in the canvas beside the chat, and which of its versions. */
-type ChatSearch = { artifact?: string; v?: number };
+/** What the canvas beside the chat shows: an artifact and which of its versions, or one of the chat's tasks. */
+type ChatSearch = { artifact?: string; v?: number; task?: string };
 
 export const Route = createFileRoute("/chat/$sessionId")({
   validateSearch: (search: Record<string, unknown>): ChatSearch => {
@@ -40,6 +41,8 @@ export const Route = createFileRoute("/chat/$sessionId")({
       ...(typeof search.artifact === "string" &&
         search.artifact && { artifact: search.artifact }),
       ...(Number.isSafeInteger(v) && v > 0 && { v }),
+      ...(typeof search.task === "string" &&
+        search.task && { task: search.task }),
     };
   },
   loader: async ({ context, params, preload }) => {
@@ -74,14 +77,14 @@ function SessionNotFound() {
 function ChatPage() {
   const { t } = useI18n();
   const { sessionId } = Route.useParams();
-  const { artifact, v } = Route.useSearch();
+  const { artifact, v, task } = Route.useSearch();
   const navigate = useNavigate();
   const page = useRef<HTMLElement>(null);
   const [canvasWidth, setCanvasWidth] = useStoredSize(
     "pim-canvas-width",
     CANVAS_WIDTH.default,
   );
-  const showArtifact = (search: ChatSearch) =>
+  const showCanvas = (search: ChatSearch) =>
     void navigate({
       to: "/chat/$sessionId",
       params: { sessionId },
@@ -276,16 +279,17 @@ function ChatPage() {
               </div>
             </div>
           </div>
-          {ready && !artifact && (
+          {ready && !artifact && !task && (
             <SummaryBox
               sessionId={sessionId}
               entries={view.entries.length}
               settled={!view.running}
+              visit={!!session?.visit}
             />
           )}
         </div>
       </div>
-      {artifact && (
+      {(artifact || task) && (
         // The canvas: beside the chat, as wide as the person last made it, or over it on phones.
         <aside
           style={{ "--canvas-width": `${canvasWidth}%` } as CSSProperties}
@@ -308,14 +312,25 @@ function ChatPage() {
             }}
             className="hidden md:block"
           />
-          <ArtifactView
-            key={artifact}
-            artifactId={artifact}
-            version={v}
-            onVersion={(version) => showArtifact({ artifact, v: version })}
-            onDeleted={() => showArtifact({})}
-            onClose={() => showArtifact({})}
-          />
+          {artifact ? (
+            <ArtifactView
+              key={artifact}
+              artifactId={artifact}
+              version={v}
+              onVersion={(version) => showCanvas({ artifact, v: version })}
+              onDeleted={() => showCanvas({})}
+              onClose={() => showCanvas({})}
+            />
+          ) : (
+            task && (
+              <TaskView
+                key={task}
+                sessionId={sessionId}
+                taskId={task}
+                onClose={() => showCanvas({})}
+              />
+            )
+          )}
         </aside>
       )}
     </main>

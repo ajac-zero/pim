@@ -2,6 +2,7 @@ import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useState, useSyncExternalStore } from "react";
 import { BrowserView } from "~/components/chat/browser-view";
 import { Markdown } from "~/components/chat/markdown";
+import { TaskList } from "~/components/chat/tasks";
 import { useI18n } from "~/components/i18n";
 import {
   AlertCircle,
@@ -73,8 +74,8 @@ export function SummaryToggle({ className }: { className?: string }) {
 
 /**
  * A box beside a chat (above it on phones) with a quick summary of it and
- * its next steps, from the utility model, and below it, while it's open,
- * the browser the person's agents share. The thread makes room for it. Nothing is
+ * its next steps, from the utility model; below it, the tasks the chat led
+ * to, if any, and while it's open, the browser the person's agents share. The thread makes room for it. Nothing is
  * written until the summary dropdown is open. While open, it asks again only
  * when the chat has settled with new entries (`entries`),
  * and Pim writes a new summary only if something more was said.
@@ -83,10 +84,13 @@ export function SummaryBox({
   sessionId,
   entries,
   settled,
+  visit,
 }: {
   sessionId: string;
   entries: number;
   settled: boolean;
+  /** A conversation with someone else's space, whose tasks aren't yours to see. */
+  visit: boolean;
 }) {
   const { t } = useI18n();
   const [open] = useSummaryOpen();
@@ -98,6 +102,12 @@ export function SummaryBox({
     staleTime: Number.POSITIVE_INFINITY,
     placeholderData: keepPreviousData,
     retry: false,
+  });
+  // The same query as the chat's task cards, which keeps it up to date.
+  const tasks = useQuery({
+    queryKey: ["tasks", sessionId],
+    queryFn: () => pim.tasks(sessionId),
+    enabled: open && !visit,
   });
   const browser = useQuery({
     ...browserQuery(),
@@ -145,6 +155,9 @@ export function SummaryBox({
             )}
           </CollapsibleContent>
         </Collapsible>
+        {tasks.data && tasks.data.length > 0 && (
+          <TaskList sessionId={sessionId} tasks={tasks.data} />
+        )}
         {page && <BrowserView page={page} updatedAt={browser.dataUpdatedAt} />}
       </div>
     </aside>

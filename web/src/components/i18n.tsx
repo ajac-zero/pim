@@ -344,6 +344,8 @@ const translations = {
     addMember: "Add member",
     removeTeamMember: "Remove member",
     teamWorking: "{count} working",
+    tasksWorking: "{count} working",
+    tasksWaiting: "{count} waiting for you",
     tasks: "Tasks",
     taskDelegated: "Delegated at {time}",
     jumpToCompletion: "Jump to completion",
@@ -362,6 +364,7 @@ const translations = {
     taskReadOnly:
       "{agent} works on this for {from} and answers it, not you. This is what it did.",
     cancelTask: "Cancel task",
+    taskNotFound: "This task isn't here anymore.",
     cancelTaskConfirm:
       "Cancel this task? Its agent stops, and so do the tasks it handed out.",
     usedTool: "Used {tool}",
@@ -1279,6 +1282,8 @@ const translations = {
     addMember: "Añadir miembro",
     removeTeamMember: "Quitar miembro",
     teamWorking: "{count} trabajando",
+    tasksWorking: "{count} trabajando",
+    tasksWaiting: "{count} esperándote",
     tasks: "Tareas",
     taskDelegated: "Encargada a las {time}",
     jumpToCompletion: "Ir al resultado",
@@ -1297,6 +1302,7 @@ const translations = {
     taskReadOnly:
       "{agent} hace esto para {from} y le responde a él, no a ti. Esto es lo que hizo.",
     cancelTask: "Cancelar tarea",
+    taskNotFound: "Esta tarea ya no está.",
     cancelTaskConfirm:
       "¿Cancelar esta tarea? Su agente se detiene, y también las tareas que encargó.",
     usedTool: "Usó {tool}",

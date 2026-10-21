@@ -3,7 +3,6 @@ import { DurableObject } from "cloudflare:workers";
 import pimConfig from "../pim.config";
 import { HttpError } from "./http";
 import { type CustomProvider, MAX_PROVIDERS, type ProviderInput, prepareProvider } from "./providers";
-import type { TeamMember } from "./agents";
 import { appDirectory, type CustomApp, type DirectoryApp, findSiteIcon, storedApps } from "./extensions/app-directory";
 import { APP_CATEGORIES, type AppCategory } from "./extensions/define";
 import type { ArtifactFile, ArtifactKind } from "./artifacts";
@@ -14,9 +13,11 @@ import type { ArtifactFile, ArtifactKind } from "./artifacts";
  * the instance, apart from the Directory, so browsing never touches accounts.
  *
  * A template is a copy of one of its author's agents when they published it:
- * its name, description, instructions, suggested apps, team and look (its
+ * its name, description, instructions, suggested apps and look (its
  * symbol, color and uploaded icon), never their memory, conversations or
- * credentials. Publishing again replaces it.
+ * credentials. Its contacts come with it, and theirs: copies of the other
+ * agents it hands tasks to, which whoever makes it their own gets too.
+ * Publishing again replaces it.
  *
  * People publish artifacts here too, the same way: a copy of one version,
  * which anyone can open and use, with their own storage, model and tools,
@@ -33,7 +34,27 @@ export type Profile = {
 	readonly bio: string | null;
 };
 
-export type Template = {
+/** Another of the author's agents that comes with one they publish: one of its contacts, or of theirs. */
+export type BundledAgent = {
+	readonly name: string;
+	readonly description: string;
+	readonly instructions: string;
+	readonly apps: readonly string[];
+	readonly blueprint: string | null;
+	readonly symbol: string | null;
+	readonly color: string | null;
+	/** Its contacts, by name, among the agents that come with it. */
+	readonly contacts: readonly string[];
+};
+
+/** An agent's contacts as the gallery keeps them: their names, and every agent that comes with it. */
+export type Contacts = {
+	/** Its own contacts, by name, among `bundle`. */
+	readonly contacts: readonly string[];
+	readonly bundle: readonly BundledAgent[];
+};
+
+export type Template = Contacts & {
 	readonly id: string;
 	/** The author's username. */
 	readonly author: string;
@@ -42,7 +63,6 @@ export type Template = {
 	readonly description: string;
 	readonly instructions: string;
 	readonly apps: readonly string[];
-	readonly team: readonly TeamMember[];
 	/** The blueprint it builds on, or null for none. */
 	readonly blueprint: string | null;
 	/** An icon's name or an emoji, as an agent's; null for the default. */
@@ -56,7 +76,7 @@ export type Template = {
 };
 
 /** The agent everyone starts with, as the admin chose it. */
-export type DefaultAgent = {
+export type DefaultAgent = Contacts & {
 	/** The admin's username. */
 	readonly author: string;
 	/** Which of the admin's agents it is a copy of. */
@@ -65,7 +85,6 @@ export type DefaultAgent = {
 	readonly description: string;
 	readonly instructions: string;
 	readonly apps: readonly string[];
-	readonly team: readonly TeamMember[];
 	readonly blueprint: string | null;
 	readonly symbol: string | null;
 	readonly color: string | null;
@@ -78,13 +97,12 @@ export type DefaultAgent = {
 export type AgentIcon = { readonly type: string; readonly data: ArrayBuffer };
 
 /** One of an author's agents as the gallery copies it. */
-export type PublishedAgent = {
+export type PublishedAgent = Contacts & {
 	readonly id: string;
 	readonly name: string;
 	readonly description: string;
 	readonly instructions: string;
 	readonly apps: readonly string[];
-	readonly team: readonly TeamMember[];
 	readonly blueprint: string | null;
 	readonly symbol: string | null;
 	readonly color: string | null;
@@ -202,7 +220,31 @@ type Row = Record<string, SqlStorageValue>;
 
 const optional = (value: SqlStorageValue | undefined) => (value === null || value === undefined ? null : String(value));
 
+/**
+ * The contacts kept with a template or the agent everyone starts with.
+ * Published when agents had teams, its members come with it as agents of
+ * their own, with its apps and blueprint.
+ */
+function contactsOf(row: Row, apps: readonly string[]): Contacts {
+	const team = JSON.parse(String(row.team ?? "[]")) as { name: string; instructions: string }[];
+	if (team.length === 0) return { contacts: JSON.parse(String(row.contacts ?? "[]")) as string[], bundle: JSON.parse(String(row.bundle ?? "[]")) as BundledAgent[] };
+	return {
+		contacts: team.map((member) => member.name),
+		bundle: team.map((member) => ({
+			name: member.name,
+			description: (member.instructions.trim().split(/\r?\n/)[0] ?? "").slice(0, MAX_BIO),
+			instructions: member.instructions,
+			apps,
+			blueprint: optional(row.blueprint),
+			symbol: null,
+			color: optional(row.color),
+			contacts: [],
+		})),
+	};
+}
+
 function templateOf(row: Row, directory: () => readonly DirectoryApp[]): Template {
+	const apps = storedApps(JSON.parse(String(row.apps)) as unknown[], directory);
 	return {
 		id: String(row.id),
 		author: String(row.username),
@@ -210,8 +252,8 @@ function templateOf(row: Row, directory: () => readonly DirectoryApp[]): Templat
 		name: String(row.name),
 		description: String(row.description),
 		instructions: String(row.instructions),
-		apps: storedApps(JSON.parse(String(row.apps)) as unknown[], directory),
-		team: JSON.parse(String(row.team ?? "[]")) as TeamMember[],
+		apps,
+		...contactsOf(row, apps),
 		blueprint: optional(row.blueprint),
 		symbol: optional(row.symbol),
 		color: optional(row.color),
@@ -228,7 +270,7 @@ const summaryOf = (row: Row, directory: () => readonly DirectoryApp[]): Template
 
 // Every column but the icon's bytes, which only its own route reads.
 const WITH_AUTHOR =
-	"SELECT t.id, t.owner_id, t.username, t.agent_id, t.name, t.description, t.instructions, t.apps, t.team, t.blueprint, t.symbol, t.color, t.icon_data IS NOT NULL AS has_icon, t.published_at, t.uses, p.display_name FROM templates t LEFT JOIN profiles p ON p.owner_id = t.owner_id";
+	"SELECT t.id, t.owner_id, t.username, t.agent_id, t.name, t.description, t.instructions, t.apps, t.team, t.contacts, t.bundle, t.blueprint, t.symbol, t.color, t.icon_data IS NOT NULL AS has_icon, t.published_at, t.uses, p.display_name FROM templates t LEFT JOIN profiles p ON p.owner_id = t.owner_id";
 
 // Every column but the files, which only opening one reads.
 const PUBLISHED_ARTIFACT =
@@ -278,7 +320,8 @@ const copyOf = (agent: PublishedAgent) => [
 	agent.description,
 	agent.instructions,
 	JSON.stringify(agent.apps),
-	JSON.stringify(agent.team),
+	JSON.stringify(agent.contacts),
+	JSON.stringify(agent.bundle),
 	agent.blueprint,
 	agent.symbol,
 	agent.color,
@@ -305,6 +348,9 @@ export class Gallery extends DurableObject<Env> {
 		for (const table of ["templates", "default_agent"]) {
 			const columns = ctx.storage.sql.exec(`PRAGMA table_info(${table})`).toArray().map((row) => String(row.name));
 			if (!columns.includes("team")) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN team TEXT NOT NULL DEFAULT '[]'`);
+			for (const column of ["contacts", "bundle"]) {
+				if (!columns.includes(column)) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT NOT NULL DEFAULT '[]'`);
+			}
 			// Published before extensions, they all built on Pim's own assistant.
 			if (!columns.includes("blueprint")) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN blueprint TEXT DEFAULT '${ASSISTANT_BLUEPRINT}'`);
 			for (const column of ["symbol", "color", "icon_type", "icon_data"]) {
@@ -447,8 +493,8 @@ export class Gallery extends DurableObject<Env> {
 		}
 		const id = known ? String(known.id) : `t_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 		this.#sql(
-			`INSERT INTO templates (id, owner_id, username, agent_id, name, description, instructions, apps, team, blueprint, symbol, color, icon_type, icon_data, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (id) DO UPDATE SET name = excluded.name, description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, blueprint = excluded.blueprint,
+			`INSERT INTO templates (id, owner_id, username, agent_id, name, description, instructions, apps, contacts, bundle, blueprint, symbol, color, icon_type, icon_data, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (id) DO UPDATE SET name = excluded.name, description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = '[]', contacts = excluded.contacts, bundle = excluded.bundle, blueprint = excluded.blueprint,
 			symbol = excluded.symbol, color = excluded.color, icon_type = excluded.icon_type, icon_data = excluded.icon_data, published_at = excluded.published_at`,
 			id,
 			ownerId,
@@ -611,14 +657,15 @@ export class Gallery extends DurableObject<Env> {
 	defaultAgent(): DefaultAgent | null {
 		const [row] = this.#sql("SELECT * FROM default_agent WHERE id = 1").toArray();
 		if (!row) return null;
+		const apps = storedApps(JSON.parse(String(row.apps)) as unknown[], this.#directory);
 		return {
 			author: String(row.username),
 			agentId: String(row.agent_id),
 			name: String(row.name),
 			description: String(row.description),
 			instructions: String(row.instructions),
-			apps: storedApps(JSON.parse(String(row.apps)) as unknown[], this.#directory),
-			team: JSON.parse(String(row.team ?? "[]")) as TeamMember[],
+			apps,
+			...contactsOf(row, apps),
 			blueprint: optional(row.blueprint),
 			symbol: optional(row.symbol),
 			color: optional(row.color),
@@ -630,9 +677,9 @@ export class Gallery extends DurableObject<Env> {
 	/** The admin makes a copy of one of their agents the one everyone starts with. Choosing again replaces it. */
 	setDefaultAgent(ownerId: string, username: string, agent: PublishedAgent): DefaultAgent {
 		this.#sql(
-			`INSERT INTO default_agent (id, owner_id, username, agent_id, name, description, instructions, apps, team, blueprint, symbol, color, icon_type, icon_data, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO default_agent (id, owner_id, username, agent_id, name, description, instructions, apps, contacts, bundle, blueprint, symbol, color, icon_type, icon_data, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET owner_id = excluded.owner_id, username = excluded.username, agent_id = excluded.agent_id, name = excluded.name,
-			description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = excluded.team, blueprint = excluded.blueprint,
+			description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, team = '[]', contacts = excluded.contacts, bundle = excluded.bundle, blueprint = excluded.blueprint,
 			symbol = excluded.symbol, color = excluded.color, icon_type = excluded.icon_type, icon_data = excluded.icon_data, updated_at = excluded.updated_at`,
 			ownerId,
 			username,

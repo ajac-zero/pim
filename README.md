@@ -18,7 +18,7 @@ Pim is an open-source home for personal agents that you run yourself. Each perso
 Pim is [pi](https://github.com/earendil-works/pi), the agent harness it runs on, plus **m** for **multi**:
 
 - **Multiplayer.** One Pim serves everyone you invite. Each person has a private space, can let others talk to their agents through circles, and publishes agents and artifacts for the others to find.
-- **Multiagent.** You talk with your majordomo, which hands work to your other agents and tells you what came back. Any agent can have a team working at once.
+- **Multiagent.** You talk with your majordomo, which hands work to your other agents and tells you what came back. Any agent can hand work to its contacts, others of your agents, working at once.
 - **Multidevice.** Use it on desktop or phone, with push notifications. Agents work on a computer you connect, bots use the API, and Claude, ChatGPT and other MCP clients can talk with your majordomo.
 - **Multimodel.** Bring the models you want, hosted or local (see [Models](#models)).
 

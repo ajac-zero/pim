@@ -157,10 +157,10 @@ import {
 	TOOL_PERMISSIONS,
 	type ToolPermission,
 } from "./store";
-import { type Agent, type AgentInput, AgentStore, agentInput, type TeamMember } from "./agents";
+import { type Agent, type AgentInput, AgentStore, agentInput, checkContacts, freeName, MAX_AGENTS } from "./agents";
 import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessages } from "./chat-links";
-import type { AgentIcon, ArtifactToPublish } from "./gallery";
-import { type Delegate, type Role, TASKS_EXTENSION, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
+import type { AgentIcon, ArtifactToPublish, PublishedAgent } from "./gallery";
+import { MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension, withPreferences } from "./majordomo";
 import { Progress } from "./progress";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
@@ -260,7 +260,7 @@ const UTILITY_MODEL_KEY = "utility_model";
 const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
-/** Tools of the space the person talks with that its team members don't get, though their extensions stay. */
+/** Tools of the space the person talks with that an agent at work on a task doesn't get, though their extensions stay. */
 const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, RENAME_AGENT, MANAGE_APPS, WRITE_SKILL]);
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
 /** The admin's apps, as this space last read them from the gallery, and how long before it reads them again. */
@@ -338,19 +338,19 @@ export class Pim extends DurableAgent<Env> {
 	readonly circles = new CircleStore(this.ctx.storage.sql);
 	/** Spaces shared with this space's owner, and their conversations with them. */
 	readonly visits = new VisitStore(this.ctx.storage.sql);
+	/** The tasks agents handed each other, each in a conversation of its own (./tasks.ts); made before the agents, which make their old teams' tasks their own. */
+	readonly #tasks = new TaskStore(this.ctx.storage.sql);
 	/** The owner's agents: each with its own instructions, the majordomo first. */
 	readonly agents = new AgentStore(this.ctx.storage.sql, () => {
 		// The majordomo until the person names it: built on the deployment's default blueprint, or bare.
 		const ref = this.extensions.defaultBlueprint;
 		const blueprint = ref === null ? undefined : this.extensions.blueprint(ref);
-		return { name: "Majordomo", description: "", instructions: "", apps: [], skills: [], team: [], blueprint: blueprint ? ref : null };
+		return { name: "Majordomo", description: "", instructions: "", apps: [], skills: [], contacts: [], blueprint: blueprint ? ref : null };
 	}, () => this.appDirectory());
 	/** The skills the owner's agents wrote for work they do again. */
 	readonly skills = new SkillStore(this.ctx.storage.sql);
 	/** Public links to the owner's chats, each with the copy of its chat it shows. */
 	readonly chatLinks = new ChatLinkStore(this.ctx.storage.sql);
-	/** The tasks agents handed each other, each in a conversation of its own (./tasks.ts). */
-	readonly #tasks = new TaskStore(this.ctx.storage.sql);
 	/** Images the person sent, in R2; their messages keep their URLs. */
 	readonly images = new ImageStore({
 		sql: this.ctx.storage.sql,
@@ -422,8 +422,8 @@ export class Pim extends DurableAgent<Env> {
 		service: (this.env as TelemetryEnv).OTEL_SERVICE_NAME || "pim",
 		instance: this.ctx.id.toString(),
 		agentOf: (conversation) => {
-			const { agent, member } = this.#roleOf(conversation);
-			return member ? { id: `${agent.id}:${member.name}`, name: member.name } : { id: agent.id, name: agent.name };
+			const { agent } = this.#roleOf(conversation);
+			return { id: agent.id, name: agent.name };
 		},
 		idOf: (conversation) => this.store.publicId(conversation),
 	});
@@ -583,11 +583,7 @@ export class Pim extends DurableAgent<Env> {
 			this.registry.install(filesExtension(this.#files));
 			this.registry.install(
 				dashboardExtension({
-					agentOf: (session) => {
-						if (this.visits.bySession(session)) return null;
-						const { agent, member } = this.#roleOf(session);
-						return member ? null : agent;
-					},
+					agentOf: (session) => (this.visits.bySession(session) ? null : this.#roleOf(session).agent),
 					change: (agent, changes) => this.#changeDashboard(agent, changes),
 				}),
 			);
@@ -1218,9 +1214,9 @@ export class Pim extends DurableAgent<Env> {
 			},
 			approvalFiled: (approval, isNew) => this.#approvalFiled(approval, isNew),
 			permission: (approval) => this.#approvalPermission(approval),
-			teamMember: (session) => {
+			taskAgent: (session) => {
 				const task = this.#tasks.of(session);
-				return task && task.kind !== "review" ? { name: task.member ?? this.#roleOf(session).agent.name, session: task.root } : null;
+				return task && task.kind !== "review" ? { name: this.#roleOf(session).agent.name, session: task.root } : null;
 			},
 			widgetsFor: (session) => this.#chatWidgets(session),
 			showWidget: async (session, ref) => {
@@ -1638,7 +1634,7 @@ export class Pim extends DurableAgent<Env> {
 			this.broadcastMessage({ type: "approval", approval: this.#publicApproval(approval) });
 			const notification = this.store.addNotification({
 				id: crypto.randomUUID(),
-				// A team member's request shows in the chat it works for.
+				// The request of an agent at work on a task shows in the chat the work began in.
 				session: approval.member?.session ?? approval.session,
 				title: "Pim needs your approval",
 				body: approval.summary,
@@ -2320,7 +2316,6 @@ export class Pim extends DurableAgent<Env> {
 					batch: call,
 					position: 0,
 					agent: majordomo.id,
-					member: null,
 					task: approval.summary,
 				});
 			}
@@ -2335,10 +2330,8 @@ export class Pim extends DurableAgent<Env> {
 
 	/** What the majordomo reads to decide: who asks, for what, and in what chat. */
 	#reviewRequest(approval: Approval): string {
-		const { agent, member, from } = this.#roleOf(approval.session);
-		const asker = member
-			? `${member.name}, a member of ${agent.name}'s team, working on a task ${from} handed it`
-			: `${agent.name}${agent.description ? ` (${agent.description})` : ""}, ${from === null ? "in a chat the person has with it" : `working on a task ${from} handed it for the person`}`;
+		const { agent, from } = this.#roleOf(approval.session);
+		const asker = `${agent.name}${agent.description ? ` (${agent.description})` : ""}, ${from === null ? "in a chat the person has with it" : `working on a task ${from} handed it for the person`}`;
 		const args = JSON.stringify(approval.args, null, 2);
 		return [
 			`[Approval review ${approval.id}] ${asker}, asks for approval.`,
@@ -2392,53 +2385,48 @@ export class Pim extends DurableAgent<Env> {
 
 	// The owner's agents, and the tasks they hand each other (./tasks.ts).
 
-	/** The agent a conversation talks as, the team member it is, if it is one, and who handed it its task. A review talks as the majordomo. */
+	/** The agent a conversation talks as, and who handed it its task. A review talks as the majordomo. */
 	#roleOf(session: string): Role {
 		const task = this.#tasks.of(session);
-		if (!task) return { agent: this.agents.ofSession(session), member: null, from: null };
-		if (task.kind === "review") return { agent: this.agents.majordomo(), member: null, from: null };
+		if (!task) return { agent: this.agents.ofSession(session), from: null };
+		if (task.kind === "review") return { agent: this.agents.majordomo(), from: null };
 		const agent = this.agents.get(task.agent) ?? this.agents.majordomo();
-		const from = this.#roleOf(task.requester!);
-		const fromName = from.member?.name ?? from.agent.name;
-		if (task.kind === "agent") return { agent, member: null, from: fromName };
-		// A member taken off the team since keeps working on what it was given, with no instructions of its own.
-		const member = agent.team.find((candidate) => candidate.name === task.member) ?? { name: task.member!, instructions: "", tools: null };
-		return { agent, member, from: fromName };
+		return { agent, from: this.#roleOf(task.requester!).agent.name };
 	}
 
 	/**
-	 * Whom a conversation can hand tasks to: the majordomo, the person's
-	 * other agents; an agent, the members of its team. A member hands out none.
+	 * Whom a conversation can hand tasks to: the majordomo, the person's other
+	 * agents; any other agent, its contacts. None of the agents already on the
+	 * chain of tasks that led to it, so work never goes round in a circle, and
+	 * none at all `MAX_TASK_DEPTH` tasks down the chain.
 	 */
-	#delegates(session: string): Delegate[] {
-		if (this.visits.bySession(session)) return [];
-		const { agent, member } = this.#roleOf(session);
-		if (member || this.#tasks.of(session)?.kind === "review") return [];
-		const others = agent.majordomo ? this.agents.list().filter((other) => !other.majordomo) : [];
-		return [...others.map((other) => ({ agent: other, member: null })), ...agent.team.map((teammate) => ({ agent, member: teammate }))];
+	#delegates(session: string): Agent[] {
+		if (this.visits.bySession(session) || this.#tasks.of(session)?.kind === "review") return [];
+		const chain: string[] = [];
+		for (let conversation: string | null = session; conversation !== null; ) {
+			chain.push(this.#roleOf(conversation).agent.id);
+			conversation = this.#tasks.of(conversation)?.requester ?? null;
+		}
+		if (chain.length > MAX_TASK_DEPTH) return [];
+		const { agent } = this.#roleOf(session);
+		const candidates = agent.majordomo ? this.agents.list() : agent.contacts.flatMap((id) => this.agents.get(id) ?? []);
+		return candidates.filter((other) => !other.majordomo && !chain.includes(other.id));
 	}
 
 	/**
 	 * A task's conversation leaves out what only an agent the person talks
 	 * with does: talking to them, scheduling work and watching apps' events
 	 * (both come back to the conversation that asked), and changing agents,
-	 * apps and skills. A member hands out no tasks, and one with a list of
-	 * tools gets only those. App tools switched off for its agent are left out.
+	 * apps and skills. App tools switched off for its agent are left out.
 	 */
-	#taskAgent(agent: Agent, member: TeamMember | null): AgentChange {
+	#taskAgent(agent: Agent): AgentChange {
 		const snapshot = this.registry.snapshot();
 		const off = this.#switchedOff(agent);
-		const removed = [MESSAGING_EXTENSION, SCHEDULE_EXTENSION, ...(member ? [TASKS_EXTENSION] : [])].flatMap((name) => snapshot.extension(name) ?? []);
+		const removed = [MESSAGING_EXTENSION, SCHEDULE_EXTENSION].flatMap((name) => snapshot.extension(name) ?? []);
 		// It works with its agent's abilities and apps.
 		const added = [...this.extensions.abilitiesOf(agent.blueprint), ...this.#appExtensionsOf(agent)].flatMap((name) => snapshot.extension(name) ?? []);
-		const extensions = { add: added, remove: removed };
-		const kept = snapshot
-			.tools()
-			.filter(({ extension, tool }) => !removed.includes(extension) && !LEAD_ONLY_TOOLS.has(tool.name) && !off.has(tool.name))
-			.filter(({ extension }) => !this.#perPim(extension.name) || added.includes(extension));
-		if (member?.tools) return { extensions, tools: kept.filter(({ tool }) => member.tools!.includes(tool.name)).map(({ tool }) => tool) };
 		const left = snapshot.tools().filter(({ tool }) => LEAD_ONLY_TOOLS.has(tool.name) || off.has(tool.name));
-		return { extensions, ...(left.length > 0 ? { tools: { remove: left.map(({ tool }) => tool) } } : {}) };
+		return { extensions: { add: added, remove: removed }, ...(left.length > 0 ? { tools: { remove: left.map(({ tool }) => tool) } } : {}) };
 	}
 
 	/** The names of the app tools switched off for an agent, which its conversations aren't offered. */
@@ -2453,7 +2441,7 @@ export class Pim extends DurableAgent<Env> {
 	 * call finds the tasks it gave, and gives them again only where giving
 	 * didn't finish.
 	 */
-	async #startTasks(requester: string, batch: string, given: { to: Delegate; task: string; continues: Task | null }[]): Promise<Task[]> {
+	async #startTasks(requester: string, batch: string, given: { to: Agent; task: string; continues: Task | null }[]): Promise<Task[]> {
 		const asking = this.#tasks.of(requester);
 		const root = asking?.root ?? requester;
 		const started: Task[] = [];
@@ -2462,15 +2450,14 @@ export class Pim extends DurableAgent<Env> {
 			if (!record) {
 				const conversation = continues?.conversation ?? (await this.#taskConversation(to));
 				record = this.#tasks.start({
-					kind: to.member ? "member" : "agent",
+					kind: "agent",
 					conversation,
 					requester,
 					parent: asking && asking.kind !== "review" ? asking.id : null,
 					root,
 					batch,
 					position,
-					agent: to.agent.id,
-					member: to.member?.name ?? null,
+					agent: to.id,
 					task,
 				});
 			}
@@ -2483,12 +2470,12 @@ export class Pim extends DurableAgent<Env> {
 		return started;
 	}
 
-	/** A new conversation for a task, as the agent or member it is for. */
-	async #taskConversation({ agent, member }: Delegate): Promise<string> {
+	/** A new conversation for a task, as the agent it is for. */
+	async #taskConversation(agent: Agent): Promise<string> {
 		const { id } = await this.harness.sessions.create();
 		await this.harness.session(id).setModel(this.chosenModel());
-		await (await this.harness.conversation(id)).configure(this.#taskAgent(agent, member), BACKGROUND_CONTEXT);
-		if (!member) this.agents.setSession(id, agent.id);
+		await (await this.harness.conversation(id)).configure(this.#taskAgent(agent), BACKGROUND_CONTEXT);
+		this.agents.setSession(id, agent.id);
 		return id;
 	}
 
@@ -2547,7 +2534,7 @@ export class Pim extends DurableAgent<Env> {
 	/** Submits an update `#deliver` marked as being given; again after a restart, which gives it once. */
 	async #giveUpdate(requester: string, batch: string, operation: string): Promise<void> {
 		const tasks = this.#tasks.inBatch(batch);
-		const by = (task: Task) => ({ task, by: task.member ?? this.agents.get(task.agent)?.name ?? "An agent" });
+		const by = (task: Task) => ({ task, by: this.agents.get(task.agent)?.name ?? "An agent" });
 		const text = taskUpdate(
 			tasks.filter((task) => task.update === operation).map(by),
 			tasks.filter((task) => task.state === "auth-required").map(by),
@@ -2899,8 +2886,8 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * The widgets a chat can show with its messages: those its agent can show
-	 * that have a description for the model. None in a visit, or in a team
-	 * member's conversation.
+	 * that have a description for the model. None in a visit, or in a task's
+	 * conversation.
 	 */
 	#chatWidgets(session: string): { ref: string; description: string }[] {
 		if (this.visits.bySession(session) || this.#tasks.of(session)) return [];
@@ -2914,11 +2901,49 @@ export class Pim extends DurableAgent<Env> {
 		return { id: agent.id, name: agent.name };
 	}
 
-	/** One of the owner's agents, with its uploaded icon, for the Worker to publish to the gallery. */
-	async agentToPublish(id: string): Promise<(Agent & { image: AgentIcon | null }) | null> {
+	/**
+	 * One of the owner's agents, with its uploaded icon, for the Worker to
+	 * publish to the gallery: with its contacts, and theirs, which come with
+	 * it, each by name.
+	 */
+	async agentToPublish(id: string): Promise<PublishedAgent | null> {
 		this.#assertOpen();
 		const agent = this.agents.get(id);
-		return agent ? { ...agent, image: this.agents.icon(id) ?? null } : null;
+		if (!agent) return null;
+		const byId = new Map(this.agents.list().map((other) => [other.id, other]));
+		const names = (contacts: readonly string[]) => contacts.flatMap((contact) => byId.get(contact)?.name ?? []);
+		const bundle: Agent[] = [];
+		const seen = new Set([agent.id]);
+		for (const queue = [...agent.contacts]; queue.length > 0; ) {
+			const other = byId.get(queue.shift()!);
+			if (!other || seen.has(other.id)) continue;
+			seen.add(other.id);
+			bundle.push(other);
+			queue.push(...other.contacts);
+		}
+		const { name, description, instructions, apps, blueprint, symbol, color } = agent;
+		return {
+			id,
+			name,
+			description,
+			instructions,
+			apps,
+			blueprint,
+			symbol,
+			color,
+			contacts: names(agent.contacts),
+			bundle: bundle.map((other) => ({
+				name: other.name,
+				description: other.description,
+				instructions: other.instructions,
+				apps: other.apps,
+				blueprint: other.blueprint,
+				symbol: other.symbol,
+				color: other.color,
+				contacts: names(other.contacts),
+			})),
+			image: this.agents.icon(id) ?? null,
+		};
 	}
 
 	/** Records which template an agent is published as; null once unpublished. */
@@ -2982,35 +3007,46 @@ export class Pim extends DurableAgent<Env> {
 		return this.artifacts.get(id)!;
 	}
 
-	/** Makes a published template one of the owner's agents: a copy of it, theirs to change. */
-	async adoptTemplate(template: {
-		id: string;
-		author: string;
-		name: string;
-		description: string;
-		instructions: string;
-		apps: readonly string[];
-		team: readonly TeamMember[];
-		blueprint: string | null;
-		symbol: string | null;
-		color: string | null;
-		image: AgentIcon | null;
-	}): Promise<Agent> {
+	/** Makes a published template one of the owner's agents: a copy of it, theirs to change, with copies of the agents that come with it. */
+	async adoptTemplate(template: Omit<PublishedAgent, "image"> & { author: string; image: AgentIcon | null }): Promise<Agent> {
 		this.#assertOpen();
-		const { image, ...rest } = template;
-		const input = await this.#installed(agentInput({ ...rest }));
-		const agent = this.agents.create(input, { template: template.id, author: template.author });
-		if (image) this.agents.setIcon(agent.id, image.type, image.data);
-		return this.agents.get(agent.id)!;
+		return this.#adopt(template, { template: template.id, author: template.author });
 	}
 
-	/** At registration: gives the person a copy of the agent the admin chose for everyone, its icon too, besides their majordomo. */
-	async adoptEveryonesAgent(agent: Omit<AgentInput, "skills"> & { author: string; image: AgentIcon | null }): Promise<Agent> {
+	/** At registration: gives the person a copy of the agent the admin chose for everyone, its icon and the agents that come with it too, besides their majordomo. */
+	async adoptEveryonesAgent(agent: Omit<PublishedAgent, "id" | "image"> & { author: string; image: AgentIcon | null }): Promise<Agent> {
 		this.#assertOpen();
-		const { author, image, ...input } = agent;
-		const copy = this.agents.create(await this.#installed(agentInput({ ...input })), { template: "default", author });
-		if (image) this.agents.setIcon(copy.id, image.type, image.data);
-		return this.agents.get(copy.id)!;
+		return this.#adopt(agent, { template: "default", author: agent.author });
+	}
+
+	/**
+	 * Copies an agent from the gallery into the owner's agents, and the agents
+	 * that come with it, each a contact of the copies that had it. A copy
+	 * that comes with it and is called as one of the owner's agents already is
+	 * gets a name of its own, so that agents hand it tasks by its name.
+	 */
+	async #adopt(copy: Omit<PublishedAgent, "id" | "image"> & { image: AgentIcon | null }, source: NonNullable<Agent["source"]>): Promise<Agent> {
+		const all = [copy, ...copy.bundle];
+		if (all.length > 1 && this.agents.list().length + all.length > MAX_AGENTS) {
+			throw new HttpError(429, `You can have up to ${MAX_AGENTS} agents, and ${copy.name} comes with ${all.length - 1} more.`);
+		}
+		const inputs: AgentInput[] = [];
+		for (const { name, description, instructions, apps, blueprint, symbol, color } of all) {
+			inputs.push(await this.#installed(agentInput({ name, description, instructions, apps, blueprint, symbol, color })));
+		}
+		const taken = new Set(this.agents.list().map((agent) => agent.name.toLowerCase()));
+		const made = inputs.map((input, index) => {
+			const name = index === 0 ? input.name : freeName(input.name, copy.name, taken);
+			taken.add(name.toLowerCase());
+			return this.agents.create({ ...input, name }, source);
+		});
+		const copyOf = new Map(all.map((agent, index) => [agent.name.toLowerCase(), made[index]!]));
+		for (const [index, agent] of all.entries()) {
+			const contacts = agent.contacts.flatMap((name) => copyOf.get(name.toLowerCase())?.id ?? []).filter((id) => id !== made[index]!.id);
+			if (contacts.length > 0) this.agents.update(made[index]!.id, agentInput({ contacts }, made[index]));
+		}
+		if (copy.image) this.agents.setIcon(made[0]!.id, copy.image.type, copy.image.data);
+		return this.agents.get(made[0]!.id)!;
 	}
 
 	// Visits: spaces shared with this one's owner, and their conversations with them.
@@ -3326,8 +3362,8 @@ export class Pim extends DurableAgent<Env> {
 	/** A task as the API shows it: who does it for whom, and how it went. */
 	#publicTask(task: Task) {
 		const by = (conversation: string) => {
-			const { agent, member } = this.#roleOf(conversation);
-			return { id: agent.id, name: member?.name ?? agent.name, member: member !== null };
+			const { agent } = this.#roleOf(conversation);
+			return { id: agent.id, name: agent.name };
 		};
 		return {
 			id: task.id,
@@ -4550,7 +4586,8 @@ export class Pim extends DurableAgent<Env> {
 			"POST",
 			"/agents",
 			async (_params, request) => {
-				const agent = this.agents.create(this.#checkSkills(this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request))))));
+				const input = this.#checkSkills(this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request)))));
+				const agent = this.agents.create(checkContacts(null, input, this.agents.list()));
 				return Response.json(agent, { status: 201 });
 			},
 		],
@@ -4558,7 +4595,9 @@ export class Pim extends DurableAgent<Env> {
 			"PUT",
 			"/agents/:agent",
 			async ({ agent: id }, request) => {
-				return this.agents.update(id!, this.#checkSkills(this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request), this.#agent(id!))))));
+				const agent = this.#agent(id!);
+				const input = this.#checkSkills(this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request), agent))));
+				return this.agents.update(id!, checkContacts(agent, input, this.agents.list()));
 			},
 		],
 		// Skills the agents wrote, with the person's approval, every version kept; each agent lists the ones it uses.
@@ -4699,7 +4738,7 @@ export class Pim extends DurableAgent<Env> {
 			"/agents/:agent",
 			async ({ agent: id }) => {
 				this.#agent(id!);
-				// Its tasks, and its team's, stop with it: no other agent takes them over.
+				// Its tasks stop with it: no other agent takes them over. It leaves the contacts of the agents that had it.
 				for (const task of this.#tasks.open()) if (task.agent === id) await this.#cancelTask(task, "Its agent was deleted.");
 				this.agents.delete(id!);
 				this.store.clearAudience(agentAudience(id!));
@@ -4925,7 +4964,7 @@ export class Pim extends DurableAgent<Env> {
 				list: () => this.agents.list(),
 				blueprints: () => this.extensions.blueprints().map(({ ref, blueprint }) => ({ ref, name: blueprint.name, description: blueprint.description })),
 				apps: () => this.appDirectory(),
-				create: (input) => this.agents.create(this.#checkApps(this.#checkBlueprint(agentInput(input)))),
+				create: (input) => this.agents.create(checkContacts(null, this.#checkApps(this.#checkBlueprint(agentInput(input))), this.agents.list())),
 			},
 		);
 	}

@@ -1,12 +1,12 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { text } from "./extensions/services";
-import { MAX_TEAM, type Agent, type TeamMember } from "./agents";
+import type { Agent } from "./agents";
 
 /**
  * Agents handing work to each other. An agent hands a task to another with
- * `delegate`: the majordomo to any of the person's agents, and any agent to
- * the members of its team. Each task runs in a conversation of its own, not
+ * `delegate`: the majordomo to any of the person's other agents, and any
+ * agent to its contacts. Each task runs in a conversation of its own, not
  * a chat: the person reads it, read-only, from the chat the work began in,
  * where the tasks show as a tree. In a chat the person talks with an agent;
  * in a task an agent talks with the one that handed it the task, and nothing
@@ -24,15 +24,17 @@ import { MAX_TEAM, type Agent, type TeamMember } from "./agents";
  *
  * An agent that hands out tasks of its own while working on one answers its
  * task only once those come back: its task completes with its answer after
- * the last of them.
+ * the last of them. Work never goes round in a circle: no agent is handed a
+ * task by one working, directly or not, on a task it handed out, and a chain
+ * of tasks ends `MAX_TASK_DEPTH` deep.
  *
  * A review, the majordomo deciding another agent's approval request for the
  * person (see ./majordomo.ts), is a task too, which Pim gives and waits for
  * itself; no chat shows it.
  */
 
-/** Who does a task: another of the person's agents, a member of the asking agent's team, or the majordomo reviewing an approval. */
-export type TaskKind = "agent" | "member" | "review";
+/** Who does a task: another of the person's agents, or the majordomo reviewing an approval. */
+export type TaskKind = "agent" | "review";
 
 /** A2A's task states, those Pim's tasks go through. */
 export type TaskState = "working" | "auth-required" | "completed" | "failed" | "canceled";
@@ -54,10 +56,8 @@ export type Task = {
 	readonly root: string;
 	/** The `delegate` call that gave it: tasks handed out together share it, and are answered together. */
 	readonly batch: string;
-	/** The agent doing it, or, for a member, the agent whose team it is on. */
+	/** The agent doing it. */
 	readonly agent: string;
-	/** The member doing it, by name, for a member's task. */
-	readonly member: string | null;
 	readonly task: string;
 	readonly state: TaskState;
 	/** Its answer, or why it didn't finish, once it is done. */
@@ -113,7 +113,6 @@ const taskOf = (row: Row): Task => ({
 	root: String(row.root),
 	batch: String(row.batch),
 	agent: String(row.agent),
-	member: nullable(row.member),
 	task: String(row.task),
 	state: String(row.state) as TaskState,
 	result: nullable(row.result),
@@ -132,7 +131,7 @@ export class TaskStore {
 	constructor(sql: SqlStorage) {
 		this.#sql = sql;
 		this.#sql.exec(SCHEMA);
-		// Team members' tasks were once kept apart, and waited for: those still running when that changed are over. Older ones named the agent `persona`.
+		// Team members' tasks were once kept apart, and waited for: those still running when that changed are over. Older ones named the agent `persona`. Each keeps its member's name, so that it becomes the task of the agent the member becomes (see ./agents.ts).
 		const old = this.#sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pim_team_runs'").toArray();
 		if (old.length > 0) {
 			for (const row of this.#sql.exec<Record<string, SqlStorageValue>>("SELECT * FROM pim_team_runs").toArray()) {
@@ -140,7 +139,7 @@ export class TaskStore {
 				this.#sql.exec(
 					"INSERT OR IGNORE INTO pim_tasks (id, kind, conversation, requester, parent, root, batch, position, agent, member, task, state, result, operation, delivered, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, '', ?, ?, ?)",
 					newId(),
-					review ? "review" : "member",
+					review ? "review" : "agent",
 					row.conversation ?? null,
 					review ? null : row.session,
 					row.session ?? null,
@@ -169,7 +168,6 @@ export class TaskStore {
 		batch: string;
 		position: number;
 		agent: string;
-		member: string | null;
 		task: string;
 	}): Task {
 		const existing = this.at(task.batch, task.position);
@@ -177,7 +175,7 @@ export class TaskStore {
 		const id = newId();
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT INTO pim_tasks (id, kind, conversation, requester, parent, root, batch, position, agent, member, task, state, operation, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'working', ?, ?, ?)",
+			"INSERT INTO pim_tasks (id, kind, conversation, requester, parent, root, batch, position, agent, task, state, operation, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'working', ?, ?, ?)",
 			id,
 			task.kind,
 			task.conversation,
@@ -187,7 +185,6 @@ export class TaskStore {
 			task.batch,
 			task.position,
 			task.agent,
-			task.member,
 			task.task,
 			`task:${id}`,
 			now,
@@ -312,22 +309,19 @@ export class TaskStore {
  * What a conversation is: a chat with one of the person's agents, or a task
  * one agent handed another. `from` names who handed it the task.
  */
-export type Role = { readonly agent: Agent; readonly member: TeamMember | null; readonly from: string | null };
-
-/** Someone an agent can hand tasks to. */
-export type Delegate = { readonly agent: Agent; readonly member: TeamMember | null };
+export type Role = { readonly agent: Agent; readonly from: string | null };
 
 /** What `delegate` needs from the space. */
 export type TasksHost = {
 	roleOf(session: string): Role;
-	/** Whom a conversation can hand tasks to: none for a team member. */
-	delegates(session: string): Delegate[];
+	/** Whom a conversation can hand tasks to: the majordomo, the person's other agents; any other agent, its contacts. */
+	delegates(session: string): Agent[];
 	/**
-	 * Gives the tasks, each to its delegate, in a new conversation or the one
-	 * of an earlier task it continues. Idempotent on `batch`: a replayed call
+	 * Gives the tasks, each to its agent, in a new conversation or the one of
+	 * an earlier task it continues. Idempotent on `batch`: a replayed call
 	 * gives none twice.
 	 */
-	start(requester: string, batch: string, tasks: { to: Delegate; task: string; continues: Task | null }[]): Promise<Task[]>;
+	start(requester: string, batch: string, tasks: { to: Agent; task: string; continues: Task | null }[]): Promise<Task[]>;
 	readonly tasks: TaskStore;
 };
 
@@ -335,14 +329,10 @@ export const TASKS_EXTENSION = "pim.tasks";
 export const DELEGATE = "delegate";
 /** How a message giving tasks' answers starts. */
 export const TASK_UPDATE = "[Task update]";
-
-const nameOf = ({ agent, member }: Delegate) => member?.name ?? agent.name;
-
-/** The first line of instructions, as a list of delegates shows it. */
-function gist(instructions: string): string {
-	const line = instructions.trim().split(/\r?\n/)[0] ?? "";
-	return line.length > 200 ? `${line.slice(0, 199)}…` : line;
-}
+/** The most tasks one `delegate` call hands out. */
+export const MAX_TASKS = 8;
+/** How deep a chain of tasks goes: an agent this many tasks away from the chat the work began in hands out none. */
+export const MAX_TASK_DEPTH = 3;
 
 /** What an agent reads before its own instructions, in a task's conversation, in place of the habits of talking to the person. */
 export function taskPreamble(self: string, from: string): string {
@@ -354,19 +344,12 @@ export function taskPreamble(self: string, from: string): string {
 - Be honest about what you did. Never claim an action happened unless a tool result says so.`;
 }
 
-/** A member's own instructions, which come before its general habits. */
-export function memberInstructions(member: TeamMember): string {
-	return `Your instructions, which come before your general habits wherever the two differ:\n${member.instructions}`;
-}
-
 /** Whom an agent can hand tasks to, and how it hears back. */
-function delegatesSection(delegates: Delegate[]): string {
-	const agents = delegates.filter((delegate) => delegate.member === null);
-	const members = delegates.filter((delegate) => delegate.member !== null);
+function delegatesSection(self: Agent, delegates: Agent[]): string {
 	return [
-		`Hand tasks to others with \`${DELEGATE}\`: each works on its own, at the same time as the others, in a conversation of its own that the person can read.`,
-		...(agents.length > 0 ? ["The person's other agents:", ...agents.map(({ agent }) => `- ${agent.name}${agent.description ? `: ${agent.description}` : ""}`)] : []),
-		...(members.length > 0 ? ["Your team:", ...members.map(({ member }) => `- ${member!.name}: ${gist(member!.instructions)}`)] : []),
+		`Hand tasks to others with \`${DELEGATE}\`: each works on its own, at the same time as the others, in a conversation of its own that the person can read. Hand one agent several tasks at once when the work splits into parts it can do side by side.`,
+		self.majordomo ? "The person's other agents:" : "Your contacts, the person's agents you hand tasks to:",
+		...delegates.map((agent) => `- ${agent.name}${agent.description ? `: ${agent.description}` : ""}`),
 		`A task's agent knows only its own instructions and the task: give it everything it needs. \`${DELEGATE}\` returns at once with the tasks' ids. Don't wait for them, check on them or do their work yourself: say what you handed out if it helps, then end your turn. Their answers arrive later in this conversation, all those you handed out together in one message starting with "${TASK_UPDATE}"; then carry on with them. To follow up on a task, hand out another that \`continues\` it.`,
 	].join("\n");
 }
@@ -378,13 +361,13 @@ export function tasksExtension(host: TasksHost) {
 		parameters: Type.Object({
 			tasks: Type.Array(
 				Type.Object({
-					to: Type.String({ description: "Whom it is for: an agent's or team member's name, as your prompt lists them." }),
+					to: Type.String({ description: "Whom it is for: an agent's name, as your prompt lists them." }),
 					task: Type.String({ minLength: 1, maxLength: 20_000, description: "What to do, what you already know, and what to answer with." }),
 					continues: Type.Optional(
 						Type.String({ description: "The id of a finished task you handed the same one before, to carry on in its conversation, where its earlier work is." }),
 					),
 				}),
-				{ minItems: 1, maxItems: MAX_TEAM },
+				{ minItems: 1, maxItems: MAX_TASKS },
 			),
 		}),
 		// A rerun after an eviction finds the tasks the call gave, and gives none twice.
@@ -392,33 +375,31 @@ export function tasksExtension(host: TasksHost) {
 		async execute(args, api) {
 			const session = String(api.conversationId);
 			const delegates = host.delegates(session);
-			if (delegates.length === 0) {
-				return text(host.roleOf(session).member ? "Team members can't hand out tasks." : "You have no one to hand tasks to: do the work yourself.", true);
-			}
+			if (delegates.length === 0) return text("You have no one to hand tasks to: do the work yourself.", true);
 			const problems: string[] = [];
 			const given = args.tasks.map(({ to, task, continues }) => {
-				const delegate = delegates.find((candidate) => nameOf(candidate).toLowerCase() === to.trim().toLowerCase());
-				if (!delegate) {
-					problems.push(`No one called ${to} to hand tasks to. You can hand them to: ${delegates.map(nameOf).join(", ")}.`);
+				const agent = delegates.find((candidate) => candidate.name.toLowerCase() === to.trim().toLowerCase());
+				if (!agent) {
+					problems.push(`No one called ${to} to hand tasks to. You can hand them to: ${delegates.map((candidate) => candidate.name).join(", ")}.`);
 					return null;
 				}
-				if (continues === undefined || continues.trim() === "") return { to: delegate, task, continues: null };
+				if (continues === undefined || continues.trim() === "") return { to: agent, task, continues: null };
 				const earlier = host.tasks.get(continues.trim());
-				if (!earlier || earlier.requester !== session || earlier.agent !== delegate.agent.id || earlier.member !== (delegate.member?.name ?? null)) {
-					problems.push(`No task ${continues} you handed ${nameOf(delegate)}: leave out continues to start afresh.`);
+				if (!earlier || earlier.requester !== session || earlier.agent !== agent.id) {
+					problems.push(`No task ${continues} you handed ${agent.name}: leave out continues to start afresh.`);
 					return null;
 				}
 				if (!TERMINAL_STATES.has(host.tasks.of(earlier.conversation)!.state)) {
-					problems.push(`${nameOf(delegate)} is still working on task ${earlier.id}: its answer will arrive here; follow up once it has.`);
+					problems.push(`${agent.name} is still working on task ${earlier.id}: its answer will arrive here; follow up once it has.`);
 					return null;
 				}
-				return { to: delegate, task, continues: earlier };
+				return { to: agent, task, continues: earlier };
 			});
 			if (problems.length > 0) return text(problems.join("\n"), true);
 			const started = await host.start(session, String(api.taskId), given.map((entry) => entry!));
 			return text(
 				[
-					...started.map((task) => `Task ${task.id}: ${task.member ?? host.roleOf(task.conversation).agent.name} is on it.`),
+					...started.map((task) => `Task ${task.id}: ${host.roleOf(task.conversation).agent.name} is on it.`),
 					`Their answers will arrive in this conversation in a message starting with "${TASK_UPDATE}". End your turn now unless there is other work to do meanwhile.`,
 				].join("\n"),
 			);
@@ -430,7 +411,7 @@ export function tasksExtension(host: TasksHost) {
 		sections: [
 			section("delegates", ({ conversationId }) => {
 				const delegates = host.delegates(String(conversationId));
-				return delegates.length === 0 ? undefined : delegatesSection(delegates);
+				return delegates.length === 0 ? undefined : delegatesSection(host.roleOf(String(conversationId)).agent, delegates);
 			}),
 		],
 		tools: [delegate],

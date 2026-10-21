@@ -9,7 +9,8 @@ import { spans } from "./worker";
 
 type Context = Parameters<FauxResponseFactory>[0];
 
-type PublicTask = { id: string; parent: string | null; agent: { name: string; member: boolean }; from: { name: string }; task: string; state: string; result: string | null };
+type PublicTask = { id: string; parent: string | null; agent: { name: string }; from: { name: string }; task: string; state: string; result: string | null };
+type Agent = { id: string; name: string; contacts: string[]; majordomo: boolean };
 
 const toolResult = (messages: readonly Message[]) =>
 	JSON.stringify(messages.findLast((message) => message.role === "toolResult")?.content);
@@ -21,24 +22,30 @@ const tasksOf = async (session: string) => (await api<{ tasks: PublicTask[] }>(`
 /** The updates a chat was given: messages starting with "[Task update]". */
 const updatesIn = async (session: string) => (await messagesOf(session, "user")).filter((text) => text.startsWith("[Task update]"));
 
-const planner = {
-	name: "Trip planner",
-	instructions: "Plan trips in detail.",
-	team: [
-		{ name: "Researcher", instructions: "Find facts and cite where they came from." },
-		{ name: "Writer", instructions: "Write plans as short lists.", tools: ["current_time"] },
-	],
-};
+const agents = async () => (await api<{ agents: Agent[] }>("/agents")).body.agents;
 
-describe("an agent's team", () => {
-	it("works on the tasks the agent hands out at the same time, without the agent waiting, which goes on once they all answer", async () => {
-		expect((await post("/agents", { ...planner, team: [planner.team[0], planner.team[0]] })).status).toBe(400);
-		expect((await post("/agents", { ...planner, team: [{ name: "Researcher" }] })).status).toBe(400);
-		const agent = (await post("/agents", planner)).body;
-		expect(agent.team).toEqual([
-			{ name: "Researcher", instructions: "Find facts and cite where they came from.", tools: null },
-			{ name: "Writer", instructions: "Write plans as short lists.", tools: ["current_time"] },
-		]);
+/** One of the person's agents, made the first time it is asked for. */
+async function agent(body: { name: string; description?: string; instructions?: string; contacts?: string[] }): Promise<Agent> {
+	return (await agents()).find((other) => other.name === body.name) ?? (await post<Agent>("/agents", body)).body;
+}
+
+/** A trip planner, with a researcher and a writer for its contacts. */
+async function planner(name = "Trip planner"): Promise<Agent> {
+	const researcher = await agent({ name: "Researcher", description: "Finds facts", instructions: "Find facts and cite where they came from." });
+	const writer = await agent({ name: "Writer", description: "Writes plans", instructions: "Write plans as short lists." });
+	return agent({ name, instructions: "Plan trips in detail.", contacts: [researcher.id, writer.id] });
+}
+
+describe("an agent's contacts", () => {
+	it("work on the tasks the agent hands out at the same time, without the agent waiting, which goes on once they all answer", async () => {
+		const majordomo = (await agents()).find((other) => other.majordomo)!;
+		// Contacts are others of the person's agents, never the majordomo, which hands tasks to all of them and lists none.
+		expect((await post("/agents", { name: "Lost", contacts: ["p_nobody"] })).status).toBe(400);
+		expect((await post("/agents", { name: "Lost", contacts: [majordomo.id] })).status).toBe(400);
+		const agent = await planner();
+		expect((await api(`/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ contacts: [agent.id] }) })).status).toBe(400);
+		expect((await api(`/agents/${majordomo.id}`, { method: "PUT", body: JSON.stringify({ contacts: [agent.id] }) })).status).toBe(400);
+		const [researcherId, writerId] = agent.contacts as [string, string];
 		const session = (await post("/sessions", { agent: agent.id })).body.id;
 
 		const seen: Record<string, { prompt: string; tools: string[]; task: string }> = {};
@@ -96,8 +103,10 @@ describe("an agent's team", () => {
 		await settled(session);
 		expect(await messagesOf(session, "user")).toEqual(["Plan Lisbon for me.", update]);
 
-		// The agent knows its team; each member knows who it is, who asked, its own instructions, and only its tools.
-		expect(seen.lead!.prompt).toContain("- Researcher: Find facts and cite where they came from.");
+		// The agent knows its contacts; each knows who it is, who asked, and its own instructions, and has none of what only a chat with the person gets.
+		expect(seen.lead!.prompt).toContain("Your contacts, the person's agents you hand tasks to:");
+		expect(seen.lead!.prompt).toContain("- Researcher: Finds facts");
+		expect(seen.lead!.prompt).toContain("- Writer: Writes plans");
 		expect(seen.lead!.tools).toContain("delegate");
 		expect(seen.Researcher!.prompt).toContain("working on a task Trip planner handed you");
 		expect(seen.Researcher!.prompt).toContain("Find facts and cite where they came from.");
@@ -105,14 +114,13 @@ describe("an agent's team", () => {
 		expect(seen.Researcher!.prompt).not.toContain("Plan trips in detail.");
 		expect(seen.Researcher!.task).toBe("Find the best month to visit Lisbon.");
 		expect(seen.Researcher!.tools).toContain("current_time");
-		for (const tool of ["send_to_user", "delegate", "schedule_task", "watch_app_event", "create_agent", "update_agent", "rename_agent", "manage_apps", "write_skill"]) expect(seen.Researcher!.tools).not.toContain(tool);
-		expect(seen.Writer!.tools).toEqual(["current_time"]);
+		for (const tool of ["send_to_user", "schedule_task", "watch_app_event", "create_agent", "update_agent", "rename_agent", "manage_apps", "write_skill"]) expect(seen.Researcher!.tools).not.toContain(tool);
 		// Their answers come in one update, by task.
 		expect(update).toMatch(/^\[Task update\] /);
 		expect(update).toContain(`Researcher finished task ${researcher.id}:\nMay: mild and before the crowds.`);
 		expect(update).toContain(`Writer finished task ${writer.id}:\nDay 1: Alfama. Day 2: Belém. Day 3: Sintra.`);
 
-		// The person sees what the team did, read-only; tasks' conversations aren't chats.
+		// The person sees what its contacts did, read-only; tasks' conversations aren't chats.
 		expect((await tasksOf(session)).map((task) => [task.agent.name, task.state, task.result])).toEqual([
 			["Researcher", "completed", "May: mild and before the crowds."],
 			["Writer", "completed", "Day 1: Alfama. Day 2: Belém. Day 3: Sintra."],
@@ -122,6 +130,9 @@ describe("an agent's team", () => {
 		const listed = (await api("/sessions")).body.sessions.map((info: { id: string }) => info.id);
 		expect(listed).toEqual(expect.arrayContaining([session, ROOT]));
 		expect(listed).toHaveLength(2);
+		// A deleted agent leaves the contacts of those that had it.
+		expect((await api(`/agents/${writerId}`, { method: "DELETE" })).status).toBe(200);
+		expect((await api<Agent>(`/agents/${agent.id}`)).body.contacts).toEqual([researcherId]);
 		expect((await api(`/sessions/${ROOT}/tasks/${researcher.id}`)).status).toBe(404);
 
 		// An agent with no one to hand tasks to is told so, as is one that names someone it can't.
@@ -136,7 +147,7 @@ describe("an agent's team", () => {
 				},
 			],
 		});
-		await say("Ask your team.", solo);
+		await say("Ask your contacts.", solo);
 		scripts({
 			lead: [
 				() => toolUse("delegate", { tasks: [{ to: "Editor", task: "x" }] }),
@@ -148,17 +159,17 @@ describe("an agent's team", () => {
 		});
 		await say("Ask your editor.", session);
 		expect(results[0]).toContain("You have no one to hand tasks to: do the work yourself.");
-		expect(results[1]).toContain("No one called Editor to hand tasks to. You can hand them to: Researcher, Writer.");
+		expect(results[1]).toContain("No one called Editor to hand tasks to. You can hand them to: Researcher.");
 	});
 
-	it("shows a member's approval in the agent's chat, where its task waits for the person, and the agent hears its answer once it is decided", async () => {
+	it("shows a contact's approval in the agent's chat, where its task waits for the person, and the agent hears its answer once it is decided", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
 		const realFetch = globalThis.fetch;
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 			const request = new Request(input, init);
 			return request.url.startsWith("https://hooks.example.test/") ? new Response("booked", { status: 201 }) : realFetch(input, init);
 		});
-		const agent = (await post("/agents", { ...planner, name: "Booker" })).body;
+		const agent = await planner("Booker");
 		const session = (await post("/sessions", { agent: agent.id })).body.id;
 		let result = "";
 		let update = "";
@@ -250,7 +261,7 @@ describe("the majordomo", () => {
 		expect(scoutSaw.message).toBe("Find the best month to visit Lisbon.");
 		expect(scoutSaw.tools).not.toContain("send_to_user");
 		const [task] = await tasksOf(ROOT);
-		expect(task).toMatchObject({ agent: { name: "Scout", member: false }, from: { name: "Alfred" }, state: "completed" });
+		expect(task).toMatchObject({ agent: { name: "Scout" }, from: { name: "Alfred" }, state: "completed" });
 		expect(results[0]).toContain(`Scout finished task ${task!.id}:\nMay: mild and before the crowds.`);
 		// It is no chat, and the person's chat has only what they said and the update.
 		expect(await chats()).toEqual(before);
@@ -306,8 +317,12 @@ describe("the majordomo", () => {
 		expect(scoutSaw.prompt).not.toContain("The person's other agents:");
 	});
 
-	it("hears an agent's answer to a task once, once its team has answered the agent", async () => {
-		await post("/agents", { ...planner, name: "Lisbon planner" });
+	it("hears an agent's answer to a task once, once its contacts have answered the agent, and work never goes back up the chain", async () => {
+		const lisbon = await planner("Lisbon planner");
+		const researcher = (await agents()).find((other) => other.name === "Researcher")!;
+		// The researcher may hand the planner tasks, but not while it works on one the planner handed it.
+		await api(`/agents/${researcher.id}`, { method: "PUT", body: JSON.stringify({ contacts: [lisbon.id] }) });
+		let refused = "";
 		let planned = "";
 		let researched = "";
 		// The researcher answers only once the planner's turn is over.
@@ -326,7 +341,7 @@ describe("the majordomo", () => {
 			],
 			"Lisbon planner": [
 				() => toolUse("delegate", { tasks: [{ to: "Researcher", task: "Find the best month." }] }),
-				// Its turn ends while its team works: its task isn't done yet.
+				// Its turn ends while its contacts work: its task isn't done yet.
 				() => fauxAssistantMessage("I asked my researcher."),
 				(context) => {
 					researched = lastUserText(context.messages);
@@ -336,6 +351,10 @@ describe("the majordomo", () => {
 			Researcher: [
 				async () => {
 					await released;
+					return toolUse("delegate", { tasks: [{ to: "Lisbon planner", task: "Check my work." }] });
+				},
+				(context) => {
+					refused = toolResult(context.messages);
 					return fauxAssistantMessage("May.");
 				},
 			],
@@ -360,6 +379,8 @@ describe("the majordomo", () => {
 		expect(planned).toContain(`Lisbon planner finished task ${plan.id}:\nThree days in May: Alfama, Belém, Sintra.`);
 		expect(planned).not.toContain("I asked my researcher.");
 		expect((await updatesIn(ROOT)).filter((update) => update.includes(plan.id))).toEqual([planned]);
+		expect(refused).toContain("You have no one to hand tasks to: do the work yourself.");
+		await api(`/agents/${researcher.id}`, { method: "PUT", body: JSON.stringify({ contacts: [] }) });
 	});
 
 	it("talks with MCP clients at /mcp, a new chat per call unless they continue one, waiting for the work it hands out", async () => {

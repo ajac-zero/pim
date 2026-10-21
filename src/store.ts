@@ -53,7 +53,7 @@ export type Approval = {
 	/** A guest who asked, from their own space, through one of the owner's circles; null when Pim asked for the owner. */
 	readonly requestedBy: ApprovalRequester | null;
 	/**
-	 * An agent at work on a task asked, another agent or a member of a team:
+	 * An agent at work on a task asked:
 	 * its `session` is then the task's conversation, where the decision goes,
 	 * and the person sees the request in the chat the work began in.
 	 */

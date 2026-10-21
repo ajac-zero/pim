@@ -119,13 +119,15 @@ describe("the owner's agents", () => {
 			description: "Reviews my pull requests.",
 			instructions: "Point out bugs before style.",
 			apps: ["test.ledger/github"],
-			team: [{ name: "Linter", instructions: "Flag style issues.", tools: ["fetch_url"] }],
+			contacts: ["trip PLANNER"],
 			emoji: "🧐",
 			color: "indigo",
 		};
 		faux.setResponses([
 			record,
 			toolUse(CREATE_AGENT, { ...reviewer, apps: ["custom/github"] }),
+			record,
+			toolUse(CREATE_AGENT, { ...reviewer, contacts: ["Linter"] }),
 			record,
 			toolUse(CREATE_AGENT, { ...reviewer, emoji: "a sticker" }),
 			record,
@@ -141,19 +143,22 @@ describe("the owner's agents", () => {
 		// Refused as the API refuses it: nothing made.
 		await say("Make me a code reviewer", session);
 		expect(seen[1]!.result).toContain("This Pim offers no app custom/github");
+		await say("Hand linting to someone", session);
+		expect(seen[2]!.result).toContain("The person has no agent called Linter.");
 		await say("Try again", session);
-		expect(seen[2]!.result).toContain("symbol must be an icon's name");
+		expect(seen[3]!.result).toContain("symbol must be an icon's name");
 		expect((await api("/agents")).body.agents.some((agent: { name: string }) => agent.name === "Code reviewer")).toBe(false);
 		await say("Once more", session);
-		expect(seen[3]!.result).toContain('\\"created\\": true');
+		expect(seen[4]!.result).toContain('\\"created\\": true');
+		expect(seen[4]!.result).toContain("Trip planner");
 		const made = (await api("/agents")).body.agents.find((agent: { name: string }) => agent.name === "Code reviewer");
-		const { emoji, ...given } = reviewer;
-		expect(made).toMatchObject({ ...given, symbol: emoji, color: "indigo", majordomo: false, source: null });
+		const { emoji, contacts: _contacts, ...given } = reviewer;
+		expect(made).toMatchObject({ ...given, contacts: [planner.id], symbol: emoji, color: "indigo", majordomo: false, source: null });
 		// One the person has already isn't made again, whatever its case.
 		await say("And another code reviewer", session);
-		expect(seen[4]!.result).toContain('\\"exists\\": true');
+		expect(seen[5]!.result).toContain('\\"exists\\": true');
 		expect((await api("/agents")).body.agents.filter((agent: { name: string }) => agent.name === "Code reviewer")).toHaveLength(1);
-		expect(seen[4]!.prompt).toContain("- Code reviewer: Reviews my pull requests.");
+		expect(seen[5]!.prompt).toContain("- Code reviewer: Reviews my pull requests.");
 	});
 
 	it("renames another agent or itself in chat only after approval, keeping its identity and settings", async () => {
@@ -223,18 +228,13 @@ describe("the owner's agents", () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
 	});
 
-	it("changes itself, its team included, once the person approves", async () => {
+	it("changes itself, its contacts included, once the person approves", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
+		const editor = (await post("/agents", { name: "Editor", instructions: "Fix grammar." })).body;
+		const checker = (await post("/agents", { name: "Fact checker", instructions: "Check every claim." })).body;
+		const finder = (await post("/agents", { name: "Source finder", description: "Finds sources.", instructions: "Find sources." })).body;
 		const writer = (
-			await post("/agents", {
-				name: "Ghostwriter",
-				instructions: "Write short.",
-				apps: ["test.ledger/docs"],
-				team: [
-					{ name: "Editor", instructions: "Fix grammar." },
-					{ name: "Fact checker", instructions: "Check every claim." },
-				],
-			})
+			await post("/agents", { name: "Ghostwriter", instructions: "Write short.", apps: ["test.ledger/docs"], contacts: [editor.id, checker.id] })
 		).body;
 		const session = (await post("/sessions", { agent: writer.id })).body.id;
 		const results: string[] = [];
@@ -242,19 +242,14 @@ describe("the owner's agents", () => {
 			results.push(JSON.stringify(context.messages.findLast((m) => m.role === "toolResult")?.content));
 			return toolUse("send_to_user", { message: "ok" });
 		};
-		const edit: Record<string, JsonValue> = {
-			instructions: "Write long.",
-			set_members: [
-				{ name: "editor", instructions: "Fix grammar and tone." },
-				{ name: "Researcher", instructions: "Find sources.", tools: ["fetch_url"] },
-			],
-			remove_members: ["Fact checker"],
-		};
+		const edit: Record<string, JsonValue> = { instructions: "Write long.", add_contacts: ["source FINDER", "editor"], remove_contacts: ["Fact checker"] };
 		let prompt = "";
 		faux.setResponses([
-			toolUse(UPDATE_AGENT, { set_members: [{ name: "Editor", instructions: "" }] }),
+			toolUse(UPDATE_AGENT, { add_contacts: ["Researcher"] }),
 			record,
-			toolUse(UPDATE_AGENT, { instructions: "Write short." }),
+			toolUse(UPDATE_AGENT, { add_contacts: ["Ghostwriter"] }),
+			record,
+			toolUse(UPDATE_AGENT, { instructions: "Write short.", add_contacts: ["Editor"] }),
 			record,
 			toolUse(UPDATE_AGENT, edit),
 			// The turn goes on as the agent is now.
@@ -264,14 +259,14 @@ describe("the owner's agents", () => {
 			},
 		]);
 		await say("Bring on a researcher", session);
-		expect(results[0]).toContain("Editor's instructions is required");
+		expect(results[0]).toContain("The person has no agent called Researcher.");
+		await say("Hand tasks to yourself", session);
+		expect(results[1]).toContain("contacts can't include the agent itself");
 		await say("Again?", session);
-		expect(results[1]).toContain("That changes nothing.");
+		expect(results[2]).toContain("That changes nothing.");
 		const asking = say("Please", session);
 		const approval = await pendingApproval();
-		expect(approval.summary).toBe(
-			"Ghostwriter changes its instructions, adds Researcher to its team, changes Editor on its team, removes Fact checker from its team",
-		);
+		expect(approval.summary).toBe("Ghostwriter changes its instructions, adds Source finder to its contacts, to hand tasks to, removes Fact checker from its contacts");
 		// Nothing changes until the person says yes.
 		expect((await api(`/agents/${writer.id}`)).body.instructions).toBe("Write short.");
 
@@ -280,13 +275,11 @@ describe("the owner's agents", () => {
 		expect((await api(`/agents/${writer.id}`)).body).toMatchObject({
 			instructions: "Write long.",
 			apps: ["test.ledger/docs"],
-			team: [
-				{ name: "Editor", instructions: "Fix grammar and tone.", tools: null },
-				{ name: "Researcher", instructions: "Find sources.", tools: ["fetch_url"] },
-			],
+			contacts: [editor.id, finder.id],
 		});
 		expect(prompt).toContain("Write long.");
-		expect(prompt).toContain("- Researcher: Find sources.");
+		expect(prompt).toContain("- Source finder: Finds sources.");
+		expect(prompt).not.toContain("- Fact checker");
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
 	});
 
@@ -437,9 +430,46 @@ describe("a database from when agents were personas", () => {
 			// Its default agent is its majordomo, already named: nobody is asked to name theirs again.
 			expect(agents.introduced()).toBe(true);
 			expect(agents.ofSession("9").id).toBe("p_1");
-			expect(new TaskStore(sql).of("c1")).toMatchObject({ kind: "member", agent: "p_1", member: "Editor", requester: "9", root: "9", state: "completed" });
+			expect(new TaskStore(sql).of("c1")).toMatchObject({ kind: "agent", agent: "p_1", requester: "9", root: "9", state: "completed" });
 			// Starting again changes nothing.
 			expect(new AgentStore(sql, () => { throw new Error("unused"); }, directory).list()).toHaveLength(1);
+		});
+	});
+});
+
+describe("a database from when agents had teams", () => {
+	it("makes each member an agent of its own, a contact of its agent, with its tasks and its agent's apps and permissions", async () => {
+		await runInDurableObject(env.Pim.getByName("teams"), async (_instance, state) => {
+			const sql = state.storage.sql;
+			for (const table of ["pim_agents", "pim_agent_sessions", "pim_tasks", "pim_tool_permissions"]) sql.exec(`DELETE FROM ${table}`);
+			sql.exec("ALTER TABLE pim_agents ADD COLUMN team TEXT NOT NULL DEFAULT '[]'");
+			const insert = "INSERT INTO pim_agents (id, name, description, instructions, apps, skills, team, blueprint, color, created_at, updated_at, is_default) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, 1, 1, ?)";
+			sql.exec(insert, "p_major", "Alfred", "", "[]", "[]", "[]", null, null, 1);
+			sql.exec(insert, "p_writer", "Writer", "Write.", "[]", "[]", "[]", null, null, 0);
+			const team = [
+				{ name: "Researcher", instructions: "Find facts.\nCite them.", tools: ["fetch_url"] },
+				{ name: "Writer", instructions: "Write it up.", tools: null },
+			];
+			sql.exec(insert, "p_plan", "Planner", "Plan.", '["test.ledger/github"]', '["weekly-plan"]', JSON.stringify(team), "test.ledger/budget", "teal", 0);
+			sql.exec("INSERT INTO pim_tool_permissions (audience, app, tool, permission, updated_at) VALUES ('agent:p_plan', 'github', 'github_merge', 'off', 1)");
+			const tasks = new TaskStore(sql);
+			tasks.start({ kind: "agent", conversation: "c1", requester: "chat", parent: null, root: "chat", batch: "b", position: 0, agent: "p_plan", task: "Look it up." });
+			sql.exec("UPDATE pim_tasks SET kind = 'member', member = 'Researcher' WHERE conversation = 'c1'");
+
+			const agents = new AgentStore(sql, () => { throw new Error("unused"); }, () => []);
+			const byName = Object.fromEntries(agents.list().map((agent) => [agent.name, agent]));
+			// A member called as another agent is gets its agent's name after its own.
+			expect(Object.keys(byName).sort()).toEqual(["Alfred", "Planner", "Researcher", "Writer", "Writer (Planner)"]);
+			const researcher = byName.Researcher!;
+			expect(researcher).toMatchObject({ description: "Find facts.", instructions: "Find facts.\nCite them.", skills: ["weekly-plan"], blueprint: "test.ledger/budget", color: "teal", contacts: [] });
+			expect(byName.Planner!.contacts).toEqual([researcher.id, byName["Writer (Planner)"]!.id]);
+			// What it did as a member is its own now.
+			expect(tasks.of("c1")).toMatchObject({ kind: "agent", agent: researcher.id });
+			expect(agents.ofSession("c1").id).toBe(researcher.id);
+			const permissions = sql.exec("SELECT audience FROM pim_tool_permissions WHERE tool = 'github_merge' ORDER BY audience").toArray().map((row) => row.audience);
+			expect(permissions).toEqual(expect.arrayContaining([`agent:${researcher.id}`, `agent:${byName["Writer (Planner)"]!.id}`, "agent:p_plan"]));
+			// Starting again changes nothing.
+			expect(new AgentStore(sql, () => { throw new Error("unused"); }, () => []).list()).toHaveLength(5);
 		});
 	});
 });

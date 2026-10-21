@@ -117,7 +117,7 @@ export async function fileApproval(
 	const approval = services.store.requestApproval({
 		id,
 		session,
-		member: services.teamMember(session),
+		member: services.taskAgent(session),
 		callId: api.callId,
 		createdAt: now,
 		expiresAt: timeout === null ? null : now + timeout,

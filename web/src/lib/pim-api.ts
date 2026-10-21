@@ -56,12 +56,16 @@ export const APP_CATEGORIES = [
 ] as const;
 export type AppCategory = (typeof APP_CATEGORIES)[number];
 
-/** One of an agent's team: it does tasks the agent hands it, and answers the agent, never you. */
-export type TeamMember = {
+/** Another agent that comes with a template: one of its contacts, or of theirs. */
+export type BundledAgent = {
   name: string;
+  description: string;
   instructions: string;
-  /** The tools it may use, by name; null for all the agent's tools a member can have. */
-  tools: string[] | null;
+  apps: string[];
+  symbol: string | null;
+  color: string | null;
+  /** Its contacts, by name, among the agents that come with the template. */
+  contacts: string[];
 };
 
 /** A conversation's message, as the REST API projects it. */
@@ -84,8 +88,8 @@ export type TranscriptMessage = {
   error?: string;
 };
 
-/** Who works on a task, or asked for it: an agent, or a member of an agent's team. */
-export type TaskAgent = { id: string; name: string; member: boolean };
+/** Who works on a task, or asked for it: one of your agents. */
+export type TaskAgent = { id: string; name: string };
 
 /**
  * A task one agent handed another, in a conversation of its own. The tasks a
@@ -173,7 +177,8 @@ export type Agent = {
   apps: string[];
   /** The names of your skills it uses. */
   skills: string[];
-  team: TeamMember[];
+  /** Your other agents it hands tasks to, by id; your majordomo's is empty, as it hands tasks to all of them. */
+  contacts: string[];
   /** The blueprint it builds on, as `<extension>/<blueprint>`, which brings its dashboard; null for none. */
   blueprint: string | null;
   /** The template it was made from. */
@@ -297,7 +302,7 @@ export type AgentInput = {
   instructions: string;
   apps: string[];
   skills?: string[];
-  team: TeamMember[];
+  contacts: string[];
   /** Left out, a new agent is based on the deployment's default blueprint. */
   blueprint?: string | null;
   /** Left out, a new agent has the default look and an edited one keeps its own. */
@@ -337,7 +342,10 @@ export type Template = {
   description: string;
   instructions: string;
   apps: string[];
-  team: TeamMember[];
+  /** Its contacts, by name, among `bundle`. */
+  contacts: string[];
+  /** The other agents that come with it: its contacts, and theirs. */
+  bundle: BundledAgent[];
   /** Its look, as the agent's was when published. */
   symbol: string | null;
   color: string | null;

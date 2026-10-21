@@ -2,7 +2,7 @@
   "name": "pim",
   "version": "0.1.0",
   "description": "An open-source personal agent, with its web app, deployable to Cloudflare Durable Objects.",
-  "license": "MIT",
+  "license": "FSL-1.1-ALv2",
   "private": true,
   "packageManager": "pnpm@12.0.0",
   "type": "module",

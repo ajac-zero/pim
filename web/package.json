@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "license": "MIT",
+  "license": "FSL-1.1-ALv2",
   "scripts": {
     "dev": "vite dev --port 3000",
     "build": "vite build && node scripts/build-artifact-runtimes.mjs && node scripts/build-notification-symbols.mjs",

@@ -74,4 +74,4 @@ A Pim on Cloudflare can reach only servers on the public internet; one on your o
 
 To work on Pim, `pnpm check` runs the type checks, lint and tests, as CI does.
 
-Pim is released under the [MIT License](LICENSE).
+Pim is released under the [Functional Source License, Version 1.1, ALv2 Future License](LICENSE) (FSL-1.1-ALv2). You can use, modify and self-host Pim for any purpose, including inside a company, except offering it as a competing commercial service. Each release becomes available under the Apache License 2.0 two years after it is published.

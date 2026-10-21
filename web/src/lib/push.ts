@@ -12,15 +12,21 @@ export function registerServiceWorker() {
   }
 }
 
-const subscription = async () =>
-  (await navigator.serviceWorker.ready).pushManager.getSubscription();
-
-export const pushEnabled = async () =>
-  Notification.permission === "granted" && (await subscription()) !== null;
+/** Registers this browser automatically only when permission is already granted. */
+export async function pushEnabled() {
+  if (Notification.permission !== "granted") return false;
+  // Permission is the person's choice; there is no separate in-app opt-in.
+  // Register even if this browser has never subscribed or Pim lost its record.
+  await enablePush();
+  return true;
+}
 
 /** Asks for permission, subscribes this browser, and tells Pim. */
 export async function enablePush() {
-  if ((await Notification.requestPermission()) !== "granted") {
+  if (
+    Notification.permission !== "granted" &&
+    (await Notification.requestPermission()) !== "granted"
+  ) {
     throw new Error("notifications-blocked");
   }
   const registration = await navigator.serviceWorker.ready;
@@ -44,13 +50,6 @@ export async function enablePush() {
     p256dh: keys?.p256dh as string,
     auth: keys?.auth as string,
   });
-}
-
-export async function disablePush() {
-  const current = await subscription();
-  if (!current) return;
-  await pim.unsubscribePush(current.endpoint);
-  await current.unsubscribe();
 }
 
 function sameBytes(buffer: ArrayBuffer | null, bytes: Uint8Array) {

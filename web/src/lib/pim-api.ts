@@ -1255,11 +1255,6 @@ export const pim = {
       method: "PUT",
       body: JSON.stringify(subscription),
     }),
-  unsubscribePush: (endpoint: string) =>
-    call<{ subscribed: boolean }>("/push/subscription", {
-      method: "DELETE",
-      body: JSON.stringify({ endpoint }),
-    }),
   model: () => call<ModelSettings>("/model"),
   chooseModel: (model: Pick<ModelInfo, "provider" | "id">) =>
     call<{ model: ModelInfo }>("/model", {

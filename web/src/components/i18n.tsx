@@ -423,10 +423,13 @@ const translations = {
     scheduleCancelled: "Schedule cancelled",
     notifications: "Notifications",
     pushNotifications: "Push notifications",
-    pushDescription:
-      "Get your agents' replies and Pim's notifications on this device when you aren't looking at the chat, even with the app closed.",
+    pushDescription: "Get replies and alerts while you're away.",
+    pushAllow: "Allow notifications",
+    pushRegistered: "Registered. Manage alerts in device or browser settings.",
+    pushRegistering: "Setting up notifications…",
+    pushRegistrationFailed: "Couldn't register this device for notifications.",
     pushBlocked:
-      "Notifications are blocked for this site. Allow them in your browser's settings.",
+      "Notifications are blocked. Allow them in your device or browser settings.",
     pushUnsupported:
       "This browser can't receive push notifications. On an iPhone or iPad, add Pim to your Home Screen first.",
     openChat: "Open chat",
@@ -681,7 +684,6 @@ const translations = {
     open: "Open",
     settingsGeneral: "General",
     settingsModel: "Model",
-    settingsNotifications: "Notifications",
     settingsPermissions: "Permissions",
     settingsAccount: "Account",
     settingsMembers: "Members",
@@ -1356,10 +1358,15 @@ const translations = {
     unread: "No leída",
     scheduleCancelled: "Programación cancelada",
     pushNotifications: "Notificaciones push",
-    pushDescription:
-      "Recibe las respuestas de tus agentes y las notificaciones de Pim en este dispositivo cuando no estás viendo el chat, incluso con la app cerrada.",
+    pushDescription: "Recibe respuestas y avisos cuando no estás aquí.",
+    pushAllow: "Permitir notificaciones",
+    pushRegistered:
+      "Registrado. Controla los avisos en los ajustes del dispositivo o del navegador.",
+    pushRegistering: "Configurando las notificaciones…",
+    pushRegistrationFailed:
+      "No se pudo registrar este dispositivo para recibir notificaciones.",
     pushBlocked:
-      "Las notificaciones están bloqueadas para este sitio. Permítelas en los ajustes de tu navegador.",
+      "Las notificaciones están bloqueadas. Permítelas en los ajustes del dispositivo o del navegador.",
     pushUnsupported:
       "Este navegador no puede recibir notificaciones push. En un iPhone o iPad, primero agrega Pim a tu pantalla de inicio.",
     openChat: "Abrir chat",
@@ -1616,7 +1623,6 @@ const translations = {
     open: "Abrir",
     settingsGeneral: "General",
     settingsModel: "Modelo",
-    settingsNotifications: "Notificaciones",
     settingsPermissions: "Permisos",
     settingsAccount: "Cuenta",
     settingsMembers: "Miembros",

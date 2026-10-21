@@ -2,7 +2,7 @@
 
 A Pim is one Worker for everyone on it. Each person has their own space: one Durable Object `Pim` holding their memory, apps and agents, plus their own conversations, goals, schedules, ChatGPT sign-in, passkeys, linked accounts and API tokens. The person who sets it up is its admin: they invite the others, and help them back in when they lose every passkey. A Pim for one person is the same thing with one account.
 
-People on the same Pim can share with each other: circles let others message your agent from their own space (see [Sharing](../README.md#sharing)), and Discover lists the templates people published. Nothing crosses from one deployment to another.
+People on the same Pim can share with each other: circles let others message your agent from their own space (see [Sharing](reference.md#sharing)), and Discover lists the templates people published. Nothing crosses from one deployment to another.
 
 ## How it works
 
@@ -42,7 +42,7 @@ People on the same Pim can share with each other: circles let others message you
 
 - **The admin.** While a Pim has no admin, the only way to make an account is to claim it, and that account is the admin's. Anyone who opens the Pim in the 15 minutes after a deploy can, so open it right after deploying. After that, the sign-in screen asks the Worker to write a setup link to its logs (`#claim=<code>`, one hour), which only someone signed in to the Cloudflare account can read. If the admin's registration lapses without a passkey, or the admin deletes their account, the Pim can be claimed again the same ways.
 - **Everyone else** joins as `PIM_REGISTRATION` says: `invite` (the default) takes a single-use invite link the admin makes in Settings (`#invite=<code>`), `open` takes anyone, `closed` nobody. Registrations are limited per address per day (`PIM_REGISTRATIONS_PER_ADDRESS`, default 3) and, optionally, in total (`PIM_MAX_ACCOUNTS`).
-- **Registering** (`POST /auth/register`) provisions the person's space, gives them a copy of the agent the admin chose for everyone, if any (see [Your agents](../README.md#your-agents)), sets its time zone from the browser, and returns ten recovery codes and a one-time setup code (good for a day). The web app shows the codes, then makes the first passkey with the setup code, which activates the account. Signed in, the person names their [majordomo](../README.md#your-majordomo).
+- **Registering** (`POST /auth/register`) provisions the person's space, gives them a copy of the agent the admin chose for everyone, if any (see [Your agents](reference.md#your-agents)), sets its time zone from the browser, and returns ten recovery codes and a one-time setup code (good for a day). The web app shows the codes, then makes the first passkey with the setup code, which activates the account. Signed in, the person names their [majordomo](reference.md#your-majordomo).
 - **Recovery.** A recovery code, with its username, makes one passkey, once. People can replace their codes in Settings. The admin can make anyone a one-hour setup link from Settings, after checking who they are some other way, and gets one for themselves from the logs.
 - **Approvals** default to `PIM_APPROVAL_POLICY`; each person can change theirs.
 - **Usage and limits.** Every model request goes through a metered model catalog. Requests and runs are checked and counted in one step before they start, so concurrent ones can't all take the last slot. Tokens are known only when a request ends, so requests already under way can take a day past `dailyTokens`; the next one is refused. Tokens are counted by the day the request was sent, and by provider. Tokens on someone's own ChatGPT plan are counted apart and never use up the deployment's allowance. The `PIM_LIMIT_*` variables set members' limits; the admin has none. The admin can set one person's in the admin API. Running out stops the model request with a non-retryable "quota exceeded" error, refuses new runs with `429`, and skips scheduled tasks with one notification a day. Usage is recorded, not charged.
@@ -53,7 +53,7 @@ People on the same Pim can share with each other: circles let others message you
 
 ## Running it
 
-How the Pim runs for everyone is its variables, set in the Cloudflare dashboard (see [Deploy](../README.md#deploy)); Settings → Deployment shows the admin each one and any Pim can't read. The admin manages people in Settings → Members: invite someone, make a setup link, suspend or restore an account, delete one. The same tab shows which of Google, GitHub and a custom OpenID Connect provider the deployment's `PIM_<PROVIDER>_*` secrets turn on, and how to set one up (see [Deploy](../README.md#deploy)). The same is in the API, under `/api/admin`, for the admin signed in to the app; an API token can't run the instance:
+How the Pim runs for everyone is its variables, set in the Cloudflare dashboard (see [Deploy](reference.md#deploy)); Settings → Deployment shows the admin each one and any Pim can't read. The admin manages people in Settings → Members: invite someone, make a setup link, suspend or restore an account, delete one. The same tab shows which of Google, GitHub and a custom OpenID Connect provider the deployment's `PIM_<PROVIDER>_*` secrets turn on, and how to set one up (see [Deploy](reference.md#deploy)). The same is in the API, under `/api/admin`, for the admin signed in to the app; an API token can't run the instance:
 
 | Method | Path | Body | Does |
 | --- | --- | --- | --- |
@@ -69,7 +69,7 @@ How the Pim runs for everyone is its variables, set in the Cloudflare dashboard 
 | DELETE | `/api/admin/templates/:id` | | Takes a published agent out of Discover |
 | POST | `/api/admin/apps` | `{ name, description?, url }` | Adds an app everyone can connect: a remote MCP server, named `custom/<id>` after its name (`201` with `{ app }`) |
 | DELETE | `/api/admin/apps/:id` | | Takes it out of the directory. People's connections to it stay until they disconnect them |
-| POST | `/api/admin/providers` | `{ name, url, key?, models? }` | Adds a model provider everyone can use: a server that speaks OpenAI's chat completions (`201` with `{ provider }`, never the key). See the README's Model providers |
+| POST | `/api/admin/providers` | `{ name, url, key?, models? }` | Adds a model provider everyone can use: a server that speaks OpenAI's chat completions (`201` with `{ provider }`, never the key). See [Model providers](reference.md#model-providers) |
 | PUT, DELETE | `/api/admin/providers/:id` | PUT: `{ name?, url?, key?, models? }` | Changes it and reads its models again, or takes it away from everyone |
 | GET, PUT, DELETE | `/api/admin/default-agent` | PUT: `{ agent }`, one of the admin's agents | The agent everyone who joins gets a copy of besides their majordomo (`{ agent }`, null for none). PUT copies the admin's agent as it is now; choosing again replaces it. DELETE goes back to none |
 | POST | `/api/admin/invites` | `{ count?, note? }` | Single-use invite codes and links (up to 100) |
@@ -132,5 +132,5 @@ What the fence stops, each covered by a test in `test/people.test.ts` ("erasure 
 - **Data residency**: agents are created without a jurisdiction (see above).
 - **Account cache**: each Worker isolate trusts what it read about an account for up to 30 seconds. Suspensions reach the agent at once regardless. Deletions wipe credentials, so a stale cache can't open a deleted account.
 - **Directory**: one Durable Object holds every account and runs every cleanup. That is plenty for a household or a team, since lookups are cached.
-- **Email** is optional, and only for Pim's messages to each person (see the README's Email section). Accounts have no email: recovery is codes, or the admin's setup link.
+- **Email** is optional, and only for Pim's messages to each person (see [Email](reference.md#email)). Accounts have no email: recovery is codes, or the admin's setup link.
 - **One admin.** More admins, or handing the role over, aren't built.

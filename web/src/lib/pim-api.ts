@@ -3,7 +3,7 @@ import type { AgentEvent } from "@earendil-works/pi-durable";
 /**
  * Pim's REST API, reached through this app's own `/api` path: the app's
  * Worker forwards it to Pim and adds the API token, so the browser never
- * holds it. Shapes follow Pim's README.
+ * holds it. Shapes follow the API in docs/reference.md.
  */
 
 export type Session = {

@@ -55,9 +55,9 @@
   // How a Pim runs (its address, who may join, its models, members' limits, who answers approvals)
   // is each deployment's own, so it isn't here: set those variables in the dashboard (Workers & Pages
   // → pim → Settings → Variables and Secrets), and this keeps them through deploys. All but the
-  // address, PIM_PUBLIC_URL, have a default in src/deployment.ts; the README lists them, and the
+  // address, PIM_PUBLIC_URL, have a default in src/deployment.ts; docs/reference.md lists them, and the
   // admin sees them in Settings → Deployment. OpenTelemetry traces are set the same way: see Traces
-  // in the README.
+  // in docs/reference.md.
   "keep_vars": true,
   // Signing in with Google, GitHub or your own OpenID Connect provider, besides passkeys, is off
   // until you add an OAuth app's client ID and secret as secrets (dashboard → Workers & Pages →

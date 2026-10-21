@@ -22,6 +22,7 @@
 
 import { Buffer } from "node:buffer";
 import { compileJsxApp, dataUrl, inlineCssUrls, inlineScript, resolvePath } from "./artifact-jsx";
+import { FileStore } from "./file-store";
 import { HttpError } from "./http";
 
 export const ARTIFACT_KINDS = ["html", "markdown", "svg", "mermaid", "jsx"] as const;
@@ -119,8 +120,6 @@ export const MAX_TITLE_LENGTH = 200;
 const MAX_PATH_LENGTH = 200;
 /** How many bytes of files an export carries inline; the rest are listed by hash. */
 const EXPORT_INLINE_BYTES = 32_000_000;
-/** How long a write's claim on a file it is storing keeps it from being collected, should the write never finish. */
-const PENDING_MS = 60 * 60 * 1000;
 /**
  * What one artifact, and all of them, may keep through the bridge, keys and
  * values together, in UTF-8 bytes: an export holds it all in memory too.
@@ -198,13 +197,6 @@ CREATE TABLE IF NOT EXISTS pim_artifact_files (
 	PRIMARY KEY (artifact, version, path)
 );
 CREATE INDEX IF NOT EXISTS pim_artifact_files_by_hash ON pim_artifact_files (sha256);
--- Files a write is storing in R2 before it lists them: they aren't collected meanwhile.
-CREATE TABLE IF NOT EXISTS pim_artifact_pending (
-	sha256 TEXT NOT NULL,
-	write TEXT NOT NULL,
-	at INTEGER NOT NULL,
-	PRIMARY KEY (sha256, write)
-);
 `;
 
 type Row = Record<string, SqlStorageValue>;
@@ -391,8 +383,7 @@ export class ArtifactStore {
 	readonly #storageRoom: () => number | null;
 	readonly #bucket: R2Bucket;
 	readonly #owner: () => string;
-	/** One chain of R2 work per file hash, so a file isn't collected while a write stores it again. */
-	readonly #locks = new Map<string, Promise<void>>();
+	readonly #blobs: FileStore;
 
 	constructor(sql: SqlStorage, limits: () => ArtifactLimits, options: ArtifactWriteOptions) {
 		this.#sql = sql;
@@ -401,6 +392,13 @@ export class ArtifactStore {
 		this.#bucket = options.bucket;
 		this.#owner = options.owner;
 		this.#sql.exec(SCHEMA);
+		// Files a write is storing in R2 before it lists them are claimed in pim_artifact_pending, so they aren't collected meanwhile.
+		this.#blobs = new FileStore(sql, {
+			bucket: options.bucket,
+			key: (hash) => blobKey(this.#owner(), hash),
+			pending: "pim_artifact_pending",
+			listed: (hash) => this.#known(hash),
+		});
 	}
 
 	/** Every artifact, most recently changed first. */
@@ -499,7 +497,7 @@ export class ArtifactStore {
 		if (!this.#inline(id, version)) return found;
 		const [row] = this.#sql.exec("SELECT content FROM pim_artifact_versions WHERE artifact = ? AND version = ?", id, version).toArray();
 		const file = found.files[0]!;
-		await this.#store([{ ...file }], new Map([[file.sha256, encoder.encode(String(row!.content))]]), () => {
+		await this.#blobs.store([file.sha256], new Map([[file.sha256, encoder.encode(String(row!.content))]]), () => {
 			if (!this.#inline(id, version)) return;
 			this.#sql.exec("INSERT INTO pim_artifact_files (artifact, version, path, sha256, size, type) VALUES (?, ?, ?, ?, ?, ?)", id, version, file.path, file.sha256, file.size, file.type);
 			this.#sql.exec("UPDATE pim_artifact_versions SET content = '' WHERE artifact = ? AND version = ?", id, version);
@@ -578,58 +576,6 @@ export class ArtifactStore {
 		return { files: [...files.values()].sort((a, b) => (a.path < b.path ? -1 : 1)), bytes };
 	}
 
-	/**
-	 * Stores a draft's new files in R2, then runs `commit`, with nothing
-	 * awaited between its checks and its writes. While a file is being
-	 * stored, it's claimed, so a deletion doesn't collect it; one a refused
-	 * write stored and no version lists is collected after.
-	 */
-	async #store<T>(files: readonly ArtifactFile[], bytes: ReadonlyMap<string, Uint8Array>, commit: () => T): Promise<T> {
-		const write = crypto.randomUUID();
-		const hashes = [...new Set(files.map((file) => file.sha256))].filter((hash) => bytes.has(hash));
-		const now = Date.now();
-		for (const hash of hashes) this.#sql.exec("INSERT INTO pim_artifact_pending (sha256, write, at) VALUES (?, ?, ?)", hash, write, now);
-		try {
-			await Promise.all(
-				hashes.map((hash) =>
-					this.#locked(hash, async () => {
-						await this.#bucket.put(blobKey(this.#owner(), hash), bytes.get(hash)!);
-					}),
-				),
-			);
-			return commit();
-		} finally {
-			this.#sql.exec("DELETE FROM pim_artifact_pending WHERE write = ?", write);
-			await this.#collect(hashes);
-		}
-	}
-
-	/** Runs R2 work on one file hash after the work on it before. */
-	#locked(hash: string, work: () => Promise<void>): Promise<void> {
-		const before = this.#locks.get(hash) ?? Promise.resolve();
-		const done = before.then(work, work);
-		const settled = done.catch(() => undefined);
-		this.#locks.set(hash, settled);
-		void settled.then(() => {
-			if (this.#locks.get(hash) === settled) this.#locks.delete(hash);
-		});
-		return done;
-	}
-
-	/** Deletes from R2 the files no version lists and no write is storing. */
-	async #collect(hashes: readonly string[]): Promise<void> {
-		this.#sql.exec("DELETE FROM pim_artifact_pending WHERE at < ?", Date.now() - PENDING_MS);
-		await Promise.all(
-			hashes.map((hash) =>
-				this.#locked(hash, async () => {
-					// Checked here, just before deleting: a write that claims it later stores it again after.
-					if (this.#known(hash) || this.#sql.exec("SELECT 1 FROM pim_artifact_pending WHERE sha256 = ? LIMIT 1", hash).toArray().length > 0) return;
-					await this.#bucket.delete(blobKey(this.#owner(), hash));
-				}),
-			),
-		);
-	}
-
 	/** Writes a version's row and its files' rows. */
 	#insertVersion(id: string, version: number, draft: Draft, hash: string, input: { source: ArtifactSource; restoredFrom?: number; callId?: string }, now: number) {
 		const size = draft.files.reduce((total, file) => total + file.size, 0);
@@ -669,7 +615,7 @@ export class ArtifactStore {
 		// Checked before storing anything, and again when writing, after storing took a while.
 		const before = check();
 		if (before) return before;
-		return this.#store(draft.files, draft.bytes, () => {
+		return this.#blobs.store(draft.files.map((file) => file.sha256), draft.bytes, () => {
 			const existing = check();
 			if (existing) return existing;
 			const now = Date.now();
@@ -743,7 +689,7 @@ export class ArtifactStore {
 		};
 		const before = check();
 		if (before) return before;
-		return this.#store(draft.files, draft.bytes, () => {
+		return this.#blobs.store(draft.files.map((file) => file.sha256), draft.bytes, () => {
 			const decided = check();
 			if (decided) return decided;
 			const current = this.get(id)!;
@@ -777,7 +723,7 @@ export class ArtifactStore {
 		this.#sql.exec("DELETE FROM pim_artifact_grants WHERE artifact = ?", id);
 		this.#sql.exec("DELETE FROM pim_artifact_circles WHERE artifact = ?", id);
 		this.#sql.exec("DELETE FROM pim_artifacts WHERE id = ?", id);
-		await this.#collect(hashes);
+		await this.#blobs.collect(hashes);
 		return true;
 	}
 

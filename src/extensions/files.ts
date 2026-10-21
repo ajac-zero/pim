@@ -42,7 +42,7 @@ const CHANGES: ReadonlySet<WorkspaceTool> = new Set(["write", "edit", "delete", 
 /** Running these again after an eviction does what the first run did. `edit` would apply its edits twice, and code could do anything twice. */
 const REPLAY_SAFE: ReadonlySet<WorkspaceTool> = new Set(["read", "ls", "find", "grep", "write", "delete"]);
 
-const WHERE = `The person's files are under ${FILES_ROOT}; they see the same files under Files in the app, and can add their own there. Paths outside ${FILES_ROOT} are refused.`;
+const WHERE = `The person's files are under ${FILES_ROOT}; they see the same files under Files in the app, and can add their own there. Paths outside ${FILES_ROOT} are refused. To share a file in chat, use a Markdown link to its absolute path, such as [Download the report](${FILES_ROOT}/report.csv). Pim opens it in the file viewer; do not use sandbox: or file: URLs.`;
 
 /** How stored files look to agents, with or without code to open them. */
 function storedNote(code: boolean): string {
@@ -51,7 +51,7 @@ function storedNote(code: boolean): string {
 }
 
 /** What `run_javascript` is for, before the backend's own description of the language and modules. */
-const CODE = `Run JavaScript to work with the person's files: analyse data, convert formats, compute, or make files such as CSV, JSON, SVG charts or HTML. Each run starts fresh, has no network (use http_request or fetch_url for that), and stops after a minute. Write what the person should keep to a file under ${FILES_ROOT}; return what you need to read in the result. Code sees only files that are text: to open a stored file (a PDF, image or audio file that listings mark "stored"), file_load it first and open the copy. Files the code writes that aren't text become stored files when it ends.`;
+const CODE = `Run JavaScript to work with the person's files: analyse data, convert formats, compute, or make files such as CSV, JSON, SVG charts or HTML. Each run starts fresh, has no network (use http_request or fetch_url for that), and stops after a minute. Write what the person should keep to a file under ${FILES_ROOT}; return what you need to read in the result. Code sees only files that are text: to open a stored file (a PDF, image or audio file that listings mark "stored"), file_load it first and open the copy. Files the code writes that aren't text become stored files when it ends. ${WHERE}`;
 
 const LOAD = `Copy one of the person's stored files (those file_list and file_find mark "stored": PDFs, images, audio and other files that aren't text) into ${LOADED_ROOT}, so run_javascript can open it, and get the copy's path. The copy is temporary: older copies are dropped to make room, and changing it doesn't change the original, so write what you make to a new file.`;
 

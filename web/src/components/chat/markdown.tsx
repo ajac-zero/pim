@@ -26,6 +26,7 @@ import {
   CodeBlockHeader,
   CodeBlockTitle,
 } from "~/components/ui/code-block";
+import { FILES_ROOT } from "~/lib/pim-api";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
 import { openTab } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
@@ -56,6 +57,8 @@ type MdastNode = {
  * Makes the chats a message names into links: an id, bare or in backticks,
  * and a `/chat/<id>` address. An id that turns out not to be a chat (an
  * artifact's or an approval's) is shown as text again by `ChatLink`.
+ * Workspace file links, including `sandbox:` addresses from older replies,
+ * go to the file viewer before Markdown's sanitizer checks their protocol.
  */
 function remarkChatLinks() {
   const link = (text: string, id: string): MdastNode => ({
@@ -81,6 +84,16 @@ function remarkChatLinks() {
     const artifact =
       node.type === "link" && ARTIFACT_SCHEME.exec(node.url ?? "");
     if (artifact) node.url = `/artifacts/${artifact[1]}`;
+    if (node.type === "link" && node.url) {
+      const path = node.url.replace(/^sandbox:/i, "");
+      if (path.startsWith(`${FILES_ROOT}/`)) {
+        try {
+          node.url = `/files?path=${encodeURIComponent(decodeURIComponent(path))}`;
+        } catch {
+          // An invalid percent escape stays subject to the usual link checks.
+        }
+      }
+    }
     // Text already in a link stays that link's.
     if (!node.children || node.type === "link" || node.type === "linkReference")
       return;

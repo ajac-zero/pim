@@ -362,6 +362,35 @@ describe("chats an agent names", () => {
     );
   }
 
+  it("opens workspace links in the file viewer, including sandbox addresses in older replies", () => {
+    const text = [
+      "[Tailored Rx Resume JSON](sandbox:/workspace/Anibal-Angulo-STLabs-Agent-Evaluation.json)",
+      "[Changes and follow-up notes](sandbox:/workspace/Anibal-Angulo-STLabs-Tailoring-Notes.md)",
+      "[Report](/workspace/reports/notes%20%23%201.md)",
+    ].join("\n\n");
+    for (const streaming of [false, true]) {
+      const html = renderToStaticMarkup(
+        <Markdown text={text} streaming={streaming} />,
+      );
+      const hrefs = elements(html).flatMap((element) =>
+        element.attributes.filter((a) => a.name === "href").map((a) => a.value),
+      );
+      expect(hrefs).toEqual([
+        "/files?path=%2Fworkspace%2FAnibal-Angulo-STLabs-Agent-Evaluation.json",
+        "/files?path=%2Fworkspace%2FAnibal-Angulo-STLabs-Tailoring-Notes.md",
+        "/files?path=%2Fworkspace%2Freports%2Fnotes%20%23%201.md",
+      ]);
+      expect(html).not.toContain("[blocked]");
+    }
+    // Stored Markdown remains untrusted, and unrelated sandbox paths aren't file links.
+    expect(
+      renderToStaticMarkup(<Markdown text={text} untrusted />),
+    ).not.toContain('href="/files');
+    expect(
+      renderToStaticMarkup(<Markdown text="[Other](sandbox:/etc/passwd)" />),
+    ).not.toContain('href="/files');
+  });
+
   it("links a chat by its id, bare, in backticks or as its address, and shows its title", async () => {
     const links = (html: string) =>
       [...html.matchAll(/<a [^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].map(

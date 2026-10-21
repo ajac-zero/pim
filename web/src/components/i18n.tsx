@@ -585,7 +585,7 @@ const translations = {
     summaryAndBrowser: "Summary and browser",
     browserPicture: "What the browser shows: {title}",
     takeOverBrowser: "Take over",
-    closeBrowser: "Close the browser",
+    closeBrowser: "Turn off browser",
     browserClosed: "Browser closed",
     noFilePreview: "There's no preview for this file. Download it to open it.",
     deleteFileNamed: "Delete {name}",
@@ -1517,7 +1517,7 @@ const translations = {
     summaryAndBrowser: "Resumen y navegador",
     browserPicture: "Lo que muestra el navegador: {title}",
     takeOverBrowser: "Tomar el control",
-    closeBrowser: "Cerrar el navegador",
+    closeBrowser: "Apagar el navegador",
     browserClosed: "Navegador cerrado",
     noFilePreview:
       "Este archivo no tiene vista previa. Descárgalo para abrirlo.",

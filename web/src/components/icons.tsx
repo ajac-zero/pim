@@ -191,6 +191,7 @@ export const Plane = themedIcon(
 export const Play = themedIcon(Lucide.Play, Pixel.Play);
 export const Plug = themedIcon(Lucide.Plug, Pixel.Plug);
 export const Plus = themedIcon(Lucide.Plus, Pixel.Plus);
+export const Power = themedIcon(Lucide.Power, Pixel.CirclePower);
 export const Puzzle = themedIcon(
   Lucide.Puzzle,
   pixelPath("M3 3h6V1h6v6h6v6h2v6h-6v4H3v-6h4v-6H3V3Z"),

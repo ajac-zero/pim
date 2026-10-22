@@ -143,8 +143,6 @@ import {
 	agentExtension,
 	MANAGE_APPS,
 	manageAppsAction,
-	RENAME_AGENT,
-	renameAgentAction,
 	requestedIcon,
 	SHARE_MEMORY_SCOPE,
 	shareMemoryScopeAction,
@@ -337,7 +335,7 @@ const LIMITS_KEY = "limits";
  * scope; and, in the admin's space, adding apps to this Pim.
  */
 const MAJORDOMO_TOOLS = [CREATE_MEMORY_SCOPE, SHARE_MEMORY_SCOPE, ADD_CUSTOM_APP];
-const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, RENAME_AGENT, MANAGE_APPS, ADD_CUSTOM_APP, WRITE_SKILL, INSTALL_SKILL]);
+const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, MANAGE_APPS, ADD_CUSTOM_APP, WRITE_SKILL, INSTALL_SKILL]);
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
 /** The admin's apps, as this space last read them from the gallery, and how long before it reads them again. */
 const CUSTOM_APPS_KEY = "custom_apps";
@@ -611,7 +609,6 @@ export class Pim extends DurableAgent<Env> {
 		...mcpActions(this.apps),
 		watchAction(this.apps, this.appEvents),
 		updateAgentAction(this.agents, this.files),
-		renameAgentAction(this.agents),
 		shareMemoryScopeAction(this.agents, () => this.memory.store.namedScopes()),
 		manageAppsAction(this.agents, this.apps, () => this.appDirectory()),
 		addCustomAppAction(this.agents, this.apps, (app) => this.#addCustomApp(app)),
@@ -3196,7 +3193,7 @@ export class Pim extends DurableAgent<Env> {
 		const agent = this.agents.get(id);
 		if (!agent) return null;
 		const byId = new Map(this.agents.list().map((other) => [other.id, other]));
-		const names = (contacts: readonly string[]) => contacts.flatMap((contact) => byId.get(contact)?.name ?? []);
+		const names = (contacts: readonly string[]) => contacts.flatMap((contact) => byId.get(contact)?.role ?? []);
 		const bundle: Agent[] = [];
 		const seen = new Set([agent.id]);
 		for (const queue = [...agent.contacts]; queue.length > 0; ) {
@@ -3206,10 +3203,11 @@ export class Pim extends DurableAgent<Env> {
 			bundle.push(other);
 			queue.push(...other.contacts);
 		}
-		const { name, description, instructions, apps, blueprint, symbol, color } = agent;
+		const { name, role, description, instructions, apps, blueprint, symbol, color } = agent;
 		return {
 			id,
 			name,
+			role,
 			description,
 			instructions,
 			apps,
@@ -3219,6 +3217,7 @@ export class Pim extends DurableAgent<Env> {
 			contacts: names(agent.contacts),
 			bundle: bundle.map((other) => ({
 				name: other.name,
+				role: other.role,
 				description: other.description,
 				instructions: other.instructions,
 				apps: other.apps,
@@ -3309,8 +3308,8 @@ export class Pim extends DurableAgent<Env> {
 	 * Copies an agent from the gallery into the owner's agents, and the agents
 	 * that come with it, each with its uploaded icon and a contact of the
 	 * copies that had it. A copy
-	 * that comes with it and is called as one of the owner's agents already is
-	 * gets a name of its own, so that agents hand it tasks by its name.
+	 * whose role one of the owner's agents already has gets a role of its own,
+	 * so that agents hand it tasks by its role.
 	 */
 	async #adopt(copy: Omit<PublishedAgent, "id" | "image"> & { image: AgentIcon | null }, source: NonNullable<Agent["source"]>): Promise<Agent> {
 		const all = [copy, ...copy.bundle];
@@ -3318,18 +3317,18 @@ export class Pim extends DurableAgent<Env> {
 			throw new HttpError(429, `You can have up to ${MAX_AGENTS} agents, and ${copy.name} comes with ${all.length - 1} more.`);
 		}
 		const inputs: AgentInput[] = [];
-		for (const { name, description, instructions, apps, blueprint, symbol, color } of all) {
-			inputs.push(await this.#installed(agentInput({ name, description, instructions, apps, blueprint, symbol, color })));
+		for (const { name, role, description, instructions, apps, blueprint, symbol, color } of all) {
+			inputs.push(await this.#installed(agentInput({ name, role, description, instructions, apps, blueprint, symbol, color })));
 		}
-		const taken = new Set(this.agents.list().map((agent) => agent.name.toLowerCase()));
+		const taken = new Set(this.agents.list().map((agent) => agent.role.toLowerCase()));
 		const made = inputs.map((input, index) => {
-			const name = index === 0 ? input.name : freeName(input.name, copy.name, taken);
-			taken.add(name.toLowerCase());
-			return this.agents.create({ ...input, name }, source, index === 0 ? source.template : `${source.template}/${all[index]!.name.toLowerCase()}`);
+			const role = freeName(input.role!, copy.name, taken);
+			taken.add(role.toLowerCase());
+			return this.agents.create({ ...input, role }, source, index === 0 ? source.template : `${source.template}/${all[index]!.role.toLowerCase()}`);
 		});
-		const copyOf = new Map(all.map((agent, index) => [agent.name.toLowerCase(), made[index]!]));
+		const copyOf = new Map(all.map((agent, index) => [agent.role.toLowerCase(), made[index]!]));
 		for (const [index, agent] of all.entries()) {
-			const contacts = agent.contacts.flatMap((name) => copyOf.get(name.toLowerCase())?.id ?? []).filter((id) => id !== made[index]!.id);
+			const contacts = agent.contacts.flatMap((role) => copyOf.get(role.toLowerCase())?.id ?? []).filter((id) => id !== made[index]!.id);
 			if (contacts.length > 0) this.agents.update(made[index]!.id, agentInput({ contacts }, made[index]));
 		}
 		for (const [index, agent] of all.entries()) if (agent.image) this.agents.setIcon(made[index]!.id, agent.image.type, agent.image.data);

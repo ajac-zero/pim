@@ -34,7 +34,10 @@ import { SKILL_NAME } from "./skills";
 
 export type Agent = {
 	readonly id: string;
+	/** What people call it, such as "Ada". Agents may share a name. */
 	readonly name: string;
+	/** What it is for, such as "Researcher", which is how agents and templates refer to it. Each of the person's agents has its own. */
+	readonly role: string;
 	readonly description: string;
 	readonly instructions: string;
 	/** The apps it works with, by name in the directory: `<extension>/<app>`. */
@@ -75,6 +78,8 @@ export type Agent = {
 
 export type AgentInput = {
 	readonly name: string;
+	/** Left out, a new agent's role is its name and an edited one keeps its own. */
+	readonly role?: string;
 	readonly description: string;
 	readonly instructions: string;
 	readonly apps: readonly string[];
@@ -102,6 +107,7 @@ export function checkIcon(type: string, bytes: number): void {
 
 export const AGENT_COLORS = ["gray", "red", "orange", "amber", "green", "teal", "blue", "indigo", "violet", "pink"];
 export const MAX_NAME = 60;
+export const MAJORDOMO_ROLE = "Majordomo";
 export const MAX_DESCRIPTION = 280;
 export const MAX_INSTRUCTIONS = 8000;
 export const MAX_APPS = 10;
@@ -112,6 +118,7 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS pim_agents (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
+	role TEXT,
 	description TEXT NOT NULL,
 	instructions TEXT NOT NULL,
 	apps TEXT NOT NULL,
@@ -152,7 +159,17 @@ type Row = Record<string, SqlStorageValue>;
 
 const newAgentId = () => `p_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 
-/** `name`, or, when one of the person's agents has it, the name with its former agent's after it, or a number. */
+/** An agent as a prompt lists it: its name, and its role when that is not the same. */
+export const agentLabel = (agent: Agent) => (agent.role.toLowerCase() === agent.name.toLowerCase() ? agent.name : `${agent.name} (${agent.role})`);
+
+/** The agent someone means by `wanted`: the one with that role, or else the only one with that name. */
+export function agentCalled(wanted: string, agents: readonly Agent[]): Agent | undefined {
+	const key = wanted.trim().toLowerCase();
+	const named = agents.filter((agent) => agent.name.toLowerCase() === key);
+	return agents.find((agent) => agent.role.toLowerCase() === key) ?? (named.length === 1 ? named[0] : undefined);
+}
+
+/** `name`, or, when one of the person's agents has it as its role, the name with its former agent's after it, or a number. */
 export function freeName(name: string, of: string, taken: ReadonlySet<string>): string {
 	const candidates = [name, `${name} (${of})`.slice(0, MAX_NAME), ...Array.from({ length: MAX_AGENTS * 2 }, (_, n) => `${name.slice(0, MAX_NAME - 4)} ${n + 2}`)];
 	return candidates.find((candidate) => !taken.has(candidate.toLowerCase())) ?? name;
@@ -181,6 +198,7 @@ const SELECT = "SELECT p.*, (SELECT updated_at FROM pim_agent_icons WHERE agent 
 const agentOf = (row: Row, directory: () => readonly DirectoryApp[]): Agent => ({
 	id: String(row.id),
 	name: String(row.name),
+	role: String(row.role),
 	description: String(row.description),
 	instructions: String(row.instructions),
 	apps: storedApps(JSON.parse(String(row.apps)) as unknown[], directory),
@@ -214,8 +232,10 @@ function text(value: unknown, field: string, max: number, required: boolean): st
 export function agentInput(body: Record<string, unknown>, partial?: Agent): AgentInput {
 	const apps = body.apps === undefined ? (partial?.apps ?? []) : body.apps;
 	if (!Array.isArray(apps) || apps.length > MAX_APPS) throw new HttpError(400, `apps must be a list of up to ${MAX_APPS}`);
+	const name = body.name === undefined && partial ? partial.name : text(body.name, "name", MAX_NAME, true);
 	return {
-		name: body.name === undefined && partial ? partial.name : text(body.name, "name", MAX_NAME, true),
+		name,
+		role: body.role === undefined ? (partial?.role ?? name) : text(body.role, "role", MAX_NAME, true),
 		description:
 			body.description === undefined && partial ? partial.description : text(body.description, "description", MAX_DESCRIPTION, false),
 		instructions:
@@ -311,7 +331,8 @@ export function checkContacts(self: Agent | null, input: AgentInput, agents: rea
  * person's own, which win.
  */
 export function agentInstructions(agent: Agent, blueprint: BlueprintDefinition | undefined, role?: string): string {
-	const identity = `In this conversation you are "${agent.name}"${agent.description ? `: ${agent.description}` : "."}`;
+	const as = agent.role.toLowerCase() === agent.name.toLowerCase() ? "" : `, the person's ${agent.role}`;
+	const identity = `In this conversation you are "${agent.name}"${as}${agent.description ? `: ${agent.description}` : "."}`;
 	const own =
 		agent.instructions === ""
 			? []
@@ -350,6 +371,9 @@ export class AgentStore {
 		if (!columns.includes("memory_scope")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN memory_scope TEXT");
 		if (!columns.includes("memory_scopes")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN memory_scopes TEXT NOT NULL DEFAULT '[]'");
 		if (!columns.includes("copy_of")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN copy_of TEXT");
+		// Agents were called by their role: it is their name, until the person gives them another.
+		if (!columns.includes("role")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN role TEXT");
+		this.#sql.exec(`UPDATE pim_agents SET role = CASE WHEN is_default = 1 THEN '${MAJORDOMO_ROLE}' ELSE name END WHERE role IS NULL`);
 		if (columns.includes("team")) this.#moveTeams();
 		// Agents from before memory scopes, and those made from teams, each get a scope of their own.
 		this.#sql.exec(`UPDATE pim_agents SET memory_scope = CASE WHEN is_default = 1 THEN '${PRIVATE_SCOPE}' ELSE 'agent-' || id END WHERE memory_scope IS NULL`);
@@ -382,7 +406,7 @@ export class AgentStore {
 	 */
 	#moveTeams(): void {
 		const tables = new Set(this.#sql.exec("SELECT name FROM sqlite_master WHERE type = 'table'").toArray().map((row) => String(row.name)));
-		const taken = new Set(this.#sql.exec("SELECT name FROM pim_agents").toArray().map((row) => String(row.name).toLowerCase()));
+		const taken = new Set(this.#sql.exec("SELECT role FROM pim_agents").toArray().map((row) => String(row.role).toLowerCase()));
 		for (const row of this.#sql.exec("SELECT * FROM pim_agents WHERE team != '[]'").toArray()) {
 			const team = JSON.parse(String(row.team)) as { name: string; instructions: string }[];
 			const contacts = JSON.parse(String(row.contacts)) as string[];
@@ -392,8 +416,9 @@ export class AgentStore {
 				const id = newAgentId();
 				const line = member.instructions.trim().split(/\r?\n/)[0] ?? "";
 				this.#sql.exec(
-					"INSERT INTO pim_agents (id, name, description, instructions, apps, skills, blueprint, color, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+					"INSERT INTO pim_agents (id, name, role, description, instructions, apps, skills, blueprint, color, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 					id,
+					name,
 					name,
 					line.length > MAX_DESCRIPTION ? `${line.slice(0, MAX_DESCRIPTION - 1)}…` : line,
 					member.instructions,
@@ -461,13 +486,21 @@ export class AgentStore {
 		return this.#insert(input, source, false, copyOf);
 	}
 
+	/** Each of the person's agents has a role of its own, which is how others refer to it. */
+	#checkRole(role: string, self: string | null): void {
+		const [taken] = this.#sql.exec("SELECT name FROM pim_agents WHERE lower(role) = ? AND id IS NOT ?", role.toLowerCase(), self).toArray();
+		if (taken) throw new HttpError(409, `You already have an agent for the role ${role}: ${String(taken.name)}. Each agent has a role of its own.`);
+	}
+
 	#insert(input: AgentInput, source: Agent["source"], isDefault: boolean, copyOf: string | null = null): Agent {
+		if (!isDefault) this.#checkRole(input.role ?? input.name, null);
 		const id = newAgentId();
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT INTO pim_agents (id, name, description, instructions, apps, skills, contacts, memory_scope, memory_scopes, copy_of, blueprint, symbol, color, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+			"INSERT INTO pim_agents (id, name, role, description, instructions, apps, skills, contacts, memory_scope, memory_scopes, copy_of, blueprint, symbol, color, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
 			id,
 			input.name,
+			isDefault ? MAJORDOMO_ROLE : (input.role ?? input.name),
 			input.description,
 			input.instructions,
 			JSON.stringify(input.apps),
@@ -488,9 +521,12 @@ export class AgentStore {
 	}
 
 	update(id: string, input: AgentInput): Agent {
+		const before = this.get(id);
+		if (input.role !== undefined && !before?.majordomo && input.role.toLowerCase() !== before?.role.toLowerCase()) this.#checkRole(input.role, id);
 		this.#sql.exec(
-			"UPDATE pim_agents SET name = ?, description = ?, instructions = ?, apps = ?, skills = ?, contacts = ?, updated_at = ? WHERE id = ?",
+			"UPDATE pim_agents SET name = ?, role = COALESCE(?, role), description = ?, instructions = ?, apps = ?, skills = ?, contacts = ?, updated_at = ? WHERE id = ?",
 			input.name,
+			before?.majordomo ? null : (input.role ?? null),
 			input.description,
 			input.instructions,
 			JSON.stringify(input.apps),

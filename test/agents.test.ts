@@ -4,7 +4,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { AgentStore } from "../src/agents";
 import { TaskStore } from "../src/tasks";
-import { CREATE_AGENT, RENAME_AGENT, UPDATE_AGENT } from "../src/extensions/agents";
+import { CREATE_AGENT, UPDATE_AGENT } from "../src/extensions/agents";
 import { INSTALL_SKILL, WRITE_SKILL } from "../src/extensions/skills";
 import { api, apiUrl, OWNER, pairTestComputer, pendingApproval, post, ROOT, say, TOKEN, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
@@ -74,8 +74,28 @@ describe("the owner's agents", () => {
 		expect((await api("/agents")).body.agents).toEqual([expect.objectContaining({ id: mine.id, name: "Sam", majordomo: true })]);
 	});
 
+	it("lets agents share a name but not a role, and the name changes without the role", async () => {
+		const first = (await post("/agents", { name: "Ada", role: "Researcher" })).body;
+		expect(first).toMatchObject({ name: "Ada", role: "Researcher" });
+		// A second Ada is fine; a second researcher is not, whatever its case.
+		const second = await post("/agents", { name: "Ada", role: "Editor" });
+		expect(second).toMatchObject({ status: 201, body: { name: "Ada", role: "Editor" } });
+		expect((await post("/agents", { name: "Grace", role: " researcher " })).status).toBe(409);
+		expect((await api(`/agents/${second.body.id}`, { method: "PUT", body: JSON.stringify({ role: "RESEARCHER" }) })).status).toBe(409);
+		// Without a role, it is the name, as agents were before roles; renaming then leaves it.
+		const plain = (await post("/agents", { name: "Sage" })).body;
+		expect(plain.role).toBe("Sage");
+		expect((await api(`/agents/${plain.id}`, { method: "PUT", body: JSON.stringify({ name: "Sagan" }) })).body).toMatchObject({ name: "Sagan", role: "Sage" });
+		expect((await post("/agents", { name: "Sage" })).status).toBe(409);
+		// The majordomo keeps its role whatever it is named.
+		const [majordomo] = (await api("/agents")).body.agents;
+		expect((await api(`/agents/${majordomo.id}`, { method: "PUT", body: JSON.stringify({ name: "Jeeves", role: "Researcher" }) })).body).toMatchObject({ name: "Jeeves", role: "Majordomo" });
+		await api(`/agents/${majordomo.id}`, { method: "PUT", body: JSON.stringify({ name: "Majordomo" }) });
+		for (const agent of [first, second.body, plain]) await api(`/agents/${agent.id}`, { method: "DELETE" });
+	});
+
 	it("keeps an icon for each agent, only as a picture", async () => {
-		const agent = (await post("/agents", { name: "Coach" })).body;
+		const agent = (await post("/agents", { name: "Pacer" })).body;
 		expect(agent.icon).toBeNull();
 		expect((await api(`/agents/${agent.id}/icon`)).status).toBe(404);
 		const png = new Uint8Array([137, 80, 78, 71, 1, 2, 3]);
@@ -165,21 +185,22 @@ describe("the owner's agents", () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
 		const creator = (await post("/agents", { name: "Organizer", instructions: "Organize my work." })).body;
 		const session = (await post("/sessions", { agent: creator.id })).body.id;
+		const major = (await post("/sessions", {})).body.id;
 		faux.setResponses([
 			toolUse(CREATE_AGENT, { name: "Draft helper", description: "Writes drafts.", instructions: "Write clearly." }),
 			toolUse("send_to_user", { message: "Created." }),
 		]);
-		await say("Make a writing assistant", session);
+		await say("Make a writing assistant", major);
 		const target = (await api("/agents")).body.agents.find((agent: { name: string }) => agent.name === "Draft helper");
 		const targetSession = (await post("/sessions", { agent: target.id })).body.id;
 
 		faux.setResponses([
-			toolUse(RENAME_AGENT, { agent: target.id, name: "  Quill  " }),
+			toolUse(UPDATE_AGENT, { agent: target.id, name: "  Quill  " }),
 			toolUse("send_to_user", { message: "Renamed." }),
 		]);
-		const renaming = say("Rename the assistant you just made to Quill", session);
+		const renaming = say("Rename the assistant you just made to Quill", major);
 		const approval = await pendingApproval();
-		expect(approval.summary).toBe('Rename "Draft helper" to "Quill"');
+		expect(approval.summary).toBe('Majordomo renames Draft helper to "Quill"');
 		expect((await api(`/agents/${target.id}`)).body.name).toBe("Draft helper");
 		// Approval changes only the name, retaining edits made while it was waiting.
 		await api(`/agents/${target.id}`, { method: "PUT", body: JSON.stringify({ instructions: "Use short paragraphs." }) });
@@ -201,30 +222,20 @@ describe("the owner's agents", () => {
 
 		// The same tool can rename the agent in this chat; denying it leaves the name alone.
 		for (const decision of ["deny", "approve"]) {
-			faux.setResponses([toolUse(RENAME_AGENT, { agent: creator.id, name: "Atlas" }), toolUse("send_to_user", { message: "Understood." })]);
+			faux.setResponses([toolUse(UPDATE_AGENT, { name: "Atlas" }), toolUse("send_to_user", { message: "Understood." })]);
 			const asking = say("Call yourself Atlas", session);
 			const request = await pendingApproval();
 			await post(`/approvals/${request.id}/${decision}`);
 			expect(await asking).toMatchObject({ status: "done", replies: ["Understood."] });
 			expect((await api(`/agents/${creator.id}`)).body.name).toBe(decision === "approve" ? "Atlas" : "Organizer");
 		}
-		// Renaming has its own permission, separate from changing instructions and apps.
-		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: RENAME_AGENT, permission: "on" }) });
-		faux.setResponses([toolUse(RENAME_AGENT, { agent: target.id, name: "Scribe" }), toolUse("send_to_user", { message: "Renamed." })]);
-		await say("Call Quill Scribe instead", session);
-		expect((await api(`/agents/${target.id}`)).body.name).toBe("Scribe");
-		expect((await api("/approvals?status=pending")).body.approvals).toEqual([]);
-		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: RENAME_AGENT, permission: "off" }) });
-		const fresh = (await post("/sessions", { agent: creator.id })).body.id;
-		let tools: string[] = [];
-		faux.setResponses([(context) => {
-			tools = context.messages.flatMap((message) => message.role === "system" ? (message.toolsAdded ?? []).map((tool) => tool.name) : []);
-			return toolUse("send_to_user", { message: "Hello." });
+		// Only the majordomo changes another agent.
+		faux.setResponses([toolUse(UPDATE_AGENT, { agent: target.id, instructions: "Be rude." }), (context) => {
+			expect(JSON.stringify(context.messages.findLast((m) => m.role === "toolResult")?.content)).toContain("Only the person's majordomo");
+			return toolUse("send_to_user", { message: "No." });
 		}]);
-		await say("Hi", fresh);
-		expect(tools).not.toContain(RENAME_AGENT);
-		expect(tools).toContain(UPDATE_AGENT);
-		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: RENAME_AGENT, permission: null }) });
+		await say("Make Quill rude", session);
+		expect((await api(`/agents/${target.id}`)).body.instructions).toBe("Use short paragraphs.");
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
 	});
 
@@ -680,6 +691,8 @@ describe("a database from when agents were personas", () => {
 				directory,
 			);
 			expect(agents.list()).toMatchObject([{ id: "p_1", name: "Coach", blueprint: "test.ledger/budget", majordomo: true, icon: 7, apps: ["test.ledger/strava"] }]);
+			// Its name was its role; the majordomo's role is its title.
+			expect(agents.list()[0]!.role).toBe("Majordomo");
 			// Its default agent is its majordomo, already named: nobody is asked to name theirs again.
 			expect(agents.introduced()).toBe(true);
 			expect(agents.ofSession("9").id).toBe("p_1");
@@ -713,6 +726,7 @@ describe("a database from when agents had teams", () => {
 			const byName = Object.fromEntries(agents.list().map((agent) => [agent.name, agent]));
 			// A member called as another agent is gets its agent's name after its own.
 			expect(Object.keys(byName).sort()).toEqual(["Alfred", "Planner", "Researcher", "Writer", "Writer (Planner)"]);
+			expect(byName["Writer (Planner)"]!.role).toBe("Writer (Planner)");
 			const researcher = byName.Researcher!;
 			expect(researcher).toMatchObject({ description: "Find facts.", instructions: "Find facts.\nCite them.", skills: ["weekly-plan"], blueprint: "test.ledger/budget", color: "teal", contacts: [] });
 			expect(byName.Planner!.contacts).toEqual([researcher.id, byName["Writer (Planner)"]!.id]);

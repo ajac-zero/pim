@@ -1920,10 +1920,11 @@ describe("profiles and published agents", () => {
 				published: null,
 			},
 		});
-		// The physio's copy takes a name of its own beside Eli's own physio, and each copy hands tasks to the copies of its contacts.
-		const eliAgents = (await eli.browser.json("/api/agents")).body.agents as { id: string; name: string; contacts: string[]; source: unknown }[];
-		const named = (name: string) => eliAgents.find((agent) => agent.name === name)!;
-		expect(eliAgents.map((agent) => agent.name)).toEqual(["Majordomo", "Physio", "Marathon coach", "Physio (Marathon coach)", "Dietitian"]);
+		// The physio's copy takes a role of its own beside Eli's own physio, keeping the name it came with, and each copy hands tasks to the copies of its contacts.
+		const eliAgents = (await eli.browser.json("/api/agents")).body.agents as { id: string; name: string; role: string; contacts: string[]; source: unknown }[];
+		const named = (role: string) => eliAgents.find((agent) => agent.role === role)!;
+		expect(eliAgents.map((agent) => agent.role)).toEqual(["Majordomo", "Physio", "Marathon coach", "Physio (Marathon coach)", "Dietitian"]);
+		expect(eliAgents.map((agent) => agent.name)).toEqual(["Majordomo", "Physio", "Marathon coach", "Physio", "Dietitian"]);
 		expect(mine.body.contacts).toEqual([named("Physio (Marathon coach)").id]);
 		expect(named("Physio (Marathon coach)")).toMatchObject({ contacts: [named("Dietitian").id], source: { template: templateId, author: "dee" } });
 		expect(named("Physio").contacts).toEqual([]);
@@ -1959,7 +1960,7 @@ describe("profiles and published agents", () => {
 		// Unpublished, it's gone from the gallery; Eli keeps his copy.
 		expect((await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "DELETE" })).status).toBe(200);
 		expect((await eli.browser.json(`/api/templates/${templateId}`)).status).toBe(404);
-		expect((await eli.browser.json("/api/agents")).body.agents.map((agent: { name: string }) => agent.name)).toEqual(["Majordomo", "Physio", "Marathon coach", "Physio (Marathon coach)", "Dietitian"]);
+		expect((await eli.browser.json("/api/agents")).body.agents.map((agent: { role: string }) => agent.role)).toEqual(["Majordomo", "Physio", "Marathon coach", "Physio (Marathon coach)", "Dietitian"]);
 
 		// Deleting a published agent unpublishes it; deleting the account takes the profile and everything published.
 		const again = (await dee.browser.json(`/api/agents/${coach.id}/publish`, { method: "POST" })).body.id;

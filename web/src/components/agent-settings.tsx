@@ -786,6 +786,7 @@ function AgentForm({
   }, [look.image]);
   const [value, setValue] = useState<Omit<AgentInput, "apps">>({
     name: initial.name,
+    role: agent?.role ?? "",
     description: initial.description,
     instructions: initial.instructions,
     blueprint: initial.blueprint,
@@ -794,9 +795,10 @@ function AgentForm({
   });
   const save = useMutation({
     mutationFn: async () => {
-      const { blueprint, ...rest } = value;
+      const { blueprint, role, ...rest } = value;
       const input: Omit<AgentInput, "apps"> = {
         ...rest,
+        ...(role?.trim() ? { role: role.trim() } : {}),
         symbol: look.symbol,
         color: look.color,
         ...(blueprint === undefined ? {} : { blueprint }),
@@ -881,6 +883,22 @@ function AgentForm({
           />
         </div>
       </div>
+      {!agent?.majordomo && (
+        <label className="block space-y-1">
+          <span className="font-medium text-sm">{t("agentRole")}</span>
+          <Input
+            value={value.role ?? ""}
+            onChange={(event) =>
+              setValue({ ...value, role: event.target.value })
+            }
+            placeholder={t("agentRolePlaceholder")}
+            maxLength={60}
+          />
+          <span className="block text-muted-foreground text-xs">
+            {t("agentRoleHint")}
+          </span>
+        </label>
+      )}
       <label className="block space-y-1">
         <span className="font-medium text-sm">{t("agentDescription")}</span>
         <Input

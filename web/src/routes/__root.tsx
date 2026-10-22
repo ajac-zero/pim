@@ -217,8 +217,7 @@ function usePimEvents() {
         if (approval.action === "file_delete" && approval.status === "approved")
           queryClient.invalidateQueries({ queryKey: ["files"] });
         if (
-          (approval.action === "rename_agent" ||
-            approval.action === "update_agent" ||
+          (approval.action === "update_agent" ||
             approval.action === "manage_apps" ||
             approval.action === "add_custom_app") &&
           approval.status === "approved"

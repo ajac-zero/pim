@@ -631,7 +631,14 @@ function AgentRow({
         tile
         className={cn("size-8 rounded-[10px]", large && "size-10 rounded-xl")}
       />
-      <RowText title={agent.name} meta={agent.description} />
+      <RowText
+        title={agent.name}
+        meta={
+          agent.role.toLowerCase() === agent.name.toLowerCase()
+            ? agent.description
+            : [agent.role, agent.description].filter(Boolean).join(" · ")
+        }
+      />
     </Link>
   );
 }

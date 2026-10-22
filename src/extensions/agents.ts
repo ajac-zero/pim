@@ -12,8 +12,10 @@ import {
 	type Agent,
 	type AgentInput,
 	type AgentStore,
+	agentCalled,
 	agentInput,
 	agentInstructions,
+	agentLabel,
 	checkContacts,
 } from "../agents";
 import { sha256 } from "../artifacts";
@@ -30,13 +32,14 @@ import { type PimServices, json, text } from "./services";
 
 export const CREATE_AGENT = "create_agent";
 export const UPDATE_AGENT = "update_agent";
-export const RENAME_AGENT = "rename_agent";
 export const MANAGE_APPS = "manage_apps";
 export const ADD_CUSTOM_APP = "add_custom_app";
 export const SHARE_MEMORY_SCOPE = "share_memory_scope";
 
 /** What `update_agent` changes. Contacts are added and removed by name. */
 const Changes = Type.Object({
+	name: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_NAME, pattern: "\\S", description: "A new name for the agent: what the person calls it, such as Ada. Agents may share a name." })),
+	role: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_NAME, pattern: "\\S", description: "A new role: what it is for, such as Researcher. Each of the person's agents has its own." })),
 	description: Type.Optional(Type.String({ maxLength: MAX_DESCRIPTION })),
 	instructions: Type.Optional(Type.String({ maxLength: MAX_INSTRUCTIONS, description: "The complete new instructions: they replace the old ones." })),
 	add_contacts: Type.Optional(
@@ -69,13 +72,11 @@ async function readIcon(source: string, files: Pick<Files, "bytes">): Promise<Ui
 	return bytes;
 }
 
-const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
-
 /** The ids of the person's agents called `names`; throws for a name none of them has. */
 function agentIds(names: readonly string[], agents: readonly Agent[]): string[] {
 	return names.map((name) => {
-		const agent = agents.find((candidate) => same(candidate.name, name));
-		if (!agent) throw new Error(`The person has no agent called ${name}. Their agents: ${agents.map((candidate) => candidate.name).join(", ")}.`);
+		const agent = agentCalled(name, agents);
+		if (!agent) throw new Error(`The person has no agent called ${name}. Their agents: ${agents.map(agentLabel).join(", ")}.`);
 		return agent.id;
 	});
 }
@@ -85,14 +86,16 @@ function changed(agent: Agent, changes: Changes, agents: readonly Agent[]): Agen
 	const added = agentIds(changes.add_contacts ?? [], agents);
 	const removed = agentIds(changes.remove_contacts ?? [], agents);
 	const contacts = [...agent.contacts.filter((id) => !removed.includes(id)), ...added.filter((id) => !agent.contacts.includes(id) && !removed.includes(id))];
-	const { description, instructions, emoji: symbol, color } = changes;
-	return checkContacts(agent, agentInput({ description, instructions, contacts, symbol, color }, agent), agents);
+	const { name, role, description, instructions, emoji: symbol, color } = changes;
+	return checkContacts(agent, agentInput({ name, role, description, instructions, contacts, symbol, color }, agent), agents);
 }
 
 /** What an edit changes, for the person to approve: empty if nothing. `whose` is "its", or the agent's name when another agent edits it. */
 function describeChanges(agent: Agent, next: AgentInput, icon: Changes["icon"], agents: readonly Agent[], whose: string): string[] {
 	const name = (id: string) => agents.find((other) => other.id === id)?.name ?? id;
 	return [
+		...(next.name !== agent.name ? [`renames ${whose === "its" ? "itself" : whose.slice(0, -2)} to ${JSON.stringify(next.name)}`] : []),
+		...(next.role !== undefined && next.role !== agent.role ? [`changes ${whose} role to ${JSON.stringify(next.role)}`] : []),
 		...(next.description !== agent.description ? [`changes ${whose} description`] : []),
 		...(next.instructions !== agent.instructions ? [`changes ${whose} instructions`] : []),
 		...next.contacts.filter((id) => !agent.contacts.includes(id)).map((id) => `adds ${name(id)} to ${whose} contacts, to hand tasks to`),
@@ -121,7 +124,7 @@ export async function requestedIcon(args: unknown, files: Pick<Files, "bytes">):
 export function updateAgentAction(agents: Pick<AgentStore, "get" | "update" | "list" | "setIcon" | "removeIcon">, files: Pick<Files, "bytes">): GatedAction {
 	return defineGatedAction({
 		name: UPDATE_AGENT,
-		description: "An agent changes itself, or the majordomo changes another agent: instructions, description, contacts or icon.",
+		description: "An agent changes itself, or the majordomo changes another agent: name, role, instructions, description, contacts or icon.",
 		// Filed by the tool, which names the agent to change.
 		internal: true,
 		parameters: Type.Object({ agent: Type.String(), ...Changes.properties, icon_sha256: Type.Optional(Type.String()) }),
@@ -234,25 +237,6 @@ export function addCustomAppAction(
 	}) as GatedAction;
 }
 
-/** Renames one of the person's agents without changing its instructions or connections. */
-export function renameAgentAction(agents: Pick<AgentStore, "get" | "update">): GatedAction {
-	return defineGatedAction({
-		name: RENAME_AGENT,
-		description: "Rename one of the person's agents, including yourself, when they ask. Use its id from your_agents. Its chats and settings stay the same.",
-		parameters: Type.Object({
-			agent: Type.String({ description: "The agent's id from your_agents." }),
-			name: Type.String({ minLength: 1, maxLength: MAX_NAME, pattern: "\\S", description: "The new name." }),
-		}),
-		summarize: ({ agent, name }) => `Rename ${JSON.stringify(agents.get(agent)?.name ?? agent)} to ${JSON.stringify(name.trim())}`,
-		async run({ agent: id, name }) {
-			const agent = agents.get(id);
-			if (!agent) return "That agent no longer exists.";
-			const updated = agents.update(id, agentInput({ name }, agent));
-			return `${JSON.stringify(agent.name)} is now named ${JSON.stringify(updated.name)}. Its chats and settings are unchanged.`;
-		},
-	}) as GatedAction;
-}
-
 /**
  * The majordomo lets another agent read one of the person's named memory
  * scopes, or stop reading it: who knows what about them is theirs to say,
@@ -309,7 +293,7 @@ function agentsSection(self: Agent, host: AgentsHost): string {
 			.list()
 			.map(
 				(agent) =>
-					`- ${agent.name}${agent.id === self.id ? " (you)" : ""}${agent.majordomo ? " (their majordomo)" : ""}${agent.description ? `: ${agent.description}` : ""} [id: ${agent.id}]`,
+					`- ${agentLabel(agent)}${agent.id === self.id ? " (you)" : ""}${agent.majordomo ? " (their majordomo)" : ""}${agent.description ? `: ${agent.description}` : ""} [id: ${agent.id}]`,
 			),
 		self.majordomo
 			? `Hand work to these with \`${DELEGATE}\`. When none of them is right for it, such as a coding helper or a trip planner, make one with \`${CREATE_AGENT}\` without asking first, then hand it the task. Each is in the sidebar too, with its own chats, for the person to talk with it directly.`
@@ -359,7 +343,8 @@ export function agentExtension(
 		description:
 			"Make a new agent for the person: a named agent with its own instructions and the apps it works with, with its own chats in the sidebar. Only when none of their agents already does what they want. Write its instructions as the person would: what it's for, what to focus on, how to answer. Give it an emoji and a color that fit what it's for, so the person tells it apart in the sidebar. Apps are ids of apps this Pim offers, as `find_app` finds them; the person connects each the first time they use it.",
 		parameters: Type.Object({
-			name: Type.String({ minLength: 1, maxLength: MAX_NAME }),
+			name: Type.String({ minLength: 1, maxLength: MAX_NAME, description: "What the person calls it: a given name, such as Ada, which the person may change. Agents may share one." }),
+			role: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_NAME, description: "What it is for, such as Researcher. Each of the person's agents has a role of its own; left out, it is the name." })),
 			description: Type.String({ maxLength: MAX_DESCRIPTION, description: "One line, shown under its name." }),
 			instructions: Type.String({ maxLength: MAX_INSTRUCTIONS }),
 			apps: Type.Optional(Type.Array(Type.String({ description: "An app's id, from find_app." }), { maxItems: MAX_APPS })),
@@ -373,10 +358,10 @@ export function agentExtension(
 			emoji: Type.Optional(Type.String({ description: "One emoji shown as its icon, such as 🏃 for a running coach." })),
 			color: Type.Optional(Type.Union(AGENT_COLORS.map((color) => Type.Literal(color)), { description: "The color behind its emoji." })),
 		}),
-		// A rerun finds the agent it made by its name, and makes no other.
+		// A rerun finds the agent it made by its role, and makes no other.
 		replay: "safe",
 		async execute(args) {
-			const existing = agents.list().find((agent) => agent.name.toLowerCase() === args.name.trim().toLowerCase());
+			const existing = agents.list().find((agent) => agent.role.toLowerCase() === (args.role ?? args.name).trim().toLowerCase());
 			if (existing) return json({ exists: true, agent: { id: existing.id, name: existing.name, description: existing.description } });
 			try {
 				const { emoji, contacts, ...rest } = args;
@@ -396,7 +381,7 @@ export function agentExtension(
 	const editing = ownToolPermission(services.store, UPDATE_AGENT).permission;
 	const updateAgent = defineTool({
 		name: UPDATE_AGENT,
-		description: `Change yourself, the agent this chat is with: your description, your instructions, your contacts (the person's other agents you hand tasks to), or how you look in the sidebar: your emoji and color, or an image as your icon, such as one made with generate_image or found on the web. App changes use manage_apps instead. Do it when the person asks, or when handing parts of work you'll do again to another agent would help. Only the fields you give change.${editing === "ask" ? ` ${approvalNote(services)}` : ""}`,
+		description: `Change yourself, the agent this chat is with: your name, your role, your description, your instructions, your contacts (the person's other agents you hand tasks to), or how you look in the sidebar: your emoji and color, or an image as your icon, such as one made with generate_image or found on the web. App changes use manage_apps instead. Do it when the person asks, or when handing parts of work you'll do again to another agent would help. Only the fields you give change.${editing === "ask" ? ` ${approvalNote(services)}` : ""}`,
 		parameters: Type.Object({
 			agent: Type.Optional(
 				Type.String({ description: "The id of another of the person's agents to change instead, from your_agents. Only their majordomo changes other agents." }),

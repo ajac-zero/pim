@@ -113,7 +113,7 @@ describe("scheduled tasks", () => {
 
 	it("lets only the majordomo schedule new chats with another agent", async () => {
 		const scout = (await post("/agents", { name: "Scout", instructions: "Find things to do in NYC." })).body;
-		const coach = (await post("/agents", { name: "Coach", instructions: "Coach me." })).body;
+		const coach = (await post("/agents", { name: "Fitness coach", instructions: "Coach me." })).body;
 		const training = (await post("/sessions", { agent: coach.id, title: "Training" })).body.id;
 		let refused = "";
 		faux.setResponses([

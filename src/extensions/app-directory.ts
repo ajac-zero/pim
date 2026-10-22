@@ -148,7 +148,7 @@ export function findApps(directory: readonly DirectoryApp[], query: string): Dir
 /** The apps found, as the model reads them. */
 export function describeFound(query: string, found: readonly DirectoryApp[]): string {
 	if (found.length === 0) {
-		return `No app on this Pim matches "${query}". Only the apps this Pim offers can be connected: tell the person, and that its admin can add one.`;
+		return `No app on this Pim matches "${query}". Only the apps this Pim offers can be connected: tell the person, and that its admin can add one. If you have add_custom_app, the person is its admin: ask for the app's MCP server URL and add it.`;
 	}
 	return [
 		`Apps on this Pim matching "${query}":`,

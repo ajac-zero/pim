@@ -1276,6 +1276,65 @@ describe("the admin", () => {
 		expect((await uma.browser.json(`/api/agents/${sales.id}`, { method: "PUT", json: { apps: ["custom/acme-crm"] } })).status).toBe(400);
 		expect((await uma.browser.json("/api/mcp")).body.servers).toHaveLength(1);
 	});
+
+	it("lets the admin's majordomo add an app for everyone, once the admin approves it in the app", async () => {
+		const vera = await person("app-vera");
+		const tools = async (browser: Browser) => ((await browser.json("/api/permissions")).body.tools as { tool: string }[]).map((info) => info.tool);
+		expect(await tools(vera.browser)).not.toContain("add_custom_app");
+		expect(await tools(operator.browser)).toContain("add_custom_app");
+
+		const wiki = { name: "Acme Wiki", url: "https://wiki.example.test/mcp", description: "The team's pages." };
+		let result = "";
+		faux.setResponses([
+			toolUse("add_custom_app", wiki),
+			(context) => {
+				result = JSON.stringify(context.messages.filter((message) => message.role === "toolResult"));
+				return toolUse("send_to_user", { message: "Added." });
+			},
+		]);
+		const realFetch = globalThis.fetch;
+		const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			if (request.url.startsWith(wiki.url)) {
+				const server = () => {
+					const mcp = new McpServer({ name: "wiki", version: "1.0.0" });
+					mcp.registerTool("pages", { description: "Find pages.", annotations: { readOnlyHint: true } }, async () => ({ content: [{ type: "text", text: "None." }] }));
+					return mcp;
+				};
+				return createMcpHandler(server)(request, {}, createExecutionContext());
+			}
+			if (request.url.includes("wiki.example.test")) return new Response("Not found", { status: 404 });
+			return realFetch(input, init);
+		});
+		const made = await operator.browser.json("/auth/tokens", { method: "POST", json: { name: "Bridge" } });
+		try {
+			const turn = admin(`/api/sessions/${await rootOf(operator.browser)}/messages`, { method: "POST", json: { content: "Add our wiki", wait: true } });
+			const approval = await vi.waitFor(async () => {
+				const [asked] = (await admin("/api/approvals?status=pending")).body.approvals;
+				expect(asked).toBeDefined();
+				return asked;
+			});
+			expect(approval).toMatchObject({ action: "add_custom_app", summary: "Add Acme Wiki (https://wiki.example.test/mcp) to this Pim's apps for everyone, and connect it" });
+			// Not with an API token, even the admin's, nor by claiming to be signed in.
+			const byToken = await new Browser().json(`/api/approvals/${approval.id}/approve`, {
+				method: "POST",
+				json: {},
+				headers: { Authorization: `Bearer ${made.body.token}`, "x-pim-signed-in": "1" },
+			});
+			expect(byToken.status).toBe(403);
+			expect((await admin(`/api/approvals/${approval.id}/approve`, { method: "POST", json: {} })).status).toBe(200);
+			expect((await turn).body).toMatchObject({ status: "done" });
+		} finally {
+			spy.mockRestore();
+		}
+		expect(result).toContain("Connected Acme Wiki.");
+		// Everyone can connect it now, and the admin's majordomo works with it.
+		expect((await vera.browser.json("/api/app-directory")).body.apps).toContainEqual(expect.objectContaining({ ref: "custom/acme-wiki", ...wiki, custom: true }));
+		expect((await admin("/api/majordomo")).body.agent.apps).toContain("custom/acme-wiki");
+		expect((await admin("/api/mcp")).body.servers).toContainEqual(expect.objectContaining({ url: wiki.url, state: "ready" }));
+		await admin("/api/admin/apps/acme-wiki", { method: "DELETE" });
+		await operator.browser.json(`/auth/tokens/${made.body.id}`, { method: "DELETE" });
+	});
 });
 
 /**

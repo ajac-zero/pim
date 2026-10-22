@@ -118,6 +118,7 @@ export const CornerDownLeft = themedIcon(
   Lucide.CornerDownLeft,
   Pixel.CornerDownLeft,
 );
+export const Crown = themedIcon(Lucide.Crown, Pixel.Crown);
 export const Dog = themedIcon(Lucide.Dog, Pixel.Dog);
 export const Download = themedIcon(Lucide.Download, Pixel.Download);
 export const Dumbbell = themedIcon(

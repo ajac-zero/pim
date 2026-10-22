@@ -190,11 +190,6 @@ function DashboardPage() {
                     ))}
                   </DropdownMenuContent>
                 </DropdownMenu>
-                {agent.majordomo && (
-                  <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
-                    {t("majordomoBadge")}
-                  </span>
-                )}
               </h1>
               {agent.description && (
                 <p className="truncate text-muted-foreground text-sm">

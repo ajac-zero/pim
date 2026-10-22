@@ -5,7 +5,7 @@ import { exports } from "cloudflare:workers";
 import { AgentStore } from "../src/agents";
 import { TaskStore } from "../src/tasks";
 import { CREATE_AGENT, RENAME_AGENT, UPDATE_AGENT } from "../src/extensions/agents";
-import { WRITE_SKILL } from "../src/extensions/skills";
+import { INSTALL_SKILL, WRITE_SKILL } from "../src/extensions/skills";
 import { api, apiUrl, OWNER, pairTestComputer, pendingApproval, post, ROOT, say, TOKEN, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
 
@@ -316,7 +316,7 @@ describe("the owner's agents", () => {
 		await post(`/approvals/${approval.id}/approve`);
 		expect(await saving).toMatchObject({ status: "done", replies: ["Saved."] });
 		expect((await api("/skills")).body.skills).toEqual([
-			{ name: "weekly-plan", description: skill.description, version: 1, author: "Coach", restoredFrom: null, createdAt: expect.any(Number), updatedAt: expect.any(Number), agents: [{ id: coach.id, name: "Coach" }] },
+			{ name: "weekly-plan", description: skill.description, version: 1, author: "Coach", restoredFrom: null, source: null, createdAt: expect.any(Number), updatedAt: expect.any(Number), agents: [{ id: coach.id, name: "Coach" }] },
 		]);
 
 		// The agent that wrote it lists it and loads it; another agent doesn't see it.
@@ -468,6 +468,90 @@ describe("the owner's agents", () => {
 		expect(results[1]).toContain("to /workspace/out/plan.docx (8 bytes)");
 		expect(new Uint8Array(await (await raw("/files/content?path=/workspace/out/plan.docx")).arrayBuffer())).toEqual(template);
 		await api("/skills/race-plan", { method: "DELETE" });
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
+	});
+
+	it("installs a skill someone published, from GitHub or the person's files, as its source has it", async () => {
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
+		const commit = "0123456789abcdef0123456789abcdef01234567";
+		const skillMd = `---
+name: frontend-design
+description: >
+  Build distinctive interfaces,
+  not generic ones.
+license: Apache-2.0
+---
+
+# Frontend design
+
+Read reference/fonts.md first.
+`;
+		const fonts = "Pair a display face with a plain one.\n";
+		const raw = `https://raw.githubusercontent.com/acme/skills/${commit}/skills/frontend-design/`;
+		const realFetch = globalThis.fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const url = new Request(input, init).url;
+			if (url === "https://api.github.com/repos/acme/skills/commits/main") return new Response(commit);
+			if (url === `https://api.github.com/repos/acme/skills/git/trees/${commit}?recursive=1`) {
+				const tree = ["README.md", "skills/frontend-design/SKILL.md", "skills/frontend-design/reference/fonts.md", "skills/frontend-design/.DS_Store", "skills/other/SKILL.md"];
+				return Response.json({ truncated: false, tree: tree.map((path) => ({ path, type: "blob", size: 40 })) });
+			}
+			if (url === `${raw}SKILL.md`) return new Response(skillMd);
+			if (url === `${raw}reference/fonts.md`) return new Response(fonts);
+			if (url.startsWith("https://api.github.com/") || url.startsWith("https://raw.githubusercontent.com/")) return new Response("Not Found", { status: 404 });
+			return realFetch(input, init);
+		});
+		const agent = (await post("/agents", { name: "Designer", instructions: "Design." })).body;
+		const session = (await post("/sessions", { agent: agent.id })).body.id;
+		const results: string[] = [];
+		const record = (context: { messages: Message[] }) => {
+			results.push(JSON.stringify(context.messages.findLast((m) => m.role === "toolResult")?.content));
+			return toolUse("send_to_user", { message: "ok" });
+		};
+
+		// From GitHub: the folder at the commit its branch is at now, its hidden files left out, with one request for all of it.
+		faux.setResponses([toolUse(INSTALL_SKILL, { source: "https://github.com/acme/skills/tree/main/skills/frontend-design" }), record]);
+		let installing = say("Use the frontend design skill from acme/skills", session);
+		let approval = await pendingApproval();
+		const source = `https://github.com/acme/skills/tree/${commit}/skills/frontend-design`;
+		expect(approval.summary).toBe(`Designer installs the skill frontend-design from ${source}`);
+		expect(approval.args).toEqual({
+			agent: agent.id,
+			name: "frontend-design",
+			description: "Build distinctive interfaces, not generic ones.",
+			instructions: "# Frontend design\n\nRead reference/fonts.md first.",
+			files: [{ path: "reference/fonts.md", from_url: `${raw}reference/fonts.md`, sha256: expect.stringMatching(/^[0-9a-f]{64}$/), size: fonts.length }],
+			source,
+		});
+		await post(`/approvals/${approval.id}/approve`);
+		await installing;
+		expect((await api("/skills/frontend-design")).body).toMatchObject({ version: 1, author: "Designer", source, files: [{ path: "reference/fonts.md", size: fonts.length }] });
+		faux.setResponses([toolUse("read_skill", { skill: "frontend-design" }), record]);
+		await say("Design my page", session);
+		expect(results.at(-1)).toContain(`installed with their approval from ${source}`);
+
+		// From the person's files: a folder on their computer, its frontmatter's quoted name read as YAML.
+		await pairTestComputer();
+		const putFile = (path: string, body: string | Uint8Array) =>
+			exports.default.fetch(new Request(apiUrl(`/files/content?path=${path}`), { method: "PUT", body, headers: { Authorization: `Bearer ${TOKEN}` } }));
+		const logo = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 1]);
+		await putFile("/workspace/skills/deck/SKILL.md", '---\nname: "deck-style"\ndescription: \'Our slides\'\'s look.\'\n---\nUse assets/logo.png.\n');
+		await putFile("/workspace/skills/deck/assets/logo.png", logo);
+		await putFile("/workspace/skills/deck/.git/HEAD", "ref: main");
+		faux.setResponses([toolUse(INSTALL_SKILL, { source: "/workspace/skills/deck" }), record]);
+		installing = say("Install my deck skill", session);
+		approval = await pendingApproval();
+		expect(approval.args).toMatchObject({ name: "deck-style", description: "Our slides's look.", files: [{ path: "assets/logo.png", from_file: "/workspace/skills/deck/assets/logo.png", size: 6 }], source: "/workspace/skills/deck" });
+		await post(`/approvals/${approval.id}/approve`);
+		await installing;
+		expect((await api("/skills/deck-style")).body.files).toEqual([{ path: "assets/logo.png", size: 6, type: "image/png" }]);
+
+		// A folder without a SKILL.md is refused before anything is asked.
+		faux.setResponses([toolUse(INSTALL_SKILL, { source: "/workspace/skills/deck/assets" }), record]);
+		await say("Install the assets", session);
+		expect(results.at(-1)).toContain("has no SKILL.md");
+		for (const name of ["frontend-design", "deck-style"]) await api(`/skills/${name}`, { method: "DELETE" });
+		vi.restoreAllMocks();
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
 	});
 

@@ -715,6 +715,7 @@ const translations = {
     skillAuthor: "Author",
     skillAuthorYou: "You",
     skillDate: "Date",
+    skillSource: "Source",
     skillUsedBy: "Agents that use it",
     skillUsedByHint:
       "Their chats list it, and they load it before the work it describes.",
@@ -1661,6 +1662,7 @@ const translations = {
     skillAuthor: "Autor",
     skillAuthorYou: "Tú",
     skillDate: "Fecha",
+    skillSource: "Origen",
     skillUsedBy: "Agentes que la usan",
     skillUsedByHint:
       "Sus chats la muestran, y la cargan antes del trabajo que describe.",

@@ -71,12 +71,13 @@ function fieldOf(name: string, value: unknown): ApprovalField {
   return { name, kind: "text", text: String(value) };
 }
 
-/** Files a request would save, such as a skill's supporting files: text, or copies of the person's files. */
+/** Files a request would save, such as a skill's supporting files: text, or copies of the person's files or of files on the web. */
 function isFileList(
   value: unknown,
 ): value is ({ path: string } & (
   | { content: string }
   | { from_file: string }
+  | { from_url: string }
 ))[] {
   return (
     Array.isArray(value) &&
@@ -86,7 +87,8 @@ function isFileList(
         isRecord(item) &&
         typeof item.path === "string" &&
         (typeof item.content === "string" ||
-          typeof item.from_file === "string"),
+          typeof item.from_file === "string" ||
+          typeof item.from_url === "string"),
     )
   );
 }
@@ -138,7 +140,12 @@ export function approvalView(
                         language: languageOf(file.path),
                       }
                     : // A copy shows where it comes from.
-                      { name: file.path, kind: "text", text: file.from_file },
+                      {
+                        name: file.path,
+                        kind: "text",
+                        text:
+                          "from_file" in file ? file.from_file : file.from_url,
+                      },
               )
             : [fieldOf(name, value)],
         )

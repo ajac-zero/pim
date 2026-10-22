@@ -80,6 +80,13 @@ describe("approvalView", () => {
             sha256: "ab12",
             size: 9000,
           },
+          {
+            path: "reference/fonts.md",
+            from_url:
+              "https://raw.githubusercontent.com/acme/skills/abc/fonts.md",
+            sha256: "cd34",
+            size: 40,
+          },
         ],
       },
       summary: "Coach saves a new skill: weekly-plan",
@@ -101,6 +108,11 @@ describe("approvalView", () => {
         name: "templates/plan.docx",
         kind: "text",
         text: "/workspace/plan.docx",
+      },
+      {
+        name: "reference/fonts.md",
+        kind: "text",
+        text: "https://raw.githubusercontent.com/acme/skills/abc/fonts.md",
       },
     ]);
   });

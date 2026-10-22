@@ -226,6 +226,25 @@ function SkillPage() {
                 <dt className="text-muted-foreground">{t("skillDate")}</dt>
                 <dd>{date(listed.createdAt)}</dd>
               </div>
+              {listed.source && (
+                <div className="flex min-w-0 gap-2">
+                  <dt className="text-muted-foreground">{t("skillSource")}</dt>
+                  <dd className="min-w-0 truncate">
+                    {listed.source.startsWith("https://") ? (
+                      <a
+                        href={listed.source}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="underline underline-offset-2"
+                      >
+                        {listed.source.replace("https://", "")}
+                      </a>
+                    ) : (
+                      listed.source
+                    )}
+                  </dd>
+                </div>
+              )}
             </dl>
           </section>
           <section>

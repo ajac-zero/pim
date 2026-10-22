@@ -34,6 +34,8 @@ export type SkillVersionInfo = {
 	readonly author: string | null;
 	/** The version a restore copied. */
 	readonly restoredFrom: number | null;
+	/** Where it was installed from, as its source has it, for a version installed or restored from one; null for one an agent wrote. */
+	readonly source: string | null;
 	readonly createdAt: number;
 };
 
@@ -98,6 +100,7 @@ CREATE TABLE IF NOT EXISTS pim_skill_versions (
 	files TEXT NOT NULL DEFAULT '[]',
 	author TEXT,
 	restored_from INTEGER,
+	source TEXT,
 	created_at INTEGER NOT NULL,
 	PRIMARY KEY (name, version)
 );
@@ -141,6 +144,7 @@ const versionInfo = (row: Row): SkillVersionInfo => ({
 	version: Number(row.version),
 	author: row.author === null ? null : String(row.author),
 	restoredFrom: row.restored_from === null ? null : Number(row.restored_from),
+	source: row.source === null || row.source === undefined ? null : String(row.source),
 	createdAt: Number(row.created_at),
 });
 
@@ -148,7 +152,7 @@ const LATEST = `SELECT v.*, s.created_at AS skill_created_at FROM pim_skills s
 	JOIN pim_skill_versions v ON v.name = s.name AND v.version = s.version`;
 
 /** The latest versions without their text, which lists and every model request read, so skills' size doesn't weigh on them. */
-const SUMMARIES = `SELECT v.name, v.version, v.description, v.author, v.restored_from, v.created_at, s.created_at AS skill_created_at
+const SUMMARIES = `SELECT v.name, v.version, v.description, v.author, v.restored_from, v.source, v.created_at, s.created_at AS skill_created_at
 	FROM pim_skills s JOIN pim_skill_versions v ON v.name = s.name AND v.version = s.version`;
 
 const summaryOf = (row: Row): SkillSummary => ({
@@ -170,6 +174,8 @@ export type SkillWrite = {
 	/** The agent writing it, by name; left out for a restore. */
 	readonly author?: string;
 	readonly restoredFrom?: number;
+	/** Where it is installed from, for a skill someone published. */
+	readonly source?: string;
 };
 
 export type SkillStoreOptions = {
@@ -190,6 +196,8 @@ export class SkillStore {
 		this.#sql = sql;
 		this.#options = options;
 		this.#sql.exec(SCHEMA);
+		const columns = new Set(this.#sql.exec("PRAGMA table_info(pim_skill_versions)").toArray().map((row) => String(row.name)));
+		if (!columns.has("source")) this.#sql.exec("ALTER TABLE pim_skill_versions ADD COLUMN source TEXT");
 		this.#blobs = new FileStore(sql, {
 			bucket: options.bucket,
 			key: (hash) => this.#key(hash),
@@ -220,7 +228,7 @@ export class SkillStore {
 	/** Every version kept, newest first, without their text. */
 	history(name: string): SkillVersionInfo[] {
 		return this.#sql
-			.exec("SELECT version, author, restored_from, created_at FROM pim_skill_versions WHERE name = ? ORDER BY version DESC", name)
+			.exec("SELECT version, author, restored_from, source, created_at FROM pim_skill_versions WHERE name = ? ORDER BY version DESC", name)
 			.toArray()
 			.map(versionInfo);
 	}
@@ -385,13 +393,14 @@ export class SkillStore {
 				const now = Date.now();
 				const version = (write.baseVersion ?? 0) + 1;
 				this.#sql.exec(
-					"INSERT INTO pim_skill_versions (name, version, description, instructions, files, author, restored_from, created_at) VALUES (?, ?, ?, ?, '[]', ?, ?, ?)",
+					"INSERT INTO pim_skill_versions (name, version, description, instructions, files, author, restored_from, source, created_at) VALUES (?, ?, ?, ?, '[]', ?, ?, ?, ?)",
 					write.name,
 					version,
 					write.description,
 					write.instructions,
 					write.author ?? null,
 					write.restoredFrom ?? null,
+					write.source ?? null,
 					now,
 				);
 				for (const file of draft.files) {
@@ -433,7 +442,7 @@ export class SkillStore {
 	async restore(name: string, version: number, baseVersion: number): Promise<Skill> {
 		const old = this.version(name, version);
 		if (!old) throw new HttpError(404, `No version ${version} of the skill ${name}`);
-		const write = { name, description: old.description, instructions: old.instructions, baseVersion, restoredFrom: version };
+		const write = { name, description: old.description, instructions: old.instructions, baseVersion, restoredFrom: version, ...(old.source ? { source: old.source } : {}) };
 		return this.#add(write, await this.#draft(undefined, { name, version }));
 	}
 

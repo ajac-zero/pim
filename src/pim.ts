@@ -70,7 +70,7 @@ import { SqlCredentialStore } from "./credentials";
 import { AppCatalog } from "./extensions/app-catalog";
 import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
 import { skillTools } from "./extensions/app-skills";
-import { skillsExtension, WRITE_SKILL, writeSkillAction } from "./extensions/skills";
+import { INSTALL_SKILL, skillsExtension, WRITE_SKILL, writeSkillAction } from "./extensions/skills";
 import { SKILL_NAME, SkillStore } from "./skills";
 import { type SpriteLink, Sprites } from "./sprites";
 import {
@@ -261,7 +261,7 @@ const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
 /** Tools of the space the person talks with that an agent at work on a task doesn't get, though their extensions stay. */
-const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, RENAME_AGENT, MANAGE_APPS, WRITE_SKILL]);
+const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, RENAME_AGENT, MANAGE_APPS, WRITE_SKILL, INSTALL_SKILL]);
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
 /** The admin's apps, as this space last read them from the gallery, and how long before it reads them again. */
 const CUSTOM_APPS_KEY = "custom_apps";

@@ -24,7 +24,7 @@ const google = {
 	revoked: [] as string[],
 	requests: [] as { method: string; url: string; token: string }[],
 	/** How the next refreshes are answered; by default with a new access token and no refresh token, as Google does. */
-	refresh: null as null | (() => Response),
+	refresh: null as null | (() => Response | Promise<Response>),
 	revoke: () => new Response(null, { status: 200 }),
 	/** How Google's APIs answer. */
 	api: (_request: Request, _token: string): Response => Response.json({ emailAddress: "ada@example.com" }),
@@ -397,6 +397,25 @@ describe("Google apps", () => {
 		expect((await stored("files"))!.state).toBe("failed");
 		expect(String((await stored("mail"))!.credential)).not.toBe(files);
 		expect((await callTool("mail", { url: PROFILE })).isError).toBeUndefined();
+	});
+
+	it("leave a connection made again alone when a call on the old one learns its grant is gone", async () => {
+		// A call's renewal is under way when the person disconnects (revoking the grant) and connects again.
+		let refuse = () => {};
+		google.refresh = () => new Promise((resolve) => (refuse = () => resolve(Response.json({ error: "invalid_grant", error_description: "Token has been expired or revoked." }, { status: 400 }))));
+		google.api = () => Response.json({ error: { code: 401 } }, { status: 401 });
+		const result = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			const call = instance.nativeApps.call("mail", "request", { url: PROFILE });
+			await vi.waitFor(() => expect(google.grants.some((grant) => grant.grant_type === "refresh_token")).toBe(true));
+			await instance.nativeApps.remove("mail");
+			const { authUrl } = await instance.nativeApps.connect("test.google/mail", "mail");
+			const state = new URL(authUrl).searchParams.get("state")!;
+			expect(await instance.nativeApps.finish(new URL(`https://pim.test/mcp/callback/apps?state=${state}&code=good-mail`))).toEqual({ name: "Mail" });
+			refuse();
+			return call;
+		});
+		expect(result).toMatchObject({ isError: true, content: [{ text: "Mail needs the person to connect it again from the Apps page." }] });
+		expect((await stored("mail"))!).toMatchObject({ state: "ready", error: null, credential: expect.stringMatching(/^sealed:v1:/) });
 	});
 
 	it("disconnect one without the other: Pim forgets the credential, then revokes its grant at Google", async () => {

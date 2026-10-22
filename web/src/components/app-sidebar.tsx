@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { useI18n } from "~/components/i18n";
 import {
+  Archive,
   Bell,
   Blocks,
   CalendarClock,
@@ -740,6 +741,12 @@ function SessionRow({
     onError: (error) => toast.error(error.message),
   });
 
+  const archive = useMutation({
+    mutationFn: () => pim.archiveSession(session.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onError: (error) => toast.error(error.message),
+  });
+
   const navigate = useNavigate();
   // Delete asks twice: the first click turns the item into a confirmation.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -900,6 +907,14 @@ function SessionRow({
           >
             <Sparkles className="size-4" /> {t("regenerate")}
           </DropdownMenuItem>
+          {!session.archived && (
+            <DropdownMenuItem
+              disabled={archive.isPending}
+              onClick={() => archive.mutate()}
+            >
+              <Archive className="size-4" /> {t("archiveChat")}
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem
             variant="destructive"
             disabled={deleteMutation.isPending}

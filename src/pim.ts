@@ -3944,7 +3944,7 @@ export class Pim extends DurableAgent<Env> {
 						responseAt: info?.responseAt ?? null,
 						unread,
 						// A chat still working, or with a reply not yet read, stays in the list however old it is.
-						archived: !session.busy && !unread && info !== undefined && info.updatedAt < archiveBefore,
+						archived: info?.archivedAt != null || (!session.busy && !unread && info !== undefined && info.updatedAt < archiveBefore),
 						visit: visit ? { username: visit.username, available: !visit.revoked } : null,
 						agent: this.#agentRef(session.id),
 					};
@@ -3971,6 +3971,16 @@ export class Pim extends DurableAgent<Env> {
 				const { responseAt } = await readJson<{ responseAt: number }>(request);
 				if (typeof responseAt !== "number" || !Number.isSafeInteger(responseAt) || responseAt < 0) throw new HttpError(400, "responseAt must be a non-negative integer");
 				this.store.readSession(id, responseAt);
+				this.broadcastMessage({ type: "sessions" });
+				return this.#sessionInfo(id);
+			},
+		],
+		[
+			"POST",
+			"/sessions/:session/archive",
+			async ({ session }) => {
+				const id = await this.#session(session!);
+				this.store.archiveSession(id);
 				this.broadcastMessage({ type: "sessions" });
 				return this.#sessionInfo(id);
 			},

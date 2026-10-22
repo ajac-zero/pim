@@ -112,6 +112,19 @@ describe("conversation", () => {
 		}
 	});
 
+	it("archives a chat by hand until it is active again", async () => {
+		const id = (await post("/sessions", { title: "Manual" })).body.id;
+		const archived = async () => (await api("/sessions")).body.sessions.find((s: { id: string }) => s.id === id).archived;
+		expect(await archived()).toBe(false);
+		expect((await post(`/sessions/${id}/archive`, {})).status).toBe(200);
+		expect(await archived()).toBe(true);
+		faux.setResponses([toolUse("send_to_user", { message: "Back." })]);
+		await say("I'm back", id);
+		expect(await archived()).toBe(false);
+		expect((await post("/sessions/missing/archive", {})).status).toBe(404);
+		await api(`/sessions/${id}`, { method: "DELETE" });
+	});
+
 	it("archives chats after two weeks without activity, except those with unread replies, until they are active again", async () => {
 		const quiet = (await post("/sessions", { title: "Quiet" })).body.id;
 		const unread = (await post("/sessions", { title: "Unread" })).body.id;

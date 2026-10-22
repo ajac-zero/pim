@@ -144,6 +144,8 @@ export type SessionInfo = {
 	readonly updatedAt: number;
 	readonly responseAt: number | null;
 	readonly unread: boolean;
+	/** When the user archived it by hand; activity in the session clears it. */
+	readonly archivedAt: number | null;
 };
 
 type Row = Record<string, SqlStorageValue>;
@@ -439,6 +441,7 @@ export class PimStore {
 		if (!sessionColumns.includes("summary_of")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN summary_of TEXT");
 		if (!sessionColumns.includes("response_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN response_at INTEGER");
 		if (!sessionColumns.includes("read_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN read_at INTEGER");
+		if (!sessionColumns.includes("archived_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN archived_at INTEGER");
 	}
 
 	// Goals
@@ -764,6 +767,7 @@ export class PimStore {
 				updatedAt: Number(row.updated_at),
 				responseAt: row.response_at === null ? null : Number(row.response_at),
 				unread: Number(row.response_at ?? 0) > Number(row.read_at ?? 0),
+				archivedAt: row.archived_at === null ? null : Number(row.archived_at),
 			}
 			: undefined;
 	}
@@ -775,7 +779,7 @@ export class PimStore {
 	touchSession(id: string, title?: string): void {
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT INTO pim_sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET updated_at = excluded.updated_at, title = COALESCE(pim_sessions.title, excluded.title), deleted_at = NULL",
+			"INSERT INTO pim_sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET updated_at = excluded.updated_at, title = COALESCE(pim_sessions.title, excluded.title), deleted_at = NULL, archived_at = NULL",
 			id,
 			title ?? null,
 			now,
@@ -787,6 +791,11 @@ export class PimStore {
 	recordResponse(id: string, at: number): void {
 		this.touchSession(id);
 		this.#sql.exec("UPDATE pim_sessions SET response_at = MAX(COALESCE(response_at, 0), ?) WHERE id = ?", at, id);
+	}
+
+	/** Archives a session by hand, whatever its age; its next activity lists it again. */
+	archiveSession(id: string): void {
+		this.#sql.exec("UPDATE pim_sessions SET archived_at = ? WHERE id = ?", Date.now(), id);
 	}
 
 	readSession(id: string, through: number): void {

@@ -27,6 +27,7 @@ import {
   Palette,
   PanelLeft,
   Plus,
+  Repeat,
   Search,
   Settings,
   Sun,
@@ -37,6 +38,7 @@ import {
   accountQuery,
   agentsQuery,
   artifactsQuery,
+  schedulesQuery,
   sessionsQuery,
 } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -80,7 +82,7 @@ export function CommandPalette({
 }: {
   onToggleSidebar: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, formatDate } = useI18n();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const { data: sessions } = useQuery(sessionsQuery());
@@ -88,6 +90,7 @@ export function CommandPalette({
   const { data: account } = useQuery(accountQuery());
   const { data } = useQuery(artifactsQuery());
   const artifacts = data?.artifacts;
+  const { data: schedules } = useQuery(schedulesQuery());
   const newChat = useNewChat();
   const awaitingApproval = useAwaitingApproval();
   const { preference, setPreference, themes, colorTheme, setColorTheme } =
@@ -245,6 +248,60 @@ export function CommandPalette({
                       <span className="truncate">{artifact.title}</span>
                     </Command.Item>
                   ))}
+                </Command.Group>
+              )}
+              {!!schedules?.length && (
+                <Command.Group heading={t("schedules")} className={GROUP}>
+                  {[...schedules]
+                    .sort((a, b) => Date.parse(a.next) - Date.parse(b.next))
+                    .map((schedule) => {
+                      const title = schedule.label ?? schedule.instruction;
+                      // A task that starts new chats outlives the chat that scheduled it.
+                      const linked =
+                        !schedule.newChat ||
+                        !!sessions?.some(
+                          (session) => session.id === schedule.session,
+                        );
+                      return (
+                        <Command.Item
+                          key={schedule.id}
+                          value={`schedule ${title} ${schedule.instruction} ${schedule.id}`}
+                          className={ITEM}
+                          onSelect={run(() =>
+                            linked
+                              ? navigate({
+                                  to: "/chat/$sessionId",
+                                  params: { sessionId: schedule.session },
+                                })
+                              : navigate({
+                                  to: ".",
+                                  search: (prev) => ({
+                                    ...prev,
+                                    panel: "schedules",
+                                  }),
+                                }),
+                          )}
+                        >
+                          {schedule.type === "cron" ||
+                          schedule.type === "interval" ? (
+                            <Repeat />
+                          ) : (
+                            <CalendarClock />
+                          )}
+                          <span className="truncate">{title}</span>
+                          <span className="ml-auto shrink-0 text-[13px] text-muted-foreground">
+                            {t("scheduleNext", {
+                              date: formatDate(new Date(schedule.next), {
+                                month: "short",
+                                day: "numeric",
+                                hour: "numeric",
+                                minute: "2-digit",
+                              }),
+                            })}
+                          </span>
+                        </Command.Item>
+                      );
+                    })}
                 </Command.Group>
               )}
               {!!agents?.length && (

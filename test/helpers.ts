@@ -6,9 +6,11 @@ import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, expect, vi } from "vitest";
 import { type BrowserHost, type ExecArgs, type ExecResult, Link, type Machine } from "../computer/pim-computer";
+import { ownedCode } from "../src/auth";
 import type { Approval } from "../src/store";
 import type { TranscriptMessage } from "../src/transcript";
 import { faux } from "./worker";
+import { Authenticator } from "./webauthn";
 
 /**
  * Each test file gets its own storage, so each file starts with a fresh
@@ -59,6 +61,44 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
 
 export function post<T = any>(path: string, body: unknown = {}) {
 	return api<T>(path, { method: "POST", body: JSON.stringify(body) });
+}
+
+/** The session cookie of a browser signed in as `owner`, with a passkey of its own. */
+export async function signedIn(owner = OWNER): Promise<string> {
+	const call = (path: string, body: unknown, cookie?: string) =>
+		exports.default.fetch(
+			new Request(url(`/auth${path}`), {
+				method: "POST",
+				headers: { origin: "https://pim.test", "content-type": "application/json", "CF-Connecting-IP": "192.0.2.80", ...(cookie ? { cookie } : {}) },
+				body: JSON.stringify(body),
+			}),
+		);
+	const cookies = (response: Response) => response.headers.getSetCookie().map((cookie) => cookie.split(";")[0]).join("; ");
+	const { code } = await env.Auth.getByName(owner).issueSetupCode(Date.now(), 60_000);
+	const options = await call("/passkeys/options", { setup: ownedCode(owner, code) });
+	const authenticator = await Authenticator.make();
+	const created = await call("/passkeys", { ...(await authenticator.register((await options.json()) as { challenge: string })), name: "Tests" }, cookies(options));
+	expect(created.status).toBe(200);
+	return cookies(created);
+}
+
+/**
+ * Comes back from a service as a browser does: the service's redirect, a
+ * GET, which carries no cookie of Pim's; then the post the page it gets
+ * makes from Pim's own origin, with the browser's cookie, if any.
+ */
+export async function comeBack(params: Record<string, string>, cookie?: string): Promise<Response> {
+	const page = await exports.default.fetch(url(`/mcp/callback/apps?${new URLSearchParams(params)}`));
+	expect(page.status).toBe(200);
+	const fields = [...(await page.text()).matchAll(/<input type="hidden" name="([^"]*)" value="([^"]*)">/g)].map((match) => [match[1]!, match[2]!]);
+	expect(Object.fromEntries(fields)).toEqual(params);
+	return exports.default.fetch(
+		new Request(url("/mcp/callback/apps"), {
+			method: "POST",
+			headers: { origin: "https://pim.test", "content-type": "application/x-www-form-urlencoded", ...(cookie ? { cookie } : {}) },
+			body: new URLSearchParams(fields),
+		}),
+	);
 }
 
 /** Sends a message and waits for the answer. */

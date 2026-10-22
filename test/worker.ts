@@ -10,6 +10,7 @@ import { type ImageModel, workersAiImageModel } from "../src/extensions/image-ge
 import { type Api, type Model, Type } from "@earendil-works/pi-ai";
 import { section } from "@earendil-works/pi-durable";
 import { defineAppTool, defineGatedAction, definePimExtension, oauth2, type PimConfig } from "../src/extensions/define";
+import { GOOGLE_SCOPES, googleApp, googleJson } from "../src/extensions/google";
 
 export { default, Auth, Directory, Gallery } from "../src/index";
 
@@ -206,11 +207,34 @@ export const ledger = definePimExtension({
 	],
 });
 
+/** A Google app's one tool in tests: a request to a Google API, by its URL, with the person's credential. */
+const googleRequest = defineAppTool({
+	name: "request",
+	description: "A request to a Google API.",
+	parameters: Type.Object({ url: Type.String(), method: Type.Optional(Type.String()) }),
+	readOnly: true,
+	async execute({ url, method }, context) {
+		return JSON.stringify(await googleJson(context, url, method ? { method } : {}));
+	},
+});
+
+/**
+ * Google apps made as Gmail and Drive are, against Google's addresses,
+ * which tests answer: Mail and Files, each with its own OAuth client, and
+ * one whose client is never set. (The real Gmail and Drive are the
+ * deployment's `google` extension.)
+ */
+export const google = definePimExtension({ id: "test.google", name: "Test Google", description: "Google apps for tests.", apps: [
+	googleApp({ id: "mail", name: "Mail", description: "Reads mail.", client: { id: "TEST_GMAIL_CLIENT_ID", secret: "TEST_GMAIL_CLIENT_SECRET" }, scopes: [GOOGLE_SCOPES.gmailReadonly], tools: [googleRequest] }),
+	googleApp({ id: "files", name: "Files", description: "Picked files.", client: { id: "TEST_DRIVE_CLIENT_ID", secret: "TEST_DRIVE_CLIENT_SECRET" }, scopes: [GOOGLE_SCOPES.driveFile], tools: [googleRequest] }),
+	googleApp({ id: "unset", name: "Unset", description: "Never configured.", client: { id: "TEST_UNSET_CLIENT_ID", secret: "TEST_UNSET_CLIENT_SECRET" }, scopes: [GOOGLE_SCOPES.driveFile], tools: [] }),
+] });
+
 export class Pim extends RealPim {
 	/** The deployment's extensions, and the tests' own. */
 	protected override pimConfig(): PimConfig {
 		const config = super.pimConfig();
-		return { ...config, extensions: [...config.extensions, ledger] };
+		return { ...config, extensions: [...config.extensions, ledger, google] };
 	}
 
 	/** Email works in tests, into `outbox`. */

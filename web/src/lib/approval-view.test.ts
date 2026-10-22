@@ -4,6 +4,7 @@ import { approvalView, resultView } from "~/lib/approval-view";
 describe("approvalView", () => {
   it("shows an app's tool call as the app, the tool, and one field per argument", () => {
     const view = approvalView({
+      id: "a1",
       action: "mcp_call",
       args: {
         server: "cf-1",
@@ -50,6 +51,7 @@ describe("approvalView", () => {
 
   it("keeps Pim's own summary and shows only what it leaves out", () => {
     const view = approvalView({
+      id: "a1",
       action: "http_request",
       args: {
         method: "POST",
@@ -66,8 +68,34 @@ describe("approvalView", () => {
     ]);
   });
 
+  it("shows an agent's new icon as the picture, without its hash", () => {
+    const view = approvalView({
+      id: "a2",
+      action: "update_agent",
+      args: {
+        agent: "p_coach",
+        icon: "/workspace/images/coach.png",
+        icon_sha256: "ab12",
+        instructions: "Coach my runs.\nRest on Mondays.",
+      },
+      summary:
+        "Sam makes Coach's icon the image at /workspace/images/coach.png, changes Coach's instructions",
+    });
+    expect(view.fields).toEqual([
+      { name: "icon", kind: "image", src: "/api/approvals/a2/icon" },
+      { name: "agent", kind: "text", text: "p_coach" },
+      {
+        name: "instructions",
+        kind: "code",
+        code: "Coach my runs.\nRest on Mondays.",
+        language: "text",
+      },
+    ]);
+  });
+
   it("shows each file a request would save under its path, as code", () => {
     const view = approvalView({
+      id: "a1",
       action: "write_skill",
       args: {
         name: "weekly-plan",

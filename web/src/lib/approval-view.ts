@@ -10,7 +10,8 @@ export type CodeLanguage = "json" | "javascript" | "text";
 
 export type ApprovalField =
   | { name: string; kind: "text"; text: string }
-  | { name: string; kind: "code"; code: string; language: CodeLanguage };
+  | { name: string; kind: "code"; code: string; language: CodeLanguage }
+  | { name: string; kind: "image"; src: string };
 
 export type ApprovalView = { title: string; fields: ApprovalField[] };
 
@@ -100,9 +101,24 @@ function languageOf(path: string): CodeLanguage {
 }
 
 export function approvalView(
-  approval: Pick<Approval, "action" | "args" | "summary">,
+  approval: Pick<Approval, "id" | "action" | "args" | "summary">,
 ): ApprovalView {
-  const { action, args, summary } = approval;
+  const { id, action, args, summary } = approval;
+  // An agent's new icon shows as the picture, as Pim reads it to set it; its hash is for Pim.
+  if (
+    action === "update_agent" &&
+    isRecord(args) &&
+    typeof args.icon === "string"
+  ) {
+    const { icon: _, icon_sha256: __, ...rest } = args;
+    return {
+      title: summary,
+      fields: [
+        { name: "icon", kind: "image", src: `/api/approvals/${id}/icon` },
+        ...approvalView({ id, action, args: rest, summary }).fields,
+      ],
+    };
+  }
   // A connected app's tool: Pim's summary is "<App>: <tool> <JSON>".
   if (
     action === "mcp_call" &&

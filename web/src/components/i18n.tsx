@@ -320,6 +320,8 @@ const translations = {
     removeArtifact: "Remove artifact {name}",
     attachedImage: "Attached image",
     generatedImageDeleted: "This image is no longer in your files.",
+    approvalImageMissing:
+      "This image can't be shown: it moved or changed since it was asked for.",
     imagesOnly: "Only PNG, JPEG, WebP and GIF images can be attached.",
     imageTooLarge: "That image is too large.",
     tooManyImages: "A message can carry at most {count} images.",
@@ -1329,6 +1331,8 @@ const translations = {
     removeArtifact: "Quitar artefacto {name}",
     attachedImage: "Imagen adjunta",
     generatedImageDeleted: "Esta imagen ya no está en tus archivos.",
+    approvalImageMissing:
+      "No se puede mostrar esta imagen: se movió o cambió desde que se pidió.",
     imagesOnly: "Solo se pueden adjuntar imágenes PNG, JPEG, WebP y GIF.",
     imageTooLarge: "Esa imagen es demasiado grande.",
     tooManyImages: "Un mensaje puede llevar como máximo {count} imágenes.",

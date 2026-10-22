@@ -142,6 +142,7 @@ import {
 	manageAppsAction,
 	RENAME_AGENT,
 	renameAgentAction,
+	requestedIcon,
 	SHARE_MEMORY_SCOPE,
 	shareMemoryScopeAction,
 	UPDATE_AGENT,
@@ -595,7 +596,7 @@ export class Pim extends DurableAgent<Env> {
 		httpRequest as GatedAction,
 		...mcpActions(this.apps),
 		watchAction(this.apps, this.appEvents),
-		updateAgentAction(this.agents),
+		updateAgentAction(this.agents, this.files),
 		renameAgentAction(this.agents),
 		shareMemoryScopeAction(this.agents, () => this.memory.store.namedScopes()),
 		manageAppsAction(this.agents, this.apps, () => this.appDirectory()),
@@ -4763,6 +4764,16 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 		[
+			"GET",
+			"/approvals/:id/icon",
+			async ({ id }) => {
+				const approval = this.store.approval(id!);
+				if (approval?.action !== UPDATE_AGENT) throw new HttpError(404, `No approval ${id} with an icon`);
+				const { type, bytes } = await requestedIcon(approval.args, this.files);
+				return new Response(bytes, { headers: { "content-type": type, "x-content-type-options": "nosniff", "cache-control": "private, max-age=31536000, immutable" } });
+			},
+		],
+		[
 			"POST",
 			"/approvals/:id/approve",
 			async ({ id }, request) => {
@@ -5277,6 +5288,7 @@ export class Pim extends DurableAgent<Env> {
 				blueprints: () => this.extensions.blueprints().map(({ ref, blueprint }) => ({ ref, name: blueprint.name, description: blueprint.description })),
 				apps: () => this.appDirectory(),
 				create: (input) => this.agents.create(checkContacts(null, this.#checkApps(this.#checkBlueprint(agentInput(input))), this.agents.list())),
+				files: this.files,
 			},
 		);
 	}

@@ -47,6 +47,12 @@ const translations = {
     agentToolsHint:
       "{name} uses the tools that are on without asking you first, and can't use those that are off.",
     useTool: "Let it use {tool}",
+    agentSkills: "Skills",
+    writeSkills: "Write and install skills",
+    writeSkillsHint:
+      "{name} can save how you want work done as a skill, or install one someone published, each time with your approval. Off, no agent changes its skills, your majordomo included.",
+    writeSkillsHintMajordomo:
+      "{name} can save how you want work done as a skill, or install one someone published, for itself or for your other agents whose skills are on, each time with your approval.",
     destructiveTool: "Can delete",
     agentToolChanged:
       "The app changed this tool since you turned it on, so it's off until you turn it on again.",
@@ -1061,6 +1067,12 @@ const translations = {
     agentToolsHint:
       "{name} usa sin preguntarte las herramientas activadas, y no puede usar las desactivadas.",
     useTool: "Permitir usar {tool}",
+    agentSkills: "Habilidades",
+    writeSkills: "Escribir e instalar habilidades",
+    writeSkillsHint:
+      "{name} puede guardar cómo quieres que se haga un trabajo como una habilidad, o instalar una que alguien publicó, siempre con tu aprobación. Desactivado, ningún agente cambia sus habilidades, ni siquiera tu mayordomo.",
+    writeSkillsHintMajordomo:
+      "{name} puede guardar cómo quieres que se haga un trabajo como una habilidad, o instalar una que alguien publicó, para sí o para tus otros agentes que tengan las habilidades activadas, siempre con tu aprobación.",
     destructiveTool: "Puede borrar",
     agentToolChanged:
       "La app cambió esta herramienta desde que la activaste, así que está desactivada hasta que la actives de nuevo.",

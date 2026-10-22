@@ -371,25 +371,29 @@ export class SkillStore {
 
 	/**
 	 * Makes a skill or adds a version: stores its new files, then, checked
-	 * again against the skill as it is then, lists them, with nothing awaited
-	 * in between.
+	 * again against the skill as it is then and by `guard`, lists them, with
+	 * nothing awaited in between.
 	 */
-	async write(given: SkillWrite): Promise<Skill> {
+	async write(given: SkillWrite, guard?: () => void): Promise<Skill> {
 		const write = this.#checkInput(given);
 		const base = write.baseVersion === undefined ? undefined : { name: write.name, version: write.baseVersion };
 		// The files of the version it is based on, which is still the latest when it is written.
 		const draft = await this.#draft(write.files, base);
-		return this.#add(write, draft);
+		return this.#add(write, draft, guard);
 	}
 
-	/** Adds a version with a draft's files, checked before storing anything and again when writing. */
-	async #add(write: SkillWrite, draft: Draft): Promise<Skill> {
+	/**
+	 * Adds a version with a draft's files, checked before storing anything and
+	 * again when writing, with `guard`, which throws what else the writer refuses.
+	 */
+	async #add(write: SkillWrite, draft: Draft, guard?: () => void): Promise<Skill> {
 		this.#checkState(write, draft);
 		const { skill, pruned } = await this.#blobs.store(
 			draft.files.map((file) => file.sha256),
 			draft.bytes,
 			() => {
 				this.#checkState(write, draft);
+				guard?.();
 				const now = Date.now();
 				const version = (write.baseVersion ?? 0) + 1;
 				this.#sql.exec(

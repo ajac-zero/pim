@@ -1,11 +1,12 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { type FauxResponseFactory, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { Approval } from "../src/store";
-import { api, lastUserText, messagesOf, pendingApproval, post, ROOT, say, scripts, settled, speaker, systemPrompt, TOKEN, toolUse, url } from "./helpers";
-import { spans } from "./worker";
+import { api, lastUserText, messagesOf, OWNER, pendingApproval, post, ROOT, say, scripts, settled, speaker, systemPrompt, TOKEN, toolUse, url } from "./helpers";
+import { type Pim, spans } from "./worker";
 
 type Context = Parameters<FauxResponseFactory>[0];
 
@@ -114,7 +115,14 @@ describe("an agent's contacts", () => {
 		expect(seen.Researcher!.prompt).not.toContain("Plan trips in detail.");
 		expect(seen.Researcher!.task).toBe("Find the best month to visit Lisbon.");
 		expect(seen.Researcher!.tools).toContain("current_time");
-		for (const tool of ["send_to_user", "schedule_task", "watch_app_event", "create_agent", "update_agent", "manage_apps", "write_skill"]) expect(seen.Researcher!.tools).not.toContain(tool);
+		for (const tool of ["send_to_user", "schedule_task", "watch_app_event", "create_agent", "update_agent", "manage_apps", "write_skill", "install_skill"]) expect(seen.Researcher!.tools).not.toContain(tool);
+		// Nor does a request to write a skill filed from a task's conversation save anything when approved.
+		const forged = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim, state) => {
+			const conversation = String(state.storage.sql.exec("SELECT conversation FROM pim_tasks WHERE id = ?", researcher.id).one().conversation);
+			const write = instance.actions.find((action) => action.name === "write_skill")!;
+			return write.run({ by: researcherId, agent: researcherId, name: "lisbon", description: "Plan Lisbon.", instructions: "Go in May." }, { session: conversation });
+		});
+		expect(forged).toContain("An agent at work on a task writes no skills");
 		// Their answers come in one update, by task.
 		expect(update).toMatch(/^\[Task update\] /);
 		expect(update).toContain(`Researcher finished task ${researcher.id}:\nMay: mild and before the crowds.`);

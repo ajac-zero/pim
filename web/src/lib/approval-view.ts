@@ -94,6 +94,14 @@ function isFileList(
   );
 }
 
+/** Where a copy comes from, and the size and hash Pim checks it against when it is approved. */
+function copyText(file: Record<string, unknown>): string {
+  const from = String(file.from_file ?? file.from_url);
+  if (typeof file.sha256 !== "string") return from;
+  const size = typeof file.size === "number" ? `${file.size} bytes, ` : "";
+  return `${from} (${size}SHA-256 ${file.sha256.slice(0, 12)}…)`;
+}
+
 function languageOf(path: string): CodeLanguage {
   if (/\.(m?js|ts)$/i.test(path)) return "javascript";
   if (/\.json$/i.test(path)) return "json";
@@ -137,11 +145,14 @@ export function approvalView(
   }
   // Pim's own actions summarize themselves; show what the summary leaves out,
   // and each file they would save as a field of its own, named by its path.
+  // A skill's summary names the agent asking and the agent it is for, whose ids are Pim's.
+  const named = action === "write_skill" ? ["by", "agent"] : [];
   const fields = isRecord(args)
     ? Object.entries(args)
         .filter(
-          ([, value]) =>
+          ([name, value]) =>
             value !== undefined &&
+            !named.includes(name) &&
             !(typeof value === "string" && summary.includes(value)),
         )
         .flatMap(([name, value]): ApprovalField[] =>
@@ -155,13 +166,8 @@ export function approvalView(
                         code: file.content,
                         language: languageOf(file.path),
                       }
-                    : // A copy shows where it comes from.
-                      {
-                        name: file.path,
-                        kind: "text",
-                        text:
-                          "from_file" in file ? file.from_file : file.from_url,
-                      },
+                    : // A copy shows where it comes from, and the hash it must still have.
+                      { name: file.path, kind: "text", text: copyText(file) },
               )
             : [fieldOf(name, value)],
         )

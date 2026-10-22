@@ -41,7 +41,7 @@ import {
   schedulesQuery,
   sessionsQuery,
 } from "~/lib/queries";
-import { cn } from "~/lib/utils";
+import { cn, MAC } from "~/lib/utils";
 
 const PANELS: {
   panel: SidebarPanel;
@@ -55,8 +55,6 @@ const PANELS: {
   { panel: "skills", label: "skills", icon: <Lightbulb /> },
   { panel: "schedules", label: "schedules", icon: <CalendarClock /> },
 ];
-
-const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 
 /** A shortcut's keys, with the modifier a Mac or another computer uses. */
 function Shortcut({ keys }: { keys: string }) {

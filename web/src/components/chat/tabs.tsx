@@ -19,7 +19,35 @@ import {
   pruneTabs,
   useTabs,
 } from "~/lib/tabs";
-import { cn } from "~/lib/utils";
+import { cn, MAC } from "~/lib/utils";
+
+/**
+ * The position a tab shortcut selects: ⌘1 to ⌘9 on a Mac, Ctrl+1 to Ctrl+9
+ * elsewhere, counting from the left (so 9 is the ninth tab, not the last).
+ * Undefined for any other key press, including one with a modifier of the
+ * other platform, Alt or Shift, one while composing text, or one already
+ * handled.
+ */
+export function tabShortcutPosition(
+  event: Pick<
+    KeyboardEvent,
+    | "key"
+    | "metaKey"
+    | "ctrlKey"
+    | "altKey"
+    | "shiftKey"
+    | "isComposing"
+    | "defaultPrevented"
+  >,
+  mac: boolean,
+) {
+  if (event.defaultPrevented || event.isComposing) return;
+  if (event.altKey || event.shiftKey) return;
+  if (mac ? !event.metaKey || event.ctrlKey : !event.ctrlKey || event.metaKey) {
+    return;
+  }
+  return /^[1-9]$/.test(event.key) ? Number(event.key) - 1 : undefined;
+}
 
 /**
  * The open chats, as tabs in the chat's header. Each shows its agent, its
@@ -39,6 +67,30 @@ export function ChatTabs({ activeId }: { activeId: string }) {
   useEffect(() => {
     if (sessions) pruneTabs(new Set(sessions.map((session) => session.id)));
   }, [sessions]);
+
+  // The chats shown, left to right: open tabs whose chat still exists.
+  const open = tabs.filter((tab) =>
+    sessions?.some((session) => session.id === tab.session),
+  );
+  const shown = open.map((tab) => tab.session);
+  const shownKey = shown.join("\n");
+
+  // ⌘1 to ⌘9 (Ctrl+1 to Ctrl+9 away from a Mac) opens the chat in that
+  // position. Browsers may keep these keys for their own tabs.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: shownKey stands for the list shown.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const position = tabShortcutPosition(event, MAC);
+      const target = position === undefined ? undefined : shown[position];
+      if (!target) return;
+      event.preventDefault();
+      if (target !== activeId) {
+        navigate({ to: "/chat/$sessionId", params: { sessionId: target } });
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [shownKey, activeId, navigate]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new active tab, or more tabs, may push it out of view.
   useEffect(() => {
@@ -92,9 +144,6 @@ export function ChatTabs({ activeId }: { activeId: string }) {
     ) : null;
 
   // A lone chat shows its title only while it is open, not on a dashboard.
-  const open = tabs.filter((tab) =>
-    sessions?.some((session) => session.id === tab.session),
-  );
   if (open.length <= 1 && activeId) {
     const session = sessions?.find((candidate) => candidate.id === activeId);
     if (!session) return <div className="flex-1" />;
@@ -115,6 +164,7 @@ export function ChatTabs({ activeId }: { activeId: string }) {
       {/* The padding leaves room for the open tab's flared corners. */}
       <ul className="flex h-full items-end gap-1 px-2">
         {tabs.map((tab) => {
+          const position = shown.indexOf(tab.session);
           const session = sessions?.find(
             (candidate) => candidate.id === tab.session,
           );
@@ -122,6 +172,8 @@ export function ChatTabs({ activeId }: { activeId: string }) {
           const active = session.id === activeId;
           const title = sessionTitle(session, t);
           const status = statusOf(session);
+          const shortcut =
+            position < 9 ? `${MAC ? "⌘" : "Ctrl+"}${position + 1}` : undefined;
           return (
             <li
               key={session.id}
@@ -139,7 +191,16 @@ export function ChatTabs({ activeId }: { activeId: string }) {
                 to="/chat/$sessionId"
                 params={{ sessionId: session.id }}
                 aria-current={active ? "page" : undefined}
-                title={[title, session.agent?.name ?? session.visit?.username]
+                aria-keyshortcuts={
+                  shortcut
+                    ? `${MAC ? "Meta" : "Control"}+${position + 1}`
+                    : undefined
+                }
+                title={[
+                  title,
+                  session.agent?.name ?? session.visit?.username,
+                  shortcut,
+                ]
                   .filter(Boolean)
                   .join(" · ")}
                 onAuxClick={(event) => {

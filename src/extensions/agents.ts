@@ -2,7 +2,9 @@ import { defineExtension, defineTool, section } from "@earendil-works/pi-durable
 import { type Static, Type } from "@earendil-works/pi-ai";
 import {
 	AGENT_COLORS,
+	checkIcon,
 	MAX_APPS,
+	MAX_ICON_BYTES,
 	MAX_DESCRIPTION,
 	MAX_INSTRUCTIONS,
 	MAX_NAME,
@@ -14,6 +16,9 @@ import {
 	agentInstructions,
 	checkContacts,
 } from "../agents";
+import { sha256 } from "../artifacts";
+import { FILES_ROOT, type Files, filesPath, imageType } from "../files";
+import { HttpError } from "../http";
 import { majordomoRole } from "../majordomo";
 import { DELEGATE, type Role, taskPreamble } from "../tasks";
 import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";
@@ -32,13 +37,36 @@ export const SHARE_MEMORY_SCOPE = "share_memory_scope";
 /** What `update_agent` changes. Contacts are added and removed by name. */
 const Changes = Type.Object({
 	description: Type.Optional(Type.String({ maxLength: MAX_DESCRIPTION })),
-	instructions: Type.Optional(Type.String({ maxLength: MAX_INSTRUCTIONS, description: "Your complete new instructions: they replace the old ones." })),
+	instructions: Type.Optional(Type.String({ maxLength: MAX_INSTRUCTIONS, description: "The complete new instructions: they replace the old ones." })),
 	add_contacts: Type.Optional(
 		Type.Array(Type.String(), { maxItems: MAX_AGENTS, description: `Names of the person's other agents to hand tasks to with \`${DELEGATE}\`.` }),
 	),
 	remove_contacts: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_AGENTS, description: "Names of contacts to stop handing tasks to." })),
+	emoji: Type.Optional(Type.String({ description: "One emoji shown as the icon." })),
+	color: Type.Optional(Type.Union(AGENT_COLORS.map((color) => Type.Literal(color)), { description: "The color behind the emoji." })),
+	icon: Type.Optional(
+		Type.Union([Type.String(), Type.Null()], {
+			description: `An image shown as the icon in place of the emoji: a PNG, JPEG, WebP or GIF of at most ${MAX_ICON_BYTES / 1024} KB, as a path in the person's files, such as ${FILES_ROOT}/images/coach.png, or the http(s) URL of an image on the web. null removes it, to show the emoji again.`,
+		}),
+	),
 });
 type Changes = Static<typeof Changes>;
+
+/** An image for an agent's icon, from the person's files or the web, checked as an uploaded icon is. */
+async function readIcon(source: string, files: Pick<Files, "bytes">): Promise<Uint8Array> {
+	let bytes: Uint8Array;
+	if (filesPath(source) !== null) bytes = await files.bytes(source);
+	else if (/^https?:\/\//.test(source)) {
+		const response = await fetch(source, { headers: { "user-agent": "pim-agent/0.1" }, redirect: "follow", signal: AbortSignal.timeout(20_000) });
+		if (!response.ok) {
+			await response.body?.cancel();
+			throw new HttpError(502, `${source} answered HTTP ${response.status}.`);
+		}
+		bytes = new Uint8Array(await response.arrayBuffer());
+	} else throw new HttpError(400, `icon must be a path under ${FILES_ROOT}, an http(s) URL, or null`);
+	checkIcon(imageType(bytes) ?? "", bytes.byteLength);
+	return bytes;
+}
 
 const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
@@ -56,33 +84,62 @@ function changed(agent: Agent, changes: Changes, agents: readonly Agent[]): Agen
 	const added = agentIds(changes.add_contacts ?? [], agents);
 	const removed = agentIds(changes.remove_contacts ?? [], agents);
 	const contacts = [...agent.contacts.filter((id) => !removed.includes(id)), ...added.filter((id) => !agent.contacts.includes(id) && !removed.includes(id))];
-	return checkContacts(agent, agentInput({ description: changes.description, instructions: changes.instructions, contacts }, agent), agents);
+	const { description, instructions, emoji: symbol, color } = changes;
+	return checkContacts(agent, agentInput({ description, instructions, contacts, symbol, color }, agent), agents);
 }
 
-/** What an edit changes, for the person to approve: empty if nothing. */
-function describeChanges(agent: Agent, next: AgentInput, agents: readonly Agent[]): string[] {
+/** What an edit changes, for the person to approve: empty if nothing. `whose` is "its", or the agent's name when another agent edits it. */
+function describeChanges(agent: Agent, next: AgentInput, icon: Changes["icon"], agents: readonly Agent[], whose: string): string[] {
 	const name = (id: string) => agents.find((other) => other.id === id)?.name ?? id;
 	return [
-		...(next.description !== agent.description ? ["changes its description"] : []),
-		...(next.instructions !== agent.instructions ? ["changes its instructions"] : []),
-		...next.contacts.filter((id) => !agent.contacts.includes(id)).map((id) => `adds ${name(id)} to its contacts, to hand tasks to`),
-		...agent.contacts.filter((id) => !next.contacts.includes(id)).map((id) => `removes ${name(id)} from its contacts`),
+		...(next.description !== agent.description ? [`changes ${whose} description`] : []),
+		...(next.instructions !== agent.instructions ? [`changes ${whose} instructions`] : []),
+		...next.contacts.filter((id) => !agent.contacts.includes(id)).map((id) => `adds ${name(id)} to ${whose} contacts, to hand tasks to`),
+		...agent.contacts.filter((id) => !next.contacts.includes(id)).map((id) => `removes ${name(id)} from ${whose} contacts`),
+		...(next.symbol !== undefined && next.symbol !== agent.symbol ? [`makes ${whose} emoji ${next.symbol}`] : []),
+		...(next.color !== undefined && next.color !== agent.color ? [`makes ${whose} color ${next.color}`] : []),
+		...(typeof icon === "string" ? [`makes ${whose} icon the image at ${icon}`] : []),
+		...(icon === null && agent.icon !== null ? [`removes ${whose} icon image`] : []),
 	];
 }
 
-/** The approved edit of an agent, made to it as it is then. */
-export function updateAgentAction(agents: Pick<AgentStore, "get" | "update" | "list">): GatedAction {
+/**
+ * The image an `update_agent` request makes an agent's icon, read again: the
+ * approval card shows it, and approving sets it. Refused when it is no longer
+ * the image the agent asked for, whose hash the request names.
+ */
+export async function requestedIcon(args: unknown, files: Pick<Files, "bytes">): Promise<{ type: string; bytes: Uint8Array }> {
+	const { icon, icon_sha256 } = (args ?? {}) as { icon?: unknown; icon_sha256?: unknown };
+	if (typeof icon !== "string") throw new HttpError(404, "This request sets no icon image.");
+	const bytes = await readIcon(icon, files);
+	if ((await sha256(bytes)) !== icon_sha256) throw new HttpError(409, `${icon} changed since it was asked for, so it isn't the image the person approved.`);
+	return { type: imageType(bytes)!, bytes };
+}
+
+/** The approved edit of an agent, made to it as it is then. An icon is set only if its image is still the one the person approved. */
+export function updateAgentAction(agents: Pick<AgentStore, "get" | "update" | "list" | "setIcon" | "removeIcon">, files: Pick<Files, "bytes">): GatedAction {
 	return defineGatedAction({
 		name: UPDATE_AGENT,
-		description: "An agent changes its own instructions, description or contacts.",
-		// Filed by the tool, which names the chat's agent.
+		description: "An agent changes itself, or the majordomo changes another agent: instructions, description, contacts or icon.",
+		// Filed by the tool, which names the agent to change.
 		internal: true,
-		parameters: Type.Object({ agent: Type.String(), ...Changes.properties }),
+		parameters: Type.Object({ agent: Type.String(), ...Changes.properties, icon_sha256: Type.Optional(Type.String()) }),
 		summarize: ({ agent }) => `Change the agent ${agent}`,
-		async run({ agent: id, ...changes }) {
+		async run(args) {
+			const { agent: id, icon, icon_sha256: _, ...changes } = args;
 			const agent = agents.get(id);
 			if (!agent) return "That agent no longer exists.";
+			let image: { type: string; bytes: Uint8Array } | undefined;
+			if (typeof icon === "string") {
+				try {
+					image = await requestedIcon(args, files);
+				} catch (error) {
+					return `Nothing changed: ${error instanceof Error ? error.message : String(error)}`;
+				}
+			}
 			const updated = agents.update(id, changed(agent, changes, agents.list()));
+			if (image) agents.setIcon(id, image.type, image.bytes.buffer as ArrayBuffer);
+			else if (icon === null) agents.removeIcon(id);
 			return `${updated.name} is updated. The change applies from its next step.`;
 		},
 	}) as GatedAction;
@@ -201,6 +258,8 @@ export type AgentsHost = {
 	apps(): readonly DirectoryApp[];
 	/** Checked as the API checks a new agent; throws what it refuses. */
 	create(input: Record<string, unknown>): Agent;
+	/** The person's files, where an agent's new icon can come from. */
+	files: Pick<Files, "bytes">;
 };
 
 /** What the agent a person talks with knows of their other agents, and when to make one. */
@@ -299,22 +358,33 @@ export function agentExtension(
 	const editing = ownToolPermission(services.store, UPDATE_AGENT).permission;
 	const updateAgent = defineTool({
 		name: UPDATE_AGENT,
-		description: `Change yourself, the agent this chat is with: your description, your instructions, or your contacts, the person's other agents you hand tasks to. App changes use manage_apps instead. Do it when the person asks, or when handing parts of work you'll do again to another agent would help. Only the fields you give change.${editing === "ask" ? ` ${approvalNote(services)}` : ""}`,
-		parameters: Changes,
+		description: `Change yourself, the agent this chat is with: your description, your instructions, your contacts (the person's other agents you hand tasks to), or how you look in the sidebar: your emoji and color, or an image as your icon, such as one made with generate_image or found on the web. App changes use manage_apps instead. Do it when the person asks, or when handing parts of work you'll do again to another agent would help. Only the fields you give change.${editing === "ask" ? ` ${approvalNote(services)}` : ""}`,
+		parameters: Type.Object({
+			agent: Type.Optional(
+				Type.String({ description: "The id of another of the person's agents to change instead, from your_agents. Only their majordomo changes other agents." }),
+			),
+			...Changes.properties,
+		}),
 		replay: "safe",
-		async execute(changes, api, context) {
-			const { agent } = roleOf(String(api.conversationId));
+		async execute({ agent: id, ...changes }, api, context) {
+			const { agent: self } = roleOf(String(api.conversationId));
+			const all = agents.list();
+			const agent = id === undefined ? self : all.find((other) => other.id === id);
+			if (!agent) return text(`The person has no agent with the id ${id}. Use an id from your_agents.`, true);
+			if (agent.id !== self.id && !self.majordomo) return text("Only the person's majordomo changes their other agents.", true);
 			let edits: string[];
+			let icon_sha256: string | undefined;
 			try {
-				const all = agents.list();
-				edits = describeChanges(agent, changed(agent, changes, all), all);
+				edits = describeChanges(agent, changed(agent, changes, all), changes.icon, all, agent.id === self.id ? "its" : `${agent.name}'s`);
+				if (typeof changes.icon === "string") icon_sha256 = await sha256(await readIcon(changes.icon, agents.files));
 			} catch (error) {
 				return text(error instanceof Error ? error.message : String(error), true);
 			}
-			// A rerun after the edit was made finds nothing left to change: it keeps what it asked.
-			const summary = await api.memo("update_agent", edits.length === 0 ? "" : `${agent.name} ${edits.join(", ")}`, context);
+			// A rerun after the edit was made finds nothing left to change: it keeps what it asked, and the image it read.
+			const summary = await api.memo("update_agent", edits.length === 0 ? "" : `${self.name} ${edits.join(", ")}`, context);
 			if (summary === "") return text("That changes nothing.", true);
-			return fileApproval(services, api, context, { action: UPDATE_AGENT, tool: UPDATE_AGENT, args: { agent: agent.id, ...changes }, summary });
+			if (icon_sha256 !== undefined) icon_sha256 = await api.memo("icon_sha256", icon_sha256, context);
+			return fileApproval(services, api, context, { action: UPDATE_AGENT, tool: UPDATE_AGENT, args: { agent: agent.id, ...changes, icon_sha256 }, summary });
 		},
 	});
 

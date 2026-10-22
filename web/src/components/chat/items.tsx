@@ -640,7 +640,14 @@ function ApprovalFields({ fields }: { fields: readonly ApprovalField[] }) {
   return (
     <dl className="mt-2.5 space-y-2.5">
       {fields.map((field) =>
-        field.kind === "text" ? (
+        field.kind === "image" ? (
+          <div key={field.name} className="min-w-0 space-y-1">
+            <dt className={FIELD_LABEL_CLASS}>{field.name}</dt>
+            <dd>
+              <ApprovalImage src={field.src} />
+            </dd>
+          </div>
+        ) : field.kind === "text" ? (
           <div key={field.name} className="flex min-w-0 items-baseline gap-2">
             <dt className={cn(FIELD_LABEL_CLASS, "shrink-0")}>{field.name}</dt>
             <dd className="min-w-0 font-mono text-xs [overflow-wrap:anywhere]">
@@ -657,6 +664,27 @@ function ApprovalFields({ fields }: { fields: readonly ApprovalField[] }) {
         ),
       )}
     </dl>
+  );
+}
+
+/** An image a request would use, as Pim reads it to act on it; a note when it can't. */
+function ApprovalImage({ src }: { src: string }) {
+  const { t } = useI18n();
+  const [missing, setMissing] = useState(false);
+  if (missing) {
+    return (
+      <p className="text-muted-foreground text-sm">
+        {t("approvalImageMissing")}
+      </p>
+    );
+  }
+  return (
+    <img
+      src={src}
+      alt=""
+      onError={() => setMissing(true)}
+      className="block size-24 rounded-xl border bg-background object-cover"
+    />
   );
 }
 

@@ -92,6 +92,14 @@ export type AgentInput = {
 export const MAX_AGENTS = 50;
 export const MAX_ICON_BYTES = 256 * 1024;
 export const ICON_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+/** Refuses what can't be an agent's icon: an image of a type browsers show in a picture, of at most `MAX_ICON_BYTES`. */
+export function checkIcon(type: string, bytes: number): void {
+	if (!ICON_TYPES.includes(type)) throw new HttpError(415, "An icon must be a PNG, JPEG, WebP or GIF image.");
+	if (bytes === 0) throw new HttpError(400, "The icon is empty.");
+	if (bytes > MAX_ICON_BYTES) throw new HttpError(413, `An icon must be at most ${MAX_ICON_BYTES / 1024} KB.`);
+}
+
 export const AGENT_COLORS = ["gray", "red", "orange", "amber", "green", "teal", "blue", "indigo", "violet", "pink"];
 export const MAX_NAME = 60;
 export const MAX_DESCRIPTION = 280;
@@ -528,9 +536,7 @@ export class AgentStore {
 
 	/** Sets its icon, an image of a type browsers show in a picture. */
 	setIcon(id: string, type: string, data: ArrayBuffer): void {
-		if (!ICON_TYPES.includes(type)) throw new HttpError(415, "An icon must be a PNG, JPEG, WebP or GIF image.");
-		if (data.byteLength === 0) throw new HttpError(400, "The icon is empty.");
-		if (data.byteLength > MAX_ICON_BYTES) throw new HttpError(413, `An icon must be at most ${MAX_ICON_BYTES / 1024} KB.`);
+		checkIcon(type, data.byteLength);
 		this.#sql.exec(
 			"INSERT INTO pim_agent_icons (agent, type, data, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (agent) DO UPDATE SET type = excluded.type, data = excluded.data, updated_at = excluded.updated_at",
 			id,

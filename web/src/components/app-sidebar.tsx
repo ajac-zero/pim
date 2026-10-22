@@ -20,7 +20,6 @@ import {
   Contact,
   ExternalLink,
   Folder,
-  ListFilter,
   MessagesSquare,
   MoreHorizontal,
   Pencil,
@@ -54,8 +53,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import { Input } from "~/components/ui/input";
@@ -65,13 +62,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
-import {
-  type ChatView,
-  flatChats,
-  type InboxOrder,
-  useChatListPreferences,
-} from "~/lib/chat-list";
-import { type Agent, pim, type Session, type Visit } from "~/lib/pim-api";
+import { flatChats, groupByAge } from "~/lib/chat-list";
+import { pim, type Session } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import {
   accountQuery,
@@ -82,19 +74,12 @@ import {
   notificationsQuery,
   profileQuery,
   sessionsQuery,
-  visitsQuery,
 } from "~/lib/queries";
 import { CHAT_DRAG_TYPE, closeTab, openTab } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 import { version } from "../../../package.json";
 
 type T = ReturnType<typeof useI18n>["t"];
-
-/**
- * One of your agents in the sidebar, with its chats, most recent first;
- * `archived` says it has older ones, listed under Archived.
- */
-type AgentSection = { agent: Agent; list: Session[]; archived: boolean };
 
 export function sessionTitle(session: Pick<Session, "title">, t: T) {
   return session.title ?? t("newChat");
@@ -366,7 +351,7 @@ export function AppSidebar({
   );
 }
 
-/** Chats grouped by agent, in one inbox, or only with the majordomo. */
+/** Every chat in one list, most recently active first, under dividers by age. */
 function ChatsPanel({
   awaitingApproval,
   onNavigate,
@@ -377,117 +362,22 @@ function ChatsPanel({
   const { t } = useI18n();
   const [search, setSearch] = useState("");
   const { data: sessions } = useQuery(sessionsQuery());
-  const { data: agents } = useQuery(agentsQuery());
-  const { data: account } = useQuery(accountQuery());
-  const { data: visits } = useQuery({ ...visitsQuery(), enabled: !!account });
   const params = useParams({ strict: false }) as { sessionId?: string };
   const activeId = params.sessionId;
   const newChat = useNewChat(onNavigate);
-  const { view, order, set } = useChatListPreferences();
-  const viewLabels = {
-    agents: t("agentsView"),
-    inbox: t("inboxView"),
-    majordomo: t("majordomoView"),
-  };
   const current = useMemo(
-    () => (sessions ?? []).filter((session) => !session.archived),
-    [sessions],
+    () => flatChats(sessions ?? [], search, t("newChat")),
+    [sessions, search, t],
   );
-  const majordomoId = agents?.find((agent) => agent.majordomo)?.id;
-  const flatView = view === "majordomo" ? "majordomo" : "inbox";
-  const flat = flatChats(
-    current,
-    majordomoId,
-    flatView,
-    order,
-    search,
-    t("newChat"),
-  );
-  // Archived chats are listed apart, most recent first; visits stay under Shared with you in the agents view.
-  const archived = flatChats(
-    (sessions ?? []).filter(
-      (session) => session.archived && !(view === "agents" && session.visit),
-    ),
-    majordomoId,
-    flatView,
-    "recent",
-    search,
-    t("newChat"),
-  );
-  const shownVisits = (visits ?? []).filter((visit) =>
-    visit.username.toLowerCase().includes(search.toLowerCase()),
-  );
-
-  // A section for each of your agents, holding the chats with it.
-  const sections = useMemo((): AgentSection[] => {
-    const all = (agents ?? []).map((agent) => ({
-      agent,
-      list: [] as Session[],
-      archived: false,
-    }));
-    for (const session of sessions ?? []) {
-      // Conversations with others' spaces are listed under Shared with you.
-      if (session.visit) continue;
-      const section =
-        all.find((candidate) => candidate.agent.id === session.agent?.id) ??
-        all.find((candidate) => candidate.agent.majordomo);
-      if (!section) continue;
-      if (session.archived) section.archived = true;
-      else section.list.push(session);
-    }
-    // Agents with the most recently active open chats come first; those with none go last.
-    const latest = (section: AgentSection) =>
-      Math.max(...section.list.map((session) => session.updatedAt ?? 0));
-    return all.sort(
-      (a, b) =>
-        Number(b.list.length > 0) - Number(a.list.length > 0) ||
-        (a.list.length > 0 ? latest(b) - latest(a) : 0),
-    );
-  }, [agents, sessions]);
-  const shownSections = useMemo(
-    () =>
-      sections.flatMap((section) => {
-        if (!search) return [section];
-        const list = section.list.filter((session) =>
-          sessionTitle(session, t).toLowerCase().includes(search.toLowerCase()),
-        );
-        return list.length > 0 ? [{ ...section, list }] : [];
-      }),
-    [sections, search, t],
-  );
+  const open = current.filter((session) => !session.archived);
+  const archived = current.filter((session) => session.archived);
 
   return (
     <>
-      <SidebarPanelHeader title={t("chats")}>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              aria-label={t("chatView")}
-              title={`${t("chatView")}: ${viewLabels[view]}`}
-              className="flex size-10 items-center justify-center rounded-full text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
-            >
-              <MoreHorizontal className="size-4.5 rotate-90" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuRadioGroup
-              value={view}
-              onValueChange={(value) => set({ view: value as ChatView })}
-            >
-              {(["agents", "inbox", "majordomo"] as const).map((value) => (
-                <DropdownMenuRadioItem key={value} value={value}>
-                  {viewLabels[value]}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </SidebarPanelHeader>
+      <SidebarPanelHeader title={t("chats")} />
 
-      {/* Search and inbox sorting share a row. */}
-      <div className="flex items-center gap-2 px-3 pt-1 pb-2">
-        <div className="relative min-w-0 flex-1">
+      <div className="px-3 pt-1 pb-2">
+        <div className="relative">
           <Search className="-translate-y-1/2 absolute top-1/2 left-2.5 size-4 text-muted-foreground" />
           <Input
             value={search}
@@ -496,33 +386,6 @@ function ChatsPanel({
             className="h-8 truncate border-transparent bg-sidebar-accent/60 pl-8 text-sm shadow-none focus-visible:border-sidebar-border focus-visible:bg-sidebar-accent/60 focus-visible:ring-0"
           />
         </div>
-        {view === "inbox" && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                aria-label={t("sortChats")}
-                title={t(order === "unread" ? "unreadFirst" : "recentActivity")}
-                className="flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
-              >
-                <ListFilter className="size-4" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuRadioGroup
-                value={order}
-                onValueChange={(value) => set({ order: value as InboxOrder })}
-              >
-                <DropdownMenuRadioItem value="recent">
-                  {t("recentActivity")}
-                </DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="unread">
-                  {t("unreadFirst")}
-                </DropdownMenuRadioItem>
-              </DropdownMenuRadioGroup>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
       </div>
 
       <div className="flex justify-start px-3 pb-3">
@@ -541,43 +404,7 @@ function ChatsPanel({
         aria-label={t("chats")}
         className="flex-1 overflow-y-auto px-3 pb-2 scrollbar-thin"
       >
-        {view === "agents" && shownVisits.length > 0 && (
-          <div className="mb-3">
-            <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
-              {t("sharedWithYou")}
-            </div>
-            <ul className="space-y-px" aria-label={t("sharedWithYou")}>
-              {shownVisits.map((visit) => (
-                <VisitRow
-                  key={visit.ownerId}
-                  visit={visit}
-                  active={visit.session !== null && visit.session === activeId}
-                  onNavigate={onNavigate}
-                />
-              ))}
-            </ul>
-          </div>
-        )}
-        {view === "agents" &&
-          search &&
-          shownSections.length === 0 &&
-          shownVisits.length === 0 &&
-          archived.length === 0 && (
-            <p className="px-2 py-6 text-center text-muted-foreground text-sm">
-              {t("noChatsMatch")}
-            </p>
-          )}
-        {view === "agents" ? (
-          shownSections.map((section) => (
-            <AgentSectionList
-              key={section.agent.id}
-              section={section}
-              activeId={activeId}
-              awaitingApproval={awaitingApproval}
-              onNavigate={onNavigate}
-            />
-          ))
-        ) : flat.length === 0 ? (
+        {open.length === 0 ? (
           (archived.length === 0 || !search) && (
             <p className="px-2 py-6 text-center text-muted-foreground text-sm">
               {t(
@@ -590,18 +417,12 @@ function ChatsPanel({
             </p>
           )
         ) : (
-          <ul className="space-y-px">
-            {flat.map((session) => (
-              <SessionRow
-                key={session.id}
-                session={session}
-                active={session.id === activeId}
-                awaitingApproval={awaitingApproval.has(session.id)}
-                onNavigate={onNavigate}
-                showAgent={view === "inbox"}
-              />
-            ))}
-          </ul>
+          <DatedChats
+            list={open}
+            activeId={activeId}
+            awaitingApproval={awaitingApproval}
+            onNavigate={onNavigate}
+          />
         )}
         {archived.length > 0 && (
           <ArchivedChats
@@ -756,66 +577,41 @@ function RailDialogLink({
   );
 }
 
-/** An agent's chats under its name, which shows or hides them. */
-function AgentSectionList({
-  section: { agent, list, archived },
+/** Chats under dividers for today, yesterday, last week and the last 14 days. */
+function DatedChats({
+  list,
   activeId,
   awaitingApproval,
   onNavigate,
 }: {
-  section: AgentSection;
+  list: Session[];
   activeId?: string;
   awaitingApproval: ReadonlySet<string>;
   onNavigate?: () => void;
 }) {
   const { t } = useI18n();
-  // Until toggled, an agent with no open chats is folded away.
-  const [toggled, setOpen] = useState<boolean>();
-  const open = toggled ?? list.length > 0;
-  return (
-    <section className="mb-3" aria-label={agent.name}>
-      <button
-        type="button"
-        className="flex min-w-0 max-w-full items-center gap-1 rounded-md px-2 py-1.5 font-medium text-muted-foreground text-xs hover:text-foreground"
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-        aria-label={t(open ? "hideChatsOf" : "showChatsOf", {
-          name: agent.name,
-        })}
-      >
-        <AgentIcon agent={agent} className="size-4" />
-        <span className="truncate">{agent.name}</span>
-        <ChevronDown
-          className={cn(
-            "size-3.5 shrink-0 transition-transform",
-            !open && "-rotate-90",
-          )}
-        />
-      </button>
-      {open &&
-        (list.length === 0 ? (
-          <p className="px-2 py-1 text-muted-foreground text-xs">
-            {t(archived ? "noRecentChats" : "noChatsYet")}
-          </p>
-        ) : (
-          <ul className="space-y-px">
-            {list.map((session) => (
-              <SessionRow
-                key={session.id}
-                session={session}
-                active={session.id === activeId}
-                awaitingApproval={awaitingApproval.has(session.id)}
-                onNavigate={onNavigate}
-              />
-            ))}
-          </ul>
+  return groupByAge(list).map(({ age, sessions }) => (
+    <div key={age}>
+      <div className="px-2 pt-2 pb-1 text-muted-foreground/70 text-xs">
+        {t(age)}
+      </div>
+      <ul className="space-y-px">
+        {sessions.map((session) => (
+          <SessionRow
+            key={session.id}
+            session={session}
+            active={session.id === activeId}
+            awaitingApproval={awaitingApproval.has(session.id)}
+            onNavigate={onNavigate}
+          />
         ))}
-    </section>
-  );
+      </ul>
+    </div>
+  ));
 }
 
 /**
- * Chats with no activity for two days, folded away below the others. It
+ * Chats with no activity for two weeks, folded away below the others. It
  * opens while searching, and when the open chat is one of them.
  */
 function ArchivedChats({
@@ -866,65 +662,11 @@ function ArchivedChats({
               active={session.id === activeId}
               awaitingApproval={awaitingApproval.has(session.id)}
               onNavigate={onNavigate}
-              showAgent
             />
           ))}
         </ul>
       )}
     </section>
-  );
-}
-
-/** Someone else's space, shared with you: opens your conversation with it, started on first use. */
-function VisitRow({
-  visit,
-  active,
-  onNavigate,
-}: {
-  visit: Visit;
-  active: boolean;
-  onNavigate?: () => void;
-}) {
-  const { t } = useI18n();
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
-  const open = useMutation({
-    mutationFn: async () =>
-      visit.session ?? (await pim.startVisit(visit.username)).session,
-    onSuccess: async (session) => {
-      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      queryClient.invalidateQueries({ queryKey: ["visits"] });
-      navigate({ to: "/chat/$sessionId", params: { sessionId: session } });
-      onNavigate?.();
-    },
-    onError: (error) => toast.error(error.message),
-  });
-  // Taken back: the conversation stays readable; there's nothing to start.
-  const disabled = open.isPending || (!visit.available && !visit.session);
-  return (
-    <li>
-      <button
-        type="button"
-        onClick={() => open.mutate()}
-        disabled={disabled}
-        className={cn(
-          "flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-sm transition-colors hover:bg-sidebar-accent disabled:opacity-60",
-          active && "bg-sidebar-accent",
-        )}
-      >
-        <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 font-medium text-[11px] text-primary uppercase">
-          {visit.username.slice(0, 1)}
-        </span>
-        <span className="min-w-0 flex-1 truncate">
-          {t("visitPim", { username: visit.username })}
-        </span>
-        {!visit.available && (
-          <span className="shrink-0 text-muted-foreground text-xs">
-            {t("visitUnavailable")}
-          </span>
-        )}
-      </button>
-    </li>
   );
 }
 
@@ -963,15 +705,18 @@ function SessionRow({
   active,
   awaitingApproval,
   onNavigate,
-  showAgent = false,
 }: {
   session: Session;
   active: boolean;
   awaitingApproval: boolean;
   onNavigate?: () => void;
-  showAgent?: boolean;
 }) {
   const { t } = useI18n();
+  const { data: agents } = useQuery(agentsQuery());
+  // Chats from before agents belong to the majordomo.
+  const agent = agents?.find((candidate) =>
+    session.agent ? candidate.id === session.agent.id : candidate.majordomo,
+  );
   const queryClient = useQueryClient();
   const title = sessionTitle(session, t);
   const [renaming, setRenaming] = useState(false);
@@ -1067,6 +812,16 @@ function SessionRow({
         onMouseEnter={scrollTitleIntoView}
         onFocus={scrollTitleIntoView}
       >
+        {session.visit ? (
+          <span
+            className="flex size-4 shrink-0 items-center justify-center rounded-full bg-primary/10 font-medium text-[10px] text-primary uppercase"
+            title={`@${session.visit.username}`}
+          >
+            {session.visit.username.slice(0, 1)}
+          </span>
+        ) : (
+          agent && <AgentIcon agent={agent} className="size-4" />
+        )}
         <span className="min-w-0 flex-1">
           {/* A long title fills the row and is cut off with an ellipsis. While the row shows its options button, it slides to reveal its end. */}
           <span
@@ -1082,19 +837,12 @@ function SessionRow({
               {title}
             </span>
           </span>
-          {showAgent && (
-            <span className="block truncate text-muted-foreground text-xs">
-              {session.visit
-                ? `@${session.visit.username}`
-                : session.agent?.name}
-            </span>
-          )}
         </span>
-        {session.unread && (
+        {/* Working takes priority: one dot shows at a time. */}
+        {session.unread && !session.busy && (
           <span
             className={cn(
-              "order-first size-1.5 shrink-0 rounded-full bg-link",
-              showAgent && "motion-safe:animate-pulse",
+              "order-first size-1.5 shrink-0 rounded-full bg-link motion-safe:animate-pulse",
             )}
             role="img"
             aria-label={t("unreadResponse")}

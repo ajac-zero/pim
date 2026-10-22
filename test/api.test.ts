@@ -112,7 +112,7 @@ describe("conversation", () => {
 		}
 	});
 
-	it("archives chats after two days without activity, except those with unread replies, until they are active again", async () => {
+	it("archives chats after two weeks without activity, except those with unread replies, until they are active again", async () => {
 		const quiet = (await post("/sessions", { title: "Quiet" })).body.id;
 		const unread = (await post("/sessions", { title: "Unread" })).body.id;
 		const archived = async () =>
@@ -125,7 +125,7 @@ describe("conversation", () => {
 		await say("Remind me", unread);
 		vi.useFakeTimers({ toFake: ["Date"] });
 		try {
-			vi.setSystemTime(Date.now() + 47 * 60 * 60 * 1000);
+			vi.setSystemTime(Date.now() + (14 * 24 - 1) * 60 * 60 * 1000);
 			expect(await archived()).toMatchObject({ [quiet]: false, [unread]: false });
 			vi.setSystemTime(Date.now() + 2 * 60 * 60 * 1000);
 			expect(await archived()).toMatchObject({ [quiet]: true, [unread]: false });

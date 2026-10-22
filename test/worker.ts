@@ -10,7 +10,8 @@ import { type ImageModel, workersAiImageModel } from "../src/extensions/image-ge
 import { type Api, type Model, Type } from "@earendil-works/pi-ai";
 import { section } from "@earendil-works/pi-durable";
 import { defineAppTool, defineGatedAction, definePimExtension, oauth2, type PimConfig } from "../src/extensions/define";
-import { GOOGLE_SCOPES, googleApp, googleJson } from "../src/extensions/google";
+import { GOOGLE_SCOPES, googleApp, googleExtension, googleJson } from "../src/extensions/google";
+import { googleDrive } from "../src/extensions/google-drive";
 
 export { default, Auth, Directory, Gallery } from "../src/index";
 
@@ -234,7 +235,8 @@ export class Pim extends RealPim {
 	/** The deployment's extensions, and the tests' own. */
 	protected override pimConfig(): PimConfig {
 		const config = super.pimConfig();
-		return { ...config, extensions: [...config.extensions, ledger, google] };
+		// Google Drive, until the deployment's configuration offers it.
+		return { ...config, extensions: [...config.extensions, ledger, google, googleExtension([googleDrive])] };
 	}
 
 	/** Email works in tests, into `outbox`. */

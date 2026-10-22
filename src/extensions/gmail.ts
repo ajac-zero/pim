@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { type AppToolContext, defineAppTool, type NativeAppDefinition } from "./define";
-import { fenced, type GmailContent, type GmailSummary, headersOnlyGmailContent } from "./gmail-adapter";
+import { fenced, type GmailContent, type GmailSummary, mimeGmailContent } from "./gmail-adapter";
 import { GOOGLE_SCOPES, GoogleApiError, googleApp, googleJson, GoogleTooLarge } from "./google";
 
 /**
@@ -9,9 +9,10 @@ import { GOOGLE_SCOPES, GoogleApiError, googleApp, googleJson, GoogleTooLarge } 
  * moves or deletes mail, or downloads an attachment.
  *
  * These handlers talk to Gmail, within bounds on what they ask for and how
- * much of Gmail's answer they read; a `GmailContent` adapter
- * (./gmail-adapter.ts) turns the answers into what the model reads. That
- * adapter is the seam where the MIME normalizer plugs in.
+ * much of Gmail's answer they read (which bounds memory and parsing); a
+ * `GmailContent` adapter (./gmail-adapter.ts) turns the answers into what
+ * the model reads, within the MIME normalizer's own bounds on the work and
+ * the text (./gmail-content.ts).
  *
  * Its secrets: an OAuth client in a Google Cloud project of its own
  * (`GOOGLE_GMAIL_CLIENT_ID`, `GOOGLE_GMAIL_CLIENT_SECRET`).
@@ -139,5 +140,5 @@ export function gmailApp(content: GmailContent): NativeAppDefinition {
 	});
 }
 
-/** Gmail as this Pim offers it. SEAM: pass the MIME normalizer's adapter here once ./gmail-content.ts lands (see ./gmail-adapter.ts). */
-export const gmail = gmailApp(headersOnlyGmailContent);
+/** Gmail as this Pim offers it, reading mail through the MIME normalizer. */
+export const gmail = gmailApp(mimeGmailContent);

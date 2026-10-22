@@ -8,7 +8,7 @@ This repository is the agent, its API, and its web app ([`web/`](../web)): chat,
 
 ## Chats
 
-A chat with no activity for two weeks moves to Archived, folded at the bottom of the chat list, so the list holds what's current. Until then, chats sit under dividers for today, yesterday, last week and the last 14 days. It is not deleted: search finds it, it opens as before, and sending it a message brings it back. A chat with an unread reply, or one still working, stays in the list.
+A chat with no activity for two weeks moves to Archived, folded at the bottom of the chat list, so the list holds what's current. Until then, chats sit under dividers for today, yesterday, last week and the last 14 days. It is not deleted: search finds it, it opens as before, and sending it a message brings it back. A chat with an unread reply, or one still working, stays in the list. Archive in a chat's options menu moves it there at once, whatever its age; sending it a message brings it back.
 
 The copy button in a chat's header copies the conversation as Markdown, with separate headings for the user, the named agent and system notices. It becomes available when the chat finishes loading and the agent finishes replying. Message formatting stays intact; attached images are marked with a placeholder, and private reasoning and tool activity are left out.
 
@@ -198,7 +198,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | --- | --- | --- | --- |
 | GET | `/health` | | `{ name: "pim", ok: true }`; no token needed; also at the root |
 | GET | `/` | | Model, time zone, root session, and tools (with `requiresApproval`) |
-| GET | `/sessions` | | `{ sessions: [{ id, title, busy, createdAt, updatedAt, responseAt, unread, archived }] }`, most recently active first; `title` is a few words the utility model picks from the user's first message, and the start of that message until it answers or if it fails. `responseAt` identifies the latest delivered reply (null before reply tracking began); `unread` says it has not been acknowledged. `archived` says the chat has had no activity for two weeks and has nothing unread or running: the app lists it apart, under Archived, and its next message or rename brings it back. Nothing is deleted |
+| GET | `/sessions` | | `{ sessions: [{ id, title, busy, createdAt, updatedAt, responseAt, unread, archived }] }`, most recently active first; `title` is a few words the utility model picks from the user's first message, and the start of that message until it answers or if it fails. `responseAt` identifies the latest delivered reply (null before reply tracking began); `unread` says it has not been acknowledged. `archived` says the chat has had no activity for two weeks and has nothing unread or running: the app lists it apart, under Archived, and its next message or rename brings it back. Nothing is deleted. `POST /sessions/:id/archive` archives a chat by hand, until its next activity |
 | POST | `/sessions` | `{ title? }` | A new session |
 | POST | `/sessions/:s/read` | `{ responseAt }` | Acknowledges replies through the supplied `responseAt`; a newer reply stays unread. Returns the session's name, activity and read state |
 | PUT | `/sessions/:s` | `{ title }` | Renames it |

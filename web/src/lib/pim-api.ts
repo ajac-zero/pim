@@ -14,7 +14,7 @@ export type Session = {
   updatedAt: number | null;
   responseAt: number | null;
   unread: boolean;
-  /** Two weeks without activity, and nothing unread or running: listed apart until it is active again. */
+  /** Archived by hand, or two weeks without activity with nothing unread or running: listed apart until it is active again. */
   archived?: boolean;
   /** A conversation with someone else's space, shared with you; null for your own chats. */
   visit?: { username: string; available: boolean } | null;
@@ -1292,6 +1292,8 @@ export const pim = {
       method: "PUT",
       body: JSON.stringify({ title }),
     }),
+  archiveSession: (id: string) =>
+    call<Session>(`/sessions/${id}/archive`, { method: "POST" }),
   deleteSession: (id: string) =>
     call<{ deleted: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
   chatLink: (id: string) =>

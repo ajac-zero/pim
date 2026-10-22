@@ -4,6 +4,7 @@ import { type AgentStore, agentInput } from "../agents";
 import { sha256 } from "../artifacts";
 import type { Files } from "../files";
 import { HttpError } from "../http";
+import { readUrl, skillFromFolder, skillFromGitHub } from "../skill-sources";
 import { MAX_SKILL_DESCRIPTION, MAX_SKILL_FILE_CHARS, MAX_SKILL_FILES, MAX_SKILL_INSTRUCTIONS, type SkillFileContent, type SkillStore } from "../skills";
 import type { Role } from "../tasks";
 import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";
@@ -20,9 +21,14 @@ import { type PimServices, text } from "./services";
  * read when the agent asks, and the request names its SHA-256; when it is
  * approved, the file is read again and saved only if it is still the same,
  * so what is saved is what the person approved.
+ *
+ * `install_skill` installs a skill someone published (../skill-sources.ts)
+ * through the same request: its instructions as written there, and its
+ * files as copies from the person's files or from GitHub.
  */
 
 export const WRITE_SKILL = "write_skill";
+export const INSTALL_SKILL = "install_skill";
 
 const Write = Type.Object({
 	name: Type.String({ description: "Lowercase letters, digits and hyphens, such as weekly-report." }),
@@ -60,23 +66,27 @@ const FileArg = Type.Object({
 	path: Type.String(),
 	content: Type.Optional(Type.String()),
 	from_file: Type.Optional(Type.String()),
+	from_url: Type.Optional(Type.String()),
 	sha256: Type.Optional(Type.String()),
 	size: Type.Optional(Type.Integer()),
 });
 type FileArg = Static<typeof FileArg>;
 
-/** Reads a write's copies of the person's files: each file's content, and the request's account of it. */
+/** Reads a write's copies, of the person's files or of files on GitHub: each file's content, and the request's account of it. */
 async function readCopies(files: Pick<Files, "bytes">, given: readonly FileArg[]): Promise<{ contents: SkillFileContent[]; args: FileArg[] }> {
 	const read = await Promise.all(
 		given.map(async (file) => {
-			if ((file.content === undefined) === (file.from_file === undefined)) throw new HttpError(400, `${file.path}: give either content or from_file`);
-			if (file.from_file === undefined) return { content: { path: file.path, content: file.content! }, arg: { path: file.path, content: file.content } };
-			const bytes = await files.bytes(file.from_file);
+			if ([file.content, file.from_file, file.from_url].filter((source) => source !== undefined).length !== 1) {
+				throw new HttpError(400, `${file.path}: give either content or from_file`);
+			}
+			if (file.content !== undefined) return { content: { path: file.path, content: file.content }, arg: { path: file.path, content: file.content } };
+			const from = file.from_file === undefined ? { from_url: file.from_url! } : { from_file: file.from_file };
+			const bytes = from.from_file === undefined ? await readUrl(from.from_url!) : await files.bytes(from.from_file);
 			const hash = await sha256(bytes);
 			if (file.sha256 !== undefined && file.sha256 !== hash) {
-				throw new HttpError(409, `${file.from_file} changed after the person approved copying it, so nothing was copied: ask again`);
+				throw new HttpError(409, `${from.from_file ?? from.from_url} changed after the person approved copying it, so nothing was copied: ask again`);
 			}
-			return { content: { path: file.path, content: bytes }, arg: { path: file.path, from_file: file.from_file, sha256: hash, size: bytes.byteLength } };
+			return { content: { path: file.path, content: bytes }, arg: { path: file.path, ...from, sha256: hash, size: bytes.byteLength } };
 		}),
 	);
 	return { contents: read.map((file) => file.content), args: read.map((file) => file.arg) };
@@ -94,15 +104,15 @@ export function writeSkillAction(skills: SkillStore, agents: Pick<AgentStore, "g
 		description: "An agent saves a skill, or rewrites one: instructions for work it does again, which the person's agents follow.",
 		// Filed by the tool, which names the chat's agent.
 		internal: true,
-		parameters: Type.Object({ agent: Type.String(), ...Write.properties, files: Type.Optional(Type.Array(FileArg)) }),
+		parameters: Type.Object({ agent: Type.String(), ...Write.properties, files: Type.Optional(Type.Array(FileArg)), source: Type.Optional(Type.String()) }),
 		summarize: ({ name }) => `Save the skill ${name}`,
-		async run({ agent: id, name, description, instructions, files: given, base_version }) {
+		async run({ agent: id, name, description, instructions, files: given, base_version, source }) {
 			try {
 				const agent = agents.get(id);
 				// A copy is saved only as the person approved it: one without the hash they saw is refused too.
-				if (given?.some((file) => file.from_file !== undefined && file.sha256 === undefined)) throw new HttpError(400, "A copied file needs the hash the person approved");
+				if (given?.some((file) => file.content === undefined && file.sha256 === undefined)) throw new HttpError(400, "A copied file needs the hash the person approved");
 				const files = given && (await readCopies(copies, given)).contents;
-				const skill = await skills.write({ name, description, instructions, files, baseVersion: base_version, author: agent?.name });
+				const skill = await skills.write({ name, description, instructions, files, baseVersion: base_version, author: agent?.name, source });
 				if (agent && !agent.skills.includes(name)) agents.update(id, agentInput({ skills: [...agent.skills, name] }, agent));
 				return `Saved the skill ${name}, version ${skill.version}${agent ? `, one of ${agent.name}'s skills` : ""}. It applies from the next step.`;
 			} catch (error) {
@@ -117,7 +127,7 @@ const SCRIPTS =
 	"A skill can carry scripts and other files, such as templates: an agent that needs one saves it to the person's files with read_skill_file's save_to and runs it on their computer with shell.";
 
 /** `canRunCode`: the person has a computer, where `shell` runs the scripts skills carry. */
-export function skillsExtension(services: PimServices, roleOf: (session: string) => Role, skills: SkillStore, files: Pick<Files, "bytes">, canRunCode: boolean) {
+export function skillsExtension(services: PimServices, roleOf: (session: string) => Role, skills: SkillStore, files: Pick<Files, "bytes" | "list">, canRunCode: boolean) {
 	const permission = () => ownToolPermission(services.store, WRITE_SKILL).permission;
 
 	const writeSkill = defineTool({
@@ -144,6 +154,37 @@ export function skillsExtension(services: PimServices, roleOf: (session: string)
 		},
 	});
 
+	const installSkill = defineTool({
+		name: INSTALL_SKILL,
+		description: `Install a skill someone published, as one of your skills, when the person asks for it: a folder in the Agent Skills format, with a SKILL.md, on GitHub or in the person's files. It is saved as its source has it, its instructions and files exactly, once the person approves. To update one of your skills from its source, give its version as base_version.${permission() === "ask" ? ` ${approvalNote(services)}` : ""}`,
+		parameters: Type.Object({
+			source: Type.String({
+				description:
+					"The skill's folder on GitHub, such as https://github.com/owner/repo/tree/main/skills/name (or a repository with SKILL.md at its root), or in the person's files, such as /workspace/skills/name.",
+			}),
+			base_version: Type.Optional(Type.Integer({ minimum: 1, description: "To update one of your skills: its version, as read_skill gave it." })),
+		}),
+		replay: "safe",
+		async execute({ source, base_version }, api, context) {
+			const { agent } = roleOf(String(api.conversationId));
+			let summary: string;
+			let args: Record<string, unknown>;
+			try {
+				const found = source.startsWith("/") ? await skillFromFolder(files, source) : await skillFromGitHub(source);
+				const copies = await readCopies(files, found.files);
+				const { name, description, instructions } = found;
+				await skills.check({ name, description, instructions, files: copies.contents, baseVersion: base_version });
+				if (!agent.skills.includes(name)) agentInput({ skills: [...agent.skills, name] }, agent);
+				summary = `${agent.name} ${base_version === undefined ? "installs" : "updates"} the skill ${name} from ${found.source}`;
+				args = { agent: agent.id, name, description, instructions, files: copies.args, source: found.source, ...(base_version === undefined ? {} : { base_version }) };
+			} catch (error) {
+				return text(failure(error), true);
+			}
+			summary = await api.memo(INSTALL_SKILL, summary, context);
+			return fileApproval(services, api, context, { action: WRITE_SKILL, tool: WRITE_SKILL, args, summary });
+		},
+	});
+
 	return defineExtension({
 		name: "pim.skills",
 		sections: [
@@ -166,6 +207,6 @@ export function skillsExtension(services: PimServices, roleOf: (session: string)
 				].join("\n");
 			}),
 		],
-		tools: permission() === "off" ? [] : [writeSkill],
+		tools: permission() === "off" ? [] : [writeSkill, installSkill],
 	});
 }

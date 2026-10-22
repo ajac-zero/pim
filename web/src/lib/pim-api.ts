@@ -625,6 +625,8 @@ export type SkillVersionInfo = {
   author: string | null;
   /** The version a restore copied. */
   restoredFrom: number | null;
+  /** Where it was installed from: a GitHub folder at a commit, or a folder in your files; null for one an agent wrote. */
+  source: string | null;
   createdAt: number;
 };
 

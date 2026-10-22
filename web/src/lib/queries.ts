@@ -32,6 +32,13 @@ export const agentPermissionsQuery = (agent: string) =>
     queryFn: () => pim.agentPermissions(agent),
   });
 
+/** Whether agents may write and install skills for an agent. */
+export const agentSkillsPermissionQuery = (agent: string) =>
+  queryOptions({
+    queryKey: ["permissions", "agent", agent, "skills"],
+    queryFn: () => pim.agentSkillsPermission(agent),
+  });
+
 export const circlesQuery = () =>
   queryOptions({ queryKey: ["circles"], queryFn: pim.circles });
 

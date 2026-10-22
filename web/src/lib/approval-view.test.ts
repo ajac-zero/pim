@@ -98,6 +98,8 @@ describe("approvalView", () => {
       id: "a1",
       action: "write_skill",
       args: {
+        by: "p_ada",
+        agent: "p_coach",
         name: "weekly-plan",
         files: [
           { path: "scripts/paces.js", content: "export const easy = 1;" },
@@ -117,8 +119,9 @@ describe("approvalView", () => {
           },
         ],
       },
-      summary: "Coach saves a new skill: weekly-plan",
+      summary: "Ada (Majordomo) saves a new skill for Coach: weekly-plan",
     });
+    // The summary names both agents; their ids stay out of the card.
     expect(view.fields).toEqual([
       {
         name: "scripts/paces.js",
@@ -135,12 +138,12 @@ describe("approvalView", () => {
       {
         name: "templates/plan.docx",
         kind: "text",
-        text: "/workspace/plan.docx",
+        text: "/workspace/plan.docx (9000 bytes, SHA-256 ab12…)",
       },
       {
         name: "reference/fonts.md",
         kind: "text",
-        text: "https://raw.githubusercontent.com/acme/skills/abc/fonts.md",
+        text: "https://raw.githubusercontent.com/acme/skills/abc/fonts.md (40 bytes, SHA-256 cd34…)",
       },
     ]);
   });

@@ -72,7 +72,7 @@ import { SqlCredentialStore } from "./credentials";
 import { AppCatalog } from "./extensions/app-catalog";
 import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
 import { skillTools } from "./extensions/app-skills";
-import { INSTALL_SKILL, skillsExtension, WRITE_SKILL, writeSkillAction } from "./extensions/skills";
+import { INSTALL_SKILL, type SkillWriters, skillsExtension, skillsSwitch, WRITE_SKILL, writeSkillAction } from "./extensions/skills";
 import { SKILL_NAME, SkillStore } from "./skills";
 import { type SpriteLink, Sprites } from "./sprites";
 import {
@@ -615,6 +615,8 @@ export class Pim extends DurableAgent<Env> {
 			await this.deliverNotification(notification);
 		},
 	});
+	/** What decides who writes which skill, read as it is at each check (./extensions/skills.ts). */
+	readonly #skillWriters: SkillWriters = { agents: this.agents, store: this.store, skills: this.skills, roleOf: (session) => this.#roleOf(session) };
 	/** Pim's own actions; the extensions' come with their abilities. */
 	readonly #ownActions: readonly GatedAction[] = [
 		httpRequest as GatedAction,
@@ -628,7 +630,7 @@ export class Pim extends DurableAgent<Env> {
 		shellAction(this.computer),
 		browserClickAction(this.browser),
 		browserTypeAction(this.browser),
-		writeSkillAction(this.skills, this.agents, this.files),
+		writeSkillAction(this.skills, this.#skillWriters, this.files),
 	];
 
 	/**
@@ -2151,12 +2153,38 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
+	 * An agent's switch for skills: on, its chats write and install skills
+	 * (with approval, as `write_skill`'s permission has it), and the majordomo
+	 * may for it; off, no agent changes its skills. On by default.
+	 */
+	agentSkillsPermission(agent: Agent): ToolPermissionInfo {
+		return {
+			app: null,
+			appName: null,
+			tool: WRITE_SKILL,
+			name: WRITE_SKILL,
+			description: "Write and install skills for this agent, with your approval",
+			readOnly: false,
+			destructive: false,
+			choices: ["off", "on"],
+			...skillsSwitch(this.store, agent.id),
+		};
+	}
+
+	/**
 	 * Switches an app's tool on or off for one agent, or back to its default
-	 * (null). Switched on, it is held to the tool's definition now. The agent's
-	 * conversations see it from their next request.
+	 * (null); or, as Pim's own `write_skill` (`app` empty), its switch for
+	 * skills. Switched on, an app's tool is held to the tool's definition now.
+	 * The agent's conversations see it from their next request.
 	 */
 	setAgentToolPermission(agent: Agent, app: string, tool: string, permission: ToolPermission | null): ToolPermissionInfo {
 		if (permission === "ask") throw new HttpError(400, "An agent's app tools are either on or off");
+		if (app === "") {
+			if (tool !== WRITE_SKILL) throw new HttpError(404, `${agent.name} has no switch for ${tool}`);
+			if (permission === null) this.store.clearToolPermission(agentAudience(agent.id), "", WRITE_SKILL);
+			else this.store.setToolPermission(agentAudience(agent.id), "", WRITE_SKILL, permission, null);
+			return this.agentSkillsPermission(agent);
+		}
 		const found = this.agentToolPermissions(agent).find((info) => info.app === app && info.tool === tool);
 		if (!found) throw new HttpError(404, `${agent.name} has no tool ${tool} in the app ${app}`);
 		const info = this.apps.tools().find((candidate) => candidate.serverId === app && candidate.name === tool)!;
@@ -2678,11 +2706,13 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * The names of the tools an agent's conversations aren't offered: the app
-	 * tools switched off for it, and, for any agent but the majordomo, the
-	 * majordomo's own: naming and sharing memory scopes, and adding apps.
+	 * tools switched off for it, writing and installing skills when its switch
+	 * for skills is off, and, for any agent but the majordomo, the majordomo's
+	 * own: naming and sharing memory scopes, and adding apps.
 	 */
 	#switchedOff(agent: Agent): Set<string> {
 		const off = this.agentToolPermissions(agent).flatMap((info) => (info.permission === "off" ? [info.name] : []));
+		if (skillsSwitch(this.store, agent.id).permission === "off") off.push(WRITE_SKILL, INSTALL_SKILL);
 		return new Set(agent.majordomo ? off : [...off, ...MAJORDOMO_TOOLS]);
 	}
 
@@ -4881,9 +4911,12 @@ export class Pim extends DurableAgent<Env> {
 			"GET",
 			"/permissions",
 			(_params, _request, url) => {
-				// One of the owner's agents: the switches of its apps' tools.
+				// One of the owner's agents: the switches of its apps' tools, and its switch for skills.
 				const agent = url.searchParams.get("agent");
-				if (agent !== null) return { tools: this.agentToolPermissions(this.#agent(agent)) };
+				if (agent !== null) {
+					const found = this.#agent(agent);
+					return { tools: this.agentToolPermissions(found), skills: this.agentSkillsPermission(found) };
+				}
 				const circle = url.searchParams.get("circle");
 				if (circle !== null) this.#circle(circle);
 				return { tools: this.toolPermissions(circle ?? OWNER) };
@@ -5381,7 +5414,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/** The person's skills in their agents' chats: rebuilt when whether `write_skill` asks first changes. */
 	#skillsExtension(services: PimServices) {
-		return skillsExtension(services, (session) => this.#roleOf(session), this.skills, this.files, this.computer.paired());
+		return skillsExtension(services, this.#skillWriters, this.skills, this.files, this.computer.paired());
 	}
 
 	/** Rebuilds the extensions whose tools describe the approval policy, once pi's registry has been set up. */

@@ -1350,6 +1350,11 @@ export const pim = {
     call<{ tools: ToolPermissionInfo[] }>(
       `/permissions?agent=${encodeURIComponent(agent)}`,
     ).then((body) => body.tools),
+  /** An agent's switch for skills: on, it writes and installs skills with your approval, and your majordomo may for it. */
+  agentSkillsPermission: (agent: string) =>
+    call<{ skills: ToolPermissionInfo }>(
+      `/permissions?agent=${encodeURIComponent(agent)}`,
+    ).then((body) => body.skills),
   setAgentPermission: (
     agent: string,
     app: string,

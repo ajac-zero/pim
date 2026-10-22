@@ -428,7 +428,11 @@ function AppLayout() {
         />
       </div>
       <AppDialogs />
-      <CommandPalette />
+      <CommandPalette
+        onToggleSidebar={() =>
+          setCollapsedOn(sidebarCollapsed ? null : (panel ?? "chats"))
+        }
+      />
     </div>
   );
 }

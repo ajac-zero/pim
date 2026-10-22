@@ -10,6 +10,7 @@ import {
   useAwaitingApproval,
   useNewChat,
 } from "~/components/app-sidebar";
+import { ArtifactIcon } from "~/components/artifact";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
   Bell,
@@ -24,6 +25,7 @@ import {
   Monitor,
   Moon,
   Palette,
+  PanelLeft,
   Plus,
   Search,
   Settings,
@@ -31,7 +33,12 @@ import {
   Users,
 } from "~/components/icons";
 import { useTheme } from "~/components/theme";
-import { accountQuery, agentsQuery, sessionsQuery } from "~/lib/queries";
+import {
+  accountQuery,
+  agentsQuery,
+  artifactsQuery,
+  sessionsQuery,
+} from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 const PANELS: {
@@ -47,6 +54,18 @@ const PANELS: {
   { panel: "schedules", label: "schedules", icon: <CalendarClock /> },
 ];
 
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+
+/** A shortcut's keys, with the modifier a Mac or another computer uses. */
+function Shortcut({ keys }: { keys: string }) {
+  return (
+    <span className="ml-auto text-[13px] text-muted-foreground">
+      {MAC ? "⌘" : "Ctrl+"}
+      {keys}
+    </span>
+  );
+}
+
 const ITEM =
   "flex h-10 cursor-default items-center gap-3 rounded-xl px-3 text-[15px] outline-none select-none data-[selected=true]:bg-muted [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground";
 const GROUP =
@@ -56,28 +75,39 @@ const GROUP =
  * A search over everything you can open or do: chats, agents, the sidebar's
  * panels, dialogs and New chat. ⌘K or Ctrl+K opens it from anywhere.
  */
-export function CommandPalette() {
+export function CommandPalette({
+  onToggleSidebar,
+}: {
+  onToggleSidebar: () => void;
+}) {
   const { t } = useI18n();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const { data: sessions } = useQuery(sessionsQuery());
   const { data: agents } = useQuery(agentsQuery());
   const { data: account } = useQuery(accountQuery());
+  const { data } = useQuery(artifactsQuery());
+  const artifacts = data?.artifacts;
   const newChat = useNewChat();
   const awaitingApproval = useAwaitingApproval();
   const { preference, setPreference, themes, colorTheme, setColorTheme } =
     useTheme();
 
+  // ⌘K opens the palette, ⌘⇧O starts a chat and ⌘B hides or shows the sidebar
+  // (Ctrl instead of ⌘ away from a Mac).
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key.toLowerCase() === "k" && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault();
-        setOpen((current) => !current);
-      }
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (key === "k" && !event.shiftKey) setOpen((current) => !current);
+      else if (key === "o" && event.shiftKey) newChat();
+      else if (key === "b" && !event.shiftKey) onToggleSidebar();
+      else return;
+      event.preventDefault();
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [newChat, onToggleSidebar]);
 
   const run = (action: () => void) => () => {
     setOpen(false);
@@ -111,6 +141,11 @@ export function CommandPalette() {
               <Command.Group heading={t("commandActions")} className={GROUP}>
                 <Command.Item className={ITEM} onSelect={run(newChat)}>
                   <Plus /> {t("newChat")}
+                  <Shortcut keys="⇧O" />
+                </Command.Item>
+                <Command.Item className={ITEM} onSelect={run(onToggleSidebar)}>
+                  <PanelLeft /> {t("toggleSidebar")}
+                  <Shortcut keys="B" />
                 </Command.Item>
                 <Command.Item
                   className={ITEM}
@@ -192,6 +227,26 @@ export function CommandPalette() {
                   </Command.Item>
                 ))}
               </Command.Group>
+              {!!artifacts?.length && (
+                <Command.Group heading={t("artifacts")} className={GROUP}>
+                  {artifacts.map((artifact) => (
+                    <Command.Item
+                      key={artifact.id}
+                      value={`artifact ${artifact.title} ${artifact.id}`}
+                      className={ITEM}
+                      onSelect={run(() =>
+                        navigate({
+                          to: "/artifacts/$artifactId",
+                          params: { artifactId: artifact.id },
+                        }),
+                      )}
+                    >
+                      <ArtifactIcon kind={artifact.kind} />
+                      <span className="truncate">{artifact.title}</span>
+                    </Command.Item>
+                  ))}
+                </Command.Group>
+              )}
               {!!agents?.length && (
                 <Command.Group heading={t("agents")} className={GROUP}>
                   {agents.map((agent) => (

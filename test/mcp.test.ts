@@ -585,6 +585,38 @@ describe("connected apps (MCP)", () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
 	});
 
+	it("lets the majordomo change another agent's apps, and no other agent", async () => {
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "auto" }) });
+		const app = "test.ledger/firecrawl";
+		const margaret = (await post("/agents", { name: "Margaret", apps: [app] })).body;
+		const ada = (await post("/agents", { name: "Ada", apps: [app] })).body;
+
+		faux.setResponses([toolUse(MANAGE_APPS, { agent: margaret.id, remove: [app] }), toolUse("send_to_user", { message: "Done." })]);
+		const turn = say("Take Firecrawl away from Margaret");
+		const approval = await pendingApproval();
+		expect(approval.summary).toBe("Margaret: remove Firecrawl");
+		expect((await api(`/agents/${margaret.id}`)).body.apps).toEqual([app]);
+		await post(`/approvals/${approval.id}/approve`);
+		expect(await turn).toMatchObject({ status: "done", replies: ["Done."] });
+		expect((await api(`/agents/${margaret.id}`)).body.apps).toEqual([]);
+		expect((await api(`/agents/${ada.id}`)).body.apps).toEqual([app]);
+
+		// Another agent can't reach past itself.
+		let refusal = "";
+		faux.setResponses([
+			toolUse(MANAGE_APPS, { agent: ada.id, remove: [app] }),
+			(context) => {
+				refusal = toolResults(context.messages);
+				return toolUse("send_to_user", { message: "Refused." });
+			},
+		]);
+		const session = (await post("/sessions", { agent: margaret.id })).body.id;
+		await say("Remove Firecrawl from Ada", session);
+		expect(refusal).toContain("Only the person's majordomo changes their other agents.");
+		expect((await api(`/agents/${ada.id}`)).body.apps).toEqual([app]);
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
+	});
+
 	it("can disable app management without disabling self-edits, and reports connection failures honestly", async () => {
 		const app = "test.ledger/down";
 		const agent = (await post("/agents", { name: "App manager" })).body;

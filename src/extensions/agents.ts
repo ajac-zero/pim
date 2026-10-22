@@ -413,12 +413,18 @@ export function agentExtension(
 
 	const manageApps = defineTool({
 		name: MANAGE_APPS,
-		description: `Change the apps this agent works with when the person asks: add apps this Pim offers, by their ids from find_app, or remove them. Approval connects additions automatically; continue the original task once the result arrives. Removing an app affects only this agent, not the person's connection, which their other agents share. ${approvalNote(services, true)}`,
-		parameters: AppChanges,
+		description: `Change the apps this agent works with when the person asks: add apps this Pim offers, by their ids from find_app, or remove them. Approval connects additions automatically; continue the original task once the result arrives. Removing an app affects only this agent, not the person's connection, which their other agents share. Only the person's majordomo can give \`agent\`, to change another of their agents. ${approvalNote(services, true)}`,
+		parameters: Type.Object({
+			agent: Type.Optional(Type.String({ description: "The id of another of the person's agents to change instead, from your_agents." })),
+			...AppChanges.properties,
+		}),
 		replay: "safe",
-		async execute(changes, api, context) {
+		async execute({ agent: id, ...changes }, api, context) {
 			if (ownToolPermission(services.store, MANAGE_APPS).permission === "off") return text("The user turned off app management. Do not try it another way.", true);
-			const { agent } = roleOf(String(api.conversationId));
+			const { agent: self } = roleOf(String(api.conversationId));
+			const agent = id === undefined ? self : agents.list().find((other) => other.id === id);
+			if (!agent) return text(`The person has no agent with the id ${id}. Use an id from your_agents.`, true);
+			if (agent.id !== self.id && !self.majordomo) return text("Only the person's majordomo changes their other agents.", true);
 			let summary: string;
 			try {
 				const apps = agents.apps();

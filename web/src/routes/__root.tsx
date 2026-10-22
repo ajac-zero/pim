@@ -26,6 +26,7 @@ import { AppsDialog } from "~/components/apps-dialog";
 import { ChatLinkMenu } from "~/components/chat/chat-link";
 import { CopyConversation } from "~/components/chat/copy-conversation";
 import { SummaryToggle } from "~/components/chat/summary";
+import { CommandPalette } from "~/components/command-palette";
 import { DiscoverDialog } from "~/components/discover-dialog";
 import { I18nProvider, useI18n } from "~/components/i18n";
 import { MeetMajordomo } from "~/components/majordomo-setup";
@@ -427,6 +428,7 @@ function AppLayout() {
         />
       </div>
       <AppDialogs />
+      <CommandPalette />
     </div>
   );
 }

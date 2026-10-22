@@ -1,5 +1,6 @@
 import type { JsonValue, Message } from "@earendil-works/pi-ai";
-import { describe, expect, it, vi } from "vitest";
+import * as fs from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { AgentStore } from "../src/agents";
@@ -647,149 +648,6 @@ Read reference/fonts.md first.
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
 	});
 
-	it("writes skills only for the agent asking, or by the majordomo for another, as their switches and the skill's other agents allow when asked and when approved", async () => {
-		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
-		const [majordomo] = (await api("/agents")).body.agents;
-		const by = majordomo.role.toLowerCase() === majordomo.name.toLowerCase() ? majordomo.name : `${majordomo.name} (${majordomo.role})`;
-		const coach = (await post("/agents", { name: "Strider", instructions: "Coach my running." })).body;
-		const chef = (await post("/agents", { name: "Cook", instructions: "Plan meals." })).body;
-		const coachChat: string = (await post("/sessions", { agent: coach.id })).body.id;
-		const chefChat: string = (await post("/sessions", { agent: chef.id })).body.id;
-		let told = "";
-		let tools: string[] = [];
-		const record = (context: { messages: Message[] }) => {
-			told = JSON.stringify(context.messages.findLast((m) => m.role === "toolResult")?.content);
-			tools = context.messages.flatMap((message) => (message.role === "system" ? (message.toolsAdded ?? []).map((tool) => tool.name) : []));
-			for (const message of context.messages) if (message.role === "system") for (const tool of message.toolsRemoved ?? []) tools = tools.filter((name) => name !== tool.name);
-			return toolUse("send_to_user", { message: "ok" });
-		};
-		const ask = async (args: Record<string, JsonValue>, session: string, tool = WRITE_SKILL) => {
-			faux.setResponses([toolUse(tool, args), record]);
-			await say("Go on", session);
-			return told;
-		};
-		const offeredIn = async (session: string) => {
-			faux.setResponses([record]);
-			await say("Hi", session);
-			return tools;
-		};
-		/** Asks, and once the request is filed, does `meanwhile` before approving it. */
-		const approved = async (args: Record<string, JsonValue>, session: string, meanwhile = async () => {}) => {
-			faux.setResponses([toolUse(WRITE_SKILL, args), record]);
-			const asking = say("Go on", session);
-			const request = await pendingApproval();
-			await meanwhile();
-			await post(`/approvals/${request.id}/approve`);
-			await asking;
-			const decided = (await api("/approvals")).body.approvals.find((approval: { id: string }) => approval.id === request.id);
-			return { ...request, result: decided.result as string };
-		};
-		const switchSkills = (agent: string, permission: string | null) =>
-			api("/permissions", { method: "PUT", body: JSON.stringify({ agent, app: "", tool: WRITE_SKILL, permission }) });
-		const plan = { name: "weekly-plan", description: "Plan the week's runs.", instructions: "Add 10% distance." };
-		const meals = { name: "meal-prep", description: "Prep meals.", instructions: "Cook on Sunday." };
-
-		// Refused before anything is asked: another agent's id from any agent but the majordomo, one that isn't an agent,
-		// a write and an install at once, and sources outside GitHub or the person's files.
-		expect(await ask({ ...plan, agent: chef.id }, coachChat)).toContain("Only the person's majordomo writes skills for their other agents");
-		expect(await ask({ ...meals, agent: "p_nope" }, ROOT)).toContain("no agent with the id p_nope");
-		expect(await ask({ from: "/workspace/skills/deck", name: "deck", instructions: "Mine." }, coachChat)).toContain("not both: name, instructions came with from");
-		expect(await ask({ description: "Half a skill." }, coachChat)).toContain("Give name, description and instructions");
-		expect(await ask({ from: "https://evil.example/skills/deck" }, coachChat)).toContain("Give a GitHub repository's address");
-		expect(await ask({ from: "/workspace/../etc/skills" }, coachChat)).toContain(`path must be an absolute path under /workspace`);
-		expect((await api("/approvals?status=pending")).body.approvals).toEqual([]);
-
-		// Its own: the request names who asks and the skill's checks; approved, it is on its list.
-		const own = await approved(plan, coachChat);
-		expect(own).toMatchObject({ summary: "Strider saves a new skill: weekly-plan", args: { by: coach.id, agent: coach.id } });
-		expect((await api(`/agents/${coach.id}`)).body.skills).toEqual(["weekly-plan"]);
-
-		// Another agent can't rewrite it by its name and version, nor take its name, even once no agent uses it.
-		expect(await ask({ ...plan, instructions: "Mine now.", base_version: 1 }, chefChat)).toContain("weekly-plan is one of Strider's skills, not Cook's");
-		expect(await ask(plan, chefChat)).toContain("weekly-plan is one of Strider's skills, not Cook's");
-		await api(`/agents/${coach.id}`, { method: "PUT", body: JSON.stringify({ skills: [] }) });
-		expect(await ask({ ...plan, instructions: "Mine now.", base_version: 1 }, chefChat)).toContain("The person has a skill named weekly-plan that isn't one of Cook's");
-		await api(`/agents/${coach.id}`, { method: "PUT", body: JSON.stringify({ skills: ["weekly-plan"] }) });
-
-		// The majordomo rewrites it for Strider: the request names both, and the version is the majordomo's.
-		const rewrite = await approved({ ...plan, instructions: "Add 5% distance.", base_version: 1, agent: coach.id }, ROOT);
-		expect(rewrite).toMatchObject({ summary: `${by} rewrites Strider's skill weekly-plan`, args: { by: majordomo.id, agent: coach.id } });
-		expect((await api("/skills/weekly-plan")).body).toMatchObject({ instructions: "Add 5% distance.", history: [{ version: 2, author: majordomo.name }, { version: 1, author: "Strider" }] });
-		// From a version that is no longer the latest, nothing is asked.
-		expect(await ask({ ...plan, base_version: 1, agent: coach.id }, ROOT)).toContain("is at version 2 now, not 1");
-
-		// Switched off for Cook: its chats aren't offered skills' tools, and the majordomo writes none for it.
-		expect((await switchSkills(chef.id, "ask")).status).toBe(400);
-		expect((await switchSkills(chef.id, "off")).body).toMatchObject({ tool: WRITE_SKILL, permission: "off", chosen: "off", default: "on" });
-		expect((await api(`/permissions?agent=${chef.id}`)).body.skills).toMatchObject({ permission: "off" });
-		expect(await offeredIn(chefChat)).toContain("current_time");
-		expect(tools).not.toContain(WRITE_SKILL);
-		expect(tools).not.toContain(INSTALL_SKILL);
-		expect(await offeredIn(coachChat)).toContain(WRITE_SKILL);
-		await switchSkills(majordomo.id, "off");
-		expect(await offeredIn(ROOT)).not.toContain(WRITE_SKILL);
-		await switchSkills(majordomo.id, null);
-		expect(await ask({ ...meals, agent: chef.id }, ROOT)).toContain("The person turned off skills for Cook");
-
-		// Turned off, or the agent deleted, after asking and before approval: approving saves nothing.
-		await switchSkills(chef.id, null);
-		const revoked = await approved({ ...meals, agent: chef.id }, ROOT, async () => {
-			await switchSkills(chef.id, "off");
-		});
-		expect(revoked.summary).toBe(`${by} saves a new skill for Cook: meal-prep`);
-		expect(revoked.result).toContain("The skill was not saved: The person turned off skills for Cook");
-		await switchSkills(chef.id, null);
-		// Its own chat loses the tool as the decision lands, so the call hears it was interrupted; the request's result says why.
-		const selfRevoked = await approved({ ...meals, name: "race-day" }, coachChat, async () => {
-			await switchSkills(coach.id, "off");
-		});
-		expect(selfRevoked.result).toBe("The skill was not saved: The person turned off skills for Strider. Only they can turn them on again, on its page in Agents.");
-		await switchSkills(coach.id, null);
-		const temp = (await post("/agents", { name: "Baker", instructions: "Bake." })).body;
-		const gone = await approved({ ...meals, agent: temp.id }, ROOT, async () => {
-			expect((await api(`/agents/${temp.id}`, { method: "DELETE" })).status).toBe(200);
-		});
-		expect(gone.result).toContain(`The skill was not saved: The person has no agent with the id ${temp.id}`);
-		const baker = (await post("/agents", { name: "Baker", instructions: "Bake." })).body;
-		const bakerChat = (await post("/sessions", { agent: baker.id })).body.id;
-		const asker = await approved(meals, bakerChat, async () => {
-			expect((await api(`/agents/${baker.id}`, { method: "DELETE" })).status).toBe(200);
-		});
-		expect(asker.result).toContain("The skill was not saved: The agent that asked for this skill no longer exists");
-		// write_skill turned off for every agent after asking: approving saves nothing either.
-		const off = await approved(meals, chefChat, async () => {
-			await api("/permissions", { method: "PUT", body: JSON.stringify({ app: null, tool: WRITE_SKILL, permission: "off" }) });
-		});
-		expect(off.result).toContain("The skill was not saved: The person turned off write_skill");
-		await api("/permissions", { method: "PUT", body: JSON.stringify({ app: null, tool: WRITE_SKILL, permission: null }) });
-		expect((await api("/skills/meal-prep")).status).toBe(404);
-		expect((await api("/skills/race-day")).status).toBe(404);
-
-		// A skill the person gave Cook too is no longer Strider's alone: neither Strider nor the majordomo changes it for Strider.
-		expect((await api(`/agents/${chef.id}`, { method: "PUT", body: JSON.stringify({ skills: ["weekly-plan"] }) })).status).toBe(200);
-		expect(await ask({ ...plan, base_version: 2 }, coachChat)).toContain("weekly-plan is one of Cook's skills too");
-		expect(await ask({ ...plan, base_version: 2, agent: coach.id }, ROOT)).toContain("weekly-plan is one of Cook's skills too");
-
-		// The majordomo installs a published skill for Strider with write_skill's from, each copy named by its hash.
-		await pairTestComputer();
-		const putFile = (path: string, body: string) =>
-			exports.default.fetch(new Request(apiUrl(`/files/content?path=${path}`), { method: "PUT", body, headers: { Authorization: `Bearer ${TOKEN}` } }));
-		await putFile("/workspace/skills/stretch/SKILL.md", "---\nname: stretch\ndescription: Stretch after runs.\n---\nSee reference/moves.md.\n");
-		await putFile("/workspace/skills/stretch/reference/moves.md", "Calves, then hamstrings.\n");
-		const installed = await approved({ from: "/workspace/skills/stretch", agent: coach.id }, ROOT);
-		expect(installed).toMatchObject({
-			summary: `${by} installs the skill stretch for Strider from /workspace/skills/stretch`,
-			args: { by: majordomo.id, agent: coach.id, source: "/workspace/skills/stretch", files: [{ path: "reference/moves.md", from_file: "/workspace/skills/stretch/reference/moves.md", sha256: expect.stringMatching(/^[0-9a-f]{64}$/) }] },
-		});
-		expect((await api("/skills/stretch")).body).toMatchObject({ version: 1, author: majordomo.name, source: "/workspace/skills/stretch" });
-		expect((await api(`/agents/${coach.id}`)).body.skills).toEqual(["weekly-plan", "stretch"]);
-		expect(await ask({ source: "/workspace/skills/stretch", base_version: 2, agent: coach.id }, ROOT, INSTALL_SKILL)).toContain("stretch is at version 1 now, not 2");
-
-		for (const name of ["weekly-plan", "stretch"]) await api(`/skills/${name}`, { method: "DELETE" });
-		for (const agent of [coach, chef]) await api(`/agents/${agent.id}`, { method: "DELETE" });
-		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
-	});
-
 	it("reads a skill saved before its files were in R2, and moves them there with its next version", async () => {
 		const script = "print('5k in 25:00')\n";
 		await runInDurableObject(env.Pim.getByName(OWNER), (_instance, state) => {
@@ -807,6 +665,347 @@ Read reference/fonts.md first.
 		expect((await env.BLOBS.list({ prefix: `${OWNER}/skills/` })).objects).toHaveLength(1);
 		expect((await api("/skills/race-pace", { method: "DELETE" })).status).toBe(200);
 		expect((await env.BLOBS.list({ prefix: `${OWNER}/skills/` })).objects).toEqual([]);
+	});
+});
+
+describe("skills the majordomo writes for other agents, and each agent's switch for skills", () => {
+	let told = "";
+	let tools: string[] = [];
+	/** The model's last step: it reads the tool's result and the tools it was offered, then answers. */
+	const record = (context: { messages: Message[] }) => {
+		told = JSON.stringify(context.messages.findLast((m) => m.role === "toolResult")?.content);
+		tools = context.messages.flatMap((message) => (message.role === "system" ? (message.toolsAdded ?? []).map((tool) => tool.name) : []));
+		for (const message of context.messages) if (message.role === "system") for (const tool of message.toolsRemoved ?? []) tools = tools.filter((name) => name !== tool.name);
+		return toolUse("send_to_user", { message: "ok" });
+	};
+	/** Calls a tool in a chat, and gives what it returned. */
+	const ask = async (args: Record<string, JsonValue>, session: string, tool = WRITE_SKILL) => {
+		faux.setResponses([toolUse(tool, args), record]);
+		await say("Go on", session);
+		return told;
+	};
+	const offeredIn = async (session: string) => {
+		faux.setResponses([record]);
+		await say("Hi", session);
+		return tools;
+	};
+	type Decided = { id: string; summary: string; args: Record<string, unknown>; status: string; result: string | null };
+	const approval = async (id: string): Promise<Decided> => (await api("/approvals")).body.approvals.find((found: { id: string }) => found.id === id);
+	/** Files a request with a tool, and once it waits, does `meanwhile` and decides it. */
+	const decide = async (args: Record<string, JsonValue>, session: string, options: { meanwhile?: () => Promise<unknown>; decision?: "approve" | "deny"; tool?: string } = {}) => {
+		faux.setResponses([toolUse(options.tool ?? WRITE_SKILL, args), record]);
+		const asking = say("Go on", session);
+		const request = await pendingApproval();
+		await options.meanwhile?.();
+		await post(`/approvals/${request.id}/${options.decision ?? "approve"}`);
+		await asking;
+		return approval(request.id);
+	};
+	/**
+	 * Files a request with write_skill and approves it, holding the approved
+	 * write with `hold` until `change` is made: between the checks it starts
+	 * with and the commit, so only the checks made as it commits see it.
+	 */
+	const approveWhile = async (args: Record<string, JsonValue>, session: string, hold: () => Promise<Gate>, change: () => Promise<unknown>) => {
+		faux.setResponses([toolUse(WRITE_SKILL, args), record]);
+		const asking = say("Go on", session);
+		const request = await pendingApproval();
+		const gate = await hold();
+		const approving = post(`/approvals/${request.id}/approve`);
+		await gate.reached;
+		await change();
+		gate.release();
+		expect((await approving).status).toBe(200);
+		await asking;
+		return approval(request.id);
+	};
+	type Gate = { reached: Promise<void>; release: () => void };
+	const gate = () => {
+		const opened = { reach: () => {}, release: () => {} };
+		const reached = new Promise<void>((resolve) => {
+			opened.reach = resolve;
+		});
+		const released = new Promise<void>((resolve) => {
+			opened.release = resolve;
+		});
+		return { reached, released, ...opened };
+	};
+	/** Holds the next skill file stored in R2 until released. */
+	const holdStorage = async (): Promise<Gate> => {
+		const { reached, released, reach, release } = gate();
+		await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => {
+			const bucket = (instance as unknown as { env: { BLOBS: R2Bucket } }).env.BLOBS;
+			// One hold at a time: the one before is undone, so this one stores through the bucket itself.
+			if (vi.isMockFunction(bucket.put)) vi.mocked(bucket.put).mockRestore();
+			const put = bucket.put.bind(bucket);
+			vi.spyOn(bucket, "put").mockImplementation(async (...args: Parameters<R2Bucket["put"]>) => {
+				if (args[0].includes("/skills/")) {
+					reach();
+					await released;
+				}
+				return put(...args);
+			});
+		});
+		return { reached, release };
+	};
+	const switchSkills = (agent: string, permission: string | null) =>
+		api("/permissions", { method: "PUT", body: JSON.stringify({ agent, app: "", tool: WRITE_SKILL, permission }) });
+	const writeSkill = (permission: string | null) => api("/permissions", { method: "PUT", body: JSON.stringify({ app: null, tool: WRITE_SKILL, permission }) });
+	const version = async (name: string): Promise<number | null> => {
+		const found = await api(`/skills/${name}`);
+		return found.status === 404 ? null : found.body.version;
+	};
+	const skillsOf = async (id: string): Promise<string[]> => (await api(`/agents/${id}`)).body.skills;
+	const plan = { name: "weekly-plan", description: "Plan the week's runs.", instructions: "Add 10% distance." };
+	const meals = { name: "meal-prep", description: "Prep meals.", instructions: "Cook on Sunday." };
+
+	type Cast = { id: string; name: string; chat: string };
+	let made: string[] = [];
+	let cast = 0;
+	/** The majordomo, as requests name it, and two new agents with a chat each. */
+	const agents = async () => {
+		cast++;
+		const [majordomo] = (await api("/agents")).body.agents;
+		const by = majordomo.role.toLowerCase() === majordomo.name.toLowerCase() ? majordomo.name : `${majordomo.name} (${majordomo.role})`;
+		const make = async (name: string): Promise<Cast> => {
+			const agent = (await post("/agents", { name: `${name} ${cast}`, instructions: "Work." })).body;
+			made.push(agent.id);
+			return { id: agent.id, name: agent.name, chat: (await post("/sessions", { agent: agent.id })).body.id };
+		};
+		return { majordomo: majordomo as { id: string; name: string }, by, coach: await make("Strider"), chef: await make("Cook") };
+	};
+	/** Puts a skill on an agent's list, written by the majordomo for it. */
+	const given = async (agent: Cast, write: Record<string, JsonValue>) => {
+		expect((await decide({ ...write, agent: agent.id }, ROOT)).result).toContain("Saved the skill");
+	};
+
+	beforeEach(async () => {
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
+	});
+	afterEach(async () => {
+		for (const skill of (await api("/skills")).body.skills) await api(`/skills/${skill.name}`, { method: "DELETE" });
+		for (const id of made) await api(`/agents/${id}`, { method: "DELETE" });
+		made = [];
+		await writeSkill(null);
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
+	});
+
+	it("refuses before asking: other agents' skills from any agent but the majordomo, unknown agents, mixed or missing input, sources outside GitHub or /workspace, and names it doesn't hold", async () => {
+		const { coach, chef } = await agents();
+		expect(await ask({ ...plan, agent: chef.id }, coach.chat)).toContain("Only the person's majordomo writes skills for their other agents");
+		expect(await ask({ source: "/workspace/skills/deck", agent: chef.id }, coach.chat, INSTALL_SKILL)).toContain("Only the person's majordomo writes skills for their other agents");
+		expect(await ask({ ...meals, agent: "p_nope" }, ROOT)).toContain("no agent with the id p_nope");
+		expect(await ask({ from: "/workspace/skills/deck", name: "deck", instructions: "Mine." }, coach.chat)).toContain("not both: name, instructions came with from");
+		expect(await ask({ description: "Half a skill." }, coach.chat)).toContain("Give name, description and instructions");
+		expect(await ask({ from: "https://evil.example/skills/deck" }, coach.chat)).toContain("Give a GitHub repository's address");
+		expect(await ask({ from: "/workspace/../etc/skills" }, coach.chat)).toContain("path must be an absolute path under /workspace");
+		expect((await api("/approvals?status=pending")).body.approvals).toEqual([]);
+
+		// A skill of another agent's, or of none, by its name and version: not Cook's to write.
+		await given(coach, plan);
+		expect(await ask({ ...plan, instructions: "Mine now.", base_version: 1 }, chef.chat)).toContain(`weekly-plan is one of ${coach.name}'s skills, not ${chef.name}'s`);
+		expect(await ask(plan, chef.chat)).toContain(`weekly-plan is one of ${coach.name}'s skills, not ${chef.name}'s`);
+		await api(`/agents/${coach.id}`, { method: "PUT", body: JSON.stringify({ skills: [] }) });
+		expect(await ask({ ...plan, instructions: "Mine now.", base_version: 1 }, chef.chat)).toContain(`The person has a skill named weekly-plan that isn't one of ${chef.name}'s`);
+		// One two agents use is neither's to change.
+		await api(`/agents/${coach.id}`, { method: "PUT", body: JSON.stringify({ skills: ["weekly-plan"] }) });
+		await api(`/agents/${chef.id}`, { method: "PUT", body: JSON.stringify({ skills: ["weekly-plan"] }) });
+		expect(await ask({ ...plan, base_version: 1 }, coach.chat)).toContain(`weekly-plan is one of ${chef.name}'s skills too`);
+		expect(await ask({ ...plan, base_version: 1, agent: coach.id }, ROOT)).toContain(`weekly-plan is one of ${chef.name}'s skills too`);
+		expect(await version("weekly-plan")).toBe(1);
+	});
+
+	it("writes an agent's own skills, and the majordomo's for another agent, naming both, from the version it read", async () => {
+		const { majordomo, by, coach } = await agents();
+		const own = await decide(plan, coach.chat);
+		expect(own).toMatchObject({ summary: `${coach.name} saves a new skill: weekly-plan`, args: { by: coach.id, agent: coach.id } });
+		expect(await skillsOf(coach.id)).toEqual(["weekly-plan"]);
+
+		const rewrite = await decide({ ...plan, instructions: "Add 5% distance.", base_version: 1, agent: coach.id }, ROOT);
+		expect(rewrite).toMatchObject({ summary: `${by} rewrites ${coach.name}'s skill weekly-plan`, args: { by: majordomo.id, agent: coach.id } });
+		expect((await api("/skills/weekly-plan")).body).toMatchObject({ instructions: "Add 5% distance.", history: [{ version: 2, author: majordomo.name }, { version: 1, author: coach.name }] });
+		expect(await skillsOf(majordomo.id)).not.toContain("weekly-plan");
+		expect(await ask({ ...plan, base_version: 1, agent: coach.id }, ROOT)).toContain("is at version 2 now, not 1");
+	});
+
+	it("follows each agent's switch for skills and write_skill's permission, which still decides whether to ask", async () => {
+		const { majordomo, coach, chef } = await agents();
+		expect((await switchSkills(chef.id, "ask")).status).toBe(400);
+		expect((await switchSkills(chef.id, "off")).body).toMatchObject({ tool: WRITE_SKILL, permission: "off", chosen: "off", default: "on" });
+		expect((await api(`/permissions?agent=${chef.id}`)).body.skills).toMatchObject({ permission: "off" });
+		expect(await offeredIn(chef.chat)).toContain("current_time");
+		expect(tools).not.toContain(WRITE_SKILL);
+		expect(tools).not.toContain(INSTALL_SKILL);
+		expect(await offeredIn(coach.chat)).toContain(WRITE_SKILL);
+		expect(await ask({ ...meals, agent: chef.id }, ROOT)).toContain(`The person turned off skills for ${chef.name}`);
+		await switchSkills(majordomo.id, "off");
+		expect(await offeredIn(ROOT)).not.toContain(WRITE_SKILL);
+		await switchSkills(majordomo.id, null);
+
+		// write_skill on: a write the switches allow runs without asking; one they don't is still refused, and so is another's from any agent but the majordomo.
+		await writeSkill("on");
+		await ask({ ...meals, agent: coach.id }, ROOT);
+		expect(told).toContain("Saved the skill meal-prep");
+		expect((await api("/approvals?status=pending")).body.approvals).toEqual([]);
+		expect(await skillsOf(coach.id)).toEqual(["meal-prep"]);
+		expect(await ask({ ...plan, agent: chef.id }, ROOT)).toContain(`The person turned off skills for ${chef.name}`);
+		expect(await ask({ ...plan, agent: chef.id }, coach.chat)).toContain("Only the person's majordomo writes skills");
+		expect(await version("weekly-plan")).toBeNull();
+		// write_skill off: no agent is offered it.
+		await writeSkill("off");
+		expect(await offeredIn(coach.chat)).not.toContain(WRITE_SKILL);
+	});
+
+	it("saves nothing when, before approval, a switch goes off, an agent is deleted, the skill gains another agent or a newer version, or write_skill is turned off", async () => {
+		const { by, coach, chef } = await agents();
+		const offFor = await decide({ ...meals, agent: chef.id }, ROOT, { meanwhile: () => switchSkills(chef.id, "off") });
+		expect(offFor.summary).toBe(`${by} saves a new skill for ${chef.name}: meal-prep`);
+		expect(offFor.result).toContain(`The skill was not saved: The person turned off skills for ${chef.name}`);
+		await switchSkills(chef.id, null);
+		// Its own chat loses the tool as the decision lands, so the call hears it was interrupted; the request's result says why.
+		const selfOff = await decide({ ...meals, name: "race-day" }, coach.chat, { meanwhile: () => switchSkills(coach.id, "off") });
+		expect(selfOff.result).toBe(`The skill was not saved: The person turned off skills for ${coach.name}. Only they can turn them on again, on its page in Agents.`);
+		await switchSkills(coach.id, null);
+		const temp = (await post("/agents", { name: `Baker ${cast}`, instructions: "Bake." })).body;
+		const target = await decide({ ...meals, agent: temp.id }, ROOT, { meanwhile: () => api(`/agents/${temp.id}`, { method: "DELETE" }) });
+		expect(target.result).toContain(`The skill was not saved: The person has no agent with the id ${temp.id}`);
+		const asker = (await post("/agents", { name: `Baker ${cast}`, instructions: "Bake." })).body;
+		const askerChat = (await post("/sessions", { agent: asker.id })).body.id;
+		const asked = await decide(meals, askerChat, { meanwhile: () => api(`/agents/${asker.id}`, { method: "DELETE" }) });
+		expect(asked.result).toContain("The skill was not saved: The agent that asked for this skill no longer exists");
+		const off = await decide(meals, chef.chat, { meanwhile: () => writeSkill("off") });
+		expect(off.result).toContain("The skill was not saved: The person turned off write_skill");
+		await writeSkill(null);
+		expect(await version("meal-prep")).toBeNull();
+		expect(await version("race-day")).toBeNull();
+
+		// The majordomo's rewrite for Strider, approved after the person gave the skill to Cook too, or restored a version.
+		await given(coach, plan);
+		const shared = await decide({ ...plan, instructions: "Mine.", base_version: 1, agent: coach.id }, ROOT, {
+			meanwhile: () => api(`/agents/${chef.id}`, { method: "PUT", body: JSON.stringify({ skills: ["weekly-plan"] }) }),
+		});
+		expect(shared.result).toContain(`The skill was not saved: weekly-plan is one of ${chef.name}'s skills too`);
+		await api(`/agents/${chef.id}`, { method: "PUT", body: JSON.stringify({ skills: [] }) });
+		const stale = await decide({ ...plan, instructions: "Mine.", base_version: 1, agent: coach.id }, ROOT, {
+			meanwhile: () => post("/skills/weekly-plan/restore", { version: 1, baseVersion: 1 }),
+		});
+		expect(stale.result).toContain("weekly-plan is at version 2 now, not 1");
+		expect((await api("/skills/weekly-plan")).body).toMatchObject({ version: 2, instructions: plan.instructions });
+	});
+
+	it("checks again as it commits: what changes while an approved write stores its files or reads its copies saves nothing", async () => {
+		const { majordomo, coach, chef } = await agents();
+		const notes = (text: string) => [{ path: "notes.md", content: text }];
+		/** A refused write added no version and put the skill on no list. */
+		const unchanged = async (name: string, wanted: number | null, lists: Record<string, string[]>) => {
+			expect(await version(name)).toBe(wanted);
+			for (const [id, skills] of Object.entries(lists)) expect(await skillsOf(id)).toEqual(skills);
+		};
+
+		const targetOff = await approveWhile({ ...meals, files: notes("1"), agent: coach.id }, ROOT, holdStorage, () => switchSkills(coach.id, "off"));
+		expect(targetOff.result).toContain(`The skill was not saved: The person turned off skills for ${coach.name}`);
+		await unchanged("meal-prep", null, { [coach.id]: [] });
+		await switchSkills(coach.id, null);
+
+		const actorOff = await approveWhile({ ...meals, files: notes("2"), agent: coach.id }, ROOT, holdStorage, () => switchSkills(majordomo.id, "off"));
+		expect(actorOff.result).toContain(`The skill was not saved: The person turned off skills for ${majordomo.name}`);
+		await unchanged("meal-prep", null, { [coach.id]: [] });
+		await switchSkills(majordomo.id, null);
+
+		const temp = (await post("/agents", { name: `Baker ${cast}`, instructions: "Bake." })).body;
+		const deleted = await approveWhile({ ...meals, files: notes("3"), agent: temp.id }, ROOT, holdStorage, () => api(`/agents/${temp.id}`, { method: "DELETE" }));
+		expect(deleted.result).toContain(`The skill was not saved: The person has no agent with the id ${temp.id}`);
+		await unchanged("meal-prep", null, {});
+
+		await given(coach, plan);
+		const rewrite = (text: string) => ({ ...plan, instructions: text, files: notes(text), base_version: 1, agent: coach.id });
+		const attached = await approveWhile(rewrite("4"), ROOT, holdStorage, () => api(`/agents/${chef.id}`, { method: "PUT", body: JSON.stringify({ skills: ["weekly-plan"] }) }));
+		expect(attached.result).toContain(`The skill was not saved: weekly-plan is one of ${chef.name}'s skills too`);
+		await unchanged("weekly-plan", 1, { [coach.id]: ["weekly-plan"], [chef.id]: ["weekly-plan"] });
+		await api(`/agents/${chef.id}`, { method: "PUT", body: JSON.stringify({ skills: [] }) });
+
+		const detached = await approveWhile(rewrite("5"), ROOT, holdStorage, () => api(`/agents/${coach.id}`, { method: "PUT", body: JSON.stringify({ skills: [] }) }));
+		expect(detached.result).toContain(`The skill was not saved: The person has a skill named weekly-plan that isn't one of ${coach.name}'s`);
+		await unchanged("weekly-plan", 1, { [coach.id]: [] });
+		// The files the refused writes stored aren't kept: weekly-plan's one version has none.
+		expect((await env.BLOBS.list({ prefix: `${OWNER}/skills/` })).objects).toHaveLength(0);
+
+		// While it reads a copy again at approval, from GitHub: held there, the target's switch goes off.
+		const commit = "0123456789abcdef0123456789abcdef01234567";
+		const raw = `https://raw.githubusercontent.com/acme/skills/${commit}/stretch/`;
+		const held = gate();
+		let reads = 0;
+		const realFetch = globalThis.fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const url = new Request(input, init).url;
+			if (url === "https://api.github.com/repos/acme/skills/commits/main") return new Response(commit);
+			if (url === `https://api.github.com/repos/acme/skills/git/trees/${commit}?recursive=1`) {
+				return Response.json({ truncated: false, tree: ["stretch/SKILL.md", "stretch/moves.md"].map((path) => ({ path, type: "blob", size: 20 })) });
+			}
+			if (url === `${raw}SKILL.md`) return new Response("---\nname: stretch\ndescription: Stretch after runs.\n---\nSee moves.md.\n");
+			if (url === `${raw}moves.md`) {
+				// The second read is the approved write's.
+				if (++reads === 2) {
+					held.reach();
+					await held.released;
+				}
+				return new Response("Calves first.\n");
+			}
+			return realFetch(input, init);
+		});
+		const copying = await approveWhile({ from: "https://github.com/acme/skills/tree/main/stretch", agent: coach.id }, ROOT, async () => held, () => switchSkills(coach.id, "off"));
+		expect(reads).toBe(2);
+		expect(copying.result).toContain(`The skill was not saved: The person turned off skills for ${coach.name}`);
+		await unchanged("stretch", null, { [coach.id]: [] });
+	});
+
+	it("installs a published skill for another agent with install_skill or from, as its source has it, and saves nothing denied, forged or leading outside /workspace", async () => {
+		const { majordomo, by, coach, chef } = await agents();
+		const { root } = await pairTestComputer();
+		const putFile = (path: string, body: string) =>
+			exports.default.fetch(new Request(apiUrl(`/files/content?path=${path}`), { method: "PUT", body, headers: { Authorization: `Bearer ${TOKEN}` } }));
+		await putFile("/workspace/skills/stretch/SKILL.md", "---\nname: stretch\ndescription: Stretch after runs.\n---\nSee reference/moves.md.\n");
+		await putFile("/workspace/skills/stretch/reference/moves.md", "Calves, then hamstrings.\n");
+
+		// Denied: nothing saved, on no list.
+		const denied = await decide({ source: "/workspace/skills/stretch", agent: coach.id }, ROOT, { tool: INSTALL_SKILL, decision: "deny" });
+		expect(denied.status).toBe("denied");
+		expect(await version("stretch")).toBeNull();
+		expect(await skillsOf(coach.id)).toEqual([]);
+
+		const installed = await decide({ source: "/workspace/skills/stretch", agent: coach.id }, ROOT, { tool: INSTALL_SKILL });
+		expect(installed).toMatchObject({
+			summary: `${by} installs the skill stretch for ${coach.name} from /workspace/skills/stretch`,
+			args: { by: majordomo.id, agent: coach.id, source: "/workspace/skills/stretch", files: [{ path: "reference/moves.md", from_file: "/workspace/skills/stretch/reference/moves.md", sha256: expect.stringMatching(/^[0-9a-f]{64}$/) }] },
+		});
+		expect((await api("/skills/stretch")).body).toMatchObject({ version: 1, author: majordomo.name, source: "/workspace/skills/stretch" });
+		expect(await skillsOf(coach.id)).toEqual(["stretch"]);
+		// Updated through write_skill's from, from the version it read.
+		await putFile("/workspace/skills/stretch/reference/moves.md", "Hamstrings, then calves.\n");
+		expect((await decide({ from: "/workspace/skills/stretch", base_version: 1, agent: coach.id }, ROOT)).summary).toBe(`${by} updates ${coach.name}'s skill stretch from /workspace/skills/stretch`);
+		expect(await version("stretch")).toBe(2);
+		expect(await ask({ source: "/workspace/skills/stretch", base_version: 1, agent: coach.id }, ROOT, INSTALL_SKILL)).toContain("stretch is at version 2 now, not 1");
+
+		// A link in the skill's folder that leads outside /workspace refuses the install before anything is asked.
+		await putFile("/workspace/skills/leaky/SKILL.md", "---\nname: leaky\ndescription: Leaks.\n---\nRead secret.txt.\n");
+		await fs.mkdir(`${root}-outside`, { recursive: true });
+		await fs.writeFile(`${root}-outside/secret.txt`, "secret");
+		await fs.symlink(`${root}-outside/secret.txt`, `${root}/skills/leaky/secret.txt`);
+		expect(await ask({ source: "/workspace/skills/leaky", agent: chef.id }, ROOT, INSTALL_SKILL)).toContain("outside /workspace");
+		await fs.rm(`${root}/skills/leaky/secret.txt`);
+		await fs.symlink(`${root}-outside`, `${root}/skills/leaky/linked`);
+		expect(await ask({ source: "/workspace/skills/leaky", agent: chef.id }, ROOT, INSTALL_SKILL)).toContain("outside /workspace");
+		expect((await api("/approvals?status=pending")).body.approvals).toEqual([]);
+		expect(await version("leaky")).toBeNull();
+
+		// An approved request whose copy names an address off GitHub's raw files copies nothing.
+		const forged = await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => {
+			const write = instance.actions.find((action) => action.name === WRITE_SKILL)!;
+			return write.run({ by: majordomo.id, agent: chef.id, ...meals, files: [{ path: "x.md", from_url: "https://evil.example/x.md", sha256: "0".repeat(64) }] }, { session: ROOT });
+		});
+		expect(forged).toContain("Only files on https://raw.githubusercontent.com/ are copied from the web");
+		expect(await version("meal-prep")).toBeNull();
+		expect(await skillsOf(chef.id)).toEqual([]);
 	});
 });
 

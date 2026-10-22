@@ -94,6 +94,7 @@ import { ExtensionDataStore } from "./extensions/data";
 import { NativeApps } from "./extensions/native-apps";
 import {
 	type Ability,
+	APP_CREDENTIALS_KEY,
 	checkToolNames,
 	CUSTOM_APPS,
 	isNativeApp,
@@ -550,6 +551,7 @@ export class Pim extends DurableAgent<Env> {
 			return app && isNativeApp(app) ? app : undefined;
 		},
 		secrets: (app) => this.#secrets(app),
+		credentialsKey: () => this.#env([APP_CREDENTIALS_KEY])[APP_CREDENTIALS_KEY] ?? null,
 		callbackUrl: () => `${this.deployment().publicUrl}${APPS_CALLBACK_PATH}`,
 		owner: () => this.name,
 		changed: () => this.#installApps(),
@@ -799,7 +801,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/** Ends a connection, MCP or native, and forgets its approval policy. */
 	async #disconnect(id: string): Promise<void> {
-		if (!this.nativeApps.remove(id)) await this.removeMcpServer(id).catch(() => undefined);
+		if (!(await this.nativeApps.remove(id))) await this.removeMcpServer(id).catch(() => undefined);
 		this.store.deleteMcpApproval(id);
 	}
 
@@ -3665,6 +3667,7 @@ export class Pim extends DurableAgent<Env> {
 			const sessions = await this.harness.sessions.list();
 			await Promise.allSettled(sessions.map((session) => this.harness.session(session.id).abort()));
 			await Promise.allSettled(this.store.watches().map((watch) => this.appEvents.stop(watch.id)));
+			await this.nativeApps.revokeAll();
 		};
 		await Promise.race([courtesy().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, ERASE_COURTESY_MS))]);
 		// Images and stored files live outside this object's storage, in R2 under the owner's prefix,
@@ -5255,19 +5258,47 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 		["GET", "/mcp", () => ({ servers: this.#describeApps() })],
-		// Where the person comes back from signing in to an app its extension implements; the Worker found this space by its `state`.
+		// Where the person comes back from signing in to an app its extension implements: the Worker found this space by
+		// its `state`, and posts what the service sent back (as a form) only from a browser signed in as this owner.
 		[
-			"GET",
+			"POST",
 			APPS_CALLBACK_PATH,
-			async (_params, _request, url) => {
+			async (_params, request) => {
+				if (request.headers.get(SIGNED_IN_HEADER) !== "1") throw new HttpError(403, "Sign in to Pim in this browser first");
+				const url = new URL(`${this.deployment().publicUrl}${APPS_CALLBACK_PATH}`);
+				for (const [name, value] of await request.formData()) if (typeof value === "string") url.searchParams.append(name, value);
 				const result = await this.nativeApps.finish(url);
 				const ok = "name" in result;
 				return new Response(
 					ok
 						? "<!doctype html><title>Connected</title><p>Connected. You can close this window and go back to Pim.</p>"
-						: `<!doctype html><title>Not connected</title><p>Sign-in failed: ${result.error.replace(/[<&]/g, "")}</p>`,
-					{ status: ok ? 200 : 400, headers: { "content-type": "text/html; charset=utf-8" } },
+						: `<!doctype html><title>Not connected</title><p>Sign-in failed: ${result.error.replace(/[&<>"']/g, (character) => `&#${character.charCodeAt(0)};`)}</p>`,
+					{ status: ok ? 200 : 400, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" } },
 				);
+			},
+		],
+		// An app's action, for the person in their own browser only (see `NativeAppDefinition.actions`), such as Drive's file picker.
+		[
+			"POST",
+			"/app-actions/:extension/:app/:action",
+			async ({ extension, app, action }, request) => {
+				if (request.headers.get(SIGNED_IN_HEADER) !== "1") throw new HttpError(403, "Only the person, signed in to Pim in their browser, can do this");
+				if (Number(request.headers.get("content-length") ?? 0) > 65_536) throw new HttpError(413, "Too large");
+				const ref = `${extension}/${app}`;
+				if (!this.appDirectory().some((candidate) => candidate.ref === ref)) {
+					const definition = this.extensions.app(ref);
+					const names = secretsOf(definition);
+					const missing = names.filter((name) => !(name in this.#env(names)));
+					// Names of what its admin must set, never values.
+					throw new HttpError(404, definition && missing.length > 0 ? `This Pim isn't set up for ${definition.name} yet: its admin must set ${missing.join(", ")}.` : `This Pim doesn't offer ${ref}`);
+				}
+				const input = await readJson<Record<string, unknown>>(request);
+				try {
+					const result = await this.nativeApps.act(ref, action!, input);
+					return Response.json({ result: result ?? null }, { headers: { "cache-control": "no-store" } });
+				} catch (error) {
+					throw new HttpError(400, errorMessage(error));
+				}
 			},
 		],
 		[

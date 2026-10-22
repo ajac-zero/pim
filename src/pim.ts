@@ -1639,8 +1639,10 @@ export class Pim extends DurableAgent<Env> {
 		const keys = await this.#vapidKeys();
 		const subject = this.deployment().publicUrl ?? "https://pim.invalid";
 		const { id, session, title, body, reply, agent } = this.#publicNotification(notification);
-		// A push message holds about 4 KB; the full text is in the app.
-		const message = { id, session, agent, title: title.slice(0, 120), body: body.slice(0, 500), ...(reply ? { reply } : {}) };
+		// A device alert shows only the first sentence, and a push message
+		// holds about 4 KB; the full text is in the app.
+		const first = new Intl.Segmenter(undefined, { granularity: "sentence" }).segment(body.trim())[Symbol.iterator]().next().value;
+		const message = { id, session, agent, title: title.slice(0, 120), body: (first?.segment.trim() ?? "").slice(0, 500), ...(reply ? { reply } : {}) };
 		await Promise.all(
 			subscriptions.map(async (subscription) => {
 				try {

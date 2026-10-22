@@ -366,10 +366,11 @@ describe("web push", () => {
 
 		const fetched = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 201 }));
 		try {
-			await deliver("Price drop", "Your flight is $80 cheaper.");
+			await deliver("Price drop", "Your flight is $80.50 cheaper.\nBook by **Friday** to keep it.");
 			const [[endpoint, init]] = fetched.mock.calls as [[string, RequestInit]];
 			expect(endpoint).toBe("https://push.example/phone");
-			expect(await phone.decrypt(new Uint8Array(init.body as ArrayBuffer))).toMatchObject({ title: "Price drop", body: "Your flight is $80 cheaper.", session: ROOT });
+			// The alert shows only the first sentence.
+			expect(await phone.decrypt(new Uint8Array(init.body as ArrayBuffer))).toMatchObject({ title: "Price drop", body: "Your flight is $80.50 cheaper.", session: ROOT });
 
 			// The VAPID token is signed by the key /push/key advertises, for the push service's origin.
 			const header = (init.headers as Record<string, string>).Authorization!;
@@ -416,7 +417,7 @@ describe("web push", () => {
 			}
 		};
 
-		faux.setResponses([toolUse("send_to_user", { message: "Booked the 9:40 to Lisbon." })]);
+		faux.setResponses([toolUse("send_to_user", { message: "Booked the 9:40 to Lisbon. It leaves from Santa Apolónia." })]);
 		await say("Book the train.", chat.id);
 		expect(await runChecks()).toEqual([{ id: expect.any(String), session: chat.id, title: "Lisbon trip", body: "Booked the 9:40 to Lisbon.", reply: true, agent: { id: agent.id, icon: null, symbol: "🚂", color: "orange" } }]);
 

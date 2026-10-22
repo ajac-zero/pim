@@ -199,7 +199,7 @@ function ComposerInner({
       {showSuggestions && (
         // They float over what's above the composer, which scrolls on beneath them, so they take none of its room.
         // Radix positions the scroll area itself, so a wrapper places it.
-        <div className="pointer-events-none absolute inset-x-0 bottom-full z-10">
+        <div className="pointer-events-none absolute inset-x-0 bottom-full z-10 animate-in fade-in duration-700">
           <Suggestions>
             {promptSuggestions.map((suggestion) => (
               <Suggestion

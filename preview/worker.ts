@@ -25,7 +25,7 @@ export { Auth, Directory, Gallery } from "../src/index";
  *   and it asks the person about every approval it reviews.
  *   The utility model titles a chat with the first words of its last message, appends a
  *   line to a prompt it improves, writes a placeholder summary, and names the tools an
- *   agent is calling as what it is doing. `generate_image` draws Pim's icon.
+ *   agent is calling as what it is doing, and suggests three prompts from the last thing you said. `generate_image` draws Pim's icon.
  * - `GET /__dev/sign-in/<username>?returnTo=/path` signs the browser in as
  *   that person, making the account if it's new, with a passkey made here.
  */
@@ -81,6 +81,11 @@ const answer: FauxResponseFactory = (context, _options, _state, model) => {
 		if (job.startsWith("You tell a person what their AI assistant is doing")) {
 			const tools = [...input.matchAll(/^- ([^\s:]+) \{/gm)].map((match) => match[1]!.replaceAll("_", " "));
 			return fauxAssistantMessage(`Working on it with ${tools.join(" and ") || "a tool"}`);
+		}
+		if (job.startsWith("You suggest what a person might say next")) {
+			const said = input.split("\n").find((turn) => turn.startsWith("Person: "))?.replace(/^Person: /, "") ?? "this";
+			const messages = [`Tell me more about ${said.split(/\s+/).slice(0, 4).join(" ")}`, "What should I do next?", "Summarize what we covered"];
+			return fauxAssistantMessage(JSON.stringify({ messages }));
 		}
 		if (job.startsWith("You answer requests from a small app")) {
 			return fauxAssistantMessage(`The preview model got your request: ${input}`);

@@ -176,6 +176,7 @@ describe("A person's own model providers", () => {
 			url: "http://localhost:1234/v1",
 			hasKey: false,
 			chosen: null,
+			structuredOutput: false,
 			models: [
 				{ id: "local-model", name: "local-model", contextWindow: 128_000, maxTokens: 8_192, images: false, reasoning: false },
 				{ id: "vision-model", name: "Vision", contextWindow: 32_768, maxTokens: 8_192, images: true, reasoning: false },
@@ -211,6 +212,35 @@ describe("A person's own model providers", () => {
 		faux.setResponses([toolUse("send_to_user", { message: "Back on the default." })]);
 		expect((await say("Still there?")).text).toBe("Back on the default.");
 		expect((await api("/providers/home-server", { method: "DELETE" })).status).toBe(404);
+	});
+
+	it("offers a provider's models for side jobs only when it answers in a JSON schema", async () => {
+		const utility = async () => (await api("/model")).body.utility as { model: { id: string }; choices: { provider: string; id: string }[] };
+		const choose = (provider: string, id: string) => put("/model/utility", { provider, id });
+		// A custom endpoint says whether it does; without that its models aren't offered, and can't be chosen.
+		await post("/providers", { name: "Home server", url: "http://localhost:1234/v1/" });
+		expect((await utility()).choices.map((choice) => choice.id)).toEqual(["utility-model"]);
+		expect((await choose("own:home-server", "local-model")).status).toBe(400);
+
+		expect((await put("/providers/home-server", { structuredOutput: true })).body.provider).toMatchObject({ structuredOutput: true });
+		expect((await utility()).choices.map((choice) => choice.id)).toEqual(["utility-model", "local-model", "vision-model", "served-model"]);
+		expect((await choose("own:home-server", "local-model")).body).toMatchObject({ model: { id: "local-model" } });
+		expect((await put("/providers/home-server", { structuredOutput: "yes" })).status).toBe(400);
+
+		// Taking it back puts side jobs back on the deployment's model; the choice is kept for if it is said again.
+		await put("/providers/home-server", { structuredOutput: false });
+		expect((await utility()).model.id).toBe("utility-model");
+		await put("/providers/home-server", { structuredOutput: true });
+		expect((await utility()).model.id).toBe("local-model");
+
+		// Services that follow a schema are offered; those that only promise valid JSON, or only for some models, aren't.
+		const services = [["anthropic", "claude-sonnet-4-6", true], ["openai", "gpt-4.1", true], ["google", "gemini-2.5-flash", true], ["mistral", "mistral-large-latest", true], ["xai", "grok-4.3", true], ["deepseek", "deepseek-flash", false], ["groq", "llama-3.3-70b-versatile", false], ["openrouter", "openai/gpt-4.1", false]] as const;
+		for (const [builtin, id] of services) expect((await post("/providers", { builtin, key: "sk-test", models: [id] })).status).toBe(200);
+		const offered = (await utility()).choices.map((choice) => choice.provider);
+		for (const [builtin, , schemaOutput] of services) expect(offered.includes(`own:${builtin}`)).toBe(schemaOutput);
+		expect((await choose("own:deepseek", "deepseek-flash")).status).toBe(400);
+		expect((await choose("own:openai", "gpt-4.1")).status).toBe(200);
+		for (const id of ["home-server", ...services.map(([builtin]) => builtin)]) await api(`/providers/${id}`, { method: "DELETE" });
 	});
 
 	it("keep a provider's key to themselves, and offer only models its server lists", async () => {

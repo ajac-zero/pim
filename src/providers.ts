@@ -47,13 +47,15 @@ export type CustomProvider = {
 	/** The models the person named, in their order; null offers every model the server lists. */
 	readonly chosen: readonly string[] | null;
 	readonly models: readonly ProviderModel[];
+	/** Whether a custom endpoint's models can answer in a JSON schema (`response_format`); the person says so, and an absent flag is no. Built-in services are known (see `answersInSchema`). */
+	readonly structuredOutput?: boolean;
 };
 
 /** A provider as the API shows it: never its key. */
 export type ProviderInfo = Omit<CustomProvider, "key"> & { readonly hasKey: boolean };
 
 /** What adding or changing a provider gives; a missing field keeps what it was. */
-export type ProviderInput = { readonly builtin?: unknown; readonly name?: unknown; readonly url?: unknown; readonly key?: unknown; readonly models?: unknown };
+export type ProviderInput = { readonly builtin?: unknown; readonly name?: unknown; readonly url?: unknown; readonly key?: unknown; readonly models?: unknown; readonly structuredOutput?: unknown };
 
 /** Known services need a key, not an address. Model definitions come from pi-ai. */
 const BUILTIN_PROVIDERS = [
@@ -66,6 +68,14 @@ const BUILTIN_PROVIDERS = [
 	{ id: "groq", name: "Groq", url: "https://api.groq.com/openai/v1" },
 	{ id: "xai", name: "xAI", url: "https://api.x.ai/v1" },
 ] as const;
+
+/** Built-in services whose models take a JSON schema for their answer; the others, such as DeepSeek, only promise valid JSON, or do for some models. */
+const SCHEMA_SERVICES: ReadonlySet<string> = new Set(["anthropic", "openai", "google", "mistral", "xai"]);
+
+/** Whether a provider's models can be the utility model: a side job's structured answer needs them to follow a JSON schema (see ./utility.ts). */
+export function answersInSchema(provider: CustomProvider): boolean {
+	return provider.builtin === undefined ? provider.structuredOutput === true : SCHEMA_SERVICES.has(provider.builtin);
+}
 
 /** The chat catalog for the built-in picker, without loading it at Worker startup. */
 export async function builtinProviders() {
@@ -186,6 +196,7 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 		if (ids.length > MAX_CHOSEN) throw new HttpError(400, `Name at most ${MAX_CHOSEN} models`);
 		chosen = ids.length === 0 ? null : ids;
 	}
+	if (input.structuredOutput !== undefined && typeof input.structuredOutput !== "boolean") throw new HttpError(400, "structuredOutput must be true or false");
 	if (preset) {
 		const { getBuiltinModels } = await import("./provider-catalog");
 		const catalog = getBuiltinModels(preset.id) as Model<Api>[];
@@ -231,7 +242,8 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 		id = base;
 		for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
 	}
-	return { id, name, url, key, chosen, models };
+	const structuredOutput = input.structuredOutput === undefined ? existing?.structuredOutput === true : input.structuredOutput;
+	return { id, name, url, key, chosen, models, structuredOutput };
 }
 
 export function providerInfo({ key, ...provider }: CustomProvider): ProviderInfo {

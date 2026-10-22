@@ -182,6 +182,14 @@ export const dashboardQuery = (id: string, locale: string) =>
     retry: false,
   });
 
+/** What an agent's dashboard suggests saying to it: instant when Pim has them, a few seconds when it writes them. */
+export const suggestionsQuery = (id: string, locale: string) =>
+  queryOptions({
+    queryKey: ["suggestions", id, locale],
+    queryFn: () => pim.suggestions(id, locale),
+    retry: false,
+  });
+
 /** How this deployment runs for everyone: the admin's view. */
 export const deploymentQuery = () =>
   queryOptions({ queryKey: ["deployment"], queryFn: admin.deployment });

@@ -43,6 +43,7 @@ import {
 import { digestHex } from "./auth/store";
 import { Email, type Mailer, mailerFrom } from "./email";
 import {
+	answersInSchema,
 	builtinProviders,
 	type CustomProvider,
 	MAX_PROVIDERS,
@@ -165,7 +166,7 @@ import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoSetup, RE
 import { Progress } from "./progress";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { projectEntries } from "./transcript";
-import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, SUMMARIZE_CHAT, type UtilityTask } from "./utility";
+import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
 import { type Limits, parseLimits, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
 
@@ -256,6 +257,12 @@ const ERASE_COURTESY_MS = 3_000;
 /** `pim_meta` keys of the models chosen through the API: for chats, and the utility model. */
 const MODEL_KEY = "model";
 const UTILITY_MODEL_KEY = "utility_model";
+/** `pim_meta` keys of an agent's dashboard suggestions (see `Pim.#suggestions`) start with this, then its id. */
+const SUGGESTIONS_KEY = "suggestions:";
+/** What the utility model reads to suggest prompts: the latest chats, and how much of each and of memory. */
+const SUGGESTION_CHATS = 3;
+const SUGGESTION_CHAT_CHARS = 2_000;
+const SUGGESTION_MEMORY_CHARS = 3_000;
 /** `pim_meta` keys the Worker sets: the owner's profile, a suspension, the space's own limits. */
 const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
@@ -340,6 +347,8 @@ export class Pim extends DurableAgent<Env> {
 	readonly visits = new VisitStore(this.ctx.storage.sql);
 	/** The tasks agents handed each other, each in a conversation of its own (./tasks.ts); made before the agents, which make their old teams' tasks their own. */
 	readonly #tasks = new TaskStore(this.ctx.storage.sql);
+	/** Suggestions being written, by their `pim_meta` key. In memory. */
+	readonly #suggesting = new Map<string, { of: string; promise: Promise<string[]> }>();
 	/** The owner's agents: each with its own instructions, the majordomo first. */
 	readonly agents = new AgentStore(this.ctx.storage.sql, () => {
 		// The majordomo until the person names it: built on the deployment's default blueprint, or bare.
@@ -1104,15 +1113,25 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
+	 * Whether a provider's models may be the utility model: the ChatGPT plan's,
+	 * and those of a provider that answers in a JSON schema (see `answersInSchema`),
+	 * which structured jobs need. The deployment's default is the admin's choice.
+	 */
+	#utilityProvider(provider: string): boolean {
+		return provider === CHATGPT_PROVIDER || this.customProviders().some((entry) => entry.catalogId === provider && answersInSchema(entry.provider));
+	}
+
+	/**
 	 * The utility model: the one chosen through the API, or the default.
-	 * A ChatGPT model counts only while the plan is connected.
+	 * A ChatGPT model counts only while the plan is connected, and a chosen
+	 * model whose provider no longer answers in a schema is skipped.
 	 */
 	async utilityModel(): Promise<Model<Api> | undefined> {
 		const json = this.store.meta(UTILITY_MODEL_KEY);
 		if (json !== undefined) {
 			const { provider, id } = JSON.parse(json) as { provider: string; id: string };
 			const model = this.modelCatalog().getModel(provider, id);
-			if (model && (provider !== CHATGPT_PROVIDER || (await this.chatgpt.status()).connected)) return model;
+			if (model && this.#utilityProvider(provider) && (provider !== CHATGPT_PROVIDER || (await this.chatgpt.status()).connected)) return model;
 		}
 		return this.defaultUtilityModel();
 	}
@@ -1122,22 +1141,45 @@ export class Pim extends DurableAgent<Env> {
 	 * the task says. It counts against the daily model limits, but not as a run.
 	 */
 	async utility(task: UtilityTask, input: string): Promise<string> {
-		this.#assertOpen();
-		if (this.status() !== "active") throw new HttpError(403, "This space is suspended");
-		const model = await this.utilityModel();
-		if (!model) throw new HttpError(503, "This space has no utility model");
-		const answer = await this.modelCatalog().completeSimple(
-			model,
-			{ systemPrompt: task.instructions, messages: [{ role: "user", content: input, timestamp: Date.now() }] },
-			// A reasoning model thinks as little as it can; a cap on its tokens could cut off the answer.
-			{ ...(model.reasoning ? { reasoning: "minimal" } : { maxTokens: task.maxTokens }), signal: AbortSignal.timeout(60_000) },
-		);
+		const answer = await this.#askUtility(task.instructions, task.maxTokens, input);
 		const text = answer.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 		const result = task.clean ? task.clean(text) : text.trim();
 		if (answer.stopReason === "error" || result === "") {
 			throw new HttpError(502, `The utility model couldn't answer: ${answer.errorMessage ?? "it said nothing"}`);
 		}
 		return result;
+	}
+
+	/**
+	 * Runs a side job whose answer is structured: the model answers in JSON
+	 * that follows the task's schema, which its provider enforces. Only models
+	 * that can are the utility model (see `utilityModel`).
+	 */
+	async utilityStructured<T extends readonly unknown[]>(task: StructuredUtilityTask<T>, input: string): Promise<T> {
+		const answer = await this.#askUtility(task.instructions, task.maxTokens, input, (payload, model) => withJsonSchema(model.api, payload, task.schema));
+		const text = answer.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(text);
+		} catch {}
+		const result = task.result(parsed);
+		if (answer.stopReason === "error" || result.length === 0) {
+			throw new HttpError(502, `The utility model couldn't answer: ${answer.errorMessage ?? "it didn't answer in the schema"}`);
+		}
+		return result;
+	}
+
+	async #askUtility(instructions: string, maxTokens: number, input: string, onPayload?: (payload: unknown, model: Model<Api>) => unknown) {
+		this.#assertOpen();
+		if (this.status() !== "active") throw new HttpError(403, "This space is suspended");
+		const model = await this.utilityModel();
+		if (!model) throw new HttpError(503, "This space has no utility model");
+		return this.modelCatalog().completeSimple(
+			model,
+			{ systemPrompt: instructions, messages: [{ role: "user", content: input, timestamp: Date.now() }] },
+			// A reasoning model thinks as little as it can; a cap on its tokens could cut off the answer.
+			{ ...(model.reasoning ? { reasoning: "minimal" } : { maxTokens }), ...(onPayload && { onPayload }), signal: AbortSignal.timeout(60_000) },
+		);
 	}
 
 	/** A session's conversation as the utility model reads it; 409 when there is nothing in it yet. */
@@ -2764,7 +2806,6 @@ export class Pim extends DurableAgent<Env> {
 	 * brings anymore, and an artifact since deleted, are left out.
 	 */
 	async #dashboard(agent: Agent, locale: string) {
-		const blueprint = agent.blueprint === null ? undefined : this.extensions.blueprint(agent.blueprint);
 		const items = await Promise.all(
 			this.#dashboardItems(agent).map(async (item) => {
 				const artifact = this.#pinnedArtifact(item);
@@ -2781,9 +2822,65 @@ export class Pim extends DurableAgent<Env> {
 		);
 		return {
 			agent: { id: agent.id, name: agent.name, description: agent.description, majordomo: agent.majordomo, blueprint: agent.blueprint, icon: agent.icon, symbol: agent.symbol, color: agent.color },
-			starters: (blueprint?.starters ?? []).map((starter) => localize(starter, locale)),
 			widgets: items.filter((item) => item !== null),
 		};
+	}
+
+	/**
+	 * The messages an agent's dashboard offers to start a chat with. Once the
+	 * agent has had a chat, the utility model writes them from its latest chats,
+	 * what Pim remembers and what its dashboard shows, and writes them again
+	 * only when that has changed since, so an agent nobody talks to costs
+	 * nothing. Until then, and when the model can't, its blueprint's starters.
+	 */
+	async #suggestions(agent: Agent, locale: string): Promise<string[]> {
+		const blueprint = agent.blueprint === null ? undefined : this.extensions.blueprint(agent.blueprint);
+		const starters = (blueprint?.starters ?? []).map((starter) => localize(starter, locale));
+		const hidden = this.#hiddenSessions();
+		const chats = (await this.harness.sessions.list())
+			.filter((session) => !hidden.has(session.id) && this.#agentRef(session.id)?.id === agent.id)
+			.sort((a, b) => (this.store.sessionInfo(b.id)?.updatedAt ?? 0) - (this.store.sessionInfo(a.id)?.updatedAt ?? 0))
+			.slice(0, SUGGESTION_CHATS);
+		const talked = (await Promise.all(chats.map(async (chat) => conversationText(projectEntries(await this.harness.session(chat.id).messages()), SUGGESTION_CHAT_CHARS)))).filter((text) => text !== "");
+		if (talked.length === 0) return starters;
+
+		const pinned = this.#dashboardItems(agent).flatMap((item) => this.#pinnedArtifact(item)?.title ?? []);
+		const memory = this.memory.view().join("\n");
+		const input = [
+			`Assistant: ${agent.name}${agent.description === "" ? "" : `, ${agent.description}`}`,
+			`Language: ${locale}`,
+			memory === "" ? "" : `What it remembers about the person:\n${memory.length > SUGGESTION_MEMORY_CHARS ? `…${memory.slice(-SUGGESTION_MEMORY_CHARS)}` : memory}`,
+			pinned.length === 0 ? "" : `On its dashboard: ${pinned.join("; ")}`,
+			`Recent chats, latest first:\n\n${talked.join("\n\n---\n\n")}`,
+		]
+			.filter((part) => part !== "")
+			.join("\n\n");
+		const key = `${SUGGESTIONS_KEY}${agent.id}`;
+		const of = await digestHex(input);
+		const stored = this.store.meta(key);
+		const cached = stored === undefined ? undefined : (JSON.parse(stored) as { of: string; items: string[] });
+		if (cached?.of === of) return cached.items;
+
+		// Two dashboards opened together share one answer.
+		let writing = this.#suggesting.get(key);
+		if (!writing || writing.of !== of) {
+			const promise = this.utilityStructured(SUGGEST_PROMPTS, input).then((items) => {
+				this.store.setMeta(key, JSON.stringify({ of, items }));
+				return items;
+			});
+			writing = { of, promise };
+			this.#suggesting.set(key, writing);
+			void promise.then(
+				() => this.#suggesting.delete(key),
+				() => this.#suggesting.delete(key),
+			);
+		}
+		try {
+			return await writing.promise;
+		} catch (error) {
+			if (!(error instanceof HttpError)) console.warn("prompt suggestions failed", error);
+			return cached?.items ?? starters;
+		}
 	}
 
 	/**
@@ -3907,8 +4004,8 @@ export class Pim extends DurableAgent<Env> {
 				const choices = [fallback, ...platform, ...chatgptModels, ...custom];
 				const utilityDefault = this.defaultUtilityModel();
 				const utility = await this.utilityModel();
-				const utilityChoices =
-					utilityDefault && !choices.some((model) => sameModel(model, utilityDefault)) ? [utilityDefault, ...choices] : choices;
+				// Only models that can answer in a JSON schema, for the jobs that need one.
+				const utilityChoices = [...(utilityDefault ? [utilityDefault] : []), ...[...chatgptModels, ...custom].filter((model) => this.#utilityProvider(model.provider) && !(utilityDefault && sameModel(model, utilityDefault)))];
 				return {
 					model: describeModel(this.chosenModel()),
 					default: describeModel(fallback),
@@ -3952,6 +4049,9 @@ export class Pim extends DurableAgent<Env> {
 				if (fallback && provider === fallback.provider && id === fallback.id) this.store.deleteMeta(UTILITY_MODEL_KEY);
 				else {
 					const model = await this.#choice(provider, id);
+					if (!this.#utilityProvider(model.provider)) {
+						throw new HttpError(400, "That model can't be the utility model: its provider isn't known to answer in a JSON schema. For a custom endpoint, say in its settings that it does.");
+					}
 					this.store.setMeta(UTILITY_MODEL_KEY, JSON.stringify({ provider: model.provider, id: model.id }));
 				}
 				const model = await this.utilityModel();
@@ -4725,6 +4825,7 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 		["GET", "/agents/:agent/dashboard", ({ agent }, _request, url) => this.#dashboard(this.#agent(agent!), url.searchParams.get("locale") ?? "en")],
+		["GET", "/agents/:agent/suggestions", async ({ agent }, _request, url) => ({ suggestions: await this.#suggestions(this.#agent(agent!), url.searchParams.get("locale") ?? "en") })],
 		[
 			"PUT",
 			"/agents/:agent/dashboard",
@@ -4763,6 +4864,7 @@ export class Pim extends DurableAgent<Env> {
 				// Its tasks stop with it: no other agent takes them over. It leaves the contacts of the agents that had it.
 				for (const task of this.#tasks.open()) if (task.agent === id) await this.#cancelTask(task, "Its agent was deleted.");
 				this.agents.delete(id!);
+				this.store.deleteMeta(`${SUGGESTIONS_KEY}${id}`);
 				this.store.clearAudience(agentAudience(id!));
 				return { deleted: true };
 			},

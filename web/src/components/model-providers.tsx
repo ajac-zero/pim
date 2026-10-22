@@ -216,6 +216,9 @@ function ProviderForm({
   const [removeKey, setRemoveKey] = useState(false);
   const [models, setModels] = useState(provider?.chosen?.join(", ") ?? "");
   const [shared, setShared] = useState(false);
+  const [structured, setStructured] = useState(
+    provider?.structuredOutput ?? false,
+  );
   const [kind, setKind] = useState(
     provider?.builtin ?? (provider ? "custom" : "anthropic"),
   );
@@ -247,6 +250,7 @@ function ProviderForm({
                 .split(",")
                 .map((id) => id.trim())
                 .filter(Boolean),
+              structuredOutput: structured,
             }),
         ...(key.trim() ? { key: key.trim() } : removeKey ? { key: "" } : {}),
       };
@@ -461,6 +465,17 @@ function ProviderForm({
           <span className="block text-muted-foreground text-xs">
             {t("providerModelsHint")}
           </span>
+        </label>
+      )}
+      {!builtin && (
+        <label className="flex items-center justify-between gap-3 text-sm">
+          <span>
+            {t("providerStructured")}
+            <span className="block text-muted-foreground text-xs">
+              {t("providerStructuredHint")}
+            </span>
+          </span>
+          <Switch checked={structured} onCheckedChange={setStructured} />
         </label>
       )}
       {admin && !provider && (

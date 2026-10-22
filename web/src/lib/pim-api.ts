@@ -272,8 +272,6 @@ export type Dashboard = {
     | "symbol"
     | "color"
   >;
-  /** Messages to start a chat with. */
-  starters: string[];
   /** What it shows, in order: widgets, and artifacts pinned to it. */
   widgets: (Widget | PinnedArtifact)[];
 };
@@ -943,6 +941,8 @@ export type ModelProvider = {
   models: ProviderModelInfo[];
   /** The admin's, for everyone on this Pim. */
   shared: boolean;
+  /** A custom endpoint's models answer in a JSON schema, which lets them be the utility model. */
+  structuredOutput?: boolean;
 };
 
 /** A provider as adding or changing it answers. */
@@ -955,6 +955,7 @@ export type ProviderInput = {
   url?: string;
   key?: string;
   models?: string[] | null;
+  structuredOutput?: boolean;
 };
 
 export type BuiltinProvider = {
@@ -1150,6 +1151,14 @@ export const pim = {
     call<Dashboard>(
       `/agents/${id}/dashboard?locale=${encodeURIComponent(locale)}`,
     ),
+  /**
+   * Messages to start a chat with the agent, written by the utility model from
+   * its latest chats once it has had one. They can take a few seconds.
+   */
+  suggestions: (id: string, locale: string) =>
+    call<{ suggestions: string[] }>(
+      `/agents/${id}/suggestions?locale=${encodeURIComponent(locale)}`,
+    ).then((answer) => answer.suggestions),
   /**
    * Sets what an agent's dashboard shows, in order, by the ids it gives them,
    * and the size of artifacts' widgets in `sizes`, by id; the others keep theirs.

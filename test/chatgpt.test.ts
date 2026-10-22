@@ -308,9 +308,9 @@ describe("Sign in with ChatGPT", () => {
 
 	it("runs side jobs, such as naming chats, on a ChatGPT model when the person chooses one as the utility model", async () => {
 		const { body: model } = await api("/model");
-		// The deployment's utility model comes first, then every model Pim may use.
+		// The deployment's utility model comes first, then the models that can answer in a JSON schema.
 		expect(model.utility.model).toMatchObject({ provider: "utility", id: "utility-model" });
-		expect(model.utility.choices.map((choice: { id: string }) => choice.id)).toEqual(["utility-model", "faux-model", "gpt-6.1-sol"]);
+		expect(model.utility.choices.map((choice: { id: string }) => choice.id)).toEqual(["utility-model", "gpt-6.1-sol"]);
 		const chosen = await api("/model/utility", { method: "PUT", body: JSON.stringify({ provider: "openai", id: "gpt-6.1-sol" }) });
 		expect(chosen.body).toMatchObject({ model: { provider: "openai", id: "gpt-6.1-sol" } });
 		expect((await api("/model")).body.model.id).toBe("gpt-6.1-sol");

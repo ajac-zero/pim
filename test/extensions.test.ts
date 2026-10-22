@@ -7,7 +7,7 @@ import { themes as ownThemes } from "../src/extensions/themes";
 import { nord } from "../src/extensions/themes/nord";
 import { PimThemes, type Theme, type ThemeList } from "../src/themes";
 import { api, apiUrl, lastUserText, pendingApproval, post, ROOT, say, scripts, settled, systemPrompt, TOKEN, toolUse } from "./helpers";
-import { faux, ledger, outbox } from "./worker";
+import { faux, ledger, outbox, utility } from "./worker";
 
 type Agent = { id: string; name: string; blueprint: string | null; majordomo: boolean };
 
@@ -15,6 +15,7 @@ type Agent = { id: string; name: string; blueprint: string | null; majordomo: bo
 const ask = async (content: string, session: string) => (await say(content, session)) as unknown as { replies: string[] };
 
 const dashboard = async (agent: Agent, locale = "en") => (await api(`/agents/${agent.id}/dashboard?locale=${locale}`)).body;
+const suggestions = async (agent: Agent, locale = "en") => (await api(`/agents/${agent.id}/suggestions?locale=${locale}`)).body.suggestions as string[];
 const widget = (board: { widgets: { id: string }[] }, id: string) => board.widgets.find((candidate) => candidate.id === id) as any;
 type Request = { messages: Message[] };
 
@@ -135,7 +136,8 @@ describe("extensions", () => {
 
 		const board = await dashboard(coach);
 		expect(board.agent).toMatchObject({ id: coach.id, name: "Run coach", majordomo: false });
-		expect(board.starters).toEqual(["What can you do for me?", "Help me plan my week", "Start tracking a goal with me"]);
+		// The blueprint's starters, while the utility model has nothing to suggest.
+		expect(await suggestions(coach)).toEqual(["What can you do for me?", "Help me plan my week", "Start tracking a goal with me"]);
 		expect(board.widgets.map((shown: { id: string }) => shown.id)).toEqual(builtIn);
 		const [scheduled] = widget(board, "pim.schedule/upcoming").items;
 		expect(scheduled).toMatchObject({ title: "Long run check-in", link: { chat } });
@@ -164,20 +166,71 @@ describe("extensions", () => {
 		// In the person's language, where the extension translated it.
 		const spanish = await dashboard(mine, "es");
 		expect(widget(spanish, "pim.goals/active").title).toBe("Metas");
-		expect(spanish.starters[0]).toBe("¿Qué puedes hacer por mí?");
+		expect((await suggestions(mine, "es"))[0]).toBe("¿Qué puedes hacer por mí?");
+	});
+
+	it("suggests what to say to an agent from its latest chats and memory, writing them again only when that changes", async () => {
+		const coach = (await post("/agents", { name: "Run coach", description: "Trains people for races." })).body as Agent;
+		const other = (await post("/agents", { name: "Chef" })).body as Agent;
+		// An agent nobody has talked to costs nothing: no model is asked.
+		expect(await suggestions(coach)).toEqual(["What can you do for me?", "Help me plan my week", "Start tracking a goal with me"]);
+
+		await post("/memory/log", { text: "Training for the Lisbon half marathon in March" });
+		const chat = (await post("/sessions", { agent: coach.id })).body.id;
+		faux.setResponses([toolUse("send_to_user", { message: "Long run on Sunday?" })]);
+		await say("Plan my week of training", chat);
+		const otherChat = (await post("/sessions", { agent: other.id })).body.id;
+		faux.setResponses([toolUse("send_to_user", { message: "Pasta tonight." })]);
+		await say("What should I cook?", otherChat);
+
+		const inputs: string[] = [];
+		const write =
+			(...messages: string[]) =>
+			(request: { messages: Message[] }) => {
+				inputs.push(JSON.stringify(request.messages.at(-1)?.content));
+				return fauxAssistantMessage(JSON.stringify({ messages }));
+			};
+		// What a small model still gets wrong is dropped: repeats, blanks, and what runs past four.
+		utility.setResponses([write("Plan my long run", " Plan my long run ", "", "How was my pace?", "Add a rest day", "Should I taper?", "One more")]);
+		const written = ["Plan my long run", "How was my pace?", "Add a rest day", "Should I taper?"];
+		expect(await suggestions(coach, "es")).toEqual(written);
+		// It read this agent's chat and what Pim remembers, not another agent's chat.
+		expect(inputs[0]).toContain("Run coach, Trains people for races.");
+		expect(inputs[0]).toContain("Language: es");
+		expect(inputs[0]).toContain("Lisbon half marathon");
+		expect(inputs[0]).toContain("Long run on Sunday?");
+		expect(inputs[0]).not.toContain("Pasta tonight");
+
+		// Nothing has changed, so nobody asks the model again, and another agent's chat is no change.
+		expect(await suggestions(coach, "es")).toEqual(written);
+		faux.setResponses([toolUse("send_to_user", { message: "More pasta." })]);
+		await say("And tomorrow?", otherChat);
+		expect(await suggestions(coach, "es")).toEqual(written);
+		expect(utility.getPendingResponseCount()).toBe(0);
+
+		// More said in its chat, and they are written again; if the model then fails, the last ones stay.
+		faux.setResponses([toolUse("send_to_user", { message: "Rest on Monday." })]);
+		await say("I ran 15 km", chat);
+		utility.setResponses([write("Plan my recovery week")]);
+		expect(await suggestions(coach, "es")).toEqual(["Plan my recovery week"]);
+		expect(inputs[1]).toContain("Rest on Monday.");
+		faux.setResponses([toolUse("send_to_user", { message: "Good." })]);
+		await say("Thanks", chat);
+		expect(await suggestions(coach, "es")).toEqual(["Plan my recovery week"]);
 	});
 
 	it("draws a deployment extension's dashboard, and one widget failing leaves the rest", async () => {
 		const books = (await post("/agents", { name: "Household", blueprint: "test.ledger/budget" })).body as Agent;
 		const board = await dashboard(books, "es");
-		expect(board.starters).toEqual(["¿Cuánto gasté?"]);
+		expect(await suggestions(books, "es")).toEqual(["¿Cuánto gasté?"]);
 		expect(board.widgets).toEqual([
 			{ id: "test.ledger/bills", title: "Próximas facturas", empty: "No bills.", kind: "list", items: [] },
 			{ id: "test.ledger/broken", title: "Bank balance", empty: "", failed: true },
 			{ id: "pim.goals/active", title: "Metas", empty: expect.any(String), kind: "progress", items: [] },
 		]);
 		const bare = (await post("/agents", { name: "Blank", blueprint: null })).body as Agent;
-		expect(await dashboard(bare)).toMatchObject({ starters: [], widgets: [] });
+		expect(await dashboard(bare)).toMatchObject({ widgets: [] });
+		expect(await suggestions(bare)).toEqual([]);
 
 		// Published and made someone's own, an agent keeps what it builds on; so does an agent from nothing.
 		for (const [agent, blueprint] of [

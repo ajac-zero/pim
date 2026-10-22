@@ -524,7 +524,7 @@ const translations = {
     moreModels: "More models",
     utilityModel: "Utility model",
     utilityModelHint:
-      "A quick model for small jobs: naming chats, improving prompts and summarizing chats.",
+      "A quick model for small jobs: naming chats, improving prompts, summarizing chats and suggesting messages. Only models that can answer in a JSON schema are offered.",
     utilityModelChanged: "{model} is now your utility model",
     noUtilityModel: "None",
     regenerate: "Regenerate",
@@ -562,6 +562,9 @@ const translations = {
     providerModelsHint:
       "Separate them with commas. Leave empty to offer every model it lists.",
     providerModelsAll: "Every model it lists",
+    providerStructured: "Supports structured outputs",
+    providerStructuredHint:
+      "Its models follow a JSON schema (response_format). Only then can they be the utility model; if it doesn't, side jobs will fail.",
     providerForEveryone: "Everyone on this Pim can use it",
     providerShared: "For everyone",
     providerSaved: "Saved {name}.",
@@ -1513,7 +1516,7 @@ const translations = {
     moreModels: "Más modelos",
     utilityModel: "Modelo de utilidades",
     utilityModelHint:
-      "Un modelo rápido para tareas pequeñas: nombrar chats, mejorar mensajes y resumir chats.",
+      "Un modelo rápido para tareas pequeñas: nombrar chats, mejorar mensajes, resumir chats y sugerir mensajes. Solo se ofrecen modelos que pueden responder con un esquema JSON.",
     utilityModelChanged: "{model} es ahora tu modelo de utilidades",
     noUtilityModel: "Ninguno",
     regenerate: "Regenerar",
@@ -1551,6 +1554,9 @@ const translations = {
     providerModelsHint:
       "Sepáralos con comas. Déjalo vacío para ofrecer todos los modelos que lista.",
     providerModelsAll: "Todos los modelos que lista",
+    providerStructured: "Admite salidas estructuradas",
+    providerStructuredHint:
+      "Sus modelos siguen un esquema JSON (response_format). Solo entonces pueden ser el modelo de utilidades; si no lo hace, las tareas auxiliares fallarán.",
     providerForEveryone: "Todos en este Pim pueden usarlo",
     providerShared: "Para todos",
     providerSaved: "{name} guardado.",

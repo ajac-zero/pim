@@ -231,3 +231,10 @@ html[data-resizing] iframe {
     color: var(--foreground);
   }
 }
+
+/* Lets a chat title's left fade grow smoothly as it slides. */
+@property --fade-left {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}

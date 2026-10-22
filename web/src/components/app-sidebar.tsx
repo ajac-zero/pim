@@ -940,14 +940,23 @@ export function AwaitingApprovalMark({ className }: { className?: string }) {
   );
 }
 
-/** Measures how far a row's title overflows once its options button takes room, for it to slide by. */
+/**
+ * Measures how far a row's title overflows once its options button takes room,
+ * for it to slide by, at a readable pace and clear of the fade at the edge.
+ */
 function scrollTitleIntoView(event: { currentTarget: HTMLElement }) {
   const box = event.currentTarget.querySelector<HTMLElement>("[data-title]");
   if (!box?.firstElementChild) return;
   const overflow =
     (box.firstElementChild as HTMLElement).offsetWidth - box.clientWidth;
-  box.style.setProperty("--title-shift", `${-Math.max(0, overflow)}px`);
+  const shift = overflow > 0 ? overflow + TITLE_FADE : 0;
+  box.style.setProperty("--title-shift", `${-shift}px`);
+  box.style.setProperty("--title-duration", `${shift / TITLE_SPEED}s`);
 }
+
+/** Pixels of the title that fade out at its edges, and how many it slides per second. */
+const TITLE_FADE = 16;
+const TITLE_SPEED = 40;
 
 function SessionRow({
   session,
@@ -1061,7 +1070,7 @@ function SessionRow({
         <span className="min-w-0 flex-1">
           {/* A long title fills the row and is cut off with an ellipsis. While the row shows its options button, it slides to reveal its end. */}
           <span
-            className="block truncate group-focus-within/row:text-clip group-hover/row:text-clip"
+            className="block truncate transition-[--fade-left] duration-300 group-focus-within/row:text-clip group-focus-within/row:[--fade-left:1rem] group-focus-within/row:[mask-image:linear-gradient(to_right,transparent,#000_var(--fade-left),#000_calc(100%-1rem),transparent)] group-hover/row:text-clip group-hover/row:[--fade-left:1rem] group-hover/row:[mask-image:linear-gradient(to_right,transparent,#000_var(--fade-left),#000_calc(100%-1rem),transparent)]"
             data-title
           >
             <span
@@ -1105,7 +1114,7 @@ function SessionRow({
           <button
             type="button"
             className={cn(
-              "-translate-y-1/2 absolute top-1/2 right-1.5 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-foreground focus:opacity-100 group-hover/row:opacity-100 pointer-coarse:opacity-100",
+              "-translate-y-1/2 absolute top-1/2 right-1.5 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-foreground focus:opacity-100 group-focus-within/row:opacity-100 group-hover/row:opacity-100 pointer-coarse:opacity-100",
               active && "opacity-100",
             )}
             aria-label={t("chatOptions")}

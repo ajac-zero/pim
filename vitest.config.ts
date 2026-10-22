@@ -14,7 +14,7 @@ export default defineConfig({
 			// Open registration, so tests add people without invites unless they mean to.
 			// Approvals as they were before majordomos, so only the tests about them script a majordomo's review.
 			// The secrets of the test extension's bank app, and the client registered for its Forge app.
-			// The OAuth clients of the test Google apps, and the key that encrypts apps' credentials.
+			// The OAuth clients of the test Google apps and of Drive, Drive's Picker's key and project, and the key that encrypts apps' credentials.
 			// A content origin, so public artifact links are on.
 			// Traces with their content, so the tests check what an operator who opts in would see.
 			// Computers Pim starts as Fly.io Sprites, whose API the tests stand in for.
@@ -36,6 +36,10 @@ export default defineConfig({
 					TEST_GMAIL_CLIENT_SECRET: "gmail-secret",
 					TEST_DRIVE_CLIENT_ID: "drive-client",
 					TEST_DRIVE_CLIENT_SECRET: "drive-secret",
+					GOOGLE_DRIVE_CLIENT_ID: "real-drive-client",
+					GOOGLE_DRIVE_CLIENT_SECRET: "real-drive-secret",
+					GOOGLE_DRIVE_API_KEY: "picker-key",
+					GOOGLE_DRIVE_APP_ID: "123456789012",
 					APP_CREDENTIALS_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
 					OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "true",
 					SPRITES_TOKEN: "sprites-test-token",

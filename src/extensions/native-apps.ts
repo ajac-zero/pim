@@ -247,7 +247,7 @@ export class NativeApps {
 		try {
 			current = await this.#fresh(id, app, row);
 		} catch (error) {
-			if (error instanceof ReconnectRequired) return this.#reconnect(id, app, error);
+			if (error instanceof ReconnectRequired) return this.#reconnect(row, app, error);
 			return { content: [{ type: "text", text: `${app.name} couldn't renew its sign-in just now (${message(error)}). Try again in a moment.` }], isError: true };
 		}
 		const context: AppToolContext = {
@@ -264,7 +264,7 @@ export class NativeApps {
 				...(result.widget ? { widget: result.widget } : {}),
 			};
 		} catch (error) {
-			if (error instanceof ReconnectRequired) return this.#reconnect(id, app, error);
+			if (error instanceof ReconnectRequired) return this.#reconnect(row, app, error);
 			return { content: [{ type: "text", text: message(error) }], isError: true };
 		}
 	}
@@ -285,7 +285,7 @@ export class NativeApps {
 		try {
 			current = await this.#fresh(id, app, row);
 		} catch (error) {
-			if (error instanceof ReconnectRequired) this.#reconnect(id, app, error);
+			if (error instanceof ReconnectRequired) this.#reconnect(row, app, error);
 			throw error;
 		}
 		try {
@@ -296,7 +296,7 @@ export class NativeApps {
 				update: (change) => this.#update(id, app, change),
 			});
 		} catch (error) {
-			if (error instanceof ReconnectRequired) this.#reconnect(id, app, error);
+			if (error instanceof ReconnectRequired) this.#reconnect(row, app, error);
 			throw error;
 		}
 	}
@@ -357,11 +357,24 @@ export class NativeApps {
 			.finally(() => clearTimeout(timer));
 	}
 
-	/** The grant is gone: the connection fails, without its credential, until the person connects it again. */
-	#reconnect(id: string, app: NativeAppDefinition, error: ReconnectRequired): McpCallResult {
-		this.#fail(id, `Sign in again: ${error.message}`);
-		this.#refreshing.delete(id);
-		this.#host.changed();
+	/**
+	 * The grant is gone: the connection `row` was, fails, without its
+	 * credential, until the person connects it again. One they removed and
+	 * made again while the call ran (which the removal's revocation can make
+	 * Google refuse) is a new connection, and is left alone.
+	 */
+	#reconnect(row: Row, app: NativeAppDefinition, error: ReconnectRequired): McpCallResult {
+		const id = String(row.id);
+		const failed = this.#host.sql.exec(
+			"UPDATE pim_app_connections SET state = 'failed', error = ?, credential = NULL, sign_in_state = NULL, pending = NULL, auth_url = NULL WHERE id = ? AND created_at = ? AND state = 'ready'",
+			`Sign in again: ${error.message}`,
+			id,
+			row.created_at,
+		).rowsWritten;
+		if (failed > 0) {
+			this.#refreshing.delete(id);
+			this.#host.changed();
+		}
 		return { content: [{ type: "text", text: `${app.name} needs the person to connect it again from the Apps page.` }], isError: true };
 	}
 

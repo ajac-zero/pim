@@ -1,61 +1,50 @@
-import { useSyncExternalStore } from "react";
 import type { Session } from "~/lib/pim-api";
 
-export type ChatView = "agents" | "inbox" | "majordomo";
-export type InboxOrder = "recent" | "unread";
-
-const STORAGE_KEY = "pim-chat-list";
-const DEFAULT = { view: "agents", order: "recent" } as const;
-
-/** The same choice in the desktop sidebar and mobile chats panel, kept in this browser. */
-export function useChatListPreferences() {
-  const stored = useSyncExternalStore(
-    (listener) => {
-      window.addEventListener("storage", listener);
-      return () => window.removeEventListener("storage", listener);
-    },
-    () => localStorage.getItem(STORAGE_KEY),
-    () => null,
-  );
-  let view: ChatView = DEFAULT.view;
-  let order: InboxOrder = DEFAULT.order;
-  try {
-    const saved = JSON.parse(stored ?? "null");
-    if (saved?.view === "inbox" || saved?.view === "majordomo")
-      view = saved.view;
-    if (saved?.order === "unread") order = saved.order;
-  } catch {
-    // A preference from an older browser session can be discarded.
-  }
-  const set = (next: { view?: ChatView; order?: InboxOrder }) => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ view, order, ...next }));
-    window.dispatchEvent(new Event("storage"));
-  };
-  return { view, order, set };
-}
-
-/** Flat conversation lists: the inbox includes visits; the majordomo view includes only its chats. */
+/** Chats matching a search, most recently active first; one never used goes last. */
 export function flatChats(
   sessions: readonly Session[],
-  majordomo: string | undefined,
-  view: "inbox" | "majordomo",
-  order: InboxOrder,
   search: string,
   untitled: string,
 ) {
   const query = search.toLowerCase();
   return sessions
-    .filter(
-      (session) =>
-        (view === "inbox" ||
-          (!session.visit &&
-            (session.agent ? session.agent.id === majordomo : !!majordomo))) &&
-        (session.title ?? untitled).toLowerCase().includes(query),
+    .filter((session) =>
+      (session.title ?? untitled).toLowerCase().includes(query),
     )
-    .sort(
-      (a, b) =>
-        (view === "inbox" && order === "unread"
-          ? Number(b.unread) - Number(a.unread)
-          : 0) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0),
-    );
+    .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+}
+
+export type ChatAge = "today" | "yesterday" | "lastWeek" | "last14Days";
+
+/**
+ * Which divider a chat sits under, by calendar days in the browser's time
+ * zone: today, yesterday, the week before that, then the rest of the 14 days
+ * before it is archived. A chat never used counts as today.
+ */
+export function chatAge(updatedAt: number | null, now = Date.now()): ChatAge {
+  const day = (daysAgo: number) => {
+    const date = new Date(now);
+    return new Date(
+      date.getFullYear(),
+      date.getMonth(),
+      date.getDate() - daysAgo,
+    ).getTime();
+  };
+  const at = updatedAt ?? now;
+  if (at >= day(0)) return "today";
+  if (at >= day(1)) return "yesterday";
+  if (at >= day(7)) return "lastWeek";
+  return "last14Days";
+}
+
+/** Consecutive chats under the same age divider, in the order given. */
+export function groupByAge(sessions: readonly Session[], now = Date.now()) {
+  const groups: { age: ChatAge; sessions: Session[] }[] = [];
+  for (const session of sessions) {
+    const age = chatAge(session.updatedAt, now);
+    const last = groups.at(-1);
+    if (last?.age === age) last.sessions.push(session);
+    else groups.push({ age, sessions: [session] });
+  }
+  return groups;
 }

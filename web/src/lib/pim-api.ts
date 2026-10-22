@@ -14,7 +14,7 @@ export type Session = {
   updatedAt: number | null;
   responseAt: number | null;
   unread: boolean;
-  /** Two days without activity, and nothing unread or running: listed apart until it is active again. */
+  /** Two weeks without activity, and nothing unread or running: listed apart until it is active again. */
   archived?: boolean;
   /** A conversation with someone else's space, shared with you; null for your own chats. */
   visit?: { username: string; available: boolean } | null;

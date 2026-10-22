@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { flatChats } from "~/lib/chat-list";
+import { chatAge, flatChats } from "~/lib/chat-list";
 import type { Session } from "~/lib/pim-api";
 
 const chat = (
@@ -33,76 +33,39 @@ const sessions = [
 ];
 const ids = (list: Session[]) => list.map((session) => session.id);
 
-describe("flat conversation views", () => {
-  it("orders the inbox by activity, or puts unread replies first and orders each group by activity", () => {
-    expect(
-      ids(flatChats(sessions, "majordomo", "inbox", "recent", "", "New chat")),
-    ).toEqual([
+describe("flatChats", () => {
+  it("lists every chat, visits included, by activity with unused ones last", () => {
+    expect(ids(flatChats(sessions, "", "New chat"))).toEqual([
       "newest read",
       "shared space",
       "newer unread",
       "legacy default",
       "older unread",
-      "never used",
-    ]);
-    expect(
-      ids(flatChats(sessions, "majordomo", "inbox", "unread", "", "New chat")),
-    ).toEqual([
-      "newer unread",
-      "older unread",
-      "newest read",
-      "shared space",
-      "legacy default",
       "never used",
     ]);
     expect(sessions[0]?.id).toBe("older unread");
   });
 
-  it("shows only the majordomo's chats, in activity order regardless of the inbox's sort", () => {
+  it("searches titles case-insensitively, including unnamed chats", () => {
+    expect(ids(flatChats(sessions, "UNREAD", "New chat"))).toEqual([
+      "newer unread",
+      "older unread",
+    ]);
     expect(
-      ids(
-        flatChats(sessions, "majordomo", "majordomo", "unread", "", "New chat"),
-      ),
-    ).toEqual(["newest read", "newer unread", "legacy default", "never used"]);
-    expect(
-      flatChats(sessions, undefined, "majordomo", "recent", "", "New chat"),
-    ).toEqual([]);
-  });
-
-  it("searches only the selected view, case-insensitively, including unnamed chats", () => {
-    expect(
-      ids(
-        flatChats(
-          sessions,
-          "majordomo",
-          "inbox",
-          "recent",
-          "UNREAD",
-          "New chat",
-        ),
-      ),
-    ).toEqual(["newer unread", "older unread"]);
-    expect(
-      flatChats(
-        sessions,
-        "majordomo",
-        "majordomo",
-        "recent",
-        "shared",
-        "New chat",
-      ),
-    ).toEqual([]);
-    expect(
-      ids(
-        flatChats(
-          [chat("untitled", 5, { title: null })],
-          "majordomo",
-          "majordomo",
-          "recent",
-          "New",
-          "New chat",
-        ),
-      ),
+      ids(flatChats([chat("untitled", 5, { title: null })], "New", "New chat")),
     ).toEqual(["untitled"]);
+  });
+});
+
+describe("chatAge", () => {
+  const now = new Date(2026, 9, 22, 0, 30).getTime();
+  const at = (day: number, hour = 12) => new Date(2026, 9, day, hour).getTime();
+  it("divides by calendar day, not by hours elapsed", () => {
+    expect(chatAge(at(22, 0), now)).toBe("today");
+    expect(chatAge(at(21, 23), now)).toBe("yesterday");
+    expect(chatAge(at(20), now)).toBe("lastWeek");
+    expect(chatAge(at(15, 0), now)).toBe("lastWeek");
+    expect(chatAge(at(14, 23), now)).toBe("last14Days");
+    expect(chatAge(null, now)).toBe("today");
   });
 });

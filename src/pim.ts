@@ -217,7 +217,7 @@ const MEMORY_TOOL = "memory";
 /** How long a guest's request waits for the owner before it is denied. */
 const GUEST_APPROVAL_MS = 24 * 60 * 60 * 1000;
 /** How long a chat goes without activity before it is archived: listed apart, not deleted. */
-const ARCHIVE_AFTER_MS = 2 * 24 * 60 * 60 * 1000;
+const ARCHIVE_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
 
 /** A circle's name as given: trimmed, not empty, not long. */
 function circleName(name: unknown): string {

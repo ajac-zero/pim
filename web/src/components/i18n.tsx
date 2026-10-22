@@ -90,8 +90,6 @@ const translations = {
     basedOnNothingOption: "None: only its own instructions",
     basedOnHint:
       "Its habits, the tools it gets beyond Pim's own, and its dashboard. Your instructions go on top.",
-    showChatsOf: "Show {name}'s chats",
-    hideChatsOf: "Hide {name}'s chats",
     noDashboard:
       "Nothing here yet. Ask {name} to put something on this page, like a chart of your spending or today's headlines.",
     dashboardRemove: "Remove {title} from this page",
@@ -173,8 +171,6 @@ const translations = {
     visitEmptyHint:
       "It answers for {username}, with what they share with you. Anything they want to approve goes to them first.",
     messageVisit: "Message {username}'s space…",
-    visitPim: "{username}'s space",
-    visitUnavailable: "No longer shared",
     visitBanner:
       "You're messaging {username}'s space. It acts for {username}, within what they allow you. Your messages use your own usage.",
     connectedApps: "Apps",
@@ -318,17 +314,15 @@ const translations = {
     more: "More",
     resizeSidebar: "Resize the sidebar",
     resizeCanvas: "Resize the side panel",
-    chatView: "Conversation view",
-    agentsView: "Agents",
-    inboxView: "Inbox",
-    majordomoView: "Majordomo",
-    sortChats: "Sort conversations",
-    unreadFirst: "Unread first",
     unreadResponse: "Unread response",
     newChat: "New chat",
     noChatsMatch: "No chats match your search.",
     noChatsYet: "No chats yet.",
     noRecentChats: "No recent chats.",
+    today: "Today",
+    yesterday: "Yesterday",
+    lastWeek: "Last week",
+    last14Days: "Last 14 days",
     archived: "Archived",
     contacts: "Contacts",
     contactsHint:
@@ -1077,8 +1071,6 @@ const translations = {
     basedOnNothingOption: "Ninguno: solo sus propias instrucciones",
     basedOnHint:
       "Sus hábitos, las herramientas que recibe además de las de Pim, y su panel. Tus instrucciones van encima.",
-    showChatsOf: "Mostrar los chats de {name}",
-    hideChatsOf: "Ocultar los chats de {name}",
     noDashboard:
       "Aún no hay nada aquí. Pídele a {name} que ponga algo en esta página, como un gráfico de tus gastos o los titulares de hoy.",
     dashboardRemove: "Quitar {title} de esta página",
@@ -1160,8 +1152,6 @@ const translations = {
     visitEmptyHint:
       "Responde por {username}, con lo que te comparte. Lo que quiera aprobar le llega primero.",
     messageVisit: "Escribe al espacio de {username}…",
-    visitPim: "Espacio de {username}",
-    visitUnavailable: "Ya no se comparte",
     visitBanner:
       "Estás escribiendo al espacio de {username}. Actúa para {username}, dentro de lo que te permite. Tus mensajes usan tu propio uso.",
     connectedApps: "Apps",
@@ -1306,17 +1296,15 @@ const translations = {
     more: "Más",
     resizeSidebar: "Cambiar el ancho de la barra lateral",
     resizeCanvas: "Cambiar el ancho del panel lateral",
-    chatView: "Vista de conversaciones",
-    agentsView: "Agentes",
-    inboxView: "Bandeja de entrada",
-    majordomoView: "Mayordomo",
-    sortChats: "Ordenar conversaciones",
-    unreadFirst: "No leídas primero",
     unreadResponse: "Respuesta no leída",
     newChat: "Nuevo chat",
     noChatsMatch: "Ningún chat coincide con la búsqueda.",
     noChatsYet: "Aún no hay chats.",
     noRecentChats: "No hay chats recientes.",
+    today: "Hoy",
+    yesterday: "Ayer",
+    lastWeek: "La semana pasada",
+    last14Days: "Últimos 14 días",
     archived: "Archivados",
     contacts: "Contactos",
     contactsHint:

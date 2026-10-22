@@ -55,19 +55,21 @@ export function ProvidersSection({
         className="divide-y overflow-hidden rounded-2xl border bg-muted/20"
         aria-label={t("providers")}
       >
-        <li>
-          <Row
-            icon={
-              <ModelProviderLogo provider="cloudflare" className="size-6" />
-            }
-            title={t("workersAI")}
-            actions={
-              <span className="text-muted-foreground text-sm">
-                {t("providerOn")}
-              </span>
-            }
-          />
-        </li>
+        {settings.workersAi && (
+          <li>
+            <Row
+              icon={
+                <ModelProviderLogo provider="cloudflare" className="size-6" />
+              }
+              title={t("workersAI")}
+              actions={
+                <span className="text-muted-foreground text-sm">
+                  {t("providerOn")}
+                </span>
+              }
+            />
+          </li>
+        )}
         <li>
           <ChatGPTProvider settings={settings} />
         </li>

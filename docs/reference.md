@@ -448,6 +448,8 @@ Pim also runs on any server that speaks OpenAI's `/chat/completions`: a model on
 
 A Pim on Cloudflare can only reach providers on the public internet; one running on your own machine reaches `localhost` too. Pim says everything with tool calls, so a model needs dependable tool calling and a large context: llama.cpp needs `--jinja` and a `-c` well above the 8k tokens of memory every prompt carries, and LM Studio a context length well above its default. Image generation stays on Workers AI.
 
+Workers AI is optional. A deployment without the `AI` binding (delete `ai` from `wrangler.jsonc`) has no platform model: the first model of the first provider, the admin's and then the person's own, is the default until someone chooses another, and until a provider is added, chats answer that no model is set up. Without it, `PIM_MODELS`, `PIM_IMAGE_MODEL` and `PIM_UTILITY_MODEL` do nothing, chat naming and similar side jobs use a provider's model that answers in a JSON schema when someone picks one, long-term memory is not compressed, and `generate_image` is not offered.
+
 ## Utility model
 
 Small jobs around a conversation go to one utility model rather than the chat's model: a fast, cheap one by default (`PIM_UTILITY_MODEL`), or a model on your ChatGPT plan, a built-in service that answers in a JSON schema, or a custom endpoint you said supports structured outputs (Settings → Model → Utility model). A chosen model whose provider stops qualifying, such as an endpoint with the switch turned off, is skipped for the default until it does again. Its requests count against the daily model limits, but not as runs. Today it:

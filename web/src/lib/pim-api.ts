@@ -934,6 +934,8 @@ export type ModelSettings = {
   /** The deployment's own model, used when nothing else is chosen. */
   default: ModelInfo;
   choices: ModelInfo[];
+  /** Whether this Pim has Workers AI; without it, models come only from providers. */
+  workersAi: boolean;
   /** The utility model, for side jobs: naming chats, improving prompts, summarizing. Null when there is none. */
   utility: {
     model: ModelInfo | null;

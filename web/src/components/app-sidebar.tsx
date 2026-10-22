@@ -418,7 +418,7 @@ function ChatsPanel({
     visit.username.toLowerCase().includes(search.toLowerCase()),
   );
 
-  // A section for each of your agents, the majordomo first, holding the chats with it.
+  // A section for each of your agents, holding the chats with it.
   const sections = useMemo((): AgentSection[] => {
     const all = (agents ?? []).map((agent) => ({
       agent,
@@ -435,7 +435,14 @@ function ChatsPanel({
       if (session.archived) section.archived = true;
       else section.list.push(session);
     }
-    return all;
+    // Agents with the most recently active open chats come first; those with none go last.
+    const latest = (section: AgentSection) =>
+      Math.max(...section.list.map((session) => session.updatedAt ?? 0));
+    return all.sort(
+      (a, b) =>
+        Number(b.list.length > 0) - Number(a.list.length > 0) ||
+        (a.list.length > 0 ? latest(b) - latest(a) : 0),
+    );
   }, [agents, sessions]);
   const shownSections = useMemo(
     () =>
@@ -762,7 +769,9 @@ function AgentSectionList({
   onNavigate?: () => void;
 }) {
   const { t } = useI18n();
-  const [open, setOpen] = useState(true);
+  // Until toggled, an agent with no open chats is folded away.
+  const [toggled, setOpen] = useState<boolean>();
+  const open = toggled ?? list.length > 0;
   return (
     <section className="mb-3" aria-label={agent.name}>
       <button

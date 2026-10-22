@@ -176,11 +176,6 @@ export function AgentSettingsPage({ agent }: { agent: Agent }) {
         <div className="min-w-0 flex-1">
           <h1 className="flex items-center gap-2 font-semibold text-xl">
             <span className="truncate">{agent.name}</span>
-            {agent.majordomo && (
-              <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-normal text-primary text-xs">
-                {t("majordomoBadge")}
-              </span>
-            )}
           </h1>
           <p className="mt-1 flex flex-wrap gap-x-3 text-muted-foreground text-xs">
             <BuildsOn blueprint={agent.blueprint} />

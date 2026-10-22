@@ -43,6 +43,7 @@ import {
 } from "~/components/ui/tooltip";
 import { baseName, parentOf } from "~/lib/files";
 import {
+  type Agent,
   ApiError,
   FILES_ROOT,
   type FileEntry,
@@ -608,6 +609,33 @@ function FileRow({
   );
 }
 
+function AgentRow({
+  agent,
+  onNavigate,
+  large = false,
+}: {
+  agent: Agent;
+  onNavigate?: () => void;
+  large?: boolean;
+}) {
+  return (
+    <Link
+      to="/agents/$agentId/settings"
+      params={{ agentId: agent.id }}
+      onClick={onNavigate}
+      className={cn(ROW_CLASS, large && "py-2.5")}
+      activeProps={{ className: "bg-sidebar-accent" }}
+    >
+      <AgentIcon
+        agent={agent}
+        tile
+        className={cn("size-8 rounded-[10px]", large && "size-10 rounded-xl")}
+      />
+      <RowText title={agent.name} meta={agent.description} />
+    </Link>
+  );
+}
+
 /**
  * Your agents, each opening its settings in the main content, and a new one
  * from the header.
@@ -616,6 +644,8 @@ export function AgentsPanel({ onNavigate }: { onNavigate?: () => void }) {
   const { t } = useI18n();
   const navigate = useNavigate();
   const { data: agents } = useQuery(agentsQuery());
+  // The majordomo stays pinned first, a little larger than the rest.
+  const majordomo = agents?.find((agent) => agent.majordomo);
   return (
     <>
       <SidebarPanelHeader title={t("agents")}>
@@ -630,23 +660,18 @@ export function AgentsPanel({ onNavigate }: { onNavigate?: () => void }) {
         </SidebarPanelAction>
       </SidebarPanelHeader>
       <PanelList label={t("agents")} empty={false}>
-        {agents?.map((agent) => (
-          <li key={agent.id}>
-            <Link
-              to="/agents/$agentId/settings"
-              params={{ agentId: agent.id }}
-              onClick={onNavigate}
-              className={ROW_CLASS}
-              activeProps={{ className: "bg-sidebar-accent" }}
-            >
-              <AgentIcon agent={agent} tile className="size-8 rounded-[10px]" />
-              <RowText
-                title={agent.name}
-                meta={agent.majordomo ? t("majordomoBadge") : agent.description}
-              />
-            </Link>
+        {majordomo && (
+          <li className="mb-2 border-border border-b pb-2">
+            <AgentRow agent={majordomo} onNavigate={onNavigate} large />
           </li>
-        ))}
+        )}
+        {agents
+          ?.filter((agent) => !agent.majordomo)
+          .map((agent) => (
+            <li key={agent.id}>
+              <AgentRow agent={agent} onNavigate={onNavigate} />
+            </li>
+          ))}
       </PanelList>
     </>
   );

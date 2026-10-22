@@ -16,6 +16,7 @@ import {
   ChevronRight,
   Code,
   Coffee,
+  Crown,
   Dog,
   Dumbbell,
   Flower2,
@@ -216,7 +217,8 @@ export function tileClass(color: string | null): string {
 /** Named icons are lowercase words; anything else the API keeps is an emoji. */
 const isIconName = (symbol: string) => /^[a-z][a-z0-9-]*$/.test(symbol);
 
-type Look = Pick<Agent, "id" | "icon" | "symbol" | "color">;
+type Look = Pick<Agent, "id" | "icon" | "symbol" | "color"> &
+  Partial<Pick<Agent, "majordomo">>;
 
 /** An agent's symbol alone: its emoji, or its icon, or a robot. */
 function Glyph({
@@ -267,6 +269,25 @@ export function AgentIcon({
   /** An image to show instead, such as one not uploaded yet. */
   src?: string;
 }) {
+  const { t } = useI18n();
+  if (tile && agent.majordomo) {
+    // The majordomo's tile wears a crown, ringed so it reads as cut out of the tile.
+    return (
+      <span className="relative inline-flex shrink-0">
+        <AgentIcon
+          agent={{ ...agent, majordomo: false }}
+          tile
+          className={className}
+          src={src}
+        />
+        <Crown
+          role="img"
+          aria-label={t("majordomoBadge")}
+          className="absolute -right-[14%] -bottom-[14%] size-[50%] fill-current text-yellow-400 drop-shadow-[0_0_1.5px_var(--background)]"
+        />
+      </span>
+    );
+  }
   if (src !== undefined || agent.icon !== null) {
     return (
       <img

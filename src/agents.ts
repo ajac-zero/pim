@@ -2,6 +2,7 @@ import { type DirectoryApp, storedApps } from "./extensions/app-directory";
 import { ASSISTANT_BLUEPRINT } from "./extensions/assistant";
 import type { WidgetSize } from "./extensions/dashboard";
 import type { BlueprintDefinition } from "./extensions/define";
+import { PRIVATE_SCOPE } from "./extensions/optmem/store";
 import { HttpError } from "./http";
 import { SKILL_NAME } from "./skills";
 
@@ -15,10 +16,13 @@ import { SKILL_NAME } from "./skills";
  * their approvals (see ./majordomo.ts). It talks in chats started without
  * choosing an agent, and it is always the same one: the title can't move to
  * another agent, and it can't be deleted. The person names it and chooses
- * its look when they first sign in. Memory, approvals and connected apps
+ * its look when they first sign in. Approvals and connected apps
  * are shared by all of them: an agent lists the apps it works with by name, from the
  * deployment's directory (./extensions/app-directory.ts), and the person
- * connects each app once.
+ * connects each app once. Memory is kept in scopes: each agent has its own,
+ * which copies of one template share, and reads the scope every agent reads
+ * and the person's named scopes they chose for it; the majordomo's own is
+ * the private scope, and it reads them all.
  * One can be published as a template others make their own (see
  * ./gallery.ts); a copy made from a template remembers where it came from.
  *
@@ -39,6 +43,10 @@ export type Agent = {
 	readonly skills: readonly string[];
 	/** The person's other agents it hands tasks to, by id; the majordomo's is empty, as it hands tasks to all of them. */
 	readonly contacts: readonly string[];
+	/** The memory scope its notes go to: the majordomo's is the private scope, and copies of one template share one. */
+	readonly memoryScope: string;
+	/** The person's named memory scopes it reads besides its own and everyone's, by key. */
+	readonly memoryScopes: readonly string[];
 	/** The blueprint it builds on, as `<extension>/<blueprint>`; null for none. */
 	readonly blueprint: string | null;
 	/** The template it was made from. */
@@ -72,6 +80,8 @@ export type AgentInput = {
 	readonly apps: readonly string[];
 	readonly skills: readonly string[];
 	readonly contacts: readonly string[];
+	/** Left out, a new agent reads none of the named memory scopes and an edited one keeps those it reads. */
+	readonly memoryScopes?: readonly string[];
 	/** Left out, a new agent builds on the deployment's default blueprint and an edited one keeps its own. */
 	readonly blueprint?: string | null;
 	/** Left out, a new agent has the default look and an edited one keeps its own. */
@@ -88,6 +98,7 @@ export const MAX_DESCRIPTION = 280;
 export const MAX_INSTRUCTIONS = 8000;
 export const MAX_APPS = 10;
 export const MAX_AGENT_SKILLS = 20;
+export const MAX_MEMORY_SCOPES = 20;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS pim_agents (
@@ -108,7 +119,10 @@ CREATE TABLE IF NOT EXISTS pim_agents (
 	skills TEXT NOT NULL DEFAULT '[]',
 	dashboard TEXT,
 	dashboard_sizes TEXT,
-	contacts TEXT NOT NULL DEFAULT '[]'
+	contacts TEXT NOT NULL DEFAULT '[]',
+	memory_scope TEXT,
+	memory_scopes TEXT NOT NULL DEFAULT '[]',
+	copy_of TEXT
 );
 CREATE TABLE IF NOT EXISTS pim_agent_icons (
 	agent TEXT PRIMARY KEY,
@@ -164,6 +178,8 @@ const agentOf = (row: Row, directory: () => readonly DirectoryApp[]): Agent => (
 	apps: storedApps(JSON.parse(String(row.apps)) as unknown[], directory),
 	skills: JSON.parse(String(row.skills)) as string[],
 	contacts: JSON.parse(String(row.contacts)) as string[],
+	memoryScope: String(row.memory_scope),
+	memoryScopes: JSON.parse(String(row.memory_scopes)) as string[],
 	blueprint: row.blueprint === null ? null : String(row.blueprint),
 	source: row.source ? (JSON.parse(String(row.source)) as Agent["source"]) : null,
 	published: row.published === null ? null : String(row.published),
@@ -208,6 +224,7 @@ export function agentInput(body: Record<string, unknown>, partial?: Agent): Agen
 		],
 		skills: body.skills === undefined ? (partial?.skills ?? []) : skillsInput(body.skills),
 		contacts: body.contacts === undefined ? (partial?.contacts ?? []) : contactsInput(body.contacts),
+		...(body.memoryScopes === undefined ? {} : { memoryScopes: memoryScopesInput(body.memoryScopes) }),
 		...(body.symbol === undefined ? {} : { symbol: symbolInput(body.symbol) }),
 		...(body.color === undefined ? {} : { color: colorInput(body.color) }),
 		...(body.blueprint === undefined ? {} : { blueprint: blueprintInput(body.blueprint) }),
@@ -253,6 +270,14 @@ function colorInput(value: unknown): string | null {
 function contactsInput(value: unknown): string[] {
 	if (!Array.isArray(value) || value.length > MAX_AGENTS || value.some((id) => typeof id !== "string" || !/^p_\w{1,32}$/.test(id))) {
 		throw new HttpError(400, `contacts must be a list of up to ${MAX_AGENTS} of your agents' ids`);
+	}
+	return [...new Set(value as string[])];
+}
+
+/** Named memory scopes as given, by key. Whether each is one of the person's is the space's to check. */
+function memoryScopesInput(value: unknown): string[] {
+	if (!Array.isArray(value) || value.length > MAX_MEMORY_SCOPES || value.some((key) => typeof key !== "string" || !/^s_\w{1,32}$/.test(key))) {
+		throw new HttpError(400, `memoryScopes must be a list of up to ${MAX_MEMORY_SCOPES} of your named memory scopes' keys`);
 	}
 	return [...new Set(value as string[])];
 }
@@ -314,7 +339,29 @@ export class AgentStore {
 		if (!columns.includes("dashboard")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN dashboard TEXT");
 		if (!columns.includes("dashboard_sizes")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN dashboard_sizes TEXT");
 		if (!columns.includes("contacts")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN contacts TEXT NOT NULL DEFAULT '[]'");
+		if (!columns.includes("memory_scope")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN memory_scope TEXT");
+		if (!columns.includes("memory_scopes")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN memory_scopes TEXT NOT NULL DEFAULT '[]'");
+		if (!columns.includes("copy_of")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN copy_of TEXT");
 		if (columns.includes("team")) this.#moveTeams();
+		// Agents from before memory scopes, and those made from teams, each get a scope of their own.
+		this.#sql.exec(`UPDATE pim_agents SET memory_scope = CASE WHEN is_default = 1 THEN '${PRIVATE_SCOPE}' ELSE 'agent-' || id END WHERE memory_scope IS NULL`);
+	}
+
+	/**
+	 * The memory scope a new agent keeps its notes in: the private scope for
+	 * the majordomo; for a copy, the scope of an earlier copy of the same
+	 * agent, or of the person's own agent it was published from, so copies of
+	 * one agent share what they remember; else a scope of its own.
+	 */
+	#memoryScope(id: string, copyOf: string | null, majordomo: boolean): string {
+		if (majordomo) return PRIVATE_SCOPE;
+		if (copyOf !== null) {
+			const [sibling] = this.#sql
+				.exec("SELECT memory_scope FROM pim_agents WHERE is_default = 0 AND (copy_of = ? OR published = ?) ORDER BY created_at, rowid LIMIT 1", copyOf, copyOf)
+				.toArray();
+			if (sibling) return String(sibling.memory_scope);
+		}
+		return `agent-${id}`;
 	}
 
 	/**
@@ -396,16 +443,21 @@ export class AgentStore {
 		return row ? agentOf(row, this.#directory) : undefined;
 	}
 
-	create(input: AgentInput, source: Agent["source"] = null): Agent {
+	/**
+	 * Makes an agent. `copyOf` names the agent it copies, when it is a copy:
+	 * a template's id, or `<template id>/<name>` for an agent that comes with
+	 * a template; copies of one agent share a memory scope.
+	 */
+	create(input: AgentInput, source: Agent["source"] = null, copyOf: string | null = null): Agent {
 		if (this.list().length >= MAX_AGENTS) throw new HttpError(429, `You can have up to ${MAX_AGENTS} agents.`);
-		return this.#insert(input, source, false);
+		return this.#insert(input, source, false, copyOf);
 	}
 
-	#insert(input: AgentInput, source: Agent["source"], isDefault: boolean): Agent {
+	#insert(input: AgentInput, source: Agent["source"], isDefault: boolean, copyOf: string | null = null): Agent {
 		const id = newAgentId();
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT INTO pim_agents (id, name, description, instructions, apps, skills, contacts, blueprint, symbol, color, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+			"INSERT INTO pim_agents (id, name, description, instructions, apps, skills, contacts, memory_scope, memory_scopes, copy_of, blueprint, symbol, color, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
 			id,
 			input.name,
 			input.description,
@@ -413,6 +465,9 @@ export class AgentStore {
 			JSON.stringify(input.apps),
 			JSON.stringify(input.skills),
 			JSON.stringify(input.contacts),
+			this.#memoryScope(id, copyOf, isDefault),
+			JSON.stringify(input.memoryScopes ?? []),
+			copyOf,
 			input.blueprint === undefined ? (this.#starter().blueprint ?? null) : input.blueprint,
 			input.symbol ?? null,
 			input.color ?? null,
@@ -439,6 +494,7 @@ export class AgentStore {
 		if (input.blueprint !== undefined) this.#sql.exec("UPDATE pim_agents SET blueprint = ? WHERE id = ?", input.blueprint, id);
 		if (input.symbol !== undefined) this.#sql.exec("UPDATE pim_agents SET symbol = ? WHERE id = ?", input.symbol, id);
 		if (input.color !== undefined) this.#sql.exec("UPDATE pim_agents SET color = ? WHERE id = ?", input.color, id);
+		if (input.memoryScopes !== undefined) this.#sql.exec("UPDATE pim_agents SET memory_scopes = ? WHERE id = ?", JSON.stringify(input.memoryScopes), id);
 		return this.get(id)!;
 	}
 
@@ -450,6 +506,13 @@ export class AgentStore {
 
 	setPublished(id: string, template: string | null): void {
 		this.#sql.exec("UPDATE pim_agents SET published = ? WHERE id = ?", template, id);
+	}
+
+	/** No agent reads a named memory scope any more, as when it is deleted. */
+	dropMemoryScope(key: string): void {
+		for (const agent of this.list()) {
+			if (agent.memoryScopes.includes(key)) this.#sql.exec("UPDATE pim_agents SET memory_scopes = ? WHERE id = ?", JSON.stringify(agent.memoryScopes.filter((other) => other !== key)), agent.id);
+		}
 	}
 
 	/** Deletes it; its chats stay, with the majordomo, and it leaves the contacts of the agents that had it. */

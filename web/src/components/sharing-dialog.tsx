@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { ApprovalBlock } from "~/components/chat/items";
 import { useI18n } from "~/components/i18n";
 import { ChevronDown, Plus, Trash2, X } from "~/components/icons";
+import { CircleMemoryField } from "~/components/memory-settings";
 import { ToolPermissionList } from "~/components/tool-permissions";
 import { Button } from "~/components/ui/button";
 import {
@@ -284,6 +285,7 @@ function CircleCard({ circle }: { circle: Circle }) {
             {t("circlePermissionsDescription")}
           </p>
           <ToolPermissionList circle={circle.id} />
+          <CircleMemoryField circle={circle} />
         </CollapsibleContent>
       </Collapsible>
     </article>

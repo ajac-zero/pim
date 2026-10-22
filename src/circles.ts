@@ -1,3 +1,5 @@
+import { EVERYONE_SCOPE } from "./extensions/optmem/store";
+
 /**
  * The people a space's owner lets message it, in circles: Family, Close
  * friends, Acquaintances. Each circle has its own tool permissions (in
@@ -7,7 +9,8 @@
  * Guests never run anything here: their conversations with this space run in
  * their own space (see ./visits.ts), on their own usage, and every tool they
  * use comes back here through `Pim.guestCall`, which checks the circle and
- * the tool's permission each time.
+ * the tool's permission each time. A circle reads the memory scopes the
+ * owner ticked for it, and no others.
  */
 
 export type Circle = {
@@ -15,6 +18,8 @@ export type Circle = {
 	readonly name: string;
 	/** Off: nobody in the circle can message the space, until it is on again. */
 	readonly enabled: boolean;
+	/** The owner's memory scopes it reads, by key: everyone's, or ones the owner named. */
+	readonly memoryScopes: readonly string[];
 	readonly createdAt: number;
 };
 
@@ -48,7 +53,8 @@ CREATE TABLE IF NOT EXISTS pim_circles (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
 	enabled INTEGER NOT NULL,
-	created_at INTEGER NOT NULL
+	created_at INTEGER NOT NULL,
+	memory_scopes TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS pim_circle_members (
 	owner_id TEXT PRIMARY KEY,
@@ -88,6 +94,7 @@ const circleOf = (row: Row): Circle => ({
 	id: String(row.id),
 	name: String(row.name),
 	enabled: Number(row.enabled) === 1,
+	memoryScopes: JSON.parse(String(row.memory_scopes)) as string[],
 	createdAt: Number(row.created_at),
 });
 
@@ -104,6 +111,18 @@ export class CircleStore {
 	constructor(sql: SqlStorage) {
 		this.#sql = sql;
 		this.#sql.exec(SCHEMA);
+		const columns = this.#sql.exec("PRAGMA table_info(pim_circles)").toArray().map((row) => String(row.name));
+		if (!columns.includes("memory_scopes")) {
+			this.#sql.exec("ALTER TABLE pim_circles ADD COLUMN memory_scopes TEXT NOT NULL DEFAULT '[]'");
+			// Memory was once one switch, which let a circle read all of it: such a circle reads everyone's scope now.
+			const tables = this.#sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pim_tool_permissions'").toArray();
+			if (tables.length > 0) {
+				this.#sql.exec(
+					`UPDATE pim_circles SET memory_scopes = '["${EVERYONE_SCOPE}"]' WHERE id IN (SELECT audience FROM pim_tool_permissions WHERE app = '' AND tool = 'memory' AND permission = 'on')`,
+				);
+				this.#sql.exec("DELETE FROM pim_tool_permissions WHERE app = '' AND tool = 'memory'");
+			}
+		}
 	}
 
 	circles(): Circle[] {
@@ -121,9 +140,17 @@ export class CircleStore {
 		return this.circle(id)!;
 	}
 
-	updateCircle(id: string, change: { name?: string; enabled?: boolean }): void {
+	updateCircle(id: string, change: { name?: string; enabled?: boolean; memoryScopes?: readonly string[] }): void {
 		if (change.name !== undefined) this.#sql.exec("UPDATE pim_circles SET name = ? WHERE id = ?", change.name, id);
 		if (change.enabled !== undefined) this.#sql.exec("UPDATE pim_circles SET enabled = ? WHERE id = ?", change.enabled ? 1 : 0, id);
+		if (change.memoryScopes !== undefined) this.#sql.exec("UPDATE pim_circles SET memory_scopes = ? WHERE id = ?", JSON.stringify(change.memoryScopes), id);
+	}
+
+	/** No circle reads a memory scope any more, as when it is deleted. */
+	dropMemoryScope(key: string): void {
+		for (const circle of this.circles()) {
+			if (circle.memoryScopes.includes(key)) this.updateCircle(circle.id, { memoryScopes: circle.memoryScopes.filter((other) => other !== key) });
+		}
 	}
 
 	/** Deletes the circle and lets go of its members; returns them. Its permissions are the caller's to clear. */

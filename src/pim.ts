@@ -82,7 +82,6 @@ import {
 	httpRequest,
 	ownToolPermission,
 	type ResolvedPermission,
-	resolvePermission,
 } from "./extensions/approvals";
 import pimConfig from "../pim.config";
 import { artifactsExtension, artifactsWidgets } from "./extensions/artifacts";
@@ -133,10 +132,21 @@ import {
 	toText,
 } from "./extensions/mcp";
 import { MESSAGING_EXTENSION, messagingExtension, plainReply, SEND_TO_USER } from "./extensions/messaging";
-import { createOptMem, memoryWidgets } from "./extensions/optmem";
+import { CREATE_MEMORY_SCOPE, createOptMem, type MemoryAccess, type MemoryScope, memoryWidgets } from "./extensions/optmem";
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
-import { byteLength, ENTRY_BYTES, entryLine } from "./extensions/optmem/store";
-import { CREATE_AGENT, agentExtension, MANAGE_APPS, manageAppsAction, RENAME_AGENT, renameAgentAction, UPDATE_AGENT, updateAgentAction } from "./extensions/agents";
+import { byteLength, ENTRY_BYTES, EVERYONE_SCOPE, entryLine, MAX_NAMED_SCOPES, MAX_SCOPE_NAME, PRIVATE_SCOPE } from "./extensions/optmem/store";
+import {
+	CREATE_AGENT,
+	agentExtension,
+	MANAGE_APPS,
+	manageAppsAction,
+	RENAME_AGENT,
+	renameAgentAction,
+	SHARE_MEMORY_SCOPE,
+	shareMemoryScopeAction,
+	UPDATE_AGENT,
+	updateAgentAction,
+} from "./extensions/agents";
 import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
@@ -212,8 +222,6 @@ const REVIEW_EXPIRY_CALLBACK = "expireReview";
 const REPLY_PUSH_DELAY_SECONDS = 10;
 const REPLY_PUSH_CALLBACK = "pushReply";
 
-/** A circle's permission row for reading the owner's memory. */
-const MEMORY_TOOL = "memory";
 /** How long a guest's request waits for the owner before it is denied. */
 const GUEST_APPROVAL_MS = 24 * 60 * 60 * 1000;
 /** How long a chat goes without activity before it is archived: listed apart, not deleted. */
@@ -224,6 +232,52 @@ function circleName(name: unknown): string {
 	if (typeof name !== "string" || name.trim() === "") throw new HttpError(400, "name must be a non-empty string");
 	if (name.trim().length > MAX_CIRCLE_NAME) throw new HttpError(400, `name must be at most ${MAX_CIRCLE_NAME} characters`);
 	return name.trim();
+}
+
+/** A named memory scope's name as given: trimmed, not empty, not long. */
+function scopeName(name: unknown): string {
+	if (typeof name !== "string" || name.trim() === "") throw new HttpError(400, "name must be a non-empty string");
+	if (name.trim().length > MAX_SCOPE_NAME) throw new HttpError(400, `name must be at most ${MAX_SCOPE_NAME} characters`);
+	return name.trim();
+}
+
+/** A memory scope as the API shows it. */
+export type MemoryScopeInfo = {
+	readonly key: string;
+	/**
+	 * `private`: the majordomo's own; `everyone`: every agent reads it;
+	 * `agent`: an agent's own, which copies of it share; `named`: one the
+	 * person made, for the agents they choose; `former`: left by an agent or
+	 * named scope since deleted, which only the majordomo reads.
+	 */
+	readonly kind: "private" | "everyone" | "agent" | "named" | "former";
+	/** A named scope's name, or the names of the agents whose own scope it is; null for the others. */
+	readonly name: string | null;
+	/** The agents whose own scope it is, by id. */
+	readonly agents: readonly string[];
+	/** The agents that read it, by id: the majordomo reads every scope. */
+	readonly readers: readonly string[];
+	/** The memories in it, those forgotten too. */
+	readonly count: number;
+};
+
+/** What an agent's model is told about who reads one of the scopes it reads; `names` are the agents' names by id. */
+function memoryScopeAbout(scope: MemoryScopeInfo, agent: Agent, names: ReadonlyMap<string, string>): string {
+	switch (scope.kind) {
+		case "private":
+			return "your own: only you read it";
+		case "everyone":
+			return "which all of the person's agents read";
+		case "agent":
+			if (!scope.agents.includes(agent.id)) return `the own scope of ${scope.name}`;
+			return scope.agents.length === 1 ? "your own: only you and the majordomo read it" : "your own, which your copies share: only you, they and the majordomo read it";
+		case "named": {
+			const others = scope.readers.filter((id) => id !== agent.id && names.has(id)).map((id) => names.get(id)!);
+			return `"${scope.name}", which ${others.length === 0 ? "only you read" : `you and ${others.join(", ")} read`}`;
+		}
+		case "former":
+			return "left by an agent or scope since deleted: only you read it";
+	}
 }
 
 /** Why an approval was decided without the user deciding: it timed out, or the user always approves its tool. */
@@ -268,6 +322,8 @@ const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
 /** Tools of the space the person talks with that an agent at work on a task doesn't get, though their extensions stay. */
+/** Naming memory scopes and choosing which agents read them: only the majordomo, which reads every scope, is offered these. */
+const MAJORDOMO_MEMORY_TOOLS = [CREATE_MEMORY_SCOPE, SHARE_MEMORY_SCOPE];
 const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, RENAME_AGENT, MANAGE_APPS, WRITE_SKILL, INSTALL_SKILL]);
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
 /** The admin's apps, as this space last read them from the gallery, and how long before it reads them again. */
@@ -418,12 +474,13 @@ export class Pim extends DurableAgent<Env> {
 	readonly credentials = new SqlCredentialStore(this.store);
 	readonly chatgpt = new ChatGPT(this.store, chatgptCredentials(this.credentials));
 	#modelCatalog: Models | undefined;
-	/** Long-term memory: an OptMem-style log and summary tree. */
+	/** Long-term memory: an OptMem-style log and summary tree for each scope, each conversation reading those of its agent. */
 	readonly memory = createOptMem({
 		sql: this.ctx.storage.sql,
 		timeZone: () => this.settings().timeZone,
 		viewLines: this.deployment().memoryLines,
 		compressionModel: () => this.memoryModel(),
+		access: (conversation) => this.#memoryAccess(this.#roleOf(conversation).agent),
 	});
 	/** Traces of the agents' runs, model requests and tool calls, for the deployment's OpenTelemetry backend (./telemetry.ts). */
 	readonly telemetry = new Telemetry({
@@ -540,6 +597,7 @@ export class Pim extends DurableAgent<Env> {
 		watchAction(this.apps, this.appEvents),
 		updateAgentAction(this.agents),
 		renameAgentAction(this.agents),
+		shareMemoryScopeAction(this.agents, () => this.memory.store.namedScopes()),
 		manageAppsAction(this.agents, this.apps, () => this.appDirectory()),
 		fileDeleteAction(this.#files),
 		shellAction(this.computer),
@@ -1187,6 +1245,74 @@ export class Pim extends DurableAgent<Env> {
 		const text = conversationText(projectEntries(await this.harness.session(session).messages()), limit);
 		if (text === "") throw new HttpError(409, "This chat has no conversation yet");
 		return text;
+	}
+
+	/**
+	 * Every memory scope, in the order the majordomo's memory shows them:
+	 * its own, the private scope; everyone's, which every agent reads; each
+	 * agent's own, which copies of one agent share; the scopes the person
+	 * named, which the agents they chose read; and those left by agents and
+	 * named scopes since deleted, which only the majordomo reads, as it reads
+	 * every scope.
+	 */
+	memoryScopes(): MemoryScopeInfo[] {
+		const agents = this.agents.list();
+		const majordomo = agents.find((agent) => agent.majordomo)!;
+		const counts = this.memory.store.counts();
+		const own = Map.groupBy(
+			agents.filter((agent) => !agent.majordomo),
+			(agent) => agent.memoryScope,
+		);
+		const scopes: Omit<MemoryScopeInfo, "count">[] = [
+			{ key: PRIVATE_SCOPE, kind: "private", name: null, agents: [majordomo.id], readers: [majordomo.id] },
+			{ key: EVERYONE_SCOPE, kind: "everyone", name: null, agents: [], readers: agents.map((agent) => agent.id) },
+			...[...own].map(([key, copies]) => ({
+				key,
+				kind: "agent" as const,
+				name: copies.map((agent) => agent.name).join(", "),
+				agents: copies.map((agent) => agent.id),
+				readers: [majordomo.id, ...copies.map((agent) => agent.id)],
+			})),
+			...this.memory.store.namedScopes().map(({ key, name }) => ({
+				key,
+				kind: "named" as const,
+				name,
+				agents: [],
+				readers: [majordomo.id, ...agents.filter((agent) => agent.memoryScopes.includes(key)).map((agent) => agent.id)],
+			})),
+		];
+		const known = new Set(scopes.map((scope) => scope.key));
+		const former = [...counts.keys()].filter((key) => !known.has(key)).map((key) => ({ key, kind: "former" as const, name: null, agents: [], readers: [majordomo.id] }));
+		return [...scopes, ...former].map((scope) => ({ ...scope, count: counts.get(scope.key) ?? 0 }));
+	}
+
+	/** The memory scopes an agent reads, its own first, each with what its model is told about who reads it, and where its notes go. */
+	#memoryAccess(agent: Agent): MemoryAccess {
+		const reads = this.memoryScopes().filter((scope) => scope.readers.includes(agent.id));
+		const own = reads.filter((scope) => scope.key === agent.memoryScope);
+		const names = new Map(this.agents.list().map((other) => [other.id, other.name]));
+		const read = [...own, ...reads.filter((scope) => scope.key !== agent.memoryScope)].map((scope) => ({ key: scope.key, about: memoryScopeAbout(scope, agent, names) }));
+		return { read, own: agent.memoryScope };
+	}
+
+	/** The memory scopes a circle reads: those ticked for it that are still the person's, with what a guest's model is told of each. */
+	#circleMemory(circle: Circle): MemoryScope[] {
+		return this.memoryScopes()
+			.filter((scope) => (scope.kind === "everyone" || scope.kind === "named") && circle.memoryScopes.includes(scope.key))
+			.map((scope) => ({ key: scope.key, about: scope.kind === "named" ? `"${scope.name}"` : "what all of the space's agents know" }));
+	}
+
+	/** A memory scope the person may keep memories in, read by the scopes' key; 404 for none. */
+	#memoryScope(key: string): MemoryScopeInfo {
+		const scope = this.memoryScopes().find((candidate) => candidate.key === key);
+		if (!scope) throw new HttpError(404, `No memory scope ${key}`);
+		return scope;
+	}
+
+	/** Named memory scopes an agent or a circle is to read must be the person's. */
+	#checkNamedScopes(keys: readonly string[]): void {
+		const named = new Set(this.memory.store.namedScopes().map((scope) => scope.key));
+		for (const key of keys) if (!named.has(key)) throw new HttpError(400, `${key} isn't one of your named memory scopes`);
 	}
 
 	/**
@@ -1892,7 +2018,8 @@ export class Pim extends DurableAgent<Env> {
 	 * Every tool a permission can be set for, for the owner (`OWNER`) or a
 	 * circle, with the permission that applies: for the owner, Pim's own tools
 	 * that act on the world, since each agent has its own switches for its
-	 * apps' tools; for a circle, its row for memory and every app's tools.
+	 * apps' tools; for a circle, every app's tools. What a circle remembers is
+	 * the memory scopes ticked for it.
 	 */
 	toolPermissions(audience: string = OWNER): ToolPermissionInfo[] {
 		if (audience === OWNER) {
@@ -1908,17 +2035,6 @@ export class Pim extends DurableAgent<Env> {
 				...ownToolPermission(this.store, action.name),
 			}));
 		}
-		const memory: ToolPermissionInfo = {
-			app: null,
-			appName: null,
-			tool: MEMORY_TOOL,
-			name: MEMORY_TOOL,
-			description: "Read what Pim remembers about you: its memory view, and searching every memory.",
-			readOnly: true,
-			destructive: false,
-			choices: ["off", "on"],
-			...resolvePermission(this.store, audience, "", MEMORY_TOOL, "off", null),
-		};
 		const servers = new Map(this.apps.servers().map((server) => [server.id, server]));
 		const apps = this.apps.tools().flatMap((tool) => {
 			const server = servers.get(tool.serverId);
@@ -1926,7 +2042,7 @@ export class Pim extends DurableAgent<Env> {
 			const choices = tool.annotations?.destructiveHint === true ? (["off", "ask"] as const) : TOOL_PERMISSIONS;
 			return [{ ...this.#appToolInfo(server, tool), choices, ...appToolPermission(this.store, server, tool, audience) }];
 		});
-		return [memory, ...apps];
+		return apps;
 	}
 
 	/** What a permission row says about an app's tool, besides the permission. */
@@ -1980,9 +2096,8 @@ export class Pim extends DurableAgent<Env> {
 		if (audience !== OWNER) this.#circle(audience);
 		let definition: string | null = null;
 		if (app === "") {
-			const known = audience === OWNER ? this.#ownGatedActions().some((action) => action.name === tool) : tool === MEMORY_TOOL;
+			const known = audience === OWNER && this.#ownGatedActions().some((action) => action.name === tool);
 			if (!known) throw new HttpError(404, `No tool ${tool}`);
-			if (tool === MEMORY_TOOL && permission === "ask") throw new HttpError(400, "Memory is either on or off");
 			if (permission === "on" && this.#ownGatedActions().find((action) => action.name === tool)?.explicitApproval) {
 				throw new HttpError(400, "This tool can only be off or ask: every change requires explicit approval");
 			}
@@ -2110,17 +2225,18 @@ export class Pim extends DurableAgent<Env> {
 		const access = this.#guestAccess(guest);
 		if (!access.ok) return access;
 		const me = this.#me()!;
-		const memory = resolvePermission(this.store, access.circle.id, "", MEMORY_TOOL, "off", null).permission === "on";
-		const lines = memory ? this.memory.view() : [];
+		const scopes = this.#circleMemory(access.circle);
+		const lines = this.memory.view(scopes);
 		return {
 			ok: true,
 			brief: {
 				host: me,
 				circle: access.circle.name,
 				timeZone: this.settings().timeZone,
-				memory: memory
-					? `<memory>\n${lines.length === 0 ? `${me.username}'s space remembers nothing yet.` : `What ${me.username}'s space remembers, oldest first; later memories override earlier ones:\n${lines.join("\n")}`}\n</memory>`
-					: null,
+				memory:
+					scopes.length > 0
+						? `<memory>\nWhat ${me.username}'s space remembers, oldest first; later memories override earlier ones:\n${lines.join("\n")}\n</memory>`
+						: null,
 				tools: this.#guestTools(access.circle.id).map(({ server, tool, permission, name }) => ({
 					name,
 					appName: server.name,
@@ -2224,13 +2340,14 @@ export class Pim extends DurableAgent<Env> {
 		}
 
 		if (call.tool === "recall") {
-			if (resolvePermission(this.store, circle.id, "", MEMORY_TOOL, "off", null).permission !== "on") {
+			const scopes = this.#circleMemory(circle).map((scope) => scope.key);
+			if (scopes.length === 0) {
 				log("refused", "recall");
 				return { text: `${host} doesn't let you read their space's memory.`, isError: true };
 			}
 			const pattern = typeof call.args.pattern === "string" ? call.args.pattern : "";
 			log("ran", `recall ${JSON.stringify(pattern)}`);
-			return this.memory.search(pattern);
+			return this.memory.search(pattern, scopes);
 		}
 
 		const found = this.#guestTools(circle.id).find((candidate) => candidate.name === call.tool);
@@ -2480,9 +2597,14 @@ export class Pim extends DurableAgent<Env> {
 		return { extensions: { add: added, remove: removed }, ...(left.length > 0 ? { tools: { remove: left.map(({ tool }) => tool) } } : {}) };
 	}
 
-	/** The names of the app tools switched off for an agent, which its conversations aren't offered. */
+	/**
+	 * The names of the tools an agent's conversations aren't offered: the app
+	 * tools switched off for it, and, for any agent but the majordomo, naming
+	 * and sharing memory scopes, which are the majordomo's to do.
+	 */
 	#switchedOff(agent: Agent): Set<string> {
-		return new Set(this.agentToolPermissions(agent).flatMap((info) => (info.permission === "off" ? [info.name] : [])));
+		const off = this.agentToolPermissions(agent).flatMap((info) => (info.permission === "off" ? [info.name] : []));
+		return new Set(agent.majordomo ? off : [...off, ...MAJORDOMO_MEMORY_TOOLS]);
 	}
 
 	/**
@@ -2703,7 +2825,7 @@ export class Pim extends DurableAgent<Env> {
 				// Pim's own (BUILT_IN_WIDGETS): every chat can show their widgets.
 				goalsWidgets(this.store),
 				scheduleWidgets(() => this.services().listSchedules()),
-				memoryWidgets(this.memory.store),
+				memoryWidgets(this.memory.store, (id) => this.#memoryAccess(this.agents.get(id) ?? this.agents.majordomo()).read.map((scope) => scope.key)),
 				artifactsWidgets(this.artifacts),
 				...this.pimConfig().extensions,
 			],
@@ -2847,7 +2969,7 @@ export class Pim extends DurableAgent<Env> {
 		if (talked.length === 0) return starters;
 
 		const pinned = this.#dashboardItems(agent).flatMap((item) => this.#pinnedArtifact(item)?.title ?? []);
-		const memory = this.memory.view().join("\n");
+		const memory = this.memory.view(this.#memoryAccess(agent).read).join("\n");
 		const input = [
 			`Assistant: ${agent.name}${agent.description === "" ? "" : `, ${agent.description}`}`,
 			`Language: ${locale}`,
@@ -3146,7 +3268,7 @@ export class Pim extends DurableAgent<Env> {
 		const made = inputs.map((input, index) => {
 			const name = index === 0 ? input.name : freeName(input.name, copy.name, taken);
 			taken.add(name.toLowerCase());
-			return this.agents.create({ ...input, name }, source);
+			return this.agents.create({ ...input, name }, source, index === 0 ? source.template : `${source.template}/${all[index]!.name.toLowerCase()}`);
 		});
 		const copyOf = new Map(all.map((agent, index) => [agent.name.toLowerCase(), made[index]!]));
 		for (const [index, agent] of all.entries()) {
@@ -3383,7 +3505,7 @@ export class Pim extends DurableAgent<Env> {
 			// Without their keys, as everywhere.
 			providers: this.customProviders().flatMap(({ shared, provider }) => (shared ? [] : [providerInfo(provider)])),
 			sessions,
-			memory: { entries: this.memory.store.page(Number.MAX_SAFE_INTEGER) },
+			memory: { scopes: this.memoryScopes(), entries: this.memory.store.page(Number.MAX_SAFE_INTEGER) },
 			goals: this.store.goals().map((goal) => this.#publicSession(goal)),
 			extensions: this.extensionData.export(),
 			schedules: (await this.services().listSchedules()).map((schedule) => describeSchedule(schedule, this.store)),
@@ -4438,14 +4560,16 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 
-		// Long-term memory: what the agent knows about the person. They can always make it forget.
+		// Long-term memory: what the agents know about the person, in scopes that different agents read. They can always make it forget.
 		[
 			"GET",
 			"/memory",
 			() => ({
 				count: this.memory.store.count(),
 				pendingCompressions: this.memory.store.pending().length,
-				view: this.memory.view(),
+				// The majordomo's view: every scope.
+				view: this.memory.view(this.#memoryAccess(this.agents.majordomo()).read),
+				scopes: this.memoryScopes(),
 			}),
 		],
 		[
@@ -4453,6 +4577,8 @@ export class Pim extends DurableAgent<Env> {
 			"/memory/log",
 			(_params, _request, url) => {
 				const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 100, 1), 500);
+				const scope = url.searchParams.get("scope");
+				const scopes = scope === null ? undefined : [this.#memoryScope(scope).key];
 				const pattern = url.searchParams.get("q");
 				if (pattern !== null) {
 					let regex: RegExp;
@@ -4461,23 +4587,41 @@ export class Pim extends DurableAgent<Env> {
 					} catch (error) {
 						throw new HttpError(400, errorMessage(error));
 					}
-					return this.memory.store.search(regex, limit);
+					return this.memory.store.search(regex, limit, scopes);
 				}
 				const before = url.searchParams.get("before");
-				return { entries: this.memory.store.page(limit, before === null ? undefined : Number(before)) };
+				return { entries: this.memory.store.page(limit, before === null ? undefined : Number(before), scopes) };
 			},
 		],
 		[
 			"POST",
 			"/memory/log",
 			async (_params, request) => {
-				const { text } = await readJson<{ text: string }>(request);
+				const { text, scope } = await readJson<{ text: string; scope?: string }>(request);
 				const line = typeof text === "string" ? text.trim() : "";
 				if (line === "" || /[\r\n]/.test(line)) throw new HttpError(400, "text must be one non-empty line");
 				if (byteLength(line) > ENTRY_BYTES) throw new HttpError(400, `text is limited to ${ENTRY_BYTES} bytes`);
-				const entry = this.memory.store.append(line, this.memory.today());
+				if (scope !== undefined && typeof scope !== "string") throw new HttpError(400, "scope must be a memory scope's key");
+				const entry = this.memory.store.append(line, this.memory.today(), { scope: scope === undefined ? PRIVATE_SCOPE : this.#memoryScope(scope).key });
 				await this.startMemoryNap();
 				return Response.json(entry, { status: 201 });
+			},
+		],
+		[
+			"PUT",
+			"/memory/log/:id",
+			async ({ id }, request) => {
+				// Moving a memory to another scope: it gets a new id there.
+				const { scope } = await readJson<{ scope: string }>(request);
+				const entry = /^\d+$/.test(id!) ? this.memory.store.entry(Number(id)) : undefined;
+				if (!entry) throw new HttpError(404, `No memory ${id}`);
+				if (typeof scope !== "string") throw new HttpError(400, "scope must be a memory scope's key");
+				const target = this.#memoryScope(scope).key;
+				if (entry.forgotten) throw new HttpError(409, `Memory ${id} was forgotten`);
+				if (target === entry.scope) return entry;
+				const moved = this.memory.store.move(entry.id, target);
+				await this.startMemoryNap();
+				return moved;
 			},
 		],
 		[
@@ -4491,32 +4635,64 @@ export class Pim extends DurableAgent<Env> {
 		],
 		[
 			"GET",
-			"/memory/tree/:block",
-			({ block: name }) => {
+			"/memory/tree/:scope/:block",
+			({ scope, block: name }) => {
 				const block = parseBlock(name!);
 				if (!block) throw new HttpError(400, `${name} is not a block, like 16-31`);
-				if (block[0] >= this.memory.store.count()) throw new HttpError(404, `No memories in ${name}`);
+				if (block[0] >= this.memory.store.size(scope!)) throw new HttpError(404, `No memories in ${scope}/${name}`);
 				return {
 					block: blockName(block),
-					summary: this.memory.store.summary(block) ?? null,
-					halves: halves(block).map((half) =>
-						half[1] - half[0] === 1
-							? { block: String(half[0]), line: this.memory.store.entry(half[0]) ? entryLine(this.memory.store.entry(half[0])!) : null }
-							: { block: blockName(half), summary: this.memory.store.summary(half) ?? null },
-					),
+					summary: this.memory.store.summary(scope!, block) ?? null,
+					halves: halves(block).map((half) => {
+						if (half[1] - half[0] > 1) return { block: blockName(half), summary: this.memory.store.summary(scope!, half) ?? null };
+						const entry = this.memory.store.at(scope!, half[0]);
+						return { block: String(half[0]), line: entry ? entryLine(entry) : null };
+					}),
 				};
 			},
 		],
 		[
 			"DELETE",
-			"/memory/tree/:block",
-			async ({ block: name }) => {
+			"/memory/tree/:scope/:block",
+			async ({ scope, block: name }) => {
 				const block = parseBlock(name!);
 				if (!block) throw new HttpError(400, `${name} is not a block, like 16-31`);
-				const dropped = this.memory.store.dropSummary(block);
-				if (dropped === 0) throw new HttpError(404, `No summary ${name}`);
+				const dropped = this.memory.store.dropSummary(scope!, block);
+				if (dropped === 0) throw new HttpError(404, `No summary ${scope}/${name}`);
 				await this.startMemoryNap();
 				return { dropped };
+			},
+		],
+		// Named memory scopes: ones the person makes, such as Work, for the agents and circles they choose.
+		[
+			"POST",
+			"/memory/scopes",
+			async (_params, request) => {
+				const name = scopeName((await readJson<{ name: string }>(request)).name);
+				if (this.memory.store.namedScopes().length >= MAX_NAMED_SCOPES) throw new HttpError(429, `You can have up to ${MAX_NAMED_SCOPES} named memory scopes.`);
+				const { key } = this.memory.store.createScope(name);
+				return Response.json(this.#memoryScope(key), { status: 201 });
+			},
+		],
+		[
+			"PUT",
+			"/memory/scopes/:key",
+			async ({ key }, request) => {
+				if (this.#memoryScope(key!).kind !== "named") throw new HttpError(400, "Only a scope you named can be renamed");
+				this.memory.store.renameScope(key!, scopeName((await readJson<{ name: string }>(request)).name));
+				return this.#memoryScope(key!);
+			},
+		],
+		[
+			"DELETE",
+			"/memory/scopes/:key",
+			async ({ key }) => {
+				// Its memories stay, and only the majordomo reads them, until the person moves or forgets them.
+				if (this.#memoryScope(key!).kind !== "named") throw new HttpError(400, "Only a scope you named can be deleted");
+				this.memory.store.deleteScope(key!);
+				this.agents.dropMemoryScope(key!);
+				this.circles.dropMemoryScope(key!);
+				return { deleted: true };
 			},
 		],
 
@@ -4678,7 +4854,7 @@ export class Pim extends DurableAgent<Env> {
 				const { name, symbol, color, instructions } = setup;
 				this.agents.update(majordomo.id, agentInput({ name, symbol, color, instructions }, majordomo));
 				const memories = setupMemories(setup);
-				for (const memory of memories) this.memory.store.append(memory, this.memory.today());
+				for (const { text, everyone } of memories) this.memory.store.append(text, this.memory.today(), { scope: everyone ? EVERYONE_SCOPE : PRIVATE_SCOPE });
 				if (memories.length > 0) await this.startMemoryNap();
 				this.agents.introduce();
 				// It opens the person's first chat by introducing itself; they answer with whatever they like it to know.
@@ -4698,6 +4874,7 @@ export class Pim extends DurableAgent<Env> {
 			"/agents",
 			async (_params, request) => {
 				const input = this.#checkSkills(this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request)))));
+				this.#checkNamedScopes(input.memoryScopes ?? []);
 				const agent = this.agents.create(checkContacts(null, input, this.agents.list()));
 				return Response.json(agent, { status: 201 });
 			},
@@ -4708,6 +4885,7 @@ export class Pim extends DurableAgent<Env> {
 			async ({ agent: id }, request) => {
 				const agent = this.#agent(id!);
 				const input = this.#checkSkills(this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request), agent))));
+				this.#checkNamedScopes(input.memoryScopes ?? []);
 				return this.agents.update(id!, checkContacts(agent, input, this.agents.list()));
 			},
 		],
@@ -4889,9 +5067,17 @@ export class Pim extends DurableAgent<Env> {
 			"/circles/:circle",
 			async ({ circle }, request) => {
 				this.#circle(circle!);
-				const { name, enabled } = await readJson<{ name: string; enabled: boolean }>(request);
+				const { name, enabled, memoryScopes } = await readJson<{ name: string; enabled: boolean; memoryScopes: string[] }>(request);
 				if (enabled !== undefined && typeof enabled !== "boolean") throw new HttpError(400, "enabled must be true or false");
-				this.circles.updateCircle(circle!, { ...(name !== undefined ? { name: circleName(name) } : {}), ...(enabled !== undefined ? { enabled } : {}) });
+				if (memoryScopes !== undefined) {
+					if (!Array.isArray(memoryScopes) || memoryScopes.some((key) => typeof key !== "string")) throw new HttpError(400, "memoryScopes must be a list of memory scopes' keys");
+					this.#checkNamedScopes(memoryScopes.filter((key) => key !== EVERYONE_SCOPE));
+				}
+				this.circles.updateCircle(circle!, {
+					...(name !== undefined ? { name: circleName(name) } : {}),
+					...(enabled !== undefined ? { enabled } : {}),
+					...(memoryScopes !== undefined ? { memoryScopes: [...new Set(memoryScopes)] } : {}),
+				});
 				return this.#describeCircles().find((candidate) => candidate.id === circle);
 			},
 		],

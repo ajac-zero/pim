@@ -20,12 +20,14 @@ import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToo
 import type { DirectoryApp } from "./app-directory";
 import type { BlueprintDefinition } from "./define";
 import { type McpBridge, serverFor } from "./mcp";
+import type { NamedScope } from "./optmem/store";
 import { type PimServices, json, text } from "./services";
 
 export const CREATE_AGENT = "create_agent";
 export const UPDATE_AGENT = "update_agent";
 export const RENAME_AGENT = "rename_agent";
 export const MANAGE_APPS = "manage_apps";
+export const SHARE_MEMORY_SCOPE = "share_memory_scope";
 
 /** What `update_agent` changes. Contacts are added and removed by name. */
 const Changes = Type.Object({
@@ -156,6 +158,40 @@ export function renameAgentAction(agents: Pick<AgentStore, "get" | "update">): G
 	}) as GatedAction;
 }
 
+/**
+ * The majordomo lets another agent read one of the person's named memory
+ * scopes, or stop reading it: who knows what about them is theirs to say,
+ * so it asks first.
+ */
+export function shareMemoryScopeAction(agents: Pick<AgentStore, "get" | "update">, scopes: () => readonly NamedScope[]): GatedAction {
+	const named = (key: string) => scopes().find((scope) => scope.key === key);
+	return defineGatedAction({
+		name: SHARE_MEMORY_SCOPE,
+		description:
+			"Let another of the person's agents read one of their named memory scopes, as your memory lists it, or with `stop` no longer read it, when the agent needs what it holds for its work or the person asks. Use the agent's id from your_agents.",
+		parameters: Type.Object({
+			scope: Type.String({ description: "A named scope's key, such as s_0123456789ab, as your memory lists it." }),
+			agent: Type.String({ description: "The agent's id from your_agents." }),
+			stop: Type.Optional(Type.Boolean({ description: "True to stop it reading the scope." })),
+		}),
+		summarize: ({ scope, agent, stop }) => {
+			const who = JSON.stringify(agents.get(agent)?.name ?? agent);
+			const what = JSON.stringify(named(scope)?.name ?? scope);
+			return stop ? `Stop ${who} reading the memory scope ${what}` : `Let ${who} read the memory scope ${what}`;
+		},
+		async run({ scope: key, agent: id, stop }) {
+			const scope = named(key);
+			if (!scope) return `There is no named memory scope ${key}: only a scope the person or you named can be shared.`;
+			const agent = agents.get(id);
+			if (!agent) return "That agent no longer exists.";
+			if (agent.majordomo) return "You read every scope already.";
+			const memoryScopes = stop ? agent.memoryScopes.filter((other) => other !== key) : [...new Set([...agent.memoryScopes, key])];
+			agents.update(id, agentInput({ memoryScopes }, agent));
+			return stop ? `${agent.name} no longer reads "${scope.name}".` : `${agent.name} reads "${scope.name}" from its next step.`;
+		},
+	}) as GatedAction;
+}
+
 /** The person's agents, for a chat's agent to know them and make new ones. */
 export type AgentsHost = {
 	list(): readonly Agent[];
@@ -171,7 +207,7 @@ export type AgentsHost = {
 function agentsSection(self: Agent, host: AgentsHost): string {
 	const blueprints = host.blueprints();
 	return [
-		"The person's agents. Each has its own chats in the sidebar; they share memory, apps, goals and schedules.",
+		"The person's agents. Each has its own chats in the sidebar; they share apps, goals and schedules, and each remembers what its memory scopes hold.",
 		...host
 			.list()
 			.map(

@@ -9,7 +9,7 @@ import { PimThemes, type Theme, type ThemeList } from "../src/themes";
 import { api, apiUrl, lastUserText, pendingApproval, post, ROOT, say, scripts, settled, systemPrompt, TOKEN, toolUse } from "./helpers";
 import { faux, ledger, outbox, utility } from "./worker";
 
-type Agent = { id: string; name: string; blueprint: string | null; majordomo: boolean };
+type Agent = { id: string; name: string; blueprint: string | null; majordomo: boolean; memoryScope: string };
 
 /** A message's result as API clients get it: what Pim sent, in order. */
 const ask = async (content: string, session: string) => (await say(content, session)) as unknown as { replies: string[] };
@@ -130,8 +130,9 @@ describe("extensions", () => {
 		await settled(chat);
 		faux.setResponses([toolUse("create_goal", { title: "Learn Portuguese", steps: ["Find a tutor"] }), toolUse("send_to_user", { message: "ok" })]);
 		await say("I want to learn Portuguese.", ROOT);
-		await post("/memory/log", { text: "Prefers morning runs" });
-		const forgotten = (await post("/memory/log", { text: "Lives in Lisbon" })).body;
+		await post("/memory/log", { text: "Prefers morning runs", scope: "everyone" });
+		await post("/memory/log", { text: "Saving for a new car" });
+		const forgotten = (await post("/memory/log", { text: "Lives in Lisbon", scope: "everyone" })).body;
 		await api(`/memory/log/${forgotten.id}`, { method: "DELETE" });
 
 		const board = await dashboard(coach);
@@ -149,7 +150,7 @@ describe("extensions", () => {
 			kind: "progress",
 			items: [{ title: "Run a 10k", value: 0, max: 2, detail: "Buy shoes", link: { chat } }],
 		});
-		// Memory is shared by every agent; a forgotten memory is gone from it.
+		// Only what the coach reads: not the majordomo's own memories, nor a forgotten one.
 		expect(widget(board, "pim.memory/recent").items.map((item: { title: string }) => item.title)).toEqual(["Prefers morning runs"]);
 		const artifact = widget(board, "pim.artifacts/recent").items;
 		expect(artifact).toMatchObject([{ title: "Training plan", link: { artifact: expect.any(String), chat } }]);
@@ -161,7 +162,7 @@ describe("extensions", () => {
 		expect(widget(home, "pim.goals/active").items.map((item: { title: string }) => item.title)).toEqual(["Learn Portuguese"]);
 		expect(widget(home, "pim.schedule/upcoming").items).toEqual([]);
 		expect(widget(home, "pim.artifacts/recent")).toMatchObject({ items: [], empty: expect.stringContaining("Nothing made yet") });
-		expect(widget(home, "pim.memory/recent").items.map((item: { title: string }) => item.title)).toEqual(["Prefers morning runs"]);
+		expect(widget(home, "pim.memory/recent").items.map((item: { title: string }) => item.title)).toEqual(["Saving for a new car", "Prefers morning runs"]);
 
 		// In the person's language, where the extension translated it.
 		const spanish = await dashboard(mine, "es");
@@ -175,7 +176,8 @@ describe("extensions", () => {
 		// An agent nobody has talked to costs nothing: no model is asked.
 		expect(await suggestions(coach)).toEqual(["What can you do for me?", "Help me plan my week", "Start tracking a goal with me"]);
 
-		await post("/memory/log", { text: "Training for the Lisbon half marathon in March" });
+		await post("/memory/log", { text: "Training for the Lisbon half marathon in March", scope: coach.memoryScope });
+		await post("/memory/log", { text: "Allergic to shellfish", scope: other.memoryScope });
 		const chat = (await post("/sessions", { agent: coach.id })).body.id;
 		faux.setResponses([toolUse("send_to_user", { message: "Long run on Sunday?" })]);
 		await say("Plan my week of training", chat);
@@ -198,6 +200,7 @@ describe("extensions", () => {
 		expect(inputs[0]).toContain("Run coach, Trains people for races.");
 		expect(inputs[0]).toContain("Language: es");
 		expect(inputs[0]).toContain("Lisbon half marathon");
+		expect(inputs[0]).not.toContain("shellfish");
 		expect(inputs[0]).toContain("Long run on Sunday?");
 		expect(inputs[0]).not.toContain("Pasta tonight");
 

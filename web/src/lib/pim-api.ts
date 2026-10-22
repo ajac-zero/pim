@@ -169,8 +169,29 @@ export type MajordomoSetup = {
 /** How long an agent's name may be. */
 export const MAX_PIM_NAME = 60;
 
+/** A memory scope, the agents that read it, and how much it holds. */
+export type MemoryScopeInfo = {
+  key: string;
+  kind: "private" | "everyone" | "agent" | "named" | "former";
+  name: string | null;
+  agents: string[];
+  readers: string[];
+  count: number;
+};
+
+export type MemoryEntry = {
+  id: number;
+  date: string;
+  text: string;
+  forgotten: boolean;
+  source: string | null;
+  scope: string;
+};
+
 /** One of your agents: its own name and instructions, on top of a blueprint. */
 export type Agent = {
+  memoryScope: string;
+  memoryScopes: string[];
   id: string;
   name: string;
   description: string;
@@ -297,6 +318,7 @@ export type PinnedArtifact = {
 };
 
 export type AgentInput = {
+  memoryScopes?: string[];
   name: string;
   description: string;
   instructions: string;
@@ -425,6 +447,7 @@ export type Approval = {
 
 /** One of your circles: people who may message your space, and what they may use. */
 export type Circle = {
+  memoryScopes: string[];
   id: string;
   name: string;
   enabled: boolean;
@@ -1042,6 +1065,43 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const pim = {
+  memory: () =>
+    call<{
+      count: number;
+      pendingCompressions: number;
+      view: string[];
+      scopes: MemoryScopeInfo[];
+    }>("/memory"),
+  memoryLog: (scope = "", before?: number) =>
+    call<{ entries: MemoryEntry[] }>(
+      `/memory/log?limit=30${scope ? `&scope=${encodeURIComponent(scope)}` : ""}${before === undefined ? "" : `&before=${before}`}`,
+    ),
+  addMemory: (text: string, scope = "private") =>
+    call<MemoryEntry>("/memory/log", {
+      method: "POST",
+      body: JSON.stringify({ text, scope }),
+    }),
+  moveMemory: (id: number, scope: string) =>
+    call<MemoryEntry>(`/memory/log/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ scope }),
+    }),
+  forgetMemory: (id: number) =>
+    call<unknown>(`/memory/log/${id}`, { method: "DELETE" }),
+  createMemoryScope: (name: string) =>
+    call<MemoryScopeInfo>("/memory/scopes", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  renameMemoryScope: (key: string, name: string) =>
+    call<MemoryScopeInfo>(`/memory/scopes/${encodeURIComponent(key)}`, {
+      method: "PUT",
+      body: JSON.stringify({ name }),
+    }),
+  deleteMemoryScope: (key: string) =>
+    call<unknown>(`/memory/scopes/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+    }),
   sessions: () =>
     call<{ sessions: Session[] }>("/sessions").then((body) => body.sessions),
   createSession: (options: { title?: string; agent?: string } = {}) =>
@@ -1310,7 +1370,10 @@ export const pim = {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
-  updateCircle: (id: string, change: { name?: string; enabled?: boolean }) =>
+  updateCircle: (
+    id: string,
+    change: { name?: string; enabled?: boolean; memoryScopes?: string[] },
+  ) =>
     call<Circle>(`/circles/${id}`, {
       method: "PUT",
       body: JSON.stringify(change),

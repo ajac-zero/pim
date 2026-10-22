@@ -362,7 +362,7 @@ export function tasksExtension(host: TasksHost) {
 			tasks: Type.Array(
 				Type.Object({
 					to: Type.String({ description: "Whom it is for: an agent's name, as your prompt lists them." }),
-					task: Type.String({ minLength: 1, maxLength: 20_000, description: "What to do, what you already know, and what to answer with." }),
+					task: Type.String({ minLength: 1, maxLength: 20_000, description: "What to do, what you already know that it needs, and what to answer with. It remembers only what its own memory holds: give it what the task needs about the person, and nothing more." }),
 					continues: Type.Optional(
 						Type.String({ description: "The id of a finished task you handed the same one before, to carry on in its conversation, where its earlier work is." }),
 					),

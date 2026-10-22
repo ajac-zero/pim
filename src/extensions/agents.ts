@@ -32,6 +32,7 @@ export const CREATE_AGENT = "create_agent";
 export const UPDATE_AGENT = "update_agent";
 export const RENAME_AGENT = "rename_agent";
 export const MANAGE_APPS = "manage_apps";
+export const ADD_CUSTOM_APP = "add_custom_app";
 export const SHARE_MEMORY_SCOPE = "share_memory_scope";
 
 /** What `update_agent` changes. Contacts are added and removed by name. */
@@ -178,20 +179,57 @@ export function manageAppsAction(
 			if (!agent) return "That agent no longer exists.";
 			const apps = directory();
 			const updated = agents.update(id, changedApps(agent, changes, apps));
-			const results = [`${agent.name}'s apps are updated. Shared connections and their tool permissions are unchanged.`];
-			for (const app of apps.filter((app) => changes.add?.includes(app.ref) && updated.apps.includes(app.ref))) {
-				if (serverFor(bridge.servers(), app)?.state === "ready") {
-					results.push(`${app.name} is already connected.`);
-					continue;
-				}
-				try {
-					const result = await bridge.connect(app);
-					results.push(result.authUrl ? `${app.name} needs the person to sign in: ${result.authUrl}` : `Connected ${app.name}.`);
-				} catch (error) {
-					results.push(`${app.name} was added, but connecting failed: ${error instanceof Error ? error.message : String(error)}. Use connect_app to retry.`);
-				}
-			}
-			return results.join("\n");
+			const added = apps.filter((app) => changes.add?.includes(app.ref) && updated.apps.includes(app.ref));
+			return [`${agent.name}'s apps are updated. Shared connections and their tool permissions are unchanged.`, ...(await connectAdded(bridge, added))].join("\n");
+		},
+	}) as GatedAction;
+}
+
+/** Connects apps just added to an agent, saying for each what came of it. */
+async function connectAdded(bridge: Pick<McpBridge, "servers" | "connect">, apps: readonly DirectoryApp[]): Promise<string[]> {
+	const results: string[] = [];
+	for (const app of apps) {
+		if (serverFor(bridge.servers(), app)?.state === "ready") {
+			results.push(`${app.name} is already connected.`);
+			continue;
+		}
+		try {
+			const result = await bridge.connect(app);
+			results.push(result.authUrl ? `${app.name} needs the person to sign in: ${result.authUrl}` : `Connected ${app.name}.`);
+		} catch (error) {
+			results.push(`${app.name} was added, but connecting failed: ${error instanceof Error ? error.message : String(error)}. Use connect_app to retry.`);
+		}
+	}
+	return results;
+}
+
+/**
+ * The admin's majordomo adds a remote MCP server to this Pim's apps, as the
+ * admin does in Apps → Create new app, then works with it and connects it.
+ * The space offers it only to the admin's majordomo; `add` checks again.
+ */
+export function addCustomAppAction(
+	agents: Pick<AgentStore, "majordomo" | "update">,
+	bridge: Pick<McpBridge, "servers" | "connect">,
+	/** Puts the server in the directory, unless an app there has its URL already, and returns that app. */
+	add: (app: { name: string; url: string; description?: string }) => Promise<DirectoryApp>,
+): GatedAction {
+	return defineGatedAction({
+		name: ADD_CUSTOM_APP,
+		description:
+			"The person runs this Pim: add a remote MCP server they give you to its apps, for everyone on it, then add it to your apps and connect it. Only for an app find_app doesn't find. Give the server's https URL as the person gave it, never with credentials in it; if it needs a sign-in, you get the link to give them. Then hand it to an agent with create_agent's apps, or they add it to one in Your agents.",
+		explicitApproval: true,
+		parameters: Type.Object({
+			name: Type.String({ minLength: 1, maxLength: 60, description: "The app's name, as people will see it." }),
+			url: Type.String({ pattern: "^https://\\S+$", maxLength: 500, description: "The MCP server's https URL." }),
+			description: Type.Optional(Type.String({ maxLength: 160, description: "What it does, in a sentence." })),
+		}),
+		summarize: ({ name, url }) => `Add ${name} (${url}) to this Pim's apps for everyone, and connect it`,
+		async run(input) {
+			const app = await add(input);
+			const majordomo = agents.majordomo();
+			agents.update(majordomo.id, agentInput({ apps: [...new Set([...majordomo.apps, app.ref])] }, majordomo));
+			return [`${app.name} is one of this Pim's apps [id: ${app.ref}], and one of yours.`, ...(await connectAdded(bridge, [app]))].join("\n");
 		},
 	}) as GatedAction;
 }

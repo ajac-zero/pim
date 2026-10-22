@@ -5,7 +5,7 @@ import { deploymentSettings } from "./deployment";
 import { accountApi, adminApi, clientIp, contentOrigin, handleRegistration, limited, resolveAccount, servePublicArtifact, siteFor, sites, socialApi } from "./accounts";
 import { COMPUTER_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
 import { BROWSER_LIVE_PATH } from "./browser";
-import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER } from "./pim";
+import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER, SIGNED_IN_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
 import { themes as ownThemes } from "./extensions/themes";
@@ -136,8 +136,8 @@ const mcpAccess: McpAccess = {
 
 const under = (pathname: string, prefix: string) => pathname === prefix || pathname.startsWith(`${prefix}/`);
 
-/** Hands a request to an owner's space, `path` being its path in the space's API. */
-export async function toAgent(request: Request, env: Env, owner: string, path: string): Promise<Response> {
+/** Hands a request to an owner's space, `path` being its path in the space's API; `signedIn` when it came with their browser's session. */
+export async function toAgent(request: Request, env: Env, owner: string, path: string, signedIn = false): Promise<Response> {
 	const agent = await getAgentByName(env.Pim, owner);
 	const url = new URL(request.url);
 	url.pathname = path;
@@ -145,6 +145,9 @@ export async function toAgent(request: Request, env: Env, owner: string, path: s
 	const forwarded = new Request(url, request.body === null ? request : new Request(request, { body: await request.arrayBuffer() }));
 	// The space checks it is the one this owner's requests are for.
 	forwarded.headers.set(OWNER_HEADER, owner);
+	// Only the Worker says how the caller signed in: a header sent from outside is dropped.
+	if (signedIn) forwarded.headers.set(SIGNED_IN_HEADER, "1");
+	else forwarded.headers.delete(SIGNED_IN_HEADER);
 	try {
 		return await agent.fetch(forwarded);
 	} catch (error) {
@@ -359,5 +362,5 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 	if (upgrade !== (path === "/ws" || path === BROWSER_LIVE_PATH)) {
 		return withCors(fail(upgrade ? 404 : 426, upgrade ? "WebSockets connect at /api/ws" : "/api/ws expects a WebSocket upgrade"));
 	}
-	return withCors(await toAgent(request, env, account.ownerId, path));
+	return withCors(await toAgent(request, env, account.ownerId, path, viaSession));
 }

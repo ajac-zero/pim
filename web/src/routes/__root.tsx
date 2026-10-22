@@ -219,14 +219,20 @@ function usePimEvents() {
         if (
           (approval.action === "rename_agent" ||
             approval.action === "update_agent" ||
-            approval.action === "manage_apps") &&
+            approval.action === "manage_apps" ||
+            approval.action === "add_custom_app") &&
           approval.status === "approved"
         ) {
           queryClient.invalidateQueries({ queryKey: ["agents"] });
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
           queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-          if (approval.action === "manage_apps")
+          if (
+            approval.action === "manage_apps" ||
+            approval.action === "add_custom_app"
+          )
             queryClient.invalidateQueries({ queryKey: ["apps"] });
+          if (approval.action === "add_custom_app")
+            queryClient.invalidateQueries({ queryKey: ["app-directory"] });
         }
         if (
           approval.action === "write_skill" &&

@@ -94,6 +94,7 @@ import { NativeApps } from "./extensions/native-apps";
 import {
 	type Ability,
 	checkToolNames,
+	CUSTOM_APPS,
 	isNativeApp,
 	secretsOf,
 	type NativeAppDefinition,
@@ -136,6 +137,8 @@ import { CREATE_MEMORY_SCOPE, createOptMem, type MemoryAccess, type MemoryScope,
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
 import { byteLength, ENTRY_BYTES, EVERYONE_SCOPE, entryLine, MAX_NAMED_SCOPES, MAX_SCOPE_NAME, PRIVATE_SCOPE } from "./extensions/optmem/store";
 import {
+	ADD_CUSTOM_APP,
+	addCustomAppAction,
 	CREATE_AGENT,
 	agentExtension,
 	MANAGE_APPS,
@@ -196,6 +199,12 @@ const PINNED_ARTIFACT = "artifact:";
  * refused rather than served.
  */
 export const OWNER_HEADER = "x-pim-owner";
+/**
+ * Set by the Worker, and only by it, on API requests from the person's
+ * signed-in browser rather than an API token: what runs this Pim, such as
+ * approving an app for everyone on it, needs that, as the admin API does.
+ */
+export const SIGNED_IN_HEADER = "x-pim-signed-in";
 
 /** Where apps' sign-ins return, as `/mcp/callback/<owner>`, so the Worker knows whose space the callback is for. */
 export const MCP_CALLBACK_PATH = "/mcp/callback";
@@ -323,12 +332,17 @@ const PROFILE_KEY = "owner";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
 /** Tools of the space the person talks with that an agent at work on a task doesn't get, though their extensions stay. */
-/** Naming memory scopes and choosing which agents read them: only the majordomo, which reads every scope, is offered these. */
-const MAJORDOMO_MEMORY_TOOLS = [CREATE_MEMORY_SCOPE, SHARE_MEMORY_SCOPE];
-const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, RENAME_AGENT, MANAGE_APPS, WRITE_SKILL, INSTALL_SKILL]);
+/**
+ * Only the majordomo is offered these: naming memory scopes and choosing which agents read them, as it reads every
+ * scope; and, in the admin's space, adding apps to this Pim.
+ */
+const MAJORDOMO_TOOLS = [CREATE_MEMORY_SCOPE, SHARE_MEMORY_SCOPE, ADD_CUSTOM_APP];
+const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, RENAME_AGENT, MANAGE_APPS, ADD_CUSTOM_APP, WRITE_SKILL, INSTALL_SKILL]);
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
 /** The admin's apps, as this space last read them from the gallery, and how long before it reads them again. */
 const CUSTOM_APPS_KEY = "custom_apps";
+/** "1" when the owner is this Pim's admin, as last read from the directory with the admin's apps. */
+const OWNER_ADMIN_KEY = "owner_admin";
 /** How long what the admin shares through the gallery (apps and model providers) is used before it's read again. */
 const CUSTOM_APPS_TTL_MS = 60_000;
 /** The person's own model providers (./providers.ts), keys included. */
@@ -600,6 +614,7 @@ export class Pim extends DurableAgent<Env> {
 		renameAgentAction(this.agents),
 		shareMemoryScopeAction(this.agents, () => this.memory.store.namedScopes()),
 		manageAppsAction(this.agents, this.apps, () => this.appDirectory()),
+		addCustomAppAction(this.agents, this.apps, (app) => this.#addCustomApp(app)),
 		fileDeleteAction(this.#files),
 		shellAction(this.computer),
 		browserClickAction(this.browser),
@@ -607,10 +622,15 @@ export class Pim extends DurableAgent<Env> {
 		writeSkillAction(this.skills, this.agents, this.files),
 	];
 
-	/** Pim's own actions whose tools agents are offered now: those that use the computer only while one is paired. */
+	/**
+	 * Pim's own actions whose tools agents are offered now: those that use the
+	 * computer only while one is paired, and adding apps to this Pim only in
+	 * its admin's space.
+	 */
 	#offeredActions(): GatedAction[] {
 		const computer = this.computer.paired();
-		return this.#ownActions.filter((action) => computer || !COMPUTER_ACTIONS.has(action.name));
+		const admin = this.store.meta(OWNER_ADMIN_KEY) === "1";
+		return this.#ownActions.filter((action) => (computer || !COMPUTER_ACTIONS.has(action.name)) && (admin || action.name !== ADD_CUSTOM_APP));
 	}
 
 	/** Every action an approval can be for: Pim's own, and the extensions'. */
@@ -901,15 +921,24 @@ export class Pim extends DurableAgent<Env> {
 
 	#customAppsReadAt = 0;
 
-	/** Reads the admin's apps and model providers from the gallery again, at most once a minute unless `now`. */
+	/**
+	 * Reads the admin's apps and model providers from the gallery again, and
+	 * whether the owner is the admin from the directory, at most once a minute
+	 * unless `now`.
+	 */
 	async #refreshCustomApps(now = false): Promise<void> {
 		if (!now && Date.now() - this.#customAppsReadAt < CUSTOM_APPS_TTL_MS) return;
 		this.#customAppsReadAt = Date.now();
 		try {
 			const gallery = this.env.Gallery.getByName("gallery");
-			const [apps, providers] = await Promise.all([gallery.customApps(), gallery.sharedProviders()]);
+			// The directory failing to answer leaves what it said before.
+			const [apps, providers, admin] = await Promise.all([gallery.customApps(), gallery.sharedProviders(), this.#ownerIsAdmin().catch(() => null)]);
 			const custom = JSON.stringify(apps);
 			if (custom !== this.store.meta(CUSTOM_APPS_KEY)) this.store.setMeta(CUSTOM_APPS_KEY, custom);
+			if (admin !== null && (admin ? "1" : "0") !== this.store.meta(OWNER_ADMIN_KEY)) {
+				this.store.setMeta(OWNER_ADMIN_KEY, admin ? "1" : "0");
+				this.#reinstallApprovals();
+			}
 			const shared = JSON.stringify(providers);
 			if (shared !== (this.store.meta(SHARED_PROVIDERS_KEY) ?? "[]")) {
 				this.store.setMeta(SHARED_PROVIDERS_KEY, shared);
@@ -918,6 +947,33 @@ export class Pim extends DurableAgent<Env> {
 		} catch (error) {
 			console.warn("reading the admin's apps and providers failed", error);
 		}
+	}
+
+	/** Whether this space's owner runs this Pim, as the directory says now. */
+	async #ownerIsAdmin(): Promise<boolean> {
+		const account = await this.env.Directory.getByName("directory").account(this.name);
+		return account?.role === "admin" && account.status === "active";
+	}
+
+	/**
+	 * The admin's majordomo adds a remote MCP server to this Pim's apps, as
+	 * the admin does in Apps → Create new app (`POST /admin/apps`), and gets
+	 * it back from the directory. A server the directory has already is that
+	 * app, whoever added it.
+	 */
+	async #addCustomApp(input: { name: string; url: string; description?: string }): Promise<DirectoryApp> {
+		if (!(await this.#ownerIsAdmin())) throw new Error("Only this Pim's admin adds apps to it.");
+		const url = input.url.trim();
+		await this.#refreshCustomApps(true);
+		let app = this.appDirectory().find((candidate) => candidate.url === url);
+		if (!app) {
+			const added = await this.env.Gallery.getByName("gallery").addCustomApp({ name: input.name, url, description: input.description });
+			console.log(JSON.stringify({ event: "pim.app_added", app: added.id, by: this.name }));
+			await this.#refreshCustomApps(true);
+			app = this.appDirectory().find((candidate) => candidate.ref === `${CUSTOM_APPS}/${added.id}`);
+		}
+		if (!app) throw new Error(`${input.name} was added to this Pim, but this space doesn't see it yet. Try again in a minute.`);
+		return app;
 	}
 
 	/** Apps given through the API must be in the directory. */
@@ -2600,12 +2656,12 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * The names of the tools an agent's conversations aren't offered: the app
-	 * tools switched off for it, and, for any agent but the majordomo, naming
-	 * and sharing memory scopes, which are the majordomo's to do.
+	 * tools switched off for it, and, for any agent but the majordomo, the
+	 * majordomo's own: naming and sharing memory scopes, and adding apps.
 	 */
 	#switchedOff(agent: Agent): Set<string> {
 		const off = this.agentToolPermissions(agent).flatMap((info) => (info.permission === "off" ? [info.name] : []));
-		return new Set(agent.majordomo ? off : [...off, ...MAJORDOMO_MEMORY_TOOLS]);
+		return new Set(agent.majordomo ? off : [...off, ...MAJORDOMO_TOOLS]);
 	}
 
 	/**
@@ -4777,6 +4833,9 @@ export class Pim extends DurableAgent<Env> {
 			"POST",
 			"/approvals/:id/approve",
 			async ({ id }, request) => {
+				if (this.store.approval(id!)?.action === ADD_CUSTOM_APP && request.headers.get(SIGNED_IN_HEADER) !== "1") {
+					throw new HttpError(403, "Adding an app to this Pim needs you signed in to the app.");
+				}
 				const { note, always } = await readJson<{ note: string; always: boolean }>(request);
 				const given = typeof note === "string" ? note : undefined;
 				return this.#publicApproval(always === true ? await this.alwaysApprove(id!, given) : await this.decideApproval(id!, "approve", given));

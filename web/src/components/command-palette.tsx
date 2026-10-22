@@ -7,6 +7,7 @@ import { AgentIcon } from "~/components/agent-icon";
 import {
   type SidebarPanel,
   sessionTitle,
+  useAwaitingApproval,
   useNewChat,
 } from "~/components/app-sidebar";
 import { type TranslationKey, useI18n } from "~/components/i18n";
@@ -14,17 +15,24 @@ import {
   Bell,
   Blocks,
   CalendarClock,
+  Check,
   Compass,
   FileIcon,
   Folder,
   Lightbulb,
   MessagesSquare,
+  Monitor,
+  Moon,
+  Palette,
   Plus,
   Search,
   Settings,
+  Sun,
   Users,
 } from "~/components/icons";
+import { useTheme } from "~/components/theme";
 import { accountQuery, agentsQuery, sessionsQuery } from "~/lib/queries";
+import { cn } from "~/lib/utils";
 
 const PANELS: {
   panel: SidebarPanel;
@@ -56,6 +64,9 @@ export function CommandPalette() {
   const { data: agents } = useQuery(agentsQuery());
   const { data: account } = useQuery(accountQuery());
   const newChat = useNewChat();
+  const awaitingApproval = useAwaitingApproval();
+  const { preference, setPreference, themes, colorTheme, setColorTheme } =
+    useTheme();
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -149,6 +160,38 @@ export function CommandPalette() {
                   <Settings /> {t("settings")}
                 </Command.Item>
               </Command.Group>
+              <Command.Group heading={t("appearance")} className={GROUP}>
+                {(
+                  [
+                    ["light", "lightTheme", Sun],
+                    ["dark", "darkTheme", Moon],
+                    ["system", "systemTheme", Monitor],
+                  ] as const
+                ).map(([value, label, Icon]) => (
+                  <Command.Item
+                    key={value}
+                    value={`appearance ${t(label)}`}
+                    className={ITEM}
+                    onSelect={run(() => setPreference(value))}
+                  >
+                    <Icon /> {t(label)}
+                    {preference === value && <Check className="ml-auto" />}
+                  </Command.Item>
+                ))}
+                {themes.map((theme) => (
+                  <Command.Item
+                    key={theme.id}
+                    value={`${t("theme")} ${theme.name}`}
+                    className={ITEM}
+                    onSelect={run(() => setColorTheme(theme.id))}
+                  >
+                    <Palette /> {t("theme")}: {theme.name}
+                    {colorTheme?.id === theme.id && (
+                      <Check className="ml-auto" />
+                    )}
+                  </Command.Item>
+                ))}
+              </Command.Group>
               {!!agents?.length && (
                 <Command.Group heading={t("agents")} className={GROUP}>
                   {agents.map((agent) => (
@@ -175,27 +218,48 @@ export function CommandPalette() {
               )}
               {!!sessions?.length && (
                 <Command.Group heading={t("chats")} className={GROUP}>
-                  {sessions.map((session) => (
-                    <Command.Item
-                      key={session.id}
-                      value={`chat ${sessionTitle(session, t)} ${session.id}`}
-                      className={ITEM}
-                      onSelect={run(() =>
-                        navigate({
-                          to: "/chat/$sessionId",
-                          params: { sessionId: session.id },
-                        }),
-                      )}
-                    >
-                      <MessagesSquare />
-                      <span className="truncate">
-                        {sessionTitle(session, t)}
-                      </span>
-                    </Command.Item>
-                  ))}
+                  {sessions.map((session) => {
+                    const waiting = awaitingApproval.has(session.id);
+                    const hint = waiting
+                      ? t("awaitingApproval")
+                      : (session.visit?.username ?? session.agent?.name);
+                    return (
+                      <Command.Item
+                        key={session.id}
+                        value={`chat ${sessionTitle(session, t)} ${hint ?? ""} ${session.id}`}
+                        className={ITEM}
+                        onSelect={run(() =>
+                          navigate({
+                            to: "/chat/$sessionId",
+                            params: { sessionId: session.id },
+                          }),
+                        )}
+                      >
+                        <MessagesSquare />
+                        <span className="truncate">
+                          {sessionTitle(session, t)}
+                        </span>
+                        {hint && (
+                          <span
+                            className={cn(
+                              "ml-auto shrink-0 text-[13px] text-muted-foreground",
+                              waiting && "text-foreground",
+                            )}
+                          >
+                            {hint}
+                          </span>
+                        )}
+                      </Command.Item>
+                    );
+                  })}
                 </Command.Group>
               )}
             </Command.List>
+            <div className="hidden items-center gap-4 border-t px-4 py-2.5 text-[13px] text-muted-foreground md:flex">
+              <span>↑↓ {t("commandMove")}</span>
+              <span>↵ {t("commandOpen")}</span>
+              <span>esc {t("close")}</span>
+            </div>
           </Command>
         </Dialog.Content>
       </Dialog.Portal>

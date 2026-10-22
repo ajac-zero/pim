@@ -529,7 +529,7 @@ function ChatsPanel({
         <Button
           variant="ghost"
           size="lg"
-          className="w-full justify-start rounded-lg px-2 hover:bg-sidebar-accent has-[>svg]:px-2"
+          className="w-full justify-start rounded-lg px-2 text-foreground hover:bg-sidebar-accent hover:text-foreground has-[>svg]:px-2"
           onClick={newChat}
         >
           <SquarePen className="size-4.5" />

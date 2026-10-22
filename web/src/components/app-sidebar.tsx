@@ -1075,7 +1075,7 @@ function SessionRow({
           >
             <span
               className={cn(
-                "whitespace-nowrap transition-transform group-focus-within/row:inline-block group-hover/row:inline-block duration-[1200ms] ease-linear group-focus-within/row:[transform:translateX(var(--title-shift,0px))] group-hover/row:[transform:translateX(var(--title-shift,0px))] motion-reduce:transition-none",
+                "whitespace-nowrap transition-transform group-focus-within/row:inline-block group-hover/row:inline-block delay-300 duration-[var(--title-duration,0s)] ease-linear group-focus-within/row:[transform:translateX(var(--title-shift,0px))] group-hover/row:[transform:translateX(var(--title-shift,0px))] motion-reduce:transition-none",
                 !session.title && "italic",
               )}
             >

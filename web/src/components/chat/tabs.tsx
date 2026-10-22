@@ -83,7 +83,7 @@ export function ChatTabs({ activeId }: { activeId: string }) {
   const statusOf = (session: Session) =>
     session.busy ? (
       <span
-        className="size-1.5 rounded-full bg-primary motion-safe:animate-pulse"
+        className="size-1.5 shrink-0 rounded-full bg-primary motion-safe:animate-pulse"
         role="img"
         aria-label={t("working")}
       />
@@ -100,9 +100,9 @@ export function ChatTabs({ activeId }: { activeId: string }) {
     if (!session) return <div className="flex-1" />;
     return (
       <div className="flex min-w-0 flex-1 items-center gap-2 pl-4 text-[15px]">
+        {statusOf(session)}
         {iconOf(session, "bg-muted")}
         <span className="truncate">{sessionTitle(session, t)}</span>
-        {statusOf(session)}
       </div>
     );
   }
@@ -150,21 +150,17 @@ export function ChatTabs({ activeId }: { activeId: string }) {
                 }}
                 className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-t-xl pr-8 pl-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
               >
+                {status}
                 {iconOf(session, "bg-background")}
                 <span className="truncate">{title}</span>
               </Link>
-              {status && (
-                <span className="pointer-events-none absolute right-2 flex size-6 items-center justify-center transition-opacity group-hover/tab:opacity-0 group-has-[button:focus-visible]/tab:opacity-0">
-                  {status}
-                </span>
-              )}
               <button
                 type="button"
                 onClick={() => close(session.id)}
                 aria-label={t("closeTab")}
                 className={cn(
                   "absolute right-2 flex size-6 items-center justify-center rounded-md text-muted-foreground opacity-0 outline-none transition-opacity hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring group-hover/tab:opacity-100",
-                  active && !status && "opacity-100",
+                  active && "opacity-100",
                 )}
               >
                 <X className="size-3.5" />

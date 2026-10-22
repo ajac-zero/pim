@@ -1102,12 +1102,14 @@ function SessionRow({
         )}
         {session.busy && (
           <span
-            className="size-1.5 shrink-0 animate-pulse rounded-full bg-primary"
+            className="order-first size-1.5 shrink-0 animate-pulse rounded-full bg-primary"
             role="img"
             aria-label={t("working")}
           />
         )}
-        {awaitingApproval && <AwaitingApprovalMark />}
+        {awaitingApproval && (
+          <AwaitingApprovalMark className="order-first ml-0" />
+        )}
       </Link>
       <DropdownMenu onOpenChange={() => setConfirmingDelete(false)}>
         <DropdownMenuTrigger asChild>

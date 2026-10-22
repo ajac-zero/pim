@@ -49,6 +49,7 @@ import {
 	MAX_PROVIDERS,
 	OWN_PROVIDER,
 	piProvider,
+	providerModel,
 	prepareProvider,
 	providerInfo,
 	type ProviderInput,
@@ -318,6 +319,13 @@ export type OwnerProfile = { readonly ownerId: string; readonly username: string
 const ERASE_COURTESY_MS = 3_000;
 /** `pim_meta` keys of the models chosen through the API: for chats, and the utility model. */
 const MODEL_KEY = "model";
+/** What a deployment without the `AI` binding has for Workers AI: it fails every request with a way forward. */
+type AiEnv = { readonly AI?: Ai };
+const NO_WORKERS_AI = {
+	run: async () => {
+		throw new Error("No model is set up. Add a model provider in Settings → Model → Providers, or ask this Pim's admin to.");
+	},
+} as unknown as Ai;
 const UTILITY_MODEL_KEY = "utility_model";
 /** `pim_meta` keys of an agent's dashboard suggestions (see `Pim.#suggestions`) start with this, then its id. */
 const SUGGESTIONS_KEY = "suggestions:";
@@ -480,7 +488,11 @@ export class Pim extends DurableAgent<Env> {
 		get: (key) => this.store.meta(key) || null,
 		set: (key, value) => this.store.setMeta(key, value ?? ""),
 	});
-	readonly ai = createAI({ binding: this.env.AI });
+	/**
+	 * Workers AI, when the deployment has the `AI` binding. Without it, models
+	 * come from the providers people add, and a request to Workers AI says so.
+	 */
+	readonly ai = createAI({ binding: (this.env as AiEnv).AI ?? NO_WORKERS_AI });
 	/** The person's email address, and emailing them there. */
 	readonly email = new Email(this.store, () => this.mailer());
 	/** Model credentials (the ChatGPT plan's tokens), refreshed by pi-ai. */
@@ -1104,7 +1116,8 @@ export class Pim extends DurableAgent<Env> {
 			return (provider.startsWith(OWN_PROVIDER) || provider.startsWith(SHARED_PROVIDER)) && !catalog.getModel(provider, id);
 		};
 		if (missing(UTILITY_MODEL_KEY)) this.store.deleteMeta(UTILITY_MODEL_KEY);
-		if (missing(MODEL_KEY)) await this.chooseModel(null);
+		// Without Workers AI, the default is a provider's model, so it changes as providers come and go.
+		if (missing(MODEL_KEY) || (!this.#hasWorkersAi() && this.store.meta(MODEL_KEY) === undefined)) await this.chooseModel(null);
 	}
 
 	/** The person adds a model provider of their own, or changes one; its models are read from the server again. */
@@ -1164,7 +1177,18 @@ export class Pim extends DurableAgent<Env> {
 
 	/** The deployment's model (`PIM_MODEL`), used whenever no other is chosen. */
 	protected defaultModel(): PiModel {
+		if (!this.#hasWorkersAi()) {
+			// The first model of the first provider: the admin's, then the person's own.
+			for (const { catalogId, provider } of this.customProviders()) {
+				if (provider.models[0]) return providerModel(catalogId, provider, provider.models[0]);
+			}
+		}
 		return this.ai(this.deployment().model);
+	}
+
+	/** Whether this deployment has Workers AI: the `AI` binding. */
+	#hasWorkersAi(): boolean {
+		return (this.env as AiEnv).AI !== undefined;
 	}
 
 	/** The model every session uses: the one chosen through the API, or the default. */
@@ -1185,7 +1209,7 @@ export class Pim extends DurableAgent<Env> {
 	async #choice(provider: string, id: string): Promise<PiModel> {
 		const fallback = this.defaultModel();
 		if (provider === fallback.provider && id === fallback.id) return fallback;
-		if (provider === fallback.provider && this.#allowedModels()?.includes(id)) return this.ai(id);
+		if (this.#hasWorkersAi() && provider === fallback.provider && this.#allowedModels()?.includes(id)) return this.ai(id);
 		const model = this.modelCatalog().getModel(provider, id);
 		if (!model) throw new HttpError(400, `No model ${provider}/${id}`);
 		if (provider === CHATGPT_PROVIDER && !(await this.chatgpt.status()).connected) {
@@ -1210,6 +1234,7 @@ export class Pim extends DurableAgent<Env> {
 	 * Never the chosen model, so background work does not spend a ChatGPT plan.
 	 */
 	protected memoryModel(): ModelRef | undefined {
+		if (!this.#hasWorkersAi()) return undefined;
 		const { memoryModel, model: fallback } = this.deployment();
 		const model = this.ai(memoryModel ?? fallback);
 		return { provider: model.provider, modelId: model.id };
@@ -1221,7 +1246,7 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	protected defaultUtilityModel(): Model<Api> | undefined {
 		const { utilityModel } = this.deployment();
-		return utilityModel ? this.ai(utilityModel) : undefined;
+		return utilityModel && this.#hasWorkersAi() ? this.ai(utilityModel) : undefined;
 	}
 
 	/**
@@ -4152,6 +4177,7 @@ export class Pim extends DurableAgent<Env> {
 				}
 				let resolved: PiModel;
 				try {
+					if (!this.#hasWorkersAi()) throw new Error("This Pim has no Workers AI");
 					resolved = this.ai(model);
 				} catch (error) {
 					throw new HttpError(400, errorMessage(error));
@@ -4178,10 +4204,11 @@ export class Pim extends DurableAgent<Env> {
 					}
 				}
 				const fallback = this.defaultModel();
-				const platform = (this.#allowedModels() ?? []).filter((id) => id !== fallback.id).map((id) => this.ai(id));
+				const platform = this.#hasWorkersAi() ? (this.#allowedModels() ?? []).filter((id) => id !== fallback.id).map((id) => this.ai(id)) : [];
 				const providers = this.customProviders();
 				const custom = providers.flatMap(({ catalogId, provider }) => provider.models.flatMap((model) => this.modelCatalog().getModel(catalogId, model.id) ?? []));
-				const choices = [fallback, ...platform, ...chatgptModels, ...custom];
+				// Without Workers AI the default is a provider's model, already among `custom`, or nothing to choose.
+				const choices = [...(this.#hasWorkersAi() ? [fallback] : []), ...platform, ...chatgptModels, ...custom];
 				const utilityDefault = this.defaultUtilityModel();
 				const utility = await this.utilityModel();
 				// Only models that can answer in a JSON schema, for the jobs that need one.
@@ -4190,6 +4217,7 @@ export class Pim extends DurableAgent<Env> {
 					model: describeModel(this.chosenModel()),
 					default: describeModel(fallback),
 					choices: choices.map(describeModel),
+					workersAi: this.#hasWorkersAi(),
 					// The model for side jobs (./utility.ts); null when there is none.
 					utility: {
 						model: utility ? describeModel(utility) : null,
@@ -5434,7 +5462,8 @@ export class Pim extends DurableAgent<Env> {
 	/** The model `generate_image` draws with: `PIM_IMAGE_MODEL` on Workers AI, or null when it's off. */
 	protected imageModel(): ImageModel | null {
 		const { imageModel } = this.deployment();
-		return imageModel ? workersAiImageModel(this.env.AI, imageModel) : null;
+		const ai = (this.env as AiEnv).AI;
+		return imageModel && ai ? workersAiImageModel(ai, imageModel) : null;
 	}
 
 	/** `generate_image`, where the deployment has an image model. Each image counts as a model request. */

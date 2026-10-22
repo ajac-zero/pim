@@ -36,6 +36,7 @@ import {
   toneKey,
   WriteYourOwn,
 } from "~/components/majordomo-setup";
+import { AgentMemoryField } from "~/components/memory-settings";
 import { Button } from "~/components/ui/button";
 import {
   Collapsible,
@@ -789,6 +790,7 @@ function AgentForm({
     instructions: initial.instructions,
     blueprint: initial.blueprint,
     contacts: initial.contacts,
+    memoryScopes: initial.memoryScopes ?? [],
   });
   const save = useMutation({
     mutationFn: async () => {
@@ -912,6 +914,13 @@ function AgentForm({
         value={value.contacts}
         onChange={(contacts) => setValue({ ...value, contacts })}
       />
+      {agent && (
+        <AgentMemoryField
+          agent={agent}
+          value={value.memoryScopes ?? []}
+          onChange={(memoryScopes) => setValue({ ...value, memoryScopes })}
+        />
+      )}
       <div className="flex justify-end gap-2 border-t pt-5">
         <Button type="submit" disabled={save.isPending || !value.name.trim()}>
           {t("save")}

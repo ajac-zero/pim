@@ -27,6 +27,7 @@ export function majordomoRole(majordomo: Agent): string {
 	return `You are the person's majordomo, ${majordomo.name}: the agent they come to first and most, for almost anything, and the one that knows them best.
 
 - Get to know them. Record what you learn about them, their people, routines and preferences with \`note\`, even when it comes up in passing, and use it, so they never have to tell you twice.
+- Decide what their other agents know. Your notes stay in your private scope, which only you read. Keep in \`everyone\` only what every agent of theirs should know, such as their name, language and how they like to be addressed; when an agent needs more for a task, say it in the task. Move a memory with \`move_memory\` when they want an agent to know it, or not to. For a part of their life only some agents should know, such as their health, name a scope with \`create_memory_scope\` and keep those memories there; let an agent that needs it read it with \`share_memory_scope\`, which asks them first.
 - Don't do the work yourself. Talking with them, remembering, and keeping track of goals and schedules are yours. Anything else that takes real effort (research, writing, working in their apps) goes to one of their agents with \`${DELEGATE}\`. When none of them fits, make one with \`create_agent\`, then hand it the task. An agent that should hand parts of its own work to others gets them as its \`contacts\`: make those first. Answer a quick question yourself. Recurring or later work for one of them is scheduled with \`schedule_task\` and its \`agent\`, so each run is that agent's own chat.
 - While their agents work, you stay free: tell the person briefly what you handed out, and end your turn. When the answers arrive, tell them what came of it in your own words. They can read each task's conversation from this chat.
 - You are the person's face to their agents: when the person lets you, their approval requests come to you first, and you decide those you're sure about for them.
@@ -201,13 +202,13 @@ export function withPreferences(instructions: string, body: Record<string, unkno
 	return [preferenceLines(body), own.join("\n").trim()].filter((part) => part !== "").join("\n");
 }
 
-/** What it remembers from the setup, one memory each. */
-export function setupMemories(setup: MajordomoSetup): string[] {
+/** What it remembers from the setup, one memory each: their name for every agent, the rest for itself. */
+export function setupMemories(setup: MajordomoSetup): { text: string; everyone: boolean }[] {
 	const [last, ...rest] = [...setup.helpWith].reverse();
 	const areas = rest.length === 0 ? last : `${rest.reverse().join(", ")} and ${last}`;
 	return [
-		...(setup.yourName ? [`Their name is ${setup.yourName}.`] : []),
-		...(areas ? [`They'd like a hand with ${areas}.`] : []),
+		...(setup.yourName ? [{ text: `Their name is ${setup.yourName}.`, everyone: true }] : []),
+		...(areas ? [{ text: `They'd like a hand with ${areas}.`, everyone: false }] : []),
 	];
 }
 
@@ -229,7 +230,7 @@ export function introduction(majordomo: Agent, setup: MajordomoSetup): string {
 	const opener =
 		setup.helpWith.length > 0 ? "about one of the things they'd like a hand with, the one that seems to matter most" : "about what keeps them busy these days";
 	return [
-		`${INTRODUCTION} The person just joined and named you ${majordomo.name}.${known.length > 0 ? ` ${known.join(" ")}` : ""} This is your first conversation with them, and you start it.`,
+		`${INTRODUCTION} The person just joined and named you ${majordomo.name}.${known.length > 0 ? ` ${known.map((memory) => memory.text).join(" ")}` : ""} This is your first conversation with them, and you start it.`,
 		...(setup.locale && !setup.locale.startsWith("en") ? [`Their app is in the language with the code "${setup.locale}": write to them in it.`] : []),
 		`Your first message, with send_to_user, is a few short sentences: greet them${setup.yourName ? " by name" : ""}, say who you are and what you're for (they can come to you for almost anything; you get to know them, set up agents for the bigger jobs, and look after what those agents need their approval for), and end with one light, open question ${opener}.`,
 		`How to get to know them, in that message and the ones after it:

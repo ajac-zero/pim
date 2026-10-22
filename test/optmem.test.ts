@@ -3,8 +3,11 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/provid
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
+import type { Agent } from "../src/agents";
+import { CircleStore } from "../src/circles";
 import { cover } from "../src/extensions/optmem/cover";
-import { api, lastUserText, OWNER, post, say, toolUse } from "./helpers";
+import { OptMemStore } from "../src/extensions/optmem/store";
+import { api, lastUserText, OWNER, pendingApproval, post, say, scripts, settled as idle, toolUse } from "./helpers";
 import { faux, napper, type Pim } from "./worker";
 
 /**
@@ -78,7 +81,7 @@ describe("long-term memory", () => {
 		await say("My sister Ana is visiting.");
 		const { body } = await api("/memory/log");
 		expect(body.entries).toEqual([
-			{ id: 0, date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), text: "Ana is the user's sister.", forgotten: false, source: "1" },
+			{ id: 0, date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), text: "Ana is the user's sister.", forgotten: false, source: "1", scope: "private" },
 		]);
 	});
 
@@ -127,7 +130,7 @@ describe("long-term memory", () => {
 		expect(sixteen).toContain("fact 15");
 		expect(sixteen).not.toContain("fact 16");
 
-		const zoomed = (await api("/memory/tree/0-15")).body;
+		const zoomed = (await api("/memory/tree/private/0-15")).body;
 		expect(zoomed).toMatchObject({
 			summary: "S[0-15]",
 			halves: [{ block: "0-7", summary: "S[0-7]" }, { block: "8-15", summary: "S[8-15]" }],
@@ -138,12 +141,12 @@ describe("long-term memory", () => {
 		const { body } = await api("/memory");
 		expect(body.count).toBe(20);
 		const view = body.view as string[];
-		expect(view).toHaveLength(8);
+		// The majordomo's view: its own scope, which holds them all and so has all 8 lines, then the empty one every agent reads.
+		expect(view).toHaveLength(11);
 		const expected = cover(20, 8).map(([lo, hi]) =>
-			hi - lo === 1 ? expect.stringMatching(new RegExp(`^#${lo} \\S+ fact ${lo}$`)) : `#${lo}-${hi - 1} S[${lo}-${hi - 1}]`,
+			hi - lo === 1 ? expect.stringMatching(new RegExp(`^#${lo} \\S+ fact ${lo}$`)) : `#private/${lo}-${hi - 1} S[${lo}-${hi - 1}]`,
 		);
-		expect(view).toEqual(expected);
-		expect(view.at(-1)).toMatch(/^#19 \S+ fact 19$/);
+		expect(view).toEqual(["Scope private, your own: only you read it:", ...expected, "Scope everyone, which all of the person's agents read:", "(nothing yet)"]);
 	});
 
 	it("builds blocks above 16 from their two halves", async () => {
@@ -162,7 +165,7 @@ describe("long-term memory", () => {
 			(context) => {
 				prompt = systemText(context.messages).at(-1) ?? "";
 				return fauxAssistantMessage(
-					[fauxToolCall("recall", { pattern: "sister|fact 3[12]" }), fauxToolCall("zoom", { block: "0-15" })],
+					[fauxToolCall("recall", { pattern: "sister|fact 3[12]" }), fauxToolCall("zoom", { block: "private/0-15" })],
 					{ stopReason: "toolUse" },
 				);
 			},
@@ -172,13 +175,13 @@ describe("long-term memory", () => {
 			},
 		]);
 		await say("Who is my sister?", (await post("/sessions")).body.id);
-		expect(prompt).toMatch(/^<memory count="33" epoch="0">/);
+		expect(prompt).toMatch(/^<memory scopes="private:33 everyone:0" epoch="0">/);
 		// cover(33, 8) is #0-7, #8-15, #16-23, #24-27, #28-29, then #30, #31 and #32 verbatim.
-		expect(prompt).toContain("#0-7 S[0-7]\n#8-15 S[8-15]\n#16-23 S[16-23]\n#24-27 S[24-27]\n#28-29 S[28-29]\n#30 ");
+		expect(prompt).toContain("#private/0-7 S[0-7]\n#private/8-15 S[8-15]\n#private/16-23 S[16-23]\n#private/24-27 S[24-27]\n#private/28-29 S[28-29]\n#30 ");
 		expect(prompt).toContain("fact 32");
 		// Recall searches the raw log, oldest match first in its answer.
 		expect(results).toMatch(/#0 \S+ Ana is the user's sister\.\\n#31 \S+ fact 31\\n#32 \S+ fact 32\\n3 matches\./);
-		expect(results).toContain("#0-7 S[0-7]\\n#8-15 S[8-15]");
+		expect(results).toContain("#private/0-7 S[0-7]\\n#private/8-15 S[8-15]");
 	});
 
 	it("keeps a conversation's view, listing memories from elsewhere in a small section", async () => {
@@ -225,7 +228,7 @@ describe("long-term memory", () => {
 		await say("three", session);
 		// One fresh copy of the view, and the list is withdrawn.
 		expect(seen[2]!.memory).toHaveLength(2);
-		expect(seen[2]!.memory[1]).toMatch(new RegExp(`^<memory count="${base + 5}" epoch="0">`));
+		expect(seen[2]!.memory[1]).toMatch(new RegExp(`^<memory scopes="private:${base + 5} everyone:0" epoch="0">`));
 		expect(seen[2]!.since.at(-1)).toBeNull();
 		await settled();
 	});
@@ -257,7 +260,7 @@ describe("long-term memory", () => {
 		// The old copy is gone with the compacted entries; the one copy left is current.
 		const count = await memoryCount();
 		expect(seen[1]!.memory).toHaveLength(1);
-		expect(seen[1]!.memory[0]).toMatch(new RegExp(`^<memory count="${count}" epoch="0">`));
+		expect(seen[1]!.memory[0]).toMatch(new RegExp(`^<memory scopes="private:${count} everyone:0" epoch="0">`));
 		expect(seen[1]!.memory[0]).not.toBe(before);
 		expect(seen[1]!.memory[0]).toContain("Noted before the compaction.");
 	});
@@ -273,7 +276,7 @@ describe("long-term memory", () => {
 		await settled();
 
 		expect((await api("/memory/log?before=6&limit=1")).body.entries).toEqual([
-			{ id: 5, date: expect.any(String), text: "", forgotten: true, source: null },
+			{ id: 5, date: expect.any(String), text: "", forgotten: true, source: null, scope: "private" },
 		]);
 		expect((await api("/memory/log?q=fact%205$")).body.total).toBe(0);
 		// Exactly the summaries over #5 were rebuilt, and none of them saw it.
@@ -291,7 +294,7 @@ describe("long-term memory", () => {
 			},
 		]);
 		await say("still there?", session);
-		expect(latest).toMatch(new RegExp(`^<memory count="${await memoryCount()}" epoch="1">`));
+		expect(latest).toMatch(new RegExp(`^<memory scopes="private:${await memoryCount()} everyone:0" epoch="1">`));
 	});
 
 	it("discards a summary written from memories forgotten while it was being written", async () => {
@@ -313,7 +316,7 @@ describe("long-term memory", () => {
 		const attempts = naps.slice(before).filter((nap) => nap.block === block);
 		expect(attempts).toHaveLength(2);
 		expect(attempts[1]!.prompt).not.toContain("the secret plan");
-		expect((await api(`/memory/tree/${block}`)).body.summary).toBe(`S[${block}]`);
+		expect((await api(`/memory/tree/private/${block}`)).body.summary).toBe(`S[${block}]`);
 	});
 
 	it("validates the memory API", async () => {
@@ -322,6 +325,249 @@ describe("long-term memory", () => {
 		expect((await post("/memory/log", { text: "é".repeat(141) })).status).toBe(400);
 		expect((await api("/memory/log/999", { method: "DELETE" })).status).toBe(404);
 		expect((await api("/memory/log?q=(")).status).toBe(400);
-		expect((await api("/memory/tree/5-6")).status).toBe(400);
+		expect((await api("/memory/tree/private/5-6")).status).toBe(400);
 	});
 });
+
+/** What a model was sent in one request: its latest memory view, and the tool results it had. */
+type Seen = { memory: string; since: string; results: string };
+
+function seen(context: { messages: Message[] }): Seen {
+	return {
+		memory: systemText(context.messages).at(-1) ?? "",
+		since: patches(context.messages, "memory_since").at(-1) ?? "",
+		results: JSON.stringify(context.messages.filter((message) => message.role === "toolResult")),
+	};
+}
+
+/** Says something in a chat whose model calls `calls`, one after another, then answers; returns what it saw first and last. */
+async function ask(session: string, calls: [string, Record<string, unknown>][]): Promise<{ first: Seen; last: Seen }> {
+	const views: Seen[] = [];
+	faux.setResponses([
+		...calls.map(([name, args]) => (context: { messages: Message[] }) => {
+			views.push(seen(context));
+			return toolUse(name, args as never);
+		}),
+		(context: { messages: Message[] }) => {
+			views.push(seen(context));
+			return toolUse("send_to_user", { message: "ok" });
+		},
+	]);
+	await say("go", session);
+	return { first: views[0]!, last: views.at(-1)! };
+}
+
+describe("memory scopes", () => {
+	let gamer: Agent;
+	let coder: Agent;
+	let gamerChat: string;
+	let coderChat: string;
+
+	it("keeps an agent's notes in its own scope, and shows each agent only the scopes it reads", async () => {
+		gamer = (await post("/agents", { name: "Gamer" })).body;
+		coder = (await post("/agents", { name: "Coder" })).body;
+		expect([gamer.memoryScope, coder.memoryScope]).toEqual([`agent-${gamer.id}`, `agent-${coder.id}`]);
+		gamerChat = (await post("/sessions", { agent: gamer.id })).body.id;
+		coderChat = (await post("/sessions", { agent: coder.id })).body.id;
+
+		const noted = await ask(gamerChat, [["note", { text: "The Minecraft world seed is 4417." }]]);
+		expect(noted.last.results).toContain(`in ${gamer.memoryScope}.`);
+		expect((await api(`/memory/log?scope=${gamer.memoryScope}`)).body.entries).toEqual([
+			expect.objectContaining({ text: "The Minecraft world seed is 4417.", scope: gamer.memoryScope }),
+		]);
+
+		// The coder reads its own scope and everyone's: none of the majordomo's memories, nor the gamer's.
+		const { first, last } = await ask(coderChat, [
+			["recall", { pattern: "sister|4417" }],
+			["zoom", { block: "private/0-15" }],
+			["forget", { id: 0 }],
+		]);
+		expect(first.memory).toMatch(new RegExp(`^<memory scopes="${coder.memoryScope}:0 everyone:0" epoch="\\d+">`));
+		expect(first.memory).toContain(`Scope ${coder.memoryScope}, your own: only you and the majordomo read it:`);
+		expect(first.memory).not.toMatch(/4417|sister|fact|Scope private/);
+		expect(last.results).toContain("No match.");
+		expect(last.results).toContain("You don't read the scope private.");
+		expect(last.results).toContain("There is no memory #0.");
+		expect((await api("/memory/log?q=sister")).body.total).toBe(1);
+
+		// The majordomo reads every scope.
+		const view = (await api("/memory")).body.view.join("\n");
+		expect(view).toContain(`Scope ${gamer.memoryScope}, the own scope of Gamer:`);
+		expect(view).toContain("The Minecraft world seed is 4417.");
+		await settled();
+	});
+
+	it("lets an agent keep and move memories among the scopes it reads, and no others", async () => {
+		const noted = await ask(coderChat, [
+			["note", { text: "Prefers TypeScript.", scope: "everyone" }],
+			["note", { text: "Earns a lot.", scope: "private" }],
+		]);
+		expect(noted.last.results).toContain("in everyone.");
+		expect(noted.last.results).toContain("You can't keep memories in private");
+		const [typescript] = (await api("/memory/log?q=TypeScript")).body.matches;
+		expect(typescript.scope).toBe("everyone");
+		expect((await api("/memory/log?q=Earns")).body.total).toBe(0);
+
+		// Everyone's scope reaches the gamer's conversation.
+		const told = await ask(gamerChat, []);
+		expect(`${told.first.memory}${told.first.since}`).toContain("Prefers TypeScript.");
+
+		// The coder takes it back into its own scope: the gamer no longer finds it; the majordomo's memory it can't move.
+		const moved = await ask(coderChat, [
+			["move_memory", { id: typescript.id, scope: coder.memoryScope }],
+			["move_memory", { id: 0, scope: coder.memoryScope }],
+		]);
+		expect(moved.last.results).toMatch(new RegExp(`Moved #${typescript.id} to ${coder.memoryScope}, as #\\d+\\.`));
+		expect(moved.last.results).toContain("There is no memory #0.");
+		const recalled = await ask(gamerChat, [["recall", { pattern: "TypeScript" }]]);
+		expect(recalled.last.results).toContain("No match.");
+		expect((await api(`/memory/log?scope=${coder.memoryScope}`)).body.entries.map((entry: { text: string }) => entry.text)).toEqual(["Prefers TypeScript."]);
+		await settled();
+	});
+
+	it("lets the person name scopes and choose which agents read them", async () => {
+		expect((await post("/memory/scopes", { name: "" })).status).toBe(400);
+		const work = (await post("/memory/scopes", { name: "Work" })).body;
+		expect(work).toMatchObject({ key: expect.stringMatching(/^s_/), kind: "named", name: "Work", count: 0 });
+		expect((await api(`/agents/${coder.id}`, { method: "PUT", body: JSON.stringify({ memoryScopes: ["s_nope"] }) })).status).toBe(400);
+		const ticked = (await api(`/agents/${coder.id}`, { method: "PUT", body: JSON.stringify({ memoryScopes: [work.key] }) })).body;
+		expect(ticked.memoryScopes).toEqual([work.key]);
+		expect((await post("/memory/log", { text: "Works at Acme.", scope: work.key })).status).toBe(201);
+		expect((await post("/memory/log", { text: "Nope.", scope: "s_nope" })).status).toBe(404);
+
+		const coderSaw = await ask(coderChat, []);
+		expect(`${coderSaw.first.memory}${coderSaw.first.since}`).toContain("Works at Acme.");
+		const gamerSaw = await ask(gamerChat, [["recall", { pattern: "Acme" }]]);
+		expect(gamerSaw.first.memory).not.toContain("Acme");
+		expect(gamerSaw.last.results).toContain("No match.");
+
+		// Deleted, no agent reads it, and its memory stays for the majordomo alone.
+		expect((await api(`/memory/scopes/${work.key}`, { method: "DELETE" })).status).toBe(200);
+		expect((await api(`/agents/${coder.id}`)).body.memoryScopes).toEqual([]);
+		const { scopes, view } = (await api("/memory")).body;
+		expect(scopes.find((scope: { key: string }) => scope.key === work.key)).toMatchObject({ kind: "former", count: 1, readers: [expect.any(String)] });
+		expect(view.join("\n")).toContain("Works at Acme.");
+		const after = await ask(coderChat, [["recall", { pattern: "Acme" }]]);
+		expect(after.last.results).toContain("No match.");
+		await settled();
+	});
+
+	it("lets the majordomo name a scope, and share it with an agent once the person approves", async () => {
+		const chat = (await post("/sessions")).body.id;
+		const made = await ask(chat, [
+			["create_memory_scope", { name: "Health" }],
+			["create_memory_scope", { name: "health" }],
+		]);
+		const health = (await api("/memory")).body.scopes.find((scope: { name: string | null }) => scope.name === "Health");
+		expect(made.last.results).toContain(`Made the scope \\"Health\\", as ${health.key}.`);
+		expect(made.last.results).toContain(`The scope \\"Health\\" is there already, as ${health.key}.`);
+		await ask(chat, [["note", { text: "Has asthma.", scope: health.key }]]);
+
+		// Other agents aren't offered naming or sharing scopes.
+		let offered: string[] = [];
+		faux.setResponses([
+			(context) => {
+				offered = context.messages.flatMap((message) => (message.role === "system" ? (message.toolsAdded ?? []).map((tool) => tool.name) : []));
+				return toolUse("send_to_user", { message: "ok" });
+			},
+		]);
+		await say("hi", (await post("/sessions", { agent: coder.id })).body.id);
+		expect(offered).toContain("move_memory");
+		expect(offered).not.toContain("create_memory_scope");
+		expect(offered).not.toContain("share_memory_scope");
+
+		// Sharing asks the person first; approved, the agent reads the scope.
+		faux.setResponses([toolUse("share_memory_scope", { scope: health.key, agent: coder.id }), toolUse("send_to_user", { message: "Shared." })]);
+		const said = say("Let Coder know about my health.", chat);
+		const approval = await pendingApproval();
+		expect(approval.summary).toBe('Let "Coder" read the memory scope "Health"');
+		expect((await api(`/agents/${coder.id}`)).body.memoryScopes).toEqual([]);
+		await post(`/approvals/${approval.id}/approve`);
+		await said;
+		expect((await api(`/agents/${coder.id}`)).body.memoryScopes).toEqual([health.key]);
+		const coderSaw = await ask(coderChat, [["recall", { pattern: "asthma" }]]);
+		expect(coderSaw.last.results).toContain("Has asthma.");
+		await settled();
+	});
+
+	it("moves a memory through the API, rebuilding its old scope's summaries without it", async () => {
+		const before = naps.length;
+		const moved = (await api("/memory/log/0", { method: "PUT", body: JSON.stringify({ scope: "everyone" }) })).body;
+		expect(moved).toMatchObject({ text: "Ana is the user's sister.", scope: "everyone" });
+		expect(moved.id).toBeGreaterThan(0);
+		await settled();
+		expect((await api("/memory/log?q=sister")).body.matches.map((entry: { id: number }) => entry.id)).toEqual([moved.id]);
+		// The private scope's summaries over its old place were rebuilt, and none of them saw it; everyone's has it now.
+		const rebuilt = naps.slice(before).filter((nap) => nap.prompt.includes("of the scope private"));
+		expect(rebuilt.map((nap) => nap.block)).toEqual(["0-1", "0-3", "0-7", "0-15", "0-31"]);
+		expect(rebuilt[0]!.prompt).toContain("#0 2");
+		expect(rebuilt[0]!.prompt).toContain("(moved to another scope)");
+		for (const nap of rebuilt) expect(nap.prompt).not.toContain("sister");
+		expect(naps.slice(before).find((nap) => nap.prompt.includes("of the scope everyone"))?.prompt).toContain("Ana is the user's sister.");
+		const found = await ask(gamerChat, [["recall", { pattern: "sister" }]]);
+		expect(found.last.results).toContain("Ana is the user's sister.");
+
+		expect((await api("/memory/log/0", { method: "PUT", body: JSON.stringify({ scope: "everyone" }) })).status).toBe(404);
+		expect((await api("/memory/log/5", { method: "PUT", body: JSON.stringify({ scope: "everyone" }) })).status).toBe(409);
+		expect((await api(`/memory/log/${moved.id}`, { method: "PUT", body: JSON.stringify({ scope: "nowhere" }) })).status).toBe(404);
+	});
+
+	it("gives a task the memory of the agent doing it, not of the one that handed it out", async () => {
+		await post("/memory/log", { text: "Saving for a new car." });
+		const chat = (await post("/sessions")).body.id;
+		let task = "";
+		scripts({
+			lead: [
+				() => toolUse("delegate", { tasks: [{ to: "Gamer", task: "What is my world seed?" }] }),
+				() => toolUse("send_to_user", { message: "Asked Gamer." }),
+				() => toolUse("send_to_user", { message: "It's 4417." }),
+			],
+			Gamer: [
+				(context) => {
+					task = seen(context).memory;
+					return fauxAssistantMessage("4417");
+				},
+			],
+		});
+		await say("What's my seed?", chat);
+		await idle(chat);
+		expect(task).toMatch(new RegExp(`^<memory scopes="${gamer.memoryScope}:1 everyone:\\d+"`));
+		expect(task).toContain("The Minecraft world seed is 4417.");
+		expect(task).not.toContain("new car");
+		await settled();
+	});
+
+	it("puts memories from before scopes in the private scope, keeping their summaries, and gives circles that read memory everyone's", async () => {
+		await runInDurableObject(env.Pim.getByName("memory-before-scopes"), (_instance: Pim, state) => {
+			const sql = state.storage.sql;
+			sql.exec("DROP TABLE optmem_log");
+			sql.exec("DROP TABLE optmem_tree");
+			sql.exec("CREATE TABLE optmem_log (id INTEGER PRIMARY KEY, key TEXT UNIQUE, date TEXT NOT NULL, text TEXT NOT NULL, forgotten INTEGER NOT NULL DEFAULT 0, source TEXT)");
+			sql.exec("CREATE TABLE optmem_tree (size INTEGER NOT NULL, lo INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY (size, lo))");
+			for (const [id, text] of ["one", "two", "three"].entries()) sql.exec("INSERT INTO optmem_log (id, key, date, text) VALUES (?, ?, '2026-01-01', ?)", id, `k${id}`, text);
+			sql.exec("INSERT INTO optmem_tree (size, lo, text) VALUES (2, 0, 'one and two')");
+			const store = new OptMemStore(sql);
+			expect(store.entries("private", 0, 3).map((entry) => [entry.id, entry.text, entry.scope])).toEqual([
+				[0, "one", "private"],
+				[1, "two", "private"],
+				[2, "three", "private"],
+			]);
+			expect(store.summary("private", [0, 2])).toBe("one and two");
+			expect(store.append("four", "2026-01-02", { scope: "everyone" })).toMatchObject({ id: 3, scope: "everyone" });
+			expect(store.size("private")).toBe(3);
+
+			const circles = new CircleStore(sql);
+			const reads = circles.createCircle("Family");
+			const not = circles.createCircle("Friends");
+			sql.exec("ALTER TABLE pim_circles DROP COLUMN memory_scopes");
+			sql.exec("INSERT INTO pim_tool_permissions (audience, app, tool, permission, definition, updated_at) VALUES (?, '', 'memory', 'on', NULL, 1), (?, '', 'memory', 'off', NULL, 1)", reads.id, not.id);
+			const migrated = new CircleStore(sql);
+			expect(migrated.circles().map((circle) => [circle.name, circle.memoryScopes]).sort()).toEqual([
+				["Family", ["everyone"]],
+				["Friends", []],
+			]);
+			expect(sql.exec("SELECT COUNT(*) AS n FROM pim_tool_permissions WHERE tool = 'memory'").one().n).toBe(0);
+		});
+	});
+});
+

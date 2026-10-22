@@ -1663,7 +1663,8 @@ describe("circles and visits", () => {
 			const ben = await person("ben");
 			const cyd = await person("cyd");
 			expect((await ana.browser.json("/api/mcp", { method: "POST", json: { app: "test.ledger/calendar" } })).status).toBe(201);
-			await ana.browser.json("/api/memory/log", { method: "POST", json: { text: "Ana's favourite restaurant is Tasca do Chico." } });
+			await ana.browser.json("/api/memory/log", { method: "POST", json: { text: "Ana's favourite restaurant is Tasca do Chico.", scope: "everyone" } });
+			await ana.browser.json("/api/memory/log", { method: "POST", json: { text: "Ana's door code is 0420." } });
 
 			// Ana puts Ben in a circle; Ben's space hears of it.
 			const family = (await ana.browser.json("/api/circles", { method: "POST", json: { name: "Family" } })).body;
@@ -1675,15 +1676,16 @@ describe("circles and visits", () => {
 			]);
 			expect((await ben.browser.json("/api/notifications")).body.notifications[0]).toMatchObject({ title: "ana shared their space with you" });
 
-			// A circle starts with nothing: every tool off, memory off.
+			// A circle starts with nothing: every tool off, no memory scope.
 			const circleTools = (await ana.browser.json(`/api/permissions?circle=${family.id}`)).body.tools;
 			expect(circleTools.map((info: { name: string; permission: string }) => [info.name, info.permission])).toEqual([
-				["memory", "off"],
 				["calendar_find_events", "off"],
 				["calendar_create_event", "off"],
 			]);
-			expect((await setPermission(ana.browser, family.id, null, "memory", "ask")).status).toBe(400);
-			expect((await setPermission(ana.browser, family.id, null, "memory", "on")).body).toMatchObject({ permission: "on" });
+			expect(family.memoryScopes).toEqual([]);
+			// It reads everyone's scope and those Ana named, never her majordomo's own.
+			expect((await ana.browser.json(`/api/circles/${family.id}`, { method: "PUT", json: { memoryScopes: ["private"] } })).status).toBe(400);
+			expect((await ana.browser.json(`/api/circles/${family.id}`, { method: "PUT", json: { memoryScopes: ["everyone"] } })).body.memoryScopes).toEqual(["everyone"]);
 			await setPermission(ana.browser, family.id, "calendar", "find_events", "on");
 			await setPermission(ana.browser, family.id, "calendar", "create_event", "ask");
 
@@ -1704,6 +1706,7 @@ describe("circles and visits", () => {
 			expect((await say(ben.browser, session, "Is Ana free Monday morning?")).body).toMatchObject({ status: "done" });
 			expect(system).toContain("You are ana's personal AI agent");
 			expect(system).toContain("Tasca do Chico");
+			expect(system).not.toContain("0420");
 			// The circle's tools, and the visitor's own way to be answered.
 			expect(offered.sort()).toEqual(["calendar_create_event", "calendar_find_events", "current_time", "recall", "send_to_user"]);
 			expect(await transcript(ben.browser, session)).toContain("Events on monday: dentist at 9.");
@@ -1874,6 +1877,19 @@ describe("profiles and published agents", () => {
 		await eli.browser.json(`/api/agents/${mine.body.id}`, { method: "PUT", json: { instructions: "Plan my week around work." } });
 		expect((await dee.browser.json(`/api/agents/${coach.id}`)).body.instructions).toBe("Plan two weeks at a time.");
 		expect((await eli.browser.json(`/api/templates/${templateId}`)).body.uses).toBe(1);
+		// Copies of one agent share a memory scope: made his own again, each new copy keeps its notes with the earlier copy of the same agent.
+		type Scoped = { id: string; contacts: string[]; memoryScope: string };
+		const second = (await eli.browser.json(`/api/templates/${templateId}/use`, { method: "POST" })).body as Scoped;
+		const eliAgent = async (id: string) => (await eli.browser.json(`/api/agents/${id}`)).body as Scoped;
+		const physioAgain = await eliAgent(second.contacts[0]!);
+		const dietitianAgain = await eliAgent(physioAgain.contacts[0]!);
+		expect([second.memoryScope, physioAgain.memoryScope, dietitianAgain.memoryScope]).toEqual(
+			[mine.body.id, named("Physio (Marathon coach)").id, named("Dietitian").id].map((id) => `agent-${id}`),
+		);
+		const firstScopes = (await eli.browser.json("/api/agents")).body.agents.map((agent: Scoped) => agent.memoryScope);
+		expect(new Set(firstScopes).size).toBe(5);
+		expect(firstScopes[0]).toBe("private");
+		for (const copy of [second, physioAgain, dietitianAgain]) await eli.browser.fetch(`/api/agents/${copy.id}`, { method: "DELETE" });
 		// Published again without its picture, the template has none; Eli's copy keeps it.
 		await dee.browser.fetch(`/api/agents/${coach.id}/icon`, { method: "DELETE" });
 		await dee.browser.json(`/api/agents/${coach.id}`, { method: "PUT", json: { symbol: "rocket", color: null } });

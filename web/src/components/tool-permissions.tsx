@@ -110,19 +110,12 @@ function ToolPermissionRow({
     ask: t("permissionAsk"),
     on: t("permissionOn"),
   };
-  const label = info.tool === "memory" ? t("memoryTool") : info.tool;
+  const label = info.tool;
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
       <span className="min-w-0 flex-1 basis-48">
         <span className="flex items-center gap-2">
-          <span
-            className={cn(
-              "truncate text-sm",
-              info.tool !== "memory" && "font-mono",
-            )}
-          >
-            {label}
-          </span>
+          <span className="truncate font-mono text-sm">{label}</span>
           {info.readOnly && info.app !== null && (
             <span className="shrink-0 rounded border px-1 text-[10px] text-muted-foreground">
               {t("readOnlyTool")}
@@ -134,9 +127,7 @@ function ToolPermissionRow({
             className="block truncate text-muted-foreground text-xs"
             title={info.description}
           >
-            {info.tool === "memory"
-              ? t("memoryToolDescription")
-              : info.description}
+            {info.description}
           </span>
         )}
         {info.changed && (

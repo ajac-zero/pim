@@ -38,6 +38,7 @@ import {
   X,
 } from "~/components/icons";
 import { MembersSection } from "~/components/members";
+import { MemorySection } from "~/components/memory-settings";
 import { ModelProviderLogo } from "~/components/model-logo";
 import { ProvidersSection } from "~/components/model-providers";
 import { ProviderLogo } from "~/components/provider-buttons";
@@ -83,6 +84,7 @@ export const SETTINGS_TABS = [
   "model",
   "computer",
   "permissions",
+  "memory",
   "account",
   "members",
   "deployment",
@@ -94,6 +96,7 @@ const TAB_LABELS: Record<SettingsTab, [TranslationKey, LucideIcon]> = {
   model: ["settingsModel", Sparkles],
   computer: ["settingsComputer", Server],
   permissions: ["settingsPermissions", ShieldCheck],
+  memory: ["memory", MessageCircle],
   account: ["settingsAccount", UserRound],
   members: ["settingsMembers", Users],
   deployment: ["settingsDeployment", Settings],
@@ -201,6 +204,7 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
           </>
         )}
         {tab === "computer" && <ComputerSection />}
+        {tab === "memory" && <MemorySection />}
         {tab === "permissions" && <ToolPermissionsSection />}
         {tab === "account" && (
           <>

@@ -9,8 +9,9 @@ import type { Pim } from "./worker";
 
 /**
  * Pim's Google apps against Google's APIs, which the tests answer as
- * Google does: Gmail's handlers, through the adapter that reads mail; and
- * Drive's picked files and its picker's actions.
+ * Google does: Gmail's handlers, through the adapter that reads mail;
+ * Drive's picked files, its picker's actions and page; and the two as the
+ * deployment offers them.
  */
 
 /** Every request Google's APIs got, with the headers that matter. */
@@ -309,5 +310,45 @@ describe("Google Drive", () => {
 		expect(result.files.map((file) => file.id)).not.toContain("pdf0000000003");
 		expect((await call("google_drive", "list_files")).text).toContain("text000000002");
 		expect(requests.every((request) => request.method === "GET")).toBe(true);
+	});
+});
+
+describe("Gmail and Drive as the deployment offers them", () => {
+	it("are offered, each with its own client, and Gmail connects", async () => {
+		const offered = ((await api("/app-directory")).body.apps as { ref: string }[]).map((app) => app.ref);
+		expect(offered).toEqual(expect.arrayContaining(["google/gmail", "google/drive"]));
+		expect(await connect("google/gmail")).toMatchObject({ client_id: "real-gmail-client", scope: "https://www.googleapis.com/auth/gmail.readonly" });
+		const servers = (await api("/mcp")).body.servers as { id: string; tools: { name: string }[] }[];
+		expect(servers.find((server) => server.id === "gmail")!.tools.map((tool) => tool.name)).toEqual(["gmail_search", "gmail_get_message", "gmail_get_thread"]);
+		expect((await call("gmail", "get_message", { id: "m1" })).text).toContain("Subject: Lunch");
+	});
+
+	it("serve Drive's picker page with nothing of anyone's in it, under its own policy", async () => {
+		const page = await exports.default.fetch(url("/app-pages/google/drive"));
+		expect(page.status).toBe(200);
+		const html = await page.text();
+		const policy = page.headers.get("content-security-policy")!;
+		const nonce = /'nonce-([\w-]+)'/.exec(policy)![1];
+		expect(html).toContain(`<script nonce="${nonce}">`);
+		expect(policy).toContain("'strict-dynamic'");
+		expect(policy).toContain("frame-ancestors 'none'");
+		expect(page.headers.get("cache-control")).toBe("no-store");
+		expect(page.headers.get("referrer-policy")).toBe("same-origin");
+		expect(html).not.toContain("picker-key");
+		// Another load, another nonce.
+		expect((await exports.default.fetch(url("/app-pages/google/drive"))).headers.get("content-security-policy")).not.toContain(nonce);
+		expect((await exports.default.fetch(url("/app-pages/google/gmail"))).status).toBe(404);
+	});
+
+	it("disconnect Drive without Gmail, revoking only Drive's grant", async () => {
+		expect((await api("/mcp/google_drive", { method: "DELETE" })).body).toEqual({ deleted: true });
+		expect(revoked).toEqual(["drive-refresh"]);
+		expect((await api("/mcp")).body.servers.find((server: { id: string }) => server.id === "gmail")).toMatchObject({ state: "ready" });
+		expect((await act("picker")).status).toBe(400);
+	});
+
+	it("revoke Gmail's grant when the person's space is erased", async () => {
+		await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.deleteEverything()).catch(() => undefined);
+		expect(revoked).toEqual(["gmail-refresh"]);
 	});
 });

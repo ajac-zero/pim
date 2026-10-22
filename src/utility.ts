@@ -1,3 +1,4 @@
+import { Type, type TSchema } from "@earendil-works/pi-ai";
 import { DELIVERY_REMINDER, type TranscriptMessage } from "./transcript";
 
 /**
@@ -14,6 +15,9 @@ export type UtilityTask = {
 	/** The answer as the feature uses it; empty when it is unusable. */
 	readonly clean?: (answer: string) => string;
 };
+
+/** The most prompts the utility model suggests at once. */
+const MAX_SUGGESTIONS = 4;
 
 /** An answer's first line without what small models add all the same: a label, quotes, a full stop. */
 function line(answer: string, label: RegExp): string {
@@ -105,4 +109,65 @@ export function conversationText(messages: readonly TranscriptMessage[], limit: 
 	}
 	const text = turns.join("\n\n");
 	return text.length > limit ? `…${text.slice(text.length - limit)}` : text;
+}
+
+/**
+ * A side job whose answer has a shape: the model answers in JSON that follows
+ * `schema`, which the provider enforces while it writes (see `withJsonSchema`),
+ * so only models that can do that are offered as the utility model.
+ */
+export type StructuredUtilityTask<T extends readonly unknown[]> = {
+	/** What the model is told to do with the input. */
+	readonly instructions: string;
+	/** The most a model that doesn't reason may answer, in tokens. */
+	readonly maxTokens: number;
+	/** The JSON schema of the answer: an object whose properties are all required, with no others allowed, which every provider's strict mode takes. */
+	readonly schema: TSchema;
+	/** The answer as the feature uses it, from JSON that follows the schema but may still hold nonsense; an empty list when it is unusable. */
+	readonly result: (answer: unknown) => T;
+};
+
+/** The messages an agent's dashboard offers to start a chat with. */
+export const SUGGEST_PROMPTS: StructuredUtilityTask<string[]> = {
+	instructions: [
+		"You suggest what a person might say next to their AI assistant, from what the assistant knows about them, what they talked about lately, and what is on its dashboard.",
+		"Write 4 messages the person could send, each one a short request in their own voice, of 3 to 9 words, that continues something they are doing or follows up on what they care about, or that starts something new that fits.",
+		"Use only what you are given: don't invent facts, and don't suggest what a recent chat already finished.",
+		"Write in the language of the recent chats, or else the language you are given.",
+		"Reply with a JSON object with the messages in a list.",
+	].join(" "),
+	maxTokens: 300,
+	schema: Type.Object({ messages: Type.Array(Type.String()) }, { additionalProperties: false }),
+	result: (answer) => {
+		const messages = (answer as { messages?: unknown } | null)?.messages;
+		if (!Array.isArray(messages)) return [];
+		const texts = messages.flatMap((message) => (typeof message === "string" && message.trim() !== "" && message.length <= 100 ? [message.trim()] : []));
+		return [...new Set(texts)].slice(0, MAX_SUGGESTIONS);
+	},
+};
+
+/**
+ * A request's payload asking for an answer in `schema`, in the form its API
+ * takes: a response format on chat completions (OpenAI, xAI, Workers AI and
+ * compatible servers) and Mistral, a text format on the Responses API
+ * (OpenAI, ChatGPT), an output format on Anthropic's, and a response schema
+ * on Google's. Undefined for an API without one, which leaves it unchanged.
+ */
+export function withJsonSchema(api: string, payload: unknown, schema: TSchema): unknown {
+	const body = payload as Record<string, any>;
+	const format = { name: "answer", strict: true, schema };
+	switch (api) {
+		case "openai-completions":
+		case "cloudflare-ai":
+		case "mistral-conversations":
+			return { ...body, response_format: { type: "json_schema", json_schema: format } };
+		case "openai-responses":
+		case "azure-openai-responses":
+		case "openai-codex-responses":
+			return { ...body, text: { ...body.text, format: { type: "json_schema", ...format } } };
+		case "anthropic-messages":
+			return { ...body, output_config: { ...body.output_config, format: { type: "json_schema", schema } } };
+		case "google-generative-ai":
+			return { ...body, config: { ...body.config, responseMimeType: "application/json", responseJsonSchema: schema } };
+	}
 }

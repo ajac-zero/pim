@@ -28,7 +28,7 @@ import {
   type WidgetSize,
 } from "~/lib/pim-api";
 import { EMPTY_STREAM } from "~/lib/pim-view";
-import { agentsQuery, dashboardQuery } from "~/lib/queries";
+import { agentsQuery, dashboardQuery, suggestionsQuery } from "~/lib/queries";
 import { useStartChat } from "~/lib/start-chat";
 import { useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
@@ -53,6 +53,7 @@ function DashboardPage() {
   const { prompt } = Route.useSearch();
   const { data: agents } = useQuery(agentsQuery());
   const { data, error, refetch } = useQuery(dashboardQuery(agentId, locale));
+  const { data: suggestions } = useQuery(suggestionsQuery(agentId, locale));
   const { start, sent } = useStartChat(agentId);
   const shelf = useTabs().length > 0;
   const queryClient = useQueryClient();
@@ -72,7 +73,7 @@ function DashboardPage() {
     return <RouteError error={error} reset={() => refetch()} />;
   }
   // The header and composer show as soon as the agent is known, from the
-  // agents the sidebar already has; widgets and starters follow when loaded.
+  // agents the sidebar already has; widgets follow when loaded, and suggestions when written.
   const agent = data?.agent ?? agents?.find((choice) => choice.id === agentId);
   if (!agent) return null;
   const widgets = data?.widgets ?? [];
@@ -259,7 +260,7 @@ function DashboardPage() {
             busy={sent !== null}
             disabled={sent !== null}
             placeholder={t("messageAgent", { name: agent.name })}
-            promptSuggestions={data?.starters}
+            promptSuggestions={suggestions}
           />
         </div>
       </div>

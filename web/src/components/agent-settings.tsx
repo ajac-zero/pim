@@ -527,13 +527,13 @@ function AgentApps({ agent }: { agent: Agent }) {
 
 /**
  * Whether agents may change an agent's skills: on, it writes and installs
- * them with your approval, and the majordomo may for it; off, none does.
- * Only you switch it.
+ * them, asking first as write_skill's permission and the approval policy
+ * say, and the majordomo may for it; off, none does. Only you switch it.
  */
-function AgentSkills({ agent }: { agent: Agent }) {
+export function AgentSkills({ agent }: { agent: Agent }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const { data: info } = useQuery(agentSkillsPermissionQuery(agent.id));
+  const { data: info, error } = useQuery(agentSkillsPermissionQuery(agent.id));
   const set = useMutation({
     mutationFn: (on: boolean) =>
       pim.setAgentPermission(agent.id, "", "write_skill", on ? "on" : "off"),
@@ -544,31 +544,42 @@ function AgentSkills({ agent }: { agent: Agent }) {
       ),
     onError: (error) => toast.error(error.message),
   });
-  if (!info) return null;
+  if (!info && !error) return null;
   // What was just chosen shows while it saves.
-  const on = set.isPending ? set.variables : info.permission === "on";
+  const on = set.isPending ? set.variables : info?.permission === "on";
   return (
     <section className="mt-8 space-y-2" aria-label={t("agentSkills")}>
       <h2 className="text-[13px] text-muted-foreground">{t("agentSkills")}</h2>
-      <div className="flex items-center gap-3 rounded-xl border px-3 py-2.5">
-        <span className="min-w-0 flex-1">
-          <span className="block text-sm">{t("writeSkills")}</span>
-          <span className="block text-muted-foreground text-xs">
-            {t(
-              agent.majordomo ? "writeSkillsHintMajordomo" : "writeSkillsHint",
-              {
-                name: agent.name,
-              },
-            )}
+      {!info ? (
+        <p role="alert" className="text-muted-foreground text-sm">
+          {t("writeSkillsUnavailable", {
+            name: agent.name,
+            error: error?.message ?? "",
+          })}
+        </p>
+      ) : (
+        <div className="flex items-center gap-3 rounded-xl border px-3 py-2.5">
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm">{t("writeSkills")}</span>
+            <span className="block text-muted-foreground text-xs">
+              {t(
+                agent.majordomo
+                  ? "writeSkillsHintMajordomo"
+                  : "writeSkillsHint",
+                {
+                  name: agent.name,
+                },
+              )}
+            </span>
           </span>
-        </span>
-        <Switch
-          checked={on}
-          onCheckedChange={(next) => set.mutate(next)}
-          disabled={set.isPending}
-          aria-label={t("writeSkills")}
-        />
-      </div>
+          <Switch
+            checked={on}
+            onCheckedChange={(next) => set.mutate(next)}
+            disabled={set.isPending}
+            aria-label={t("writeSkills")}
+          />
+        </div>
+      )}
     </section>
   );
 }

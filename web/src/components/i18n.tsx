@@ -50,9 +50,11 @@ const translations = {
     agentSkills: "Skills",
     writeSkills: "Write and install skills",
     writeSkillsHint:
-      "{name} can save how you want work done as a skill, or install one someone published, each time with your approval. Off, no agent changes its skills, your majordomo included.",
+      "{name} can save how you want work done as a skill, or install one someone published. Whether you're asked first follows write_skill in Tool permissions and your approval policy. Off, no agent changes its skills, your majordomo included.",
     writeSkillsHintMajordomo:
-      "{name} can save how you want work done as a skill, or install one someone published, for itself or for your other agents whose skills are on, each time with your approval.",
+      "{name} can save how you want work done as a skill, or install one someone published, for itself or for your other agents whose skills are on. Whether you're asked first follows write_skill in Tool permissions and your approval policy.",
+    writeSkillsUnavailable:
+      "Couldn't load whether {name} can write skills: {error}",
     destructiveTool: "Can delete",
     agentToolChanged:
       "The app changed this tool since you turned it on, so it's off until you turn it on again.",
@@ -1070,9 +1072,11 @@ const translations = {
     agentSkills: "Habilidades",
     writeSkills: "Escribir e instalar habilidades",
     writeSkillsHint:
-      "{name} puede guardar cómo quieres que se haga un trabajo como una habilidad, o instalar una que alguien publicó, siempre con tu aprobación. Desactivado, ningún agente cambia sus habilidades, ni siquiera tu mayordomo.",
+      "{name} puede guardar cómo quieres que se haga un trabajo como una habilidad, o instalar una que alguien publicó. Si te pregunta antes depende de write_skill en Permisos de herramientas y de tu política de aprobación. Desactivado, ningún agente cambia sus habilidades, ni siquiera tu mayordomo.",
     writeSkillsHintMajordomo:
-      "{name} puede guardar cómo quieres que se haga un trabajo como una habilidad, o instalar una que alguien publicó, para sí o para tus otros agentes que tengan las habilidades activadas, siempre con tu aprobación.",
+      "{name} puede guardar cómo quieres que se haga un trabajo como una habilidad, o instalar una que alguien publicó, para sí o para tus otros agentes que tengan las habilidades activadas. Si te pregunta antes depende de write_skill en Permisos de herramientas y de tu política de aprobación.",
+    writeSkillsUnavailable:
+      "No se pudo cargar si {name} puede escribir habilidades: {error}",
     destructiveTool: "Puede borrar",
     agentToolChanged:
       "La app cambió esta herramienta desde que la activaste, así que está desactivada hasta que la actives de nuevo.",

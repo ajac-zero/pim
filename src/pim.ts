@@ -2163,7 +2163,7 @@ export class Pim extends DurableAgent<Env> {
 			appName: null,
 			tool: WRITE_SKILL,
 			name: WRITE_SKILL,
-			description: "Write and install skills for this agent, with your approval",
+			description: "Write and install skills for this agent, asking first as write_skill's permission says",
 			readOnly: false,
 			destructive: false,
 			choices: ["off", "on"],

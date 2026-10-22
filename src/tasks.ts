@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { text } from "./extensions/services";
-import type { Agent } from "./agents";
+import { type Agent, agentCalled, agentLabel } from "./agents";
 
 /**
  * Agents handing work to each other. An agent hands a task to another with
@@ -349,7 +349,7 @@ function delegatesSection(self: Agent, delegates: Agent[]): string {
 	return [
 		`Hand tasks to others with \`${DELEGATE}\`: each works on its own, at the same time as the others, in a conversation of its own that the person can read. Hand one agent several tasks at once when the work splits into parts it can do side by side.`,
 		self.majordomo ? "The person's other agents:" : "Your contacts, the person's agents you hand tasks to:",
-		...delegates.map((agent) => `- ${agent.name}${agent.description ? `: ${agent.description}` : ""}`),
+		...delegates.map((agent) => `- ${agentLabel(agent)}${agent.description ? `: ${agent.description}` : ""}`),
 		`A task's agent knows only its own instructions and the task: give it everything it needs. \`${DELEGATE}\` returns at once with the tasks' ids. Don't wait for them, check on them or do their work yourself: say what you handed out if it helps, then end your turn. Their answers arrive later in this conversation, all those you handed out together in one message starting with "${TASK_UPDATE}"; then carry on with them. To follow up on a task, hand out another that \`continues\` it.`,
 	].join("\n");
 }
@@ -378,9 +378,9 @@ export function tasksExtension(host: TasksHost) {
 			if (delegates.length === 0) return text("You have no one to hand tasks to: do the work yourself.", true);
 			const problems: string[] = [];
 			const given = args.tasks.map(({ to, task, continues }) => {
-				const agent = delegates.find((candidate) => candidate.name.toLowerCase() === to.trim().toLowerCase());
+				const agent = agentCalled(to, delegates);
 				if (!agent) {
-					problems.push(`No one called ${to} to hand tasks to. You can hand them to: ${delegates.map((candidate) => candidate.name).join(", ")}.`);
+					problems.push(`No one called ${to} to hand tasks to. You can hand them to: ${delegates.map(agentLabel).join(", ")}.`);
 					return null;
 				}
 				if (continues === undefined || continues.trim() === "") return { to: agent, task, continues: null };

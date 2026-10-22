@@ -171,7 +171,7 @@ describe("extensions", () => {
 	});
 
 	it("suggests what to say to an agent from its latest chats and memory, writing them again only when that changes", async () => {
-		const coach = (await post("/agents", { name: "Run coach", description: "Trains people for races." })).body as Agent;
+		const coach = (await post("/agents", { name: "Race coach", description: "Trains people for races." })).body as Agent;
 		const other = (await post("/agents", { name: "Chef" })).body as Agent;
 		// An agent nobody has talked to costs nothing: no model is asked.
 		expect(await suggestions(coach)).toEqual(["What can you do for me?", "Help me plan my week", "Start tracking a goal with me"]);
@@ -197,7 +197,7 @@ describe("extensions", () => {
 		const written = ["Plan my long run", "How was my pace?", "Add a rest day", "Should I taper?"];
 		expect(await suggestions(coach, "es")).toEqual(written);
 		// It read this agent's chat and what Pim remembers, not another agent's chat.
-		expect(inputs[0]).toContain("Run coach, Trains people for races.");
+		expect(inputs[0]).toContain("Race coach, Trains people for races.");
 		expect(inputs[0]).toContain("Language: es");
 		expect(inputs[0]).toContain("Lisbon half marathon");
 		expect(inputs[0]).not.toContain("shellfish");
@@ -434,7 +434,7 @@ describe("extensions", () => {
 	it("gives an agent's chats, and its tasks, the abilities of the blueprint it builds on, and only those", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
 		const clerk = (await post("/agents", { name: "Clerk", instructions: "File bills.", blueprint: "test.ledger/budget" })).body as Agent;
-		const books = (await post("/agents", { name: "Books", blueprint: "test.ledger/budget", contacts: [clerk.id] })).body as Agent;
+		const books = (await post("/agents", { name: "Ledger books", blueprint: "test.ledger/budget", contacts: [clerk.id] })).body as Agent;
 		const chat = (await post("/sessions", { agent: books.id })).body.id;
 
 		let seen: Request = { messages: [] };

@@ -114,7 +114,7 @@ describe("an agent's contacts", () => {
 		expect(seen.Researcher!.prompt).not.toContain("Plan trips in detail.");
 		expect(seen.Researcher!.task).toBe("Find the best month to visit Lisbon.");
 		expect(seen.Researcher!.tools).toContain("current_time");
-		for (const tool of ["send_to_user", "schedule_task", "watch_app_event", "create_agent", "update_agent", "rename_agent", "manage_apps", "write_skill"]) expect(seen.Researcher!.tools).not.toContain(tool);
+		for (const tool of ["send_to_user", "schedule_task", "watch_app_event", "create_agent", "update_agent", "manage_apps", "write_skill"]) expect(seen.Researcher!.tools).not.toContain(tool);
 		// Their answers come in one update, by task.
 		expect(update).toMatch(/^\[Task update\] /);
 		expect(update).toContain(`Researcher finished task ${researcher.id}:\nMay: mild and before the crowds.`);
@@ -562,7 +562,7 @@ describe("the majordomo", () => {
 		});
 		const { name } = await majordomo();
 		spans.reset();
-		const booker = (await post("/agents", { name: "Booker", instructions: "Book what the person asks for." })).body;
+		const booker = (await post("/agents", { name: "Reservations", instructions: "Book what the person asks for." })).body;
 		const chat = (await post("/sessions", { agent: booker.id })).body.id;
 		const chats = async () => (await api("/sessions")).body.sessions.map((info: { id: string }) => info.id);
 		const before = await chats();
@@ -598,12 +598,12 @@ describe("the majordomo", () => {
 		expect(outcome).toContain(`${name}, the user's majordomo, approved it for them: POST https://hooks.example.test/hotel`);
 		expect(outcome).toContain(`${name}'s note: They asked for this hotel.`);
 		expect(review.prompt).toContain(`You are \\"${name}\\", the majordomo of one person`);
-		expect(review.request).toContain("Booker, in a chat the person has with it, asks for approval.");
+		expect(review.request).toContain("Reservations, in a chat the person has with it, asks for approval.");
 		expect(review.tools.sort()).toEqual(["decide_approval", "recall", "zoom"]);
 		// One trace, in OpenTelemetry's conventions for generative AI, holds the request and the review it led to.
 		const span = (name: string) => spans.getFinishedSpans().find((candidate) => candidate.name === name)!;
 		await vi.waitFor(() => expect(span(`invoke_agent ${name}`)).toBeDefined());
-		const run = span("invoke_agent Booker");
+		const run = span("invoke_agent Reservations");
 		const call = span("execute_tool http_request");
 		const reviewRun = span(`invoke_agent ${name}`);
 		const decided = span("execute_tool decide_approval");

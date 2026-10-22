@@ -193,7 +193,10 @@ export type Agent = {
   memoryScope: string;
   memoryScopes: string[];
   id: string;
+  /** What people call it, such as Ada. Agents may share a name. */
   name: string;
+  /** What it is for, such as Researcher: each of your agents has its own. */
+  role: string;
   description: string;
   instructions: string;
   /** The apps it works with, by `ref`: its chats get only these apps' tools. */
@@ -320,6 +323,8 @@ export type PinnedArtifact = {
 export type AgentInput = {
   memoryScopes?: string[];
   name: string;
+  /** Left out, a new agent's role is its name and an edited one keeps its own. */
+  role?: string;
   description: string;
   instructions: string;
   apps: string[];

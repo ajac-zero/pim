@@ -399,8 +399,13 @@ describe("Google Drive", () => {
 
 describe("Gmail and Drive as the deployment offers them", () => {
 	it("are offered, each with its own client, and Gmail connects", async () => {
-		const offered = ((await api("/app-directory")).body.apps as { ref: string }[]).map((app) => app.ref);
-		expect(offered).toEqual(expect.arrayContaining(["google/gmail", "google/drive"]));
+		const apps = (await api("/app-directory")).body.apps as { ref: string; page?: { url: string } }[];
+		expect(apps.map((app) => app.ref)).toEqual(expect.arrayContaining(["google/gmail", "google/drive"]));
+		// The Apps page offers Drive's picker, where it is served; Gmail has no page.
+		const drive = apps.find((app) => app.ref === "google/drive")!;
+		expect(drive.page).toEqual({ url: "/app-pages/google/drive", label: { en: "Choose files", es: "Elegir archivos" } });
+		expect((await exports.default.fetch(url(drive.page!.url))).status).toBe(200);
+		expect(apps.find((app) => app.ref === "google/gmail")).not.toHaveProperty("page");
 		expect(await connect("google/gmail")).toMatchObject({ client_id: "real-gmail-client", scope: "https://www.googleapis.com/auth/gmail.readonly" });
 		const servers = (await api("/mcp")).body.servers as { id: string; tools: { name: string }[] }[];
 		expect(servers.find((server) => server.id === "gmail")!.tools.map((tool) => tool.name)).toEqual(["gmail_search", "gmail_get_message", "gmail_get_thread"]);

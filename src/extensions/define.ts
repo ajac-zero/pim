@@ -272,6 +272,8 @@ export type NativeAppDefinition = AppIdentity & {
 	 * carry it, and the policy allows them by it.
 	 */
 	page?(nonce: string): { readonly html: string; readonly contentSecurityPolicy: string };
+	/** What the button that opens the page says on the Apps page, once the person has connected the app, such as "Choose files". */
+	readonly pageLabel?: Text;
 };
 
 /** What an action gets: what a tool does, and a way to change what Pim keeps with the connection. */

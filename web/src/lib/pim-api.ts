@@ -39,6 +39,8 @@ export type DirectoryApp = {
   icon: string | null;
   /** Where the Apps page files it; null for Other. */
   category: AppCategory | null;
+  /** Its page for you once you've connected it, such as Drive's file picker, and what its button says. */
+  page?: { url: string; label: ExtensionText };
 };
 
 /** The categories apps are filed under, in the order the Apps page shows them (src/extensions/define.ts). */

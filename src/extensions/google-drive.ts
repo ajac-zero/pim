@@ -369,4 +369,5 @@ export const googleDrive = googleApp({
 	tools: [listFiles, readFile],
 	actions: { files: list, picker, select, forget },
 	page,
+	pageLabel: { en: "Choose files", es: "Elegir archivos" },
 });

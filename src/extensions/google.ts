@@ -63,6 +63,7 @@ export type GoogleAppOptions = {
 	readonly tools: readonly AppTool[];
 	readonly actions?: NativeAppDefinition["actions"];
 	readonly page?: NativeAppDefinition["page"];
+	readonly pageLabel?: NativeAppDefinition["pageLabel"];
 };
 
 const allowed = new Set<string>(Object.values(GOOGLE_SCOPES));

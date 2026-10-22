@@ -2,9 +2,10 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { AppWatch, PimStore } from "../store";
 import type { AppCatalog } from "./app-catalog";
-import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";
-import type { McpBridge } from "./mcp";
-import { json, type PimServices, text } from "./services";
+import type { DirectoryApp } from "./app-directory";
+import { defineGatedAction, type GatedAction } from "./approvals";
+import { type McpBridge, serverFor } from "./mcp";
+import { json, text } from "./services";
 
 /**
  * Event-triggered work through the draft MCP Events extension
@@ -275,10 +276,20 @@ export class AppEvents {
 }
 
 /** The model-facing side: discovering, creating, listing and stopping watches. */
-export function eventTools(bridge: McpBridge, catalog: AppCatalog, events: AppEvents, services: PimServices) {
-	const app = (name: string) => {
+export function eventTools(
+	bridge: McpBridge,
+	catalog: AppCatalog,
+	events: AppEvents,
+	/** The apps a conversation's agent works with: the only ones it may watch. */
+	appsOf: (session: string) => readonly DirectoryApp[],
+	/** Whether the person switched `watch_app_event` off. */
+	switchedOff: () => boolean,
+) {
+	/** The connected servers of the apps this conversation's agent works with. */
+	const servers = (session: string) => appsOf(session).flatMap((app) => serverFor(bridge.servers(), app) ?? []);
+	const app = (name: string, session: string) => {
 		const wanted = name.toLowerCase();
-		return bridge.servers().find((server) => server.id === wanted || server.name.toLowerCase() === wanted);
+		return servers(session).find((server) => server.id === wanted || server.name.toLowerCase() === wanted);
 	};
 
 	const listAppEvents = defineTool({
@@ -286,9 +297,9 @@ export function eventTools(bridge: McpBridge, catalog: AppCatalog, events: AppEv
 		description: "List the events connected apps can notify you about, with the arguments each accepts.",
 		parameters: Type.Object({}),
 		replay: "safe",
-		async execute() {
+		async execute(_args, api) {
 			return json(
-				bridge.servers().flatMap((server) =>
+				servers(String(api.conversationId)).flatMap((server) =>
 					catalog.events(server.id).map((event) => ({
 						app: server.name,
 						event: event.name,
@@ -300,10 +311,9 @@ export function eventTools(bridge: McpBridge, catalog: AppCatalog, events: AppEv
 		},
 	});
 
-	const watching = ownToolPermission(services.store, "watch_app_event").permission;
 	const watchEvent = defineTool({
 		name: "watch_app_event",
-		description: `Have a connected app notify you whenever an event happens (see list_app_events), and say what to do each time. Each event arrives as a message starting with "[App event]".${watching === "ask" ? ` ${approvalNote(services)}` : ""}`,
+		description: `Have a connected app notify you whenever an event happens (see list_app_events), and say what to do each time. Each event arrives as a message starting with "[App event]". Subscribing needs no approval; what you do when an event arrives is still subject to the usual approvals.`,
 		parameters: Type.Object({
 			app: Type.String(),
 			event: Type.String(),
@@ -311,19 +321,21 @@ export function eventTools(bridge: McpBridge, catalog: AppCatalog, events: AppEv
 			instruction: Type.String({ minLength: 1, description: "What to do each time it fires, written to your future self." }),
 		}),
 		replay: "safe",
-		async execute({ app: appName, event, arguments: args, instruction }, api, context) {
-			const server = app(appName);
-			if (!server) return text(`No connected app named ${appName}.`, true);
+		async execute({ app: appName, event, arguments: args, instruction }, api) {
+			if (switchedOff()) return text("The person switched watch_app_event off. Do not try it another way.", true);
+			const server = app(appName, String(api.conversationId));
+			if (!server) return text(`No connected app named ${appName} among the apps you work with.`, true);
 			if (!catalog.events(server.id).some((candidate) => candidate.name === event)) {
 				return text(`${server.name} has no event named ${event}. See list_app_events.`, true);
 			}
-			const watch = { serverId: server.id, event, arguments: args ?? {}, instruction, session: String(api.conversationId) };
-			return fileApproval(services, api, context, {
-				action: "watch_app_event",
-				tool: "watch_app_event",
-				args: watch,
-				summary: `When ${server.name} reports "${event}"${args && Object.keys(args).length > 0 ? ` ${JSON.stringify(args)}` : ""}, Pim will: ${instruction}`,
-			});
+			if (server.state !== "ready") return text(`${server.name} is not connected.`, true);
+			let watch: AppWatch;
+			try {
+				watch = await events.watch({ serverId: server.id, event, arguments: args ?? {}, instruction, session: String(api.conversationId) });
+			} catch (error) {
+				return text(`Could not watch ${server.name} for "${event}": ${errorText(error)}`, true);
+			}
+			return text(`Watching ${server.name} for "${event}" (watch ${watch.id}). Each event will arrive here as a message starting with "[App event]".`);
 		},
 	});
 
@@ -347,10 +359,14 @@ export function eventTools(bridge: McpBridge, catalog: AppCatalog, events: AppEv
 		},
 	});
 
-	return (watching === "off" ? [listAppEvents, listWatches, stopWatch] : [listAppEvents, watchEvent, listWatches, stopWatch]) as ToolRegistration[];
+	return (switchedOff() ? [listAppEvents, listWatches, stopWatch] : [listAppEvents, watchEvent, listWatches, stopWatch]) as ToolRegistration[];
 }
 
-/** The approved half of `watch_app_event`: subscribing. */
+/**
+ * Subscribing no longer needs approval: `watch_app_event` calls `events.watch`
+ * itself. This action stays only so an approval filed before that change can
+ * still be decided and run; nothing files new ones.
+ */
 export function watchAction(bridge: McpBridge, events: AppEvents): GatedAction {
 	return defineGatedAction({
 		name: "watch_app_event",

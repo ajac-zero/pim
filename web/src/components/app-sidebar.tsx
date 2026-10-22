@@ -940,6 +940,15 @@ export function AwaitingApprovalMark({ className }: { className?: string }) {
   );
 }
 
+/** Measures how far a row's title overflows once its options button takes room, for it to slide by. */
+function scrollTitleIntoView(event: { currentTarget: HTMLElement }) {
+  const box = event.currentTarget.querySelector<HTMLElement>("[data-title]");
+  if (!box?.firstElementChild) return;
+  const overflow =
+    (box.firstElementChild as HTMLElement).offsetWidth - box.clientWidth;
+  box.style.setProperty("--title-shift", `${-Math.max(0, overflow)}px`);
+}
+
 function SessionRow({
   session,
   active,
@@ -1043,13 +1052,26 @@ function SessionRow({
           event.dataTransfer.setData(CHAT_DRAG_TYPE, session.id)
         }
         className={cn(
-          "flex items-center gap-2 rounded-lg px-2 py-2 pr-8 text-sm transition-colors hover:bg-sidebar-accent",
-          active && "bg-sidebar-accent",
+          "flex items-center gap-2 rounded-lg px-2 py-2 text-sm transition-colors hover:bg-sidebar-accent group-focus-within/row:pr-8 group-hover/row:pr-8 pointer-coarse:pr-8",
+          active && "bg-sidebar-accent pr-8",
         )}
+        onMouseEnter={scrollTitleIntoView}
+        onFocus={scrollTitleIntoView}
       >
         <span className="min-w-0 flex-1">
-          <span className={cn("block truncate", !session.title && "italic")}>
-            {title}
+          {/* A long title fills the row and is cut off with an ellipsis. While the row shows its options button, it slides to reveal its end. */}
+          <span
+            className="block truncate group-focus-within/row:text-clip group-hover/row:text-clip"
+            data-title
+          >
+            <span
+              className={cn(
+                "whitespace-nowrap transition-transform group-focus-within/row:inline-block group-hover/row:inline-block duration-[1200ms] ease-linear group-focus-within/row:[transform:translateX(var(--title-shift,0px))] group-hover/row:[transform:translateX(var(--title-shift,0px))] motion-reduce:transition-none",
+                !session.title && "italic",
+              )}
+            >
+              {title}
+            </span>
           </span>
           {showAgent && (
             <span className="block truncate text-muted-foreground text-xs">

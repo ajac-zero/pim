@@ -1,3 +1,4 @@
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message } from "@earendil-works/pi-ai";
 import { type FauxResponseFactory, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
@@ -10,7 +11,7 @@ import { type Pim, spans } from "./worker";
 
 type Context = Parameters<FauxResponseFactory>[0];
 
-type PublicTask = { id: string; parent: string | null; agent: { name: string }; from: { name: string }; task: string; state: string; result: string | null };
+type PublicTask = { id: string; parent: string | null; call: string | null; agent: { name: string }; from: { name: string }; task: string; state: string; result: string | null };
 type Agent = { id: string; name: string; contacts: string[]; majordomo: boolean };
 
 const toolResult = (messages: readonly Message[]) =>
@@ -218,6 +219,134 @@ describe("an agent's contacts", () => {
 		expect(await updatesIn(session)).toEqual([update]);
 		expect((await tasksOf(session))[0]).toMatchObject({ state: "completed", result: "Booked: confirmation 77." });
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
+	});
+
+	it("waits for the answers when it needs them to reply, suspended meanwhile, and they come as the call's result", async () => {
+		const agent = await planner("Concierge");
+		const session = (await post("/sessions", { agent: agent.id })).body.id;
+		let release = () => {};
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let started = 0;
+		const member = (answer: string) => async () => {
+			started++;
+			await released;
+			return fauxAssistantMessage(answer);
+		};
+		let result = "";
+		scripts({
+			lead: [
+				() =>
+					toolUse("delegate", {
+						wait: true,
+						tasks: [
+							{ to: "Researcher", task: "Find the best month to visit Lisbon." },
+							{ to: "Writer", task: "Draft a three-day outline." },
+						],
+					}),
+				(context) => {
+					result = JSON.parse(toolResult(context.messages))[0].text;
+					return toolUse("send_to_user", { message: "Go in May; here is your outline." });
+				},
+			],
+			Researcher: [member("May: mild and before the crowds.")],
+			Writer: [member("Day 1: Alfama. Day 2: Belém. Day 3: Sintra.")],
+		});
+		const said = say("When should I go to Lisbon, and what should I see?", session);
+		await vi.waitFor(() => expect(started).toBe(2));
+		// The call is suspended while they work: nothing of it runs or waits in memory.
+		const calls = await runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) =>
+			(await (await pim.harness.pi()).inspect(BACKGROUND_CONTEXT)).tasks.flatMap(({ record, state }) => (record.kind === "pi.tool" ? [state.kind] : [])),
+		);
+		expect(calls).toEqual(["suspended"]);
+		// The chat shows the tasks at the call that handed them out, which has no result yet.
+		const [researcher, writer] = (await tasksOf(session)) as [PublicTask, PublicTask];
+		const { messages } = (await api<{ messages: { parts: { type: string; id?: string; name?: string }[] }[] }>(`/sessions/${session}/messages`)).body;
+		const call = messages.flatMap((message) => message.parts).find((part) => part.type === "tool-call" && part.name === "delegate");
+		expect([researcher.call, writer.call]).toEqual([call!.id, call!.id]);
+
+		release();
+		expect(await said).toMatchObject({ status: "done", replies: ["Go in May; here is your outline."] });
+		expect(result).toContain(`Task ${researcher.id}: Researcher answered:\nMay: mild and before the crowds.`);
+		expect(result).toContain(`Task ${writer.id}: Writer answered:\nDay 1: Alfama. Day 2: Belém. Day 3: Sintra.`);
+		await settled(session);
+		// Answers come once: the call returned them, so no update follows.
+		expect(await updatesIn(session)).toEqual([]);
+		expect((await tasksOf(session)).map((task) => task.state)).toEqual(["completed", "completed"]);
+	});
+
+	it("waits through a task's approval for as long as the person takes, and hears the answers in an update when its chat is stopped", async () => {
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
+		const realFetch = globalThis.fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			return request.url.startsWith("https://hooks.example.test/") ? new Response("booked", { status: 201 }) : realFetch(input, init);
+		});
+		const agent = await planner("Waiting booker");
+		const session = (await post("/sessions", { agent: agent.id })).body.id;
+		let result = "";
+		scripts({
+			lead: [
+				() => toolUse("delegate", { wait: true, tasks: [{ to: "Researcher", task: "Book the hotel." }] }),
+				(context) => {
+					result = JSON.parse(toolResult(context.messages))[0].text;
+					return toolUse("send_to_user", { message: "Booked: confirmation 77." });
+				},
+			],
+			Researcher: [
+				() => toolUse("http_request", { method: "POST", url: "https://hooks.example.test/hotel" }),
+				() => fauxAssistantMessage("Booked: confirmation 77."),
+			],
+		});
+		const booked = say("Book my hotel and tell me the confirmation.", session);
+		const approval = await pendingApproval();
+		await vi.waitFor(async () => expect((await tasksOf(session))[0]?.state).toBe("auth-required"));
+		// Both calls are suspended: the agent's, waiting for the task, and its contact's, waiting for the person.
+		const calls = await runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) =>
+			(await (await pim.harness.pi()).inspect(BACKGROUND_CONTEXT)).tasks.flatMap(({ record, state }) => (record.kind === "pi.tool" ? [state.kind] : [])),
+		);
+		expect(calls).toEqual(["suspended", "suspended"]);
+		expect(result).toBe("");
+		await post(`/approvals/${approval.id}/approve`);
+		expect(await booked).toMatchObject({ status: "done", replies: ["Booked: confirmation 77."] });
+		const [task] = await tasksOf(session);
+		expect(result).toBe(`Task ${task!.id}: Researcher answered:\nBooked: confirmation 77.`);
+		await settled(session);
+		expect(await updatesIn(session)).toEqual([]);
+		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
+
+		let update = "";
+		// A chat stopped while it waits hears the answers in an update instead.
+		let release = () => {};
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let working = false;
+		scripts({
+			lead: [
+				() => toolUse("delegate", { wait: true, tasks: [{ to: "Writer", task: "Draft a three-day outline." }] }),
+				(context) => {
+					update = lastUserText(context.messages);
+					return toolUse("send_to_user", { message: "Here is the outline." });
+				},
+			],
+			Writer: [
+				async () => {
+					working = true;
+					await released;
+					return fauxAssistantMessage("Day 1: Alfama.");
+				},
+			],
+		});
+		const said = say("Outline it for me.", session);
+		await vi.waitFor(() => expect(working).toBe(true));
+		expect((await post(`/sessions/${session}/abort`)).status).toBe(200);
+		expect((await said).status).toBe("unanswered");
+		release();
+		await settled(session);
+		expect(update).toMatch(/^\[Task update\] Writer answered/);
+		expect(update).toContain("Day 1: Alfama.");
 	});
 });
 

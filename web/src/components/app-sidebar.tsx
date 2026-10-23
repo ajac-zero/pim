@@ -21,6 +21,7 @@ import {
   Contact,
   ExternalLink,
   Folder,
+  Loader2,
   MessagesSquare,
   MoreHorizontal,
   Pencil,
@@ -718,6 +719,13 @@ function SessionRow({
   const agent = agents?.find((candidate) =>
     session.agent ? candidate.id === session.agent.id : candidate.majordomo,
   );
+  // A group chat shows every agent in it, its host first.
+  const chatAgents = [
+    agent,
+    ...(session.room?.members ?? []).map((member) =>
+      agents?.find((candidate) => candidate.id === member.id),
+    ),
+  ].filter((candidate) => candidate !== undefined);
   const queryClient = useQueryClient();
   const title = sessionTitle(session, t);
   const [renaming, setRenaming] = useState(false);
@@ -827,7 +835,34 @@ function SessionRow({
             {session.visit.username.slice(0, 1)}
           </span>
         ) : (
-          agent && <AgentIcon agent={agent} className="size-4" />
+          chatAgents.length > 0 && (
+            <span className="flex shrink-0 items-center">
+              {chatAgents.slice(0, 4).map((member, index) => (
+                // Drawn as in the chat's header, without the majordomo's crown, which is too small here.
+                <span
+                  key={member.id}
+                  className={cn(
+                    chatAgents.length > 1 &&
+                      "rounded-md bg-sidebar ring-2 ring-sidebar",
+                    index > 0 && "-ml-1.5",
+                  )}
+                >
+                  <AgentIcon
+                    agent={{ ...member, majordomo: false }}
+                    tile={chatAgents.length > 1}
+                    className={
+                      chatAgents.length > 1 ? "size-5 rounded-md" : "size-4"
+                    }
+                  />
+                </span>
+              ))}
+              {chatAgents.length > 4 && (
+                <span className="ml-1 text-muted-foreground text-xs">
+                  +{chatAgents.length - 4}
+                </span>
+              )}
+            </span>
+          )
         )}
         <span className="min-w-0 flex-1">
           {/* A long title fills the row and is cut off with an ellipsis. While the row shows its options button, it slides to reveal its end. */}
@@ -856,8 +891,8 @@ function SessionRow({
           />
         )}
         {session.busy && (
-          <span
-            className="order-first size-1.5 shrink-0 animate-pulse rounded-full bg-primary"
+          <Loader2
+            className="order-first size-3 shrink-0 animate-spin text-primary motion-reduce:animate-none"
             role="img"
             aria-label={t("working")}
           />

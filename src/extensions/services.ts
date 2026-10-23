@@ -27,6 +27,15 @@ export type PimServices = {
 	 * devices if no client has read it a few seconds later.
 	 */
 	responseSent(session: string, at: number, alert?: string): Promise<void>;
+	/**
+	 * An agent sent a message in a chat, sent at `at`, with Pim's copies of
+	 * the images it shows by their addresses: the other agents in the chat
+	 * hear it, and those it mentions answer (see ../rooms.ts). The same
+	 * message again is heard once.
+	 */
+	posted(session: string, message: string, at: number, images: Readonly<Record<string, string>>): Promise<void>;
+	/** Whether the agent of a chat may take no turn on `input` without sending anything, as an agent in a room may on what wasn't for it. */
+	maySkip(session: string, input: string): boolean;
 	/** IANA time zone the user lives in, for reading and writing times; it follows their settings. */
 	readonly timeZone: string;
 	schedule(when: Date | number | string, payload: ScheduledTaskPayload): Promise<Schedule<ScheduledTaskPayload>>;

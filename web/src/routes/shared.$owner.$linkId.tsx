@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { AgentIcon } from "~/components/agent-icon";
 import { PimMark } from "~/components/app-sidebar";
 import { AssistantMessage, UserMessage } from "~/components/chat/items";
+import { Speaker } from "~/components/chat/room";
 import { useI18n } from "~/components/i18n";
 import { Loader2 } from "~/components/icons";
 import { SentWidgets } from "~/components/widgets";
@@ -49,6 +50,10 @@ function SharedChatPage() {
       </main>
     );
   }
+  // A group chat's copy says who wrote each agent's message.
+  const grouped = chat.messages.some(
+    (message) => message.role === "agent" && message.from !== undefined,
+  );
   return (
     <div className="flex min-h-svh flex-col">
       <header className="sticky top-0 z-10 border-border border-b bg-background">
@@ -100,6 +105,11 @@ function SharedChatPage() {
               key={index}
               at={message.at}
               untrusted
+              speaker={
+                grouped ? (
+                  <Speaker name={message.from ?? chat.agent.name} />
+                ) : undefined
+              }
               item={{
                 type: "message",
                 role: "assistant",

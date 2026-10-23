@@ -20,6 +20,20 @@ export type Session = {
   visit?: { username: string; available: boolean } | null;
   /** The agent of yours it talks with: the one it was started with, or your default one. Null in a visit. */
   agent?: { id: string; name: string } | null;
+  /**
+   * A group chat: how its agents take turns, and the agents in it besides
+   * `agent`, its host, each with whether it is at work. Null for a chat with
+   * one agent.
+   */
+  room?: Room | null;
+};
+
+/** How a group chat's agents take turns: `mentions`, answering when mentioned; `open`, each deciding for itself. */
+export type RoomMode = "mentions" | "open";
+
+export type Room = {
+  mode: RoomMode;
+  members: { id: string; name: string; busy: boolean }[];
 };
 
 /**
@@ -275,7 +289,14 @@ export type SharedChat = {
   sharedAt: number;
   messages: (
     | { role: "user"; text: string; images: number; at: number }
-    | { role: "agent"; text: string; widgets: ShownWidget[]; at: number }
+    | {
+        role: "agent";
+        text: string;
+        widgets: ShownWidget[];
+        at: number;
+        /** In a group chat, another agent than the chat's own. */
+        from?: string;
+      }
   )[];
 };
 
@@ -1331,6 +1352,11 @@ export const pim = {
       `/sessions/${session}/messages`,
       { method: "POST", body: JSON.stringify({ content }) },
     ),
+  setRoomMode: (session: string, mode: RoomMode) =>
+    call<{ room: Room | null }>(`/sessions/${session}/room`, {
+      method: "PUT",
+      body: JSON.stringify({ mode }),
+    }).then((body) => body.room),
   abort: (session: string) =>
     call<{ aborted: boolean }>(`/sessions/${session}/abort`, {
       method: "POST",

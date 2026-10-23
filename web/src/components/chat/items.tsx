@@ -31,6 +31,7 @@ import {
   Search,
   Shapes,
   ShieldCheck,
+  UserPlus,
   Workflow,
   Wrench,
   X,
@@ -208,8 +209,11 @@ export const AssistantMessage = memo(function AssistantMessage({
   attachments,
   untrusted,
   images = {},
+  speaker,
 }: {
   item: MessageItem;
+  /** Who wrote it, in a group chat. */
+  speaker?: ReactNode;
   /** When it was sent, in ms. */
   at: number;
   streaming?: boolean;
@@ -228,6 +232,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   // the time and actions don't push the thread when it finishes.
   return (
     <div data-speaker="assistant" className="group/assistant w-full min-w-0">
+      {speaker}
       <ReplyImages images={images} streaming={streaming ?? false}>
         <Markdown text={text} streaming={streaming} untrusted={untrusted} />
       </ReplyImages>
@@ -283,6 +288,7 @@ const NOTICE_ICONS = {
   schedule: Bell,
   event: Zap,
   task: Workflow,
+  room: UserPlus,
   reset: RotateCcw,
 } as const;
 

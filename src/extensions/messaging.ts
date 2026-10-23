@@ -190,6 +190,7 @@ export function messagingExtension(services: PimServices) {
 			const responseAt = await api.memo("responseAt", Math.max(Date.now(), (services.store.sessionInfo(session)?.responseAt ?? 0) + 1), context);
 			// A reply that went to their inbox needs no push.
 			await services.responseSent(session, responseAt, channel === "email" ? undefined : plainReply(message));
+			if (channel !== "email") await services.posted(session, message, responseAt, images);
 			// What the widgets showed, and where the images' copies are, go back to the model too, so it knows what the person saw; the app draws them from here.
 			const missing = channel === "email" ? [] : pictured.filter((url) => !images[url]);
 			const result = {
@@ -208,15 +209,26 @@ export function messagingExtension(services: PimServices) {
 		hooks: [
 			hook(GenerationTask, {
 				async beforeRequest({ messages }, api, context) {
+					const session = String(api.conversationId);
 					let required = false;
 					let reminders = 0;
+					/** Sends that finish a turn, by call: one that went through answered what was owed. */
+					const finishing = new Set<string>();
 					for (const message of messages) {
-						if (message.role === "user") {
+						if (message.role === "assistant") {
+							for (const part of message.content) {
+								if (part.type === "toolCall" && part.name === SEND_TO_USER && part.arguments?.complete !== false) finishing.add(part.id);
+							}
+						} else if (message.role === "toolResult") {
+							if (finishing.has(message.toolCallId) && !message.isError) required = false;
+						} else if (message.role === "user") {
 							const input = typeof message.content === "string" ? message.content : message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
 							if (input === DELIVERY_REMINDER) {
 								reminders++;
 								continue;
 							}
+							// What others said in a room that wasn't for this agent leaves what it owes as it was.
+							if (services.maySkip(session, input)) continue;
 							// Background work may deliberately stay silent.
 							required = !/^\[(?:Scheduled task|Approval |App event\]|Team:|Chat with )/.test(input);
 							reminders = 0;

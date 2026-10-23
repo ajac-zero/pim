@@ -28,6 +28,8 @@ const TypeArgs = Type.Object({
 
 export type BrowserServices = {
 	readonly browser: PimBrowser;
+	/** The window a conversation works in: its own, or its room's, which every agent in a group chat shares. */
+	readonly windowOf: (conversation: string) => string;
 	/** Saves a screenshot to the person's files, on their computer. */
 	readonly saveScreenshot: (path: string | undefined, png: Uint8Array) => Promise<string>;
 };
@@ -37,7 +39,7 @@ function failure(error: unknown) {
 }
 
 /** Clicking, once the person approved what the request named. */
-export function browserClickAction(browser: PimBrowser): GatedAction {
+export function browserClickAction(browser: PimBrowser, windowOf: (conversation: string) => string): GatedAction {
 	return defineGatedAction({
 		name: BROWSER_CLICK,
 		description: "Click a link or button in the agents' browser.",
@@ -46,13 +48,13 @@ export function browserClickAction(browser: PimBrowser): GatedAction {
 		parameters: ClickArgs,
 		summarize: ({ ref }) => `Click [${ref}] in the browser`,
 		async run({ ref }, { session }) {
-			return describePage(await browser.click(session, ref));
+			return describePage(await browser.click(windowOf(session), ref));
 		},
 	}) as GatedAction;
 }
 
 /** Typing, once the person approved what the request named. */
-export function browserTypeAction(browser: PimBrowser): GatedAction {
+export function browserTypeAction(browser: PimBrowser, windowOf: (conversation: string) => string): GatedAction {
 	return defineGatedAction({
 		name: BROWSER_TYPE,
 		description: "Type into a field in the agents' browser, and press Enter if asked.",
@@ -60,12 +62,12 @@ export function browserTypeAction(browser: PimBrowser): GatedAction {
 		parameters: TypeArgs,
 		summarize: ({ ref, text }) => `Type “${text}” into [${ref}] in the browser`,
 		async run({ ref, text, submit }, { session }) {
-			return describePage(await browser.type(session, ref, text, submit === true));
+			return describePage(await browser.type(windowOf(session), ref, text, submit === true));
 		},
 	}) as GatedAction;
 }
 
-export function browserExtension(services: PimServices, { browser, saveScreenshot }: BrowserServices) {
+export function browserExtension(services: PimServices, { browser, windowOf, saveScreenshot }: BrowserServices) {
 	const browserOpen = defineTool({
 		name: "browser_open",
 		description: `Open a web page in your window of the browser and read it: its text, with what can be clicked or typed into numbered like [12 link “Prices”]. Use it for pages fetch_url can't read (built by JavaScript) and for anything you need to click through. ${SHARED}`,
@@ -73,7 +75,7 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 		replay: "safe",
 		async execute({ url }, api) {
 			try {
-				return text(describePage(await browser.visit(String(api.conversationId), url)));
+				return text(describePage(await browser.visit(windowOf(String(api.conversationId)), url)));
 			} catch (error) {
 				return failure(error);
 			}
@@ -87,7 +89,7 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 		replay: "safe",
 		async execute(_args, api) {
 			try {
-				const view = await browser.read(String(api.conversationId));
+				const view = await browser.read(windowOf(String(api.conversationId)));
 				return view ? text(describePage(view)) : text("Your window is closed. Open a page with browser_open.", true);
 			} catch (error) {
 				return failure(error);
@@ -108,7 +110,7 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 		async execute(args, api, context) {
 			let summary: string;
 			try {
-				const element = await browser.describe(String(api.conversationId), args.ref);
+				const element = await browser.describe(windowOf(String(api.conversationId)), args.ref);
 				if (!element) return text(`There is no [${args.ref}] on the page now. Read the page again with browser_read and use a number it shows.`, true);
 				summary = `On ${element.host}, click ${element.label}`;
 			} catch (error) {
@@ -127,7 +129,7 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 		async execute(args, api, context) {
 			let summary: string;
 			try {
-				const element = await browser.describe(String(api.conversationId), args.ref);
+				const element = await browser.describe(windowOf(String(api.conversationId)), args.ref);
 				if (!element) return text(`There is no [${args.ref}] on the page now. Read the page again with browser_read and use a number it shows.`, true);
 				summary = `On ${element.host}, type “${args.text}” into ${element.label}${args.submit ? " and press Enter" : ""}`;
 			} catch (error) {
@@ -147,7 +149,7 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 		replay: "safe",
 		async execute({ path }, api) {
 			try {
-				const png = await browser.screenshot(String(api.conversationId));
+				const png = await browser.screenshot(windowOf(String(api.conversationId)));
 				if (!png) return text("Your window is closed. Open a page with browser_open.", true);
 				return text(`Saved to ${await saveScreenshot(path, png)}.`);
 			} catch (error) {
@@ -162,7 +164,7 @@ export function browserExtension(services: PimServices, { browser, saveScreensho
 		parameters: Type.Object({}),
 		replay: "safe",
 		async execute(_args, api) {
-			await browser.close(String(api.conversationId));
+			await browser.close(windowOf(String(api.conversationId)));
 			return text("Your window is closed.");
 		},
 	});

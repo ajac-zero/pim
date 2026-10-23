@@ -75,6 +75,8 @@ function describeEntries(entries: readonly ThreadEntry[]): string[] {
     if (entry.kind === "notice") {
       return `${entry.key} notice:${entry.notice.kind} ${entry.notice.title}`;
     }
+    if (entry.kind === "post")
+      return `${entry.key} ${entry.from}: ${entry.text}`;
     const item = entry.item as unknown as Record<string, unknown>;
     switch (item.type) {
       case "message": {
@@ -134,6 +136,8 @@ describe("snapshot", () => {
           ]),
           toolResult(3, "call-a", "<html>…</html>"),
           user(4, "[Scheduled task 9] Morning briefing\nSummarize my day."),
+          user(5, "[Room] Coach joined the chat."),
+          user(6, "[From Coach]\nRun **5 km** today."),
         ],
         run: { inputs: ["s1"] },
         generation: {
@@ -160,6 +164,8 @@ describe("snapshot", () => {
       '2:2 call call-a web_fetch({"url":"https://news.ycombinator.com"})',
       "3 output call-a [completed]: <html>…</html>",
       "4 notice:schedule Morning briefing",
+      "5 notice:room Coach joined the chat.",
+      "6 Coach: Run **5 km** today.",
     ]);
     expect(describeEntries(state.view.live)).toEqual([
       "live:0 assistant: Here's",
@@ -730,6 +736,7 @@ describe("conversationMarkdown", () => {
           ]),
           user(9, "One more question."),
           assistant(10, [send("last", "The last answer.")]),
+          user(11, "[From Coach]\nRun *5 km*."),
         ],
       }),
     ]).view.entries;
@@ -741,6 +748,7 @@ describe("conversationMarkdown", () => {
         "## Agent: Ada (email)\n\nThe full report.",
         "## User\n\nOne more question.",
         "## Agent: Ada\n\nThe last answer.",
+        "## Agent: Coach\n\nRun *5 km*.",
       ].join("\n\n---\n\n"),
     );
   });

@@ -837,7 +837,6 @@ function SessionRow({
           chatAgents.length > 0 && (
             <span className="flex shrink-0 items-center">
               {chatAgents.slice(0, 4).map((member, index) => (
-                // Drawn as in the chat's header, without the majordomo's crown, which is too small here.
                 <span
                   key={member.id}
                   className={cn(
@@ -847,10 +846,17 @@ function SessionRow({
                   )}
                 >
                   <AgentIcon
-                    agent={{ ...member, majordomo: false }}
-                    tile={chatAgents.length > 1}
+                    // The crown stays off group rows, where it would crowd the next tile.
+                    agent={
+                      chatAgents.length > 1
+                        ? { ...member, majordomo: false }
+                        : member
+                    }
+                    tile={chatAgents.length > 1 || member.majordomo}
                     className={
-                      chatAgents.length > 1 ? "size-5 rounded-md" : "size-4"
+                      chatAgents.length > 1 || member.majordomo
+                        ? "size-5 rounded-md"
+                        : "size-4"
                     }
                   />
                 </span>

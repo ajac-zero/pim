@@ -1,0 +1,80 @@
+# The TLS proxy in front of one celld node running Pim, for Caddy v2.11.7 (versions.env). It is
+# the only way in: celld serves plain HTTP on loopback (CELLD_ADDR=127.0.0.1:8080 in
+# env/celld.env.example) and keeps its peer and operator API on loopback too. Copy it to
+# /etc/caddy/Caddyfile and change the two hostnames, or set PIM_HOST, PIM_CONTENT_HOST and
+# CELLD_ADDR in Caddy's environment. Caddy gets and renews the certificates itself; both
+# hostnames need DNS pointing here, and ports 80 and 443 reachable for the ACME challenge.
+# deploy/celld/test/proxy.check.mjs runs this file as it is.
+{
+	# Caddy's own admin API, on loopback only.
+	admin {$CADDY_ADMIN:localhost:2019}
+	http_port {$CADDY_HTTP_PORT:80}
+	https_port {$CADDY_HTTPS_PORT:443}
+	# No trusted_proxies: Caddy trusts no client's X-Forwarded-*, and sets its own. With another
+	# proxy in front (a router's, a tunnel's), the address Pim sees is that proxy's.
+}
+
+(celld) {
+	reverse_proxy {$CELLD_ADDR:127.0.0.1:8080} {
+		# Every header a client could send to claim another address goes... (CF-Connecting-IP isn't
+		# deleted: Caddy applies deletions after the `set` below, which replaces the client's.)
+		header_up -CF-Connecting-IPv6
+		header_up -True-Client-IP
+		header_up -X-Real-IP
+		header_up -X-Client-IP
+		header_up -X-Cluster-Client-IP
+		header_up -Fastly-Client-IP
+		header_up -Forwarded
+		header_up -CF-IPCountry
+		header_up -CF-Ray
+		header_up -CF-Visitor
+		header_up -CF-Worker
+		header_up -CDN-Loop
+		# ...and the one Pim reads (src/accounts.ts's clientIp) says where this connection came from,
+		# as Cloudflare's edge would. X-Forwarded-For, -Host and -Proto are Caddy's own, replacing
+		# any the client sent; celld trusts the last two (CELLD_TRUST_FORWARDED_HEADERS=1).
+		header_up CF-Connecting-IP {remote_host}
+
+		# Trusted ingress, PENDING. PIM_RUNTIME=celld is to make Pim believe CF-Connecting-IP only
+		# on requests carrying a secret that only this proxy holds. Its header and variable names
+		# aren't settled. Until a Pim release documents them, add nothing here: the only thing
+		# keeping a forged CF-Connecting-IP out is that nothing but this proxy reaches CELLD_ADDR.
+
+		# Streaming answers and server-sent events go out as they come, never buffered. WebSockets
+		# need nothing more: Caddy passes the upgrade through. On a config reload, open sockets
+		# get 5 minutes before Caddy closes them, and the app reconnects.
+		flush_interval -1
+		stream_close_delay 5m
+	}
+}
+
+{$PIM_HOST:pim.example.com} {
+	# celld doesn't compress. Only the web app's files here: compressing an event stream would
+	# hold its events back.
+	encode zstd gzip {
+		match {
+			header Content-Type text/html*
+			header Content-Type text/css*
+			header Content-Type text/javascript*
+			header Content-Type application/javascript*
+			header Content-Type image/svg+xml*
+		}
+	}
+	# celld's own readiness check is for this machine (curl 127.0.0.1:8080/.well-known/celld/health),
+	# not for the internet. Pim's /health stays public.
+	respond /.well-known/celld/* 404
+	import celld
+}
+
+# Public artifact links (PIM_CONTENT_ORIGIN), on a hostname that shares no cookies with the app's.
+# Only the published pages and their scripts: nothing of the app, its API or its sign-in. Without
+# PIM_CONTENT_ORIGIN, delete this block.
+{$PIM_CONTENT_HOST:pim-content.example.net} {
+	@published path /p/* /artifact-runtime/*
+	handle @published {
+		import celld
+	}
+	handle {
+		respond 404
+	}
+}

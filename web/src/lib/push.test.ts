@@ -169,6 +169,7 @@ describe("push alerts", () => {
             visible ? [{ visibilityState: "visible" }] : [],
         },
         registration: {
+          getNotifications: async () => [],
           showNotification: async (
             title: string,
             options: NotificationOptions,
@@ -207,8 +208,9 @@ describe("push alerts", () => {
       options: {
         body: "$80 cheaper",
         icon: "/api/agents/planner/icon?v=42",
-        tag: "notice",
-        data: { url: "/chat/trip" },
+        tag: "pim-chat-trip",
+        renotify: true,
+        data: { url: "/chat/trip", chats: { trip: 1 }, ids: ["notice"] },
       },
     });
   });
@@ -261,5 +263,90 @@ describe("push alerts", () => {
       await push({ id: "planner", icon: 42 }, image, true),
     ).toBeUndefined();
     expect(image).not.toHaveBeenCalled();
+  });
+});
+
+describe("grouped push alerts", () => {
+  const worker = readFileSync(
+    new URL("../../public/sw.js", import.meta.url),
+    "utf8",
+  );
+
+  /** A service worker that keeps the alerts on screen, as a browser does, keyed by tag. */
+  function device() {
+    let receive: (event: unknown) => void = () => {};
+    const screen = new Map<
+      string,
+      { title: string; body: string; tag: string; data: unknown; close(): void }
+    >();
+    runInNewContext(worker, {
+      self: {
+        addEventListener: (type: string, listener: typeof receive) => {
+          if (type === "push") receive = listener;
+        },
+        clients: { matchAll: async () => [] },
+        registration: {
+          getNotifications: async () => [...screen.values()],
+          showNotification: async (
+            title: string,
+            options: { body: string; tag: string; data: unknown },
+          ) => {
+            screen.set(options.tag, {
+              title,
+              ...options,
+              close: () => screen.delete(options.tag),
+            });
+          },
+        },
+      },
+      fetch: async () => new Response(null, { status: 404 }),
+      Uint8Array,
+      btoa,
+    });
+    return {
+      async push(id: string, session: string, title: string, body: string) {
+        let finished: Promise<void> | undefined;
+        receive({
+          data: { json: () => ({ id, session, title, body }) },
+          waitUntil: (promise: Promise<void>) => {
+            finished = promise;
+          },
+        });
+        await finished;
+      },
+      alerts: () =>
+        [...screen.values()].map(({ title, body }) => ({ title, body })),
+    };
+  }
+
+  it("counts replies from one chat in that chat's alert", async () => {
+    const phone = device();
+    await phone.push("a", "trip", "Trip", "First");
+    await phone.push("b", "trip", "Trip", "Second");
+    await phone.push("c", "trip", "Trip", "Third");
+    expect(phone.alerts()).toEqual([
+      { title: "Trip", body: "3 new messages: Third" },
+    ]);
+  });
+
+  it("replaces chat alerts with one summary once a second chat speaks", async () => {
+    const phone = device();
+    await phone.push("a", "trip", "Trip", "First");
+    await phone.push("b", "trip", "Trip", "Second");
+    await phone.push("c", "work", "Work", "Hello");
+    expect(phone.alerts()).toEqual([
+      { title: "Pim", body: "3 new messages in 2 chats" },
+    ]);
+    await phone.push("d", "work", "Work", "Again");
+    expect(phone.alerts()).toEqual([
+      { title: "Pim", body: "4 new messages in 2 chats" },
+    ]);
+  });
+
+  it("counts a message delivered twice once", async () => {
+    const phone = device();
+    await phone.push("a", "trip", "Trip", "First");
+    await phone.push("a", "trip", "Trip", "First");
+    expect(phone.alerts()).toEqual([{ title: "Trip", body: "First" }]);
   });
 });

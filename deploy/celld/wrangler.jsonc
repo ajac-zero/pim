@@ -1,0 +1,60 @@
+// Pim on celld v0.6.3 (deploy/celld/versions.env): the same Worker as wrangler.jsonc, the
+// production src/index.ts, never preview/worker.ts, in the configuration `celld deploy` accepts.
+// See docs/celld.md. build.sh copies this file to the root of a build made from one commit, so
+// its paths are relative to the repository's root, not to this directory.
+//
+// Left out of wrangler.jsonc, because celld refuses each of them or has nothing behind it:
+//   workers_dev, preview_urls  Cloudflare's own addresses; a TLS proxy gives Pim its address.
+//   build                      build.sh builds web/ explicitly, from the same commit.
+//   ai                         celld has no Workers AI. Pim runs without it: people use the model
+//                              providers the admin and they add in Settings.
+//   ratelimits                 celld has no rate limiting binding, and Pim then slows nothing down.
+//   keep_vars                  Variables come from the operator's files on every deploy (deploy.sh).
+//   version_metadata           celld has none, so the first 15 minutes after a deploy don't let
+//                              anyone claim the Pim: the admin claims it with the setup link the
+//                              Worker writes to celld's log.
+//   observability              Workers Logs; the Worker's console goes to celld's log instead.
+//   send_email (commented out) celld has no Email Workers, so Pim sends no email.
+//
+// The names below, `pim`, `pim-oauth`, `pim-blobs` and `pim-artifacts`, are where celld keeps the
+// data in the fleet bucket. Never change them on a running Pim: its data would stay under the
+// old names.
+{
+  "name": "pim",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp", "/oauth/*", "/.well-known/*", "/authorize", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*", "/shared/*", "/app-pages/*", "/p/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "Pim", "class_name": "Pim" },
+      { "name": "Auth", "class_name": "Auth" },
+      { "name": "Directory", "class_name": "Directory" },
+      { "name": "Gallery", "class_name": "Gallery" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Pim"] },
+    { "tag": "v2", "new_sqlite_classes": ["Auth"] },
+    { "tag": "v3", "new_sqlite_classes": ["Directory"] },
+    { "tag": "v4", "new_sqlite_classes": ["Gallery"] }
+  ],
+  // celld needs an id for a namespace, and a bucket_name for each R2 binding, which Cloudflare
+  // makes up on its own.
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "pim-oauth" }],
+  "r2_buckets": [
+    { "binding": "BLOBS", "bucket_name": "pim-blobs" },
+    { "binding": "ARTIFACTS", "bucket_name": "pim-artifacts" }
+  ],
+  // Defaults for every celld Pim. Both are Workers AI models, which celld doesn't have; `off`
+  // says so in Settings → Deployment. The rest is the operator's (deploy.sh).
+  "vars": {
+    "PIM_UTILITY_MODEL": "off",
+    "PIM_IMAGE_MODEL": "off"
+  }
+}

@@ -51,7 +51,7 @@ Pim is one server application, written to the Workers and Durable Objects APIs: 
 
   [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ajac-zero/pim)
 
-- **Next, anywhere.** The aim is a Pim that runs entirely off Cloudflare: on your own machines with [celld](https://celld.dev), which runs the same APIs, keeping its state in any S3-compatible bucket, with the models of your choice.
+- **Next, anywhere.** The aim is a Pim that runs entirely off Cloudflare: on your own machines with [celld](https://celld.dev), which runs the same APIs, keeping its state in any S3-compatible bucket, with the models of your choice. A beta for one node at home, [Pim on celld](docs/celld.md), is there to try; it hasn't been checked with real sign-in providers or apps yet.
 
 To try it on your machine first, `pnpm install && pnpm preview` starts a Pim at `http://localhost:8787` with a stand-in model, to look around without a Cloudflare account.
 
@@ -69,7 +69,7 @@ A Pim on Cloudflare can reach only servers on the public internet; one on your o
 ## Learn more
 
 - [How Pim works](docs/reference.md): deploying, the API, memory, models, apps, agents and sharing
-- [Running a Pim for several people](docs/instance.md)
+- [Running a Pim for several people](docs/instance.md), and [on celld](docs/celld.md) (beta)
 - [Artifacts](docs/artifacts.md) and [extensions](docs/extensions.md)
 
 To work on Pim, `pnpm check` runs the type checks, lint and tests, as CI does.

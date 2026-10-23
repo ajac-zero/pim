@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvalView, resultView } from "~/lib/approval-view";
+import { approvalView } from "~/lib/approval-view";
 
 describe("approvalView", () => {
   it("shows an app's tool call as the app, the tool, and one field per argument", () => {
@@ -143,24 +143,5 @@ describe("approvalView", () => {
         text: "https://raw.githubusercontent.com/acme/skills/abc/fonts.md",
       },
     ]);
-  });
-});
-
-describe("resultView", () => {
-  it("separates a status line from a JSON body", () => {
-    expect(resultView('HTTP 200 OK\n{"ok":true}')).toEqual({
-      lead: "HTTP 200 OK",
-      code: '{\n  "ok": true\n}',
-      language: "json",
-    });
-  });
-
-  it("formats JSON, and leaves other text as it is", () => {
-    expect(resultView('[{"id":1}]').code).toBe('[\n  {\n    "id": 1\n  }\n]');
-    expect(resultView("Connected.\nSign in at https://x")).toEqual({
-      lead: null,
-      code: "Connected.\nSign in at https://x",
-      language: "text",
-    });
   });
 });

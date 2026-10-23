@@ -15,13 +15,6 @@ export type ApprovalField =
 
 export type ApprovalView = { title: string; fields: ApprovalField[] };
 
-export type ResultView = {
-  /** A status line before a JSON body, such as "HTTP 200 OK". */
-  lead: string | null;
-  code: string;
-  language: CodeLanguage;
-};
-
 /** Strings this long, or with line breaks, read better as a block. */
 const INLINE_MAX = 80;
 const CODE_NAMES = /^(code|script|source|function)$/i;
@@ -167,27 +160,4 @@ export function approvalView(
         )
     : [];
   return { title: summary, fields };
-}
-
-export function resultView(result: string): ResultView {
-  const whole = parseStructured(result);
-  if (whole !== undefined) {
-    return {
-      lead: null,
-      code: JSON.stringify(whole, null, 2),
-      language: "json",
-    };
-  }
-  const newline = result.indexOf("\n");
-  if (newline > 0) {
-    const body = parseStructured(result.slice(newline + 1));
-    if (body !== undefined) {
-      return {
-        lead: result.slice(0, newline).trim(),
-        code: JSON.stringify(body, null, 2),
-        language: "json",
-      };
-    }
-  }
-  return { lead: null, code: result, language: "text" };
 }

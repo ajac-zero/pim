@@ -343,7 +343,9 @@ const LIMITS_KEY = "limits";
  * scope; and, in the admin's space, adding apps to this Pim.
  */
 const MAJORDOMO_TOOLS = [CREATE_MEMORY_SCOPE, SHARE_MEMORY_SCOPE, ADD_CUSTOM_APP];
-const LEAD_ONLY_TOOLS = new Set(["watch_app_event", CREATE_AGENT, UPDATE_AGENT, MANAGE_APPS, ADD_CUSTOM_APP, WRITE_SKILL, INSTALL_SKILL]);
+/** Subscribing to an app's events needs no approval, so its setting is only Off or On, and Ask (from before) counts as On. */
+const WATCH_APP_EVENT = "watch_app_event";
+const LEAD_ONLY_TOOLS = new Set([WATCH_APP_EVENT, CREATE_AGENT, UPDATE_AGENT, MANAGE_APPS, ADD_CUSTOM_APP, WRITE_SKILL, INSTALL_SKILL]);
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
 /** The admin's apps, as this space last read them from the gallery, and how long before it reads them again. */
 const CUSTOM_APPS_KEY = "custom_apps";
@@ -865,7 +867,13 @@ export class Pim extends DurableAgent<Env> {
 	#appExtras(services: PimServices) {
 		return {
 			catalog: this.catalog,
-			tools: [...skillTools(this.apps, this.catalog, this.skills, this.files), ...eventTools(this.apps, this.catalog, this.appEvents, services)],
+			tools: [...skillTools(this.apps, this.catalog, this.skills, this.files), ...eventTools(
+					this.apps,
+					this.catalog,
+					this.appEvents,
+					(session) => this.#appsOf(this.#roleOf(session).agent),
+					() => ownToolPermission(this.store, WATCH_APP_EVENT).chosen === "off",
+				)],
 		};
 	}
 
@@ -2052,6 +2060,12 @@ export class Pim extends DurableAgent<Env> {
 		return this.actions.filter((action) => action.name !== "mcp_call" && (offered.has(action.name) || !this.#ownActions.includes(action)));
 	}
 
+	/** `watch_app_event`'s permission: on unless switched off, whatever else was chosen before it stopped asking. */
+	#watchPermission(): ResolvedPermission {
+		const { chosen } = ownToolPermission(this.store, WATCH_APP_EVENT);
+		return { permission: chosen === "off" ? "off" : "on", default: "on", chosen: chosen === "ask" ? null : chosen, changed: false };
+	}
+
 	/** The tool an approval was filed for, as permissions name it: by its app and the app's own name for it. */
 	#approvalTool(approval: Approval): { app: string; tool: string } {
 		if (approval.action === "mcp_call") {
@@ -2074,6 +2088,8 @@ export class Pim extends DurableAgent<Env> {
 		const { app, tool } = this.#approvalTool(approval);
 		if (app === "") {
 			const resolved = ownToolPermission(this.store, tool);
+			// An approval filed before watching needed none stays pending unless the person switched the tool off.
+			if (tool === WATCH_APP_EVENT) return resolved.chosen === "off" ? "off" : "ask";
 			if (this.#requiresExplicitApproval(approval)) return resolved.permission === "off" ? "off" : "ask";
 			if (!approval.requestedBy && resolved.chosen === null) {
 				const assigned = this.extensions.abilitiesOf(this.#roleOf(approval.session).agent.blueprint);
@@ -2113,8 +2129,8 @@ export class Pim extends DurableAgent<Env> {
 				description: action.description,
 				readOnly: false,
 				destructive: false,
-				choices: action.explicitApproval ? ["off", "ask"] : TOOL_PERMISSIONS,
-				...ownToolPermission(this.store, action.name),
+				choices: action.name === WATCH_APP_EVENT ? ["off", "on"] : action.explicitApproval ? ["off", "ask"] : TOOL_PERMISSIONS,
+				...(action.name === WATCH_APP_EVENT ? this.#watchPermission() : ownToolPermission(this.store, action.name)),
 			}));
 		}
 		const servers = new Map(this.apps.servers().map((server) => [server.id, server]));
@@ -2206,6 +2222,7 @@ export class Pim extends DurableAgent<Env> {
 		if (app === "") {
 			const known = audience === OWNER && this.#ownGatedActions().some((action) => action.name === tool);
 			if (!known) throw new HttpError(404, `No tool ${tool}`);
+			if (tool === WATCH_APP_EVENT && permission === "ask") throw new HttpError(400, "This tool can only be off or on: watching an app's events needs no approval");
 			if (permission === "on" && this.#ownGatedActions().find((action) => action.name === tool)?.explicitApproval) {
 				throw new HttpError(400, "This tool can only be off or ask: every change requires explicit approval");
 			}
@@ -3958,7 +3975,7 @@ export class Pim extends DurableAgent<Env> {
 						responseAt: info?.responseAt ?? null,
 						unread,
 						// A chat still working, or with a reply not yet read, stays in the list however old it is.
-						archived: !session.busy && !unread && info !== undefined && info.updatedAt < archiveBefore,
+						archived: info?.archivedAt != null || (!session.busy && !unread && info !== undefined && info.updatedAt < archiveBefore),
 						visit: visit ? { username: visit.username, available: !visit.revoked } : null,
 						agent: this.#agentRef(session.id),
 					};
@@ -3985,6 +4002,16 @@ export class Pim extends DurableAgent<Env> {
 				const { responseAt } = await readJson<{ responseAt: number }>(request);
 				if (typeof responseAt !== "number" || !Number.isSafeInteger(responseAt) || responseAt < 0) throw new HttpError(400, "responseAt must be a non-negative integer");
 				this.store.readSession(id, responseAt);
+				this.broadcastMessage({ type: "sessions" });
+				return this.#sessionInfo(id);
+			},
+		],
+		[
+			"POST",
+			"/sessions/:session/archive",
+			async ({ session }) => {
+				const id = await this.#session(session!);
+				this.store.archiveSession(id);
 				this.broadcastMessage({ type: "sessions" });
 				return this.#sessionInfo(id);
 			},

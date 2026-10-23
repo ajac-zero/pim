@@ -9,3 +9,8 @@ export function cn(...inputs: ClassValue[]) {
 export function modelName(name: string) {
   return name.replace(/^[^:]+:\s+/, "");
 }
+
+/** Whether this computer's shortcuts use ⌘ rather than Ctrl. */
+export const MAC =
+  typeof navigator !== "undefined" &&
+  /Mac|iPhone|iPad/.test(navigator.platform);

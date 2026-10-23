@@ -606,10 +606,14 @@ describe("work rows", () => {
     toolResult(5, "m", "Sent."),
     assistant(6, [search], { timestamp: 8_000, durationMs: 500 }),
   ];
-  const rows = (running: boolean, lines: Record<string, string> = {}) =>
+  const rows = (
+    running: boolean,
+    lines: Record<string, string> = {},
+    approvals: Record<string, "pending" | "approved" | "denied"> = {},
+  ) =>
     layoutThread(run([snapshot({ entries })]).view.entries, {
       shown: () => false,
-      work: { running, lines },
+      work: { running, lines, approvals },
     });
 
   it("folds the work before a message into its headings and tools, timed from the row before", () => {
@@ -660,6 +664,40 @@ describe("work rows", () => {
       steps: [
         { tool: null, text: "Checking flights" },
         { tool: "web_search", text: "Looking for flights in May" },
+      ],
+    });
+  });
+});
+
+describe("layoutThread approvals", () => {
+  it("marks a gated call's step with its approval's status instead of drawing a card", () => {
+    const entries = run([
+      snapshot({
+        entries: [
+          user(1, "Go"),
+          assistant(2, [
+            { type: "toolCall", id: "a", name: "shell", arguments: {} },
+            { type: "toolCall", id: "b", name: "shell", arguments: {} },
+          ]),
+        ],
+      }),
+    ]).view.entries;
+    const [, work] = layoutThread(entries, {
+      shown: () => false,
+      work: {
+        running: true,
+        lines: { a: "Run on your computer: ls", b: "Run on your computer: ls" },
+        approvals: { a: "approved", b: "denied" },
+      },
+    });
+    expect(work).toMatchObject({
+      steps: [
+        {
+          tool: "shell",
+          text: "Run on your computer: ls",
+          approval: "approved",
+        },
+        { tool: "shell", text: "Run on your computer: ls", approval: "denied" },
       ],
     });
   });

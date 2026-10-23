@@ -240,7 +240,7 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 	let watchId = "";
 	let secret = "";
 
-	it("watches an event once the user approves, subscribing with a signed callback", async () => {
+	it("watches an event at once, with no approval, subscribing with a signed callback", async () => {
 		faux.setResponses([
 			toolUse("watch_app_event", {
 				app: "Travel",
@@ -248,16 +248,15 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 				arguments: { route: "JFK-LIS" },
 				instruction: "Tell me if it drops below $500.",
 			}),
-			toolUse("send_to_user", { message: "I've asked to watch it." }),
+			(context) => {
+				results = toolResults(context.messages);
+				return toolUse("send_to_user", { message: "Watching it." });
+			},
 		]);
-		const turn = say("Watch JFK to Lisbon prices.");
-		const approval = await pendingApproval();
-		expect(subscribes).toEqual([]);
-		expect(approval.summary).toBe('When Travel reports "flight.price_changed" {"route":"JFK-LIS"}, Pim will: Tell me if it drops below $500.');
-
-		const decided = await post<Approval>(`/approvals/${approval.id}/approve`);
-		expect(decided.body.result).toMatch(/^Watching Travel for "flight.price_changed" \(watch [0-9a-f-]{36}\)/);
-		await turn;
+		let results = "";
+		await say("Watch JFK to Lisbon prices.");
+		expect(results).toMatch(/Watching Travel for .{1,4}flight\.price_changed.{1,4} \(watch [0-9a-f-]{36}\)/);
+		expect((await api("/approvals")).body.approvals).toEqual([]);
 
 		const [watch] = (await api("/watches")).body.watches;
 		watchId = watch.id;
@@ -319,6 +318,140 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		expect(deliveries).toHaveLength(1);
 	});
 
+	it("keeps what an event leads to gated: a follow-up http_request still files an approval", async () => {
+		faux.setResponses([
+			() => toolUse("http_request", { method: "POST", url: "https://hooks.example.test/book", body: "{}" }),
+			toolUse("send_to_user", { message: "Waiting on you." }),
+		]);
+		const event = { eventId: "evt_gated", name: "flight.price_changed", timestamp: "2026-10-08T12:30:00Z", data: { price: 400 } };
+		expect((await deliver(`/mcp/events/${OWNER}/${watchId}`, secret, event)).status).toBe(204);
+		const approval = await pendingApproval();
+		expect(approval).toMatchObject({ action: "http_request", status: "pending" });
+		await post(`/approvals/${approval.id}/deny`);
+		await api(`/sessions/${ROOT_SESSION}/operations/event:${watchId}:evt_gated`);
+	});
+
+	it("honors the tool's Off setting, and counts a leftover Ask as On", async () => {
+		const row = async () => (await api("/permissions")).body.tools.find((info: { tool: string }) => info.tool === "watch_app_event");
+		expect(await row()).toMatchObject({ app: null, permission: "on", default: "on", choices: ["off", "on"] });
+		expect((await api("/permissions", { method: "PUT", body: JSON.stringify({ app: null, tool: "watch_app_event", permission: "ask" }) })).status).toBe(400);
+
+		// Ask, chosen before watching stopped asking, no longer asks.
+		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => instance.store.setToolPermission("", "", "watch_app_event", "ask", null));
+		expect(await row()).toMatchObject({ permission: "on" });
+		let results = "";
+		faux.setResponses([
+			toolUse("watch_app_event", { app: "Travel", event: "flight.price_changed", instruction: "legacy ask" }),
+			(context) => {
+				results = toolResults(context.messages);
+				return toolUse("send_to_user", { message: "ok" });
+			},
+		]);
+		await say("Watch.");
+		expect(results).toContain("Watching Travel for");
+		expect((await api("/approvals?status=pending")).body.approvals).toEqual([]);
+		const legacy = (await api("/watches")).body.watches.find((watch: { instruction: string }) => watch.instruction === "legacy ask");
+		expect((await api(`/watches/${legacy.id}`, { method: "DELETE" })).status).toBe(200);
+
+		// Off removes the tool from what the agent is offered, and refuses a call made before it was switched off.
+		const before = subscribes.length;
+		const off = await api("/permissions", { method: "PUT", body: JSON.stringify({ app: null, tool: "watch_app_event", permission: "off" }) });
+		expect(off.body).toMatchObject({ permission: "off", chosen: "off" });
+		let offered: string[] = [];
+		faux.setResponses([
+			(context) => {
+				const tools = new Set<string>();
+				for (const message of context.messages) {
+					if (message.role !== "system") continue;
+					for (const tool of message.toolsAdded ?? []) tools.add(tool.name);
+					for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+				}
+				offered = [...tools];
+				return toolUse("send_to_user", { message: "ok" });
+			},
+		]);
+		await say("What can you do?");
+		expect(offered).toContain("list_watches");
+		expect(offered).not.toContain("watch_app_event");
+		expect(subscribes.length).toBe(before);
+
+		// Back to the default, it works again.
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ app: null, tool: "watch_app_event", permission: null }) });
+		expect(await row()).toMatchObject({ permission: "on", chosen: null });
+	});
+
+	it("still lets the person decide an approval filed before watching stopped asking", async () => {
+		const id = crypto.randomUUID();
+		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			instance.store.requestApproval({
+				id,
+				session: ROOT_SESSION,
+				member: null,
+				callId: "legacy-call",
+				createdAt: Date.now(),
+				expiresAt: null,
+				onTimeout: "deny",
+				action: "watch_app_event",
+				tool: "watch_app_event",
+				args: { serverId: "travel", event: "flight.price_changed", arguments: {}, instruction: "legacy approval", session: ROOT_SESSION },
+				summary: "legacy",
+			});
+		});
+		expect((await api<Approval>(`/approvals/${id}`)).body).toMatchObject({ status: "pending" });
+		// Ask no longer applies to new calls, but this request keeps waiting for its decision.
+		const decided = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) =>
+			instance.decideApproval(id, "approve", undefined, undefined, { inTurn: true }),
+		);
+		expect(decided).toMatchObject({ status: "approved" });
+		expect(decided.result).toMatch(/^Watching Travel for/);
+		const legacy = (await api("/watches")).body.watches.find((watch: { instruction: string }) => watch.instruction === "legacy approval");
+		expect((await api(`/watches/${legacy.id}`, { method: "DELETE" })).status).toBe(200);
+	});
+
+	it("only watches apps the conversation's agent works with, and only while they are connected", async () => {
+		const bare = (await post("/agents", { name: "Bare", instructions: "No apps.", apps: [] })).body;
+		const session = (await post("/sessions", { agent: bare.id })).body.id;
+		const before = subscribes.length;
+		let results = "";
+		faux.setResponses([
+			toolUse("list_app_events", {}),
+			toolUse("watch_app_event", { app: "Travel", event: "flight.price_changed", instruction: "outside" }),
+			(context) => {
+				results = toolResults(context.messages);
+				return toolUse("send_to_user", { message: "no" });
+			},
+		]);
+		await say("Watch Travel.", session);
+		expect(results).toContain("No connected app named Travel among the apps you work with.");
+		expect(subscribes.length).toBe(before);
+	});
+
+	it("refuses to watch an unknown app or event, or one the app rejects, without subscribing or filing approvals", async () => {
+		const attempts = subscribes.length;
+		let results = "";
+		faux.setResponses([
+			toolUse("watch_app_event", { app: "Nowhere", event: "flight.price_changed", instruction: "x" }),
+			toolUse("watch_app_event", { app: "Travel", event: "no.such_event", instruction: "x" }),
+			(context) => {
+				results = toolResults(context.messages);
+				refuseSubscribe = -32012;
+				return toolUse("watch_app_event", { app: "Travel", event: "flight.price_changed", instruction: "x" });
+			},
+			(context) => {
+				refuseSubscribe = undefined;
+				results += toolResults(context.messages);
+				return toolUse("send_to_user", { message: "No." });
+			},
+		]);
+		await say("Watch things.");
+		expect(results).toContain("No connected app named Nowhere");
+		expect(results).toContain("Travel has no event named no.such_event");
+		expect(results).toContain("Could not watch Travel for");
+		expect(subscribes.length).toBe(attempts);
+		expect((await api("/watches")).body.watches.filter((watch: { instruction: string }) => watch.instruction === "x")).toEqual([]);
+		expect((await api("/approvals")).body.approvals.filter((approval: Approval) => approval.status === "pending")).toEqual([]);
+	});
+
 	it("refuses deliveries that are forged, stale, or for another event", async () => {
 		const event = { eventId: "evt_x", name: "flight.price_changed", timestamp: "2026-10-08T12:00:00Z", data: {} };
 		expect((await deliver(`/mcp/events/${OWNER}/${watchId}`, secret, event, { signWith: newSecret() })).status).toBe(401);
@@ -348,12 +481,9 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		const watchOnce = async () => {
 			faux.setResponses([
 				toolUse("watch_app_event", { app: "Travel", event: "flight.price_changed", instruction: "Tell me." }),
-				toolUse("send_to_user", { message: "I've asked to watch it." }),
+				toolUse("send_to_user", { message: "Watching." }),
 			]);
-			const turn = say("Watch prices.");
-			const approval = await pendingApproval();
-			await post(`/approvals/${approval.id}/approve`);
-			await turn;
+			await say("Watch prices.");
 			const watches = (await api("/watches")).body.watches as { id: string; status: string }[];
 			return watches.find((watch) => watch.status === "active")!.id;
 		};
@@ -380,5 +510,20 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		expect((await api("/mcp/travel", { method: "DELETE" })).status).toBe(200);
 		expect(unsubscribes.length).toBe(before + 1);
 		expect((await api("/watches")).body.watches.some((watch: { id: string }) => watch.id === orphaned)).toBe(false);
+	});
+
+	it("cannot watch an app the agent lists but that is no longer connected", async () => {
+		const before = subscribes.length;
+		let results = "";
+		faux.setResponses([
+			toolUse("watch_app_event", { app: "Travel", event: "flight.price_changed", instruction: "gone" }),
+			(context) => {
+				results = toolResults(context.messages);
+				return toolUse("send_to_user", { message: "no" });
+			},
+		]);
+		await say("Watch Travel again.");
+		expect(results).toMatch(/No connected app named Travel|is not connected/);
+		expect(subscribes.length).toBe(before);
 	});
 });

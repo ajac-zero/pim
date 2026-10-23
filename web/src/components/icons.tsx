@@ -58,6 +58,7 @@ function pixelPath(d: string) {
 }
 
 export const AlertCircle = themedIcon(Lucide.AlertCircle, Pixel.WarningDiamond);
+export const Archive = themedIcon(Lucide.Archive, Pixel.Archive);
 export const ArrowDownIcon = themedIcon(Lucide.ArrowDown, Pixel.ArrowDown);
 export const ArrowLeft = themedIcon(Lucide.ArrowLeft, Pixel.ArrowLeft);
 export const ArrowUp = themedIcon(Lucide.ArrowUp, Pixel.ArrowUp);

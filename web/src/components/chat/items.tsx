@@ -15,6 +15,7 @@ import {
   CheckCheck,
   ChevronDown,
   ChevronRight,
+  Clock,
   Contact,
   Copy,
   Folder,
@@ -36,7 +37,6 @@ import {
   Zap,
 } from "~/components/icons";
 import { Action, Actions } from "~/components/ui/actions";
-import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { CodeBlock } from "~/components/ui/code-block";
 import {
@@ -54,14 +54,19 @@ import {
   type ApprovalField,
   approvalView,
   type CodeLanguage,
-  resultView,
 } from "~/lib/approval-view";
 import {
   type InputImagePart,
   type MessageItem,
   messageText,
 } from "~/lib/openresponses";
-import { type Approval, FILES_ROOT, fileContentUrl, pim } from "~/lib/pim-api";
+import {
+  type Approval,
+  type ApprovalStatus,
+  FILES_ROOT,
+  fileContentUrl,
+  pim,
+} from "~/lib/pim-api";
 import type { PimNotice, WorkStep } from "~/lib/pim-view";
 import { agentsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -348,8 +353,9 @@ export const EventNotice = memo(function EventNotice({
 /* -------------------------------- approvals ------------------------------ */
 
 /**
- * A gated tool call, shown as the approval it filed: what Pim wants to do,
- * and Approve/Deny while it waits. Once decided, the outcome and its result.
+ * A gated tool call waiting for an answer: what Pim wants to do, and
+ * Approve/Deny. It sits in the summary box beside the chat, not in the
+ * conversation, where the call is only a step; once decided it's gone from here.
  */
 export const ApprovalBlock = memo(function ApprovalBlock({
   approval,
@@ -378,34 +384,14 @@ export const ApprovalBlock = memo(function ApprovalBlock({
   // The majordomo decides other agents' requests first, and may ask you with a word of its own.
   const { data: agents } = useQuery(agentsQuery());
   const majordomo = agents?.find((agent) => agent.majordomo)?.name ?? "";
-  const pending = approval.status === "pending";
-  const approved = approval.status === "approved";
-  const reviewing = pending && approval.review?.status === "reviewing";
-  const escalated = pending && approval.review?.status === "escalated";
-  const StatusIcon = reviewing
-    ? Loader2
-    : pending
-      ? ShieldCheck
-      : approved
-        ? Check
-        : X;
+  const reviewing = approval.review?.status === "reviewing";
+  const escalated = approval.review?.status === "escalated";
+  const StatusIcon = reviewing ? Loader2 : ShieldCheck;
   const status = reviewing
     ? t("majordomoReviewing", { name: majordomo })
     : escalated
       ? t("majordomoAsks", { name: majordomo })
-      : pending
-        ? t("approvalRequested")
-        : approval.decidedBy === "majordomo"
-          ? t(approved ? "approvedByMajordomo" : "deniedByMajordomo", {
-              name: majordomo,
-            })
-          : approved
-            ? t(
-                approval.decidedBy === "timeout"
-                  ? "approvedNoAnswer"
-                  : "approved",
-              )
-            : t(approval.decidedBy === "timeout" ? "deniedNoAnswer" : "denied");
+      : t("approvalRequested");
   const escalation = escalated && approval.review?.note;
   // Someone in a circle asked: who, and through which circle. Or a member of this Pim's team.
   const asker = approval.requestedBy
@@ -417,38 +403,22 @@ export const ApprovalBlock = memo(function ApprovalBlock({
       ? t("memberAsked", { member: approval.member.name })
       : null;
   const view = useMemo(() => approvalView(approval), [approval]);
-  const hasDetails = view.fields.length > 0 || approval.result !== null;
 
   return (
-    <article className="w-full min-w-0 rounded-2xl bg-muted px-4 py-4">
-      <div className="flex flex-col-reverse items-start gap-2 sm:flex-row sm:justify-between">
-        <p
-          className="min-w-0 flex-1 font-medium text-[15px] [overflow-wrap:anywhere]"
-          title={view.title}
-        >
-          {view.title}
-        </p>
-        <Badge
-          variant={approved ? "success" : "secondary"}
-          className={cn(
-            "gap-1.5",
-            !approved && "bg-background",
-            approval.status === "denied" && "text-destructive",
-          )}
-        >
-          {approved ? (
-            <span className="size-1.5 rounded-full bg-current" />
-          ) : (
-            <StatusIcon
-              className={cn("size-3.5 shrink-0", reviewing && "animate-spin")}
-            />
-          )}
-          {status}
-        </Badge>
-      </div>
-      {asker && (
-        <p className="mt-1 text-muted-foreground text-[13px]">{asker}</p>
-      )}
+    <article className="w-full min-w-0 rounded-xl border bg-background p-3">
+      <p className="flex items-center gap-1.5 text-muted-foreground text-xs">
+        <StatusIcon
+          className={cn("size-3.5 shrink-0", reviewing && "animate-spin")}
+        />
+        {status}
+      </p>
+      <p
+        className="mt-1.5 line-clamp-4 font-medium text-sm [overflow-wrap:anywhere]"
+        title={view.title}
+      >
+        {view.title}
+      </p>
+      {asker && <p className="mt-1 text-muted-foreground text-xs">{asker}</p>}
       {escalation && (
         <p className="mt-1 text-sm [overflow-wrap:anywhere]">
           {majordomo}: “{escalation}”
@@ -459,91 +429,85 @@ export const ApprovalBlock = memo(function ApprovalBlock({
           “{approval.note}”
         </p>
       )}
-      {/* What is being approved stays in view; once decided, it folds away. */}
-      {pending
-        ? view.fields.length > 0 && <ApprovalFields fields={view.fields} />
-        : hasDetails && (
-            <Collapsible className="mt-2">
-              <CollapsibleTrigger className="group flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground">
-                <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
-                {t("details")}
-              </CollapsibleTrigger>
-              <CollapsibleContent>
-                <ApprovalFields fields={view.fields} />
-                {approval.result !== null && (
-                  <ApprovalResult result={approval.result} />
-                )}
-              </CollapsibleContent>
-            </Collapsible>
-          )}
-      {pending && (
-        <div className="mt-4 flex flex-wrap justify-end gap-2">
-          {/* The countdown sits on the button the timeout will press. */}
+      {view.fields.length > 0 && (
+        <Collapsible className="mt-2">
+          <CollapsibleTrigger className="group flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground">
+            <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
+            {t("details")}
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <ApprovalFields fields={view.fields} />
+          </CollapsibleContent>
+        </Collapsible>
+      )}
+      <div className="mt-3 flex flex-wrap justify-end gap-2">
+        {/* The countdown sits on the button the timeout will press. */}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => decide.mutate("deny")}
+          disabled={decide.isPending}
+        >
+          {/* A guest's request waits a day: no countdown for that. */}
+          {approval.expiresAt !== null &&
+          approval.onTimeout === "deny" &&
+          !approval.requestedBy ? (
+            <CountdownRing
+              from={approval.createdAt}
+              until={approval.expiresAt}
+            />
+          ) : (
+            <X className="size-4" />
+          )}{" "}
+          {t("deny")}
+        </Button>
+        {/* Approve, with "always" one step away in its menu rather than a button of its own. */}
+        <div className="flex">
           <Button
-            variant="outline"
-            onClick={() => decide.mutate("deny")}
+            size="sm"
+            onClick={() => decide.mutate("approve")}
             disabled={decide.isPending}
+            className={cn(approval.tool !== null && "rounded-r-none pr-3")}
           >
-            {/* A guest's request waits a day: no countdown for that. */}
-            {approval.expiresAt !== null &&
-            approval.onTimeout === "deny" &&
-            !approval.requestedBy ? (
+            {approval.expiresAt !== null && approval.onTimeout !== "deny" ? (
               <CountdownRing
                 from={approval.createdAt}
                 until={approval.expiresAt}
               />
             ) : (
-              <X className="size-4" />
+              <Check className="size-4" />
             )}{" "}
-            {t("deny")}
+            {t("approve")}
           </Button>
-          {/* Approve, with "always" one step away in its menu rather than a button of its own. */}
-          <div className="flex">
-            <Button
-              onClick={() => decide.mutate("approve")}
-              disabled={decide.isPending}
-              className={cn(approval.tool !== null && "rounded-r-none pr-3")}
-            >
-              {approval.expiresAt !== null && approval.onTimeout !== "deny" ? (
-                <CountdownRing
-                  from={approval.createdAt}
-                  until={approval.expiresAt}
-                />
-              ) : (
-                <Check className="size-4" />
-              )}{" "}
-              {t("approve")}
-            </Button>
-            {approval.tool !== null && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    size="icon"
-                    disabled={decide.isPending}
-                    aria-label={t("moreApprovalOptions")}
-                    className="rounded-l-none border-primary-foreground/20 border-l"
-                  >
-                    <ChevronDown className="size-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem
-                    className="cursor-pointer"
-                    onSelect={() => decide.mutate("always")}
-                  >
-                    <CheckCheck />{" "}
-                    {approval.requestedBy
-                      ? t("alwaysApproveForCircle", {
-                          circle: approval.requestedBy.circleName,
-                        })
-                      : t("alwaysApprove")}
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
-          </div>
+          {approval.tool !== null && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="icon-sm"
+                  disabled={decide.isPending}
+                  aria-label={t("moreApprovalOptions")}
+                  className="rounded-l-none border-primary-foreground/20 border-l"
+                >
+                  <ChevronDown className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  className="cursor-pointer"
+                  onSelect={() => decide.mutate("always")}
+                >
+                  <CheckCheck />{" "}
+                  {approval.requestedBy
+                    ? t("alwaysApproveForCircle", {
+                        circle: approval.requestedBy.circleName,
+                      })
+                    : t("alwaysApprove")}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
-      )}
+      </div>
     </article>
   );
 });
@@ -688,20 +652,6 @@ function ApprovalImage({ src }: { src: string }) {
   );
 }
 
-function ApprovalResult({ result }: { result: string }) {
-  const { t } = useI18n();
-  const view = useMemo(() => resultView(result), [result]);
-  return (
-    <div className="mt-2.5 min-w-0 space-y-1">
-      <div className={FIELD_LABEL_CLASS}>
-        {t("result")}
-        {view.lead && <span className="ml-2 text-foreground">{view.lead}</span>}
-      </div>
-      <ApprovalCode code={view.code} language={view.language} />
-    </div>
-  );
-}
-
 /* ---------------------------- generated images --------------------------- */
 
 /** The image `generate_image` saved, by its path in your files; null for an answer that isn't one (an error). */
@@ -838,6 +788,27 @@ function duration(ms: number): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
+/** How a gated call stands, after its step: approved, denied, or waiting for an answer. */
+function ApprovalMark({ status }: { status: ApprovalStatus }) {
+  const { t } = useI18n();
+  const Icon = status === "approved" ? Check : status === "denied" ? X : Clock;
+  const label =
+    status === "pending"
+      ? t("approvalRequested")
+      : t(status === "approved" ? "approved" : "denied");
+  return (
+    <Icon
+      role="img"
+      aria-label={label}
+      className={cn(
+        "mt-[3px] size-3.5 shrink-0",
+        status === "approved" && "text-success",
+        status === "denied" && "text-destructive",
+      )}
+    />
+  );
+}
+
 /**
  * The agent's work as a list of its steps: growing as it goes (`live`),
  * then folded before the message it led to into one line with how long it
@@ -858,12 +829,15 @@ export const WorkedSteps = memo(function WorkedSteps({
   const [open, setOpen] = useState(false);
   // A tool used again and again is one step.
   const views = steps
-    .map((step) => stepView(step, apps, t))
+    .map((step) => ({ ...stepView(step, apps, t), approval: step.approval }))
     .filter(
       (view, index, all) =>
         view.text !== all[index - 1]?.text ||
-        view.mark !== all[index - 1]?.mark,
+        view.mark !== all[index - 1]?.mark ||
+        view.approval !== all[index - 1]?.approval,
     );
+  // A call waiting for its answer stays in view, so it isn't lost in a folded list.
+  const waiting = steps.some((step) => step.approval === "pending");
   const list = (
     <ol
       aria-live={live ? "polite" : undefined}
@@ -879,7 +853,13 @@ export const WorkedSteps = memo(function WorkedSteps({
           className="flex gap-2 duration-300 animate-in fade-in-0 motion-reduce:animate-none"
         >
           {view.icon}
-          <span className="min-w-0">{view.text}</span>
+          <span
+            className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]"
+            title={view.text}
+          >
+            {view.text}
+          </span>
+          {view.approval && <ApprovalMark status={view.approval} />}
         </li>
       ))}
     </ol>
@@ -907,7 +887,7 @@ export const WorkedSteps = memo(function WorkedSteps({
           )}
         />
       </button>
-      {open && list}
+      {(open || waiting) && list}
     </div>
   );
 });

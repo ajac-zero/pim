@@ -1,0 +1,45 @@
+# One celld node running Pim. Install: install-celld.sh to /opt/celld, a `celld` system user
+# (useradd --system --home-dir /var/lib/celld --shell /usr/sbin/nologin celld), this file as
+# /etc/systemd/system/celld.service, /etc/celld/celld.env from env/celld.env.example, then
+# `systemctl enable --now celld`. See docs/celld.md.
+[Unit]
+Description=celld node (Pim)
+Documentation=https://celld.dev/docs
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=celld
+Group=celld
+EnvironmentFile=/etc/celld/celld.env
+ExecStart=/opt/celld/bin/celld
+# The Worker's console (setup links among it) goes to the journal: journalctl -u celld.
+StandardOutput=journal
+StandardError=journal
+# celld drains on SIGTERM: it finishes requests, proves every write durable and publishes a final
+# snapshot of each database within CELLD_SHUTDOWN_TOTAL_MS (40 s by default). Give it longer
+# than that, or SIGKILL cuts the handoff short.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5
+StateDirectory=celld
+StateDirectoryMode=0700
+UMask=0077
+LimitNOFILE=65536
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

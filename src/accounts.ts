@@ -9,6 +9,7 @@ import { HttpError } from "./http";
 import { providerInfo } from "./providers";
 import { parseLimits, UNLIMITED } from "./usage";
 import { type Account, type AccountStatus, type CleanupResult, PENDING_MS, type RegistrationPolicy } from "./directory";
+import { claimWindowOpen } from "./runtime";
 import { usernameProblem } from "./usernames";
 
 /**
@@ -25,9 +26,6 @@ import { usernameProblem } from "./usernames";
 /** How long a Worker trusts what it read about an account. Suspensions reach the space at once regardless. */
 const ACCOUNT_CACHE_MS = 30_000;
 const accounts = new Map<string, { account: Account | null; at: number }>();
-
-/** How long after a deploy a Pim with no admin lets whoever opens it become the admin. */
-export const CLAIM_WINDOW_MS = 15 * 60 * 1000;
 
 const directory = (env: Env) => env.Directory.getByName("directory");
 const gallery = (env: Env) => env.Gallery.getByName("gallery");
@@ -56,24 +54,9 @@ const fail = (status: number, error: string) => json({ error }, status);
 const noStore = (value: unknown, status = 200) =>
 	Response.json(value, { status, headers: { "cache-control": "no-store, private", "x-content-type-options": "nosniff" } });
 
-/** The client's address, as Cloudflare reports it. */
-export const clientIp = (request: Request) => request.headers.get("CF-Connecting-IP") ?? "unknown";
-
-/** A rate limit, if the deployment binds one; `key` is what it counts by. */
-export async function limited(limiter: RateLimit | undefined, key: string): Promise<boolean> {
-	if (!limiter) return false;
-	return !(await limiter.limit({ key })).success;
-}
-
 function registrationPolicy(env: Env): RegistrationPolicy {
 	const { registration, maxAccounts, registrationsPerAddress } = deploymentSettings(env);
 	return { mode: registration, maxAccounts, perAddressPerDay: registrationsPerAddress };
-}
-
-/** Whether this version of the Worker was deployed less than `CLAIM_WINDOW_MS` ago. */
-function claimWindowOpen(env: Env, now: number): boolean {
-	const deployed = Date.parse(env.CF_VERSION_METADATA?.timestamp ?? "");
-	return now >= deployed && now < deployed + CLAIM_WINDOW_MS;
 }
 
 /**
@@ -185,9 +168,10 @@ function deletionResponse(result: CleanupResult, headers?: HeadersInit): Respons
  * `/auth/register`, `/auth/username` and `/auth/setup-link`: joining the Pim,
  * claiming one that has no admin, and the setup link the Worker writes to its
  * logs. Anything else under `/auth` is ./auth's. The gateway slows down
- * attempts from one address before either.
+ * attempts from one address before either; `address` is the client's, as
+ * the runtime vouches for it (./runtime.ts).
  */
-export async function handleRegistration(request: Request, env: Env, now = Date.now()): Promise<Response | undefined> {
+export async function handleRegistration(request: Request, env: Env, address: string, now = Date.now()): Promise<Response | undefined> {
 	const url = new URL(request.url);
 	const route = `${request.method} ${url.pathname}`;
 
@@ -201,7 +185,7 @@ export async function handleRegistration(request: Request, env: Env, now = Date.
 
 	if (route === "POST /auth/setup-link") {
 		if (fromAnotherSite(request)) return fail(403, "Requests must come from this app");
-		// Anyone may ask; only someone signed in to the Cloudflare account can read the logs it lands in.
+		// Anyone may ask; only the operator can read the logs it lands in: Cloudflare's, or the celld nodes'. The answer never holds the code.
 		const dir = directory(env);
 		const admin = await dir.admin(now);
 		if (!admin) {
@@ -218,12 +202,12 @@ export async function handleRegistration(request: Request, env: Env, now = Date.
 		return json({ expiresAt: until });
 	}
 
-	if (route === "POST /auth/register") return register(request, env, now);
+	if (route === "POST /auth/register") return register(request, env, address, now);
 	return undefined;
 }
 
 /** Makes an account, and hands back its setup code, to make its first passkey with, and its recovery codes. */
-async function register(request: Request, env: Env, now: number): Promise<Response> {
+async function register(request: Request, env: Env, address: string, now: number): Promise<Response> {
 	if (fromAnotherSite(request)) return fail(403, "Requests must come from this app");
 	const body = (await request.json().catch(() => null)) as { username?: unknown; invite?: unknown; claim?: unknown; timeZone?: unknown } | null;
 	const username = typeof body?.username === "string" ? body.username.trim().toLowerCase() : "";
@@ -233,7 +217,7 @@ async function register(request: Request, env: Env, now: number): Promise<Respon
 	const dir = directory(env);
 	const result = await dir.register({
 		username,
-		ip: clientIp(request),
+		ip: address,
 		policy,
 		claim: { window: claimWindowOpen(env, now), ...(typeof body?.claim === "string" ? { code: body.claim } : {}) },
 		...(typeof body?.invite === "string" ? { invite: body.invite } : {}),

@@ -135,7 +135,7 @@ test("JSONC: comments and trailing commas go, and nothing inside a string is tou
 
 test("env files: one strict form, read as written, and anything else refused", () => {
 	// Taken exactly as written: base64, URLs, paths, and shell punctuation that systemd keeps as it is.
-	const kept = "A1+/=._-:@%,~#;&|()*?[]{}!<>^";
+	const kept = "A1+/=._-:@%,~;&|()*?[]{}!<>^";
 	assert.deepEqual([...parseEnv(`# a comment\n\nA=1\nB=two=2\nC=${kept}\nD=s3://bucket/pim\n`, "f")], [["A", "1"], ["B", "two=2"], ["C", kept], ["D", "s3://bucket/pim"]]);
 	const refused = {
 		'A="quoted"': /a double quote/,
@@ -148,6 +148,8 @@ test("env files: one strict form, read as written, and anything else refused", (
 		"A=`id`": /a backtick/,
 		"A=two words": /whitespace/,
 		"A=value # note": /whitespace/,
+		"A=value#note": /a #/,
+		"A=#": /a #/,
 		"A=tab\there": /whitespace/,
 		"A=caf\u00e9": /beyond visible ASCII/,
 		"A=1\r": /carriage return/,

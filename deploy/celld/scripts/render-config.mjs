@@ -65,7 +65,7 @@ const RUNTIME = "PIM_RUNTIME";
  * this script, systemd's EnvironmentFile (Caddy reads ingress.env, celld reads celld.env), and a
  * dotenv reader. A value is taken exactly as written, so anything those would read differently
  * is refused rather than changed: quotes, backslashes (escapes, continued lines), `$` and
- * backticks (expansion), whitespace and control characters, characters beyond ASCII, a carriage
+ * backticks (expansion), `#` (where a dotenv reader ends the value), whitespace and control characters, characters beyond ASCII, a carriage
  * return, `export`, and a name line or comment that doesn't start the line. Comments are lines
  * whose first character is `#`. None of these files is meant to be `source`d by a shell.
  */
@@ -83,11 +83,11 @@ export function parseEnv(text, file) {
 		if (!NAME.test(name)) throw new Error(`${at}: ${JSON.stringify(name)} isn't an upper-case variable name`);
 		if (entries.has(name)) throw new Error(`${at}: ${name} is set twice`);
 		if (value === "") throw new Error(`${at}: ${name} is empty; remove the line to leave it unset`);
-		const odd = /["'\\$`]|[^\x21-\x7e]/.exec(value);
+		const odd = /["'\\$`#]|[^\x21-\x7e]/.exec(value);
 		if (odd) {
-			const named = { '"': "a double quote", "'": "a single quote", "\\": "a backslash", $: "a dollar sign", "`": "a backtick" };
+			const named = { '"': "a double quote", "'": "a single quote", "\\": "a backslash", $: "a dollar sign", "`": "a backtick", "#": "a #" };
 			const what = named[odd[0]] ?? (/\s/.test(odd[0]) ? "whitespace" : "a character beyond visible ASCII");
-			throw new Error(`${at}: ${name}'s value has ${what}, which systemd or a shell would read differently; write the value bare, without quotes, backslashes, dollar signs, backticks or spaces`);
+			throw new Error(`${at}: ${name}'s value has ${what}, which systemd or a shell would read differently; write the value bare, without quotes, backslashes, dollar signs, backticks, # or spaces`);
 		}
 		entries.set(name, value);
 	}

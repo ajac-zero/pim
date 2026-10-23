@@ -1,17 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { type DragEvent, useEffect, useRef, useState } from "react";
-import { AgentIcon } from "~/components/agent-icon";
 import {
   AwaitingApprovalMark,
-  PimMark,
   sessionTitle,
   useAwaitingApproval,
 } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
 import { Loader2, X } from "~/components/icons";
 import type { Session } from "~/lib/pim-api";
-import { agentsQuery, sessionsQuery } from "~/lib/queries";
+import { sessionsQuery } from "~/lib/queries";
 import {
   CHAT_DRAG_TYPE,
   closeTab,
@@ -50,8 +48,8 @@ export function tabShortcutPosition(
 }
 
 /**
- * The open chats, as tabs in the chat's header. Each shows its agent, its
- * title, and whether it is working or waiting for an approval, so chats in
+ * The open chats, as tabs in the chat's header. Each shows its title
+ * and whether it is working or waiting for an approval, so chats in
  * the background stay in view with the sidebar collapsed. With only one
  * open, it shows that chat's title instead.
  */
@@ -60,7 +58,6 @@ export function ChatTabs({ activeId }: { activeId: string }) {
   const navigate = useNavigate();
   const tabs = useTabs();
   const { data: sessions } = useQuery(sessionsQuery());
-  const { data: agents } = useQuery(agentsQuery());
   const awaitingApproval = useAwaitingApproval();
   const activeRef = useRef<HTMLLIElement>(null);
 
@@ -107,31 +104,6 @@ export function ChatTabs({ activeId }: { activeId: string }) {
     );
   };
 
-  const agentOf = (session: Session) =>
-    session.visit
-      ? undefined
-      : agents?.find((candidate) =>
-          session.agent
-            ? candidate.id === session.agent.id
-            : candidate.majordomo,
-        );
-  const iconOf = (session: Session, circle: string) => {
-    const agent = agentOf(session);
-    return session.visit ? (
-      <span
-        className={cn(
-          "flex size-5 shrink-0 items-center justify-center rounded-full font-medium text-[11px] uppercase",
-          circle,
-        )}
-      >
-        {session.visit.username.slice(0, 1)}
-      </span>
-    ) : agent ? (
-      <AgentIcon agent={agent} tile className="size-5 shrink-0 rounded-md" />
-    ) : (
-      <PimMark className="h-3 w-6 shrink-0" />
-    );
-  };
   const statusOf = (session: Session) =>
     session.busy ? (
       <Loader2
@@ -150,7 +122,6 @@ export function ChatTabs({ activeId }: { activeId: string }) {
     return (
       <div className="flex min-w-0 flex-1 items-center gap-2 pl-4 text-[15px]">
         {statusOf(session)}
-        {iconOf(session, "bg-muted")}
         <span className="truncate">{sessionTitle(session, t)}</span>
       </div>
     );
@@ -212,7 +183,6 @@ export function ChatTabs({ activeId }: { activeId: string }) {
                 className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-t-xl pr-8 pl-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
               >
                 {status}
-                {iconOf(session, "bg-background")}
                 <span className="truncate">{title}</span>
               </Link>
               <button

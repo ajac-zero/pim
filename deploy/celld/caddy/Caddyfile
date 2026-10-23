@@ -2,8 +2,9 @@
 # the only way in: celld serves plain HTTP on loopback (CELLD_ADDR=127.0.0.1:8080 in
 # env/celld.env.example) and keeps its peer and operator API on loopback too. Copy it to
 # /etc/caddy/Caddyfile and change the two hostnames, or set PIM_HOST, PIM_CONTENT_HOST and
-# CELLD_ADDR in Caddy's environment. Caddy gets and renews the certificates itself; both
-# hostnames need DNS pointing here, and ports 80 and 443 reachable for the ACME challenge.
+# CELLD_ADDR in Caddy's environment. Caddy reads PIM_INGRESS_SECRET from its environment
+# (caddy/pim-ingress.conf), never from this file. Caddy gets and renews the certificates itself;
+# both hostnames need DNS pointing here, and ports 80 and 443 reachable for the ACME challenge.
 # deploy/celld/test/proxy.check.mjs runs this file as it is.
 {
 	# Caddy's own admin API, on loopback only.
@@ -16,8 +17,18 @@
 
 (celld) {
 	reverse_proxy {$CELLD_ADDR:127.0.0.1:8080} {
-		# Every header a client could send to claim another address goes... (CF-Connecting-IP isn't
-		# deleted: Caddy applies deletions after the `set` below, which replaces the client's.)
+		# Pim's celld runtime (PIM_RUNTIME=celld) answers only requests that carry its ingress secret,
+		# and takes the client's address from X-Pim-Client-IP on those alone. Caddy sets both on every
+		# request, replacing whatever a client sent: the address of the connection, one bare IPv4 or
+		# IPv6 address, and the secret from Caddy's environment at request time ({env.*}, so it never
+		# appears in the config the admin API serves). Unset, the header is empty and Pim refuses
+		# everything with 403. X-Forwarded-For, -Host and -Proto are Caddy's own too; celld takes its
+		# scheme and host from the last two (CELLD_TRUST_FORWARDED_HEADERS=1).
+		header_up X-Pim-Client-IP {remote_host}
+		header_up X-Pim-Ingress-Secret {env.PIM_INGRESS_SECRET}
+		# Other headers that claim an address go. Pim strips CF-Connecting-IP itself as well. (Caddy
+		# deletes after it sets, so the two headers above can't be deleted here; setting replaces.)
+		header_up -CF-Connecting-IP
 		header_up -CF-Connecting-IPv6
 		header_up -True-Client-IP
 		header_up -X-Real-IP
@@ -30,15 +41,6 @@
 		header_up -CF-Visitor
 		header_up -CF-Worker
 		header_up -CDN-Loop
-		# ...and the one Pim reads (src/accounts.ts's clientIp) says where this connection came from,
-		# as Cloudflare's edge would. X-Forwarded-For, -Host and -Proto are Caddy's own, replacing
-		# any the client sent; celld trusts the last two (CELLD_TRUST_FORWARDED_HEADERS=1).
-		header_up CF-Connecting-IP {remote_host}
-
-		# Trusted ingress, PENDING. PIM_RUNTIME=celld is to make Pim believe CF-Connecting-IP only
-		# on requests carrying a secret that only this proxy holds. Its header and variable names
-		# aren't settled. Until a Pim release documents them, add nothing here: the only thing
-		# keeping a forged CF-Connecting-IP out is that nothing but this proxy reaches CELLD_ADDR.
 
 		# Streaming answers and server-sent events go out as they come, never buffered. WebSockets
 		# need nothing more: Caddy passes the upgrade through. On a config reload, open sockets

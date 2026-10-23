@@ -6,6 +6,9 @@
 #
 #   deploy/celld/test/run-scratch.sh [REF]       REF defaults to HEAD
 #
+# The commit must have Pim's celld runtime (PIM_RUNTIME=celld); ALLOW_PRE_RUNTIME=1 runs an earlier
+# one to test the tooling alone, without the ingress checks.
+#
 # Needs celld (pinned; CELLD=...), moto_server (`uv tool install 'moto[server]==5.1.14'`) as a
 # throwaway S3 that unsigned requests reach, and network for Caddy unless CADDY is set. Nothing it
 # makes is real: the bucket is moto's memory, the secrets are random canaries, the model is
@@ -57,6 +60,12 @@ command -v moto_server >/dev/null || { echo "Need moto_server: uv tool install '
 say "Build $ref"
 "$celld_dir/build.sh" "$ref" "$scratch/build" | tail -12
 build="$scratch/build"
+runtime="$(node -p 'require(process.argv[1]).celldRuntime ? 1 : 0' "$build/build-info.json")"
+if [[ "$runtime" != 1 ]]; then
+	[[ "${ALLOW_PRE_RUNTIME:-0}" == 1 ]] || { echo "$ref predates Pim's celld runtime; ALLOW_PRE_RUNTIME=1 tests the tooling alone." >&2; exit 1; }
+	echo "This commit predates Pim's celld runtime: the ingress checks are skipped."
+	export PIM_CELLD_ALLOW_PRE_RUNTIME=1
+fi
 
 s3_port="$(free_port)"
 moto_server -H 127.0.0.1 -p "$s3_port" >"$scratch/s3.log" 2>&1 &
@@ -90,11 +99,14 @@ canary="canary-$(openssl rand -hex 12)"
 (umask 077 && echo "SPOTIFY_CLIENT_SECRET=$canary" >"$scratch/etc/secrets.env")
 "$celld_dir/gen-app-credentials-key.sh" "$scratch/etc/app-credentials-key"
 app_key="$(cat "$scratch/etc/app-credentials-key")"
+"$celld_dir/gen-ingress-secret.sh" "$scratch/etc/ingress.env"
+ingress_secret="$(sed -n 's/^PIM_INGRESS_SECRET=//p' "$scratch/etc/ingress.env")"
 
 say "Deploy"
 CELLD="$celld" "$celld_dir/deploy.sh" "$build" --vars "$scratch/etc/pim.env" --secrets "$scratch/etc/secrets.env" \
-	--app-credentials-key "$scratch/etc/app-credentials-key" --celld-env "$scratch/etc/celld.env" 2>&1 | tee "$scratch/deploy.log"
-if grep -qF -e "$canary" -e "$app_key" "$scratch/deploy.log"; then echo "deploy.sh printed a secret" >&2; exit 1; fi
+	--app-credentials-key "$scratch/etc/app-credentials-key" --ingress-secret "$scratch/etc/ingress.env" \
+	--celld-env "$scratch/etc/celld.env" 2>&1 | tee "$scratch/deploy.log"
+if grep -qF -e "$canary" -e "$app_key" -e "$ingress_secret" "$scratch/deploy.log"; then echo "deploy.sh printed a secret" >&2; exit 1; fi
 if compgen -G "$build/.deploy-*" >/dev/null; then echo "deploy.sh left its configuration behind" >&2; exit 1; fi
 echo "deploy.sh printed no secret value and left no configuration with secrets behind."
 
@@ -122,13 +134,14 @@ node "$here/mock-model.mjs" "$model_port" >"$scratch/model.log" 2>&1 &
 pids+=($!)
 env -i PATH="$PATH" HOME="$scratch" XDG_DATA_HOME="$scratch/caddy" XDG_CONFIG_HOME="$scratch/caddy" \
 	PIM_HOST="pim.localhost" PIM_CONTENT_HOST="pim-content.localhost" CELLD_ADDR="127.0.0.1:$celld_port" \
-	CADDY_HTTPS_PORT="$proxy_port" CADDY_HTTP_PORT="$(free_port)" CADDY_ADMIN="localhost:$(free_port)" \
+	CADDY_HTTPS_PORT="$proxy_port" CADDY_HTTP_PORT="$(free_port)" CADDY_ADMIN="localhost:$(free_port)" PIM_INGRESS_SECRET="$ingress_secret" \
 	"$CADDY" run --config "$celld_dir/caddy/Caddyfile" --adapter caddyfile >"$scratch/caddy.log" 2>&1 &
 pids+=($!)
 for _ in $(seq 1 100); do curl -sk -o /dev/null --resolve "pim.localhost:$proxy_port:127.0.0.1" "$pim_url/health" && break; sleep 0.2; done
 
 export PIM_URL="$pim_url" PROXY_PORT="$proxy_port" CELLD_URL="http://127.0.0.1:$celld_port" CELLD_LOG="$scratch/node.log" \
-	MOCK_MODEL_URL="http://127.0.0.1:$model_port/v1" WEB_DIST="$build/web/dist" STATE="$scratch/state.json"
+	MOCK_MODEL_URL="http://127.0.0.1:$model_port/v1" WEB_DIST="$build/web/dist" STATE="$scratch/state.json" \
+	INGRESS_SECRET="$ingress_secret" RUNTIME="$runtime"
 say "Smoke: setup"
 node "$here/smoke.mjs" setup
 echo "Runtime: $(grep -m1 -o 'runtime_version="[^"]*"' "$scratch/node.log")"
@@ -145,14 +158,14 @@ stop_node
 script="$(grep -o '/assets/index-[^"]*\.js' "$build/web/dist/index.html" | head -1)"
 node "$here/scratch-bucket.mjs" find pim-scratch pim/deploy/ "Pim setup link" "$script" | tee "$scratch/controls-found.txt"
 [[ "$(cut -f1 "$scratch/controls-found.txt" | grep -vc manifest.json)" -ge 2 ]] || { echo "The search can't read the deployment's modules or assets." >&2; exit 1; }
-node "$here/scratch-bucket.mjs" find pim-scratch pim/ "$canary" "$app_key" | tee "$scratch/secrets-found.txt"
-if grep -vqE '^pim/deploy/pim/[0-9a-f]+/manifest\.json	2/2$' "$scratch/secrets-found.txt"; then
+node "$here/scratch-bucket.mjs" find pim-scratch pim/ "$canary" "$app_key" "$ingress_secret" | tee "$scratch/secrets-found.txt"
+if grep -vqE '^pim/deploy/pim/[0-9a-f]+/manifest\.json	3/3$' "$scratch/secrets-found.txt"; then
 	echo "A secret is somewhere besides the deployment's manifest." >&2
 	exit 1
 fi
 [[ "$(wc -l <"$scratch/secrets-found.txt")" == 1 ]] || { echo "Expected the secrets in exactly one manifest." >&2; exit 1; }
-if grep -rqF -e "$canary" -e "$app_key" "$build/web/dist" "$build/build-info.json"; then echo "A secret is in the build." >&2; exit 1; fi
-echo "Both secrets are in the deployment's manifest only: not in the Worker's modules, the static assets, the data, or the build."
+if grep -rqF -e "$canary" -e "$app_key" -e "$ingress_secret" "$build/web/dist" "$build/build-info.json"; then echo "A secret is in the build." >&2; exit 1; fi
+echo "All three secrets are in the deployment's manifest only: not in the Worker's modules, the static assets, the data, or the build."
 
 say "Cold backup, restored into an empty prefix, on a fresh node"
 node "$here/scratch-bucket.mjs" copy pim-scratch pim/ pim-scratch-restore pim/

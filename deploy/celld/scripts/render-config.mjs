@@ -1,11 +1,11 @@
 // Writes the configuration one `celld deploy` reads: the profile (deploy/celld/wrangler.jsonc)
-// with the operator's variables, their secrets and APP_CREDENTIALS_KEY added as `vars`. celld
+// with the operator's variables, their secrets, PIM_INGRESS_SECRET and APP_CREDENTIALS_KEY added as `vars`. celld
 // v0.6.3 has no store for secrets: `celld deploy` keeps every var in the deployment's manifest in
 // the fleet bucket, and nowhere else, so this file is written only for the length of one deploy,
 // readable only by its owner, and deploy.sh deletes it. Nothing here goes into the Worker's
 // bundle (no `define`) or the web app's build. It prints the names it sets, never their values.
 //
-//   node render-config.mjs --profile FILE --vars FILE [--secrets FILE]
+//   node render-config.mjs --profile FILE --vars FILE [--secrets FILE] --ingress-secret FILE
 //                          [--app-credentials-key FILE] --out FILE
 
 import { readFileSync, statSync, writeFileSync } from "node:fs";
@@ -36,6 +36,9 @@ const NAME = /^[A-Z][A-Z0-9_]*$/;
 // A name like these is a secret, and belongs in the secrets file, not the variables one.
 const SECRET_NAME = /SECRET|PASSWORD|TOKEN|_KEY$|_KEY_|^OTEL_EXPORTER_OTLP(_TRACES)?_HEADERS$/;
 export const APP_CREDENTIALS_KEY = "APP_CREDENTIALS_KEY";
+export const INGRESS_SECRET = "PIM_INGRESS_SECRET";
+// Set by the profile, for every celld Pim; never by the operator's files.
+const RUNTIME = "PIM_RUNTIME";
 
 /** `NAME=value` lines, as systemd's EnvironmentFile reads them; `#` comments, blank lines, one pair of surrounding quotes. */
 export function parseEnv(text, file) {
@@ -74,10 +77,23 @@ export function readAppCredentialsKey(text, file) {
 }
 
 /**
+ * The secret only the TLS proxy and Pim share (Pim's celld runtime): `PIM_INGRESS_SECRET=` and at
+ * least 32 visible ASCII characters, alone in its file, which Caddy reads too.
+ */
+export function readIngressSecret(text, file) {
+	const entries = parseEnv(text, file);
+	const secret = entries.get(INGRESS_SECRET);
+	if (entries.size !== 1 || secret === undefined || !/^[\x21-\x7e]{32,}$/.test(secret)) {
+		throw new Error(`${file} must hold one line, ${INGRESS_SECRET}= and at least 32 visible ASCII characters, as gen-ingress-secret.sh writes it`);
+	}
+	return secret;
+}
+
+/**
  * The profile with `vars` from each source, in order: the profile's own defaults, then the
  * variables, the secrets and the key. Returns the config and, for each name, where it came from.
  */
-export function render({ profile, vars, secrets = new Map(), appCredentialsKey = null }) {
+export function render({ profile, vars, secrets = new Map(), ingressSecret = null, appCredentialsKey = null }) {
 	const config = structuredClone(profile);
 	const bindings = new Set([
 		...(config.durable_objects?.bindings ?? []).map((binding) => binding.name),
@@ -100,6 +116,14 @@ export function render({ profile, vars, secrets = new Map(), appCredentialsKey =
 	for (const [name, source] of sources) {
 		if (bindings.has(name)) throw new Error(`${name} (${source}) is the name of a binding`);
 		if (name === APP_CREDENTIALS_KEY) throw new Error(`${APP_CREDENTIALS_KEY} comes only from its own file (--app-credentials-key)`);
+		if (name === INGRESS_SECRET) throw new Error(`${INGRESS_SECRET} comes only from its own file (--ingress-secret)`);
+		if (name === RUNTIME && source !== "profile") throw new Error(`${RUNTIME} is the profile's to set, not the ${source} file's`);
+	}
+	if (merged[RUNTIME] === "celld") {
+		if (ingressSecret === null) throw new Error(`${INGRESS_SECRET} isn't set (--ingress-secret): Pim's celld runtime refuses every request without it`);
+		if (ingressSecret === appCredentialsKey) throw new Error(`${INGRESS_SECRET} must differ from ${APP_CREDENTIALS_KEY}`);
+		merged[INGRESS_SECRET] = ingressSecret;
+		sources.set(INGRESS_SECRET, "ingress secret file");
 	}
 	if (appCredentialsKey !== null) {
 		merged[APP_CREDENTIALS_KEY] = appCredentialsKey;
@@ -117,15 +141,18 @@ function main() {
 			vars: { type: "string" },
 			secrets: { type: "string" },
 			"app-credentials-key": { type: "string" },
+			"ingress-secret": { type: "string" },
 			out: { type: "string" },
 		},
 	});
 	if (!values.profile || !values.vars || !values.out) throw new Error("--profile, --vars and --out are required");
 	const keyFile = values["app-credentials-key"];
+	const ingressFile = values["ingress-secret"];
 	const { config, sources } = render({
 		profile: parseJsonc(readFileSync(values.profile, "utf8")),
 		vars: parseEnv(readFileSync(values.vars, "utf8"), values.vars),
 		secrets: values.secrets ? parseEnv(readPrivate(values.secrets), values.secrets) : new Map(),
+		ingressSecret: ingressFile ? readIngressSecret(readPrivate(ingressFile), ingressFile) : null,
 		appCredentialsKey: keyFile ? readAppCredentialsKey(readPrivate(keyFile), keyFile) : null,
 	});
 	// `wx`: never over an existing file, and never readable by anyone else, even for a moment.

@@ -28,6 +28,9 @@ fail() {
 }
 
 git -C "$repo" cat-file -e "$commit:deploy/celld/wrangler.jsonc" 2>/dev/null || fail "$commit has no deploy/celld/wrangler.jsonc, so it has no celld build."
+# Whether the commit's Worker has Pim's celld runtime (PIM_RUNTIME=celld, PIM_INGRESS_SECRET), which
+# the profile and the Caddyfile expect. deploy.sh refuses a build without it.
+if git -C "$repo" grep -q PIM_INGRESS_SECRET "$commit" -- src; then runtime=true; else runtime=false; fi
 
 # The toolchain the commit asks for.
 want_node="$(git -C "$repo" show "$commit:.nvmrc" | tr -d '[:space:]')"
@@ -75,15 +78,16 @@ dry_run="$(cd "$out" && CELLD_ESBUILD="$esbuild" "$celld" deploy wrangler.celld.
 # One hash over every file the web app serves, by path, so two builds compare in one line.
 web_dist="$(cd "$out/web/dist" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
 node -e '
-const [commit, node, pnpm, celld, esbuild, webDist, dryRun] = process.argv.slice(1);
+const [commit, node, pnpm, celld, esbuild, webDist, dryRun, runtime] = process.argv.slice(1);
 const info = {
 	commit,
+	celldRuntime: runtime === "true",
 	toolchain: { node, pnpm, celld, esbuild },
 	webDistSha256: webDist,
 	// The version celld gives this build before deploy.sh adds any variable.
 	profileVersion: JSON.parse(dryRun).version,
 };
-require("node:fs").writeFileSync(process.argv[8], JSON.stringify(info, null, 2) + "\n");
-' "$commit" "$(node --version)" "$have_pnpm" "$have_celld" "$("$esbuild" --version)" "$web_dist" "$dry_run" "$out/build-info.json"
+require("node:fs").writeFileSync(process.argv[9], JSON.stringify(info, null, 2) + "\n");
+' "$commit" "$(node --version)" "$have_pnpm" "$have_celld" "$("$esbuild" --version)" "$web_dist" "$dry_run" "$runtime" "$out/build-info.json"
 cat "$out/build-info.json"
 echo "Built $commit in $out. Deploy it with deploy/celld/deploy.sh $out."

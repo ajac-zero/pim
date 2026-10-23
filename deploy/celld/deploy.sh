@@ -2,11 +2,13 @@
 # Deploys a build from build.sh to the fleet bucket, with this Pim's variables and secrets. Running
 # nodes adopt it in place within CELLD_DEPLOY_POLL_S (30 s by default); nothing restarts.
 #
-#   deploy/celld/deploy.sh BUILD --vars FILE [--secrets FILE] [--app-credentials-key FILE]
-#                          [--celld-env FILE] [--dry-run]
+#   deploy/celld/deploy.sh BUILD --vars FILE --ingress-secret FILE [--secrets FILE]
+#                          [--app-credentials-key FILE] [--celld-env FILE] [--dry-run]
 #
 #   BUILD                      a directory build.sh made
 #   --vars FILE                this Pim's variables, such as PIM_PUBLIC_URL (env/pim.env.example)
+#   --ingress-secret FILE      PIM_INGRESS_SECRET, as gen-ingress-secret.sh made it, mode 400; the
+#                              TLS proxy sends the same one
 #   --secrets FILE             its secrets, mode 600 (env/secrets.env.example)
 #   --app-credentials-key FILE APP_CREDENTIALS_KEY, as gen-app-credentials-key.sh made it, mode 400
 #   --celld-env FILE           the bucket settings the node uses too (env/celld.env.example);
@@ -27,13 +29,13 @@ fail() {
 }
 
 build="${1:-}"
-[[ -n "$build" && "$build" != --* ]] || fail "usage: deploy.sh BUILD --vars FILE [--secrets FILE] [--app-credentials-key FILE] [--celld-env FILE] [--dry-run]"
+[[ -n "$build" && "$build" != --* ]] || fail "usage: deploy.sh BUILD --vars FILE --ingress-secret FILE [--secrets FILE] [--app-credentials-key FILE] [--celld-env FILE] [--dry-run]"
 shift
 render_args=()
 dry_run=()
 while (($#)); do
 	case "$1" in
-	--vars | --secrets | --app-credentials-key)
+	--vars | --secrets | --app-credentials-key | --ingress-secret)
 		[[ -f "${2:-}" ]] || fail "$1 needs a file; ${2:-nothing} isn't one."
 		render_args+=("$1" "$2")
 		shift 2
@@ -56,6 +58,12 @@ done
 [[ " ${render_args[*]} " == *" --vars "* ]] || fail "--vars is required: PIM_PUBLIC_URL at least."
 
 [[ -f "$build/.pim-celld-build" && -f "$build/build-info.json" ]] || fail "$build isn't a finished build.sh build."
+# A Worker without Pim's celld runtime ignores PIM_RUNTIME and the ingress secret, and reads a
+# client's address from CF-Connecting-IP, which the Caddyfile no longer sends. Only a scratch run
+# may deploy one, to test the tooling (PIM_CELLD_ALLOW_PRE_RUNTIME=1).
+if [[ "$(node -p 'require(process.argv[1]).celldRuntime' "$build/build-info.json")" != true && "${PIM_CELLD_ALLOW_PRE_RUNTIME:-0}" != 1 ]]; then
+	fail "$build is from a commit before Pim's celld runtime (PIM_RUNTIME=celld). Build a later commit."
+fi
 built_with="$(node -p 'require(process.argv[1]).toolchain.celld' "$build/build-info.json")"
 have_celld="$("$celld" --version | sed -n 's/^celld //p')"
 [[ "$have_celld" == "$built_with" ]] || fail "$build was built with celld $built_with; this is celld $have_celld."

@@ -185,6 +185,19 @@ export type SkillStoreOptions = {
 	readonly bucket: R2Bucket;
 	/** The owner's id: their files' prefix in the bucket. */
 	readonly owner: () => string;
+	/** Runs `work` as one transaction of this object's database: all of its writes, or, when it throws, none. */
+	readonly transaction: <T>(work: () => T) => T;
+};
+
+/**
+ * What a writer adds to a write, in the transaction that adds the version:
+ * `check` before it is added, throwing what the writer refuses, and
+ * `publish` after, such as to list the skill for an agent. Either throwing
+ * leaves nothing of the write in the database.
+ */
+export type SkillCommit = {
+	check(): void;
+	publish(skill: Skill): void;
 };
 
 export class SkillStore {
@@ -371,29 +384,31 @@ export class SkillStore {
 
 	/**
 	 * Makes a skill or adds a version: stores its new files, then, checked
-	 * again against the skill as it is then and by `guard`, lists them, with
-	 * nothing awaited in between.
+	 * again against the skill as it is then, lists them, with nothing awaited
+	 * in between, in one transaction with the writer's `commit`.
 	 */
-	async write(given: SkillWrite, guard?: () => void): Promise<Skill> {
+	async write(given: SkillWrite, commit?: SkillCommit): Promise<Skill> {
 		const write = this.#checkInput(given);
 		const base = write.baseVersion === undefined ? undefined : { name: write.name, version: write.baseVersion };
 		// The files of the version it is based on, which is still the latest when it is written.
 		const draft = await this.#draft(write.files, base);
-		return this.#add(write, draft, guard);
+		return this.#add(write, draft, commit);
 	}
 
 	/**
 	 * Adds a version with a draft's files, checked before storing anything and
-	 * again when writing, with `guard`, which throws what else the writer refuses.
+	 * again, with `commit`, in the transaction that adds it. Once that
+	 * transaction is done the version is the skill's: collecting files
+	 * afterwards can fail without undoing it.
 	 */
-	async #add(write: SkillWrite, draft: Draft, guard?: () => void): Promise<Skill> {
+	async #add(write: SkillWrite, draft: Draft, commit?: SkillCommit): Promise<Skill> {
 		this.#checkState(write, draft);
-		const { skill, pruned } = await this.#blobs.store(
-			draft.files.map((file) => file.sha256),
-			draft.bytes,
-			() => {
+		// Set as the transaction ends, which is when the version is the skill's.
+		const done: { added?: { skill: Skill; pruned: string[] } } = {};
+		const transaction = () => {
+			done.added = this.#options.transaction(() => {
 				this.#checkState(write, draft);
-				guard?.();
+				commit?.check();
 				const now = Date.now();
 				const version = (write.baseVersion ?? 0) + 1;
 				this.#sql.exec(
@@ -424,10 +439,25 @@ export class SkillStore {
 					version,
 					now,
 				);
-				return { skill: this.get(write.name)!, pruned: this.#deleteVersions(write.name, version - MAX_SKILL_VERSIONS) };
-			},
-		);
-		await this.#blobs.collect(pruned);
+				const skill = this.get(write.name)!;
+				const pruned = this.#deleteVersions(write.name, version - MAX_SKILL_VERSIONS);
+				commit?.publish(skill);
+				return { skill, pruned };
+			});
+		};
+		try {
+			await this.#blobs.store(draft.files.map((file) => file.sha256), draft.bytes, transaction);
+		} catch (error) {
+			// Refused, or failed, before the transaction ended: nothing was added.
+			if (done.added === undefined) throw error;
+			console.warn(`collecting files stored for ${write.name} failed`, error);
+		}
+		const { skill, pruned } = done.added!;
+		try {
+			await this.#blobs.collect(pruned);
+		} catch (error) {
+			console.warn(`collecting the files of ${write.name}'s pruned versions failed`, error);
+		}
 		return skill;
 	}
 

@@ -105,11 +105,61 @@ function checkSize(files: readonly { size: number }[]): void {
 	if (size > MAX_SKILL_BYTES) throw new HttpError(413, `A skill's supporting files can take up to ${MAX_SKILL_BYTES} bytes together; these take ${size}`);
 }
 
-/** A repository on GitHub, and what its address names in it: a ref and a path, as segments, for a folder or a file. */
-const GITHUB_URL = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:\/(tree|blob)\/([^?#]+))?\/?(?:[?#].*)?$/;
+/**
+ * A repository on GitHub, and what its address names in it: a ref and a
+ * path, as segments, for a folder or a file. Its owner is a GitHub account's
+ * name and its repository a repository's, so neither can be `.` or `..`.
+ */
+const GITHUB_URL = /^https:\/\/github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([\w.-]{1,100}?)(?:\.git)?(?:\/(tree|blob)\/([^?#]+))?\/?(?:[?#].*)?$/;
+
+/** A commit, as GitHub names it: its full hash, which never names anything else. */
+const COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
+/** A file of a commit, as `raw.githubusercontent.com` serves it: `/<owner>/<repo>/<commit>/<path>`. */
+const RAW_PATH = /^\/[^/]+\/[^/]+\/[0-9a-f]{40}(?:[0-9a-f]{24})?\/[^?#]+$/;
+
+/** Segments of a path in a repository, decoded; none may leave the folder it names or be empty. */
+function segmentsOf(rest: string): string[] {
+	return rest
+		.split("/")
+		.filter((part) => part !== "")
+		.map((part) => {
+			let decoded: string;
+			try {
+				decoded = decodeURIComponent(part);
+			} catch {
+				throw new HttpError(400, "The address has a part that isn't a file or folder's name");
+			}
+			if (decoded === "." || decoded === ".." || /[/\\\x00-\x1f]/.test(decoded)) throw new HttpError(400, "The address has a part that isn't a file or folder's name");
+			return decoded;
+		});
+}
+
+/**
+ * Fetches from GitHub, following a redirect only where `allowed` says it
+ * may lead, so a request never leaves the addresses Pim reads skills from.
+ */
+async function pinned(url: string, init: RequestInit, allowed: (next: URL) => boolean): Promise<Response> {
+	let at = url;
+	for (let redirects = 0; ; redirects++) {
+		const response = await fetch(at, { ...init, redirect: "manual", signal: AbortSignal.timeout(20_000) });
+		if (response.status < 300 || response.status > 399) return response;
+		await response.body?.cancel();
+		const location = response.headers.get("location");
+		const next = location === null ? null : URL.parse(location, at);
+		if (redirects >= 3 || next === null || !allowed(next)) throw new HttpError(502, `GitHub sent ${new URL(at).origin} elsewhere, so nothing was read from it`);
+		at = next.href;
+	}
+}
+
+/** An address on `host` over HTTPS, with no credentials or port. */
+const onHost = (url: URL, host: string) => url.protocol === "https:" && url.hostname === host && url.port === "" && url.username === "" && url.password === "";
 
 async function github(path: string, accept = "application/vnd.github+json"): Promise<Response> {
-	const response = await fetch(`${API}${path}`, { headers: { accept, "user-agent": "pim", "x-github-api-version": "2022-11-28" }, signal: AbortSignal.timeout(20_000) });
+	// GitHub's API sends a renamed or moved repository's requests to its new address, also under /repos or /repositories.
+	const response = await pinned(`${API}${path}`, { headers: { accept, "user-agent": "pim", "x-github-api-version": "2022-11-28" } }, (next) =>
+		onHost(next, "api.github.com") && /^\/(repos|repositories)\//.test(next.pathname),
+	);
 	if (response.status === 403 || response.status === 429) {
 		await response.body?.cancel();
 		throw new HttpError(
@@ -124,7 +174,11 @@ async function github(path: string, accept = "application/vnd.github+json"): Pro
 async function resolveRef(repo: string, segments: readonly string[]): Promise<{ commit: string; path: string[] }> {
 	for (let count = 1; count <= segments.length; count++) {
 		const response = await github(`/repos/${repo}/commits/${encodeURIComponent(segments.slice(0, count).join("/"))}`, "application/vnd.github.sha");
-		if (response.ok) return { commit: (await response.text()).trim(), path: segments.slice(count) };
+		if (response.ok) {
+			const commit = (await response.text()).trim();
+			if (!COMMIT.test(commit)) throw new HttpError(502, `GitHub answered with no commit's hash for ${repo}: ${JSON.stringify(commit.slice(0, 80))}`);
+			return { commit, path: segments.slice(count) };
+		}
 		await response.body?.cancel();
 		if (response.status !== 404 && response.status !== 422) throw new HttpError(502, `GitHub answered ${response.status} for ${repo}`);
 	}
@@ -136,8 +190,9 @@ export async function skillFromGitHub(url: string): Promise<SkillSource> {
 	const match = GITHUB_URL.exec(url);
 	if (!match) throw new HttpError(400, "Give a GitHub repository's address, or a folder's in it, such as https://github.com/owner/repo/tree/main/skills/name");
 	const [, owner, name, kind, rest] = match;
+	if (name === "." || name === "..") throw new HttpError(400, "Give a GitHub repository's address, such as https://github.com/owner/repo");
 	const repo = `${owner}/${name}`;
-	const segments = rest ? rest.split("/").filter((part) => part !== "").map(decodeURIComponent) : ["HEAD"];
+	const segments = rest ? segmentsOf(rest) : ["HEAD"];
 	const { commit, path } = await resolveRef(repo, segments);
 	// An address of the SKILL.md itself names its folder.
 	if (kind === "blob") {
@@ -166,10 +221,17 @@ export async function skillFromGitHub(url: string): Promise<SkillSource> {
 	return { source: `https://github.com/${repo}/tree/${commit}${folder === "" ? "" : `/${folder}`}`, ...skill, files: copies };
 }
 
-/** A file of a commit on GitHub; only GitHub's raw addresses are read. */
+/**
+ * A file of a commit on GitHub: only GitHub's raw addresses of a commit's
+ * files are read, as written (nothing a URL would resolve differently), and
+ * a redirect elsewhere is refused.
+ */
 export async function readUrl(url: string): Promise<Uint8Array> {
-	if (!url.startsWith(RAW_GITHUB)) throw new HttpError(400, `Only files on ${RAW_GITHUB} are copied from the web`);
-	const response = await fetch(url, { headers: { "user-agent": "pim" }, signal: AbortSignal.timeout(20_000) });
+	const parsed = URL.parse(url);
+	if (!url.startsWith(RAW_GITHUB) || parsed === null || parsed.href !== url || !onHost(parsed, "raw.githubusercontent.com") || parsed.search !== "" || !RAW_PATH.test(parsed.pathname)) {
+		throw new HttpError(400, `Only files of a commit on ${RAW_GITHUB} are copied from the web`);
+	}
+	const response = await pinned(url, { headers: { "user-agent": "pim" } }, () => false);
 	if (!response.ok) {
 		await response.body?.cancel();
 		throw new HttpError(502, `GitHub answered ${response.status} for ${url}`);

@@ -959,7 +959,7 @@ describe("skills the majordomo writes for other agents, and each agent's switch 
 		await unchanged("stretch", null, { [coach.id]: [] });
 	});
 
-	it("installs a published skill for another agent with install_skill or from, as its source has it, and saves nothing denied, forged or leading outside /workspace", async () => {
+	it("installs a published skill for another agent with install_skill or from, as its source has it, and saves nothing denied or leading outside /workspace", async () => {
 		const { majordomo, by, coach, chef } = await agents();
 		const { root } = await pairTestComputer();
 		const putFile = (path: string, body: string) =>
@@ -997,15 +997,156 @@ describe("skills the majordomo writes for other agents, and each agent's switch 
 		expect(await ask({ source: "/workspace/skills/leaky", agent: chef.id }, ROOT, INSTALL_SKILL)).toContain("outside /workspace");
 		expect((await api("/approvals?status=pending")).body.approvals).toEqual([]);
 		expect(await version("leaky")).toBeNull();
+	});
 
-		// An approved request whose copy names an address off GitHub's raw files copies nothing.
-		const forged = await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => {
-			const write = instance.actions.find((action) => action.name === WRITE_SKILL)!;
-			return write.run({ by: majordomo.id, agent: chef.id, ...meals, files: [{ path: "x.md", from_url: "https://evil.example/x.md", sha256: "0".repeat(64) }] }, { session: ROOT });
+	it("lists the skill for its agent in the transaction that adds the version: what changes after it stands, and a failed listing adds nothing", async () => {
+		const { coach, chef } = await agents();
+		/** A skill with 20 versions, Strider's, whose first version alone has its file: the next write prunes it, and deletes that file from R2 after it commits. */
+		const twentyVersions = async (name: string) => {
+			await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+				const base = { name, description: "Plan.", instructions: "Plan.", author: "Setup" };
+				await instance.skills.write({ ...base, files: [{ path: "first.md", content: `only in ${name}'s first version` }] });
+				await instance.skills.write({ ...base, files: [{ path: "later.md", content: "later" }], baseVersion: 1 });
+				for (let version = 2; version < 20; version++) await instance.skills.restore(name, 2, version);
+			});
+			await api(`/agents/${coach.id}`, { method: "PUT", body: JSON.stringify({ skills: [name] }) });
+			expect(await version(name)).toBe(20);
+		};
+		/** Holds the first file deleted from R2 once a write has committed, until released; `fail` makes the delete fail instead. */
+		const holdCleanup = async (fail = false): Promise<Gate> => {
+			const { reached, released, reach, release } = gate();
+			await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => {
+				const bucket = (instance as unknown as { env: { BLOBS: R2Bucket } }).env.BLOBS;
+				if (vi.isMockFunction(bucket.delete)) vi.mocked(bucket.delete).mockRestore();
+				const remove = bucket.delete.bind(bucket);
+				vi.spyOn(bucket, "delete").mockImplementation(async (keys: string | string[]) => {
+					reach();
+					await released;
+					if (fail) throw new Error("R2 is down");
+					return remove(keys);
+				});
+			});
+			return { reached, release };
+		};
+		const rewrite = (name: string) => ({ name, description: "Plan.", instructions: "Version 21.", files: [{ path: "new.md", content: `new in ${name}` }], base_version: 20, agent: coach.id });
+		/** By the time it collects, the version is published and listed. */
+		const published = async (name: string) => {
+			expect(await version(name)).toBe(21);
+			expect(await skillsOf(coach.id)).toContain(name);
+		};
+
+		// Taken off Strider after the commit: it stays off; nothing lists it again.
+		await twentyVersions("detached");
+		const detached = await approveWhile(rewrite("detached"), ROOT, holdCleanup, async () => {
+			await published("detached");
+			await api(`/agents/${coach.id}`, { method: "PUT", body: JSON.stringify({ skills: [] }) });
 		});
-		expect(forged).toContain("Only files on https://raw.githubusercontent.com/ are copied from the web");
+		expect(detached.result).toContain(`Saved the skill detached, version 21, one of ${coach.name}'s skills`);
+		expect(await skillsOf(coach.id)).toEqual([]);
+
+		// Switched off, or given to Cook too, after the commit: the person's later changes, which stand.
+		await twentyVersions("switched");
+		const switched = await approveWhile(rewrite("switched"), ROOT, holdCleanup, async () => {
+			await published("switched");
+			await switchSkills(coach.id, "off");
+			await api(`/agents/${chef.id}`, { method: "PUT", body: JSON.stringify({ skills: ["switched"] }) });
+		});
+		expect(switched.result).toContain(`Saved the skill switched, version 21, one of ${coach.name}'s skills`);
+		expect(await skillsOf(coach.id)).toEqual(["switched"]);
+		expect(await skillsOf(chef.id)).toEqual(["switched"]);
+		expect((await api(`/permissions?agent=${coach.id}`)).body.skills.permission).toBe("off");
+		await switchSkills(coach.id, null);
+		await api(`/agents/${chef.id}`, { method: "PUT", body: JSON.stringify({ skills: [] }) });
+
+		// Collecting files failing after the commit doesn't make it unsaved.
+		await twentyVersions("collected");
+		const collected = await approveWhile(rewrite("collected"), ROOT, () => holdCleanup(true), () => published("collected"));
+		expect(collected.result).toContain(`Saved the skill collected, version 21, one of ${coach.name}'s skills`);
+		expect(await version("collected")).toBe(21);
+
+		// Strider deleted after the commit: the request still says whose skill it became.
+		await twentyVersions("deleted");
+		const deleted = await approveWhile(rewrite("deleted"), ROOT, holdCleanup, async () => {
+			await published("deleted");
+			await api(`/agents/${coach.id}`, { method: "DELETE" });
+		});
+		expect(deleted.result).toContain(`Saved the skill deleted, version 21, one of ${coach.name}'s skills`);
+
+		// Listing it for Cook fails in the transaction: no version, no list, as if never asked.
+		await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => {
+			vi.spyOn(instance.agents, "update").mockImplementationOnce(() => {
+				throw new Error("listing failed");
+			});
+		});
+		const unlisted = await decide({ ...meals, files: [{ path: "notes.md", content: "unlisted" }], agent: chef.id }, ROOT);
+		expect(unlisted.result).toBe("The action failed: listing failed");
 		expect(await version("meal-prep")).toBeNull();
 		expect(await skillsOf(chef.id)).toEqual([]);
+	});
+
+	it("reads published skills only from GitHub's own addresses, at a commit's hash, and follows no redirect elsewhere", async () => {
+		const { majordomo, coach } = await agents();
+		const commit = "0123456789abcdef0123456789abcdef01234567";
+		const fetched: string[] = [];
+		const responses: Record<string, () => Response> = {};
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const url = new Request(input, init).url;
+			fetched.push(url);
+			return responses[url]?.() ?? new Response("Not Found", { status: 404 });
+		});
+		const install = (from: string) => ask({ from, agent: coach.id }, ROOT);
+
+		// Addresses that aren't a repository's folder are refused before anything is fetched.
+		for (const [from, refusal] of [
+			["https://github.com/../skills/tree/main/name", "Give a GitHub repository's address"],
+			["https://github.com/acme/../tree/main/name", "Give a GitHub repository's address"],
+			["https://github.com/acme/./tree/main/name", "Give a GitHub repository's address"],
+			["https://user:secret@github.com/acme/skills", "Give a GitHub repository's address"],
+			["https://github.com:8443/acme/skills", "Give a GitHub repository's address"],
+			["https://github.com/acme/skills/tree/main/%2e%2e/secrets", "isn't a file or folder's name"],
+			["https://github.com/acme/skills/tree/main/a%2Fb", "isn't a file or folder's name"],
+			["https://github.com/acme/skills/tree/main/a\\b", "isn't a file or folder's name"],
+			["https://github.com/acme/skills/tree/main/%E0%A4%A", "isn't a file or folder's name"],
+		] as const) {
+			expect(await install(from)).toContain(refusal);
+		}
+		expect(fetched).toEqual([]);
+
+		// What GitHub names as the commit must be a full hash, or nothing else is read.
+		responses["https://api.github.com/repos/acme/odd/commits/main"] = () => new Response("../../users/acme");
+		expect(await install("https://github.com/acme/odd/tree/main/skill")).toContain("GitHub answered with no commit's hash");
+		expect(fetched.filter((url) => url.includes("/git/trees/"))).toEqual([]);
+
+		// A redirect away from GitHub's API, or from a raw file, is refused without following it.
+		responses["https://api.github.com/repos/acme/moved/commits/main"] = () => new Response(null, { status: 301, headers: { location: "https://evil.example/commits/main" } });
+		expect(await install("https://github.com/acme/moved/tree/main/skill")).toContain("GitHub sent https://api.github.com elsewhere");
+		responses["https://api.github.com/repos/acme/skills/commits/main"] = () => new Response(commit);
+		responses[`https://api.github.com/repos/acme/skills/git/trees/${commit}?recursive=1`] = () =>
+			Response.json({ truncated: false, tree: [{ path: "skill/SKILL.md", type: "blob", size: 40 }] });
+		responses[`https://raw.githubusercontent.com/acme/skills/${commit}/skill/SKILL.md`] = () =>
+			new Response(null, { status: 302, headers: { location: "https://raw.githubusercontent.com.evil.example/SKILL.md" } });
+		expect(await install("https://github.com/acme/skills/tree/main/skill")).toContain("GitHub sent https://raw.githubusercontent.com elsewhere");
+		expect(fetched.filter((url) => !url.startsWith("https://api.github.com/") && !url.startsWith("https://raw.githubusercontent.com/"))).toEqual([]);
+		expect((await api("/approvals?status=pending")).body.approvals).toEqual([]);
+
+		// An approved request whose copy names any other address, or one a URL resolves elsewhere, copies nothing.
+		fetched.length = 0;
+		for (const from_url of [
+			"https://evil.example/x.md",
+			`https://raw.githubusercontent.com/acme/skills/${commit}/../../../x.md`,
+			`https://raw.githubusercontent.com/acme/skills/${commit}/%2e%2e/x.md`,
+			`https://raw.githubusercontent.com:8443/acme/skills/${commit}/x.md`,
+			`https://raw.githubusercontent.com/acme/skills/main/x.md`,
+		]) {
+			const forged = await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => {
+				const write = instance.actions.find((action) => action.name === WRITE_SKILL)!;
+				return write.run({ by: majordomo.id, agent: coach.id, ...meals, files: [{ path: "x.md", from_url, sha256: "0".repeat(64) }] }, { session: ROOT });
+			});
+			expect(forged).toContain("Only files of a commit on https://raw.githubusercontent.com/ are copied from the web");
+		}
+		expect(fetched).toEqual([]);
+		expect(await version("meal-prep")).toBeNull();
+		expect(await skillsOf(coach.id)).toEqual([]);
 	});
 });
 

@@ -438,6 +438,7 @@ export class Pim extends DurableAgent<Env> {
 		storageRoom: () => this.#storageRoom(),
 		bucket: this.env.BLOBS,
 		owner: () => this.name,
+		transaction: (work) => this.ctx.storage.transactionSync(work),
 	});
 	/** Public links to the owner's chats, each with the copy of its chat it shows. */
 	readonly chatLinks = new ChatLinkStore(this.ctx.storage.sql);

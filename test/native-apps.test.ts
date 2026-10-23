@@ -32,6 +32,16 @@ const google = {
 };
 let accessTokens = 1;
 
+/** Spotify's accounts service and Web API, as the tests answer them: the grants asked for, and the tokens the API saw. */
+const spotify = {
+	grants: [] as Record<string, string>[],
+	tokens: [] as string[],
+	challenge: "",
+	/** How the next renewals are answered; by default with a new short-lived token and no refresh token. */
+	refresh: null as null | (() => Response),
+};
+let spotifyTokens = 1;
+
 const BASIC = `Basic ${btoa("bank-client:bank-secret")}`;
 const grants: Record<string, string>[] = [];
 const tokensUsed: string[] = [];
@@ -75,6 +85,24 @@ beforeEach(() => {
 			const token = request.headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
 			google.requests.push({ method: request.method, url: request.url, token });
 			return google.api(request, token);
+		}
+		if (origin === "https://accounts.spotify.com" && pathname === "/api/token") {
+			if (request.headers.get("authorization") !== `Basic ${btoa("spotify-client:spotify-secret")}`) return Response.json({ error: "invalid_client" }, { status: 401 });
+			const form = Object.fromEntries(new URLSearchParams(await request.text()));
+			spotify.grants.push(form);
+			if (form.grant_type === "authorization_code") {
+				const hashed = base64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(form.code_verifier)));
+				if (form.code !== "spotify-code" || hashed !== spotify.challenge || form.redirect_uri !== "https://pim.test/mcp/callback/apps") return Response.json({ error: "invalid_grant" }, { status: 400 });
+				return Response.json({ access_token: `sp-access-${spotifyTokens++}`, refresh_token: "sp-refresh", expires_in: 3600, token_type: "Bearer" });
+			}
+			if (spotify.refresh) return spotify.refresh();
+			if (form.refresh_token !== "sp-refresh") return Response.json({ error: "invalid_grant", error_description: "Refresh token revoked" }, { status: 400 });
+			// Spotify may leave the refresh token out of a renewal; this one expires within Pim's margin, so the next call renews again.
+			return Response.json({ access_token: `sp-access-${spotifyTokens++}`, expires_in: 30, token_type: "Bearer" });
+		}
+		if (origin === "https://api.spotify.com") {
+			spotify.tokens.push(request.headers.get("authorization") ?? "");
+			return Response.json({ is_playing: true, progress_ms: 61_000, item: { name: "Song", uri: "spotify:track:1", duration_ms: 200_000, artists: [{ name: "Ada" }], album: { name: "Album" } } });
 		}
 		if (origin !== "https://bank.example.test") return realFetch(input, init);
 		if (pathname === "/token") {
@@ -437,6 +465,69 @@ describe("Google apps", () => {
 		expect((await api("/mcp/files", { method: "DELETE" })).body).toEqual({ deleted: true });
 		expect(google.revoked).toEqual(["gmail-refresh", "drive-refresh"]);
 		expect(await stored("files")).toBeUndefined();
+	});
+});
+
+describe("Spotify, signing in with its own OAuth", () => {
+	const nowPlaying = () => runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.nativeApps.call("spotify", "now_playing", {}));
+	const renewals = () => spotify.grants.filter((grant) => grant.grant_type === "refresh_token");
+	const setCredential = (credential: unknown) =>
+		runInDurableObject(env.Pim.getByName(OWNER), (_instance: Pim, state) => {
+			state.storage.sql.exec("UPDATE pim_app_connections SET credential = ? WHERE id = 'spotify'", JSON.stringify(credential));
+		});
+
+	it("connects only in the person's own signed-in browser, and keeps its credential encrypted", async () => {
+		expect(((await api("/app-directory")).body.apps as { ref: string }[]).map((app) => app.ref)).toContain("spotify/spotify");
+		const started = await post("/mcp", { app: "spotify/spotify" });
+		expect(started).toMatchObject({ status: 201, body: { id: "spotify", state: "authenticating" } });
+		const authUrl = new URL(started.body.authUrl);
+		const params = Object.fromEntries(authUrl.searchParams);
+		expect(`${authUrl.origin}${authUrl.pathname}`).toBe("https://accounts.spotify.com/authorize");
+		expect(params).toMatchObject({ client_id: "spotify-client", redirect_uri: "https://pim.test/mcp/callback/apps", code_challenge_method: "S256" });
+		spotify.challenge = params.code_challenge!;
+
+		// Back in a browser that isn't signed in: refused, with nothing asked of Spotify, and the sign-in left for the person.
+		expect((await comeBack({ state: params.state!, code: "spotify-code" })).status).toBe(403);
+		expect(spotify.grants).toEqual([]);
+		const back = await comeBack({ state: params.state!, code: "spotify-code" }, await signedIn());
+		expect(await back.text()).toContain("Connected.");
+		expect(spotify.grants).toEqual([expect.objectContaining({ grant_type: "authorization_code", code: "spotify-code" })]);
+		const row = (await stored("spotify"))!;
+		expect(row.state).toBe("ready");
+		expect(String(row.credential)).toMatch(/^sealed:v1:/);
+		expect(String(row.credential)).not.toMatch(/sp-access|sp-refresh/);
+
+		expect((await nowPlaying()).content).toEqual([{ type: "text", text: "Playing: Song by Ada · Album (61s of 200s)." }]);
+		expect(spotify.tokens).toEqual(["Bearer sp-access-1"]);
+	});
+
+	it("encrypt a credential kept before the deployment had a key, and keep the refresh token Spotify leaves out", async () => {
+		await setCredential({ accessToken: "sp-legacy", refreshToken: "sp-refresh", expiresAt: Date.now() + 3_600_000 });
+		expect((await nowPlaying()).isError).toBeUndefined();
+		expect(spotify.tokens.at(-1)).toBe("Bearer sp-legacy");
+		expect(String((await stored("spotify"))!.credential)).toMatch(/^sealed:v1:/);
+
+		// Expired: renewed with the refresh token; Spotify's answer leaves it out, so the next renewal sends it again.
+		await setCredential({ accessToken: "sp-old", refreshToken: "sp-refresh", expiresAt: 0 });
+		await nowPlaying();
+		await nowPlaying();
+		expect(renewals()).toEqual([
+			{ grant_type: "refresh_token", refresh_token: "sp-refresh" },
+			{ grant_type: "refresh_token", refresh_token: "sp-refresh" },
+		]);
+		expect(spotify.tokens.slice(-2)).toEqual(["Bearer sp-access-2", "Bearer sp-access-3"]);
+		expect(String((await stored("spotify"))!.credential)).not.toMatch(/sp-access|sp-refresh/);
+	});
+
+	it("stay connected while Spotify can't renew, and need connecting again once it refuses the grant", async () => {
+		spotify.refresh = () => Response.json({ error: "server_error" }, { status: 503 });
+		expect(await nowPlaying()).toEqual({ content: [{ type: "text", text: "Spotify couldn't renew its sign-in just now (server_error). Try again in a moment." }], isError: true });
+		expect((await stored("spotify"))!.state).toBe("ready");
+
+		spotify.refresh = () => Response.json({ error: "invalid_grant", error_description: "Refresh token revoked" }, { status: 400 });
+		expect(await nowPlaying()).toEqual({ content: [{ type: "text", text: "Spotify needs the person to connect it again from the Apps page." }], isError: true });
+		expect((await stored("spotify"))!).toMatchObject({ state: "failed", credential: null, error: "Sign in again: Refresh token revoked" });
+		spotify.refresh = null;
 	});
 });
 

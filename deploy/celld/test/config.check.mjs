@@ -58,6 +58,8 @@ test("the committed examples hold no secret", () => {
 	assert.deepEqual([...vars.keys()], ["PIM_PUBLIC_URL"]);
 	assert.doesNotThrow(() => render({ profile, vars, ingressSecret: INGRESS }));
 	assert.doesNotMatch(read("../env/celld.env.example"), /^AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN)=\S/m);
+	// Once its two empty credentials are filled in, it is in the form deploy.sh reads.
+	assert.doesNotThrow(() => parseEnv(read("../env/celld.env.example").replace(/^(AWS_\w+)=$/gm, "$1=filled"), "celld.env.example"));
 });
 
 const KEY = Buffer.alloc(32, 7).toString("base64");
@@ -104,19 +106,85 @@ test("Pim's celld runtime gets an ingress secret of its own, from its own file o
 	assert.equal(readIngressSecret(`PIM_INGRESS_SECRET=${INGRESS}\n`, "f"), INGRESS);
 	assert.equal(readIngressSecret(`PIM_INGRESS_SECRET=${"~!".repeat(16)}\n`, "f"), "~!".repeat(16));
 	for (const bad of [`PIM_INGRESS_SECRET=${"a".repeat(31)}`, `PIM_INGRESS_SECRET=${"a".repeat(31)} b`, `PIM_INGRESS_SECRET=${"é".repeat(40)}`, `OTHER=${INGRESS}`, `PIM_INGRESS_SECRET=${INGRESS}\nPIM_X=1`]) {
-		assert.throws(() => readIngressSecret(bad, "f"), /at least 32 visible ASCII/, bad);
+		assert.throws(() => readIngressSecret(bad, "f"), /at least 32 visible ASCII|whitespace|beyond visible ASCII/, bad);
 	}
 });
 
-test("env files and the key file are read strictly", () => {
-	assert.deepEqual([...parseEnv('# c\n\nA=1\nB="two=2"\nC=\'x y\'\r\n', "f")], [["A", "1"], ["B", "two=2"], ["C", "x y"]]);
-	assert.throws(() => parseEnv("A=1\nA=2\n", "f"), /f:2: A is set twice/);
-	assert.throws(() => parseEnv("A=\n", "f"), /empty/);
-	assert.throws(() => parseEnv("export A=1\n", "f"), /expected NAME=value|upper-case/);
-	assert.throws(() => parseEnv("lower=1\n", "f"), /upper-case/);
+test("JSONC: comments and trailing commas go, and nothing inside a string is touched", () => {
+	const parsed = parseJsonc(`{
+		// a comment, with a "quote" and a trailing comma,
+		"vars": { "X": "a,}", "Y": "b,]", "Z": "c, }", }, /* a block, }, */
+		"list": ["x,]", "y" , // why
+		],
+		"escaped": "say \\"hi\\", // not a comment, /* nor this */",
+		"slashes": "http://example.com/*/",
+		"empty": [ , ],
+	}`.replace('"empty": [ , ],', '"empty": [],'));
+	assert.deepEqual(parsed, {
+		vars: { X: "a,}", Y: "b,]", Z: "c, }" },
+		list: ["x,]", "y"],
+		escaped: 'say "hi", // not a comment, /* nor this */',
+		slashes: "http://example.com/*/",
+		empty: [],
+	});
+	// What the review found: a comma before } inside a value.
+	assert.equal(parseJsonc('{"vars":{"X":"a,}"}}').vars.X, "a,}");
+	// Not JSONC either: a lone trailing comma, two commas, an open string or comment.
+	for (const bad of ["{},", "[1,,2]", '{"a": "b}', "{} /* open"]) assert.throws(() => parseJsonc(bad), undefined, bad);
+});
+
+test("env files: one strict form, read as written, and anything else refused", () => {
+	// Taken exactly as written: base64, URLs, paths, and shell punctuation that systemd keeps as it is.
+	const kept = "A1+/=._-:@%,~#;&|()*?[]{}!<>^";
+	assert.deepEqual([...parseEnv(`# a comment\n\nA=1\nB=two=2\nC=${kept}\nD=s3://bucket/pim\n`, "f")], [["A", "1"], ["B", "two=2"], ["C", kept], ["D", "s3://bucket/pim"]]);
+	const refused = {
+		'A="quoted"': /a double quote/,
+		"A='quoted'": /a single quote/,
+		"A=it's": /a single quote/,
+		"A=back\\slash": /a backslash/,
+		"A=continued\\": /a backslash/,
+		"A=$HOME": /a dollar sign/,
+		"A=${X}": /a dollar sign/,
+		"A=`id`": /a backtick/,
+		"A=two words": /whitespace/,
+		"A=value # note": /whitespace/,
+		"A=tab\there": /whitespace/,
+		"A=caf\u00e9": /beyond visible ASCII/,
+		"A=1\r": /carriage return/,
+		" A=1": /starts with whitespace/,
+		" # indented comment": /starts with whitespace/,
+		"export A=1": /drop "export"/,
+		"A =1": /isn't an upper-case variable name/,
+		"lower=1": /isn't an upper-case variable name/,
+		"A=": /empty/,
+		"A": /expected NAME=value/,
+		"A=1\nA=2": /f:2: A is set twice/,
+	};
+	for (const [text, pattern] of Object.entries(refused)) assert.throws(() => parseEnv(text, "f"), pattern, JSON.stringify(text));
 	assert.equal(readAppCredentialsKey(`${KEY}\n`, "k"), KEY);
 	assert.throws(() => readAppCredentialsKey(Buffer.alloc(16).toString("base64"), "k"), /32 random bytes/);
 	assert.throws(() => readAppCredentialsKey(`${KEY}\nPIM_X=1`, "k"), /32 random bytes/);
+});
+
+test("what env files accept, a shell reads the same, for the characters celld.env and keys use", () => {
+	// systemd keeps every accepted value as written (it expands nothing in an EnvironmentFile, and
+	// only quotes and backslashes would change a value). A shell is stricter, so the values celld.env
+	// and the generated keys hold are checked against bash itself: base64, URLs, paths, ARNs.
+	const dir = mkdtempSync(join(tmpdir(), "pim-env-"));
+	try {
+		const text = `AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY+a=\nS3_ENDPOINT=https://abc.r2.cloudflarestorage.com\nCELLD_BUCKET=s3://pim-bucket/pim\nCELLD_ADDR=127.0.0.1:8080\nCELLD_WATCH=/var/lib/celld/state\nX=a.b_c-d:e@f%g,h\n`;
+		writeFileSync(join(dir, "celld.env"), text);
+		const shell = execFileSync("bash", ["-c", `set -a; source "$1"; for n in ${[...parseEnv(text, "f").keys()].join(" ")}; do printf '%s=%s\\0' "$n" "\${!n}"; done`, "bash", join(dir, "celld.env")], { encoding: "utf8" });
+		assert.deepEqual(shell.split("\0").filter(Boolean), [...parseEnv(text, "f")].map(([name, value]) => `${name}=${value}`));
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("the script can be imported without running, as `node -e` does", () => {
+	const script = new URL("../scripts/render-config.mjs", import.meta.url).href;
+	const out = execFileSync("node", ["-e", `import(${JSON.stringify(script)}).then((m) => console.log(typeof m.parseEnv))`], { encoding: "utf8" });
+	assert.equal(out.trim(), "function");
 });
 
 test("the command line refuses secrets others can read, and writes a config only its owner can", () => {
@@ -152,6 +220,26 @@ test("the command line refuses secrets others can read, and writes a config only
 		assert.ok(!printed.includes("hush-1234") && !printed.includes(KEY) && !printed.includes(INGRESS));
 		// Never over an existing file.
 		assert.throws(() => run(["--secrets", secrets, "--ingress-secret", ingress, "--out", out]), /EEXIST/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("--print-env checks a private env file and prints it NUL-separated, for deploy.sh to export", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pim-print-env-"));
+	try {
+		const script = new URL("../scripts/render-config.mjs", import.meta.url).pathname;
+		const file = join(dir, "celld.env");
+		writeFileSync(file, "# bucket\nCELLD_BUCKET=s3://b/pim\nAWS_SECRET_ACCESS_KEY=a/b+c=\n", { mode: 0o644 });
+		const run = () => spawnSync("node", [script, "--print-env", file], { encoding: "utf8" });
+		assert.match(run().stderr, /can be read by others/);
+		chmodSync(file, 0o600);
+		assert.equal(run().stdout, "CELLD_BUCKET=s3://b/pim\0AWS_SECRET_ACCESS_KEY=a/b+c=\0");
+		writeFileSync(file, 'CELLD_BUCKET="s3://b/pim"\n');
+		const refused = run();
+		assert.equal(refused.status, 1);
+		assert.equal(refused.stdout, "");
+		assert.match(refused.stderr, /celld\.env:1: CELLD_BUCKET's value has a double quote/);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

@@ -81,7 +81,7 @@ proxy_port="$(free_port)"
 model_port="$(free_port)"
 pim_url="https://pim.localhost:$proxy_port"
 mkdir -p "$scratch/etc"
-cat >"$scratch/etc/celld.env" <<EOF
+(umask 077 && cat >"$scratch/etc/celld.env") <<EOF
 CELLD_BUCKET=s3://pim-scratch/pim
 S3_ENDPOINT=$S3_ENDPOINT
 AWS_REGION=us-east-1
@@ -112,9 +112,8 @@ echo "deploy.sh printed no secret value and left no configuration with secrets b
 
 start_node() { # LOG [BUCKET] [WATCH]
 	(
-		set -a
-		source "$scratch/etc/celld.env"
-		set +a
+		# As deploy.sh reads it, never through a shell.
+		while IFS= read -r -d '' entry; do export "${entry?}"; done < <(node "$celld_dir/scripts/render-config.mjs" --print-env "$scratch/etc/celld.env")
 		[[ -z "${2:-}" ]] || export CELLD_BUCKET="$2"
 		[[ -z "${3:-}" ]] || export CELLD_WATCH="$3"
 		exec "$celld"

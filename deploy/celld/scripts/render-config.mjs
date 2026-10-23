@@ -7,29 +7,49 @@
 //
 //   node render-config.mjs --profile FILE --vars FILE [--secrets FILE] --ingress-secret FILE
 //                          [--app-credentials-key FILE] --out FILE
+//   node render-config.mjs --print-env FILE
+//       checks a private env file, such as celld.env, as parseEnv reads it, and prints its entries
+//       as NAME=value, each ending in a NUL byte, for deploy.sh to export without a shell reading them
 
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
-/** JSONC as celld and Wrangler read it: `//` and block comments outside strings, and trailing commas. */
+/**
+ * JSONC as celld and Wrangler read it: JSON with `//` and block comments, and commas before a
+ * closing `}` or `]`. One pass that knows where strings are, so nothing inside a string, such as
+ * `"a,}"`, `"// x"` or an escaped quote, is ever taken for a comment or a trailing comma.
+ */
 export function parseJsonc(text) {
 	let out = "";
+	// A comma not yet known to be trailing: kept back until the next character that counts.
+	let comma = "";
 	for (let i = 0; i < text.length; i++) {
 		const char = text[i];
-		if (char === '"') {
-			const start = i;
-			for (i++; i < text.length && text[i] !== '"'; i++) if (text[i] === "\\") i++;
-			out += text.slice(start, i + 1);
-		} else if (char === "/" && text[i + 1] === "/") {
+		if (char === "/" && text[i + 1] === "/") {
 			while (i < text.length && text[i] !== "\n") i++;
 			out += "\n";
 		} else if (char === "/" && text[i + 1] === "*") {
-			i = text.indexOf("*/", i + 2) + 1;
-			if (i === 0) throw new Error("unterminated comment");
-		} else out += char;
+			const close = text.indexOf("*/", i + 2);
+			if (close === -1) throw new Error("unterminated comment");
+			i = close + 1;
+		} else if (/\s/.test(char)) {
+			out += char;
+		} else if (char === ",") {
+			out += comma;
+			comma = ",";
+		} else {
+			if (char !== "}" && char !== "]") out += comma;
+			comma = "";
+			if (char === '"') {
+				const start = i;
+				for (i++; i < text.length && text[i] !== '"'; i++) if (text[i] === "\\") i++;
+				if (i >= text.length) throw new Error("unterminated string");
+				out += text.slice(start, i + 1);
+			} else out += char;
+		}
 	}
-	return JSON.parse(out.replace(/,(\s*[}\]])/g, "$1"));
+	return JSON.parse(out + comma);
 }
 
 const NAME = /^[A-Z][A-Z0-9_]*$/;
@@ -40,21 +60,35 @@ export const INGRESS_SECRET = "PIM_INGRESS_SECRET";
 // Set by the profile, for every celld Pim; never by the operator's files.
 const RUNTIME = "PIM_RUNTIME";
 
-/** `NAME=value` lines, as systemd's EnvironmentFile reads them; `#` comments, blank lines, one pair of surrounding quotes. */
+/**
+ * `NAME=value` lines, in the one form that means the same to everything that may read them:
+ * this script, systemd's EnvironmentFile (Caddy reads ingress.env, celld reads celld.env), and a
+ * dotenv reader. A value is taken exactly as written, so anything those would read differently
+ * is refused rather than changed: quotes, backslashes (escapes, continued lines), `$` and
+ * backticks (expansion), whitespace and control characters, characters beyond ASCII, a carriage
+ * return, `export`, and a name line or comment that doesn't start the line. Comments are lines
+ * whose first character is `#`. None of these files is meant to be `source`d by a shell.
+ */
 export function parseEnv(text, file) {
 	const entries = new Map();
-	for (const [index, raw] of text.split("\n").entries()) {
-		const line = raw.replace(/\r$/, "");
-		if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+	for (const [index, line] of text.split("\n").entries()) {
 		const at = `${file}:${index + 1}`;
-		const match = /^([^=\s]+)=(.*)$/.exec(line);
+		if (line.includes("\r")) throw new Error(`${at}: has a carriage return (Windows line ends); save the file with \\n alone`);
+		if (line === "" || line.startsWith("#")) continue;
+		if (/^\s/.test(line)) throw new Error(`${at}: starts with whitespace; start each line with its name or #`);
+		const match = /^([^=]*)=(.*)$/.exec(line);
 		if (!match) throw new Error(`${at}: expected NAME=value`);
-		const [, name, rawValue] = match;
-		if (!NAME.test(name)) throw new Error(`${at}: ${name} isn't an upper-case variable name`);
+		const [, name, value] = match;
+		if (name.startsWith("export ")) throw new Error(`${at}: drop "export"; the line is NAME=value alone`);
+		if (!NAME.test(name)) throw new Error(`${at}: ${JSON.stringify(name)} isn't an upper-case variable name`);
 		if (entries.has(name)) throw new Error(`${at}: ${name} is set twice`);
-		const quoted = /^(["'])(.*)\1$/.exec(rawValue);
-		const value = quoted ? quoted[2] : rawValue;
 		if (value === "") throw new Error(`${at}: ${name} is empty; remove the line to leave it unset`);
+		const odd = /["'\\$`]|[^\x21-\x7e]/.exec(value);
+		if (odd) {
+			const named = { '"': "a double quote", "'": "a single quote", "\\": "a backslash", $: "a dollar sign", "`": "a backtick" };
+			const what = named[odd[0]] ?? (/\s/.test(odd[0]) ? "whitespace" : "a character beyond visible ASCII");
+			throw new Error(`${at}: ${name}'s value has ${what}, which systemd or a shell would read differently; write the value bare, without quotes, backslashes, dollar signs, backticks or spaces`);
+		}
 		entries.set(name, value);
 	}
 	return entries;
@@ -143,8 +177,14 @@ function main() {
 			"app-credentials-key": { type: "string" },
 			"ingress-secret": { type: "string" },
 			out: { type: "string" },
+			"print-env": { type: "string" },
 		},
 	});
+	if (values["print-env"]) {
+		const file = values["print-env"];
+		for (const [name, value] of parseEnv(readPrivate(file), file)) process.stdout.write(`${name}=${value}\0`);
+		return;
+	}
 	if (!values.profile || !values.vars || !values.out) throw new Error("--profile, --vars and --out are required");
 	const keyFile = values["app-credentials-key"];
 	const ingressFile = values["ingress-secret"];
@@ -161,7 +201,8 @@ function main() {
 	if (!keyFile) process.stderr.write(`  (no ${APP_CREDENTIALS_KEY}: Gmail and Google Drive aren't offered, other apps' sign-ins aren't encrypted)\n`);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Run as a command, not when imported (by the checks, or `node -e`, where there is no argv[1]).
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
 	try {
 		main();
 	} catch (error) {

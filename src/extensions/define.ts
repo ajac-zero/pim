@@ -4,7 +4,7 @@ import type { Theme } from "../themes";
 import type { GatedAction } from "./approvals";
 
 export { defineGatedAction, type GatedAction } from "./approvals";
-export { oauth2 } from "./native-apps";
+export { oauth2, ReconnectRequired } from "./native-apps";
 
 /**
  * Pim extensions: what a deployment adds to every person's agents, chosen in
@@ -201,7 +201,17 @@ export type AppToolResult = {
 	readonly isError?: boolean;
 };
 
-export type AppToolContext = { readonly credential: AppCredential; readonly secrets: AppSecrets };
+export type AppToolContext = {
+	readonly credential: AppCredential;
+	readonly secrets: AppSecrets;
+	/**
+	 * The credential renewed now, before it expires, for a service that
+	 * refused this one (an HTTP 401): calls at once share one renewal, and a
+	 * credential another call already renewed comes back as it is. Throws
+	 * `ReconnectRequired` when it can't be renewed.
+	 */
+	renew(): Promise<AppCredential>;
+};
 
 export type AppTool = {
 	/** Lowercase letters, digits and underscores; unique in its app. The model sees it as `<app>_<name>`. */
@@ -229,17 +239,68 @@ export type NativeAppDefinition = AppIdentity & {
 	signIn(context: AppSignInContext): Promise<{ readonly url: string; readonly pending?: unknown }>;
 	/** The person came back to `url`: their credential, or a throw that says what went wrong. */
 	callback(context: AppSignInContext & { readonly url: URL; readonly pending: unknown }): Promise<AppCredential>;
-	/** A credential renewed before it expires; without it, the person signs in again. */
+	/** A credential renewed before it expires; without it, the person signs in again. Throw `ReconnectRequired` when the grant is gone. */
 	refresh?(credential: AppCredential, context: { readonly secrets: AppSecrets }): Promise<AppCredential>;
+	/**
+	 * Ends the person's grant at the service, when they disconnect the app or
+	 * their space is erased. Pim has already forgotten the credential, so this
+	 * is best effort: a failure is logged, and the person can still remove the
+	 * grant in the service's own settings.
+	 */
+	revoke?(credential: AppCredential, context: { readonly secrets: AppSecrets }): Promise<void>;
+	/**
+	 * Its credentials are kept encrypted with the deployment's
+	 * `APP_CREDENTIALS_KEY`: nobody is offered it until that is set. (Once the
+	 * key is set, every app's credentials are encrypted; this makes it a
+	 * requirement.)
+	 */
+	readonly encrypted?: boolean;
 	readonly tools: readonly AppTool[];
+	/**
+	 * What the person does with their connection in their own browser, such
+	 * as picking files to share with Pim: each is `POST /api/app-actions/<extension>/<app>/<name>`,
+	 * which only a browser signed in as the person may call (not an API
+	 * token, an MCP client or an agent), with a JSON body, answered with
+	 * what the action returns, uncached. An action runs with the
+	 * connection's credential, like a tool.
+	 */
+	readonly actions?: Readonly<Record<string, AppAction>>;
+	/**
+	 * A page for those actions, served from Pim's origin at
+	 * `/app-pages/<extension>/<app>`, with the content security policy it
+	 * gives. `nonce` is new for every response: the page's own scripts
+	 * carry it, and the policy allows them by it.
+	 */
+	page?(nonce: string): { readonly html: string; readonly contentSecurityPolicy: string };
+	/** What the button that opens the page says on the Apps page, once the person has connected the app, such as "Choose files". */
+	readonly pageLabel?: Text;
 };
 
+/** What an action gets: what a tool does, and a way to change what Pim keeps with the connection. */
+export type AppActionContext = AppToolContext & {
+	/**
+	 * Changes the credential Pim keeps for the connection, such as to note
+	 * what the person picked. `change` gets the latest one, after any
+	 * renewal, and must keep what it doesn't mean to change.
+	 */
+	update(change: (credential: AppCredential) => AppCredential): Promise<void>;
+};
+
+/** An action's answer must survive JSON. A thrown error's message is the person's to read. */
+export type AppAction = (input: Record<string, unknown>, context: AppActionContext) => Promise<unknown>;
+
 export const isNativeApp = (app: AppDefinition): app is NativeAppDefinition => !("url" in app);
+
+/**
+ * The Worker secret that encrypts people's credentials for native apps: 32
+ * random bytes in base64, such as `openssl rand -base64 32` makes.
+ */
+export const APP_CREDENTIALS_KEY = "APP_CREDENTIALS_KEY";
 
 /** The Worker's environment variables an app needs set before anyone is offered it. */
 export function secretsOf(app: AppDefinition | undefined): string[] {
 	if (!app) return [];
-	if (isNativeApp(app)) return [...(app.secrets ?? [])];
+	if (isNativeApp(app)) return [...(app.secrets ?? []), ...(app.encrypted ? [APP_CREDENTIALS_KEY] : [])];
 	return typeof app.client === "object" ? [app.client.id, ...(app.client.secret ? [app.client.secret] : [])] : [];
 }
 

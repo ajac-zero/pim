@@ -398,8 +398,13 @@ function Apps() {
   );
 }
 
-/** One app as a card: its logo, what it does, your connection, and what you can do with it. */
-function AppCard({
+/**
+ * One app as a card: its logo, what it does, your connection, and what you
+ * can do with it. An app with a page of its own, such as Drive's file
+ * picker, offers it once the connection is ready; one whose sign-in failed
+ * or was revoked says why, and connects again.
+ */
+export function AppCard({
   row: { app, connection },
   isAdmin,
   busy,
@@ -416,9 +421,10 @@ function AppCard({
   onChangeIcon: (app: DirectoryApp) => void;
   onUnlist: (app: DirectoryApp) => void;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const name = app?.name ?? connection?.name ?? "";
   const state = connection?.state;
+  const page = state === "ready" ? app?.page : undefined;
   const stateLabel =
     state === "ready"
       ? t("appReady")
@@ -447,13 +453,28 @@ function AppCard({
             disabled={busy}
             onClick={() => onConnect(app)}
           >
-            {t("connect")}
+            {state === "failed" ? t("reconnect") : t("connect")}
+          </Button>
+        )}
+        {page && (
+          <Button variant="outline" size="sm" asChild>
+            <a href={page.url} target="_blank" rel="noopener">
+              {typeof page.label === "string"
+                ? page.label
+                : (page.label[locale] ?? page.label.en)}{" "}
+              <ExternalLink />
+            </a>
           </Button>
         )}
       </div>
       <p className="line-clamp-2 text-muted-foreground text-xs leading-relaxed">
         {app ? app.description || app.url : t("appNoLongerOffered")}
       </p>
+      {state === "failed" && connection?.error && (
+        <p className="line-clamp-2 text-destructive text-xs leading-relaxed">
+          {connection.error}
+        </p>
+      )}
       {(connection || adminActions) && (
         <div className="mt-auto flex items-center gap-1 border-t pt-2">
           <span className="flex min-w-0 flex-1 items-center gap-1.5 text-muted-foreground text-xs">

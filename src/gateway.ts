@@ -8,6 +8,8 @@ import { BROWSER_LIVE_PATH } from "./browser";
 import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER, SIGNED_IN_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
+import { base64UrlEncode } from "./auth/encoding";
+import { isNativeApp } from "./extensions/define";
 import { themes as ownThemes } from "./extensions/themes";
 import { type McpAccess, type McpGrant, serveConsent, serveOAuth } from "./mcp-auth";
 import { PimThemes } from "./themes";
@@ -165,13 +167,14 @@ export type ApiExtension = (path: string, request: Request) => Promise<Response 
 /**
  * An app's callback or event delivery: `/mcp/callback/<owner>` (GET, the
  * OAuth sign-in's redirect, which the space matches against the callback URL
- * it gave), `/mcp/callback/apps` (GET, the same for the apps extensions
- * implement, whose `state` starts with the owner), or
+ * it gave), `/mcp/callback/apps` (the same for the apps extensions
+ * implement, whose `state` starts with the owner: see `serveAppReturn`), or
  * `/mcp/events/<owner>/<watch>` (POST, which the space answers as `/mcp/events/<watch>`).
  * Also `/mcp/client/<owner>` (GET): Pim's client metadata document for that
  * owner's sign-ins, for services that take one instead of registering clients.
  */
 async function serveApp(request: Request, env: Env, pathname: string): Promise<Response | undefined> {
+	if (pathname === APPS_CALLBACK_PATH) return serveAppReturn(request, env);
 	const client = new RegExp(`^${MCP_CLIENT_PATH}/([^/]+)$`).exec(pathname);
 	if (client) {
 		if (request.method !== "GET") return fail(405, `${pathname} takes GET`);
@@ -192,12 +195,94 @@ async function serveApp(request: Request, env: Env, pathname: string): Promise<R
 	if (!callback && !events) return undefined;
 	const method = callback ? "GET" : "POST";
 	if (request.method !== method) return fail(405, `${pathname} takes ${method}`);
-	const owner = pathname === APPS_CALLBACK_PATH ? (new URL(request.url).searchParams.get("state") ?? "").split(".")[0]! : decodeURIComponent((callback ?? events)![1]!);
-	const account = await resolveAccount(env, owner);
+	const account = await resolveAccount(env, decodeURIComponent((callback ?? events)![1]!));
 	if (!account) return fail(404, "Not found");
 	const refused = closed(account);
 	if (refused) return refused;
 	return toAgent(request, env, account.ownerId, callback ? pathname : `${MCP_EVENTS_PATH}${events![2]}`);
+}
+
+/** What the page that posts a sign-in's return back runs; its hash is the page's only allowed script. */
+const RESUBMIT = "document.forms[0].submit()";
+let resubmitHash: Promise<string> | undefined;
+
+const escapeHtml = (text: string) => text.replace(/[&<>"']/g, (character) => `&#${character.charCodeAt(0)};`);
+
+function appReturnPage(status: number, body: string, script = ""): Response {
+	return new Response(`<!doctype html><meta charset="utf-8"><title>Pim</title>${body}`, {
+		status,
+		headers: {
+			"content-type": "text/html; charset=utf-8",
+			"cache-control": "no-store",
+			// The address holds the sign-in's code: it goes nowhere else. (Not `no-referrer`: the form's post must say it comes from Pim.)
+			"referrer-policy": "same-origin",
+			"content-security-policy": `default-src 'none'; script-src ${script || "'none'"}; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
+		},
+	});
+}
+
+/**
+ * The person's return from signing in to an app an extension implements,
+ * at `/mcp/callback/apps`. The service sends the browser back with a GET
+ * from its own site, which doesn't carry Pim's session cookie (it is
+ * SameSite=Strict), so the page answering it posts the same parameters
+ * from Pim's own origin, which does. The post is handed on to the space
+ * that `state` names only from a browser signed in as that owner: a sign-in
+ * someone else started, such as a consent link sent to the person, can't
+ * connect their account to another space. One that isn't signed in can sign
+ * in and reload: the sign-in is still there.
+ */
+async function serveAppReturn(request: Request, env: Env): Promise<Response> {
+	if (request.method === "GET") {
+		const fields = [...new URL(request.url).searchParams].slice(0, 32);
+		resubmitHash ??= crypto.subtle
+			.digest("SHA-256", new TextEncoder().encode(RESUBMIT))
+			.then((digest) => `'sha256-${btoa(String.fromCharCode(...new Uint8Array(digest)))}'`);
+		return appReturnPage(
+			200,
+			`<form method="post" action="${APPS_CALLBACK_PATH}">${fields.map(([name, value]) => `<input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">`).join("")}<p>Finishing signing in…</p><noscript><button>Continue</button></noscript></form><script>${RESUBMIT}</script>`,
+			await resubmitHash,
+		);
+	}
+	if (request.method !== "POST") return fail(405, `${APPS_CALLBACK_PATH} takes GET and POST`);
+	if (Number(request.headers.get("content-length") ?? 0) > 16_384) return fail(413, "Too large");
+	const state = (await request.clone().formData().catch(() => null))?.get("state");
+	const account = typeof state === "string" ? await resolveAccount(env, state.split(".")[0]!) : null;
+	if (!account) return fail(404, "Not found");
+	const refused = closed(account);
+	if (refused) return refused;
+	const browser = await signedIn(request, env);
+	if (!browser || browser instanceof Response || browser.ownerId !== account.ownerId) {
+		return appReturnPage(403, "<p>Sign in to Pim in this browser, as the person who is connecting the app, then reload this page.</p>");
+	}
+	return toAgent(request, env, account.ownerId, APPS_CALLBACK_PATH, true);
+}
+
+/**
+ * An app's page for the person (`NativeAppDefinition.page`), such as
+ * Drive's file picker: `/app-pages/<extension>/<app>`. The page holds
+ * nothing of anyone's; what it does goes through the app's actions, which
+ * check the person's session. It runs under the app's own content security
+ * policy, in no frame, and its address goes nowhere else.
+ */
+function serveAppPage(request: Request, pathname: string): Response {
+	const match = /^\/app-pages\/([^/]+)\/([^/]+)$/.exec(pathname);
+	const app = match ? pimConfig.extensions.find((extension) => extension.id === match[1])?.apps?.find((candidate) => candidate.id === match[2]) : undefined;
+	if (!app || !isNativeApp(app) || !app.page) return fail(404, "Not found");
+	if (request.method !== "GET") return fail(405, `${pathname} takes GET`);
+	const nonce = base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)));
+	const page = app.page(nonce);
+	return new Response(page.html, {
+		headers: {
+			"content-type": "text/html; charset=utf-8",
+			"cache-control": "no-store",
+			"content-security-policy": page.contentSecurityPolicy,
+			"x-frame-options": "DENY",
+			"x-content-type-options": "nosniff",
+			// Not `no-referrer`: the page's posts must say they come from Pim.
+			"referrer-policy": "same-origin",
+		},
+	});
 }
 
 /**
@@ -323,6 +408,7 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 	}
 
 	if (under(pathname, "/images")) return serveImage(request, env, pathname);
+	if (under(pathname, "/app-pages")) return serveAppPage(request, pathname);
 
 	if (under(pathname, "/api/shared")) return withCors(await serveSharedChat(request, env, pathname));
 	if (under(pathname, "/shared")) {

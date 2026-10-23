@@ -7,7 +7,9 @@
 #
 #   deploy/celld/build.sh [REF] [OUT]
 #     REF  the commit to build (default HEAD)
-#     OUT  where (default ~/.cache/pim-celld/builds/<commit>); replaced if it is an earlier build
+#     OUT  where (default ~/.cache/pim-celld/builds/<commit>); replaced if it is an earlier build.
+#          It must be a directory of its own: not a symbolic link, not / or a top-level directory,
+#          not in or above this repository, and not your home directory or above it.
 #
 # Needs git, node, pnpm and celld (on PATH, or CELLD=/path/to/celld). Touches no bucket and no
 # secret: deploy.sh deploys what it leaves. OUT/build-info.json records what went in, and the
@@ -27,6 +29,24 @@ fail() {
 	exit 1
 }
 
+# OUT is deleted and made again, so before anything else, it must be a place that can only be a
+# build: compared as real paths, with every symbolic link above it resolved.
+while [[ "$out" == */ && "$out" != / ]]; do out="${out%/}"; done
+[[ ! -L "$out" ]] || fail "$out is a symbolic link; give the build a directory of its own."
+real() { node -e 'const fs = require("node:fs"), path = require("node:path");
+let at = path.resolve(process.argv[1]); const rest = [];
+while (!fs.existsSync(at)) { rest.unshift(path.basename(at)); at = path.dirname(at); }
+console.log(path.join(fs.realpathSync(at), ...rest));' "$1"; }
+out="$(real "$out")"
+real_repo="$(real "$repo")"
+real_home="$(real "$HOME")"
+[[ "$out" =~ ^/[^/]+/[^/]+ ]] || fail "$out is / or a top-level directory; give the build a directory of its own."
+[[ "$out" != "$real_repo" && "$real_repo" != "$out"/* && "$out" != "$real_repo"/* ]] || fail "$out is in or above this repository; give the build a directory outside it."
+[[ "$out" != "$real_home" && "$real_home" != "$out"/* ]] || fail "$out is your home directory or above it; give the build a directory of its own."
+if [[ -e "$out" ]] && [[ ! -f "$out/.pim-celld-build" || -L "$out/.pim-celld-build" ]]; then
+	fail "$out exists and isn't a build; choose another OUT."
+fi
+
 git -C "$repo" cat-file -e "$commit:deploy/celld/wrangler.jsonc" 2>/dev/null || fail "$commit has no deploy/celld/wrangler.jsonc, so it has no celld build."
 # Whether the commit's Worker has Pim's celld runtime (PIM_RUNTIME=celld, PIM_INGRESS_SECRET), which
 # the profile and the Caddyfile expect. deploy.sh refuses a build without it.
@@ -43,10 +63,8 @@ have_celld="$("$celld" --version 2>/dev/null | sed -n 's/^celld //p')" || true
 [[ "$have_pnpm" == "$want_pnpm" ]] || fail "this commit builds with pnpm $want_pnpm (package.json); this is pnpm $have_pnpm."
 [[ "$have_celld" == "$want_celld" ]] || fail "this commit builds with celld $want_celld (deploy/celld/versions.env); $celld is ${have_celld:-missing}. Run deploy/celld/install-celld.sh."
 
-if [[ -e "$out" ]]; then
-	[[ -f "$out/.pim-celld-build" ]] || fail "$out exists and isn't a build; choose another OUT."
-	rm -rf "$out"
-fi
+# Checked above: an earlier build, and nothing else.
+[[ ! -e "$out" ]] || rm -rf -- "$out"
 mkdir -p "$out"
 git -C "$repo" archive --format=tar "$commit" | tar -x -C "$out"
 touch "$out/.pim-celld-build"

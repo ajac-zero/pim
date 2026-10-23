@@ -31,6 +31,8 @@ fail() {
 build="${1:-}"
 [[ -n "$build" && "$build" != --* ]] || fail "usage: deploy.sh BUILD --vars FILE --ingress-secret FILE [--secrets FILE] [--app-credentials-key FILE] [--celld-env FILE] [--dry-run]"
 shift
+[[ -f "$build/.pim-celld-build" && -f "$build/build-info.json" ]] || fail "$build isn't a finished build.sh build."
+render="$build/deploy/celld/scripts/render-config.mjs"
 render_args=()
 dry_run=()
 while (($#)); do
@@ -42,10 +44,15 @@ while (($#)); do
 		;;
 	--celld-env)
 		[[ -f "${2:-}" ]] || fail "$1 needs a file; ${2:-nothing} isn't one."
-		set -a
-		# shellcheck disable=SC1090
-		source "$2"
-		set +a
+		# Read as celld's systemd unit reads it, never by a shell: each entry is checked, then exported
+		# exactly as written. A value a shell or systemd would read differently is refused.
+		entries="$(mktemp)"
+		node "$render" --print-env "$2" >"$entries" || {
+			rm -f "$entries"
+			fail "$2 isn't a file deploy.sh can read; see above."
+		}
+		while IFS= read -r -d '' entry; do export "${entry?}"; done <"$entries"
+		rm -f "$entries"
 		shift 2
 		;;
 	--dry-run)
@@ -57,7 +64,6 @@ while (($#)); do
 done
 [[ " ${render_args[*]} " == *" --vars "* ]] || fail "--vars is required: PIM_PUBLIC_URL at least."
 
-[[ -f "$build/.pim-celld-build" && -f "$build/build-info.json" ]] || fail "$build isn't a finished build.sh build."
 # A Worker without Pim's celld runtime ignores PIM_RUNTIME and the ingress secret, and reads a
 # client's address from CF-Connecting-IP, which the Caddyfile no longer sends. Only a scratch run
 # may deploy one, to test the tooling (PIM_CELLD_ALLOW_PRE_RUNTIME=1).
@@ -75,7 +81,7 @@ trap 'rm -f "$config"' EXIT
 trap 'exit 130' INT TERM
 echo "Variables for this deployment (names only):"
 # The build's own copy, so the variables are added as the commit that was built adds them.
-node "$build/deploy/celld/scripts/render-config.mjs" --profile "$build/wrangler.celld.jsonc" --out "$config" "${render_args[@]}"
+node "$render" --profile "$build/wrangler.celld.jsonc" --out "$config" "${render_args[@]}"
 
 esbuild="$(cd "$build" && node -e 'const { createRequire } = require("node:module"); console.log(createRequire(require.resolve("wrangler/package.json")).resolve("esbuild/bin/esbuild"))')"
 (cd "$build" && CELLD_ESBUILD="$esbuild" "$celld" deploy "$(basename "$config")" "${dry_run[@]}")

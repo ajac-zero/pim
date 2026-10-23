@@ -6,8 +6,9 @@ import type { Pim } from "../src/pim";
 import { userHandle } from "../src/auth";
 import { base64UrlDecode, base64UrlEncode } from "../src/auth/encoding";
 import { derToRaw } from "../src/auth/webauthn";
-import type { Directory } from "../src/directory";
+import { Directory, RATE_LIMIT_KEYS } from "../src/directory";
 import worker from "../src/index";
+import { admitIngress, CLIENT_IP_HEADER, clientAddress, INGRESS_SECRET_HEADER, LIMITER_OBJECT, limited } from "../src/runtime";
 import { Authenticator, concat, encoder, rawToDer, type Tamper } from "./webauthn";
 
 const ORIGIN = "https://pim.test";
@@ -49,7 +50,12 @@ class Browser {
 		if (!headers.has("origin") && init.method && init.method !== "GET") headers.set("origin", ORIGIN);
 		if (this.cookies.size > 0) headers.set("cookie", [...this.cookies].map(([k, v]) => `${k}=${v}`).join("; "));
 		if (init.json !== undefined) headers.set("content-type", "application/json");
-		headers.set("CF-Connecting-IP", this.ip);
+		// On celld the ingress proxy vouches for the address; whatever CF-Connecting-IP says is the client's own claim.
+		if ((this.env as { PIM_RUNTIME?: string }).PIM_RUNTIME === "celld") {
+			if (!headers.has(INGRESS_SECRET_HEADER)) headers.set(INGRESS_SECRET_HEADER, INGRESS_SECRET);
+			if (!headers.has(CLIENT_IP_HEADER)) headers.set(CLIENT_IP_HEADER, this.ip);
+		}
+		if (!headers.has("CF-Connecting-IP")) headers.set("CF-Connecting-IP", this.ip);
 		const request = new Request(url(path), { ...init, headers, body: init.json === undefined ? init.body : JSON.stringify(init.json) });
 		const response = await worker.fetch(request as Request<unknown, IncomingRequestCfProperties>, this.env, createExecutionContext());
 		for (const cookie of response.headers.getSetCookie()) {
@@ -101,6 +107,24 @@ async function person(username: string, deployment: Env = settled, extra: Record
 }
 
 const admin = () => person("ana", fresh());
+
+/** The secret celld's ingress proxy sends in tests. */
+const INGRESS_SECRET = "test-ingress-secret-7f3a9c1e5b2d8f4a6c0e";
+
+/**
+ * This Worker on celld, behind its ingress proxy: no rate-limit bindings, and
+ * a deploy time it never trusts (here, as if one had just happened).
+ */
+function celld(vars: Record<string, unknown> = {}): Env {
+	return {
+		...deployed(60 * 1000),
+		PIM_RUNTIME: "celld",
+		PIM_INGRESS_SECRET: INGRESS_SECRET,
+		AUTH_LIMITER: undefined,
+		API_LIMITER: undefined,
+		...vars,
+	} as unknown as Env;
+}
 
 /**
  * Asks for a setup link, as the sign-in screen does, and reads it from the
@@ -812,6 +836,217 @@ describe("signing in with another account", () => {
 		await viaProvider(ana.browser, "github");
 		expect(await viaProvider(elsewhere, "github")).toMatchObject({ error: undefined });
 		expect((await elsewhere.json("/api/account")).body.username).toBe("ana");
+	});
+});
+
+describe("on celld", () => {
+	/** A request as it reaches celld, with only the headers given: from a client that went around the proxy, or from the proxy. */
+	const arrive = (deployment: Env, headers: Record<string, string>, path = "/auth/session") =>
+		worker.fetch(new Request(url(path), { headers }) as Request<unknown, IncomingRequestCfProperties>, deployment, createExecutionContext());
+
+	it("answers only requests its ingress vouches for, from one address", async () => {
+		const deployment = celld();
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const refused: Record<string, string>[] = [
+				{},
+				{ "CF-Connecting-IP": "198.51.100.1", "X-Forwarded-For": "198.51.100.1" },
+				{ [INGRESS_SECRET_HEADER]: "x".repeat(INGRESS_SECRET.length), [CLIENT_IP_HEADER]: "198.51.100.1" },
+				{ [INGRESS_SECRET_HEADER]: INGRESS_SECRET.slice(0, -1), [CLIENT_IP_HEADER]: "198.51.100.1" },
+				{ [INGRESS_SECRET_HEADER]: `${INGRESS_SECRET}, ${INGRESS_SECRET}`, [CLIENT_IP_HEADER]: "198.51.100.1" },
+			];
+			for (const headers of refused) {
+				const response = await arrive(deployment, headers);
+				expect(response.status).toBe(403);
+				expect(await response.text()).not.toContain(INGRESS_SECRET);
+			}
+			const unreadable = ["", "unknown", "198.51.100.1, 203.0.113.9", "198.51.100.1:443", "[2001:db8::1]", "2001:db8::1%eth0", "010.0.0.1", "256.1.1.1", "0x7f.0.0.1", "::ffff:1.2.3.4.5"];
+			for (const ip of unreadable) expect((await arrive(deployment, { [INGRESS_SECRET_HEADER]: INGRESS_SECRET, [CLIENT_IP_HEADER]: ip })).status).toBe(400);
+			expect((await arrive(deployment, { [INGRESS_SECRET_HEADER]: INGRESS_SECRET })).status).toBe(400);
+		} finally {
+			log.mockRestore();
+			error.mockRestore();
+		}
+		expect((await arrive(deployment, { [INGRESS_SECRET_HEADER]: INGRESS_SECRET, [CLIENT_IP_HEADER]: "198.51.100.1" })).status).toBe(200);
+		expect((await arrive(deployment, { [INGRESS_SECRET_HEADER]: INGRESS_SECRET, [CLIENT_IP_HEADER]: "2001:db8::1" })).status).toBe(200);
+	});
+
+	it("takes what only the ingress may say off the request before anything reads it", async () => {
+		const request = new Request(url("/api/sessions"), {
+			headers: { [INGRESS_SECRET_HEADER]: INGRESS_SECRET, [CLIENT_IP_HEADER]: "2001:DB8:0:7:1::2", "CF-Connecting-IP": "192.0.2.66", authorization: "Bearer pim_x" },
+		});
+		const admitted = await admitIngress(request, celld());
+		if (admitted instanceof Response) throw new Error(`Refused: ${admitted.status}`);
+		expect(admitted.address).toBe("2001:db8:0:7::/64");
+		expect([...admitted.request.headers.keys()]).toEqual(["authorization"]);
+		expect(admitted.request.url).toBe(request.url);
+		// On Cloudflare the request is as it came, from the address Cloudflare reports.
+		expect(await admitIngress(request, settled)).toEqual({ request, address: "192.0.2.66" });
+	});
+
+	it("counts an IPv6 client by its /64, and an IPv4 address written as IPv6 as itself", () => {
+		expect(clientAddress("198.51.100.7")).toBe("198.51.100.7");
+		expect(clientAddress("::ffff:198.51.100.7")).toBe("198.51.100.7");
+		expect(clientAddress("2001:db8:0:7:1::2")).toBe(clientAddress("2001:db8:0:7:ffff:ffff:ffff:ffff"));
+		expect(clientAddress("2001:db8:0:7::1")).not.toBe(clientAddress("2001:db8:0:8::1"));
+		expect(clientAddress("::1")).toBe("0:0:0:0::/64");
+	});
+
+	it("refuses every request when it is set up wrong, and limits everything", async () => {
+		const wrong: Record<string, unknown>[] = [
+			{ PIM_RUNTIME: "celId" },
+			{ PIM_INGRESS_SECRET: undefined },
+			{ PIM_INGRESS_SECRET: "too-short" },
+			{ PIM_INGRESS_SECRET: "long enough but it has spaces in it, 0123456789" },
+			{ PIM_INGRESS_SECRET: (env as unknown as Record<string, string>).APP_CREDENTIALS_KEY },
+			{ Directory: undefined },
+		];
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			for (const vars of wrong) {
+				const deployment = celld(vars);
+				const secret = typeof vars.PIM_INGRESS_SECRET === "string" ? vars.PIM_INGRESS_SECRET : INGRESS_SECRET;
+				const response = await new Browser(deployment).fetch("/health", { headers: { [INGRESS_SECRET_HEADER]: secret } });
+				expect(response.status).toBe(503);
+				expect(await response.text()).not.toContain(secret);
+				expect(await limited(deployment, "auth", "198.51.100.2")).toBe(true);
+			}
+		} finally {
+			error.mockRestore();
+		}
+	});
+
+	it("leaves a Cloudflare deployment as it was", async () => {
+		for (const runtime of [undefined, "", "cloudflare"]) {
+			// No ingress headers: Cloudflare's edge is the ingress.
+			const response = await new Browser({ ...settled, PIM_RUNTIME: runtime } as unknown as Env).json("/auth/session");
+			expect(response).toMatchObject({ status: 200, body: { canClaim: false } });
+		}
+		// A deployment without the rate-limit bindings has no limits there, as before.
+		expect(await limited({ ...settled, AUTH_LIMITER: undefined, API_LIMITER: undefined } as unknown as Env, "auth", "198.51.100.3")).toBe(false);
+	});
+
+	it("slows down guessing by the address the ingress vouches for, whatever the client claims", async () => {
+		const deployment = celld();
+		const guess = (ip: string, attempt: number) =>
+			new Browser(deployment).fetch("/auth/sign-in/options", { method: "POST", headers: { [CLIENT_IP_HEADER]: ip, "CF-Connecting-IP": `192.0.2.${attempt}` } });
+		const statuses: number[] = [];
+		for (let attempt = 0; attempt < 31; attempt++) statuses.push((await guess("198.51.100.10", attempt)).status);
+		expect(statuses.slice(0, 30)).not.toContain(429);
+		expect(statuses[30]).toBe(429);
+		expect((await guess("198.51.100.11", 0)).status).not.toBe(429);
+		// Every address in an IPv6 /64 is one client; the next /64 is another.
+		const walked: number[] = [];
+		for (let attempt = 1; attempt <= 31; attempt++) walked.push((await guess(`2001:db8:a:1::${attempt.toString(16)}`, attempt)).status);
+		expect(walked.slice(0, 30)).not.toContain(429);
+		expect(walked[30]).toBe(429);
+		expect((await guess("2001:db8:a:2::1", 0)).status).not.toBe(429);
+	});
+
+	it("slows down heavy API use per person, and public links per address", async () => {
+		const deployment = celld();
+		const { claim } = await setupLink(deployment);
+		const ana = await person("ana", deployment, { claim });
+		const ben = await person("ben", deployment);
+		const reader = new Browser(deployment);
+		// Ana's minute and the reader's are used up, as 600 requests would.
+		await runInDurableObject(env.Directory.getByName(LIMITER_OBJECT), async (limiter: Directory) => {
+			let allowed = 0;
+			while (await limiter.hit("api", ana.owner, 600, 60_000)) allowed++;
+			expect(allowed).toBeLessThan(600);
+			allowed = 0;
+			while (await limiter.hit("public", reader.ip, 600, 60_000)) allowed++;
+			expect(allowed).toBe(600);
+		});
+		expect((await ana.browser.fetch("/api/sessions")).status).toBe(429);
+		expect((await ben.browser.fetch("/api/sessions")).status).toBe(200);
+		expect((await reader.fetch("/api/shared/o_nobody/link")).status).toBe(429);
+		expect((await new Browser(deployment).fetch("/api/shared/o_nobody/link")).status).toBe(404);
+	});
+
+	it("counts registrations per address by the address the ingress vouches for", async () => {
+		const deployment = celld({ PIM_REGISTRATIONS_PER_ADDRESS: "1" });
+		const { claim } = await setupLink(deployment);
+		await person("ana", deployment, { claim });
+		const ben = new Browser(deployment);
+		expect((await register(ben, "ben")).status).toBe(201);
+		const sameAddress = await new Browser(deployment).fetch("/auth/register", {
+			method: "POST",
+			json: { username: "cyd" },
+			headers: { [CLIENT_IP_HEADER]: ben.ip, "CF-Connecting-IP": "192.0.2.77" },
+		});
+		expect(sameAddress.status).toBe(429);
+		expect((await register(new Browser(deployment), "dee")).status).toBe(201);
+	});
+
+	it("opens no window to claim it, even right after a deploy", async () => {
+		const deployment = celld();
+		expect((await new Browser(deployment).json("/auth/session")).body).toMatchObject({ claimed: false, canClaim: false });
+		expect((await register(new Browser(deployment), "ana")).status).toBe(403);
+		expect((await register(new Browser(deployment), "ana", { claim: "made-up" })).status).toBe(403);
+	});
+
+	it("is claimed with the setup link from the logs by one person, once", async () => {
+		const deployment = celld({ PIM_REGISTRATION: "invite" });
+		const { claim } = await setupLink(deployment);
+		const tries = await Promise.all(["ana", "ben", "cyd"].map((name) => register(new Browser(deployment), name, { claim })));
+		expect(tries.map(({ status }) => status).sort()).toEqual([201, 403, 403]);
+		expect(tries.find(({ status }) => status === 201)?.body.role).toBe("admin");
+		// Used, it claims nothing.
+		expect((await register(new Browser(deployment), "dee", { claim })).status).toBe(403);
+	});
+
+	it("keeps its setup link through a restart, and asking again doesn't replace it", async () => {
+		const deployment = celld();
+		const { claim } = await setupLink(deployment);
+		// As when celld restarts a node or moves the Directory to another: a new instance on the same storage.
+		const kept = await runInDurableObject(env.Directory.getByName("directory"), async (_instance: Directory, state) => new Directory(state, env).claimCode().code);
+		expect(kept).toBe(claim);
+		expect((await setupLink(deployment)).claim).toBe(claim);
+		expect((await new Browser(deployment).json("/auth/session")).body).toMatchObject({ claimed: false, canClaim: false });
+		expect((await person("ana", deployment, { claim })).role).toBe("admin");
+		// Claimed, the link from the logs adds a passkey to the admin's account, and claims nothing.
+		expect(Object.keys(await setupLink(deployment))).toEqual(["setup"]);
+	});
+});
+
+describe("the Directory's rate limits", () => {
+	const limiter = () => env.Directory.getByName(LIMITER_OBJECT);
+
+	it("allows the limit in a window from a key's first request, and the limit again once it ends", async () => {
+		const start = 1_000_000;
+		for (let n = 0; n < 3; n++) expect(await limiter().hit("auth", "203.0.113.251", 3, 60_000, start + n)).toBe(true);
+		expect(await limiter().hit("auth", "203.0.113.251", 3, 60_000, start + 59_999)).toBe(false);
+		// Other keys, and other limits, count apart.
+		expect(await limiter().hit("auth", "203.0.113.252", 3, 60_000, start + 59_999)).toBe(true);
+		expect(await limiter().hit("public", "203.0.113.251", 3, 60_000, start + 59_999)).toBe(true);
+		for (let n = 0; n < 3; n++) expect(await limiter().hit("auth", "203.0.113.251", 3, 60_000, start + 60_000)).toBe(true);
+		expect(await limiter().hit("auth", "203.0.113.251", 3, 60_000, start + 60_000)).toBe(false);
+		// Addresses are kept only as salted digests.
+		const keys = await runInDurableObject(limiter(), async (_instance: Directory, state) => state.storage.sql.exec("SELECT key FROM rate_limits").toArray());
+		expect(JSON.stringify(keys)).not.toContain("203.0.113");
+	});
+
+	it("lets exactly the limit through when requests race", async () => {
+		const results = await Promise.all(Array.from({ length: 50 }, () => limiter().hit("auth", "203.0.113.253", 30, 60_000)));
+		expect(results.filter(Boolean)).toHaveLength(30);
+	});
+
+	it("counts at most RATE_LIMIT_KEYS keys at once, refusing new ones until windows end", async () => {
+		const now = 5_000_000;
+		await runInDurableObject(limiter(), async (_instance: Directory, state) => {
+			state.storage.sql.exec(
+				"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) INSERT INTO rate_limits (name, key, window_ends, hits) SELECT 'public', 'filler-' || i, ?, 1 FROM n",
+				RATE_LIMIT_KEYS,
+				now + 60_000,
+			);
+		});
+		expect(await limiter().hit("public", "203.0.113.254", 600, 60_000, now)).toBe(false);
+		expect(await limiter().hit("api", "o_someone", 600, 60_000, now)).toBe(true);
+		expect(await limiter().hit("public", "203.0.113.254", 600, 60_000, now + 60_000)).toBe(true);
+		const left = await runInDurableObject(limiter(), async (_instance: Directory, state) => state.storage.sql.exec("SELECT COUNT(*) AS n FROM rate_limits").one().n);
+		expect(Number(left)).toBeLessThan(100);
 	});
 });
 

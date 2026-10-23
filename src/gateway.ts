@@ -2,7 +2,7 @@ import { getAgentByName } from "agents";
 import pimConfig from "../pim.config";
 import { diagramPage } from "./artifacts";
 import { deploymentSettings } from "./deployment";
-import { accountApi, adminApi, clientIp, contentOrigin, handleRegistration, limited, resolveAccount, servePublicArtifact, siteFor, sites, socialApi } from "./accounts";
+import { accountApi, adminApi, contentOrigin, handleRegistration, resolveAccount, servePublicArtifact, siteFor, sites, socialApi } from "./accounts";
 import { COMPUTER_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
 import { BROWSER_LIVE_PATH } from "./browser";
 import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER, SIGNED_IN_HEADER } from "./pim";
@@ -12,11 +12,13 @@ import { base64UrlEncode } from "./auth/encoding";
 import { isNativeApp } from "./extensions/define";
 import { themes as ownThemes } from "./extensions/themes";
 import { type McpAccess, type McpGrant, serveConsent, serveOAuth } from "./mcp-auth";
+import { admitIngress, limited } from "./runtime";
 import { PimThemes } from "./themes";
 
 /**
  * Serves a Pim: everyone's web app, sign-in, API and app callbacks, on one
- * hostname.
+ * hostname. Before anything else, the runtime vouches for where a request
+ * came from (./runtime.ts).
  *
  * - `/api/*`: the signed-in person's own space. The request names its owner:
  *   browsers by their session's cookie, other clients by their API
@@ -106,7 +108,7 @@ async function signedIn(request: Request, env: Env): Promise<Account | Response 
 
 /** Whether `account` may make a request now: heavy use is slowed down per person. */
 async function throttled(env: Env, account: Account): Promise<Response | undefined> {
-	if (!(await limited(env.API_LIMITER, account.ownerId))) return undefined;
+	if (!(await limited(env, "api", account.ownerId))) return undefined;
 	console.log(JSON.stringify({ event: "pim.rate_limited", limit: "api", owner: account.ownerId }));
 	return fail(429, "Too many requests. Slow down a little.");
 }
@@ -306,11 +308,11 @@ async function serveImage(request: Request, env: Env, pathname: string): Promise
  * answers it as `/shared/<link>`. Every way it isn't there, including an
  * account that is suspended or gone, is the same `404`.
  */
-async function serveSharedChat(request: Request, env: Env, pathname: string): Promise<Response> {
+async function serveSharedChat(request: Request, env: Env, pathname: string, address: string): Promise<Response> {
 	const notFound = () => Response.json({ error: "This link doesn't exist, or was turned off." }, { status: 404, headers: { "cache-control": "no-store" } });
 	if (request.method !== "GET" && request.method !== "HEAD") return fail(405, `${pathname} takes GET`);
 	// Nobody signs in to read it, so it is slowed down per address.
-	if (await limited(env.API_LIMITER, `public:${clientIp(request)}`)) return fail(429, "Too many requests. Slow down a little.");
+	if (await limited(env, "public", address)) return fail(429, "Too many requests. Slow down a little.");
 	const match = /^\/api\/shared\/([^/]+)\/([^/]+)$/.exec(pathname);
 	const account = match ? await resolveAccount(env, decodeURIComponent(match[1]!)) : null;
 	if (!account || closed(account)) return notFound();
@@ -352,11 +354,14 @@ function serveThemes(request: Request, path: string): Response {
 	return new Response(deployedThemes.stylesheet(), { headers: { ...headers, "Content-Type": "text/css; charset=utf-8" } });
 }
 
-export async function serve(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+	const admitted = await admitIngress(arrived, env);
+	if (admitted instanceof Response) return admitted;
+	const { request, address } = admitted;
 	const { pathname, origin } = new URL(request.url);
 	if (origin === contentOrigin(env)) {
 		// Nobody signs in here, so pages are slowed down per address.
-		if (await limited(env.API_LIMITER, `public:${clientIp(request)}`)) return fail(429, "Too many requests. Slow down a little.");
+		if (await limited(env, "public", address)) return fail(429, "Too many requests. Slow down a little.");
 		return servePublicArtifact(request, env, pathname);
 	}
 	if (pathname === "/health") return withCors(Response.json({ name: "pim", ok: true }));
@@ -377,7 +382,7 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 
 	if (under(pathname, "/auth") || under(pathname, "/oauth")) {
 		// Guessing at passkeys, recovery codes and tokens, and registering clients, is slowed down per address.
-		if (request.method !== "GET" && request.method !== "OPTIONS" && (await limited(env.AUTH_LIMITER, clientIp(request)))) {
+		if (request.method !== "GET" && request.method !== "OPTIONS" && (await limited(env, "auth", address))) {
 			console.log(JSON.stringify({ event: "pim.rate_limited", limit: "auth" }));
 			return fail(429, "Too many attempts. Wait a minute and try again.");
 		}
@@ -395,7 +400,7 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 		return serveConsent(request, env, account.ownerId, publicUrl, mcpAccess);
 	}
 
-	if (under(pathname, "/auth")) return (await handleRegistration(request, env)) ?? handleAuth(request, env, sites(env));
+	if (under(pathname, "/auth")) return (await handleRegistration(request, env, address)) ?? handleAuth(request, env, sites(env));
 
 	if (pathname === "/authorize") {
 		// The app's page where the person lets an MCP client in, which no other site may frame.
@@ -410,7 +415,7 @@ export async function serve(request: Request, env: Env, ctx: ExecutionContext): 
 	if (under(pathname, "/images")) return serveImage(request, env, pathname);
 	if (under(pathname, "/app-pages")) return serveAppPage(request, pathname);
 
-	if (under(pathname, "/api/shared")) return withCors(await serveSharedChat(request, env, pathname));
+	if (under(pathname, "/api/shared")) return withCors(await serveSharedChat(request, env, pathname, address));
 	if (under(pathname, "/shared")) {
 		// The app's page for a chat's public link, which search engines should leave out.
 		const asset = await env.ASSETS.fetch(request);

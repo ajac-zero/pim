@@ -86,6 +86,8 @@ export type CleanupResult = { readonly done: true } | { readonly done: false; re
 /** How long a registration may go without a passkey before its username is given back. */
 export const PENDING_MS = 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** Keys one rate limit counts at once. Past this, new keys are refused until windows end, so the table stays small whatever addresses come. */
+export const RATE_LIMIT_KEYS = 10_000;
 /** Waits between cleanup attempts: a minute, five, half an hour, two hours, then every six. */
 const RETRY_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000, 6 * 60 * 60_000];
 /** Cleanups one alarm runs, so a backlog can't hold the Directory for long. */
@@ -135,6 +137,14 @@ CREATE TABLE IF NOT EXISTS directory_meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS rate_limits (
+	name TEXT NOT NULL,
+	key TEXT NOT NULL,
+	window_ends INTEGER NOT NULL,
+	hits INTEGER NOT NULL,
+	PRIMARY KEY (name, key)
+);
+CREATE INDEX IF NOT EXISTS rate_limits_by_end ON rate_limits (window_ends);
 `;
 
 type Row = Record<string, SqlStorageValue>;
@@ -246,12 +256,13 @@ export class Directory extends DurableObject<Env> {
 		return fresh;
 	}
 
-	async #isClaimCode(code: string, now: number): Promise<boolean> {
+	/** The stored claim code `code` matches, if it is active: registration checks it is still the one stored when it takes the admin's place. */
+	async #matchClaimCode(code: string, now: number): Promise<string | null> {
 		const stored = this.#meta("claim_code");
 		const active = stored ? (JSON.parse(stored) as ClaimCode) : null;
-		if (!active || active.expiresAt <= now) return false;
+		if (!stored || !active || active.expiresAt <= now) return null;
 		const digest = (text: string) => crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-		return crypto.subtle.timingSafeEqual(await digest(code), await digest(active.code));
+		return crypto.subtle.timingSafeEqual(await digest(code), await digest(active.code)) ? stored : null;
 	}
 
 	/** Addresses are kept only as salted digests, and only for a day. */
@@ -262,6 +273,32 @@ export class Directory extends DurableObject<Env> {
 			this.#sql("INSERT INTO directory_meta (key, value) VALUES ('salt', ?)", salt);
 		}
 		return digestHex(`${salt}:${ip}`);
+	}
+
+	/**
+	 * Counts one request against a rate limit, where the runtime has no
+	 * limiter of its own (./runtime.ts): true if it may go ahead. A key's
+	 * window starts with its first request and lasts `periodMs`, in which it
+	 * may make `limit`. Keys are kept as salted digests, only until their
+	 * window ends, and at most `RATE_LIMIT_KEYS` per limit at once: a key that
+	 * would be one more is refused.
+	 */
+	async hit(name: string, key: string, limit: number, periodMs: number, now = Date.now()): Promise<boolean> {
+		const digest = await this.#address(`${name}:${key}`);
+		// No awaits from here on: reading and counting is one step, so two requests can't both take the last place.
+		const row = this.#sql("SELECT window_ends, hits FROM rate_limits WHERE name = ? AND key = ?", name, digest).toArray()[0];
+		if (row && Number(row.window_ends) > now) {
+			if (Number(row.hits) >= limit) return false;
+			this.#sql("UPDATE rate_limits SET hits = hits + 1 WHERE name = ? AND key = ?", name, digest);
+			return true;
+		}
+		this.#sql("DELETE FROM rate_limits WHERE window_ends <= ?", now);
+		if (!row && Number(this.#sql("SELECT COUNT(*) AS n FROM rate_limits WHERE name = ?", name).one().n) >= RATE_LIMIT_KEYS) {
+			console.log(JSON.stringify({ event: "pim.rate_limit_full", limit: name }));
+			return false;
+		}
+		this.#sql("INSERT INTO rate_limits (name, key, window_ends, hits) VALUES (?, ?, ?, 1)", name, digest, now + periodMs);
+		return true;
 	}
 
 	#byUsername(username: string): Account | null {
@@ -323,8 +360,10 @@ export class Directory extends DurableObject<Env> {
 		const now = input.now ?? Date.now();
 		const address = await this.#address(input.ip);
 		const invite = input.policy.mode === "invite" && input.invite ? await digestHex(input.invite.trim()) : null;
-		const claimCode = input.claim?.code ? await this.#isClaimCode(input.claim.code, now) : false;
+		const matched = input.claim?.code ? await this.#matchClaimCode(input.claim.code, now) : null;
 		// No awaits from here on: checking and taking the username, the invite, the admin's place and a place is one step.
+		// A code another registration used while this one checked it claims nothing.
+		const claimCode = matched !== null && this.#meta("claim_code") === matched;
 		const result = this.#takeUsername(input.username, address, invite, Boolean(input.claim?.window) || claimCode, input.policy, now);
 		if (result.ok && result.account.role === "admin" && claimCode) this.#setMeta("claim_code", null);
 		await this.#scheduleAlarm();

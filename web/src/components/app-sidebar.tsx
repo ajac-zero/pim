@@ -47,7 +47,6 @@ import {
   NotificationsPanel,
   SchedulesPanel,
   SIDEBAR_TOOLTIP_CLASS,
-  SidebarPanelHeader,
   SkillsPanel,
 } from "~/components/sidebar-panels";
 import { Button } from "~/components/ui/button";
@@ -376,9 +375,7 @@ function ChatsPanel({
 
   return (
     <>
-      <SidebarPanelHeader title={t("chats")} />
-
-      <div className="px-3 pt-1 pb-2">
+      <div className="px-3 pt-4 pb-2">
         <div className="relative">
           <Search className="-translate-y-1/2 absolute top-1/2 left-2.5 size-4 text-muted-foreground" />
           <Input
@@ -404,7 +401,7 @@ function ChatsPanel({
 
       <nav
         aria-label={t("chats")}
-        className="flex-1 overflow-y-auto px-3 pb-2 scrollbar-thin"
+        className="flex-1 overflow-y-auto px-3 py-3 scrollbar-thin [mask-image:linear-gradient(to_bottom,transparent,black_12px,black_calc(100%-12px),transparent)]"
       >
         {open.length === 0 ? (
           (archived.length === 0 || !search) && (

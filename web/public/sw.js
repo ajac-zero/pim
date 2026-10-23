@@ -26,6 +26,51 @@ async function notificationIcon(agent) {
   }
 }
 
+const SUMMARY_TAG = "pim-summary";
+const chatTag = (session) => `pim-chat-${session}`;
+
+/**
+ * Shows a chat's alert, folding into what is already on screen so a burst
+ * stays a few alerts: one chat shows its name and how many messages are new;
+ * a second chat replaces the chat alerts with one "N new messages in M chats".
+ * Each alert remembers its chats' counts and the message ids it counted, so a
+ * message delivered twice counts once.
+ */
+async function showGrouped(message) {
+  const existing = (await self.registration.getNotifications()).filter((n) => n.tag === SUMMARY_TAG || n.tag.startsWith("pim-chat-"));
+  const chats = {};
+  const ids = [];
+  for (const { data } of existing) {
+    for (const [session, count] of Object.entries(data?.chats ?? {})) chats[session] = count;
+    ids.push(...(data?.ids ?? []));
+  }
+  if (ids.includes(message.id)) return;
+  chats[message.session] = (chats[message.session] ?? 0) + 1;
+  ids.push(message.id);
+  const sessions = Object.keys(chats);
+  const total = Object.values(chats).reduce((sum, count) => sum + count, 0);
+  const options = { renotify: true, data: { chats, ids: ids.slice(-50) } };
+  if (sessions.length === 1) {
+    const count = chats[message.session];
+    await self.registration.showNotification(message.title, {
+      ...options,
+      body: count === 1 ? message.body : `${count} new messages: ${message.body}`,
+      icon: await notificationIcon(message.agent),
+      tag: chatTag(message.session),
+      data: { ...options.data, url: `/chat/${message.session}` },
+    });
+    return;
+  }
+  await self.registration.showNotification("Pim", {
+    ...options,
+    body: `${total} new messages in ${sessions.length} chats`,
+    icon: "/icon-192.png",
+    tag: SUMMARY_TAG,
+    data: { ...options.data, url: "/notifications" },
+  });
+  for (const alert of existing) if (alert.tag !== SUMMARY_TAG) alert.close();
+}
+
 self.addEventListener("push", (event) => {
   let message;
   try {
@@ -45,13 +90,17 @@ self.addEventListener("push", (event) => {
         ? visible.some((client) => new URL(client.url).pathname === chat)
         : visible.length > 0;
       if (shown) return;
-      await self.registration.showNotification(message.title, {
-        body: message.body,
-        icon: await notificationIcon(message.agent),
-        // A notification delivered twice shows once.
-        tag: message.id,
-        data: { url: message.session ? `/chat/${message.session}` : "/notifications" },
-      });
+      // An alert about no chat, such as a limit notice, stands alone.
+      if (!message.session) {
+        await self.registration.showNotification(message.title, {
+          body: message.body,
+          icon: await notificationIcon(message.agent),
+          tag: message.id,
+          data: { url: "/notifications" },
+        });
+        return;
+      }
+      await showGrouped(message);
     })(),
   );
 });

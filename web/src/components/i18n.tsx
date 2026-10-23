@@ -124,9 +124,6 @@ const translations = {
     inThisChat: "In this chat",
     roomHost: "Host",
     removeFromChat: "Remove {name} from the chat",
-    roomOpen: "Every agent decides when to speak",
-    roomOpenHint:
-      "Otherwise an agent answers when it's mentioned, and {name} answers the rest.",
     agentWorking: "{name} is working",
     mentionAgent: "Mention an agent",
     discover: "Discover",
@@ -1156,9 +1153,6 @@ const translations = {
     inThisChat: "En este chat",
     roomHost: "Anfitrión",
     removeFromChat: "Sacar a {name} del chat",
-    roomOpen: "Cada agente decide cuándo hablar",
-    roomOpenHint:
-      "Si no, un agente responde cuando se le menciona, y {name} responde al resto.",
     agentWorking: "{name} está trabajando",
     mentionAgent: "Mencionar a un agente",
     discover: "Descubrir",

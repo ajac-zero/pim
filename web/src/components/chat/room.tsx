@@ -7,13 +7,11 @@ import { X } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
-import { type Agent, pim, type RoomMode } from "~/lib/pim-api";
+import { type Agent, pim } from "~/lib/pim-api";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
 
 /**
@@ -68,10 +66,9 @@ export function MembersWorking({
 }
 
 /**
- * Who is in a group chat, as their icons in the header, and how they take
- * turns: when mentioned, with the host answering the rest, or each deciding
- * for itself. Each agent but the host can be taken out of the chat from
- * here. Nothing for a chat with one agent.
+ * Who is in a group chat, as their icons in the header. Each agent but the
+ * host can be taken out of the chat from here. Nothing for a chat with one
+ * agent.
  */
 export function RoomMenu({ sessionId }: { sessionId: string }) {
   const { t } = useI18n();
@@ -79,11 +76,6 @@ export function RoomMenu({ sessionId }: { sessionId: string }) {
   const { data: sessions } = useQuery(sessionsQuery());
   const { data: agents } = useQuery(agentsQuery());
   const session = sessions?.find((candidate) => candidate.id === sessionId);
-  const change = useMutation({
-    mutationFn: (mode: RoomMode) => pim.setRoomMode(sessionId, mode),
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
-    onError: (failure) => toast.error(failure.message),
-  });
   const remove = useMutation({
     mutationFn: (agent: string) => pim.removeFromRoom(sessionId, agent),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
@@ -172,18 +164,6 @@ export function RoomMenu({ sessionId }: { sessionId: string }) {
             </div>
           );
         })}
-        <DropdownMenuSeparator />
-        <DropdownMenuCheckboxItem
-          checked={room.mode === "open"}
-          disabled={change.isPending}
-          onCheckedChange={(open) => change.mutate(open ? "open" : "mentions")}
-          onSelect={(event) => event.preventDefault()}
-        >
-          {t("roomOpen")}
-        </DropdownMenuCheckboxItem>
-        <p className="px-2 pt-1 pb-1.5 text-muted-foreground text-xs leading-5">
-          {t("roomOpenHint", { name: host.name })}
-        </p>
       </DropdownMenuContent>
     </DropdownMenu>
   );

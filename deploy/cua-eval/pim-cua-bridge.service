@@ -4,6 +4,8 @@
 # The bridge runs as a system user of its own. The only secret it holds, spacesd's root token,
 # comes from /etc/cua/spacesd.env as a systemd credential, readable by this service alone and
 # never placed in its environment. It talks to nothing but spacesd on 127.0.0.1:3211 and Caddy.
+# Who has the machine is kept in /var/lib/pim-cua-bridge/state.json (StateDirectory), which only
+# it reads and writes.
 
 [Unit]
 Description=pim-cua-bridge (private Cua evaluation for one Pim space)
@@ -17,6 +19,8 @@ User=pim-bridge
 Group=pim-bridge
 EnvironmentFile=/etc/pim-cua-bridge/bridge.env
 LoadCredential=spacesd.env:/etc/cua/spacesd.env
+StateDirectory=pim-cua-bridge
+StateDirectoryMode=0700
 ExecStart=/usr/bin/python3 -I /opt/pim-cua-bridge/pim_cua_bridge.py
 Restart=on-failure
 RestartSec=5

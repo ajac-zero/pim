@@ -60,7 +60,8 @@ function definitions(services: FileServices) {
 		if (problem) return text(problem, true);
 		if (CHANGES.has(name)) services.assertOpen();
 		try {
-			const result = await execute({ id, name, arguments: args }, { abortSignal: signal });
+			// The whole tool on one computer: an edit never reads one and writes another.
+			const result = await services.computer.pinned(() => execute({ id, name, arguments: args }, { abortSignal: signal }));
 			return { content: result.content as ToolExecutionResult["content"], ...(result.isError ? { isError: true } : {}) };
 		} catch (error) {
 			return text(error instanceof Error ? error.message : String(error), true);

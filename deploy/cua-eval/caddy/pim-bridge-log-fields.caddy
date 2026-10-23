@@ -1,0 +1,8 @@
+# Log field filters for every log on the VM's Caddy that names requests: the site's access log
+# and the default log, where reverse-proxy failures and other errors are written with the
+# request. Caddy redacts Authorization and Cookie on its own, but not X-Pim-Bridge-Authorization,
+# x-cua-env-authorization (viewer tickets) or a query (/media?ticket=…). Import it inside each
+# `format filter { fields { … } }`.
+request>headers delete
+request>uri regexp \?.*$ ?REDACTED
+uri regexp \?.*$ ?REDACTED

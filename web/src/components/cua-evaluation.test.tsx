@@ -35,22 +35,24 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("offers the viewer only once the agents are paused, and resuming only by hand", () => {
+it("offers the viewer and resuming only once the pause is complete, and resuming only by hand", () => {
   expect(buttons(render(status("agents")))).toEqual([
     { label: "Pause agents", disabled: false },
   ]);
   const pausing = render(status("pausing", 2));
-  expect(pausing).toContain("waiting for 2 agent action(s) to finish");
+  expect(pausing).toContain("running on the computer (2)");
   expect(buttons(pausing)).toEqual([
     { label: "Open viewer", disabled: true },
-    { label: "Resume agents", disabled: false },
+    { label: "Resume agents", disabled: true },
   ]);
   const paused = render(status("paused"));
   expect(buttons(paused)).toEqual([
     { label: "Open viewer", disabled: false },
     { label: "Resume agents", disabled: false },
   ]);
-  expect(paused).toContain("Closing it doesn&#x27;t resume your agents");
+  expect(paused).toContain(
+    "Closing it doesn&#x27;t resume your agents; resuming them closes it first",
+  );
   // The viewer is never framed here.
   for (const html of [pausing, paused]) expect(html).not.toContain("<iframe");
 });

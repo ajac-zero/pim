@@ -1,9 +1,9 @@
 """Tests for pim_cua_bridge.py, against a stand-in spacesd that runs its processes here.
 
-Run with `python3 -m unittest deploy/cua-eval/test_pim_cua_bridge.py` (or `pnpm test:cua-bridge`).
+Run with `python3 -m unittest deploy/cua-eval/test_pim_cua_bridge.py`.
 Nothing here reaches a network or a Cua machine. The protocol-buffer bytes below were made by the
-official protobuf library from cua.env.v1 at Cua commit fca21937 (process.proto, system.proto),
-so they check this bridge's hand-written encoder and decoder against the real schema.
+official protobuf library from cua.env.v1 at Cua commit fca21937; check_protocol.py checks that
+they still are, and checks the bridge's messages against the compiled schema.
 """
 
 import hashlib
@@ -26,6 +26,7 @@ import pim_cua_bridge as bridge  # noqa: E402
 
 CREDENTIAL = "pimcb_" + "a1B2" * 12
 ROOT_TOKEN = "spacesd-root-" + "z9" * 16
+VIEWER_TICKET = "v1." + "V" * 40
 
 # CreateViewerTicketRequest{ttl{seconds:300}, policy:ALLOW_ACTIVATION, principal{id:"pim-owner", display_name:"Pim owner", kind:HUMAN}}
 VIEWER_REQUEST = "0a0308ac02100332180a0970696d2d6f776e6572120950696d206f776e65722001"
@@ -33,20 +34,35 @@ VIEWER_REQUEST = "0a0308ac02100332180a0970696d2d6f776e6572120950696d206f776e6572
 END_EVENT = "0a111a0f08fdffffffffffffffff01100f1801"
 # StartProcessResponse{event{data{offset:300, stderr:"warn\n"}}}
 DATA_EVENT = "0a0c120a08ac021a057761726e0a"
+# OpenMediaResponse{media_session_id:"ms-42", ticket:"v1.media", ws_path:"/media?ticket=v1.media"}
+OPEN_MEDIA_RESPONSE = "0a056d732d3432120876312e6d6564696122162f6d656469613f7469636b65743d76312e6d65646961"
+# ListProcessesResponse{processes:[{pid:1, tag:"pim-exec-3-a", RUNNING}, {pid:2, tag:"someone-else", RUNNING}, {pid:3, tag:"pim-call-3-b", RUNNING}]}
+LIST_PROCESSES_RESPONSE = "0a120801120c70696d2d657865632d332d6128010a120802120c736f6d656f6e652d656c736528010a120803120c70696d2d63616c6c2d332d622801"
 
 
 def frame(message, flags=0):
     return bytes([flags]) + len(message).to_bytes(4, "big") + message
 
 
+TRAILERS = frame(b"grpc-status:0\r\n", 0x80)
+
+
 class FakeSpacesd(http.server.BaseHTTPRequestHandler):
-    """gRPC-Web StartProcess (run here, as this user), CreateViewerTicket, /mcp and /health, checking the root token."""
+    """gRPC-Web ProcessService (run here, as this user), StreamService media sessions, CreateViewerTicket, /mcp and /health."""
 
     protocol_version = "HTTP/1.1"
-    calls = []
-    users = []
-    mcp_answer = None
-    fail_with = None
+
+    @classmethod
+    def reset(cls):
+        cls.calls, cls.users, cls.tags = [], [], []
+        cls.processes = {}
+        cls.media = {}
+        cls.media_auth = []
+        cls.mcp_answer = None
+        cls.mcp_delay = 0
+        cls.fail_with = None
+        cls.close_fails = False
+        cls.mint_gate = None
 
     def log_message(self, *_args):
         pass
@@ -60,26 +76,54 @@ class FakeSpacesd(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def grpc_error(self, code):
+        self.reply(200, b"", headers=[("grpc-status", str(code))])
+
     def do_GET(self):
         self.reply(204 if self.path == "/health" else 404)
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers["Content-Length"]))
         FakeSpacesd.calls.append(self.path)
+        message = bytes(body[5:])
+        if self.path == "/cua.env.v1.StreamService/OpenMedia":
+            return self.open_media()
         if self.headers.get("x-cua-env-authorization") != "Bearer " + ROOT_TOKEN:
-            return self.reply(200, b"", headers=[("grpc-status", "16")])
+            return self.grpc_error(16)
         if FakeSpacesd.fail_with:
             return self.reply(500, FakeSpacesd.fail_with.encode(), "text/plain")
         if self.path == "/mcp":
             return self.mcp(json.loads(body))
-        message = bytes(body[5:])
         if self.path == "/cua.env.v1.SystemService/CreateViewerTicket":
             assert message.hex() == VIEWER_REQUEST
+            if FakeSpacesd.mint_gate:
+                FakeSpacesd.mint_gate.wait(10)
             answer = bridge.field_string(1, "T" * 24) + bridge.field_bytes(2, bridge.field_varint(1, 1_793_000_000)) + bridge.field_string(3, "/viewer/#ticket=" + "T" * 24)
-            return self.reply(200, frame(answer) + frame(b"grpc-status:0\r\n", 0x80))
+            return self.reply(200, frame(answer) + TRAILERS)
         if self.path == "/cua.env.v1.ProcessService/StartProcess":
             return self.start_process(message)
-        self.reply(200, b"", headers=[("grpc-status", "12")])
+        if self.path == "/cua.env.v1.ProcessService/ListProcesses":
+            prefix = bridge.last(bridge.parse(message), 2, b"").decode()
+            running = [bridge.field_bytes(1, bridge.field_varint(1, process.pid) + bridge.field_string(2, tag) + bridge.field_varint(5, 1)) for tag, process in list(FakeSpacesd.processes.items()) if tag.startswith(prefix) and process.poll() is None]
+            return self.reply(200, frame(b"".join(running)) + TRAILERS)
+        if self.path == "/cua.env.v1.StreamService/CloseMedia":
+            if FakeSpacesd.close_fails:
+                return self.grpc_error(14)
+            session = bridge.last(bridge.parse(message), 1, b"").decode()
+            if FakeSpacesd.media.pop(session, None) is None:
+                return self.grpc_error(5)
+            return self.reply(200, frame(b"") + TRAILERS)
+        self.grpc_error(12)
+
+    def open_media(self):
+        # The viewer's own call: spacesd checks its viewer ticket, never the bridge's root token.
+        FakeSpacesd.media_auth.append(self.headers.get("x-cua-env-authorization"))
+        if self.headers.get("x-cua-env-authorization") != "Bearer " + VIEWER_TICKET:
+            return self.grpc_error(16)
+        session = "ms-%d" % (len(FakeSpacesd.media) + 1 + len(FakeSpacesd.calls))
+        FakeSpacesd.media[session] = True
+        answer = bridge.field_string(1, session) + bridge.field_string(2, "v1.media") + bridge.field_string(4, "/media?ticket=v1.media")
+        self.reply(200, frame(answer) + TRAILERS)
 
     def start_process(self, message):
         request = bridge.parse(message)
@@ -90,19 +134,42 @@ class FakeSpacesd(http.server.BaseHTTPRequestHandler):
             pair = bridge.parse(entry)
             env[bridge.last(pair, 1).decode()] = bridge.last(pair, 2).decode()
         FakeSpacesd.users.append(bridge.last(config, 5).decode())
-        timeout = bridge.last(bridge.parse(bridge.last(config, 6)), 1)
+        tag = bridge.last(request, 3, b"").decode()
+        FakeSpacesd.tags.append(tag)
         env["PATH"] = os.environ["PATH"]
         env["HOME"] = os.environ.get("HOME", "/tmp")
+        process = subprocess.Popen(command, env=env, cwd=bridge.last(config, 4).decode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        FakeSpacesd.processes[tag] = process
+        self.send_response(200)
+        self.send_header("Content-Type", "application/grpc-web+proto")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        sent = [frame(bridge.field_bytes(1, bridge.field_bytes(1, bridge.field_varint(1, process.pid))))]
+        stderr = []
+        reader = threading.Thread(target=lambda: stderr.append(process.stderr.read()))
+        reader.start()
         try:
-            done = subprocess.run(command, env=env, cwd=bridge.last(config, 4).decode(), capture_output=True, timeout=timeout)
-            data = frame(bridge.field_bytes(1, bridge.field_bytes(2, bridge.field_bytes(2, done.stdout)))) if done.stdout else b""
-            if done.stderr:
-                data += frame(bridge.field_bytes(1, bridge.field_bytes(2, bridge.field_bytes(3, done.stderr))))
-            end = bridge.varint(8) + bridge.varint(done.returncode) if done.returncode >= 0 else bridge.field_varint(2, -done.returncode)
-        except subprocess.TimeoutExpired:
-            data, end = b"", bridge.field_varint(2, 15) + bridge.field_varint(3, 1)
-        start = frame(bridge.field_bytes(1, bridge.field_bytes(1, bridge.field_varint(1, 4242))))
-        self.reply(200, start + data + frame(bridge.field_bytes(1, bridge.field_bytes(3, end))) + frame(b"grpc-status:0\r\n", 0x80))
+            self.wfile.write(sent[0])
+            self.wfile.flush()
+            while True:
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                self.wfile.write(frame(bridge.field_bytes(1, bridge.field_bytes(2, bridge.field_bytes(2, chunk)))))
+                self.wfile.flush()
+            code = process.wait()
+            reader.join()
+            if stderr[0]:
+                self.wfile.write(frame(bridge.field_bytes(1, bridge.field_bytes(2, bridge.field_bytes(3, stderr[0])))))
+            end = bridge.varint(8) + bridge.varint(code) if code >= 0 else bridge.field_varint(2, -code)
+            self.wfile.write(frame(bridge.field_bytes(1, bridge.field_bytes(3, end))) + TRAILERS)
+        except OSError:
+            # The bridge stopped listening: a command's helper goes on, as spacesd's detached processes do.
+            if bridge.last(request, 7, 0):
+                process.terminate()
+        finally:
+            threading.Thread(target=lambda: (reader.join(), process.stdout.close(), process.stderr.close()), daemon=True).start()
+        self.close_connection = True
 
     def mcp(self, request):
         if request.get("method") == "initialize":
@@ -111,6 +178,7 @@ class FakeSpacesd(http.server.BaseHTTPRequestHandler):
             return self.reply(404, b"", "application/json")
         if "id" not in request:
             return self.reply(202, b"", "application/json")
+        time.sleep(FakeSpacesd.mcp_delay)
         answer = FakeSpacesd.mcp_answer or {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"echo": request["params"]}}
         self.reply(200, json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": answer}).encode(), "application/json")
 
@@ -119,47 +187,61 @@ class BridgeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.fake = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeSpacesd)
+        cls.fake.daemon_threads = True
         threading.Thread(target=cls.fake.serve_forever, daemon=True).start()
 
     @classmethod
     def tearDownClass(cls):
         cls.fake.shutdown()
+        cls.fake.server_close()
 
     def setUp(self):
+        FakeSpacesd.reset()
         self.base = tempfile.mkdtemp()
         self.root = os.path.join(self.base, "home", "pim")
         os.makedirs(self.root)
-        env_file = os.path.join(self.base, "spacesd.env")
-        with open(env_file, "w") as handle:
+        self.env_file = os.path.join(self.base, "spacesd.env")
+        with open(self.env_file, "w") as handle:
             handle.write("# spacesd\nCUA_ENV_TOKEN=%s\n" % ROOT_TOKEN)
-        self.config = bridge.load_config(
-            {
-                "PIM_BRIDGE_LISTEN": "127.0.0.1:0",
-                "PIM_BRIDGE_TOKEN_SHA256": hashlib.sha256(CREDENTIAL.encode()).hexdigest(),
-                "PIM_BRIDGE_RUN_AS": "cua",
-                "PIM_BRIDGE_ROOT": self.root,
-                "PIM_BRIDGE_SPACESD_ENV": env_file,
-                "PIM_BRIDGE_PYTHON": sys.executable,
-            }
-        )
-        self.server = bridge.serve(self.config, bridge.Spacesd(ROOT_TOKEN, self.fake.server_address))
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.environ = {
+            "PIM_BRIDGE_LISTEN": "127.0.0.1:0",
+            "PIM_BRIDGE_TOKEN_SHA256": hashlib.sha256(CREDENTIAL.encode()).hexdigest(),
+            "PIM_BRIDGE_RUN_AS": "pim-agent",
+            "PIM_BRIDGE_ROOT": self.root,
+            "PIM_BRIDGE_SPACESD_ENV": self.env_file,
+            "PIM_BRIDGE_PYTHON": sys.executable,
+            "PIM_BRIDGE_STATE": os.path.join(self.base, "state.json"),
+        }
+        self.config = bridge.load_config(self.environ, groups_of=lambda user: set())
         self.log = io.StringIO()
         self.redirect = redirect_stderr(self.log)
         self.redirect.__enter__()
-        FakeSpacesd.calls, FakeSpacesd.users, FakeSpacesd.mcp_answer, FakeSpacesd.fail_with = [], [], None, None
+        self.start()
+
+    def start(self):
+        self.server = bridge.serve(self.config, bridge.Spacesd(ROOT_TOKEN, self.fake.server_address))
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def restart(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.start()
 
     def tearDown(self):
         self.redirect.__exit__(None, None, None)
         self.server.shutdown()
         self.server.server_close()
+        for process in FakeSpacesd.processes.values():
+            if process.poll() is None:
+                os.killpg(process.pid, 9)
+                process.wait()
         shutil.rmtree(self.base)
-        # Neither secret ever reaches the log.
-        self.assertNotIn(CREDENTIAL, self.log.getvalue())
-        self.assertNotIn(ROOT_TOKEN, self.log.getvalue())
+        # Neither secret, nor a viewer ticket, ever reaches the log.
+        for secret in (CREDENTIAL, ROOT_TOKEN, VIEWER_TICKET):
+            self.assertNotIn(secret, self.log.getvalue())
 
-    def request(self, route, body=None, token=CREDENTIAL, method="POST", headers=None, raw=None):
-        connection = http.client.HTTPConnection(*self.server.server_address, timeout=30)
+    def request(self, route, body=None, token=CREDENTIAL, method="POST", headers=None, raw=None, timeout=30):
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=timeout)
         data = raw if raw is not None else json.dumps(body if body is not None else {}).encode()
         sent = {"Content-Type": "application/json", "Content-Length": str(len(data))}
         if token is not None:
@@ -171,8 +253,41 @@ class BridgeTest(unittest.TestCase):
         connection.close()
         return response.status, answer
 
-    def call(self, op, **args):
-        status, answer = self.request("call", {"op": op, "args": args})
+    def open_media(self, ticket=VIEWER_TICKET):
+        """The viewer's OpenMedia, as Caddy hands it on: (status, grpc-status, session id or None)."""
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=30)
+        message = b"\x0a\x02\x0a\x00"
+        connection.request("POST", bridge.MEDIA_ROUTE, body=frame(message), headers={"Content-Type": "application/grpc-web+proto", "x-cua-env-authorization": "Bearer " + ticket, "x-grpc-web": "1"})
+        response = connection.getresponse()
+        body = response.read()
+        connection.close()
+        if response.status != 200:
+            return response.status, None, None
+        status = response.getheader("grpc-status")
+        session = None
+        if body:
+            ok, session = bridge.opened_media({k.lower(): v for k, v in response.getheaders()}, body)
+            status = "0" if ok else status
+        return response.status, status, session
+
+    def lease(self):
+        """Gives the machine to the agents, as the person resuming them in Pim does: their lease."""
+        status, view = self.request("status")
+        status, view = self.request("resume", {"epoch": view["epoch"]})
+        self.assertEqual((status, view["mode"]), (200, "agents"), view)
+        return view["epoch"]
+
+    def pause(self, until="human", seconds=15):
+        deadline = time.monotonic() + seconds
+        while True:
+            status, view = self.request("pause")
+            self.assertEqual(status, 200, view)
+            if view["mode"] == until or time.monotonic() > deadline:
+                return view
+            time.sleep(0.2)
+
+    def call(self, op, lease=None, **args):
+        status, answer = self.request("call", {"op": op, "args": args, "lease": lease or self.current})
         self.assertEqual(status, 200, answer)
         return answer
 
@@ -181,25 +296,35 @@ class BridgeTest(unittest.TestCase):
     def test_refuses_to_start_without_sound_settings(self):
         good = {
             "PIM_BRIDGE_TOKEN_SHA256": "ab" * 32,
-            "PIM_BRIDGE_RUN_AS": "cua",
-            "PIM_BRIDGE_ROOT": "/home/cua/pim",
-            "PIM_BRIDGE_SPACESD_ENV": os.path.join(self.base, "spacesd.env"),
+            "PIM_BRIDGE_RUN_AS": "pim-agent",
+            "PIM_BRIDGE_ROOT": "/home/pim-agent/pim",
+            "PIM_BRIDGE_SPACESD_ENV": self.env_file,
         }
-        bridge.load_config(good)
-        for change, said in [
-            ({"PIM_BRIDGE_LISTEN": "0.0.0.0:3290"}, "loopback"),
-            ({"PIM_BRIDGE_LISTEN": "10.0.0.4:3290"}, "loopback"),
-            ({"PIM_BRIDGE_TOKEN_SHA256": "short"}, "SHA-256"),
-            ({"PIM_BRIDGE_TOKEN_SHA256": ""}, "SHA-256"),
-            ({"PIM_BRIDGE_RUN_AS": "root"}, "not root"),
-            ({"PIM_BRIDGE_ROOT": "/"}, "PIM_BRIDGE_ROOT"),
-            ({"PIM_BRIDGE_ROOT": "/home"}, "PIM_BRIDGE_ROOT"),
-            ({"PIM_BRIDGE_SPACESD_ENV": "/nonexistent/spacesd.env"}, "spacesd env file"),
+        bridge.load_config(good, groups_of=lambda user: set())
+        for change, groups, said in [
+            ({"PIM_BRIDGE_LISTEN": "0.0.0.0:3290"}, set(), "loopback"),
+            ({"PIM_BRIDGE_LISTEN": "10.0.0.4:3290"}, set(), "loopback"),
+            ({"PIM_BRIDGE_TOKEN_SHA256": "short"}, set(), "SHA-256"),
+            ({"PIM_BRIDGE_TOKEN_SHA256": ""}, set(), "SHA-256"),
+            ({"PIM_BRIDGE_RUN_AS": "root"}, set(), "not root"),
+            ({}, {"sudo"}, "without administrator rights"),
+            ({}, None, "no user"),
+            ({"PIM_BRIDGE_ROOT": "/"}, set(), "PIM_BRIDGE_ROOT"),
+            ({"PIM_BRIDGE_ROOT": "/home"}, set(), "PIM_BRIDGE_ROOT"),
+            ({"PIM_BRIDGE_SPACESD_ENV": "/nonexistent/spacesd.env"}, set(), "spacesd env file"),
         ]:
             with self.assertRaises(SystemExit) as refused:
-                bridge.load_config({**good, **change})
+                bridge.load_config({**good, **change}, groups_of=lambda user, groups=groups: groups)
             self.assertIn(said, str(refused.exception))
             self.assertNotIn(ROOT_TOKEN, str(refused.exception))
+        # Root itself counts as an administrator, whatever its groups.
+        self.assertEqual(bridge.admin_groups("root"), {"root"})
+        self.assertIsNone(bridge.admin_groups("no-such-user-pim"))
+        # A state file it didn't write is refused, not taken as the person's or the agents'.
+        with open(self.config["state"], "w") as handle:
+            handle.write('{"mode": "agents", "epoch": "7"}')
+        with self.assertRaises(SystemExit):
+            bridge.State(self.config["state"])
 
     # ── Protocol buffers ──
 
@@ -209,6 +334,17 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual((bridge.int32(bridge.last(end, 1)), bridge.last(end, 2), bridge.last(end, 3)), (-3, 15, 1))
         data = bridge.parse(bridge.last(bridge.parse(bridge.last(bridge.parse(bytes.fromhex(DATA_EVENT)), 1)), 2))
         self.assertEqual((bridge.last(data, 1), bridge.last(data, 3)), (300, b"warn\n"))
+        opened = frame(bytes.fromhex(OPEN_MEDIA_RESPONSE)) + TRAILERS
+        self.assertEqual(bridge.opened_media({}, opened), (True, "ms-42"))
+        self.assertEqual(bridge.opened_media({"grpc-status": "16"}, b""), (False, None))
+        with self.assertRaises(ValueError):
+            bridge.opened_media({}, opened[:-3])
+
+        class Lists:
+            def grpc(self, method, message, timeout):
+                yield bytes.fromhex(LIST_PROCESSES_RESPONSE)
+
+        self.assertEqual(bridge.running_agent_processes(Lists()), 2)
 
     # ── Who may call, and how ──
 
@@ -219,8 +355,10 @@ class BridgeTest(unittest.TestCase):
         # The root token is spacesd's, not a credential for the bridge.
         self.assertEqual(self.request("status", token=ROOT_TOKEN)[0], 401)
         self.assertEqual(self.request("status", token=None, headers={"Authorization": "Bearer " + CREDENTIAL})[0], 401)
+        # A viewer ticket opens only the viewer's route, and Pim's credential not that one.
+        self.assertEqual(self.request("status", token=VIEWER_TICKET)[0], 401)
         status, answer = self.request("status")
-        self.assertEqual((status, answer), (200, {"ok": True, "inflight": 0, "version": bridge.VERSION}))
+        self.assertEqual((status, answer["mode"], answer["inflight"]), (200, "human", 0))
 
     def test_too_many_failures_lock_everyone_out_for_a_while(self):
         for _ in range(bridge.AUTH_FAILURES[0]):
@@ -228,27 +366,198 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(self.request("status")[0], 429)
 
     def test_takes_only_exact_routes_methods_and_small_json(self):
+        self.current = self.lease()
+        FakeSpacesd.calls = []
         self.assertEqual(self.request("status", method="GET")[0], 405)
         self.assertEqual(self.request("mint")[0], 404)
         self.assertEqual(self.request("status?x=1")[0], 404)
         self.assertEqual(self.request("call/../status")[0], 404)
+        self.assertEqual(self.request("media/open")[0], 415)
         self.assertEqual(self.request("status", raw=b"x" * (bridge.MAX_BODY + 1))[0], 413)
         self.assertEqual(self.request("status", headers={"Content-Type": "text/plain"})[0], 415)
         self.assertEqual(self.request("call", raw=b"[1]")[0], 400)
-        self.assertEqual(self.request("call", {"op": "chmod", "args": {"path": "/workspace"}})[0], 400)
-        self.assertEqual(self.request("call", {"op": "stat", "args": {"path": "/workspace", "follow": True}})[0], 400)
-        self.assertEqual(self.request("call", {"op": "read", "args": {"path": "/workspace/a", "length": 10**9}})[0], 400)
-        self.assertEqual(self.request("call", {"op": "stat", "args": {"path": "/etc/passwd"}})[0], 400)
+        for op, args in [
+            ("chmod", {"path": "/workspace"}),
+            ("stat", {"path": "/workspace", "follow": True}),
+            ("read", {"path": "/workspace/a", "length": 10**9}),
+            ("stat", {"path": "/etc/passwd"}),
+        ]:
+            self.assertEqual(self.request("call", {"op": op, "args": args, "lease": self.current})[0], 400, op)
         # Nothing reached spacesd.
         self.assertEqual(FakeSpacesd.calls, [])
 
+    # ── Who has the machine ──
+
+    def test_the_agents_call_only_under_their_lease_while_the_machine_is_theirs(self):
+        stat = {"op": "stat", "args": {"path": "/workspace"}}
+        # It starts as the person's: nothing of the agents' runs, whatever lease they name.
+        for lease in (None, 0, 1, 2):
+            status, answer = self.request("call", {**stat, "lease": lease})
+            self.assertEqual((status, answer["error"]["code"]), (423, "paused"))
+        lease = self.lease()
+        self.assertEqual(self.request("call", {**stat, "lease": lease})[0], 200)
+        self.assertEqual(self.request("call", {**stat, "lease": lease - 1})[0], 423)
+        self.assertEqual(self.pause()["mode"], "human")
+        # A call that arrives late, from before the pause, is refused, and so is one after the next resume.
+        self.assertEqual(self.request("call", {**stat, "lease": lease})[0], 423)
+        newer = self.lease()
+        self.assertGreater(newer, lease)
+        self.assertEqual(self.request("call", {**stat, "lease": lease})[0], 423)
+        self.assertEqual(self.request("driver", {"tool": "end_session", "arguments": {"session": "pim"}, "lease": lease})[0], 423)
+        self.assertEqual(self.request("call", {**stat, "lease": newer})[0], 200)
+
+    def test_resuming_needs_the_pause_the_person_saw_and_a_complete_pause(self):
+        epoch = self.request("status")[1]["epoch"]
+        self.assertEqual(self.request("resume", {"epoch": epoch - 1})[1]["error"]["code"], "stale")
+        lease = self.request("resume", {"epoch": epoch})[1]["epoch"]
+        self.assertEqual(self.request("resume", {"epoch": lease})[1]["error"]["code"], "not-paused")
+        # While the agents' work finishes, resuming is refused: nothing hands the machine back half-paused.
+        self.current = lease
+        running = threading.Thread(target=lambda: self.call("exec", command="sleep 1.5"))
+        running.start()
+        time.sleep(0.5)
+        draining = self.request("pause")[1]
+        self.assertEqual((draining["mode"], draining["inflight"]), ("draining", 1))
+        status, answer = self.request("resume", {"epoch": draining["epoch"]})
+        self.assertEqual((status, answer["error"]["code"]), (409, "not-paused"))
+        running.join()
+        self.assertEqual(self.pause()["mode"], "human")
+
+    def test_a_pause_waits_for_what_commands_left_running_however_they_left(self):
+        self.current = self.lease()
+        started = time.monotonic()
+        ran = self.call("exec", command="(sleep 1.5; touch late-nohup) > /dev/null 2>&1 & setsid sh -c 'sleep 2.5; touch late-setsid' > /dev/null 2>&1 < /dev/null & echo started")["result"]
+        # The command's answer comes when the shell ends, not when what it left does.
+        self.assertEqual((ran["exitCode"], ran["stdout"]), (0, "started\n"))
+        self.assertLess(time.monotonic() - started, 1.4)
+        view = self.request("pause")[1]
+        self.assertEqual((view["mode"], view["background"]), ("draining", 1))
+        self.assertEqual(self.request("viewer")[1]["error"]["code"], "busy")
+        view = self.pause()
+        self.assertEqual(view["mode"], "human")
+        # By then even what escaped into a session of its own had done what it was going to.
+        self.assertTrue(os.path.exists(os.path.join(self.root, "late-nohup")))
+        self.assertTrue(os.path.exists(os.path.join(self.root, "late-setsid")))
+        self.assertGreater(time.monotonic() - started, 2.4)
+
+    def test_a_pause_waits_for_a_call_whose_caller_gave_up_waiting(self):
+        lease = self.lease()
+        # Pim stops waiting after a second; the driver call goes on, and so does the agents' hold on the machine.
+        FakeSpacesd.mcp_delay = 2
+        with self.assertRaises(OSError):
+            self.request("driver", {"tool": "end_session", "arguments": {"session": "pim"}, "lease": lease}, timeout=1)
+        view = self.request("pause")[1]
+        self.assertEqual((view["mode"], view["inflight"]), ("draining", 1))
+        self.assertEqual(self.request("viewer")[1]["error"]["code"], "busy")
+        started = time.monotonic()
+        self.assertEqual(self.pause()["mode"], "human")
+        self.assertGreater(time.monotonic() - started, 0.5)
+
+    def test_a_restart_keeps_who_has_the_machine_and_waits_out_what_it_forgot(self):
+        lease = self.lease()
+        # A process of the agents' that the restarted bridge knows nothing of, still running in spacesd.
+        FakeSpacesd.processes["pim-exec-%d-old" % lease] = subprocess.Popen(["sleep", "3"], start_new_session=True)
+        bridge.QUIET_AFTER_RESTART, quiet = 1, bridge.QUIET_AFTER_RESTART
+        try:
+            self.restart()
+            view = self.request("status")[1]
+            self.assertEqual(view["mode"], "draining")
+            self.assertGreater(view["epoch"], lease)
+            self.assertEqual(self.request("call", {"op": "stat", "args": {"path": "/workspace"}, "lease": lease})[0], 423)
+            view = self.request("pause")[1]
+            self.assertEqual(view["mode"], "draining")
+            self.assertEqual(self.pause()["mode"], "human")
+            self.assertIsNotNone(FakeSpacesd.processes["pim-exec-%d-old" % lease].poll())
+        finally:
+            bridge.QUIET_AFTER_RESTART = quiet
+        # And the person's state outlives a restart too.
+        self.restart()
+        self.assertEqual(self.request("status")[1]["mode"], "human")
+
+    def test_a_pause_stays_incomplete_while_spacesd_cant_say_what_runs(self):
+        self.current = self.lease()
+        FakeSpacesd.fail_with = "down"
+        status, answer = self.request("pause")
+        self.assertEqual(status, 502)
+        FakeSpacesd.fail_with = None
+        self.assertEqual(self.request("status")[1]["mode"], "draining")
+        self.assertEqual(self.pause()["mode"], "human")
+
+    # ── The person's viewer ──
+
+    def test_the_viewer_opens_media_only_while_the_machine_is_the_persons_and_resuming_closes_it(self):
+        status, ticket = self.request("viewer")
+        self.assertEqual((status, ticket["viewerPath"]), (200, "/viewer/#ticket=" + "T" * 24))
+        _, grpc, first = self.open_media()
+        _, _, second = self.open_media()
+        self.assertEqual(grpc, "0")
+        self.assertEqual(sorted(FakeSpacesd.media), sorted([first, second]))
+        # The viewer's call reached spacesd with its own ticket only, never the root token.
+        self.assertEqual(set(FakeSpacesd.media_auth), {"Bearer " + VIEWER_TICKET})
+        self.assertEqual(self.open_media(ticket="v1." + "W" * 40)[1], "16")
+        self.assertEqual(self.open_media(ticket=ROOT_TOKEN)[0], 401)
+        self.assertEqual(self.request("status")[1]["viewerSessions"], 2)
+        lease = self.lease()
+        # Every one of the person's sessions was closed before the agents got the machine.
+        self.assertEqual(FakeSpacesd.media, {})
+        self.assertEqual(self.request("status")[1]["viewerSessions"], 0)
+        # Its still-valid viewer ticket opens nothing now, and no new ticket is made.
+        self.assertEqual(self.open_media()[1], "9")
+        self.assertEqual(FakeSpacesd.media, {})
+        self.assertEqual(self.request("viewer")[1]["error"]["code"], "busy")
+        self.current = lease
+        self.assertIn("result", self.call("stat", path="/workspace"))
+
+    def test_the_agents_stay_paused_when_a_viewer_session_wont_close(self):
+        self.open_media()
+        FakeSpacesd.close_fails = True
+        epoch = self.request("status")[1]["epoch"]
+        status, answer = self.request("resume", {"epoch": epoch})
+        self.assertEqual((status, answer["error"]["code"]), (502, "handoff"))
+        view = self.request("status")[1]
+        self.assertEqual((view["mode"], view["viewerSessions"]), ("human", 1))
+        self.assertEqual(self.request("call", {"op": "stat", "args": {"path": "/workspace"}, "lease": epoch})[0], 423)
+        FakeSpacesd.close_fails = False
+        # A session spacesd already ended counts as closed.
+        FakeSpacesd.media.clear()
+        self.assertEqual(self.request("resume", {"epoch": epoch})[1]["mode"], "agents")
+
+    def test_a_ticket_minted_as_the_agents_resume_opens_nothing(self):
+        FakeSpacesd.mint_gate = threading.Event()
+        minted = []
+        minting = threading.Thread(target=lambda: minted.append(self.request("viewer")))
+        minting.start()
+        time.sleep(0.3)
+        epoch = self.request("status")[1]["epoch"]
+        resumed = []
+        resuming = threading.Thread(target=lambda: resumed.append(self.request("resume", {"epoch": epoch})))
+        resuming.start()
+        time.sleep(0.3)
+        # The resume waits for the ticket being made…
+        self.assertEqual(resumed, [])
+        FakeSpacesd.mint_gate.set()
+        minting.join()
+        resuming.join()
+        self.assertEqual((minted[0][0], resumed[0][1]["mode"]), (200, "agents"))
+        # …and the ticket then opens no media session.
+        self.assertEqual(self.open_media()[1], "9")
+        self.assertEqual(FakeSpacesd.media, {})
+
+    def test_media_sessions_are_remembered_across_a_restart(self):
+        _, _, session = self.open_media()
+        self.restart()
+        self.lease()
+        self.assertNotIn(session, FakeSpacesd.media)
+
     # ── Files and commands ──
 
-    def test_keeps_files_under_the_root_as_the_desktop_user(self):
+    def test_keeps_files_under_the_root_as_the_agents_user(self):
+        self.current = self.lease()
         payload = bridge.base64.b64encode(b"# Lisbon\nFlight TP 202\n").decode()
         self.assertEqual(self.call("mkdir", path="/workspace/trips", recursive=True), {"result": None})
         self.assertEqual(self.call("write", path="/workspace/trips/lisbon.md", data=payload), {"result": None})
-        self.assertEqual(FakeSpacesd.users, ["cua", "cua"])
+        self.assertEqual(FakeSpacesd.users, ["pim-agent", "pim-agent"])
+        self.assertTrue(all(tag.startswith("pim-call-%d-" % self.current) for tag in FakeSpacesd.tags))
         with open(os.path.join(self.root, "trips", "lisbon.md")) as handle:
             self.assertEqual(handle.read(), "# Lisbon\nFlight TP 202\n")
         read = self.call("read", path="/workspace/trips/lisbon.md", offset=2, length=6)["result"]
@@ -268,6 +577,7 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(self.call("rm", path="/workspace")["error"]["code"], "EPERM")
 
     def test_links_and_dot_dots_dont_lead_out_of_the_root(self):
+        self.current = self.lease()
         outside = os.path.join(self.base, "outside")
         os.makedirs(outside)
         with open(os.path.join(outside, "secret.txt"), "w") as handle:
@@ -282,6 +592,7 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(self.call("exec", command="pwd", cwd="/workspace/..")["error"]["code"], "EACCES")
 
     def test_runs_commands_in_the_root_with_their_output_and_exit_code(self):
+        self.current = self.lease()
         ran = self.call("exec", command='echo "in $PWD for $PIM_WORKSPACE"; echo warn >&2; exit 3', timeoutMs=20_000, maxBytes=64_000)["result"]
         real = os.path.realpath(self.root)
         self.assertEqual(ran, {"exitCode": 3, "signal": None, "stdout": "in %s for %s\n" % (real, real), "stderr": "warn\n", "timedOut": False, "truncated": False})
@@ -290,21 +601,15 @@ class BridgeTest(unittest.TestCase):
         self.assertIn("[… output cut …]", cut["stdout"])
         # The command never sees the request it came in.
         self.assertEqual(self.call("exec", command='echo "${PIM_FSOP_REQUEST:-none}"')["result"]["stdout"], "none\n")
-
-    def test_no_viewer_ticket_while_an_agent_call_is_under_way(self):
-        started = threading.Thread(target=lambda: self.call("exec", command="sleep 1.5"))
-        started.start()
-        time.sleep(0.5)
-        status, answer = self.request("viewer")
-        self.assertEqual((status, answer["error"]["code"]), (409, "busy"))
-        self.assertEqual(self.request("status")[1]["inflight"], 1)
-        started.join()
-        status, answer = self.request("viewer")
-        self.assertEqual((status, answer), (200, {"viewerPath": "/viewer/#ticket=" + "T" * 24, "expiresAt": 1_793_000_000}))
+        slow = self.call("exec", command="echo before; sleep 30", timeoutMs=1000)["result"]
+        self.assertEqual((slow["timedOut"], slow["exitCode"], slow["signal"], slow["stdout"]), (True, None, "SIGTERM", "before\n"))
+        self.assertTrue(all(tag.startswith("pim-exec-%d-" % self.current) for tag in FakeSpacesd.tags))
 
     # ── The browser ──
 
     def test_calls_only_the_driver_tools_it_knows_in_their_fixed_shapes(self):
+        lease = self.lease()
+        FakeSpacesd.calls = []
         for tool, arguments in [
             ("launch_app", {"name": "xterm"}),
             ("page", {"action": "execute_javascript"}),
@@ -315,27 +620,26 @@ class BridgeTest(unittest.TestCase):
             ("browser_click", {"session": "pim", "target_id": "t", "tab_id": "a", "ref": "p1:2", "input_route": "dom_event"}),
             ("browser_type", {"session": "pim", "target_id": "t", "tab_id": "a", "ref": "p1:2", "text": "x" * 2001}),
         ]:
-            status, _ = self.request("driver", {"tool": tool, "arguments": arguments})
+            status, _ = self.request("driver", {"tool": tool, "arguments": arguments, "lease": lease})
             self.assertIn(status, (400, 413), tool)
         self.assertEqual(FakeSpacesd.calls, [])
         arguments = {"session": "pim", "target_id": "t", "tab_id": "a", "url": "https://example.com/"}
-        status, answer = self.request("driver", {"tool": "browser_navigate", "arguments": arguments})
+        status, answer = self.request("driver", {"tool": "browser_navigate", "arguments": arguments, "lease": lease})
         self.assertEqual((status, answer), (200, {"structured": {"echo": {"name": "browser_navigate", "arguments": arguments}}, "text": "ok", "image": None, "isError": False}))
         self.assertEqual(FakeSpacesd.calls, ["/mcp", "/mcp", "/mcp"])
 
     # ── Failures ──
 
     def test_failures_upstream_say_nothing_of_what_came_back(self):
+        self.current = self.lease()
         FakeSpacesd.fail_with = "boom " + ROOT_TOKEN
-        status, answer = self.request("call", {"op": "stat", "args": {"path": "/workspace"}})
+        status, answer = self.request("call", {"op": "stat", "args": {"path": "/workspace"}, "lease": self.current})
         self.assertEqual((status, answer["error"]["message"]), (502, "The Cua computer refused the call (HTTP 500)."))
-        status, answer = self.request("viewer")
-        self.assertEqual(status, 502)
         self.assertNotIn(ROOT_TOKEN, json.dumps(answer))
         FakeSpacesd.fail_with = None
-        unauthenticated = bridge.Bridge(self.config, bridge.Spacesd("wrong-root-token-xxxx", self.fake.server_address))
+        unauthenticated = bridge.Spacesd("wrong-root-token-xxxx", self.fake.server_address)
         with self.assertRaises(bridge.Refusal) as refused:
-            unauthenticated.dispatch("viewer", {})
+            bridge.mint_viewer(unauthenticated)
         self.assertEqual(str(refused.exception), "The Cua computer refused the call (unauthenticated).")
 
 

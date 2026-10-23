@@ -1,0 +1,46 @@
+# pim-cua-bridge's routes, for the Cua evaluation VM's site block (see docs/cua-evaluation.md).
+# Not applied by anything in this repository. Import it at the top of the existing
+# `cua-eval.ajac-zero.com { … }` block, above its other routes, and take
+# /cua.env.v1.StreamService/OpenMedia out of the viewer's existing allowlist: it is served here.
+#
+# Pim's four POST routes reach the bridge with Pim's own credential (X-Pim-Bridge-Authorization),
+# which the bridge checks; the site's HTTP Basic login is neither asked for nor passed on. The
+# viewer's OpenMedia reaches the bridge with its viewer ticket, which spacesd checks. Nothing
+# else under /pim-bridge/ does, nothing with a query does, and spacesd's 3211 stays private.
+# Headers a client could forge to look like it came from elsewhere, and its credentials, don't
+# reach the bridge.
+
+@pim_bridge {
+	method POST
+	path /pim-bridge/v1/status /pim-bridge/v1/call /pim-bridge/v1/driver /pim-bridge/v1/viewer /pim-bridge/v1/pause /pim-bridge/v1/resume
+	expression {http.request.uri.query} == ""
+	# Optional, where the Pim preview's address is known and stable:
+	# remote_ip 203.0.113.7/32
+}
+handle @pim_bridge {
+	request_body {
+		max_size 192KiB
+	}
+	reverse_proxy {$PIM_BRIDGE_UPSTREAM:127.0.0.1:3290} {
+		import pim-bridge-strip.caddy
+	}
+}
+
+@pim_bridge_media {
+	method POST
+	path /cua.env.v1.StreamService/OpenMedia
+	expression {http.request.uri.query} == ""
+}
+handle @pim_bridge_media {
+	request_body {
+		max_size 64KiB
+	}
+	rewrite * /pim-bridge/v1/media/open
+	reverse_proxy {$PIM_BRIDGE_UPSTREAM:127.0.0.1:3290} {
+		import pim-bridge-strip.caddy
+	}
+}
+
+handle /pim-bridge/* {
+	respond 404
+}

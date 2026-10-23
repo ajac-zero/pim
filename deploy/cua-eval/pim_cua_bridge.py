@@ -1,30 +1,48 @@
 #!/usr/bin/env python3
-"""pim-cua-bridge: the few calls a Pim's Cua evaluation provider makes, on one Cua machine.
+"""pim-cua-bridge: who has one Cua machine, Pim's agents or the person, and the few calls the agents make there.
 
 A private evaluation prototype, not a product (see docs/cua-evaluation.md). It runs on the Cua
-VM, bound to loopback, behind the VM's Caddy, which proxies exactly /pim-bridge/v1/{status,call,
-driver,viewer} to it. It is the only holder of cua-spacesd's root token besides spacesd itself:
-Pim sends its own machine credential, never the root token, and the root token never leaves the
-VM. Every call goes to the one spacesd on this machine at 127.0.0.1:3211, which is fixed: no call
-names a URL, a host or a spacesd method.
+VM, bound to loopback, behind the VM's Caddy (Caddyfile.pim-bridge). It is the only holder of
+cua-spacesd's root token besides spacesd itself: Pim sends its own machine credential, never the
+root token, and the root token never leaves the VM. Every call goes to the one spacesd on this
+machine at 127.0.0.1:3211, which is fixed: no call names a URL, a host or a spacesd method.
 
-- `status`: whether spacesd answers, and how many agent calls are under way here.
+The bridge, not Pim, decides who has the machine, and keeps it in a file (PIM_BRIDGE_STATE) so a
+restart keeps it: `human` (the default, and where it starts with no file), `agents`, `draining`
+(agents' work is finishing) or `handoff` (the person's viewer sessions are closing). Agents' calls
+carry the lease Pim was given when the person resumed them, and run only while the machine is the
+agents' under that same lease. The person's viewer opens its media sessions through the bridge
+(`media/open`), which records each one and refuses while agents have the machine; resuming closes
+every one of them first (StreamService.CloseMedia). Viewer tickets can't open anything once agents
+have the machine, since the only way they reach the desktop is a media session.
+
+Pim's routes, with its credential in X-Pim-Bridge-Authorization:
+
+- `status`: who has the machine, its lease, and what of the agents' is still under way.
 - `call`: one of pim-computer's file and command calls (computer/pim-computer.ts's `handle`):
   stat, read, write, mkdir, rm, rename, readdir, find, grep, exec. Each runs as one process that
-  spacesd starts as PIM_BRIDGE_RUN_AS (never root), which checks its paths against
-  PIM_BRIDGE_ROOT after following links, as pim-computer does.
-- `driver`: one of eight cua-driver tools for the browser over spacesd's /mcp, with fixed shapes: one
-  driver session (`pim`), an isolated named profile (`pim`), never an existing profile.
-- `viewer`: a short-lived viewer ticket (SystemService.CreateViewerTicket) for the person, refused
-  while any agent call is under way here.
+  spacesd starts, tagged `pim-…`, as PIM_BRIDGE_RUN_AS (never root nor an administrator), which
+  checks its paths against PIM_BRIDGE_ROOT after following links. A command's process stays,
+  as the subreaper of everything the command started, until the last of those ends.
+- `driver`: one of eight cua-driver tools for the browser over spacesd's /mcp, with fixed shapes:
+  one driver session (`pim`), an isolated named profile (`pim`), never an existing profile.
+- `pause`: agents' calls stop being taken at once; the machine is the person's once nothing of
+  the agents' runs: no call here, no `pim-` process in spacesd, and, after a restart, long enough
+  for a driver call the bridge lost track of to have ended.
+- `resume`: the person's viewer sessions are closed, then the machine is the agents', under a new lease.
+- `viewer`: a short-lived viewer ticket (SystemService.CreateViewerTicket), only while it's the person's.
+
+And the viewer's one route, with its viewer ticket, which spacesd checks: `media/open`, where
+Caddy sends StreamService/OpenMedia.
 
 Only Python 3's standard library. Settings come from the environment (pim-cua-bridge.env.example);
 the root token from the spacesd env file systemd hands over as a credential. It refuses to start
-without a sound credential digest, a non-root user, a workspace root and the root token, and on
-anything but a loopback address.
+without a sound credential digest, a user without administrator rights, a workspace root, the root
+token and a sound state file, and on anything but a loopback address.
 """
 
 import base64
+import grp
 import hashlib
 import hmac
 import http.client
@@ -32,17 +50,29 @@ import http.server
 import ipaddress
 import json
 import os
+import pwd
 import re
 import signal
 import sys
 import threading
 import time
+import uuid
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 #: The one spacesd this bridge reaches. Not configurable.
 SPACESD = ("127.0.0.1", 3211)
 PREFIX = "/pim-bridge/v1/"
-ROUTES = ("status", "call", "driver", "viewer")
+ROUTES = ("status", "call", "driver", "viewer", "pause", "resume")
+#: Where Caddy sends the viewer's StreamService/OpenMedia.
+MEDIA_ROUTE = PREFIX + "media/open"
+MAX_MEDIA_BODY = 64 * 1024
+MEDIA_RATE = (30, 60.0)
+#: Tags of the processes the agents' calls start in spacesd.
+TAG_PREFIX = "pim-"
+#: After a restart, how long a driver call the bridge had under way, and lost track of, may still be running.
+QUIET_AFTER_RESTART = 120
+#: The administrator groups the agents' user may not be in.
+ADMIN_GROUPS = frozenset({"sudo", "admin", "wheel", "root"})
 #: The largest request: a 64 KiB write is 88 KiB of base64.
 MAX_BODY = 192 * 1024
 #: Header Pim sends its credential in, apart from any HTTP Basic login on the same host.
@@ -60,7 +90,6 @@ MAX_INFLIGHT = 4
 RATE = (60, 10.0)
 AUTH_FAILURES = (10, 60.0)
 VIEWER_TTL_SECONDS = 300
-HELPER_FAILED = 213
 
 
 class Refusal(Exception):
@@ -90,7 +119,23 @@ def read_env_file(path):
     return values
 
 
-def load_config(environ):
+def admin_groups(user):
+    """The administrator groups `user` is in, or None when there's no such user. Sudoers files aren't read: see the docs."""
+    try:
+        entry = pwd.getpwnam(user)
+    except KeyError:
+        return None
+    if entry.pw_uid == 0:
+        return {"root"}
+    names = {group.gr_name for group in grp.getgrall() if user in group.gr_mem}
+    try:
+        names.add(grp.getgrgid(entry.pw_gid).gr_name)
+    except KeyError:
+        pass
+    return names & ADMIN_GROUPS
+
+
+def load_config(environ, groups_of=admin_groups):
     """The bridge's settings, or SystemExit naming what's wrong (never a secret's value)."""
     problems = []
     listen = environ.get("PIM_BRIDGE_LISTEN", "127.0.0.1:3290")
@@ -106,7 +151,13 @@ def load_config(environ):
         problems.append("PIM_BRIDGE_TOKEN_SHA256 must be the SHA-256 (64 hex digits) of Pim's bridge credential")
     run_as = environ.get("PIM_BRIDGE_RUN_AS", "").strip()
     if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", run_as) or run_as == "root":
-        problems.append("PIM_BRIDGE_RUN_AS must name the desktop user, not root")
+        problems.append("PIM_BRIDGE_RUN_AS must name the agents' user, not root")
+    else:
+        admin = groups_of(run_as)
+        if admin is None:
+            problems.append("PIM_BRIDGE_RUN_AS names no user on this machine")
+        elif admin:
+            problems.append("PIM_BRIDGE_RUN_AS must be a user without administrator rights, not one in %s" % ", ".join(sorted(admin)))
     root = environ.get("PIM_BRIDGE_ROOT", "").rstrip("/")
     if not root.startswith("/") or root.count("/") < 2 or "\0" in root or "/.." in root:
         problems.append("PIM_BRIDGE_ROOT must be an absolute folder at least two levels deep, such as /home/cua/pim")
@@ -130,6 +181,7 @@ def load_config(environ):
         "root": root,
         "token": token,
         "python": environ.get("PIM_BRIDGE_PYTHON", "/usr/bin/python3"),
+        "state": environ.get("PIM_BRIDGE_STATE") or os.path.join(environ.get("STATE_DIRECTORY", "/var/lib/pim-cua-bridge"), "state.json"),
     }
 
 
@@ -211,8 +263,12 @@ def int32(value):
     return value - (1 << 64) if value >= 1 << 63 else value
 
 
-def start_process_request(config, args, env, timeout_seconds):
-    """StartProcessRequest (process.proto): `python3 -I -c HELPER` as the desktop user, killed with this request."""
+def start_process_request(config, args, env, tag, timeout_seconds=None):
+    """StartProcessRequest (process.proto): `python3 -I -c HELPER` as the agents' user, tagged `tag`.
+
+    A file call has a time limit and ends with this request. A command has neither: its helper
+    enforces the command's limit itself, and stays, as long as anything the command started does.
+    """
     environment = b"".join(field_bytes(3, field_string(1, key) + field_string(2, value)) for key, value in env.items())
     process = (
         field_string(1, config["python"])
@@ -220,10 +276,20 @@ def start_process_request(config, args, env, timeout_seconds):
         + environment
         + field_string(4, "/")
         + field_string(5, config["run_as"])
-        + field_bytes(6, field_varint(1, timeout_seconds))
+        + (field_bytes(6, field_varint(1, timeout_seconds)) if timeout_seconds else b"")
     )
-    # config, keepalive_interval (15 s), scrollback_bytes (4 MiB), kill_on_disconnect.
-    return field_bytes(1, process) + field_bytes(5, field_varint(1, 15)) + field_varint(6, 4 << 20) + field_varint(7, 1)
+    # config, tag, keepalive_interval (15 s), scrollback_bytes (4 MiB), kill_on_disconnect.
+    return field_bytes(1, process) + field_string(3, tag) + field_bytes(5, field_varint(1, 15)) + field_varint(6, 4 << 20) + field_varint(7, 1 if timeout_seconds else 0)
+
+
+def list_processes_request():
+    """ListProcessesRequest (process.proto): running processes whose tag starts with TAG_PREFIX."""
+    return field_string(2, TAG_PREFIX)
+
+
+def close_media_request(media_session_id):
+    """CloseMediaRequest (stream.proto)."""
+    return field_string(1, media_session_id)
 
 
 def viewer_ticket_request():
@@ -277,7 +343,7 @@ class Spacesd:
                 raise Refusal(502, "The Cua computer refused the call (HTTP %d)." % response.status)
             status = response.getheader("grpc-status")
             if status not in (None, "0"):
-                raise Refusal(502, grpc_failure(status))
+                raise Refusal(502, grpc_failure(status), "grpc-" + status)
             trailers = None
             while True:
                 head = response.read(5)
@@ -297,7 +363,28 @@ class Spacesd:
                 yield body
             status = re.search(r"(?im)^grpc-status:\s*(\d+)", trailers or "")
             if status and status.group(1) != "0":
-                raise Refusal(502, grpc_failure(status.group(1)))
+                raise Refusal(502, grpc_failure(status.group(1)), "grpc-" + status.group(1))
+        except OSError:
+            raise Refusal(502, "The Cua computer didn't answer.") from None
+        finally:
+            connection.close()
+
+    def forward_open_media(self, body, content_type, ticket):
+        """The viewer's own OpenMedia, with its own viewer ticket and never the root token: (status, headers, body)."""
+        connection = self.connection(20)
+        try:
+            connection.request(
+                "POST",
+                "/cua.env.v1.StreamService/OpenMedia",
+                body=body,
+                headers={"content-type": content_type, "accept": content_type, "x-grpc-web": "1", "x-cua-env-authorization": "Bearer " + ticket},
+            )
+            response = connection.getresponse()
+            answer = response.read(MAX_MEDIA_BODY + 1)
+            if len(answer) > MAX_MEDIA_BODY:
+                raise Refusal(502, "The Cua computer's answer was too large.")
+            kept = {name: response.getheader(name) for name in ("content-type", "grpc-status", "grpc-message") if response.getheader(name) is not None}
+            return response.status, kept, answer
         except OSError:
             raise Refusal(502, "The Cua computer didn't answer.") from None
         finally:
@@ -556,12 +643,94 @@ def handle(op, args):
                 break
         return page(matches, args)
     if op == "exec":
-        cwd = local(args["cwd"]) if args.get("cwd") else ROOT
-        os.chdir(cwd)
-        os.environ["PIM_WORKSPACE"] = ROOT
-        sys.stdout.flush()
-        os.execv("/bin/bash", ["bash", "-lc", args["command"]])
+        run_command(local(args["cwd"]) if args.get("cwd") else ROOT, args)
     raise CallError("This bridge doesn't know the call " + op, "ENOSYS")
+class Output:
+    def __init__(self, maximum):
+        self.half, self.head, self.tail, self.dropped = maximum // 2, b"", b"", False
+    def add(self, chunk):
+        if len(self.head) < self.half:
+            room = self.half - len(self.head)
+            self.head, chunk = self.head + chunk[:room], chunk[room:]
+        if chunk:
+            self.tail += chunk
+            if len(self.tail) > self.half:
+                self.tail, self.dropped = self.tail[-self.half:], True
+    def text(self):
+        head, tail = self.head.decode("utf-8", "replace"), self.tail.decode("utf-8", "replace")
+        return head + "\n[\u2026 output cut \u2026]\n" + tail if self.dropped else head + tail
+def run_command(cwd, args):
+    # The command runs in a process group of its own, under this process as its subreaper: whatever
+    # it starts, detached or not, stays this process's descendant, so this process (tagged in spacesd)
+    # runs until the last of them ends, and the bridge counts it as the agents' work until then.
+    import ctypes, selectors, signal, subprocess, time
+    if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+        raise CallError("This computer can't keep track of what a command starts", "ENOSYS")
+    limit = int(args.get("maxBytes") or 64000)
+    deadline = time.monotonic() + int(args.get("timeoutMs") or 120000) / 1000
+    child = subprocess.Popen(["/bin/bash", "-lc", args["command"]], cwd=cwd, env=dict(os.environ, PIM_WORKSPACE=ROOT),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setpgrp)
+    fds = []
+    for pipe in (child.stdout, child.stderr):
+        fds.append(os.dup(pipe.fileno()))
+        pipe.close()
+    outputs = {fd: Output(limit) for fd in fds}
+    selector = selectors.DefaultSelector()
+    for fd in outputs:
+        os.set_blocking(fd, False)
+        selector.register(fd, selectors.EVENT_READ)
+    def pump(timeout, keep=True):
+        if not selector.get_map():
+            time.sleep(timeout)
+            return False
+        ready = selector.select(timeout)
+        for key, _ in ready:
+            try:
+                chunk = os.read(key.fd, 65536)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                selector.unregister(key.fd)
+                os.close(key.fd)
+            elif keep:
+                outputs[key.fd].add(chunk)
+        return bool(ready)
+    timed_out, kill_at = False, None
+    while child.poll() is None:
+        now = time.monotonic()
+        if not timed_out and now >= deadline:
+            timed_out, kill_at = True, now + 5
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        elif kill_at is not None and now >= kill_at:
+            kill_at = None
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        pump(0.05)
+    until = time.monotonic() + 0.5
+    while time.monotonic() < until and pump(0.02):
+        pass
+    code = child.returncode
+    out, err = outputs[fds[0]], outputs[fds[1]]
+    result = {"exitCode": code if code >= 0 else None, "signal": signal.Signals(-code).name if code < 0 else None,
+              "stdout": out.text(), "stderr": err.text(), "timedOut": timed_out, "truncated": out.dropped or err.dropped}
+    sys.stdout.write("\x1epim-result " + json.dumps(result) + "\n")
+    sys.stdout.flush()
+    quiet = os.open(os.devnull, os.O_RDWR)
+    os.dup2(quiet, 1)
+    os.dup2(quiet, 2)
+    # Then wait for everything the command left running, reading and dropping what it still writes.
+    while True:
+        pump(0.5, keep=False)
+        try:
+            while os.waitpid(-1, os.WNOHANG)[0] != 0:
+                pass
+        except ChildProcessError:
+            os._exit(0)
 REASONS = {"ENOENT": "no such file or directory", "EEXIST": "file already exists", "ENOTDIR": "not a directory", "EISDIR": "is a directory",
            "ENOTEMPTY": "directory not empty", "EACCES": "permission denied", "EPERM": "operation not permitted"}
 try:
@@ -580,34 +749,6 @@ except (re.error, ValueError) as error:
     sys.exit(213)
 """
 
-
-class Output:
-    """A stream's first and last `max / 2` bytes, as pim-computer keeps a command's output."""
-
-    def __init__(self, maximum):
-        self.half = maximum // 2
-        self.head = b""
-        self.tail = b""
-        self.dropped = False
-
-    def add(self, chunk):
-        if len(self.head) < self.half:
-            room = self.half - len(self.head)
-            self.head += chunk[:room]
-            chunk = chunk[room:]
-        if chunk:
-            self.tail += chunk
-            if len(self.tail) > self.half:
-                self.tail = self.tail[-self.half :]
-                self.dropped = True
-
-    def text(self):
-        head = self.head.decode("utf-8", "replace")
-        tail = self.tail.decode("utf-8", "replace")
-        return head + "\n[… output cut …]\n" + tail if self.dropped else head + tail
-
-
-SIGNALS = {number.value: number.name for number in signal.Signals}
 
 PATH = {"type": str, "max": 4096}
 SCHEMAS = {
@@ -660,63 +801,54 @@ def check(args, schema, required=()):
             raise Refusal(400, "%s is required" % key)
 
 
-def run_call(config, spacesd, op, args):
-    """One of pim-computer's calls, run as the desktop user through spacesd: (result, error)."""
+RESULT_MARK = b"\x1epim-result "
+
+
+def run_call(config, spacesd, op, args, epoch):
+    """One of pim-computer's calls, run as the agents' user through spacesd: (result, error)."""
     if op not in SCHEMAS:
         raise Refusal(400, "unknown call")
     check(args, SCHEMAS[op], REQUIRED.get(op, ()))
     if op == "exec" and not args["command"].strip():
         raise Refusal(400, "command must be a shell command")
-    timeout = -(-args.get("timeoutMs", 120_000) // 1000) if op == "exec" else 30
+    command = op == "exec"
+    tag = "%s%s-%d-%s" % (TAG_PREFIX, "exec" if command else "call", epoch, uuid.uuid4().hex[:12])
     env = {"PIM_FSOP_REQUEST": json.dumps({"op": op, "args": args}), "PIM_WORKSPACE": config["root"]}
-    request = start_process_request(config, ["-I", "-c", HELPER], env, timeout)
-    stdout = Output(args.get("maxBytes", MAX_OUTPUT)) if op == "exec" else None
-    stderr = Output(args.get("maxBytes", MAX_OUTPUT)) if op == "exec" else None
+    request = start_process_request(config, ["-I", "-c", HELPER], env, tag, None if command else 30)
+    wait = -(-args.get("timeoutMs", 120_000) // 1000) + 30 if command else 50
     captured = bytearray()
     end = None
-    for message in spacesd.grpc("cua.env.v1.ProcessService/StartProcess", request, timeout + 20):
+    for message in spacesd.grpc("cua.env.v1.ProcessService/StartProcess", request, wait):
         event = parse(last(parse(message), 1, b""))
         if 2 in event:
-            data = parse(last(event, 2))
-            out, err = last(data, 2), last(data, 3)
-            if op == "exec":
-                if out:
-                    stdout.add(out)
-                if err:
-                    stderr.add(err)
-            elif out and len(captured) < 3 << 20:
+            out = last(parse(last(event, 2)), 2)
+            if out and len(captured) < 3 << 20:
                 captured += out
+            if command:
+                # A command's answer is the helper's mark; the helper stays for what the command left running.
+                mark = captured.find(RESULT_MARK)
+                line = captured.find(b"\n", mark) if mark >= 0 else -1
+                if line >= 0:
+                    try:
+                        return json.loads(bytes(captured[mark + len(RESULT_MARK) : line]).decode("utf-8")), None
+                    except ValueError:
+                        raise Refusal(502, "The command's answer was garbled.") from None
         if 3 in event:
             end = parse(last(event, 3))
     if end is None:
         raise Refusal(502, "The Cua computer stopped answering before the call ended.")
     exit_code = int32(last(end, 1)) if 1 in end else None
-    failed = last(end, 4, b"").decode("utf-8", "replace")
-    if op == "exec":
-        if exit_code == HELPER_FAILED:
-            try:
-                return None, json.loads(stdout.head.decode())["error"]
-            except (ValueError, KeyError):
-                pass
-        if failed:
-            return {"exitCode": None, "signal": None, "stdout": "", "stderr": failed[:500], "timedOut": False, "truncated": False}, None
-        return {
-            "exitCode": exit_code,
-            "signal": SIGNALS.get(last(end, 2, 0)) if exit_code is None else None,
-            "stdout": stdout.text(),
-            "stderr": stderr.text(),
-            "timedOut": bool(last(end, 3, 0)),
-            "truncated": stdout.dropped or stderr.dropped,
-        }, None
-    if failed or last(end, 3, 0):
-        raise Refusal(502, "The Cua computer couldn't run the file call.")
+    if last(end, 4, b"") or last(end, 3, 0):
+        raise Refusal(502, "The Cua computer couldn't run the call.")
     try:
         answer = json.loads(bytes(captured).decode("utf-8"))
     except ValueError:
-        raise Refusal(502, "The file call failed on the Cua computer.") from None
+        raise Refusal(502, "The call failed on the Cua computer.") from None
     if "error" in answer:
         error = answer["error"]
         return None, {"message": str(error.get("message", "failed"))[:500], "code": error.get("code")}
+    if command or exit_code != 0:
+        raise Refusal(502, "The call failed on the Cua computer.")
     return answer.get("result"), None
 
 
@@ -804,6 +936,111 @@ def mint_viewer(spacesd):
     return {"viewerPath": path, "expiresAt": int(last(expires, 1, 0))}
 
 
+def running_agent_processes(spacesd):
+    """How many processes the agents' calls started are still running in spacesd (ListProcesses, by tag)."""
+    count = 0
+    for answer in spacesd.grpc("cua.env.v1.ProcessService/ListProcesses", list_processes_request(), 10):
+        for info in parse(answer).get(1, []):
+            fields = parse(info)
+            if last(fields, 2, b"").decode("utf-8", "replace").startswith(TAG_PREFIX) and last(fields, 5, 0) != 2:
+                count += 1
+    return count
+
+
+def close_media(spacesd, media_session_id):
+    """Closes one of the person's media sessions; one spacesd no longer has (NOT_FOUND) is closed already."""
+    try:
+        list(spacesd.grpc("cua.env.v1.StreamService/CloseMedia", close_media_request(media_session_id), 10))
+    except Refusal as refusal:
+        if refusal.code != "grpc-5":
+            raise
+
+
+def grpc_web_frames(body):
+    """A gRPC-Web body's (flags, message) frames, or ValueError."""
+    frames, index = [], 0
+    while index < len(body):
+        if index + 5 > len(body):
+            raise ValueError("truncated frame")
+        length = int.from_bytes(body[index + 1 : index + 5], "big")
+        message = body[index + 5 : index + 5 + length]
+        if len(message) != length:
+            raise ValueError("truncated frame")
+        frames.append((body[index], message))
+        index += 5 + length
+    return frames
+
+
+def opened_media(headers, body):
+    """What an OpenMedia answer says: (ok, media_session_id or None). Raises ValueError on a garbled answer."""
+    status = headers.get("grpc-status")
+    frames = grpc_web_frames(body)
+    for flags, message in frames:
+        if flags & 0x80:
+            found = re.search(r"(?im)^grpc-status:\s*(\d+)", message.decode("latin-1"))
+            status = found.group(1) if found else status
+    if status not in ("0", None):
+        return False, None
+    data = [message for flags, message in frames if not flags & 0x80]
+    if status is None or len(data) != 1:
+        raise ValueError("no answer")
+    session = last(parse(data[0]), 1, b"").decode("utf-8", "replace")
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", session):
+        raise ValueError("no session id")
+    return True, session
+
+
+# ── Who has the machine ────────────────────────────────────────────────────────────────────────
+
+
+class State:
+    """Who has the machine, under which lease, and the person's media sessions: a file, rewritten whole on each change."""
+
+    FRESH = {"mode": "human", "epoch": 1, "media": [], "quietUntil": 0, "viewerUntil": 0}
+
+    def __init__(self, path):
+        self.path = path
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            data = dict(self.FRESH)
+        except (OSError, ValueError):
+            raise SystemExit("pim-cua-bridge won't start: its state file isn't readable JSON; with spacesd restarted (which closes every viewer session), delete it") from None
+        if (
+            not isinstance(data, dict)
+            or data.get("mode") not in ("human", "agents", "draining", "handoff")
+            or not isinstance(data.get("epoch"), int)
+            or not isinstance(data.get("media"), list)
+            or not all(isinstance(item, str) for item in data["media"])
+        ):
+            raise SystemExit("pim-cua-bridge won't start: its state file isn't one it wrote; with spacesd restarted (which closes every viewer session), delete it")
+        self.data = {**self.FRESH, **data}
+
+    def __getattr__(self, name):
+        try:
+            return self.__dict__["data"][name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+    def update(self, **changes):
+        """Changes and saves it, or leaves it as it was and raises."""
+        changed = {**self.data, **changes}
+        temporary = "%s.%d.tmp" % (self.path, os.getpid())
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(changed, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, self.path)
+        folder = os.open(os.path.dirname(self.path) or ".", os.O_RDONLY)
+        try:
+            os.fsync(folder)
+        finally:
+            os.close(folder)
+        self.data = changed
+
+
 # ── HTTP ───────────────────────────────────────────────────────────────────────────────────────
 
 
@@ -821,14 +1058,28 @@ class Window:
         self.times.append(now)
 
 
+PAUSED = "The person has the Cua computer now; nothing was done there."
+
+
 class Bridge:
     def __init__(self, config, spacesd=None):
         self.config = config
         self.spacesd = spacesd or Spacesd(config["token"])
+        #: Guards the counters and the state's reads; held only briefly.
         self.lock = threading.Lock()
+        #: Serializes changing hands, minting a viewer ticket and opening a media session.
+        self.transition = threading.Lock()
         self.inflight = 0
         self.requests = Window(*RATE)
+        self.media_requests = Window(*MEDIA_RATE)
         self.failures = Window(*AUTH_FAILURES)
+        self.state = State(config["state"])
+        # A restart forgets what was under way: the agents' lease ends, and the machine is the
+        # person's only once whatever the bridge had under way can have ended.
+        if self.state.mode in ("agents", "draining"):
+            self.state.update(mode="draining", epoch=self.state.epoch + 1, quietUntil=time.time() + QUIET_AFTER_RESTART)
+        elif self.state.mode == "handoff":
+            self.state.update(mode="human")
 
     def authorized(self, header):
         scheme, _, token = (header or "").partition(" ")
@@ -837,21 +1088,28 @@ class Bridge:
 
     def serve(self, handler):
         started = time.monotonic()
-        route = "-"
+        route, status, headers = "-", 200, {"Content-Type": "application/json"}
         try:
-            route, payload = self.admit(handler)
-            status, body = 200, self.dispatch(route, payload)
+            if handler.path == MEDIA_ROUTE:
+                route = "media/open"
+                status, headers, data = self.open_media(handler)
+            else:
+                route, payload = self.admit(handler)
+                data = json.dumps(self.dispatch(route, payload)).encode("utf-8")
         except Refusal as refusal:
-            status, body = refusal.status, {"error": {"message": str(refusal)[:500], "code": refusal.code}}
+            status, headers = refusal.status, {"Content-Type": "application/json"}
+            data = json.dumps({"error": {"message": str(refusal)[:500], "code": refusal.code}}).encode("utf-8")
         except Exception:  # noqa: BLE001 - nothing about it goes back, or to the log, but its kind
-            status, body = 500, {"error": {"message": "The bridge failed.", "code": None}}
+            status, headers = 500, {"Content-Type": "application/json"}
+            data = json.dumps({"error": {"message": "The bridge failed.", "code": None}}).encode("utf-8")
             print(json.dumps({"event": "error", "route": route, "kind": type(sys.exc_info()[1]).__name__}), file=sys.stderr, flush=True)
-        data = json.dumps(body).encode("utf-8")
         handler.send_response(status)
-        handler.send_header("Content-Type", "application/json")
+        for name, value in headers.items():
+            handler.send_header(name, value)
         handler.send_header("Content-Length", str(len(data)))
         handler.send_header("Cache-Control", "no-store")
         handler.send_header("X-Content-Type-Options", "nosniff")
+        handler.send_header("X-Pim-Bridge", route)
         if status >= 400:
             handler.send_header("Connection", "close")
             handler.close_connection = True
@@ -859,6 +1117,17 @@ class Bridge:
         handler.wfile.write(data)
         # Method, route, status and time only: never headers, a query, a body or an address.
         print(json.dumps({"event": "request", "route": route, "status": status, "ms": round((time.monotonic() - started) * 1000)}), file=sys.stderr, flush=True)
+
+    def read_body(self, handler, maximum):
+        if handler.headers.get("Transfer-Encoding"):
+            raise Refusal(411, "Send a Content-Length")
+        try:
+            length = int(handler.headers.get("Content-Length", ""))
+        except ValueError:
+            raise Refusal(411, "Send a Content-Length") from None
+        if length < 0 or length > maximum:
+            raise Refusal(413, "Too large")
+        return handler.rfile.read(length)
 
     def admit(self, handler):
         if handler.command != "POST":
@@ -893,26 +1162,131 @@ class Bridge:
             raise Refusal(400, "Send a JSON object")
         return route, payload
 
+    def view(self, background=None):
+        state = self.state
+        return {
+            "ok": True,
+            "mode": state.mode,
+            "epoch": state.epoch,
+            "inflight": self.inflight,
+            "background": background,
+            "quietSeconds": max(0, round(state.quietUntil - time.time())),
+            "viewerSessions": len(state.media),
+            "version": VERSION,
+        }
+
     def dispatch(self, route, payload):
         if route == "status":
-            return {"ok": self.spacesd.health(), "inflight": self.inflight, "version": VERSION}
-        if route == "viewer":
             with self.lock:
-                if self.inflight > 0:
-                    raise Refusal(409, "Agent calls are still under way on the Cua computer.", "busy")
-            return mint_viewer(self.spacesd)
+                return self.view()
+        if route == "pause":
+            return self.pause()
+        if route == "resume":
+            return self.resume(payload.get("epoch"))
+        if route == "viewer":
+            return self.viewer()
         with self.lock:
+            if self.state.mode != "agents" or payload.get("lease") != self.state.epoch:
+                raise Refusal(423, PAUSED, "paused")
             if self.inflight >= MAX_INFLIGHT:
                 raise Refusal(429, "Too many calls at once")
             self.inflight += 1
+            epoch = self.state.epoch
         try:
             if route == "call":
-                result, error = run_call(self.config, self.spacesd, payload.get("op"), payload.get("args", {}))
+                result, error = run_call(self.config, self.spacesd, payload.get("op"), payload.get("args", {}), epoch)
                 return {"error": error} if error else {"result": result}
             return run_driver(self.spacesd, payload.get("tool"), payload.get("arguments", {}))
         finally:
             with self.lock:
                 self.inflight -= 1
+
+    def pause(self):
+        """Takes no new agent call from now on; the machine is the person's once nothing of the agents' runs."""
+        with self.transition:
+            with self.lock:
+                if self.state.mode == "agents":
+                    self.state.update(mode="draining", epoch=self.state.epoch + 1)
+                if self.state.mode != "draining":
+                    return self.view()
+                # Nothing is admitted while draining, so once no call is under way none will be: then
+                # whatever the finished calls started is in spacesd's list.
+                if self.inflight > 0 or time.time() < self.state.quietUntil:
+                    return self.view()
+            background = running_agent_processes(self.spacesd)
+            with self.lock:
+                if background == 0 and self.inflight == 0:
+                    self.state.update(mode="human", epoch=self.state.epoch + 1, quietUntil=0)
+                return self.view(background)
+
+    def resume(self, epoch):
+        """Closes every media session of the person's, then gives the machine to the agents under a new lease."""
+        with self.transition:
+            with self.lock:
+                if self.state.mode != "human":
+                    raise Refusal(409, "The machine isn't the person's: pause the agents first.", "not-paused")
+                if epoch != self.state.epoch:
+                    raise Refusal(409, "This pause has ended or changed since; look again.", "stale")
+                self.state.update(mode="handoff")
+            try:
+                for media_session_id in list(self.state.media):
+                    close_media(self.spacesd, media_session_id)
+                    with self.lock:
+                        self.state.update(media=[item for item in self.state.media if item != media_session_id])
+            except Refusal:
+                with self.lock:
+                    self.state.update(mode="human")
+                raise Refusal(502, "The person's viewer sessions couldn't all be closed, so the agents stay paused.", "handoff")
+            with self.lock:
+                self.state.update(mode="agents", epoch=self.state.epoch + 1)
+                return self.view()
+
+    def viewer(self):
+        with self.transition:
+            with self.lock:
+                if self.state.mode != "human":
+                    raise Refusal(409, "The agents' work is still finishing on the Cua computer.", "busy")
+            minted = mint_viewer(self.spacesd)
+            with self.lock:
+                self.state.update(viewerUntil=max(self.state.viewerUntil, minted["expiresAt"]))
+            return minted
+
+    def open_media(self, handler):
+        """The viewer's OpenMedia: passed to spacesd with the viewer's own ticket only while the machine is the person's, and recorded."""
+        refused = lambda message: (200, {"Content-Type": "application/grpc-web+proto", "grpc-status": "9", "grpc-message": message}, b"")  # noqa: E731
+        if handler.command != "POST":
+            raise Refusal(405, "Only POST")
+        now = time.monotonic()
+        with self.lock:
+            if self.media_requests.full(now):
+                raise Refusal(429, "Too many requests")
+            self.media_requests.add(now)
+        content_type = (handler.headers.get("Content-Type") or "").strip()
+        if content_type not in ("application/grpc-web+proto", "application/grpc-web"):
+            raise Refusal(415, "Send gRPC-Web")
+        bearer = (handler.headers.get("x-cua-env-authorization") or "").strip()
+        ticket = bearer[7:] if bearer[:7].lower() == "bearer " else ""
+        if not re.fullmatch(r"v1\.[A-Za-z0-9._~-]{16,1024}", ticket):
+            raise Refusal(401, "Send a viewer ticket")
+        body = self.read_body(handler, MAX_MEDIA_BODY)
+        with self.transition:
+            with self.lock:
+                if self.state.mode != "human":
+                    return refused("Pim's agents are using this computer: pause them in Pim first.")
+            # A session this doesn't record is one whose media ticket nobody gets: its answer goes no
+            # further, so no socket ever attaches, and spacesd reaps it at its attach deadline.
+            status, headers, answer = self.spacesd.forward_open_media(body, content_type, ticket)
+            try:
+                ok, media_session_id = opened_media(headers, answer) if status == 200 else (False, None)
+            except ValueError:
+                return refused("The bridge couldn't read spacesd's answer, so it kept it.")
+            if ok:
+                try:
+                    with self.lock:
+                        self.state.update(media=self.state.media + [media_session_id])
+                except OSError:
+                    return refused("The bridge couldn't record this session, so it kept its answer.")
+            return status, headers, answer
 
 
 class Handler(http.server.BaseHTTPRequestHandler):

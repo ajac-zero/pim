@@ -110,7 +110,7 @@ export function CuaControls({ status }: { status: Offered }) {
             <Button
               variant="secondary"
               onClick={() => resume.mutate()}
-              disabled={resume.isPending}
+              disabled={status.mode !== "paused" || resume.isPending}
             >
               {resume.isPending ? (
                 <Loader2 className="animate-spin" />
@@ -183,15 +183,18 @@ export function CuaEvaluationSection() {
       </div>
       {data.enabled && <CuaControls status={data} />}
       {data.enabled ? (
-        <Button
-          variant="ghost"
-          className="text-muted-foreground"
-          onClick={() => disable.mutate()}
-          disabled={disable.isPending}
-        >
-          {disable.isPending && <Loader2 className="animate-spin" />}
-          {t("cuaTurnOff")}
-        </Button>
+        // Only while the agents are paused: turning it off moves them to another computer.
+        data.mode === "paused" && (
+          <Button
+            variant="ghost"
+            className="text-muted-foreground"
+            onClick={() => disable.mutate()}
+            disabled={disable.isPending}
+          >
+            {disable.isPending && <Loader2 className="animate-spin" />}
+            {t("cuaTurnOff")}
+          </Button>
+        )
       ) : (
         <Button
           variant="secondary"

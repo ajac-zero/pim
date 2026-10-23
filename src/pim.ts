@@ -4132,6 +4132,19 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
+	/**
+	 * The agents' computer changed, to or from the Cua evaluation's: what they
+	 * asked to do on a computer, and the person hasn't decided yet, would run
+	 * on another than the one it was asked for, so it is denied.
+	 */
+	async #computerSwitched(): Promise<void> {
+		const reason = "The agents' computer changed since this was asked, so nothing ran. Ask again if it's still wanted.";
+		for (const approval of this.store.approvals("pending")) {
+			if (!COMPUTER_ACTIONS.has(approval.action) && approval.action !== WRITE_SKILL) continue;
+			await this.decideApproval(approval.id, "deny", reason).catch((error) => console.warn(`denying approval ${approval.id} failed`, error));
+		}
+	}
+
 	/** Only the person, signed in to Pim in their browser, controls the Cua evaluation: no API token, and no other site. */
 	#fromPerson(request: Request): void {
 		if (request.headers.get(SIGNED_IN_HEADER) !== "1") throw new HttpError(403, "Only the person, signed in to Pim in their browser, can do this");
@@ -5038,10 +5051,12 @@ export class Pim extends DurableAgent<Env> {
 		[
 			"POST",
 			"/cua",
-			(_params, request) => {
+			async (_params, request) => {
 				this.#fromPerson(request);
 				this.#assertOpen();
+				const was = this.cua.active();
 				this.cua.enable(Date.now());
+				if (!was) await this.#computerSwitched();
 				this.#computerChanged();
 				return noStore(this.cua.view());
 			},
@@ -5049,9 +5064,11 @@ export class Pim extends DurableAgent<Env> {
 		[
 			"DELETE",
 			"/cua",
-			(_params, request) => {
+			async (_params, request) => {
 				this.#fromPerson(request);
+				const was = this.cua.active();
 				this.cua.disable();
+				if (was) await this.#computerSwitched();
 				this.#computerChanged();
 				return noStore(this.cua.view());
 			},
@@ -5076,7 +5093,7 @@ export class Pim extends DurableAgent<Env> {
 			async (_params, request) => {
 				this.#fromPerson(request);
 				const { generation } = await readJson<{ generation?: unknown }>(request);
-				return noStore(this.cua.resume(generation));
+				return noStore(await this.cua.resume(generation));
 			},
 		],
 		[

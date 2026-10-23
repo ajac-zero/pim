@@ -106,18 +106,28 @@ function fileCall(op: string, args: Record<string, any>): unknown {
 	}
 }
 
-/** What the bridge was asked, the driver's state, and the switches tests turn. */
+/** What the bridge was asked, who it says has the machine, the driver's state, and the switches tests turn. */
 const bridge = {
 	seen: [] as { route: string; body: Record<string, any> }[],
 	ran: [] as ExecArgs[],
-	/** What the bridge says it has under way, as after a restart of the space. */
+	/** Who has the machine, as pim_cua_bridge.py keeps it: the person's until they resume the agents. */
+	mode: "human" as "human" | "agents" | "draining",
+	epoch: 1,
+	/** Agent calls under way at the bridge now. */
 	inflight: 0,
-	/** Holds `call`s for `op` until released. */
-	gate: null as { op: string; arrived: () => void; release: Promise<void> } | null,
+	/** What else the bridge counts as the agents' still: calls it lost track of, commands' background processes. */
+	elsewhere: 0,
+	/** The person's open viewer sessions, which resuming closes. */
+	media: [] as string[],
+	closeFails: false,
+	/** Holds the bridge's next request on `route` (and `op`, for calls) until released. */
+	gate: null as { route: string; op?: string; arrived: () => void; release: Promise<void> } | null,
 	/** The next answer, in place of the bridge's own, made where the space reads it. */
 	answerWith: null as { status: number; body: string; headers?: Record<string, string> } | null,
 	driver: { snapshot: 0, bound: false, url: "about:blank", title: "", clicked: [] as string[], typed: [] as Record<string, unknown>[] },
 };
+
+const bridgeView = () => ({ ok: true, mode: bridge.mode, epoch: bridge.epoch, inflight: bridge.inflight, background: bridge.elsewhere, quietSeconds: 0, viewerSessions: bridge.media.length, version: "test" });
 
 function driverAnswer(tool: string, args: Record<string, any>) {
 	const ok = (structured: Record<string, unknown>, image: string | null = null) => ({ structured: { status: "ok", ...structured }, text: "ok", image, isError: false });
@@ -178,7 +188,7 @@ function driverAnswer(tool: string, args: Record<string, any>) {
 	}
 }
 
-/** The bridge's API, as pim_cua_bridge.py answers it. */
+/** The bridge's API, as pim_cua_bridge.py answers it, deciding who has the machine. */
 function standInBridge() {
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		const request = new Request(input, init);
@@ -197,42 +207,59 @@ function standInBridge() {
 			bridge.answerWith = null;
 			return new Response(answer.body || null, { status: answer.status, headers: answer.headers ?? {} });
 		}
+		const gated = async () => {
+			const gate = bridge.gate;
+			if (!gate || gate.route !== route || (gate.op !== undefined && gate.op !== body.op)) return;
+			bridge.gate = null;
+			gate.arrived();
+			await gate.release;
+		};
+		const refuse = (status: number, code: string, message = code) => Response.json({ error: { message, code } }, { status });
 		switch (route) {
 			case "status":
-				return Response.json({ ok: true, inflight: bridge.inflight, version: "test" });
+				return Response.json(bridgeView());
+			case "pause":
+				if (bridge.mode === "agents") [bridge.mode, bridge.epoch] = ["draining", bridge.epoch + 1];
+				if (bridge.mode === "draining" && bridge.inflight === 0 && bridge.elsewhere === 0) [bridge.mode, bridge.epoch] = ["human", bridge.epoch + 1];
+				return Response.json(bridgeView());
+			case "resume":
+				if (bridge.mode !== "human") return refuse(409, "not-paused", "The machine isn't the person's: pause the agents first.");
+				if (body.epoch !== bridge.epoch) return refuse(409, "stale", "This pause has ended or changed since; look again.");
+				if (bridge.closeFails && bridge.media.length > 0) return refuse(502, "handoff", "The person's viewer sessions couldn't all be closed, so the agents stay paused.");
+				bridge.media = [];
+				[bridge.mode, bridge.epoch] = ["agents", bridge.epoch + 1];
+				return Response.json(bridgeView());
 			case "viewer":
+				await gated();
+				if (bridge.mode !== "human") return refuse(409, "busy", "The agents' work is still finishing on the Cua computer.");
+				// The person opens it, and with it a media session the bridge records.
+				bridge.media.push(`ms-${bridge.media.length + 1}`);
 				return Response.json({ viewerPath: `/viewer/#ticket=${"V".repeat(32)}`, expiresAt: 1_793_000_000 });
-			case "driver":
-				return Response.json(driverAnswer(body.tool, body.arguments));
-			case "call": {
-				const gate = bridge.gate;
-				if (gate && gate.op === body.op) {
-					bridge.gate = null;
-					gate.arrived();
-					await gate.release;
-				}
-				try {
-					if (body.op !== "exec") return Response.json({ result: fileCall(body.op, body.args) });
-					bridge.ran.push(body.args);
-					return Response.json({ result: { exitCode: 0, signal: null, stdout: `ran ${body.args.command}\n`, stderr: "", timedOut: false, truncated: false } });
-				} catch (error) {
-					return Response.json({ error: { message: (error as Error).message, code: (error as { code?: string }).code ?? null } });
-				}
-			}
-			default:
-				return Response.json({ error: { message: "Not found" } }, { status: 404 });
+		}
+		if (bridge.mode !== "agents" || body.lease !== bridge.epoch) return refuse(423, "paused", "The person has the Cua computer now; nothing was done there.");
+		bridge.inflight++;
+		try {
+			await gated();
+			if (route === "driver") return Response.json(driverAnswer(body.tool, body.arguments));
+			if (body.op !== "exec") return Response.json({ result: fileCall(body.op, body.args) });
+			bridge.ran.push(body.args);
+			return Response.json({ result: { exitCode: 0, signal: null, stdout: `ran ${body.args.command}\n`, stderr: "", timedOut: false, truncated: false } });
+		} catch (error) {
+			return Response.json({ error: { message: (error as Error).message, code: (error as { code?: string }).code ?? null } });
+		} finally {
+			bridge.inflight--;
 		}
 	});
 }
 
-/** Holds the bridge's next `op` call until `release` is called; `arrived` settles once it has reached the bridge. */
-function holdNext(op: string) {
+/** Holds the bridge's next request on `route` (a call, by default, for `op`) until `release` is called; `reached` settles once it has arrived. */
+function holdNext(op: string, route = "call") {
 	let release!: () => void;
 	let arrived!: () => void;
 	const reached = new Promise<void>((resolve) => {
 		arrived = resolve;
 	});
-	bridge.gate = { op, arrived, release: new Promise<void>((resolve) => (release = resolve)) };
+	bridge.gate = { route, ...(route === "call" ? { op } : {}), arrived, release: new Promise<void>((resolve) => (release = resolve)) };
 	return { reached, release };
 }
 
@@ -242,7 +269,7 @@ function lastToolResult(messages: readonly Message[]): { text: string; isError: 
 	return { text: result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join(""), isError: result.isError === true };
 }
 
-async function callTool(name: string, args: Record<string, unknown>) {
+async function callTool(name: string, args: Record<string, unknown>, session?: string) {
 	let result = { text: "", isError: false };
 	faux.setResponses([
 		toolUse(name, args as never),
@@ -251,7 +278,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
 			return toolUse("send_to_user", { message: "Done." });
 		},
 	]);
-	await say(`Please use ${name}`);
+	await say(`Please use ${name}`, session);
 	return result;
 }
 
@@ -290,6 +317,20 @@ async function asPerson<T = any>(path: string, method = "GET", body?: unknown, h
 }
 
 const status = async () => (await asPerson("/cua")).body;
+
+/** The person resumes their agents, from the pause they see. */
+async function resume() {
+	const { generation } = await status();
+	const resumed = await asPerson("/cua/resume", "POST", { generation });
+	expect(resumed.body).toMatchObject({ mode: "agents" });
+	return resumed.body;
+}
+
+/** The person pauses their agents, and the pause completes. */
+async function pause() {
+	await asPerson("/cua/pause", "POST");
+	await vi.waitFor(async () => expect(await status()).toMatchObject({ mode: "paused" }));
+}
 
 function useEvaluation(owner = OWNER) {
 	Object.assign(cuaEnvironment, { CUA_EVAL_BRIDGE_URL: BRIDGE, CUA_EVAL_BRIDGE_TOKEN: BRIDGE_TOKEN, CUA_EVAL_OWNER: owner });
@@ -352,9 +393,10 @@ describe("the Cua evaluation's settings", () => {
 		expect(await status()).toEqual({ offered: false });
 		expect((await asPerson("/cua", "POST")).status).toBe(404);
 		useEvaluation();
-		expect(await status()).toEqual({ offered: true, enabled: false, mode: "agents", generation: 0, pending: 0, host: "cua-eval.ajac-zero.com" });
-		// Offered isn't on: nothing changes until the person turns it on.
+		expect(await status()).toEqual({ offered: true, enabled: false, mode: "paused", generation: 0, pending: 0, host: "cua-eval.ajac-zero.com" });
+		// Offered isn't on: nothing changes, and nothing reaches the bridge, until the person turns it on.
 		expect((await api("/computer")).body.state).toBe("none");
+		expect(bridge.seen).toEqual([]);
 	});
 });
 
@@ -372,7 +414,7 @@ describe("turning the Cua evaluation on", () => {
 		await directory.activate(bob);
 		await (await getAgentByName(env.Pim, bob)).provision({ ownerId: bob, username: "bob" });
 		const bobs = await signedIn(bob);
-		for (const path of ["/cua", "/cua/pause", "/cua/viewer"]) {
+		for (const path of ["/cua", "/cua/pause", "/cua/resume", "/cua/viewer"]) {
 			const response = await exports.default.fetch(new Request(apiUrl(path), { method: "POST", headers: { cookie: bobs, origin: "https://pim.test" } }));
 			expect(response.status).toBe(404);
 		}
@@ -380,27 +422,40 @@ describe("turning the Cua evaluation on", () => {
 		expect(bridge.seen).toEqual([]);
 	});
 
-	it("puts the Cua computer in place of the space's paired one, whose files stay where they are", async () => {
+	it("puts the Cua computer in place of the space's paired one, with the agents paused until the person resumes them", async () => {
 		// A paired pim-computer, as the person had before.
 		const paired = await post<{ token: string }>("/computer");
 		await connectTestComputer(paired.body.token, PAIRED_ROOT, async () => {
 			throw new Error("The paired computer runs no commands here.");
 		});
 		await fs.writeFile(`${PAIRED_ROOT}/notes.md`, "on the paired computer");
+		// A command asked for on the paired computer, not yet decided, mustn't run on the Cua computer in its place.
+		const chat = (await post<{ id: string }>("/sessions", {})).body.id;
+		faux.setResponses([toolUse("shell", { command: "ls ~" }), toolUse("send_to_user", { message: "Asked." })]);
+		const asking = say("What's in my home folder?", chat);
+		const approval = await pendingApproval();
 
 		const on = await asPerson("/cua", "POST");
+		expect((await api(`/approvals/${approval.id}`)).body).toMatchObject({ status: "denied" });
+		await asking;
 		expect(on.status).toBe(200);
-		expect(on.body).toMatchObject({ enabled: true, mode: "agents" });
+		expect(on.body).toMatchObject({ enabled: true, mode: "paused" });
 		expect(JSON.stringify(on.body)).not.toContain(BRIDGE_TOKEN);
 		expect((await api("/computer")).body).toMatchObject({ state: "online", provider: "cua", computer: { hostname: "cua-eval.ajac-zero.com", browser: "cua-driver" } });
 		const tools = await offeredTools();
 		for (const tool of ["file_read", "file_write", "file_search", "shell", "browser_open", "browser_click", "browser_type"]) expect(tools).toContain(tool);
+		// Nothing of the agents' runs there until the person resumes them.
+		expect((await callTool("file_write", { path: "/workspace/notes.md", content: "too early" })).text).toContain("paused agents on their Cua evaluation computer");
+		expect(bridge.seen.filter((seen) => seen.route === "call")).toEqual([]);
+		const resumed = await resume();
+		expect(bridge.seen.map((seen) => seen.route)).toEqual(["pause", "resume"]);
+		expect(resumed.generation).toBeGreaterThan(on.body.generation);
 
-		// The agents' files are the Cua computer's now.
+		// The agents' files are the Cua computer's now, each call under the lease the bridge gave.
 		expect((await callTool("file_write", { path: "/workspace/notes.md", content: "on the Cua computer" })).isError).toBe(false);
 		expect(text("/workspace/notes.md")).toBe("on the Cua computer");
 		expect(await fs.readFile(`${PAIRED_ROOT}/notes.md`, "utf8")).toBe("on the paired computer");
-		expect(bridge.seen).toContainEqual({ route: "call", body: { op: "write", args: { path: "/workspace/notes.md", data: expect.any(String) } } });
+		expect(bridge.seen).toContainEqual({ route: "call", body: { op: "write", args: { path: "/workspace/notes.md", data: expect.any(String) }, lease: bridge.epoch } });
 		// Larger files go in parts small enough for the bridge, as one file.
 		const big = "x".repeat(200_000);
 		expect((await callTool("file_write", { path: "/workspace/big.txt", content: big })).isError).toBe(false);
@@ -408,7 +463,7 @@ describe("turning the Cua evaluation on", () => {
 		const parts = bridge.seen.filter((seen) => seen.route === "call" && seen.body.op === "write" && seen.body.args.path !== "/workspace/notes.md");
 		expect(parts.length).toBe(4);
 		expect(Math.max(...parts.map((part) => Buffer.from(part.body.args.data, "base64").byteLength))).toBe(64 * 1024);
-		const searched = JSON.parse((await callTool("file_search", { query: "cua computer" , ignoreCase: true })).text);
+		const searched = JSON.parse((await callTool("file_search", { query: "cua computer", ignoreCase: true })).text);
 		expect(searched.matches).toEqual([expect.objectContaining({ path: "/workspace/notes.md", line: 1 })]);
 		// The app's Files are the same.
 		expect((await api("/files")).body.entries.map((entry: { name: string }) => entry.name)).toEqual(["big.txt", "notes.md"]);
@@ -496,6 +551,27 @@ describe("the agents on the Cua computer", () => {
 		live.webSocket!.accept();
 		expect(await said).toContain("Cua evaluation");
 	});
+
+	it("use the one tab one at a time, so a number one chat read can't land on another's page", async () => {
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			const before = (await instance.cuaBrowser.read("chat-a"))!.text;
+			const order = Number(/\[(\d+) button “Order”\]/.exec(before)![1]);
+			const clicked = [...bridge.driver.clicked];
+			const held = holdNext("", "driver");
+			const reading = instance.cuaBrowser.read("chat-a");
+			await held.reached;
+			const asked = bridge.seen.length;
+			// Another chat's click, on a number from before, waits for the read under way; nothing of it reaches the machine meanwhile.
+			const clicking = instance.cuaBrowser.click("chat-b", order);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			expect(bridge.seen.length).toBe(asked);
+			held.release();
+			await reading;
+			// By the time it runs, the read has numbered the page anew, and its number is no longer there.
+			await expect(clicking).rejects.toThrow(`There is no [${order}] on the page now`);
+			expect(bridge.driver.clicked).toEqual(clicked);
+		});
+	});
 });
 
 describe("pausing the agents for the person", () => {
@@ -506,10 +582,11 @@ describe("pausing the agents for the person", () => {
 		const pausing = await asPerson("/cua/pause", "POST");
 		expect(pausing.body).toMatchObject({ mode: "pausing", pending: 1 });
 		const generation = pausing.body.generation;
-		// Nothing new starts meanwhile, and the viewer stays closed.
+		// Nothing new starts meanwhile, the viewer stays closed, and resuming a pause not yet complete is refused.
 		expect((await api("/files")).status).toBe(423);
 		expect((await asPerson("/cua/viewer", "POST")).status).toBe(409);
-		expect(bridge.seen.some((seen) => seen.route === "viewer")).toBe(false);
+		expect((await asPerson("/cua/resume", "POST", { generation })).status).toBe(409);
+		expect(bridge.seen.some((seen) => seen.route === "viewer" || seen.route === "resume")).toBe(false);
 
 		held.release();
 		expect((await reading).text).toContain("on the Cua computer");
@@ -524,8 +601,18 @@ describe("pausing the agents for the person", () => {
 		expect((await post("/cua/viewer")).status).toBe(403);
 	});
 
+	it("waits for what the agents' commands left running on the machine, as the bridge counts it", async () => {
+		await resume();
+		bridge.elsewhere = 2;
+		expect((await asPerson("/cua/pause", "POST")).body).toMatchObject({ mode: "pausing", pending: 2 });
+		expect((await asPerson("/cua/viewer", "POST")).status).toBe(409);
+		expect(await status()).toMatchObject({ mode: "pausing", pending: 2 });
+		bridge.elsewhere = 0;
+		expect(await status()).toMatchObject({ mode: "paused", pending: 0 });
+	});
+
 	it("refuses every agent call while paused, whether asked for before or after, read or write", async () => {
-		const before = bridge.seen.length;
+		const before = bridge.seen.filter((seen) => seen.route === "call" || seen.route === "driver").length;
 		for (const [tool, args] of [
 			["file_read", { path: "/workspace/notes.md" }],
 			["file_write", { path: "/workspace/later.md", content: "x" }],
@@ -536,18 +623,17 @@ describe("pausing the agents for the person", () => {
 			const result = await callTool(tool, args);
 			expect(result.text).toContain("paused agents on their Cua evaluation computer");
 		}
-		expect(bridge.seen.length).toBe(before);
+		expect(bridge.seen.filter((seen) => seen.route === "call" || seen.route === "driver").length).toBe(before);
 		expect(files.has("/workspace/later.md")).toBe(false);
 	});
 
 	it("doesn't let an approval given during a pause run what it approved", async () => {
-		const generation = (await status()).generation;
-		expect((await asPerson("/cua/resume", "POST", { generation })).body.mode).toBe("agents");
+		await resume();
 		faux.setResponses([toolUse("shell", { command: "rm -rf /workspace/notes.md" }), toolUse("send_to_user", { message: "Tried." })]);
 		const asking = say("Clean up.");
 		const approval = await pendingApproval();
 		// The person pauses while the request waits, then approves it.
-		expect((await asPerson("/cua/pause", "POST")).body.mode).toBe("paused");
+		await pause();
 		const ran = bridge.ran.length;
 		const decided = await post<Approval>(`/approvals/${approval.id}/approve`);
 		expect(JSON.stringify(decided.body)).toContain("paused agents on their Cua evaluation computer");
@@ -556,39 +642,107 @@ describe("pausing the agents for the person", () => {
 		expect(text("/workspace/notes.md")).toBe("on the Cua computer");
 	});
 
-	it("resumes only for the person, and only the pause they saw", async () => {
+	it("resumes only for the person, and only the pause they saw, closing their viewer first", async () => {
 		const { generation } = await status();
 		expect((await post("/cua/resume", { generation })).status).toBe(403);
 		expect((await asPerson("/cua/resume", "POST", { generation: generation - 1 })).status).toBe(409);
 		expect((await asPerson("/cua/resume", "POST", {})).status).toBe(409);
 		expect((await status()).mode).toBe("paused");
-		// Closing the viewer resumes nothing: only this does.
+		// The person has the viewer open; closing it resumes nothing.
+		expect((await asPerson("/cua/viewer", "POST")).status).toBe(200);
+		expect(bridge.media.length).toBeGreaterThan(0);
 		const resumed = await asPerson("/cua/resume", "POST", { generation });
 		expect(resumed.body).toMatchObject({ mode: "agents", generation: generation + 1 });
+		// The bridge closed every viewer session before it gave the agents the machine.
+		expect(bridge.media).toEqual([]);
 		expect((await asPerson("/cua/resume", "POST", { generation })).status).toBe(409);
 		expect((await asPerson("/cua/viewer", "POST")).status).toBe(409);
 		expect((await callTool("file_read", { path: "/workspace/notes.md" })).text).toContain("on the Cua computer");
 	});
 
-	it("stays paused across a restart, and waits for what the bridge still has under way", async () => {
+	it("keeps the agents paused when the person's viewer won't close", async () => {
+		await pause();
+		expect((await asPerson("/cua/viewer", "POST")).status).toBe(200);
+		bridge.closeFails = true;
+		const { generation } = await status();
+		const refused = await asPerson("/cua/resume", "POST", { generation });
+		expect(refused.status).toBe(502);
+		expect(refused.body.error).toContain("viewer sessions couldn't all be closed");
+		expect(await status()).toMatchObject({ mode: "paused" });
+		expect((await callTool("file_read", { path: "/workspace/notes.md" })).text).toContain("paused agents");
+		bridge.closeFails = false;
+		await resume();
+		expect(bridge.media).toEqual([]);
+	});
+
+	it("doesn't hand back a viewer that was being made as the agents resumed", async () => {
+		await pause();
+		const { generation } = await status();
+		const held = holdNext("", "viewer");
+		const opening = asPerson("/cua/viewer", "POST");
+		await held.reached;
+		const resuming = asPerson("/cua/resume", "POST", { generation });
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		// The resume waits for the ticket being made, then closes the session it opened.
+		expect(bridge.seen.some((seen) => seen.route === "resume")).toBe(false);
+		held.release();
+		expect((await opening).status).toBe(200);
+		expect((await resuming).body).toMatchObject({ mode: "agents" });
+		expect(bridge.media).toEqual([]);
+	});
+
+	it("gives up the machine when the bridge takes it back, and waits for what the bridge still has under way", async () => {
+		// The bridge restarted: the agents' lease ended there, and it still counts a call it lost track of.
+		[bridge.mode, bridge.epoch, bridge.elsewhere] = ["draining", bridge.epoch + 1, 1];
+		expect((await callTool("file_read", { path: "/workspace/notes.md" })).text).toContain("paused agents");
+		expect(await status()).toMatchObject({ mode: "pausing", pending: 1 });
+		const { generation } = await status();
+		expect((await asPerson("/cua/resume", "POST", { generation })).status).toBe(409);
+		expect((await asPerson("/cua/viewer", "POST")).status).toBe(409);
+		bridge.elsewhere = 0;
+		expect(await status()).toMatchObject({ mode: "paused" });
+	});
+
+	it("stays paused across a restart of the space, and starts paused with nothing kept", async () => {
 		await runInDurableObject(agent(), async (instance: Pim) => {
-			instance.store.setMeta("cua_control", JSON.stringify({ mode: "pausing", generation: 40, at: 0 }));
+			const kept = instance.store.meta("cua_control");
 			// A new instance on the same storage, as after a restart: it has nothing of its own under way.
 			const restarted = new CuaEvaluation({ meta: instance.store, config: () => readCuaConfig(cuaEnvironment), owner: () => OWNER, changed: () => {} });
 			await expect(restarted.hold(async () => "ran")).rejects.toThrow("paused agents");
-			bridge.inflight = 1;
-			expect((await restarted.settle()).mode).toBe("pausing");
-			await expect(restarted.viewer()).rejects.toThrow("still finishing");
-			bridge.inflight = 0;
-			expect((await restarted.settle()).mode).toBe("paused");
-			await expect(restarted.hold(async () => "ran")).rejects.toThrow("paused agents");
+			// With nothing kept at all, it starts paused too.
+			instance.store.deleteMeta("cua_control");
+			const fresh = new CuaEvaluation({ meta: instance.store, config: () => readCuaConfig(cuaEnvironment), owner: () => OWNER, changed: () => {} });
+			expect(fresh.view().mode).toBe("paused");
+			await expect(fresh.hold(async () => "ran")).rejects.toThrow("paused agents");
+			instance.store.setMeta("cua_control", kept!);
 		});
-		expect(await status()).toMatchObject({ mode: "paused", generation: 40 });
-		// Without the bridge, a pause can't be shown complete, and stays pausing.
-		await runInDurableObject(agent(), (instance: Pim) => instance.store.setMeta("cua_control", JSON.stringify({ mode: "pausing", generation: 41, at: 0 })));
+		// Without the bridge, a pause can't be shown complete, and resuming waits.
 		bridge.answerWith = { status: 502, body: JSON.stringify({ error: { message: "down" } }) };
-		expect(await status()).toMatchObject({ mode: "pausing", problem: "down" });
-		expect((await asPerson("/cua/resume", "POST", { generation: 41 })).body.mode).toBe("agents");
+		expect(await status()).toMatchObject({ problem: "down" });
+		await resume();
+	});
+
+	it("doesn't let a call from before a pause act after it, wherever it was held up", async () => {
+		const held = holdNext("read");
+		const reading = callTool("file_read", { path: "/workspace/notes.md" });
+		await held.reached;
+		const lease = bridge.epoch;
+		await asPerson("/cua/pause", "POST");
+		// The call reached the bridge under the old lease and counts as the agents' until it ends.
+		expect(bridge.mode).toBe("draining");
+		expect(await status()).toMatchObject({ mode: "pausing" });
+		held.release();
+		await reading;
+		await vi.waitFor(async () => expect(await status()).toMatchObject({ mode: "paused" }));
+		// The same lease, arriving late, is refused by the bridge.
+		const late = await fetch(`${BRIDGE}/pim-bridge/v1/call`, {
+			method: "POST",
+			redirect: "manual",
+			headers: { "content-type": "application/json", [CUA_BRIDGE_AUTH_HEADER]: `Bearer ${BRIDGE_TOKEN}` },
+			body: JSON.stringify({ op: "stat", args: { path: "/workspace" }, lease }),
+		});
+		expect(late.status).toBe(423);
+		await resume();
 	});
 });
 
@@ -609,11 +763,42 @@ describe("the bridge's answers", () => {
 });
 
 describe("turning the Cua evaluation off", () => {
-	it("gives the agents back the space's own computer, as it was", async () => {
+	it("waits for the agents' work there, which a pause cuts short between calls and never moves to another computer", async () => {
+		const big = "y".repeat(200_000);
+		const held = holdNext("write");
+		const writing = callTool("file_write", { path: "/workspace/whole.txt", content: big });
+		await held.reached;
+		expect((await asPerson("/cua", "DELETE")).status).toBe(409);
+		await asPerson("/cua/pause", "POST");
+		expect((await asPerson("/cua", "DELETE")).status).toBe(409);
+		held.release();
+		// The part under way finished; the next was refused, by the bridge, under the lease the pause ended.
+		expect((await writing).text).toContain("paused agents");
+		const refused = bridge.seen.filter((seen) => seen.route === "call" && seen.body.op === "write" && seen.body.args.path.includes("whole.txt"));
+		expect(refused.length).toBe(2);
+		// No file is left half-written, and nothing went to the paired computer.
+		expect(files.has("/workspace/whole.txt")).toBe(false);
+		await expect(fs.stat(`${PAIRED_ROOT}/whole.txt`)).rejects.toThrow();
+		await vi.waitFor(async () => expect(await status()).toMatchObject({ mode: "paused" }));
+	});
+
+	it("denies what the agents asked to do there and the person hadn't decided, and gives back the space's own computer", async () => {
+		await resume();
+		// A chat of its own: the main one is long by now, and would be summarized first.
+		const chat = (await post<{ id: string }>("/sessions", {})).body.id;
+		faux.setResponses([toolUse("shell", { command: "rm -rf /workspace" }), toolUse("send_to_user", { message: "Asked." })]);
+		const asking = say("Clear it all out.", chat);
+		const approval = await pendingApproval();
+		await pause();
+		bridge.seen = [];
 		expect((await asPerson("/cua", "DELETE")).body).toMatchObject({ enabled: false });
+		// The request was for the Cua computer: it doesn't run on the paired one in its place.
+		expect((await api(`/approvals/${approval.id}`)).body).toMatchObject({ status: "denied" });
+		await asking;
+		expect(bridge.ran.some((ran) => ran.command === "rm -rf /workspace")).toBe(false);
 		expect((await api("/computer")).body).toMatchObject({ state: "online", computer: { hostname: "test-box" } });
 		expect((await api("/computer")).body.provider).toBeUndefined();
-		expect((await callTool("file_read", { path: "/workspace/notes.md" })).text).toContain("on the paired computer");
+		expect((await callTool("file_read", { path: "/workspace/notes.md" }, chat)).text).toContain("on the paired computer");
 		expect((await api("/browser")).body.provider).toBeUndefined();
 		expect(bridge.seen).toEqual([]);
 	});

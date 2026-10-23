@@ -15,8 +15,9 @@ import type { CuaEvaluation, DriverAnswer } from "./cua";
  * tools expect: `[12 button “Search”]`. Numbers keep counting up and each
  * stands for one ref of one snapshot, which a newer snapshot or a
  * navigation ends, so a number that waited for the person's approval
- * reaches the element it named or none. Each use is one piece of work for
- * the evaluation's pause (`CuaEvaluation.hold`).
+ * reaches the element it named or none. Uses run one at a time, since they
+ * share the tab, and each is one piece of work for the evaluation's pause
+ * (`CuaEvaluation.hold`), checked when it runs rather than when it queued.
  */
 
 /** The driver session, and the isolated profile, Pim's browser uses; the bridge accepts no other. */
@@ -58,10 +59,22 @@ const record = (value: unknown): Record<string, unknown> => (value && typeof val
 export class CuaBrowser implements AgentBrowser {
 	readonly #cua: CuaEvaluation;
 	readonly #meta: Meta;
+	/** The use under way: the next waits for it. */
+	#queue: Promise<unknown> = Promise.resolve();
 
 	constructor(cua: CuaEvaluation, meta: Meta) {
 		this.#cua = cua;
 		this.#meta = meta;
+	}
+
+	/** One use of the tab at a time, each held for the pause once it runs. */
+	#use<T>(work: () => Promise<T>): Promise<T> {
+		const next = this.#queue.then(
+			() => this.#cua.hold(work),
+			() => this.#cua.hold(work),
+		);
+		this.#queue = next.catch(() => {});
+		return next;
 	}
 
 	#kept(): Kept {
@@ -157,7 +170,7 @@ export class CuaBrowser implements AgentBrowser {
 
 	visit(_chat: string, url: string): Promise<PageView> {
 		if (!/^https?:\/\//i.test(url)) return Promise.reject(new Error("The Cua evaluation's browser opens http(s) addresses only."));
-		return this.#cua.hold(async () => {
+		return this.#use(async () => {
 			let binding = await this.#bind();
 			try {
 				await this.#call("browser_navigate", { session: SESSION, target_id: binding.targetId, tab_id: binding.tabId, url });
@@ -173,7 +186,7 @@ export class CuaBrowser implements AgentBrowser {
 	}
 
 	read(_chat: string): Promise<PageView | null> {
-		return this.#cua.hold(async () => {
+		return this.#use(async () => {
 			const { binding } = this.#kept();
 			if (!binding) return null;
 			try {
@@ -202,7 +215,7 @@ export class CuaBrowser implements AgentBrowser {
 	}
 
 	click(_chat: string, ref: number): Promise<PageView> {
-		return this.#cua.hold(async () => {
+		return this.#use(async () => {
 			const target = this.#target(ref);
 			const { targetId, tabId } = target.binding;
 			try {
@@ -216,7 +229,7 @@ export class CuaBrowser implements AgentBrowser {
 	}
 
 	type(_chat: string, ref: number, text: string, submit: boolean): Promise<PageView> {
-		return this.#cua.hold(async () => {
+		return this.#use(async () => {
 			const target = this.#target(ref);
 			const at = { session: SESSION, target_id: target.binding.targetId, tab_id: target.binding.tabId, ref: target.ref };
 			try {
@@ -232,7 +245,7 @@ export class CuaBrowser implements AgentBrowser {
 
 	/** A picture of the tab. It reads the tab again too, so numbers from before it are gone: read the page again after. */
 	screenshot(_chat: string): Promise<Uint8Array | null> {
-		return this.#cua.hold(async () => {
+		return this.#use(async () => {
 			const { binding } = this.#kept();
 			if (!binding) return null;
 			const { image } = await this.#snapshot(binding, true).catch((error) => {
@@ -244,7 +257,7 @@ export class CuaBrowser implements AgentBrowser {
 
 	/** Ends the driver session, which closes the browser; its named profile, with what's signed in there, stays. */
 	close(_chat: string): Promise<void> {
-		return this.#cua.hold(async () => {
+		return this.#use(async () => {
 			if (this.#kept().binding) await this.#call("end_session", { session: SESSION }).catch(() => undefined);
 			this.#save({ ...this.#kept(), binding: null, page: null });
 		});

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
 import type { Connection } from "agents";
 import type { ExecArgs, ExecResult } from "../computer/pim-computer";
@@ -108,7 +109,7 @@ export type ComputerProvider = {
 	active(): boolean;
 	status(): ComputerStatus;
 	call<T>(op: string, args: Record<string, unknown>, timeoutMs: number): Promise<T>;
-	/** Runs several calls as one piece of work, which a pause waits for. */
+	/** Runs several calls as one piece of work, which a pause waits for, and which turning it off waits for too. */
 	hold<T>(work: () => Promise<T>): Promise<T>;
 	/** The most bytes one write sends. */
 	readonly chunkBytes: number;
@@ -139,6 +140,8 @@ export class Computer {
 	#usedAt = 0;
 	#idle: ReturnType<typeof setTimeout> | undefined;
 	readonly #provider: ComputerProvider | undefined;
+	/** The computer a piece of work started on (`pinned`): the stand-in, or null for this one. */
+	readonly #pinned = new AsyncLocalStorage<ComputerProvider | null>();
 
 	constructor(options: { meta: Meta; sockets: () => Connection[]; wake: () => Promise<SpriteLink>; inUse: () => boolean; provider?: ComputerProvider }) {
 		this.#meta = options.meta;
@@ -151,6 +154,23 @@ export class Computer {
 	/** The computer standing in for this one now, if any. */
 	#standIn(): ComputerProvider | undefined {
 		return this.#provider?.active() ? this.#provider : undefined;
+	}
+
+	/** Where a call goes: the computer the work under way started on, else the one in use now. */
+	#target(): ComputerProvider | undefined {
+		const pinned = this.#pinned.getStore();
+		return pinned === undefined ? this.#standIn() : (pinned ?? undefined);
+	}
+
+	/**
+	 * Runs one tool's work on the computer in use when it starts, whichever
+	 * stands in meanwhile, so no tool reads one computer and writes another.
+	 * On a stand-in it is one piece of work there, which a pause waits for.
+	 */
+	pinned<T>(work: () => Promise<T>): Promise<T> {
+		if (this.#pinned.getStore() !== undefined) return work();
+		const standIn = this.#standIn();
+		return standIn ? standIn.hold(() => this.#pinned.run(standIn, work)) : this.#pinned.run(null, work);
 	}
 
 	/** The machine of the computer Pim started, or null for one the person brought. */
@@ -313,7 +333,7 @@ export class Computer {
 
 	/** Calls the computer and waits for its answer; one Pim started wakes first, if it's asleep. */
 	async call<T = unknown>(op: string, args: Record<string, unknown>, timeoutMs = FILE_CALL_MS, counts = true): Promise<T> {
-		const standIn = this.#standIn();
+		const standIn = this.#target();
 		if (standIn) return standIn.call<T>(op, args, timeoutMs);
 		if (!this.paired()) throw new HttpError(404, "No computer is connected. The person can connect one in Settings → Computer.");
 		await this.wake();
@@ -450,16 +470,16 @@ export class Computer {
 		writeFile: async (path: string, content: Uint8Array | string, options: { mode?: number } = {}): Promise<void> => {
 			const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
 			const mode = options.mode === undefined ? {} : { mode: options.mode };
-			const standIn = this.#standIn();
-			const chunk = standIn?.chunkBytes ?? CHUNK_BYTES;
-			if (bytes.byteLength <= chunk) {
-				await this.call("write", { path, data: Buffer.from(bytes).toString("base64"), ...mode });
-				return;
-			}
-			// In parts, to a file beside it that takes its place once whole: one piece of work, which a pause waits for.
-			const slash = path.lastIndexOf("/");
-			const temporary = `${path.slice(0, slash)}/.${path.slice(slash + 1)}.pim-${crypto.randomUUID()}`;
-			const write = async () => {
+			// One piece of work, on one computer, which a pause waits for.
+			await this.pinned(async () => {
+				const chunk = this.#target()?.chunkBytes ?? CHUNK_BYTES;
+				if (bytes.byteLength <= chunk) {
+					await this.call("write", { path, data: Buffer.from(bytes).toString("base64"), ...mode });
+					return;
+				}
+				// In parts, to a file beside it that takes its place once whole.
+				const slash = path.lastIndexOf("/");
+				const temporary = `${path.slice(0, slash)}/.${path.slice(slash + 1)}.pim-${crypto.randomUUID()}`;
 				try {
 					for (let start = 0; start < bytes.byteLength; start += chunk) {
 						const data = Buffer.from(bytes.subarray(start, start + chunk)).toString("base64");
@@ -470,8 +490,7 @@ export class Computer {
 					await this.call("rm", { path: temporary, force: true }).catch(() => undefined);
 					throw error;
 				}
-			};
-			await (standIn ? standIn.hold(write) : write());
+			});
 		},
 		mkdir: async (path: string, options: { recursive?: boolean } = {}): Promise<void> => {
 			await this.call("mkdir", { path, recursive: options.recursive === true });

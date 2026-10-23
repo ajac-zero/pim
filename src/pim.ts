@@ -674,7 +674,7 @@ export class Pim extends DurableAgent<Env> {
 				tasksExtension({
 					roleOf: (session) => this.#roleOf(session),
 					delegates: (session) => this.#delegates(session),
-					start: (requester, batch, tasks) => this.#startTasks(requester, batch, tasks),
+					start: (requester, batch, tasks, options) => this.#startTasks(requester, batch, tasks, options),
 					tasks: this.#tasks,
 				}),
 			);
@@ -2767,12 +2767,17 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Gives out tasks a conversation hands out, each in a new conversation of
-	 * its own or that of the earlier task it continues, and doesn't wait for
-	 * them: their answers come back in an update (see `#deliver`). A replayed
-	 * call finds the tasks it gave, and gives them again only where giving
-	 * didn't finish.
+	 * its own or that of the earlier task it continues. Their answers come
+	 * back in an update (see `#deliver`), or, when the call `waits`, as what
+	 * it returns. A replayed call finds the tasks it gave, and gives them
+	 * again only where giving didn't finish.
 	 */
-	async #startTasks(requester: string, batch: string, given: { to: Agent; task: string; continues: Task | null }[]): Promise<Task[]> {
+	async #startTasks(
+		requester: string,
+		batch: string,
+		given: { to: Agent; task: string; continues: Task | null }[],
+		{ call, waits }: { call: string; waits: boolean },
+	): Promise<Task[]> {
 		const asking = this.#tasks.of(requester);
 		// Work an agent in a room hands out shows in the room's chat.
 		const root = asking?.root ?? this.#rooms.of(requester)?.room ?? requester;
@@ -2788,6 +2793,8 @@ export class Pim extends DurableAgent<Env> {
 					parent: asking && asking.kind !== "review" ? asking.id : null,
 					root,
 					batch,
+					call,
+					waits,
 					position,
 					agent: to.id,
 					task,
@@ -2843,18 +2850,26 @@ export class Pim extends DurableAgent<Env> {
 	 * Gives a conversation the answers of tasks it handed out together, once
 	 * none of them is working: in one message, which wakes it. Those waiting
 	 * for the person are named, and answered in a later update of their own.
+	 * When the call that gave them waits, it waits for all of them, those
+	 * waiting for the person too, and the last answer wakes it to return them.
 	 */
 	async #deliver(batch: string): Promise<void> {
 		const tasks = this.#tasks.inBatch(batch);
 		const requester = tasks[0]?.requester;
 		if (!requester || tasks.some((task) => task.state === "working")) return;
-		const done = this.#tasks.unanswered(batch);
-		if (done.length === 0) return;
 		// No one is left to tell: the chat that asked was deleted, or the task that asked was canceled.
 		if (this.store.deletedSessions().has(requester) || this.#tasks.of(requester)?.state === "canceled") {
 			this.#tasks.drop(batch);
 			return;
 		}
+		if (tasks[0]!.waits) {
+			if (tasks.some((task) => !TERMINAL_STATES.has(task.state))) return;
+			if ((await this.harness.resumeTask(requester, Number(batch) as TaskId)) !== "terminal") return;
+			// The call ended without them, as when its chat was stopped: the answers come in an update.
+			this.#tasks.stopWaiting(batch);
+		}
+		const done = this.#tasks.unanswered(batch);
+		if (done.length === 0) return;
 		const operation = `task-update:${done.map((task) => task.id).join(",")}`;
 		this.#tasks.giving(
 			done.map((task) => task.id),
@@ -2898,6 +2913,8 @@ export class Pim extends DurableAgent<Env> {
 			const requester = this.#tasks.inBatch(batch)[0]?.requester;
 			if (requester) await this.#giveUpdate(requester, batch, operation);
 		}
+		// A call waiting for tasks that finished just before the restart may not have been woken.
+		for (const batch of this.#tasks.waiting()) await this.#deliver(batch);
 	}
 
 	// Rooms: chats grown into group chats (./rooms.ts).
@@ -3934,6 +3951,7 @@ export class Pim extends DurableAgent<Env> {
 		return {
 			id: task.id,
 			parent: task.parent,
+			call: task.call,
 			agent: by(task.conversation),
 			from: by(task.requester!),
 			task: task.task,

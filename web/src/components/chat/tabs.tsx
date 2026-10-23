@@ -9,7 +9,7 @@ import {
   useAwaitingApproval,
 } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
-import { X } from "~/components/icons";
+import { Loader2, X } from "~/components/icons";
 import type { Session } from "~/lib/pim-api";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
 import {
@@ -134,8 +134,8 @@ export function ChatTabs({ activeId }: { activeId: string }) {
   };
   const statusOf = (session: Session) =>
     session.busy ? (
-      <span
-        className="size-1.5 shrink-0 rounded-full bg-primary motion-safe:animate-pulse"
+      <Loader2
+        className="size-3 shrink-0 text-primary motion-safe:animate-spin"
         role="img"
         aria-label={t("working")}
       />

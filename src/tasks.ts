@@ -13,7 +13,12 @@ import { type Agent, agentCalled, agentLabel } from "./agents";
  * there is the person's.
  *
  * Handing out tasks doesn't wait for them, as in A2A's task model: the call
- * returns their ids at once, and the agent goes on, or ends its turn. Each
+ * returns their ids at once, and the agent goes on, or ends its turn. An
+ * agent that needs the answers to go on, such as to reply to the person,
+ * hands the tasks out with `wait` instead: the call suspends, holding no
+ * memory and keeping nothing running, and returns their answers once all of
+ * them are done, those waiting for the person too, in place of the update.
+ * Each
  * task is `working` until its agent answers (`completed`), gives up
  * (`failed`) or the person cancels it (`canceled`); while its agent waits
  * for the person's approval it is `auth-required`. The answers come back to
@@ -56,6 +61,10 @@ export type Task = {
 	readonly root: string;
 	/** The `delegate` call that gave it: tasks handed out together share it, and are answered together. */
 	readonly batch: string;
+	/** The id of that call in its conversation's transcript, where the chat shows the task; null for a review, and for tasks from before it was kept. */
+	readonly call: string | null;
+	/** Whether that call waits, suspended, to return the answers itself; false once it has returned. */
+	readonly waits: boolean;
 	/** The agent doing it. */
 	readonly agent: string;
 	readonly task: string;
@@ -79,6 +88,8 @@ CREATE TABLE IF NOT EXISTS pim_tasks (
 	parent TEXT,
 	root TEXT NOT NULL,
 	batch TEXT NOT NULL,
+	call TEXT,
+	waits INTEGER NOT NULL DEFAULT 0,
 	position INTEGER NOT NULL,
 	agent TEXT NOT NULL,
 	member TEXT,
@@ -112,6 +123,8 @@ const taskOf = (row: Row): Task => ({
 	parent: nullable(row.parent),
 	root: String(row.root),
 	batch: String(row.batch),
+	call: nullable(row.call),
+	waits: Number(row.waits) === 1,
 	agent: String(row.agent),
 	task: String(row.task),
 	state: String(row.state) as TaskState,
@@ -131,6 +144,9 @@ export class TaskStore {
 	constructor(sql: SqlStorage) {
 		this.#sql = sql;
 		this.#sql.exec(SCHEMA);
+		const columns = new Set(this.#sql.exec("PRAGMA table_info(pim_tasks)").toArray().map((row) => String(row.name)));
+		if (!columns.has("call")) this.#sql.exec("ALTER TABLE pim_tasks ADD COLUMN call TEXT");
+		if (!columns.has("waits")) this.#sql.exec("ALTER TABLE pim_tasks ADD COLUMN waits INTEGER NOT NULL DEFAULT 0");
 		// Team members' tasks were once kept apart, and waited for: those still running when that changed are over. Older ones named the agent `persona`. Each keeps its member's name, so that it becomes the task of the agent the member becomes (see ./agents.ts).
 		const old = this.#sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pim_team_runs'").toArray();
 		if (old.length > 0) {
@@ -166,6 +182,8 @@ export class TaskStore {
 		parent: string | null;
 		root: string;
 		batch: string;
+		call?: string;
+		waits?: boolean;
 		position: number;
 		agent: string;
 		task: string;
@@ -175,7 +193,7 @@ export class TaskStore {
 		const id = newId();
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT INTO pim_tasks (id, kind, conversation, requester, parent, root, batch, position, agent, task, state, operation, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'working', ?, ?, ?)",
+			"INSERT INTO pim_tasks (id, kind, conversation, requester, parent, root, batch, call, waits, position, agent, task, state, operation, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'working', ?, ?, ?)",
 			id,
 			task.kind,
 			task.conversation,
@@ -183,6 +201,8 @@ export class TaskStore {
 			task.parent,
 			task.root,
 			task.batch,
+			task.call ?? null,
+			task.waits ? 1 : 0,
 			task.position,
 			task.agent,
 			task.task,
@@ -294,6 +314,35 @@ export class TaskStore {
 			.map((row) => ({ operation: String(row.update_op), batch: String(row.batch) }));
 	}
 
+	/** The `delegate` calls that wait for their tasks' answers, by batch. */
+	waiting(): string[] {
+		return this.#sql
+			.exec("SELECT DISTINCT batch FROM pim_tasks WHERE waits = 1")
+			.toArray()
+			.map((row) => String(row.batch));
+	}
+
+	/**
+	 * The answers a waiting `delegate` call returns, once its tasks are all
+	 * done: marks them as given by it, and the call as no longer waiting. Its
+	 * rerun, after an eviction, finds the same answers.
+	 */
+	answerWaiting(batch: string): Task[] {
+		const operation = `wait:${batch}`;
+		this.#sql.exec(
+			`UPDATE pim_tasks SET delivered = ${DELIVERY.given}, update_op = ? WHERE batch = ? AND waits = 1 AND state IN ('completed', 'failed', 'canceled') AND delivered = ${DELIVERY.none}`,
+			operation,
+			batch,
+		);
+		this.stopWaiting(batch);
+		return this.inBatch(batch).filter((task) => task.update === operation);
+	}
+
+	/** The call no longer waits for the batch's answers, which come in updates. */
+	stopWaiting(batch: string): void {
+		this.#sql.exec("UPDATE pim_tasks SET waits = 0 WHERE batch = ?", batch);
+	}
+
 	/** Gives up on telling a requester that is gone. */
 	drop(batch: string): void {
 		this.#sql.exec(`UPDATE pim_tasks SET delivered = ${DELIVERY.given} WHERE batch = ? AND state IN ('completed', 'failed', 'canceled')`, batch);
@@ -319,9 +368,10 @@ export type TasksHost = {
 	/**
 	 * Gives the tasks, each to its agent, in a new conversation or the one of
 	 * an earlier task it continues. Idempotent on `batch`: a replayed call
-	 * gives none twice.
+	 * gives none twice. With `waits`, the call `call` waits for their
+	 * answers, and the space wakes it once all of them are done.
 	 */
-	start(requester: string, batch: string, tasks: { to: Agent; task: string; continues: Task | null }[]): Promise<Task[]>;
+	start(requester: string, batch: string, tasks: { to: Agent; task: string; continues: Task | null }[], options: { call: string; waits: boolean }): Promise<Task[]>;
 	readonly tasks: TaskStore;
 };
 
@@ -351,13 +401,14 @@ function delegatesSection(self: Agent, delegates: Agent[]): string {
 		self.majordomo ? "The person's other agents:" : "Your contacts, the person's agents you hand tasks to:",
 		...delegates.map((agent) => `- ${agentLabel(agent)}${agent.description ? `: ${agent.description}` : ""}`),
 		`A task's agent knows only its own instructions and the task: give it everything it needs. \`${DELEGATE}\` returns at once with the tasks' ids. Don't wait for them, check on them or do their work yourself: say what you handed out if it helps, then end your turn. Their answers arrive later in this conversation, all those you handed out together in one message starting with "${TASK_UPDATE}"; then carry on with them. To follow up on a task, hand out another that \`continues\` it.`,
+		`When you can't go on without the answers, such as when the person asked something only they can tell you and expects the reply now, set \`wait\`: the call returns their answers once they are done, and you carry on from there. Meanwhile you can do nothing else, and the person's messages wait too, so don't wait for long work the person needn't watch.`,
 	].join("\n");
 }
 
 export function tasksExtension(host: TasksHost) {
 	const delegate = defineTool({
 		name: DELEGATE,
-		description: `Hand tasks to others, as your prompt lists them: each task to one, all working at the same time, each in a conversation of its own. Returns at once with each task's id; the answers arrive later in this conversation, in a message starting with "${TASK_UPDATE}".`,
+		description: `Hand tasks to others, as your prompt lists them: each task to one, all working at the same time, each in a conversation of its own. Returns at once with each task's id; the answers arrive later in this conversation, in a message starting with "${TASK_UPDATE}". With wait, returns the answers instead, once the tasks are done.`,
 		parameters: Type.Object({
 			tasks: Type.Array(
 				Type.Object({
@@ -368,6 +419,11 @@ export function tasksExtension(host: TasksHost) {
 					),
 				}),
 				{ minItems: 1, maxItems: MAX_TASKS },
+			),
+			wait: Type.Optional(
+				Type.Boolean({
+					description: "Wait for the answers and return them, when you need them to go on. The call returns once every task is done, including any waiting for the person's approval.",
+				}),
 			),
 		}),
 		// A rerun after an eviction finds the tasks the call gave, and gives none twice.
@@ -396,7 +452,20 @@ export function tasksExtension(host: TasksHost) {
 				return { to: agent, task, continues: earlier };
 			});
 			if (problems.length > 0) return text(problems.join("\n"), true);
-			const started = await host.start(session, String(api.taskId), given.map((entry) => entry!));
+			const batch = String(api.taskId);
+			const started = await host.start(
+				session,
+				batch,
+				given.map((entry) => entry!),
+				{ call: api.callId, waits: args.wait === true },
+			);
+			if (args.wait) {
+				// Suspended, the call holds nothing: the space wakes it once all its tasks are done, and it runs again to here.
+				const tasks = host.tasks.inBatch(batch);
+				if (tasks.some((task) => task.waits) && tasks.some((task) => !TERMINAL_STATES.has(task.state))) return { control: { suspend: true } };
+				const by = (task: Task) => host.roleOf(task.conversation).agent.name;
+				return text(host.tasks.answerWaiting(batch).map((task) => waitedAnswer(task, by(task))).join("\n\n"));
+			}
 			return text(
 				[
 					...started.map((task) => `Task ${task.id}: ${host.roleOf(task.conversation).agent.name} is on it.`),
@@ -416,6 +485,13 @@ export function tasksExtension(host: TasksHost) {
 		],
 		tools: [delegate],
 	});
+}
+
+/** What a `delegate` call that waited returns for one of its tasks, once it is done. */
+function waitedAnswer(task: Task, by: string): string {
+	if (task.state === "completed") return `Task ${task.id}: ${by} answered:\n${task.result}`;
+	if (task.state === "canceled") return `Task ${task.id}: ${by}'s task was canceled: ${task.result}`;
+	return `Task ${task.id}: ${by} didn't finish: ${task.result}`;
 }
 
 /** The message that gives a requester the answers of tasks it handed out together, and says which of them still wait for the person. */

@@ -107,8 +107,8 @@ export function RoomMenu({ sessionId }: { sessionId: string }) {
                 key={person.id}
                 className={
                   index > 0
-                    ? "-ml-1.5 rounded-md ring-2 ring-background"
-                    : "rounded-md ring-2 ring-background"
+                    ? "-ml-1.5 rounded-md bg-background ring-2 ring-background"
+                    : "rounded-md bg-background ring-2 ring-background"
                 }
               >
                 {/* Too small here for the majordomo's crown. */}

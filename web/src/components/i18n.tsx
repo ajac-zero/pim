@@ -123,6 +123,7 @@ const translations = {
     messageRoom: "Message everyone, or @mention an agent…",
     inThisChat: "In this chat",
     roomHost: "Host",
+    removeFromChat: "Remove {name} from the chat",
     roomOpen: "Every agent decides when to speak",
     roomOpenHint:
       "Otherwise an agent answers when it's mentioned, and {name} answers the rest.",
@@ -1154,6 +1155,7 @@ const translations = {
     messageRoom: "Escribe a todos, o menciona a un agente con @…",
     inThisChat: "En este chat",
     roomHost: "Anfitrión",
+    removeFromChat: "Sacar a {name} del chat",
     roomOpen: "Cada agente decide cuándo hablar",
     roomOpenHint:
       "Si no, un agente responde cuando se le menciona, y {name} responde al resto.",

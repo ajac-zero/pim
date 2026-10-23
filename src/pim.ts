@@ -684,6 +684,11 @@ export class Pim extends DurableAgent<Env> {
 					speaker: (conversation) => (this.#roomable(conversation) || this.#rooms.of(conversation) ? this.#roleOf(conversation).agent : null),
 					agent: (id) => this.agents.get(id),
 					invitable: (conversation) => this.#invitable(conversation),
+					remove: (seat) => this.#leave(seat),
+					history: async (seat) => {
+						const said = projectEntries(await this.harness.session(seat.room).messages()).filter((message) => message.timestamp < seat.joinedAt);
+						return roomHistory(said, this.agents.ofSession(seat.room).name, ROOM_HISTORY_CHARS);
+					},
 				}),
 			);
 			this.registry.install(
@@ -2979,10 +2984,12 @@ export class Pim extends DurableAgent<Env> {
 	 * message than the turn that sent it; the others hear it without being woken.
 	 */
 	async #posted(conversation: string, message: string, at: number, images: Readonly<Record<string, string>>): Promise<void> {
+		// An agent taken out of a room, still finishing a message, brings no one in and is heard by no one.
+		if (this.store.deletedSessions().has(conversation)) return;
 		if (!this.#rooms.of(conversation) && !this.#roomable(conversation)) return;
 		const room = this.#rooms.of(conversation)?.room ?? conversation;
 		const speaker = this.#roleOf(conversation).agent;
-		for (const agent of mentioned(message, this.#invitable(conversation))) await this.#join(room, agent, conversation === room ? message : undefined);
+		for (const agent of mentioned(message, this.#invitable(conversation))) await this.#join(room, agent);
 		// The chat shows the images as the sender's own message does, from Pim's copies.
 		const said = Object.entries(images).reduce((text, [url, copy]) => text.replaceAll(url, copy), message);
 		const seat = this.#rooms.of(conversation);
@@ -3042,25 +3049,24 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * Brings an agent into a chat, which becomes a room if it wasn't one. It
 	 * gets a seat: a conversation of its own, as a chat with it is, which
-	 * starts with what was said so far; everyone else hears it joined. `said`
-	 * is the host's message that brought it in, already in the chat, which it
-	 * hears next rather than as said before.
+	 * starts with nothing of what was said before (it reads that with
+	 * `chat_history`); everyone else hears it joined. The message that
+	 * brought it in is the first thing it hears.
 	 */
-	#join(room: string, agent: Agent, said?: string): Promise<Seat> {
+	#join(room: string, agent: Agent): Promise<Seat> {
 		const seated = this.#rooms.at(room, agent.id);
 		if (seated) return Promise.resolve(seated);
 		const key = `${room}:${agent.id}`;
 		let joining = this.#joining.get(key);
 		if (!joining) {
-			joining = this.#seat(room, agent, said).finally(() => this.#joining.delete(key));
+			joining = this.#seat(room, agent).finally(() => this.#joining.delete(key));
 			this.#joining.set(key, joining);
 		}
 		return joining;
 	}
 
-	async #seat(room: string, agent: Agent, said: string | undefined): Promise<Seat> {
+	async #seat(room: string, agent: Agent): Promise<Seat> {
 		const host = this.agents.ofSession(room);
-		const history = roomHistory(projectEntries(await this.harness.session(room).messages()), host.name, ROOM_HISTORY_CHARS, said);
 		const { id } = await this.harness.sessions.create();
 		await this.harness.session(id).setModel(this.chosenModel());
 		this.agents.setSession(id, agent.id);
@@ -3068,14 +3074,32 @@ export class Pim extends DurableAgent<Env> {
 		const others = this.#rooms.seats(room);
 		const seat = this.#rooms.seat(room, agent.id, id);
 		const names = this.#seated(others).map((other) => other.name);
-		await this.#write(
-			id,
-			`${ROOM_NOTICE} You joined this chat, with the person and ${names.join(", ")}.${history === "" ? "" : ` What was said before you joined:\n\n${history}`}`,
-			`join:${id}`,
-		);
+		await this.#write(id, `${ROOM_NOTICE} You joined this chat, with the person and ${names.join(", ")}.`, `join:${id}`);
 		for (const other of others) await this.#write(other.conversation, `${ROOM_NOTICE} ${agent.name} joined the chat.`, `joined:${id}:${other.agent}`);
 		this.broadcastMessage({ type: "sessions" });
 		return seat;
+	}
+
+	/**
+	 * Takes an agent out of a room, as its host or the person asks. Its
+	 * conversation is put away as a deleted chat's is: it stops, the tasks it
+	 * handed out are canceled and its approval requests denied. Everyone left
+	 * hears it left. Brought in again, it gets a seat afresh.
+	 */
+	async #leave(seat: Seat): Promise<void> {
+		if (seat.conversation === seat.room || !this.#rooms.of(seat.conversation)) return;
+		this.#rooms.unseat(seat);
+		this.store.deleteSession(seat.conversation);
+		const reason = "It was taken out of the chat.";
+		for (const approval of this.store.approvals("pending")) {
+			if (approval.session !== seat.conversation || !this.store.decideApproval(approval.id, "denied", reason, "user")) continue;
+			this.broadcastMessage({ type: "approval", approval: this.#publicApproval(this.store.approval(approval.id)!) });
+		}
+		await this.harness.session(seat.conversation).abort();
+		for (const task of this.#tasks.byRequester(seat.conversation)) await this.#cancelTask(task, reason);
+		const name = this.agents.get(seat.agent)?.name ?? "An agent";
+		for (const other of this.#rooms.seats(seat.room)) await this.#write(other.conversation, `${ROOM_NOTICE} ${name} left the chat.`, `left:${seat.conversation}:${other.agent}`);
+		this.broadcastMessage({ type: "sessions" });
 	}
 
 	/** What the chat list says of a room: how agents take turns, and who is in it besides the host, each with whether it is at work. */
@@ -4272,6 +4296,18 @@ export class Pim extends DurableAgent<Env> {
 				this.#rooms.open(id, this.agents.ofSession(id).id);
 				this.#rooms.setMode(id, mode);
 				this.broadcastMessage({ type: "sessions" });
+				const busy = new Set((await this.harness.sessions.list()).flatMap((info) => (info.busy ? [info.id] : [])));
+				return { room: this.#roomInfo(id, busy) };
+			},
+		],
+		[
+			"DELETE",
+			"/sessions/:session/room/members/:agent",
+			async ({ session, agent }) => {
+				const id = await this.#session(session!);
+				const seat = this.#rooms.at(id, agent!);
+				if (!seat || seat.conversation === id) throw new HttpError(404, "No such agent in this chat besides its host");
+				await this.#leave(seat);
 				const busy = new Set((await this.harness.sessions.list()).flatMap((info) => (info.busy ? [info.id] : [])));
 				return { room: this.#roomInfo(id, busy) };
 			},

@@ -835,17 +835,28 @@ describe("a group chat", () => {
 		expect(await roomOf(session)).toBeNull();
 		const before = await chats();
 
-		// Mentioned, Coach joins with what was said so far and answers in the chat; the host isn't woken.
-		scripts({ Coach: [as("Coach", "Start with 5 km on Monday.")] });
+		// Mentioned, Coach joins knowing nothing of what was said before, reads it back, and answers in the chat; the host isn't woken.
+		let readBack = "";
+		scripts({
+			Coach: [
+				(context) => {
+					seen.Coach!.push(context);
+					return toolUse("chat_history", {});
+				},
+				(context) => {
+					readBack = toolResult(context.messages);
+					return toolUse("send_to_user", { message: "Start with 5 km on Monday." });
+				},
+			],
+		});
 		expect(await say("@coach plan my first week", session)).toMatchObject({ status: "done" });
 		await quiet(session);
 		const [joining] = seen.Coach as [Context];
 		expect(systemPrompt(joining.messages)).toContain("Plan runs in kilometres.");
 		expect(systemPrompt(joining.messages)).toContain("This chat is a group chat");
-		expect(userTexts(joining)).toEqual([
-			`[Room] You joined this chat, with the person and ${host.name}. What was said before you joined:\n\nThe person: I want to run a marathon.\n\n${host.name}: Happy to help you train.`,
-			"@coach plan my first week",
-		]);
+		expect(userTexts(joining)).toEqual([`[Room] You joined this chat, with the person and ${host.name}.`, "@coach plan my first week"]);
+		expect(readBack).toContain(`The person: I want to run a marathon.\\n\\n${host.name}: Happy to help you train.`);
+		expect(readBack).not.toContain("plan my first week");
 		expect(await messagesOf(session, "user")).toEqual([
 			"I want to run a marathon.",
 			"[Room] Coach joined the chat.",
@@ -857,15 +868,12 @@ describe("a group chat", () => {
 		expect(await chats()).toBe(before);
 
 		// Said to no one in particular, it is the host's to answer, having heard Coach. It brings in Physio by
-		// mentioning it, which hears that message as what brought it in, not as said before.
+		// mentioning it, which hears that message as what brought it in, and nothing before it.
 		scripts({ lead: [as("lead", "Good plan. @Physio, check the knees.")], Physio: [as("Physio", "Knees look fine.")] });
 		await say("Sounds good?", session);
 		await quiet(session);
 		expect(userTexts(seen.lead!.at(-1)!).slice(-3)).toEqual(["@coach plan my first week", "[From Coach]\nStart with 5 km on Monday.", "Sounds good?"]);
-		const [physio] = userTexts(seen.Physio![0]!).slice(-2) as [string, string];
-		expect(physio).toContain("Coach: Start with 5 km on Monday.\n\nThe person: Sounds good?");
-		expect(physio).not.toContain("check the knees");
-		expect(userTexts(seen.Physio![0]!).at(-1)).toBe(`[From ${host.name}]\nGood plan. @Physio, check the knees.`);
+		expect(userTexts(seen.Physio![0]!)).toEqual([`[Room] You joined this chat, with the person and ${host.name}, Coach.`, `[From ${host.name}]\nGood plan. @Physio, check the knees.`]);
 
 		// Coach heard all of it without being woken, and has it when mentioned again.
 		scripts({ Coach: [as("Coach", "Tuesday is rest.")] });
@@ -879,6 +887,60 @@ describe("a group chat", () => {
 			"@Coach what about Tuesday?",
 		]);
 		expect((await roomOf(session))?.members.map((member) => member.name)).toEqual(["Coach", "Physio"]);
+
+		// The host takes Physio out once it is done: it hears nothing more, and everyone left hears it left.
+		let removed = "";
+		scripts({
+			lead: [
+				() => toolUse("remove_from_chat", { agents: ["@Physio", "Nobody"] }),
+				(context) => {
+					removed = toolResult(context.messages);
+					return toolUse("send_to_user", { message: "Physio is done." });
+				},
+			],
+		});
+		await say("Thanks, Physio is no longer needed.", session);
+		await quiet(session);
+		expect(removed).toContain("Physio left the chat.\\nNobody isn't in this chat.");
+		expect((await roomOf(session))?.members.map((member) => member.name)).toEqual(["Coach"]);
+		expect((await messagesOf(session, "user")).slice(-2)).toEqual(["Thanks, Physio is no longer needed.", "[Room] Physio left the chat."]);
+		const physioHeard = seen.Physio!.length;
+		scripts({ Coach: [as("Coach", "Rest on Wednesday.")] });
+		await say("@Coach and Wednesday?", session);
+		await quiet(session);
+		expect(userTexts(seen.Coach!.at(-1)!).slice(-4)).toEqual([
+			"Thanks, Physio is no longer needed.",
+			"[Room] Physio left the chat.",
+			`[From ${host.name}]\nPhysio is done.`,
+			"@Coach and Wednesday?",
+		]);
+		expect(seen.Physio).toHaveLength(physioHeard);
+
+		// Only the host takes agents out; the person does through the API, and can bring one back, afresh.
+		const coachTried: string[] = [];
+		scripts({
+			Coach: [
+				() => toolUse("remove_from_chat", { agents: [host.name] }),
+				(context) => {
+					coachTried.push(toolResult(context.messages));
+					return fauxAssistantMessage("I can't.");
+				},
+				as("Coach", "Fine."),
+			],
+		});
+		await say("@Coach remove the host", session);
+		await quiet(session);
+		expect(coachTried[0]).toContain("Only the chat's host takes agents out of it.");
+		const removing = await api(`/sessions/${session}/room/members/${coach.id}`, { method: "DELETE" });
+		expect(removing.body).toEqual({ room: { mode: "mentions", members: [] } });
+		expect((await api(`/sessions/${session}/room/members/${coach.id}`, { method: "DELETE" })).status).toBe(404);
+		expect((await api(`/sessions/${session}/room/members/${host.id}`, { method: "DELETE" })).status).toBe(404);
+		expect(await chats()).toBe(before);
+		scripts({ Coach: [as("Coach", "Back again.")] });
+		await say("@Coach come back", session);
+		await quiet(session);
+		expect(userTexts(seen.Coach!.at(-1)!)).toEqual([`[Room] You joined this chat, with the person and ${host.name}.`, "@Coach come back"]);
+		expect((await roomOf(session))?.members.map((member) => member.name)).toEqual(["Coach"]);
 	});
 
 	it("in an open room wakes every agent for everything said, each choosing whether to answer, unless it is asked", async () => {

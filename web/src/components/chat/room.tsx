@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { ThinkingDot } from "~/components/chat/items";
 import { useI18n } from "~/components/i18n";
+import { X } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
@@ -69,7 +70,8 @@ export function MembersWorking({
 /**
  * Who is in a group chat, as their icons in the header, and how they take
  * turns: when mentioned, with the host answering the rest, or each deciding
- * for itself. Nothing for a chat with one agent.
+ * for itself. Each agent but the host can be taken out of the chat from
+ * here. Nothing for a chat with one agent.
  */
 export function RoomMenu({ sessionId }: { sessionId: string }) {
   const { t } = useI18n();
@@ -79,6 +81,11 @@ export function RoomMenu({ sessionId }: { sessionId: string }) {
   const session = sessions?.find((candidate) => candidate.id === sessionId);
   const change = useMutation({
     mutationFn: (mode: RoomMode) => pim.setRoomMode(sessionId, mode),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onError: (failure) => toast.error(failure.message),
+  });
+  const remove = useMutation({
+    mutationFn: (agent: string) => pim.removeFromRoom(sessionId, agent),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
     onError: (failure) => toast.error(failure.message),
   });
@@ -146,10 +153,21 @@ export function RoomMenu({ sessionId }: { sessionId: string }) {
                 />
               )}
               <span className="min-w-0 flex-1 truncate">{person.name}</span>
-              {person.host && (
+              {person.host ? (
                 <span className="text-muted-foreground text-xs">
                   {t("roomHost")}
                 </span>
+              ) : (
+                <button
+                  type="button"
+                  className="-my-1 rounded-full p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+                  aria-label={t("removeFromChat", { name: person.name })}
+                  title={t("removeFromChat", { name: person.name })}
+                  disabled={remove.isPending}
+                  onClick={() => remove.mutate(person.id)}
+                >
+                  <X className="size-3.5" />
+                </button>
               )}
             </div>
           );

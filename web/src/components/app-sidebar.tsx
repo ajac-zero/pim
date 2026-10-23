@@ -21,6 +21,7 @@ import {
   Contact,
   ExternalLink,
   Folder,
+  Loader2,
   MessagesSquare,
   MoreHorizontal,
   Pencil,
@@ -890,8 +891,8 @@ function SessionRow({
           />
         )}
         {session.busy && (
-          <span
-            className="order-first size-1.5 shrink-0 animate-pulse rounded-full bg-primary"
+          <Loader2
+            className="order-first size-3 shrink-0 animate-spin text-primary motion-reduce:animate-none"
             role="img"
             aria-label={t("working")}
           />

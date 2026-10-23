@@ -239,11 +239,20 @@ export function writeSkillAction(skills: SkillStore, writers: SkillWriters, copi
 				// A copy is saved only as the person approved it: one without the hash they saw is refused too.
 				if (given?.some((file) => file.content === undefined && file.sha256 === undefined)) throw new HttpError(400, "A copied file needs the hash the person approved");
 				const files = given && (await readCopies(copies, given)).contents;
-				// Checked again as it is written, after the copies are read.
-				const skill = await skills.write({ name, description, instructions, files, baseVersion: base_version, author: by.name, source }, () => void check());
-				const target = writers.agents.get(id);
-				if (!target) return `Saved the skill ${name}, version ${skill.version}.`;
-				if (!target.skills.includes(name)) writers.agents.update(id, agentInput({ skills: [...target.skills, name] }, target));
+				// Checked again, and listed for the agent it is for, in the transaction that adds the version: a change
+				// made before it ends is seen, and one made after it is the person's to keep.
+				let target = by;
+				const skill = await skills.write(
+					{ name, description, instructions, files, baseVersion: base_version, author: by.name, source },
+					{
+						check: () => {
+							target = check().target;
+						},
+						publish: () => {
+							if (!target.skills.includes(name)) writers.agents.update(target.id, agentInput({ skills: [...target.skills, name] }, target));
+						},
+					},
+				);
 				return `Saved the skill ${name}, version ${skill.version}, one of ${target.name}'s skills. It applies from its next step.`;
 			} catch (error) {
 				return `The skill was not saved: ${failure(error)}`;

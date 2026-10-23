@@ -4,7 +4,7 @@
 
 **This is a beta, on a beta.** celld v0.6.3 calls itself beta and not safe for hostile multi-tenant use. Pim on celld has been run end to end only on a disposable machine, with a stand-in bucket and a stand-in model (see [What has been checked](#what-has-been-checked)). Real passkeys in a browser on a real domain, sign-in with Google, GitHub or OpenID Connect, apps' OAuth (Gmail, Drive, Spotify, GitHub), real model providers, the ChatGPT plan, MCP clients and the computer companion have **not** been checked on celld. Use it for yourself and people you trust, and keep backups.
 
-Out of scope here: moving a Pim from Cloudflare to celld or back (there is no import), more than one node, and Pim's own security changes for celld ([Trusted ingress](#trusted-ingress-pending)).
+It needs a commit with Pim's celld runtime (`PIM_RUNTIME=celld`, [Trusted ingress](#trusted-ingress)); `deploy.sh` refuses an earlier one. Out of scope here: moving a Pim from Cloudflare to celld or back (there is no import), and more than one node.
 
 ## How it fits together
 
@@ -12,7 +12,7 @@ Out of scope here: moving a Pim from Cloudflare to celld or back (there is no im
  Browser, apps                 This machine
 ┌──────────────┐  HTTPS/WSS   ┌────────────────────────────────────────────────────────────┐
 │ pim.example  │─────────────▶│ Caddy :443 (deploy/celld/caddy/Caddyfile)                   │
-│ .com         │              │  TLS, drops client address headers, sets CF-Connecting-IP   │
+│ .com         │              │  TLS; sets X-Pim-Client-IP and X-Pim-Ingress-Secret         │
 └──────────────┘              │   │ HTTP                                                    │
                               │   ▼                                                         │
                               │ celld 127.0.0.1:8080  public listener: the Worker           │
@@ -39,8 +39,8 @@ The bucket is the Pim. A write is answered only once it is in the bucket (one no
 | Left out | On celld |
 | --- | --- |
 | `ai` (Workers AI) | No platform model. The admin adds a model provider for everyone, or each person their own ([Models](#models)). `PIM_UTILITY_MODEL` and `PIM_IMAGE_MODEL` are `off`; `generate_image` isn't offered |
-| `ratelimits` | Nothing slows down sign-in attempts or heavy API use. `PIM_REGISTRATIONS_PER_ADDRESS` still counts per address, from the proxy's `CF-Connecting-IP` |
-| `version_metadata` | No 15 minutes after a deploy in which anyone can claim the Pim: the admin claims it with the setup link the Worker writes to celld's log ([Install](#install)) |
+| `ratelimits` | Pim's celld runtime keeps its rate limits in the Directory instead, by the address in the proxy's `X-Pim-Client-IP` (an IPv6 address counts by its /64), with no binding to add |
+| `version_metadata` | No claim window: under `PIM_RUNTIME=celld` nobody can claim the Pim anonymously after a deploy. The admin claims it with the setup link the Worker writes to celld's log ([Install](#install)) |
 | `send_email` | celld has no Email Workers: Pim sends no email |
 | `observability` | The Worker's console, Pim's `pim.*` events among it, goes to celld's log: `journalctl -u celld` |
 | `keep_vars` | No dashboard: variables and secrets come from your files on every deploy ([Variables and secrets](#variables-and-secrets)) |
@@ -85,16 +85,21 @@ On a Linux machine (x86-64 or ARM64) with ports 80 and 443 reachable, and DNS fo
    ```sh
    deploy/celld/build.sh "$(git rev-parse origin/main)"     # prints where it built, ~/.cache/pim-celld/builds/<commit>
    ```
-4. **Variables and secrets.** Copy [`env/pim.env.example`](../deploy/celld/env/pim.env.example) to `/etc/pim/pim.env` and set `PIM_PUBLIC_URL`. Copy [`env/secrets.env.example`](../deploy/celld/env/secrets.env.example) to `/etc/pim/secrets.env` (`chmod 600`) if you use any secret. Make the [app credentials key](#app_credentials_key) once.
+4. **Variables and secrets.** Copy [`env/pim.env.example`](../deploy/celld/env/pim.env.example) to `/etc/pim/pim.env` and set `PIM_PUBLIC_URL`. Copy [`env/secrets.env.example`](../deploy/celld/env/secrets.env.example) to `/etc/pim/secrets.env` (`chmod 600`) if you use any secret. Make the ingress secret and the [app credentials key](#app_credentials_key), once each:
+
+   ```sh
+   deploy/celld/gen-ingress-secret.sh /etc/pim/ingress.env
+   deploy/celld/gen-app-credentials-key.sh /etc/pim/app-credentials-key
+   ```
 5. **Deploy** the build:
 
    ```sh
    deploy/celld/deploy.sh ~/.cache/pim-celld/builds/<commit> --vars /etc/pim/pim.env \
-     --secrets /etc/pim/secrets.env --app-credentials-key /etc/pim/app-credentials-key \
-     --celld-env /etc/celld/celld.env
+     --ingress-secret /etc/pim/ingress.env --secrets /etc/pim/secrets.env \
+     --app-credentials-key /etc/pim/app-credentials-key --celld-env /etc/celld/celld.env
    ```
 6. **Start the node**, and check it locally: `systemctl enable --now celld`, then `curl -s 127.0.0.1:8080/.well-known/celld/health` gives `{"ok":true}`.
-7. **The proxy.** Install Caddy v2.11.7 (your distribution's package if it is that version, or the release in `versions.env` with its SHA-256), copy [`caddy/Caddyfile`](../deploy/celld/caddy/Caddyfile) to `/etc/caddy/Caddyfile`, change the hostnames (and delete the content host's block if you don't use public links), and start it. It gets certificates itself.
+7. **The proxy.** Install Caddy v2.11.7 (your distribution's package if it is that version, or the release in `versions.env` with its SHA-256), copy [`caddy/Caddyfile`](../deploy/celld/caddy/Caddyfile) to `/etc/caddy/Caddyfile`, change the hostnames (and delete the content host's block if you don't use public links), install [`caddy/pim-ingress.conf`](../deploy/celld/caddy/pim-ingress.conf) as `/etc/systemd/system/caddy.service.d/pim-ingress.conf` so Caddy has the ingress secret, and start it. It gets certificates itself. Until Caddy runs with the secret, Pim answers 403.
 8. **Claim the Pim.** Open your address. With no admin, the sign-in screen asks the Worker for a setup link; read it from the log and open it, within the hour:
 
    ```sh
@@ -106,13 +111,14 @@ On a Linux machine (x86-64 or ARM64) with ports 80 and 443 reachable, and DNS fo
 
 ## Variables and secrets
 
-There is no dashboard: `deploy.sh` reads three files on every deploy, and a change is a new deploy, which nodes adopt within 30 seconds without a restart. Settings → Deployment still shows the admin what each variable is and any Pim can't read.
+There is no dashboard: `deploy.sh` reads four files on every deploy, and a change is a new deploy, which nodes adopt within 30 seconds without a restart. Settings → Deployment still shows the admin what each variable is and any Pim can't read.
 
 - **`pim.env`**: the variables in [docs/reference.md's Deploy table](reference.md#deploy), such as `PIM_PUBLIC_URL`, `PIM_REGISTRATION` and the `PIM_LIMIT_*` limits, and `PIM_OIDC_ISSUER`. Nothing secret: `deploy.sh` refuses a name that looks like one there.
 - **`secrets.env`**, mode 600: OAuth clients' IDs and secrets, apps' secrets, an OTLP collector's headers.
+- **`ingress.env`**, mode 400: `PIM_INGRESS_SECRET`, alone, which Caddy reads too ([Trusted ingress](#trusted-ingress)).
 - **`app-credentials-key`**, mode 400: [`APP_CREDENTIALS_KEY`](#app_credentials_key), alone.
 
-The lines are `NAME=value`, as systemd reads them. `deploy.sh` refuses a secret file others can read, a name in two files, a name that is a binding's, and `APP_CREDENTIALS_KEY` anywhere but its own file, and prints the names it sets, never their values.
+The lines are `NAME=value`, as systemd reads them. `deploy.sh` refuses a secret file others can read, a name in two files, a name that is a binding's, `PIM_INGRESS_SECRET` and `APP_CREDENTIALS_KEY` anywhere but their own files, an ingress secret shorter than 32 visible ASCII characters or equal to the app credentials key, and `PIM_RUNTIME` anywhere (the profile sets it), and prints the names it sets, never their values.
 
 ### Where secrets go
 
@@ -120,7 +126,7 @@ celld v0.6.3 has no store for secrets: every variable is a plain-text binding in
 
 - **In the bucket**, readable by whoever has its credentials, who already controls everything else in it, people's data among it. Each deployment's manifest keeps the values it was deployed with: deploying a new secret doesn't remove the old one from older manifests, and celld v0.6.3 has no command to delete an old deployment. After a leak, revoke the secret where it was issued, so the old value is useless.
 - **In every copy of the bucket**, backups among them: encrypt them ([Backup](#backup-and-restore)).
-- **Not** in this repository (only examples without values are committed, and `config.check.mjs` checks they stay so), **not** in the Worker's bundle (the profile has no `define`), **not** in the web app's files, and **not** on disk after a deploy: `deploy.sh` writes the configuration with them only inside the build, mode 600, and deletes it when `celld deploy` returns. `run-scratch.sh` checks the bucket and the build for two random canary secrets after a deploy, and finds them in the manifest only.
+- **Not** in this repository (only examples without values are committed, and `config.check.mjs` checks they stay so), **not** in the Worker's bundle (the profile has no `define`), **not** in the web app's files, and **not** on disk after a deploy: `deploy.sh` writes the configuration with them only inside the build, mode 600, and deletes it when `celld deploy` returns. `run-scratch.sh` checks the bucket and the build for three random secrets (a canary, the ingress secret and the app credentials key) after a deploy, and finds them in the manifest only.
 - **In the operator's files** in `/etc/pim`, and on the machine that runs `deploy.sh`.
 
 ### APP_CREDENTIALS_KEY
@@ -154,14 +160,33 @@ Links are off until `PIM_CONTENT_ORIGIN` names a second hostname that shares no 
 [`caddy/Caddyfile`](../deploy/celld/caddy/Caddyfile) is the only way in:
 
 - **Listeners.** celld's public listener and its peer and operator API (which has no authentication) are on loopback, and Caddy's admin API on `localhost:2019`. With the proxy on another machine, put `CELLD_ADDR` on a private address (WireGuard, Tailscale), never a public one, and keep `CELLD_INTERNAL_ADDR` on loopback. celld's own `/.well-known/celld/health` is answered 404 from outside; check it on the machine.
-- **Client addresses.** It drops every header a client could use to claim an address (`True-Client-IP`, `X-Real-IP`, `Forwarded`, `CF-IPCountry` and the like), sets `CF-Connecting-IP`, which Pim reads, to the connection's address, and replaces `X-Forwarded-For`, `-Host` and `-Proto` with its own. Behind another proxy (a router's, a tunnel's) the address Pim sees is that proxy's.
+- **Ingress secret and client address.** On every request it sets `X-Pim-Ingress-Secret` from its environment and `X-Pim-Client-IP` to the connection's address, one bare IPv4 or IPv6 address, replacing whatever the client sent. It drops `CF-Connecting-IP` and every other header a client could use to claim an address (`True-Client-IP`, `X-Real-IP`, `Forwarded`, `CF-IPCountry` and the like). Behind another proxy (a router's, a tunnel's) the address Pim sees is that proxy's.
+- **Scheme and host.** It replaces `X-Forwarded-For`, `-Host` and `-Proto` with its own, and celld must trust the last two (`CELLD_TRUST_FORWARDED_HEADERS=1`). Checked on celld v0.6.3: without it, `request.url` stays `http://` even with `X-Forwarded-Proto: https`, so Pim, at an `https://` address, refuses everything (421); with it, celld takes the last value of each header, so the proxy's replaces any a client sent.
 - **Streams and WebSockets.** Responses go out as they come (`flush_interval -1`); WebSockets pass through, and survive a reload for 5 minutes. Only the web app's files are compressed: compressing an event stream would hold its events back.
 
 `deploy/celld/test/proxy.check.mjs` runs this file as it is in front of a stand-in for celld and checks each of these.
 
-## Trusted ingress (pending)
+## Trusted ingress
 
-Today the only thing that keeps a forged `CF-Connecting-IP` out of Pim is the network: nothing but the proxy reaches celld's listener. A Pim that runs as `PIM_RUNTIME=celld` is to believe that header only on requests carrying a secret only the proxy holds, so a mistake in the network can't make Pim trust a client's claim. That is being designed separately, and its variable and header names aren't settled. Until a Pim release documents them, set neither `PIM_RUNTIME` nor any ingress secret: current Pim ignores them, and the profile, `deploy.sh` and the Caddyfile accept none. Their places are marked in the Caddyfile and `env/pim.env.example`.
+With `PIM_RUNTIME=celld`, which the profile sets, Pim answers only requests that come through your proxy:
+
+- Each request must carry `X-Pim-Ingress-Secret` with `PIM_INGRESS_SECRET`, at least 32 visible ASCII characters and not the app credentials key. Without it, or with another, Pim answers 403.
+- The client's address is `X-Pim-Client-IP`, set by the proxy: one bare IPv4 or IPv6 address, never a list. Anything else is 400. An IPv4 address mapped into IPv6 counts as the IPv4 address, and an IPv6 address counts by its /64.
+- Pim strips `X-Pim-Ingress-Secret`, `X-Pim-Client-IP` and `CF-Connecting-IP` before anything else reads the request, so none reaches a person's space or an app.
+- A missing or unreadable `PIM_INGRESS_SECRET` is a configuration error: 503 for everything. `deploy.sh` refuses to deploy without one.
+
+So even a mistake in the network, such as celld's listener reachable from the LAN, doesn't let anyone claim another address or skip the proxy. The secret lives in `/etc/pim/ingress.env` (mode 400, root's), which `deploy.sh` and Caddy (through its systemd drop-in) both read, and in the deployment's manifest in the bucket. Back it up with `/etc/pim`; losing it costs nothing but making a new one.
+
+**Rotating it** briefly refuses requests, because Pim takes one secret at a time: make a new file, deploy, and restart Caddy right after.
+
+```sh
+deploy/celld/gen-ingress-secret.sh /etc/pim/ingress.env.new && mv /etc/pim/ingress.env.new /etc/pim/ingress.env
+deploy/celld/deploy.sh <build> ... --ingress-secret /etc/pim/ingress.env && systemctl restart caddy
+```
+
+Until the node adopts the new deployment (up to 30 seconds), requests with the new secret get 403; a `POST 127.0.0.1:8081/reload` on the machine adopts it at once. The old secret stays in the older deployment's manifest, where it opens nothing.
+
+What has been checked: `proxy.check.mjs` checks the Caddyfile's side (both headers always set, the client's values never passed on, a bare `::1` for an IPv6 client, and the secret absent from the config Caddy's admin API serves). `run-scratch.sh` checks Pim's side past the proxy (403, 400, 421) when it builds a commit with the runtime. This page was written against the runtime's described interface; the full scratch run hasn't yet been run with a commit that has it ([What has been checked](#what-has-been-checked)).
 
 ## Updating
 
@@ -207,6 +232,6 @@ Keep `APP_CREDENTIALS_KEY`, `/etc/pim` and `/etc/celld` backed up apart from the
 
 - `node --test deploy/celld/test/config.check.mjs`: the profile against what celld v0.6.3 accepts and against `wrangler.jsonc`, its Durable Objects against `src/index.ts`'s exports, the committed examples hold no secret, and how variables and secrets are read and refused.
 - `CADDY=... node --test deploy/celld/test/proxy.check.mjs`: the Caddyfile, as above.
-- `CELLD=... deploy/celld/test/run-scratch.sh [REF]`: the whole install on one machine, with [moto](https://github.com/getmoto/moto) as a throwaway S3 (not a qualified store), random canary secrets, and [`mock-model.mjs`](../deploy/celld/test/mock-model.mjs) as a custom-endpoint model. It builds and deploys the commit, starts celld v0.6.3 and the Caddyfile, then checks through the proxy: `/health`; `/`, a page of the app and a script are the build's files; `/api` goes to the Worker; Pim refuses requests without the proxy's forwarded headers; claiming from the setup link in celld's log; a passkey (a software one, as the Worker's tests make), an API token, a provider, a chat with an image kept in R2, a goal, a WebSocket. It restarts the node gracefully and checks it all again, searches all of the bucket and the build for the canaries (found in the deployment's manifest only), then restores a cold backup into an empty prefix on a fresh node and checks it all again.
+- `CELLD=... deploy/celld/test/run-scratch.sh [REF]`: the whole install on one machine, with [moto](https://github.com/getmoto/moto) as a throwaway S3 (not a qualified store), random canary secrets, and [`mock-model.mjs`](../deploy/celld/test/mock-model.mjs) as a custom-endpoint model. It builds and deploys the commit, starts celld v0.6.3 and the Caddyfile, then checks through the proxy: `/health`; `/`, a page of the app and a script are the build's files; `/api` goes to the Worker; past the proxy, Pim refuses a missing or wrong ingress secret (403), a bad client address (400) and `http://` (421); claiming from the setup link in celld's log; a passkey (a software one, as the Worker's tests make), an API token, a provider, a chat with an image kept in R2, a goal, a WebSocket. It restarts the node gracefully and checks it all again, searches all of the bucket and the build for the canaries (found in the deployment's manifest only), then restores a cold backup into an empty prefix on a fresh node and checks it all again. It refuses a commit without Pim's celld runtime unless `ALLOW_PRE_RUNTIME=1`, which runs everything but the ingress checks: that is how it has run so far, on main from before the runtime. With the runtime, it needs running again.
 
-Not checked on celld, and each needs a real deployment: a qualified bucket's latency and errors, Caddy's real certificates, passkeys in browsers, Google/GitHub/OIDC sign-in, apps' OAuth and encrypted credentials in use, real model providers, the ChatGPT plan, MCP clients, the computer companion, alarms that fire across a restart, push notifications, sustained load, and the bucket's growth over months.
+Not checked on celld, and each needs a real deployment: Pim's celld runtime itself, end to end (its rate limits in the Directory among it), a qualified bucket's latency and errors, Caddy's real certificates, passkeys in browsers, Google/GitHub/OIDC sign-in, apps' OAuth and encrypted credentials in use, real model providers, the ChatGPT plan, MCP clients, the computer companion, alarms that fire across a restart, push notifications, sustained load, and the bucket's growth over months.

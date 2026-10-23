@@ -1,7 +1,8 @@
 // Runs deploy/celld/caddy/Caddyfile as it is, in front of a stand-in for celld that reports what
-// reached it, and checks what the proxy promises: a client can't claim another address, Pim gets
-// the public scheme and host, streams aren't held back, WebSockets connect, the content host
-// serves only published pages, and celld's own health path stays private.
+// reached it, and checks what the proxy promises: every request carries the ingress secret and
+// the connection's address as Pim's celld runtime expects, whatever the client sends; Pim gets
+// the public scheme and host; streams aren't held back; WebSockets connect; the content host
+// serves only published pages; and celld's own health path stays private.
 //
 //   CADDY=/path/to/caddy node --test deploy/celld/test/proxy.check.mjs
 //
@@ -20,10 +21,11 @@ import assert from "node:assert/strict";
 const caddyfile = new URL("../caddy/Caddyfile", import.meta.url).pathname;
 const CADDY = process.env.CADDY;
 const PIM = "pim.localhost";
+const SECRET = `proxy-check-${"x".repeat(40)}`;
 const CONTENT = "pim-content.localhost";
 const port = () => 20000 + Math.floor(Math.random() * 20000);
 
-let backend, caddy, home, httpsPort, adminPort;
+let backend, caddy, home, httpsPort, adminPort, ipv6;
 const seen = [];
 
 /** The stand-in for celld: answers with the headers it got, streams on /sse, and echoes one WebSocket message. */
@@ -42,7 +44,7 @@ function startBackend() {
 			return;
 		}
 		res.writeHead(200, { "content-type": "application/json" });
-		res.end(JSON.stringify({ url: req.url, headers: req.headers }));
+		res.end(JSON.stringify({ url: req.url, headers: req.headers, rawHeaders: req.rawHeaders }));
 	});
 	server.on("upgrade", (req, socket) => {
 		seen.push({ url: req.url, headers: req.headers });
@@ -59,12 +61,12 @@ function startBackend() {
 	return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
 }
 
-/** A request to Caddy as a browser on `host` would make it. */
-function get(host, path, headers = {}) {
+/** A request to Caddy as a browser on `host` would make it, from `from` (IPv4 or IPv6 loopback). */
+function get(host, path, headers = {}, from = "127.0.0.1") {
 	return new Promise((resolve, reject) => {
 		const started = Date.now();
 		const req = httpsRequest(
-			{ host: "127.0.0.1", port: httpsPort, path, servername: host, rejectUnauthorized: false, headers: { host, ...headers } },
+			{ host: from, port: httpsPort, path, servername: host, rejectUnauthorized: false, headers: { host, ...headers } },
 			(res) => {
 				const chunks = [];
 				let firstAt;
@@ -98,6 +100,7 @@ before(async (t) => {
 			CADDY_HTTPS_PORT: String(httpsPort),
 			CADDY_HTTP_PORT: String(port()),
 			CADDY_ADMIN: `localhost:${adminPort}`,
+			PIM_INGRESS_SECRET: SECRET,
 		},
 		stdio: ["ignore", "ignore", "pipe"],
 	});
@@ -105,7 +108,10 @@ before(async (t) => {
 	caddy.stderr.on("data", (chunk) => (log += chunk));
 	for (let i = 0; i < 100; i++) {
 		const up = await get(PIM, "/health").catch(() => null);
-		if (up?.status === 200) return;
+		if (up?.status === 200) {
+			ipv6 = (await get(PIM, "/health", {}, "::1").catch(() => null))?.status === 200;
+			return;
+		}
 		await new Promise((resolve) => setTimeout(resolve, 100));
 	}
 	throw new Error(`Caddy didn't start:\n${log}`);
@@ -119,9 +125,11 @@ after(() => {
 
 const skip = CADDY ? false : "set CADDY to the pinned Caddy binary";
 
-test("a client can't claim another address, and Pim gets the public scheme and host", { skip }, async () => {
+test("a client can't claim another address or forge the secret, and Pim gets the public scheme and host", { skip }, async () => {
 	const spoofed = "203.0.113.9";
 	const res = await get(PIM, "/api/whoami", {
+		"X-Pim-Client-IP": spoofed,
+		"X-Pim-Ingress-Secret": "forged",
 		"CF-Connecting-IP": spoofed,
 		"CF-Connecting-IPv6": "2001:db8::9",
 		"True-Client-IP": spoofed,
@@ -134,17 +142,35 @@ test("a client can't claim another address, and Pim gets the public scheme and h
 		"CF-IPCountry": "XX",
 	});
 	assert.equal(res.status, 200);
-	const { headers } = JSON.parse(res.body);
-	assert.equal(headers["cf-connecting-ip"], "127.0.0.1");
+	const { headers, rawHeaders } = JSON.parse(res.body);
+	assert.equal(headers["x-pim-client-ip"], "127.0.0.1");
+	assert.equal(headers["x-pim-ingress-secret"], SECRET);
+	// One value each, not the client's beside the proxy's.
+	assert.equal(rawHeaders.filter((name, i) => i % 2 === 0 && /^x-pim-/i.test(name)).length, 2);
 	assert.equal(headers["x-forwarded-for"], "127.0.0.1");
 	assert.equal(headers["x-forwarded-proto"], "https");
 	assert.equal(headers["x-forwarded-host"], PIM);
 	assert.equal(headers.host, PIM);
-	for (const name of ["cf-connecting-ipv6", "true-client-ip", "x-real-ip", "x-client-ip", "forwarded", "cf-ipcountry"]) {
+	for (const name of ["cf-connecting-ip", "cf-connecting-ipv6", "true-client-ip", "x-real-ip", "x-client-ip", "forwarded", "cf-ipcountry"]) {
 		assert.equal(headers[name], undefined, `${name} reached celld`);
 	}
 	assert.ok(!JSON.stringify(headers).includes(spoofed), "the spoofed address reached celld");
 	assert.ok(!JSON.stringify(headers).includes("evil.example"), "the spoofed host reached celld");
+	assert.ok(!JSON.stringify(headers).includes("forged"), "the forged secret reached celld");
+});
+
+test("an IPv6 client's address arrives bare: no brackets, no port, not a list", { skip }, async (t) => {
+	if (!ipv6) return t.skip("no IPv6 loopback here");
+	const res = await get(PIM, "/api/whoami", { "X-Pim-Client-IP": "2001:db8::1" }, "::1");
+	const { headers } = JSON.parse(res.body);
+	assert.equal(headers["x-pim-client-ip"], "::1");
+	assert.equal(headers["x-pim-ingress-secret"], SECRET);
+});
+
+test("the admin API's config never holds the secret, which Caddy reads at request time", { skip }, async () => {
+	const config = await adminGet("/config/");
+	assert.ok(!config.includes(SECRET), "the secret is in Caddy's config");
+	assert.match(config, /\{env\.PIM_INGRESS_SECRET\}/);
 });
 
 test("an event stream's first event arrives before the stream ends", { skip }, async () => {
@@ -181,12 +207,14 @@ test("a WebSocket connects through the proxy and carries messages", { skip }, as
 		req.end();
 	});
 	assert.equal(echoed, "hello pim");
-	assert.equal(seen.at(-1).headers["cf-connecting-ip"], "127.0.0.1");
+	assert.equal(seen.at(-1).headers["x-pim-client-ip"], "127.0.0.1");
+	assert.equal(seen.at(-1).headers["x-pim-ingress-secret"], SECRET);
 });
 
 test("the content host serves only published pages and their scripts", { skip }, async () => {
 	const before = seen.length;
-	assert.equal((await get(CONTENT, "/p/abc")).status, 200);
+	const page = JSON.parse((await get(CONTENT, "/p/abc", { "X-Pim-Ingress-Secret": "forged" })).body);
+	assert.equal(page.headers["x-pim-ingress-secret"], SECRET);
 	assert.equal((await get(CONTENT, "/artifact-runtime/react.js")).status, 200);
 	assert.equal(seen.length, before + 2);
 	for (const path of ["/", "/api/account", "/auth/register", "/health", "/assets/index.js"]) {
@@ -205,14 +233,16 @@ test("celld's own health path isn't public, Pim's is, and the web app is compres
 	assert.equal((await get(PIM, "/api/whoami", { "Accept-Encoding": "gzip" })).headers["content-encoding"], undefined);
 });
 
-test("the admin API answers only on loopback", { skip }, async () => {
-	const config = await new Promise((resolve, reject) =>
-		httpRequest({ host: "127.0.0.1", port: adminPort, path: "/config/admin", headers: { host: `localhost:${adminPort}` } }, (res) => {
+const adminGet = (path) =>
+	new Promise((resolve, reject) =>
+		httpRequest({ host: "127.0.0.1", port: adminPort, path, headers: { host: `localhost:${adminPort}` } }, (res) => {
 			let body = "";
-			res.on("data", (chunk) => (body += chunk)).on("end", () => resolve(JSON.parse(body)));
+			res.on("data", (chunk) => (body += chunk)).on("end", () => resolve(body));
 		})
 			.on("error", reject)
 			.end(),
 	);
-	assert.equal(config.listen, `localhost:${adminPort}`);
+
+test("the admin API answers only on loopback", { skip }, async () => {
+	assert.equal(JSON.parse(await adminGet("/config/admin")).listen, `localhost:${adminPort}`);
 });

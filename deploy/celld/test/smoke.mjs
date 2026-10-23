@@ -7,7 +7,8 @@
 //
 // Environment: PIM_URL (the proxy's origin, also PIM_PUBLIC_URL), PROXY_PORT, CELLD_URL (celld's
 // public listener), CELLD_LOG (its log file), MOCK_MODEL_URL, WEB_DIST, STATE (a JSON file the two
-// phases share). The proxy's certificate is Caddy's own local CA's, so TLS isn't verified here.
+// phases share), INGRESS_SECRET, and RUNTIME=1 when the Worker has Pim's celld runtime. The
+// proxy's certificate is Caddy's own local CA's, so TLS isn't verified here.
 
 import { createHash, webcrypto } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -15,7 +16,7 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import assert from "node:assert/strict";
 
-const { PIM_URL, PROXY_PORT, CELLD_URL, CELLD_LOG, MOCK_MODEL_URL, WEB_DIST, STATE } = process.env;
+const { PIM_URL, PROXY_PORT, CELLD_URL, CELLD_LOG, MOCK_MODEL_URL, WEB_DIST, STATE, INGRESS_SECRET, RUNTIME } = process.env;
 const pim = new URL(PIM_URL);
 const step = (what) => console.log(`  ✓ ${what}`);
 
@@ -106,9 +107,22 @@ async function setup() {
 	assert.ok(anonymous.json, "/api/account answered with the app, not the Worker");
 	step("/api/* goes to the Worker first (401 without a session)");
 
-	const direct = await call("GET", "/api/account", { base: CELLD_URL });
-	assert.equal(direct.status, 421, "celld without the proxy's X-Forwarded-Proto isn't https://");
-	step("without the proxy's forwarded headers Pim refuses the request (421)");
+	// Straight to celld, past the proxy, as anything else on the machine could.
+	const direct = (headers) => call("GET", "/api/account", { base: CELLD_URL, headers: { "x-forwarded-proto": "https", "x-forwarded-host": pim.host, ...headers } });
+	if (RUNTIME === "1") {
+		assert.equal((await direct({})).status, 403, "no ingress secret");
+		assert.equal((await direct({ "x-pim-ingress-secret": "x".repeat(64), "x-pim-client-ip": "203.0.113.5" })).status, 403, "a wrong ingress secret");
+		const secret = { "x-pim-ingress-secret": INGRESS_SECRET };
+		for (const ip of ["203.0.113.5, 198.51.100.7", "[2001:db8::1]", "203.0.113.5:443", "not-an-ip", ""]) {
+			assert.equal((await direct({ ...secret, "x-pim-client-ip": ip })).status, 400, `client address ${JSON.stringify(ip)}`);
+		}
+		assert.equal((await direct({ ...secret, "x-pim-client-ip": "2001:db8::1" })).status, 401, "the secret and an IPv6 address");
+		assert.equal((await direct({ ...secret, "x-pim-client-ip": "203.0.113.5", "x-forwarded-proto": "http" })).status, 421, "http:// isn't PIM_PUBLIC_URL");
+		step("past the proxy, Pim refuses a missing or wrong secret (403) and a bad client address (400), and needs https:// from the forwarded headers (421)");
+	} else {
+		assert.equal((await direct({ "x-forwarded-proto": "http" })).status, 421, "celld without the proxy's X-Forwarded-Proto isn't https://");
+		step("without the proxy's forwarded headers Pim refuses the request (421); this Worker predates the celld runtime, so its ingress checks are skipped");
+	}
 
 	const asked = await call("POST", "/auth/setup-link", { headers: { origin: pim.origin }, body: {} });
 	assert.equal(asked.status, 200, asked.text);

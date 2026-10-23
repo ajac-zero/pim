@@ -1,5 +1,7 @@
-import { defineExtension, section } from "@earendil-works/pi-durable";
-import type { Agent } from "./agents";
+import { Type } from "@earendil-works/pi-ai";
+import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
+import { type Agent, agentCalled } from "./agents";
+import { text } from "./extensions/services";
 import { DELEGATE } from "./tasks";
 import { ROOM_POST, type TranscriptMessage } from "./transcript";
 
@@ -8,9 +10,9 @@ export { ROOM_POST };
 /**
  * Group chats. A chat is with one agent, its host, until someone in it
  * mentions another of the person's agents by name, as `@Coach`: that agent
- * joins the chat, with what was said so far, and talks there itself. The
- * chat is then a room: the person and their agents in one conversation, each
- * agent hearing what the others say and answering where the person reads it.
+ * joins the chat and talks there itself. The chat is then a room: the person
+ * and their agents in one conversation, each agent hearing what the others
+ * say and answering where the person reads it.
  *
  * Each agent in a room has a seat: a conversation of its own, as a chat's,
  * so it works as itself, with its own instructions, apps, memory and tools.
@@ -18,6 +20,12 @@ export { ROOM_POST };
  * What the person says goes into every seat; what an agent sends goes into
  * every other seat as a message starting "[From Coach]", which the chat
  * shows as Coach's.
+ *
+ * An agent joins knowing nothing of what was said before: the message that
+ * brought it in says what it needs, and it reads back through the chat with
+ * `chat_history` when it must. The host, or the person, removes an agent
+ * once it is no longer needed; it hears nothing more, and can be brought
+ * in again later, afresh.
  *
  * Who takes a turn: in a room in `mentions` mode, the default, the host
  * answers what the person says to no one in particular, and an agent
@@ -107,6 +115,11 @@ export class RoomStore {
 		return this.at(room, agent)!;
 	}
 
+	/** Takes an agent's seat away; the host's stays. */
+	unseat(seat: Seat): void {
+		this.#sql.exec("DELETE FROM pim_room_seats WHERE conversation = ? AND conversation != room", seat.conversation);
+	}
+
 	/** The seat a conversation is, in whichever room. */
 	of(conversation: string): Seat | undefined {
 		const [row] = this.#sql.exec("SELECT * FROM pim_room_seats WHERE conversation = ?", conversation).toArray();
@@ -180,16 +193,15 @@ export function mentioned(text: string, agents: readonly Agent[]): Agent[] {
 	return found;
 }
 
-/** How much of what was said an agent joining a chat reads, in characters: the end of a longer chat. */
+/** How much of what was said before it joined an agent reads back, in characters: the end of a longer chat. */
 export const ROOM_HISTORY_CHARS = 24_000;
 
 /**
- * What was said in a room's chat, for an agent joining it: the person's
- * messages, what the host sent, and what other agents said, by name. Pim's
- * own notices are left out, and so is the host's last message when it is
- * `except`, the one that brought the agent in. Long chats keep their end.
+ * What was said in a room's chat, for an agent reading back through it: the
+ * person's messages, what the host sent, and what other agents said, by
+ * name. Pim's own notices are left out. Long chats keep their end.
  */
-export function roomHistory(messages: readonly TranscriptMessage[], host: string, limit: number, except?: string): string {
+export function roomHistory(messages: readonly TranscriptMessage[], host: string, limit: number): string {
 	const turns: string[] = [];
 	for (const message of messages) {
 		if (message.role === "user") {
@@ -209,9 +221,8 @@ export function roomHistory(messages: readonly TranscriptMessage[], host: string
 			}
 		}
 	}
-	if (except !== undefined && turns.at(-1) === `${host}: ${except.trim()}`) turns.pop();
-	const text = turns.join("\n\n");
-	return text.length > limit ? `…${text.slice(text.length - limit)}` : text;
+	const said = turns.join("\n\n");
+	return said.length > limit ? `…${said.slice(said.length - limit)}` : said;
 }
 
 /** What a room is to Pim's extensions. */
@@ -222,7 +233,14 @@ export type RoomsHost = {
 	agent(id: string): Agent | undefined;
 	/** The agents a conversation can bring into its chat by mentioning them. */
 	invitable(conversation: string): Agent[];
+	/** Takes an agent out of its room. */
+	remove(seat: Seat): Promise<void>;
+	/** What was said in a seat's room before its agent joined. */
+	history(seat: Seat): Promise<string>;
 };
+
+export const REMOVE_FROM_CHAT = "remove_from_chat";
+export const CHAT_HISTORY = "chat_history";
 
 const ROOMS_EXTENSION = "pim.rooms";
 
@@ -232,7 +250,7 @@ export function roomSection(self: Agent, seats: readonly { agent: Agent; host: b
 		invitable.length === 0
 			? []
 			: [
-					`To bring another of the person's agents into this chat, mention it in a message you send, as @Name: it joins, reads what was said so far, and answers here, where the person talks with it too. Bring one in when the person should talk with it directly; hand it a task with \`${DELEGATE}\` when it can work out of sight and report back. You can bring in: ${invitable.map((agent) => `@${agent.name}`).join(", ")}.`,
+					`To bring another of the person's agents into this chat, mention it in a message you send, as @Name: it joins and answers here, where the person talks with it too. It knows nothing of what was said here before, so say in that message what it needs. Bring one in when the person should talk with it directly; hand it a task with \`${DELEGATE}\` when it can work out of sight and report back. You can bring in: ${invitable.map((agent) => `@${agent.name}`).join(", ")}.`,
 				];
 	if (seats.length < 2) return bring.length === 0 ? undefined : bring.join("\n");
 	const host = seats.find((seat) => seat.host)?.agent;
@@ -248,11 +266,54 @@ export function roomSection(self: Agent, seats: readonly { agent: Agent; host: b
 			? "Everything said here comes to you, and you decide whether to answer. Answer when you are mentioned, or when you have something to add that is yours to say: what your instructions, apps or memory give you that the others' don't. Otherwise end your turn without sending anything; staying quiet is often right. Don't repeat what others said, agree with them or thank them."
 			: `You answer when you are mentioned${imHost ? ", and when the person says something without mentioning anyone" : ""}. Everything else said here comes to you without needing an answer, so you know it when you next speak: end your turn without sending anything then.`,
 		"Answer the agents here, in the chat, rather than handing them tasks, unless the work should go on out of the person's sight.",
+		imHost
+			? `When an agent you or the person brought in has done what it was here for, take it out of the chat with \`${REMOVE_FROM_CHAT}\`: it hears nothing more, and can be brought in again later.`
+			: `You joined knowing nothing of what was said here before; when what you are asked refers to it, read it with \`${CHAT_HISTORY}\`.`,
 		...bring,
 	].join("\n");
 }
 
 export function roomsExtension(host: RoomsHost) {
+	const remove = defineTool({
+		name: REMOVE_FROM_CHAT,
+		description: "Take agents out of this group chat once they are no longer needed. Only the chat's host can. They hear nothing more said here, and can be brought in again by mentioning them.",
+		parameters: Type.Object({
+			agents: Type.Array(Type.String({ description: "An agent's name, as the chat's list gives it." }), { minItems: 1 }),
+		}),
+		// Run again, it finds those it took out already gone.
+		replay: "safe",
+		async execute(args, api) {
+			const conversation = String(api.conversationId);
+			const seat = host.rooms.of(conversation);
+			if (!seat || seat.conversation !== seat.room) return text("Only the chat's host takes agents out of it.", true);
+			const members = host.rooms.seats(seat.room).filter((other) => other.conversation !== seat.room);
+			const agents = members.flatMap((other) => host.agent(other.agent) ?? []);
+			const said: string[] = [];
+			for (const name of args.agents) {
+				const agent = agentCalled(name.replace(/^@/, ""), agents);
+				const member = agent && members.find((other) => other.agent === agent.id);
+				if (!member) {
+					said.push(`${name} isn't in this chat.`);
+					continue;
+				}
+				await host.remove(member);
+				said.push(`${agent.name} left the chat.`);
+			}
+			return text(said.join("\n"));
+		},
+	});
+	const history = defineTool({
+		name: CHAT_HISTORY,
+		description: "Read what was said in this group chat before you joined it.",
+		parameters: Type.Object({}),
+		replay: "safe",
+		async execute(_args, api) {
+			const seat = host.rooms.of(String(api.conversationId));
+			if (!seat || seat.conversation === seat.room) return text("You have everything said in this chat already.");
+			const said = await host.history(seat);
+			return text(said === "" ? "Nothing was said in this chat before you joined." : said);
+		},
+	});
 	return defineExtension({
 		name: ROOMS_EXTENSION,
 		sections: [
@@ -270,5 +331,6 @@ export function roomsExtension(host: RoomsHost) {
 				return roomSection(self, seats, room ? host.rooms.mode(room) : "mentions", host.invitable(conversation));
 			}),
 		],
+		tools: [remove, history],
 	});
 }

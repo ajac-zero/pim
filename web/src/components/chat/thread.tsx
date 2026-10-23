@@ -234,7 +234,10 @@ export const Thread = memo(function Thread({
   );
   /* In a group chat each agent's message says who wrote it, once for messages in a row from one agent. */
   const { data: agents } = useQuery(agentsQuery());
-  const grouped = (room?.members.length ?? 0) > 0;
+  // A chat whose other agents all left still says who wrote what they said.
+  const grouped =
+    (room?.members.length ?? 0) > 0 ||
+    entries.some((entry) => entry.kind === "post");
   const working = room?.members.filter((member) => member.busy) ?? [];
   let lastSpeaker: string | null = null;
   const speaker = (name: string, id?: string) => {

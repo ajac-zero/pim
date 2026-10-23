@@ -1359,6 +1359,10 @@ export const pim = {
       method: "PUT",
       body: JSON.stringify({ mode }),
     }).then((body) => body.room),
+  removeFromRoom: (session: string, agent: string) =>
+    call<{ room: Room | null }>(`/sessions/${session}/room/members/${agent}`, {
+      method: "DELETE",
+    }).then((body) => body.room),
   abort: (session: string) =>
     call<{ aborted: boolean }>(`/sessions/${session}/abort`, {
       method: "POST",

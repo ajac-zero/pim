@@ -31,7 +31,7 @@ import {
   Search,
   Shapes,
   ShieldCheck,
-  UserPlus,
+  Users,
   Workflow,
   Wrench,
   X,
@@ -288,7 +288,7 @@ const NOTICE_ICONS = {
   schedule: Bell,
   event: Zap,
   task: Workflow,
-  room: UserPlus,
+  room: Users,
   reset: RotateCcw,
 } as const;
 

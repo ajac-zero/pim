@@ -33,6 +33,7 @@ import {
   Sun,
   Users,
 } from "~/components/icons";
+import { Shortcut } from "~/components/shortcut";
 import { useTheme } from "~/components/theme";
 import {
   accountQuery,
@@ -41,7 +42,7 @@ import {
   schedulesQuery,
   sessionsQuery,
 } from "~/lib/queries";
-import { cn, MAC } from "~/lib/utils";
+import { cn } from "~/lib/utils";
 
 const PANELS: {
   panel: SidebarPanel;
@@ -55,16 +56,6 @@ const PANELS: {
   { panel: "skills", label: "skills", icon: <Lightbulb /> },
   { panel: "schedules", label: "schedules", icon: <CalendarClock /> },
 ];
-
-/** A shortcut's keys, with the modifier a Mac or another computer uses. */
-function Shortcut({ keys }: { keys: string }) {
-  return (
-    <span className="ml-auto text-[13px] text-muted-foreground">
-      {MAC ? "⌘" : "Ctrl+"}
-      {keys}
-    </span>
-  );
-}
 
 const ITEM =
   "flex h-10 cursor-default items-center gap-3 rounded-xl px-3 text-[15px] outline-none select-none data-[selected=true]:bg-muted [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground";

@@ -40,6 +40,7 @@ import {
   ProfilePopover,
   ProfilePopoverTrigger,
 } from "~/components/profile-popover";
+import { Shortcut } from "~/components/shortcut";
 import {
   AgentsPanel,
   ArtifactsPanel,
@@ -396,6 +397,7 @@ function ChatsPanel({
         >
           <SquarePen className="size-4.5" />
           {t("newChat")}
+          <Shortcut keys="⇧O" />
         </Button>
       </div>
 

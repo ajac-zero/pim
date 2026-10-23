@@ -378,6 +378,10 @@ describe("Google apps", () => {
 		google.refresh = () => Response.json({ error: "temporarily_unavailable" }, { status: 503 });
 		expect((await callTool("mail", { url: PROFILE })).isError).toBe(true);
 		expect((await stored("mail"))!.state).toBe("ready");
+		// An answer larger than Pim reads from a token endpoint says only its status, and isn't taken for a revocation.
+		google.refresh = () => Response.json({ error: "invalid_grant", error_description: "x".repeat(100_000) }, { status: 400 });
+		expect(await callTool("mail", { url: PROFILE })).toEqual({ content: [{ type: "text", text: "The token endpoint answered 400" }], isError: true });
+		expect((await stored("mail"))!.state).toBe("ready");
 
 		google.refresh = () => Response.json({ error: "invalid_grant", error_description: "Token has been expired or revoked." }, { status: 400 });
 		expect(await callTool("mail", { url: PROFILE })).toEqual({ content: [{ type: "text", text: "Mail needs the person to connect it again from the Apps page." }], isError: true });

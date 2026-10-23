@@ -10,6 +10,7 @@ import {
 	type PimExtension,
 	ReconnectRequired,
 } from "./define";
+import { readBody, readJsonObject, serviceText } from "./native-apps";
 
 /**
  * What Pim's Google apps share: Google's OAuth sign-in and its APIs, for
@@ -150,9 +151,9 @@ async function revokeGoogle(credential: AppCredential): Promise<void> {
 		signal: AbortSignal.timeout(10_000),
 	});
 	if (response.ok) return;
-	const answer = (await response.json().catch(() => ({}))) as { error?: string };
+	const answer = await readJsonObject(response, ERROR_BYTES);
 	if (answer.error === "invalid_token") return;
-	throw new Error(`Google answered ${response.status}${answer.error ? ` (${answer.error})` : ""}`);
+	throw new Error(`Google answered ${response.status}${typeof answer.error === "string" ? ` (${serviceText(answer.error)})` : ""}`);
 }
 
 /** The Google extension, with the Google apps this deployment offers (`pim.config.ts`). Its apps are `google/<app>`. */
@@ -194,30 +195,10 @@ export class GoogleTooLarge extends Error {
 }
 
 /** At most `maxBytes` of a response's body, and whether there was more; the rest is never read. */
-export async function readGoogleBytes(response: Response, maxBytes: number): Promise<{ bytes: Uint8Array; truncated: boolean }> {
-	const declared = Number(response.headers.get("content-length"));
-	const reader = response.body?.getReader();
-	if (!reader) return { bytes: new Uint8Array(), truncated: false };
-	const chunks: Uint8Array[] = [];
-	let size = 0;
-	let truncated = Number.isFinite(declared) && declared > maxBytes;
-	while (!truncated) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		const room = maxBytes - size;
-		chunks.push(value.length > room ? value.subarray(0, room) : value);
-		size += Math.min(value.length, room);
-		if (value.length > room) truncated = true;
-	}
-	if (truncated) await reader.cancel().catch(() => undefined);
-	const bytes = new Uint8Array(size);
-	let offset = 0;
-	for (const chunk of chunks) {
-		bytes.set(chunk, offset);
-		offset += chunk.length;
-	}
-	return { bytes, truncated };
-}
+export const readGoogleBytes = readBody;
+
+/** The most bytes of an error's answer read. */
+const ERROR_BYTES = 16 * 1024;
 
 /** How many times a request is sent, at most, when Google is busy or unreachable; a refused token is renewed once besides. */
 export const GOOGLE_ATTEMPTS = 3;
@@ -234,14 +215,14 @@ const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Google's error as JSON: `{ error: { code, message, status, errors: [{ reason }], details: [{ reason }] } }`. */
 async function refusal(response: Response): Promise<GoogleApiError> {
-	const body = (await response.json().catch(() => ({}))) as {
+	const body = (await readJsonObject(response, ERROR_BYTES)) as {
 		error?: { message?: string; status?: string; errors?: { reason?: string }[]; details?: { reason?: string }[] } | string;
 		error_description?: string;
 	};
 	const error = typeof body.error === "object" ? body.error : undefined;
 	const reason = error?.errors?.[0]?.reason ?? error?.details?.find((detail) => detail.reason)?.reason ?? error?.status ?? (typeof body.error === "string" ? body.error : null);
-	const text = (error?.message ?? body.error_description ?? response.statusText) || `HTTP ${response.status}`;
-	return new GoogleApiError(response.status, reason ?? null, `Google: ${text.slice(0, 300)}`);
+	const text = serviceText(String(error?.message ?? body.error_description ?? response.statusText ?? "")) || `HTTP ${response.status}`;
+	return new GoogleApiError(response.status, typeof reason === "string" ? reason.slice(0, 100) : null, `Google: ${text}`);
 }
 
 /**
@@ -305,7 +286,13 @@ export async function googleFetch(context: AppToolContext, url: string, request:
 /** `googleFetch`'s answer as JSON, read up to `maxBytes`; null for an empty one. */
 export async function googleJson<T>(context: AppToolContext, url: string, request: GoogleRequest = {}): Promise<T | null> {
 	const maxBytes = request.maxBytes ?? 2 * 1024 * 1024;
-	const { bytes, truncated } = await readGoogleBytes(await googleFetch(context, url, request), maxBytes);
+	const response = await googleFetch(context, url, request);
+	// Too large by its own account: none of it is read.
+	if (Number(response.headers.get("content-length")) > maxBytes) {
+		await response.body?.cancel();
+		throw new GoogleTooLarge(maxBytes);
+	}
+	const { bytes, truncated } = await readBody(response, maxBytes);
 	if (truncated) throw new GoogleTooLarge(maxBytes);
 	const text = new TextDecoder().decode(bytes);
 	return text === "" ? null : (JSON.parse(text) as T);

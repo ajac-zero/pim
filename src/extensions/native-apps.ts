@@ -515,6 +515,58 @@ function base64url(bytes: Uint8Array): string {
 		.replace(/=+$/, "");
 }
 
+/**
+ * At most `maxBytes` of a response's body, and whether there was more; the
+ * rest is never read. A declared length past the limit still gives the
+ * first `maxBytes`, as a body without one does.
+ */
+export async function readBody(response: Response, maxBytes: number): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+	const reader = response.body?.getReader();
+	if (!reader) return { bytes: new Uint8Array(), truncated: false };
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	let truncated = false;
+	while (!truncated) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		const room = maxBytes - size;
+		chunks.push(value.length > room ? value.subarray(0, room) : value);
+		size += Math.min(value.length, room);
+		if (value.length > room) truncated = true;
+	}
+	if (truncated) await reader.cancel().catch(() => undefined);
+	const bytes = new Uint8Array(size);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.length;
+	}
+	return { bytes, truncated };
+}
+
+/** A small JSON object from a service, such as a token or an error: `{}` when it is longer than `maxBytes`, or isn't one. */
+export async function readJsonObject(response: Response, maxBytes: number): Promise<Record<string, unknown>> {
+	try {
+		const { bytes, truncated } = await readBody(response, maxBytes);
+		if (truncated) return {};
+		const value: unknown = JSON.parse(new TextDecoder().decode(bytes));
+		return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+	} catch {
+		return {};
+	}
+}
+
+/** A service's own words, such as its error description, as one short line. */
+export const serviceText = (text: string) =>
+	text
+		.slice(0, 1000)
+		.replace(/[\u0000-\u001F\u007F]+/g, " ")
+		.trim()
+		.slice(0, 300);
+
+/** The most bytes of a token endpoint's answer read. */
+const TOKEN_BYTES = 64 * 1024;
+
 type TokenResponse = { access_token?: string; refresh_token?: string; expires_in?: number; scope?: string; error?: string; error_description?: string };
 
 /** How long a token endpoint may take to answer. */
@@ -544,9 +596,10 @@ export function oauth2(options: {
 		if (options.clientSecret) headers.authorization = `Basic ${btoa(`${id}:${secrets[options.clientSecret] ?? ""}`)}`;
 		else body.set("client_id", id);
 		const response = await fetch(options.tokenUrl, { method: "POST", headers, body, signal: AbortSignal.timeout(TOKEN_TIMEOUT_MS) });
-		const answer = (await response.json().catch(() => ({}))) as TokenResponse;
-		if (!response.ok || !answer.access_token) {
-			const reason = answer.error_description ?? answer.error ?? `The token endpoint answered ${response.status}`;
+		const answer = (await readJsonObject(response, TOKEN_BYTES)) as TokenResponse;
+		if (!response.ok || typeof answer.access_token !== "string") {
+			const told = typeof answer.error_description === "string" ? answer.error_description : typeof answer.error === "string" ? answer.error : "";
+			const reason = serviceText(told) || `The token endpoint answered ${response.status}`;
 			// The grant was revoked, expired, or never was: only signing in again helps.
 			throw answer.error === "invalid_grant" ? new ReconnectRequired(reason) : new Error(reason);
 		}

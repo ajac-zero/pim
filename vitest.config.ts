@@ -15,6 +15,7 @@ export default defineConfig({
 			// Approvals as they were before majordomos, so only the tests about them script a majordomo's review.
 			// The secrets of the test extension's bank app, and the client registered for its Forge app.
 			// The OAuth clients of the test Google apps and of Gmail and Drive, Drive's Picker's key and project, and the key that encrypts apps' credentials.
+			// Spotify's client, so its sign-in is tested as the deployment offers it.
 			// A content origin, so public artifact links are on.
 			// Traces with their content, so the tests check what an operator who opts in would see.
 			// Computers Pim starts as Fly.io Sprites, whose API the tests stand in for.
@@ -43,6 +44,8 @@ export default defineConfig({
 					GOOGLE_DRIVE_API_KEY: "picker-key",
 					GOOGLE_DRIVE_APP_ID: "123456789012",
 					APP_CREDENTIALS_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+					SPOTIFY_CLIENT_ID: "spotify-client",
+					SPOTIFY_CLIENT_SECRET: "spotify-secret",
 					OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "true",
 					SPRITES_TOKEN: "sprites-test-token",
 				},

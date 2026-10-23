@@ -47,6 +47,11 @@ const ARTIFACT_SCHEME = new RegExp(`^artifacts?:(?://)?(${UUID})$`, "i");
 /** Link text that is only the chat's id or address, which its title reads better than. */
 const BARE_CHAT = new RegExp(`^(?:(?:https?://[^/\\s]+)?/chat/)?${UUID}$`, "i");
 
+/** Where the link around a text that mentions agents goes, which `a` swaps for the mentions themselves. */
+const MENTIONS_HREF = "#pim-mentions";
+/** An @ that starts a word, as in `@Coach` but not in `ada@example.com`. */
+const AT = /(?:^|[^\p{L}\p{N}_])@/u;
+
 type MdastNode = {
   type: string;
   value?: string;
@@ -61,13 +66,24 @@ type MdastNode = {
  * Workspace file links, including `sandbox:` addresses from older replies,
  * go to the file viewer before Markdown's sanitizer checks their protocol.
  */
-function remarkChatLinks() {
+function remarkChatLinks(options?: { agents?: boolean }) {
+  const mentionAgents = options?.agents;
   const link = (text: string, id: string): MdastNode => ({
     type: "link",
     url: `/chat/${id.toLowerCase()}`,
     children: [{ type: "text", value: text }],
   });
   const mentions = (text: string): MdastNode[] => {
+    // A text that mentions someone is kept whole: `Mentions` finds who, as it knows the agents.
+    if (mentionAgents && AT.test(text)) {
+      return [
+        {
+          type: "link",
+          url: MENTIONS_HREF,
+          children: [{ type: "text", value: text }],
+        },
+      ];
+    }
     const nodes: MdastNode[] = [];
     let last = 0;
     for (const match of text.matchAll(CHAT_MENTION)) {
@@ -116,7 +132,7 @@ function remarkChatLinks() {
 
 const chatRemarkPlugins: PluggableList = [
   ...Object.values(defaultRemarkPlugins),
-  remarkChatLinks as Pluggable,
+  [remarkChatLinks, { agents: true }] as Pluggable,
 ];
 
 /**
@@ -146,7 +162,7 @@ function remarkBreaks() {
 const bubbleRemarkPlugins: PluggableList = [
   ...Object.values(defaultRemarkPlugins),
   remarkBreaks as Pluggable,
-  remarkChatLinks as Pluggable,
+  [remarkChatLinks, { agents: true }] as Pluggable,
 ];
 
 /** Whether a link's origin, when it names one, is this app's. */
@@ -296,6 +312,63 @@ function ChatLink({
 }
 
 /**
+ * A text with agents mentioned in it, as `@Name` or `@Role` as Pim's agents
+ * mention each other: each mention is shown as a chip, and opens that agent.
+ * Names are matched as the Worker does, the longest first, and a name two
+ * agents share mentions neither. What isn't an agent's name stays as written.
+ */
+function Mentions({ text, chip }: { text: string; chip: string }) {
+  const { data: agents } = useQuery(agentsQuery());
+  const names = new Map<string, number>();
+  for (const agent of agents ?? []) {
+    const key = agent.name.toLowerCase();
+    names.set(key, (names.get(key) ?? 0) + 1);
+  }
+  const keys = (agents ?? [])
+    .flatMap((agent) => [
+      { key: agent.role.toLowerCase(), agent },
+      ...(names.get(agent.name.toLowerCase()) === 1
+        ? [{ key: agent.name.toLowerCase(), agent }]
+        : []),
+    ])
+    .filter(({ key }) => key !== "")
+    .sort((a, b) => b.key.length - a.key.length);
+  const lower = text.toLowerCase();
+  const nodes: ReactNode[] = [];
+  let last = 0;
+  for (const match of lower.matchAll(/@/g)) {
+    if (match.index < last) continue;
+    if (match.index > 0 && /[\p{L}\p{N}_]/u.test(lower[match.index - 1] ?? ""))
+      continue;
+    const rest = lower.slice(match.index + 1);
+    const hit = keys.find(
+      ({ key }) =>
+        rest.startsWith(key) && !/[\p{L}\p{N}_]/u.test(rest[key.length] ?? ""),
+    );
+    if (!hit) continue;
+    const end = match.index + 1 + hit.key.length;
+    if (match.index > last) nodes.push(text.slice(last, match.index));
+    nodes.push(
+      <Link
+        key={match.index}
+        to="/agents/$agentId"
+        params={{ agentId: hit.agent.id }}
+        title={hit.agent.name}
+        className={cn(
+          "rounded px-1 font-medium no-underline transition-colors",
+          chip,
+        )}
+      >
+        {text.slice(match.index, end)}
+      </Link>,
+    );
+    last = end;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return <>{nodes}</>;
+}
+
+/**
  * Chat-tuned markdown. Styled to feel like ChatGPT: comfortable line height,
  * tight headings, bordered tables, and syntax-highlighted code blocks.
  *
@@ -431,6 +504,7 @@ const agentComponents = {
 const TONES = {
   page: {
     link: LINK_CLASS,
+    chip: "bg-link/10 text-link hover:bg-link/20",
     code: "bg-foreground/[0.06] text-destructive",
     quote: "border-border text-muted-foreground",
     line: "border-border",
@@ -438,6 +512,7 @@ const TONES = {
   },
   bubble: {
     link: "underline underline-offset-2",
+    chip: "bg-current/15 hover:bg-current/25",
     code: "bg-background/50",
     quote: "border-current/40",
     line: "border-current/25",
@@ -542,7 +617,9 @@ export const Markdown = memo(function Markdown({
           ),
           hr: () => <hr className={cn("my-6", tone.line)} />,
           a: ({ href, children }) =>
-            // A person may name their own chats too; untrusted text may not.
+            href === MENTIONS_HREF ? (
+              <Mentions text={textOf(children)} chip={tone.chip} />
+            ) : // A person may name their own chats too; untrusted text may not.
             (!safe || bubble) && chatOf(href) ? (
               <ChatLink id={chatOf(href) as string} className={tone.link}>
                 {children}

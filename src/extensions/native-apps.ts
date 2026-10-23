@@ -51,6 +51,18 @@ const ENCRYPTED = "sealed:v1:";
 
 type Row = Record<string, SqlStorageValue>;
 
+/**
+ * One sign-in of a connection: its id and app, and the random generation
+ * every sign-in gets. A connection removed and made again under the same id
+ * is a new generation, so work begun on the old one (a call, an action, a
+ * renewal) can't read, renew or change the new one's credential.
+ */
+type Sign = { readonly id: string; readonly app: string; readonly generation: string };
+
+const signOf = (row: Row): Sign => ({ id: String(row.id), app: String(row.app), generation: String(row.generation) });
+
+const newGeneration = () => base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)));
+
 export type NativeAppsHost = {
 	readonly sql: SqlStorage;
 	/** The installed app, by `<extension>/<app>`. */
@@ -115,7 +127,7 @@ function importKey(raw: string): Promise<CryptoKey> {
 
 export class NativeApps {
 	readonly #host: NativeAppsHost;
-	/** One renewal per connection at a time: concurrent calls wait for the same one. */
+	/** One renewal per sign-in at a time, by generation: concurrent calls wait for the same one. */
 	readonly #refreshing = new Map<string, Promise<Stored>>();
 	/** Sign-ins being finished now, by state: the same return arriving twice finishes once. */
 	readonly #finishing = new Set<string>();
@@ -123,6 +135,12 @@ export class NativeApps {
 	constructor(host: NativeAppsHost) {
 		this.#host = host;
 		host.sql.exec(SCHEMA);
+		// Connections made before generations existed get one each.
+		const columns = host.sql.exec("PRAGMA table_info(pim_app_connections)").toArray();
+		if (!columns.some((column) => column.name === "generation")) host.sql.exec("ALTER TABLE pim_app_connections ADD COLUMN generation TEXT");
+		for (const row of host.sql.exec("SELECT id FROM pim_app_connections WHERE generation IS NULL").toArray()) {
+			host.sql.exec("UPDATE pim_app_connections SET generation = ? WHERE id = ? AND generation IS NULL", newGeneration(), row.id);
+		}
 	}
 
 	#rows(): Row[] {
@@ -175,7 +193,7 @@ export class NativeApps {
 		const { url, pending } = await app.signIn({ callbackUrl: this.#host.callbackUrl(), state, secrets: this.#host.secrets(app) });
 		const kept = await this.#encrypt(app, { id, app: ref }, "pending", pending ?? null);
 		this.#host.sql.exec(
-			"INSERT INTO pim_app_connections (id, app, name, state, sign_in_state, pending, auth_url, created_at) VALUES (?, ?, ?, 'authenticating', ?, ?, ?, ?)",
+			"INSERT INTO pim_app_connections (id, app, name, state, sign_in_state, pending, auth_url, created_at, generation) VALUES (?, ?, ?, 'authenticating', ?, ?, ?, ?, ?)",
 			id,
 			ref,
 			app.name,
@@ -183,6 +201,7 @@ export class NativeApps {
 			kept,
 			url,
 			Date.now(),
+			newGeneration(),
 		);
 		this.#host.changed();
 		return { id, state: "authenticating", authUrl: url };
@@ -243,17 +262,18 @@ export class NativeApps {
 		const app = row ? this.#host.app(String(row.app)) : undefined;
 		const tool = app?.tools.find((candidate) => candidate.name === name);
 		if (!row || !app || !tool || row.state !== "ready") return { content: [{ type: "text", text: `${name} isn't available right now.` }], isError: true };
+		const sign = signOf(row);
 		let current: Stored;
 		try {
-			current = await this.#fresh(id, app, row);
+			current = await this.#fresh(sign, app, row);
 		} catch (error) {
-			if (error instanceof ReconnectRequired) return this.#reconnect(row, app, error);
+			if (error instanceof ReconnectRequired) return this.#reconnect(sign, app, error);
 			return { content: [{ type: "text", text: `${app.name} couldn't renew its sign-in just now (${message(error)}). Try again in a moment.` }], isError: true };
 		}
 		const context: AppToolContext = {
 			credential: current.credential,
 			secrets: this.#host.secrets(app),
-			renew: async () => (await this.#renew(id, app, current.stored)).credential,
+			renew: async () => (current = await this.#renew(sign, app, current.stored)).credential,
 		};
 		try {
 			const result = await tool.execute(args, context);
@@ -264,7 +284,7 @@ export class NativeApps {
 				...(result.widget ? { widget: result.widget } : {}),
 			};
 		} catch (error) {
-			if (error instanceof ReconnectRequired) return this.#reconnect(row, app, error);
+			if (error instanceof ReconnectRequired) return this.#reconnect(sign, app, error);
 			return { content: [{ type: "text", text: message(error) }], isError: true };
 		}
 	}
@@ -280,37 +300,48 @@ export class NativeApps {
 		const action = app?.actions && Object.hasOwn(app.actions, name) ? app.actions[name] : undefined;
 		if (!app || !action) throw new Error(`${ref} has no action ${name}`);
 		if (!row || row.state !== "ready") throw new Error(`Connect ${app.name} first, from the Apps page.`);
-		const id = String(row.id);
+		const sign = signOf(row);
 		let current: Stored;
 		try {
-			current = await this.#fresh(id, app, row);
+			current = await this.#fresh(sign, app, row);
 		} catch (error) {
-			if (error instanceof ReconnectRequired) this.#reconnect(row, app, error);
+			if (error instanceof ReconnectRequired) this.#reconnect(sign, app, error);
 			throw error;
 		}
 		try {
 			return await action(input, {
 				credential: current.credential,
 				secrets: this.#host.secrets(app),
-				renew: async () => (current = await this.#renew(id, app, current.stored)).credential,
-				update: (change) => this.#update(id, app, change),
+				renew: async () => (current = await this.#renew(sign, app, current.stored)).credential,
+				update: (change) => this.#update(sign, app, change),
 			});
 		} catch (error) {
-			if (error instanceof ReconnectRequired) this.#reconnect(row, app, error);
+			if (error instanceof ReconnectRequired) this.#reconnect(sign, app, error);
 			throw error;
 		}
 	}
 
-	/** Applies `change` to the latest credential, after any renewal under way, without undoing one that finishes meanwhile. */
-	async #update(id: string, app: NativeAppDefinition, change: (credential: AppCredential) => AppCredential): Promise<void> {
+	/** The ready connection `sign` is a sign-in of, unless it was removed or made again since. */
+	#current(sign: Sign, app: NativeAppDefinition): Row & { credential: string } {
+		const row = this.#host.sql.exec("SELECT * FROM pim_app_connections WHERE id = ? AND generation = ?", sign.id, sign.generation).toArray()[0];
+		if (!row || row.state !== "ready" || row.credential === null) throw new Error(`${app.name} was disconnected.`);
+		return row as Row & { credential: string };
+	}
+
+	/** Applies `change` to the sign-in's latest credential, after any renewal under way, without undoing one that finishes meanwhile. */
+	async #update(sign: Sign, app: NativeAppDefinition, change: (credential: AppCredential) => AppCredential): Promise<void> {
 		for (let attempt = 0; attempt < 3; attempt++) {
-			await this.#refreshing.get(id)?.catch(() => undefined);
-			const row = this.#row(id);
-			if (!row || row.state !== "ready" || row.credential === null) throw new Error(`${app.name} was disconnected.`);
-			const where = { id, app: String(row.app) };
-			const stored = String(row.credential);
-			const next = await this.#encrypt(app, where, "credential", change((await this.#decrypt(where, "credential", stored)) as AppCredential));
-			if (this.#host.sql.exec("UPDATE pim_app_connections SET credential = ? WHERE id = ? AND credential = ?", next, id, stored).rowsWritten > 0) return;
+			await this.#refreshing.get(sign.generation)?.catch(() => undefined);
+			const stored = String(this.#current(sign, app).credential);
+			const next = await this.#encrypt(app, sign, "credential", change((await this.#decrypt(sign, "credential", stored)) as AppCredential));
+			const written = this.#host.sql.exec(
+				"UPDATE pim_app_connections SET credential = ? WHERE id = ? AND generation = ? AND credential = ?",
+				next,
+				sign.id,
+				sign.generation,
+				stored,
+			).rowsWritten;
+			if (written > 0) return;
 		}
 		throw new Error(`${app.name} was busy renewing its sign-in. Try again.`);
 	}
@@ -324,7 +355,7 @@ export class NativeApps {
 		const row = this.#row(id);
 		if (!row) return false;
 		this.#host.sql.exec("DELETE FROM pim_app_connections WHERE id = ?", id);
-		this.#refreshing.delete(id);
+		this.#refreshing.delete(String(row.generation));
 		this.#host.changed();
 		await this.#revokeRow(row);
 		return true;
@@ -358,21 +389,20 @@ export class NativeApps {
 	}
 
 	/**
-	 * The grant is gone: the connection `row` was, fails, without its
-	 * credential, until the person connects it again. One they removed and
-	 * made again while the call ran (which the removal's revocation can make
-	 * Google refuse) is a new connection, and is left alone.
+	 * The grant is gone: the sign-in fails, without its credential, until the
+	 * person connects the app again. A connection they removed and made again
+	 * meanwhile (which the removal's revocation can make the service refuse)
+	 * is another sign-in, and is left alone.
 	 */
-	#reconnect(row: Row, app: NativeAppDefinition, error: ReconnectRequired): McpCallResult {
-		const id = String(row.id);
+	#reconnect(sign: Sign, app: NativeAppDefinition, error: ReconnectRequired): McpCallResult {
 		const failed = this.#host.sql.exec(
-			"UPDATE pim_app_connections SET state = 'failed', error = ?, credential = NULL, sign_in_state = NULL, pending = NULL, auth_url = NULL WHERE id = ? AND created_at = ? AND state = 'ready'",
+			"UPDATE pim_app_connections SET state = 'failed', error = ?, credential = NULL, sign_in_state = NULL, pending = NULL, auth_url = NULL WHERE id = ? AND generation = ? AND state = 'ready'",
 			`Sign in again: ${error.message}`,
-			id,
-			row.created_at,
+			sign.id,
+			sign.generation,
 		).rowsWritten;
 		if (failed > 0) {
-			this.#refreshing.delete(id);
+			this.#refreshing.delete(sign.generation);
 			this.#host.changed();
 		}
 		return { content: [{ type: "text", text: `${app.name} needs the person to connect it again from the Apps page.` }], isError: true };
@@ -386,47 +416,57 @@ export class NativeApps {
 		);
 	}
 
-	/** The connection's credential, renewed first if it is about to expire, and encrypted if it was kept before the key was set. */
-	async #fresh(id: string, app: NativeAppDefinition, row: Row): Promise<Stored> {
+	/** The sign-in's credential, renewed first if it is about to expire, and encrypted if it was kept before the key was set. */
+	async #fresh(sign: Sign, app: NativeAppDefinition, row: Row): Promise<Stored> {
 		let stored = String(row.credential);
-		const credential = (await this.#decrypt({ id, app: String(row.app) }, "credential", stored)) as AppCredential;
+		const credential = (await this.#decrypt(sign, "credential", stored)) as AppCredential;
 		if (!stored.startsWith(ENCRYPTED) && this.#host.credentialsKey() !== null) {
-			const encrypted = await this.#encrypt(app, { id, app: String(row.app) }, "credential", credential);
-			if (this.#host.sql.exec("UPDATE pim_app_connections SET credential = ? WHERE id = ? AND credential = ?", encrypted, id, stored).rowsWritten > 0) stored = encrypted;
+			const encrypted = await this.#encrypt(app, sign, "credential", credential);
+			const written = this.#host.sql.exec(
+				"UPDATE pim_app_connections SET credential = ? WHERE id = ? AND generation = ? AND credential = ?",
+				encrypted,
+				sign.id,
+				sign.generation,
+				stored,
+			).rowsWritten;
+			if (written > 0) stored = encrypted;
 		}
 		if (credential.expiresAt === undefined || credential.expiresAt - REFRESH_MARGIN_MS > Date.now()) return { stored, credential };
-		return this.#renew(id, app, stored);
+		return this.#renew(sign, app, stored);
 	}
 
 	/**
-	 * Renews the credential stored as `stale`, once however many calls ask:
-	 * one that was renewed already comes back as it is now.
+	 * Renews the sign-in's credential stored as `stale`, once however many
+	 * calls ask: one that was renewed already comes back as it is now. Only
+	 * ever this sign-in's: work begun on a connection removed or made again
+	 * since fails, and gets nothing of the new one's.
 	 */
-	#renew(id: string, app: NativeAppDefinition, stale: string): Promise<Stored> {
-		const running = this.#refreshing.get(id);
+	#renew(sign: Sign, app: NativeAppDefinition, stale: string): Promise<Stored> {
+		const running = this.#refreshing.get(sign.generation);
 		if (running) return running;
 		const work = (async (): Promise<Stored> => {
-			const row = this.#row(id);
-			if (!row || row.state !== "ready" || row.credential === null) throw new Error(`${app.name} was disconnected.`);
-			const where = { id, app: String(row.app) };
-			const latest = String(row.credential);
-			const credential = (await this.#decrypt(where, "credential", latest)) as AppCredential;
+			const latest = String(this.#current(sign, app).credential);
+			const credential = (await this.#decrypt(sign, "credential", latest)) as AppCredential;
 			// Renewed since (a renewal always sets a new expiry), rather than only changed by an action: use it.
-			if (latest !== stale && credential.expiresAt !== ((await this.#decrypt(where, "credential", stale)) as AppCredential).expiresAt) {
+			if (latest !== stale && credential.expiresAt !== ((await this.#decrypt(sign, "credential", stale)) as AppCredential).expiresAt) {
 				return { stored: latest, credential };
 			}
 			if (!app.refresh) throw new ReconnectRequired("the sign-in expired.");
 			const renewed = await app.refresh(credential, { secrets: this.#host.secrets(app) });
-			const stored = await this.#encrypt(app, where, "credential", renewed);
-			// Not over a connection the person removed, or made again, meanwhile.
-			if (this.#host.sql.exec("UPDATE pim_app_connections SET credential = ? WHERE id = ? AND credential = ?", stored, id, latest).rowsWritten === 0) {
-				throw new Error(`${app.name} was disconnected.`);
-			}
+			const stored = await this.#encrypt(app, sign, "credential", renewed);
+			const written = this.#host.sql.exec(
+				"UPDATE pim_app_connections SET credential = ? WHERE id = ? AND generation = ? AND credential = ?",
+				stored,
+				sign.id,
+				sign.generation,
+				latest,
+			).rowsWritten;
+			if (written === 0) throw new Error(`${app.name} was disconnected.`);
 			return { stored, credential: renewed };
 		})().finally(() => {
-			if (this.#refreshing.get(id) === work) this.#refreshing.delete(id);
+			if (this.#refreshing.get(sign.generation) === work) this.#refreshing.delete(sign.generation);
 		});
-		this.#refreshing.set(id, work);
+		this.#refreshing.set(sign.generation, work);
 		return work;
 	}
 

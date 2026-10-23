@@ -3,6 +3,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { googleApp } from "../src/extensions/google";
+import { NativeApps } from "../src/extensions/native-apps";
 import { api, comeBack, OWNER, post, ROOT, say, signedIn, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
@@ -432,5 +433,24 @@ describe("Google apps", () => {
 		expect((await api("/mcp/files", { method: "DELETE" })).body).toEqual({ deleted: true });
 		expect(google.revoked).toEqual(["gmail-refresh", "drive-refresh"]);
 		expect(await stored("files")).toBeUndefined();
+	});
+});
+
+describe("connections made before sign-ins had generations", () => {
+	it("get one each", async () => {
+		const generations = await runInDurableObject(env.Pim.getByName(OWNER), (_instance: Pim, state) => {
+			const { sql } = state.storage;
+			sql.exec("ALTER TABLE pim_app_connections DROP COLUMN generation");
+			for (const id of ["old_a", "old_b"]) {
+				sql.exec("INSERT INTO pim_app_connections (id, app, name, state, credential, created_at) VALUES (?, ?, 'Old', 'ready', '{}', 1)", id, `test.old/${id}`);
+			}
+			new NativeApps({ sql, app: () => undefined, secrets: () => ({}), credentialsKey: () => null, callbackUrl: () => "", owner: () => OWNER, changed: () => {} });
+			const found = sql.exec("SELECT generation FROM pim_app_connections WHERE id IN ('old_a', 'old_b')").toArray().map((row) => row.generation);
+			sql.exec("DELETE FROM pim_app_connections WHERE id IN ('old_a', 'old_b')");
+			return found;
+		});
+		expect(generations).toHaveLength(2);
+		expect(generations.every((generation) => typeof generation === "string" && generation.length >= 22)).toBe(true);
+		expect(generations[0]).not.toBe(generations[1]);
 	});
 });

@@ -180,8 +180,57 @@ export const music = definePimExtension({
 ```
 
 - **Sign-in.** `signIn` gets the `callbackUrl`, a `state` and the app's secrets, and returns the URL to send the person to, with anything to keep until they return (`pending`, such as a PKCE verifier). They come back to `callbackUrl`, which is this Pim's `/mcp/callback/apps` for everyone, so it can be registered as the redirect URI; `state` tells the Worker whose space it is. `callback` gets the URL they came back to and returns their credential, any JSON; throw to fail with a reason the person sees. A service with another flow, such as Plaid's Hosted Link, implements `signIn` and `callback` itself.
-- **Credentials** stay in the person's own space, never in exports, and go with their account. One with `expiresAt` (ms) is renewed with `refresh` a minute before it expires, once however many calls want it; without `refresh`, or when it fails, the app shows as failed and the person connects it again.
-- **Tools** are named `<connection>_<name>`, like an MCP app's, and get the person's `credential` and the app's `secrets`. A thrown error comes back to the model as the tool's error.
+- **Coming back.** The page at `/mcp/callback/apps` posts what the service sent back from Pim's own origin, and the Worker passes it to the space only from a browser signed in as the person the `state` names. So a consent link someone else started can't connect the person's account to another space, and a person who isn't signed in in that browser signs in and reloads the page. A sign-in is good for 15 minutes and finishes once.
+- **Credentials** stay in the person's own space, never in exports, and go with their account. Once the deployment sets `APP_CREDENTIALS_KEY` (32 random bytes in base64: `openssl rand -base64 32`), they and sign-ins under way are encrypted with it (AES-GCM), bound to the owner, the connection and the app; ones kept before are encrypted when next used. An app with `encrypted: true` isn't offered until the key is set. Keep the key: changing or removing it means everyone connects those apps again.
+- **Renewal.** A credential with `expiresAt` (ms) is renewed with `refresh` a minute before it expires, once however many calls want it. `refresh`, `callback` and tools throw `ReconnectRequired` (from `define.ts`) when the grant is gone, such as an `invalid_grant` answer, which `oauth2` turns into one: Pim forgets the credential and the app shows as failed until the person connects it again. Any other error is passing, such as the service being down: the call fails and the connection stays. `oauth2` reads at most 64 KiB of a token endpoint's answer, and says only its status for one larger.
+- **Generations.** Each sign-in gets a random generation of its own. A call, action or renewal works only on the generation it began with: if the person disconnects and connects again meanwhile, it fails, and can neither use, renew nor change the new sign-in's credential.
+- **Tools** are named `<connection>_<name>`, like an MCP app's, and get the person's `credential`, the app's `secrets`, and `renew()`, which renews the credential now, for a service that refused it (401), sharing one renewal with every call at the same time. A thrown error comes back to the model as the tool's error.
+- **Actions and a page.** `actions` are what the person does with their connection in their own browser, such as picking files: `POST /api/app-actions/<extension>/<app>/<name>` runs one with the connection's credential, only for a browser signed in as the person (not an API token, MCP client or agent), and answers uncached. An action can change what Pim keeps with the credential (`update`). `page(nonce)` is the HTML the person uses them on, served at `/app-pages/<extension>/<app>` under the content security policy it returns, in no frame; its scripts carry the nonce. Once the person's connection is ready, the Apps page offers the page on a button saying `pageLabel` (default "Open"), in a tab of its own; a connection that failed, or whose grant was revoked, shows why and a Reconnect button instead. Drive's file picker ([`google-drive.ts`](../src/extensions/google-drive.ts)) is both, behind "Choose files".
+- **Disconnecting** deletes the credential at once, then calls the app's `revoke`, if it has one, to end the grant at the service, with 10 seconds to do it. Its failure is logged without the credential, and the connection is gone all the same; the person can still remove the grant in the service's settings. Erasing an account revokes every connection's grant the same way.
+
+### Google apps
+
+[`google.ts`](../src/extensions/google.ts) is what Google's apps share. `googleApp` makes an app from Google's sign-in, renewal and revocation, and the app's own tools; `googleFetch` and `googleJson` call Google's APIs with the person's credential; `googleExtension` is the extension they are offered in, so each is `google/<app>`:
+
+```ts
+import { Type } from "@earendil-works/pi-ai";
+import { defineAppTool } from "./define";
+import { GOOGLE_SCOPES, googleApp, googleJson } from "./google";
+
+export const gmail = googleApp({
+	id: "gmail",
+	name: "Gmail",
+	description: "Search and read your mail.",
+	category: "productivity",
+	// This app's own OAuth client, in a Google Cloud project of its own.
+	client: { id: "GOOGLE_GMAIL_CLIENT_ID", secret: "GOOGLE_GMAIL_CLIENT_SECRET" },
+	scopes: [GOOGLE_SCOPES.gmailReadonly],
+	tools: [
+		defineAppTool({
+			name: "profile",
+			description: "The person's Gmail address.",
+			parameters: Type.Object({}),
+			readOnly: true,
+			async execute(_args, context) {
+				const profile = await googleJson<{ emailAddress: string }>(context, "https://gmail.googleapis.com/gmail/v1/users/me/profile");
+				return `Connected as ${profile?.emailAddress}.`;
+			},
+		}),
+	],
+});
+
+// pim.config.ts: extensions: [..., googleExtension([gmail, googleDrive])]
+```
+
+- **One OAuth client per app, each in its own Google Cloud project.** Google keeps a person's grant per project: every client in a project shares it, and revoking it ends every client's tokens there. With a project each, the person allows Gmail and Drive separately, and disconnecting one revokes only its grant. `client` names the Worker secrets holding the client's ID and secret; until both and `APP_CREDENTIALS_KEY` are set, nobody is offered the app.
+- **Narrow scopes only.** `GOOGLE_SCOPES` is what apps may ask for: `gmail.readonly`, and `drive.file`, which reaches only the files the person picks for Pim or Pim creates; anything else throws when the extension loads. The sign-in asks for offline access with Google's consent screen each time, so every sign-in has a refresh token, and asks Google to list every scope the person granted the project (`include_granted_scopes`), so the check sees the whole grant. Granted scopes must be the app's exactly, in any order or spacing. One with more (its project serves something else too) is refused and left unrevoked, since revoking would end that other grant; one with less (the person unticked a box), or without a refresh token, is refused and revoked.
+- **The credential** is `{ accessToken, refreshToken, expiresAt, scope }` (`GoogleCredential`). Renewing keeps the refresh token, which Google leaves out of its answer. `invalid_grant` (revoked, or expired) means connecting again.
+- **`googleFetch(context, url, { method, query, headers, body, idempotent })`** calls only `https://*.googleapis.com`, sends the token, and doesn't follow redirects. Google busy (429, 5xx, or a rate-limit 403) or out of reach: it tries up to `GOOGLE_ATTEMPTS` (3) times, waiting longer each time or as `Retry-After` says, up to 5 seconds; a request that isn't GET, HEAD, PUT or DELETE is tried once unless `idempotent`. A 401 renews the token once and tries again; refused again, the app needs connecting again. Any other refusal throws a `GoogleApiError` with its `status`, Google's `reason` and message, never the token. `googleJson` reads the answer as JSON.
+- `readGoogleBytes(response, maxBytes)` reads the first `maxBytes` of an answer and says whether there was more, whether or not Google declared its length; `googleJson`'s `maxBytes` (2 MiB by default) throws `GoogleTooLarge` past it, without reading an answer whose declared length is larger. Google's refusals are read up to 16 KiB and said in one line of at most 300 characters. So a large answer never fills memory.
+- `secrets`, `actions`, `page` and `pageLabel` pass through to the app: Drive adds its Picker's API key and project number, its picking actions, and its page.
+- Tools that only read are `readOnly`. Google apps don't write: not mail, not Drive files.
+
+Pim's own Google apps are [Gmail](../src/extensions/gmail.ts), whose `search`, `get_message` and `get_thread` fetch from Gmail within bounds (20 results a search, headers only for results, 256 KiB for a list, 8 MiB for a message, 16 MiB for a thread, falling back to headers past that) and read what comes back through a `GmailContent` adapter ([`gmail-adapter.ts`](../src/extensions/gmail-adapter.ts)) over the MIME normalizer [`gmail-content.ts`](../src/extensions/gmail-content.ts): at most 12 levels and 200 parts a message, 1 MiB decoded and 20,000 characters of text a message, 4 MiB and 60,000 a thread's latest 25 messages, header values of 500 characters (200 in a thread); plain text before HTML, HTML reduced to its text, attachments listed and never fetched, and mail fenced as untrusted. The HTTP bounds limit memory and parsing; the normalizer's limit the work and what the model reads; and [Google Drive](../src/extensions/google-drive.ts), whose `list_files` and `read_file` read only the files the person picked on its page: Docs and Slides as text, Sheets as CSV, and text files, up to 512 KiB and 40,000 characters; anything else is refused by name.
 
 ## Widgets
 

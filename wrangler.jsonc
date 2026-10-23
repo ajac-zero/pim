@@ -14,7 +14,7 @@
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     // Everything else is the app's pages and files.
-    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp", "/oauth/*", "/.well-known/*", "/authorize", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*", "/shared/*", "/p/*"]
+    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp", "/oauth/*", "/.well-known/*", "/authorize", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*", "/shared/*", "/app-pages/*", "/p/*"]
   },
   // Workers AI runs the model; under `wrangler dev` it calls your logged-in account. Optional:
   // delete this line to run without it, and people use the model providers they add in Settings.

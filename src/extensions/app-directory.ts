@@ -1,4 +1,4 @@
-import { type AppCategory, CUSTOM_APPS, isNativeApp, type PimExtension } from "./define";
+import { type AppCategory, CUSTOM_APPS, isNativeApp, type PimExtension, type Text } from "./define";
 
 /**
  * The apps people can connect: those the installed extensions bring, and
@@ -32,6 +32,8 @@ export type DirectoryApp = {
 	readonly icon: string | null;
 	/** Null files it under Other. */
 	readonly category: AppCategory | null;
+	/** The app's page for the person once connected (`NativeAppDefinition.page`), and what its button says; absent for none. */
+	readonly page?: { readonly url: string; readonly label: Text };
 };
 
 const MAX_FOUND = 8;
@@ -48,6 +50,7 @@ export function appDirectory(extensions: readonly PimExtension[], custom: readon
 				custom: false,
 				icon: app.icon ?? null,
 				category: app.category ?? null,
+				...(isNativeApp(app) && app.page ? { page: { url: `/app-pages/${extension.id}/${app.id}`, label: app.pageLabel ?? { en: "Open", es: "Abrir" } } } : {}),
 			})),
 		),
 		...custom.map(({ id, name, description, url, icon, category }) => ({ ref: `${CUSTOM_APPS}/${id}`, name, description, url, custom: true, icon, category })),

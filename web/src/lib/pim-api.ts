@@ -117,6 +117,8 @@ export type AgentTask = {
   id: string;
   /** The task its requester was working on when it handed this one out; null when the chat's agent did. */
   parent: string | null;
+  /** The id of the `delegate` call that handed it out, in its requester's transcript; null for tasks from before it was kept. */
+  call: string | null;
   agent: TaskAgent;
   from: TaskAgent;
   task: string;

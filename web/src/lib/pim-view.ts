@@ -77,6 +77,15 @@ export function taskHistory(
         : [],
     ),
   );
+  // A task names the call that handed it out, so a call still waiting for its answers shows them at work.
+  const handedOut = new Map<string, Set<string>>();
+  for (const task of tasks) {
+    if (task.call === null || !calls.has(task.call)) continue;
+    handedOut.set(
+      task.call,
+      new Set([...(handedOut.get(task.call) ?? []), task.id]),
+    );
+  }
   for (const entry of entries) {
     if (
       entry.kind === "item" &&
@@ -86,16 +95,16 @@ export function taskHistory(
       const output = entry.item as FunctionCallOutputItem;
       if (output.status === "incomplete" || typeof output.output !== "string")
         continue;
-      // These lines are the delegate tool's receipt, not the model's arguments.
-      const ids = new Set(
-        [...output.output.matchAll(/^Task (\S+): /gm)].map((match) => match[1]),
+      // Older tasks name no call: these lines are the delegate tool's receipt, not the model's arguments.
+      handedOut.set(
+        output.call_id,
+        new Set([
+          ...(handedOut.get(output.call_id) ?? []),
+          ...[...output.output.matchAll(/^Task (\S+): /gm)].map(
+            (match) => match[1] as string,
+          ),
+        ]),
       );
-      const group = tasks.filter((task) => ids.has(task.id));
-      // Descendants work in their own transcripts, but belong under this handoff.
-      for (const task of group) {
-        group.push(...tasks.filter((child) => child.parent === task.id));
-      }
-      if (group.length > 0) delegations.set(output.call_id, group);
     }
     if (entry.kind === "notice" && entry.notice.kind === "task") {
       const ids = new Set(
@@ -109,6 +118,14 @@ export function taskHistory(
       notices.set(entry.key, answered);
       for (const task of answered) completions.set(task.id, entry.key);
     }
+  }
+  for (const [call, ids] of handedOut) {
+    const group = tasks.filter((task) => ids.has(task.id));
+    // Descendants work in their own transcripts, but belong under this handoff.
+    for (const task of group) {
+      group.push(...tasks.filter((child) => child.parent === task.id));
+    }
+    if (group.length > 0) delegations.set(call, group);
   }
   const placed = new Set(
     [...delegations.values()].flat().map((task) => task.id),

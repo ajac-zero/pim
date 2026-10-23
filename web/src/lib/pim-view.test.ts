@@ -997,9 +997,14 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
 });
 
 it("keeps handoffs anchored while linking each answer to its own notice, not an earlier mention of waiting", () => {
-  const task = (id: string, parent: string | null = null): AgentTask => ({
+  const task = (
+    id: string,
+    parent: string | null = null,
+    call: string | null = null,
+  ): AgentTask => ({
     id,
     parent,
+    call,
     agent: { id, name: id },
     from: { id: "lead", name: "Lead" },
     task: `Work for ${id}`,
@@ -1014,6 +1019,7 @@ it("keeps handoffs anchored while linking each answer to its own notice, not an 
     task("child", "research"),
     task("later"),
     task("unrelated"),
+    task("awaited", null, "third"),
   ];
   const handoff = (id: number, call: string) =>
     assistant(id, [
@@ -1045,6 +1051,7 @@ it("keeps handoffs anchored while linking each answer to its own notice, not an 
           9,
           "[Task update] Researcher didn't finish\n\nResearcher didn't finish task later: It didn't finish: unanswered.",
         ),
+        handoff(10, "third"),
       ],
     }),
   ]).view.entries;
@@ -1056,6 +1063,10 @@ it("keeps handoffs anchored while linking each answer to its own notice, not an 
   ]);
   expect(history.delegations.get("second")?.map((task) => task.id)).toEqual([
     "later",
+  ]);
+  // A call that waits for its answers has no result yet: its tasks name it.
+  expect(history.delegations.get("third")?.map((task) => task.id)).toEqual([
+    "awaited",
   ]);
   expect([...history.completions]).toEqual([
     ["research", "5"],
@@ -1070,7 +1081,7 @@ it("keeps handoffs anchored while linking each answer to its own notice, not an 
     layoutThread(entries, {
       shown: (call) => history.delegations.has(call.call_id),
     }).map((row) => row.key),
-  ).toEqual(["1", "2:0", "4", "5", "6:0", "8", "9"]);
+  ).toEqual(["1", "2:0", "4", "5", "6:0", "8", "9", "10:0"]);
   const beforeAnswers = taskHistory(entries.slice(0, 4), tasks);
   expect(
     beforeAnswers.delegations.get("first")?.map((task) => task.id),

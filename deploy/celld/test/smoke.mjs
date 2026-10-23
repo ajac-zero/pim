@@ -119,6 +119,20 @@ async function setup() {
 		assert.equal((await direct({ ...secret, "x-pim-client-ip": "2001:db8::1" })).status, 401, "the secret and an IPv6 address");
 		assert.equal((await direct({ ...secret, "x-pim-client-ip": "203.0.113.5", "x-forwarded-proto": "http" })).status, 421, "http:// isn't PIM_PUBLIC_URL");
 		step("past the proxy, Pim refuses a missing or wrong secret (403) and a bad client address (400), and needs https:// from the forwarded headers (421)");
+
+		// The Directory's sign-in limit, 30 attempts a minute per address, as the proxy reports addresses.
+		const attempt = (ip) => call("POST", "/auth/sign-in/options", { base: CELLD_URL, headers: { ...secret, "x-pim-client-ip": ip, "x-forwarded-proto": "https", "x-forwarded-host": pim.host, origin: pim.origin }, body: {} });
+		const spend = async (ip) => {
+			for (let i = 0; i < 30; i++) assert.notEqual((await attempt(ip)).status, 429, `attempt ${i + 1} from ${ip}`);
+		};
+		await spend("198.51.100.7");
+		assert.equal((await attempt("198.51.100.7")).status, 429, "a 31st attempt from one address");
+		assert.equal((await attempt("::ffff:198.51.100.7")).status, 429, "the same IPv4 address, written as IPv6");
+		assert.notEqual((await attempt("198.51.100.8")).status, 429, "another address");
+		await spend("2001:db8:1:2::1");
+		assert.equal((await attempt("2001:db8:1:2::ffff")).status, 429, "another address in the same IPv6 /64");
+		assert.notEqual((await attempt("2001:db8:1:3::1")).status, 429, "another IPv6 /64");
+		step("the Directory limits sign-in attempts per address: 30 a minute, an IPv6 /64 as one, IPv4-mapped IPv6 as IPv4");
 	} else {
 		assert.equal((await direct({ "x-forwarded-proto": "http" })).status, 421, "celld without the proxy's X-Forwarded-Proto isn't https://");
 		step("without the proxy's forwarded headers Pim refuses the request (421); this Worker predates the celld runtime, so its ingress checks are skipped");

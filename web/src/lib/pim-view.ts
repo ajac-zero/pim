@@ -21,6 +21,7 @@ import {
   DELIVERY_REMINDER,
   INTRODUCTION,
   NOTICE_PREFIXES,
+  ROOM_POST,
   reasoningHeadings,
 } from "../../../src/transcript";
 
@@ -32,9 +33,9 @@ import {
  * function_call / function_call_output.
  */
 
-/** Something Pim fed itself: an approval decision, a scheduled task, an app event, tasks' answers, a reset. */
+/** Something Pim fed itself: an approval decision, a scheduled task, an app event, tasks' answers, who joined a group chat, a reset. */
 export type PimNotice = {
-  kind: "approval" | "schedule" | "event" | "task" | "reset";
+  kind: "approval" | "schedule" | "event" | "task" | "room" | "reset";
   /** One line, without the machine prefix. */
   title: string;
   /** The full text Pim received. */
@@ -53,7 +54,9 @@ export type ThreadEntry =
       at: number;
     }
   /** `at` is when Pim gave it, except for a reset. */
-  | { key: string; kind: "notice"; notice: PimNotice; at?: number };
+  | { key: string; kind: "notice"; notice: PimNotice; at?: number }
+  /** What another agent in a group chat said there, by its name. */
+  | { key: string; kind: "post"; from: string; text: string; at: number };
 
 export type RunningTool = { callId: string; name: string; output: string };
 
@@ -297,6 +300,17 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
       const notice = noticeOf(text);
       if (notice)
         return [{ key, kind: "notice", notice, at: message.timestamp }];
+      const post = ROOM_POST.exec(text);
+      if (post)
+        return [
+          {
+            key,
+            kind: "post",
+            from: post[1] as string,
+            text: text.slice(post[0].length),
+            at: message.timestamp,
+          },
+        ];
       return [
         {
           key,
@@ -792,7 +806,7 @@ export function layoutThread(
     since = entry.at ?? null;
   };
   for (const entry of entries) {
-    if (entry.kind === "notice") {
+    if (entry.kind === "notice" || entry.kind === "post") {
       own(entry);
       continue;
     }
@@ -860,9 +874,9 @@ export function conversationMarkdown(
     ),
   );
   // Names are headings, not Markdown supplied by the conversation.
-  const name = agent
-    .replace(/[\r\n]+/g, " ")
-    .replace(/[\\`*_{}[\]<>()#!|]/g, "\\$&");
+  const heading = (name: string) =>
+    name.replace(/[\r\n]+/g, " ").replace(/[\\`*_{}[\]<>()#!|]/g, "\\$&");
+  const name = heading(agent);
   return layoutThread(entries, {
     shown: () => false,
     refused: (call) => refused.has(call.call_id),
@@ -876,6 +890,9 @@ export function conversationMarkdown(
       const { entry } = row;
       if (entry.kind === "notice") {
         return `## System\n\n${entry.notice.text || entry.notice.title}`;
+      }
+      if (entry.kind === "post") {
+        return `## Agent: ${heading(entry.from)}\n\n${entry.text}`;
       }
       const item = entry.item as MessageItem;
       const images =

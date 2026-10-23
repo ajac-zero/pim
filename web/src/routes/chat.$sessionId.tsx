@@ -13,6 +13,7 @@ import { ArtifactView } from "~/components/artifact-view";
 import { ChatLinkMenu } from "~/components/chat/chat-link";
 import { Composer } from "~/components/chat/composer";
 import { CopyConversation } from "~/components/chat/copy-conversation";
+import { RoomMenu } from "~/components/chat/room";
 import { SummaryBox, SummaryToggle } from "~/components/chat/summary";
 import { ChatTabs, useChatDrop } from "~/components/chat/tabs";
 import { TaskView } from "~/components/chat/tasks";
@@ -25,7 +26,7 @@ import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
 import { useElementHeight } from "~/hooks/use-element-size";
 import { FILES_ROOT, pim, type UserContent } from "~/lib/pim-api";
 import { pimClient, usePimClient } from "~/lib/pim-client";
-import { sessionsQuery } from "~/lib/queries";
+import { agentsQuery, sessionsQuery } from "~/lib/queries";
 import { showTab, useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
@@ -101,6 +102,10 @@ function ChatPage() {
     });
   const { data: sessions } = useQuery(sessionsQuery());
   const session = sessions?.find((candidate) => candidate.id === sessionId);
+  const { data: agents } = useQuery(agentsQuery());
+  // In a group chat, Stop stops every agent at work in it.
+  const roomBusy =
+    session?.room?.members.some((member) => member.busy) ?? false;
 
   // The socket outlives this page, so notifications and approvals keep
   // arriving elsewhere in the app; it switches when another chat opens.
@@ -206,6 +211,7 @@ function ChatPage() {
               {t("connecting")}
             </span>
           )}
+          <RoomMenu sessionId={sessionId} />
           <CopyConversation sessionId={sessionId} />
           <ChatLinkMenu sessionId={sessionId} />
           <SummaryToggle
@@ -236,6 +242,8 @@ function ChatPage() {
                 sessionId={sessionId}
                 synced={synced}
                 visit={session?.visit?.username}
+                host={session?.agent}
+                room={session?.room}
                 view={view}
                 pending={pending}
                 composerHeight={composerHeight}
@@ -270,12 +278,15 @@ function ChatPage() {
                   placeholder={
                     session?.visit
                       ? t("messageVisit", { username: session.visit.username })
-                      : session?.agent
-                        ? t("messageAgent", { name: session.agent.name })
-                        : undefined
+                      : session?.room?.members.length
+                        ? t("messageRoom")
+                        : session?.agent
+                          ? t("messageAgent", { name: session.agent.name })
+                          : undefined
                   }
                   onStop={stop}
-                  busy={ready && view.running}
+                  busy={ready && (view.running || roomBusy)}
+                  mentions={session && !session.visit ? agents : undefined}
                   disabled={!ready}
                   disclaimer={
                     session?.visit ? (

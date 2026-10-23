@@ -23,6 +23,7 @@ import {
   WorkedSteps,
 } from "~/components/chat/items";
 import { sentImages } from "~/components/chat/reply-blocks";
+import { MembersWorking, Speaker } from "~/components/chat/room";
 import { TASK_POLL_MS, TaskCard, TaskJump } from "~/components/chat/tasks";
 import { CHATGPT_USAGE_URL } from "~/components/chatgpt-logo";
 import { type TranslationKey, useI18n } from "~/components/i18n";
@@ -39,7 +40,7 @@ import type {
   FunctionCallOutputItem,
   MessageItem,
 } from "~/lib/openresponses";
-import { pim, type UserContent } from "~/lib/pim-api";
+import { pim, type Room, type UserContent } from "~/lib/pim-api";
 import {
   layoutThread,
   type ModelProblem,
@@ -48,7 +49,12 @@ import {
   taskHistory,
   userItem,
 } from "~/lib/pim-view";
-import { appDirectoryQuery, approvalsQuery, appsQuery } from "~/lib/queries";
+import {
+  agentsQuery,
+  appDirectoryQuery,
+  approvalsQuery,
+  appsQuery,
+} from "~/lib/queries";
 
 /** Tools whose answer names an artifact version, shown as the artifact itself: one made, changed or shown again. */
 const ARTIFACT_TOOLS = new Set([
@@ -96,10 +102,19 @@ const scrollPositions = new Map<string, number>();
 /** How close to the bottom counts as there, as `use-stick-to-bottom` counts it. */
 const NEAR_BOTTOM = 70;
 
+/** Pim's copies of images a group chat message shows, which it names by their own addresses. */
+function postedImages(text: string): Record<string, string> {
+  return Object.fromEntries(
+    [...text.matchAll(/\/api\/images\/[\w-]+/g)].map(([url]) => [url, url]),
+  );
+}
+
 export const Thread = memo(function Thread({
   sessionId,
   synced,
   visit,
+  host,
+  room,
   view,
   pending,
   composerHeight,
@@ -110,6 +125,10 @@ export const Thread = memo(function Thread({
   synced: boolean;
   /** The username whose space this conversation is with, when it's someone else's. */
   visit?: string;
+  /** The agent the chat is with; in a group chat, its host. */
+  host?: { id: string; name: string } | null;
+  /** The other agents in a group chat, if it is one. */
+  room?: Room | null;
   view: SessionView;
   /** A message sent but not yet in the transcript, shown right away. */
   pending: UserContent | null;
@@ -213,6 +232,19 @@ export const Thread = memo(function Thread({
     () => new Set(view.live.map((entry) => entry.key)),
     [view.live],
   );
+  /* In a group chat each agent's message says who wrote it, once for messages in a row from one agent. */
+  const { data: agents } = useQuery(agentsQuery());
+  const grouped = (room?.members.length ?? 0) > 0;
+  const working = room?.members.filter((member) => member.busy) ?? [];
+  let lastSpeaker: string | null = null;
+  const speaker = (name: string, id?: string) => {
+    if (!grouped || lastSpeaker === name) return undefined;
+    lastSpeaker = name;
+    const agent =
+      agents?.find((candidate) => candidate.id === id) ??
+      agents?.find((candidate) => candidate.name === name);
+    return <Speaker name={name} agent={agent} />;
+  };
 
   /*
    * Only user-facing approvals, tasks, artifacts and images are drawn from tool
@@ -270,7 +302,9 @@ export const Thread = memo(function Thread({
   );
 
   const empty =
-    !view.running && entries.every((entry) => entry.kind === "notice");
+    !view.running &&
+    working.length === 0 &&
+    entries.every((entry) => entry.kind === "notice");
 
   return (
     <Conversation
@@ -303,6 +337,7 @@ export const Thread = memo(function Thread({
             return (
               <AssistantMessage
                 key={row.key}
+                speaker={host ? speaker(host.name, host.id) : undefined}
                 item={{
                   type: "message",
                   role: "assistant",
@@ -340,6 +375,23 @@ export const Thread = memo(function Thread({
             );
           }
           const { entry } = row;
+          if (entry.kind === "post") {
+            return (
+              <AssistantMessage
+                key={entry.key}
+                speaker={speaker(entry.from)}
+                item={{
+                  type: "message",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: entry.text }],
+                }}
+                at={entry.at}
+                images={postedImages(entry.text)}
+              />
+            );
+          }
+          // Anything else between two of an agent's messages names it again.
+          lastSpeaker = null;
           if (entry.kind === "notice") {
             // A decision whose approval is a step in the work is told there.
             if (entry.notice.approval && placed.has(entry.notice.approval)) {
@@ -438,6 +490,8 @@ export const Thread = memo(function Thread({
         )}
 
         {view.running && !replying && <ThinkingDot />}
+
+        <MembersWorking members={working} agents={agents} />
 
         {view.retry && (
           <div className="flex items-center justify-center gap-2 text-muted-foreground text-[13px]">

@@ -120,6 +120,14 @@ const translations = {
     connected: "Connected",
     appConnected: "Connected.",
     messageAgent: "Message {name}…",
+    messageRoom: "Message everyone, or @mention an agent…",
+    inThisChat: "In this chat",
+    roomHost: "Host",
+    roomOpen: "Every agent decides when to speak",
+    roomOpenHint:
+      "Otherwise an agent answers when it's mentioned, and {name} answers the rest.",
+    agentWorking: "{name} is working",
+    mentionAgent: "Mention an agent",
     discover: "Discover",
     discoverDescription:
       "Agents and artifacts people published. Make one your own: you get a copy of it, never anything of theirs.",
@@ -1143,6 +1151,14 @@ const translations = {
     connected: "Conectada",
     appConnected: "Conectada.",
     messageAgent: "Escribe a {name}…",
+    messageRoom: "Escribe a todos, o menciona a un agente con @…",
+    inThisChat: "En este chat",
+    roomHost: "Anfitrión",
+    roomOpen: "Cada agente decide cuándo hablar",
+    roomOpenHint:
+      "Si no, un agente responde cuando se le menciona, y {name} responde al resto.",
+    agentWorking: "{name} está trabajando",
+    mentionAgent: "Mencionar a un agente",
     discover: "Descubrir",
     discoverDescription:
       "Agentes y artefactos que otros publicaron. Haz uno tuyo: recibes una copia, nunca nada suyo.",

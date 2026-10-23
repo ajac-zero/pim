@@ -1,7 +1,7 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { type ShownWidget, shownWidgets } from "./extensions/define";
 import { plainReply, SEND_TO_USER } from "./extensions/messaging";
-import { DELIVERY_REMINDER, INTRODUCTION, NOTICE_PREFIXES } from "./transcript";
+import { DELIVERY_REMINDER, INTRODUCTION, NOTICE_PREFIXES, ROOM_POST } from "./transcript";
 
 /**
  * Public links to chats. A link shows a copy of the conversation made when
@@ -16,8 +16,8 @@ import { DELIVERY_REMINDER, INTRODUCTION, NOTICE_PREFIXES } from "./transcript";
 export type SharedMessage =
 	/** What the person said; `images` counts the images they attached, which the copy leaves out. */
 	| { readonly role: "user"; readonly text: string; readonly images: number; readonly at: number }
-	/** What their agent sent them in the chat, and the widgets that went with it, as they were. */
-	| { readonly role: "agent"; readonly text: string; readonly widgets: readonly ShownWidget[]; readonly at: number };
+	/** What their agent sent them in the chat, and the widgets that went with it, as they were; in a group chat, `from` names another agent than the chat's. */
+	| { readonly role: "agent"; readonly text: string; readonly widgets: readonly ShownWidget[]; readonly at: number; readonly from?: string };
 
 /** A chat's public copy: what its link shows. */
 export type SharedChat = {
@@ -81,6 +81,12 @@ export function sharedMessages(entries: readonly EntryRecord[]): SharedMessage[]
 		if (message.role === "user") {
 			const text = textOf(message.content);
 			if (text === DELIVERY_REMINDER || text.startsWith(INTRODUCTION) || NOTICE_PREFIXES.some(([prefix]) => prefix.test(text))) continue;
+			// What another agent in a group chat said there; its images' copies are the owner's too.
+			const post = ROOM_POST.exec(text);
+			if (post) {
+				messages.push({ role: "agent", text: plainReply(text.slice(post[0].length)), widgets: [], at: message.timestamp, from: post[1]! });
+				continue;
+			}
 			const images = typeof message.content === "string" ? 0 : message.content.filter((part) => part.type === "image").length;
 			messages.push({ role: "user", text, images, at: message.timestamp });
 		} else if (message.role === "assistant") {

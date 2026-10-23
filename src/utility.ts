@@ -1,5 +1,5 @@
 import { Type, type TSchema } from "@earendil-works/pi-ai";
-import { DELIVERY_REMINDER, type TranscriptMessage } from "./transcript";
+import { DELIVERY_REMINDER, ROOM_POST, type TranscriptMessage } from "./transcript";
 
 /**
  * Side jobs for the utility model: one small, fast model, chosen once per
@@ -98,7 +98,10 @@ export function conversationText(messages: readonly TranscriptMessage[], limit: 
 				.join("\n")
 				.trim();
 			if (text === "" || text === DELIVERY_REMINDER) continue;
-			turns.push(`${text.startsWith("[") ? "Event" : "Person"}: ${text}`);
+			// In a group chat, what another agent said there.
+			const post = ROOM_POST.exec(text);
+			if (post) turns.push(`${post[1]}: ${text.slice(post[0].length).trim()}`);
+			else turns.push(`${text.startsWith("[") ? "Event" : "Person"}: ${text}`);
 		} else if (message.role === "assistant") {
 			for (const part of message.parts) {
 				if (part.type !== "tool-call" || part.name !== "send_to_user") continue;

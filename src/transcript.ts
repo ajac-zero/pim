@@ -13,7 +13,11 @@ export const NOTICE_PREFIXES = [
 	[/^\[Scheduled task[^\]]*\]\s*/, "schedule"],
 	[/^\[App event\]\s*/, "event"],
 	[/^\[Task update\]\s*/, "task"],
+	[/^\[Room\]\s*/, "room"],
 ] as const;
+
+/** How a message starts that another agent in a group chat said, with its name (see ./rooms.ts). */
+export const ROOM_POST = /^\[From ([^\]\n]+)\]\n?/;
 
 /**
  * The headings of a model's summarized reasoning, in order. OpenAI's models

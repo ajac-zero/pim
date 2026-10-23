@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
+import { AgentIcon } from "~/components/agent-icon";
 import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
 import { ArtifactIcon } from "~/components/artifact";
 import { useI18n } from "~/components/i18n";
@@ -39,6 +40,7 @@ import {
   TooltipTrigger,
 } from "~/components/ui/tooltip";
 import {
+  type Agent,
   type ModelInfo,
   type ModelSettings,
   pim,
@@ -62,7 +64,12 @@ export interface ComposerProps {
   initialInput?: string;
   /** Keeps unsent text under this key, such as the chat's id, while other chats are open. */
   draftKey?: string;
+  /** The agents an @ offers to mention: mentioning one brings it into the chat. */
+  mentions?: readonly Agent[];
 }
+
+/** The mention being typed just before the caret: an @ at the start of a word, and what follows it. */
+const MENTION = /(?:^|\s)@([^\s@]{0,40})$/;
 
 /** Unsent text by draft key, for this page's lifetime. */
 const drafts = new Map<string, string>();
@@ -108,6 +115,7 @@ function ComposerInner({
   autoFocus,
   promptSuggestions = [],
   draftKey,
+  mentions,
 }: ComposerProps) {
   const { t } = useI18n();
   const controller = usePromptInputController();
@@ -139,6 +147,35 @@ function ComposerInner({
     const input = textareaRef.current;
     if (input) input.setSelectionRange(input.value.length, input.value.length);
   }, [autoFocus, touchInput]);
+  // Typing @ offers the agents to mention, by the start of their name.
+  const [caret, setCaret] = useState(0);
+  const [highlighted, setHighlighted] = useState(0);
+  const [dismissed, setDismissed] = useState<string | null>(null);
+  const typed = inputText.slice(0, caret);
+  const mention = MENTION.exec(typed);
+  const query = mention?.[1]?.toLowerCase();
+  const choices =
+    query === undefined || !mentions || dismissed === typed
+      ? []
+      : mentions
+          .filter((agent) => agent.name.toLowerCase().startsWith(query))
+          .slice(0, 6);
+  const mentionId = useId();
+  const pickMention = (agent: Agent) => {
+    if (query === undefined) return;
+    const start = caret - query.length - 1;
+    const next = `${inputText.slice(0, start)}@${agent.name} ${inputText.slice(caret)}`;
+    controller.textInput.setInput(
+      (prefix ? `${prefix.trimEnd()}\n\n` : "") + next,
+    );
+    const position = start + agent.name.length + 2;
+    setCaret(position);
+    setHighlighted(0);
+    queueMicrotask(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(position, position);
+    });
+  };
   const [preparing, setPreparing] = useState(false);
   const files = controller.attachments.files;
   const hasText = text.trim().length > 0;
@@ -212,6 +249,36 @@ function ComposerInner({
               />
             ))}
           </Suggestions>
+        </div>
+      )}
+
+      {choices.length > 0 && (
+        <div
+          id={mentionId}
+          role="listbox"
+          aria-label={t("mentionAgent")}
+          className="absolute bottom-full left-0 z-20 mb-2 w-64 animate-in rounded-xl border bg-popover p-1 text-popover-foreground shadow-[0_8px_30px_-6px_rgb(0_0_0/0.18)] duration-150 fade-in"
+        >
+          {choices.map((agent, index) => (
+            <button
+              key={agent.id}
+              type="button"
+              role="option"
+              aria-selected={index === highlighted % choices.length}
+              // Keeps the caret in the text, where the name goes.
+              onMouseDown={(event) => event.preventDefault()}
+              onMouseEnter={() => setHighlighted(index)}
+              onClick={() => pickMention(agent)}
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm aria-selected:bg-muted"
+            >
+              <AgentIcon
+                agent={agent}
+                tile
+                className="size-5 shrink-0 rounded-md"
+              />
+              <span className="truncate">{agent.name}</span>
+            </button>
+          ))}
         </div>
       )}
 
@@ -295,13 +362,42 @@ function ComposerInner({
             ref={textareaRef}
             id={inputId}
             value={inputText}
-            onChange={(event) =>
+            onChange={(event) => {
+              setCaret(event.currentTarget.selectionStart);
+              setHighlighted(0);
               controller.textInput.setInput(
                 (prefix ? `${prefix.trimEnd()}\n\n` : "") +
                   event.currentTarget.value,
-              )
-            }
+              );
+            }}
+            onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
+            aria-controls={choices.length > 0 ? mentionId : undefined}
             onKeyDown={(event) => {
+              if (choices.length > 0) {
+                const step =
+                  event.key === "ArrowDown"
+                    ? 1
+                    : event.key === "ArrowUp"
+                      ? -1
+                      : 0;
+                if (step !== 0) {
+                  event.preventDefault();
+                  setHighlighted(
+                    (highlighted + step + choices.length) % choices.length,
+                  );
+                  return;
+                }
+                if (event.key === "Enter" || event.key === "Tab") {
+                  event.preventDefault();
+                  pickMention(choices[highlighted % choices.length] as Agent);
+                  return;
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setDismissed(typed);
+                  return;
+                }
+              }
               if (prefix && !inputText && event.key === "Backspace") {
                 event.preventDefault();
                 controller.textInput.setInput("");

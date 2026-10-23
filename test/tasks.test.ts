@@ -674,3 +674,127 @@ describe("the majordomo", () => {
 		expect(await calling).toMatchObject({ status: "done", replies: ["Fine."] });
 	});
 });
+
+describe("a group chat", () => {
+	type Member = { id: string; name: string; busy: boolean };
+	const roomOf = async (session: string) =>
+		(await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === session)?.room as { mode: string; members: Member[] } | null;
+	/** Waits until every scripted response is used and no agent in the chat is at work. */
+	const quiet = async (session: string) => {
+		await settled(session);
+		await vi.waitFor(async () => expect((await roomOf(session))?.members.filter((member) => member.busy) ?? []).toEqual([]));
+	};
+	const userTexts = (context: Context) =>
+		context.messages.flatMap((message) =>
+			message.role === "user" ? [typeof message.content === "string" ? message.content : message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("")] : [],
+		);
+
+	it("brings in the agents the person and the host mention: each answers what is for it, in the chat, and hears the rest", async () => {
+		const host = (await agents()).find((other) => other.majordomo)!;
+		const coach = await agent({ name: "Coach", description: "Plans runs", instructions: "Plan runs in kilometres." });
+		await agent({ name: "Physio", description: "Treats injuries", instructions: "Look after the person's knees." });
+		const session = (await post("/sessions", {})).body.id;
+		const chats = async () => (await api("/sessions")).body.sessions.length;
+		const seen: Record<string, Context[]> = { lead: [], Coach: [], Physio: [] };
+		const as = (role: string, message: string) => (context: Context) => {
+			seen[role]!.push(context);
+			return toolUse("send_to_user", { message });
+		};
+		scripts({ lead: [as("lead", "Happy to help you train.")] });
+		await say("I want to run a marathon.", session);
+		await quiet(session);
+		expect(await roomOf(session)).toBeNull();
+		const before = await chats();
+
+		// Mentioned, Coach joins with what was said so far and answers in the chat; the host isn't woken.
+		scripts({ Coach: [as("Coach", "Start with 5 km on Monday.")] });
+		expect(await say("@coach plan my first week", session)).toMatchObject({ status: "done" });
+		await quiet(session);
+		const [joining] = seen.Coach as [Context];
+		expect(systemPrompt(joining.messages)).toContain("Plan runs in kilometres.");
+		expect(systemPrompt(joining.messages)).toContain("This chat is a group chat");
+		expect(userTexts(joining)).toEqual([
+			`[Room] You joined this chat, with the person and ${host.name}. What was said before you joined:\n\nThe person: I want to run a marathon.\n\n${host.name}: Happy to help you train.`,
+			"@coach plan my first week",
+		]);
+		expect(await messagesOf(session, "user")).toEqual([
+			"I want to run a marathon.",
+			"[Room] Coach joined the chat.",
+			"@coach plan my first week",
+			"[From Coach]\nStart with 5 km on Monday.",
+		]);
+		expect(await roomOf(session)).toEqual({ mode: "mentions", members: [{ id: coach.id, name: "Coach", busy: false }] });
+		// Coach's own conversation isn't one of the person's chats.
+		expect(await chats()).toBe(before);
+
+		// Said to no one in particular, it is the host's to answer, having heard Coach. It brings in Physio by
+		// mentioning it, which hears that message as what brought it in, not as said before.
+		scripts({ lead: [as("lead", "Good plan. @Physio, check the knees.")], Physio: [as("Physio", "Knees look fine.")] });
+		await say("Sounds good?", session);
+		await quiet(session);
+		expect(userTexts(seen.lead!.at(-1)!).slice(-3)).toEqual(["@coach plan my first week", "[From Coach]\nStart with 5 km on Monday.", "Sounds good?"]);
+		const [physio] = userTexts(seen.Physio![0]!).slice(-2) as [string, string];
+		expect(physio).toContain("Coach: Start with 5 km on Monday.\n\nThe person: Sounds good?");
+		expect(physio).not.toContain("check the knees");
+		expect(userTexts(seen.Physio![0]!).at(-1)).toBe(`[From ${host.name}]\nGood plan. @Physio, check the knees.`);
+
+		// Coach heard all of it without being woken, and has it when mentioned again.
+		scripts({ Coach: [as("Coach", "Tuesday is rest.")] });
+		await say("@Coach what about Tuesday?", session);
+		await quiet(session);
+		expect(userTexts(seen.Coach!.at(-1)!).slice(-5)).toEqual([
+			"Sounds good?",
+			"[Room] Physio joined the chat.",
+			`[From ${host.name}]\nGood plan. @Physio, check the knees.`,
+			"[From Physio]\nKnees look fine.",
+			"@Coach what about Tuesday?",
+		]);
+		expect((await roomOf(session))?.members.map((member) => member.name)).toEqual(["Coach", "Physio"]);
+	});
+
+	it("in an open room wakes every agent for everything said, each choosing whether to answer, unless it is asked", async () => {
+		const host = (await agents()).find((other) => other.majordomo)!;
+		await agent({ name: "Coach", description: "Plans runs", instructions: "Plan runs in kilometres." });
+		const session = (await post("/sessions", {})).body.id;
+		expect((await api(`/sessions/${session}/room`, { method: "PUT", body: JSON.stringify({ mode: "loud" }) })).status).toBe(400);
+		expect((await api(`/sessions/${session}/room`, { method: "PUT", body: JSON.stringify({ mode: "open" }) })).body).toEqual({ room: { mode: "open", members: [] } });
+		/** What each agent let pass, by what it was last told: a reminder to answer would show here. */
+		const passed: string[] = [];
+		const silent = (role: string) => (context: Context) => {
+			passed.push(`${role}: ${lastUserText(context.messages)}`);
+			return fauxAssistantMessage("Nothing to add.");
+		};
+
+		// The host hears the person speak to Coach, and then Coach, and lets both pass.
+		scripts({ lead: [silent("host"), silent("host")], Coach: [() => toolUse("send_to_user", { message: "Hi, I'm Coach." })] });
+		expect(await say("@Coach hello", session)).toMatchObject({ status: "done" });
+		await quiet(session);
+		expect(passed.sort()).toEqual(["host: @Coach hello", "host: [From Coach]\nHi, I'm Coach."]);
+
+		// What the person says to no one in particular, the host answers; Coach hears it, and the host's answer, and lets both pass.
+		passed.length = 0;
+		scripts({ lead: [() => toolUse("send_to_user", { message: "Start easy." })], Coach: [silent("Coach"), silent("Coach")] });
+		expect(await say("Where do we begin?", session)).toMatchObject({ status: "done", replies: ["Start easy."] });
+		await quiet(session);
+		expect(passed).toEqual(["Coach: Where do we begin?", `Coach: [From ${host.name}]\nStart easy.`]);
+
+		// Coach, mentioned, has to answer: when it doesn't send, it's reminded to.
+		passed.length = 0;
+		let reminded = "";
+		scripts({
+			lead: [silent("host"), silent("host")],
+			Coach: [
+				() => fauxAssistantMessage("5 km, I think."),
+				(context) => {
+					reminded = lastUserText(context.messages);
+					return toolUse("send_to_user", { message: "Run 5 km." });
+				},
+			],
+		});
+		expect(await say("@Coach how far?", session)).toMatchObject({ status: "done" });
+		await quiet(session);
+		expect(reminded).toMatch(/^\[Delivery required\]/);
+		expect(passed.sort()).toEqual(["host: @Coach how far?", "host: [From Coach]\nRun 5 km."]);
+		expect((await messagesOf(session, "user")).filter((text) => text.startsWith("[From Coach]"))).toEqual(["[From Coach]\nHi, I'm Coach.", "[From Coach]\nRun 5 km."]);
+	});
+});

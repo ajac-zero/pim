@@ -26,8 +26,12 @@ function b64(content: string | Uint8Array): string {
 const requests: { method: string; url: URL; token: string; resourceKeys: string | null }[] = [];
 const revoked: string[] = [];
 let accessTokens = 1;
-/** How Gmail's and Drive's APIs answer in a test, before the defaults. */
-let answer: (url: URL, token: string) => Response | undefined = () => undefined;
+/** The access tokens Google's token endpoint gave, in order, with the grant each was for. */
+const issued: { grant: string; token: string }[] = [];
+/** While set, the next renewal stops there until the test releases it (see `hold`). */
+let holdRenewal: ReturnType<typeof hold> | null = null;
+/** How Gmail's and Drive's APIs answer in a test, before the defaults; it may take its time. */
+let answer: (url: URL, token: string) => Response | undefined | Promise<Response | undefined> = () => undefined;
 
 const headers = (from: string, subject: string) => [
 	{ name: "From", value: from },
@@ -101,6 +105,8 @@ function driveAnswer(target: URL, resourceKeys: string | null): Response | undef
 beforeEach(() => {
 	requests.length = 0;
 	revoked.length = 0;
+	issued.length = 0;
+	holdRenewal = null;
 	answer = () => undefined;
 	const realFetch = globalThis.fetch;
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -113,8 +119,15 @@ beforeEach(() => {
 			const form = new URLSearchParams(await request.text());
 			const scope = client === "gmail" ? "https://www.googleapis.com/auth/gmail.readonly" : "https://www.googleapis.com/auth/drive.file";
 			if (form.get("grant_type") === "refresh_token" && form.get("refresh_token") !== `${client}-refresh`) return Response.json({ error: "invalid_grant" }, { status: 400 });
+			if (form.get("grant_type") === "refresh_token" && holdRenewal) {
+				const held = holdRenewal;
+				holdRenewal = null;
+				await held.reached();
+			}
+			const token = `${client}-access-${accessTokens++}`;
+			issued.push({ grant: form.get("grant_type") ?? "", token });
 			return Response.json({
-				access_token: `${client}-access-${accessTokens++}`,
+				access_token: token,
 				...(form.get("grant_type") === "authorization_code" ? { refresh_token: `${client}-refresh` } : {}),
 				expires_in: 3599,
 				scope,
@@ -128,7 +141,7 @@ beforeEach(() => {
 			const token = request.headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
 			const resourceKeys = request.headers.get("x-goog-drive-resource-keys");
 			requests.push({ method: request.method, url: target, token, resourceKeys });
-			const answered = answer(target, token) ?? (target.hostname === "gmail.googleapis.com" ? gmailAnswer(target) : driveAnswer(target, resourceKeys));
+			const answered = (await answer(target, token)) ?? (target.hostname === "gmail.googleapis.com" ? gmailAnswer(target) : driveAnswer(target, resourceKeys));
 			return answered ?? new Response("not found", { status: 404 });
 		}
 		return realFetch(input, init);
@@ -293,6 +306,35 @@ async function connect(ref: string) {
 	return params;
 }
 
+/** A point a request stops at until the test releases it: `waiting` resolves once one reached it. */
+function hold() {
+	let reached = () => {};
+	let release = () => {};
+	const waiting = new Promise<void>((resolve) => (reached = resolve));
+	const released = new Promise<void>((resolve) => (release = resolve));
+	const held = {
+		done: false,
+		waiting,
+		reached: () => {
+			reached();
+			return released;
+		},
+		release: () => {
+			held.done = true;
+			release();
+		},
+	};
+	return held;
+}
+
+/** The person disconnects Drive and connects it again, in their space. */
+async function again(instance: Pim) {
+	await instance.nativeApps.remove("google_drive");
+	const { authUrl } = await instance.nativeApps.connect("google/drive", "google_drive");
+	const state = new URL(authUrl).searchParams.get("state");
+	expect(await instance.nativeApps.finish(new URL(`https://pim.test/mcp/callback/apps?state=${state}&code=good`))).toEqual({ name: "Google Drive" });
+}
+
 describe("Google Drive", () => {
 	it("connects with its own client, only for files the person picks", async () => {
 		cookie = await signedIn();
@@ -394,6 +436,73 @@ describe("Google Drive", () => {
 		expect(result.files.map((file) => file.id)).not.toContain("pdf0000000003");
 		expect((await call("google_drive", "list_files")).text).toContain("text000000002");
 		expect(requests.every((request) => request.method === "GET")).toBe(true);
+	});
+
+	it("keep what an action began on an old sign-in out of the connection made again meanwhile", async () => {
+		const held = hold();
+		answer = async (target) => (target.pathname.endsWith("/text000000002") ? (await held.reached(), undefined) : undefined);
+		const { stale, files } = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			// The person picks a file; while Google checks it, they disconnect Drive and connect it again.
+			const picking = instance.nativeApps.act("google/drive", "select", { files: [{ id: "text000000002", resourceKey: "0-rk" }] }).then(
+				() => "kept",
+				(error: Error) => error.message,
+			);
+			await held.waiting;
+			await again(instance);
+			held.release();
+			return { stale: await picking, files: await instance.nativeApps.act("google/drive", "files", {}) };
+		});
+		expect(stale).toBe("Google Drive was disconnected.");
+		expect(files).toEqual({ files: [] });
+	});
+
+	it("never give a call begun on an old sign-in the token of the one made again meanwhile", async () => {
+		await act("select", { files: [{ id: "text000000002", resourceKey: "0-rk" }] });
+		const held = hold();
+		// Google refuses the call's token, but only once the connection was made again.
+		answer = async (target) =>
+			target.pathname.endsWith("/text000000002") && !held.done ? (await held.reached(), Response.json({ error: { code: 401 } }, { status: 401 })) : undefined;
+		const before = issued.length;
+		const result = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			const calling = instance.nativeApps.call("google_drive", "read_file", { id: "text000000002" });
+			await held.waiting;
+			await again(instance);
+			held.release();
+			return calling;
+		});
+		expect(result).toMatchObject({ isError: true, content: [{ text: "Google Drive was disconnected." }] });
+		const replacement = issued.slice(before).map((grant) => grant.token);
+		expect(replacement).toHaveLength(1);
+		expect(requests.filter((request) => replacement.includes(request.token))).toEqual([]);
+	});
+
+	it("renew each sign-in on its own: an old one's renewal neither holds up nor changes the new one's", async () => {
+		await act("select", { files: [{ id: "text000000002", resourceKey: "0-rk" }] });
+		const old = requests.at(-1)!.token;
+		const held = hold();
+		holdRenewal = held;
+		// The old sign-in's token is refused, and so is the new one's first token: each must be renewed.
+		const refused = new Set([old]);
+		answer = (_target, token) => (refused.has(token) ? Response.json({ error: { code: 401 } }, { status: 401 }) : undefined);
+		const outcome = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			const calling = instance.nativeApps.call("google_drive", "read_file", { id: "text000000002" });
+			await held.waiting;
+			await again(instance);
+			refused.add(issued.at(-1)!.token);
+			// The new sign-in renews while the old one's renewal is still held.
+			const picked = await Promise.race([
+				instance.nativeApps.act("google/drive", "select", { files: [{ id: "text000000002", resourceKey: "0-rk" }] }),
+				new Promise((resolve) => setTimeout(() => resolve("held up"), 3_000)),
+			]);
+			held.release();
+			return { picked, stale: await calling, files: await instance.nativeApps.act("google/drive", "files", {}) };
+		});
+		expect(outcome.picked).toMatchObject({ added: [{ id: "text000000002" }] });
+		expect(outcome.stale).toMatchObject({ isError: true, content: [{ text: "Google Drive was disconnected." }] });
+		expect(outcome.files).toEqual({ files: [{ id: "text000000002", name: "notes.txt", mimeType: "text/plain" }] });
+		// The new sign-in still works with its own renewed token.
+		answer = () => undefined;
+		expect((await call("google_drive", "read_file", { id: "text000000002" })).isError).toBe(false);
 	});
 });
 

@@ -339,7 +339,12 @@ describe("chats an agent names", () => {
         agent: { id: "p_scout", name: "Scout" },
       },
     ] as never);
-    queryClient.setQueryData(agentsQuery().queryKey, []);
+    queryClient.setQueryData(agentsQuery().queryKey, [
+      { id: "p_coach", name: "Coach", role: "Trainer" },
+      { id: "p_trip", name: "Trip planner", role: "Travel" },
+      { id: "p_a", name: "Twin", role: "First" },
+      { id: "p_b", name: "Twin", role: "Second" },
+    ] as never);
     const root = createRootRoute({
       component: () => (
         <>
@@ -351,6 +356,7 @@ describe("chats an agent names", () => {
     const router = createRouter({
       routeTree: root.addChildren([
         createRoute({ getParentRoute: () => root, path: "/chat/$sessionId" }),
+        createRoute({ getParentRoute: () => root, path: "/agents/$agentId" }),
       ]),
       history: createMemoryHistory({ initialEntries: [path] }),
     });
@@ -392,6 +398,29 @@ describe("chats an agent names", () => {
     expect(
       renderToStaticMarkup(<Markdown text="[Other](sandbox:/etc/passwd)" />),
     ).not.toContain('href="/files');
+  });
+
+  it("shows a mentioned agent as a chip that opens it, longest name first", async () => {
+    const mentions = (html: string) =>
+      [...html.matchAll(/<a [^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g)].map(
+        ([, href, text]) => [href, String(text).replace(/<[^>]+>/g, "")],
+      );
+    for (const bubble of [false, true]) {
+      const html = await render(
+        "@Coach and @trip planner, @Twin, @Travel, @Nobody, ada@example.com",
+        "/",
+        false,
+        bubble,
+      );
+      expect(
+        mentions(html).filter(([href]) => href?.startsWith("/agents/")),
+      ).toEqual([
+        ["/agents/p_coach", "@Coach"],
+        ["/agents/p_trip", "@trip planner"],
+        ["/agents/p_trip", "@Travel"],
+      ]);
+      expect(html).toContain("@Twin, ");
+    }
   });
 
   it("links a chat by its id, bare, in backticks or as its address, and shows its title", async () => {

@@ -12,7 +12,6 @@ import { useStickToBottomContext } from "use-stick-to-bottom";
 import { PimMark } from "~/components/app-sidebar";
 import { ArtifactCard, artifactReference } from "~/components/artifact";
 import {
-  ApprovalBlock,
   AssistantMessage,
   EmailedMessage,
   EventNotice,
@@ -170,7 +169,7 @@ export const Thread = memo(function Thread({
         : false,
   });
   const history = useMemo(() => taskHistory(entries, tasks), [entries, tasks]);
-  /* A gated tool call renders as the approval it filed. */
+  /* A gated tool call is a step like any other, marked with the answer to its approval, which waits in the summary box. */
   const { data: allApprovals } = useQuery(approvalsQuery());
   // Requests from people in your circles belong to their conversations, not yours.
   const approvals = useMemo(
@@ -193,18 +192,6 @@ export const Thread = memo(function Thread({
     () => new Set([...approvalsByCall.values()].map((approval) => approval.id)),
     [approvalsByCall],
   );
-  /* Pending approvals of this chat with no call in view (filed before a reset). */
-  const unplaced = useMemo(() => {
-    return (approvals ?? [])
-      .filter(
-        (approval) =>
-          // A team member's request shows in the chat it works for.
-          (approval.member?.session ?? approval.session) === sessionId &&
-          approval.status === "pending" &&
-          !placed.has(approval.id),
-      )
-      .sort((a, b) => a.createdAt - b.createdAt);
-  }, [approvals, placed, sessionId]);
   /* The connected app of each app tool, for the steps that used it. */
   const { data: connected } = useQuery(appsQuery());
   const { data: directory } = useQuery(appDirectoryQuery());
@@ -236,7 +223,6 @@ export const Thread = memo(function Thread({
     () =>
       layoutThread(entries, {
         shown: (call) =>
-          approvalsByCall.has(call.call_id) ||
           history.delegations.has(call.call_id) ||
           (ARTIFACT_TOOLS.has(call.name) &&
             artifactReference(outputs.get(call.call_id)?.output) !== null) ||
@@ -244,7 +230,25 @@ export const Thread = memo(function Thread({
             call.name === IMAGE_TOOL &&
             generatedImagePath(outputs.get(call.call_id)?.output) !== null),
         refused: (call) => outputs.get(call.call_id)?.status === "incomplete",
-        work: { running: view.running, lines: view.lines },
+        work: {
+          running: view.running,
+          // What the person approved is read as it was asked, not as the utility model put it.
+          lines: {
+            ...view.lines,
+            ...Object.fromEntries(
+              [...approvalsByCall].map(([call, approval]) => [
+                call,
+                approval.summary,
+              ]),
+            ),
+          },
+          approvals: Object.fromEntries(
+            [...approvalsByCall].map(([call, approval]) => [
+              call,
+              approval.status,
+            ]),
+          ),
+        },
       }),
     [
       entries,
@@ -266,9 +270,7 @@ export const Thread = memo(function Thread({
   );
 
   const empty =
-    !view.running &&
-    unplaced.length === 0 &&
-    entries.every((entry) => entry.kind === "notice");
+    !view.running && entries.every((entry) => entry.kind === "notice");
 
   return (
     <Conversation
@@ -339,7 +341,7 @@ export const Thread = memo(function Thread({
           }
           const { entry } = row;
           if (entry.kind === "notice") {
-            // A decision whose approval shows as a card is told by the card.
+            // A decision whose approval is a step in the work is told there.
             if (entry.notice.approval && placed.has(entry.notice.approval)) {
               return <Fragment key={entry.key} />;
             }
@@ -390,10 +392,6 @@ export const Thread = memo(function Thread({
                 />
               );
             }
-            const approval = approvalsByCall.get(call.call_id);
-            if (approval) {
-              return <ApprovalBlock key={entry.key} approval={approval} />;
-            }
             const artifact = artifactReference(
               outputs.get(call.call_id)?.output,
             );
@@ -422,10 +420,6 @@ export const Thread = memo(function Thread({
           }
           return null;
         })}
-
-        {unplaced.map((approval) => (
-          <ApprovalBlock key={approval.id} approval={approval} />
-        ))}
 
         {empty && (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 py-16 text-center">

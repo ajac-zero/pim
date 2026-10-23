@@ -16,7 +16,7 @@ import {
   type ORItem,
   type ReasoningItem,
 } from "~/lib/openresponses";
-import type { AgentTask } from "~/lib/pim-api";
+import type { AgentTask, ApprovalStatus } from "~/lib/pim-api";
 import {
   DELIVERY_REMINDER,
   INTRODUCTION,
@@ -675,9 +675,13 @@ export function sentOf(call: FunctionCallItem): Sent | null {
  * One step of an agent's work the person doesn't read: a heading of its
  * summarized reasoning (`text` alone), or a tool it called (`tool`), with
  * the utility model's line for the call as `text` when there is one; the
- * app names the others.
+ * app names the others. A gated tool also has its approval's `status`.
  */
-export type WorkStep = { tool: string | null; text: string | null };
+export type WorkStep = {
+  tool: string | null;
+  text: string | null;
+  approval?: ApprovalStatus;
+};
 
 /** One row of the chat as the person reads it. */
 export type ThreadRow =
@@ -709,6 +713,7 @@ export type ThreadRow =
 function stepsOf(
   item: ORItem,
   lines: Readonly<Record<string, string>>,
+  approvals: Readonly<Record<string, ApprovalStatus>>,
 ): WorkStep[] {
   if (item.type === "reasoning") {
     return reasoningHeadings(
@@ -720,14 +725,21 @@ function stepsOf(
   if (item.type === "function_call") {
     const call = item as FunctionCallItem;
     if (call.name === SEND_TO_USER) return [];
-    return [{ tool: call.name, text: lines[call.call_id] ?? null }];
+    const approval = approvals[call.call_id];
+    return [
+      {
+        tool: call.name,
+        text: lines[call.call_id] ?? null,
+        ...(approval && { approval }),
+      },
+    ];
   }
   return [];
 }
 
 /**
  * Lays the thread out as the person reads it: what they said and what Pim sent
- * them. `shown` picks user-facing approvals and artifacts, never raw tool calls.
+ * them. `shown` picks user-facing artifacts and the like, never raw tool calls.
  *
  * Only explicit send_to_user calls are presented as assistant text. Ordinary
  * assistant text, raw reasoning, tool arguments and results are private, even
@@ -742,7 +754,12 @@ export function layoutThread(
     shown: (call: FunctionCallItem) => boolean;
     /** A `send_to_user` call the tool refused (an unknown widget, an email that couldn't go): nothing reached the person. */
     refused?: (call: FunctionCallItem) => boolean;
-    work?: { running: boolean; lines?: Readonly<Record<string, string>> };
+    work?: {
+      running: boolean;
+      lines?: Readonly<Record<string, string>>;
+      /** The status of the approval each gated call (by call id) filed. */
+      approvals?: Readonly<Record<string, ApprovalStatus>>;
+    };
   },
 ): ThreadRow[] {
   const rows: ThreadRow[] = [];
@@ -753,6 +770,7 @@ export function layoutThread(
   /** When the work's latest step ended. */
   let until: number | null = null;
   const lines = options.work?.lines ?? {};
+  const approvals = options.work?.approvals ?? {};
   const fold = (end: number | null, live = false) => {
     if (options.work && steps.length > 0) {
       rows.push({
@@ -785,7 +803,7 @@ export function layoutThread(
         if ((item as MessageItem).role === "user") own(entry);
         else if (entry.source === "agent") {
           if (steps.length === 0) workKey = entry.key;
-          steps.push(...stepsOf(item, lines));
+          steps.push(...stepsOf(item, lines, approvals));
           until = entry.at;
         }
         break;
@@ -809,7 +827,7 @@ export function layoutThread(
         } else if (options.shown(call)) own(entry);
         else {
           if (steps.length === 0) workKey = entry.key;
-          steps.push(...stepsOf(item, lines));
+          steps.push(...stepsOf(item, lines, approvals));
           until = entry.at;
         }
         break;

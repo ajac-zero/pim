@@ -204,6 +204,7 @@ export function SummaryBox({
             sessionId={sessionId}
             page={page}
             updatedAt={browser.dataUpdatedAt}
+            provider={browser.data?.provider}
           />
         )}
       </div>

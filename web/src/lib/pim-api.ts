@@ -775,6 +775,8 @@ export const fileContentUrl = (path: string, download = false) =>
  */
 export type ComputerStatus = {
   state: "none" | "offline" | "online";
+  /** Set while the Cua evaluation stands in for your computer. */
+  provider?: "cua";
   /** Whether Pim started it: it sleeps when unused and wakes when needed, so offline is asleep. */
   managed: boolean;
   /** Whether this Pim starts computers for people, so you needn't bring one. */
@@ -798,9 +800,32 @@ export type ComputerStatus = {
 /** The browser your agents share: whether this Pim has one, and the page a chat's window shows when it's open. */
 export type BrowserStatus = {
   available: boolean;
+  /** Set while your agents browse on the Cua evaluation computer, which you use in its own viewer. */
+  provider?: "cua";
   /** The page it shows; `asleep` while the computer Pim started sleeps, which taking it over wakes. */
   page: { url: string; title: string; asleep?: boolean } | null;
 };
+
+/**
+ * The Cua evaluation: a private test of a Cua computer for your agents,
+ * offered only where this Pim's operator set it up for you. While it's on,
+ * your agents use it in place of your computer. You pause them to use it
+ * yourself in Cua's viewer, and only you resume them.
+ */
+export type CuaStatus =
+  | { offered: false }
+  | {
+      offered: true;
+      enabled: boolean;
+      /** `pausing` while agents' work under way finishes, before the viewer can open. */
+      mode: "agents" | "pausing" | "paused";
+      /** Which pause this is: resuming names it. */
+      generation: number;
+      pending: number;
+      host: string | null;
+      /** Why a pause isn't complete yet, when the computer can't be asked. */
+      problem?: string;
+    };
 
 /** A picture of the page a chat's window shows, as fetched at `at`. */
 export const browserScreenshotUrl = (sessionId: string, at: number) =>
@@ -1214,6 +1239,21 @@ export const pim = {
   removeComputer: () => call<ComputerStatus>("/computer", { method: "DELETE" }),
   browser: (sessionId: string) =>
     call<BrowserStatus>(`/browser?session=${encodeURIComponent(sessionId)}`),
+  cua: () => call<CuaStatus>("/cua"),
+  enableCua: () => call<CuaStatus>("/cua", { method: "POST" }),
+  disableCua: () => call<CuaStatus>("/cua", { method: "DELETE" }),
+  pauseCua: () => call<CuaStatus>("/cua/pause", { method: "POST" }),
+  resumeCua: (generation: number) =>
+    call<CuaStatus>("/cua/resume", {
+      method: "POST",
+      body: JSON.stringify({ generation }),
+    }),
+  /** A link to Cua's viewer with a short-lived ticket in its fragment: open it at once, and keep it nowhere. */
+  cuaViewer: () =>
+    call<{ url: string; expiresAt: number }>("/cua/viewer", {
+      method: "POST",
+      cache: "no-store",
+    }),
   closeBrowser: (sessionId: string) =>
     call<{ closed: boolean }>(
       `/browser?session=${encodeURIComponent(sessionId)}`,

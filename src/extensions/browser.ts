@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
-import { describePage, type PimBrowser } from "../browser";
+import { type AgentBrowser, describePage } from "../browser";
 import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";
 import { type PimServices, text } from "./services";
 
@@ -27,7 +27,7 @@ const TypeArgs = Type.Object({
 });
 
 export type BrowserServices = {
-	readonly browser: PimBrowser;
+	readonly browser: AgentBrowser;
 	/** The window a conversation works in: its own, or its room's, which every agent in a group chat shares. */
 	readonly windowOf: (conversation: string) => string;
 	/** Saves a screenshot to the person's files, on their computer. */
@@ -39,7 +39,7 @@ function failure(error: unknown) {
 }
 
 /** Clicking, once the person approved what the request named. */
-export function browserClickAction(browser: PimBrowser, windowOf: (conversation: string) => string): GatedAction {
+export function browserClickAction(browser: AgentBrowser, windowOf: (conversation: string) => string): GatedAction {
 	return defineGatedAction({
 		name: BROWSER_CLICK,
 		description: "Click a link or button in the agents' browser.",
@@ -54,7 +54,7 @@ export function browserClickAction(browser: PimBrowser, windowOf: (conversation:
 }
 
 /** Typing, once the person approved what the request named. */
-export function browserTypeAction(browser: PimBrowser, windowOf: (conversation: string) => string): GatedAction {
+export function browserTypeAction(browser: AgentBrowser, windowOf: (conversation: string) => string): GatedAction {
 	return defineGatedAction({
 		name: BROWSER_TYPE,
 		description: "Type into a field in the agents' browser, and press Enter if asked.",

@@ -190,6 +190,8 @@ pnpm wrangler secret put SPRITES_TOKEN
 
 Sprites bill for the CPU, memory and storage they use while running, and only for storage while asleep (see [Sprites' pricing](https://sprites.dev)). The token can create and delete every Sprite in the organization, so give Pim an organization of its own.
 
+A private prototype on a review branch lets one allowlisted owner's agents use a Cua machine instead, which the person pauses them to use in Cua's viewer; it is off everywhere else. See [Cua evaluation](cua-evaluation.md).
+
 ### Traces
 
 Pim sends [OpenTelemetry](https://opentelemetry.io/) traces of what the agents do to any backend that takes OTLP over HTTP as JSON: Langfuse, Arize Phoenix, Honeycomb, Grafana, Jaeger, or an OpenTelemetry Collector. They follow the [semantic conventions for generative AI](https://github.com/open-telemetry/semantic-conventions-genai): each run of a conversation is an `invoke_agent` span, each model request in it a `chat` span with the model, finish reason and tokens, and each tool call an `execute_tool` span. Work a tool call starts in another conversation is that call's child, so one trace holds everything a message led to: the tasks it handed out, and the majordomo's review of an approval request, with its decision.

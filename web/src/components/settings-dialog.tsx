@@ -12,6 +12,7 @@ import {
 import { AddDevice } from "~/components/add-device";
 import { ChatGPTLogo } from "~/components/chatgpt-logo";
 import { ComputerSection } from "~/components/computer-settings";
+import { CuaEvaluationSection } from "~/components/cua-evaluation";
 import { DeploymentSection } from "~/components/deployment-settings";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
@@ -203,7 +204,12 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
             />
           </>
         )}
-        {tab === "computer" && <ComputerSection />}
+        {tab === "computer" && (
+          <>
+            <CuaEvaluationSection />
+            <ComputerSection />
+          </>
+        )}
         {tab === "memory" && <MemorySection />}
         {tab === "permissions" && <ToolPermissionsSection />}
         {tab === "account" && (

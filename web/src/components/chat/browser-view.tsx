@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { CuaBrowserControls } from "~/components/cua-evaluation";
 import { useI18n } from "~/components/i18n";
 import { ChevronRight, ExternalLink, Power } from "~/components/icons";
 import { Action } from "~/components/ui/actions";
@@ -15,15 +16,18 @@ import { type BrowserStatus, browserScreenshotUrl, pim } from "~/lib/pim-api";
  * The chat's window in the browser your agents share, in the box beside
  * the chat while it's open: expand its dropdown for a picture that keeps up
  * with them, and take it over, on a page of its own (routes/browser.tsx),
- * to sign in or finish something yourself.
+ * to sign in or finish something yourself. On the Cua evaluation computer
+ * you pause the agents and use it in Cua's viewer instead.
  */
 export function BrowserView({
   sessionId,
   page,
   updatedAt,
+  provider,
 }: {
   sessionId: string;
   page: NonNullable<BrowserStatus["page"]>;
+  provider?: BrowserStatus["provider"];
   /** When the status was last fetched: the picture is fetched again with it. */
   updatedAt: number;
 }) {
@@ -52,7 +56,9 @@ export function BrowserView({
               {hostOf(page.url)}
             </p>
           </div>
-          {page.asleep ? (
+          {provider === "cua" ? (
+            <CuaBrowserControls />
+          ) : page.asleep ? (
             <p className="rounded-lg border bg-muted/30 px-3 py-6 text-center text-muted-foreground text-xs">
               {t("browserAsleep")}
             </p>
@@ -63,29 +69,31 @@ export function BrowserView({
               className="w-full rounded-lg border bg-background"
             />
           )}
-          <div className="grid grid-cols-[3fr_1fr] gap-2">
-            <Button className="w-full" asChild>
-              {/* A page of its own, beside the chat, where the person uses the browser. */}
-              <a
-                href={`/browser?session=${encodeURIComponent(sessionId)}`}
-                target="_blank"
-                rel="noopener"
+          {provider !== "cua" && (
+            <div className="grid grid-cols-[3fr_1fr] gap-2">
+              <Button className="w-full" asChild>
+                {/* A page of its own, beside the chat, where the person uses the browser. */}
+                <a
+                  href={`/browser?session=${encodeURIComponent(sessionId)}`}
+                  target="_blank"
+                  rel="noopener"
+                >
+                  <ExternalLink className="size-4" />
+                  {t("takeOverBrowser")}
+                </a>
+              </Button>
+              <Action
+                tooltip={t("closeBrowser")}
+                variant="destructive"
+                size="default"
+                className="w-full bg-destructive text-white hover:bg-destructive/85"
+                disabled={close.isPending}
+                onClick={() => close.mutate()}
               >
-                <ExternalLink className="size-4" />
-                {t("takeOverBrowser")}
-              </a>
-            </Button>
-            <Action
-              tooltip={t("closeBrowser")}
-              variant="destructive"
-              size="default"
-              className="w-full bg-destructive text-white hover:bg-destructive/85"
-              disabled={close.isPending}
-              onClick={() => close.mutate()}
-            >
-              <Power className="size-4" />
-            </Action>
-          </div>
+                <Power className="size-4" />
+              </Action>
+            </div>
+          )}
         </CollapsibleContent>
       </section>
     </Collapsible>

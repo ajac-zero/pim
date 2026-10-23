@@ -81,6 +81,10 @@ export const filesQuery = (path: string) =>
 export const computerQuery = () =>
   queryOptions({ queryKey: ["computer"], queryFn: pim.computer });
 
+/** The Cua evaluation, where this Pim offers it to you. */
+export const cuaQuery = () =>
+  queryOptions({ queryKey: ["cua"], queryFn: pim.cua });
+
 /** A chat's window in the agents' browser: its own, or that of a task it handed out. */
 export const browserQuery = (sessionId: string) =>
   queryOptions({

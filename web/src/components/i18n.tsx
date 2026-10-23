@@ -670,6 +670,26 @@ const translations = {
       "Your computer is offline, so your files can't be shown. Start pim-computer on it again.",
     noComputerFiles:
       "Your files live on your computer. Connect one, and your agents can keep files and run commands there.",
+    cuaEvaluation: "Cua evaluation",
+    cuaDescription:
+      "A private test of a Cua computer for your agents, set up for you by this Pim's operator. While it's on, your agents run commands, browse and keep files there instead of on your computer, which stays as it is and comes back when you turn this off.",
+    cuaFeatures:
+      "Commands, files and browsing through cua-driver · viewer in a new tab",
+    cuaOn: "On",
+    cuaOff: "Off",
+    cuaTurnOn: "Use it for my agents",
+    cuaTurnOff: "Turn off the evaluation",
+    cuaAgentsInControl:
+      "Your agents can use this computer. Pause them before you use it yourself.",
+    cuaPausing:
+      "Pausing: waiting for {count} agent action(s) to finish before the viewer can open…",
+    cuaPaused:
+      "Your agents are paused: nothing of theirs runs here until you resume them.",
+    cuaPause: "Pause agents",
+    cuaOpenViewer: "Open viewer",
+    cuaResume: "Resume agents",
+    cuaViewerHint:
+      "The viewer opens in a new tab; sign in there with the evaluation's own login. Closing it doesn't resume your agents.",
     browser: "Browser",
     summaryAndBrowser: "Summary and browser",
     browserPicture: "What the browser shows: {title}",
@@ -1707,6 +1727,26 @@ const translations = {
     browser: "Navegador",
     summaryAndBrowser: "Resumen y navegador",
     browserPicture: "Lo que muestra el navegador: {title}",
+    cuaEvaluation: "Evaluación de Cua",
+    cuaDescription:
+      "Una prueba privada de una computadora Cua para tus agentes, configurada para ti por quien opera este Pim. Mientras esté activa, tus agentes ejecutan comandos, navegan y guardan archivos allí en lugar de en tu computadora, que se queda como está y vuelve cuando la desactives.",
+    cuaFeatures:
+      "Comandos, archivos y navegación con cua-driver · visor en una pestaña nueva",
+    cuaOn: "Activa",
+    cuaOff: "Inactiva",
+    cuaTurnOn: "Usarla para mis agentes",
+    cuaTurnOff: "Desactivar la evaluación",
+    cuaAgentsInControl:
+      "Tus agentes pueden usar esta computadora. Pausa a tus agentes antes de usarla tú.",
+    cuaPausing:
+      "Pausando: esperando a que terminen {count} acciones de los agentes antes de abrir el visor…",
+    cuaPaused:
+      "Tus agentes están en pausa: nada suyo se ejecuta aquí hasta que los reanudes.",
+    cuaPause: "Pausar agentes",
+    cuaOpenViewer: "Abrir visor",
+    cuaResume: "Reanudar agentes",
+    cuaViewerHint:
+      "El visor se abre en una pestaña nueva; inicia sesión allí con el acceso propio de la evaluación. Cerrarlo no reanuda a tus agentes.",
     takeOverBrowser: "Tomar el control",
     closeBrowser: "Apagar el navegador",
     browserClosed: "Navegador cerrado",

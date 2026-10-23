@@ -230,7 +230,14 @@ export const google = definePimExtension({ id: "test.google", name: "Test Google
 	googleApp({ id: "unset", name: "Unset", description: "Never configured.", client: { id: "TEST_UNSET_CLIENT_ID", secret: "TEST_UNSET_CLIENT_SECRET" }, scopes: [GOOGLE_SCOPES.driveFile], tools: [] }),
 ] });
 
+/** The Cua evaluation's settings, as a deployment would set them: none until a test sets some (test/cua.test.ts). */
+export const cuaEnvironment: Record<string, string> = {};
+
 export class Pim extends RealPim {
+	protected override cuaEnvironment(): object {
+		return cuaEnvironment;
+	}
+
 	/** The deployment's extensions, and the tests' own. */
 	protected override pimConfig(): PimConfig {
 		const config = super.pimConfig();

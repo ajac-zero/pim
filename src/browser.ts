@@ -60,6 +60,21 @@ export type PageView = { url: string; title: string; text: string };
 /** What a reference points to, for the person deciding whether to let an agent use it. */
 export type ElementDescription = { host: string; label: string };
 
+/**
+ * What the browser tools (./extensions/browser.ts) do with a browser: this
+ * one, driven over DevTools, or the Cua evaluation's, driven through
+ * cua-driver (./cua-browser.ts). Pages read as text with numbered references.
+ */
+export type AgentBrowser = {
+	visit(chat: string, url: string): Promise<PageView>;
+	read(chat: string): Promise<PageView | null>;
+	describe(chat: string, ref: number): Promise<ElementDescription | null>;
+	click(chat: string, ref: number): Promise<PageView>;
+	type(chat: string, ref: number, text: string, submit: boolean): Promise<PageView>;
+	screenshot(chat: string): Promise<Uint8Array | null>;
+	close(chat: string): Promise<void>;
+};
+
 /** Where someone taking the browser over connects, behind the Worker's `/api/browser/live`. */
 export const BROWSER_LIVE_PATH = "/browser/live";
 /** The tag of the sockets of those taking the browser over. */
@@ -203,7 +218,7 @@ const DESCRIBE = `((ref) => {
 	return name ? "the " + role + " “" + name + "”" : "a " + role + " with no name";
 })`;
 
-export class PimBrowser {
+export class PimBrowser implements AgentBrowser {
 	readonly #computer: Computer;
 	readonly #meta: Meta;
 	#browser: Browser | undefined;

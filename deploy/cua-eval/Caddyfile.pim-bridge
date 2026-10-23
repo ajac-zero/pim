@@ -1,0 +1,41 @@
+# The addition to the Cua evaluation VM's Caddyfile for pim-cua-bridge (see docs/cua-evaluation.md).
+# Not applied by anything in this repository. Put these lines inside the existing
+# `cua-eval.ajac-zero.com { … }` site block, above its other `handle` blocks, so they win
+# before the site's HTTP Basic login and viewer allowlist; change nothing else there.
+#
+# Exactly four POST paths reach the bridge, which checks Pim's own credential in
+# X-Pim-Bridge-Authorization. The human's Basic login is not asked for here and is stripped if sent.
+# Anything else under /pim-bridge/ is a 404. spacesd's 3211 stays private: nothing here names it.
+
+	@pim_bridge {
+		method POST
+		path /pim-bridge/v1/status /pim-bridge/v1/call /pim-bridge/v1/driver /pim-bridge/v1/viewer
+		# Optional, where the Pim preview's address is known and stable:
+		# remote_ip 203.0.113.7/32
+	}
+	handle @pim_bridge {
+		request_body {
+			max_size 192KiB
+		}
+		reverse_proxy 127.0.0.1:3290 {
+			header_up -Authorization
+			header_up -Cookie
+			transport http {
+				response_header_timeout 12m
+			}
+		}
+	}
+	handle /pim-bridge/* {
+		respond 404
+	}
+
+# If the site has a `log` directive, keep Pim's credential out of the access log
+# (Caddy redacts Authorization by default, but not this header):
+#
+#	log {
+#		format filter {
+#			fields {
+#				request>headers>X-Pim-Bridge-Authorization delete
+#			}
+#		}
+#	}

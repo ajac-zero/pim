@@ -207,6 +207,8 @@ function usePimEvents() {
       onComputer: () => {
         queryClient.invalidateQueries({ queryKey: ["computer"] });
         queryClient.invalidateQueries({ queryKey: ["files"] });
+        queryClient.invalidateQueries({ queryKey: ["cua"] });
+        queryClient.invalidateQueries({ queryKey: ["browser"] });
       },
       onVisits: () => {
         queryClient.invalidateQueries({ queryKey: ["visits"] });

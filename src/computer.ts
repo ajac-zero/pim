@@ -77,6 +77,8 @@ export type ComputerState = "none" | "offline" | "online";
 
 export type ComputerStatus = {
 	readonly state: ComputerState;
+	/** Set while another kind of computer stands in for this one: the Cua evaluation (./cua.ts). */
+	readonly provider?: "cua";
 	/** Whether Pim started it (./sprites.ts): it sleeps when unused, and wakes when it's needed. */
 	readonly managed: boolean;
 	readonly pairedAt: number | null;
@@ -95,6 +97,21 @@ export type BrowserTransport = {
 	close(): void;
 	onmessage?: (message: string) => void;
 	onclose?: () => void;
+};
+
+/**
+ * Another way to reach a computer, which stands in for pim-computer's
+ * connection while it's active: the Cua evaluation (./cua.ts). It takes
+ * the file and command calls; it has no DevTools browser.
+ */
+export type ComputerProvider = {
+	active(): boolean;
+	status(): ComputerStatus;
+	call<T>(op: string, args: Record<string, unknown>, timeoutMs: number): Promise<T>;
+	/** Runs several calls as one piece of work, which a pause waits for. */
+	hold<T>(work: () => Promise<T>): Promise<T>;
+	/** The most bytes one write sends. */
+	readonly chunkBytes: number;
 };
 
 type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
@@ -121,12 +138,19 @@ export class Computer {
 	#arrivals: ((hello: boolean) => void)[] = [];
 	#usedAt = 0;
 	#idle: ReturnType<typeof setTimeout> | undefined;
+	readonly #provider: ComputerProvider | undefined;
 
-	constructor(options: { meta: Meta; sockets: () => Connection[]; wake: () => Promise<SpriteLink>; inUse: () => boolean }) {
+	constructor(options: { meta: Meta; sockets: () => Connection[]; wake: () => Promise<SpriteLink>; inUse: () => boolean; provider?: ComputerProvider }) {
 		this.#meta = options.meta;
 		this.#sockets = options.sockets;
 		this.#wake = options.wake;
 		this.#inUse = options.inUse;
+		this.#provider = options.provider;
+	}
+
+	/** The computer standing in for this one now, if any. */
+	#standIn(): ComputerProvider | undefined {
+		return this.#provider?.active() ? this.#provider : undefined;
 	}
 
 	/** The machine of the computer Pim started, or null for one the person brought. */
@@ -168,9 +192,9 @@ export class Computer {
 		this.#failPending();
 	}
 
-	/** Whether a computer is paired, online or not: one the person brought, with its token, or one Pim started. */
+	/** Whether a computer is paired, online or not: one the person brought, with its token, or one Pim started; or one stands in. */
 	paired(): boolean {
-		return this.#meta.meta(TOKEN_KEY) !== undefined || this.machine() !== null;
+		return this.#standIn() !== undefined || this.#meta.meta(TOKEN_KEY) !== undefined || this.machine() !== null;
 	}
 
 	#socket(): Pick<Connection, "send"> | undefined {
@@ -179,6 +203,8 @@ export class Computer {
 	}
 
 	status(): ComputerStatus {
+		const standIn = this.#standIn();
+		if (standIn) return standIn.status();
 		if (!this.paired()) return { state: "none", managed: false, pairedAt: null, computer: null };
 		const info = this.#meta.meta(INFO_KEY);
 		return {
@@ -287,6 +313,8 @@ export class Computer {
 
 	/** Calls the computer and waits for its answer; one Pim started wakes first, if it's asleep. */
 	async call<T = unknown>(op: string, args: Record<string, unknown>, timeoutMs = FILE_CALL_MS, counts = true): Promise<T> {
+		const standIn = this.#standIn();
+		if (standIn) return standIn.call<T>(op, args, timeoutMs);
 		if (!this.paired()) throw new HttpError(404, "No computer is connected. The person can connect one in Settings → Computer.");
 		await this.wake();
 		const socket = this.#socket();
@@ -309,7 +337,7 @@ export class Computer {
 	 * call that finds it asleep.
 	 */
 	wake(): Promise<void> {
-		if (this.#socket() || !this.machine()) return Promise.resolve();
+		if (this.#standIn() || this.#socket() || !this.machine()) return Promise.resolve();
 		this.#waking ??= (async () => {
 			const arrived = new Promise<boolean>((resolve) => {
 				const timer = setTimeout(() => resolve(false), WAKE_MS);
@@ -422,23 +450,28 @@ export class Computer {
 		writeFile: async (path: string, content: Uint8Array | string, options: { mode?: number } = {}): Promise<void> => {
 			const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
 			const mode = options.mode === undefined ? {} : { mode: options.mode };
-			if (bytes.byteLength <= CHUNK_BYTES) {
+			const standIn = this.#standIn();
+			const chunk = standIn?.chunkBytes ?? CHUNK_BYTES;
+			if (bytes.byteLength <= chunk) {
 				await this.call("write", { path, data: Buffer.from(bytes).toString("base64"), ...mode });
 				return;
 			}
-			// In parts, to a file beside it that takes its place once whole.
+			// In parts, to a file beside it that takes its place once whole: one piece of work, which a pause waits for.
 			const slash = path.lastIndexOf("/");
 			const temporary = `${path.slice(0, slash)}/.${path.slice(slash + 1)}.pim-${crypto.randomUUID()}`;
-			try {
-				for (let start = 0; start < bytes.byteLength; start += CHUNK_BYTES) {
-					const data = Buffer.from(bytes.subarray(start, start + CHUNK_BYTES)).toString("base64");
-					await this.call("write", { path: temporary, data, append: start > 0, ...mode });
+			const write = async () => {
+				try {
+					for (let start = 0; start < bytes.byteLength; start += chunk) {
+						const data = Buffer.from(bytes.subarray(start, start + chunk)).toString("base64");
+						await this.call("write", { path: temporary, data, append: start > 0, ...mode });
+					}
+					await this.call("rename", { from: temporary, to: path });
+				} catch (error) {
+					await this.call("rm", { path: temporary, force: true }).catch(() => undefined);
+					throw error;
 				}
-				await this.call("rename", { from: temporary, to: path });
-			} catch (error) {
-				await this.call("rm", { path: temporary, force: true }).catch(() => undefined);
-				throw error;
-			}
+			};
+			await (standIn ? standIn.hold(write) : write());
 		},
 		mkdir: async (path: string, options: { recursive?: boolean } = {}): Promise<void> => {
 			await this.call("mkdir", { path, recursive: options.recursive === true });

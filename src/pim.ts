@@ -157,7 +157,9 @@ import { webExtension } from "./extensions/web";
 import { COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerStatus } from "./computer";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
-import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
+import { type AgentBrowser, BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
+import { type CuaConfig, CuaEvaluation, readCuaConfig } from "./cua";
+import { CuaBrowser } from "./cua-browser";
 import { type DeploymentSettings, deploymentSettings } from "./deployment";
 import { dispatch, HttpError, readJson, type Route } from "./http";
 import type { ClientMessage, PublicApproval, ServerMessage, ToolInfo } from "./protocol";
@@ -464,6 +466,15 @@ export class Pim extends DurableAgent<Env> {
 		owner: () => this.name,
 		storageRoom: () => this.#storageRoom(),
 	});
+	/** Whether unsound Cua evaluation settings were logged already. */
+	#cuaWarned = false;
+	/** The Cua evaluation, which stands in for the computer where this space opted in (see ./cua.ts). */
+	readonly cua = new CuaEvaluation({
+		meta: this.store,
+		config: () => this.#cuaConfig(),
+		owner: () => this.name,
+		changed: () => this.broadcastMessage({ type: "computer" }),
+	});
 	/** The person's computer, which their agents use, if they connected one (see ./computer.ts). */
 	readonly computer: Computer = new Computer({
 		meta: this.store,
@@ -480,6 +491,7 @@ export class Pim extends DurableAgent<Env> {
 			);
 		},
 		inUse: () => this.browser.watched(),
+		provider: this.cua,
 	});
 	/** The person's files, on their computer, which they and their agents share (see ./files.ts). */
 	readonly files = new Files(this.computer);
@@ -497,6 +509,21 @@ export class Pim extends DurableAgent<Env> {
 		get: (key) => this.store.meta(key) || null,
 		set: (key, value) => this.store.setMeta(key, value ?? ""),
 	});
+	/** The Cua evaluation's browser, driven through cua-driver (see ./cua-browser.ts). */
+	readonly cuaBrowser = new CuaBrowser(this.cua, {
+		get: (key) => this.store.meta(key) || null,
+		set: (key, value) => this.store.setMeta(key, value ?? ""),
+	});
+	/** The browser the agents' tools use, as each call finds it: the Cua evaluation's while it's on, else the computer's. */
+	readonly #agentBrowser: AgentBrowser = {
+		visit: (chat, url) => this.#browserNow().visit(chat, url),
+		read: (chat) => this.#browserNow().read(chat),
+		describe: (chat, ref) => this.#browserNow().describe(chat, ref),
+		click: (chat, ref) => this.#browserNow().click(chat, ref),
+		type: (chat, ref, text, submit) => this.#browserNow().type(chat, ref, text, submit),
+		screenshot: (chat) => this.#browserNow().screenshot(chat),
+		close: (chat) => this.#browserNow().close(chat),
+	};
 	/**
 	 * Workers AI, when the deployment has the `AI` binding. Without it, models
 	 * come from the providers people add, and a request to Workers AI says so.
@@ -638,8 +665,8 @@ export class Pim extends DurableAgent<Env> {
 		addCustomAppAction(this.agents, this.apps, (app) => this.#addCustomApp(app)),
 		fileDeleteAction(this.#files),
 		shellAction(this.computer),
-		browserClickAction(this.browser, (conversation) => this.#browserWindowOf(conversation)),
-		browserTypeAction(this.browser, (conversation) => this.#browserWindowOf(conversation)),
+		browserClickAction(this.#agentBrowser, (conversation) => this.#browserWindowOf(conversation)),
+		browserTypeAction(this.#agentBrowser, (conversation) => this.#browserWindowOf(conversation)),
 		writeSkillAction(this.skills, this.#skillWriters, this.files),
 	];
 
@@ -4085,6 +4112,32 @@ export class Pim extends DurableAgent<Env> {
 		return this.browser;
 	}
 
+	#browserNow(): AgentBrowser {
+		return this.cua.active() ? this.cuaBrowser : this.browser;
+	}
+
+	/** Where the Cua evaluation's settings are read from: the Worker's environment, which only the deployment sets. */
+	protected cuaEnvironment(): object {
+		return this.env;
+	}
+
+	/** The deployment's Cua evaluation settings, or null where it has none, or unsound ones, which are logged once. */
+	#cuaConfig(): CuaConfig | null {
+		try {
+			return readCuaConfig(this.cuaEnvironment());
+		} catch (error) {
+			if (!this.#cuaWarned) console.warn(errorMessage(error));
+			this.#cuaWarned = true;
+			return null;
+		}
+	}
+
+	/** Only the person, signed in to Pim in their browser, controls the Cua evaluation: no API token, and no other site. */
+	#fromPerson(request: Request): void {
+		if (request.headers.get(SIGNED_IN_HEADER) !== "1") throw new HttpError(403, "Only the person, signed in to Pim in their browser, can do this");
+		if (!this.cua.offered()) throw new HttpError(404, "This space isn't part of the Cua evaluation.");
+	}
+
 	#artifact(id: string) {
 		const artifact = ARTIFACT_ID.test(id) ? this.artifacts.get(id) : undefined;
 		if (!artifact) throw new HttpError(404, `No artifact ${id}`);
@@ -4940,16 +4993,20 @@ export class Pim extends DurableAgent<Env> {
 				}),
 		],
 		// The agents' browser (see ./browser.ts): what a chat's window shows, a picture of it, closing it. Taking it over is a socket.
+		// The Cua evaluation's is one tab, shown in Cua's viewer: asking about it touches nothing on its machine.
 		[
 			"GET",
 			"/browser",
-			async (_params, _request, url) =>
-				noStore({ available: this.browser.available, page: this.browser.available ? await this.browser.current(await this.#browserWindow(url)) : null }),
+			async (_params, _request, url) => {
+				if (this.cua.active()) return noStore({ available: true, provider: "cua", page: this.cuaBrowser.current() });
+				return noStore({ available: this.browser.available, page: this.browser.available ? await this.browser.current(await this.#browserWindow(url)) : null });
+			},
 		],
 		[
 			"GET",
 			"/browser/screenshot",
 			async (_params, _request, url) => {
+				if (this.cua.active()) throw new HttpError(404, "The Cua evaluation's browser is shown in its viewer");
 				const png = await this.#browserIn().screenshot(await this.#browserWindow(url));
 				if (!png) throw new HttpError(404, "The browser is closed");
 				return new Response(png, { headers: { "content-type": "image/png", "cache-control": "no-store, private", "x-content-type-options": "nosniff" } });
@@ -4959,8 +5016,76 @@ export class Pim extends DurableAgent<Env> {
 			"DELETE",
 			"/browser",
 			async (_params, _request, url) => {
-				await this.#browserIn().close(await this.#browserWindow(url));
+				if (this.cua.active()) await this.cuaBrowser.close(ROOT_SESSION);
+				else await this.#browserIn().close(await this.#browserWindow(url));
 				return noStore({ closed: true });
+			},
+		],
+		// The Cua evaluation (see ./cua.ts): whether this space may use it, turning it on and off, and pausing the agents
+		// for the person to use the machine in Cua's viewer. Only the person changes it, from their browser.
+		[
+			"GET",
+			"/cua",
+			async () => {
+				if (!this.cua.offered()) return noStore({ offered: false });
+				try {
+					return noStore(await this.cua.settle());
+				} catch (error) {
+					return noStore({ ...this.cua.view(), problem: errorMessage(error) });
+				}
+			},
+		],
+		[
+			"POST",
+			"/cua",
+			(_params, request) => {
+				this.#fromPerson(request);
+				this.#assertOpen();
+				this.cua.enable(Date.now());
+				this.#computerChanged();
+				return noStore(this.cua.view());
+			},
+		],
+		[
+			"DELETE",
+			"/cua",
+			(_params, request) => {
+				this.#fromPerson(request);
+				this.cua.disable();
+				this.#computerChanged();
+				return noStore(this.cua.view());
+			},
+		],
+		[
+			"POST",
+			"/cua/pause",
+			async (_params, request) => {
+				this.#fromPerson(request);
+				try {
+					return noStore(await this.cua.pause());
+				} catch (error) {
+					// Paused or not, the agents stay stopped until the person resumes; the app hears why it isn't complete yet.
+					if (this.cua.view().mode === "agents") throw error;
+					return noStore({ ...this.cua.view(), problem: errorMessage(error) });
+				}
+			},
+		],
+		[
+			"POST",
+			"/cua/resume",
+			async (_params, request) => {
+				this.#fromPerson(request);
+				const { generation } = await readJson<{ generation?: unknown }>(request);
+				return noStore(this.cua.resume(generation));
+			},
+		],
+		[
+			"POST",
+			"/cua/viewer",
+			async (_params, request) => {
+				this.#fromPerson(request);
+				const viewer = await this.cua.viewer();
+				return Response.json(viewer, { headers: { "cache-control": "no-store, private", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" } });
 			},
 		],
 		[
@@ -5832,7 +5957,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 		this.registry.install(
 			browserExtension(services, {
-				browser: this.browser,
+				browser: this.#agentBrowser,
 				windowOf: (conversation) => this.#browserWindowOf(conversation),
 				saveScreenshot: async (path, png) => {
 					this.#assertOpen();
@@ -5931,6 +6056,7 @@ export class Pim extends DurableAgent<Env> {
 		};
 		try {
 			if (!this.browser.available) throw new Error("This space has no browser: connect a computer in Settings → Computer.");
+			if (this.cua.active()) throw new Error("This space's agents browse on the Cua evaluation computer: pause them and open its viewer in Settings → Computer.");
 			if (request) connection.setState({ session: await this.#browserWindow(new URL(request.url)) });
 			await this.browser.watch(connection.state?.session ?? ROOT_SESSION, connection.id, {
 				frame: (frame) => send({ type: "frame", ...frame }),
@@ -6027,6 +6153,8 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	#computerConnected(): void {
 		this.broadcastMessage({ type: "computer" });
+		// Files the space kept move to the computer it paired, never to the Cua evaluation's in its place.
+		if (this.cua.active()) return;
 		void this.keepAliveWhile(async () => {
 			try {
 				if (!(await this.legacyFiles.any())) return;

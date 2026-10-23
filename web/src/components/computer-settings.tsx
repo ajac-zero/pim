@@ -78,7 +78,8 @@ export function ComputerSection() {
     },
     onError: (error) => toast.error(error.message),
   });
-  if (!status) return null;
+  // The Cua evaluation stands in for your computer, which stays as it was: its own section says so.
+  if (!status || status.provider === "cua") return null;
   const machine = status.computer;
   const shown = token ? commands(token) : null;
 

@@ -1,0 +1,51 @@
+# pim-cua-bridge on the Cua evaluation VM (see docs/cua-evaluation.md). Not installed by anything
+# in this repository: whoever operates the VM copies it to /etc/systemd/system/ after review.
+#
+# The bridge runs as a system user of its own. The only secret it holds, spacesd's root token,
+# comes from /etc/cua/spacesd.env as a systemd credential, readable by this service alone and
+# never placed in its environment. It talks to nothing but spacesd on 127.0.0.1:3211 and Caddy.
+
+[Unit]
+Description=pim-cua-bridge (private Cua evaluation for one Pim space)
+After=network.target
+# Name the unit that runs cua-spacesd on this VM here, if it has one, so the bridge starts after it:
+# After=cua-spacesd.service
+
+[Service]
+Type=simple
+User=pim-bridge
+Group=pim-bridge
+EnvironmentFile=/etc/pim-cua-bridge/bridge.env
+LoadCredential=spacesd.env:/etc/cua/spacesd.env
+ExecStart=/usr/bin/python3 -I /opt/pim-cua-bridge/pim_cua_bridge.py
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

@@ -76,6 +76,123 @@ class PackagingTest(unittest.TestCase):
             self.assertEqual(stopped[-1], "pim-agent-exec.socket")
             self.assertTrue(os.path.exists(os.path.join(state, "expired")))
 
+    def rollback(self, stuck="", fail_stop="", cgroup="", listening="", backup_ok=True, caddy_rc=0, installed=True):
+        """rollback.sh in a scratch root with stand-in systemctl, ss, id and caddy; returns (exit code, systemctl calls, root)."""
+        fs = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", fs])
+        bin_, state = os.path.join(fs, "fakebin"), os.path.join(fs, "fakestate")
+        for folder in (bin_, state, "opt/cua-evaluation/bootstrap/proxy", "opt/cua-evaluation/bootstrap/bin", "var/backups/pim-cua-bridge",
+                       "usr/local/bin", "etc/cua-evaluation/credentials", "etc/systemd/system", "opt/pim-cua-bridge", "sys/fs/cgroup/system.slice"):
+            os.makedirs(os.path.join(fs, folder), exist_ok=True)
+
+        def put(path, text, mode=0o644):
+            with open(os.path.join(fs, path), "w", encoding="utf-8") as handle:
+                handle.write(text)
+            os.chmod(os.path.join(fs, path), mode)
+
+        for kind, live, backup in (("caddyfile", "opt/cua-evaluation/bootstrap/proxy/Caddyfile", "Caddyfile.orig"),
+                                   ("deadline", "opt/cua-evaluation/bootstrap/bin/deadline-check.sh", "deadline-check.sh.orig")):
+            original = vm_patch.original_text(kind)
+            put(live, vm_patch.patch(kind, original) if installed else original)
+            put("var/backups/pim-cua-bridge/" + backup, original if backup_ok else original + "#")
+        put("etc/cua-evaluation/credentials/viewer-basic", "viewer:$2a$hash\n", 0o600)
+        put("usr/local/bin/caddy", "#!/bin/sh\nexit %d\n" % caddy_rc, 0o755)
+        put("fakebin/id", "#!/bin/sh\necho 0\n", 0o755)
+        put("fakebin/ss", "#!/bin/sh\nprintf %s \"$FAKE_LISTENING\"\n", 0o755)
+        put("fakebin/systemctl", """#!/bin/bash
+echo "$*" >>"$FAKE_STATE/log"
+case "$1" in
+  stop) [[ " $FAKE_FAIL_STOP " == *" $2 "* ]] && exit 1; rm -f "$FAKE_STATE/$2" ;;
+  start|restart) touch "$FAKE_STATE/$2" ;;
+  is-active) [ -e "$FAKE_STATE/$3" ] || [[ " $FAKE_STUCK " == *" $3 "* ]] || exit 3 ;;
+esac
+exit 0
+""", 0o755)
+        units = ("pim-cua-bridge.service", "pim-agent-exec.socket", "pim-agent-exec.service")
+        for unit in ("cua-viewer-proxy.service", "cua-spacesd.service") + (units if installed else ()):
+            put("fakestate/" + unit, "")
+        if installed:
+            for unit in units:
+                put("etc/systemd/system/" + unit, "")
+        if cgroup:
+            os.makedirs(os.path.join(fs, "sys/fs/cgroup/system.slice", cgroup))
+            put("sys/fs/cgroup/system.slice/%s/cgroup.procs" % cgroup, "4242\n")
+        ran = subprocess.run(["bash", os.path.join(HERE, "rollback.sh")], capture_output=True, text=True,
+                             env={"PATH": bin_ + ":" + os.environ["PATH"], "PIM_ROLLBACK_FS": fs, "FAKE_STATE": state, "FAKE_STUCK": stuck,
+                                  "FAKE_FAIL_STOP": fail_stop, "FAKE_LISTENING": listening})
+        with open(os.path.join(state, "log")) as handle:
+            return ran.returncode, handle.read().splitlines(), fs
+
+    def test_rollback_reopens_the_viewer_only_once_everything_is_verifiably_back(self):
+        code, calls, fs = self.rollback()
+        self.assertEqual(code, 0)
+        self.assertLess(calls.index("restart cua-spacesd.service"), calls.index("start cua-viewer-proxy.service"))
+        self.assertFalse(os.path.exists(os.path.join(fs, "opt/pim-cua-bridge")))
+        with open(os.path.join(fs, "opt/cua-evaluation/bootstrap/proxy/Caddyfile"), encoding="utf-8") as handle:
+            self.assertEqual(vm_patch.sha256(handle.read()), vm_patch.ORIGINAL["caddyfile"])
+        # After a partial install (nothing of the bridge's, originals untouched) it succeeds too.
+        self.assertEqual(self.rollback(installed=False, backup_ok=False)[0], 0)
+
+    def test_rollback_keeps_the_viewer_down_and_the_evidence_when_anything_is_ambiguous(self):
+        for name, faults in [
+            ("the viewer route won't stop", {"stuck": "cua-viewer-proxy.service"}),
+            ("the runner won't stop", {"fail_stop": "pim-agent-exec.service", "stuck": "pim-agent-exec.service"}),
+            ("a process stays in the runner's cgroup", {"cgroup": "pim-agent-exec.service"}),
+            ("something listens on 3290", {"listening": "LISTEN 0 5 127.0.0.1:3290"}),
+            ("the backup isn't the original", {"backup_ok": False}),
+            ("caddy refuses the restored Caddyfile", {"caddy_rc": 1}),
+        ]:
+            with self.subTest(name):
+                code, calls, fs = self.rollback(**faults)
+                self.assertEqual(code, 1)
+                self.assertNotIn("start cua-viewer-proxy.service", calls)
+                self.assertNotIn("restart cua-spacesd.service", calls)
+                self.assertTrue(os.path.isdir(os.path.join(fs, "var/backups/pim-cua-bridge")))
+                if "stuck" in faults or "cgroup" in faults or "listening" in faults:
+                    self.assertTrue(os.path.exists(os.path.join(fs, "opt/pim-cua-bridge")))
+
+    def test_the_e2e_run_accepts_only_when_every_required_check_ran_and_passed(self):
+        import contextlib
+        import io
+        import socket
+
+        import e2e
+
+        def verdict(passed, skipped=(), failed=(), partial=False):
+            e2e.passed[:], e2e.skipped[:], e2e.failures[:] = list(passed), list(skipped), list(failed)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = e2e.verdict(partial)
+            return code, out.getvalue()
+
+        everything = list(e2e.REQUIRED)
+        self.assertEqual(verdict(everything)[0], 0)
+        for partial in (False, True):
+            code, said = verdict(everything[1:], partial=partial)
+            self.assertEqual(code, 2 if partial else 1)
+            self.assertIn("INCOMPLETE", said)
+            self.assertNotIn("ACCEPTED", said)
+            code, said = verdict(everything, skipped=["browser_type"], partial=partial)
+            self.assertNotEqual(code, 0)
+            self.assertNotIn("ACCEPTED", said)
+        self.assertEqual(verdict(everything, failed=["x"], partial=True)[0], 1)
+        # A media socket counts as alive only if it answers a ping and stays open.
+        import threading
+
+        def pong(peer):
+            frame = peer.recv(64)
+            mask, payload = frame[2:6], frame[6:]
+            peer.sendall(bytes([0x8A, len(payload)]) + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+        ours, theirs = socket.socketpair()
+        threading.Thread(target=pong, args=(theirs,)).start()
+        self.assertTrue(e2e.alive(ours, 0.5))
+        ours.close(), theirs.close()
+        ours, theirs = socket.socketpair()
+        theirs.close()
+        self.assertFalse(e2e.alive(ours, 0.3))
+        ours.close()
+
     def test_the_scripts_parse(self):
         for script in ("install.sh", "rollback.sh", "rehearsal/orb-vm.sh"):
             subprocess.run(["bash", "-n", os.path.join(HERE, script)], check=True)

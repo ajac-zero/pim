@@ -2,7 +2,17 @@
 """Smoke test of the Cua evaluation end to end: a local Pim preview's real tools, through Caddy and pim-cua-bridge, on a Cua machine.
 
     python3 deploy/cua-eval/e2e.py owner [--user cua-e2e]     # the test account's owner id, for CUA_EVAL_OWNER
-    python3 deploy/cua-eval/e2e.py run [--user cua-e2e] [--viewer-basic FILE] [--browser-url URL]
+    python3 deploy/cua-eval/e2e.py fixture                    # the browser fixture page, to host where the VM's browser reaches it
+    python3 deploy/cua-eval/e2e.py run --viewer-basic FILE --browser-url URL [--user cua-e2e]   # acceptance
+    python3 deploy/cua-eval/e2e.py run --partial [...]        # diagnostics only: never an acceptance pass
+
+Acceptance (the default) passes only when every check in REQUIRED ran and passed: the browser on
+the fixture page (open, read, click a button, type in a field, each seen in the page afterwards),
+files, shell with approvals and a denial, owner isolation, CSRF, API tokens, a stale pause, a
+background process holding the pause, and the person's handoff (a media WebSocket shown alive just
+before the resume, and closed by it). A skipped or missing check fails it. `--partial` runs what it
+can and ends with INCOMPLETE and exit code 2 whenever anything was skipped; it never says that all
+checks passed.
 
 Run it on the machine with the Pim preview (`pnpm preview`, http://localhost:8787 only), whose
 .dev.vars names the bridge (CUA_EVAL_BRIDGE_URL, CUA_EVAL_BRIDGE_TOKEN) and this test account's
@@ -14,7 +24,7 @@ tool registry, approvals, the space's pause state, Caddy, the bridge, and the ma
 `--viewer-basic FILE` (a file holding `user:password` of the VM's viewer login, read and never
 printed) adds the person's side: the viewer's own OpenMedia through Caddy with the ticket Pim
 made, an attached media WebSocket, and that resuming the agents closes it and that the ticket then
-opens nothing. Without it those checks are skipped.
+opens nothing. Without it those checks are skipped, which only `--partial` allows.
 
 Against the real VM this reaches only https://cua-eval.ajac-zero.com, as the preview does. It
 prints what each check found, never a cookie, credential, password or ticket, and exits non-zero
@@ -39,20 +49,73 @@ import urllib.request
 SITE = "cua-eval.ajac-zero.com"
 PAUSED = "paused agents on their Cua evaluation computer"
 failures = []
+passed = []
+skipped = []
 secrets = []
+#: Every check acceptance needs, by the name `report` gives it.
+REQUIRED = (
+    "another account isn't offered it, and sees nothing of it",
+    "another site can't ask for a viewer with the owner's cookie",
+    "an API token can't resume the agents",
+    "an API token can't ask for a viewer",
+    "resuming a stale pause is refused",
+    "shell asks the person first",
+    "an approved command runs as pim-agent in its workspace",
+    "a denied command isn't run",
+    "file_write writes on the Cua computer",
+    "file_read reads what the command wrote",
+    "file_read outside /workspace is refused",
+    "browser_open reads the fixture page",
+    "browser_click asks first, then clicks the fixture's button",
+    "browser_type asks first, then types in the fixture's field",
+    "the pause waits for it",
+    "the pause completes once it has ended, and nothing stopped it",
+    "the viewer's OpenMedia, through Caddy and the bridge, opens a media session",
+    "the attached media WebSocket is alive just before the resume",
+    "the attached media WebSocket is closed by the resume",
+    "the viewer's still-valid ticket opens nothing once the agents have the machine",
+)
+#: The browser fixture: a link, a button and a text field, each of whose use shows on the page.
+FIXTURE_MARK = "pim-e2e-fixture-1"
+FIXTURE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>%s</title></head><body>
+<h1 id="state">%s ready</h1>
+<button onclick="document.getElementById('state').textContent='pim-e2e-clicked'">Mark clicked</button>
+<label>Note <input type="text" oninput="document.getElementById('typed').textContent='typed: '+this.value"></label>
+<p id="typed">typed: nothing</p>
+<a href="#linked">A link</a>
+</body></html>
+""" % (FIXTURE_MARK, FIXTURE_MARK)
 
 
 def report(ok, what, detail=""):
     for secret in secrets:
         detail = detail.replace(secret, "[secret]")
     print(("PASS  " if ok else "FAIL  ") + what + (": " + detail if detail and not ok else ""), flush=True)
-    if not ok:
-        failures.append(what)
+    (passed if ok else failures).append(what)
     return ok
 
 
 def skip(what, why):
     print("SKIP  %s: %s" % (what, why), flush=True)
+    skipped.append(what)
+
+
+def verdict(partial):
+    """The run's last line and exit code: 0 only when every required check ran and passed."""
+    missing = [name for name in REQUIRED if name not in passed and name not in failures]
+    if failures:
+        print("\nFAILED: %d check(s): %s" % (len(failures), "; ".join(failures)))
+        return 1
+    if missing or skipped:
+        print("\nINCOMPLETE: not run: %s" % "; ".join(missing + skipped))
+        if partial:
+            print("(--partial: a diagnostic run, not an acceptance pass)")
+            return 2
+        print("acceptance needs every required check; see the top of e2e.py")
+        return 1
+    print("\nACCEPTED: all %d required checks ran and passed (%d checks in all)" % (len(REQUIRED), len(passed)))
+    return 0
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -294,6 +357,47 @@ def attach_media(basic, ws_path):
     return connection
 
 
+def alive(connection, seconds):
+    """Whether the socket answers a ping with a pong and is still open after `seconds`; media frames are read and dropped."""
+    payload = os.urandom(4)
+    mask = os.urandom(4)
+    try:
+        connection.sendall(bytes([0x89, 0x80 | len(payload)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+    except OSError:
+        return False
+    deadline = time.monotonic() + seconds
+    buffered, ponged = b"", False
+    while time.monotonic() < deadline:
+        connection.settimeout(max(0.1, deadline - time.monotonic()))
+        try:
+            chunk = connection.recv(65536)
+        except (TimeoutError, socket.timeout):
+            break
+        except OSError:
+            return False
+        if not chunk:
+            return False
+        buffered += chunk
+        while len(buffered) >= 2:
+            opcode, length, index = buffered[0] & 0x0F, buffered[1] & 0x7F, 2
+            if length == 126:
+                if len(buffered) < 4:
+                    break
+                length, index = int.from_bytes(buffered[2:4], "big"), 4
+            elif length == 127:
+                if len(buffered) < 10:
+                    break
+                length, index = int.from_bytes(buffered[2:10], "big"), 10
+            if len(buffered) < index + length:
+                break
+            if opcode == 0x8:
+                return False
+            if opcode == 0xA and buffered[index : index + length] == payload:
+                ponged = True
+            buffered = buffered[index + length :]
+    return ponged
+
+
 def closed_within(connection, seconds):
     """Whether the server closes the socket (a close frame, or the end of the stream) within `seconds`; media frames are read and dropped."""
     deadline = time.monotonic() + seconds
@@ -368,7 +472,7 @@ def checks(args, owner):
         report(owner.post("/api/cua/resume", {"generation": 1}, origin=None, bearer=token["token"])[0] == 403, "an API token can't resume the agents")
         report(owner.post("/api/cua/viewer", origin=None, bearer=token["token"])[0] == 403, "an API token can't ask for a viewer")
     else:
-        skip("API token checks", "couldn't make a token (HTTP %s)" % status)
+        report(False, "an API token can't resume the agents", "couldn't make a token (HTTP %s)" % status)
 
     print("— turned on, paused")
     if view.get("enabled"):
@@ -412,23 +516,23 @@ def checks(args, owner):
     text, error, _ = use_tool(owner, chat, "browser_open", {"url": args.browser_url})
     if error:
         report(all(word not in text for word in ("Traceback", "CUA_ENV_TOKEN", "Bearer")), "a driver failure comes back without internals or credentials", text[:300])
-        print("      browser_open failed on this machine (%s); the browser checks below are skipped" % text[:160].replace("\n", " "))
+        report(False, "browser_open reads the fixture page", text[:160].replace("\n", " "))
+    elif not report(FIXTURE_MARK in text, "browser_open reads the fixture page", "not the fixture (`e2e.py fixture`): " + text[:160]):
+        pass
     else:
-        report("URL: " + args.browser_url.rstrip("/") in text or "Page:" in text, "browser_open reads the page", text[:200])
         text, error, _ = use_tool(owner, chat, "browser_read", {})
-        report(not error and "Page:" in text, "browser_read reads it again", text[:200])
-        found = re.search(r"\[(\d+) (?:link|button)", text)
-        if found:
+        report(not error and FIXTURE_MARK in text, "browser_read reads it again", text[:200])
+        found = re.search(r"\[(\d+) button[^\]]*Mark clicked", text)
+        if report(bool(found), "the fixture's button is listed", text[:300]):
             text, error, approval = use_tool(owner, chat, "browser_click", {"ref": int(found.group(1))}, decide="approve")
-            report(approval is not None and not error, "browser_click asks first, then clicks", text[:200])
-        else:
-            skip("browser_click", "the page has no link or button")
-        found = re.search(r"\[(\d+) (?:textbox|searchbox|combobox)", text)
-        if found:
+            seen, _, _ = use_tool(owner, chat, "browser_read", {})
+            report(approval is not None and not error and "pim-e2e-clicked" in seen, "browser_click asks first, then clicks the fixture's button", (text + " | " + seen)[:300])
+        found = re.search(r"\[(\d+) (?:textbox|searchbox)", text if not found else seen)
+        if report(bool(found), "the fixture's text field is listed", text[:300]):
             text, error, approval = use_tool(owner, chat, "browser_type", {"ref": int(found.group(1)), "text": "pim e2e"}, decide="approve")
-            report(approval is not None and not error, "browser_type asks first, then types", text[:200])
-        else:
-            skip("browser_type", "the page has no text field")
+            seen, _, _ = use_tool(owner, chat, "browser_read", {})
+            report(approval is not None and not error and "typed: pim e2e" in seen, "browser_type asks first, then types in the fixture's field", (text + " | " + seen)[:300])
+        report(bool(re.search(r"\[\d+ link[^\]]*A link", seen if found else text)), "the fixture's link is listed")
 
     print("— pausing")
     queued = ask_only(owner, chat, "shell", {"command": "touch %s-queued.txt" % run_id, "cwd": "/workspace"})
@@ -471,9 +575,8 @@ def checks(args, owner):
         socket_ = attach_media(basic, ws_path) if ws_path else None
         report(socket_ is not None, "the media WebSocket attaches through Caddy")
         if socket_ is not None:
-            if closed_within(socket_, 2):
-                skip("closing on resume", "spacesd closed the socket by itself before the resume")
-            else:
+            # Alive (it answers a ping, and stays open for a while) right before the resume, closed right after: the resume closed it.
+            if report(alive(socket_, 5), "the attached media WebSocket is alive just before the resume", "spacesd closed it, or it stopped answering, before any resume"):
                 status, view, _ = resume(owner)
                 report(status == 200 and view["mode"] == "agents", "resuming closes the viewer's sessions first", json.dumps(view))
                 report(closed_within(socket_, 15), "the attached media WebSocket is closed by the resume")
@@ -491,18 +594,24 @@ def checks(args, owner):
     report(status == 200 and not view["enabled"], "turning it off, paused, gives the space its own computer back", json.dumps(view))
     computer = owner.get("/api/computer") or {}
     report(computer.get("provider") != "cua", "the space's computer isn't the Cua one any more", json.dumps(computer)[:200])
-    print("\n%d failed" % len(failures) if failures else "\nall checks passed")
-    return 1 if failures else 0
+    return verdict(args.partial)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=("owner", "run"))
+    parser.add_argument("command", choices=("owner", "run", "fixture"))
+    parser.add_argument("--partial", action="store_true", help="diagnostics: run what can run; never an acceptance pass")
     parser.add_argument("--pim", default="http://localhost:8787")
     parser.add_argument("--user", default="cua-e2e")
     parser.add_argument("--viewer-basic", help="a file holding the viewer's user:password; read, never printed")
-    parser.add_argument("--browser-url", default="https://example.com/")
+    parser.add_argument("--browser-url", help="where the VM's browser reaches `e2e.py fixture`'s page")
     args = parser.parse_args()
+    if args.command == "fixture":
+        sys.stdout.write(FIXTURE)
+        return 0
+    if args.command == "run" and not args.partial and not (args.browser_url and args.viewer_basic):
+        parser.error("acceptance needs --browser-url (the hosted fixture) and --viewer-basic; use --partial for a diagnostic run")
+    args.browser_url = args.browser_url or "https://example.com/"
     if args.command == "owner":
         print(Pim(args.pim, args.user).sign_in().get("/api/account")["ownerId"])
         return 0

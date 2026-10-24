@@ -62,6 +62,18 @@ say "1/7 checking this folder and the VM"
 (cd "$HERE" && sha256sum --quiet --strict -c SHA256SUMS) || die "this folder doesn't match its SHA256SUMS"
 say "    sources: SHA256SUMS $(sha "$HERE/SHA256SUMS")"
 [ ! -e /var/lib/cua-evaluation/expired ] || die "the evaluation's soft deadline has passed (/var/lib/cua-evaluation/expired)"
+# The deadline itself, not only its marker (written by a timer that may not have run yet): the time
+# from the first bootstrap, as deadline-check.sh counts it, must leave at least an hour.
+time_left() {
+  local epoch_file=/var/lib/cua-evaluation/bootstrap-epoch start
+  { [ -f "$epoch_file" ] && [ "$(stat -c %u "$epoch_file")" = 0 ]; } || die "no root-owned $epoch_file: the deadline can't be checked"
+  start="$(cat "$epoch_file")"
+  [[ "$start" =~ ^[0-9]+$ ]] || die "$epoch_file isn't an epoch"
+  left=$((start + 48 * 3600 - $(date +%s)))
+  [ "$left" -ge 3600 ] || die "the soft deadline is less than an hour away ($((left / 60)) minutes): not installing"
+}
+time_left
+say "    deadline: $((left / 3600)) h left"
 read -r caddy_original caddy_patched < <(python3 -I "$HERE/vm_patch.py" hashes | awk '$1 == "caddyfile" { print $3, $5 }')
 read -r deadline_original deadline_patched < <(python3 -I "$HERE/vm_patch.py" hashes | awk '$1 == "deadline" { print $3, $5 }')
 now="$(sha "$CADDYFILE")"
@@ -77,7 +89,10 @@ done
 for path in /etc/cua/spacesd.env /etc/cua-evaluation/credentials/viewer-basic /usr/local/bin/caddy /usr/bin/python3; do
   [ -e "$path" ] || die "no $path"
 done
-[ "$(stat -c '%u %a' /etc/cua/spacesd.env)" = "0 600" ] || say "    note: /etc/cua/spacesd.env is $(stat -c '%U %a' /etc/cua/spacesd.env), not root 600"
+[ "$(stat -c '%u %g %a' /etc/cua/spacesd.env)" = "0 0 600" ] || die "/etc/cua/spacesd.env (spacesd's root token) is $(stat -c '%U:%G %a' /etc/cua/spacesd.env), not root:root 600"
+[ "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs ] || die "/sys/fs/cgroup isn't the unified cgroup v2 hierarchy, which the runner's accounting and IPAddressDeny need"
+systemd_version="$(systemctl --version | awk 'NR == 1 { print $2 }')"
+[[ "$systemd_version" =~ ^[0-9]+$ ]] && [ "$systemd_version" -ge 247 ] || die "systemd $systemd_version is older than 247"
 python3 -I -c 'import sys; sys.exit(sys.version_info < (3, 10))' || die "python3 must be 3.10 or newer"
 for path in /opt/pim-cua-bridge /etc/pim-cua-bridge "$BACKUP" "${UNITS[@]/#//etc/systemd/system/}"; do
   [ ! -e "$path" ] || die "$path exists already: the bridge is (partly) installed (rollback.sh first)"
@@ -117,6 +132,41 @@ for user in pim-bridge pim-agent; do
     sudo -n -l -U "$user" 2>&1 | grep -q "is not allowed to run sudo" || die "sudo -l -U $user grants something: remove it from sudoers first"
   fi
 done
+
+# The platform, tried for real: a transient unit as pim-agent with the runner's sandbox must find
+# itself unprivileged, cut off from loopback, link-local and Azure's host endpoints, without the
+# desktop's X socket, session bus, homes or spacesd's token, and must keep even a detached process in
+# its own cgroup. Anything else, including systemd ignoring a setting it can't apply, refuses.
+say "    trying the runner's sandbox for real"
+# A refusal inside proves the denial only if the same address answers outside it.
+for target in 127.0.0.1/3211 127.0.0.1/443 169.254.169.254/80; do
+  timeout 3 bash -c "exec 3<>/dev/tcp/$target" 2>/dev/null || die "$target doesn't answer the installer, so the sandbox's denial of it can't be shown"
+done
+cua_uid="$(id -u cua 2>/dev/null || echo none)"
+probe="$(systemd-run --quiet --wait --pipe --collect -p User=pim-agent -p Group=pim-agent -p NoNewPrivileges=yes \
+  -p ProtectSystem=strict -p ProtectHome=tmpfs -p BindPaths=/home/pim-agent -p PrivateTmp=yes -p PrivateDevices=yes \
+  -p RestrictSUIDSGID=yes -p CapabilityBoundingSet= -p "IPAddressDeny=localhost link-local 168.63.129.16/32" \
+  -p IPAddressAllow=127.0.0.53/32 -p KillMode=control-group \
+  /bin/bash -c '
+    no() { ! timeout 3 bash -c "$1" >/dev/null 2>&1; }
+    [ "$(id -u)" != 0 ] && echo ok-unprivileged
+    case " $(id -nG) " in *" sudo "*|*" admin "*|*" wheel "*|*" root "*) ;; *) echo ok-groups ;; esac
+    no "sudo -n true" && echo ok-no-sudo
+    no "exec 3<>/dev/tcp/127.0.0.1/3211" && no "exec 3<>/dev/tcp/127.0.0.1/443" && echo ok-no-loopback
+    no "exec 3<>/dev/tcp/169.254.169.254/80" && no "exec 3<>/dev/tcp/168.63.129.16/80" && echo ok-no-metadata
+    no "cat /etc/cua/spacesd.env" && echo ok-no-root-token
+    [ "$(ls -A /home)" = pim-agent ] && echo ok-homes
+    [ ! -e /tmp/.X11-unix ] && no "ls /run/user/'"$cua_uid"'/bus" && echo ok-no-desktop
+    cg="$(sed -n "s/^0:://p" /proc/self/cgroup)"
+    [ -n "$cg" ] && [ -r "/sys/fs/cgroup$cg/cgroup.procs" ] && echo ok-cgroup
+    setsid sleep 20 </dev/null >/dev/null 2>&1 &
+    sleep 1
+    pgrep -u pim-agent -x sleep | while read -r pid; do grep -qx "$pid" "/sys/fs/cgroup$cg/cgroup.procs" && echo ok-detached && break; done
+  ' 2>&1)" || true
+for want in unprivileged groups no-sudo no-loopback no-metadata no-root-token homes no-desktop cgroup detached; do
+  grep -qx "ok-$want" <<<"$probe" || die "the runner's sandbox doesn't hold on this VM: $want (see install.sh, step 2)"
+done
+say "    sandbox: unprivileged, no loopback or metadata, no desktop, detached processes stay in its cgroup"
 
 # ── 3. Files ────────────────────────────────────────────────────────────────────────────────────
 say "3/7 files"
@@ -178,6 +228,7 @@ replace() { # replace FILE NEW: NEW takes FILE's place with FILE's owner and mod
   cp -p "$2" "$1.pim-new"
   mv -f "$1.pim-new" "$1"
 }
+time_left
 say "6/7 switching over: the viewer route stops, cua-spacesd restarts briefly"
 switched=1
 systemctl stop cua-viewer-proxy.service

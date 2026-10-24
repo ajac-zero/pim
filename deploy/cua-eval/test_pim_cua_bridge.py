@@ -20,7 +20,9 @@ import sys
 import tempfile
 import threading
 import time
+import contextlib
 import unittest
+from unittest import mock
 from contextlib import redirect_stderr
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -300,13 +302,35 @@ class BridgeTest(unittest.TestCase):
         for environ, said in [
             ({}, "PIM_AGENT_ROOT must be an absolute folder"),
             ({"PIM_AGENT_ROOT": "/"}, "PIM_AGENT_ROOT must be an absolute folder"),
-            ({"PIM_AGENT_ROOT": "/proc/1"}, "a folder the agents' user owns"),
             ({"PIM_AGENT_ROOT": self.root}, "must run in pim-agent-exec.service"),
             ({"PIM_AGENT_ROOT": self.root, "LISTEN_FDS": "1", "LISTEN_PID": "1"}, "started by pim-agent-exec.socket"),
         ]:
             with self.assertRaises(SystemExit) as refused:
                 bridge.runner_main(environ)
             self.assertIn(said, str(refused.exception))
+        # Owners and users are stood in for, so this holds wherever the tests run, whoever owns /proc/1.
+        real_stat = os.stat
+
+        def owned_by_another(path, *args, **kwargs):
+            info = real_stat(path, *args, **kwargs)
+            if path != self.root:
+                return info
+            values = list(info[:10])
+            values[4] = os.getuid() + 1
+            return os.stat_result(values)
+
+        def refusal(**patches):
+            with contextlib.ExitStack() as stack:
+                for name, value in patches.items():
+                    stack.enter_context(mock.patch.object(bridge if name == "admin_groups" else bridge.os, name, value))
+                with self.assertRaises(SystemExit) as refused:
+                    bridge.runner_main({"PIM_AGENT_ROOT": self.root})
+            return str(refused.exception)
+
+        self.assertNotIn("a folder the agents' user owns", refusal())
+        self.assertIn("a folder the agents' user owns", refusal(stat=owned_by_another))
+        self.assertIn("not root nor a member of", refusal(geteuid=lambda: 0))
+        self.assertIn("not root nor a member of", refusal(admin_groups=lambda _: {"sudo"}))
         # A state file it didn't write is refused, not taken as the person's or the agents'.
         with open(self.config["state"], "w") as handle:
             handle.write('{"mode": "agents", "epoch": "7"}')
@@ -436,22 +460,70 @@ class BridgeTest(unittest.TestCase):
         lease = self.current = self.lease()
         # A command's process that the restarted bridge knows nothing of, still running in the runner's cgroup.
         self.call("exec", command="setsid sh -c 'sleep 2.5; touch late' > /dev/null 2>&1 < /dev/null &")
-        bridge.QUIET_AFTER_RESTART, quiet = 1, bridge.QUIET_AFTER_RESTART
-        try:
-            self.restart()
-            view = self.request("status")[1]
-            self.assertEqual(view["mode"], "draining")
-            self.assertGreater(view["epoch"], lease)
-            self.assertEqual(self.request("call", {"op": "stat", "args": {"path": "/workspace"}, "lease": lease})[0], 423)
-            view = self.request("pause")[1]
-            self.assertEqual(view["mode"], "draining")
-            self.assertEqual(self.pause()["mode"], "human")
-            self.assertTrue(os.path.exists(os.path.join(self.root, "late")))
-        finally:
-            bridge.QUIET_AFTER_RESTART = quiet
+        self.restart()
+        view = self.request("status")[1]
+        self.assertEqual((view["mode"], view["unsettled"]), ("draining", False))
+        self.assertGreater(view["epoch"], lease)
+        self.assertEqual(self.request("call", {"op": "stat", "args": {"path": "/workspace"}, "lease": lease})[0], 423)
+        view = self.request("pause")[1]
+        self.assertEqual(view["mode"], "draining")
+        self.assertEqual(self.pause()["mode"], "human")
+        self.assertTrue(os.path.exists(os.path.join(self.root, "late")))
         # And the person's state outlives a restart too.
         self.restart()
         self.assertEqual(self.request("status")[1]["mode"], "human")
+
+    def test_a_restart_during_a_browser_call_keeps_the_viewer_closed_until_an_operator_recovers(self):
+        lease = self.lease()
+        # A browser call spacesd is still working on when the bridge goes down, as if it crashed.
+        FakeSpacesd.mcp_delay = 3
+        def call():
+            try:
+                self.request("driver", {"tool": "end_session", "arguments": {"session": "pim"}, "lease": lease}, timeout=10)
+            except OSError:
+                pass
+
+        caller = threading.Thread(target=call)
+        caller.start()
+        deadline = time.monotonic() + 5
+        while self.request("status")[1]["inflight"] == 0 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        old = self.server
+        self.server = bridge.serve(self.config, bridge.Spacesd(ROOT_TOKEN, self.fake.server_address))
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        view = self.request("status")[1]
+        self.assertEqual((view["mode"], view["unsettled"]), ("draining", True))
+        # No wait makes it the person's: not the upstream call finishing, nor any time passing.
+        caller.join()
+        self.assertEqual(self.pause(seconds=4)["mode"], "draining")
+        self.assertEqual(self.request("viewer")[1]["error"]["code"], "busy")
+        self.assertEqual(self.request("resume", {"epoch": view["epoch"]})[0], 409)
+        old.shutdown()
+        old.server_close()
+        # The operator's recovery: with spacesd restarted, the state file goes and the bridge starts fresh.
+        self.server.shutdown()
+        self.server.server_close()
+        os.unlink(self.config["state"])
+        self.start()
+        self.assertEqual(self.request("status")[1]["mode"], "human")
+
+    def test_a_browser_call_that_got_no_answer_keeps_the_viewer_closed(self):
+        lease = self.lease()
+        # spacesd's /mcp drops the call: whether the browser acted, or still acts, is unknown.
+        self.server.bridge.spacesd = bridge.Spacesd(ROOT_TOKEN, ("127.0.0.1", 1))
+        status, answer = self.request("driver", {"tool": "end_session", "arguments": {"session": "pim"}, "lease": lease})
+        self.assertEqual(status, 502, answer)
+        view = self.pause(seconds=2)
+        self.assertEqual((view["mode"], view["unsettled"], view["inflight"]), ("draining", True, 0))
+        self.restart()
+        self.assertEqual(self.pause(seconds=1)["mode"], "draining")
+        # A call spacesd answered, even with a refusal, leaves nothing behind.
+        os.unlink(self.config["state"])
+        self.restart()
+        lease = self.lease()
+        FakeSpacesd.fail_with = "refused"
+        self.request("driver", {"tool": "end_session", "arguments": {"session": "pim"}, "lease": lease})
+        self.assertEqual(self.pause()["mode"], "human")
 
     def test_a_pause_waits_while_the_runners_cgroup_holds_more_than_the_runner_whatever_it_says(self):
         self.current = self.lease()

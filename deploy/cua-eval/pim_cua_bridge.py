@@ -30,8 +30,14 @@ Pim's routes, with its credential in X-Pim-Bridge-Authorization:
 - `driver`: one of eight cua-driver tools for the browser over spacesd's /mcp, with fixed shapes:
   one driver session (`pim`), an isolated named profile (`pim`), never an existing profile.
 - `pause`: agents' calls stop being taken at once; the machine is the person's once nothing of
-  the agents' runs: no call here, no process but the runner's own in the runner's cgroup, and,
-  after a restart, long enough for a driver call the bridge lost track of to have ended.
+  the agents' runs: no call here and no process but the runner's own in the runner's cgroup.
+  A browser call has no such proof: the bridge can't see or cancel what cua-driver does with a
+  call whose answer it never got. So when a driver call ends without spacesd's answer (a timeout
+  or a dropped connection), or the bridge restarts while one was under way (the state file counts
+  them), the machine is `unsettled`: it stays out of the person's hands, and the viewer with it,
+  however long anyone waits. Only an operator ends that, by hand (docs/cua-evaluation.md,
+  "After an unsettled restart"): stop the bridge, restart cua-spacesd so the driver and its
+  browser session end, check that nothing of the driver's runs, delete the state file, start it.
 - `resume`: the person's viewer sessions are closed, then the machine is the agents', under a new lease.
 - `viewer`: a short-lived viewer ticket (SystemService.CreateViewerTicket), only while it's the person's.
 
@@ -77,8 +83,6 @@ MEDIA_RATE = (30, 60.0)
 AGENT_SOCKET = "/run/pim-agent-exec.sock"
 #: The runner's systemd unit: its cgroup holds everything the agents' calls start.
 RUNNER_UNIT = "pim-agent-exec.service"
-#: After a restart, how long a driver call the bridge had under way, and lost track of, may still be running.
-QUIET_AFTER_RESTART = 120
 #: The administrator groups the agents' user may not be in.
 ADMIN_GROUPS = frozenset({"sudo", "admin", "wheel", "root"})
 #: The largest request: a 64 KiB write is 88 KiB of base64.
@@ -406,12 +410,16 @@ class Spacesd:
             except ValueError:
                 return response.status, None
         except OSError:
-            raise Refusal(502, "The Cua driver didn't answer.") from None
+            raise Unanswered(502, "The Cua driver didn't answer.") from None
         finally:
             connection.close()
 
 
 GRPC_CODES = {"3": "invalid argument", "4": "deadline exceeded", "5": "not found", "7": "permission denied", "8": "resource exhausted", "9": "failed precondition", "12": "unimplemented", "13": "internal error", "14": "unavailable", "16": "unauthenticated"}
+
+
+class Unanswered(Refusal):
+    """A driver call that got no answer from spacesd: what it does in the browser, if anything, is unknown."""
 
 
 def grpc_failure(status):
@@ -1237,7 +1245,7 @@ def opened_media(headers, body):
 class State:
     """Who has the machine, under which lease, and the person's media sessions: a file, rewritten whole on each change."""
 
-    FRESH = {"mode": "human", "epoch": 1, "media": [], "quietUntil": 0, "viewerUntil": 0}
+    FRESH = {"mode": "human", "epoch": 1, "media": [], "quietUntil": 0, "viewerUntil": 0, "driverPending": 0, "unsettled": False}
 
     def __init__(self, path):
         self.path = path
@@ -1315,10 +1323,13 @@ class Bridge:
         self.media_requests = Window(*MEDIA_RATE)
         self.failures = Window(*AUTH_FAILURES)
         self.state = State(config["state"])
-        # A restart forgets what was under way: the agents' lease ends, and the machine is the
-        # person's only once whatever the bridge had under way can have ended.
+        # A restart forgets what was under way: the agents' lease ends. Commands and file calls left
+        # running stay in the runner's cgroup, which pause() waits on; a driver call that was under way
+        # may still be acting in the browser, and nothing here can tell when it stops, so that leaves
+        # the machine unsettled: never the person's until an operator recovers it.
         if self.state.mode in ("agents", "draining"):
-            self.state.update(mode="draining", epoch=self.state.epoch + 1, quietUntil=time.time() + QUIET_AFTER_RESTART)
+            self.state.update(mode="draining", epoch=self.state.epoch + 1, quietUntil=0,
+                              unsettled=self.state.unsettled or self.state.driverPending > 0, driverPending=0)
         elif self.state.mode == "handoff":
             self.state.update(mode="human")
 
@@ -1413,6 +1424,7 @@ class Bridge:
             "background": background,
             "quietSeconds": max(0, round(state.quietUntil - time.time())),
             "viewerSessions": len(state.media),
+            "unsettled": state.unsettled,
             "version": VERSION,
         }
 
@@ -1436,7 +1448,22 @@ class Bridge:
             if route == "call":
                 result, error = run_call(self.config, payload.get("op"), payload.get("args", {}))
                 return {"error": error} if error else {"result": result}
-            return run_driver(self.spacesd, payload.get("tool"), payload.get("arguments", {}))
+            check_driver(payload.get("tool"), payload.get("arguments", {}))
+            with self.lock:
+                self.state.update(driverPending=self.state.driverPending + 1)
+            settled = False
+            try:
+                answer = run_driver(self.spacesd, payload.get("tool"), payload.get("arguments", {}))
+                settled = True
+                return answer
+            except Unanswered:
+                raise
+            except Refusal:
+                settled = True
+                raise
+            finally:
+                with self.lock:
+                    self.state.update(driverPending=self.state.driverPending - 1, unsettled=self.state.unsettled or not settled)
         finally:
             with self.lock:
                 self.inflight -= 1
@@ -1451,7 +1478,8 @@ class Bridge:
                     return self.view()
                 # Nothing is admitted while draining, so once no call is under way none will be: then
                 # whatever the finished calls started is in the runner's cgroup.
-                if self.inflight > 0 or time.time() < self.state.quietUntil:
+                # A driver call nobody got the answer to may still act in the browser: no wait proves it stopped.
+                if self.inflight > 0 or self.state.unsettled:
                     return self.view()
             background = runner_request(self.config["agent_socket"], {"busy": True}, 10).get("busy")
             if not isinstance(background, int) or isinstance(background, bool):

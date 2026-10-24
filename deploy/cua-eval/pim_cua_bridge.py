@@ -23,7 +23,7 @@ Pim's routes, with its credential in X-Pim-Bridge-Authorization:
   stat, read, write, mkdir, rm, rename, readdir, find, grep, exec. The bridge hands each to the
   agents' runner (this file with `--runner`, in pim-agent-exec.service, as the agents' own user,
   never root nor an administrator) over a socket only the bridge may open. The runner starts one
-  helper process per call, which checks its paths against PIM_AGENT_ROOT after following links. A
+  helper process per call, which walks each path from PIM_AGENT_ROOT and refuses any symbolic link. A
   command's helper stays, as the subreaper of everything the command started, until the last of
   those ends; and all of it stays in the runner's systemd cgroup, which nothing it starts leaves.
   spacesd runs as the desktop user and can't start processes as another, so it runs none of these.
@@ -421,7 +421,7 @@ def grpc_failure(status):
 # ── Calls ──────────────────────────────────────────────────────────────────────────────────────
 
 #: Runs as the agents' user, in a process the runner starts: one file call, or `exec`'s checks before it becomes the command.
-#: Paths are pim-computer's: /workspace/… is PIM_WORKSPACE (the runner's PIM_AGENT_ROOT), and links may not lead out of it.
+#: Paths are pim-computer's: /workspace/… is PIM_WORKSPACE (the runner's PIM_AGENT_ROOT); no call follows a symbolic link (see below).
 HELPER = r"""
 import base64, errno, json, os, re, shutil, stat, sys
 request = json.loads(os.environ.pop("PIM_FSOP_REQUEST"))
@@ -440,22 +440,77 @@ def relative(virtual):
     if not resolved.startswith(W + "/"):
         raise CallError("%s is outside %s" % (virtual, W), "EACCES")
     return resolved[len(W) + 1:]
-def virtual_of(local):
-    rest = os.path.relpath(local, ROOT)
-    return W if rest == "." else W + "/" + rest
+def virtual_of(rest):
+    return W + "/" + rest if rest else W
+# Confinement: every call opens its path one part at a time from a descriptor of the root, with O_NOFOLLOW, and acts on
+# the last part through its folder's descriptor. A symbolic link anywhere in a path is refused, never followed, so a link
+# swapped in between a check and a use fails the call instead of leading out. Links inside the root are listed, moved and
+# deleted as links but never read, written or descended into. This guards only these file calls: hard links, and exec,
+# which is a shell of the same unprivileged user, reach whatever that user may reach.
+NOLINK = os.O_NOFOLLOW | os.O_CLOEXEC
+def linked(virtual):
+    return CallError("%s goes through a symbolic link, which these calls don't follow" % virtual, "EACCES")
+def open_dir(fd, name, virtual):
+    try:
+        return os.open(name, os.O_RDONLY | os.O_DIRECTORY | NOLINK, dir_fd=fd)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise linked(virtual)
+        if error.errno == errno.ENOTDIR:
+            try:
+                if stat.S_ISLNK(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
+                    raise linked(virtual)
+            except FileNotFoundError:
+                pass
+        raise
+def parent(virtual):
+    # The folder that holds the path's last part, as a descriptor, and that part's name ("" for the root itself).
+    parts = [part for part in relative(virtual).split("/") if part]
+    fd = os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY | NOLINK)
+    try:
+        for part in parts[:-1]:
+            down = open_dir(fd, part, virtual)
+            os.close(fd)
+            fd = down
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, parts[-1] if parts else ""
+def open_folder(virtual):
+    fd, name = parent(virtual)
+    if not name:
+        return fd
+    try:
+        return open_dir(fd, name, virtual)
+    finally:
+        os.close(fd)
+def open_file(virtual, flags, mode=0o666):
+    fd, name = parent(virtual)
+    try:
+        if not name:
+            raise CallError("EISDIR: is a directory '%s'" % virtual, "EISDIR")
+        try:
+            opened = os.open(name, flags | os.O_NONBLOCK | NOLINK, mode, dir_fd=fd)
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise linked(virtual)
+            raise
+    finally:
+        os.close(fd)
+    kind = os.fstat(opened).st_mode
+    if not stat.S_ISREG(kind):
+        os.close(opened)
+        if stat.S_ISDIR(kind):
+            raise CallError("EISDIR: is a directory '%s'" % virtual, "EISDIR")
+        raise CallError("%s is not a regular file" % virtual, "EINVAL")
+    os.set_blocking(opened, True)
+    return opened
 def local(virtual):
+    # exec's working folder: checked to be a real folder under the root, reached through no link. The command itself is
+    # not confined (see above), so a later swap of this folder gains it nothing it lacked.
+    os.close(open_folder(virtual))
     rest = relative(virtual)
-    target = os.path.join(ROOT, rest) if rest else ROOT
-    existing = target
-    while True:
-        if os.path.lexists(existing):
-            real = os.path.realpath(existing)
-            if real != ROOT and not real.startswith(ROOT + os.sep):
-                raise CallError("%s leads outside %s" % (virtual, W), "EACCES")
-            return target
-        if existing == ROOT:
-            raise CallError("ENOENT: no such file or directory '%s'" % virtual, "ENOENT")
-        existing = os.path.dirname(existing)
+    return os.path.join(ROOT, rest) if rest else ROOT
 def glob(pattern):
     source, i = "", 0
     while i < len(pattern):
@@ -478,9 +533,13 @@ def glob(pattern):
 def globs(value):
     values = value if isinstance(value, list) else [] if value is None else [value]
     return [glob(str(v)) for v in values]
-def walk(folder, exclude, prefix=""):
+def entries_of(fd):
+    with os.scandir(fd) as found:
+        return sorted(found, key=lambda e: e.name)
+def walk(fd, exclude, prefix=""):
+    # Yields (relative path, folder descriptor, name, is a folder); the descriptor is open only until the next item.
     try:
-        entries = sorted(os.scandir(folder), key=lambda e: e.name)
+        entries = entries_of(fd)
     except PermissionError:
         return
     for entry in entries:
@@ -488,22 +547,27 @@ def walk(folder, exclude, prefix=""):
         if any(g.match(rel) for g in exclude):
             continue
         directory = entry.is_dir(follow_symlinks=False)
-        yield rel, entry.path, directory
+        yield rel, fd, entry.name, directory
         if directory:
-            yield from walk(entry.path, exclude, rel)
+            try:
+                down = open_dir(fd, entry.name, rel)
+            except (OSError, CallError):
+                continue
+            try:
+                yield from walk(down, exclude, rel)
+            finally:
+                os.close(down)
 def page(items, args):
     offset = int(args.get("offset") or 0)
     limit = args.get("limit")
     return items[offset:] if limit is None else items[offset:offset + int(limit)]
-def describe(path, link=None):
-    info = os.stat(path)
-    link = link or os.lstat(path)
+def describe(info):
     return {"mode": info.st_mode, "mtime": info.st_mtime * 1000, "size": 0 if stat.S_ISDIR(info.st_mode) else info.st_size,
-            "isFile": stat.S_ISREG(info.st_mode), "isDirectory": stat.S_ISDIR(info.st_mode), "isSymbolicLink": stat.S_ISLNK(link.st_mode)}
-def grep_file(path, matcher, context):
-    if os.path.getsize(path) > 10000000:
-        return []
-    with open(path, "rb") as handle:
+            "isFile": stat.S_ISREG(info.st_mode), "isDirectory": stat.S_ISDIR(info.st_mode), "isSymbolicLink": stat.S_ISLNK(info.st_mode)}
+def grep_fd(fd, matcher, context):
+    with os.fdopen(fd, "rb") as handle:
+        if os.fstat(handle.fileno()).st_size > 10000000:
+            return []
         data = handle.read()
     if b"\0" in data[:8192]:
         return []
@@ -517,101 +581,167 @@ def grep_file(path, matcher, context):
             match["context"] = [{"line": n + 1, "text": lines[n], "isMatch": bool(matcher.search(lines[n]))} for n in range(max(0, index - context), min(len(lines), index + context + 1))]
         found.append(match)
     return found
+def remove_tree(fd, name, virtual):
+    down = open_dir(fd, name, virtual)
+    try:
+        for entry in entries_of(down):
+            if entry.is_dir(follow_symlinks=False):
+                remove_tree(down, entry.name, virtual + "/" + entry.name)
+            else:
+                os.unlink(entry.name, dir_fd=down)
+    finally:
+        os.close(down)
+    os.rmdir(name, dir_fd=fd)
 def handle(op, args):
     if op == "stat":
-        path = local(args["path"])
-        info = describe(path)
-        info.update(name=os.path.basename(path), inode=os.stat(path).st_ino, size=os.stat(path).st_size)
-        return info
+        fd, name = parent(args["path"])
+        try:
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False) if name else os.fstat(fd)
+        finally:
+            os.close(fd)
+        described = describe(info)
+        described.update(name=name or os.path.basename(ROOT), inode=info.st_ino, size=info.st_size)
+        return described
     if op == "read":
-        path = local(args["path"])
-        with open(path, "rb") as handle:
+        with os.fdopen(open_file(args["path"], os.O_RDONLY), "rb") as handle:
             size = os.fstat(handle.fileno()).st_size
             handle.seek(int(args.get("offset") or 0))
             data = handle.read(min(int(args.get("length") or 1048576), 1048576))
         return {"data": base64.b64encode(data).decode(), "size": size}
     if op == "write":
-        path = local(args["path"])
         data = base64.b64decode(args.get("data") or "", validate=True)
         flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if args.get("append") else os.O_TRUNC)
         mode = args.get("mode")
-        fd = os.open(path, flags, 0o666 if mode is None else mode & 0o777)
-        with os.fdopen(fd, "wb") as handle:
+        with os.fdopen(open_file(args["path"], flags, 0o666 if mode is None else mode & 0o777), "wb") as handle:
             handle.write(data)
         return None
     if op == "mkdir":
-        path = local(args["path"])
-        if args.get("recursive"):
-            os.makedirs(path, exist_ok=True)
-        else:
-            os.mkdir(path)
+        if not args.get("recursive"):
+            fd, name = parent(args["path"])
+            try:
+                if not name:
+                    raise CallError("EEXIST: file already exists '%s'" % args["path"], "EEXIST")
+                os.mkdir(name, dir_fd=fd)
+            finally:
+                os.close(fd)
+            return None
+        fd = open_folder(W)
+        try:
+            for part in [part for part in relative(args["path"]).split("/") if part]:
+                try:
+                    os.mkdir(part, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                down = open_dir(fd, part, args["path"])
+                os.close(fd)
+                fd = down
+        finally:
+            os.close(fd)
         return None
     if op == "rm":
-        path = local(args["path"])
-        if path == ROOT:
+        if not relative(args["path"]):
             raise CallError(W + " itself can't be deleted", "EPERM")
-        if not os.path.lexists(path):
+        try:
+            fd, name = parent(args["path"])
+        except FileNotFoundError:
             if args.get("force"):
                 return None
-            raise CallError("ENOENT: no such file or directory '%s'" % args["path"], "ENOENT")
-        if os.path.isdir(path) and not os.path.islink(path):
-            if not args.get("recursive"):
-                raise CallError("EISDIR: is a directory '%s'" % args["path"], "EISDIR")
-            shutil.rmtree(path)
-        else:
-            os.unlink(path)
+            raise
+        try:
+            try:
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                if args.get("force"):
+                    return None
+                raise
+            if stat.S_ISDIR(info.st_mode):
+                if not args.get("recursive"):
+                    raise CallError("EISDIR: is a directory '%s'" % args["path"], "EISDIR")
+                remove_tree(fd, name, args["path"])
+            else:
+                os.unlink(name, dir_fd=fd)
+        finally:
+            os.close(fd)
         return None
     if op == "rename":
-        os.rename(local(args["from"]), local(args["to"]))
+        source, source_name = parent(args["from"])
+        try:
+            target, target_name = parent(args["to"])
+            try:
+                if not source_name or not target_name:
+                    raise CallError(W + " itself can't be moved", "EPERM")
+                os.rename(source_name, target_name, src_dir_fd=source, dst_dir_fd=target)
+            finally:
+                os.close(target)
+        finally:
+            os.close(source)
         return None
     if op == "readdir":
-        folder = local(args["path"])
-        entries = []
-        for name in page(sorted(os.listdir(folder)), args):
-            full = os.path.join(folder, name)
-            link = os.lstat(full)
-            try:
-                info = describe(full, link)
-            except OSError:
-                info = {"mode": link.st_mode, "mtime": link.st_mtime * 1000, "size": link.st_size, "isFile": False, "isDirectory": False, "isSymbolicLink": True}
-            info.update(name=name, parentPath=virtual_of(folder))
-            entries.append(info)
+        rest = relative(args["path"])
+        fd = open_folder(args["path"])
+        try:
+            entries = []
+            for entry in page(entries_of(fd), args):
+                info = describe(entry.stat(follow_symlinks=False))
+                info.update(name=entry.name, parentPath=virtual_of(rest))
+                entries.append(info)
+        finally:
+            os.close(fd)
         return entries
     if op == "find":
-        folder = local(args.get("path") or W)
+        rest = relative(args.get("path") or W)
+        fd = open_folder(args.get("path") or W)
         pattern = glob(str(args.get("pattern") or "**"))
         end = int(args.get("offset") or 0) + int(args.get("limit") or 10 ** 9)
         found = []
-        for rel, full, directory in walk(folder, globs(args.get("exclude"))):
-            if pattern.match(rel):
-                found.append({"path": virtual_of(full), "type": "dir" if directory else "file"})
-                if len(found) >= end:
-                    break
+        try:
+            for rel, _, _, directory in walk(fd, globs(args.get("exclude"))):
+                if pattern.match(rel):
+                    found.append({"path": virtual_of(rest + "/" + rel if rest else rel), "type": "dir" if directory else "file"})
+                    if len(found) >= end:
+                        break
+        finally:
+            os.close(fd)
         return page(found, args)
     if op == "grep":
-        target = local(args.get("path") or W)
+        target = args.get("path") or W
+        rest = relative(target)
         query = str(args.get("query") or "")
         matcher = re.compile(query if args.get("regex") else re.escape(query), re.IGNORECASE if args.get("ignoreCase") else 0)
         context = min(int(args.get("context") or 0), 10)
         include = None if args.get("include") is None else globs(args.get("include"))
         end = int(args.get("offset") or 0) + int(args.get("limit") or 10 ** 9)
-        files = []
-        if os.path.isdir(target):
-            for rel, full, directory in walk(target, globs(args.get("exclude"))):
-                if not directory and (include is None or any(g.match(rel) for g in include)):
-                    files.append(full)
-        else:
-            files.append(target)
         matches = []
-        for path in files:
-            try:
-                for match in grep_file(path, matcher, context):
-                    match["path"] = virtual_of(path)
-                    matches.append(match)
-            except OSError:
-                pass
-            if len(matches) >= end:
-                break
+        fd, name = parent(target)
+        try:
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False) if name else os.fstat(fd)
+        finally:
+            os.close(fd)
+        if not stat.S_ISDIR(info.st_mode):
+            for match in grep_fd(open_file(target, os.O_RDONLY), matcher, context):
+                match["path"] = virtual_of(rest)
+                matches.append(match)
+            return page(matches, args)
+        folder = open_folder(target)
+        try:
+            for rel, fd, name, directory in walk(folder, globs(args.get("exclude"))):
+                if directory or (include is not None and not any(g.match(rel) for g in include)):
+                    continue
+                try:
+                    # Links and anything but regular files are skipped: O_NOFOLLOW refuses a link even if one was just swapped in.
+                    opened = os.open(name, os.O_RDONLY | os.O_NONBLOCK | NOLINK, dir_fd=fd)
+                    if not stat.S_ISREG(os.fstat(opened).st_mode):
+                        os.close(opened)
+                        continue
+                    for match in grep_fd(opened, matcher, context):
+                        match["path"] = virtual_of(rest + "/" + rel if rest else rel)
+                        matches.append(match)
+                except OSError:
+                    pass
+                if len(matches) >= end:
+                    break
+        finally:
+            os.close(folder)
         return page(matches, args)
     if op == "exec":
         run_command(local(args["cwd"]) if args.get("cwd") else ROOT, args)

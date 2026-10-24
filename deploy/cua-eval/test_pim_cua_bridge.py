@@ -585,6 +585,71 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(self.call("stat", path="/workspace/../etc/passwd")["error"]["code"], "EACCES")
         self.assertEqual(self.call("exec", command="pwd", cwd="/workspace/escape")["error"]["code"], "EACCES")
         self.assertEqual(self.call("exec", command="pwd", cwd="/workspace/..")["error"]["code"], "EACCES")
+        # A link to a file outside is listed as a link but never read, searched, written through or described as its target.
+        with open(os.path.join(self.base, "outside.txt"), "w") as handle:
+            handle.write("SENTINEL-OUTSIDE\n")
+        os.symlink(os.path.join(self.base, "outside.txt"), os.path.join(self.root, "escape.txt"))
+        with open(os.path.join(self.root, "inside.txt"), "w") as handle:
+            handle.write("SENTINEL-INSIDE\n")
+        self.assertEqual(self.call("read", path="/workspace/escape.txt")["error"]["code"], "EACCES")
+        self.assertEqual(self.call("write", path="/workspace/escape.txt", data="eA==")["error"]["code"], "EACCES")
+        self.assertEqual(self.call("grep", query="SENTINEL", path="/workspace/escape.txt")["error"]["code"], "EACCES")
+        found = self.call("grep", query="SENTINEL", path="/workspace")["result"]
+        self.assertEqual([(match["path"], match["text"]) for match in found], [("/workspace/inside.txt", "SENTINEL-INSIDE")])
+        self.assertEqual(self.call("grep", query="secret", path="/workspace")["result"], [])
+        self.assertNotIn("secret.txt", json.dumps(self.call("find", path="/workspace")))
+        described = self.call("stat", path="/workspace/escape.txt")["result"]
+        self.assertEqual((described["isSymbolicLink"], described["isFile"]), (True, False))
+        listed = {entry["name"]: entry for entry in self.call("readdir", path="/workspace")["result"]}
+        self.assertEqual((listed["escape"]["isSymbolicLink"], listed["escape"]["isDirectory"]), (True, False))
+        self.assertEqual(self.call("readdir", path="/workspace/escape")["error"]["code"], "EACCES")
+        self.assertEqual(self.call("mkdir", path="/workspace/escape/new", recursive=True)["error"]["code"], "EACCES")
+        self.assertEqual(self.call("exec", command="pwd", cwd="/workspace/escape.txt")["error"]["code"], "EACCES")
+        # Deleting a link deletes the link, not what it names.
+        self.assertEqual(self.call("rm", path="/workspace/escape", recursive=True), {"result": None})
+        self.assertEqual(os.listdir(outside), ["secret.txt"])
+        with open(os.path.join(self.base, "outside.txt")) as handle:
+            self.assertEqual(handle.read(), "SENTINEL-OUTSIDE\n")
+        self.assertEqual(os.stat(os.path.join(self.root, "inside.txt")).st_uid, os.getuid())
+
+    def test_a_folder_swapped_for_a_link_mid_call_is_never_followed(self):
+        self.current = self.lease()
+        outside = os.path.join(self.base, "outside")
+        os.makedirs(outside)
+        with open(os.path.join(outside, "note.txt"), "w") as handle:
+            handle.write("SENTINEL-OUTSIDE\n")
+        inside = os.path.join(self.root, "notes")
+        os.makedirs(inside)
+        with open(os.path.join(inside, "note.txt"), "w") as handle:
+            handle.write("SENTINEL-INSIDE\n")
+        self.server.bridge.requests = bridge.Window(10_000, 10.0)
+        stop = threading.Event()
+
+        def swap():
+            # Keeps replacing the real folder with a link outside and back, as a racing process of the agents' user could.
+            while not stop.is_set():
+                os.rename(inside, inside + ".real")
+                os.symlink(outside, inside)
+                time.sleep(0.001)
+                os.unlink(inside)
+                os.rename(inside + ".real", inside)
+
+        swapper = threading.Thread(target=swap)
+        swapper.start()
+        seen = set()
+        try:
+            for _ in range(30):
+                for answer in (self.call("read", path="/workspace/notes/note.txt"), self.call("grep", query="SENTINEL", path="/workspace"),
+                               self.call("write", path="/workspace/notes/planted.txt", data="eA=="), self.call("readdir", path="/workspace/notes")):
+                    seen.add(json.dumps(answer))
+        finally:
+            stop.set()
+            swapper.join()
+        text = "\n".join(seen)
+        self.assertNotIn("SENTINEL-OUTSIDE", text)
+        self.assertNotIn(bridge.base64.b64encode(b"SENTINEL-OUTSIDE\n").decode(), text)
+        self.assertEqual(os.listdir(outside), ["note.txt"])
+        self.assertIn("SENTINEL-INSIDE", text)
 
     def test_runs_commands_in_the_root_with_their_output_and_exit_code(self):
         self.current = self.lease()

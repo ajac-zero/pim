@@ -35,9 +35,8 @@ Pim's routes, with its credential in X-Pim-Bridge-Authorization:
   call whose answer it never got. So when a driver call ends without spacesd's answer (a timeout
   or a dropped connection), or the bridge restarts while one was under way (the state file counts
   them), the machine is `unsettled`: it stays out of the person's hands, and the viewer with it,
-  however long anyone waits. Only an operator ends that, by hand (docs/cua-evaluation.md,
-  "After an unsettled restart"): stop the bridge, restart cua-spacesd so the driver and its
-  browser session end, check that nothing of the driver's runs, delete the state file, start it.
+  however long anyone waits, across restarts. This prototype has no verified way back from that
+  (docs/cua-evaluation.md, "Unsettled"): the evaluation of this machine ends there.
 - `resume`: the person's viewer sessions are closed, then the machine is the agents', under a new lease.
 - `viewer`: a short-lived viewer ticket (SystemService.CreateViewerTicket), only while it's the person's.
 
@@ -420,6 +419,10 @@ GRPC_CODES = {"3": "invalid argument", "4": "deadline exceeded", "5": "not found
 
 class Unanswered(Refusal):
     """A driver call that got no answer from spacesd: what it does in the browser, if anything, is unknown."""
+
+
+class DriverRefused(Refusal):
+    """A driver call spacesd answered with a well-formed JSON-RPC error for it: the call is over."""
 
 
 def grpc_failure(status):
@@ -1171,12 +1174,27 @@ def check_driver(tool, arguments):
 
 
 def run_driver(spacesd, tool, arguments):
+    """One driver tool call. It returns, or raises DriverRefused, only on a well-formed JSON-RPC answer to this very
+    call: a tool result with a content list, or an error with an integer code. Anything else (no answer, an HTTP
+    status, an MCP session that wouldn't open, unreadable JSON or SSE, a missing or odd result) raises some other
+    Refusal, which the bridge takes as not knowing whether the call ended."""
     check_driver(tool, arguments)
-    answer = spacesd.mcp({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}}, 90)
+    try:
+        answer = spacesd.mcp({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}}, 90)
+    except Refusal as refusal:
+        raise Unanswered(refusal.status, str(refusal)) from None
+    unreadable = Unanswered(502, "The Cua driver's answer to %s couldn't be read." % tool)
+    if not isinstance(answer, dict) or answer.get("jsonrpc") != "2.0" or answer.get("id") != 1 or ("error" in answer) == ("result" in answer):
+        raise unreadable
     if "error" in answer:
-        raise Refusal(502, "The Cua driver refused %s." % tool)
-    result = answer.get("result") if isinstance(answer.get("result"), dict) else {}
-    content = result.get("content") if isinstance(result.get("content"), list) else []
+        error = answer["error"]
+        if not isinstance(error, dict) or not isinstance(error.get("code"), int) or isinstance(error.get("code"), bool):
+            raise unreadable
+        raise DriverRefused(502, "The Cua driver refused %s." % tool)
+    result = answer["result"]
+    if not isinstance(result, dict) or not isinstance(result.get("content"), list) or not all(isinstance(part, dict) for part in result["content"]):
+        raise unreadable
+    content = result["content"]
     text = "\n".join(str(part.get("text", "")) for part in content if isinstance(part, dict) and part.get("type") == "text")[:20_000]
     image = next((part.get("data") for part in content if isinstance(part, dict) and part.get("type") == "image" and part.get("mimeType") == "image/png"), None)
     structured = result.get("structuredContent") if isinstance(result.get("structuredContent"), dict) else None
@@ -1255,7 +1273,7 @@ class State:
         except FileNotFoundError:
             data = dict(self.FRESH)
         except (OSError, ValueError):
-            raise SystemExit("pim-cua-bridge won't start: its state file isn't readable JSON; with spacesd restarted (which closes every viewer session), delete it") from None
+            raise SystemExit("pim-cua-bridge won't start: its state file isn't readable JSON (see docs/cua-evaluation.md, \"Unsettled\")") from None
         if (
             not isinstance(data, dict)
             or data.get("mode") not in ("human", "agents", "draining", "handoff")
@@ -1263,7 +1281,7 @@ class State:
             or not isinstance(data.get("media"), list)
             or not all(isinstance(item, str) for item in data["media"])
         ):
-            raise SystemExit("pim-cua-bridge won't start: its state file isn't one it wrote; with spacesd restarted (which closes every viewer session), delete it")
+            raise SystemExit("pim-cua-bridge won't start: its state file isn't one it wrote (see docs/cua-evaluation.md, \"Unsettled\")")
         self.data = {**self.FRESH, **data}
 
     def __getattr__(self, name):
@@ -1456,9 +1474,7 @@ class Bridge:
                 answer = run_driver(self.spacesd, payload.get("tool"), payload.get("arguments", {}))
                 settled = True
                 return answer
-            except Unanswered:
-                raise
-            except Refusal:
+            except DriverRefused:
                 settled = True
                 raise
             finally:

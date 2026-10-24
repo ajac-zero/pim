@@ -57,6 +57,7 @@ class FakeSpacesd(http.server.BaseHTTPRequestHandler):
         cls.media_auth = []
         cls.mcp_answer = None
         cls.mcp_delay = 0
+        cls.mcp_raw = None
         cls.fail_with = None
         cls.close_fails = False
         cls.mint_gate = None
@@ -124,6 +125,8 @@ class FakeSpacesd(http.server.BaseHTTPRequestHandler):
         if "id" not in request:
             return self.reply(202, b"", "application/json")
         time.sleep(FakeSpacesd.mcp_delay)
+        if FakeSpacesd.mcp_raw:
+            return self.reply(*FakeSpacesd.mcp_raw)
         answer = FakeSpacesd.mcp_answer or {"content": [{"type": "text", "text": "ok"}], "structuredContent": {"echo": request["params"]}}
         self.reply(200, json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": answer}).encode(), "application/json")
 
@@ -473,7 +476,7 @@ class BridgeTest(unittest.TestCase):
         self.restart()
         self.assertEqual(self.request("status")[1]["mode"], "human")
 
-    def test_a_restart_during_a_browser_call_keeps_the_viewer_closed_until_an_operator_recovers(self):
+    def test_a_restart_during_a_browser_call_keeps_the_viewer_closed_for_good(self):
         lease = self.lease()
         # A browser call spacesd is still working on when the bridge goes down, as if it crashed.
         FakeSpacesd.mcp_delay = 3
@@ -489,6 +492,8 @@ class BridgeTest(unittest.TestCase):
         while self.request("status")[1]["inflight"] == 0 and time.monotonic() < deadline:
             time.sleep(0.05)
         old = self.server
+        # The old bridge is gone, as after a crash: it writes nothing more.
+        old.bridge.state.update = lambda **_: None
         self.server = bridge.serve(self.config, bridge.Spacesd(ROOT_TOKEN, self.fake.server_address))
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         view = self.request("status")[1]
@@ -500,12 +505,10 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(self.request("resume", {"epoch": view["epoch"]})[0], 409)
         old.shutdown()
         old.server_close()
-        # The operator's recovery: with spacesd restarted, the state file goes and the bridge starts fresh.
-        self.server.shutdown()
-        self.server.server_close()
-        os.unlink(self.config["state"])
-        self.start()
-        self.assertEqual(self.request("status")[1]["mode"], "human")
+        # It stays so across restarts: there is no verified recovery, so none is offered.
+        self.restart()
+        self.assertEqual(self.pause(seconds=1)["mode"], "draining")
+        self.assertTrue(self.request("status")[1]["unsettled"])
 
     def test_a_browser_call_that_got_no_answer_keeps_the_viewer_closed(self):
         lease = self.lease()
@@ -517,13 +520,50 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual((view["mode"], view["unsettled"], view["inflight"]), ("draining", True, 0))
         self.restart()
         self.assertEqual(self.pause(seconds=1)["mode"], "draining")
-        # A call spacesd answered, even with a refusal, leaves nothing behind.
-        os.unlink(self.config["state"])
-        self.restart()
-        lease = self.lease()
-        FakeSpacesd.fail_with = "refused"
-        self.request("driver", {"tool": "end_session", "arguments": {"session": "pim"}, "lease": lease})
-        self.assertEqual(self.pause()["mode"], "human")
+
+    def test_only_a_well_formed_answer_to_the_browser_call_settles_it(self):
+        # Through the real Spacesd client and HTTP: each of these leaves the call's end unknown.
+        error = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "no"}}
+        for name, raw in [
+            ("server error", (500, b"boom", "text/plain")),
+            ("bad gateway with JSON", (502, json.dumps(error).encode(), "application/json")),
+            ("empty 200", (200, b"", "application/json")),
+            ("accepted, no answer", (202, b"", "application/json")),
+            ("malformed JSON", (200, b'{"jsonrpc": "2.0", "id": 1, "result": {"content": [', "application/json")),
+            ("truncated SSE", (200, b"event: message\ndata: {\"jsonrpc\": \"2.0\", \"id\": 1, \"res", "text/event-stream")),
+            ("SSE with no data", (200, b"event: message\n\n", "text/event-stream")),
+            ("no result", (200, json.dumps({"jsonrpc": "2.0", "id": 1}).encode(), "application/json")),
+            ("another call's answer", (200, json.dumps({"jsonrpc": "2.0", "id": 7, "result": {"content": []}}).encode(), "application/json")),
+            ("result without content", (200, json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode(), "application/json")),
+            ("error without a code", (200, json.dumps({"jsonrpc": "2.0", "id": 1, "error": "no"}).encode(), "application/json")),
+            ("both result and error", (200, json.dumps({**error, "result": {"content": []}}).encode(), "application/json")),
+        ]:
+            with self.subTest(name):
+                FakeSpacesd.reset()
+                self.server.shutdown()
+                self.server.server_close()
+                if os.path.exists(self.config["state"]):
+                    os.unlink(self.config["state"])  # a fresh machine for each case, as a test only
+                self.start()
+                lease = self.lease()
+                FakeSpacesd.mcp_raw = raw
+                status, answer = self.request("driver", {"tool": "end_session", "arguments": {"session": "pim"}, "lease": lease})
+                self.assertEqual(status, 502, answer)
+                self.assertNotIn(ROOT_TOKEN, json.dumps(answer))
+                view = self.pause(seconds=1)
+                self.assertEqual((view["mode"], view["unsettled"]), ("draining", True))
+        # A JSON-RPC error for this very call, or a tool result (even one marked isError), ends it.
+        for raw in [(200, json.dumps(error).encode(), "application/json"),
+                    (200, b"event: message\ndata: " + json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": [], "isError": True}}).encode() + b"\n\n", "text/event-stream")]:
+            FakeSpacesd.reset()
+            self.server.shutdown()
+            self.server.server_close()
+            os.unlink(self.config["state"])
+            self.start()
+            lease = self.lease()
+            FakeSpacesd.mcp_raw = raw
+            self.request("driver", {"tool": "end_session", "arguments": {"session": "pim"}, "lease": lease})
+            self.assertEqual(self.pause()["mode"], "human")
 
     def test_a_pause_waits_while_the_runners_cgroup_holds_more_than_the_runner_whatever_it_says(self):
         self.current = self.lease()

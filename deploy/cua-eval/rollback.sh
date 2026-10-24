@@ -8,12 +8,16 @@
 # those as well, afterwards:
 #   userdel -r pim-agent; userdel pim-bridge; rm -rf /var/lib/pim-cua-bridge /var/backups/pim-cua-bridge*
 #
-# It fails closed. The viewer route (cua-viewer-proxy) stops first and starts again only once all of
-# these hold: the bridge's and the runner's units are stopped, their cgroups hold no process, nothing
-# listens on port 3290 or the runner's socket, both originals are back with the reviewed SHA-256 and
-# `caddy validate` accepts the Caddyfile. Anything else leaves the viewer route down, keeps the
-# backups, the bridge's code and units where they are (for a person to look at) and the deadline
-# timer as it is, and exits 1. Running it again after fixing the cause is safe.
+# It fails closed, in this order, stopping at the first thing it can't verify, with exit 1:
+#   1. The viewer route (cua-viewer-proxy) stops, and stays down unless every later step succeeds.
+#   2. The bridge and the runner stop: their units inactive, their cgroups empty, nothing on port
+#      3290 or the runner's socket. Until that holds, the patched deadline-check.sh (which stops them
+#      at the deadline), the Caddyfile, the units, the code and the backups all stay as they are.
+#   3. The Caddyfile comes back (reviewed SHA-256, `caddy validate`), and only then deadline-check.sh.
+#   4. Only then do the units and the code go, cua-spacesd restarts, and, if it did, the viewer route
+#      starts again.
+# A failure in 3 keeps the units (stopped, disabled) and the code as they are, for a person to look
+# at. Running it again after fixing the cause is safe.
 set -uo pipefail
 umask 077
 
@@ -68,8 +72,12 @@ if [ -n "$busy" ]; then
   problem "still running or listening after stopping:$busy"
   quiet=0
 fi
+keep() {
+  problem "$1: the viewer route stays down; the patched deadline-check.sh, the units, the code and the backups in $BACKUP stay as they are"
+  exit 1
+}
+[ "$quiet" = 1 ] || keep "the bridge or the runner may still run"
 
-restored=1
 restore() { # restore FILE BACKUP WANT
   if [ "$(sha "$1")" = "$3" ]; then
     say "$1 is the original already"
@@ -81,46 +89,36 @@ restore() { # restore FILE BACKUP WANT
   [ "$(sha "$1")" = "$3" ] || { problem "$1 isn't the original after restoring it"; return 1; }
   say "restored $1"
 }
-restore "$CADDYFILE" "$BACKUP/Caddyfile.orig" "$CADDY_ORIGINAL" || restored=0
-restore "$DEADLINE" "$BACKUP/deadline-check.sh.orig" "$DEADLINE_ORIGINAL" || restored=0
-
-valid=0
-if [ "$restored" = 1 ]; then
-  scratch="$(mktemp -d)"
-  if (
-    IFS= read -r line <"$BASIC"
-    export CUA_EVAL_BASIC_USER="${line%%:*}" CUA_EVAL_BASIC_HASH="${line#*:}"
-    unset line
-    export HOME="$scratch" XDG_DATA_HOME="$scratch" XDG_CONFIG_HOME="$scratch"
-    exec "$CADDY" validate --config "$CADDYFILE" --adapter caddyfile
-  ) >"$scratch/validate.log" 2>&1; then
-    valid=1
-  else
-    problem "caddy validate refused the restored Caddyfile"
-  fi
+restore "$CADDYFILE" "$BACKUP/Caddyfile.orig" "$CADDY_ORIGINAL" || keep "the Caddyfile isn't the original"
+scratch="$(mktemp -d)"
+if ! (
+  IFS= read -r line <"$BASIC"
+  export CUA_EVAL_BASIC_USER="${line%%:*}" CUA_EVAL_BASIC_HASH="${line#*:}"
+  unset line
+  export HOME="$scratch" XDG_DATA_HOME="$scratch" XDG_CONFIG_HOME="$scratch"
+  exec "$CADDY" validate --config "$CADDYFILE" --adapter caddyfile
+) >"$scratch/validate.log" 2>&1; then
   rm -rf "$scratch"
+  keep "caddy validate refused the restored Caddyfile"
 fi
+rm -rf "$scratch"
+restore "$DEADLINE" "$BACKUP/deadline-check.sh.orig" "$DEADLINE_ORIGINAL" || keep "deadline-check.sh isn't the original"
 
-if [ "$quiet" = 1 ]; then
-  for unit in "${UNITS[@]}"; do
-    rm -f "$FS/etc/systemd/system/$unit"
-  done
-  systemctl daemon-reload || { problem "systemctl daemon-reload failed"; quiet=0; }
-  systemctl reset-failed "${UNITS[@]}" 2>/dev/null || true
-  rm -rf "$FS/opt/pim-cua-bridge" "$FS/etc/pim-cua-bridge"
-else
-  say "kept the bridge's units and code in place, since something of it may still run"
-fi
-
-if [ "$quiet" != 1 ] || [ "$restored" != 1 ] || [ "$valid" != 1 ]; then
-  problem "not reopening: the viewer route stays down, the backups stay in $BACKUP, the deadline timer is untouched"
-  exit 1
-fi
+for unit in "${UNITS[@]}"; do
+  rm -f "$FS/etc/systemd/system/$unit"
+done
+systemctl daemon-reload || keep "systemctl daemon-reload failed"
+systemctl reset-failed "${UNITS[@]}" 2>/dev/null || true
+rm -rf "$FS/opt/pim-cua-bridge" "$FS/etc/pim-cua-bridge"
 
 say "restarting cua-spacesd briefly, then the viewer route"
 failed=0
-systemctl restart cua-spacesd.service || failed=1
-systemctl start cua-viewer-proxy.service || failed=1
+if systemctl restart cua-spacesd.service && systemctl is-active --quiet cua-spacesd.service; then
+  systemctl start cua-viewer-proxy.service || failed=1
+else
+  problem "cua-spacesd didn't restart, so the viewer route stays down"
+  failed=1
+fi
 for unit in cua-spacesd.service cua-viewer-proxy.service; do
   systemctl is-active --quiet "$unit" || { problem "$unit isn't running (if the soft deadline passed, that's expected)"; failed=1; }
 done

@@ -66,6 +66,10 @@ REQUIRED = (
     "file_read reads what the command wrote",
     "file_read outside /workspace is refused",
     "browser_open reads the fixture page",
+    "browser_read reads it again",
+    "the fixture's link is listed",
+    "the fixture's button is listed",
+    "the fixture's text field is listed",
     "browser_click asks first, then clicks the fixture's button",
     "browser_type asks first, then types in the fixture's field",
     "the pause waits for it",
@@ -80,12 +84,18 @@ FIXTURE_MARK = "pim-e2e-fixture-1"
 FIXTURE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>%s</title></head><body>
 <h1 id="state">%s ready</h1>
-<button onclick="document.getElementById('state').textContent='pim-e2e-clicked'">Mark clicked</button>
-<label>Note <input type="text" oninput="document.getElementById('typed').textContent='typed: '+this.value"></label>
-<p id="typed">typed: nothing</p>
+<button onclick="document.getElementById('state').textContent='clicked-'+(6*7)">Mark clicked</button>
+<label>Note <input type="text" oninput="document.getElementById('typed').textContent='field holds, reversed: '+this.value.split('').reverse().join('')"></label>
+<p id="typed">field holds nothing</p>
 <a href="#linked">A link</a>
 </body></html>
 """ % (FIXTURE_MARK, FIXTURE_MARK)
+#: What the page shows once its button is clicked, and once its field holds `value`: written by its script, absent from its markup.
+FIXTURE_CLICKED = "clicked-42"
+
+
+def fixture_typed(value):
+    return "field holds, reversed: " + value[::-1]
 
 
 def report(ok, what, detail=""):
@@ -104,6 +114,10 @@ def skip(what, why):
 def verdict(partial):
     """The run's last line and exit code: 0 only when every required check ran and passed."""
     missing = [name for name in REQUIRED if name not in passed and name not in failures]
+    if partial and not failures:
+        # A partial run is never an acceptance pass, however much of it ran and passed.
+        print("\nINCOMPLETE (--partial, diagnostics only): not an acceptance pass; not run: %s" % ("; ".join(missing + skipped) or "nothing, but rerun without --partial to accept"))
+        return 2
     if failures:
         print("\nFAILED: %d check(s): %s" % (len(failures), "; ".join(failures)))
         return 1
@@ -520,19 +534,21 @@ def checks(args, owner):
     elif not report(FIXTURE_MARK in text, "browser_open reads the fixture page", "not the fixture (`e2e.py fixture`): " + text[:160]):
         pass
     else:
-        text, error, _ = use_tool(owner, chat, "browser_read", {})
-        report(not error and FIXTURE_MARK in text, "browser_read reads it again", text[:200])
-        found = re.search(r"\[(\d+) button[^\]]*Mark clicked", text)
-        if report(bool(found), "the fixture's button is listed", text[:300]):
-            text, error, approval = use_tool(owner, chat, "browser_click", {"ref": int(found.group(1))}, decide="approve")
-            seen, _, _ = use_tool(owner, chat, "browser_read", {})
-            report(approval is not None and not error and "pim-e2e-clicked" in seen, "browser_click asks first, then clicks the fixture's button", (text + " | " + seen)[:300])
-        found = re.search(r"\[(\d+) (?:textbox|searchbox)", text if not found else seen)
-        if report(bool(found), "the fixture's text field is listed", text[:300]):
-            text, error, approval = use_tool(owner, chat, "browser_type", {"ref": int(found.group(1)), "text": "pim e2e"}, decide="approve")
-            seen, _, _ = use_tool(owner, chat, "browser_read", {})
-            report(approval is not None and not error and "typed: pim e2e" in seen, "browser_type asks first, then types in the fixture's field", (text + " | " + seen)[:300])
-        report(bool(re.search(r"\[\d+ link[^\]]*A link", seen if found else text)), "the fixture's link is listed")
+        # `page` is always the latest browser_read; what the fixture's script writes isn't in its markup, so seeing it proves the action.
+        page, error, _ = use_tool(owner, chat, "browser_read", {})
+        report(not error and FIXTURE_MARK in page, "browser_read reads it again", page[:200])
+        report(bool(re.search(r"\[\d+ link[^\]]*A link", page)), "the fixture's link is listed", page[:300])
+        button = re.search(r"\[(\d+) button[^\]]*Mark clicked", page)
+        if report(bool(button), "the fixture's button is listed", page[:300]):
+            text, error, approval = use_tool(owner, chat, "browser_click", {"ref": int(button.group(1))}, decide="approve")
+            page, _, _ = use_tool(owner, chat, "browser_read", {})
+            report(approval is not None and not error and FIXTURE_CLICKED in page, "browser_click asks first, then clicks the fixture's button", (text + " | " + page)[:300])
+        field = re.search(r"\[(\d+) (?:textbox|searchbox)", page)
+        if report(bool(field), "the fixture's text field is listed", page[:300]):
+            typed = "pim%d" % int.from_bytes(os.urandom(3), "big")
+            text, error, approval = use_tool(owner, chat, "browser_type", {"ref": int(field.group(1)), "text": typed}, decide="approve")
+            page, _, _ = use_tool(owner, chat, "browser_read", {})
+            report(approval is not None and not error and fixture_typed(typed) in page, "browser_type asks first, then types in the fixture's field", (text + " | " + page)[:300])
 
     print("— pausing")
     queued = ask_only(owner, chat, "shell", {"command": "touch %s-queued.txt" % run_id, "cwd": "/workspace"})

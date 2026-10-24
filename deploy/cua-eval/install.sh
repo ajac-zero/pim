@@ -64,12 +64,14 @@ say "    sources: SHA256SUMS $(sha "$HERE/SHA256SUMS")"
 [ ! -e /var/lib/cua-evaluation/expired ] || die "the evaluation's soft deadline has passed (/var/lib/cua-evaluation/expired)"
 # The deadline itself, not only its marker (written by a timer that may not have run yet): the time
 # from the first bootstrap, as deadline-check.sh counts it, must leave at least an hour.
+# deadline-check.sh's own calculation (vm_patch.py deadline-left: the earlier of the bootstrap
+# epoch and CUA_EVAL_CREATED_EPOCH, plus CUA_EVAL_DEADLINE_HOURS), and its unit may not set any of
+# them some other way. At least an hour must be left, here and again just before switching over.
 time_left() {
-  local epoch_file=/var/lib/cua-evaluation/bootstrap-epoch start
-  { [ -f "$epoch_file" ] && [ "$(stat -c %u "$epoch_file")" = 0 ]; } || die "no root-owned $epoch_file: the deadline can't be checked"
-  start="$(cat "$epoch_file")"
-  [[ "$start" =~ ^[0-9]+$ ]] || die "$epoch_file isn't an epoch"
-  left=$((start + 48 * 3600 - $(date +%s)))
+  local env
+  env="$(systemctl show -p Environment --value cua-eval-deadline.service)" || die "can't read cua-eval-deadline.service"
+  [[ "$env" != *CUA_EVAL_* ]] || die "cua-eval-deadline.service sets CUA_EVAL_* itself, which the installer doesn't follow"
+  left="$(python3 -I "$HERE/vm_patch.py" deadline-left)" || die "the soft deadline can't be established"
   [ "$left" -ge 3600 ] || die "the soft deadline is less than an hour away ($((left / 60)) minutes): not installing"
 }
 time_left
@@ -133,40 +135,6 @@ for user in pim-bridge pim-agent; do
   fi
 done
 
-# The platform, tried for real: a transient unit as pim-agent with the runner's sandbox must find
-# itself unprivileged, cut off from loopback, link-local and Azure's host endpoints, without the
-# desktop's X socket, session bus, homes or spacesd's token, and must keep even a detached process in
-# its own cgroup. Anything else, including systemd ignoring a setting it can't apply, refuses.
-say "    trying the runner's sandbox for real"
-# A refusal inside proves the denial only if the same address answers outside it.
-for target in 127.0.0.1/3211 127.0.0.1/443 169.254.169.254/80; do
-  timeout 3 bash -c "exec 3<>/dev/tcp/$target" 2>/dev/null || die "$target doesn't answer the installer, so the sandbox's denial of it can't be shown"
-done
-cua_uid="$(id -u cua 2>/dev/null || echo none)"
-probe="$(systemd-run --quiet --wait --pipe --collect -p User=pim-agent -p Group=pim-agent -p NoNewPrivileges=yes \
-  -p ProtectSystem=strict -p ProtectHome=tmpfs -p BindPaths=/home/pim-agent -p PrivateTmp=yes -p PrivateDevices=yes \
-  -p RestrictSUIDSGID=yes -p CapabilityBoundingSet= -p "IPAddressDeny=localhost link-local 168.63.129.16/32" \
-  -p IPAddressAllow=127.0.0.53/32 -p KillMode=control-group \
-  /bin/bash -c '
-    no() { ! timeout 3 bash -c "$1" >/dev/null 2>&1; }
-    [ "$(id -u)" != 0 ] && echo ok-unprivileged
-    case " $(id -nG) " in *" sudo "*|*" admin "*|*" wheel "*|*" root "*) ;; *) echo ok-groups ;; esac
-    no "sudo -n true" && echo ok-no-sudo
-    no "exec 3<>/dev/tcp/127.0.0.1/3211" && no "exec 3<>/dev/tcp/127.0.0.1/443" && echo ok-no-loopback
-    no "exec 3<>/dev/tcp/169.254.169.254/80" && no "exec 3<>/dev/tcp/168.63.129.16/80" && echo ok-no-metadata
-    no "cat /etc/cua/spacesd.env" && echo ok-no-root-token
-    [ "$(ls -A /home)" = pim-agent ] && echo ok-homes
-    [ ! -e /tmp/.X11-unix ] && no "ls /run/user/'"$cua_uid"'/bus" && echo ok-no-desktop
-    cg="$(sed -n "s/^0:://p" /proc/self/cgroup)"
-    [ -n "$cg" ] && [ -r "/sys/fs/cgroup$cg/cgroup.procs" ] && echo ok-cgroup
-    setsid sleep 20 </dev/null >/dev/null 2>&1 &
-    sleep 1
-    pgrep -u pim-agent -x sleep | while read -r pid; do grep -qx "$pid" "/sys/fs/cgroup$cg/cgroup.procs" && echo ok-detached && break; done
-  ' 2>&1)" || true
-for want in unprivileged groups no-sudo no-loopback no-metadata no-root-token homes no-desktop cgroup detached; do
-  grep -qx "ok-$want" <<<"$probe" || die "the runner's sandbox doesn't hold on this VM: $want (see install.sh, step 2)"
-done
-say "    sandbox: unprivileged, no loopback or metadata, no desktop, detached processes stay in its cgroup"
 
 # ── 3. Files ────────────────────────────────────────────────────────────────────────────────────
 say "3/7 files"
@@ -188,6 +156,57 @@ for unit in "${UNITS[@]}"; do
   install -m 0644 "$HERE/$unit" "/etc/systemd/system/$unit"
 done
 systemctl daemon-reload
+
+# The platform, tried for real, before anything serves differently: a transient unit as pim-agent
+# under every confining setting of the reviewed pim-agent-exec.service (vm_patch.py
+# runner-properties reads them from it, so they can't drift) must write only its workspace and its
+# private /tmp, run unprivileged (no capabilities, no_new_privs, no admin group, no sudo), reach no
+# loopback, link-local or Azure host address that answers the installer, see neither the desktop's
+# X socket and session bus nor other homes nor spacesd's token, and keep a detached process in its
+# own cgroup. The installed unit's effective settings must be the reviewed ones, with no drop-ins.
+# Anything unproven stops the install here, BLOCKED, before the switch. Nothing here has run on
+# the real VM or under root and systemd in a rehearsal of this version.
+blocked() { printf 'pim-cua-bridge install: BLOCKED: %s; nothing serves differently; rollback.sh removes what steps 2-3 added\n' "$*" >&2; exit 1; }
+say "    trying the runner's sandbox for real"
+[ -z "$(systemctl show -p DropInPaths --value pim-agent-exec.service)" ] || blocked "pim-agent-exec.service has drop-ins"
+effective="$(systemctl show -p User -p NoNewPrivileges -p ProtectSystem -p ProtectHome -p PrivateTmp -p IPAddressDeny -p CapabilityBoundingSet --value pim-agent-exec.service | tr '\n' ' ')"
+for want in "pim-agent " "yes " "strict " "tmpfs "; do
+  [[ "$effective" == *"$want"* ]] || blocked "pim-agent-exec.service's effective settings aren't the reviewed ones ($effective)"
+done
+for target in 127.0.0.1/3211 127.0.0.1/443 169.254.169.254/80; do
+  timeout 3 bash -c "exec 3<>/dev/tcp/$target" 2>/dev/null || blocked "$target doesn't answer the installer, so the sandbox's denial of it can't be shown"
+done
+mapfile -t properties < <(python3 -I "$HERE/vm_patch.py" runner-properties "$HERE/pim-agent-exec.service")
+[ "${#properties[@]}" -gt 10 ] || blocked "couldn't read the runner's settings"
+cua_uid="$(id -u cua 2>/dev/null || echo none)"
+marker="pim-probe-$$"
+probe="$(systemd-run --quiet --wait --pipe --collect "${properties[@]/#/-p}" \
+  /bin/bash -c '
+    no() { ! timeout 3 bash -c "$1" >/dev/null 2>&1; }
+    [ "$(id -u)" != 0 ] && [ "$(id -un)" = pim-agent ] && echo ok-unprivileged
+    case " $(id -nG) " in *" sudo "*|*" admin "*|*" wheel "*|*" root "*) ;; *) echo ok-groups ;; esac
+    grep -qx "CapEff:[[:space:]]*0000000000000000" /proc/self/status && grep -qx "NoNewPrivs:[[:space:]]*1" /proc/self/status && echo ok-caps
+    no "sudo -n true" && echo ok-no-sudo
+    touch /home/pim-agent/pim/.'"$marker"' && rm /home/pim-agent/pim/.'"$marker"' && touch /tmp/'"$marker"' && echo ok-writes
+    no "touch /etc/'"$marker"'" && no "touch /opt/'"$marker"'" && no "touch /usr/local/'"$marker"'" && no "touch /var/lib/'"$marker"'" && echo ok-read-only
+    no "exec 3<>/dev/tcp/127.0.0.1/3211" && no "exec 3<>/dev/tcp/127.0.0.1/443" && echo ok-no-loopback
+    no "exec 3<>/dev/tcp/169.254.169.254/80" && no "exec 3<>/dev/tcp/168.63.129.16/80" && echo ok-no-metadata
+    no "cat /etc/cua/spacesd.env" && echo ok-no-root-token
+    [ "$(ls -A /home)" = pim-agent ] && echo ok-homes
+    [ ! -e /tmp/.X11-unix ] && no "ls /run/user/'"$cua_uid"'/bus" && echo ok-no-desktop
+    cg="$(sed -n "s/^0:://p" /proc/self/cgroup)"
+    [ -n "$cg" ] && [ -r "/sys/fs/cgroup$cg/cgroup.procs" ] && echo ok-cgroup
+    setsid sleep 20 </dev/null >/dev/null 2>&1 &
+    detached=$!
+    sleep 1
+    grep -qx "$detached" "/sys/fs/cgroup$cg/cgroup.procs" && echo ok-detached
+  ' 2>&1)" || true
+for want in unprivileged groups caps no-sudo writes read-only no-loopback no-metadata no-root-token homes no-desktop cgroup detached; do
+  grep -qx "ok-$want" <<<"$probe" || blocked "the runner's sandbox isn't shown to hold on this machine: $want"
+done
+[ ! -e "/tmp/$marker" ] || blocked "the runner's /tmp isn't private"
+for path in /etc /opt /usr/local /var/lib; do [ ! -e "$path/$marker" ] || { rm -f "$path/$marker"; blocked "the runner could write $path"; }; done
+say "    sandbox: shown to hold for every setting of the runner's unit"
 
 # ── 4. The patched Caddyfile, validated ─────────────────────────────────────────────────────────
 say "4/7 validating the patched Caddyfile"

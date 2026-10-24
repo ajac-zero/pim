@@ -76,7 +76,7 @@ class PackagingTest(unittest.TestCase):
             self.assertEqual(stopped[-1], "pim-agent-exec.socket")
             self.assertTrue(os.path.exists(os.path.join(state, "expired")))
 
-    def rollback(self, stuck="", fail_stop="", cgroup="", listening="", backup_ok=True, caddy_rc=0, installed=True):
+    def rollback(self, stuck="", fail_stop="", cgroup="", listening="", backup_ok=True, caddy_rc=0, installed=True, fail_restart=""):
         """rollback.sh in a scratch root with stand-in systemctl, ss, id and caddy; returns (exit code, systemctl calls, root)."""
         fs = tempfile.mkdtemp()
         self.addCleanup(subprocess.run, ["rm", "-rf", fs])
@@ -103,7 +103,7 @@ class PackagingTest(unittest.TestCase):
 echo "$*" >>"$FAKE_STATE/log"
 case "$1" in
   stop) [[ " $FAKE_FAIL_STOP " == *" $2 "* ]] && exit 1; rm -f "$FAKE_STATE/$2" ;;
-  start|restart) touch "$FAKE_STATE/$2" ;;
+  start|restart) [[ " $FAKE_FAIL_RESTART " == *" $2 "* ]] && { rm -f "$FAKE_STATE/$2"; exit 1; }; touch "$FAKE_STATE/$2" ;;
   is-active) [ -e "$FAKE_STATE/$3" ] || [[ " $FAKE_STUCK " == *" $3 "* ]] || exit 3 ;;
 esac
 exit 0
@@ -119,7 +119,7 @@ exit 0
             put("sys/fs/cgroup/system.slice/%s/cgroup.procs" % cgroup, "4242\n")
         ran = subprocess.run(["bash", os.path.join(HERE, "rollback.sh")], capture_output=True, text=True,
                              env={"PATH": bin_ + ":" + os.environ["PATH"], "PIM_ROLLBACK_FS": fs, "FAKE_STATE": state, "FAKE_STUCK": stuck,
-                                  "FAKE_FAIL_STOP": fail_stop, "FAKE_LISTENING": listening})
+                                  "FAKE_FAIL_STOP": fail_stop, "FAKE_LISTENING": listening, "FAKE_FAIL_RESTART": fail_restart})
         with open(os.path.join(state, "log")) as handle:
             return ran.returncode, handle.read().splitlines(), fs
 
@@ -134,13 +134,19 @@ exit 0
         self.assertEqual(self.rollback(installed=False, backup_ok=False)[0], 0)
 
     def test_rollback_keeps_the_viewer_down_and_the_evidence_when_anything_is_ambiguous(self):
-        for name, faults in [
-            ("the viewer route won't stop", {"stuck": "cua-viewer-proxy.service"}),
-            ("the runner won't stop", {"fail_stop": "pim-agent-exec.service", "stuck": "pim-agent-exec.service"}),
-            ("a process stays in the runner's cgroup", {"cgroup": "pim-agent-exec.service"}),
-            ("something listens on 3290", {"listening": "LISTEN 0 5 127.0.0.1:3290"}),
-            ("the backup isn't the original", {"backup_ok": False}),
-            ("caddy refuses the restored Caddyfile", {"caddy_rc": 1}),
+        patched_deadline = vm_patch.sha256(vm_patch.patch("deadline", vm_patch.original_text("deadline")))
+
+        def deadline_sha(fs):
+            with open(os.path.join(fs, "opt/cua-evaluation/bootstrap/bin/deadline-check.sh"), encoding="utf-8") as handle:
+                return vm_patch.sha256(handle.read())
+
+        for name, faults, still_running in [
+            ("the viewer route won't stop", {"stuck": "cua-viewer-proxy.service"}, True),
+            ("the runner won't stop", {"fail_stop": "pim-agent-exec.service", "stuck": "pim-agent-exec.service"}, True),
+            ("a process stays in the runner's cgroup", {"cgroup": "pim-agent-exec.service"}, True),
+            ("something listens on 3290", {"listening": "LISTEN 0 5 127.0.0.1:3290"}, True),
+            ("the backup isn't the original", {"backup_ok": False}, False),
+            ("caddy refuses the restored Caddyfile", {"caddy_rc": 1}, False),
         ]:
             with self.subTest(name):
                 code, calls, fs = self.rollback(**faults)
@@ -148,8 +154,20 @@ exit 0
                 self.assertNotIn("start cua-viewer-proxy.service", calls)
                 self.assertNotIn("restart cua-spacesd.service", calls)
                 self.assertTrue(os.path.isdir(os.path.join(fs, "var/backups/pim-cua-bridge")))
-                if "stuck" in faults or "cgroup" in faults or "listening" in faults:
-                    self.assertTrue(os.path.exists(os.path.join(fs, "opt/pim-cua-bridge")))
+                # Recovery artifacts stay: the units and the code.
+                self.assertTrue(os.path.exists(os.path.join(fs, "opt/pim-cua-bridge")))
+                self.assertTrue(os.path.exists(os.path.join(fs, "etc/systemd/system/pim-agent-exec.service")))
+                if still_running:
+                    # What may still run stays under the patched deadline-check.sh, which stops the runner at the deadline.
+                    self.assertEqual(deadline_sha(fs), patched_deadline)
+                    self.assertIn("pim-agent-exec", vm_patch.patch("deadline", vm_patch.original_text("deadline")))
+                if name == "caddy refuses the restored Caddyfile":
+                    self.assertEqual(deadline_sha(fs), patched_deadline)
+        # If cua-spacesd doesn't come back, the viewer route stays down.
+        code, calls, _ = self.rollback(fail_restart="cua-spacesd.service")
+        self.assertEqual(code, 1)
+        self.assertIn("restart cua-spacesd.service", calls)
+        self.assertNotIn("start cua-viewer-proxy.service", calls)
 
     def test_the_e2e_run_accepts_only_when_every_required_check_ran_and_passed(self):
         import contextlib
@@ -176,6 +194,15 @@ exit 0
             self.assertNotEqual(code, 0)
             self.assertNotIn("ACCEPTED", said)
         self.assertEqual(verdict(everything, failed=["x"], partial=True)[0], 1)
+        # Everything passing in a partial run is still no acceptance.
+        code, said = verdict(everything, partial=True)
+        self.assertEqual(code, 2)
+        self.assertIn("INCOMPLETE", said)
+        self.assertNotIn("ACCEPTED", said)
+        # What proves a click or typing is written by the fixture's script, never present in its markup.
+        self.assertNotIn(e2e.FIXTURE_CLICKED, e2e.FIXTURE)
+        self.assertNotIn(e2e.fixture_typed("pim123"), e2e.FIXTURE)
+        self.assertNotIn("field holds, reversed: ", e2e.FIXTURE.replace("'field holds, reversed: '", ""))
         # A media socket counts as alive only if it answers a ping and stays open.
         import threading
 
@@ -192,6 +219,63 @@ exit 0
         theirs.close()
         self.assertFalse(e2e.alive(ours, 0.3))
         ours.close()
+
+    def test_the_installer_counts_the_deadline_as_deadline_check_does_and_trusts_only_roots_inputs(self):
+        from unittest import mock
+
+        root = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", root])
+        os.makedirs(root + "/var/lib/cua-evaluation")
+        os.makedirs(root + "/etc/cua-evaluation")
+
+        def put(path, text):
+            with open(root + path, "w", encoding="utf-8") as handle:
+                handle.write(text)
+
+        def left(now=10_000_000):
+            with mock.patch.object(vm_patch, "trusted", lambda path: True):
+                return vm_patch.deadline_left(root, now)
+
+        put("/var/lib/cua-evaluation/bootstrap-epoch", "10000000\n")
+        self.assertEqual(left(), 48 * 3600)
+        # The earlier creation time counts; a later one can't extend the window.
+        put("/etc/cua-evaluation/config.env", "# operator\nCUA_EVAL_CREATED_EPOCH=9990000\n")
+        self.assertEqual(left(), 48 * 3600 - 10_000)
+        put("/etc/cua-evaluation/config.env", "CUA_EVAL_CREATED_EPOCH='10500000'\nCUA_EVAL_DEADLINE_HOURS=24\n")
+        self.assertEqual(left(), 24 * 3600)
+        # Read, never run; anything unexpected refuses.
+        for config in ("CUA_EVAL_CREATED_EPOCH=$(touch %s/ran)\n" % root, "CUA_EVAL_CREATED_EPOCH=12abc\n", "CUA_EVAL_DEADLINE_HOURS=-1\n",
+                       "CUA_EVAL_CREATED_EPOCH=1\nCUA_EVAL_CREATED_EPOCH=2\n", "CUA_EVAL_STATE_DIR=/tmp\n", "echo hi\n"):
+            put("/etc/cua-evaluation/config.env", config)
+            with self.assertRaises(ValueError, msg=config):
+                left()
+        self.assertFalse(os.path.exists(root + "/ran"))
+        os.unlink(root + "/etc/cua-evaluation/config.env")
+        put("/var/lib/cua-evaluation/bootstrap-epoch", "soon\n")
+        with self.assertRaises(ValueError):
+            left()
+        os.unlink(root + "/var/lib/cua-evaluation/bootstrap-epoch")
+        with self.assertRaises(ValueError):
+            left()
+        # Without the stand-in, a file this (non-root) test wrote isn't trusted.
+        put("/var/lib/cua-evaluation/bootstrap-epoch", "10000000\n")
+        if os.getuid() != 0:
+            with self.assertRaises(ValueError):
+                vm_patch.deadline_left(root, 10_000_000)
+        install = read("install.sh")
+        self.assertLess(install.index("\ntime_left\nsay \"6/7"), install.index("switched=1"))
+
+    def test_the_installer_tries_the_runners_own_settings_and_stops_blocked_before_switching(self):
+        properties = vm_patch.runner_properties(read("pim-agent-exec.service"))
+        for line in ("User=pim-agent", "NoNewPrivileges=yes", "ProtectSystem=strict", "PrivateTmp=yes", "CapabilityBoundingSet=",
+                     "IPAddressDeny=localhost link-local 168.63.129.16/32", "KillMode=control-group"):
+            self.assertIn(line, properties)
+        self.assertFalse([line for line in properties if line.startswith(("ExecStart=", "Environment=", "Restart="))])
+        install = read("install.sh")
+        self.assertIn('vm_patch.py" runner-properties "$HERE/pim-agent-exec.service"', install)
+        checks = install[install.index("for want in unprivileged") : install.index("; do", install.index("for want in unprivileged"))].split()[3:]
+        self.assertEqual(checks, ["unprivileged", "groups", "caps", "no-sudo", "writes", "read-only", "no-loopback", "no-metadata", "no-root-token", "homes", "no-desktop", "cgroup", "detached"])
+        self.assertLess(install.index("blocked \"the runner's sandbox"), install.index("switched=1"))
 
     def test_the_scripts_parse(self):
         for script in ("install.sh", "rollback.sh", "rehearsal/orb-vm.sh"):

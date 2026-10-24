@@ -1,0 +1,20 @@
+# The person's viewer's StreamService/OpenMedia, to pim-cua-bridge's `media/open` instead of
+# straight to spacesd, so the bridge can refuse it while Pim's agents have the machine and record
+# every media session it opens (see docs/cua-evaluation.md). vm_patch.py imports it inside the
+# VM's `route { … }` just before `handle @viewer_rpc`, and takes OpenMedia out of @viewer_rpc's
+# list: so it comes after the Basic login, the path check, the response headers and the Origin
+# check, and needs the same viewer ticket header (@no_ticket_header, defined in that route).
+# The bridge passes only that ticket on to spacesd.
+
+@pim_bridge_media expression `{http.request.method} == "POST" && {http.request.uri.path} == "/cua.env.v1.StreamService/OpenMedia" && {http.request.uri.query} == ""`
+handle @pim_bridge_media {
+	respond @no_ticket_header 401
+	request_body {
+		max_size 64KiB
+	}
+	rewrite * /pim-bridge/v1/media/open
+	reverse_proxy {$PIM_BRIDGE_UPSTREAM:127.0.0.1:3290} {
+		import {$PIM_BRIDGE_CADDY_DIR:/opt/pim-cua-bridge/caddy}/pim-bridge-strip.caddy
+		header_up -X-Pim-Bridge-Authorization
+	}
+}

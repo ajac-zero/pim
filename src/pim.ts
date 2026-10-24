@@ -5058,7 +5058,12 @@ export class Pim extends DurableAgent<Env> {
 				this.cua.enable(Date.now());
 				if (!was) await this.#computerSwitched();
 				this.#computerChanged();
-				return noStore(this.cua.view());
+				// Paused once the bridge says the machine is the person's, which it may not be yet.
+				try {
+					return noStore(await this.cua.settle());
+				} catch (error) {
+					return noStore({ ...this.cua.view(), problem: errorMessage(error) });
+				}
 			},
 		],
 		[

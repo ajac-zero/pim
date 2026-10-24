@@ -1,0 +1,16 @@
+# The way from pim-cua-bridge to the agents' runner (pim-agent-exec.service): a socket only the
+# bridge's user may open. systemd holds it and starts the runner when the bridge first connects.
+
+[Unit]
+Description=pim-cua-bridge's socket to the agents' runner
+ConditionPathExists=!/var/lib/cua-evaluation/expired
+
+[Socket]
+ListenStream=/run/pim-agent-exec.sock
+SocketUser=pim-bridge
+SocketGroup=pim-bridge
+SocketMode=0600
+Accept=no
+
+[Install]
+WantedBy=sockets.target

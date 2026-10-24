@@ -152,6 +152,8 @@ export class CuaEvaluation implements ComputerProvider {
 	readonly #held = new AsyncLocalStorage<number>();
 	/** Pausing, resuming and minting a viewer ticket, one at a time. */
 	#transition: Promise<unknown> = Promise.resolve();
+	/** Whether a resume is waiting for the bridge: turning the evaluation on or off waits for it. */
+	#resuming = false;
 	/** Whether the bridge answered the last time it was asked. */
 	#reachable: boolean | null = null;
 	/** Called when what the app shows of it changes. */
@@ -177,24 +179,32 @@ export class CuaEvaluation implements ComputerProvider {
 		return this.offered() && this.#meta.meta(ENABLED_KEY) !== undefined;
 	}
 
-	/** Turning it on or off changes which computer the agents use, so it waits until nothing of theirs runs on this one. */
+	/** Turning it on or off changes which computer the agents use, so it waits until nothing of theirs runs on this one, and no resume is under way. */
 	#switchable(): void {
 		const { mode } = this.#control();
-		if (this.active() && (mode !== "paused" || this.#pending > 0)) throw new HttpError(409, "Pause your agents, and let their work finish, before turning the evaluation off.");
+		if (this.active() && (mode !== "paused" || this.#pending > 0 || this.#resuming)) {
+			throw new HttpError(409, "Pause your agents, and let their work finish, before turning the evaluation off.");
+		}
 	}
 
-	/** Puts it in place of the space's other computer, with the agents paused until the person resumes them. */
+	/**
+	 * Puts it in place of the space's other computer, with the agents
+	 * stopped: pausing, until the bridge says the machine is the person's
+	 * (`settle`), since it may still hold an earlier lease of theirs.
+	 */
 	enable(now: number): void {
 		if (!this.offered()) throw new HttpError(404, "This space isn't part of the Cua evaluation.");
 		if (this.active()) return;
 		const { generation } = this.#control();
-		this.#meta.setMeta(CONTROL_KEY, JSON.stringify({ ...PAUSED_CONTROL, generation: generation + 1, at: now }));
+		this.#meta.setMeta(CONTROL_KEY, JSON.stringify({ ...PAUSED_CONTROL, mode: "pausing", generation: generation + 1, at: now }));
 		this.#meta.setMeta(ENABLED_KEY, String(now));
 	}
 
-	/** The agents go back to the space's other computer, if it has one; only while they're paused here. */
+	/** The agents go back to the space's other computer, if it has one; only while they're paused here. A pause or resume the person saw before ends with it. */
 	disable(): void {
 		this.#switchable();
+		const control = this.#control();
+		this.#setControl({ ...control, generation: control.generation + 1, at: Date.now() });
 		this.#meta.deleteMeta(ENABLED_KEY);
 	}
 
@@ -299,11 +309,17 @@ export class CuaEvaluation implements ComputerProvider {
 		return next;
 	}
 
-	/** Stops the agents' calls from starting here at once, and asks the bridge to take none of theirs; `settle` finishes it. */
+	/**
+	 * Stops the agents' calls from starting here at once, and asks the
+	 * bridge to take none of theirs; `settle` finishes it. A pause always
+	 * starts a new generation, so a resume asked for before it, whether
+	 * waiting its turn or waiting for the bridge, never hands the machine
+	 * to the agents after it: the pause's own `settle` takes it back.
+	 */
 	async pause(): Promise<CuaStatus> {
 		if (!this.active()) throw new HttpError(404, "The Cua evaluation isn't on in this space.");
 		const control = this.#control();
-		if (control.mode === "agents") this.#setControl({ ...control, mode: "pausing", generation: control.generation + 1, lease: null, at: Date.now() });
+		if (control.mode !== "pausing") this.#setControl({ ...control, mode: "pausing", generation: control.generation + 1, lease: null, epoch: null, at: Date.now() });
 		return this.settle();
 	}
 
@@ -344,14 +360,20 @@ export class CuaEvaluation implements ComputerProvider {
 			if (generation !== control.generation) throw new HttpError(409, "This pause has ended or changed since. Look again before resuming.");
 			if (control.mode !== "paused" || control.epoch === null) throw new HttpError(409, "Agents' work is still finishing on the computer. Resume once the pause is complete.");
 			let said: BridgeView;
+			this.#resuming = true;
 			try {
 				said = await this.#post<BridgeView>("resume", { epoch: control.epoch }, 30_000);
 			} catch (error) {
 				// The machine changed hands since, or a viewer session wouldn't close: look again before anything else.
-				if (error instanceof HttpError && error.status === 409) this.#setControl({ ...control, mode: "pausing", generation: control.generation + 1, epoch: null, at: Date.now() });
+				const now = this.#control();
+				if (error instanceof HttpError && error.status === 409 && now.mode !== "pausing") this.#setControl({ ...now, mode: "pausing", generation: now.generation + 1, epoch: null, at: Date.now() });
 				throw error;
+			} finally {
+				this.#resuming = false;
 			}
 			if (said.mode !== "agents" || typeof said.epoch !== "number") throw new HttpError(502, "The Cua bridge didn't hand the computer to the agents.");
+			// Paused again while the bridge handed the machine over: the agents never get its lease here, and that pause's `settle` takes it back.
+			if (this.#control().generation !== control.generation || !this.active()) throw new HttpError(409, "You paused the agents again before they got the computer, so they stay paused.");
 			this.#setControl({ mode: "agents", generation: control.generation + 1, lease: said.epoch, epoch: null, at: Date.now() });
 			return this.view();
 		});
@@ -371,7 +393,7 @@ export class CuaEvaluation implements ComputerProvider {
 		}
 		return this.#serially(async () => {
 			const { viewerPath, expiresAt } = await this.#post<{ viewerPath?: unknown; expiresAt?: unknown }>("viewer", {}, 20_000);
-			if (typeof viewerPath !== "string" || !/^\/viewer\/#ticket=[A-Za-z0-9._~-]{16,512}$/.test(viewerPath)) throw new HttpError(502, "The Cua bridge's viewer link wasn't one Pim opens.");
+			if (typeof viewerPath !== "string" || !/^\/viewer\/#ticket=[A-Za-z0-9._~-]{16,512}&clipboard=0$/.test(viewerPath)) throw new HttpError(502, "The Cua bridge's viewer link wasn't one Pim opens.");
 			const after = this.#control();
 			// Resumed meanwhile: the ticket goes unused, and opens nothing once the agents have the machine.
 			if (after.mode !== "paused" || after.generation !== before.generation) throw new HttpError(409, "Agents were resumed meanwhile; the viewer stays closed.");

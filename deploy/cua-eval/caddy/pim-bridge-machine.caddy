@@ -1,0 +1,21 @@
+# Pim's six machine routes to pim-cua-bridge (see docs/cua-evaluation.md), imported by
+# vm_patch.py as the first thing in the VM's `route { … }`, before its HTTP Basic login: Pim sends
+# its own credential, not the person's login, and the bridge checks it.
+#
+# Only these exact request URIs, POST: no query, no percent-encoding, no other path. Anything
+# else under /pim-bridge/ goes on to the Basic login and the site's 404, as it did before. A
+# request without a credential of the right form is refused here and never reaches the bridge.
+# The VM's global log filter (`request delete`) keeps the credential out of every log.
+
+@pim_bridge expression `{http.request.method} == "POST" && {http.request.uri} in ["/pim-bridge/v1/status", "/pim-bridge/v1/call", "/pim-bridge/v1/driver", "/pim-bridge/v1/viewer", "/pim-bridge/v1/pause", "/pim-bridge/v1/resume"]`
+@pim_bridge_no_credential expression `!{http.request.header.X-Pim-Bridge-Authorization}.matches('^Bearer [A-Za-z0-9_-]{43,256}$')`
+handle @pim_bridge {
+	respond @pim_bridge_no_credential 401
+	request_body {
+		max_size 192KiB
+	}
+	reverse_proxy {$PIM_BRIDGE_UPSTREAM:127.0.0.1:3290} {
+		import {$PIM_BRIDGE_CADDY_DIR:/opt/pim-cua-bridge/caddy}/pim-bridge-strip.caddy
+		header_up -X-Cua-Env-Authorization
+	}
+}

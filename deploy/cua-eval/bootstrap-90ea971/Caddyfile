@@ -1,0 +1,134 @@
+# Direct HTTPS viewer route for the private Cua evaluation. One site, one temporary BasicAuth user.
+#
+# Env (set by bin/run-viewer-proxy.sh from the systemd credential; never in this file):
+#   CUA_EVAL_BASIC_USER / CUA_EVAL_BASIC_HASH   bcrypt hash only, never a plaintext password
+# Optional (tests/local only; production uses the defaults): CUA_EVAL_SITE, CUA_EVAL_TLS_SNIPPET,
+# CUA_EVAL_STATIC_ROOT, CUA_EVAL_HTTP_PORT, CUA_EVAL_HTTPS_PORT, CUA_EVAL_UPSTREAM.
+#
+# Everything not listed here is answered 404. Access logs are off and the request is stripped from error
+# log entries, so no URL, query string, Authorization or x-cua-env-authorization is ever logged.
+{
+	admin off
+	skip_install_trust
+	http_port {$CUA_EVAL_HTTP_PORT:80}
+	https_port {$CUA_EVAL_HTTPS_PORT:443}
+	# Runtime logs only, WARN and above. Caddy attaches the whole request (URI with query, every header
+	# including x-cua-env-authorization) to its error entries, e.g. when the upstream fails, so that field
+	# is deleted: verified by test_upstream_failures_do_not_put_..._in_warn_logs.
+	log {
+		level WARN
+		format filter {
+			wrap json
+			fields {
+				request delete
+			}
+		}
+	}
+	servers {
+		protocols h1 h2
+	}
+}
+
+# The only upstream is cua-spacesd on loopback. The Basic credential is consumed here and NOT forwarded;
+# cookies and every x-cua-* header except the viewer ticket header are dropped (the daemon trusts
+# x-cua-principal-bin etc. from relays). x-cua-env-authorization (the ticket) passes through untouched,
+# and the root token is never injected. The daemon's wildcard CORS headers are removed.
+(upstream) {
+	reverse_proxy {$CUA_EVAL_UPSTREAM:127.0.0.1:3211} {
+		flush_interval -1
+		header_up -Authorization
+		header_up -Cookie
+		header_up -X-Cua-Principal-Bin
+		header_up -X-Cua-Relay-Assertion
+		header_up -X-Cua-Relay-Authorization
+		header_up -X-Cua-Mesh-Session
+		header_up -X-Cua-Host-Caller
+		header_up -X-Cua-Device-Session
+		header_up -X-Cua-Agent-Session
+		header_down -Access-Control-Allow-Origin
+		header_down -Access-Control-Expose-Headers
+		header_down -Access-Control-Allow-Credentials
+	}
+}
+
+{$CUA_EVAL_SITE:cua-eval.ajac-zero.com} {
+	import {$CUA_EVAL_TLS_SNIPPET:/opt/cua-evaluation/bootstrap/proxy/tls-acme.caddy}
+
+	route {
+		# 1. Authenticate EVERY request first (HTTP Basic). The hash comes from the env.
+		basic_auth {
+			{$CUA_EVAL_BASIC_USER} {$CUA_EVAL_BASIC_HASH}
+		}
+
+		# 2. Response headers. CSP is the upstream viewer CSP tightened: connect-src is same-origin only
+		#    (upstream also allows any ws:/wss: and localhost), frame-ancestors stays 'none' (standalone tab,
+		#    not embeddable), and microphone/clipboard are off in the browser too.
+		header {
+			Strict-Transport-Security "max-age=31536000"
+			Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+			X-Frame-Options "DENY"
+			X-Content-Type-Options "nosniff"
+			Referrer-Policy "no-referrer"
+			Cross-Origin-Opener-Policy "same-origin"
+			Permissions-Policy "microphone=(), clipboard-read=(), clipboard-write=(), fullscreen=(self), keyboard-map=(self)"
+			Cache-Control "no-store"
+		}
+
+		# 3. Reject path tricks before any matching: percent-encoding, backslash, ';', control chars in
+		#    the raw path; '..', '//' or '/./' after decoding.
+		@odd_path expression `{http.request.uri}.matches('^[^?]*([%\\\\;]|[\\x00-\\x1f]|[\\x7f-\\xff])') || {http.request.uri.path}.matches('(^|/)\\.{1,2}(/|$)|//')`
+		respond @odd_path 400
+
+		# 4. The adapted, pinned viewer (static files, GET/HEAD only, exact names, case-sensitive).
+		@viewer_bare expression `{http.request.uri.path} == "/viewer"`
+		redir @viewer_bare /viewer/ 308
+		@viewer_static expression `({http.request.method} == "GET" || {http.request.method} == "HEAD") && {http.request.uri.path} in ["/viewer/", "/viewer/index.html", "/viewer/viewer.js", "/viewer/index.css", "/viewer/audioWorklet.js", "/viewer/captureWorklet.js"]`
+		handle @viewer_static {
+			root * {$CUA_EVAL_STATIC_ROOT:/var/lib/cua-evaluation/viewer-root}
+			header Cache-Control "no-cache"
+			file_server
+		}
+
+		# 5. Same-origin only for everything that can change state or open a socket: a browser sends
+		#    Origin on POST and on the WebSocket handshake; anything else is refused. No CORS is ever
+		#    granted and OPTIONS is not routed.
+		@bad_origin expression `({http.request.method} == "POST" || {http.request.uri.path} == "/media") && {http.request.header.Origin} != "https://{$CUA_EVAL_SITE:cua-eval.ajac-zero.com}"`
+		respond @bad_origin 403
+
+		# 6. Viewer RPCs (exact methods = upstream VIEWER_GRPC_METHODS at the pinned commit, minus the
+		#    FilesystemService.* and Get/SetClipboard methods: files and clipboard are off by default) and
+		#    the media WebSocket. Mint/root/process/mcp/files/tunnel/hotspot/unknown paths are not listed.
+		@viewer_rpc expression `{http.request.method} == "POST" && {http.request.uri.path} in [
+			"/cua.env.v1.SystemService/GetCapabilities",
+			"/cua.env.v1.SystemService/Health",
+			"/cua.env.v1.StreamService/ListTargets",
+			"/cua.env.v1.StreamService/OpenMedia",
+			"/cua.env.v1.StreamService/SetPreferences",
+			"/cua.env.v1.StreamService/RequestKeyframe",
+			"/cua.env.v1.StreamService/CloseMedia",
+			"/cua.env.v1.ComputerService/ListDisplays",
+			"/cua.env.v1.PresenceService/Join",
+			"/cua.env.v1.PresenceService/UpdateCursor",
+			"/cua.env.v1.PresenceService/Leave"
+		]`
+		@media_ws expression `{http.request.method} == "GET" && {http.request.uri.path} == "/media"`
+		# Only viewer tickets (format "v1.<url-safe chars>") are accepted here, so the root token can never
+		# be used through this route even by someone who knows it; the daemon still validates the ticket.
+		@no_ticket_header expression `!{http.request.header.X-Cua-Env-Authorization}.matches('^Bearer v1\\.[A-Za-z0-9_.=-]+$')`
+		@no_ticket_query expression `!{http.request.uri.query}.matches('(^|&)ticket=v1\\.[A-Za-z0-9_.=-]+(&|$)')`
+		handle @viewer_rpc {
+			respond @no_ticket_header 401
+			request_body {
+				max_size 1MB
+			}
+			import upstream
+		}
+		handle @media_ws {
+			respond @no_ticket_query 401
+			import upstream
+		}
+
+		# 7. Everything else.
+		respond 404
+	}
+}

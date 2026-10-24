@@ -1,5 +1,7 @@
-# What the bridge never receives: the site's Basic login, cookies, and headers that claim where
-# a request came from or which page sent it (the bridge trusts none of them, and logs none).
+# What pim-cua-bridge never receives, inside each of its `reverse_proxy` blocks: the site's Basic
+# login, cookies, headers that claim where a request came from or which page sent it, and the
+# relay headers spacesd would trust (the bridge trusts and logs none of them, and passes on only
+# a viewer's ticket). The bridge's answers get no CORS headers.
 header_up -Authorization
 header_up -Cookie
 header_up -Proxy-Authorization
@@ -15,3 +17,13 @@ header_up -CF-Connecting-IP
 header_up -True-Client-IP
 header_up -Origin
 header_up -Referer
+header_up -X-Cua-Principal-Bin
+header_up -X-Cua-Relay-Assertion
+header_up -X-Cua-Relay-Authorization
+header_up -X-Cua-Mesh-Session
+header_up -X-Cua-Host-Caller
+header_up -X-Cua-Device-Session
+header_up -X-Cua-Agent-Session
+header_down -Access-Control-Allow-Origin
+header_down -Access-Control-Expose-Headers
+header_down -Access-Control-Allow-Credentials

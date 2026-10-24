@@ -53,22 +53,8 @@ def compile_protos(cua):
 
 
 def check_messages(pb):
-    process, system, stream = pb["process"], pb["system"], pb["stream"]
-    config = {"python": "/usr/bin/python3", "run_as": "pim-agent"}
+    system, stream = pb["system"], pb["stream"]
 
-    call = process.StartProcessRequest.FromString(bridge.start_process_request(config, ["-I", "-c", "x"], {"A": "1", "B": "2"}, "pim-call-3-abc", 30))
-    check(
-        (call.config.command, list(call.config.args), dict(call.config.env), call.config.cwd, call.config.user, call.config.timeout.seconds)
-        == ("/usr/bin/python3", ["-I", "-c", "x"], {"A": "1", "B": "2"}, "/", "pim-agent", 30),
-        "StartProcessRequest for a file call: command, args, env, cwd, user, timeout",
-    )
-    check((call.tag, call.keepalive_interval.seconds, call.scrollback_bytes, call.kill_on_disconnect) == ("pim-call-3-abc", 15, 4 << 20, True), "StartProcessRequest for a file call: tag, keepalive, scrollback, kill_on_disconnect")
-    command = process.StartProcessRequest.FromString(bridge.start_process_request(config, ["-c", "x"], {}, "pim-exec-3-abc"))
-    check((command.config.HasField("timeout"), command.kill_on_disconnect, command.tag) == (False, False, "pim-exec-3-abc"), "StartProcessRequest for a command: no time limit, detached, tagged")
-    check(command.HasField("pty") is False and command.stdin is False, "StartProcessRequest: no PTY, no stdin")
-
-    listing = process.ListProcessesRequest.FromString(bridge.list_processes_request())
-    check((listing.include_exited, listing.tag_prefix) == (False, bridge.TAG_PREFIX), "ListProcessesRequest: running processes tagged pim-")
     check(stream.CloseMediaRequest.FromString(bridge.close_media_request("m-7")).media_session_id == "m-7", "CloseMediaRequest: media_session_id")
 
     viewer = system.CreateViewerTicketRequest.FromString(bridge.viewer_ticket_request())
@@ -80,42 +66,22 @@ def check_messages(pb):
     check((viewer.principal.id, viewer.principal.kind) == ("pim-owner", pb["common"].PRINCIPAL_KIND_HUMAN), "CreateViewerTicketRequest: the person, as a human")
 
     # What spacesd says, as the official library writes it, read the bridge's way.
-    running = process.ListProcessesResponse(
-        processes=[
-            process.ProcessInfo(pid=1, tag="pim-exec-3-a", state=process.PROCESS_STATE_RUNNING),
-            process.ProcessInfo(pid=2, tag="someone-else", state=process.PROCESS_STATE_RUNNING),
-            process.ProcessInfo(pid=3, tag="pim-call-3-b", state=process.PROCESS_STATE_RUNNING),
-        ]
-    ).SerializeToString()
-
-    class Lists:
-        def grpc(self, method, message, timeout):
-            assert method == "cua.env.v1.ProcessService/ListProcesses"
-            yield running
-
-    check(bridge.running_agent_processes(Lists()) == 2, "ListProcessesResponse: the bridge counts its own running processes only")
-
     opened = stream.OpenMediaResponse(media_session_id="ms-42", ticket="v1.media", ws_path="/media?ticket=v1.media").SerializeToString()
     body = b"\0" + len(opened).to_bytes(4, "big") + opened + b"\x80" + len(b"grpc-status:0\r\n").to_bytes(4, "big") + b"grpc-status:0\r\n"
     check(bridge.opened_media({}, body) == (True, "ms-42"), "OpenMediaResponse: the bridge reads media_session_id")
 
-    ticket = system.CreateViewerTicketResponse(ticket="T" * 24, viewer_path="/viewer/#ticket=" + "T" * 24)
+    ticket = system.CreateViewerTicketResponse(ticket="T" * 24, viewer_path="/viewer/#ticket=" + "T" * 24 + "&clipboard=0")
     ticket.expires_at.seconds = 1_793_000_000
 
     class Mints:
         def grpc(self, method, message, timeout):
             yield ticket.SerializeToString()
 
-    check(bridge.mint_viewer(Mints()) == {"viewerPath": "/viewer/#ticket=" + "T" * 24, "expiresAt": 1_793_000_000}, "CreateViewerTicketResponse: the bridge reads viewer_path and expires_at")
+    check(bridge.mint_viewer(Mints()) == {"viewerPath": "/viewer/#ticket=" + "T" * 24 + "&clipboard=0", "expiresAt": 1_793_000_000}, "CreateViewerTicketResponse: the bridge reads viewer_path and expires_at")
 
     # The golden bytes the unit tests use are the official library's.
-    data = process.StartProcessResponse(event=process.ProcessEvent(data=process.ProcessData(offset=300, stderr=b"warn\n"))).SerializeToString()
-    end = process.StartProcessResponse(event=process.ProcessEvent(end=process.ProcessEnd(exit_code=-3, signal=process.SIGNAL_TERM, timed_out=True))).SerializeToString()
-    check(data.hex() == golden.DATA_EVENT, "test golden DATA_EVENT is the official encoding")
-    check(end.hex() == golden.END_EVENT, "test golden END_EVENT is the official encoding")
     check(viewer.SerializeToString().hex() == golden.VIEWER_REQUEST, "test golden VIEWER_REQUEST is the official encoding")
     check(opened.hex() == golden.OPEN_MEDIA_RESPONSE, "test golden OPEN_MEDIA_RESPONSE is the official encoding")
-    check(running.hex() == golden.LIST_PROCESSES_RESPONSE, "test golden LIST_PROCESSES_RESPONSE is the official encoding")
 
 
 TYPES = {str: "string", int: "integer", bool: "boolean", dict: "object", list: "array"}
@@ -157,8 +123,16 @@ def check_spacesd(cua):
     methods = re.search(r"VIEWER_GRPC_METHODS: &\[&str\] = &\[(.*?)\];", metadata, re.S).group(1)
     names = re.findall(r'"(/[^"]+)"', methods)
     check(not any(name.startswith(("/cua.env.v1.ComputerService/Pointer", "/cua.env.v1.ComputerService/Keyboard", "/cua.env.v1.ProcessService", "/cua.env.v1.WindowsService")) for name in names), "viewer tickets can't call input, process or window methods: input is the media session's")
-    spawn = source("libs", "cua-spacesd", "crates", "cua-spacesd-server", "src", "process", "spawn.rs")
-    check("command.process_group(0);" in spawn, "spacesd starts each process in a process group of its own")
+    process = source("libs", "cua-spacesd", "crates", "cua-spacesd-server", "src", "process", "mod.rs")
+    check(
+        "if euid != 0 && euid != user.uid {" in process and "cannot switch to" in process,
+        "spacesd, run as a user other than root (the VM's runs as cua), refuses to start a process as another user: the agents' runner, not spacesd, runs their calls",
+    )
+    system_rs = source("libs", "cua-spacesd", "crates", "cua-spacesd-server", "src", "services", "system.rs")
+    check(
+        'format!("{}/#ticket={ticket}", cua_proto::metadata::VIEWER_PATH)' in system_rs and 'viewer_path.push_str("&clipboard=0");' in system_rs,
+        "spacesd's viewer_path is /viewer/#ticket=… with &clipboard=0 when the grant has no clipboard (the only form the bridge and Pim accept)",
+    )
     session = source("libs", "cua-spacesd", "crates", "cua-spacesd-session", "src", "media", "session.rs")
     check("viewers.is_empty() && Instant::now() > session.attach_deadline" in session, "spacesd reaps a media session nobody attached to at its attach deadline")
 

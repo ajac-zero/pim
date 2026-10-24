@@ -1,17 +1,18 @@
-# pim-cua-bridge on the Cua evaluation VM (see docs/cua-evaluation.md). Not installed by anything
-# in this repository: whoever operates the VM copies it to /etc/systemd/system/ after review.
+# pim-cua-bridge on the Cua evaluation VM (see docs/cua-evaluation.md). install.sh copies it to
+# /etc/systemd/system/ after review; rollback.sh removes it.
 #
 # The bridge runs as a system user of its own. The only secret it holds, spacesd's root token,
 # comes from /etc/cua/spacesd.env as a systemd credential, readable by this service alone and
-# never placed in its environment. It talks to nothing but spacesd on 127.0.0.1:3211 and Caddy.
-# Who has the machine is kept in /var/lib/pim-cua-bridge/state.json (StateDirectory), which only
-# it reads and writes.
+# never placed in its environment. It talks to nothing but spacesd on 127.0.0.1:3211, the agents'
+# runner over pim-agent-exec.socket, and Caddy. Who has the machine is kept in
+# /var/lib/pim-cua-bridge/state.json (StateDirectory), which only it reads and writes. Like every
+# unit of the evaluation, it doesn't start once the soft deadline has passed.
 
 [Unit]
 Description=pim-cua-bridge (private Cua evaluation for one Pim space)
-After=network.target
-# Name the unit that runs cua-spacesd on this VM here, if it has one, so the bridge starts after it:
-# After=cua-spacesd.service
+After=network.target cua-spacesd.service pim-agent-exec.socket
+Wants=pim-agent-exec.socket
+ConditionPathExists=!/var/lib/cua-evaluation/expired
 
 [Service]
 Type=simple

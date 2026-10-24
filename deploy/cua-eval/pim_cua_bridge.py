@@ -20,15 +20,18 @@ Pim's routes, with its credential in X-Pim-Bridge-Authorization:
 
 - `status`: who has the machine, its lease, and what of the agents' is still under way.
 - `call`: one of pim-computer's file and command calls (computer/pim-computer.ts's `handle`):
-  stat, read, write, mkdir, rm, rename, readdir, find, grep, exec. Each runs as one process that
-  spacesd starts, tagged `pim-…`, as PIM_BRIDGE_RUN_AS (never root nor an administrator), which
-  checks its paths against PIM_BRIDGE_ROOT after following links. A command's process stays,
-  as the subreaper of everything the command started, until the last of those ends.
+  stat, read, write, mkdir, rm, rename, readdir, find, grep, exec. The bridge hands each to the
+  agents' runner (this file with `--runner`, in pim-agent-exec.service, as the agents' own user,
+  never root nor an administrator) over a socket only the bridge may open. The runner starts one
+  helper process per call, which checks its paths against PIM_AGENT_ROOT after following links. A
+  command's helper stays, as the subreaper of everything the command started, until the last of
+  those ends; and all of it stays in the runner's systemd cgroup, which nothing it starts leaves.
+  spacesd runs as the desktop user and can't start processes as another, so it runs none of these.
 - `driver`: one of eight cua-driver tools for the browser over spacesd's /mcp, with fixed shapes:
   one driver session (`pim`), an isolated named profile (`pim`), never an existing profile.
 - `pause`: agents' calls stop being taken at once; the machine is the person's once nothing of
-  the agents' runs: no call here, no `pim-` process in spacesd, and, after a restart, long enough
-  for a driver call the bridge lost track of to have ended.
+  the agents' runs: no call here, no process but the runner's own in the runner's cgroup, and,
+  after a restart, long enough for a driver call the bridge lost track of to have ended.
 - `resume`: the person's viewer sessions are closed, then the machine is the agents', under a new lease.
 - `viewer`: a short-lived viewer ticket (SystemService.CreateViewerTicket), only while it's the person's.
 
@@ -37,8 +40,9 @@ Caddy sends StreamService/OpenMedia.
 
 Only Python 3's standard library. Settings come from the environment (pim-cua-bridge.env.example);
 the root token from the spacesd env file systemd hands over as a credential. It refuses to start
-without a sound credential digest, a user without administrator rights, a workspace root, the root
-token and a sound state file, and on anything but a loopback address.
+without a sound credential digest, the root token and a sound state file, and on anything but a
+loopback address. The runner refuses to start as root or an administrator, without its workspace
+root, outside its own systemd unit, or without the socket systemd hands it.
 """
 
 import base64
@@ -52,13 +56,15 @@ import json
 import os
 import pwd
 import re
+import select
 import signal
+import socket
+import subprocess
 import sys
 import threading
 import time
-import uuid
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 #: The one spacesd this bridge reaches. Not configurable.
 SPACESD = ("127.0.0.1", 3211)
 PREFIX = "/pim-bridge/v1/"
@@ -67,8 +73,10 @@ ROUTES = ("status", "call", "driver", "viewer", "pause", "resume")
 MEDIA_ROUTE = PREFIX + "media/open"
 MAX_MEDIA_BODY = 64 * 1024
 MEDIA_RATE = (30, 60.0)
-#: Tags of the processes the agents' calls start in spacesd.
-TAG_PREFIX = "pim-"
+#: The socket systemd listens on for the agents' runner (pim-agent-exec.socket), which only the bridge's user may open.
+AGENT_SOCKET = "/run/pim-agent-exec.sock"
+#: The runner's systemd unit: its cgroup holds everything the agents' calls start.
+RUNNER_UNIT = "pim-agent-exec.service"
 #: After a restart, how long a driver call the bridge had under way, and lost track of, may still be running.
 QUIET_AFTER_RESTART = 120
 #: The administrator groups the agents' user may not be in.
@@ -135,7 +143,7 @@ def admin_groups(user):
     return names & ADMIN_GROUPS
 
 
-def load_config(environ, groups_of=admin_groups):
+def load_config(environ):
     """The bridge's settings, or SystemExit naming what's wrong (never a secret's value)."""
     problems = []
     listen = environ.get("PIM_BRIDGE_LISTEN", "127.0.0.1:3290")
@@ -149,18 +157,11 @@ def load_config(environ, groups_of=admin_groups):
     digest = environ.get("PIM_BRIDGE_TOKEN_SHA256", "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         problems.append("PIM_BRIDGE_TOKEN_SHA256 must be the SHA-256 (64 hex digits) of Pim's bridge credential")
-    run_as = environ.get("PIM_BRIDGE_RUN_AS", "").strip()
-    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", run_as) or run_as == "root":
-        problems.append("PIM_BRIDGE_RUN_AS must name the agents' user, not root")
-    else:
-        admin = groups_of(run_as)
-        if admin is None:
-            problems.append("PIM_BRIDGE_RUN_AS names no user on this machine")
-        elif admin:
-            problems.append("PIM_BRIDGE_RUN_AS must be a user without administrator rights, not one in %s" % ", ".join(sorted(admin)))
-    root = environ.get("PIM_BRIDGE_ROOT", "").rstrip("/")
-    if not root.startswith("/") or root.count("/") < 2 or "\0" in root or "/.." in root:
-        problems.append("PIM_BRIDGE_ROOT must be an absolute folder at least two levels deep, such as /home/cua/pim")
+    agent_socket = environ.get("PIM_BRIDGE_AGENT_SOCKET", AGENT_SOCKET)
+    agent_cgroup = environ.get("PIM_BRIDGE_AGENT_CGROUP", "/sys/fs/cgroup/system.slice/" + RUNNER_UNIT).rstrip("/")
+    for name, value in (("PIM_BRIDGE_AGENT_SOCKET", agent_socket), ("PIM_BRIDGE_AGENT_CGROUP", agent_cgroup)):
+        if not value.startswith("/") or "\0" in value:
+            problems.append("%s must be an absolute path" % name)
     token = ""
     env_file = environ.get("PIM_BRIDGE_SPACESD_ENV") or os.path.join(environ.get("CREDENTIALS_DIRECTORY", "/nonexistent"), "spacesd.env")
     try:
@@ -177,10 +178,9 @@ def load_config(environ, groups_of=admin_groups):
         "host": host.strip("[]"),
         "port": port,
         "digest": bytes.fromhex(digest),
-        "run_as": run_as,
-        "root": root,
+        "agent_socket": agent_socket,
+        "agent_cgroup": agent_cgroup,
         "token": token,
-        "python": environ.get("PIM_BRIDGE_PYTHON", "/usr/bin/python3"),
         "state": environ.get("PIM_BRIDGE_STATE") or os.path.join(environ.get("STATE_DIRECTORY", "/var/lib/pim-cua-bridge"), "state.json"),
     }
 
@@ -256,35 +256,6 @@ def parse(buffer):
 def last(fields, number, default=None):
     values = fields.get(number)
     return values[-1] if values else default
-
-
-def int32(value):
-    value &= (1 << 64) - 1
-    return value - (1 << 64) if value >= 1 << 63 else value
-
-
-def start_process_request(config, args, env, tag, timeout_seconds=None):
-    """StartProcessRequest (process.proto): `python3 -I -c HELPER` as the agents' user, tagged `tag`.
-
-    A file call has a time limit and ends with this request. A command has neither: its helper
-    enforces the command's limit itself, and stays, as long as anything the command started does.
-    """
-    environment = b"".join(field_bytes(3, field_string(1, key) + field_string(2, value)) for key, value in env.items())
-    process = (
-        field_string(1, config["python"])
-        + b"".join(field_string(2, arg) for arg in args)
-        + environment
-        + field_string(4, "/")
-        + field_string(5, config["run_as"])
-        + (field_bytes(6, field_varint(1, timeout_seconds)) if timeout_seconds else b"")
-    )
-    # config, tag, keepalive_interval (15 s), scrollback_bytes (4 MiB), kill_on_disconnect.
-    return field_bytes(1, process) + field_string(3, tag) + field_bytes(5, field_varint(1, 15)) + field_varint(6, 4 << 20) + field_varint(7, 1 if timeout_seconds else 0)
-
-
-def list_processes_request():
-    """ListProcessesRequest (process.proto): running processes whose tag starts with TAG_PREFIX."""
-    return field_string(2, TAG_PREFIX)
 
 
 def close_media_request(media_session_id):
@@ -449,8 +420,8 @@ def grpc_failure(status):
 
 # ── Calls ──────────────────────────────────────────────────────────────────────────────────────
 
-#: Runs as the desktop user, in a process spacesd starts: one file call, or `exec`'s checks before it becomes the command.
-#: Paths are pim-computer's: /workspace/… is PIM_WORKSPACE, and links may not lead out of it.
+#: Runs as the agents' user, in a process the runner starts: one file call, or `exec`'s checks before it becomes the command.
+#: Paths are pim-computer's: /workspace/… is PIM_WORKSPACE (the runner's PIM_AGENT_ROOT), and links may not lead out of it.
 HELPER = r"""
 import base64, errno, json, os, re, shutil, stat, sys
 request = json.loads(os.environ.pop("PIM_FSOP_REQUEST"))
@@ -661,8 +632,8 @@ class Output:
         return head + "\n[\u2026 output cut \u2026]\n" + tail if self.dropped else head + tail
 def run_command(cwd, args):
     # The command runs in a process group of its own, under this process as its subreaper: whatever
-    # it starts, detached or not, stays this process's descendant, so this process (tagged in spacesd)
-    # runs until the last of them ends, and the bridge counts it as the agents' work until then.
+    # it starts, detached or not, stays this process's descendant, so this process runs until the
+    # last of them ends. The runner's cgroup holds them all in any case.
     import ctypes, selectors, signal, subprocess, time
     if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
         raise CallError("This computer can't keep track of what a command starts", "ENOSYS")
@@ -754,7 +725,7 @@ PATH = {"type": str, "max": 4096}
 SCHEMAS = {
     "stat": {"path": PATH},
     "read": {"path": PATH, "offset": {"type": int, "min": 0}, "length": {"type": int, "min": 0, "max": MAX_READ}},
-    "write": {"path": PATH, "data": {"type": str, "max": MAX_WRITE_BASE64}, "append": {"type": bool}, "mode": {"type": int, "min": 0, "max": 0o777}},
+    "write": {"path": PATH, "data": {"type": str, "max": MAX_WRITE_BASE64}, "append": {"type": bool}, "mode": {"type": int, "min": 0, "max": 0o177777}},
     "mkdir": {"path": PATH, "recursive": {"type": bool}},
     "rm": {"path": PATH, "recursive": {"type": bool}, "force": {"type": bool}},
     "rename": {"from": PATH, "to": PATH},
@@ -802,54 +773,204 @@ def check(args, schema, required=()):
 
 
 RESULT_MARK = b"\x1epim-result "
+#: The largest answer the runner passes on: a 1 MiB read is 1.4 MB of base64.
+MAX_ANSWER = 4 << 20
 
 
-def run_call(config, spacesd, op, args, epoch):
-    """One of pim-computer's calls, run as the agents' user through spacesd: (result, error)."""
+def read_line(connection, maximum):
+    """One newline-ended line from a socket, or ValueError when it is longer than `maximum` or cut short."""
+    data = bytearray()
+    while not data.endswith(b"\n"):
+        chunk = connection.recv(65536)
+        if not chunk:
+            raise ValueError("cut short")
+        data += chunk
+        if len(data) > maximum:
+            raise ValueError("too long")
+    return bytes(data)
+
+
+def runner_request(path, message, timeout):
+    """One request to the agents' runner, over its socket: its one-line JSON answer."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(timeout)
+            connection.connect(path)
+            connection.sendall(json.dumps(message).encode("utf-8") + b"\n")
+            answer = json.loads(read_line(connection, MAX_ANSWER + 4096))
+    except (OSError, ValueError):
+        raise Refusal(502, "The agents' runner on the Cua computer didn't answer.") from None
+    if not isinstance(answer, dict):
+        raise Refusal(502, "The agents' runner on the Cua computer didn't answer.")
+    return answer
+
+
+def run_call(config, op, args):
+    """One of pim-computer's calls, run by the agents' runner as the agents' user: (result, error)."""
     if op not in SCHEMAS:
         raise Refusal(400, "unknown call")
     check(args, SCHEMAS[op], REQUIRED.get(op, ()))
     if op == "exec" and not args["command"].strip():
         raise Refusal(400, "command must be a shell command")
-    command = op == "exec"
-    tag = "%s%s-%d-%s" % (TAG_PREFIX, "exec" if command else "call", epoch, uuid.uuid4().hex[:12])
-    env = {"PIM_FSOP_REQUEST": json.dumps({"op": op, "args": args}), "PIM_WORKSPACE": config["root"]}
-    request = start_process_request(config, ["-I", "-c", HELPER], env, tag, None if command else 30)
-    wait = -(-args.get("timeoutMs", 120_000) // 1000) + 30 if command else 50
-    captured = bytearray()
-    end = None
-    for message in spacesd.grpc("cua.env.v1.ProcessService/StartProcess", request, wait):
-        event = parse(last(parse(message), 1, b""))
-        if 2 in event:
-            out = last(parse(last(event, 2)), 2)
-            if out and len(captured) < 3 << 20:
-                captured += out
-            if command:
-                # A command's answer is the helper's mark; the helper stays for what the command left running.
-                mark = captured.find(RESULT_MARK)
-                line = captured.find(b"\n", mark) if mark >= 0 else -1
-                if line >= 0:
-                    try:
-                        return json.loads(bytes(captured[mark + len(RESULT_MARK) : line]).decode("utf-8")), None
-                    except ValueError:
-                        raise Refusal(502, "The command's answer was garbled.") from None
-        if 3 in event:
-            end = parse(last(event, 3))
-    if end is None:
-        raise Refusal(502, "The Cua computer stopped answering before the call ended.")
-    exit_code = int32(last(end, 1)) if 1 in end else None
-    if last(end, 4, b"") or last(end, 3, 0):
-        raise Refusal(502, "The Cua computer couldn't run the call.")
-    try:
-        answer = json.loads(bytes(captured).decode("utf-8"))
-    except ValueError:
-        raise Refusal(502, "The call failed on the Cua computer.") from None
-    if "error" in answer:
-        error = answer["error"]
-        return None, {"message": str(error.get("message", "failed"))[:500], "code": error.get("code")}
-    if command or exit_code != 0:
+    wait = -(-args.get("timeoutMs", 120_000) // 1000) + 45 if op == "exec" else 45
+    reply = runner_request(config["agent_socket"], {"op": op, "args": args}, wait)
+    answer = reply.get("answer")
+    if not isinstance(answer, dict):
         raise Refusal(502, "The call failed on the Cua computer.")
+    if isinstance(answer.get("error"), dict):
+        error = answer["error"]
+        return None, {"message": str(error.get("message", "failed"))[:500], "code": error.get("code") if isinstance(error.get("code"), str) else None}
     return answer.get("result"), None
+
+
+# ── The agents' runner ─────────────────────────────────────────────────────────────────────────
+
+
+class Runner:
+    """Runs the agents' calls, each in a helper process of its own, as the user it runs as (pim-agent-exec.service).
+
+    It answers the bridge on the socket systemd hands it, one JSON line each way: a call, or `busy`,
+    how many processes besides its own are in its cgroup. Everything a call starts stays in that
+    cgroup whatever it does (double forks, setsid, nohup), so `busy` counts all of it.
+    """
+
+    def __init__(self, root, cgroup_pids):
+        self.root = root
+        self.cgroup_pids = cgroup_pids
+        self.slots = threading.BoundedSemaphore(MAX_INFLIGHT + 2)
+        entry = pwd.getpwuid(os.getuid())
+        self.env = {
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "HOME": entry.pw_dir,
+            "USER": entry.pw_name,
+            "LOGNAME": entry.pw_name,
+            "SHELL": "/bin/bash",
+            "LANG": "C.UTF-8",
+        }
+
+    def serve(self, listener):
+        while True:
+            connection, _ = listener.accept()
+            threading.Thread(target=self.answer, args=(connection,), daemon=True).start()
+
+    def answer(self, connection):
+        with connection:
+            if not self.slots.acquire(blocking=False):
+                reply = {"failed": "busy"}
+            else:
+                try:
+                    connection.settimeout(10)
+                    request = json.loads(read_line(connection, MAX_BODY + 4096))
+                    connection.settimeout(None)
+                    reply = self.handle(request)
+                except Exception:  # noqa: BLE001 - the bridge hears that it failed, nothing more
+                    reply = {"failed": "The agents' runner failed."}
+                finally:
+                    self.slots.release()
+            try:
+                connection.sendall(json.dumps(reply).encode("utf-8") + b"\n")
+            except OSError:
+                pass
+
+    def handle(self, request):
+        if not isinstance(request, dict):
+            return {"failed": "not a request"}
+        if request.get("busy") is True:
+            return {"busy": sum(1 for pid in self.cgroup_pids() if pid != os.getpid())}
+        op, args = request.get("op"), request.get("args")
+        if op not in SCHEMAS:
+            return {"failed": "unknown call"}
+        check(args, SCHEMAS[op], REQUIRED.get(op, ()))
+        return self.run(op, args)
+
+    def run(self, op, args):
+        command = op == "exec"
+        env = dict(self.env, PIM_FSOP_REQUEST=json.dumps({"op": op, "args": args}), PIM_WORKSPACE=self.root)
+        child = subprocess.Popen([sys.executable, "-I", "-c", HELPER], env=env, cwd=self.root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+        deadline = time.monotonic() + (args.get("timeoutMs", 120_000) / 1000 + 30 if command else 30)
+        captured = bytearray()
+        answered = None
+        try:
+            fd = child.stdout.fileno()
+            while answered is None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    # Only a file call can get here (a command's helper answers by its own deadline): its helper alone is ended.
+                    os.killpg(child.pid, signal.SIGKILL)
+                    return {"failed": "The call took too long."}
+                if not select.select([fd], [], [], min(left, 1.0))[0]:
+                    continue
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                if len(captured) + len(chunk) > MAX_ANSWER:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    return {"failed": "The call's answer was too large."}
+                captured += chunk
+                mark = captured.find(RESULT_MARK) if command else -1
+                end = captured.find(b"\n", mark) if mark >= 0 else -1
+                if end >= 0:
+                    answered = {"result": json.loads(bytes(captured[mark + len(RESULT_MARK) : end]).decode("utf-8"))}
+            if answered is None:
+                child.wait(max(deadline - time.monotonic(), 1))
+                answered = json.loads(bytes(captured).decode("utf-8"))
+                if "error" not in answered and child.returncode != 0:
+                    return {"failed": "The call failed on the Cua computer."}
+            return {"answer": answered}
+        except (ValueError, subprocess.TimeoutExpired):
+            return {"failed": "The call's answer was garbled."}
+        finally:
+            # A command's helper stays for what the command left running; it is waited for, never killed.
+            child.stdout.close()
+            threading.Thread(target=child.wait, daemon=True).start()
+
+
+def own_cgroup():
+    """This process's cgroup v2 path, such as /system.slice/pim-agent-exec.service, or None."""
+    try:
+        with open("/proc/self/cgroup", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("0::"):
+                    return line[3:].strip()
+    except OSError:
+        pass
+    return None
+
+
+def cgroup_pids(folder):
+    """The pids in a cgroup, read when called; none when the cgroup isn't there (its unit isn't running)."""
+
+    def pids():
+        try:
+            with open(os.path.join(folder, "cgroup.procs"), encoding="utf-8") as handle:
+                return [int(line) for line in handle if line.strip()]
+        except FileNotFoundError:
+            return []
+
+    return pids
+
+
+def runner_main(environ):
+    """`--runner`: the agents' runner, as pim-agent-exec.service starts it."""
+    problems = []
+    me = pwd.getpwuid(os.getuid()).pw_name
+    if os.getuid() == 0 or os.geteuid() == 0 or admin_groups(me):
+        problems.append("it must run as the agents' own user, not root nor a member of %s" % ", ".join(sorted(ADMIN_GROUPS)))
+    root = environ.get("PIM_AGENT_ROOT", "").rstrip("/")
+    if not root.startswith("/") or root.count("/") < 2 or "\0" in root or "/.." in root:
+        problems.append("PIM_AGENT_ROOT must be an absolute folder at least two levels deep, such as /home/pim-agent/pim")
+    elif not os.path.isdir(root) or os.stat(root).st_uid != os.getuid():
+        problems.append("PIM_AGENT_ROOT must be a folder the agents' user owns")
+    cgroup = own_cgroup()
+    if not cgroup or not cgroup.endswith("/" + RUNNER_UNIT):
+        problems.append("it must run in %s, whose cgroup holds what the agents' calls start" % RUNNER_UNIT)
+    if environ.get("LISTEN_PID") != str(os.getpid()) or environ.get("LISTEN_FDS") != "1":
+        problems.append("it must be started by pim-agent-exec.socket")
+    if problems:
+        raise SystemExit("pim-cua-bridge's runner won't start: " + "; ".join(problems))
+    listener = socket.socket(fileno=3)
+    print(json.dumps({"event": "runner", "version": VERSION}), file=sys.stderr, flush=True)
+    Runner(os.path.realpath(root), cgroup_pids("/sys/fs/cgroup" + cgroup)).serve(listener)
 
 
 TEXT_ID = {"type": str, "max": 200}
@@ -931,20 +1052,10 @@ def mint_viewer(spacesd):
     answer = parse(answers[0])
     path = last(answer, 3, b"").decode("utf-8", "replace")
     expires = parse(last(answer, 2, b""))
-    if not re.fullmatch(r"/viewer/#ticket=[A-Za-z0-9._~\-]{16,512}", path):
+    # spacesd's viewer_path: the ticket, and `&clipboard=0` since this grant has no clipboard (system.rs).
+    if not re.fullmatch(r"/viewer/#ticket=[A-Za-z0-9._~\-]{16,512}&clipboard=0", path):
         raise Refusal(502, "The Cua computer's viewer ticket wasn't what this bridge expects.")
     return {"viewerPath": path, "expiresAt": int(last(expires, 1, 0))}
-
-
-def running_agent_processes(spacesd):
-    """How many processes the agents' calls started are still running in spacesd (ListProcesses, by tag)."""
-    count = 0
-    for answer in spacesd.grpc("cua.env.v1.ProcessService/ListProcesses", list_processes_request(), 10):
-        for info in parse(answer).get(1, []):
-            fields = parse(info)
-            if last(fields, 2, b"").decode("utf-8", "replace").startswith(TAG_PREFIX) and last(fields, 5, 0) != 2:
-                count += 1
-    return count
 
 
 def close_media(spacesd, media_session_id):
@@ -1191,10 +1302,9 @@ class Bridge:
             if self.inflight >= MAX_INFLIGHT:
                 raise Refusal(429, "Too many calls at once")
             self.inflight += 1
-            epoch = self.state.epoch
         try:
             if route == "call":
-                result, error = run_call(self.config, self.spacesd, payload.get("op"), payload.get("args", {}), epoch)
+                result, error = run_call(self.config, payload.get("op"), payload.get("args", {}))
                 return {"error": error} if error else {"result": result}
             return run_driver(self.spacesd, payload.get("tool"), payload.get("arguments", {}))
         finally:
@@ -1210,10 +1320,15 @@ class Bridge:
                 if self.state.mode != "draining":
                     return self.view()
                 # Nothing is admitted while draining, so once no call is under way none will be: then
-                # whatever the finished calls started is in spacesd's list.
+                # whatever the finished calls started is in the runner's cgroup.
                 if self.inflight > 0 or time.time() < self.state.quietUntil:
                     return self.view()
-            background = running_agent_processes(self.spacesd)
+            background = runner_request(self.config["agent_socket"], {"busy": True}, 10).get("busy")
+            if not isinstance(background, int) or isinstance(background, bool):
+                raise Refusal(502, "The agents' runner on the Cua computer didn't say what runs.")
+            # The runner shares a user with the agents' commands, so the bridge reads their cgroup too:
+            # whatever the runner says, the machine isn't the person's while more than the runner is in it.
+            background = max(background, len(cgroup_pids(self.config["agent_cgroup"])()) - 1)
             with self.lock:
                 if background == 0 and self.inflight == 0:
                     self.state.update(mode="human", epoch=self.state.epoch + 1, quietUntil=0)
@@ -1318,6 +1433,8 @@ def serve(config, spacesd=None):
 
 
 def main():
+    if sys.argv[1:] == ["--runner"]:
+        return runner_main(os.environ)
     config = load_config(os.environ)
     server = serve(config)
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown).start())

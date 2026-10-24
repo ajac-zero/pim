@@ -228,13 +228,15 @@ function standInBridge() {
 				if (bridge.closeFails && bridge.media.length > 0) return refuse(502, "handoff", "The person's viewer sessions couldn't all be closed, so the agents stay paused.");
 				bridge.media = [];
 				[bridge.mode, bridge.epoch] = ["agents", bridge.epoch + 1];
+				// The machine is the agents' at the bridge now, whenever its answer arrives.
+				await gated();
 				return Response.json(bridgeView());
 			case "viewer":
 				await gated();
 				if (bridge.mode !== "human") return refuse(409, "busy", "The agents' work is still finishing on the Cua computer.");
 				// The person opens it, and with it a media session the bridge records.
 				bridge.media.push(`ms-${bridge.media.length + 1}`);
-				return Response.json({ viewerPath: `/viewer/#ticket=${"V".repeat(32)}`, expiresAt: 1_793_000_000 });
+				return Response.json({ viewerPath: `/viewer/#ticket=${"V".repeat(32)}&clipboard=0`, expiresAt: 1_793_000_000 });
 		}
 		if (bridge.mode !== "agents" || body.lease !== bridge.epoch) return refuse(423, "paused", "The person has the Cua computer now; nothing was done there.");
 		bridge.inflight++;
@@ -448,7 +450,8 @@ describe("turning the Cua evaluation on", () => {
 		expect((await callTool("file_write", { path: "/workspace/notes.md", content: "too early" })).text).toContain("paused agents on their Cua evaluation computer");
 		expect(bridge.seen.filter((seen) => seen.route === "call")).toEqual([]);
 		const resumed = await resume();
-		expect(bridge.seen.map((seen) => seen.route)).toEqual(["pause", "resume"]);
+		// Turning it on asked the bridge whose the machine is; resuming, for the pause the person saw.
+		expect(bridge.seen.map((seen) => seen.route)).toEqual(["pause", "pause", "resume"]);
 		expect(resumed.generation).toBeGreaterThan(on.body.generation);
 
 		// The agents' files are the Cua computer's now, each call under the lease the bridge gave.
@@ -593,7 +596,7 @@ describe("pausing the agents for the person", () => {
 		await vi.waitFor(async () => expect(await status()).toMatchObject({ mode: "paused", generation, pending: 0 }));
 		const viewer = await asPerson("/cua/viewer", "POST");
 		expect(viewer.status).toBe(200);
-		expect(viewer.body).toEqual({ url: `${BRIDGE}/viewer/#ticket=${"V".repeat(32)}`, expiresAt: 1_793_000_000_000 });
+		expect(viewer.body).toEqual({ url: `${BRIDGE}/viewer/#ticket=${"V".repeat(32)}&clipboard=0`, expiresAt: 1_793_000_000_000 });
 		expect(viewer.headers.get("cache-control")).toBe("no-store, private");
 		expect(viewer.headers.get("referrer-policy")).toBe("no-referrer");
 		expect(JSON.stringify(viewer.body)).not.toContain(BRIDGE_TOKEN);
@@ -744,6 +747,56 @@ describe("pausing the agents for the person", () => {
 		expect(late.status).toBe(423);
 		await resume();
 	});
+
+	it("lets a pause win over a resume still waiting for the bridge, and turns nothing off or on meanwhile", async () => {
+		await pause();
+		const { generation } = await status();
+		const control = () => runInDurableObject(agent(), async (instance: Pim) => JSON.parse(instance.store.meta("cua_control")!));
+		const held = holdNext("", "resume");
+		const resuming = asPerson("/cua/resume", "POST", { generation });
+		await held.reached;
+		// The bridge has handed the machine to the agents; its answer hasn't come back yet.
+		expect(bridge.mode).toBe("agents");
+		expect((await asPerson("/cua", "DELETE")).status).toBe(409);
+		const pausing = asPerson("/cua/pause", "POST");
+		await vi.waitFor(async () => expect(await control()).toMatchObject({ mode: "pausing", lease: null }));
+		const opening = asPerson("/cua/viewer", "POST");
+		held.release();
+
+		// The resume is refused, the pause takes the machine back from the bridge, and only then does the viewer open.
+		expect((await resuming).status).toBe(409);
+		expect((await pausing).body).toMatchObject({ mode: "paused" });
+		expect((await opening).status).toBe(200);
+		expect(bridge.mode).toBe("human");
+		const routes = bridge.seen.map((seen) => seen.route);
+		expect(routes.indexOf("pause", routes.lastIndexOf("resume"))).toBeLessThan(routes.lastIndexOf("viewer"));
+		expect(await status()).toMatchObject({ mode: "paused", enabled: true });
+		expect((await status()).generation).toBeGreaterThan(generation);
+		expect((await callTool("file_read", { path: "/workspace/notes.md" })).text).toContain("paused agents");
+		// The old generation resumes nothing; the one the person sees now does.
+		expect((await asPerson("/cua/resume", "POST", { generation })).status).toBe(409);
+		await resume();
+	});
+
+	it("doesn't let a resume asked for before a pause, still waiting its turn, run after it", async () => {
+		await pause();
+		const { generation } = await status();
+		// A viewer ticket being made holds up the resume behind it.
+		const held = holdNext("", "viewer");
+		const opening = asPerson("/cua/viewer", "POST");
+		await held.reached;
+		const resuming = asPerson("/cua/resume", "POST", { generation });
+		const pausing = asPerson("/cua/pause", "POST");
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		held.release();
+		// The pause ended the generation the ticket was made in, so that link isn't handed out either.
+		expect((await opening).status).toBe(409);
+		expect((await resuming).status).toBe(409);
+		expect((await pausing).body).toMatchObject({ mode: "paused" });
+		expect(bridge.seen.some((seen) => seen.route === "resume")).toBe(false);
+		expect(bridge.mode).toBe("human");
+		await resume();
+	});
 });
 
 describe("the bridge's answers", () => {
@@ -780,6 +833,22 @@ describe("turning the Cua evaluation off", () => {
 		expect(files.has("/workspace/whole.txt")).toBe(false);
 		await expect(fs.stat(`${PAIRED_ROOT}/whole.txt`)).rejects.toThrow();
 		await vi.waitFor(async () => expect(await status()).toMatchObject({ mode: "paused" }));
+	});
+
+	it("turned on again, stays pausing until the bridge gives the machine back, and opens no viewer before", async () => {
+		await pause();
+		expect((await asPerson("/cua", "DELETE")).body).toMatchObject({ enabled: false });
+		// The bridge still has the agents on the machine, from something Pim lost track of, and their work under way.
+		[bridge.mode, bridge.epoch, bridge.elsewhere] = ["agents", bridge.epoch + 1, 1];
+		const on = await asPerson("/cua", "POST");
+		expect(on.body).toMatchObject({ enabled: true, mode: "pausing", pending: 1 });
+		expect(bridge.mode).toBe("draining");
+		expect((await asPerson("/cua/viewer", "POST")).status).toBe(409);
+		expect((await asPerson("/cua/resume", "POST", { generation: on.body.generation })).status).toBe(409);
+		expect(bridge.seen.some((seen) => seen.route === "viewer" || seen.route === "resume")).toBe(false);
+		bridge.elsewhere = 0;
+		expect(await status()).toMatchObject({ mode: "paused", pending: 0 });
+		expect((await asPerson("/cua/viewer", "POST")).status).toBe(200);
 	});
 
 	it("denies what the agents asked to do there and the person hadn't decided, and gives back the space's own computer", async () => {

@@ -1,0 +1,49 @@
+# The agents' runner (pim_cua_bridge.py --runner): runs each of the agents' file and command calls
+# as pim-agent, a user of their own with no administrator rights. Started by pim-agent-exec.socket.
+#
+# Its cgroup holds everything the agents' commands start, whatever they do, so the bridge can
+# tell when nothing of theirs runs; stopping it (rollback, the soft deadline) ends all of it. What
+# runs here can write only pim-agent's home (the workspace is /home/pim-agent/pim) and its own
+# /tmp, sees no other home, can't gain privileges (no sudo, no setuid), and reaches no loopback
+# service (spacesd, the bridge, Caddy), no link-local address and not Azure's host endpoints:
+# only the network beyond, and the DNS stub. It has neither the desktop's X authority nor its
+# session bus, so it can't touch the person's desktop.
+
+[Unit]
+Description=pim-cua-bridge's runner for the agents' files and commands (as pim-agent)
+Requires=pim-agent-exec.socket
+After=pim-agent-exec.socket
+ConditionPathExists=!/var/lib/cua-evaluation/expired
+
+[Service]
+Type=simple
+User=pim-agent
+Group=pim-agent
+Environment=PIM_AGENT_ROOT=/home/pim-agent/pim
+ExecStart=/usr/bin/python3 -I /opt/pim-cua-bridge/pim_cua_bridge.py --runner
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindPaths=/home/pim-agent
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+IPAddressDeny=localhost link-local 168.63.129.16/32
+IPAddressAllow=127.0.0.53/32
+MemoryMax=4G
+TasksMax=512
+CPUWeight=50
+UMask=0027

@@ -98,6 +98,33 @@ export function userInput(value: unknown): UserInput {
 	return parts;
 }
 
+/** The whole of `body` if it is at most `limit` bytes; else null, having stopped reading it. */
+async function readAtMost(body: ReadableStream<Uint8Array> | null, limit: number): Promise<Uint8Array | null> {
+	if (!body) return null;
+	const reader = body.getReader();
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	try {
+		for (let next = await reader.read(); !next.done; next = await reader.read()) {
+			size += next.value.byteLength;
+			if (size > limit) {
+				await reader.cancel();
+				return null;
+			}
+			chunks.push(next.value);
+		}
+	} catch {
+		return null;
+	}
+	const bytes = new Uint8Array(size);
+	let at = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, at);
+		at += chunk.byteLength;
+	}
+	return bytes;
+}
+
 type ImageStoreOptions = {
 	readonly sql: SqlStorage;
 	readonly bucket: R2Bucket;
@@ -176,8 +203,9 @@ export class ImageStore {
 			await response.body?.cancel();
 			return null;
 		}
-		const bytes = new Uint8Array(await response.arrayBuffer());
-		if (bytes.byteLength === 0 || bytes.byteLength > limit) return null;
+		// Content-Length can be missing or wrong, so the body is counted as it arrives.
+		const bytes = await readAtMost(response.body, limit);
+		if (!bytes || bytes.byteLength === 0) return null;
 		const id = crypto.randomUUID();
 		await this.#bucket.put(this.#key(id), bytes, { httpMetadata: { contentType: type } });
 		this.#sql.exec("INSERT INTO pim_images (id, session, type, bytes, created_at) VALUES (?, ?, ?, ?, ?)", id, session, type, bytes.byteLength, Date.now());

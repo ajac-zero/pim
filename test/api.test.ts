@@ -457,6 +457,49 @@ describe("conversation", () => {
 		expect(await refused("")).toBe(400);
 	});
 
+	it("keeps an animated GIF's bytes as they are, and refuses one over the limit even when its length isn't declared", async () => {
+		// Two frames with a loop extension, not a still: kept byte for byte.
+		const gif = Buffer.from("R0lGODlhAQABAPAAAAAAAP///yH/C05FVFNDQVBFMi4wAwEAAAAh+QQACgAAACwAAAAAAQABAAACAkQBACH5BAAKAAAALAAAAAABAAEAAAICRAEAOw==", "base64");
+		const huge = new Uint8Array(5_000_001);
+		huge.set(gif);
+		const realFetch = globalThis.fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			if (request.url === "https://cdn.example.test/anim.gif") return new Response(gif, { headers: { "content-type": "image/gif" } });
+			if (request.url === "https://cdn.example.test/huge.gif") {
+				// Chunked: no Content-Length to check up front.
+				const stream = new ReadableStream<Uint8Array>({
+					start(controller) {
+						for (let at = 0; at < huge.length; at += 100_000) controller.enqueue(huge.slice(at, at + 100_000));
+						controller.close();
+					},
+				});
+				return new Response(stream, { headers: { "content-type": "image/gif" } });
+			}
+			if (request.url === "https://cdn.example.test/page") return new Response(`<img src="https://cdn.example.test/anim.gif"><img src="https://cdn.example.test/huge.gif">`, { headers: { "content-type": "text/html" } });
+			return realFetch(input, init);
+		});
+		const gallery = (image: string) => `\`\`\`gallery\n${JSON.stringify([{ image, caption: "Row", url: "https://cdn.example.test/page" }])}\n\`\`\``;
+		faux.setResponses([
+			toolUse("fetch_url", { url: "https://cdn.example.test/page" }),
+			toolUse("send_to_user", { message: gallery("https://cdn.example.test/anim.gif") }),
+		]);
+		const { id } = (await post("/sessions")).body;
+		await say("Show me a row", id);
+		faux.setResponses([toolUse("send_to_user", { message: gallery("https://cdn.example.test/huge.gif") })]);
+		await say("And a bigger one", id);
+		const results = ((await api(`/sessions/${id}/messages`)).body.messages as TranscriptMessage[]).flatMap((message) =>
+			message.parts.flatMap((part) => (part.type === "tool-result" && part.name === "send_to_user" ? [part.content.map((content) => (content.type === "text" ? content.text : "")).join("")] : [])),
+		);
+		const kept = JSON.parse(results[0]!) as { images: Record<string, string> };
+		const served = await exports.default.fetch(url(kept.images["https://cdn.example.test/anim.gif"]!), { headers: { Authorization: `Bearer ${TOKEN}` } });
+		expect(served.headers.get("content-type")).toBe("image/gif");
+		expect(Buffer.from(await served.arrayBuffer())).toEqual(gif);
+		const refused = JSON.parse(results[1]!) as { images?: Record<string, string>; notShown: string };
+		expect(refused.images ?? {}).toEqual({});
+		expect(refused.notShown).toContain("huge.gif");
+	});
+
 	it("shows cards and galleries with copies of the images a tool's result gave, and refuses images the model made up", async () => {
 		const png = Buffer.from("iVBORw0KGgo=", "base64");
 		const fetched: string[] = [];

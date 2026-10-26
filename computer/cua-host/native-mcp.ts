@@ -36,7 +36,7 @@ import {
 	UPSTREAM_TOOLS,
 	deepFreeze,
 } from "./native-mcp-upstream.ts";
-import { NATIVE_WIRE_LIMITS, type NativeContent, type NativeOutcome, type PresentationIssue, type RejectReason, type UnknownReason } from "../native-outcome.ts";
+import { isBase64, NATIVE_WIRE_LIMITS, type NativeContent, type NativeOutcome, type PresentationIssue, type RejectReason, type UnknownReason } from "../native-outcome.ts";
 
 /** The fetch the client sends with: Node's own in use, a stand-in in tests. */
 export type Fetch = (url: string, init: RequestInit) => Promise<Response>;
@@ -75,16 +75,16 @@ export const DEFAULT_LIMITS: NativeMcpLimits = {
 	maxImageSide: 4096,
 	maxImagePixels: 4096 * 4096,
 	maxContentItems: 64,
-	maxOutputBytes: 16 * 1024 * 1024,
+	maxOutputBytes: NATIVE_WIRE_LIMITS.maxOutcomeChars,
 };
 
 const MiB = 1024 * 1024;
 
 /**
  * What each limit may be set to: integers in these ranges, no other keys. The
- * ceilings of the items, images and text an outcome holds are the wire's
- * (../native-outcome.ts); an outcome past the wire's 16 MiB, which only a
- * `maxOutputBytes` above it allows, the space takes as unknown.
+ * ceilings of what an outcome holds, its items, images, text and size as
+ * JSON, are the wire's (../native-outcome.ts), so whatever the client keeps
+ * under any limits fits one reply to the space, which reads it as it was.
  */
 export const LIMIT_RANGES: { readonly [K in keyof NativeMcpLimits]: readonly [number, number] } = {
 	setupMs: [1, 60_000],
@@ -97,7 +97,7 @@ export const LIMIT_RANGES: { readonly [K in keyof NativeMcpLimits]: readonly [nu
 	maxImageSide: [1, NATIVE_WIRE_LIMITS.maxImageSide],
 	maxImagePixels: [1, NATIVE_WIRE_LIMITS.maxImageSide * NATIVE_WIRE_LIMITS.maxImageSide],
 	maxContentItems: [1, NATIVE_WIRE_LIMITS.maxContentItems],
-	maxOutputBytes: [1024, 64 * MiB],
+	maxOutputBytes: [1024, NATIVE_WIRE_LIMITS.maxOutcomeChars],
 };
 
 /** An outcome's JSON besides its content: the envelope, and at most `maxContentItems + 4` issues of at most `ISSUE_BYTES` each. */
@@ -437,7 +437,6 @@ function envelope(body: Uint8Array, id: string): Envelope {
 // ---------------------------------------------------------------- results
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 /** An image's size from its own header: PNG's `IHDR`, or JPEG's first start-of-frame. */
@@ -474,7 +473,7 @@ function imageSize(bytes: Buffer, mimeType: "image/png" | "image/jpeg"): { width
 function image(item: Record<string, unknown>, limits: NativeMcpLimits): NativeContent | null {
 	const { mimeType, data } = item;
 	if (mimeType !== "image/png" && mimeType !== "image/jpeg") return null;
-	if (typeof data !== "string" || data.length === 0 || data.length > Math.ceil(limits.maxImageBytes / 3) * 4 || !BASE64.test(data)) return null;
+	if (typeof data !== "string" || data.length === 0 || data.length > Math.ceil(limits.maxImageBytes / 3) * 4 || !isBase64(data)) return null;
 	const bytes = Buffer.from(data, "base64");
 	if (bytes.length > limits.maxImageBytes) return null;
 	const size = imageSize(bytes, mimeType);

@@ -2,15 +2,24 @@ import type { Message } from "@earendil-works/pi-ai";
 import { env, runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NATIVE_TOOL_OP, type NativeOutcome } from "../computer/native-outcome";
+import * as nativeOutcome from "../computer/native-outcome";
+import { BRIDGE_MESSAGE_CHARS, NATIVE_TOOL_OP, type NativeOutcome } from "../computer/native-outcome";
 import type { ExecArgs, ExecResult } from "../computer/pim-computer";
 import type { Approval } from "../src/store";
 import { Computer, type ComputerLink } from "../src/computer";
+import { MAX_MESSAGE_CHARS } from "../src/cua";
 import { type ControlStorage, ControlCoordinator, ControlRefused, dispatchTrace } from "../src/computer-control-runtime";
 import type { ControlState } from "../src/computer-control";
+import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import { api, connectTestComputer, fakeChrome, OWNER, post, say, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
+
+// The space's own check of native-app outcomes, as it is, but replaceable for one reply (see "fails closed when checking a native reply throws").
+vi.mock("../computer/native-outcome", async (original) => {
+	const actual = await original<typeof import("../computer/native-outcome")>();
+	return { ...actual, readNativeOutcome: vi.fn(actual.readNativeOutcome) };
+});
 
 /**
  * The control state on the paths agents really use: approved actions, file
@@ -703,6 +712,70 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 		expect([late.status(), dropped.status(), early.status()]).toEqual(["unknown", "unknown", "unknown"]);
 		expect(new ControlCoordinator("o_a", storage).state?.requests[0]?.status).toBe("unknown");
 		expect(sent.map((call) => call.op)).toEqual([NATIVE_TOOL_OP, NATIVE_TOOL_OP, NATIVE_TOOL_OP]);
+	});
+
+	it("reads a multi-megabyte screenshot whole, and refuses multi-megabyte base64 that isn't, with nothing overflowing", async () => {
+		const { computer, reply, calls } = machine();
+		const header = Buffer.from("iVBORw0KGgoAAAANSUhEUgAABiAAAALdCAIAAAA=", "base64");
+		const screenshot = Buffer.concat([header, Buffer.alloc(6 * 1024 * 1024)]).toString("base64");
+		const image = (data: string) => ({ status: "completed", isError: false, code: null, content: [{ type: "image", mimeType: "image/png", data, width: 1568, height: 733 }], presentation: [] });
+		const cases: [string, string, boolean][] = [
+			["a PNG of 6 MiB", screenshot, true],
+			["8,000,000 characters of the alphabet", "A".repeat(8_000_000), true],
+			["a character outside it, at the end", `${"A".repeat(7_999_999)}!`, false],
+			["padding in the middle", `${"A".repeat(4_000_000)}=${"A".repeat(3_999_999)}`, false],
+			["a group cut short", "A".repeat(8_000_001), false],
+		];
+		for (const [index, [what, data, known]] of cases.entries()) {
+			expect(data.length, what).toBeGreaterThan(8 * 1000 * 1000 - 1);
+			const { coordinator } = resumed();
+			const run = traced(coordinator, "r1", async (note) => {
+				try {
+					return await computer.call(NATIVE_TOOL_OP, {});
+				} finally {
+					note();
+				}
+			});
+			await calls(index + 1);
+			reply(index, { result: image(data) });
+			const done = await run.done;
+			if (known) expect("value" in done && (done.value as { content: { data: string }[] }).content[0]!.data === data, what).toBe(true);
+			else expect("error" in done && done.error.message, what).toMatch(/couldn't be read/);
+			expect(run.notes, what).toEqual([{ sent: true, uncertain: !known, awaiting: 0 }]);
+			expect(run.status(), what).toBe(known ? "completed" : "unknown");
+		}
+		expect(computer.busy()).toBe(false);
+	});
+
+	it("fails closed when checking a native reply throws: the call settles, uncertain, with nothing of the error passed on", async () => {
+		const { computer, reply, calls } = machine();
+		const { coordinator } = resumed();
+		vi.mocked(nativeOutcome.readNativeOutcome).mockImplementationOnce(() => {
+			throw new RangeError(`Maximum call stack size exceeded ${LEAK}`);
+		});
+		// A timeout well past the test's, so only the reply can settle it.
+		const run = traced(coordinator, "r1", async (note) => {
+			try {
+				return await computer.call(NATIVE_TOOL_OP, {}, 600_000);
+			} finally {
+				note();
+			}
+		});
+		await calls(1);
+		expect(computer.busy()).toBe(true);
+		expect(() => reply(0, { result: known })).not.toThrow();
+		const done = await run.done;
+		expect("error" in done && [done.error.message, done.error.answered]).toEqual([
+			"The computer's answer to a native-app call couldn't be read, so whether it acted is unknown.",
+			undefined,
+		]);
+		expect(run.notes).toEqual([{ sent: true, uncertain: true, awaiting: 0 }]);
+		expect(run.status()).toBe("unknown");
+		expect(computer.busy()).toBe(false);
+	});
+
+	it("keeps an outcome's budget below what one bridge message carries", () => {
+		expect(BRIDGE_MESSAGE_CHARS).toBe(MAX_MESSAGE_CHARS);
 	});
 
 	it("fails closed when a native call's settling can't be stored, and stays so after a restart", async () => {

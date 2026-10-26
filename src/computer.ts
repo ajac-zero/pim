@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
 import type { Connection } from "agents";
-import { dispatchEffect, NATIVE_TOOL_OP, readNativeOutcome } from "../computer/native-outcome";
+import { dispatchEffect, NATIVE_TOOL_OP, type NativeOutcome, readNativeOutcome } from "../computer/native-outcome";
 import type { ExecArgs, ExecResult } from "../computer/pim-computer";
 import { digestHex } from "./auth/store";
 import { currentTrace, type DispatchTrace } from "./computer-control-runtime";
@@ -431,10 +431,17 @@ export class Computer {
 	 * on, or anything malformed), leaves the request uncertain, before whoever
 	 * waits hears of it. A known one clears only its own wait: it never lowers
 	 * `sent` or `uncertain`, which may stand for the request's other calls.
-	 * Nothing the computer said is passed on but a checked outcome.
+	 * Nothing the computer said is passed on but a checked outcome. Checking it
+	 * can't strand the call: the reply has already taken the call's place, so
+	 * a check that throws settles it as a malformed reply does.
 	 */
 	#nativeReply(pending: Pending, message: { result?: unknown }, { trace, key }: { trace: DispatchTrace | undefined; key: string }): void {
-		const outcome = Object.hasOwn(message, "error") ? null : readNativeOutcome(message.result);
+		let outcome: NativeOutcome | null = null;
+		try {
+			outcome = Object.hasOwn(message, "error") ? null : readNativeOutcome(message.result);
+		} catch {
+			// Not passed on or logged: it may be about what the computer said.
+		}
 		if (trace && (!outcome || dispatchEffect(outcome).uncertain)) trace.uncertain = true;
 		trace?.awaiting.delete(key);
 		if (outcome) pending.resolve(outcome);

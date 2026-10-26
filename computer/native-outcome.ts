@@ -111,12 +111,23 @@ export function dispatchEffect(outcome: NativeOutcome): { readonly sent: boolean
 	return { sent: outcome.status !== "rejected", uncertain: outcome.status === "unknown" };
 }
 
+/** The most characters one message carries through a Cua bridge (`MAX_MESSAGE_CHARS` in ./cua-bridge.ts and src/cua.ts; the tests check they agree). */
+export const BRIDGE_MESSAGE_CHARS = 16 * 1024 * 1024;
+
+/**
+ * What a reply's envelope may take beside its outcome: pim-computer answers
+ * `{"type":"reply","id":"<the space's UUID>","result":<outcome>}`, about 60
+ * characters around it. The rest of the reserve is margin.
+ */
+export const REPLY_RESERVE_CHARS = 4096;
+
 /**
  * The most an outcome may hold on the wire: as many items, images and text
- * as the client's limits may ever keep (`LIMIT_RANGES` in
- * ./cua-host/native-mcp.ts uses these as its ceilings), and at most `maxChars`
- * as JSON, the most one message carries through a Cua bridge
- * (`MAX_MESSAGE_CHARS`). Past them it isn't read as an outcome.
+ * as the client's limits may ever keep, and at most `maxOutcomeChars` as
+ * JSON, so its reply fits one bridge message whole. `LIMIT_RANGES` in
+ * ./cua-host/native-mcp.ts uses these as its ceilings, `maxOutputBytes`
+ * included (a UTF-8 byte is at least one UTF-16 character). Past them it isn't
+ * read as an outcome.
  */
 export const NATIVE_WIRE_LIMITS = Object.freeze({
 	maxContentItems: 1024,
@@ -126,11 +137,28 @@ export const NATIVE_WIRE_LIMITS = Object.freeze({
 	maxImageSide: 16_384,
 	/** UTF-8 bytes of text, all text items together. */
 	maxTextBytes: 4 * 1024 * 1024,
-	maxChars: 16 * 1024 * 1024,
+	maxOutcomeChars: BRIDGE_MESSAGE_CHARS - REPLY_RESERVE_CHARS,
 });
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+/**
+ * Whether `text` is strict base64: whole groups of four characters of the
+ * standard alphabet, padded with `=` only at the end. It is checked one
+ * character at a time, so a long text costs time in proportion, never stack
+ * (a regular expression repeating a group can overflow it on a few megabytes).
+ * The empty text is base64.
+ */
+export function isBase64(text: string): boolean {
+	const { length } = text;
+	if (length % 4 !== 0) return false;
+	const padding = text.endsWith("==") ? 2 : text.endsWith("=") ? 1 : 0;
+	for (let i = 0; i < length - padding; i++) {
+		const c = text.charCodeAt(i);
+		if (!((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a) || (c >= 0x30 && c <= 0x39) || c === 0x2b || c === 0x2f)) return false;
+	}
+	return true;
+}
 
 type Plain = Record<string, unknown>;
 
@@ -166,7 +194,7 @@ function content(value: unknown): NativeContent | null {
 	const image = exactly(value, ["type", "mimeType", "data", "width", "height"]);
 	if (!image || image.type !== "image" || (image.mimeType !== "image/png" && image.mimeType !== "image/jpeg")) return null;
 	const { data, width, height } = image;
-	if (typeof data !== "string" || data.length === 0 || data.length > NATIVE_WIRE_LIMITS.maxChars || !BASE64.test(data)) return null;
+	if (typeof data !== "string" || data.length === 0 || data.length > NATIVE_WIRE_LIMITS.maxOutcomeChars || !isBase64(data)) return null;
 	if (!count(width, 1, NATIVE_WIRE_LIMITS.maxImageSide) || !count(height, 1, NATIVE_WIRE_LIMITS.maxImageSide)) return null;
 	return { type: "image", mimeType: image.mimeType, data, width, height };
 }
@@ -210,7 +238,7 @@ function completed(value: unknown): NativeOutcome | null {
 			if (++images > NATIVE_WIRE_LIMITS.maxImages) return null;
 			chars += item.data.length;
 		}
-		if (chars > NATIVE_WIRE_LIMITS.maxChars) return null;
+		if (chars > NATIVE_WIRE_LIMITS.maxOutcomeChars) return null;
 		kept.push(item);
 	}
 	const listed: PresentationIssue[] = [];
@@ -220,7 +248,7 @@ function completed(value: unknown): NativeOutcome | null {
 		listed.push(each);
 	}
 	const outcome: NativeOutcome = { status: "completed", isError: result.isError, code: result.code as string | null, content: kept, presentation: listed };
-	return JSON.stringify(outcome).length <= NATIVE_WIRE_LIMITS.maxChars ? outcome : null;
+	return JSON.stringify(outcome).length <= NATIVE_WIRE_LIMITS.maxOutcomeChars ? outcome : null;
 }
 
 /**

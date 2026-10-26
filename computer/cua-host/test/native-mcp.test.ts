@@ -30,7 +30,8 @@ import {
 	type TrustedRun,
 } from "../native-mcp.ts";
 import { AGENT_SESSION, CUA_COMMIT, UPSTREAM_TOOLS, UPSTREAM_TOOLS_SHA256 } from "../native-mcp-upstream.ts";
-import { NATIVE_WIRE_LIMITS, readNativeOutcome } from "../../native-outcome.ts";
+import { BRIDGE_MESSAGE_CHARS, isBase64, NATIVE_WIRE_LIMITS, readNativeOutcome } from "../../native-outcome.ts";
+import { MAX_MESSAGE_CHARS } from "../../cua-bridge.ts";
 
 const ORIGIN = "http://127.0.0.1:3211";
 const TOKEN = "spacesd-root-token-of-the-stand-in-0123456789";
@@ -786,8 +787,18 @@ describe("results", () => {
 	});
 
 	it("is read on the wire as kept at the client's highest limits, and not past the wire's own bounds", async () => {
-		const highest = { maxContentItems: LIMIT_RANGES.maxContentItems[1], maxImages: LIMIT_RANGES.maxImages[1], maxTextBytes: LIMIT_RANGES.maxTextBytes[1] };
-		assert.deepEqual(highest, { maxContentItems: NATIVE_WIRE_LIMITS.maxContentItems, maxImages: NATIVE_WIRE_LIMITS.maxImages, maxTextBytes: NATIVE_WIRE_LIMITS.maxTextBytes });
+		const highest = {
+			maxContentItems: LIMIT_RANGES.maxContentItems[1],
+			maxImages: LIMIT_RANGES.maxImages[1],
+			maxTextBytes: LIMIT_RANGES.maxTextBytes[1],
+			maxOutputBytes: LIMIT_RANGES.maxOutputBytes[1],
+		};
+		assert.deepEqual(highest, {
+			maxContentItems: NATIVE_WIRE_LIMITS.maxContentItems,
+			maxImages: NATIVE_WIRE_LIMITS.maxImages,
+			maxTextBytes: NATIVE_WIRE_LIMITS.maxTextBytes,
+			maxOutputBytes: NATIVE_WIRE_LIMITS.maxOutcomeChars,
+		});
 		const many = [
 			{ type: "text", text: "é".repeat(2 * 1024 * 1024 + 10) },
 			...Array.from({ length: 20 }, () => ({ type: "image", mimeType: "image/png", data: png(8, 8) })),
@@ -810,8 +821,8 @@ describe("results", () => {
 			["text at the bound", { ...base, content: [text("é".repeat(2 * 1024 * 1024))] }, true],
 			["text past it, in bytes", { ...base, content: [text("é".repeat(2 * 1024 * 1024)), text("a")] }, false],
 			["an image wider than any", { ...base, content: [{ ...image, width: 16_385 }] }, false],
-			["JSON past the wire's, from escapes", { ...base, content: [text("\u0001".repeat(3 * 1024 * 1024))] }, false],
-			["images past the wire's JSON", { ...base, content: Array(16).fill({ ...image, data: "A".repeat(1024 * 1024 + 4) }) }, false],
+			["JSON past the wire's budget, from escapes", { ...base, content: [text("\u0001".repeat(3 * 1024 * 1024))] }, false],
+			["images past the wire's budget", { ...base, content: Array(16).fill({ ...image, data: "A".repeat(1024 * 1024 + 4) }) }, false],
 			["issues at the bound", { ...base, presentation: Array(1028).fill({ kind: "content_omitted", index: 1023 }) }, true],
 			["issues past it", { ...base, presentation: Array(1029).fill({ kind: "content_omitted", index: 0 }) }, false],
 			["an index past the items", { ...base, presentation: [{ kind: "image_omitted", index: 1024 }] }, false],
@@ -820,6 +831,50 @@ describe("results", () => {
 			["an inherited-looking key", JSON.parse('{"status":"rejected","reason":"busy","__proto__":{"x":1}}'), false],
 		];
 		for (const [what, value, read] of cases) assert.equal(readNativeOutcome(value) !== null, read, what);
+	});
+
+	it("keeps an outcome and its reply within one bridge message, and reads one exactly at the budget", () => {
+		assert.equal(BRIDGE_MESSAGE_CHARS, MAX_MESSAGE_CHARS);
+		assert.equal(DEFAULT_LIMITS.maxOutputBytes, NATIVE_WIRE_LIMITS.maxOutcomeChars);
+		assert.ok(NATIVE_WIRE_LIMITS.maxOutcomeChars < MAX_MESSAGE_CHARS);
+		const sized = (chars: number) => {
+			const empty = { status: "completed", isError: false, code: null, content: [{ type: "image", mimeType: "image/png", data: "", width: 8, height: 8 }], presentation: [] };
+			const data = "A".repeat(Math.floor((chars - JSON.stringify(empty).length) / 4) * 4);
+			return { ...empty, content: [{ ...empty.content[0], data }] };
+		};
+		const atBudget = sized(NATIVE_WIRE_LIMITS.maxOutcomeChars);
+		const length = JSON.stringify(atBudget).length;
+		assert.ok(length <= NATIVE_WIRE_LIMITS.maxOutcomeChars && length > NATIVE_WIRE_LIMITS.maxOutcomeChars - 4);
+		assert.notEqual(readNativeOutcome(atBudget), null);
+		assert.equal(readNativeOutcome(sized(NATIVE_WIRE_LIMITS.maxOutcomeChars + 4)), null);
+		// pim-computer's reply to the space around it, with the space's call ID, still fits one message.
+		assert.ok(JSON.stringify({ type: "reply", id: crypto.randomUUID(), result: atBudget }).length <= MAX_MESSAGE_CHARS);
+	});
+
+	it("checks base64 a character at a time: as strictly as the pattern did, and multi-megabyte texts without overflowing", () => {
+		// The pattern the client used, which overflows the stack on a few megabytes, as the reference for short texts.
+		const pattern = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+		const alphabet = ["A", "z", "0", "+", "/", "=", "!", "-", "\u00e9"];
+		let texts = [""];
+		for (let length = 1; length <= 5; length++) {
+			texts = texts.flatMap((text) => (text.length === length - 1 ? alphabet.map((char) => text + char) : []));
+			for (const text of texts) assert.equal(isBase64(text), pattern.test(text), JSON.stringify(text));
+		}
+		assert.throws(() => pattern.test("A".repeat(8_000_000)), RangeError);
+		assert.equal(isBase64("A".repeat(8_000_000)), true);
+		assert.equal(isBase64(`${"A".repeat(7_999_998)}==`), true);
+		assert.equal(isBase64(`${"A".repeat(7_999_999)}!`), false);
+		assert.equal(isBase64(`${"A".repeat(4_000_000)}=${"A".repeat(3_999_999)}`), false);
+		assert.equal(isBase64("A".repeat(8_000_001)), false);
+	});
+
+	it("keeps a multi-megabyte screenshot, which the pattern couldn't check, as a known result", async () => {
+		const data = Buffer.concat([Buffer.from(png(1568, 733), "base64"), Buffer.alloc(6 * 1024 * 1024)]).toString("base64");
+		assert.ok(data.length > 8_000_000);
+		const { outcome, standIn } = await result({ content: [{ type: "image", mimeType: "image/png", data }] });
+		assert.deepEqual(outcome.content.map((item) => item.type === "image" && [item.width, item.height, item.data === data]), [[1568, 733, true]]);
+		assert.deepEqual(outcome.presentation, []);
+		assert.equal(standIn.executed.length, 1);
 	});
 
 	it("keeps limits that bound a screenshot of the pinned default size", () => {

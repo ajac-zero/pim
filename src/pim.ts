@@ -154,6 +154,7 @@ import {
 import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
+import { ControlCoordinator } from "./computer-control-runtime";
 import { COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerStatus } from "./computer";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
@@ -191,6 +192,8 @@ const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory", "pim.artifacts"];
 /** Pim's own actions that use the person's computer, offered only while one is paired. */
 const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, BROWSER_CLICK, BROWSER_TYPE]);
+/** Where the space keeps its computer's control state, if it opted in (see ./computer-control-runtime.ts). */
+const CONTROL_KEY = "computer_control";
 /** How a dashboard names an artifact pinned to it: `artifact:<id>`. */
 const PINNED_ARTIFACT = "artifact:";
 
@@ -483,7 +486,28 @@ export class Pim extends DurableAgent<Env> {
 	});
 	/** The person's files, on their computer, which they and their agents share (see ./files.ts). */
 	readonly files = new Files(this.computer);
-	readonly #files: FileServices = { computer: this.computer, assertOpen: () => this.#assertOpen() };
+	/**
+	 * Whether an agent's request may reach the computer, for a space that opted in (see ./computer-control-runtime.ts).
+	 * No route or tool turns it on or changes it: a space that hasn't opted in is unaffected.
+	 */
+	get control(): ControlCoordinator {
+		return (this.#control ??= new ControlCoordinator(this.name, {
+			read: () => this.store.meta(CONTROL_KEY),
+			write: (value) => this.store.setMeta(CONTROL_KEY, value),
+		}));
+	}
+	#control: ControlCoordinator | undefined;
+	/** Sends an agent's request to the computer, if the control state admits it; the agent is the one the server knows `session` talks as. */
+	#controlled<T>(session: string, requestId: string, send: () => Promise<T>, bindingId?: string): Promise<T> {
+		if (!this.control.enabled) return send();
+		const agentId = this.#roleOf(session).agent.id;
+		return this.control.dispatch({ space: this.name, agentId, requestId, ...(bindingId ? { bindingId } : {}) }, send);
+	}
+	readonly #files: FileServices = {
+		computer: this.computer,
+		assertOpen: () => this.#assertOpen(),
+		controlled: (session, callId, send) => this.#controlled(session, `call:${session}:${callId}`, send),
+	};
 	#legacyWorkspace: Workspace | undefined;
 	/** Files kept in the space before they moved to the computer, until they move there (see ./legacy-files.ts). */
 	readonly legacyFiles = new LegacyFiles({
@@ -1918,6 +1942,8 @@ export class Pim extends DurableAgent<Env> {
 	 * (see `decideApproval`).
 	 */
 	async #approvalFiled(approval: Approval, isNew: boolean): Promise<string | null> {
+		// The lease the request is filed under, so a takeover before it's decided is found out when it runs.
+		if (isNew && COMPUTER_ACTIONS.has(approval.action)) this.control.bind(approval.id);
 		if (approval.status !== "pending") return this.#outcome(approval);
 		if (this.#approvalPermission(approval) === "on") {
 			return this.#outcome(await this.decideApproval(approval.id, "approve", undefined, "always", { inTurn: true }));
@@ -2015,7 +2041,11 @@ export class Pim extends DurableAgent<Env> {
 			let result: string;
 			try {
 				result = action
-					? await this.keepAliveWhile(() => action.run(approval.args as never, { session: approval.session }))
+					? await this.keepAliveWhile(() => {
+							const run = () => action.run(approval.args as never, { session: approval.session });
+							// Checked now, after the decision, not when it was asked: the person may have taken over since.
+							return COMPUTER_ACTIONS.has(action.name) ? this.#controlled(approval.session, `approval:${id}`, run, id) : run();
+						})
 					: `The action ${approval.action} is no longer available.`;
 			} catch (error) {
 				result = `The action failed: ${errorMessage(error)}`;

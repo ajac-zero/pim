@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import type { Connection } from "agents";
 import type { ExecArgs, ExecResult } from "../computer/pim-computer";
 import { digestHex } from "./auth/store";
+import { dispatchTrace } from "./computer-control-runtime";
 import { HttpError } from "./http";
 import type { SpriteLink } from "./sprites";
 
@@ -101,7 +102,7 @@ type Pending = { resolve(value: unknown): void; reject(error: Error): void; time
 
 /** A failure the computer reported, with its code (`ENOENT`…), which the file tools read. */
 function remoteError(error: { message?: unknown; code?: unknown }): Error {
-	return Object.assign(new Error(String(error.message ?? "The computer failed")), typeof error.code === "string" ? { code: error.code } : {});
+	return Object.assign(new Error(String(error.message ?? "The computer failed")), { answered: true }, typeof error.code === "string" ? { code: error.code } : {});
 }
 
 export class Computer {
@@ -293,14 +294,24 @@ export class Computer {
 		if (!socket) throw new HttpError(503, "The computer is offline: pim-computer isn't connected. Ask the person to start it again.");
 		if (counts) this.#use();
 		const id = crypto.randomUUID();
-		return new Promise<T>((resolve, reject) => {
+		// A request the control state admitted (see ./computer-control-runtime.ts) learns what became of its calls.
+		const trace = dispatchTrace.getStore();
+		const answer = new Promise<T>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.#pending.delete(id);
 				reject(new HttpError(504, `The computer didn't answer within ${Math.round(timeoutMs / 1000)} seconds.`));
 			}, timeoutMs);
 			this.#pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
 			socket.send(JSON.stringify({ type: "call", id, op, args }));
+			if (trace) trace.sent = true;
 		});
+		// A call that was sent and wasn't answered, by a timeout or a disconnect, may have run.
+		return trace
+			? answer.catch((error: unknown) => {
+					if (!(error as { answered?: unknown }).answered) trace.uncertain = true;
+					throw error;
+				})
+			: answer;
 	}
 
 	/**

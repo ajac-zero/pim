@@ -1,6 +1,7 @@
 import { createPiTools } from "@cloudflare/computer/tools/pi-ai";
 import { type TSchema, Type } from "@earendil-works/pi-ai";
 import { defineExtension, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
+import { ControlRefused } from "../computer-control-runtime";
 import { type Computer, DEFAULT_COMMAND_MS, MAX_COMMAND_MS } from "../computer";
 import { FILES_ROOT, filesPath } from "../files";
 import { defineGatedAction, type GatedAction } from "./approvals";
@@ -42,6 +43,12 @@ export type FileServices = {
 	readonly computer: Computer;
 	/** Throws once the space is being erased: work still under way then writes nothing. */
 	assertOpen(): void;
+	/**
+	 * Runs an agent's call to the computer for `session` and `callId`, if the
+	 * control state admits it (see ../computer-control-runtime.ts); a space that
+	 * hasn't opted in runs it as is. Refuses with a `ControlRefused`, sending nothing.
+	 */
+	controlled<T>(session: string, callId: string, send: () => Promise<T>): Promise<T>;
 };
 
 /** Says what's wrong with a call's path or folder, or null when each is under `FILES_ROOT`. */
@@ -81,7 +88,13 @@ export function filesExtension(services: FileServices) {
 				description: `${tool.description} ${WHERE}`,
 				parameters: tool.parameters as unknown as TSchema,
 				replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
-				execute: (args, api, context) => run(tool.name, args as Record<string, unknown>, api.callId, context.abortSignal),
+				execute: (args, api, context) =>
+					services
+						.controlled(String(api.conversationId), api.callId, () => run(tool.name, args as Record<string, unknown>, api.callId, context.abortSignal))
+						.catch((error) => {
+							if (error instanceof ControlRefused) return text(error.message, true);
+							throw error;
+						}),
 			}),
 		);
 	return defineExtension({ name: FILES_EXTENSION, tools: registrations });

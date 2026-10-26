@@ -28,3 +28,30 @@ This module cannot stop the machine, and its tests do not show that anything sto
 ## Next review steps
 
 Decide where state is stored and how writes are serialized; define the real viewer revocation and request cancellation evidence; design and separately verify enforcement and quiescence before any integration.
+
+## Runtime wiring (opt-in, no public control)
+
+`src/computer-control-runtime.ts` stores the state per space and gates the agent paths that reach the computer. It is wired into `src/pim.ts` and `src/extensions/files.ts`, and it changes nothing for a space that has not opted in: paired computers, Sprites and approvals behave as before.
+
+- **Opt-in.** A space is opted in when it has a stored control document (`pim_meta` key `computer_control`). `Pim.control.enable()` writes one, with the human in control. No route, tool or setting calls it, so today only in-process code (the tests) can. There is no deployment-wide switch.
+- **No takeover or resume is exposed.** `control.apply(event)` is the only transition and nothing public reaches it. **Human takeover remains unavailable while input quiescence is unproven**: a takeover event closes Pim's admissions, and does not stop the machine.
+- **Serialized, durable.** Each transition reads, applies the reducer, and writes the whole document synchronously in the Durable Object's storage, so transitions never interleave. A request is stored as admitted before it is sent; if storing fails, nothing is sent.
+- **Identity.** The request carries the space (the Durable Object's own name) and the agent the server knows the chat talks as (`#roleOf(session)`); the session comes from the approval or tool call, never from a client. A request naming another space is refused, and a stored document belonging to another space blocks.
+- **Agent paths gated.** Approved `shell`, `file_delete`, `browser_click` and `browser_type` (checked when the approval is executed, after the decision) and the file tools (`file_read`, `file_write`, ...). Request IDs are `approval:<id>` and `call:<session>:<callId>`, so a replay of the same call is refused rather than sent again.
+- **Approvals keep their lease.** When an approval for a computer action is filed, the lease then held is remembered. At execution the lease must still be the current one, so a takeover, or a takeover and resume, before the decision refuses it. An approval filed while the human had control, or whose record is gone, is refused. Approval and permission checks still apply independently.
+- **Settling.** What the request's calls did decides it: replied to (including a machine error reply) is `completed`; nothing left this process is `rejected`; sent and then timed out or disconnected is `unknown` and blocks until a `reconcile_request` event. A reply is a transport receipt, not proof of what the machine did or can still do.
+- **Restart.** The coordinator restores conservatively on load (in flight becomes unknown, revoking becomes failed) and writes that back. A damaged, unknown-version or other-space document blocks all requests and is left untouched; nothing resets it.
+- **No fallback.** An opted-in space whose control refuses does not use another computer.
+
+### Interfaces for the next stages
+
+- **Viewer stage:** feeds `control.apply({ type: "viewer_open_requested" | "viewer_opened" | "viewer_revoke_requested" | "viewer_revoked" | "viewer_revoke_failed", ... })` from real revocation evidence, with the attempt number from the state. No acknowledgment may be invented.
+- **Provider stage:** decides when a space is opted in and what computer it uses, and is the only caller of `enable`, `resume` and `takeover`, which it may expose only once enforcement and quiescence are independently established.
+
+### Open issues
+
+- **Browser tools** other than click and type (open, read, screenshot, close) and the person's own `/files` routes do not pass the gate. The first matter for an opted-in space; the second are the person's requests, not an agent's.
+- A damaged document has no repair path; that needs an operator procedure.
+- Approvals keep at most 256 lease bindings; older ones fail closed.
+- Settling after a crash between sending and storing is left as `in_flight`, which restart turns into `unknown`.
+- Full-computer takeover is unproven.

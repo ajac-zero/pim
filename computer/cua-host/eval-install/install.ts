@@ -17,10 +17,10 @@
  *   have no drop-in and enabled but not started. It never reuses, deletes or recursively changes anything it
  *   didn't make, and it doesn't undo a step that failed: the VM is then
  *   discarded.
- * - `start` starts the two services once the bridge's token is there, and
- *   only while systemd says the desktop endpoint runs, never ran, or last
- *   stopped with its result `success`; any other end means a reboot or a
- *   new VM.
+ * - `start` starts the two services once the bridge's token is there. It
+ *   leaves a running desktop endpoint alone, and starts a stopped one only
+ *   when systemd's record says its main process never started or exited
+ *   with status 0; any other end means a reboot or a new VM.
  * - `status` prints metadata only: accounts, owners and modes, the
  *   certificate's fingerprint and dates, whether the desktop account is
  *   refused each secret file, and the services' states as systemd says them.
@@ -532,36 +532,74 @@ export function status(config: Config, probe: Probe): Record<string, unknown> {
 	return { event: "pim-cua-eval.status", evaluation: config.evaluation, commit: config.commit, accounts, paths, certificate, denied, units, display, ptraceScope };
 }
 
-/** The `systemctl show` arguments `unitState` reads: ordinary unit metadata only. */
-export const UNIT_STATE = (unit: string) => [TOOLS.systemctl, "show", "--property=LoadState,ActiveState,SubState,Result", unit];
+/**
+ * What `unitState` asks `systemctl show` for: ordinary unit metadata only.
+ * The four states, and the main process's record (`ExecMain…`), which
+ * systemd resets each time the unit starts its main process and fills in
+ * when that process ends: `ExecMainCode` is how it ended (1 `CLD_EXITED`,
+ * 2 `CLD_KILLED`, 3 `CLD_DUMPED`, 0 not yet) and `ExecMainStatus` its exit
+ * status or signal.
+ */
+export const UNIT_PROPERTIES = [
+	"LoadState",
+	"ActiveState",
+	"SubState",
+	"Result",
+	"ExecMainPID",
+	"ExecMainCode",
+	"ExecMainStatus",
+	"ExecMainStartTimestampMonotonic",
+	"ExecMainExitTimestampMonotonic",
+] as const;
 
-type UnitState = { LoadState: string; ActiveState: string; SubState: string; Result: string };
+export const UNIT_STATE = (unit: string) => [TOOLS.systemctl, "show", `--property=${UNIT_PROPERTIES.join(",")}`, unit];
 
-/** A unit's load, active and sub-state and its last result, as systemd says them; `null` when they can't be read whole. */
+type UnitState = Record<(typeof UNIT_PROPERTIES)[number], string>;
+
+/** A unit's states and its main process's record, as systemd says them; `null` unless every property comes exactly once, in its expected form. */
 export function unitState(query: Probe["query"], unit: string): UnitState | null {
 	const answer = query(UNIT_STATE(unit));
 	if (answer.status !== 0) return null;
-	const lines = answer.stdout.split("\n").filter(Boolean);
 	const state: Record<string, string> = {};
-	for (const line of lines) {
-		const match = /^(LoadState|ActiveState|SubState|Result)=([a-z-]+)$/.exec(line);
-		if (!match || Object.hasOwn(state, match[1]!)) return null;
-		state[match[1]!] = match[2]!;
+	for (const line of answer.stdout.split("\n").filter(Boolean)) {
+		const match = /^([A-Za-z]+)=(.*)$/.exec(line);
+		const name = match?.[1] as (typeof UNIT_PROPERTIES)[number] | undefined;
+		if (!match || !name || !UNIT_PROPERTIES.includes(name) || Object.hasOwn(state, name)) return null;
+		if (!(name.startsWith("ExecMain") ? /^(0|-?[1-9][0-9]{0,19})$/ : /^[a-z-]+$/).test(match[2]!)) return null;
+		state[name] = match[2]!;
 	}
-	return Object.keys(state).length === 4 ? (state as UnitState) : null;
+	return Object.keys(state).length === UNIT_PROPERTIES.length ? (state as UnitState) : null;
+}
+
+/**
+ * Whether the desktop endpoint may be started now, by systemd's record
+ * alone: loaded and inactive with result `success`, and its main process
+ * either never started (every `ExecMain…` field 0) or ended by exiting with
+ * status 0 (`CLD_EXITED`, status 0, with start and exit times). `Result=success`
+ * alone isn't enough: for a simple service systemd counts death by `SIGHUP`,
+ * `SIGINT`, `SIGTERM` or `SIGPIPE` as success too, and an endpoint killed so
+ * never saw its pim-computer exit. Its own stop path (desktop.ts: `close()`,
+ * which waits for that exit, then `exit(0)`) is how the program exits 0.
+ */
+export function cleanlyStopped(state: UnitState | null): boolean {
+	if (state?.LoadState !== "loaded" || state.ActiveState !== "inactive" || state.SubState !== "dead" || state.Result !== "success") return false;
+	const neverStarted = ["ExecMainPID", "ExecMainCode", "ExecMainStatus", "ExecMainStartTimestampMonotonic", "ExecMainExitTimestampMonotonic"].every((name) => state[name as keyof UnitState] === "0");
+	const exitedZero = state.ExecMainCode === "1" && state.ExecMainStatus === "0" && state.ExecMainPID !== "0" && state.ExecMainStartTimestampMonotonic !== "0" && state.ExecMainExitTimestampMonotonic !== "0";
+	return neverStarted || exitedZero;
 }
 
 /**
  * Starts the desktop endpoint, then the bridge, once the token is the
  * bridge's and, for a headful browser, the session's display is there.
  *
- * Only an endpoint that systemd says is running, or never ran or stopped
- * with its result `success` (it exited 0, which it does only after the
- * pim-computer it started was seen to exit), is started (or left running).
- * After any other end (failed, killed, a refused start, a stop still under
- * way, or state that can't be read), it isn't recoverable in place: the VM
- * is rebooted or discarded. That is a policy about what systemd recorded,
- * not a check that nothing the endpoint started still runs.
+ * An endpoint systemd says is running is left alone: no start is sent for
+ * it, so one that ended in the meantime isn't started again. Otherwise it is
+ * started only when `cleanlyStopped` holds. After any other end (failed,
+ * killed by any signal, a refused start, a stop still under way, or a state
+ * that can't be read whole) it isn't recoverable in place: the VM is
+ * rebooted or discarded. That is a policy about what systemd recorded of the
+ * unit's main process, not a check that nothing the endpoint started still
+ * runs.
  */
 export function start(config: Config, probe: Probe, run: (argv: readonly string[]) => void): void {
 	const users = parsePasswd(probe.readText("/etc/passwd") ?? "");
@@ -575,13 +613,12 @@ export function start(config: Config, probe: Probe, run: (argv: readonly string[
 		if (socket?.kind !== "socket" || runtime?.kind !== "dir" || runtime.uid !== desktop?.uid) throw new Refusal("display-missing");
 	}
 	const desktopState = unitState(probe.query, UNITS.desktop);
-	const running = desktopState?.ActiveState === "active" && desktopState.SubState === "running";
-	const clean = desktopState?.ActiveState === "inactive" && desktopState.SubState === "dead" && desktopState.Result === "success";
-	if (desktopState?.LoadState !== "loaded" || !(running || clean)) throw new Refusal("desktop-not-clean");
+	const running = desktopState?.LoadState === "loaded" && desktopState.ActiveState === "active" && desktopState.SubState === "running";
+	if (!running && !cleanlyStopped(desktopState)) throw new Refusal("desktop-not-clean");
 	// The bridge starts nothing of its own, so a failed one may be started again; a state that can't be read, or a change under way, may not.
 	const bridgeState = unitState(probe.query, UNITS.bridge);
 	if (bridgeState?.LoadState !== "loaded" || !["active", "inactive", "failed"].includes(bridgeState.ActiveState)) throw new Refusal("bridge-state");
-	run([TOOLS.systemctl, "start", UNITS.desktop]);
+	if (!running) run([TOOLS.systemctl, "start", UNITS.desktop]);
 	run([TOOLS.systemctl, "start", UNITS.bridge]);
 }
 
@@ -605,20 +642,23 @@ function lstat(file: string): PathFact {
 	}
 }
 
-/** A regular file's text, at most 1 MiB, read without following a link or waiting on a FIFO; `null` when it can't be. */
-export function readText(file: string): string | null {
+/** The file operations `readText` makes; tests give some that fail. */
+export type ReadOperations = Pick<typeof fs, "openSync" | "fstatSync" | "readSync" | "closeSync">;
+
+/** A regular file's text, at most 1 MiB, read without following a link or waiting on a FIFO; `null` when it can't be, for any reason. */
+export function readText(file: string, ops: ReadOperations = fs): string | null {
 	let descriptor: number;
 	try {
-		descriptor = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+		descriptor = ops.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
 	} catch {
 		return null;
 	}
 	try {
-		if (!fs.fstatSync(descriptor).isFile()) return null;
+		if (!ops.fstatSync(descriptor).isFile()) return null;
 		const buffer = Buffer.alloc(1024 * 1024 + 1);
 		let length = 0;
 		for (;;) {
-			const read = fs.readSync(descriptor, buffer, length, buffer.length - length, null);
+			const read = ops.readSync(descriptor, buffer, length, buffer.length - length, null);
 			if (read === 0) break;
 			length += read;
 			if (length > 1024 * 1024) return null;
@@ -627,7 +667,11 @@ export function readText(file: string): string | null {
 	} catch {
 		return null;
 	} finally {
-		fs.closeSync(descriptor);
+		try {
+			ops.closeSync(descriptor);
+		} catch {
+			// The descriptor is gone either way.
+		}
 	}
 }
 

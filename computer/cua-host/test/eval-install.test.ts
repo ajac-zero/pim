@@ -633,9 +633,18 @@ function probe(entries: Record<string, PathFact>, texts: Record<string, string>,
 	return { value, read, queries };
 }
 
-/** How `systemctl show --property=LoadState,ActiveState,SubState,Result` answers, in systemd's own order. */
-const shown = (active: string, sub: string, result: string, load = "loaded") => ({ status: 0, stdout: `LoadState=${load}\nActiveState=${active}\nSubState=${sub}\nResult=${result}\n` });
-const SHOW = ["/usr/bin/systemctl", "show", "--property=LoadState,ActiveState,SubState,Result"];
+/** A main process's record as systemd keeps it: never started (all 0), or ended with `code` (1 exited, 2 killed, 3 dumped) and `status`. */
+type Main = { pid: string; code: string; status: string; started: string; exited: string };
+const NEVER: Main = { pid: "0", code: "0", status: "0", started: "0", exited: "0" };
+const ended = (code: string, status: string): Main => ({ pid: "4100", code, status, started: "81234567", exited: "91234567" });
+const EXITED_0 = ended("1", "0");
+
+/** How `systemctl show --property=…` answers, in systemd's own order (not the order asked). */
+const shown = (active: string, sub: string, result: string, main: Main = NEVER, load = "loaded") => ({
+	status: 0,
+	stdout: `Result=${result}\nExecMainStartTimestampMonotonic=${main.started}\nExecMainExitTimestampMonotonic=${main.exited}\nExecMainPID=${main.pid}\nExecMainCode=${main.code}\nExecMainStatus=${main.status}\nLoadState=${load}\nActiveState=${active}\nSubState=${sub}\n`,
+});
+const SHOW = ["/usr/bin/systemctl", "show", "--property=LoadState,ActiveState,SubState,Result,ExecMainPID,ExecMainCode,ExecMainStatus,ExecMainStartTimestampMonotonic,ExecMainExitTimestampMonotonic"];
 
 describe("status", () => {
 	it("says metadata only, and checks as the desktop account that each secret file is refused, reading none of them", () => {
@@ -659,11 +668,11 @@ describe("status", () => {
 			"/proc/sys/kernel/yama/ptrace_scope": "1\n",
 		};
 		const readable = new Set(["/etc/pim-eval/eval-key.pub.pem", "/etc/pim-bridge/cert.pem"]);
-		let bridgeShow = shown("failed", "failed", "exit-code");
+		let bridgeShow = shown("failed", "failed", "exit-code", ended("1", "1"));
 		const { value, read, queries } = probe(installed, texts, (argv) => {
 			if (argv[0] === "/usr/sbin/runuser") return { status: readable.has(argv.at(-1)!) ? 0 : 1, stdout: "" };
 			if (argv[1] === "is-enabled") return { status: 0, stdout: "enabled\n" };
-			return argv.at(-1) === "pim-cua-desktop.service" ? shown("active", "running", "success") : bridgeShow;
+			return argv.at(-1) === "pim-cua-desktop.service" ? shown("active", "running", "success", { ...NEVER, pid: "4100", started: "81234567" }) : bridgeShow;
 		});
 		const report = status(cfg, value);
 		assert.equal(report.accounts, "ok");
@@ -671,9 +680,10 @@ describe("status", () => {
 		assert.deepEqual((report.paths as Record<string, string>)["/etc/pim-bridge/key.pem"], "file pim-bridge:pim-bridge 0600");
 		assert.deepEqual((report.paths as Record<string, string>)["/run/pim-session"], "dir pim-desktop:pim-session 2750");
 		assert.deepEqual((report.paths as Record<string, string>)[cfg.tls.key], "absent");
+		const record = (main: Main) => ({ ExecMainPID: main.pid, ExecMainCode: main.code, ExecMainStatus: main.status, ExecMainStartTimestampMonotonic: main.started, ExecMainExitTimestampMonotonic: main.exited });
 		assert.deepEqual(report.units, {
-			"pim-cua-desktop.service": { enabled: "enabled", LoadState: "loaded", ActiveState: "active", SubState: "running", Result: "success" },
-			"pim-cua-bridge.service": { enabled: "enabled", LoadState: "loaded", ActiveState: "failed", SubState: "failed", Result: "exit-code" },
+			"pim-cua-desktop.service": { enabled: "enabled", Result: "success", ...record({ ...NEVER, pid: "4100", started: "81234567" }), LoadState: "loaded", ActiveState: "active", SubState: "running" },
+			"pim-cua-bridge.service": { enabled: "enabled", Result: "exit-code", ...record(ended("1", "1")), LoadState: "loaded", ActiveState: "failed", SubState: "failed" },
 		});
 		assert.deepEqual(report.display, { socket: true, runtimeDir: true });
 		assert.equal(report.ptraceScope, "1");
@@ -708,7 +718,7 @@ describe("start", () => {
 	const texts = { "/etc/passwd": `${PASSWD}pim-bridge:x:997:997::/nonexistent:/usr/sbin/nologin\n` };
 	const ready: Record<string, PathFact> = { "/etc/pim-bridge/token": fileFact(997, 0o600), "/tmp/.X11-unix/X0": { kind: "socket", uid: 1000, gid: 1000, mode: 0o777 }, "/run/user/1000": dirFact(1000, 0o700) };
 	type Answer = { status: number | null; stdout: string };
-	const attempt = (entries: Record<string, PathFact>, desktop: Answer, bridge: Answer = shown("inactive", "dead", "success")) => {
+	const attempt = (entries: Record<string, PathFact>, desktop: Answer, bridge: Answer = shown("inactive", "dead", "success", NEVER)) => {
 		const started: string[] = [];
 		const { value, read, queries } = probe(entries, texts, (argv) => (argv.at(-1) === "pim-cua-desktop.service" ? desktop : bridge));
 		let reason: string | undefined;
@@ -725,40 +735,61 @@ describe("start", () => {
 		return { started, reason };
 	};
 
-	it("starts the desktop endpoint, then the bridge, when the token is the bridge's, the display is there, and the endpoint never ran, stopped cleanly or runs", () => {
+	it("starts the endpoint only when its main process never started or exited 0, and leaves a running one alone", () => {
 		const both = ["/usr/bin/systemctl start pim-cua-desktop.service", "/usr/bin/systemctl start pim-cua-bridge.service"];
-		assert.deepEqual(attempt(ready, shown("inactive", "dead", "success")), { started: both, reason: undefined });
-		assert.deepEqual(attempt(ready, shown("active", "running", "success")), { started: both, reason: undefined });
+		const bridgeOnly = ["/usr/bin/systemctl start pim-cua-bridge.service"];
+		assert.deepEqual(attempt(ready, shown("inactive", "dead", "success", NEVER)), { started: both, reason: undefined });
+		assert.deepEqual(attempt(ready, shown("inactive", "dead", "success", EXITED_0)), { started: both, reason: undefined });
+		// Running: no start is sent for it at all, so one that ends between the query and the call isn't started again.
+		assert.deepEqual(attempt(ready, shown("active", "running", "success", { ...NEVER, pid: "4100", started: "81234567" })), { started: bridgeOnly, reason: undefined });
 		// The bridge starts nothing of its own: a bridge that failed (as it does at boot before seal) may be started again.
-		assert.deepEqual(attempt(ready, shown("inactive", "dead", "success"), shown("failed", "failed", "exit-code")), { started: both, reason: undefined });
+		assert.deepEqual(attempt(ready, shown("inactive", "dead", "success", EXITED_0), shown("failed", "failed", "exit-code", ended("1", "1"))), { started: both, reason: undefined });
 	});
 
 	it("refuses, starting nothing, without the token or the display, or after the endpoint ended any other way or its state can't be read", () => {
+		const clean = shown("inactive", "dead", "success", EXITED_0);
 		const cases: [string, Record<string, PathFact>, Answer, Answer?][] = [
-			["token-missing", { ...ready, "/etc/pim-bridge/token": null }, shown("inactive", "dead", "success")],
-			["token-missing", { ...ready, "/etc/pim-bridge/token": fileFact(1000, 0o600) }, shown("inactive", "dead", "success")],
-			["token-missing", { ...ready, "/etc/pim-bridge/token": fileFact(997, 0o640) }, shown("inactive", "dead", "success")],
-			["display-missing", { ...ready, "/tmp/.X11-unix/X0": null }, shown("inactive", "dead", "success")],
-			["display-missing", { ...ready, "/run/user/1000": null }, shown("inactive", "dead", "success")],
-			// Ended abnormally: not recoverable in place, whatever it left.
-			["desktop-not-clean", ready, shown("failed", "failed", "exit-code")],
-			["desktop-not-clean", ready, shown("failed", "failed", "signal")],
-			["desktop-not-clean", ready, shown("inactive", "dead", "signal")],
-			["desktop-not-clean", ready, shown("inactive", "dead", "core-dump")],
-			["desktop-not-clean", ready, shown("deactivating", "stop-sigterm", "success")],
+			["token-missing", { ...ready, "/etc/pim-bridge/token": null }, clean],
+			["token-missing", { ...ready, "/etc/pim-bridge/token": fileFact(1000, 0o600) }, clean],
+			["token-missing", { ...ready, "/etc/pim-bridge/token": fileFact(997, 0o640) }, clean],
+			["display-missing", { ...ready, "/tmp/.X11-unix/X0": null }, clean],
+			["display-missing", { ...ready, "/run/user/1000": null }, clean],
+			// Result=success after death by SIGHUP, SIGINT, SIGTERM or SIGPIPE, which systemd counts as clean for a simple service:
+			// the endpoint never saw its pim-computer exit, so these are refused like any other abnormal end.
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", ended("2", "1"))],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", ended("2", "2"))],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", ended("2", "15"))],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", ended("2", "13"))],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", ended("3", "11"))],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", ended("1", "1"))],
+			// Ended abnormally by systemd's own account.
+			["desktop-not-clean", ready, shown("failed", "failed", "exit-code", ended("1", "1"))],
+			["desktop-not-clean", ready, shown("failed", "failed", "signal", ended("2", "9"))],
+			["desktop-not-clean", ready, shown("inactive", "dead", "signal", ended("2", "9"))],
+			["desktop-not-clean", ready, shown("inactive", "dead", "core-dump", ended("3", "6"))],
+			["desktop-not-clean", ready, shown("deactivating", "stop-sigterm", "success", { ...NEVER, pid: "4100", started: "81234567" })],
 			["desktop-not-clean", ready, shown("activating", "start", "success")],
-			["desktop-not-clean", ready, shown("active", "exited", "success")],
-			["desktop-not-clean", ready, shown("inactive", "dead", "success", "not-found")],
+			["desktop-not-clean", ready, shown("active", "exited", "success", EXITED_0)],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", NEVER, "not-found")],
+			["desktop-not-clean", ready, shown("active", "running", "success", EXITED_0, "not-found")],
+			// A record that is neither "never started" nor "exited 0" exactly is ambiguous, and refused.
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...NEVER, pid: "4100" })],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...NEVER, started: "81234567" })],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, started: "0" })],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, exited: "0" })],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, pid: "0" })],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, status: "00" })],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, code: "" })],
 			// What can't be read whole is refused, not taken as clean.
 			["desktop-not-clean", ready, { status: 1, stdout: "" }],
 			["desktop-not-clean", ready, { status: null, stdout: "" }],
 			["desktop-not-clean", ready, { status: 0, stdout: "" }],
-			["desktop-not-clean", ready, { status: 0, stdout: "LoadState=loaded\nActiveState=inactive\nSubState=dead\n" }],
-			["desktop-not-clean", ready, { status: 0, stdout: "LoadState=loaded\nActiveState=failed\nActiveState=inactive\nSubState=dead\nResult=success\n" }],
-			["desktop-not-clean", ready, { status: 0, stdout: "LoadState=loaded\nActiveState=inactive\nSubState=dead\nResult=success\nMainPID=0\n" }],
-			["bridge-state", ready, shown("inactive", "dead", "success"), shown("deactivating", "stop-sigterm", "success")],
-			["bridge-state", ready, shown("inactive", "dead", "success"), { status: 1, stdout: "" }],
-			["bridge-state", ready, shown("inactive", "dead", "success"), shown("inactive", "dead", "success", "masked")],
+			["desktop-not-clean", ready, { status: 0, stdout: clean.stdout.replace(/^ExecMainCode=.*\n/m, "") }],
+			["desktop-not-clean", ready, { status: 0, stdout: `${clean.stdout}ExecMainCode=1\n` }],
+			["desktop-not-clean", ready, { status: 0, stdout: `${clean.stdout}MainPID=0\n` }],
+			["bridge-state", ready, clean, shown("deactivating", "stop-sigterm", "success")],
+			["bridge-state", ready, clean, { status: 1, stdout: "" }],
+			["bridge-state", ready, clean, shown("inactive", "dead", "success", NEVER, "masked")],
 		];
 		for (const [reason, entries, desktop, bridge] of cases) assert.deepEqual(attempt(entries, desktop, bridge), { started: [], reason }, `${reason}: ${desktop.stdout}`);
 	});
@@ -1036,10 +1067,26 @@ describe("the VM's metadata reads", () => {
 		assert.equal(readText(path.join(fake, "fifo")), null);
 		fs.writeFileSync(path.join(fake, "large"), Buffer.alloc(1024 * 1024 + 1, 0x61));
 		assert.equal(readText(path.join(fake, "large")), null);
-		if (process.geteuid?.() !== 0) {
-			fs.writeFileSync(path.join(fake, "unreadable"), "x", { mode: 0o000 });
-			assert.equal(readText(path.join(fake, "unreadable")), null);
-		}
+		// Refused access, or a read that fails partway, gives nothing, injected here rather than inferred from this machine's permissions.
+		const canonical = path.join(fake, "usr/lib/os-release");
+		const denied = Object.assign(Object.create(null) as Record<string, unknown>, fs, {
+			openSync: () => {
+				throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+			},
+		}) as typeof fs;
+		assert.equal(readText(canonical, denied), null);
+		const closed: number[] = [];
+		const failing = Object.assign(Object.create(null) as Record<string, unknown>, fs, {
+			readSync: () => {
+				throw Object.assign(new Error("EIO"), { code: "EIO" });
+			},
+			closeSync: (descriptor: number) => {
+				closed.push(descriptor);
+				fs.closeSync(descriptor);
+			},
+		}) as typeof fs;
+		assert.equal(readText(canonical, failing), null);
+		assert.equal(closed.length, 1);
 		// What such a read gives the planner: the file's text from the canonical path; a refusal (`os`) for anything it couldn't read.
 		const cfg = config();
 		const facts = vm(cfg);

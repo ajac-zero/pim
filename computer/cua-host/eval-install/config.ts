@@ -45,9 +45,7 @@ export const TOOLS = {
 	nologin: "/usr/sbin/nologin",
 	systemctl: "/usr/bin/systemctl",
 	tmpfiles: "/usr/bin/systemd-tmpfiles",
-	find: "/usr/bin/find",
 	head: "/usr/bin/head",
-	dash: "/usr/bin/dash",
 } as const;
 
 /** The files of the bundle the installation runs, relative to its directory. */
@@ -225,7 +223,9 @@ export function renderTmpfiles(): string {
  * to take away systemd's default (signal every process of the unit, then
  * `SIGKILL` them after 90 s), so stopping a service signals only its main
  * program, and the desktop endpoint ends its own pim-computer as it does
- * (docs/cua-bridge.md) before it exits.
+ * (docs/cua-bridge.md) before it exits. Nothing here removes the session
+ * socket: one an endpoint couldn't remove itself stays until a reboot
+ * clears /run, and the next endpoint refuses to start over it.
  */
 export function renderUnits(config: Config, desktopUid: number): { desktop: string; bridge: string } {
 	const node = config.node.path;
@@ -254,9 +254,6 @@ export function renderUnits(config: Config, desktopUid: number): { desktop: stri
 		"Environment=LANG=C.UTF-8",
 		...display,
 		`ExecStart=${node} ${bundle}/${BUNDLE_FILES.desktop} --socket ${PATHS.socket} --root ${config.workspace} --browser ${config.browser.path} --pim-computer ${bundle}/${BUNDLE_FILES.pimComputer}${headful ? " --headful" : ""}`,
-		// Runs once systemd has seen the endpoint exit. Only when a signal ended it (so it couldn't remove its own socket) is that socket removed,
-		// and nothing else; after an exit, a refusal included, whatever is at the path stays, and the next start refuses it (`$$` is a literal `$`).
-		`ExecStopPost=${TOOLS.dash} -c 'case "$$EXIT_CODE" in killed|dumped) exec ${TOOLS.find} ${PATHS.socketDir} -mindepth 1 -maxdepth 1 -name ${path.posix.basename(PATHS.socket)} -type s -user ${ACCOUNTS.desktop} -delete;; esac'`,
 		"KillMode=process",
 		"SendSIGKILL=no",
 		"TimeoutStopSec=infinity",

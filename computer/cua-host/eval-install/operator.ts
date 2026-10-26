@@ -16,7 +16,8 @@
  *
  * `digest` prints the tree digest of a directory, to check a copy.
  *
- * `render` checks a configuration and writes the management scripts for
+ * `render` checks a configuration and writes, into a new private directory
+ * (0700, each file 0600), the management scripts for
  * Azure Run Command (`plan.sh`, `install.sh`, `seal.sh`, `start.sh`,
  * `status.sh`) and a cloud-init `cloud-config.yaml` that places the same
  * scripts on the VM. They hold no secret, run nothing they read from a
@@ -244,6 +245,49 @@ export function writeTree(out: string, entries: ReadonlyMap<string, Buffer>): vo
 	}
 }
 
+/**
+ * Writes `files` (flat names) into `out`, a new directory of this account's
+ * (0700), each new (never over or through anything) and 0600: the
+ * operator's own copies of the rendered scripts, kept private like the rest
+ * of an evaluation's state. `out`'s parent must be this account's and
+ * writable by no one else, and every directory above it this account's or
+ * root's, not a link, and writable by no one else unless sticky (as /tmp).
+ */
+export function writePrivate(out: string, files: ReadonlyMap<string, Buffer>): void {
+	if (!path.isAbsolute(out) || path.normalize(out) !== out || out.endsWith("/")) throw new Refusal("out");
+	const euid = process.geteuid?.() ?? -1;
+	const parent = path.dirname(out);
+	let current = "";
+	for (const part of ["", ...parent.split("/").filter(Boolean)]) {
+		current = part ? `${current === "/" ? "" : current}/${part}` : "/";
+		let stat: fs.Stats;
+		try {
+			stat = fs.lstatSync(current);
+		} catch {
+			throw new Refusal("out-parent");
+		}
+		const writable = (stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0;
+		if (!stat.isDirectory() || (stat.uid !== 0 && stat.uid !== euid) || writable) throw new Refusal("out-parent");
+		if (current === parent && (stat.uid !== euid || (stat.mode & 0o022) !== 0)) throw new Refusal("out-parent");
+	}
+	try {
+		fs.mkdirSync(out, { mode: 0o700 });
+	} catch (error) {
+		throw new Refusal((error as NodeJS.ErrnoException).code === "EEXIST" ? "out-exists" : "out");
+	}
+	fs.chmodSync(out, 0o700);
+	for (const [name, content] of files) {
+		if (!ENTRY.test(name)) throw new Refusal("out");
+		const descriptor = fs.openSync(path.join(out, name), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+		try {
+			fs.fchmodSync(descriptor, 0o600);
+			fs.writeFileSync(descriptor, content);
+		} finally {
+			fs.closeSync(descriptor);
+		}
+	}
+}
+
 // ---- The management scripts ----
 
 /** A value for a single-quoted shell word; every value here is already checked to hold no quote. */
@@ -398,7 +442,7 @@ function render(configFile: string, out: string): string[] {
 	const config = parseConfig(fs.readFileSync(configFile, "utf8"));
 	const scripts = renderScripts(config);
 	const files = { ...scripts, "cloud-config.yaml": renderCloudConfig(scripts) };
-	writeTree(out, new Map(Object.entries(files).map(([name, content]) => [name, Buffer.from(content)])));
+	writePrivate(out, new Map(Object.entries(files).map(([name, content]) => [name, Buffer.from(content)])));
 	return Object.keys(files);
 }
 

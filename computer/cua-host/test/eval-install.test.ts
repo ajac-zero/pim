@@ -21,8 +21,8 @@ import { after, before, describe, it } from "node:test";
 import * as zlib from "node:zlib";
 import { KEPT_ENVIRONMENT } from "../desktop.ts";
 import { type Config, parseConfig, renderTmpfiles, renderUnits } from "../eval-install/config.ts";
-import { type Action, ApplyFailure, apply, checkAccounts, type Facts, type Host, inspectedPaths, type PathFact, type Probe, plan, type Staged, start, status, systemHost } from "../eval-install/install.ts";
-import { BUNDLE_SOURCES, bundleEntries, lockedIntegrity, renderCloudConfig, renderScripts, TREE_DIGEST_BASH, treeDigest, untarPackage, writeTree } from "../eval-install/operator.ts";
+import { type Action, ApplyFailure, apply, checkAccounts, type Facts, type Host, inspectedPaths, type PathFact, type Probe, plan, readText, type Staged, start, status, systemHost } from "../eval-install/install.ts";
+import { BUNDLE_SOURCES, bundleEntries, lockedIntegrity, renderCloudConfig, renderScripts, TREE_DIGEST_BASH, treeDigest, untarPackage, writePrivate, writeTree } from "../eval-install/operator.ts";
 
 const REPOSITORY = path.resolve(import.meta.dirname, "../../..");
 const OWNER = "o_0123456789abcdefghijklmnop";
@@ -97,7 +97,9 @@ const dirFact = (uid = 0, mode = 0o755): PathFact => ({ kind: "dir", uid, gid: u
 const fileFact = (uid = 0, mode = 0o755): PathFact => ({ kind: "file", uid, gid: uid, mode });
 
 /** A new Ubuntu 24.04 VM as the installer expects it: the base image's desktop account and programs, and nothing of the installer's. */
-function vm(cfg: Config): Mutable<Facts> & { paths: Record<string, PathFact> } {
+type VM = Omit<Mutable<Facts>, "passwd" | "group" | "sudoers" | "paths"> & { passwd: string; group: string; sudoers: (string | null)[]; paths: Record<string, PathFact> };
+
+function vm(cfg: Config): VM {
 	const paths: Record<string, PathFact> = {};
 	for (const p of inspectedPaths(cfg, DESKTOP_HOME)) paths[p] = null;
 	const put = (p: string, fact: PathFact) => {
@@ -110,7 +112,9 @@ function vm(cfg: Config): Mutable<Facts> & { paths: Record<string, PathFact> } {
 		paths[p] = fact;
 	};
 	put("/run/systemd/system", dirFact());
-	for (const tool of ["/usr/sbin/groupadd", "/usr/sbin/useradd", "/usr/sbin/runuser", "/usr/sbin/nologin", "/usr/bin/systemctl", "/usr/bin/systemd-tmpfiles", "/usr/bin/find", "/usr/bin/head", "/usr/bin/dash"]) put(tool, fileFact());
+	// Ubuntu's own layout: /etc/os-release is a link to this file, which is the one read.
+	put("/usr/lib/os-release", fileFact(0, 0o644));
+	for (const tool of ["/usr/sbin/groupadd", "/usr/sbin/useradd", "/usr/sbin/runuser", "/usr/sbin/nologin", "/usr/bin/systemctl", "/usr/bin/systemd-tmpfiles", "/usr/bin/head"]) put(tool, fileFact());
 	put(cfg.node.path, fileFact());
 	put(cfg.browser.path, fileFact());
 	for (const file of ["BUNDLE", "computer/pim-computer.ts", "computer/cua-host/bridge.ts", "computer/cua-host/desktop.ts", "computer/cua-host/eval-credentials.ts", "computer/cua-host/eval-install/install.ts", "computer/cua-host/node_modules/ws/package.json"]) {
@@ -160,7 +164,6 @@ Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 ExecStart=/opt/pim-node/bin/node /opt/pim-cua/bundle/computer/cua-host/desktop.ts --socket /run/pim-session/session.sock --root /srv/pim-workspace --browser /opt/google/chrome/chrome --pim-computer /opt/pim-cua/bundle/computer/pim-computer.ts --headful
-ExecStopPost=/usr/bin/dash -c 'case "$$EXIT_CODE" in killed|dumped) exec /usr/bin/find /run/pim-session -mindepth 1 -maxdepth 1 -name session.sock -type s -user pim-desktop -delete;; esac'
 KillMode=process
 SendSIGKILL=no
 TimeoutStopSec=infinity
@@ -286,6 +289,16 @@ describe("the plan", () => {
 		const cases: [string, (facts: ReturnType<typeof vm>) => void, Config?][] = [
 			["root-required", (f) => (f.euid = 1000)],
 			["os", (f) => (f.osRelease = 'ID=ubuntu\nVERSION_ID="22.04"\n')],
+			["os", (f) => (f.osRelease = null)],
+			["os", (f) => (f.paths["/usr/lib/os-release"] = { kind: "link", uid: 0, gid: 0, mode: 0o777 })],
+			["os", (f) => (f.paths["/usr/lib/os-release"] = fileFact(0, 0o664))],
+			["os", (f) => (f.paths["/usr/lib/os-release"] = fileFact(1000, 0o644))],
+			["os", (f) => (f.paths["/usr/lib"] = dirFact(1000))],
+			["accounts-unreadable", (f) => ((f as Mutable<Facts>).passwd = null)],
+			["accounts-unreadable", (f) => ((f as Mutable<Facts>).group = null)],
+			["sudoers-unreadable", (f) => ((f as Mutable<Facts>).sudoers = null)],
+			["sudoers-unreadable", (f) => (f.sudoers = [])],
+			["sudoers-unreadable", (f) => (f.sudoers = [...f.sudoers, null])],
 			["systemd", (f) => (f.paths["/run/systemd/system"] = null)],
 			["ptrace-scope", (f) => (f.ptraceScope = "0\n")],
 			["ptrace-scope", (f) => (f.ptraceScope = null)],
@@ -366,7 +379,7 @@ describe("the services", () => {
 		assert.equal(units.desktop, DESKTOP_UNIT);
 		assert.equal(units.bridge, BRIDGE_UNIT);
 		// Only these directives: no resource, confinement, sandboxing, capability, delegation or restart policy.
-		const allowed = new Set(["Description", "Wants", "After", "Type", "User", "Group", "WorkingDirectory", "Environment", "ExecStart", "ExecStopPost", "KillMode", "SendSIGKILL", "TimeoutStopSec", "Restart", "WantedBy"]);
+		const allowed = new Set(["Description", "Wants", "After", "Type", "User", "Group", "WorkingDirectory", "Environment", "ExecStart", "KillMode", "SendSIGKILL", "TimeoutStopSec", "Restart", "WantedBy"]);
 		for (const unit of [units.desktop, units.bridge]) {
 			for (const key of keys(unit)) assert.ok(allowed.has(key!), key);
 			assert.match(unit, /^KillMode=process$/m);
@@ -620,6 +633,10 @@ function probe(entries: Record<string, PathFact>, texts: Record<string, string>,
 	return { value, read, queries };
 }
 
+/** How `systemctl show --property=LoadState,ActiveState,SubState,Result` answers, in systemd's own order. */
+const shown = (active: string, sub: string, result: string, load = "loaded") => ({ status: 0, stdout: `LoadState=${load}\nActiveState=${active}\nSubState=${sub}\nResult=${result}\n` });
+const SHOW = ["/usr/bin/systemctl", "show", "--property=LoadState,ActiveState,SubState,Result"];
+
 describe("status", () => {
 	it("says metadata only, and checks as the desktop account that each secret file is refused, reading none of them", () => {
 		const cfg = config();
@@ -639,13 +656,14 @@ describe("status", () => {
 			"/etc/group": `${GROUP}pim-session:x:998:pim-bridge\npim-bridge:x:997:\n`,
 			"/etc/shadow": "pim-bridge:!:19000::::::\n",
 			"/etc/pim-bridge/cert.pem": tls.cert.toString(),
-			"/sys/fs/cgroup/system.slice/pim-cua-desktop.service/cgroup.procs": "4100\n4101\n",
 			"/proc/sys/kernel/yama/ptrace_scope": "1\n",
 		};
 		const readable = new Set(["/etc/pim-eval/eval-key.pub.pem", "/etc/pim-bridge/cert.pem"]);
+		let bridgeShow = shown("failed", "failed", "exit-code");
 		const { value, read, queries } = probe(installed, texts, (argv) => {
 			if (argv[0] === "/usr/sbin/runuser") return { status: readable.has(argv.at(-1)!) ? 0 : 1, stdout: "" };
-			return { status: 0, stdout: argv[1] === "is-enabled" ? "enabled\n" : "active\n" };
+			if (argv[1] === "is-enabled") return { status: 0, stdout: "enabled\n" };
+			return argv.at(-1) === "pim-cua-desktop.service" ? shown("active", "running", "success") : bridgeShow;
 		});
 		const report = status(cfg, value);
 		assert.equal(report.accounts, "ok");
@@ -654,15 +672,19 @@ describe("status", () => {
 		assert.deepEqual((report.paths as Record<string, string>)["/run/pim-session"], "dir pim-desktop:pim-session 2750");
 		assert.deepEqual((report.paths as Record<string, string>)[cfg.tls.key], "absent");
 		assert.deepEqual(report.units, {
-			"pim-cua-desktop.service": { enabled: "enabled", active: "active", processes: 2 },
-			"pim-cua-bridge.service": { enabled: "enabled", active: "active", processes: 0 },
+			"pim-cua-desktop.service": { enabled: "enabled", LoadState: "loaded", ActiveState: "active", SubState: "running", Result: "success" },
+			"pim-cua-bridge.service": { enabled: "enabled", LoadState: "loaded", ActiveState: "failed", SubState: "failed", Result: "exit-code" },
 		});
 		assert.deepEqual(report.display, { socket: true, runtimeDir: true });
 		assert.equal(report.ptraceScope, "1");
 		const x509 = new crypto.X509Certificate(tls.cert);
 		assert.equal((report.certificate as Record<string, string>).sha256, x509.fingerprint256);
-		// The token and the key are never read; the certificate (public) is, to report its fingerprint and dates.
+		// The token and the key are never read; the certificate (public) is, to report its fingerprint and dates. Nothing under /sys is.
 		assert.equal(read.includes("/etc/pim-bridge/token") || read.includes("/etc/pim-bridge/key.pem"), false);
+		assert.equal(
+			read.some((file) => file.startsWith("/sys/")),
+			false,
+		);
 		const text = JSON.stringify(report);
 		assert.doesNotMatch(text, /BEGIN|PRIVATE/);
 		assert.ok(!text.includes(tls.cert.toString().split("\n")[1]!));
@@ -670,42 +692,75 @@ describe("status", () => {
 			queries.filter((argv) => argv[0] === "/usr/sbin/runuser"),
 			["/etc/pim-eval/eval-key.pub.pem", "/etc/pim-bridge/token", "/etc/pim-bridge/cert.pem", "/etc/pim-bridge/key.pem"].map((file) => ["/usr/sbin/runuser", "-u", "pim-desktop", "--", "/usr/bin/head", "-c", "0", "--", file]),
 		);
+		for (const argv of queries.filter((argv) => argv[0] === "/usr/bin/systemctl")) assert.ok(argv[1] === "is-enabled" || JSON.stringify(argv.slice(0, 3)) === JSON.stringify(SHOW), argv.join(" "));
 		// When the desktop account can't open even the public key, the check failed, and says so rather than "denied".
 		readable.clear();
-		assert.deepEqual(status(cfg, value).denied, { "/etc/pim-bridge/token": "unknown", "/etc/pim-bridge/cert.pem": "unknown", "/etc/pim-bridge/key.pem": "unknown" });
-		for (const argv of queries.filter((argv) => argv[0] === "/usr/bin/systemctl")) assert.ok(["is-enabled", "is-active"].includes(argv[1]!), argv.join(" "));
+		// And a unit state that can't be read whole is unknown, not a state.
+		bridgeShow = { status: 0, stdout: "LoadState=loaded\nActiveState=failed\n" };
+		const again = status(cfg, value);
+		assert.deepEqual(again.denied, { "/etc/pim-bridge/token": "unknown", "/etc/pim-bridge/cert.pem": "unknown", "/etc/pim-bridge/key.pem": "unknown" });
+		assert.deepEqual((again.units as Record<string, unknown>)["pim-cua-bridge.service"], { enabled: "enabled", state: "unknown" });
 	});
 });
 
 describe("start", () => {
-	it("starts the desktop endpoint, then the bridge, only once the token is the bridge's and the display is there", () => {
-		const cfg = config();
-		const texts = { "/etc/passwd": `${PASSWD}pim-bridge:x:997:997::/nonexistent:/usr/sbin/nologin\n` };
-		const ready: Record<string, PathFact> = { "/etc/pim-bridge/token": fileFact(997, 0o600), "/tmp/.X11-unix/X0": { kind: "socket", uid: 1000, gid: 1000, mode: 0o777 }, "/run/user/1000": dirFact(1000, 0o700) };
+	const cfg = config();
+	const texts = { "/etc/passwd": `${PASSWD}pim-bridge:x:997:997::/nonexistent:/usr/sbin/nologin\n` };
+	const ready: Record<string, PathFact> = { "/etc/pim-bridge/token": fileFact(997, 0o600), "/tmp/.X11-unix/X0": { kind: "socket", uid: 1000, gid: 1000, mode: 0o777 }, "/run/user/1000": dirFact(1000, 0o700) };
+	type Answer = { status: number | null; stdout: string };
+	const attempt = (entries: Record<string, PathFact>, desktop: Answer, bridge: Answer = shown("inactive", "dead", "success")) => {
 		const started: string[] = [];
-		start(cfg, probe(ready, texts, () => ({ status: 0, stdout: "" })).value, (argv) => started.push(argv.join(" ")));
-		assert.deepEqual(started, ["/usr/bin/systemctl start pim-cua-desktop.service", "/usr/bin/systemctl start pim-cua-bridge.service"]);
-		const cases: [string, Record<string, PathFact>][] = [
-			["token-missing", { ...ready, "/etc/pim-bridge/token": null }],
-			["token-missing", { ...ready, "/etc/pim-bridge/token": fileFact(1000, 0o600) }],
-			["token-missing", { ...ready, "/etc/pim-bridge/token": fileFact(997, 0o640) }],
-			["display-missing", { ...ready, "/tmp/.X11-unix/X0": null }],
-			["display-missing", { ...ready, "/run/user/1000": null }],
-		];
-		for (const [reason, entries] of cases) {
-			const none: string[] = [];
-			refusedWith(() => start(cfg, probe(entries, texts, () => ({ status: 0, stdout: "" })).value, (argv) => none.push(argv.join(" "))), reason);
-			assert.deepEqual(none, []);
+		const { value, read, queries } = probe(entries, texts, (argv) => (argv.at(-1) === "pim-cua-desktop.service" ? desktop : bridge));
+		let reason: string | undefined;
+		try {
+			start(cfg, value, (argv) => started.push(argv.join(" ")));
+		} catch (error) {
+			reason = (error as { reason?: string }).reason ?? "thrown";
 		}
-		// A process left in the desktop endpoint's control group (it running, or what a crashed one started) means no new endpoint.
-		const none: string[] = [];
-		const leftover = { ...texts, "/sys/fs/cgroup/system.slice/pim-cua-desktop.service/cgroup.procs": "4242\n" };
-		refusedWith(() => start(cfg, probe(ready, leftover, () => ({ status: 0, stdout: "" })).value, (argv) => none.push(argv.join(" "))), "desktop-processes");
-		assert.deepEqual(none, []);
-		const empty = { ...texts, "/sys/fs/cgroup/system.slice/pim-cua-desktop.service/cgroup.procs": "" };
-		const again: string[] = [];
-		start(cfg, probe(ready, empty, () => ({ status: 0, stdout: "" })).value, (argv) => again.push(argv.join(" ")));
-		assert.equal(again.length, 2);
+		for (const argv of queries) assert.deepEqual(argv.slice(0, 3), SHOW);
+		assert.equal(
+			read.some((file) => file.startsWith("/sys/")),
+			false,
+		);
+		return { started, reason };
+	};
+
+	it("starts the desktop endpoint, then the bridge, when the token is the bridge's, the display is there, and the endpoint never ran, stopped cleanly or runs", () => {
+		const both = ["/usr/bin/systemctl start pim-cua-desktop.service", "/usr/bin/systemctl start pim-cua-bridge.service"];
+		assert.deepEqual(attempt(ready, shown("inactive", "dead", "success")), { started: both, reason: undefined });
+		assert.deepEqual(attempt(ready, shown("active", "running", "success")), { started: both, reason: undefined });
+		// The bridge starts nothing of its own: a bridge that failed (as it does at boot before seal) may be started again.
+		assert.deepEqual(attempt(ready, shown("inactive", "dead", "success"), shown("failed", "failed", "exit-code")), { started: both, reason: undefined });
+	});
+
+	it("refuses, starting nothing, without the token or the display, or after the endpoint ended any other way or its state can't be read", () => {
+		const cases: [string, Record<string, PathFact>, Answer, Answer?][] = [
+			["token-missing", { ...ready, "/etc/pim-bridge/token": null }, shown("inactive", "dead", "success")],
+			["token-missing", { ...ready, "/etc/pim-bridge/token": fileFact(1000, 0o600) }, shown("inactive", "dead", "success")],
+			["token-missing", { ...ready, "/etc/pim-bridge/token": fileFact(997, 0o640) }, shown("inactive", "dead", "success")],
+			["display-missing", { ...ready, "/tmp/.X11-unix/X0": null }, shown("inactive", "dead", "success")],
+			["display-missing", { ...ready, "/run/user/1000": null }, shown("inactive", "dead", "success")],
+			// Ended abnormally: not recoverable in place, whatever it left.
+			["desktop-not-clean", ready, shown("failed", "failed", "exit-code")],
+			["desktop-not-clean", ready, shown("failed", "failed", "signal")],
+			["desktop-not-clean", ready, shown("inactive", "dead", "signal")],
+			["desktop-not-clean", ready, shown("inactive", "dead", "core-dump")],
+			["desktop-not-clean", ready, shown("deactivating", "stop-sigterm", "success")],
+			["desktop-not-clean", ready, shown("activating", "start", "success")],
+			["desktop-not-clean", ready, shown("active", "exited", "success")],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", "not-found")],
+			// What can't be read whole is refused, not taken as clean.
+			["desktop-not-clean", ready, { status: 1, stdout: "" }],
+			["desktop-not-clean", ready, { status: null, stdout: "" }],
+			["desktop-not-clean", ready, { status: 0, stdout: "" }],
+			["desktop-not-clean", ready, { status: 0, stdout: "LoadState=loaded\nActiveState=inactive\nSubState=dead\n" }],
+			["desktop-not-clean", ready, { status: 0, stdout: "LoadState=loaded\nActiveState=failed\nActiveState=inactive\nSubState=dead\nResult=success\n" }],
+			["desktop-not-clean", ready, { status: 0, stdout: "LoadState=loaded\nActiveState=inactive\nSubState=dead\nResult=success\nMainPID=0\n" }],
+			["bridge-state", ready, shown("inactive", "dead", "success"), shown("deactivating", "stop-sigterm", "success")],
+			["bridge-state", ready, shown("inactive", "dead", "success"), { status: 1, stdout: "" }],
+			["bridge-state", ready, shown("inactive", "dead", "success"), shown("inactive", "dead", "success", "masked")],
+		];
+		for (const [reason, entries, desktop, bridge] of cases) assert.deepEqual(attempt(entries, desktop, bridge), { started: [], reason }, `${reason}: ${desktop.stdout}`);
 	});
 });
 
@@ -928,6 +983,70 @@ describe("the bundle", () => {
 		const linked = bash(out);
 		assert.notEqual(linked.status, 0);
 		assert.equal(linked.stdout, "");
+	});
+});
+
+describe("the rendered scripts' directory", () => {
+	it("is new and private (0700, files 0600), under a parent only this account can write", () => {
+		const parent = path.join(root, "operator");
+		fs.mkdirSync(parent, { mode: 0o700 });
+		const scripts = renderScripts(config());
+		const files = new Map(Object.entries({ ...scripts, "cloud-config.yaml": renderCloudConfig(scripts) }).map(([name, content]) => [name, Buffer.from(content)]));
+		const out = path.join(parent, "scripts");
+		writePrivate(out, files);
+		assert.equal(fs.lstatSync(out).mode & 0o7777, 0o700);
+		for (const name of files.keys()) {
+			assert.equal(fs.lstatSync(path.join(out, name)).mode & 0o7777, 0o600, name);
+			assert.deepEqual(fs.readFileSync(path.join(out, name)), files.get(name));
+		}
+		refusedWith(() => writePrivate(out, files), "out-exists");
+		// A parent others can write, or reach through a link, is refused, and nothing is made there.
+		const shared = path.join(root, "shared");
+		fs.mkdirSync(shared);
+		fs.chmodSync(shared, 0o777);
+		refusedWith(() => writePrivate(path.join(shared, "scripts"), files), "out-parent");
+		assert.equal(fs.existsSync(path.join(shared, "scripts")), false);
+		fs.symlinkSync(parent, path.join(root, "operator-link"));
+		refusedWith(() => writePrivate(path.join(root, "operator-link", "other"), files), "out-parent");
+		assert.equal(fs.existsSync(path.join(parent, "other")), false);
+		refusedWith(() => writePrivate("relative/scripts", files), "out");
+		// A parent that is root's (here /usr), not the operator's own, is refused before anything is tried there.
+		refusedWith(() => writePrivate("/usr/pim-cua-render-test", files), "out-parent");
+		// Neither is a group-writable parent the operator owns.
+		const group = path.join(root, "group-writable");
+		fs.mkdirSync(group);
+		fs.chmodSync(group, 0o770);
+		refusedWith(() => writePrivate(path.join(group, "scripts"), files), "out-parent");
+	});
+});
+
+describe("the VM's metadata reads", () => {
+	it("take a regular file only, never through a link, a FIFO or a directory, so the planner reads Ubuntu's canonical os-release", () => {
+		const fake = path.join(root, "fake-root");
+		fs.mkdirSync(path.join(fake, "usr/lib"), { recursive: true });
+		fs.mkdirSync(path.join(fake, "etc"));
+		fs.writeFileSync(path.join(fake, "usr/lib/os-release"), 'NAME="Ubuntu"\nID=ubuntu\nVERSION_ID="24.04"\n');
+		// Ubuntu's layout, relative link and all.
+		fs.symlinkSync("../usr/lib/os-release", path.join(fake, "etc/os-release"));
+		assert.equal(readText(path.join(fake, "usr/lib/os-release")), 'NAME="Ubuntu"\nID=ubuntu\nVERSION_ID="24.04"\n');
+		assert.equal(readText(path.join(fake, "etc/os-release")), null);
+		assert.equal(readText(path.join(fake, "usr/lib")), null);
+		assert.equal(readText(path.join(fake, "missing")), null);
+		execFileSync("mkfifo", [path.join(fake, "fifo")]);
+		assert.equal(readText(path.join(fake, "fifo")), null);
+		fs.writeFileSync(path.join(fake, "large"), Buffer.alloc(1024 * 1024 + 1, 0x61));
+		assert.equal(readText(path.join(fake, "large")), null);
+		if (process.geteuid?.() !== 0) {
+			fs.writeFileSync(path.join(fake, "unreadable"), "x", { mode: 0o000 });
+			assert.equal(readText(path.join(fake, "unreadable")), null);
+		}
+		// What such a read gives the planner: the file's text from the canonical path; a refusal (`os`) for anything it couldn't read.
+		const cfg = config();
+		const facts = vm(cfg);
+		facts.osRelease = readText(path.join(fake, "usr/lib/os-release"));
+		assert.equal(plan(cfg, facts).length, 19);
+		facts.osRelease = readText(path.join(fake, "etc/os-release"));
+		refusedWith(() => plan(cfg, facts), "os");
 	});
 });
 

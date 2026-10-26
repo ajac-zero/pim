@@ -17,11 +17,13 @@
  *   have no drop-in and enabled but not started. It never reuses, deletes or recursively changes anything it
  *   didn't make, and it doesn't undo a step that failed: the VM is then
  *   discarded.
- * - `start` starts the two services once the bridge's token is there and
- *   nothing is left in the desktop endpoint's control group.
+ * - `start` starts the two services once the bridge's token is there, and
+ *   only while systemd says the desktop endpoint runs, never ran, or last
+ *   stopped with its result `success`; any other end means a reboot or a
+ *   new VM.
  * - `status` prints metadata only: accounts, owners and modes, the
  *   certificate's fingerprint and dates, whether the desktop account is
- *   refused each secret file, and the services' states.
+ *   refused each secret file, and the services' states as systemd says them.
  *
  * It reads no token and prints no file's contents. What it prints is fixed
  * JSON; a failure says only a fixed reason and the step. The planner is
@@ -44,11 +46,17 @@ export type Facts = {
 	readonly euid: number;
 	readonly execPath: string;
 	readonly nodeVersion: string;
-	readonly osRelease: string;
-	readonly passwd: string;
-	readonly group: string;
-	/** /etc/sudoers and every file in /etc/sudoers.d. */
-	readonly sudoers: readonly string[];
+	/** /usr/lib/os-release, the canonical file /etc/os-release links to on Ubuntu; `null` when it can't be read as a regular file. */
+	readonly osRelease: string | null;
+	/** /etc/passwd and /etc/group; `null` when unreadable. */
+	readonly passwd: string | null;
+	readonly group: string | null;
+	/**
+	 * /etc/sudoers and every entry of /etc/sudoers.d, each `null` when it
+	 * can't be read as a regular file; the whole `null` when the directory
+	 * can't be listed. Only searched for the installation's account names.
+	 */
+	readonly sudoers: readonly (string | null)[] | null;
 	/** `lstat` of every path in `inspectedPaths`, and of each directory above it; `null` when nothing is there. */
 	readonly paths: Readonly<Record<string, PathFact>>;
 	readonly browserSha256: string | null;
@@ -98,6 +106,7 @@ function unitDropins(): string[] {
 /** The paths the planner looks at, each with every directory above it. */
 export function inspectedPaths(config: Config, desktopHome: string | null): string[] {
 	const paths = [
+		OS_RELEASE,
 		"/run/systemd/system",
 		...Object.values(TOOLS),
 		config.node.path,
@@ -147,6 +156,9 @@ export type Action =
 
 const NAMES = Object.values(ACCOUNTS);
 
+/** Read here rather than /etc/os-release, which on Ubuntu is a link to it; no link is followed. */
+export const OS_RELEASE = "/usr/lib/os-release";
+
 /** The account names as words in a sudoers file: a user, `%group`, or in a list. */
 function mentions(text: string, name: string): boolean {
 	return new RegExp(`(^|[^A-Za-z0-9_.-])${name.replace(/[-.]/g, "\\$&")}($|[^A-Za-z0-9_.-])`, "m").test(text);
@@ -159,6 +171,7 @@ function mentions(text: string, name: string): boolean {
  */
 export function plan(config: Config, facts: Facts): Action[] {
 	if (facts.euid !== 0) throw new Refusal("root-required");
+	if (facts.osRelease === null || !trustedFile(facts, OS_RELEASE, false)) throw new Refusal("os");
 	const os = Object.fromEntries(
 		facts.osRelease
 			.split("\n")
@@ -182,6 +195,7 @@ export function plan(config: Config, facts: Facts): Action[] {
 		throw new Refusal("unreachable");
 	}
 
+	if (facts.passwd === null || facts.group === null) throw new Refusal("accounts-unreadable");
 	const users = parsePasswd(facts.passwd);
 	const groups = parseGroup(facts.group);
 	if (users.some((user) => user.name === ACCOUNTS.bridge || user.name === ACCOUNTS.session) || groups.some((group) => group.name === ACCOUNTS.bridge || group.name === ACCOUNTS.session)) {
@@ -194,7 +208,9 @@ export function plan(config: Config, facts: Facts): Action[] {
 	if (primary.length !== 1 || primary[0]!.name !== ACCOUNTS.desktop || users.some((user) => user !== desktop && user.gid === desktop.gid)) throw new Refusal("desktop-group");
 	// The desktop account is in no group but its own: not sudo, adm, docker, lxd or any other, and so never the bridge's.
 	if (groups.some((group) => group.gid !== desktop.gid && group.members.includes(ACCOUNTS.desktop))) throw new Refusal("desktop-groups");
-	if (facts.sudoers.some((text) => NAMES.some((name) => mentions(text, name)))) throw new Refusal("sudoers");
+	// A tripwire, not an interpretation of sudo's policy: any file that can't be read refuses, and any mention of the accounts does.
+	if (facts.sudoers === null || facts.sudoers.length === 0 || facts.sudoers.some((text) => text === null)) throw new Refusal("sudoers-unreadable");
+	if (facts.sudoers.some((text) => NAMES.some((name) => mentions(text!, name)))) throw new Refusal("sudoers");
 	const home = facts.paths[desktop.home];
 	if (!path.posix.isAbsolute(desktop.home) || !trustedChain(facts, path.posix.dirname(desktop.home)) || home?.kind !== "dir" || home.uid !== desktop.uid || (home.mode & 0o022) !== 0) {
 		throw new Refusal("desktop-home");
@@ -495,15 +511,12 @@ export function status(config: Config, probe: Probe): Record<string, unknown> {
 		else denied[file] = opens(file) ? "READABLE" : "denied";
 	}
 
-	const units: Record<string, Record<string, string | number>> = {};
+	// What systemd says of each unit, nothing more: it says nothing of what the unit's programs started.
+	const units: Record<string, Record<string, string>> = {};
 	for (const unit of [UNITS.desktop, UNITS.bridge]) {
-		const word = (argv: string[]) => probe.query(argv).stdout.trim().split("\n")[0] ?? "";
-		const procs = probe.readText(`/sys/fs/cgroup/system.slice/${unit}/cgroup.procs`);
-		units[unit] = {
-			enabled: word([TOOLS.systemctl, "is-enabled", unit]),
-			active: word([TOOLS.systemctl, "is-active", unit]),
-			processes: procs === null ? 0 : procs.split("\n").filter(Boolean).length,
-		};
+		const enabled = probe.query([TOOLS.systemctl, "is-enabled", unit]).stdout.trim();
+		const state = unitState(probe.query, unit);
+		units[unit] = { enabled: /^[a-z-]+$/.test(enabled) ? enabled : "unknown", ...(state ?? { state: "unknown" }) };
 	}
 
 	const desktop = users.find((user) => user.name === ACCOUNTS.desktop);
@@ -519,7 +532,37 @@ export function status(config: Config, probe: Probe): Record<string, unknown> {
 	return { event: "pim-cua-eval.status", evaluation: config.evaluation, commit: config.commit, accounts, paths, certificate, denied, units, display, ptraceScope };
 }
 
-/** Starts the desktop endpoint, then the bridge, once the token is the bridge's and, for a headful browser, the session's display is there. */
+/** The `systemctl show` arguments `unitState` reads: ordinary unit metadata only. */
+export const UNIT_STATE = (unit: string) => [TOOLS.systemctl, "show", "--property=LoadState,ActiveState,SubState,Result", unit];
+
+type UnitState = { LoadState: string; ActiveState: string; SubState: string; Result: string };
+
+/** A unit's load, active and sub-state and its last result, as systemd says them; `null` when they can't be read whole. */
+export function unitState(query: Probe["query"], unit: string): UnitState | null {
+	const answer = query(UNIT_STATE(unit));
+	if (answer.status !== 0) return null;
+	const lines = answer.stdout.split("\n").filter(Boolean);
+	const state: Record<string, string> = {};
+	for (const line of lines) {
+		const match = /^(LoadState|ActiveState|SubState|Result)=([a-z-]+)$/.exec(line);
+		if (!match || Object.hasOwn(state, match[1]!)) return null;
+		state[match[1]!] = match[2]!;
+	}
+	return Object.keys(state).length === 4 ? (state as UnitState) : null;
+}
+
+/**
+ * Starts the desktop endpoint, then the bridge, once the token is the
+ * bridge's and, for a headful browser, the session's display is there.
+ *
+ * Only an endpoint that systemd says is running, or never ran or stopped
+ * with its result `success` (it exited 0, which it does only after the
+ * pim-computer it started was seen to exit), is started (or left running).
+ * After any other end (failed, killed, a refused start, a stop still under
+ * way, or state that can't be read), it isn't recoverable in place: the VM
+ * is rebooted or discarded. That is a policy about what systemd recorded,
+ * not a check that nothing the endpoint started still runs.
+ */
 export function start(config: Config, probe: Probe, run: (argv: readonly string[]) => void): void {
 	const users = parsePasswd(probe.readText("/etc/passwd") ?? "");
 	const bridge = users.find((user) => user.name === ACCOUNTS.bridge);
@@ -531,8 +574,13 @@ export function start(config: Config, probe: Probe, run: (argv: readonly string[
 		const runtime = desktop ? probe.lstat(`/run/user/${desktop.uid}`) : null;
 		if (socket?.kind !== "socket" || runtime?.kind !== "dir" || runtime.uid !== desktop?.uid) throw new Refusal("display-missing");
 	}
-	// Anything still in the desktop endpoint's control group (it running, or what a crashed one started) means no new endpoint now.
-	if ((probe.readText(`/sys/fs/cgroup/system.slice/${UNITS.desktop}/cgroup.procs`) ?? "").trim() !== "") throw new Refusal("desktop-processes");
+	const desktopState = unitState(probe.query, UNITS.desktop);
+	const running = desktopState?.ActiveState === "active" && desktopState.SubState === "running";
+	const clean = desktopState?.ActiveState === "inactive" && desktopState.SubState === "dead" && desktopState.Result === "success";
+	if (desktopState?.LoadState !== "loaded" || !(running || clean)) throw new Refusal("desktop-not-clean");
+	// The bridge starts nothing of its own, so a failed one may be started again; a state that can't be read, or a change under way, may not.
+	const bridgeState = unitState(probe.query, UNITS.bridge);
+	if (bridgeState?.LoadState !== "loaded" || !["active", "inactive", "failed"].includes(bridgeState.ActiveState)) throw new Refusal("bridge-state");
 	run([TOOLS.systemctl, "start", UNITS.desktop]);
 	run([TOOLS.systemctl, "start", UNITS.bridge]);
 }
@@ -558,7 +606,7 @@ function lstat(file: string): PathFact {
 }
 
 /** A regular file's text, at most 1 MiB, read without following a link or waiting on a FIFO; `null` when it can't be. */
-function readText(file: string): string | null {
+export function readText(file: string): string | null {
 	let descriptor: number;
 	try {
 		descriptor = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -614,19 +662,23 @@ function sha256File(file: string): string | null {
 }
 
 export function gatherFacts(config: Config): Facts {
-	const passwd = readText("/etc/passwd") ?? "";
-	const desktop = parsePasswd(passwd).find((user) => user.name === ACCOUNTS.desktop);
+	const passwd = readText("/etc/passwd");
+	const desktop = parsePasswd(passwd ?? "").find((user) => user.name === ACCOUNTS.desktop);
 	const paths: Record<string, PathFact> = {};
 	for (const file of inspectedPaths(config, desktop && path.posix.isAbsolute(desktop.home) ? path.posix.normalize(desktop.home) : null)) paths[file] = lstat(file);
-	const sudoers = [readText("/etc/sudoers") ?? ""];
-	for (const entry of fs.existsSync("/etc/sudoers.d") ? fs.readdirSync("/etc/sudoers.d") : []) sudoers.push(readText(path.join("/etc/sudoers.d", entry)) ?? "");
+	let sudoers: (string | null)[] | null;
+	try {
+		sudoers = [readText("/etc/sudoers"), ...fs.readdirSync("/etc/sudoers.d").map((entry) => readText(path.join("/etc/sudoers.d", entry)))];
+	} catch {
+		sudoers = null;
+	}
 	return {
 		euid: process.geteuid?.() ?? -1,
 		execPath: process.execPath,
 		nodeVersion: process.version,
-		osRelease: readText("/etc/os-release") ?? "",
+		osRelease: readText(OS_RELEASE),
 		passwd,
-		group: readText("/etc/group") ?? "",
+		group: readText("/etc/group"),
 		sudoers,
 		paths,
 		browserSha256: sha256File(config.browser.path),

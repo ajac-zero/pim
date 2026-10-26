@@ -1,3 +1,4 @@
+import type { ComputerLink } from "./computer";
 import { HttpError } from "./http";
 
 /**
@@ -54,14 +55,6 @@ fi`;
  */
 const LAUNCH = `curl -fsSL "$1/pim-computer.ts" -o ~/.pim-computer/next.ts && mv ~/.pim-computer/next.ts ~/.pim-computer/pim-computer.ts
 exec node ~/.pim-computer/pim-computer.ts --stdio --root ~/pim`;
-
-/** pim-computer on a Sprite, as the space talks to it: a line at a time. */
-export type SpriteLink = {
-	readonly readyState: number;
-	send(line: string): void;
-	/** Ends its input, so it quits, and lets go of the Sprite. */
-	close(): void;
-};
 
 /** Splits the bytes of a stream into its lines, each of which goes to `line`. */
 function lines(line: (text: string) => void): (bytes: Uint8Array) => void {
@@ -158,9 +151,11 @@ export class Sprites {
 	/**
 	 * Starts pim-computer on the Sprite, waking it, with the Pim at `pimUrl`
 	 * to fetch it from. Each line it writes goes to `receive`; `closed` is
-	 * called once it has stopped, or the Sprite went away.
+	 * called once it has stopped, or the Sprite went away. Each message sent
+	 * is a line of its input, and closing the link ends its input, so it
+	 * quits, and lets go of the Sprite.
 	 */
-	async connect(name: string, pimUrl: string, receive: (line: string) => void, closed: () => void): Promise<SpriteLink> {
+	async connect(name: string, pimUrl: string, receive: (line: string) => void, closed: () => void): Promise<ComputerLink> {
 		const socket = await this.#exec(name, LAUNCH, [pimUrl], { afterDisconnect: AFTER_DISCONNECT });
 		let ended = false;
 		const end = () => {

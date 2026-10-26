@@ -4,7 +4,6 @@ import type { ExecArgs, ExecResult } from "../computer/pim-computer";
 import { digestHex } from "./auth/store";
 import { currentTrace, type DispatchTrace } from "./computer-control-runtime";
 import { HttpError } from "./http";
-import type { SpriteLink } from "./sprites";
 
 /**
  * The person's computer: a machine of theirs (a server, a VM, a box at home)
@@ -24,7 +23,8 @@ import type { SpriteLink } from "./sprites";
  *
  * A computer Pim started (./sprites.ts) has no token: the space starts
  * pim-computer there when it's needed, which wakes it, and lets go of it
- * once it has gone unused for `IDLE_MS`, so it sleeps.
+ * once it has gone unused for `IDLE_MS`, so it sleeps. The space reaches it
+ * through a `ComputerLink`, which the provider makes.
  */
 
 /** Where the space takes the computer's connection, behind the Worker's `/api/computer/connect`. */
@@ -84,6 +84,22 @@ export type ComputerStatus = {
 	readonly computer: ComputerInfo | null;
 };
 
+/**
+ * pim-computer on a computer Pim started, as the space talks to it: a
+ * message at a time, each one of pim-computer's JSON messages, in both
+ * directions. The provider that made it hands what arrives to
+ * `Computer.receive`, and calls `Computer.disconnected` once it has ended.
+ * A message it takes is handed to its transport, which says nothing of
+ * whether pim-computer got it or ran it: only a reply does. It sends nothing
+ * again after an end, and keeps nothing to send later.
+ */
+export type ComputerLink = {
+	readonly readyState: number;
+	send(message: string): void;
+	/** Lets go of the computer: pim-computer there stops, and the provider may let it sleep. */
+	close(): void;
+};
+
 type Meta = {
 	meta(key: string): string | undefined;
 	setMeta(key: string, value: string): void;
@@ -135,18 +151,18 @@ export class Computer {
 	/** The DevTools connection to the computer's browser, of which there is one at a time. */
 	#browser: BrowserConnection | null = null;
 	/** Starts pim-computer on the computer Pim started, which wakes it, when a call finds it asleep. */
-	readonly #wake: () => Promise<SpriteLink>;
+	readonly #wake: () => Promise<ComputerLink>;
 	/** Whether the space is using the computer in a way it doesn't see itself, such as someone watching its browser. */
 	readonly #inUse: () => boolean;
 	/** pim-computer on the computer Pim started, while the space holds on to it. */
-	#link: SpriteLink | null = null;
+	#link: ComputerLink | null = null;
 	#waking: Promise<void> | undefined;
 	/** What waits for pim-computer on the computer Pim started to say what it is, or to stop before it has. */
 	#arrivals: ((hello: boolean) => void)[] = [];
 	#usedAt = 0;
 	#idle: ReturnType<typeof setTimeout> | undefined;
 
-	constructor(options: { meta: Meta; sockets: () => Connection[]; wake: () => Promise<SpriteLink>; inUse: () => boolean }) {
+	constructor(options: { meta: Meta; sockets: () => Connection[]; wake: () => Promise<ComputerLink>; inUse: () => boolean }) {
 		this.#meta = options.meta;
 		this.#sockets = options.sockets;
 		this.#wake = options.wake;

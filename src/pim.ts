@@ -74,7 +74,7 @@ import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
 import { skillTools } from "./extensions/app-skills";
 import { INSTALL_SKILL, type SkillWriters, skillsExtension, skillsSwitch, WRITE_SKILL, writeSkillAction } from "./extensions/skills";
 import { SKILL_NAME, SkillStore } from "./skills";
-import { type SpriteLink, Sprites } from "./sprites";
+import { Sprites } from "./sprites";
 import {
 	approvalsExtension,
 	gatedTools,
@@ -156,7 +156,7 @@ import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import type { ControlEvent } from "./computer-control";
 import { ControlCoordinator, ControlRefused } from "./computer-control-runtime";
-import { COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerStatus } from "./computer";
+import { COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerLink, type ComputerStatus } from "./computer";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
 import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
@@ -485,7 +485,7 @@ export class Pim extends DurableAgent<Env> {
 	readonly computer: Computer = new Computer({
 		meta: this.store,
 		sockets: () => [...this.getConnections(COMPUTER_TAG)],
-		wake: (): Promise<SpriteLink> => {
+		wake: (): Promise<ComputerLink> => {
 			const sprites = this.#sprites();
 			const machine = this.computer.machine();
 			if (!sprites || !machine) throw new HttpError(503, "This Pim no longer reaches the computer it started.");

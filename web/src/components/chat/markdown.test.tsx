@@ -299,6 +299,40 @@ describe("an agent's Markdown", () => {
     expect(html).not.toContain("```");
   });
 
+  it("draws a gallery image Pim couldn't keep as unavailable, with its caption and source, and a pending one as a placeholder", () => {
+    const text = `\`\`\`gallery\n${JSON.stringify([
+      {
+        image: "https://x.example/a.gif",
+        caption: "Row",
+        url: "https://x.example/row",
+      },
+      {
+        image: "https://x.example/big.gif",
+        caption: "Big row",
+        url: "https://x.example/big",
+      },
+    ])}\n\`\`\``;
+    const html = renderToStaticMarkup(
+      <ReplyImages
+        images={{ "https://x.example/a.gif": own }}
+        streaming={false}
+      >
+        <Markdown text={text} />
+      </ReplyImages>,
+    );
+    expect(html).toContain(`src="${own}"`);
+    expect(html).toContain("Image unavailable");
+    expect(html).toContain("Big row");
+    expect(html).toContain('href="https://x.example/big"');
+    expect(html).not.toContain("big.gif");
+    const pending = renderToStaticMarkup(
+      <ReplyImages images={null} streaming={false}>
+        <Markdown text={text} />
+      </ReplyImages>,
+    );
+    expect(pending).not.toContain("Image unavailable");
+  });
+
   it("draws a diagram only in a sandboxed frame, and anyone else's as code", () => {
     const text = "```mermaid\nflowchart LR\n  A --> B\n```";
     const found = elements(renderToStaticMarkup(<Markdown text={text} />));

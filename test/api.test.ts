@@ -457,6 +457,86 @@ describe("conversation", () => {
 		expect(await refused("")).toBe(400);
 	});
 
+	it("keeps an animated GIF's bytes as they are, and stops reading an image once it passes the limit", async () => {
+		// Two frames with a loop extension, not a still: kept byte for byte.
+		const gif = Buffer.from("R0lGODlhAQABAPAAAAAAAP///yH/C05FVFNDQVBFMi4wAwEAAAAh+QQACgAAACwAAAAAAQABAAACAkQBACH5BAAKAAAALAAAAAABAAEAAAICRAEAOw==", "base64");
+		const CHUNK = 100_000;
+		// A body made on demand, as a network gives one: nothing is read ahead but what is asked for.
+		const stats: Record<string, { pulls: number; cancelled: boolean }> = {};
+		const streamed = (name: string, total: number, headers: Record<string, string>) => {
+			const seen = { pulls: 0, cancelled: false };
+			stats[name] = seen;
+			let sent = 0;
+			const body = new ReadableStream<Uint8Array>(
+				{
+					pull(controller) {
+						seen.pulls++;
+						const chunk = new Uint8Array(Math.min(CHUNK, total - sent));
+						if (sent === 0) chunk.set(gif);
+						sent += chunk.length;
+						controller.enqueue(chunk);
+						if (sent === total) controller.close();
+					},
+					cancel() {
+						seen.cancelled = true;
+					},
+				},
+				{ highWaterMark: 0 },
+			);
+			return new Response(body, { headers: { "content-type": "image/gif", ...headers } });
+		};
+		const realFetch = globalThis.fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			switch (request.url) {
+				case "https://cdn.example.test/anim.gif":
+					return new Response(gif, { headers: { "content-type": "image/gif" } });
+				// Exactly the limit, with no length declared.
+				case "https://cdn.example.test/exact.gif":
+					return streamed("exact", 5_000_000, {});
+				// Over it by a long way, with no length declared.
+				case "https://cdn.example.test/endless.gif":
+					return streamed("endless", 50_000_000, {});
+				// Over it, declaring a length that is far too small.
+				case "https://cdn.example.test/liar.gif":
+					return streamed("liar", 50_000_000, { "content-length": "10" });
+				case "https://cdn.example.test/page":
+					return new Response(addresses.map((address) => `<img src="${address}">`).join(""), { headers: { "content-type": "text/html" } });
+				default:
+					return realFetch(input, init);
+			}
+		});
+		const names = ["anim", "exact", "endless", "liar"];
+		const addresses = names.map((name) => `https://cdn.example.test/${name}.gif`);
+		const gallery = `\`\`\`gallery\n${JSON.stringify(addresses.map((image) => ({ image, caption: "Row", url: "https://cdn.example.test/page" })))}\n\`\`\``;
+		faux.setResponses([
+			// The page's tool result has to give the images before a reply may show them.
+			toolUse("fetch_url", { url: "https://cdn.example.test/page" }),
+			toolUse("send_to_user", { message: gallery }),
+		]);
+		const { id } = (await post("/sessions")).body;
+		await say("Show me a row", id);
+		const results = ((await api(`/sessions/${id}/messages`)).body.messages as TranscriptMessage[]).flatMap((message) =>
+			message.parts.flatMap((part) => (part.type === "tool-result" && part.name === "send_to_user" ? [part.content.map((content) => (content.type === "text" ? content.text : "")).join("")] : [])),
+		);
+		const sent = JSON.parse(results.at(-1)!) as { images: Record<string, string>; notShown: string };
+		// Only the GIF and the one of exactly the limit are kept, and the first is served as it came.
+		expect(Object.keys(sent.images)).toEqual([addresses[0], addresses[1]]);
+		const served = async (address: string) => exports.default.fetch(url(sent.images[address]!), { headers: { Authorization: `Bearer ${TOKEN}` } });
+		const animated = await served(addresses[0]!);
+		expect(animated.headers.get("content-type")).toBe("image/gif");
+		expect(Buffer.from(await animated.arrayBuffer())).toEqual(gif);
+		expect((await (await served(addresses[1]!)).arrayBuffer()).byteLength).toBe(5_000_000);
+		expect(stats.exact).toEqual({ pulls: 50, cancelled: false });
+		// The others are refused, and reading stops soon after the limit: the 45 MB left unread is never pulled.
+		expect(sent.notShown).toContain("endless.gif");
+		expect(sent.notShown).toContain("liar.gif");
+		for (const name of ["endless", "liar"]) {
+			expect(stats[name]!.cancelled).toBe(true);
+			expect(stats[name]!.pulls).toBeLessThanOrEqual(52);
+		}
+	});
+
 	it("shows cards and galleries with copies of the images a tool's result gave, and refuses images the model made up", async () => {
 		const png = Buffer.from("iVBORw0KGgo=", "base64");
 		const fetched: string[] = [];

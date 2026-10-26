@@ -1317,6 +1317,8 @@ export const pim = {
       method: "PUT",
       body: JSON.stringify({ title }),
     }),
+  unarchiveSession: (id: string) =>
+    call<Session>(`/sessions/${id}/unarchive`, { method: "POST" }),
   archiveSession: (id: string) =>
     call<Session>(`/sessions/${id}/archive`, { method: "POST" }),
   deleteSession: (id: string) =>

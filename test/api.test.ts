@@ -122,6 +122,11 @@ describe("conversation", () => {
 		await say("I'm back", id);
 		expect(await archived()).toBe(false);
 		expect((await post("/sessions/missing/archive", {})).status).toBe(404);
+		await post(`/sessions/${id}/archive`, {});
+		expect(await archived()).toBe(true);
+		expect((await post(`/sessions/${id}/unarchive`, {})).status).toBe(200);
+		expect(await archived()).toBe(false);
+		expect((await post("/sessions/missing/unarchive", {})).status).toBe(404);
 		await api(`/sessions/${id}`, { method: "DELETE" });
 	});
 

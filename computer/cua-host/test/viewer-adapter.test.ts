@@ -357,6 +357,10 @@ function manualTime(start = 10_000) {
 	return {
 		clock: () => now,
 		timers,
+		/** Moves the clock without running any timer, as a timer that runs late would leave it. */
+		setNow(to: number) {
+			now = to;
+		},
 		advance(ms: number) {
 			now += ms;
 			for (const [id, t] of [...pending]) {
@@ -378,9 +382,11 @@ async function launch(adapter: ViewerAdapter, lifetimeMs = 30 * 60_000): Promise
 	return { handle, id: m[1]!, credential: m[2]! };
 }
 
-function setup(options: Partial<ViewerAdapterOptions> = {}, wall: () => number = Date.now) {
+type Fetch = (url: string, init: RequestInit) => Promise<Response>;
+
+function setup(options: Partial<ViewerAdapterOptions> = {}, wall: () => number = Date.now, wrap: (fetch: Fetch) => Fetch = (fetch) => fetch) {
 	const upstream = standIn(wall);
-	const adapter = createViewerAdapter({ upstream: { origin: ORIGIN, fetch: upstream.fetch, openMedia: upstream.openMedia }, displayId: "primary", wallClock: wall, ...options });
+	const adapter = createViewerAdapter({ upstream: { origin: ORIGIN, fetch: wrap(upstream.fetch), openMedia: upstream.openMedia }, displayId: "primary", wallClock: wall, ...options });
 	return { upstream, adapter };
 }
 
@@ -1331,5 +1337,231 @@ describe("the Cua viewer adapter", () => {
 		assert.match(readFileSync(new URL("../cua-viewer/LICENSE", import.meta.url), "utf8"), /^# Functional Source License, Version 1\.1, MIT Future License/);
 		assert.equal(CUA_COMMIT, "fca21937bc4e1420a23d544d11dbdf987f0266e6");
 		l.handle.end();
+	});
+
+	it("holds a presence stream it is still opening until spacesd's answer settles, and cancels a body that comes late", async () => {
+		/** spacesd's Join answers only when the test says, with a body whose cancel does what the test says. */
+		const pending: { signal: AbortSignal; answer: (cancel: () => Promise<void>) => { cancelled: () => number }; fail: () => void }[] = [];
+		const wrap = (fetch: Fetch): Fetch => async (url, init) => {
+			if (!url.endsWith(".PresenceService/Join")) return fetch(url, init);
+			return new Promise<Response>((resolve, reject) => {
+				pending.push({
+					signal: init.signal!,
+					answer: (cancel) => {
+						let cancels = 0;
+						const body = new ReadableStream<Uint8Array>({
+							cancel: () => {
+								cancels++;
+								return cancel();
+							},
+						});
+						resolve(new Response(body, { status: 200, headers: { "content-type": GRPC } }));
+						return { cancelled: () => cancels };
+					},
+					fail: () => reject(new Error("aborted")),
+				});
+			});
+		};
+		const { adapter } = setup({}, Date.now, wrap);
+		const join = (l: Launch, signal?: AbortSignal) =>
+			adapter.fetch(new Request(`${PAGE}/${l.id}/cua.env.v1.PresenceService/Join`, { method: "POST", headers: { "content-type": GRPC, "x-cua-env-authorization": `Bearer ${l.credential}` }, body: frame(0, new Uint8Array()), signal }));
+		const code = async (r: Promise<Response>) => (await r).headers.get("grpc-status");
+		const presence = (l: Launch) => l.handle.status().transports["presence-rpc"];
+
+		// The launch ends while spacesd hasn't answered; spacesd answers anyway, and the body it sends is cancelled before the stream counts as closed.
+		const a = await launch(adapter);
+		const answerA = join(a);
+		await until(() => pending.length === 1, "the Join upstream");
+		a.handle.end();
+		assert.equal(pending[0]!.signal.aborted, true);
+		assert.deepEqual([a.handle.status().phase, presence(a)], ["closing", 1]);
+		let release!: () => void;
+		const late = pending[0]!.answer(() => new Promise((resolve) => (release = resolve)));
+		assert.equal(await code(answerA), "9");
+		await settle();
+		assert.equal(late.cancelled(), 1);
+		// A cancel still pending is not a closure.
+		assert.deepEqual([a.handle.status().phase, presence(a)], ["closing", 1]);
+		release();
+		await until(() => a.handle.status().phase === "closed", "the late body's cancel to settle");
+		assert.equal(presence(a), 0);
+		assert.equal(late.cancelled(), 1);
+
+		// A cancel that fails is not a closure either: the stream stays counted, and says so.
+		const b = await launch(adapter);
+		const answerB = join(b);
+		await until(() => pending.length === 2, "the second Join upstream");
+		b.handle.end();
+		const failing = pending[1]!.answer(() => Promise.reject(new Error("cancel failed")));
+		assert.equal(await code(answerB), "9");
+		await settle();
+		assert.equal(failing.cancelled(), 1);
+		assert.deepEqual([b.handle.status().phase, presence(b), b.handle.status().unconfirmed], ["closing", 1, 1]);
+
+		// An open that fails after the launch ended settles it.
+		const c = await launch(adapter);
+		const answerC = join(c);
+		await until(() => pending.length === 3, "the third Join upstream");
+		c.handle.end();
+		assert.equal(c.handle.status().phase, "closing");
+		pending[2]!.fail();
+		assert.equal(await code(answerC), "14");
+		await until(() => c.handle.status().phase === "closed", "the failed open to settle");
+
+		// The browser leaving while spacesd hasn't answered: the open is aborted, a body that comes anyway is cancelled, and the launch goes on.
+		const d = await launch(adapter);
+		const leaving = new AbortController();
+		const answerD = join(d, leaving.signal).catch(() => undefined);
+		await until(() => pending.length === 4, "the fourth Join upstream");
+		leaving.abort();
+		assert.equal(pending[3]!.signal.aborted, true);
+		assert.equal(presence(d), 1);
+		const ignored = pending[3]!.answer(() => Promise.resolve());
+		await answerD;
+		await until(() => presence(d) === 0, "the ignored body's cancel");
+		assert.equal(ignored.cancelled(), 1);
+		const e = join(d, AbortSignal.abort()).catch(() => undefined);
+		await e;
+		await settle();
+		assert.equal(presence(d), 0);
+		// The launch's own count is exact: two streams may open, and a third may not.
+		const first = join(d);
+		const second = join(d);
+		await until(() => pending.length === 6, "two more Joins upstream");
+		assert.equal(await code(join(d)), "8");
+		pending[4]!.answer(() => Promise.resolve());
+		pending[5]!.answer(() => Promise.resolve());
+		assert.equal((await first).status, 200);
+		assert.equal((await second).status, 200);
+		assert.equal(d.handle.status().phase, "live");
+		d.handle.end();
+		await until(() => d.handle.status().phase === "closed", "both streams to close");
+	});
+
+	it("reads presence frame by frame, holding at most one chunk and one partial frame", async () => {
+		let chunks: Uint8Array[] = [];
+		/** Whether the body stays open, sending nothing more, once its chunks run out. */
+		let hold = false;
+		const wrap = (fetch: Fetch): Fetch => async (url, init) => {
+			if (!url.endsWith(".PresenceService/Join")) return fetch(url, init);
+			const body = new ReadableStream<Uint8Array>({
+				pull: (controller) => {
+					const next = chunks.shift();
+					if (next) controller.enqueue(next);
+					else if (hold) return new Promise<void>(() => {});
+					else controller.close();
+				},
+			});
+			return new Response(body, { status: 200, headers: { "content-type": GRPC } });
+		};
+		const { adapter } = setup({}, Date.now, wrap);
+		const l = await launch(adapter);
+		const schema = RPC["/cua.env.v1.PresenceService/Join"]![1];
+		const event = (participantIds: string[]) => frame(0, bytesOf(schema, { event: { case: "rosterHeartbeat", value: { participantIds } } }));
+		const read = async () => {
+			const response = await adapter.fetch(new Request(`${PAGE}/${l.id}/cua.env.v1.PresenceService/Join`, { method: "POST", headers: { "content-type": GRPC, "x-cua-env-authorization": `Bearer ${l.credential}` }, body: frame(0, new Uint8Array()) }));
+			try {
+				return { frames: parseFrames(new Uint8Array(await response.arrayBuffer())), failed: false };
+			} catch {
+				return { frames: [], failed: true };
+			}
+		};
+		// One frame a byte at a time, then many frames, more than the bound in all, in one chunk.
+		const one = event(["p-a"]);
+		const many = Array.from({ length: 40 }, (_, i) => event([`p-${i}`, "x".repeat(2_000)]));
+		const joined = Buffer.concat([...many, trailer(0)]);
+		assert.ok(joined.byteLength > 64 * 1024);
+		chunks = [...[...one].map((b) => new Uint8Array([b])), new Uint8Array(joined)];
+		const ok = await read();
+		assert.equal(ok.failed, false);
+		assert.equal(ok.frames.filter((f) => f.flag === 0).length, 41);
+		assert.match(new TextDecoder().decode(ok.frames.at(-1)!.payload), /grpc-status: 0/);
+		// A frame that says it is larger than the bound ends the stream when its header arrives, without waiting for or holding its body, which never comes.
+		const huge = new Uint8Array(5);
+		new DataView(huge.buffer).setUint32(1, 1 << 30);
+		chunks = [one, huge];
+		hold = true;
+		const refused = await Promise.race([read(), new Promise<undefined>((resolve) => setTimeout(resolve, 2_000))]);
+		assert.ok(refused, "the stream waited for the oversized frame's body");
+		assert.equal(refused.failed, true);
+		await until(() => l.handle.status().transports["presence-rpc"] === 0, "both streams to report closed");
+		l.handle.end();
+	});
+
+	it("reads the launch's clock on every media message, so a timer that runs late lets nothing through", async () => {
+		// Timers that never fire: only the clock tells the relay its launch has ended.
+		const inert: Timers = { set: () => 1, clear: () => {} };
+		let now = 0;
+		const start = async () => {
+			const { upstream, adapter } = setup({ clock: () => now, timers: inert });
+			now = 0;
+			const l = await launch(adapter, 60_000);
+			const media = await opened(adapter, l);
+			const socket = browserSocket(adapter, mediaTarget(l, media.wsPath));
+			await until(() => socket.received.length === 2, "the relay to open");
+			return { upstream, l, socket, up: upstream.sockets[0]! };
+		};
+
+		// A packet from spacesd after the deadline.
+		const a = await start();
+		now = 60_000;
+		a.up.serve(new Uint8Array([1, 2, 3]));
+		assert.equal(a.socket.received.length, 2);
+		assert.equal(a.l.handle.status().reason, "expired");
+		assert.equal(a.socket.terminated, 1);
+		assert.equal(a.up.terminated, 1);
+
+		// A control message from spacesd after the deadline.
+		const b = await start();
+		now = 60_000;
+		b.up.serve(JSON.stringify({ type: "lifecycle", payload: { session_id: "ms-1", event: { kind: "title_changed", title: "late" } } }));
+		assert.equal(b.socket.received.length, 2);
+		assert.equal(b.l.handle.status().reason, "expired");
+
+		// A frame ack from the browser after the deadline.
+		const c = await start();
+		c.socket.events!.message(JSON.stringify({ type: "frame_ack", payload: { session_id: "ms-1", sequence: 1, decode_queue: 0 } }));
+		assert.equal(c.up.received.length, 1);
+		now = 60_000;
+		c.socket.events!.message(JSON.stringify({ type: "frame_ack", payload: { session_id: "ms-1", sequence: 2, decode_queue: 0 } }));
+		c.socket.events!.message(JSON.stringify({ type: "request_keyframe", payload: { session_id: "ms-1" } }));
+		assert.equal(c.up.received.length, 1);
+		assert.equal(c.l.handle.status().reason, "expired");
+		assert.deepEqual([c.socket.terminated, c.up.terminated], [1, 1]);
+		await until(() => c.l.handle.status().phase === "closed", "both halves to report closed");
+	});
+
+	it("checks a media upgrade again when it is attached, not only when it was asked for", async () => {
+		let wall = 1_800_000_000_000;
+		const { upstream, adapter } = setup({}, () => wall);
+		const l = await launch(adapter);
+		const media = await opened(adapter, l);
+		const upgrade = (target = mediaTarget(l, media.wsPath)) => {
+			const u = adapter.media(target, ["rcdp.v2"]);
+			assert.equal(u.status, 101);
+			return u as Extract<typeof u, { status: 101 }>;
+		};
+		const opens = { count: 0 };
+		const open = () => {
+			opens.count++;
+			return { send: () => {}, close: () => {}, terminate: () => {}, bufferedAmount: () => 0 } satisfies MediaSocket;
+		};
+		// The media ticket expires between the check and the attach.
+		const expiring = upgrade();
+		wall += 601_000;
+		assert.equal(expiring.attach(open), 401);
+		assert.throws(() => expiring.attach(open));
+		wall -= 601_000;
+		// The session is replaced between them.
+		const replaced = upgrade();
+		const next = await rpc(adapter, l, OPEN, openInit());
+		assert.equal(replaced.attach(open), 404);
+		// The launch ends between them.
+		const ending = upgrade(mediaTarget(l, next.message!.wsPath));
+		l.handle.end();
+		assert.equal(ending.attach(open), 404);
+		assert.equal(opens.count, 0);
+		assert.equal(upstream.sockets.length, 0);
+		assert.equal(l.handle.status().phase, "closed");
 	});
 });

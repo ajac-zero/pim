@@ -158,7 +158,12 @@ export type LaunchHandle = {
 	/** The page to open, with the launch's credential in its fragment. */
 	readonly viewerPath: string;
 	readonly end: () => void;
-	readonly status: () => ReturnType<ViewerLaunch["status"]> & { readonly sessions: number; readonly cleanup: LaunchCleanup };
+	readonly status: () => ReturnType<ViewerLaunch["status"]> & {
+		readonly sessions: number;
+		/** Presence streams whose closure was asked for and that spacesd's side didn't confirm (their cancel failed); they still count as open. */
+		readonly unconfirmed: number;
+		readonly cleanup: LaunchCleanup;
+	};
 };
 
 /** Whether a media upgrade may go ahead, and if so how to finish it. */
@@ -168,10 +173,13 @@ export type MediaUpgrade =
 			readonly status: 101;
 			readonly protocol: typeof MEDIA_PROTOCOL;
 			/**
-			 * Finishes the upgrade: `open` completes it, wires `events` to the
-			 * socket, and answers it. Called once.
+			 * Finishes the upgrade, once. Everything `media` checked is checked
+			 * again first; if it no longer holds, `open` is never called and the
+			 * refusal's status is answered, for the host to send instead of
+			 * completing the upgrade. Otherwise `open` completes it, wires
+			 * `events` to the socket and answers it, and this answers 101.
 			 */
-			readonly attach: (open: (events: MediaEvents) => MediaSocket) => void;
+			readonly attach: (open: (events: MediaEvents) => MediaSocket) => 101 | 401 | 404;
 	  };
 
 export type ViewerAdapter = {
@@ -440,6 +448,59 @@ function trailerStatus(payload: Uint8Array): number | undefined {
 
 const upstreamCode = (status: number): number => (status >= 1 && status <= 16 ? status : Code.Internal);
 
+/**
+ * Reads gRPC-Web frames from a body that arrives in chunks of any size,
+ * one frame per call, or undefined at its end. It holds at most the chunk
+ * being read (the transport's own allocation, never joined to another) and
+ * one partial frame, whose header is checked against `limit` before any of
+ * its payload is kept, so nothing builds up across chunks.
+ */
+function frameReader(read: () => Promise<ReadableStreamReadResult<Uint8Array>>, limit: number): () => Promise<Frame | undefined> {
+	let chunk: Uint8Array = new Uint8Array(0);
+	let at = 0;
+	const header = new Uint8Array(5);
+	let headerHave = 0;
+	let payload: Uint8Array | undefined;
+	let payloadHave = 0;
+	return async () => {
+		for (;;) {
+			if (payload && payloadHave === payload.byteLength) {
+				const out = { flag: header[0]!, payload };
+				headerHave = 0;
+				payload = undefined;
+				return out;
+			}
+			if (at === chunk.byteLength) {
+				const { done, value } = await read();
+				if (done) {
+					if (headerHave === 0) return undefined;
+					throw new Error("A frame was cut short.");
+				}
+				chunk = value;
+				at = 0;
+				continue;
+			}
+			if (headerHave < 5) {
+				const n = Math.min(5 - headerHave, chunk.byteLength - at);
+				header.set(chunk.subarray(at, at + n), headerHave);
+				headerHave += n;
+				at += n;
+				if (headerHave === 5) {
+					const length = new DataView(header.buffer).getUint32(1);
+					if (length > limit) throw new Error("A frame is over the bound.");
+					payload = new Uint8Array(length);
+					payloadHave = 0;
+				}
+				continue;
+			}
+			const n = Math.min(payload!.byteLength - payloadHave, chunk.byteLength - at);
+			payload!.set(chunk.subarray(at, at + n), payloadHave);
+			payloadHave += n;
+			at += n;
+		}
+	};
+}
+
 // ------------------------------------------------------------------ helpers
 
 const token = (bytes: number): string => randomBytes(bytes).toString("base64url");
@@ -511,6 +572,8 @@ type LaunchState = {
 	opens: number;
 	opening: boolean;
 	presence: number;
+	/** Presence streams asked to close whose cancel failed: still counted as open by the launch. */
+	unconfirmed: number;
 	readonly cleanup: { requested: number; answered: number; failed: number };
 };
 
@@ -626,6 +689,7 @@ export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapte
 			opens: 0,
 			opening: false,
 			presence: 0,
+			unconfirmed: 0,
 			cleanup: { requested: 0, answered: 0, failed: 0 },
 		};
 		launches.set(id, launch);
@@ -634,7 +698,7 @@ export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapte
 			id,
 			viewerPath: `/${id}/viewer/#ticket=${credential}&clipboard=0`,
 			end: lifetime.end,
-			status: () => ({ ...lifetime.status(), sessions: launch.sessions.size, cleanup: { ...launch.cleanup } }),
+			status: () => ({ ...lifetime.status(), sessions: launch.sessions.size, unconfirmed: launch.unconfirmed, cleanup: { ...launch.cleanup } }),
 		});
 	}
 
@@ -950,13 +1014,42 @@ export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapte
 		launch.presence++;
 		const stream = owner(launch.lifetime, "presence-rpc");
 		const abort = new AbortController();
-		let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 		let browser: ReadableStreamDefaultController<Uint8Array> | undefined;
-		let finished = false;
-		/** Ends the stream both ways, and reports it closed once spacesd's side has let go. */
+		/** spacesd's body, once its answer has come. */
+		let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+		/** Whether spacesd's answer is still awaited: until it settles, a body may still come that has to be let go. */
+		let acquiring = true;
+		/** Whether spacesd's body ended or failed by itself, so nothing is left to let go. */
+		let settled = false;
+		let requested = false;
+		let cancelling = false;
+		let observed = false;
+		/** The stream is seen closed: it leaves the launch's counts, once. */
+		const observe = () => {
+			if (observed) return;
+			observed = true;
+			launch.presence--;
+			stream.closed();
+		};
+		/** Lets go of spacesd's side once a shutdown has been requested, and reports the stream closed only when that is seen to have happened. */
+		const release = () => {
+			if (!requested || acquiring || cancelling || observed) return;
+			if (!reader || settled) return observe();
+			cancelling = true;
+			const body = reader;
+			body.cancel().then(observe, () => {
+				// A body that had failed by itself has ended, and its cancel says so by failing too. One that was
+				// open and whose cancel failed hasn't confirmed its end: it stays counted as open, and as unconfirmed.
+				body.closed.then(
+					() => void launch.unconfirmed++,
+					() => observe(),
+				);
+			});
+		};
+		/** Requests the stream's end both ways. */
 		const finish = (trailer?: Uint8Array) => {
-			if (finished) return;
-			finished = true;
+			if (requested) return;
+			requested = true;
 			abort.abort();
 			try {
 				if (trailer) {
@@ -966,18 +1059,15 @@ export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapte
 			} catch {
 				// The browser's side has gone already.
 			}
-			const released = reader ? reader.cancel().catch(() => {}) : Promise.resolve();
-			void released.then(() => {
-				launch.presence--;
-				stream.closed();
-			});
+			release();
 		};
 		browserSignal.addEventListener("abort", () => finish(), { once: true });
 		// Cursor shapes are never asked for: spacesd may compute them by moving the real pointer (its idle probe).
 		const outbound = encode(schema.joinRequest, { cursorShapes: false, cursorBatches: true, cursorDatagrams: false, rosterInterval: { seconds: ROSTER_SECONDS, nanos: 0 } });
-		const admitted = stream.adopt(() => finish());
-		if (!admitted || browserSignal.aborted) {
+		if (!stream.adopt(() => finish()) || browserSignal.aborted) {
+			acquiring = false;
 			finish();
+			release();
 			return grpcError(Code.FailedPrecondition);
 		}
 		let response: Response;
@@ -990,12 +1080,18 @@ export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapte
 				signal: AbortSignal.any([abort.signal, launch.lifetime.signal]),
 			});
 		} catch {
+			// Nothing came, so nothing is left to let go.
+			acquiring = false;
 			finish();
+			release();
 			return grpcError(Code.Unavailable);
 		}
+		acquiring = false;
 		reader = response.body?.getReader();
-		if (finished || !launch.lifetime.live()) {
+		// A body that came after the shutdown was requested is let go now, and the stream counts until it is.
+		if (requested || !launch.lifetime.live()) {
 			finish();
+			release();
 			return grpcError(Code.FailedPrecondition);
 		}
 		const early = response.headers.get("grpc-status");
@@ -1003,28 +1099,17 @@ export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapte
 			finish();
 			return grpcError(early !== null && early !== "0" ? upstreamCode(Number(early)) : Code.Unavailable);
 		}
-		let buffer = new Uint8Array(0);
 		const source = reader;
-		/** The next whole frame from spacesd, or undefined at its end. */
-		const next = async (): Promise<Frame | undefined> => {
-			for (;;) {
-				if (buffer.byteLength >= 5) {
-					const length = new DataView(buffer.buffer, buffer.byteOffset + 1, 4).getUint32(0);
-					if (length > MAX_PRESENCE_MESSAGE_BYTES) throw new Error("too large");
-					if (buffer.byteLength >= 5 + length) {
-						const out = { flag: buffer[0]!, payload: buffer.slice(5, 5 + length) };
-						buffer = buffer.slice(5 + length);
-						return out;
-					}
-				}
-				const { done, value } = await source.read();
-				if (done) return buffer.byteLength === 0 ? undefined : Promise.reject(new Error("truncated"));
-				const joined = new Uint8Array(buffer.byteLength + value.byteLength);
-				joined.set(buffer);
-				joined.set(value, buffer.byteLength);
-				buffer = joined;
+		const next = frameReader(async () => {
+			try {
+				const result = await source.read();
+				if (result.done) settled = true;
+				return result;
+			} catch (error) {
+				settled = true;
+				throw error;
 			}
-		};
+		}, MAX_PRESENCE_MESSAGE_BYTES);
 		const body = new ReadableStream<Uint8Array>({
 			start: (controller) => {
 				browser = controller;
@@ -1033,8 +1118,10 @@ export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapte
 			pull: async (controller) => {
 				try {
 					for (;;) {
+						if (requested) return;
+						if (!launch.lifetime.live()) return finish();
 						const f = await next();
-						if (finished) return;
+						if (requested) return release();
 						if (!launch.lifetime.live()) return finish();
 						if (!f) return finish(frame(0x80, textEncoder.encode(`grpc-status: ${Code.Unavailable}\r\n`)));
 						if (f.flag === 0x80) {
@@ -1050,6 +1137,7 @@ export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapte
 					}
 				} catch {
 					finish();
+					release();
 				}
 			},
 			cancel: () => finish(),
@@ -1164,6 +1252,8 @@ export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapte
 		browser = open({
 			message: (data) => {
 				if (done) return;
+				// The launch's clock is read for every message: one that comes after the deadline ends the launch here, whether or not its timer has run.
+				if (!launch.lifetime.live()) return relay.end();
 				const up = opened && upstream ? fromBrowser(session, data) : undefined;
 				// Anything else (input, actions, geometry, audio, or a message before the stream started) ends the relay; nothing of it goes up.
 				if (up === undefined) return relay.end(1008);
@@ -1180,6 +1270,7 @@ export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapte
 		session.relay = relay;
 		const fromUpstream = (data: string | Uint8Array) => {
 			if (done) return;
+			if (!launch.lifetime.live()) return relay.end();
 			if (typeof data === "string") {
 				const m = byteLength(data) <= MAX_MEDIA_CONTROL_BYTES ? control(data) : undefined;
 				if (!m) return untrusted();
@@ -1226,12 +1317,19 @@ export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapte
 		const m = new RegExp(`^/(${LAUNCH_ID})/media\\?ticket=(${ATTACH_TOKEN})$`).exec(target);
 		if (!m) return { status: 404 };
 		if (!protocols.includes(MEDIA_PROTOCOL)) return { status: 400 };
-		const launch = launches.get(m[1]!);
-		if (!launch?.lifetime.live()) return { status: 404 };
-		const session = launch.attach.get(digest(m[2]!).toString("hex"));
-		if (!session?.open) return { status: 404 };
-		// An expired media ticket lets no new socket attach; one already attached stays, until the launch ends.
-		if (wall() >= session.expiresAtMs) return { status: 401 };
+		const [, id, token] = m as unknown as [string, string, string];
+		/** The live launch and open session this target names now, with an unexpired media ticket, or why not. */
+		const check = (): { launch: LaunchState; session: Session } | { status: 401 | 404 } => {
+			const launch = launches.get(id);
+			if (!launch?.lifetime.live()) return { status: 404 };
+			const session = launch.attach.get(digest(token).toString("hex"));
+			if (!session?.open) return { status: 404 };
+			// An expired media ticket lets no new socket attach; one already attached stays, until the launch ends.
+			if (wall() >= session.expiresAtMs) return { status: 401 };
+			return { launch, session };
+		};
+		const first = check();
+		if ("status" in first) return first;
 		let used = false;
 		return {
 			status: 101,
@@ -1239,7 +1337,11 @@ export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapte
 			attach: (open) => {
 				if (used) throw new Error("A media upgrade is attached once.");
 				used = true;
-				attach(launch, session, open);
+				// Checked again: time has passed since the upgrade was asked for, and the ticket, session or launch may have gone.
+				const now = check();
+				if ("status" in now) return now.status;
+				attach(now.launch, now.session, open);
+				return 101;
 			},
 		};
 	}

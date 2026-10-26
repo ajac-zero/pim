@@ -2,7 +2,8 @@
  * Carries a Cua evaluation bridge's token from a new VM to the local
  * preview that qualifies it (docs/cua-eval-credentials.md), so the token
  * is in plaintext only in the bridge's own token file on the VM and in the
- * preview's private `.dev.vars` on the operator's machine. It is for one
+ * preview's private environment file on the operator's machine, which
+ * `wrangler dev --env-file` loads. It is for one
  * evaluation, not for a deployment, and nothing in Pim imports it.
  *
  *   node eval-credentials.ts keygen --dir <new private directory>                 (operator's machine)
@@ -10,7 +11,7 @@
  *     --public-key <file> --fingerprint <sha256 hex> --token-file <file>          (VM, as the bridge's account)
  *   node eval-credentials.ts capture --out <file> < management-response           (operator's machine)
  *   node eval-credentials.ts open --key-dir <dir> --response <file> --evaluation <id> \
- *     --owner <o_…> --url <https://…> --out <.dev.vars>                           (operator's machine)
+ *     --owner <o_…> --url <https://…> --out <preview.env> --fixture seed           (operator's machine)
  *
  * `keygen` makes an RSA-3072 key pair in a new 0700 directory, and prints
  * only the public key's fingerprint; only the public key leaves the machine.
@@ -21,12 +22,14 @@
  * the cloud's management channel. `capture` stores that channel's response
  * in a new 0600 file. `open` finds exactly one envelope in it, checks it
  * against what the operator expects, decrypts it, and creates the preview's
- * `.dev.vars` holding `CUA_BRIDGES` for that one space.
+ * environment file, in a directory only this account can enter, holding
+ * `CUA_BRIDGES` for that one space and, with `--fixture seed`, the preview
+ * fixture's two settings for it.
  *
  * Every file it writes is created new (never over anything, never through
  * a link) with mode 0600 from its first byte, in a directory of this
  * account's that no one else can write; a failure after creating one
- * removes it. Everything is checked before anything is created. It runs no
+ * removes it, or says it couldn't (`…-write-residue`). Everything is checked before anything is created. It runs no
  * other program. What it prints is fixed: an event name, the fingerprint or
  * the evaluation's ID, or a failure's reason, never a path, a token, or
  * what was thrown. Importing it does nothing.
@@ -162,44 +165,67 @@ function readFile(file: string, reason: string, maxBytes: number, owner: "self" 
 	}
 }
 
+/** The file operations `createPrivateFile` makes; tests give some that fail. */
+export type FileOperations = Pick<typeof fs, "openSync" | "fchmodSync" | "fstatSync" | "writeSync" | "fsyncSync" | "ftruncateSync" | "lstatSync" | "unlinkSync" | "closeSync">;
+
 /**
  * Creates `file` with `content`: new (`O_EXCL`, so nothing already there,
  * a link included, is followed or replaced, and of two writers only one
  * creates it), mode 0600 from its first byte, in a directory of this
- * account's. If anything fails after it is created, it is emptied and
- * removed, so no part of `content` stays behind.
+ * account's. If anything fails after it is created, and the path is still
+ * this call's file, it is emptied and removed, each tried on its own, and
+ * the refusal is `<reason>-write`. When it can't be shown removed (the
+ * path can't be checked, is something else now, or won't unlink), the
+ * refusal is `<reason>-write-residue`: a file, possibly holding part of
+ * `content`, may be left, and the operator must remove it.
  */
-function create(file: string, content: Buffer, reason: string, private_: boolean): void {
+export function createPrivateFile(file: string, content: Buffer, reason: string, private_: boolean, ops: FileOperations = fs): void {
 	checkAbsolute(file, reason);
 	ownDirectory(path.dirname(file), reason, private_);
 	let descriptor: number;
 	try {
-		descriptor = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+		descriptor = ops.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
 	} catch (error) {
 		throw new Refusal((error as NodeJS.ErrnoException).code === "EEXIST" ? `${reason}-exists` : reason);
 	}
 	try {
-		fs.fchmodSync(descriptor, 0o600);
-		const status = fs.fstatSync(descriptor);
+		ops.fchmodSync(descriptor, 0o600);
+		const status = ops.fstatSync(descriptor);
 		if (!status.isFile() || status.uid !== euid() || (status.mode & 0o7777) !== 0o600) throw new Refusal(reason);
 		let written = 0;
-		while (written < content.length) written += fs.writeSync(descriptor, content, written, content.length - written);
-		fs.fsyncSync(descriptor);
+		while (written < content.length) written += ops.writeSync(descriptor, content, written, content.length - written);
+		ops.fsyncSync(descriptor);
 	} catch {
+		let removed = false;
+		let ours = false;
 		try {
-			const made = fs.fstatSync(descriptor);
-			const there = fs.lstatSync(file);
-			if (made.dev === there.dev && made.ino === there.ino) {
-				fs.ftruncateSync(descriptor, 0);
-				fs.unlinkSync(file);
-			}
+			const made = ops.fstatSync(descriptor);
+			const there = ops.lstatSync(file);
+			ours = made.dev === there.dev && made.ino === there.ino;
 		} catch {
-			// Nothing more can be done for it here; the failure below says so.
+			// Not shown to be this call's file, so it is left alone and reported below.
 		}
-		fs.closeSync(descriptor);
-		throw new Refusal(`${reason}-write`);
+		if (ours) {
+			try {
+				ops.ftruncateSync(descriptor, 0);
+			} catch {
+				// Removing it is still tried.
+			}
+			try {
+				ops.unlinkSync(file);
+				removed = true;
+			} catch {
+				// Reported below.
+			}
+		}
+		try {
+			ops.closeSync(descriptor);
+		} catch {
+			// The descriptor is gone either way.
+		}
+		throw new Refusal(removed ? `${reason}-write` : `${reason}-write-residue`);
 	}
-	fs.closeSync(descriptor);
+	ops.closeSync(descriptor);
 	syncDirectory(path.dirname(file));
 }
 
@@ -253,8 +279,14 @@ function findEnvelope(response: Buffer): Envelope {
 	const first = text.indexOf(ENVELOPE_PREFIX);
 	if (first < 0) throw new Refusal("envelope-missing");
 	if (text.indexOf(ENVELOPE_PREFIX, first + 1) >= 0) throw new Refusal("envelope-duplicate");
-	const run = /^[A-Za-z0-9_-]*/.exec(text.slice(first + ENVELOPE_PREFIX.length, first + ENVELOPE_PREFIX.length + MAX_ENVELOPE_CHARS + 1))?.[0] ?? "";
+	const start = first + ENVELOPE_PREFIX.length;
+	const run = /^[A-Za-z0-9_-]*/.exec(text.slice(start, start + MAX_ENVELOPE_CHARS + 1))?.[0] ?? "";
 	if (run.length === 0 || run.length > MAX_ENVELOPE_CHARS) throw new Refusal("envelope-size");
+	// The envelope is a line of its own: in bare output, or inside a JSON string (`\n` escapes, or the string's own quotes).
+	const opens = first === 0 || text[first - 1] === "\n" || text[first - 1] === '"' || text.slice(first - 2, first) === "\\n";
+	const rest = text.slice(start + run.length, start + run.length + 4);
+	const closes = rest === "" || /^(?:\r?\n|\\r\\n|\\n|")/.test(rest);
+	if (!opens || !closes) throw new Refusal("envelope-framing");
 	let json: string;
 	try {
 		json = new TextDecoder("utf-8", { fatal: true }).decode(base64url(run, "envelope-encoding"));
@@ -304,11 +336,11 @@ function keygen(dir: string): string {
 		const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", { modulusLength: MODULUS_BITS, publicExponent: 0x10001 });
 		const pem = Buffer.from(privateKey.export({ type: "pkcs8", format: "pem" }));
 		try {
-			create(path.join(dir, PRIVATE_KEY_FILE), pem, "key", true);
+			createPrivateFile(path.join(dir, PRIVATE_KEY_FILE), pem, "key", true);
 		} finally {
 			pem.fill(0);
 		}
-		create(path.join(dir, PUBLIC_KEY_FILE), Buffer.from(publicKey.export({ type: "spki", format: "pem" })), "key", true);
+		createPrivateFile(path.join(dir, PUBLIC_KEY_FILE), Buffer.from(publicKey.export({ type: "spki", format: "pem" })), "key", true);
 		return fingerprintOf(publicKey);
 	} catch (error) {
 		// Only what this call made is removed: the directory was new, so nothing else is in it.
@@ -345,7 +377,7 @@ function seal(options: { evaluation: string; owner: string; publicKey: string; f
 		const ciphertext = crypto.publicEncrypt({ key: publicKey, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256", oaepLabel: label(evaluation, owner, fingerprint) }, token);
 		const envelope = envelopeJson({ v: 1, alg: ALGORITHM, evaluation, owner, recipient: fingerprint, ciphertext: ciphertext.toString("base64url") });
 		// The token file is made last, once the envelope is ready, so a failure before leaves no token behind.
-		create(tokenFile, token, "token", true);
+		createPrivateFile(tokenFile, token, "token", true);
 		return ENVELOPE_PREFIX + Buffer.from(envelope, "utf8").toString("base64url");
 	} finally {
 		token.fill(0);
@@ -363,12 +395,13 @@ async function capture(out: string): Promise<void> {
 		chunks.push(chunk as Buffer);
 	}
 	if (length === 0) throw new Refusal("response-empty");
-	create(out, Buffer.concat(chunks), "response", false);
+	createPrivateFile(out, Buffer.concat(chunks), "response", false);
 }
 
-function open(options: { keyDir: string; response: string; evaluation: string; owner: string; url: string; out: string }): void {
-	const { evaluation, owner, url, out } = options;
+function open(options: { keyDir: string; response: string; evaluation: string; owner: string; url: string; out: string; fixture: string | undefined }): void {
+	const { evaluation, owner, url, out, fixture } = options;
 	if (!EVALUATION.test(evaluation) || !OWNER.test(owner)) throw new Refusal("context");
+	if (fixture !== undefined && fixture !== "seed") throw new Refusal("fixture");
 	checkBridgeUrl(url);
 	checkAbsolute(out, "output");
 	ownDirectory(options.keyDir, "key", true);
@@ -401,10 +434,13 @@ function open(options: { keyDir: string; response: string; evaluation: string; o
 		if (!isToken(token)) throw new Refusal("token");
 		// A token that came back in plaintext beside its envelope has leaked through the management channel; it is not used.
 		if (response.includes(token)) throw new Refusal("response-plaintext");
-		// The owner, address and token are checked to have no character JSON or a single-quoted dotenv value would treat specially
-		// (no quote, backslash, `$`, `#` or line break), so the value is the JSON `bridgeFor` in src/cua.ts reads, unescaped.
-		content = Buffer.concat([Buffer.from(`CUA_BRIDGES='{"${owner}":{"url":"${url}","token":"`, "latin1"), token, Buffer.from(`"}}'\n`, "latin1")]);
-		create(out, content, "output", false);
+		// The owner, address and token are checked to have no character JSON, a single-quoted dotenv value or Wrangler's
+		// `$` expansion would treat specially (no quote, backslash, `$`, `#` or line break), so the value is the JSON
+		// `bridgeFor` in src/cua.ts reads, unescaped. With `--fixture seed`, the preview fixture's two settings come first:
+		// fixed text and the checked owner ID, neither secret.
+		const settings = fixture ? `PREVIEW_CUA_FIXTURE=seed\nPREVIEW_CUA_FIXTURE_OWNER=${owner}\n` : "";
+		content = Buffer.concat([Buffer.from(`${settings}CUA_BRIDGES='{"${owner}":{"url":"${url}","token":"`, "latin1"), token, Buffer.from(`"}}'\n`, "latin1")]);
+		createPrivateFile(out, content, "output", true);
 	} finally {
 		token.fill(0);
 		content?.fill(0);
@@ -416,14 +452,16 @@ const USAGE = `Carries a Cua evaluation bridge's token to the local preview, enc
   node eval-credentials.ts keygen --dir <new directory>
   node eval-credentials.ts seal --evaluation <id> --owner <o_…> --public-key <file> --fingerprint <hex> --token-file <file>
   node eval-credentials.ts capture --out <file> < response
-  node eval-credentials.ts open --key-dir <dir> --response <file> --evaluation <id> --owner <o_…> --url <https://…> --out <file>`;
+  node eval-credentials.ts open --key-dir <dir> --response <file> --evaluation <id> --owner <o_…> --url <https://…> --out <file> [--fixture seed]`;
 
+/** Each command's options; all are required but `open`'s `--fixture`. */
 const COMMANDS = {
 	keygen: ["dir"],
 	seal: ["evaluation", "owner", "public-key", "fingerprint", "token-file"],
 	capture: ["out"],
-	open: ["key-dir", "response", "evaluation", "owner", "url", "out"],
+	open: ["key-dir", "response", "evaluation", "owner", "url", "out", "fixture"],
 } as const;
+const OPTIONAL = new Set(["fixture"]);
 
 async function main(argv: string[]): Promise<void> {
 	const command = argv[0] as keyof typeof COMMANDS;
@@ -433,7 +471,7 @@ async function main(argv: string[]): Promise<void> {
 		if (!names) throw new Error();
 		const parsed = parseArgs({ args: argv.slice(1), options: Object.fromEntries(names.map((name) => [name, { type: "string" as const }])), strict: true, allowPositionals: false });
 		values = parsed.values as Record<string, string | undefined>;
-		if (names.some((name) => !values[name])) throw new Error();
+		if (names.some((name) => (OPTIONAL.has(name) ? values[name] === "" : !values[name]))) throw new Error();
 	} catch {
 		// The arguments are never repeated back.
 		process.stderr.write(`${USAGE}\n`);
@@ -447,12 +485,17 @@ async function main(argv: string[]): Promise<void> {
 			process.stdout.write(`${JSON.stringify({ event: "eval-credentials.key", fingerprint })}\n`);
 		} else if (command === "seal") {
 			const envelope = seal({ evaluation: value("evaluation"), owner: value("owner"), publicKey: value("public-key"), fingerprint: value("fingerprint"), tokenFile: value("token-file") });
-			fs.writeSync(1, `${envelope}\n`);
+			try {
+				fs.writeSync(1, `${envelope}\n`);
+			} catch {
+				// The token file is made by now and is left as it is (docs/cua-eval-credentials.md says what to do).
+				throw new Refusal("stdout");
+			}
 		} else if (command === "capture") {
 			await capture(value("out"));
 			process.stdout.write(`${JSON.stringify({ event: "eval-credentials.captured" })}\n`);
 		} else {
-			open({ keyDir: value("key-dir"), response: value("response"), evaluation: value("evaluation"), owner: value("owner"), url: value("url"), out: value("out") });
+			open({ keyDir: value("key-dir"), response: value("response"), evaluation: value("evaluation"), owner: value("owner"), url: value("url"), out: value("out"), fixture: values.fixture });
 			process.stdout.write(`${JSON.stringify({ event: "eval-credentials.opened", evaluation: value("evaluation") })}\n`);
 		}
 	} catch (error) {

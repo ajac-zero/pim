@@ -2,8 +2,9 @@
  * The evaluation's credential channel (../eval-credentials.ts), run as the
  * program it is, over real files in a folder made for this run and removed
  * after: real RSA keys, real encryption, and management responses written
- * by the test in place of the cloud's. Nothing leaves this machine, and no
- * token here is used anywhere else.
+ * by the test in place of the cloud's. One test hands the preview file to
+ * Wrangler's own --env-file loader, without starting anything. Nothing
+ * leaves this machine, and no token here is used anywhere else.
  *
  *   pnpm --filter pim-cua-host test
  */
@@ -17,6 +18,7 @@ import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Relay } from "../../cua-bridge.ts";
+import { createPrivateFile, type FileOperations } from "../eval-credentials.ts";
 
 const CLI = fileURLToPath(new URL("../eval-credentials.ts", import.meta.url));
 // Derived here from docs/cua-eval-credentials.md, not taken from the module.
@@ -97,10 +99,25 @@ function seal(evaluation = EVALUATION, owner = OWNER): { stdout: string; token: 
 	return { stdout: result.stdout, token, tokenFile };
 }
 
-function open(responseFile: string, options: { out?: string; keyDir?: string; evaluation?: string; owner?: string; url?: string } = {}, wrapper: string[] = []): Result & { out: string } {
-	const out = options.out ?? path.join(work, fresh("dev-vars"));
+function open(responseFile: string, options: { out?: string; keyDir?: string; evaluation?: string; owner?: string; url?: string; fixture?: string } = {}, wrapper: string[] = []): Result & { out: string } {
+	const out = options.out ?? path.join(work, fresh("preview-env"));
 	const result = run(
-		["open", "--key-dir", options.keyDir ?? key.dir, "--response", responseFile, "--evaluation", options.evaluation ?? EVALUATION, "--owner", options.owner ?? OWNER, "--url", options.url ?? URL_, "--out", out],
+		[
+			"open",
+			"--key-dir",
+			options.keyDir ?? key.dir,
+			"--response",
+			responseFile,
+			"--evaluation",
+			options.evaluation ?? EVALUATION,
+			"--owner",
+			options.owner ?? OWNER,
+			"--url",
+			options.url ?? URL_,
+			"--out",
+			out,
+			...(options.fixture === undefined ? [] : ["--fixture", options.fixture]),
+		],
 		undefined,
 		wrapper,
 	);
@@ -118,10 +135,10 @@ function encrypt(publicPem: string, plaintext: Buffer, evaluation: string, owner
 	return crypto.publicEncrypt({ key: publicPem, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256", oaepLabel }, plaintext).toString("base64url");
 }
 
-/** What the preview reads: one line, `CUA_BRIDGES='<JSON>'`. */
+/** What the preview reads: the fixture's two settings, if asked for, and one line `CUA_BRIDGES='<JSON>'`. */
 function previewBridges(file: string): unknown {
-	const match = /^CUA_BRIDGES='([^'\n\r\\$#`]*)'\n$/.exec(fs.readFileSync(file, "latin1"));
-	assert.ok(match, "the preview file is one single-quoted CUA_BRIDGES line");
+	const match = /^(?:PREVIEW_CUA_FIXTURE=seed\nPREVIEW_CUA_FIXTURE_OWNER=o_[0-9a-z]{26}\n)?CUA_BRIDGES='([^'\n\r\\$#`]*)'\n$/.exec(fs.readFileSync(file, "latin1"));
+	assert.ok(match, "the preview file is the fixture's settings and one single-quoted CUA_BRIDGES line");
 	return JSON.parse(match[1] as string);
 }
 
@@ -154,7 +171,7 @@ describe("evaluation credentials", { skip: process.geteuid?.() === 0 ? "refuses 
 		assert.equal(fs.existsSync(root), false);
 	});
 
-	it("carries a new token from the VM to the preview's .dev.vars, encrypted on the way", () => {
+	it("carries a new token from the VM to the preview's environment file, encrypted on the way", () => {
 		assert.equal(mode(key.dir), 0o700);
 		assert.equal(mode(path.join(key.dir, "eval-key.pem")), 0o600);
 		assert.equal(mode(path.join(key.dir, "eval-key.pub.pem")), 0o600);
@@ -186,16 +203,23 @@ describe("evaluation credentials", { skip: process.geteuid?.() === 0 ? "refuses 
 		assert.equal(mode(captured), 0o600);
 		assert.equal(fs.readFileSync(captured, "utf8"), azure);
 
-		const opened = open(captured, { out: path.join(work, ".dev.vars") });
+		const opened = open(captured, { out: path.join(work, "preview.env"), fixture: "seed" });
 		assert.deepEqual({ ...opened, out: undefined }, { status: 0, stdout: `{"event":"eval-credentials.opened","evaluation":"${EVALUATION}"}\n`, stderr: "", out: undefined });
 		assert.equal(mode(opened.out), 0o600);
-		assert.equal(fs.readFileSync(opened.out, "utf8"), `CUA_BRIDGES='{"${OWNER}":{"url":"${URL_}","token":"${token}"}}'\n`);
+		assert.equal(
+			fs.readFileSync(opened.out, "utf8"),
+			`PREVIEW_CUA_FIXTURE=seed\nPREVIEW_CUA_FIXTURE_OWNER=${OWNER}\nCUA_BRIDGES='{"${OWNER}":{"url":"${URL_}","token":"${token}"}}'\n`,
+		);
 		assert.deepEqual(previewBridges(opened.out), { [OWNER]: { url: URL_, token } });
 
-		// The bare script output opens the same way.
+		// The bare script output, and a managed Run Command's instance view, open the same way; without --fixture, only CUA_BRIDGES is written.
 		const bare = open(response(stdout));
 		assert.equal(bare.status, 0, bare.stderr);
-		assert.deepEqual(previewBridges(bare.out), { [OWNER]: { url: URL_, token } });
+		assert.equal(fs.readFileSync(bare.out, "utf8"), `CUA_BRIDGES='{"${OWNER}":{"url":"${URL_}","token":"${token}"}}'\n`);
+		const managed = open(response(JSON.stringify({ name: "seal", instanceView: { executionState: "Succeeded", exitCode: 0, output: stdout, error: "" } })), { fixture: "seed" });
+		assert.equal(managed.status, 0, managed.stderr);
+		assert.equal(fs.readFileSync(managed.out, "utf8"), fs.readFileSync(opened.out, "utf8"));
+		refused(open(response(stdout), { fixture: "off" }), "open", "fixture");
 	});
 
 	it("refuses an envelope for another evaluation, owner or key, or one changed on the way, and writes nothing", () => {
@@ -238,6 +262,15 @@ describe("evaluation credentials", { skip: process.geteuid?.() === 0 ? "refuses 
 			[`${stdout}${stdout}`, "envelope-duplicate"],
 			[`${stdout}${PREFIX}\n`, "envelope-duplicate"],
 			[`${PREFIX}\n`, "envelope-size"],
+			// The envelope must be a line of its own, or a JSON string's: nothing may run on from it or into it.
+			[`${stdout.trim()}=\n`, "envelope-framing"],
+			[`${stdout.trim()}==`, "envelope-framing"],
+			[`${stdout.trim()}.\n`, "envelope-framing"],
+			[`${stdout.trim()}%3D\n`, "envelope-framing"],
+			[`${stdout.trim()} trailing\n`, "envelope-framing"],
+			[`x${stdout}`, "envelope-framing"],
+			[`=${stdout}`, "envelope-framing"],
+			[JSON.stringify({ output: `${stdout.trim()}=\n` }), "envelope-framing"],
 			[`${PREFIX}${"A".repeat(2049)}`, "envelope-size"],
 			// "{}" is e30 in base64url; e31 decodes to the same bytes but isn't the canonical form.
 			[`${PREFIX}e31`, "envelope-encoding"],
@@ -323,11 +356,15 @@ describe("evaluation credentials", { skip: process.geteuid?.() === 0 ? "refuses 
 		refused(open(good, { out: path.join(work, "to-existing") }), "open", "output-exists");
 		assert.equal(fs.readFileSync(existing, "utf8"), "kept\n");
 		const group = dir("group-writable", 0o770);
-		refused(open(good, { out: path.join(group, ".dev.vars") }), "open", "output");
+		refused(open(good, { out: path.join(group, "preview.env") }), "open", "output");
+		// Only a folder no one else can enter, such as one outside the checkout made for the evaluation, not one like the checkout's own.
+		const listable = dir("listable", 0o755);
+		refused(open(good, { out: path.join(listable, "preview.env") }), "open", "output");
 		fs.symlinkSync(work, path.join(root, "work-link"));
-		refused(open(good, { out: path.join(root, "work-link", ".dev.vars") }), "open", "output");
-		refused(open(good, { out: ".dev.vars" }), "open", "output");
+		refused(open(good, { out: path.join(root, "work-link", "preview.env") }), "open", "output");
+		refused(open(good, { out: "preview.env" }), "open", "output");
 		assert.deepEqual(fs.readdirSync(group), []);
+		assert.deepEqual(fs.readdirSync(listable), []);
 
 		// The bridge's address: the canonical HTTPS form only.
 		for (const url of ["http://bridge.example.net/pim", "https://Bridge.example.net/pim", "https://bridge.example.net", "https://bridge.example.net/pim?x", "https://bridge.example.net/pim#x", "https://u:p@bridge.example.net/pim", "https://bridge.example.net/a/../pim", "https://bridge.example.net:443/pim", "https://bridge.example.net/pim'x", "https://bridge.example.net/pim$x"]) {
@@ -377,7 +414,7 @@ describe("evaluation credentials", { skip: process.geteuid?.() === 0 ? "refuses 
 	it("publishes the preview file once when several open it at the same time", async () => {
 		const { stdout, token } = seal();
 		const file = response(stdout);
-		const out = path.join(work, "concurrent.dev.vars");
+		const out = path.join(work, "concurrent.env");
 		const args = ["open", "--key-dir", key.dir, "--response", file, "--evaluation", EVALUATION, "--owner", OWNER, "--url", URL_, "--out", out];
 		const results = await Promise.all(
 			Array.from(
@@ -410,6 +447,109 @@ describe("evaluation credentials", { skip: process.geteuid?.() === 0 ? "refuses 
 		refused(result, "open", "output-write");
 		assert.equal(fs.existsSync(result.out), false);
 		assert.ok(!outputs().includes(path.basename(result.out)));
+	});
+
+	it("says when a failed write may have left a file behind", () => {
+		const at = dir("io");
+		const failure = (code: string) => Object.assign(new Error(code), { code });
+		/** Writes the first 10 bytes for real, then fails, as a full disk would. */
+		const partway: FileOperations["writeSync"] = ((descriptor: number, buffer: Buffer, offset: number) => {
+			if (offset === 0) return fs.writeSync(descriptor, buffer, 0, 10);
+			throw failure("ENOSPC");
+		}) as FileOperations["writeSync"];
+		const content = Buffer.from("x".repeat(100));
+		const attempt = (name: string, overrides: Partial<FileOperations>) => {
+			const file = path.join(at, name);
+			try {
+				createPrivateFile(file, content, "output", true, { ...fs, writeSync: partway, ...overrides } as FileOperations);
+			} catch (error) {
+				return { file, reason: (error as { reason?: string }).reason };
+			}
+			assert.fail("the write was meant to fail");
+		};
+		// Emptied and removed: nothing left.
+		const plain = attempt("plain", {});
+		assert.equal(plain.reason, "output-write");
+		assert.equal(fs.existsSync(plain.file), false);
+		// Emptying fails, removing still happens.
+		const noTruncate = attempt("no-truncate", { ftruncateSync: () => { throw failure("EIO"); } });
+		assert.equal(noTruncate.reason, "output-write");
+		assert.equal(fs.existsSync(noTruncate.file), false);
+		// Removing fails: an empty file is left, and the refusal says so.
+		const noUnlink = attempt("no-unlink", { unlinkSync: () => { throw failure("EIO"); } });
+		assert.deepEqual([noUnlink.reason, fs.statSync(noUnlink.file).size], ["output-write-residue", 0]);
+		// Both fail: what was written is left, and the refusal says so.
+		const neither = attempt("neither", { ftruncateSync: () => { throw failure("EIO"); }, unlinkSync: () => { throw failure("EIO"); } });
+		assert.deepEqual([neither.reason, fs.readFileSync(neither.file, "utf8")], ["output-write-residue", "x".repeat(10)]);
+		// The path can't be shown to be this call's file: it is left alone, and the refusal says so.
+		const unchecked = attempt("unchecked", { lstatSync: (() => { throw failure("EIO"); }) as FileOperations["lstatSync"] });
+		assert.deepEqual([unchecked.reason, fs.existsSync(unchecked.file)], ["output-write-residue", true]);
+		fs.rmSync(at, { recursive: true });
+	});
+
+	it("leaves the token file and says so when its envelope can't be written", async () => {
+		const tokenFile = path.join(bridge, fresh("token"));
+		const args = ["seal", "--evaluation", EVALUATION, "--owner", OWNER, "--public-key", publicKeyFile, "--fingerprint", key.fingerprint, "--token-file", tokenFile];
+		const result = await new Promise<Result>((resolve) => {
+			const child = spawn(process.execPath, [CLI, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+			// Nothing reads the output, so writing the envelope fails (EPIPE).
+			child.stdout.destroy();
+			let stderr = "";
+			child.stderr.on("data", (chunk) => (stderr += chunk));
+			child.on("close", (status) => {
+				printed.push(stderr);
+				resolve({ status, stdout: "", stderr });
+			});
+		});
+		refused(result, "seal", "stdout");
+		assert.equal(mode(tokenFile), 0o600);
+		tokens.push(fs.readFileSync(tokenFile, "latin1"));
+	});
+
+	it("gives the preview exactly CUA_BRIDGES and the fixture's settings through Wrangler's --env-file loader, as hidden secrets", async () => {
+		const { stdout, token } = seal();
+		const opened = open(response(stdout), { out: path.join(dir("preview-cua"), "preview.env"), fixture: "seed" });
+		assert.equal(opened.status, 0, opened.stderr);
+		const logs = dir("wrangler-logs");
+		const saved = { path: process.env.WRANGLER_LOG_PATH, level: process.env.WRANGLER_LOG };
+		process.env.WRANGLER_LOG_PATH = logs;
+		process.env.WRANGLER_LOG = "debug";
+		const said: string[] = [];
+		const write = { out: process.stdout.write, err: process.stderr.write };
+		let vars: Record<string, { type: string; value: unknown }>;
+		try {
+			const wrangler = await import("wrangler");
+			// What `wrangler dev --config wrangler.preview.jsonc --env-file <file>` binds (`getBindings` in Wrangler 4.148), without starting it.
+			const config = wrangler.unstable_readConfig({ config: path.resolve(fileURLToPath(new URL("../../..", import.meta.url)), "wrangler.preview.jsonc") });
+			const capture = (chunk: string | Uint8Array) => (said.push(String(chunk)), true);
+			process.stdout.write = capture as typeof process.stdout.write;
+			process.stderr.write = capture as typeof process.stderr.write;
+			try {
+				vars = wrangler.unstable_getVarsForDev(config.userConfigPath, [opened.out], config.vars, undefined, false, config.secrets) as typeof vars;
+			} finally {
+				process.stdout.write = write.out;
+				process.stderr.write = write.err;
+			}
+		} finally {
+			for (const [name, value] of [["WRANGLER_LOG_PATH", saved.path], ["WRANGLER_LOG", saved.level]] as const) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+		// Wrangler appends to its log file in the background, so the test waits for what it said to arrive there.
+		const readLogs = () => fs.readdirSync(logs).map((name) => fs.readFileSync(path.join(logs, name), "utf8"));
+		for (const deadline = Date.now() + 10_000; !readLogs().join("").includes("Using secrets defined in"); ) {
+			assert.ok(Date.now() < deadline, "Wrangler's log never said which file it read");
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		// Exactly these values, with Wrangler's `$` expansion leaving them as they are, each a secret, which Wrangler shows as "(hidden)".
+		assert.deepEqual(vars.CUA_BRIDGES, { type: "secret_text", value: JSON.stringify({ [OWNER]: { url: URL_, token } }) });
+		assert.deepEqual(vars.PREVIEW_CUA_FIXTURE, { type: "secret_text", value: "seed" });
+		assert.deepEqual(vars.PREVIEW_CUA_FIXTURE_OWNER, { type: "secret_text", value: OWNER });
+		// What Wrangler said, and its debug log, name the file but hold no token.
+		const logged = readLogs();
+		assert.ok(said.some((line) => line.includes("Using secrets defined in")));
+		for (const text of [...said, ...logged]) assert.ok(!text.includes(token));
 	});
 
 	it("prints only fixed failures", () => {

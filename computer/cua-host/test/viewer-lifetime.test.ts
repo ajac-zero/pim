@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-	type Attachment,
+	type Adoption,
 	type LaunchStatus,
 	lifetimeUntil,
 	MAX_LAUNCH_MS,
@@ -75,15 +75,15 @@ function fakeTime(start = 1_000) {
 
 /** A transport that records its `close` calls and reports itself closed when the test says. */
 function transport(launch: ViewerLaunch, kind: TransportKind, options: { throws?: boolean; closesAtOnce?: boolean } = {}) {
-	const record = { closes: 0, attachment: undefined as Attachment | undefined };
+	const record = { closes: 0, adoption: undefined as Adoption | undefined };
 	const owned: OwnedTransport = {
 		close() {
 			record.closes++;
-			if (options.closesAtOnce) record.attachment?.closed();
+			if (options.closesAtOnce) record.adoption?.closed();
 			if (options.throws) throw new Error("close failed");
 		},
 	};
-	record.attachment = launch.adopt(kind, owned);
+	record.adoption = launch.adopt(kind, owned);
 	return record;
 }
 
@@ -106,7 +106,7 @@ describe("a viewer launch's lifetime", () => {
 		assert.deepEqual([viewer.closes, upstream.closes], [1, 1]);
 		assert.equal(launch.live(), false);
 		assert.equal(launch.status().reason, "expired");
-		assert.equal(launch.adopt("media-viewer", { close() {} }), undefined, "a valid ticket admits nothing more");
+		assert.equal(launch.adopt("media-viewer", { close() {} }).admitted, false, "a valid ticket admits nothing more");
 	});
 
 	it("stays live, holding its transports, after the upstream ticket expires", () => {
@@ -132,7 +132,7 @@ describe("a viewer launch's lifetime", () => {
 		time.setNow(time.clock() + 5_000);
 		assert.equal(time.pending(), 1, "the timer is still waiting");
 		const late = transport(launch, "media-viewer");
-		assert.equal(late.attachment, undefined);
+		assert.equal(late.adoption?.admitted, false);
 		assert.equal(late.closes, 1, "the late transport is closed at once");
 		assert.equal(viewer.closes, 1, "the check that refused it ended the launch");
 		assert.equal(launch.status().reason, "expired");
@@ -169,9 +169,13 @@ describe("a viewer launch's lifetime", () => {
 		assert.equal(launch.signal.aborted, true, "an open under way can be given up");
 		finish();
 		const upstream = await opened;
-		assert.equal(upstream.attachment, undefined);
+		assert.equal(upstream.adoption?.admitted, false);
 		assert.equal(upstream.closes, 1);
 		assert.equal(counts(launch.status()), 0);
+		assert.equal(launch.status().refused, 1);
+		assert.equal(launch.status().phase, "closing", "asked to close is not closed");
+		upstream.adoption?.closed();
+		assert.equal(launch.status().phase, "closed");
 	});
 
 	it("takes reconnects into the same launch, which none of them lengthens", () => {
@@ -183,9 +187,9 @@ describe("a viewer launch's lifetime", () => {
 		for (let round = 0; round < 50; round++) {
 			const viewer = transport(launch, "media-viewer");
 			const rpc = transport(launch, "presence-rpc");
-			viewer.attachment?.closed();
-			rpc.attachment?.closed();
-			rpc.attachment?.closed();
+			viewer.adoption?.closed();
+			rpc.adoption?.closed();
+			rpc.adoption?.closed();
 			time.advance(10);
 		}
 		assert.equal(launch.status().remainingMs, 500);
@@ -194,7 +198,7 @@ describe("a viewer launch's lifetime", () => {
 
 		time.advance(499);
 		const reconnected = transport(launch, "media-viewer");
-		assert.ok(reconnected.attachment);
+		assert.equal(reconnected.adoption?.admitted, true);
 		time.advance(1);
 		assert.equal(reconnected.closes, 1);
 		assert.equal(launch.status().reason, "expired");
@@ -230,7 +234,7 @@ describe("a viewer launch's lifetime", () => {
 		for (const lifetimeMs of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, MAX_LAUNCH_MS + 1, Number.MAX_SAFE_INTEGER]) {
 			assert.throws(() => startViewerLaunch({ lifetimeMs, clock: () => 0 }), RangeError, String(lifetimeMs));
 		}
-		for (const start of [Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_VALUE, 2 ** 60]) {
+		for (const start of [Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_VALUE, 2 ** 60, Number.MAX_SAFE_INTEGER - 500]) {
 			const time = fakeTime(start);
 			assert.throws(() => startViewerLaunch({ lifetimeMs: 1_000, clock: time.clock, timers: time.timers }), RangeError, String(start));
 			assert.equal(time.pending(), 0);
@@ -247,6 +251,121 @@ describe("a viewer launch's lifetime", () => {
 			assert.throws(() => lifetimeUntil(notAfter, at), RangeError, `${notAfter} at ${at}`);
 		}
 		assert.equal(lifetimeUntil(now + MAX_LAUNCH_MS, now), MAX_LAUNCH_MS);
+	});
+
+	it("starts from ordinary fractional clock readings, ending no later than the start plus the lifetime", () => {
+		// The first two are readings for which the start plus the lifetime, less the start, isn't the lifetime in floating point.
+		for (const [start, lifetimeMs] of [
+			[4187669.57210601, 60_000],
+			[3600000.123456789, MAX_LAUNCH_MS],
+			[1234.75, 1_000],
+			[0.25, 1],
+		] as const) {
+			const time = fakeTime(start);
+			const launch = startViewerLaunch({ lifetimeMs, clock: time.clock, timers: time.timers });
+			const viewer = transport(launch, "media-viewer");
+			const remaining = launch.status().remainingMs;
+			assert.ok(remaining > lifetimeMs - 1 && remaining <= lifetimeMs, `${start}: ${remaining} ms left`);
+			// The deadline is the whole millisecond at or before the start, plus the lifetime.
+			const deadline = Math.floor(start) + lifetimeMs;
+			time.setNow(deadline - 0.5);
+			assert.equal(launch.live(), true, `${start}: live just before its deadline`);
+			time.advance(start + lifetimeMs - time.clock());
+			assert.equal(viewer.closes, 1, `${start}: its timer ended it by the start plus the lifetime`);
+			assert.equal(launch.status().reason, "expired");
+
+			const checked = fakeTime(start);
+			const other = startViewerLaunch({ lifetimeMs, clock: checked.clock, timers: checked.timers });
+			checked.setNow(deadline);
+			assert.equal(other.live(), false, `${start}: not live at its deadline`);
+		}
+	});
+
+	it("keeps a refused late transport whose close throws counted until it reports closed", () => {
+		const time = fakeTime();
+		const launch = startViewerLaunch({ lifetimeMs: 1_000, clock: time.clock, timers: time.timers });
+		launch.end();
+		assert.equal(launch.status().phase, "closed");
+		const late = transport(launch, "media-upstream", { throws: true });
+		assert.equal(late.adoption?.admitted, false);
+		assert.equal(late.closes, 1);
+		assert.deepEqual(
+			(({ phase, refused, closeFailures }) => ({ phase, refused, closeFailures }))(launch.status()),
+			{ phase: "closing", refused: 1, closeFailures: 1 },
+		);
+		launch.end();
+		assert.equal(late.closes, 1, "a refused transport is asked to close once");
+		late.adoption?.closed();
+		late.adoption?.closed();
+		assert.equal(launch.status().refused, 0);
+		assert.equal(launch.status().phase, "closed");
+	});
+
+	it("keeps a refused over-bound transport whose close throws counted through the launch's end", () => {
+		const time = fakeTime();
+		const launch = startViewerLaunch({ lifetimeMs: 1_000, clock: time.clock, timers: time.timers });
+		const held = Array.from({ length: MAX_LAUNCH_TRANSPORTS }, () => transport(launch, "presence-rpc"));
+		const extra = transport(launch, "media-viewer", { throws: true });
+		assert.equal(extra.adoption?.admitted, false);
+		assert.deepEqual(
+			(({ phase, refused, closeFailures }) => ({ phase, refused, closeFailures }))(launch.status()),
+			{ phase: "live", refused: 1, closeFailures: 1 },
+		);
+		assert.equal(launch.status().transports["media-viewer"], 0, "it is not the launch's");
+
+		time.advance(1_000);
+		assert.equal(extra.closes, 1);
+		for (const t of held) t.adoption?.closed();
+		assert.equal(launch.status().phase, "closing", "the refused one has not reported closed");
+		extra.adoption?.closed();
+		assert.equal(launch.status().phase, "closed");
+	});
+
+	it("closes every transport and aborts when clearing its timer throws", () => {
+		const time = fakeTime();
+		const timers: Timers = {
+			set: time.timers.set,
+			clear() {
+				throw new Error("clear failed");
+			},
+		};
+		const launch = startViewerLaunch({ lifetimeMs: 1_000, clock: time.clock, timers });
+		const all = [transport(launch, "media-viewer"), transport(launch, "media-upstream"), transport(launch, "presence-rpc")];
+		launch.end();
+		assert.equal(launch.signal.aborted, true);
+		assert.deepEqual(
+			all.map((t) => t.closes),
+			[1, 1, 1],
+		);
+		assert.equal(launch.status().reason, "ended");
+		time.advance(5_000);
+		launch.end();
+		assert.deepEqual(
+			all.map((t) => t.closes),
+			[1, 1, 1],
+			"the timer that still fired did nothing",
+		);
+		for (const t of all) t.adoption?.closed();
+		assert.equal(launch.status().phase, "closed");
+	});
+
+	it("ends a launch whose timer can't be set again", () => {
+		const time = fakeTime();
+		let refuse = false;
+		const timers: Timers = {
+			set(callback, ms) {
+				if (refuse) throw new Error("set failed");
+				return time.timers.set(callback, ms);
+			},
+			clear: time.timers.clear,
+		};
+		const launch = startViewerLaunch({ lifetimeMs: 1_000, clock: time.clock, timers });
+		const viewer = transport(launch, "media-viewer");
+		refuse = true;
+		time.setNow(time.clock() + 400);
+		time.fireAll();
+		assert.equal(launch.status().reason, "timer");
+		assert.equal(viewer.closes, 1);
 	});
 
 	it("ends a launch whose clock fails", () => {
@@ -286,9 +405,9 @@ describe("a viewer launch's lifetime", () => {
 		assert.equal(status.closeFailures, 2);
 		assert.deepEqual(status.transports, { "media-viewer": 0, "media-upstream": 1, "presence-rpc": 1 });
 
-		rpc.attachment?.closed();
+		rpc.adoption?.closed();
 		assert.equal(launch.status().phase, "closing");
-		broken.attachment?.closed();
+		broken.adoption?.closed();
 		assert.equal(launch.status().phase, "closed");
 	});
 
@@ -296,7 +415,7 @@ describe("a viewer launch's lifetime", () => {
 		const time = fakeTime();
 		const launch = startViewerLaunch({ lifetimeMs: 1_000, clock: time.clock, timers: time.timers });
 		const gone = transport(launch, "media-viewer");
-		gone.attachment?.closed();
+		gone.adoption?.closed();
 		assert.equal(gone.closes, 0, "a transport that closed by itself is not closed again");
 		assert.equal(launch.status().phase, "live", "nor does it end the launch");
 
@@ -311,17 +430,17 @@ describe("a viewer launch's lifetime", () => {
 		assert.deepEqual([viewer.closes, upstream.closes], [1, 1]);
 		assert.equal(launch.status().reason, "ended", "the first reason stays");
 
-		viewer.attachment?.closed();
-		viewer.attachment?.closed();
+		viewer.adoption?.closed();
+		viewer.adoption?.closed();
 		assert.equal(launch.status().phase, "closing");
-		upstream.attachment?.closed();
+		upstream.adoption?.closed();
 		assert.equal(launch.status().phase, "closed");
 	});
 
 	it("refuses a transport adopted from inside a cleanup", () => {
 		const time = fakeTime();
 		const launch = startViewerLaunch({ lifetimeMs: 1_000, clock: time.clock, timers: time.timers });
-		let reentered: Attachment | undefined | null = null;
+		let reentered: Adoption | undefined;
 		let refusedCloses = 0;
 		launch.adopt("media-viewer", {
 			close() {
@@ -333,22 +452,24 @@ describe("a viewer launch's lifetime", () => {
 			},
 		});
 		launch.end();
-		assert.equal(reentered, undefined);
+		assert.equal(reentered?.admitted, false);
 		assert.equal(refusedCloses, 1);
 		assert.equal(launch.status().transports["media-viewer"], 1);
+		assert.equal(launch.status().refused, 1);
 	});
 
 	it("holds at most its bound of transports at once", () => {
 		const time = fakeTime();
 		const launch = startViewerLaunch({ lifetimeMs: 1_000, clock: time.clock, timers: time.timers });
 		const held = Array.from({ length: MAX_LAUNCH_TRANSPORTS }, () => transport(launch, "presence-rpc"));
-		assert.ok(held.every((t) => t.attachment));
+		assert.ok(held.every((t) => t.adoption?.admitted));
 		const extra = transport(launch, "presence-rpc");
-		assert.equal(extra.attachment, undefined);
+		assert.equal(extra.adoption?.admitted, false);
 		assert.equal(extra.closes, 1);
 		assert.equal(launch.live(), true, "refusing one ends nothing");
-		held[0]?.attachment?.closed();
-		assert.ok(transport(launch, "presence-rpc").attachment);
+		assert.equal(launch.status().refused, 1);
+		held[0]?.adoption?.closed();
+		assert.equal(transport(launch, "presence-rpc").adoption?.admitted, true);
 	});
 
 	it("sets one timer at a time and clears it when the launch ends", () => {

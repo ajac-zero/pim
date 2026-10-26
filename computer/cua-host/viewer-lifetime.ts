@@ -12,8 +12,10 @@
  * relay, and any presence RPC stream) and ends them all when its deadline
  * passes or its owner ends it. Its authority is read from the clock on every
  * call, not only when its timer fires, so a timer that runs late never lets
- * a late attach in. What it ends are network transports: that every one has
- * reported itself closed says nothing about processes on the desktop.
+ * a late attach in. A transport it refuses (one that opened late, or past
+ * its bound) is asked to close at once and counted as open until its owner
+ * reports it closed. What it ends are network transports: that every one
+ * has reported itself closed says nothing about processes on the desktop.
  *
  * Importing it does nothing; `startViewerLaunch(...)` starts one launch.
  * It adds no route and is not yet used by the host.
@@ -28,7 +30,13 @@ export const MAX_LAUNCH_TRANSPORTS = 8;
 /** A monotonic clock in milliseconds, such as `performance.now()`. Only differences between its readings count. */
 export type MonotonicClock = () => number;
 
-/** Timers the launch sets for its deadline; one at a time, cleared when the launch ends. */
+/**
+ * Timers the launch sets for its deadline, one at a time, cleared when a
+ * shutdown is requested. `set` must call back later, never from within
+ * itself. A `set` that throws ends the launch (`timer`); a `clear` that
+ * throws is ignored, after every transport has been asked to close, as a
+ * timer that fires after the launch ended does nothing.
+ */
 export type Timers = {
 	readonly set: (callback: () => void, ms: number) => unknown;
 	readonly clear: (handle: unknown) => void;
@@ -41,33 +49,43 @@ export type TransportKind = "media-viewer" | "media-upstream" | "presence-rpc";
  * A transport the launch owns. `close` ends it at once, as a network
  * transport only (such as `ws.terminate()` or `socket.destroy()`); it must
  * not signal a process or run a command. Its own report that it has closed
- * comes back through the attachment's `closed`.
+ * comes back through the adoption's `closed`.
  */
 export type OwnedTransport = {
 	readonly close: () => void;
 };
 
-/** One adopted transport's registration. `closed` is the owner's report that the transport has closed; later calls do nothing. */
-export type Attachment = {
+/** What `adopt` answers for every transport it is handed, taken or not. */
+export type Adoption = {
+	/** Whether the launch took the transport. One it refused has been asked to close once, and is the launch's no further. */
+	readonly admitted: boolean;
+	/**
+	 * The owner's report that the transport has closed, which every
+	 * transport needs, refused ones too: until then it counts as open.
+	 * Later calls do nothing.
+	 */
 	readonly closed: () => void;
 };
 
-/** Why a launch's shutdown was requested: its deadline passed, its owner ended it, or its clock failed. */
-export type EndReason = "expired" | "ended" | "clock";
+/** Why a launch's shutdown was requested: its deadline passed, its owner ended it, its clock failed, or its timer couldn't be set. */
+export type EndReason = "expired" | "ended" | "clock" | "timer";
 
 export type LaunchStatus = {
 	/**
-	 * `live` until a shutdown is requested; then `closing` while any owned
-	 * transport has not reported itself closed, and `closed` once every one
-	 * has. `closed` is about these transports alone.
+	 * `live` until a shutdown is requested; then `closing` while any
+	 * transport handed to `adopt`, taken or refused, has not reported itself
+	 * closed, and `closed` once every one has. `closed` is about these
+	 * transports alone.
 	 */
 	readonly phase: "live" | "closing" | "closed";
 	readonly reason: EndReason | null;
 	/** Monotonic milliseconds left; `0` once a shutdown is requested. */
 	readonly remainingMs: number;
-	/** Transports registered and not yet reported closed, by kind. */
+	/** Transports the launch took and that have not reported themselves closed, by kind. */
 	readonly transports: Readonly<Record<TransportKind, number>>;
-	/** Owned transports whose `close` threw. Each stays registered until it reports itself closed. */
+	/** Transports the launch refused and asked to close that have not reported themselves closed. */
+	readonly refused: number;
+	/** Calls to a transport's `close` that threw, taken or refused. Each such transport still counts as open until it reports itself closed. */
 	readonly closeFailures: number;
 };
 
@@ -75,12 +93,13 @@ export type ViewerLaunch = {
 	/** Whether the launch is live now, read from the clock; a launch found past its deadline ends here. */
 	readonly live: () => boolean;
 	/**
-	 * Registers a transport that has opened, such as one whose asynchronous
-	 * open finished. If the launch is not live, or already holds
-	 * `MAX_LAUNCH_TRANSPORTS`, the transport is closed at once and nothing
-	 * is answered.
+	 * Hands the launch a transport that has opened, such as one whose
+	 * asynchronous open finished. If the launch is not live, or already
+	 * holds `MAX_LAUNCH_TRANSPORTS`, the transport is refused: its `close`
+	 * is called at once, and only a count of it is kept until its owner
+	 * reports it closed.
 	 */
-	readonly adopt: (kind: TransportKind, transport: OwnedTransport) => Attachment | undefined;
+	readonly adopt: (kind: TransportKind, transport: OwnedTransport) => Adoption;
 	/** Requests the launch's shutdown: every owned transport is closed. Later calls do nothing. */
 	readonly end: () => void;
 	readonly status: () => LaunchStatus;
@@ -129,15 +148,17 @@ export function startViewerLaunch(options: LaunchOptions): ViewerLaunch {
 	const clock = options.clock ?? (() => performance.now());
 	const timers = options.timers ?? defaultTimers;
 	const started = clock();
-	const deadline = started + options.lifetimeMs;
-	// A reading so large that adding the lifetime rounds or overflows would move the deadline.
-	if (!Number.isFinite(started) || !Number.isFinite(deadline) || deadline - started !== options.lifetimeMs) {
-		throw new RangeError("A launch's clock must read a finite time its lifetime can be added to.");
+	// Counted from the whole millisecond at or before the start, so the deadline is a safe integer, never later than the start plus the lifetime.
+	const deadline = Math.floor(started) + options.lifetimeMs;
+	if (!Number.isSafeInteger(deadline)) {
+		throw new RangeError("A launch's clock must read a finite time its lifetime can be added to exactly.");
 	}
 
 	const controller = new AbortController();
-	/** Owned transports that have not reported themselves closed; each removes itself when it does. */
-	const owned = new Map<Attachment, { readonly kind: TransportKind; readonly transport: OwnedTransport }>();
+	/** Taken transports that have not reported themselves closed; each removes itself when it does. At most `MAX_LAUNCH_TRANSPORTS`. */
+	const owned = new Map<Adoption, { readonly kind: TransportKind; readonly transport: OwnedTransport }>();
+	/** Refused transports that have not reported themselves closed: a count, not a record of them. */
+	let refused = 0;
 	/** The latest the clock has read, so a clock that goes back gives back no time. */
 	let latest = started;
 	let reason: EndReason | null = null;
@@ -145,21 +166,27 @@ export function startViewerLaunch(options: LaunchOptions): ViewerLaunch {
 	let armed = false;
 	let closeFailures = 0;
 
+	const close = (transport: OwnedTransport) => {
+		try {
+			transport.close();
+		} catch {
+			// The transport still counts as open until it reports itself closed.
+			closeFailures++;
+		}
+	};
+
 	function request(why: EndReason): void {
 		if (reason !== null) return;
 		reason = why;
-		if (armed) {
-			armed = false;
-			timers.clear(timer);
-		}
 		controller.abort();
 		// Each is closed once, from a copy, as a `close` may report itself closed at once; one that throws stops none of the others.
-		for (const { transport } of [...owned.values()]) {
+		for (const { transport } of [...owned.values()]) close(transport);
+		if (armed) {
+			armed = false;
 			try {
-				transport.close();
+				timers.clear(timer);
 			} catch {
-				// It stays registered, and the launch `closing`, until it reports itself closed.
-				closeFailures++;
+				// A timer that still fires finds the launch ended and does nothing.
 			}
 		}
 	}
@@ -195,33 +222,42 @@ export function startViewerLaunch(options: LaunchOptions): ViewerLaunch {
 		const now = read();
 		if (now === undefined) return;
 		if (now >= deadline) return request("expired");
+		const fire = () => {
+			armed = false;
+			// A timer that fires early sets another for what is left; one that fires late finds the launch ended already, or ends it.
+			if (live()) arm();
+		};
+		try {
+			timer = timers.set(fire, Math.ceil(deadline - now));
+		} catch {
+			return request("timer");
+		}
 		armed = true;
-		timer = timers.set(
-			() => {
-				armed = false;
-				// A timer that fires early sets another for what is left; one that fires late finds the launch ended already, or ends it.
-				if (live()) arm();
-			},
-			Math.ceil(deadline - now),
-		);
 	};
 
-	const adopt = (kind: TransportKind, transport: OwnedTransport): Attachment | undefined => {
+	const adopt = (kind: TransportKind, transport: OwnedTransport): Adoption => {
+		let reported = false;
 		if (!live() || owned.size >= MAX_LAUNCH_TRANSPORTS) {
-			try {
-				transport.close();
-			} catch {
-				// Never registered, so nothing is left to clean up here.
-			}
-			return undefined;
+			refused++;
+			const adoption: Adoption = Object.freeze({
+				admitted: false,
+				closed: () => {
+					if (reported) return;
+					reported = true;
+					refused--;
+				},
+			});
+			close(transport);
+			return adoption;
 		}
-		const attachment: Attachment = Object.freeze({
+		const adoption: Adoption = Object.freeze({
+			admitted: true,
 			closed: () => {
-				owned.delete(attachment);
+				owned.delete(adoption);
 			},
 		});
-		owned.set(attachment, { kind, transport });
-		return attachment;
+		owned.set(adoption, { kind, transport });
+		return adoption;
 	};
 
 	const status = (): LaunchStatus => {
@@ -229,10 +265,11 @@ export function startViewerLaunch(options: LaunchOptions): ViewerLaunch {
 		const counts: Record<TransportKind, number> = { "media-viewer": 0, "media-upstream": 0, "presence-rpc": 0 };
 		for (const { kind } of owned.values()) counts[kind]++;
 		return {
-			phase: reason === null ? "live" : owned.size > 0 ? "closing" : "closed",
+			phase: reason === null ? "live" : owned.size > 0 || refused > 0 ? "closing" : "closed",
 			reason,
 			remainingMs: reason === null ? deadline - latest : 0,
 			transports: counts,
+			refused,
 			closeFailures,
 		};
 	};

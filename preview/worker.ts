@@ -10,6 +10,7 @@ import { serve } from "../src/gateway";
 import { Pim as RealPim } from "../src/pim";
 import { INTRODUCTION } from "../src/transcript";
 import { Authenticator } from "../test/webauthn";
+import { seedCuaFixture } from "./cua-fixture";
 
 export { Auth, Directory, Gallery } from "../src/index";
 
@@ -28,6 +29,9 @@ export { Auth, Directory, Gallery } from "../src/index";
  *   agent is calling as what it is doing, and suggests three prompts from the last thing you said. `generate_image` draws Pim's icon.
  * - `GET /__dev/sign-in/<username>?returnTo=/path` signs the browser in as
  *   that person, making the account if it's new, with a passkey made here.
+ *
+ * Opted into by its private environment only, it also seeds one space with an
+ * operator's Cua computer, once (./cua-fixture.ts, docs/cua-bridge.md).
  */
 
 const PREVIEW_MODEL = "preview-model";
@@ -167,6 +171,18 @@ function previewProvider() {
 const preview = previewProvider();
 
 export class Pim extends RealPim {
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+		// The one space the preview's private environment names gets its operator's Cua computer, once (./cua-fixture.ts).
+		// Before the space answers anything or sets up its agents' tools; it never throws, so the space starts either way.
+		void ctx.blockConcurrencyWhile(() =>
+			seedCuaFixture(
+				{ name: ctx.id.name, meta: this.store, transaction: (fn) => ctx.storage.transactionSync(fn), sync: () => ctx.storage.sync() },
+				env as unknown as Record<string, unknown>,
+			),
+		);
+	}
+
 	/** The stand-in model, besides the real providers: the ChatGPT plan, and those people add, such as a model on this machine. */
 	protected override models(): MutableModels {
 		const models = super.models();

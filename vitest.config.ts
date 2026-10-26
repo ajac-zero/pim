@@ -21,6 +21,8 @@ export default defineConfig({
 			// Computers Pim starts as Fly.io Sprites, whose API the tests stand in for.
 			// A local Chrome, which the tests' computers browse with (test/helpers.ts's `testBrowser`).
 			miniflare: {
+				// The preview's own Pim (preview/worker.ts), for its Cua fixture's tests only; a deployment has no such binding.
+				durableObjects: { PREVIEW_PIM: { className: "PreviewPim", useSQLite: true } },
 				browserRendering: { binding: "BROWSER" },
 				bindings: {
 					PIM_PUBLIC_URL: "https://pim.test",

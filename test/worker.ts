@@ -283,3 +283,6 @@ export class Pim extends RealPim {
 		return workersAiImageModel(imageAi, deploymentSettings(this.env).imageModel!);
 	}
 }
+
+/** The preview's own Pim (preview/worker.ts), bound as `PREVIEW_PIM` in vitest.config.ts only, for the preview's Cua fixture's tests. */
+export { Pim as PreviewPim } from "../preview/worker";

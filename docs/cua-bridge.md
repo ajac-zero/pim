@@ -1,6 +1,6 @@
 # Cua computers through an operator's bridge
 
-`src/cua.ts` connects a space to pim-computer on a Cua VM through a bridge the operator runs. A space uses it only when its operator chose it for that space (see "Choosing Cua for a space"), and then uses no other computer. Spaces without that choice keep paired computers and Sprites exactly as before. Nothing here turns on, takes over or resumes the control state (`docs/computer-control-state.md`), so an operator's computer receives agents' requests only in a space whose control state some other, operator-side step has already enabled and leased to the agent; no code in Pim does either. Its tests use a `fetch` they give it, answered in the same process; none reaches the network.
+`src/cua.ts` connects a space to pim-computer on a Cua VM through a bridge the operator runs. A space uses it only when its operator chose it for that space (see "Choosing Cua for a space"), and then uses no other computer. Spaces without that choice keep paired computers and Sprites exactly as before. Nothing here turns on, takes over or resumes the control state (`docs/computer-control-state.md`), so an operator's computer receives agents' requests only in a space whose control state some other, operator-side step has already enabled and leased to the agent; no code in `src/` does either (a local preview's one-shot fixture can, for one space: see "Qualifying a bridge against the preview"). Its tests use a `fetch` they give it, answered in the same process; none reaches the network.
 
 ## What the space talks to
 
@@ -131,7 +131,7 @@ Pim doesn't create, start, stop, replace or delete an operator's VM, and never c
 
 ## What is not done
 
-- **The operator's tooling.** Writing the marker, enabling the control state and giving the agent a lease are outside this repository; only tests do them here. Human takeover stays unavailable. To qualify a bridge against a preview later, a separately reviewed step would do the same for one test space of the preview only (`wrangler.preview.jsonc`, which is never deployed): store the marker under `computer_provider`, call `control.enable()` and then `control.apply({ type: "resume", leaseId })` in that space's Durable Object, as `test/cua-relay-qualification.test.ts` does in process, and put that space's entry in the preview's own `CUA_BRIDGES` (`.dev.vars`). It would live beside the preview's other stand-ins in `preview/worker.ts`, like `/__dev/sign-in`, never in `src/`, and add no route, tool or setting to a deployment. Nothing like it exists yet.
+- **The operator's tooling.** Writing the marker, enabling the control state and giving the agent a lease are outside this repository for a deployment; only tests, and the preview's one-shot fixture for one space of a local preview (see "Qualifying a bridge against the preview"), do them here. Human takeover stays unavailable.
 - **The bridge's installation.** Its programs are here (`computer/cua-bridge.ts`, and `bridge.ts`, `host.ts`, `session.ts` and `desktop.ts` in `computer/cua-host`), but not the accounts, directories, services, certificates and confinement of "What the operator sets up", their packaging and deployment, or a check of them on a real VM. Setting a new VM up needs its own reviewed plan. Nothing here has run against a real Cua VM. The host's tests serve loopback clients in the same process with in-memory sessions; the session tests (`computer/cua-host/test/session.test.ts`) run over real Unix sockets in a test folder, with in-memory children or a small Node script in place of pim-computer, and in one test run `bridge.ts` and `desktop.ts` as processes, the endpoint starting the real `pim-computer.ts` for one `stat` and a `ws` client in place of Pim, all on the test machine as one user; no shell or browser command runs. Pim's tests answer `fetch` in the same process, with a `WebSocketPair` and pim-computer's own `Link`; the relay's tests (`test/cua-bridge.test.ts`) put the relay's Workers adapter behind that `fetch`, with sessions made in the test from `Link` over a test folder, whose commands run nothing, or from nothing at all. How a deployed Worker's `fetch` upgrades, times out and aborts against a real bridge is untested. That Workers expose the `101` response's `x-pim-space` header to `fetch` is assumed from the platform, not tested against it; if they don't, every connection is refused.
 - **Versions.** A Sprite fetches pim-computer from its Pim each time it starts; the bridge's operator must keep its copy in step.
 - **Control and takeover.** A Cua VM is a whole desktop. Nothing here shows that a person's input there is quiescent or exclusive, so human takeover stays unavailable, as in `docs/computer-control-state.md`. Local transport tests say nothing about what else drives the VM.
@@ -146,3 +146,63 @@ Pim doesn't create, start, stop, replace or delete an operator's VM, and never c
 - Neither token, nor the bridge's address, appears in the public routes, the control state, the space's storage or what was logged; no takeover is offered, and `inputQuiescence` stays `"unproven"`.
 
 What it does not show: a real network upgrade, a VM, a host adapter or session launcher, or that anything stopped on a machine. Its sessions run no process. It can't restart the Durable Object: "reconstruction" is the control state read anew from what the space stored (the helper `cua.test.ts` also uses), so the restart of the whole object, and with it the relay's own state, is not exercised.
+
+## Qualifying a bridge against the preview
+
+`preview/cua-fixture.ts` makes one space of a local preview (`pnpm preview`, `wrangler.preview.jsonc`, never deployed) use an operator's Cua computer, so a bridge can be tried against a real Pim. For that one space it does what only tests do otherwise: stores the marker, enables the control state, and gives the agent a lease (`preview-cua-fixture`). The preview's `Pim` (`preview/worker.ts`) runs it from its constructor, inside `blockConcurrencyWhile`, so it is done before the space answers anything or sets up its agents' tools. It adds no route, RPC method, tool or setting, and nothing in `src/` calls it; a deployment can't run it, since its Worker is `src/index.ts`. Approvals and permissions are unchanged: an agent's `shell` still files an approval, which the preview model, as a majordomo reviewing it, always leaves to the person.
+
+### What it does, once
+
+It runs only when the preview's environment has `PREVIEW_CUA_FIXTURE=seed` (exactly) and names the space's owner ID in `PREVIEW_CUA_FIXTURE_OWNER`. Every other space starts as it always does. For the space named:
+
+1. **Checked first, changing nothing.** Its owner profile must be there (the person has signed in once); `CUA_BRIDGES` must have an entry for exactly that owner that `Cua.connect` would try (HTTPS, no credentials, query or fragment, a well-formed token, no other field); and the space must hold no marker, no control state of any kind (readable or not, human-owned, blocked, another space's), no paired computer and no Sprite. A refusal logs `{"event":"preview.cua_fixture","space":"o_…","outcome":"refused","reason":…}` (`owner`, `space`, `bridge`, `marker`, `control`, `computer`, `record`) and is checked again at the next start.
+2. **`seeding`, on disk.** `preview_cua_fixture` is stored as `seeding`, and the fixture waits until it is on disk (`storage.sync()`). From here it never runs for this space again.
+3. **One transaction.** The marker, the control state (enabled, then resumed under the lease), and `preview_cua_fixture` as `seeded`: all of it is stored, or none of it. It writes through a `ControlCoordinator` of its own, so a write that fails latches that one and is rolled back with it; the space's own coordinator is made after and reads only what was stored. Logged as `outcome: "seeded"`.
+
+At every later start `seeded` does nothing (`already-seeded`): the space's marker and control state are its own from then on, whatever they have become. Nothing is re-enabled, resumed, renewed or repaired, so a request left `unknown`, a blocked state, a takeover or a removed control state stays as it is. `seeding` without `seeded` means a start stopped or failed between steps 2 and 3 (`failed` with reason `seed`, then `interrupted` at every start after): the space holds no marker and no control state, reaches no operator's computer, and the fixture does nothing more for it. The one failure it can't record is step 2's own write failing (`failed`, reason `record`, nothing stored); the next start then is a first start. If its wait fails after the write, the record may be on disk, and a later start is `interrupted`. After a failure or an interruption, tear down and start again with a fresh preview (below).
+
+The logs carry fixed words and the space's owner ID, never the bridge's address or token, nor what failed.
+
+### Setting it up
+
+The bridge is set up on the VM as in "What the operator sets up", serving `--space <owner>` with its own token, at an HTTPS address the preview's machine reaches. The preview's secrets go in a private file outside the repository, never in `.dev.vars` (whose folder is the checkout's) or anything Git tracks:
+
+```sh
+# 1. Start the preview as usual, sign in as the person who will qualify the bridge, and read their owner ID.
+install -d -m 0700 "$HOME/.config/pim-preview-cua"
+curl -s -c "$HOME/.config/pim-preview-cua/jar" -o /dev/null http://localhost:8787/__dev/sign-in/qualify
+curl -s -b "$HOME/.config/pim-preview-cua/jar" http://localhost:8787/api/account | jq -r .ownerId
+rm "$HOME/.config/pim-preview-cua/jar"
+
+# 2. Opt in, for that owner only, in a file only you can read (0600).
+(umask 077 && cat > "$HOME/.config/pim-preview-cua/preview.env") <<'ENV'
+PREVIEW_CUA_FIXTURE=seed
+PREVIEW_CUA_FIXTURE_OWNER=o_...
+CUA_BRIDGES={"o_...":{"url":"https://bridge.example/o_...","token":"..."}}
+ENV
+
+# 3. Restart the preview with it: stop the usual service, then run it with the file.
+amp orb service stop preview   # or stop `pnpm preview` however it runs
+pnpm preview --env-file "$HOME/.config/pim-preview-cua/preview.env"
+```
+
+With `--env-file`, Wrangler reads only that file, not `.dev.vars`, and binds its values as secrets, which it doesn't print; put any other variable the preview needs (such as the trace exporter's) in the same file. The space is seeded the first time anything reaches it after the restart, such as the person opening the app: look for `"outcome":"seeded"` in the preview's output. Keep the person's approval policy at the preview's default (`majordomo`) or set it to `explicit` in Settings: `auto` approves an agent's request after 30 seconds.
+
+### Tearing it down
+
+There is no undo in place: nothing in Pim removes a marker, and the fixture never clears what it stored. Tear the whole preview down:
+
+```sh
+# Stop the preview started with the file (Ctrl-C in its terminal), then:
+rm -f "$HOME/.config/pim-preview-cua/preview.env" && rmdir "$HOME/.config/pim-preview-cua"
+rm -rf .wrangler/state-preview   # every preview account and space, the seeded one with them
+amp orb services ensure           # a fresh preview, without the fixture
+```
+
+On the VM, stop the bridge and the endpoint, and delete the bridge's token, which no other Pim should hold. A fresh preview gives the same person a new owner ID, so a later qualification starts again from step 1.
+
+### What it shows, and what it doesn't
+
+Its tests (`test/preview-cua-fixture.test.ts`) bind the preview's own `Pim` in the test runtime (`PREVIEW_PIM`, in `vitest.config.ts` only) and start a space again by evicting its Durable Object (`evictDurableObject`), so the constructor runs anew over the stored state: a real restart of one object in workerd, not of a running `wrangler dev`. They show the refusals, the seed, a later start leaving an unknown request, a takeover or a removed control state as they are, a failure at each write leaving only `seeding` and the space reaching no computer, and the preview model's `shell` call reaching the owner's relay once, only after the person approves it. Their bridge is the relay behind an injected `fetch`, with in-memory sessions that run nothing.
+
+Not shown, and left to the qualification itself: the preview's `fetch` reaching a real bridge over HTTPS, the `101` response's `x-pim-space` header as `wrangler dev` exposes it, giving up after `CONNECT_MS` and aborting against a real network, and a restart of the whole running preview.

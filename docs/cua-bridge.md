@@ -131,7 +131,7 @@ Pim doesn't create, start, stop, replace or delete an operator's VM, and never c
 
 ## What is not done
 
-- **The operator's tooling.** Writing the marker, enabling the control state and giving the agent a lease are outside this repository for a deployment; only tests, and the preview's one-shot fixture for one space of a local preview (see "Qualifying a bridge against the preview"), do them here. Human takeover stays unavailable.
+- **The operator's tooling.** Writing the marker, enabling the control state and giving the agent a lease are outside this repository for a deployment; only tests, and the preview's one-shot fixture for one space of a local preview (see "Qualifying a bridge against the preview"), do them here. Human takeover stays unavailable. How an evaluation's bridge token reaches the preview's private environment file from a new VM, encrypted on the way, is in `docs/cua-eval-credentials.md`.
 - **The bridge's installation.** Its programs are here (`computer/cua-bridge.ts`, and `bridge.ts`, `host.ts`, `session.ts` and `desktop.ts` in `computer/cua-host`), but not the accounts, directories, services, certificates and confinement of "What the operator sets up", their packaging and deployment, or a check of them on a real VM. Setting a new VM up needs its own reviewed plan. Nothing here has run against a real Cua VM. The host's tests serve loopback clients in the same process with in-memory sessions; the session tests (`computer/cua-host/test/session.test.ts`) run over real Unix sockets in a test folder, with in-memory children or a small Node script in place of pim-computer, and in one test run `bridge.ts` and `desktop.ts` as processes, the endpoint starting the real `pim-computer.ts` for one `stat` and a `ws` client in place of Pim, all on the test machine as one user; no shell or browser command runs. Pim's tests answer `fetch` in the same process, with a `WebSocketPair` and pim-computer's own `Link`; the relay's tests (`test/cua-bridge.test.ts`) put the relay's Workers adapter behind that `fetch`, with sessions made in the test from `Link` over a test folder, whose commands run nothing, or from nothing at all. How a deployed Worker's `fetch` upgrades, times out and aborts against a real bridge is untested. That Workers expose the `101` response's `x-pim-space` header to `fetch` is assumed from the platform, not tested against it; if they don't, every connection is refused.
 - **Versions.** A Sprite fetches pim-computer from its Pim each time it starts; the bridge's operator must keep its copy in step.
 - **Control and takeover.** A Cua VM is a whole desktop. Nothing here shows that a person's input there is quiescent or exclusive, so human takeover stays unavailable, as in `docs/computer-control-state.md`. Local transport tests say nothing about what else drives the VM.
@@ -183,41 +183,46 @@ The logs carry fixed words and the space's owner ID, never the bridge's address 
 
 ### Setting it up
 
-The bridge is set up on the VM as in "What the operator sets up", serving `--space <owner>` with its own token, at an HTTPS address the preview's machine reaches. The preview's secrets go in a private file outside the repository, never in `.dev.vars` (whose folder is the checkout's) or anything Git tracks:
+The bridge runs on a new, disposable VM as in "What the operator sets up", serving `--space <owner>`. Its token is made there and reaches the preview's private environment file only encrypted, through the evaluation credential channel (`computer/cua-host/eval-credentials.ts`, `docs/cua-eval-credentials.md`), whose `open --fixture seed` writes the file the fixture reads. That file is outside the repository, never `.dev.vars` (whose folder is the checkout's) or anything Git tracks, and no token is typed, pasted, printed or copied:
 
 ```sh
 # 1. Start the preview as usual, sign in as the person who will qualify the bridge, and read their owner ID.
-install -d -m 0700 "$HOME/.config/pim-preview-cua"
-curl -s -c "$HOME/.config/pim-preview-cua/jar" -o /dev/null http://localhost:8787/__dev/sign-in/qualify
-curl -s -b "$HOME/.config/pim-preview-cua/jar" http://localhost:8787/api/account | jq -r .ownerId
-rm "$HOME/.config/pim-preview-cua/jar"
+CFG=$HOME/.config/pim-preview-cua
+install -d -m 0700 "$CFG"
+curl -s -c "$CFG/jar" -o /dev/null http://localhost:8787/__dev/sign-in/qualify
+curl -s -b "$CFG/jar" http://localhost:8787/api/account | jq -r .ownerId   # OWNER
+rm "$CFG/jar"
 
-# 2. Opt in, for that owner only, in a file only you can read (0600).
-(umask 077 && cat > "$HOME/.config/pim-preview-cua/preview.env") <<'ENV'
-PREVIEW_CUA_FIXTURE=seed
-PREVIEW_CUA_FIXTURE_OWNER=o_...
-CUA_BRIDGES={"o_...":{"url":"https://bridge.example/o_...","token":"..."}}
-ENV
+# 2. Run the credential channel for that owner ("Running it" in docs/cua-eval-credentials.md, which sets STATE and EVAL): keygen, the VM's
+#    seal, capture, then open, which creates $CFG/preview.env (0600, in the 0700 $CFG) holding, in this order,
+#    PREVIEW_CUA_FIXTURE=seed, PREVIEW_CUA_FIXTURE_OWNER=<OWNER> and CUA_BRIDGES='{"<OWNER>":{"url":…,"token":…}}'.
+node computer/cua-host/eval-credentials.ts open --key-dir "$STATE/$EVAL/key" --response "$STATE/$EVAL/response.json" \
+  --evaluation "$EVAL" --owner "$OWNER" --url "https://<bridge address>/pim" --out "$CFG/preview.env" --fixture seed
 
-# 3. Restart the preview with it: stop the usual service, then run it with the file.
+# 3. Restart the preview with it: stop the usual service, then run it with the file and Wrangler's telemetry off.
 amp orb service stop preview   # or stop `pnpm preview` however it runs
-pnpm preview --env-file "$HOME/.config/pim-preview-cua/preview.env"
+WRANGLER_SEND_METRICS=false pnpm preview --env-file "$CFG/preview.env"
 ```
 
-With `--env-file`, Wrangler reads only that file, not `.dev.vars`, and binds its values as secrets, which it doesn't print; put any other variable the preview needs (such as the trace exporter's) in the same file. The space is seeded the first time anything reaches it after the restart, such as the person opening the app: look for `"outcome":"seeded"` in the preview's output. Anything else leaves that person's space unusable (the app shows errors) until the cause is fixed, for a refusal, or the preview is torn down. Keep the person's approval policy at the preview's default (`majordomo`) or set it to `explicit` in Settings: `auto` approves an agent's request after 30 seconds.
+`open` never writes over a file already there, so `preview.env` must not exist before step 2; nothing else should create it. With `--env-file`, Wrangler reads only that file, not `.dev.vars`, and binds its values as secrets, which its bindings table shows as `(hidden)`. It also loads them into its own `process.env`, which the processes it starts inherit (workerd, and the web app's build), and the Worker sees them in its `process.env` under `nodejs_compat`: anything running as the operator's account, and root, can read them while the preview runs, so run it only in a local account only the operator uses. To give the preview another setting, such as the trace exporter's, append it as a line of its own; never add a `CUA_BRIDGES` or `PREVIEW_CUA_…` line, and never copy, print or merge the file.
+
+The space is seeded the first time anything reaches it after the restart, such as the person opening the app: look for `"outcome":"seeded"` in the preview's output. Anything else leaves that person's space unusable (the app shows errors) until the cause is fixed, for a refusal, or the preview is torn down. Keep the person's approval policy at the preview's default (`majordomo`) or set it to `explicit` in Settings: `auto` approves an agent's request after 30 seconds.
+
+If the VM's `seal` failed, or its output gave no envelope `open` takes (including `stdout`, when the envelope couldn't be written and a whole token was left on the VM), there is no `preview.env` to start with: tear the VM down and start again with a new key and evaluation ID, never `seal` again on that VM ("When something fails" in `docs/cua-eval-credentials.md`).
 
 ### Restarting and tearing down
 
-Restarting the preview, with or without the file, changes nothing the fixture stored: a seeded space starts as it is, and a space it began on and didn't finish stays unstarted. Nothing resumes, renews or repairs either, and Pim has no route that does. There is no undo in place: nothing in Pim removes a marker or the fixture's record. Tear the whole preview down:
+Restarting the preview, with or without the file, changes nothing the fixture stored: a seeded space starts as it is, and a space it began on and didn't finish stays unstarted. Nothing resumes, renews, reseeds or repairs, and Pim has no route that does. There is no undo in place: nothing in Pim removes a marker or the fixture's record. Tear the whole preview down, operator only:
 
 ```sh
-# Stop the preview started with the file (Ctrl-C in its terminal), then:
-rm -f "$HOME/.config/pim-preview-cua/preview.env" && rmdir "$HOME/.config/pim-preview-cua"
+# Stop the preview started with the file (Ctrl-C in its terminal), so no process holds its values, then:
+rm -f "$CFG/preview.env" && rmdir "$CFG"
+rm -rf "$STATE/$EVAL"            # the evaluation's private key and captured response
 rm -rf .wrangler/state-preview   # every preview account and space, the seeded one with them
 amp orb services ensure           # a fresh preview, without the fixture
 ```
 
-On the VM, stop the bridge and the endpoint, and delete the bridge's token, which no other Pim should hold. A fresh preview gives the same person a new owner ID, so a later qualification starts again from step 1.
+Then delete the VM and what the cloud keeps of the evaluation, as in "What is kept where, and teardown" in `docs/cua-eval-credentials.md`: the VM holds the bridge's token in plaintext, which no other Pim should hold. A fresh preview gives the same person a new owner ID, so a later qualification starts again from step 1, with a new VM, key and evaluation ID.
 
 ### What it shows, and what it doesn't
 

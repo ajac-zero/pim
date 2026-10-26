@@ -1,0 +1,624 @@
+/**
+ * The native-app MCP client (../native-mcp.ts) against a stand-in for
+ * spacesd's `/mcp`, written here from its source at the pinned commit
+ * (`http/mcp.rs` and cua-driver-core's dispatch): bearer auth, minted
+ * `Mcp-Session-Id`s, `X-Cua-Agent-Session` as the driver session, `202` for
+ * notifications, and `tools/list` and `tools/call` answers. It is a `fetch`
+ * in this process that records every request and every tool call it
+ * "executes". It shows what the client sends and makes of answers; it proves
+ * nothing about the real binary. No server, socket, desktop or app is involved.
+ *
+ *   node --test test/native-mcp.test.ts
+ */
+
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { describe, it } from "node:test";
+import {
+	agentSessionOf,
+	canonical,
+	createNativeMcp,
+	DEFAULT_LIMITS,
+	dispatchEffect,
+	type Fetch,
+	type NativeCall,
+	NativeMcpSetupError,
+	type NativeMcpLimits,
+	type NativeOutcome,
+	TOOLS,
+	type TrustedRun,
+} from "../native-mcp.ts";
+import { AGENT_SESSION, CUA_COMMIT, UPSTREAM_TOOLS, UPSTREAM_TOOLS_SHA256 } from "../native-mcp-upstream.ts";
+
+const ORIGIN = "http://127.0.0.1:3211";
+const TOKEN = "spacesd-root-token-of-the-stand-in-0123456789";
+const OWNER = "space-ada";
+const RUN: TrustedRun = { owner: OWNER, agentId: "agent-1", runId: "run-1" };
+const LEAK = "upstream-internal-detail /home/desktop/.cua/secret";
+
+// ---------------------------------------------------------------- the stand-in
+
+type Sent = { url: string; method: string; headers: Record<string, string>; body: unknown; redirect: string | undefined };
+type Executed = { name: string; arguments: Record<string, unknown>; driverSession: string; mcpSession: string };
+/** How the stand-in answers one `tools/call` it executed: a JSON-RPC result, or a `Response` of the test's own. */
+type Behaviour = (call: Executed, id: unknown, session: string, signal: AbortSignal) => Promise<Response | object> | Response | object;
+
+const json = (value: unknown, session?: string, init: { status?: number; type?: string } = {}) =>
+	new Response(JSON.stringify(value), {
+		status: init.status ?? 200,
+		headers: { "content-type": init.type ?? "application/json", ...(session ? { "mcp-session-id": session } : {}) },
+	});
+
+/** Each curated tool as `tools/list` advertises it: the pinned properties with descriptions, the ones the client leaves out, and the typed `target`. */
+function advertisedTools(change?: (tools: Record<string, unknown>[]) => void): Record<string, unknown>[] {
+	const tools = Object.entries(UPSTREAM_TOOLS).map(([name, pinned]) => {
+		const properties: Record<string, unknown> = { session: { type: "string", description: "…" } };
+		for (const [property, shape] of Object.entries(pinned.properties)) properties[property] = { ...shape, description: `${property} …` };
+		if (name !== "list_apps" && name !== "list_windows" && name !== "bring_to_front") {
+			properties.scope = { type: "string", enum: ["window", "desktop"], default: "window" };
+			properties.target = { type: "object" };
+		}
+		return { name, description: "…", inputSchema: { type: "object", required: [...pinned.required], properties, additionalProperties: false } };
+	});
+	for (const name of ["launch_app", "kill_app", "set_config", "run_steps", "page", "browser_navigate", "start_recording", "end_session"]) {
+		tools.push({ name, description: "…", inputSchema: { type: "object", required: [], properties: {}, additionalProperties: false } });
+	}
+	change?.(tools);
+	return tools;
+}
+
+class StandIn {
+	readonly sent: Sent[] = [];
+	readonly executed: Executed[] = [];
+	#minted = 0;
+	behaviour: Behaviour = () => ({ content: [{ type: "text", text: "done" }] });
+	initialize: (session: string) => Response = (session) =>
+		json({ jsonrpc: "2.0", id: this.lastId, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "cua-driver", version: "0.38.0" }, instructions: "…" } }, session);
+	tools: () => Record<string, unknown>[] = () => advertisedTools();
+	lastId: unknown = null;
+
+	readonly fetch: Fetch = async (url, init) => {
+		const headers = Object.fromEntries(new Headers(init.headers).entries());
+		const body = typeof init.body === "string" ? JSON.parse(init.body) : init.body;
+		this.sent.push({ url, method: init.method ?? "GET", headers, body, redirect: init.redirect });
+		if (url !== `${ORIGIN}/mcp`) return new Response("not found", { status: 404 });
+		if (headers.authorization !== `Bearer ${TOKEN}`) return new Response("missing or invalid bearer token", { status: 401 });
+		if (init.method !== "POST") return new Response(null, { status: 405 });
+		const session = headers["mcp-session-id"] || `mcp-${String(++this.#minted).padStart(16, "x")}`;
+		const agent = headers["x-cua-agent-session"]?.trim() ?? "";
+		const driverSession = AGENT_SESSION.test(agent) ? `agent-${agent}` : session;
+		const request = body as { id?: unknown; method?: string; params?: { name?: string; arguments?: Record<string, unknown> } };
+		if (Array.isArray(request)) throw new Error("the client never sends a batch");
+		if (request.id === undefined) return new Response(null, { status: 202 });
+		this.lastId = request.id;
+		switch (request.method) {
+			case "initialize":
+				return this.initialize(session);
+			case "tools/list":
+				return json({ jsonrpc: "2.0", id: request.id, result: { tools: this.tools(), schema_version: "1" } }, session);
+			case "tools/call": {
+				const call = { name: request.params?.name ?? "", arguments: { ...request.params?.arguments }, driverSession, mcpSession: session };
+				this.executed.push(call);
+				const answered = await this.behaviour(call, request.id, session, init.signal as AbortSignal);
+				return answered instanceof Response ? answered : json({ jsonrpc: "2.0", id: request.id, result: answered }, session);
+			}
+			default:
+				return json({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: `Unknown method: ${request.method}` } }, session);
+		}
+	};
+
+	calls(): Sent[] {
+		return this.sent.filter((sent) => (sent.body as { method?: string })?.method === "tools/call");
+	}
+}
+
+function client(standIn: StandIn, limits: Partial<NativeMcpLimits> = {}) {
+	return createNativeMcp({ origin: ORIGIN, token: TOKEN, owner: OWNER, fetch: standIn.fetch, limits: { callMs: 1_000, ...limits } });
+}
+
+const call = (overrides: Partial<NativeCall> = {}): NativeCall => ({ ...RUN, callId: `call-${Math.random()}`, tool: "list_apps", arguments: {}, ...overrides });
+const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+
+/** A PNG or JPEG of `width` × `height`, as far as its header goes, which is all the client reads. */
+function png(width: number, height: number): string {
+	const bytes = Buffer.alloc(33);
+	Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0);
+	bytes.writeUInt32BE(13, 8);
+	bytes.write("IHDR", 12, "latin1");
+	bytes.writeUInt32BE(width, 16);
+	bytes.writeUInt32BE(height, 20);
+	return bytes.toString("base64");
+}
+function jpeg(width: number, height: number): string {
+	const app0 = [0xff, 0xe0, 0x00, 0x04, 0x00, 0x00];
+	const sof0 = [0xff, 0xc0, 0x00, 0x0b, 0x08, height >> 8, height & 0xff, width >> 8, width & 0xff, 0x01, 0x01, 0x11, 0x00];
+	return Buffer.from([0xff, 0xd8, ...app0, ...sof0, 0xff, 0xd9]).toString("base64");
+}
+
+// ---------------------------------------------------------------- the pins
+
+describe("pins", () => {
+	it("pins the upstream schemas by hash, and every curated field tightens its upstream field", () => {
+		assert.equal(CUA_COMMIT, "fca21937bc4e1420a23d544d11dbdf987f0266e6");
+		assert.equal(createHash("sha256").update(canonical(UPSTREAM_TOOLS)).digest("hex"), UPSTREAM_TOOLS_SHA256);
+		assert.deepEqual(Object.keys(TOOLS).sort(), Object.keys(UPSTREAM_TOOLS).sort());
+		for (const [name, tool] of Object.entries(TOOLS)) {
+			const upstream = UPSTREAM_TOOLS[name];
+			assert.ok(upstream, name);
+			for (const required of upstream.required) assert.ok(tool.required.includes(required), `${name} requires ${required}`);
+			assert.deepEqual(Object.keys(tool.properties).sort(), Object.keys(upstream.properties).sort(), name);
+			for (const [property, field] of Object.entries(tool.properties)) {
+				const pinned = upstream.properties[property] as { type: string; enum?: string[]; minimum?: number; maximum?: number; minItems?: number; pattern?: string };
+				assert.equal(field.type, pinned.type, `${name}.${property}`);
+				if (field.type === "integer" || field.type === "number") {
+					assert.ok(field.minimum >= (pinned.minimum ?? Number.NEGATIVE_INFINITY) && field.maximum <= (pinned.maximum ?? Number.POSITIVE_INFINITY), `${name}.${property}`);
+				}
+				if (field.type === "string" && pinned.enum) assert.ok(field.enum?.every((value) => pinned.enum?.includes(value)), `${name}.${property}`);
+				if (field.type === "string" && pinned.pattern) assert.ok(field.pattern, `${name}.${property} keeps a pattern`);
+				if (field.type === "array") assert.ok(field.minItems >= (pinned.minItems ?? 0), `${name}.${property}`);
+			}
+		}
+	});
+
+	it("refuses origins and tokens the operator can't have meant", () => {
+		for (const origin of ["http://10.0.0.5:3211", "http://127.0.0.1:3211/mcp", "https://u:p@spacesd.test", "http://127.0.0.1:3211?x=1", "ftp://127.0.0.1", "not a url"]) {
+			assert.throws(() => createNativeMcp({ origin, token: TOKEN, owner: OWNER, fetch: new StandIn().fetch }), origin);
+		}
+		assert.throws(() => createNativeMcp({ origin: ORIGIN, token: "a b", owner: OWNER, fetch: new StandIn().fetch }));
+		assert.doesNotThrow(() => createNativeMcp({ origin: "https://spacesd.test:8443", token: TOKEN, owner: OWNER, fetch: new StandIn().fetch }));
+	});
+});
+
+// ---------------------------------------------------------------- setup and identity
+
+describe("setting a run up", () => {
+	it("initializes its own session, with the token only to the origin, and calls nothing", async () => {
+		const standIn = new StandIn();
+		const run = await client(standIn).openRun(RUN);
+		assert.deepEqual(
+			standIn.sent.map((sent) => (sent.body as { method: string }).method),
+			["initialize", "notifications/initialized", "tools/list"],
+		);
+		assert.equal(standIn.executed.length, 0);
+		assert.equal(run.agentSession, agentSessionOf(RUN));
+		assert.ok(AGENT_SESSION.test(run.agentSession) && run.agentSession.length <= 64);
+		for (const sent of standIn.sent) {
+			assert.equal(sent.url, `${ORIGIN}/mcp`);
+			assert.equal(sent.method, "POST");
+			assert.equal(sent.redirect, "manual");
+			assert.equal(sent.headers.authorization, `Bearer ${TOKEN}`);
+			assert.equal(sent.headers["x-cua-agent-session"], run.agentSession);
+		}
+		const [initialize, notified, listed] = standIn.sent;
+		assert.equal(initialize?.headers["mcp-session-id"], undefined);
+		assert.deepEqual((initialize?.body as { params: unknown }).params, { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "pim-cua-host", version: "0.1.0" } });
+		assert.equal(notified?.headers["mcp-session-id"], "mcp-xxxxxxxxxxxxxxx1");
+		assert.equal(listed?.headers["mcp-session-id"], "mcp-xxxxxxxxxxxxxxx1");
+
+		await run.invoke(call());
+		const [sent] = standIn.calls();
+		assert.equal(sent?.headers["mcp-session-id"], "mcp-xxxxxxxxxxxxxxx1");
+		assert.equal(standIn.executed[0]?.driverSession, `agent-${run.agentSession}`);
+	});
+
+	it("gives each owner, agent and run its own stable driver session", () => {
+		const runs: TrustedRun[] = [
+			RUN,
+			{ ...RUN, owner: "space-bob" },
+			{ ...RUN, agentId: "agent-2" },
+			{ ...RUN, runId: "run-2" },
+			{ owner: "a", agentId: "bc", runId: "d" },
+			{ owner: "ab", agentId: "c", runId: "d" },
+		];
+		const sessions = runs.map(agentSessionOf);
+		assert.equal(new Set(sessions).size, runs.length);
+		assert.equal(agentSessionOf({ ...RUN }), sessions[0]);
+		for (const session of sessions) assert.ok(AGENT_SESSION.test(session));
+	});
+
+	it("refuses another owner, an unusable identity and a run opened before, sending nothing for them", async () => {
+		const standIn = new StandIn();
+		const mcp = client(standIn);
+		await mcp.openRun(RUN);
+		const before = standIn.sent.length;
+		for (const run of [{ ...RUN, owner: "space-bob" }, { ...RUN, runId: "" }, { ...RUN, agentId: "a b" }, { ...RUN, runId: "x".repeat(257) }, RUN]) {
+			await assert.rejects(mcp.openRun(run), NativeMcpSetupError);
+		}
+		assert.equal(standIn.sent.length, before);
+	});
+
+	it("lets a run whose setup failed, which called nothing, be set up again, and stops setting up when aborted", async () => {
+		const standIn = new StandIn();
+		standIn.tools = () => advertisedTools((tools) => tools.splice(0, 1));
+		const mcp = client(standIn);
+		await assert.rejects(mcp.openRun(RUN), NativeMcpSetupError);
+		standIn.tools = () => advertisedTools();
+		assert.equal((await mcp.openRun(RUN)).state, "ready");
+
+		const aborting = new StandIn();
+		const controller = new AbortController();
+		const initialize = aborting.initialize;
+		aborting.initialize = (session) => {
+			controller.abort();
+			return initialize(session);
+		};
+		await assert.rejects(client(aborting).openRun(RUN, controller.signal), NativeMcpSetupError);
+		assert.deepEqual(
+			aborting.sent.map((sent) => (sent.body as { method: string }).method),
+			["initialize"],
+		);
+		assert.equal(standIn.calls().length + aborting.calls().length, 0);
+	});
+
+	it("refuses a daemon that isn't the pinned one, or whose schemas drifted, before any call", async () => {
+		const cases: [string, (standIn: StandIn) => void][] = [
+			["version", (s) => (s.initialize = (session) => json({ jsonrpc: "2.0", id: s.lastId, result: { protocolVersion: "2025-06-18", serverInfo: { name: "cua-driver", version: "0.39.0" } } }, session))],
+			["protocol", (s) => (s.initialize = (session) => json({ jsonrpc: "2.0", id: s.lastId, result: { protocolVersion: "2026-07-28", serverInfo: { name: "cua-driver", version: "0.38.0" } } }, session))],
+			["no session", (s) => (s.initialize = () => json({ jsonrpc: "2.0", id: s.lastId, result: { protocolVersion: "2025-06-18", serverInfo: { name: "cua-driver", version: "0.38.0" } } }))],
+			["missing tool", (s) => (s.tools = () => advertisedTools((tools) => tools.splice(tools.findIndex((tool) => tool.name === "click"), 1)))],
+			[
+				"retyped field",
+				(s) =>
+					(s.tools = () =>
+						advertisedTools((tools) => {
+							const click = tools.find((tool) => tool.name === "click") as { inputSchema: { properties: Record<string, unknown> } };
+							click.inputSchema.properties.pid = { type: "string" };
+						})),
+			],
+			[
+				"opened schema",
+				(s) =>
+					(s.tools = () =>
+						advertisedTools((tools) => {
+							(tools.find((tool) => tool.name === "type_text") as { inputSchema: Record<string, unknown> }).inputSchema.additionalProperties = true;
+						})),
+			],
+			["unauthorized", (s) => (s.initialize = () => new Response(`missing or invalid bearer token ${LEAK}`, { status: 401 }))],
+		];
+		for (const [what, change] of cases) {
+			const standIn = new StandIn();
+			change(standIn);
+			const error = await client(standIn)
+				.openRun(RUN)
+				.then(
+					() => assert.fail(what),
+					(error: unknown) => error,
+				);
+			assert.ok(error instanceof NativeMcpSetupError, what);
+			assert.ok(!error.message.includes(TOKEN) && !error.message.includes(LEAK), what);
+			assert.equal(standIn.calls().length, 0, what);
+		}
+	});
+});
+
+// ---------------------------------------------------------------- what a caller can name
+
+describe("curation", () => {
+	it("refuses raw methods, lifecycle, config and every uncurated tool with no tools/call", async () => {
+		const standIn = new StandIn();
+		const run = await client(standIn).openRun(RUN);
+		const names = [
+			"initialize",
+			"tools/list",
+			"tools/call",
+			"server/discover",
+			"notifications/initialized",
+			"cua/driver/v1/open",
+			"launch_app",
+			"kill_app",
+			"run_steps",
+			"run_actions",
+			"run_script",
+			"set_config",
+			"get_config",
+			"set_value",
+			"drag",
+			"page",
+			"browser_navigate",
+			"start_recording",
+			"end_session",
+			"set_agent_cursor_enabled",
+			"__proto__",
+			"constructor",
+			"toString",
+			"",
+		];
+		for (const tool of names) assert.deepEqual(await run.invoke(call({ tool })), { status: "rejected", reason: "unknown_tool" }, tool);
+		assert.deepEqual(await run.invoke(call({ tool: ["list_apps"] as unknown as string })), { status: "rejected", reason: "unknown_tool" });
+		assert.equal(standIn.calls().length, 0);
+		assert.equal(run.state, "ready");
+	});
+
+	it("refuses arguments the curated schema doesn't admit, transport fields among them, with no tools/call", async () => {
+		const standIn = new StandIn();
+		const run = await client(standIn).openRun(RUN);
+		class Point {
+			x = 1;
+		}
+		const clickAt = { pid: 42, window_id: 7, x: 10, y: 20 };
+		const refused: [string, unknown][] = [
+			["click", { ...clickAt, session: "someone-else" }],
+			["click", { ...clickAt, _session_id: "agent-x" }],
+			["click", { ...clickAt, _transport_session_id: "x" }],
+			["click", { ...clickAt, _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } }],
+			["click", { ...clickAt, scope: "desktop" }],
+			["click", { ...clickAt, cursor_id: "other" }],
+			["click", { ...clickAt, count: 4 }],
+			["click", { ...clickAt, x: Number.NaN }],
+			["click", { ...clickAt, x: -1 }],
+			["click", { window_id: 7, x: 10, y: 20 }],
+			["click", { ...clickAt, element_token: "s0000002a:11; rm -rf" }],
+			["get_window_state", { pid: 42, screenshot_out_file: "/tmp/x.png" }],
+			["get_window_state", { pid: 42, max_image_dimension: 0 }],
+			["get_window_state", { pid: 42, timeout_ms: 120_000 }],
+			["type_text", { pid: 42, text: "x".repeat(4097) }],
+			["type_text", { pid: 42, text: "hi", method: "tools/call", params: {} }],
+			["press_key", { pid: 42, key: "a", modifiers: ["ctrl", "hyper"] }],
+			["hotkey", { pid: 42, keys: ["ctrl"] }],
+			["scroll", { pid: 42, direction: "up", amount: 51 }],
+			["list_apps", { jsonrpc: "2.0" }],
+			["list_apps", [{ jsonrpc: "2.0", method: "tools/call" }]],
+			["list_apps", null],
+			["list_apps", "{}"],
+			["list_windows", { app: { nested: { deeper: { deepest: 1 } } } }],
+			["list_windows", Object.defineProperty({}, "pid", { get: () => 42, enumerable: true })],
+			["list_windows", new Point()],
+			["list_windows", new Map([["pid", 42]])],
+			["list_windows", { [Symbol("pid")]: 42 }],
+		];
+		for (const [tool, args] of refused) {
+			assert.deepEqual(await run.invoke(call({ tool, arguments: args })), { status: "rejected", reason: "invalid_arguments" }, `${tool} ${JSON.stringify(args)}`);
+		}
+		assert.equal(standIn.calls().length, 0);
+	});
+
+	it("can't be widened by whoever imports it", () => {
+		assert.throws(() => Object.assign(TOOLS, { launch_app: { required: [], properties: {} } }), TypeError);
+		assert.throws(() => Object.assign(TOOLS.click?.properties ?? {}, { session: { type: "string", maxLength: 64 } }), TypeError);
+		assert.throws(() => Object.assign(UPSTREAM_TOOLS.click?.properties ?? {}, { session: { type: "string" } }), TypeError);
+	});
+
+	it("sends exactly what was admitted, however the caller's object changes afterwards", async () => {
+		const standIn = new StandIn();
+		const run = await client(standIn).openRun(RUN);
+		const args = { pid: 42, text: "hello", element_token: "s0000002a:11" };
+		const pending = run.invoke(call({ tool: "type_text", arguments: args }));
+		(args as Record<string, unknown>).text = "rm -rf ~";
+		(args as Record<string, unknown>).session = "someone-else";
+		await pending;
+		assert.deepEqual(standIn.executed[0]?.arguments, { pid: 42, text: "hello", element_token: "s0000002a:11" });
+		assert.equal(standIn.executed[0]?.name, "type_text");
+		assert.deepEqual((standIn.calls()[0]?.body as { params: unknown }).params, { name: "type_text", arguments: { pid: 42, text: "hello", element_token: "s0000002a:11" } });
+	});
+
+	it("keeps a call in its own run: another owner, agent or run, or a reused call ID, is refused unsent", async () => {
+		const standIn = new StandIn();
+		const run = await client(standIn).openRun(RUN);
+		for (const other of [{ owner: "space-bob" }, { agentId: "agent-2" }, { runId: "run-2" }]) {
+			assert.deepEqual(await run.invoke(call(other)), { status: "rejected", reason: "identity" });
+		}
+		assert.equal((await run.invoke(call({ callId: "c-1" }))).status, "completed");
+		assert.deepEqual(await run.invoke(call({ callId: "c-1" })), { status: "rejected", reason: "call_reused" });
+		assert.equal(standIn.calls().length, 1);
+	});
+});
+
+// ---------------------------------------------------------------- exactly one tools/call
+
+describe("one tools/call per invoke", () => {
+	const stream = (chunks: Uint8Array[], end: "close" | "error" | "hang", session: string) =>
+		new Response(
+			new ReadableStream<Uint8Array>({
+				start(controller) {
+					for (const chunk of chunks) controller.enqueue(chunk);
+					if (end === "close") controller.close();
+					if (end === "error") controller.error(new Error(LEAK));
+				},
+			}),
+			{ headers: { "content-type": "application/json", "mcp-session-id": session } },
+		);
+	const never = (signal: AbortSignal) => new Promise<Response>((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted"))));
+
+	const cases: { what: string; behaviour: Behaviour; abortAfterMs?: number; limits?: Partial<NativeMcpLimits>; expect: Partial<NativeOutcome> }[] = [
+		{ what: "a result", behaviour: () => ({ content: [{ type: "text", text: "ok" }] }), expect: { status: "completed", isError: false } },
+		{
+			what: "the tool's error",
+			behaviour: () => ({ content: [{ type: "text", text: "point_outside_window" }], isError: true, structuredContent: { code: "point_outside_window" } }),
+			expect: { status: "completed", isError: true, code: "point_outside_window" },
+		},
+		{
+			what: "an authorization refusal",
+			behaviour: () => ({ content: [{ type: "text", text: "denied" }], isError: true, structuredContent: { code: "permission_denied", detail: LEAK } }),
+			expect: { status: "completed", isError: true, code: "permission_denied" },
+		},
+		{ what: "a JSON-RPC error", behaviour: (_, id, session) => json({ jsonrpc: "2.0", id, error: { code: -32602, message: `Invalid params: ${LEAK}` } }, session), expect: { status: "rpc_error", code: -32602 } },
+		{ what: "no answer in time", behaviour: (_, __, ___, signal) => never(signal), limits: { callMs: 20 }, expect: { status: "unknown", reason: "timeout" } },
+		{ what: "the caller giving up after sending", behaviour: (_, __, ___, signal) => never(signal), abortAfterMs: 10, expect: { status: "unknown", reason: "aborted" } },
+		{
+			what: "fetch throwing after spacesd executed it",
+			behaviour: () => {
+				throw new TypeError(`fetch failed ${LEAK}`);
+			},
+			expect: { status: "unknown", reason: "transport" },
+		},
+		{ what: "HTTP 500", behaviour: (_, __, session) => json({ error: LEAK }, session, { status: 500 }), expect: { status: "unknown", reason: "http_status" } },
+		{ what: "a redirect", behaviour: () => new Response(null, { status: 307, headers: { location: "http://evil.test/mcp" } }), expect: { status: "unknown", reason: "http_status" } },
+		{ what: "an event stream", behaviour: (_, id, session) => json({ jsonrpc: "2.0", id, result: { content: [] } }, session, { type: "text/event-stream" }), expect: { status: "unknown", reason: "content_type" } },
+		{ what: "another session's answer", behaviour: (_, id) => json({ jsonrpc: "2.0", id, result: { content: [] } }, "mcp-someone-else-0001"), expect: { status: "unknown", reason: "session_mismatch" } },
+		{ what: "a malformed body", behaviour: (_, __, session) => stream([new TextEncoder().encode("{\"jsonrpc\":\"2.0\",")], "close", session), expect: { status: "unknown", reason: "malformed" } },
+		{ what: "a batch answer", behaviour: (_, id, session) => json([{ jsonrpc: "2.0", id, result: { content: [] } }], session), expect: { status: "unknown", reason: "malformed" } },
+		{ what: "both result and error", behaviour: (_, id, session) => json({ jsonrpc: "2.0", id, result: {}, error: { code: 1, message: "" } }, session), expect: { status: "unknown", reason: "malformed" } },
+		{ what: "another request's answer", behaviour: (_, __, session) => json({ jsonrpc: "2.0", id: "pim-other", result: { content: [] } }, session), expect: { status: "unknown", reason: "id_mismatch" } },
+		{ what: "a parse error's null id", behaviour: (_, __, session) => json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }, session), expect: { status: "unknown", reason: "id_mismatch" } },
+		{ what: "a body cut off", behaviour: (_, __, session) => stream([new TextEncoder().encode("{\"jsonrpc\":\"2.0\",\"id\"")], "error", session), expect: { status: "unknown", reason: "transport" } },
+		{
+			what: "an oversized body",
+			behaviour: (_, id, session) => json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "x".repeat(4096) }] } }, session),
+			limits: { maxResponseBytes: 1024 },
+			expect: { status: "unknown", reason: "oversized" },
+		},
+		{
+			what: "a body that stops mid-way",
+			behaviour: (_, __, session) => stream([new TextEncoder().encode("{\"jsonrpc\":")], "hang", session),
+			limits: { callMs: 30 },
+			expect: { status: "unknown", reason: "timeout" },
+		},
+	];
+
+	for (const { what, behaviour, abortAfterMs, limits, expect } of cases) {
+		it(`sends one tools/call and never retries: ${what}`, async () => {
+			const standIn = new StandIn();
+			standIn.behaviour = behaviour;
+			const run = await client(standIn, limits).openRun(RUN);
+			const before = standIn.sent.length;
+			const controller = new AbortController();
+			if (abortAfterMs !== undefined) setTimeout(() => controller.abort(), abortAfterMs);
+			const outcome = await run.invoke(call({ tool: "click", arguments: { pid: 42, window_id: 7, x: 1, y: 2 } }), controller.signal);
+			for (const [key, value] of Object.entries(expect)) assert.deepEqual((outcome as Record<string, unknown>)[key], value, `${what}: ${key}`);
+			assert.ok(!JSON.stringify(outcome).includes(LEAK) && !JSON.stringify(outcome).includes(TOKEN), what);
+			await settle();
+			assert.equal(standIn.executed.length, 1, what);
+			assert.equal(standIn.sent.length, before + 1, what);
+			if (outcome.status === "unknown") {
+				// Latched: nothing more is sent for this run, and nothing clears it.
+				assert.equal(run.state, "uncertain");
+				assert.deepEqual(await run.invoke(call()), { status: "rejected", reason: "uncertain" });
+				run.close();
+				assert.deepEqual(await run.invoke(call()), { status: "rejected", reason: "uncertain" });
+				assert.equal(standIn.sent.length, before + 1, what);
+			} else assert.equal(run.state, "ready");
+		});
+	}
+
+	it("ignores an answer that comes after the call was given up, and replays nothing", async () => {
+		const standIn = new StandIn();
+		let release: (() => void) | undefined;
+		// A fetch that doesn't heed the signal: its answer arrives after the bound.
+		standIn.behaviour = (_, id, session) =>
+			new Promise<Response>((resolve) => {
+				release = () => resolve(json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "late" }] } }, session));
+			});
+		const run = await client(standIn, { callMs: 20 }).openRun(RUN);
+		const before = standIn.sent.length;
+		assert.deepEqual(await run.invoke(call({ tool: "list_apps" })), { status: "unknown", reason: "timeout" });
+		release?.();
+		await settle();
+		assert.equal(run.state, "uncertain");
+		assert.equal(standIn.executed.length, 1);
+		assert.equal(standIn.sent.length, before + 1);
+	});
+
+	it("refuses unsent a call aborted before sending, and one made while another is in flight", async () => {
+		const standIn = new StandIn();
+		let release: (() => void) | undefined;
+		standIn.behaviour = (_, id, session) => new Promise((resolve) => (release = () => resolve(json({ jsonrpc: "2.0", id, result: { content: [] } }, session))));
+		const run = await client(standIn).openRun(RUN);
+		const controller = new AbortController();
+		controller.abort();
+		assert.deepEqual(await run.invoke(call(), controller.signal), { status: "rejected", reason: "aborted" });
+		const first = run.invoke(call());
+		await settle();
+		assert.equal(run.state, "busy");
+		assert.deepEqual(await run.invoke(call()), { status: "rejected", reason: "busy" });
+		release?.();
+		assert.equal((await first).status, "completed");
+		assert.equal(standIn.calls().length, 1);
+	});
+
+	it("closes without sending anything, and refuses unsent after", async () => {
+		const standIn = new StandIn();
+		const run = await client(standIn).openRun(RUN);
+		const before = standIn.sent.length;
+		run.close();
+		assert.equal(standIn.sent.length, before);
+		assert.deepEqual(await run.invoke(call()), { status: "rejected", reason: "closed" });
+		assert.equal(standIn.sent.length, before);
+		assert.ok(!standIn.sent.some((sent) => sent.method === "DELETE"));
+	});
+
+	it("returns an unknown outcome as a value whose dispatch effect is uncertain, never as an answered error", async () => {
+		const standIn = new StandIn();
+		standIn.behaviour = () => {
+			throw new TypeError("socket hang up");
+		};
+		const run = await client(standIn).openRun(RUN);
+		const outcome = await run.invoke(call());
+		assert.deepEqual(JSON.parse(JSON.stringify(outcome)), { status: "unknown", reason: "transport" });
+		assert.deepEqual(dispatchEffect(outcome), { sent: true, uncertain: true });
+		assert.deepEqual(dispatchEffect({ status: "rejected", reason: "busy" }), { sent: false, uncertain: false });
+		assert.deepEqual(dispatchEffect({ status: "rpc_error", code: -32602 }), { sent: true, uncertain: false });
+		assert.deepEqual(dispatchEffect({ status: "completed", isError: true, code: null, content: [], presentation: [] }), { sent: true, uncertain: false });
+	});
+});
+
+// ---------------------------------------------------------------- results
+
+describe("results", () => {
+	async function result(value: Record<string, unknown>, limits: Partial<NativeMcpLimits> = {}) {
+		const standIn = new StandIn();
+		standIn.behaviour = () => value;
+		const run = await client(standIn, limits).openRun(RUN);
+		const outcome = await run.invoke(call({ tool: "get_window_state", arguments: { pid: 42 } }));
+		assert.equal(outcome.status, "completed");
+		return { outcome: outcome as Extract<NativeOutcome, { status: "completed" }>, standIn };
+	}
+
+	it("passes on bounded text and checked images, and says what it left out", async () => {
+		const { outcome, standIn } = await result({
+			content: [
+				{ type: "text", text: "[1] button \"OK\"" },
+				{ type: "image", mimeType: "image/png", data: png(1280, 800) },
+				{ type: "image", mimeType: "image/jpeg", data: jpeg(640, 480) },
+				{ type: "image", mimeType: "image/png", data: png(5000, 10) },
+				{ type: "image", mimeType: "image/svg+xml", data: Buffer.from("<svg/>").toString("base64") },
+				{ type: "image", mimeType: "image/jpeg", data: png(10, 10) },
+				{ type: "image", mimeType: "image/png", data: "not base64!" },
+				{ type: "image", mimeType: "image/png", data: Buffer.concat([Buffer.from("GIF89a\0\0"), Buffer.from(png(8, 8), "base64").subarray(8)]).toString("base64") },
+				{ type: "resource_link", uri: "http://evil.test/payload", name: "x" },
+				{ type: "resource", resource: { uri: "file:///etc/shadow", text: "x" } },
+			],
+			structuredContent: { secret: TOKEN },
+		});
+		assert.deepEqual(
+			outcome.content.map((item) => (item.type === "text" ? item.text : `${item.mimeType} ${item.width}x${item.height}`)),
+			["[1] button \"OK\"", "image/png 1280x800", "image/jpeg 640x480"],
+		);
+		assert.deepEqual(outcome.presentation, [
+			{ kind: "image_omitted", index: 3 },
+			{ kind: "image_omitted", index: 4 },
+			{ kind: "image_omitted", index: 5 },
+			{ kind: "image_omitted", index: 6 },
+			{ kind: "image_omitted", index: 7 },
+			{ kind: "content_omitted", index: 8 },
+			{ kind: "content_omitted", index: 9 },
+		]);
+		assert.ok(!JSON.stringify(outcome).includes(TOKEN));
+		assert.ok(standIn.sent.every((sent) => sent.url === `${ORIGIN}/mcp`));
+	});
+
+	it("truncates text and drops images past their bounds without changing the outcome", async () => {
+		const { outcome } = await result(
+			{ content: [{ type: "text", text: "ééééé" }, { type: "text", text: "more" }, ...Array.from({ length: 3 }, () => ({ type: "image", mimeType: "image/png", data: png(8, 8) }))] },
+			{ maxTextBytes: 5, maxImages: 2 },
+		);
+		assert.deepEqual(outcome.content.slice(0, 1), [{ type: "text", text: "éé" }]);
+		assert.equal(outcome.content.filter((item) => item.type === "image").length, 2);
+		assert.deepEqual(outcome.presentation, [
+			{ kind: "text_truncated", index: 0 },
+			{ kind: "text_truncated", index: 1 },
+			{ kind: "image_omitted", index: 4 },
+		]);
+		assert.equal(outcome.isError, false);
+	});
+
+	it("doesn't take a malformed error flag as success", async () => {
+		const { outcome } = await result({ content: "nope", isError: "false" });
+		assert.equal(outcome.isError, true);
+		assert.deepEqual(outcome.presentation, [{ kind: "is_error_malformed" }, { kind: "content_malformed" }]);
+	});
+
+	it("keeps limits that bound a screenshot of the pinned default size", () => {
+		// get_window_state delivers at most 1.15 megapixels, its long edge at most 1568 by default.
+		assert.ok(DEFAULT_LIMITS.maxImageSide >= 1568 && DEFAULT_LIMITS.maxImagePixels >= 1_150_000);
+	});
+});

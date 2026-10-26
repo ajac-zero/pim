@@ -16,21 +16,50 @@ export const MAX_REPLY_IMAGES = 12;
 /** Something a reply shows, as the agent wrote it in a block. */
 export type ReplyItem = { title?: string; url?: string; image?: string; meta?: string; text?: string; caption?: string };
 
+/** A YouTube video id: exactly eleven of these characters. */
+const YOUTUBE_ID = /^[\w-]{11}$/;
+const YOUTUBE_HOSTS = new Set(["youtube.com", "www.youtube.com", "m.youtube.com"]);
+
+/**
+ * The id of the video a YouTube watch, youtu.be or shorts address names, or
+ * null for any other address. The app builds the player's address from this
+ * id alone, never from the address the agent wrote.
+ */
+export function youtubeId(address: string): string | null {
+	let url: URL;
+	try {
+		url = new URL(address);
+	} catch {
+		return null;
+	}
+	if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password || url.port) return null;
+	const host = url.hostname.toLowerCase();
+	let id: string | null = null;
+	if (host === "youtu.be") id = /^\/([^/]+)\/?$/.exec(url.pathname)?.[1] ?? null;
+	else if (YOUTUBE_HOSTS.has(host)) {
+		if (url.pathname === "/watch") id = url.searchParams.get("v");
+		else id = /^\/shorts\/([^/]+)\/?$/.exec(url.pathname)?.[1] ?? null;
+	}
+	return id !== null && YOUTUBE_ID.test(id) ? id : null;
+}
+
 /**
  * The fenced blocks of a reply's Markdown that the app draws itself, each a
  * JSON array of items: `cards`, things the agent found, such as products,
- * places or pages, as rows with their images; `gallery`, images in a grid.
+ * places or pages, as rows with their images; `gallery`, images in a grid;
+ * `videos`, YouTube videos that play in the chat once the person chooses.
  */
 const KINDS = {
 	cards: { fields: ["title", "url", "image", "meta", "text"], required: "title", max: 10, shape: "{ title, url?, image?, meta?, text? }" },
 	gallery: { fields: ["image", "caption", "url"], required: "image", max: 8, shape: "{ image, caption?, url? }" },
+	videos: { fields: ["url", "title"], required: "url", max: 6, shape: "{ url, title? }, where url is a YouTube watch, youtu.be or shorts address" },
 } as const;
 type ReplyKind = keyof typeof KINDS;
 
 export type ReplyBlock = { kind: ReplyKind; items: ReplyItem[] };
 
 /** A block's fence, alone on its lines. */
-const BLOCK = /^```(cards|gallery)[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*$/gm;
+const BLOCK = /^```(cards|gallery|videos)[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*$/gm;
 const WEB_ADDRESS = /^https?:\/\/\S+$/i;
 /** How long each text field may be; the addresses are any length. */
 const TEXT_LIMITS: Record<string, number> = { title: 200, meta: 200, caption: 200, text: 1000 };
@@ -46,6 +75,7 @@ function readItem(kind: ReplyKind, value: unknown): ReplyItem | string {
 		if (typeof field !== "string" || field.trim() === "") return `an item's ${key} must be text`;
 		if (key === "url" || key === "image") {
 			if (!WEB_ADDRESS.test(field)) return `an item's ${key} must be an http(s) address`;
+			if (kind === "videos" && youtubeId(field) === null) return "an item's url must be a YouTube watch, youtu.be or shorts address with a valid video id";
 		} else if (field.length > TEXT_LIMITS[key]!) return `an item's ${key} must be at most ${TEXT_LIMITS[key]} characters`;
 	}
 	return item as ReplyItem;
@@ -87,6 +117,7 @@ function blockMarkdown({ kind, items }: ReplyBlock): string {
 	return items
 		.map((item) => {
 			if (kind === "gallery") return `- [${item.caption ?? "Image"}](${item.url ?? item.image})`;
+			if (kind === "videos") return `- [${item.title ?? "Video"}](${item.url})`;
 			const title = item.url ? `[${item.title}](${item.url})` : item.title;
 			const head = [`**${title}**`, item.meta].filter(Boolean).join(" · ");
 			return item.text ? `- ${head}\n  ${item.text.replace(/\s*\n\s*/g, " ")}` : `- ${head}`;
@@ -120,6 +151,7 @@ export function messagingExtension(services: PimServices) {
 			description:
 				"What they read, in Markdown. To show things you found, such as products, places or pages, put a ```cards block in it, alone on its lines: a JSON array of { title, url?, image?, meta?, text? }, where meta is a short line such as its maker and price. " +
 				"To show pictures, such as an image search's results, put a ```gallery block: a JSON array of { image, caption?, url? }, where url is the page it's from. " +
+				"To show a video, such as an exercise demonstration, put a ```videos block: a JSON array of { url, title? } of YouTube watch, youtu.be or shorts addresses of real videos a tool's result gave you, never made up; it plays in the chat only when the person chooses, and other links stay ordinary Markdown links. " +
 				"To draw a diagram, such as a flowchart, a sequence or a timeline, put a ```mermaid block of Mermaid source in it; the person sees it drawn. " +
 				"An image must be an address a tool's result in this chat gave you, such as a page's image from fetch_url, never one you made up; Pim shows a copy of it.",
 		}),

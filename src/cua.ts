@@ -17,9 +17,9 @@ import { HttpError } from "./http";
  * before reaching the network unless the bridge is for exactly the space
  * asking, its address is HTTPS with no credentials, query or fragment, and
  * its token is well-formed; the token goes only in the Authorization
- * header. It makes one request and follows no redirect, so the token never
- * goes to another address, and the bridge must name the space back before
- * its connection is used. Nothing is tried again: a message handed to a
+ * header. It makes one request, gives up on it after `CONNECT_MS`, and
+ * follows no redirect, so the token never goes to another address; the
+ * bridge must name the space back before its connection is used. Nothing is tried again: a message handed to a
  * connection that then ends may or may not have reached pim-computer, and
  * only its reply says it ran.
  */
@@ -42,6 +42,8 @@ export const SPACE_HEADER = "x-pim-space";
  * screenshots; anything past this ends the connection.
  */
 export const MAX_MESSAGE_CHARS = 16 * 1024 * 1024;
+/** How long the bridge has to take the connection; past it, Pim gives up on it, and doesn't try again. */
+export const CONNECT_MS = 30_000;
 
 const OWNER = /^o_[0-9a-z]{26}$/;
 /** A token is printable ASCII without spaces, as a header value can carry it unchanged. */
@@ -66,6 +68,15 @@ function address(bridge: CuaBridge, space: string): URL {
 	return url;
 }
 
+/** Closes a socket that may still be open; one whose close throws is left to end by itself, as the link has ended all the same. */
+function shut(socket: WebSocket, code: number, reason: string): void {
+	try {
+		if (socket.readyState !== WebSocket.CLOSED) socket.close(code, reason);
+	} catch {
+		// Nothing more can be done for it here.
+	}
+}
+
 export class Cua {
 	readonly #bridge: CuaBridge;
 	readonly #fetch: typeof fetch;
@@ -83,26 +94,40 @@ export class Cua {
 	 */
 	async connect(space: string, receive: (message: string) => void, closed: () => void): Promise<ComputerLink> {
 		const url = address(this.#bridge, space);
+		const giveUp = new AbortController();
+		const timer = setTimeout(() => giveUp.abort(), CONNECT_MS);
+		const late = new HttpError(504, `The computer's bridge didn't answer within ${CONNECT_MS / 1000} seconds.`);
 		let response: Response;
 		try {
 			response = await this.#fetch(url.href, {
 				headers: { Authorization: `Bearer ${this.#bridge.token}`, Upgrade: "websocket", [SPACE_HEADER]: space },
 				redirect: "manual",
+				signal: giveUp.signal,
 			});
-		} catch (error) {
-			console.error(JSON.stringify({ event: "cua.unreachable", error: (error as Error).name }));
-			throw new HttpError(502, "Pim couldn't reach the computer's bridge. Try again in a minute.");
+		} catch {
+			// What was thrown came from the fetcher and may carry anything, the token included, so only what happened is logged.
+			console.error(JSON.stringify({ event: giveUp.signal.aborted ? "cua.timeout" : "cua.unreachable" }));
+			throw giveUp.signal.aborted ? late : new HttpError(502, "Pim couldn't reach the computer's bridge. Try again in a minute.");
+		} finally {
+			clearTimeout(timer);
 		}
 		const socket = response.webSocket;
 		const named = response.headers.get(SPACE_HEADER) === space;
-		if (response.status !== 101 || !socket || !named) {
+		// An answer after Pim gave up on it is not used, whatever it is.
+		const timedOut = giveUp.signal.aborted;
+		if (timedOut || response.status !== 101 || !socket || !named) {
 			if (socket) {
-				socket.accept();
-				socket.close(1008, "Refused");
+				try {
+					socket.accept();
+				} catch {
+					// It is closed below if it can be.
+				}
+				shut(socket, 1008, "Refused");
 			}
 			await response.body?.cancel().catch(() => undefined);
 			const redirect = response.status >= 300 && response.status < 400;
-			console.error(JSON.stringify({ event: "cua.refused", status: response.status, redirect, named }));
+			console.error(JSON.stringify(timedOut ? { event: "cua.timeout" } : { event: "cua.refused", status: response.status, redirect, named }));
+			if (timedOut) throw late;
 			throw new HttpError(
 				502,
 				redirect
@@ -123,7 +148,7 @@ export class Cua {
 		const refuse = (code: number, reason: string) => {
 			console.error(JSON.stringify({ event: "cua.protocol", reason }));
 			end();
-			if (socket.readyState === WebSocket.OPEN) socket.close(code, reason);
+			shut(socket, code, reason);
 		};
 		socket.addEventListener("message", (event) => {
 			if (ended) return;
@@ -132,7 +157,11 @@ export class Cua {
 			receive(event.data);
 		});
 		socket.addEventListener("close", end);
-		socket.addEventListener("error", end);
+		// An error ends the link, and its socket is closed if it can be. Neither says what the computer did, or stopped doing.
+		socket.addEventListener("error", () => {
+			end();
+			shut(socket, 1011, "Error");
+		});
 		return {
 			get readyState() {
 				return ended ? WebSocket.CLOSED : socket.readyState;
@@ -145,7 +174,7 @@ export class Cua {
 			},
 			close() {
 				end();
-				if (socket.readyState === WebSocket.OPEN) socket.close(1000, "Let go");
+				shut(socket, 1000, "Let go");
 			},
 		};
 	}

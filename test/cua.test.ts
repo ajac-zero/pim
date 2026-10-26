@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { type ExecArgs, Link, type Machine } from "../computer/pim-computer";
 import { Computer, IDLE_MS } from "../src/computer";
 import { type DispatchTrace, dispatchTrace } from "../src/computer-control-runtime";
-import { Cua, type CuaBridge, MAX_MESSAGE_CHARS, SPACE_HEADER } from "../src/cua";
+import { CONNECT_MS, Cua, type CuaBridge, MAX_MESSAGE_CHARS, SPACE_HEADER } from "../src/cua";
 
 /**
  * The Cua bridge's link, which nothing in Pim uses yet (src/cua.ts). These
@@ -21,7 +21,7 @@ const BRIDGE: CuaBridge = { space: SPACE, url: URL_, token: TOKEN };
 type Seen = { url: string; init: RequestInit | undefined; headers: Headers };
 
 /** A bridge's connection, as the test sees it from the bridge's side. */
-type Connection = { server: WebSocket; received: string[]; closed: CloseEvent | null };
+type Connection = { client: WebSocket; server: WebSocket; received: string[]; closed: CloseEvent | null };
 
 /**
  * A fetch that answers as a bridge does: takes the WebSocket, names the space
@@ -42,7 +42,7 @@ async function bridge(options: { relay?: boolean } = {}) {
 		seen.push({ url, init, headers: new Headers(init?.headers) });
 		const { 0: client, 1: server } = new WebSocketPair();
 		server.accept();
-		const connection: Connection = { server, received: [], closed: null };
+		const connection: Connection = { client, server, received: [], closed: null };
 		connections.push(connection);
 		const link = new Link(machine, (message) => server.readyState === WebSocket.OPEN && server.send(message));
 		server.addEventListener("message", (event) => {
@@ -162,15 +162,6 @@ describe("a computer reached through a Cua bridge", () => {
 			expect(closed).not.toHaveBeenCalled();
 		}
 
-		// A network failure is tried once, and its error isn't passed on.
-		const unreachable = vi.fn(async () => {
-			throw new TypeError(`fetch failed for ${URL_} with ${TOKEN}`);
-		});
-		const error = await new Cua(BRIDGE, unreachable as unknown as typeof fetch).connect(SPACE, () => undefined, () => undefined).catch((caught: Error) => caught);
-		expect((error as Error).message).toMatch(/couldn't reach/);
-		expect((error as Error).message).not.toContain(TOKEN);
-		expect(unreachable).toHaveBeenCalledTimes(1);
-
 		// A bridge that takes the connection without naming this space back isn't used, and its socket is closed.
 		for (const named of [null, OTHER]) {
 			const { 0: client, 1: server } = new WebSocketPair();
@@ -180,6 +171,121 @@ describe("a computer reached through a Cua bridge", () => {
 			await expect(new Cua(BRIDGE, fetcher as unknown as typeof fetch).connect(SPACE, () => undefined, () => undefined)).rejects.toThrow(/didn't name this space/);
 			expect((await shut).code).toBe(1008);
 		}
+	});
+
+	it("passes on and logs nothing of what a failing fetch throws, which may carry the token", async () => {
+		const logged: unknown[][] = [];
+		for (const method of ["error", "warn", "log", "info", "debug"] as const) vi.spyOn(console, method).mockImplementation((...args) => void logged.push(args));
+		const named = new TypeError(`fetch failed for ${URL_}`);
+		Object.defineProperty(named, "name", { value: `Bearer ${TOKEN}` });
+		const thrown: unknown[] = [named, { name: TOKEN, message: TOKEN, cause: TOKEN }, `fetch failed with ${TOKEN}`, null, undefined];
+		try {
+			for (const value of thrown) {
+				const fetcher = vi.fn(async () => {
+					throw value;
+				});
+				const error = await new Cua(BRIDGE, fetcher as unknown as typeof fetch).connect(SPACE, () => undefined, () => undefined).catch((caught: Error) => caught);
+				expect(error).toBeInstanceOf(Error);
+				expect((error as Error).message).toMatch(/couldn't reach/);
+				expect(JSON.stringify({ ...(error as Error), message: (error as Error).message, name: (error as Error).name })).not.toContain(TOKEN);
+				expect(fetcher).toHaveBeenCalledTimes(1);
+			}
+			expect(logged).toEqual(thrown.map(() => [JSON.stringify({ event: "cua.unreachable" })]));
+		} finally {
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("gives up on a bridge that doesn't answer in time, once, and uses nothing it answers after", async () => {
+		vi.useFakeTimers();
+		try {
+			// A fetch that waits until it's aborted, as the Worker's does.
+			const signals: AbortSignal[] = [];
+			const pending = vi.fn(
+				(_input: RequestInfo | URL, init?: RequestInit) =>
+					new Promise<Response>((_resolve, reject) => {
+						signals.push(init!.signal!);
+						init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason));
+					}),
+			);
+			const { computer } = computerOn(new Cua(BRIDGE, pending as unknown as typeof fetch));
+			const request = trace();
+			const answer = dispatchTrace.run(request, () => computer.exec("uname")).catch((error: Error) => error);
+			await vi.advanceTimersByTimeAsync(CONNECT_MS - 1);
+			expect(signals[0]!.aborted).toBe(false);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(signals[0]!.aborted).toBe(true);
+			expect(((await answer) as Error).message).toMatch(/didn't answer within 30 seconds/);
+			expect(((await answer) as Error).message).not.toContain(TOKEN);
+			expect(request).toMatchObject({ sent: false, uncertain: false });
+			expect(pending).toHaveBeenCalledTimes(1);
+			expect(vi.getTimerCount()).toBe(0);
+
+			// A fetch that answers after Pim gave up, ignoring the abort: its socket is closed, and not used.
+			const { 0: client, 1: server } = new WebSocketPair();
+			server.accept();
+			const shut = new Promise<CloseEvent>((resolve) => server.addEventListener("close", resolve));
+			const slow = vi.fn(
+				() =>
+					new Promise<Response>((resolve) =>
+						setTimeout(() => resolve(new Response(null, { status: 101, webSocket: client, headers: { [SPACE_HEADER]: SPACE } })), CONNECT_MS + 1_000),
+					),
+			);
+			const closed = vi.fn();
+			const late = new Cua(BRIDGE, slow as unknown as typeof fetch).connect(SPACE, () => undefined, closed).catch((error: Error) => error);
+			await vi.advanceTimersByTimeAsync(CONNECT_MS + 1_000);
+			expect(((await late) as Error).message).toMatch(/didn't answer within 30 seconds/);
+			expect((await shut).code).toBe(1008);
+			expect(closed).not.toHaveBeenCalled();
+			expect(slow).toHaveBeenCalledTimes(1);
+
+			// One that answers in time leaves no timer behind.
+			const test = await bridge();
+			const link = await new Cua(BRIDGE, test.fetch).connect(SPACE, () => undefined, () => undefined);
+			expect(vi.getTimerCount()).toBe(0);
+			link.close();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("ends the link and closes its socket on an error, and takes nothing after", async () => {
+		// Through Computer: a call waiting when the socket errors fails, and may have run.
+		const test = await bridge({ relay: false });
+		const { computer } = computerOn(new Cua(BRIDGE, test.fetch));
+		const request = trace();
+		const answer = dispatchTrace.run(request, () => computer.call("stat", { path: "/workspace" })).catch((error: Error) => error);
+		await vi.waitFor(() => expect(test.connections[0]?.received).toHaveLength(1));
+		test.connections[0]!.client.dispatchEvent(new Event("error"));
+		expect(((await answer) as Error).message).toMatch(/disconnected before it answered/);
+		expect(request).toMatchObject({ sent: true, uncertain: true });
+		await vi.waitFor(() => expect(test.connections[0]!.closed?.code).toBe(1011));
+		expect(computer.status().state).toBe("offline");
+
+		// A socket whose close throws: the link ends all the same, once, and nothing more is sent or taken.
+		const other = await bridge({ relay: false });
+		const receive = vi.fn();
+		const closed = vi.fn();
+		const link = await new Cua(BRIDGE, other.fetch).connect(SPACE, receive, closed);
+		await vi.waitFor(() => expect(receive).toHaveBeenCalledTimes(1));
+		const { client, server, received } = other.connections[0]!;
+		const close = vi.spyOn(client, "close").mockImplementation(() => {
+			throw new Error("close failed");
+		});
+		client.dispatchEvent(new Event("error"));
+		expect(close).toHaveBeenCalledWith(1011, "Error");
+		expect(closed).toHaveBeenCalledTimes(1);
+		expect(link.readyState).toBe(WebSocket.CLOSED);
+		expect(() => link.send('{"type":"call","id":"1","op":"stat","args":{}}')).toThrow(/nothing was sent/);
+		server.send(JSON.stringify({ type: "reply", id: "1", result: {} }));
+		client.dispatchEvent(new Event("error"));
+		link.close();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(receive).toHaveBeenCalledTimes(1);
+		expect(received).toEqual([]);
+		expect(closed).toHaveBeenCalledTimes(1);
+		close.mockRestore();
+		client.close(1000);
 	});
 
 	it("ignores what isn't JSON, and ends the connection on a binary or oversized message", async () => {

@@ -1,0 +1,23 @@
+{
+  "name": "pim-cua-host",
+  "description": "The Node host that serves a Cua bridge's relay over HTTPS and WebSockets. Not part of the Worker or the web app.",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "FSL-1.1-ALv2",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --test --test-concurrency=1 test/*.test.ts"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/ws": "8.18.1",
+    "typescript": "^6.0.3"
+  }
+}

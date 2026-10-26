@@ -40,6 +40,50 @@ What it does with a connection:
 
 Pim's side keeps to its own part: it checks the space, address and token before it reaches the network; puts the token only in the `Authorization` header and never in errors, logs or the space's storage; logs only fixed event names and statuses, never what a failing `fetch` threw; makes one request per connection, aborts it after 30 seconds (`CONNECT_MS`) and closes any socket answered after that unused, and retries nothing, neither the connection nor a message; refuses a message it can't send whole, and anything after the connection ends, by throwing before it leaves; ends the link and tries to close its socket on a socket error, taking nothing from it after, even if the close throws; and calls `closed` once, however the connection ends. A closed socket, like a socket error, says nothing of what the computer did or stopped doing. A message the bridge took is a transport receipt, not a result.
 
+## The bridge's Node host
+
+`computer/cua-host/host.ts` serves a `Relay` over HTTPS and WebSockets on Node 22.18 or later, as `serveWithWebSocketPair` does in a Workers runtime. It is its own package (`pim-cua-host`, in the pnpm workspace), the only one that depends on `ws`; nothing in the Worker or the web app imports it. Importing it does nothing. It starts no process and opens no session: `OpenSession` stays the embedder's, given to the `Relay`.
+
+- **`createHost({ relay, transport, limits, log })`** makes the host; `listen()` serves and answers the address and port; `close()` stops serving and ends every connection, open or opening, which closes its session.
+- **`transport`** is `{ kind: "https", cert, key, host, port }`, with the operator's certificate chain and key (PEM), TLS 1.2 or later and HTTP/1.1 only; or `{ kind: "loopback-http", host, port }`, plain HTTP for a TLS terminator the operator runs on the same machine, taken only for a loopback IP literal (`127.0.0.0/8`, `::1`), never a name such as `localhost`, and checked again on the address actually bound. There is no other kind, so plain HTTP is never served on a public address by default or by mistake.
+- **For each upgrade request, in order:** the request target must be a canonical path (`/a/../pim` is not `/pim`; an absolute-form target is refused), and `Upgrade`, `Authorization` and `x-pim-space` must each come at most once (`400`); then `relay.check`, given a `Request` holding only those three headers; then `ws` checks the handshake's key and version (`400`); only then `relay.open`. `101` is answered once the channel is ready, with `x-pim-space` naming the relay's space; otherwise `502`, or `504` when the session didn't open within `openingMs`. A request that isn't an upgrade as HTTP has it (no `Connection: upgrade`) is checked the same way and, if the relay would let it through, answered `426`. No answer is a redirect, and none repeats a header, the token, or the space asked for.
+- **What Pim's socket does reaches the relay's channel:** text messages go to `receive` as text, binary as bytes (which the relay ends with `1003`); the socket's close, error, or end before `101` (`end`, or the request's signal while the session opens) end the channel once. Bytes sent before `101` end the connection unanswered, with no session asked for.
+- **What it holds is bounded** (`limits`, defaults in `DEFAULT_LIMITS`): request line and headers to 16 KiB (`431`); a TLS handshake and headers to `headersMs` (10 s); `maxPendingUpgrades` (4) upgrades checked or opening at once, past which `503` without checking; `maxConnections` (16) sockets; `openingMs` (20 s, under Pim's 30) for a session to open; one message from Pim to 48 MiB (16 Mi characters at three bytes each), no compression; and `maxOutboundBytes` (64 MiB) held for Pim, before `101` and in the socket's buffer after. A message that would pass that limit makes the relay's `send` fail, so the connection ends (`client-send`) and its session closes: a session can't be slowed down, so nothing waits for a peer that doesn't read. Closing handshakes get `closeMs` (5 s).
+- **Logs** are fixed: `host.listening`, `host.upgraded`, `host.refused` with a status and a reason (`target`, `headers`, `method`, `upgrade`, `handshake`, `busy`, `early-data`, `opening-timeout`, `session`, `http`, `tls`), and `host.failed`; the relay logs its own. Neither logs an address, a header, or what failed.
+
+The relay's contract is unchanged by the host: one connection at a time (a newer one ends the older with `4409` and closes its session before asking for its own), nothing replayed, no `hello` or reply made up. A socket closing, or the network failing, ends a connection and closes its session as far as the relay is concerned; it says nothing of whether pim-computer, or anything else on the VM, has stopped.
+
+To embed it, an operator's program makes the relay with its own `OpenSession` and serves it:
+
+```ts
+import { readFileSync } from "node:fs";
+import { Relay } from "../cua-bridge.ts";
+import { createHost } from "./host.ts";
+
+const relay = new Relay({ space: "o_…", token: readFileSync("/etc/pim-bridge/token", "utf8").trim(), path: "/pim", open: openSession });
+await createHost({ relay, transport: { kind: "https", cert: readFileSync("/etc/pim-bridge/cert.pem"), key: readFileSync("/etc/pim-bridge/key.pem"), host: "0.0.0.0", port: 8443 } }).listen();
+```
+
+Its checks (`pnpm typecheck` and `pnpm test` run them too):
+
+```sh
+pnpm install --frozen-lockfile
+pnpm --filter pim-cua-host typecheck   # tsc against Node's types
+pnpm --filter pim-cua-host test        # node --test over loopback sockets; needs openssl
+```
+
+The tests (`computer/cua-host/test/host.test.ts`) are real Node network tests, not workerd: a Node HTTPS server on 127.0.0.1 with a certificate `openssl` makes for the run (deleted after), and `ws`'s client or raw TLS sockets writing HTTP by hand. Sessions are made in memory by the test and run nothing. They show refusals (`401`, `403`, `404`, `405`, `400`, `426`, `431`, `503`) with no session asked for and nothing reflected; `101` with the space named back, the session's `hello`, and a call and its reply unchanged; replacement; a session still opening given up by Pim or by `openingMs`, and closed once, unused, when it comes late; `502` for one that fails; binary, line-broken and oversized messages ending the connection; a peer that doesn't read getting its connection and session ended while one that reads keeps it; and plain HTTP refused off loopback. The relay's own tests (`test/cua-bridge.test.ts`) still run in workerd. Neither reaches a Worker: how Pim's deployed `fetch` meets this host over the internet, and a real certificate, are untested.
+
+## The bridge's credential boundary (design, not built)
+
+The bridge's token and TLS key must be out of the desktop user's effective reach, not merely out of its environment. The design for review, which nothing here builds:
+
+- **A bridge account** (say `pim-bridge`, no login, no sudo) owns the token and key files (`0600`, in a `0700` directory it owns) and runs the host. Its program and configuration are owned by root and not writable by either account. As another, unprivileged user, the desktop user can't read its files, its `/proc/<pid>/environ` or memory, or trace it (with Yama's `ptrace_scope` at 1 or more, and no shared group).
+- **The desktop account** (one shared, non-root user that every agent of the space runs as) runs a fixed local session endpoint: for each connection on a Unix socket at a path the operator sets (say `/run/pim-session/session.sock`, in a directory the desktop user owns, the socket `0660` with a group whose only other member is `pim-bridge`), it starts `pim-computer --stdio --root <folder>` and carries its lines both ways, ending its input when the connection closes. The endpoint may check its peer's uid (`SO_PEERCRED`) is `pim-bridge`.
+- **The host's `OpenSession`** connects to that socket, writes each message and `\n`, and reads lines back with `Lines`. Only pim-computer's messages cross it: the relay hands `OpenSession` nothing of the request, so the token and the space's header stop at `check`, and never reach the endpoint, pim-computer, or the desktop user.
+
+What it doesn't change: every agent of the space shares the desktop account, with no isolation between them; anything running as the desktop user can use the endpoint as freely as the bridge does, which gives it nothing it didn't have; root on the VM, and whoever runs the VM, see everything. Building the endpoint, the accounts, the services and their confinement, and checking the boundary on a real VM, are later stages.
+
 ## Choosing Cua for a space
 
 The choice is the operator's, and is kept in two places, neither of which anything in Pim writes:
@@ -82,7 +126,7 @@ Pim doesn't create, start, stop, replace or delete an operator's VM, and never c
 ## What is not done
 
 - **The operator's tooling.** Writing the marker, enabling the control state and giving the agent a lease are outside this repository; only tests do them here. Human takeover stays unavailable.
-- **The bridge itself** is not in this repository, only its relay (`computer/cua-bridge.ts`, above). Missing are what runs it on or in front of a VM: a host that serves TLS and WebSockets (or a qualified Worker in front of the VM, with whatever reaches the VM from there), the session it opens (pim-computer started as the desktop user, kept from the bridge's own token and control state, and its stopping and restarting), its packaging, installation, configuration and deployment. Nothing here has run against a real bridge or a real Cua VM: Pim's tests answer `fetch` in the same process, with a `WebSocketPair` and pim-computer's own `Link`; the relay's tests (`test/cua-bridge.test.ts`) put the relay's Workers adapter behind that `fetch`, with sessions made in the test from `Link` over a test folder, whose commands run nothing, or from nothing at all. How a deployed Worker's `fetch` upgrades, times out and aborts against a real bridge is untested. That Workers expose the `101` response's `x-pim-space` header to `fetch` is assumed from the platform, not tested against it; if they don't, every connection is refused.
+- **The bridge itself** is not in this repository, only its relay (`computer/cua-bridge.ts`) and a Node host that serves it (`computer/cua-host/host.ts`, above). Missing are the session it opens (the local session endpoint and its `OpenSession`, pim-computer started as the desktop user, kept from the bridge's own token and control state, and its stopping and restarting), the accounts and confinement of "The bridge's credential boundary", and the host's packaging, installation, configuration, certificates and deployment. Nothing here has run against a real bridge or a real Cua VM; the host's tests serve only loopback clients in the same process, with in-memory sessions: Pim's tests answer `fetch` in the same process, with a `WebSocketPair` and pim-computer's own `Link`; the relay's tests (`test/cua-bridge.test.ts`) put the relay's Workers adapter behind that `fetch`, with sessions made in the test from `Link` over a test folder, whose commands run nothing, or from nothing at all. How a deployed Worker's `fetch` upgrades, times out and aborts against a real bridge is untested. That Workers expose the `101` response's `x-pim-space` header to `fetch` is assumed from the platform, not tested against it; if they don't, every connection is refused.
 - **Versions.** A Sprite fetches pim-computer from its Pim each time it starts; the bridge's operator must keep its copy in step.
 - **Control and takeover.** A Cua VM is a whole desktop. Nothing here shows that a person's input there is quiescent or exclusive, so human takeover stays unavailable, as in `docs/computer-control-state.md`. Local transport tests say nothing about what else drives the VM.
 

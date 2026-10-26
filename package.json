@@ -13,10 +13,10 @@
     "deploy": "wrangler deploy",
     "preview": "wrangler dev --local --config wrangler.preview.jsonc --persist-to .wrangler/state-preview",
     "types": "wrangler types",
-    "typecheck": "tsc --noEmit && pnpm --filter pim-web typecheck",
+    "typecheck": "tsc --noEmit && pnpm --filter pim-web typecheck && pnpm --filter pim-cua-host typecheck",
     "lint": "pnpm --filter pim-web lint",
     "check": "pnpm typecheck && pnpm lint && pnpm test",
-    "test": "vitest run && pnpm --filter pim-web test",
+    "test": "vitest run && pnpm --filter pim-web test && pnpm --filter pim-cua-host test",
     "test:live": "PIM_LIVE=1 vitest run"
   },
   "dependencies": {

@@ -1,0 +1,463 @@
+/**
+ * The Node host of a Cua bridge (docs/cua-bridge.md): serves one `Relay`
+ * (computer/cua-bridge.ts) over HTTPS and WebSockets, so Pim's `Cua.connect`
+ * can reach it over the network. The relay keeps the bridge's contract (the
+ * token, the space, one connection at a time, what is held while a session
+ * opens, what ends a connection); this file only carries requests and
+ * sockets to it and back, and bounds what the network can make it hold.
+ *
+ * For each upgrade request, in order: the target must be a canonical path
+ * and the headers the relay reads must each appear at most once; then
+ * `relay.check` must let it through; then `ws` checks the handshake itself
+ * (its key and version); only then is `relay.open` asked for a session, and
+ * `101`, naming the space back in `x-pim-space`, is answered once the
+ * relay's channel is ready. Nothing of the request reaches the session, and
+ * no answer is a redirect or repeats what the request carried.
+ *
+ * It serves HTTPS with the operator's certificate and key, or, only when
+ * asked by name and only on a loopback address, plain HTTP behind a TLS
+ * terminator the operator runs on the same machine. It starts no process
+ * and opens no session itself: the relay's `OpenSession` is the embedder's.
+ * Importing it does nothing; `createHost(...).listen()` serves.
+ */
+
+import { Buffer } from "node:buffer";
+import * as http from "node:http";
+import * as https from "node:https";
+import * as net from "node:net";
+import type { Duplex } from "node:stream";
+import { type ServerOptions, WebSocketServer, type WebSocket } from "ws";
+import { type Channel, type ClientSocket, type LogEntry, MAX_MESSAGE_CHARS, type Relay, SPACE_HEADER } from "../cua-bridge.ts";
+
+/** The most bytes a request's line and headers may take. Pim's are a few hundred, with a token of at most 4096. */
+export const MAX_HEADER_BYTES = 16 * 1024;
+
+/** The most bytes one WebSocket message from Pim may take: `MAX_MESSAGE_CHARS` of UTF-16, at three bytes each at most. */
+export const MAX_PAYLOAD_BYTES = 3 * MAX_MESSAGE_CHARS;
+
+/** How the host is reached. */
+export type Transport =
+	/** HTTPS with the operator's certificate chain and private key (PEM), on any address. */
+	| { readonly kind: "https"; readonly cert: string | Buffer; readonly key: string | Buffer; readonly host: string; readonly port: number }
+	/**
+	 * Plain HTTP for a TLS terminator on the same machine, which alone faces
+	 * the network. Only a loopback address written as an IP literal is taken
+	 * (`127.0.0.0/8` or `::1`, IPv4-mapped or not; never a name such as
+	 * `localhost`), and the address the server actually listens on is checked
+	 * again.
+	 */
+	| { readonly kind: "loopback-http"; readonly host: string; readonly port: number };
+
+export type Limits = {
+	/** Upgrade requests being checked or waiting for their session at once; past it, `503`. */
+	readonly maxPendingUpgrades: number;
+	/** Sockets the server keeps at once, in any state; past it, new ones are dropped. */
+	readonly maxConnections: number;
+	/** How long a connection has for its TLS handshake and its request's headers. */
+	readonly headersMs: number;
+	/** How long an upgrade request has, from its headers, for its session to open; past it, `504`. */
+	readonly openingMs: number;
+	/** How long a closing socket has to finish closing before it is destroyed. */
+	readonly closeMs: number;
+	/**
+	 * The most bytes held for Pim, not yet written to the network: what the
+	 * session says before `101`, and after it what the socket hasn't taken.
+	 * A message that would pass it ends the connection; nothing waits for Pim
+	 * to read, as a session can't be slowed down.
+	 */
+	readonly maxOutboundBytes: number;
+};
+
+export const DEFAULT_LIMITS: Limits = {
+	maxPendingUpgrades: 4,
+	maxConnections: 16,
+	headersMs: 10_000,
+	// Below Pim's own 30 seconds (`CONNECT_MS` in src/cua.ts), so the host gives up first and says so.
+	openingMs: 20_000,
+	closeMs: 5_000,
+	// One largest message, at three bytes a character, fits with room to spare.
+	maxOutboundBytes: 64 * 1024 * 1024,
+};
+
+export type HostOptions = {
+	readonly relay: Relay;
+	readonly transport: Transport;
+	readonly limits?: Partial<Limits>;
+	/** Where the host's own log entries go (the relay has its own); by default, `console.error` as JSON. */
+	readonly log?: (entry: LogEntry) => void;
+};
+
+export type Host = {
+	/** Starts serving, and answers where. */
+	listen(): Promise<{ address: string; port: number }>;
+	/** Stops serving and ends every connection, open or opening, which closes its session. */
+	close(): Promise<void>;
+};
+
+/** The headers `relay.check` reads, which must each come at most once. */
+const READ_HEADERS = ["upgrade", "authorization", SPACE_HEADER] as const;
+const ORIGIN = "https://bridge.invalid";
+const PLAIN = "text/plain; charset=utf-8";
+
+const loopback = new net.BlockList();
+loopback.addSubnet("127.0.0.0", 8, "ipv4");
+loopback.addAddress("::1", "ipv6");
+
+function isLoopback(address: string): boolean {
+	const family = net.isIP(address);
+	return family === 4 ? loopback.check(address, "ipv4") : family === 6 ? loopback.check(address, "ipv6") : false;
+}
+
+/** A refusal the host makes itself, before or beside the relay's. */
+type Refusal = { status: number; headers: [string, string][]; body: string };
+
+const refusal = (status: number, body: string, headers: [string, string][] = []): Refusal => ({ status, headers: [["content-type", PLAIN], ...headers], body });
+
+async function fromResponse(response: Response): Promise<Refusal> {
+	return { status: response.status, headers: [...response.headers], body: await response.text() };
+}
+
+/**
+ * The `Request` the relay checks, made from only what it reads; or the
+ * host's refusal when the target isn't a canonical path (which `URL` would
+ * otherwise normalize, so `/a/../pim` isn't taken for `/pim`), or a header
+ * it reads comes more than once, or the request can't be made at all.
+ */
+function toRequest(req: http.IncomingMessage): Request | { refused: Refusal; reason: string } {
+	const target = req.url ?? "";
+	let canonical = false;
+	try {
+		canonical = target.startsWith("/") && new URL(target, ORIGIN).href === ORIGIN + target;
+	} catch {
+		// Refused below.
+	}
+	if (!canonical) return { refused: refusal(404, "Not found."), reason: "target" };
+	const headers = new Headers();
+	for (const name of READ_HEADERS) {
+		const values = req.headersDistinct[name];
+		if (!values) continue;
+		if (values.length !== 1) return { refused: refusal(400, "Bad request."), reason: "headers" };
+		try {
+			headers.set(name, values[0]!);
+		} catch {
+			return { refused: refusal(400, "Bad request."), reason: "headers" };
+		}
+	}
+	try {
+		return new Request(ORIGIN + target, { method: req.method ?? "", headers });
+	} catch {
+		// A method `Request` won't make, such as TRACE.
+		return { refused: refusal(400, "Bad request."), reason: "method" };
+	}
+}
+
+/** Answers on a socket the HTTP server has let go of, then ends it, destroying it if that doesn't finish in time. */
+function answerRaw(socket: Duplex, answer: Refusal, closeMs: number): void {
+	const lines = [`HTTP/1.1 ${answer.status} ${http.STATUS_CODES[answer.status] ?? ""}`];
+	for (const [name, value] of answer.headers) lines.push(`${name}: ${value}`);
+	lines.push("connection: close", `content-length: ${Buffer.byteLength(answer.body)}`, "", answer.body);
+	socket.end(lines.join("\r\n"));
+	setTimeout(() => socket.destroy(), closeMs).unref();
+}
+
+/**
+ * The relay's client socket for one connection. Before `101` it holds what
+ * the session says (the relay's channel is ready only after the session
+ * opened, and the socket exists only after `101`), and after it writes to
+ * the WebSocket; either way it throws, which the relay takes as the
+ * connection failing, rather than hold more than `maxOutboundBytes`.
+ */
+class Outbound implements ClientSocket {
+	readonly #max: number;
+	#held: string[] = [];
+	#heldBytes = 0;
+	#socket: WebSocket | null = null;
+	#closed = false;
+	#overflowed = false;
+
+	constructor(max: number) {
+		this.#max = max;
+	}
+
+	send(message: string): void {
+		if (this.#closed) throw new Error("The connection has ended.");
+		const bytes = Buffer.byteLength(message);
+		const queued = this.#socket ? this.#socket.bufferedAmount : this.#heldBytes;
+		if (queued + bytes > this.#max) {
+			this.#overflowed = true;
+			throw new Error("Pim isn't reading what it is sent.");
+		}
+		if (this.#socket) {
+			this.#socket.send(message);
+		} else {
+			this.#held.push(message);
+			this.#heldBytes += bytes;
+		}
+	}
+
+	close(code: number, reason: string): void {
+		if (this.#closed) return;
+		this.#closed = true;
+		this.#held = [];
+		// A socket too full to take more won't take a close frame either.
+		if (this.#overflowed) this.#socket?.terminate();
+		else this.#socket?.close(code, reason);
+	}
+
+	/** Takes the socket `101` made, and sends it what was held, in order. */
+	attach(socket: WebSocket): void {
+		this.#socket = socket;
+		const held = this.#held;
+		this.#held = [];
+		this.#heldBytes = 0;
+		for (const message of held) socket.send(message);
+	}
+}
+
+/** What the host knows of an upgrade request while it is checked and its session opens. */
+type Opening = {
+	readonly socket: Duplex;
+	readonly abort: AbortController;
+	readonly outbound: Outbound;
+	channel: Channel | null;
+	timedOut: boolean;
+	/** Stops watching the socket for the request's sake: it is answered, or upgraded. */
+	settle(): void;
+};
+
+export function createHost(options: HostOptions): Host {
+	const limits: Limits = { ...DEFAULT_LIMITS, ...options.limits };
+	for (const [name, value] of Object.entries(limits)) {
+		if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`A host's ${name} must be a positive whole number.`);
+	}
+	const { relay, transport } = options;
+	if (!Number.isSafeInteger(transport.port) || transport.port < 0 || transport.port > 65_535) throw new RangeError("A host's port must be from 0 to 65535.");
+	if (transport.kind === "loopback-http") {
+		if (!isLoopback(transport.host)) throw new Error("Plain HTTP is served only on a loopback address, written as one (127.0.0.1 or ::1).");
+	} else if (transport.kind !== "https") {
+		throw new Error("A host serves HTTPS, or plain HTTP on a loopback address.");
+	}
+	const log = options.log ?? ((entry: LogEntry) => console.error(JSON.stringify(entry)));
+
+	const serverOptions: http.ServerOptions = {
+		maxHeaderSize: MAX_HEADER_BYTES,
+		headersTimeout: limits.headersMs,
+		requestTimeout: limits.headersMs,
+		keepAliveTimeout: 1_000,
+		connectionsCheckingInterval: Math.min(1_000, limits.headersMs),
+	};
+	const server: http.Server =
+		transport.kind === "https"
+			? https.createServer({
+					...serverOptions,
+					cert: transport.cert,
+					key: transport.key,
+					minVersion: "TLSv1.2",
+					ALPNProtocols: ["http/1.1"],
+					handshakeTimeout: limits.headersMs,
+				})
+			: http.createServer(serverOptions);
+	server.maxConnections = limits.maxConnections;
+
+	/** Every socket the server has, TCP and (for HTTPS) TLS, so `close` can end them all, upgraded or not. */
+	const sockets = new Set<Duplex>();
+	const track = (socket: net.Socket) => {
+		sockets.add(socket);
+		socket.once("close", () => sockets.delete(socket));
+	};
+	server.on("connection", track);
+	server.on("secureConnection", track);
+
+	const openings = new WeakMap<http.IncomingMessage, Opening>();
+	let pending = 0;
+
+	// `closeTimeout` is ws's, though its types don't name it: how long a closing handshake may take.
+	const wssOptions: ServerOptions & { closeTimeout: number } = {
+		noServer: true,
+		clientTracking: false,
+		perMessageDeflate: false,
+		maxPayload: MAX_PAYLOAD_BYTES,
+		closeTimeout: limits.closeMs,
+		// After `relay.check` and ws's own handshake checks: the one place a session is asked for.
+		verifyClient: (info: { req: http.IncomingMessage }, accept: (verified: boolean) => void) => {
+			const opening = openings.get(info.req);
+			if (!opening || opening.abort.signal.aborted) return;
+			void openSession(opening, () => accept(true));
+		},
+	};
+	const wss = new WebSocketServer(wssOptions);
+	wss.on("headers", (headers: string[]) => {
+		headers.push(`${SPACE_HEADER}: ${relay.space}`);
+	});
+
+	async function openSession(opening: Opening, upgrade: () => void): Promise<void> {
+		const channel = relay.open(opening.outbound, opening.abort.signal);
+		opening.channel = channel;
+		const opened = await channel.ready;
+		if (!opened || channel.ended || opening.socket.destroyed) {
+			if (opening.socket.destroyed) return;
+			opening.settle();
+			const status = opening.timedOut ? 504 : 502;
+			log({ event: "host.refused", status, reason: opening.timedOut ? "opening-timeout" : "session" });
+			answerRaw(opening.socket, refusal(status, "The computer's session couldn't be opened."), limits.closeMs);
+			return;
+		}
+		opening.settle();
+		// `ws` answers `101` and hands over the socket synchronously, so nothing happens in between.
+		upgrade();
+	}
+
+	/** A request that isn't an upgrade as HTTP has it: never served, but refused as the relay would refuse it, or `426`. */
+	async function plainRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+		res.shouldKeepAlive = false;
+		const request = toRequest(req);
+		let answer: Refusal;
+		if (request instanceof Request) {
+			const refused = await relay.check(request);
+			if (refused) {
+				answer = await fromResponse(refused);
+			} else {
+				// Let through by the relay, but not an upgrade as HTTP has it (no `Connection: upgrade`).
+				log({ event: "host.refused", status: 426, reason: "upgrade" });
+				answer = refusal(426, "Only WebSocket connections are served here.", [["upgrade", "websocket"]]);
+			}
+		} else {
+			log({ event: "host.refused", status: request.refused.status, reason: request.reason });
+			answer = request.refused;
+		}
+		res.writeHead(answer.status, [...answer.headers.flat(), "connection", "close"]);
+		res.end(answer.body);
+	}
+
+	server.on("request", (req: http.IncomingMessage, res: http.ServerResponse) => {
+		plainRequest(req, res).catch(() => {
+			log({ event: "host.failed" });
+			res.destroy();
+		});
+	});
+
+	async function upgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
+		socket.on("error", () => socket.destroy());
+		if (pending >= limits.maxPendingUpgrades) {
+			log({ event: "host.refused", status: 503, reason: "busy" });
+			answerRaw(socket, refusal(503, "Too many connections are opening.", [["retry-after", "1"]]), limits.closeMs);
+			return;
+		}
+		pending++;
+		let settled = false;
+		const abort = new AbortController();
+		const opening: Opening = {
+			socket,
+			abort,
+			outbound: new Outbound(limits.maxOutboundBytes),
+			channel: null,
+			timedOut: false,
+			settle() {
+				if (settled) return;
+				settled = true;
+				pending--;
+				clearTimeout(timer);
+				socket.off("data", early);
+				socket.off("end", gone);
+			},
+		};
+		/** Pim gave the request up, or broke HTTP by sending before `101`: the relay is told, and the socket ends unanswered. */
+		const gone = () => {
+			opening.settle();
+			abort.abort();
+			socket.destroy();
+		};
+		const early = () => {
+			log({ event: "host.refused", reason: "early-data" });
+			gone();
+		};
+		const timer = setTimeout(() => {
+			opening.timedOut = true;
+			// While the session opens, the relay ends the channel and the answer is `504`; before that, there is no one to answer.
+			if (opening.channel) abort.abort();
+			else {
+				log({ event: "host.refused", reason: "opening-timeout" });
+				gone();
+			}
+		}, limits.openingMs);
+		// However the socket ends, before or after `101`, the relay hears of it once; `end` is idempotent.
+		socket.once("close", () => {
+			opening.settle();
+			abort.abort();
+			opening.channel?.end();
+		});
+		socket.on("data", early);
+		socket.on("end", gone);
+		if (head.length > 0) return early();
+
+		const request = toRequest(req);
+		if (!(request instanceof Request)) {
+			opening.settle();
+			log({ event: "host.refused", status: request.refused.status, reason: request.reason });
+			return answerRaw(socket, request.refused, limits.closeMs);
+		}
+		const refused = await relay.check(request);
+		if (abort.signal.aborted) return;
+		if (refused) {
+			opening.settle();
+			return answerRaw(socket, await fromResponse(refused), limits.closeMs);
+		}
+		openings.set(req, opening);
+		wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+			const channel = opening.channel!;
+			if (socket instanceof net.Socket) socket.setKeepAlive(true, 30_000);
+			ws.on("message", (data: Buffer, isBinary: boolean) => channel.receive(isBinary ? data : data.toString("utf8")));
+			ws.on("close", () => channel.end());
+			ws.on("error", () => {
+				// `ws` closes the socket after an error, and `close` follows.
+			});
+			opening.outbound.attach(ws);
+			log({ event: "host.upgraded" });
+		});
+		// `ws` refused the handshake itself (its key or version) and answered it, or found the socket ended: nothing was opened.
+		if (!opening.channel) {
+			opening.settle();
+			log({ event: "host.refused", reason: "handshake" });
+		}
+	}
+
+	server.on("upgrade", (req: http.IncomingMessage, socket: Duplex, head: Buffer) => {
+		upgrade(req, socket, head).catch(() => {
+			log({ event: "host.failed" });
+			socket.destroy();
+		});
+	});
+
+	server.on("clientError", (error: NodeJS.ErrnoException, socket: Duplex) => {
+		const status = error.code === "HPE_HEADER_OVERFLOW" ? 431 : error.code === "ERR_HTTP_REQUEST_TIMEOUT" ? 408 : 400;
+		log({ event: "host.refused", status, reason: "http" });
+		if (socket.writable && error.code !== "ECONNRESET") answerRaw(socket, { status, headers: [], body: "" }, limits.closeMs);
+		else socket.destroy();
+	});
+	server.on("tlsClientError", () => log({ event: "host.refused", reason: "tls" }));
+
+	const host: Host = {
+		async listen() {
+			await new Promise<void>((resolve, reject) => {
+				server.once("error", reject);
+				server.listen({ host: transport.host, port: transport.port, exclusive: true }, () => {
+					server.off("error", reject);
+					resolve();
+				});
+			});
+			const bound = server.address() as net.AddressInfo;
+			if (transport.kind === "loopback-http" && !isLoopback(bound.address)) {
+				await host.close();
+				throw new Error("Plain HTTP is served only on a loopback address.");
+			}
+			log({ event: "host.listening" });
+			return { address: bound.address, port: bound.port };
+		},
+		async close() {
+			const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+			for (const socket of sockets) socket.destroy();
+			await closed;
+		},
+	};
+	return host;
+}

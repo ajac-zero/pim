@@ -1,5 +1,6 @@
 packages:
   - web
+  - computer/cua-host
 allowBuilds:
   '@google/genai': false
   '@mongodb-js/zstd': false

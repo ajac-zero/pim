@@ -23,7 +23,8 @@
  * Everything but `serveWithWebSocketPair` uses only what Node and Workers
  * both have. That function is the one adapter here, for a Workers runtime
  * (workerd), which is how the tests run it; a host that serves TLS and
- * WebSockets some other way needs its own.
+ * WebSockets some other way needs its own, as computer/cua-host/host.ts is
+ * for Node.
  */
 
 /** The header Pim names the space in, and that the bridge names it back in on its `101`. */

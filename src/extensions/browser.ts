@@ -16,7 +16,10 @@ export const BROWSER_EXTENSION = "pim.browser";
 export const BROWSER_CLICK = "browser_click";
 export const BROWSER_TYPE = "browser_type";
 
-const SHARED = `The browser is the Chrome on the person's computer. You have a window of your own in it, which keeps its page between your steps; other agents and chats have theirs, and what the person signed in to there is signed in in every window. If a page needs the person (signing in, a check that they're human, payment details), stop and ask them to take over: in the box beside the chat, under its summary, they choose Take over and tell you when they're done. Never ask them for passwords or codes in the chat.`;
+const SHARED = `The browser is the Chrome on the person's computer. You have a window of your own in it, which keeps its page between your steps; other agents and chats have theirs, and what the person signed in to there is signed in in every window.`;
+const TAKE_OVER = `If a page needs the person (signing in, a check that they're human, payment details), stop and ask them to take over: in the box beside the chat, under its summary, they choose Take over and tell you when they're done. Never ask them for passwords or codes in the chat.`;
+/** Under control state the live view is not a takeover the state knows of, so agents aren't told to hand over through it. */
+const NO_TAKE_OVER = `If a page needs the person (signing in, a check that they're human, payment details), stop and tell them what it needs. Never ask them for passwords or codes in the chat.`;
 
 const Ref = Type.Integer({ minimum: 1, description: "The element's number, from the page as browser_open or browser_read last showed it: 12 for [12 button “Search”]." });
 const ClickArgs = Type.Object({ ref: Ref });
@@ -32,6 +35,15 @@ export type BrowserServices = {
 	readonly windowOf: (conversation: string) => string;
 	/** Saves a screenshot to the person's files, on their computer. */
 	readonly saveScreenshot: (path: string | undefined, png: Uint8Array) => Promise<string>;
+	/**
+	 * Runs what a tool call does with the browser (and, for a screenshot, the
+	 * person's files) as one request, if the control state admits it (see
+	 * ../computer-control-runtime.ts); a space that hasn't opted in runs it as
+	 * is. Refuses with a `ControlRefused`, sending nothing.
+	 */
+	readonly controlled: <T>(conversation: string, callId: string, send: () => Promise<T>) => Promise<T>;
+	/** Whether agents are told the person can take their window over: not under control state. */
+	readonly takeOver: boolean;
 };
 
 function failure(error: unknown) {
@@ -67,15 +79,21 @@ export function browserTypeAction(browser: PimBrowser, windowOf: (conversation: 
 	}) as GatedAction;
 }
 
-export function browserExtension(services: PimServices, { browser, windowOf, saveScreenshot }: BrowserServices) {
+export function browserExtension(services: PimServices, { browser, windowOf, saveScreenshot, controlled, takeOver }: BrowserServices) {
+	const shared = `${SHARED} ${takeOver ? TAKE_OVER : NO_TAKE_OVER}`;
+	/** Runs `use` with the call's window, as a request of the call's. */
+	const inWindow = <T>(api: { conversationId: unknown; callId: string }, use: (window: string) => Promise<T>, callId = api.callId) => {
+		const conversation = String(api.conversationId);
+		return controlled(conversation, callId, () => use(windowOf(conversation)));
+	};
 	const browserOpen = defineTool({
 		name: "browser_open",
-		description: `Open a web page in your window of the browser and read it: its text, with what can be clicked or typed into numbered like [12 link “Prices”]. Use it for pages fetch_url can't read (built by JavaScript) and for anything you need to click through. ${SHARED}`,
+		description: `Open a web page in your window of the browser and read it: its text, with what can be clicked or typed into numbered like [12 link “Prices”]. Use it for pages fetch_url can't read (built by JavaScript) and for anything you need to click through. ${shared}`,
 		parameters: Type.Object({ url: Type.String({ pattern: "^(https?://|data:text/html)", description: "An http(s) address, or a data:text/html URL for HTML of your own." }) }),
 		replay: "safe",
 		async execute({ url }, api) {
 			try {
-				return text(describePage(await browser.visit(windowOf(String(api.conversationId)), url)));
+				return text(describePage(await inWindow(api, (window) => browser.visit(window, url))));
 			} catch (error) {
 				return failure(error);
 			}
@@ -89,7 +107,7 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 		replay: "safe",
 		async execute(_args, api) {
 			try {
-				const view = await browser.read(windowOf(String(api.conversationId)));
+				const view = await inWindow(api, (window) => browser.read(window));
 				return view ? text(describePage(view)) : text("Your window is closed. Open a page with browser_open.", true);
 			} catch (error) {
 				return failure(error);
@@ -108,9 +126,11 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 		parameters: ClickArgs,
 		replay: "safe",
 		async execute(args, api, context) {
+			// Run again once the approval is decided, the call looks at the page again: a request of its own.
+			const resumed = (await api.memo<string>(BROWSER_CLICK, context)) !== undefined;
 			let summary: string;
 			try {
-				const element = await browser.describe(windowOf(String(api.conversationId)), args.ref);
+				const element = await inWindow(api, (window) => browser.describe(window, args.ref), resumed ? `${api.callId}:resumed` : api.callId);
 				if (!element) return text(`There is no [${args.ref}] on the page now. Read the page again with browser_read and use a number it shows.`, true);
 				summary = `On ${element.host}, click ${element.label}`;
 			} catch (error) {
@@ -127,9 +147,11 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 		parameters: TypeArgs,
 		replay: "safe",
 		async execute(args, api, context) {
+			// Run again once the approval is decided, the call looks at the page again: a request of its own.
+			const resumed = (await api.memo<string>(BROWSER_TYPE, context)) !== undefined;
 			let summary: string;
 			try {
-				const element = await browser.describe(windowOf(String(api.conversationId)), args.ref);
+				const element = await inWindow(api, (window) => browser.describe(window, args.ref), resumed ? `${api.callId}:resumed` : api.callId);
 				if (!element) return text(`There is no [${args.ref}] on the page now. Read the page again with browser_read and use a number it shows.`, true);
 				summary = `On ${element.host}, type “${args.text}” into ${element.label}${args.submit ? " and press Enter" : ""}`;
 			} catch (error) {
@@ -149,9 +171,13 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 		replay: "safe",
 		async execute({ path }, api) {
 			try {
-				const png = await browser.screenshot(windowOf(String(api.conversationId)));
-				if (!png) return text("Your window is closed. Open a page with browser_open.", true);
-				return text(`Saved to ${await saveScreenshot(path, png)}.`);
+				// Saving it is part of the request: it writes to the computer too.
+				const saved = await inWindow(api, async (window) => {
+					const png = await browser.screenshot(window);
+					return png ? saveScreenshot(path, png) : null;
+				});
+				if (saved === null) return text("Your window is closed. Open a page with browser_open.", true);
+				return text(`Saved to ${saved}.`);
 			} catch (error) {
 				return failure(error);
 			}
@@ -165,7 +191,7 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 		replay: "safe",
 		async execute(_args, api) {
 			try {
-				await browser.close(windowOf(String(api.conversationId)));
+				await inWindow(api, (window) => browser.close(window));
 			} catch (error) {
 				return failure(error);
 			}

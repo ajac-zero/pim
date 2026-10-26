@@ -246,6 +246,185 @@ export function testBrowser(): BrowserHost {
 	};
 }
 
+/** A DevTools message as it reached the fixture's browser. */
+export type Packet = { id: number; method: string; sessionId?: string; params: Record<string, unknown> };
+
+type Page = { targetId: string; sessionId: string; loaderId: number; url: string; context: number; world: string | null };
+
+/**
+ * A browser for tests that is no browser: an in-process DevTools peer that
+ * answers what puppeteer asks with fixed values and records every message
+ * that reached it. Nothing runs and no page exists; its one page reads as
+ * a heading, a button and a text box. Tests hold back answers to methods
+ * (`hold`), answer them with protocol errors (`fail`), send messages of
+ * their own (`inject`) and close the connection (`drop`).
+ */
+export function fakeChrome() {
+	const packets: Packet[] = [];
+	const hold = new Set<string>();
+	const fail = new Set<string>();
+	const pages = new Map<string, Page>();
+	let link: { send(message: unknown): void; close(): void } | null = null;
+	let running = false;
+	let next = 1;
+
+	const browserInfo = { targetId: "browser", type: "browser", title: "", url: "", attached: true, canAccessOpener: false };
+	const infoOf = (page: Page) => ({ targetId: page.targetId, type: "page", title: "Fixture", url: page.url, attached: true, canAccessOpener: false, browserContextId: "default" });
+	const frameOf = (page: Page) => ({ id: page.targetId, loaderId: `L${page.loaderId}`, url: page.url, domainAndRegistry: "", securityOrigin: "", mimeType: "text/html", secureContextType: "Secure", crossOriginIsolatedContextType: "NotIsolated", gatedAPIFeatures: [] });
+	const contexts = (page: Page) => {
+		const send = (id: number, name: string, isDefault: boolean) =>
+			link?.send({ method: "Runtime.executionContextCreated", sessionId: page.sessionId, params: { context: { id, origin: "", name, uniqueId: `u${id}`, auxData: { frameId: page.targetId, isDefault, type: isDefault ? "default" : "isolated" } } } });
+		page.context = next++;
+		send(page.context, "", true);
+		if (page.world) send(next++, page.world, false);
+	};
+	const attach = (page: Page) => link?.send({ method: "Target.attachedToTarget", params: { sessionId: page.sessionId, targetInfo: infoOf(page), waitingForDebugger: false } });
+
+	/** What the page answers to a script, by what the script is. */
+	function evaluate(params: Record<string, unknown>) {
+		const source = String(params.expression ?? params.functionDeclaration ?? "");
+		const byValue = params.returnByValue === true;
+		if (source.includes("INTERACTIVE")) {
+			const first = Number(/\(\[(\d+),/.exec(source)?.[1] ?? 1);
+			return { result: { type: "object", value: { text: `# Fixture\n[${first} button “Go”] [${first + 1} textbox “Name”]`, truncated: false, next: first + 2 } } };
+		}
+		if (source.includes("data-pim-ref=\"' + ref")) return { result: { type: "string", value: "the button “Go”" } };
+		if (source.includes("document.title")) return { result: { type: "string", value: "Fixture" } };
+		if (source.includes("documentWidth")) return { result: { type: "object", value: { documentWidth: 1280, documentHeight: 800 } } };
+		if (source.includes("getClientRects")) return { result: { type: "object", value: [{ x: 10, y: 10, width: 100, height: 30 }] } };
+		if (byValue) return { result: { type: "undefined" } };
+		return { result: { type: "object", subtype: "node", className: "HTMLElement", description: "button", objectId: `object-${next++}` } };
+	}
+
+	function answer(packet: Packet): unknown {
+		const page = [...pages.values()].find((candidate) => candidate.sessionId === packet.sessionId);
+		const params = packet.params;
+		switch (packet.method) {
+			case "Target.getBrowserContexts":
+				return { browserContextIds: [] };
+			case "Target.setDiscoverTargets":
+				link?.send({ method: "Target.targetCreated", params: { targetInfo: browserInfo } });
+				for (const each of pages.values()) link?.send({ method: "Target.targetCreated", params: { targetInfo: infoOf(each) } });
+				return {};
+			case "Target.setAutoAttach":
+				if (!packet.sessionId) for (const each of pages.values()) attach(each);
+				return {};
+			case "Target.attachToTarget": {
+				const sessionId = `browser-session-${next++}`;
+				link?.send({ method: "Target.attachedToTarget", params: { sessionId, targetInfo: browserInfo, waitingForDebugger: false } });
+				return { sessionId };
+			}
+			case "Target.createTarget": {
+				const id = next++;
+				const created: Page = { targetId: `page-${id}`, sessionId: `page-session-${id}`, loaderId: 1, url: String(params.url), context: 0, world: null };
+				pages.set(created.targetId, created);
+				link?.send({ method: "Target.targetCreated", params: { targetInfo: infoOf(created) } });
+				attach(created);
+				return { targetId: created.targetId };
+			}
+			case "Target.closeTarget": {
+				const closed = pages.get(String(params.targetId));
+				if (closed) {
+					pages.delete(closed.targetId);
+					link?.send({ method: "Target.detachedFromTarget", params: { sessionId: closed.sessionId, targetId: closed.targetId } });
+					link?.send({ method: "Target.targetDestroyed", params: { targetId: closed.targetId } });
+				}
+				return { success: true };
+			}
+			case "Browser.getVersion":
+				return { protocolVersion: "1.3", product: "Chrome/0", revision: "0", userAgent: "Mozilla/5.0 Chrome/0", jsVersion: "0" };
+			case "Page.getFrameTree":
+				return { frameTree: { frame: frameOf(page!), childFrames: [] } };
+			case "Runtime.enable":
+				queueMicrotask(() => contexts(page!));
+				return {};
+			case "Page.createIsolatedWorld":
+				page!.world = String(params.worldName);
+				return { executionContextId: next++ };
+			case "Page.navigate": {
+				page!.loaderId++;
+				page!.url = String(params.url);
+				setTimeout(() => {
+					const at = { frameId: page!.targetId, loaderId: `L${page!.loaderId}`, timestamp: 0 };
+					link?.send({ method: "Runtime.executionContextsCleared", sessionId: page!.sessionId, params: {} });
+					link?.send({ method: "Page.frameNavigated", sessionId: page!.sessionId, params: { frame: frameOf(page!), type: "Navigation" } });
+					contexts(page!);
+					for (const name of ["init", "DOMContentLoaded", "load", "networkIdle"]) link?.send({ method: "Page.lifecycleEvent", sessionId: page!.sessionId, params: { ...at, name } });
+				}, 0);
+				return { frameId: page!.targetId, loaderId: `L${page!.loaderId}` };
+			}
+			case "Runtime.evaluate":
+			case "Runtime.callFunctionOn":
+				return evaluate(params);
+			case "DOM.getContentQuads":
+				return { quads: [[10, 10, 110, 10, 110, 40, 10, 40]] };
+			case "DOM.describeNode":
+				return { node: { nodeId: 1, backendNodeId: 1, nodeType: 1, nodeName: "BUTTON", localName: "button", nodeValue: "" } };
+			case "DOM.resolveNode":
+				return { object: { type: "object", subtype: "node", objectId: `object-${next++}` } };
+			case "Page.getLayoutMetrics": {
+				const viewport = { pageX: 0, pageY: 0, clientWidth: 1280, clientHeight: 800, offsetX: 0, offsetY: 0, scale: 1, zoom: 1 };
+				return { layoutViewport: viewport, visualViewport: viewport, cssLayoutViewport: viewport, cssVisualViewport: viewport, contentSize: { x: 0, y: 0, width: 1280, height: 800 }, cssContentSize: { x: 0, y: 0, width: 1280, height: 800 } };
+			}
+			case "Page.captureScreenshot":
+				return { data: btoa(String.fromCharCode(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) };
+			default:
+				return {};
+		}
+	}
+
+	const host: BrowserHost = {
+		async connect(onMessage, onClose) {
+			running = true;
+			const channel = {
+				send: (message: unknown) => onMessage(JSON.stringify(message)),
+				close: () => {
+					if (link !== channel) return;
+					link = null;
+					onClose();
+				},
+			};
+			link = channel;
+			return {
+				send(data) {
+					const packet = JSON.parse(data) as Packet;
+					packet.params ??= {};
+					packets.push(packet);
+					if (hold.has(packet.method)) return;
+					const reply = { id: packet.id, ...(packet.sessionId ? { sessionId: packet.sessionId } : {}) };
+					if (fail.has(packet.method)) channel.send({ ...reply, error: { code: -32000, message: "The fixture refuses this." } });
+					else {
+						const result = answer(packet);
+						channel.send({ ...reply, result });
+					}
+				},
+				close() {
+					if (link === channel) link = null;
+				},
+			};
+		},
+		running: async () => running,
+		async stop() {
+			running = false;
+			pages.clear();
+			link?.close();
+		},
+	};
+
+	return {
+		host,
+		packets,
+		hold,
+		fail,
+		/** Messages that reached it with `method`, from `since` on. */
+		sent: (method: string, since = 0) => packets.slice(since).filter((packet) => packet.method === method),
+		/** Sends a message of the test's own, as if the browser had: an answer nobody asked for, or a late one. */
+		inject: (message: unknown) => link?.send(message),
+		/** The browser closes the connection, answering nothing more. */
+		drop: () => link?.close(),
+	};
+}
+
 /**
  * A computer as pim-computer is one: its own `Link`, over a folder in this
  * test's /tmp, connected with `token`. Commands go to `exec`: tests can't

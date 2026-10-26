@@ -48,9 +48,24 @@ export class ControlRefused extends Error {
 }
 
 /** What the calls of one request did on the transport. */
-export type DispatchTrace = { sent: boolean; uncertain: boolean };
-/** The request whose calls `Computer.call` is making, if the state is admitting them. */
+export type DispatchTrace = {
+	/** Something left this process for the computer. */
+	sent: boolean;
+	/** Something sent may have run without an answer saying so, or its answer can't be told apart. */
+	uncertain: boolean;
+	/** DevTools messages sent for it and not answered yet, by connection and message ID (see `Computer.connectBrowser`). */
+	awaiting: Set<string>;
+	/** It has been settled: what is sent after, from code it started, is no longer its own. */
+	settled: boolean;
+};
+/** The request whose calls `Computer.call` and the browser's connection are making, if the state is admitting them. */
 export const dispatchTrace = new AsyncLocalStorage<DispatchTrace>();
+
+/** The request being made here, unless it was already settled. */
+export function currentTrace(): DispatchTrace | undefined {
+	const trace = dispatchTrace.getStore();
+	return trace && !trace.settled ? trace : undefined;
+}
 
 /** Where a space keeps its control document. Reads and writes are synchronous, as the Durable Object's storage is. */
 export type ControlStorage = { read(): string | undefined; write(value: string): void };
@@ -200,8 +215,9 @@ export class ControlCoordinator {
 	 * 1. admitted (or refused, throwing `ControlRefused` with nothing sent) and
 	 *    stored before `send` starts;
 	 * 2. `send` runs once, never again for this request ID;
-	 * 3. settled from what its calls did: replied to (`completed`), or nothing
-	 *    left this process (`rejected`), or sent with no answer (`unknown`, which
+	 * 3. settled from what its calls and DevTools messages did: every one sent
+	 *    was answered (`completed`), or nothing left this process (`rejected`),
+	 *    or one was sent with no answer it can be sure of (`unknown`, which
 	 *    keeps the state blocked until a `reconcile_request` event).
 	 */
 	async dispatch<T>(request: ControlRequest, send: () => Promise<T>): Promise<T> {
@@ -231,11 +247,13 @@ export class ControlCoordinator {
 		this.#write({ ...doc, state: admitted.state, bindings });
 		const epoch = admitted.state.epoch;
 
-		const trace: DispatchTrace = { sent: false, uncertain: false };
+		const trace: DispatchTrace = { sent: false, uncertain: false, awaiting: new Set(), settled: false };
 		try {
 			return await dispatchTrace.run(trace, send);
 		} finally {
-			const outcome = trace.uncertain ? "unknown" : trace.sent ? "completed" : "rejected";
+			trace.settled = true;
+			// A DevTools message still unanswered may yet run; an answer arriving after this changes nothing.
+			const outcome = trace.uncertain || trace.awaiting.size > 0 ? "unknown" : trace.sent ? "completed" : "rejected";
 			try {
 				this.apply({ type: "request_result", requestId: request.requestId, epoch, outcome });
 			} catch (error) {

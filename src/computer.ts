@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import type { Connection } from "agents";
 import type { ExecArgs, ExecResult } from "../computer/pim-computer";
 import { digestHex } from "./auth/store";
-import { dispatchTrace } from "./computer-control-runtime";
+import { currentTrace, type DispatchTrace } from "./computer-control-runtime";
 import { HttpError } from "./http";
 import type { SpriteLink } from "./sprites";
 
@@ -100,6 +100,29 @@ export type BrowserTransport = {
 
 type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
 
+/**
+ * The browser's DevTools connection, and who waits for answers on it: each
+ * message sent and not answered yet, by its session and ID, with the requests
+ * it was sent for (see `connectBrowser`).
+ */
+type BrowserConnection = {
+	channel: number;
+	transport: BrowserTransport;
+	awaiting: Map<string, DispatchTrace[]>;
+	/** The requests that sent something on it; what is sent for none of them may be their doing. */
+	users: Set<DispatchTrace>;
+};
+
+/** What tells a DevTools message's answer from others': its session and ID, or null for an event or a message without an ID. */
+function answerKey(raw: string): string | null {
+	try {
+		const { id, sessionId } = JSON.parse(raw) as { id?: unknown; sessionId?: unknown };
+		return typeof id === "number" ? `${typeof sessionId === "string" ? sessionId : ""}:${id}` : null;
+	} catch {
+		return null;
+	}
+}
+
 /** A failure the computer reported, with its code (`ENOENT`…), which the file tools read. */
 function remoteError(error: { message?: unknown; code?: unknown }): Error {
 	return Object.assign(new Error(String(error.message ?? "The computer failed")), { answered: true }, typeof error.code === "string" ? { code: error.code } : {});
@@ -110,7 +133,7 @@ export class Computer {
 	readonly #sockets: () => Connection[];
 	readonly #pending = new Map<string, Pending>();
 	/** The DevTools connection to the computer's browser, of which there is one at a time. */
-	#browser: { channel: number; transport: BrowserTransport } | null = null;
+	#browser: BrowserConnection | null = null;
 	/** Starts pim-computer on the computer Pim started, which wakes it, when a call finds it asleep. */
 	readonly #wake: () => Promise<SpriteLink>;
 	/** Whether the space is using the computer in a way it doesn't see itself, such as someone watching its browser. */
@@ -273,8 +296,20 @@ export class Computer {
 		if (message.type === "cdp" || message.type === "cdp_closed") {
 			const browser = this.#browser;
 			if (!browser || browser.channel !== (message as { channel?: unknown }).channel) return;
-			if (message.type === "cdp_closed") this.#browserClosed();
-			else browser.transport.onmessage?.(String((message as { data?: unknown }).data));
+			if (message.type === "cdp_closed") {
+				this.#browserClosed();
+				return;
+			}
+			const data = String((message as { data?: unknown }).data);
+			// An answer counts only for the message it answers, on this connection; one nobody waits for (late, repeated, foreign) counts for none.
+			// With nothing awaited, as in a space that hasn't opted in, messages (the live view's pictures among them) aren't read.
+			const key = browser.awaiting.size > 0 ? answerKey(data) : null;
+			const waiting = key === null ? undefined : browser.awaiting.get(key);
+			if (key !== null && waiting) {
+				browser.awaiting.delete(key);
+				for (const trace of waiting) trace.awaiting.delete(`${browser.channel}:${key}`);
+			}
+			browser.transport.onmessage?.(data);
 			return;
 		}
 		if (message.type !== "reply" || typeof message.id !== "string") return;
@@ -295,7 +330,7 @@ export class Computer {
 		if (counts) this.#use();
 		const id = crypto.randomUUID();
 		// A request the control state admitted (see ./computer-control-runtime.ts) learns what became of its calls.
-		const trace = dispatchTrace.getStore();
+		const trace = currentTrace();
 		const answer = new Promise<T>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.#pending.delete(id);
@@ -359,24 +394,66 @@ export class Computer {
 	 * Connects to the computer's browser over DevTools, starting it there
 	 * first when it isn't running. Its messages go through the computer's
 	 * connection; a connection made before this one is closed.
+	 *
+	 * For a request the control state admitted (./computer-control-runtime.ts),
+	 * each message sent is awaited by its session and DevTools ID, in that
+	 * request's trace, until the answer with that key arrives on this
+	 * connection. One that can't be sent (this connection was replaced or
+	 * closed, or the computer is offline) throws at once, sent for nobody. One
+	 * handed to the socket stays awaited when the connection ends or the
+	 * request gives up on it, so the request is settled unknown; answers to the
+	 * connection's setup, or to other messages, don't count for it. Puppeteer's
+	 * own messages, sent as it hears from the browser, and the person's, carry no
+	 * request: each unsettled request that has used this connection waits for
+	 * them too. A request's message reusing an ID still awaited throws unsent.
+	 * With no request using the connection nothing is recorded or read.
 	 */
 	async connectBrowser(): Promise<BrowserTransport> {
 		const { channel } = await this.call<{ channel: number }>("browser_connect", {}, 60_000);
 		this.#browserClosed();
 		const transport: BrowserTransport = {
 			send: (data) => {
-				if (this.#browser?.channel !== channel) return;
+				const trace = currentTrace();
+				const socket = this.#socket();
+				if (this.#browser !== connection || !socket) {
+					// Nothing leaves; a request hears so now, rather than wait for an answer that can't come.
+					if (trace) throw new Error("The browser's connection has closed, so nothing was sent to it.");
+					return;
+				}
 				this.#use();
-				this.#socket()?.send(JSON.stringify({ type: "cdp", channel, data }));
+				this.#await(connection, data, trace);
+				socket.send(JSON.stringify({ type: "cdp", channel, data }));
 			},
 			close: () => {
-				if (this.#browser?.channel !== channel) return;
+				if (this.#browser !== connection) return;
 				this.#browser = null;
 				void this.call("browser_disconnect", { channel }).catch(() => undefined);
 			},
 		};
-		this.#browser = { channel, transport };
+		const connection: BrowserConnection = { channel, transport, awaiting: new Map(), users: new Set() };
+		this.#browser = connection;
 		return transport;
+	}
+
+	/** Records who waits for the answer to a DevTools message about to be sent; throws, before anything is sent, for a request's message whose answer couldn't be told apart. */
+	#await(connection: BrowserConnection, data: string, trace: DispatchTrace | undefined): void {
+		for (const user of connection.users) if (user.settled) connection.users.delete(user);
+		if (!trace && connection.users.size === 0) return;
+		const key = answerKey(data);
+		const earlier = key === null ? undefined : connection.awaiting.get(key);
+		if (trace && earlier) throw new Error("A message with this ID is still awaiting its answer, so this one was not sent.");
+		if (trace) {
+			trace.sent = true;
+			connection.users.add(trace);
+		}
+		const waiting = trace ? [trace] : [...connection.users];
+		if (key === null || earlier) {
+			// An answer that can't be told apart from another's says nothing of which message ran.
+			for (const each of [...waiting, ...(earlier ?? [])]) each.uncertain = true;
+			return;
+		}
+		connection.awaiting.set(key, waiting);
+		for (const each of waiting) each.awaiting.add(`${connection.channel}:${key}`);
 	}
 
 	/** Quits the computer's browser; its profile, with what's signed in there, stays. */

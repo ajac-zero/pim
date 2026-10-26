@@ -154,7 +154,7 @@ import {
 import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
-import { ControlCoordinator, ControlRefused } from "./computer-control-runtime";
+import { ControlCoordinator } from "./computer-control-runtime";
 import { COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerStatus } from "./computer";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
@@ -190,10 +190,8 @@ const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 
 /** Pim's own widgets: every chat can show them. */
 const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory", "pim.artifacts"];
-/** Pim's own actions that use the person's computer, offered only while one is paired. */
+/** Pim's own actions that use the person's computer, offered only while one is paired; the control state admits each run of them. */
 const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, BROWSER_CLICK, BROWSER_TYPE]);
-/** The actions whose requests the control state admits: their calls are all `Computer.call`s, which report to it. The browser's are not. */
-const CONTROLLED_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL]);
 /** Where the space keeps its computer's control state, if it opted in (see ./computer-control-runtime.ts). */
 const CONTROL_KEY = "computer_control";
 /** How a dashboard names an artifact pinned to it: `artifact:<id>`. */
@@ -1945,7 +1943,7 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	async #approvalFiled(approval: Approval, isNew: boolean): Promise<string | null> {
 		// The lease the request is filed under, so a takeover before it's decided is found out when it runs.
-		if (isNew && CONTROLLED_ACTIONS.has(approval.action)) {
+		if (isNew && COMPUTER_ACTIONS.has(approval.action)) {
 			try {
 				this.control.bind(approval.id);
 			} catch (error) {
@@ -2053,7 +2051,7 @@ export class Pim extends DurableAgent<Env> {
 					? await this.keepAliveWhile(() => {
 							const run = () => action.run(approval.args as never, { session: approval.session });
 							// Checked now, after the decision, not when it was asked: the person may have taken over since.
-							return CONTROLLED_ACTIONS.has(action.name) ? this.#controlled(approval.session, `approval:${id}`, run, id) : run();
+							return COMPUTER_ACTIONS.has(action.name) ? this.#controlled(approval.session, `approval:${id}`, run, id) : run();
 						})
 					: `The action ${approval.action} is no longer available.`;
 			} catch (error) {
@@ -4113,13 +4111,8 @@ export class Pim extends DurableAgent<Env> {
 		return this.browser.lastUsed([chat, ...this.#tasks.ofRoot(chat).map((task) => task.conversation)]);
 	}
 
-	/**
-	 * The window an agent's conversation browses in: in a group chat, the chat's, which its agents share.
-	 * Every agent browser path asks for it first, so a space under control state refuses them all here:
-	 * the browser's DevTools traffic doesn't report to the state, and an outcome it can't see is not "rejected".
-	 */
+	/** The window an agent's conversation browses in: in a group chat, the chat's, which its agents share. */
 	#browserWindowOf(conversation: string): string {
-		if (this.control.enabled) throw new ControlRefused("browser_uncovered", "browser actions are not covered by the control state yet");
 		return this.#rooms.of(conversation)?.room ?? conversation;
 	}
 
@@ -5883,6 +5876,8 @@ export class Pim extends DurableAgent<Env> {
 					const target = path ?? `${FILES_ROOT}/screenshots/${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
 					return (await this.files.write(target, png)).path;
 				},
+				controlled: (conversation, callId, send) => this.#controlled(conversation, `call:${conversation}:${callId}`, send),
+				takeOver: !this.control.enabled,
 			}),
 		);
 	}

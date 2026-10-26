@@ -1,0 +1,86 @@
+# The Cua viewer adapter
+
+`computer/cua-host/viewer-adapter.ts` is the host-side boundary for showing Cua's own HTML5 viewer through Pim: the viewer spacesd 0.7.0 ships, unchanged, watching one display of the computer, view only. The browser never reaches spacesd. It reaches only the adapter, which serves the viewer's pinned files and answers the handful of calls that viewer makes to watch a display. Each call is decoded strictly and rebuilt as a new request to spacesd that contains only what the adapter allows. **Nothing routes to it yet.** It adds no route, setting, listener or credential to the Node host, and the evaluation installer doesn't bundle it. See "Not wired yet".
+
+## What is pinned
+
+Everything comes from [trycua/cua at `fca2193`](https://github.com/trycua/cua/tree/fca21937bc4e1420a23d544d11dbdf987f0266e6), the cua-spacesd 0.7.0 release, and nothing is fetched at run time. `computer/cua-host/viewer-upstream.ts` holds the pins:
+
+| What | From | Kept as |
+| --- | --- | --- |
+| The viewer: `index.html`, `viewer.js`, `index.css`, `audioWorklet.js`, `captureWorklet.js` | `libs/cua/crates/cua-spacesd-html5/assets/` (FSL-1.1-MIT) | exact bytes in `computer/cua-host/cua-viewer/assets/`, each with its SHA-256 in `VIEWER_ASSETS`, and `computer/cua-host/cua-viewer/LICENSE`, upstream's licence. `loadViewerAssets()` refuses any file whose hash differs. `viewer.js` bundles its own dependencies, among them @bufbuild/protobuf and @connectrpc/connect (Apache-2.0). |
+| The schema of `cua.env.v1` `common`, `windows`, `diagnose`, `stream`, `system` and `presence` | the serialized descriptors protoc-gen-es 2.15.0 embedded in `libs/cua/crates/cua-spacesd-html5/web/src/gen/cua/env/v1/*_pb.ts` | `DESCRIPTORS`, read with @bufbuild/protobuf 2.15.0 (`computer/cua-host/package.json`, the runtime the viewer bundles). The same strings appear verbatim in the pinned `viewer.js`, so the adapter decodes the exact schema the browser encodes. |
+
+## The calls a browser may make
+
+The viewer is served at `/<launch>/viewer/` and, as it does in every deployment, resolves its RPCs and its media socket against the parent directory, `/<launch>/`. The launch's credential is the `#ticket=` in its fragment, which the viewer sends as `x-cua-env-authorization: Bearer …`. Everything below needs that credential, except the files. Any other path, including `/mcp`, `/files`, `/tunnel`, `/hotspot`, `/volume`, every other service and method (clipboard, filesystem, process, `CreateViewerTicket`, `UpdateCursor`, `Leave`), and anything with a query string, gets a plain `404`, and nothing reaches spacesd. Nothing is ever a redirect.
+
+| Path under `/<launch>/` | What the adapter does |
+| --- | --- |
+| `GET viewer/` and `GET viewer/<file>` | Serves the pinned file, with no caching, `nosniff`, no referrer, and a content security policy on the page that allows connections only to its own origin. |
+| `cua.env.v1.SystemService/GetCapabilities` | Answers only the hostname and OS family, which is all the viewer reads. |
+| `cua.env.v1.StreamService/ListTargets` | Asks spacesd without windows. It refuses `include_windows` and a window filter. It answers only the configured display (the primary one for `primary`), with H.264 and PNG among the codecs, and `audio_uplink_allowed: false`. |
+| `cua.env.v1.StreamService/OpenMedia` | See below. |
+| `cua.env.v1.StreamService/SetPreferences` | Only for a session this launch opened. It passes on only frame rate, size, bitrate and pausing audio, bounded. Size is how the viewer asks for a new capture size when its window is resized. |
+| `cua.env.v1.StreamService/RequestKeyframe`, `CloseMedia` | Only for a session this launch opened. |
+| `cua.env.v1.PresenceService/Join` | See below. |
+| `media?ticket=<attach token>` (WebSocket, `rcdp.v2`) | Relays a media socket for one of this launch's sessions. See below. |
+
+A request must be a `POST` of `application/grpc-web+proto` holding exactly one uncompressed data frame of at most 4 KiB, with no `grpc-encoding` or `content-encoding` but `identity`, and no `authorization` header beside the credential. Its message must be unambiguous under the pinned schema: every field must be known and written with its own wire type, no singular field may appear twice, and no oneof may have two members. Protobuf itself would keep the last occurrence or the unknown field; the adapter refuses the request (`INVALID_ARGUMENT`). Answers from spacesd are bounded (256 KiB for a unary answer, 64 KiB for a presence event), and must be `200`, `application/grpc-web+proto`, and well-framed, with exactly one trailer. Errors reach the browser as the gRPC code with the adapter's own text, never spacesd's.
+
+## OpenMedia: one display, view only
+
+Upstream, a `VIEW_ONLY` viewer ticket caps a media session's input policy. `OpenMedia` still accepts a window target with `GEOMETRY_CONTROL_BIDIRECTIONAL` (`cua-spacesd-desktop/src/grpc/stream.rs`), and a media socket on such a session may resize the window (`cua-spacesd-session/src/media/viewer.rs`, `set_geometry`). So the browser never reaches spacesd, and the adapter is the only thing that opens media:
+
+- **Refused before anything is sent:** a window target or no target; a display other than the configured one or the one `ListTargets` showed it to be; `GEOMETRY_CONTROL_BIDIRECTIONAL` or an unknown geometry control; an unknown policy; `prefer_quic`; `disable_video`; a `presence_participant_id`; any microphone uplink, even an empty one; chosen audio sources; codecs other than H.264 and PNG; a bitrate outside spacesd's 250–100000 kbps; a negative ticket lifetime.
+- **Built anew for spacesd:** the configured display, `SESSION_POLICY_VIEW_ONLY` (whatever the viewer asked; it asks `ALLOW_ACTIVATION` unless its URL says `view_only=1`), `GEOMETRY_CONTROL_OBSERVE_ONLY`, at most 60 fps, a long edge of 64 to 3840 pixels (native becomes 3840), at most 20000 kbps, and a media ticket that lets sockets attach for at most 600 s and no longer than the launch has left. Downlink audio of the paired source is passed on with its encoding bounded.
+- **Checked in spacesd's answer:** `VIEW_ONLY`, `OBSERVE_ONLY`, no QUIC endpoint, no granted microphone, a codec that was asked for, wire version 2, a frame no larger than 16384 pixels a side, a ticket expiring in the future but not past what was asked, and `ws_path` exactly `/media?ticket=` with that ticket percent-encoded as spacesd encodes it. Any other answer is refused (`INTERNAL`), and the adapter asks spacesd to close that session.
+- **What the browser gets:** the session's id, no ticket, and its own `ws_path` of `/media?ticket=` with a random attach token. spacesd's media ticket stays with the adapter. A new session replaces the launch's earlier ones: their tokens stop attaching, their relays end, and spacesd is asked to close them. A launch may open at most 32 sessions in all, one at a time.
+
+## The media relay
+
+`media(target, protocols)` checks an upgrade before it happens. The target must be exactly `/<launch>/media?ticket=<token>` for a live launch and an open session of that launch, the browser must offer `rcdp.v2` (`400` otherwise), and the session's media ticket must not have expired (`401` otherwise). Anything unknown is `404`. `attach(open)` then finishes it, and the adapter opens its own socket to spacesd at the origin it was configured with, plus the session's checked `ws_path`. One relay runs per session; attaching again replaces the last one (`4404` to the old socket).
+
+- **Up to spacesd** go only `request_keyframe` and `frame_ack` text messages that name this session, rebuilt from their fields, at most 1 KiB each, and only after the session opened. Anything else ends the relay with `1008` and none of it goes up: input, actions, `set_window_geometry`, audio state, binary (microphone) packets, or a message before the stream started.
+- **Down to the browser** goes `hello`, then a `session_opened` that must name this session, `view_only`, observe-only geometry and a display target that is this launch's display, then anything else, with text bounded at 64 KiB and packets at 16 MiB. A second `session_opened`, a packet before the first, or a malformed message ends the relay with `4404`, and the session is closed and dropped. A browser more than 32 MiB behind ends it with `1011`. spacesd's close codes the viewer acts on pass through.
+
+## Presence
+
+The viewer joins presence even when it can't send input, and the adapter lets it join. It builds its own `JoinRequest`: cursor batches, a roster every 5 s, **no cursor shapes**, no datagram channel and no principal. spacesd computes cursor shapes with an idle probe that can move the real pointer to a participant's position and back (`cua-spacesd-desktop/src/grpc/cursor_shape.rs`, `probe_by_warp`), and the datagram channel would hand the browser a QUIC ticket. The principal is the one the launch's viewer ticket was minted for. Each event is rebuilt: the datagram channel is dropped, and so are cursors over a window or on another display. One event is read from spacesd for each event the browser takes. A launch holds at most two presence streams. `UpdateCursor` and `Leave` are refused. The viewer never sends `UpdateCursor` when it is view-only, and its `Leave` on `pagehide` fails quietly. Its Join stream ending is what makes spacesd drop the participant (`impl Drop for JoinStream`). A cursor in presence is drawn by viewers; it is not input to the computer.
+
+## Launches, credentials and lifetime
+
+`startLaunch({ lifetimeMs, rootToken })` starts a `ViewerLaunch` (`docs/cua-viewer-lifetime.md`) and then mints the launch's own spacesd viewer ticket with `CreateViewerTicket`, using spacesd's root token for that one call. Every grant is named explicitly: `policy: VIEW_ONLY` (left unset, spacesd would grant `ALLOW_ACTIVATION`), `clipboard: false`, `files_root: ""`, `audio_uplink: false`, and a principal of its own. The ticket's lifetime is what the launch has left, rounded up, so it outlives the launch rather than shortens it. A ticket that grants files is refused. The root token isn't kept, and appears in no answer, path or error. A launch whose mint fails ends, and the error says nothing spacesd said. The launch answers its page path, with a fresh random credential in the fragment. The adapter keeps only the credential's SHA-256 and compares it in constant time. A credential, session id or attach token of one launch means nothing to another.
+
+Every relay half and presence stream is handed to the launch with `adopt` once it exists, even after the launch ended (the launch then refuses it and closes it), and reports its closure whenever that comes. That includes a closure before `adopt` returns, which happens when a refused transport closes from within its own close. The launch is read for liveness before and after every call to spacesd. A call answered after the deadline is refused, and a session it opened is asked to close. At the deadline, or `end()`, the launch closes everything it owns while spacesd's media ticket may still be valid. The launch then leaves the adapter's table, so its paths answer `404`. For each session still open, the adapter asks spacesd to close it. `status().cleanup` counts those requests and spacesd's answers. An answer is what spacesd said, not a socket seen closed. `status().phase` turns `closed` only once every transport has reported itself closed. Neither says anything about what runs on the desktop. Reconnects and new media sessions belong to the same launch and never move its deadline. An expired media ticket stops new sockets attaching, but doesn't end one already attached; the launch does.
+
+## Not wired yet
+
+The adapter is a module with three entry points and injected upstream calls. No network reaches it. Wiring it is a separate, reviewed change:
+
+1. **A launch, created only by Pim.** Its owner is authenticated as the bridge authenticates Pim today, and Pim, not the browser, sets its lifetime. The host calls `startLaunch` with spacesd's root token. Where that token lives is part of that change. A Cua credential kept in the desktop account isn't isolated from agents running as that account, and the bridge's own credential stays separate.
+2. **The host's HTTPS server.** It routes `/<launch>/…` requests whose target it has already checked is canonical (as `host.ts` does) to `adapter.fetch`. It routes WebSocket upgrades to `adapter.media`, answers a non-`101` status as a plain refusal, and completes a `101` with subprotocol `rcdp.v2` before calling `attach`. It wires `ws` `message` and `close` to the events, `terminate()`, `close(code)` and `bufferedAmount`. It must not log request targets, because they carry attach tokens.
+3. **The upstream side.** `fetch` is Node's own, against spacesd's loopback origin. `openMedia` is a `ws` client that resolves on `open`, rejects with the upgrade's status, and reports `close` with its code.
+
+Until then nothing here is reachable, and passing tests here doesn't qualify a live boundary.
+
+## Tests
+
+`computer/cua-host/test/viewer-adapter.test.ts` is part of `pnpm --filter pim-cua-host test`. Its first two tests load the pinned `viewer.js` itself, fetched from the adapter, in the test process. Its DOM, `fetch` and `WebSocket` are records in memory that reach only the adapter, and WebCodecs claims H.264. Behind the adapter is a stand-in for spacesd, written in the test from spacesd's source: tickets cap the policy, an unset ticket policy means `ALLOW_ACTIVATION`, and a window session with bidirectional geometry and input on a socket are counted as reaching the desktop. It records what the adapter sends. It is not spacesd, and nothing here shows the real binary behaving as described above; those statements come from reading its source.
+
+What they show, with the stand-in and the pinned viewer:
+
+- The viewer negotiates its display: capabilities, displays without windows, `OpenMedia` sent as view-only and observe-only although the viewer asked for `ALLOW_ACTIVATION`, a socket through the adapter, and a stream. It builds no input controller and hides its keyboard and microphone controls. A window resize sends `SetPreferences` with the new size, capped at 3840. spacesd's capture changing size reaches the canvas. No root token, viewer or media ticket, or window reaches anything the browser read. `pagehide` ends the Join stream upstream, and the stream reports closed.
+- When a media ticket runs out, the viewer opens a new session. The old session is closed and its path stops attaching, and the deadline doesn't move. After the launch ends, the viewer's retries reach nothing.
+- The mint names `VIEW_ONLY`, no clipboard, no files and no microphone. The root token is used for that call only. A grant with files, or no ticket, starts no launch.
+- Window targets, bidirectional geometry, side channels, ambiguous encodings (both oneof members, a repeated target, policy or geometry control, unknown fields, wrong wire types, truncation) and malformed gRPC-Web reach nothing upstream. The stand-in's geometry count stays at zero. Raw and other paths, other services, and minting refuse.
+- spacesd answers that would grant more are refused, and their sessions are closed.
+- A relay carries only keyframe requests and frame acks. Input, actions, geometry, audio and binary end it, and the stand-in's geometry and input counts stay at zero. A `session_opened` that isn't view-only on this display ends it.
+- Another launch's credential, session ids and socket paths are refused, and so are an ended launch's.
+- At the deadline, every owned half and the presence stream close while the media ticket is still valid. Each counts until it reports closed, `CloseMedia` is requested and answered, and late calls and attaches refuse.
+- An `OpenMedia` answered after the deadline is refused and its session closed. A media socket opened after the deadline, which reports itself closed from within its own close, is refused and accounted for.
+- An expired media ticket refuses a new attach but keeps the attached socket.
+- Presence is joined without cursor shapes or datagrams, and window and other-display cursors are dropped.
+- The served files match their hashes, and the bundle carries the adapter's descriptors.
+
+No browser, desktop, spacesd, socket, server or process is involved. The content security policy, and the viewer's rendering, codecs and audio in a real browser, are untested.

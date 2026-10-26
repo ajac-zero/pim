@@ -1,6 +1,6 @@
 # A Cua viewer launch's lifetime
 
-`computer/cua-host/viewer-lifetime.ts` holds one Cua viewer launch's absolute lifetime: the most time, from when the launch starts, that anything opened for it may stay open. It is the lifecycle piece of a future adapter that shows Cua's own HTML5 viewer through Pim, over spacesd 0.7.0's `/mcp` and `/media`. Nothing uses it yet: it adds no route, setting or host behavior, and `eval-install` doesn't bundle it.
+`computer/cua-host/viewer-lifetime.ts` holds one Cua viewer launch's absolute lifetime: the most time, from when the launch starts, that anything opened for it may stay open. It is the lifecycle piece of the adapter that shows Cua's own HTML5 viewer through Pim (`docs/cua-viewer-adapter.md`), which adopts every media relay half and presence stream into a launch. Nothing routes to that adapter yet: neither adds a route, setting or host behavior, and `eval-install` bundles neither.
 
 ## Why Pim keeps its own deadline
 

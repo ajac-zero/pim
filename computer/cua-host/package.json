@@ -13,6 +13,7 @@
     "test": "node --test --test-concurrency=1 test/*.test.ts"
   },
   "dependencies": {
+    "@bufbuild/protobuf": "2.15.0",
     "ws": "8.22.0"
   },
   "devDependencies": {

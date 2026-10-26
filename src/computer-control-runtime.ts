@@ -26,6 +26,12 @@ import {
  * recorded before anything is sent. Nothing awaits between deciding and
  * recording.
  *
+ * Any failure to store a change latches the coordinator blocked, for as long as
+ * this process lives: the stored and remembered state may then disagree, and a
+ * disk that comes back does not clear it. A restart reads the stored state
+ * conservatively (a request still in flight comes back unknown) and, if that
+ * can't be stored either, latches again.
+ *
  * What the state says is the application's view. A request that "completed"
  * got a reply over the transport; that is a receipt, not proof the machine
  * stopped accepting other input, and a takeover does not make it so.
@@ -72,6 +78,8 @@ export class ControlCoordinator {
 	#doc: Document | null = null;
 	/** Why the stored document can't be used; it is then left as it is, and every request is refused. */
 	#blocked: string | null = null;
+	/** A change could not be stored, so what is remembered can't be trusted; never cleared. */
+	#latched: string | null = null;
 
 	/**
 	 * Loads the stored document. A request recorded as in flight is restored as
@@ -88,7 +96,13 @@ export class ControlCoordinator {
 			return;
 		}
 		this.#doc = loaded;
-		if (JSON.stringify(loaded.state) !== JSON.stringify(JSON.parse(raw).state)) this.#write(loaded);
+		if (JSON.stringify(loaded.state) !== JSON.stringify(JSON.parse(raw).state)) {
+			try {
+				this.#write(loaded);
+			} catch {
+				// Remembered as restored (unknown), though not stored; blocked either way.
+			}
+		}
 	}
 
 	#parse(raw: string): Document | string {
@@ -105,17 +119,26 @@ export class ControlCoordinator {
 		if (!Array.isArray(bindings) || !bindings.every(validBinding)) return "the stored lease bindings are malformed";
 		const restored = restoreControlState(state);
 		if (!restored.ok) return `the stored control state is invalid: ${restored.error}`;
+		const seen = new Set<string>();
+		for (const binding of bindings as Binding[]) {
+			if (seen.has(binding.id)) return "the stored lease bindings repeat an approval";
+			seen.add(binding.id);
+			const { lease } = binding;
+			if (lease && lease.epoch > restored.state.epoch) return "a stored lease binding is from a future epoch";
+			if (lease && lease.epoch === restored.state.epoch && lease.leaseId !== restored.state.lease?.leaseId) return "a stored lease binding contradicts the current lease";
+		}
+		if (bindings.length > MAX_BINDINGS) return "the stored lease bindings are too many";
 		return { version: CONTROL_STATE_VERSION, space: this.#space, state: restored.state, bindings: bindings as Binding[] };
 	}
 
 	/** Whether the space has opted in, with usable state or not. */
 	get enabled(): boolean {
-		return this.#doc !== null || this.#blocked !== null;
+		return this.#doc !== null || this.blocked !== null;
 	}
 
 	/** Why requests are refused regardless of state, or null. */
 	get blocked(): string | null {
-		return this.#blocked;
+		return this.#blocked ?? this.#latched;
 	}
 
 	/** The state, or null when not opted in or blocked. It is a copy: changing it changes nothing. */
@@ -130,13 +153,18 @@ export class ControlCoordinator {
 	}
 
 	#write(doc: Document): void {
-		// Stored first: if this throws, nothing in memory has changed.
-		this.#storage.write(JSON.stringify(doc));
+		try {
+			this.#storage.write(JSON.stringify(doc));
+		} catch (error) {
+			// The write may or may not have happened, so nothing more is admitted until a restart reads what is stored.
+			if (this.#doc) this.#latched = "the control state could not be stored";
+			throw error;
+		}
 		this.#doc = doc;
 	}
 
 	#usable(): Document {
-		if (this.#blocked) throw new ControlRefused("blocked", this.#blocked);
+		if (this.blocked) throw new ControlRefused("blocked", this.blocked);
 		if (!this.#doc) throw new ControlRefused("not_enabled", "this space has not opted in");
 		return this.#doc;
 	}
@@ -210,7 +238,7 @@ export class ControlCoordinator {
 			try {
 				this.apply({ type: "request_result", requestId: request.requestId, epoch, outcome });
 			} catch (error) {
-				// Still stored as in flight, which a restart reads as unknown: blocked, not lost.
+				// The failed write latched the coordinator, so nothing more is admitted; a restart reads this request as unknown.
 				console.error("settling a computer request", error);
 			}
 		}
@@ -224,5 +252,5 @@ function validBinding(value: unknown): value is Binding {
 	if (lease === null) return true;
 	if (typeof lease !== "object") return false;
 	const { epoch, leaseId } = lease as { epoch?: unknown; leaseId?: unknown };
-	return typeof epoch === "number" && Number.isSafeInteger(epoch) && typeof leaseId === "string" && leaseId !== "";
+	return typeof epoch === "number" && Number.isSafeInteger(epoch) && epoch >= 0 && typeof leaseId === "string" && leaseId !== "";
 }

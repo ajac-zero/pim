@@ -37,10 +37,12 @@ Decide where state is stored and how writes are serialized; define the real view
 - **No takeover or resume is exposed.** `control.apply(event)` is the only transition and nothing public reaches it. **Human takeover remains unavailable while input quiescence is unproven**: a takeover event closes Pim's admissions, and does not stop the machine.
 - **Serialized, durable.** Each transition reads, applies the reducer, and writes the whole document synchronously in the Durable Object's storage, so transitions never interleave. A request is stored as admitted before it is sent; if storing fails, nothing is sent.
 - **Identity.** The request carries the space (the Durable Object's own name) and the agent the server knows the chat talks as (`#roleOf(session)`); the session comes from the approval or tool call, never from a client. A request naming another space is refused, and a stored document belonging to another space blocks.
-- **Agent paths gated.** Approved `shell`, `file_delete`, `browser_click` and `browser_type` (checked when the approval is executed, after the decision) and the file tools (`file_read`, `file_write`, ...). Request IDs are `approval:<id>` and `call:<session>:<callId>`, so a replay of the same call is refused rather than sent again.
+- **Agent paths gated.** Approved `shell` and `file_delete` (checked when the approval is executed, after the decision) and the file tools (`file_read`, `file_write`, ...). Each reaches the computer only through `Computer.call`, which reports to the request's trace.
+- **Browser fails closed.** An opted-in space refuses every agent browser tool (open, read, click, type, screenshot, close) before anything reaches the browser. Its DevTools traffic does not pass `Computer.call`, so nothing could say whether an action ran, timed out or was lost; recording such an action as `rejected` would be false. Instrumenting that transport is the next stage; until then the control state does not cover the browser, and full control must not be advertised. Request IDs are `approval:<id>` and `call:<session>:<callId>`, so a replay of the same call is refused rather than sent again.
 - **Approvals keep their lease.** When an approval for a computer action is filed, the lease then held is remembered. At execution the lease must still be the current one, so a takeover, or a takeover and resume, before the decision refuses it. An approval filed while the human had control, or whose record is gone, is refused. Approval and permission checks still apply independently.
 - **Settling.** What the request's calls did decides it: replied to (including a machine error reply) is `completed`; nothing left this process is `rejected`; sent and then timed out or disconnected is `unknown` and blocks until a `reconcile_request` event. A reply is a transport receipt, not proof of what the machine did or can still do.
-- **Restart.** The coordinator restores conservatively on load (in flight becomes unknown, revoking becomes failed) and writes that back. A damaged, unknown-version or other-space document blocks all requests and is left untouched; nothing resets it.
+- **Storage failure latches.** If any change can't be stored (an admission, a settlement, a transition), the coordinator refuses everything for the rest of its life, even if storage returns: what is stored and what is remembered may disagree. A restart reads the stored state, where a request still in flight is `unknown`.
+- **Restart.** The coordinator restores conservatively on load (in flight becomes unknown, revoking becomes failed) and writes that back; if that write fails, it is latched too. Stored lease bindings that repeat, have negative, fractional or future epochs, contradict the current lease, or exceed the cap block the document. A damaged, unknown-version or other-space document blocks all requests and is left untouched; nothing resets it.
 - **No fallback.** An opted-in space whose control refuses does not use another computer.
 
 ### Interfaces for the next stages
@@ -50,8 +52,8 @@ Decide where state is stored and how writes are serialized; define the real view
 
 ### Open issues
 
-- **Browser tools** other than click and type (open, read, screenshot, close) and the person's own `/files` routes do not pass the gate. The first matter for an opted-in space; the second are the person's requests, not an agent's.
+- **Browser:** refused outright for opted-in spaces (above), not yet instrumented. The person's own `/files` routes and live browser view do not pass the gate: they are the person's requests, not an agent's.
 - A damaged document has no repair path; that needs an operator procedure.
 - Approvals keep at most 256 lease bindings; older ones fail closed.
-- Settling after a crash between sending and storing is left as `in_flight`, which restart turns into `unknown`.
+- A latched coordinator stays blocked until the process restarts; there is no in-process recovery by design.
 - Full-computer takeover is unproven.

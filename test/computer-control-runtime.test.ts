@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ExecArgs, ExecResult } from "../computer/pim-computer";
 import { type ControlStorage, ControlCoordinator, ControlRefused } from "../src/computer-control-runtime";
 import type { ControlState } from "../src/computer-control";
-import { api, connectTestComputer, OWNER, pendingApproval, post, say, toolUse } from "./helpers";
+import { api, connectTestComputer, OWNER, pendingApproval, post, say, testBrowser, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /**
@@ -259,6 +259,61 @@ describe("the coordinator", () => {
 		await expect(coordinator.dispatch(request("r2"), send)).rejects.toThrow("disk full");
 		expect(send).not.toHaveBeenCalled();
 		expect(coordinator.state?.requests.map((r) => r.requestId)).toEqual(["r1"]);
+		// The failed write may have half happened: latched, and a disk that comes back doesn't clear it.
+		storage.failWrites = false;
+		expect(await refusal(coordinator.dispatch(request("r3"), send))).toBe("blocked");
+		expect(send).not.toHaveBeenCalled();
+	});
+
+	it("latches blocked when settling can't be stored, even if storage then recovers, and again after a restart", async () => {
+		const { storage, coordinator } = resumed();
+		await coordinator.dispatch(request("r1"), async () => {
+			// The answer arrived, but storing what became of it fails.
+			storage.failWrites = true;
+		});
+		storage.failWrites = false;
+		expect(coordinator.blocked).toEqual(expect.any(String));
+		const send = vi.fn(async () => undefined);
+		expect(await refusal(coordinator.dispatch(request("r2"), send))).toBe("blocked");
+		expect(() => coordinator.apply({ type: "takeover" })).toThrow(ControlRefused);
+		expect(send).not.toHaveBeenCalled();
+		// Stored, it is still in flight; read after a restart it is unknown, and that is stored.
+		expect(JSON.parse(storage.value!).state.requests[0].status).toBe("in_flight");
+		const restarted = new ControlCoordinator("o_a", storage);
+		expect(restarted.state?.requests[0]?.status).toBe("unknown");
+		expect(await refusal(restarted.dispatch(request("r2"), send))).toBe("blocked");
+
+		// If that can't be stored either, it is blocked all the same, and stays so when storage returns.
+		const pending = resumed();
+		void pending.coordinator.dispatch(request("r1"), () => new Promise<void>(() => undefined));
+		const stuck = memory(pending.storage.value);
+		stuck.failWrites = true;
+		const again = new ControlCoordinator("o_a", stuck);
+		stuck.failWrites = false;
+		expect(again.blocked).toEqual(expect.any(String));
+		expect(await refusal(again.dispatch(request("r3"), send))).toBe("blocked");
+		expect(send).not.toHaveBeenCalled();
+	});
+
+	it("refuses to restore lease bindings that repeat, have impossible epochs, or contradict the lease", async () => {
+		const { storage, coordinator } = resumed();
+		coordinator.bind("a1");
+		const good = JSON.parse(storage.value!);
+		const lease = { epoch: 1, leaseId: "L1" };
+		const bindings: Record<string, unknown> = {
+			"repeated approval": [{ id: "a1", lease }, { id: "a1", lease }],
+			"negative epoch": [{ id: "a1", lease: { ...lease, epoch: -1 } }],
+			"fractional epoch": [{ id: "a1", lease: { ...lease, epoch: 0.5 } }],
+			"future epoch": [{ id: "a1", lease: { ...lease, epoch: 2 } }],
+			"another lease in the current epoch": [{ id: "a1", lease: { ...lease, leaseId: "other" } }],
+			"too many": Array.from({ length: 257 }, (_, index) => ({ id: `a${index}`, lease: null })),
+		};
+		for (const [name, value] of Object.entries(bindings)) {
+			expect(new ControlCoordinator("o_a", memory(JSON.stringify({ ...good, bindings: value }))).blocked, name).toEqual(expect.any(String));
+		}
+		expect(new ControlCoordinator("o_a", memory(JSON.stringify(good))).blocked).toBeNull();
+		for (let index = 0; index < 300; index++) coordinator.bind(`b${index}`);
+		expect(JSON.parse(storage.value!).bindings).toHaveLength(256);
 	});
 
 	it("serializes a takeover against dispatches started around it: each request sees one consistent state", async () => {
@@ -343,5 +398,44 @@ describe("two spaces", () => {
 		expect(crossed.outcome).toBe("wrong_space");
 		expect(crossed.state).toMatchObject({ owner: "human", requests: [] });
 		expect(await stateOf()).toEqual(mine);
+	});
+});
+
+describe("the browser in a space under control state", () => {
+	it("refuses every agent browser path, since its traffic isn't reported to the state", async () => {
+		const state = await stateOf();
+		expect(state.owner).toBe("agent");
+		// A computer with a browser, connected the way pim-computer connects one.
+		computer = await connectTestComputer(token, `/tmp/computer-control-${crypto.randomUUID()}`, async () => ok, testBrowser());
+		let connects = 0;
+		await inSpace((instance) => {
+			const connectBrowser = instance.computer.connectBrowser.bind(instance.computer);
+			instance.computer.connectBrowser = () => {
+				connects++;
+				return connectBrowser();
+			};
+		});
+		for (const [name, args] of [
+			["browser_open", { url: "data:text/html,<p>hi</p>" }],
+			["browser_read", {}],
+			["browser_click", { ref: 1 }],
+			["browser_type", { ref: 1, text: "x" }],
+			["browser_screenshot", {}],
+			["browser_close", {}],
+		] as const) {
+			let result = "";
+			faux.setResponses([
+				toolUse(name, args as never),
+				(context) => {
+					result = lastToolResult(context.messages);
+					return toolUse("send_to_user", { message: "Done." });
+				},
+			]);
+			await say(`Use ${name}`);
+			expect(result, name).toContain("browser actions are not covered by the control state yet");
+		}
+		// Nothing reached the browser, and nothing was admitted or marked rejected on its account.
+		expect(connects).toBe(0);
+		expect((await stateOf()).requests).toEqual(state.requests);
 	});
 });

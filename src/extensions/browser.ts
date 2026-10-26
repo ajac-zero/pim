@@ -164,7 +164,11 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 		parameters: Type.Object({}),
 		replay: "safe",
 		async execute(_args, api) {
-			await browser.close(windowOf(String(api.conversationId)));
+			try {
+				await browser.close(windowOf(String(api.conversationId)));
+			} catch (error) {
+				return failure(error);
+			}
 			return text("Your window is closed.");
 		},
 	});

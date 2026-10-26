@@ -24,7 +24,8 @@ import { HttpError } from "./http";
  * A computer Pim started (./sprites.ts) has no token: the space starts
  * pim-computer there when it's needed, which wakes it, and lets go of it
  * once it has gone unused for `IDLE_MS`, so it sleeps. The space reaches it
- * through a `ComputerLink`, which the provider makes.
+ * through a `ComputerLink`, which the provider makes; ./cua.ts makes one
+ * too, which nothing uses yet.
  */
 
 /** Where the space takes the computer's connection, behind the Worker's `/api/computer/connect`. */

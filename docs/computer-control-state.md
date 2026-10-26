@@ -71,7 +71,7 @@ The person's live view of a chat's window (`/browser/live`, "Take over" in the a
 
 ### Interfaces for the next stages
 
-- **Provider stage:** decides when a space is opted in and what computer it uses, and is the only caller of `enable`, `resume` and `takeover`, which it may expose only once enforcement and quiescence are independently established.
+- **Provider stage:** decides when a space is opted in and what computer it uses, and is the only caller of `enable`, `resume` and `takeover`, which it may expose only once enforcement and quiescence are independently established. Its transport for a Cua VM behind an operator's bridge, unwired and never calling those, is in `docs/cua-bridge.md`.
 
 ### Open issues
 

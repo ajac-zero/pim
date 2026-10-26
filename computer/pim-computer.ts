@@ -70,7 +70,82 @@ export type Machine = {
 	exec(args: ExecArgs, cwd: string): Promise<ExecResult>;
 	/** The browser the space's agents use, or none where this computer has no Chrome. */
 	readonly browser?: BrowserHost;
+	/**
+	 * Answers a native-app call (`native_tool`), for an embedder that has a
+	 * native-app dispatcher. Absent, the call is unknown here (ENOSYS), as
+	 * before. Only code that builds a `Machine` can give it: no flag or
+	 * environment variable does. It is called once per call, never retried,
+	 * and gets only the request. What it returns must be a `NativeOutcome`
+	 * (./native-outcome.ts), which this file can't import: it is served alone.
+	 * `handle` checks only the outer shape of one of its four kinds; the
+	 * space reads the whole of it, and treats anything else as unknown whether
+	 * the app was acted on. A throw or a bad result is answered as an error with
+	 * a fixed message, which the space also treats as unknown.
+	 */
+	readonly native?: (request: NativeCall) => unknown;
 };
+
+/** The args of a `native_tool` call, as the space makes them (`NativeRequest` in ./native-outcome.ts); `handle` has checked only their shape. */
+export type NativeCall = {
+	readonly owner: string;
+	readonly agentId: string;
+	readonly runId: string;
+	readonly callId: string;
+	readonly tool: string;
+	readonly arguments: Readonly<Record<string, unknown>>;
+};
+
+/** Whether `outcome` has the outer shape of one of the four `NativeOutcome` kinds: exact keys, and a reason a short lower-case word. The space checks the rest, content included. */
+function looksLikeOutcome(outcome: unknown): boolean {
+	if (!isPlain(outcome)) return false;
+	const keys = Object.keys(outcome).sort().join();
+	const word = (value: unknown) => typeof value === "string" && /^[a-z_]{1,32}$/.test(value);
+	switch (outcome.status) {
+		case "rejected":
+		case "unknown":
+			return keys === "reason,status" && word(outcome.reason);
+		case "rpc_error":
+			return keys === "code,status" && Number.isSafeInteger(outcome.code);
+		case "completed":
+			return (
+				keys === "code,content,isError,presentation,status" &&
+				typeof outcome.isError === "boolean" &&
+				(outcome.code === null || typeof outcome.code === "string") &&
+				Array.isArray(outcome.content) &&
+				Array.isArray(outcome.presentation)
+			);
+		default:
+			return false;
+	}
+}
+const NATIVE_KEYS = ["owner", "agentId", "runId", "callId", "tool", "arguments"];
+
+const isPlain = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+
+/** Hands one native-app call to the machine's dispatcher, if it has one, and returns what it answers as plain JSON data. */
+async function nativeTool(machine: Machine, args: Args): Promise<unknown> {
+	if (!machine.native) throw new CallError("This computer doesn't know the call native_tool. Update pim-computer.", "ENOSYS");
+	const keys = Object.keys(args);
+	const shaped =
+		keys.length === NATIVE_KEYS.length &&
+		NATIVE_KEYS.every((key) => keys.includes(key)) &&
+		["owner", "agentId", "runId", "callId", "tool"].every((key) => typeof args[key] === "string") &&
+		isPlain(args.arguments);
+	if (!shaped) throw new CallError("The native-app call is malformed, so nothing was done.", "EINVAL");
+	let text: unknown;
+	try {
+		text = JSON.stringify(await machine.native(args as unknown as NativeCall));
+	} catch {
+		// Nothing of what it threw is passed on: it may hold what the app showed.
+		throw new CallError("The native-app dispatcher failed, so whether it acted is unknown.", "EIO");
+	}
+	const outcome = typeof text === "string" ? (JSON.parse(text) as unknown) : undefined;
+	if (!looksLikeOutcome(outcome)) {
+		throw new CallError("The native-app dispatcher's answer couldn't be read, so whether it acted is unknown.", "EIO");
+	}
+	return outcome;
+}
 
 /**
  * A Chrome on this computer, which the space drives over the DevTools
@@ -425,6 +500,8 @@ export async function handle(machine: Machine, op: string, args: Args): Promise<
 				const cwd = args.cwd === undefined ? machine.root : await local(machine, args.cwd);
 				return await machine.exec(args as ExecArgs, cwd);
 			}
+			case "native_tool":
+				return await nativeTool(machine, args);
 			default:
 				throw new CallError(`This computer doesn't know the call ${op}. Update pim-computer.`, "ENOSYS");
 		}

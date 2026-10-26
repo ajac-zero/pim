@@ -156,7 +156,8 @@ import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import type { ControlEvent } from "./computer-control";
 import { ControlCoordinator, ControlRefused } from "./computer-control-runtime";
-import { COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerLink, type ComputerStatus } from "./computer";
+import { asPersonRead, COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerLink, type ComputerStatus } from "./computer";
+import { bridgeFor, Cua, PROVIDER_KEY, selection } from "./cua";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
 import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
@@ -200,6 +201,9 @@ const TAKE_OVER_UNAVAILABLE =
 	"Taking over the browser isn't available in this space: Pim can't make sure its agents have stopped using it, so nothing you do is sent to it.";
 /** The close code of a browser socket the space refused, or ended, because it is under control state. */
 const TAKE_OVER_REFUSED = 4005;
+/** What changing an operator's computer through Pim's own routes hears: it is the operator's (./cua.ts), and Pim leaves it as it is. */
+const OPERATORS_COMPUTER =
+	"This space's computer is chosen and kept by this Pim's operator: Pim doesn't start, pair, replace or remove it, and changed nothing. Ask the operator.";
 /** How a dashboard names an artifact pinned to it: `artifact:<id>`. */
 const PINNED_ARTIFACT = "artifact:";
 
@@ -486,6 +490,7 @@ export class Pim extends DurableAgent<Env> {
 		meta: this.store,
 		sockets: () => [...this.getConnections(COMPUTER_TAG)],
 		wake: (): Promise<ComputerLink> => {
+			if (this.computer.selected()) return this.#connectCua();
 			const sprites = this.#sprites();
 			const machine = this.computer.machine();
 			if (!sprites || !machine) throw new HttpError(503, "This Pim no longer reaches the computer it started.");
@@ -497,6 +502,7 @@ export class Pim extends DurableAgent<Env> {
 			);
 		},
 		inUse: () => this.browser.watched(),
+		selected: () => selection(this.store.meta(PROVIDER_KEY), this.name),
 	});
 	/** The person's files, on their computer, which they and their agents share (see ./files.ts). */
 	readonly files = new Files(this.computer);
@@ -514,7 +520,11 @@ export class Pim extends DurableAgent<Env> {
 	#control: ControlCoordinator | undefined;
 	/** Sends an agent's request to the computer, if the control state admits it; the agent is the one the server knows `session` talks as. */
 	async #controlled<T>(session: string, requestId: string, send: () => Promise<T>, bindingId?: string): Promise<T> {
-		if (!this.control.enabled) return send();
+		if (!this.control.enabled) {
+			// The operator's computer takes only what the control state admits; without one, nothing.
+			if (this.computer.selected()) throw new ControlRefused("not_enabled", "this space's computer takes only requests its control state admits, and it has none");
+			return send();
+		}
 		// A live view of the browser opened before the space opted in is recorded and ended first, and one that can't be recorded refuses the request.
 		for (const connection of this.getConnections<SocketState>(BROWSER_TAG)) this.#revokeView(connection);
 		const agentId = this.#roleOf(session).agent.id;
@@ -3834,6 +3844,7 @@ export class Pim extends DurableAgent<Env> {
 		if (new URL(request.url).pathname === COMPUTER_PATH) {
 			// The person's computer connects with its own token, which the Worker passes along unchecked.
 			if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return Response.json({ error: "Computers connect with a WebSocket" }, { status: 426 });
+			if (this.computer.selected()) return Response.json({ error: "This space's computer is its operator's: no other computer connects to it" }, { status: 409 });
 			if (!(await this.computer.checkToken(request.headers.get(COMPUTER_TOKEN_HEADER)))) {
 				return Response.json({ error: "This isn't the token of this space's computer" }, { status: 401 });
 			}
@@ -4004,8 +4015,14 @@ export class Pim extends DurableAgent<Env> {
 		// so they go first, and the browser on the person's computer quits.
 		await this.images.deleteAll();
 		await this.artifacts.deleteAllFiles();
-		await this.browser.quit().catch(() => undefined);
-		await this.#removeMachine().catch((error) => console.error("removing the computer's machine", error));
+		if (this.computer.selected()) {
+			// The operator's computer, and any Sprite still on record beside it, are the operator's to remove: Pim lets go and sends nothing there.
+			console.warn(JSON.stringify({ event: "cua.erased", owner: this.name, sprite: this.computer.machine() }));
+			this.computer.disconnect("This space was erased");
+		} else {
+			await this.browser.quit().catch(() => undefined);
+			await this.#removeMachine().catch((error) => console.error("removing the computer's machine", error));
+		}
 		await this.ctx.storage.deleteAll();
 		this.store.markErased(Date.now());
 		await this.ctx.storage.sync();
@@ -4931,12 +4948,13 @@ export class Pim extends DurableAgent<Env> {
 				}),
 		],
 		// The person's computer (see ./computer.ts): whether one is connected, pairing one or starting one, and removing it.
-		["GET", "/computer", () => noStore({ ...this.computer.status(), startable: this.#sprites() !== null })],
+		["GET", "/computer", () => noStore({ ...this.computer.status(), startable: !this.computer.selected() && this.#sprites() !== null })],
 		[
 			"POST",
 			"/computer",
 			async (_params, request) => {
 				this.#assertOpen();
+				if (this.computer.selected()) throw new HttpError(409, OPERATORS_COMPUTER);
 				const body = await request.text();
 				const { managed } = (body ? JSON.parse(body) : {}) as { managed?: unknown };
 				if (this.computer.machine()) throw new HttpError(409, "Pim started this computer: remove it to connect another.");
@@ -4952,6 +4970,7 @@ export class Pim extends DurableAgent<Env> {
 			"DELETE",
 			"/computer",
 			async () => {
+				if (this.computer.selected()) throw new HttpError(409, OPERATORS_COMPUTER);
 				await this.#removeMachine();
 				this.computer.forget();
 				this.#computerChanged();
@@ -4959,15 +4978,22 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 		// Files: the person's, on their computer, which their agents read and write too (see ./files.ts).
-		["GET", "/files", (_params, _request, url) => this.#artifactRequest(url, async () => noStore(await this.files.list(url.searchParams.get("path") ?? FILES_ROOT)))],
+		// Reading is the person's own read (`asPersonRead`), which an operator's computer takes outside agents' requests; writing isn't.
+		[
+			"GET",
+			"/files",
+			(_params, _request, url) => this.#artifactRequest(url, () => asPersonRead(async () => noStore(await this.files.list(url.searchParams.get("path") ?? FILES_ROOT)))),
+		],
 		[
 			"GET",
 			"/files/content",
 			(_params, _request, url) =>
-				this.#artifactRequest(url, async () => {
-					const file = await this.files.read(url.searchParams.get("path"));
-					return new Response(file.body, { headers: fileHeaders(file, url.searchParams.has("download")) });
-				}),
+				this.#artifactRequest(url, () =>
+					asPersonRead(async () => {
+						const file = await this.files.read(url.searchParams.get("path"));
+						return new Response(file.body, { headers: fileHeaders(file, url.searchParams.has("download")) });
+					}),
+				),
 		],
 		[
 			"PUT",
@@ -4994,22 +5020,22 @@ export class Pim extends DurableAgent<Env> {
 				}),
 		],
 		// The agents' browser (see ./browser.ts): what a chat's window shows, a picture of it, closing it. Taking it over is a socket,
-		// which a space under control state refuses (`takeOver: false`).
+		// which a space under control state, or with an operator's computer, refuses (`takeOver: false`). Looking is the person's own read.
 		[
 			"GET",
 			"/browser",
 			async (_params, _request, url) =>
 				noStore({
 					available: this.browser.available,
-					takeOver: !this.control.enabled,
-					page: this.browser.available ? await this.browser.current(await this.#browserWindow(url)) : null,
+					takeOver: this.#takeOver(),
+					page: this.browser.available ? await asPersonRead(async () => this.browser.current(await this.#browserWindow(url))) : null,
 				}),
 		],
 		[
 			"GET",
 			"/browser/screenshot",
 			async (_params, _request, url) => {
-				const png = await this.#browserIn().screenshot(await this.#browserWindow(url));
+				const png = await asPersonRead(async () => this.#browserIn().screenshot(await this.#browserWindow(url)));
 				if (!png) throw new HttpError(404, "The browser is closed");
 				return new Response(png, { headers: { "content-type": "image/png", "cache-control": "no-store, private", "x-content-type-options": "nosniff" } });
 			},
@@ -5018,6 +5044,8 @@ export class Pim extends DurableAgent<Env> {
 			"DELETE",
 			"/browser",
 			async (_params, _request, url) => {
+				// Closing a window is input to the operator's computer, which no person's route sends.
+				if (this.computer.selected()) throw new HttpError(409, "Closing the browser's windows isn't available on this space's computer: only its agents' admitted requests reach it, so nothing was sent.");
 				await this.#browserIn().close(await this.#browserWindow(url));
 				return noStore({ closed: true });
 			},
@@ -5852,6 +5880,26 @@ export class Pim extends DurableAgent<Env> {
 		this.#reinstallApprovals();
 	}
 
+	/** Whether the person can take the browser over: not in a space under control state, nor on an operator's computer, which takes no person's input. */
+	#takeOver(): boolean {
+		return !this.control.enabled && !this.computer.selected();
+	}
+
+	/**
+	 * Connects to the operator's Cua VM through the bridge the Worker's
+	 * `CUA_BRIDGES` secret names for this space, and only this space
+	 * (./cua.ts). Without one, it refuses, and no other computer is tried.
+	 */
+	#connectCua(): Promise<ComputerLink> {
+		if (this.computer.selected() !== "cua") throw new HttpError(503, "This space's choice of computer can't be read, so Pim uses no computer for it.");
+		const bridge = bridgeFor((this.env as unknown as { CUA_BRIDGES?: unknown }).CUA_BRIDGES, this.name);
+		return new Cua(bridge).connect(
+			this.name,
+			(message) => this.#computerSaid(message),
+			() => this.#computerDisconnected(),
+		);
+	}
+
 	/** Where this deployment starts computers for people (./sprites.ts), or null where it starts none. */
 	#sprites(): Sprites | null {
 		const token = (this.env as unknown as { SPRITES_TOKEN?: string }).SPRITES_TOKEN;
@@ -5899,7 +5947,7 @@ export class Pim extends DurableAgent<Env> {
 					return (await this.files.write(target, png)).path;
 				},
 				controlled: (conversation, callId, send) => this.#controlled(conversation, `call:${conversation}:${callId}`, send),
-				takeOver: !this.control.enabled,
+				takeOver: this.#takeOver(),
 			}),
 		);
 	}
@@ -5915,8 +5963,9 @@ export class Pim extends DurableAgent<Env> {
 	#installImageGeneration(): void {
 		const model = this.imageModel();
 		if (!model) return;
-		// Images are saved to the person's files, on their computer: without one, the extension is there with no tool.
-		if (!this.computer.paired()) {
+		// Images are saved to the person's files, on their computer: without one, or on an operator's computer, which
+		// takes no write outside an agent's admitted request, the extension is there with no tool.
+		if (!this.computer.paired() || this.computer.selected()) {
 			this.registry.install(defineExtension({ name: IMAGES_EXTENSION, tools: [] }));
 			return;
 		}
@@ -5997,7 +6046,7 @@ export class Pim extends DurableAgent<Env> {
 		try {
 			if (!this.browser.available) throw new Error("This space has no browser: connect a computer in Settings → Computer.");
 			const session = request ? await this.#browserWindow(new URL(request.url)) : (connection.state?.session ?? ROOT_SESSION);
-			if (this.control.enabled) {
+			if (!this.#takeOver()) {
 				send({ type: "error", message: TAKE_OVER_UNAVAILABLE });
 				connection.close(TAKE_OVER_REFUSED, "Taking over is unavailable in this space");
 				return false;
@@ -6013,8 +6062,8 @@ export class Pim extends DurableAgent<Env> {
 			connection.close(4004, "The window couldn't open");
 			return false;
 		}
-		// The space opted in while it was opening: it is ended as one that was watching before.
-		if (this.control.enabled) {
+		// The space opted in, or its operator chose its computer, while it was opening: it is ended as one that was watching before.
+		if (!this.#takeOver()) {
 			this.#refuseInput(connection);
 			return false;
 		}
@@ -6083,9 +6132,18 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	/** Refuses what a socket taking the browser over sent, in a space under control state, and ends it. */
+	/**
+	 * Refuses what a socket taking the browser over sent, in a space under
+	 * control state or with an operator's computer, and ends it. With no
+	 * control state to record it in, it is just ended.
+	 */
 	#refuseInput(connection: Connection<SocketState>): void {
 		if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify({ type: "error", message: TAKE_OVER_UNAVAILABLE } satisfies BrowserLiveMessage));
+		if (!this.control.enabled) {
+			void this.browser.unwatch(connection.id);
+			connection.close(TAKE_OVER_REFUSED, "Taking over is unavailable in this space");
+			return;
+		}
 		try {
 			this.#revokeView(connection);
 		} catch (error) {
@@ -6112,6 +6170,7 @@ export class Pim extends DurableAgent<Env> {
 
 	async onConnect(connection: Connection<SocketState>, ctx: ConnectionContext): Promise<void> {
 		if (this.#isComputer(connection)) {
+			if (this.#strayComputer(connection)) return;
 			this.computer.connected(connection);
 			return;
 		}
@@ -6135,12 +6194,12 @@ export class Pim extends DurableAgent<Env> {
 
 	async onMessage(connection: Connection<SocketState>, raw: WSMessage): Promise<void> {
 		if (typeof raw !== "string") return;
-		if (this.#isComputer(connection)) return this.#computerSaid(raw);
+		if (this.#isComputer(connection)) return this.#strayComputer(connection) ? undefined : this.#computerSaid(raw);
 		if (this.#isBrowserWatcher(connection)) {
-			// A space that slept since forgot who was watching: they go on where they were, unless it is under control state now.
-			if (!this.control.enabled && !this.browser.watching(connection.id) && !(await this.#watchBrowser(connection))) return;
-			// Checked after any wait, right before it would be sent: under control state nothing a person sends reaches the browser.
-			if (this.control.enabled) return this.#refuseInput(connection);
+			// A space that slept since forgot who was watching: they go on where they were, unless it is under control state, or has an operator's computer, now.
+			if (this.#takeOver() && !this.browser.watching(connection.id) && !(await this.#watchBrowser(connection))) return;
+			// Checked after any wait, right before it would be sent: under control state, or on an operator's computer, nothing a person sends reaches the browser.
+			if (!this.#takeOver()) return this.#refuseInput(connection);
 			try {
 				await this.browser.input(connection.id, JSON.parse(raw) as BrowserInput);
 			} catch (error) {
@@ -6169,7 +6228,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	async onClose(connection: Connection<SocketState>): Promise<void> {
-		if (this.#isComputer(connection)) return this.#computerDisconnected();
+		if (this.#isComputer(connection)) return this.computer.selected() ? undefined : this.#computerDisconnected();
 		if (this.#isBrowserWatcher(connection)) {
 			try {
 				this.#viewClosed(connection);
@@ -6183,10 +6242,22 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	async onError(connection: Connection): Promise<void> {
-		if (this.#isComputer(connection)) return this.#computerDisconnected();
+		if (this.#isComputer(connection)) return this.computer.selected() ? undefined : this.#computerDisconnected();
 		if (this.#isBrowserWatcher(connection)) return this.browser.unwatch(connection.id);
 		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
+	}
+
+	/**
+	 * A paired computer's connection, in a space whose operator has since
+	 * chosen its computer: nothing it says is taken, and it is closed, as
+	 * one another connection replaced. Its token stays on record, for the
+	 * operator to resolve.
+	 */
+	#strayComputer(connection: Connection): boolean {
+		if (!this.computer.selected()) return false;
+		connection.close(4409, "This space's computer is its operator's");
+		return true;
 	}
 
 	/** A message from the computer: what it is, when it has just connected, or an answer. */
@@ -6201,6 +6272,8 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	#computerConnected(): void {
 		this.broadcastMessage({ type: "computer" });
+		// An operator's computer takes no write outside an agent's admitted request, so files kept in the space stay there.
+		if (this.computer.selected()) return;
 		void this.keepAliveWhile(async () => {
 			try {
 				if (!(await this.legacyFiles.any())) return;

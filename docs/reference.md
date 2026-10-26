@@ -190,6 +190,10 @@ pnpm wrangler secret put SPRITES_TOKEN
 
 Sprites bill for the CPU, memory and storage they use while running, and only for storage while asleep (see [Sprites' pricing](https://sprites.dev)). The token can create and delete every Sprite in the organization, so give Pim an organization of its own.
 
+### Computers an operator keeps
+
+An operator can give a space a Cua VM of theirs instead, reached through a bridge they run: a marker in the space's metadata chooses it, and the `CUA_BRIDGES` secret says where its bridge is. Such a space uses no other computer, only agents' requests its control state admits reach it, and Pim never starts, removes or takes it over. See `docs/cua-bridge.md`.
+
 ### Traces
 
 Pim sends [OpenTelemetry](https://opentelemetry.io/) traces of what the agents do to any backend that takes OTLP over HTTP as JSON: Langfuse, Arize Phoenix, Honeycomb, Grafana, Jaeger, or an OpenTelemetry Collector. They follow the [semantic conventions for generative AI](https://github.com/open-telemetry/semantic-conventions-genai): each run of a conversation is an `invoke_agent` span, each model request in it a `chat` span with the model, finish reason and tokens, and each tool call an `execute_tool` span. Work a tool call starts in another conversation is that call's child, so one trace holds everything a message led to: the tasks it handed out, and the majordomo's review of an approval request, with its decision.
@@ -266,7 +270,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | DELETE | `/artifacts/:id` | | Deletes it with every version |
 | PUT | `/artifacts/:id/circles` | `{ circles }` | Shares it with those circles; `[]` stops sharing it |
 | GET | `/shared-artifacts`, `/shared-artifacts/:host/:id` | | Artifacts others share with you, as their latest versions; `…/versions/:v`, `…/frame`, `…/bridge` and `…/grants` work as for your own |
-| GET | `/computer` | | `{ state, pairedAt, computer }`: `state` is `none`, `offline` or `online`; `computer` is what it last said about itself (`hostname`, `platform`, `user`, `root`, …) |
+| GET | `/computer` | | `{ state, pairedAt, computer }`: `state` is `none`, `offline` or `online`; `computer` is what it last said about itself (`hostname`, `platform`, `user`, `root`, …); `provider` is `cua` for a space whose operator chose its computer, or `unreadable` when that choice can't be read (`docs/cua-bridge.md`) |
 | POST | `/computer` | | `201` with the status and a `token` for `pim-computer`, shown only here; replaces any computer the space had |
 | DELETE | `/computer` | | Disconnects the computer and forgets its token; its files stay on it |
 | GET | `/computer/connect` | `Authorization: Bearer <computer token>`, as a WebSocket | Where `pim-computer` connects; only the token's own space answers |

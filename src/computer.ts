@@ -1,8 +1,10 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
 import type { Connection } from "agents";
 import type { ExecArgs, ExecResult } from "../computer/pim-computer";
 import { digestHex } from "./auth/store";
 import { currentTrace, type DispatchTrace } from "./computer-control-runtime";
+import type { Selection } from "./cua";
 import { HttpError } from "./http";
 
 /**
@@ -24,8 +26,14 @@ import { HttpError } from "./http";
  * A computer Pim started (./sprites.ts) has no token: the space starts
  * pim-computer there when it's needed, which wakes it, and lets go of it
  * once it has gone unused for `IDLE_MS`, so it sleeps. The space reaches it
- * through a `ComputerLink`, which the provider makes; ./cua.ts makes one
- * too, which nothing uses yet.
+ * through a `ComputerLink`, which the provider makes.
+ *
+ * A space whose operator chose its computer (./cua.ts) has that one, and
+ * no other: a Cua VM the operator keeps, which the space wakes and lets go
+ * of as it does a Sprite, but neither started nor can remove. Only agents'
+ * requests its control state admitted (./computer-control-runtime.ts), and
+ * the person's reads (`asPersonRead`), reach it; a paired computer's
+ * connection, or a Sprite on record, is never used in its place.
  */
 
 /** Where the space takes the computer's connection, behind the Worker's `/api/computer/connect`. */
@@ -55,6 +63,18 @@ const TOKEN_KEY = "computer_token";
 const MACHINE_KEY = "computer_machine";
 const PAIRED_AT_KEY = "computer_paired_at";
 const INFO_KEY = "computer_info";
+/** What the operator's computer said about itself, kept apart, so a paired computer's never stands for it. */
+const SELECTED_INFO_KEY = "computer_info_selected";
+
+/** A person's reads of their own files and browser, through the routes that only read (`asPersonRead`). */
+const personReads = new AsyncLocalStorage<true>();
+/** The calls a person's read may make on the operator's computer outside any agent's request: they look, and change nothing there. */
+const PERSON_READS: ReadonlySet<string> = new Set(["stat", "read", "readdir", "browser_status"]);
+
+/** Runs `read` as the person's own read, which the operator's computer takes outside any agent's request (see `Computer`). */
+export function asPersonRead<T>(read: () => T): T {
+	return personReads.run(true, read);
+}
 
 /** The owner a computer's token names. Whether it is really theirs is for their space to say. */
 export function computerTokenOwner(token: string): string | null {
@@ -83,6 +103,12 @@ export type ComputerStatus = {
 	readonly managed: boolean;
 	readonly pairedAt: number | null;
 	readonly computer: ComputerInfo | null;
+	/**
+	 * Set when the space's operator chose its computer (./cua.ts): `cua`, a
+	 * Cua VM that Pim neither started nor can remove, or `unreadable`, a
+	 * choice Pim can't read, when it uses no computer.
+	 */
+	readonly provider?: Selection;
 };
 
 /**
@@ -155,6 +181,8 @@ export class Computer {
 	readonly #wake: () => Promise<ComputerLink>;
 	/** Whether the space is using the computer in a way it doesn't see itself, such as someone watching its browser. */
 	readonly #inUse: () => boolean;
+	/** The computer the space's operator chose, which is then its only one; null for paired computers and Sprites. */
+	readonly #selected: () => Selection | null;
 	/** pim-computer on the computer Pim started, while the space holds on to it. */
 	#link: ComputerLink | null = null;
 	#waking: Promise<void> | undefined;
@@ -163,11 +191,17 @@ export class Computer {
 	#usedAt = 0;
 	#idle: ReturnType<typeof setTimeout> | undefined;
 
-	constructor(options: { meta: Meta; sockets: () => Connection[]; wake: () => Promise<ComputerLink>; inUse: () => boolean }) {
+	constructor(options: { meta: Meta; sockets: () => Connection[]; wake: () => Promise<ComputerLink>; inUse: () => boolean; selected?: () => Selection | null }) {
 		this.#meta = options.meta;
 		this.#sockets = options.sockets;
 		this.#wake = options.wake;
 		this.#inUse = options.inUse;
+		this.#selected = options.selected ?? (() => null);
+	}
+
+	/** The computer the space's operator chose, if any (./cua.ts). */
+	selected(): Selection | null {
+		return this.#selected();
 	}
 
 	/** The machine of the computer Pim started, or null for one the person brought. */
@@ -209,17 +243,25 @@ export class Computer {
 		this.#failPending();
 	}
 
-	/** Whether a computer is paired, online or not: one the person brought, with its token, or one Pim started. */
+	/** Whether a computer is paired, online or not: one the person brought, with its token, one Pim started, or the operator's. */
 	paired(): boolean {
-		return this.#meta.meta(TOKEN_KEY) !== undefined || this.machine() !== null;
+		return this.#selected() !== null || this.#meta.meta(TOKEN_KEY) !== undefined || this.machine() !== null;
 	}
 
 	#socket(): Pick<Connection, "send"> | undefined {
 		if (this.#link?.readyState === WebSocket.OPEN) return this.#link;
+		// A paired computer's connection never stands in for the operator's computer.
+		if (this.#selected()) return undefined;
 		return this.#sockets().find((socket) => socket.readyState === WebSocket.OPEN);
 	}
 
 	status(): ComputerStatus {
+		const selected = this.#selected();
+		if (selected) {
+			const info = selected === "cua" ? this.#meta.meta(SELECTED_INFO_KEY) : undefined;
+			const state = this.#socket() ? "online" : "offline";
+			return { state, managed: false, pairedAt: null, computer: info ? (JSON.parse(info) as ComputerInfo) : null, provider: selected };
+		}
 		if (!this.paired()) return { state: "none", managed: false, pairedAt: null, computer: null };
 		const info = this.#meta.meta(INFO_KEY);
 		return {
@@ -306,7 +348,7 @@ export class Computer {
 				browser: typeof hello.browser === "string" ? hello.browser : null,
 				connectedAt: Date.now(),
 			};
-			this.#meta.setMeta(INFO_KEY, JSON.stringify(info));
+			this.#meta.setMeta(this.#selected() ? SELECTED_INFO_KEY : INFO_KEY, JSON.stringify(info));
 			for (const arrived of this.#arrivals.splice(0)) arrived(true);
 			return;
 		}
@@ -341,6 +383,7 @@ export class Computer {
 	/** Calls the computer and waits for its answer; one Pim started wakes first, if it's asleep. */
 	async call<T = unknown>(op: string, args: Record<string, unknown>, timeoutMs = FILE_CALL_MS, counts = true): Promise<T> {
 		if (!this.paired()) throw new HttpError(404, "No computer is connected. The person can connect one in Settings → Computer.");
+		this.#admit(op);
 		await this.wake();
 		const socket = this.#socket();
 		if (!socket) throw new HttpError(503, "The computer is offline: pim-computer isn't connected. Ask the person to start it again.");
@@ -367,12 +410,35 @@ export class Computer {
 	}
 
 	/**
-	 * Wakes the computer Pim started, if it's asleep, by starting
-	 * pim-computer there, and waits until it says what it is; once for every
-	 * call that finds it asleep.
+	 * On the operator's computer, refuses `op` before anything is woken or
+	 * sent unless an agent's request the control state admitted makes it, or
+	 * it is one of the person's reads; and refuses everything while the
+	 * operator's choice can't be read, or a paired computer or a Sprite is
+	 * still on record beside it, which Pim leaves for the operator to resolve.
+	 */
+	#admit(op: string): void {
+		const selected = this.#selected();
+		if (!selected) return;
+		if (selected === "unreadable") {
+			throw new HttpError(503, "This space's choice of computer can't be read, so Pim uses no computer for it and sent nothing. Its operator must repair it.");
+		}
+		if (this.#meta.meta(TOKEN_KEY) !== undefined || this.machine() !== null) {
+			throw new HttpError(
+				409,
+				"This space's computer is its operator's Cua VM, but a paired computer or a computer Pim started is still on record, so Pim uses none of them and sent nothing. Its operator must resolve it.",
+			);
+		}
+		if (currentTrace() || (personReads.getStore() && PERSON_READS.has(op))) return;
+		throw new HttpError(409, "This space's Cua computer takes only agents' requests its control state admits, and the person's reads, so nothing was sent to it.");
+	}
+
+	/**
+	 * Wakes the computer Pim started, or the operator's, if it's asleep, by
+	 * starting pim-computer there, and waits until it says what it is; once
+	 * for every call that finds it asleep.
 	 */
 	wake(): Promise<void> {
-		if (this.#socket() || !this.machine()) return Promise.resolve();
+		if (this.#socket() || (!this.machine() && !this.#selected())) return Promise.resolve();
 		this.#waking ??= (async () => {
 			const arrived = new Promise<boolean>((resolve) => {
 				const timer = setTimeout(() => resolve(false), WAKE_MS);
@@ -508,7 +574,8 @@ export class Computer {
 				offset += bytes.byteLength;
 				return { bytes, done: bytes.byteLength === 0 || offset >= Math.min(size, end) };
 			};
-			// The first part is read now, so a missing file fails here and not in the stream.
+			// The first part is read now, so a missing file fails here and not in the stream; the rest as part of the same request, or the same person's read.
+			const later = AsyncLocalStorage.snapshot();
 			const first = await read();
 			let done = first.done;
 			return new ReadableStream<Uint8Array>({
@@ -517,7 +584,7 @@ export class Computer {
 					if (done) controller.close();
 				},
 				async pull(controller) {
-					const next = await read();
+					const next = await later(read);
 					done = next.done;
 					if (next.bytes.byteLength > 0) controller.enqueue(next.bytes);
 					if (done) controller.close();

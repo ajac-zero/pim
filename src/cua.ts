@@ -3,7 +3,8 @@ import { HttpError } from "./http";
 
 /**
  * A space's computer on a Cua VM, reached through a bridge its operator
- * runs (unwired: nothing in Pim calls this yet; see docs/cua-bridge.md).
+ * runs (see docs/cua-bridge.md). A space uses it only when its operator
+ * chose it (`PROVIDER_KEY`), and then no other computer.
  *
  * The operator keeps one persistent VM per space, where pim-computer runs
  * as the one non-root desktop user every agent of the space shares, and
@@ -33,6 +34,56 @@ export type CuaBridge = {
 	/** The bridge's bearer token, which goes only in the Authorization header. */
 	readonly token: string;
 };
+
+/**
+ * Where a space keeps its operator's choice of computer, in its own
+ * metadata (`pim_meta`). Only the operator writes it: no route, tool or
+ * setting of Pim's does. `{"provider":"cua","space":"<owner>"}`, exactly,
+ * makes the space's computer its Cua VM; anything else stored there can't
+ * be read, and the space then uses no computer at all.
+ */
+export const PROVIDER_KEY = "computer_provider";
+
+/** What a space's operator chose: its Cua VM, or something Pim can't read. */
+export type Selection = "cua" | "unreadable";
+
+/** The operator's choice, from what `PROVIDER_KEY` holds in `space`; null when it holds nothing, and the space keeps paired computers and Sprites. */
+export function selection(stored: string | undefined, space: string): Selection | null {
+	if (stored === undefined) return null;
+	let value: unknown;
+	try {
+		value = JSON.parse(stored);
+	} catch {
+		return "unreadable";
+	}
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return "unreadable";
+	const { provider, space: named, ...rest } = value as Record<string, unknown>;
+	return provider === "cua" && named === space && Object.keys(rest).length === 0 ? "cua" : "unreadable";
+}
+
+/**
+ * `space`'s bridge, from `secret`: the Worker secret `CUA_BRIDGES`, which
+ * holds every Cua space's bridge by owner,
+ * `{"<owner>":{"url":"https://…","token":"…"}}`, and is the only place
+ * Pim learns a bridge from. One that is missing, or that Pim can't read,
+ * refuses, saying nothing of what the secret holds; `Cua.connect` checks
+ * the address and token further.
+ */
+export function bridgeFor(secret: unknown, space: string): CuaBridge {
+	let entry: unknown;
+	try {
+		const bridges: unknown = typeof secret === "string" ? JSON.parse(secret) : null;
+		if (typeof bridges === "object" && bridges !== null && Object.hasOwn(bridges, space)) entry = (bridges as Record<string, unknown>)[space];
+	} catch {
+		// Refused below.
+	}
+	const { url, token, ...rest } = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
+	if (typeof url !== "string" || typeof token !== "string" || Object.keys(rest).length > 0) {
+		console.error(JSON.stringify({ event: "cua.unconfigured" }));
+		throw new HttpError(503, "This Pim has no usable bridge for this space's Cua computer, so nothing was sent to it. Its operator must set one up.");
+	}
+	return { space, url, token };
+}
 
 /** The header that names the space to the bridge, and that the bridge names it back in when it takes the connection. */
 export const SPACE_HEADER = "x-pim-space";

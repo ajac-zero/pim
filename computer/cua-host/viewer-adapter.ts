@@ -1100,15 +1100,27 @@ export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapte
 			return grpcError(early !== null && early !== "0" ? upstreamCode(Number(early)) : Code.Unavailable);
 		}
 		const source = reader;
+		/**
+		 * Whether the stream must stop: a shutdown was requested, or the
+		 * launch's clock says its deadline has passed (which requests one).
+		 * Read around every read of spacesd's body, not only around whole
+		 * frames, so fragments of a frame that arrive late end it too. A stop
+		 * found here is not the body's end: `settled` is left to the body.
+		 */
+		const stopped = () => requested || !launch.lifetime.live();
+		const stop = () => new Error("The presence stream was stopped.");
 		const next = frameReader(async () => {
+			if (stopped()) throw stop();
+			let result: ReadableStreamReadResult<Uint8Array>;
 			try {
-				const result = await source.read();
-				if (result.done) settled = true;
-				return result;
+				result = await source.read();
 			} catch (error) {
 				settled = true;
 				throw error;
 			}
+			if (result.done) settled = true;
+			if (stopped()) throw stop();
+			return result;
 		}, MAX_PRESENCE_MESSAGE_BYTES);
 		const body = new ReadableStream<Uint8Array>({
 			start: (controller) => {

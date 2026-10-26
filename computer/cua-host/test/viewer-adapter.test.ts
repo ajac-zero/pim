@@ -1564,4 +1564,75 @@ describe("the Cua viewer adapter", () => {
 		assert.equal(upstream.sockets.length, 0);
 		assert.equal(l.handle.status().phase, "closed");
 	});
+
+	it("reads the launch's clock around every read of a presence body, so fragments of a frame after the deadline end the stream", async () => {
+		// Timers that never fire: only the clock tells the stream its launch has ended.
+		const inert: Timers = { set: () => 1, clear: () => {} };
+		let now = 0;
+		let body!: { controller: ReadableStreamDefaultController<Uint8Array>; cancels: number; signal: AbortSignal };
+		let cancel: () => Promise<void> = () => Promise.resolve();
+		const wrap = (fetch: Fetch): Fetch => async (url, init) => {
+			if (!url.endsWith(".PresenceService/Join")) return fetch(url, init);
+			const record = { cancels: 0, signal: init.signal! } as typeof body;
+			body = record;
+			const stream = new ReadableStream<Uint8Array>({
+				start: (controller) => {
+					record.controller = controller;
+				},
+				cancel: () => {
+					record.cancels++;
+					return cancel();
+				},
+			});
+			return new Response(stream, { status: 200, headers: { "content-type": GRPC } });
+		};
+		const { adapter } = setup({ clock: () => now, timers: inert }, Date.now, wrap);
+		const start = async () => {
+			now = 0;
+			const l = await launch(adapter, 60_000);
+			const response = await adapter.fetch(new Request(`${PAGE}/${l.id}/cua.env.v1.PresenceService/Join`, { method: "POST", headers: { "content-type": GRPC, "x-cua-env-authorization": `Bearer ${l.credential}` }, body: frame(0, new Uint8Array()) }));
+			void response.body!.getReader().read().catch(() => {});
+			await settle();
+			return l;
+		};
+		const presence = (l: Launch) => l.handle.status().transports["presence-rpc"];
+
+		// Half a header before the deadline, the other half's first byte after it: the read that brings it ends the stream.
+		const a = await start();
+		body.controller.enqueue(new Uint8Array([0]));
+		await settle();
+		now = 60_000;
+		body.controller.enqueue(new Uint8Array([0]));
+		await settle();
+		assert.deepEqual([body.cancels, body.signal.aborted], [1, true]);
+		assert.equal(a.handle.status().reason, "expired");
+		await until(() => a.handle.status().phase === "closed", "the cancelled body to report closed");
+
+		// A header and part of a payload before the deadline, more of it after: a pending cancel keeps the stream closing until it finishes.
+		let release!: () => void;
+		cancel = () => new Promise((resolve) => (release = resolve));
+		const b = await start();
+		const header = new Uint8Array(5);
+		new DataView(header.buffer).setUint32(1, 10);
+		body.controller.enqueue(new Uint8Array([...header, 1, 2, 3]));
+		await settle();
+		now = 60_000;
+		body.controller.enqueue(new Uint8Array([4, 5]));
+		await settle();
+		assert.deepEqual([body.cancels, body.signal.aborted, b.handle.status().reason], [1, true, "expired"]);
+		assert.deepEqual([b.handle.status().phase, presence(b)], ["closing", 1]);
+		release();
+		await until(() => b.handle.status().phase === "closed", "the pending cancel to finish");
+
+		// The same with a cancel that fails: the stream stays closing, and unconfirmed.
+		cancel = () => Promise.reject(new Error("cancel failed"));
+		const c = await start();
+		body.controller.enqueue(new Uint8Array([...header, 1]));
+		await settle();
+		now = 60_000;
+		body.controller.enqueue(new Uint8Array([2]));
+		await settle();
+		assert.deepEqual([body.cancels, c.handle.status().reason], [1, "expired"]);
+		assert.deepEqual([c.handle.status().phase, presence(c), c.handle.status().unconfirmed], ["closing", 1, 1]);
+	});
 });

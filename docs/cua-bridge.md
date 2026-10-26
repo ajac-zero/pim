@@ -149,17 +149,35 @@ What it does not show: a real network upgrade, a VM, a host adapter or session l
 
 ## Qualifying a bridge against the preview
 
-`preview/cua-fixture.ts` makes one space of a local preview (`pnpm preview`, `wrangler.preview.jsonc`, never deployed) use an operator's Cua computer, so a bridge can be tried against a real Pim. For that one space it does what only tests do otherwise: stores the marker, enables the control state, and gives the agent a lease (`preview-cua-fixture`). The preview's `Pim` (`preview/worker.ts`) runs it from its constructor, inside `blockConcurrencyWhile`, so it is done before the space answers anything or sets up its agents' tools. It adds no route, RPC method, tool or setting, and nothing in `src/` calls it; a deployment can't run it, since its Worker is `src/index.ts`. Approvals and permissions are unchanged: an agent's `shell` still files an approval, which the preview model, as a majordomo reviewing it, always leaves to the person.
+`preview/cua-fixture.ts` makes one space of a local preview (`pnpm preview`, `wrangler.preview.jsonc`, never deployed) use an operator's Cua computer, so a bridge can be tried against a real Pim. For that one space it does what only tests do otherwise: stores the marker, enables the control state, and gives the agent a lease (`preview-cua-fixture`). The preview's `Pim` (`preview/worker.ts`) runs it in its constructor, before the space answers anything or sets up its agents' tools. It adds no route, RPC method, tool or setting, and nothing in `src/` calls it; a deployment can't run it, since its Worker is `src/index.ts`. Approvals and permissions are unchanged: an agent's `shell` still files an approval, which the preview model, as a majordomo reviewing it, always leaves to the person.
 
 ### What it does, once
 
-It runs only when the preview's environment has `PREVIEW_CUA_FIXTURE=seed` (exactly) and names the space's owner ID in `PREVIEW_CUA_FIXTURE_OWNER`. Every other space starts as it always does. For the space named:
+It seeds only when the preview's environment has `PREVIEW_CUA_FIXTURE=seed` (exactly) and names the space's owner ID in `PREVIEW_CUA_FIXTURE_OWNER`. For the space named:
 
-1. **Checked first, changing nothing.** Its owner profile must be there (the person has signed in once); `CUA_BRIDGES` must have an entry for exactly that owner that `Cua.connect` would try (HTTPS, no credentials, query or fragment, a well-formed token, no other field); and the space must hold no marker, no control state of any kind (readable or not, human-owned, blocked, another space's), no paired computer and no Sprite. A refusal logs `{"event":"preview.cua_fixture","space":"o_…","outcome":"refused","reason":…}` (`owner`, `space`, `bridge`, `marker`, `control`, `computer`, `record`) and is checked again at the next start.
-2. **`seeding`, on disk.** `preview_cua_fixture` is stored as `seeding`, and the fixture waits until it is on disk (`storage.sync()`). From here it never runs for this space again.
-3. **One transaction.** The marker, the control state (enabled, then resumed under the lease), and `preview_cua_fixture` as `seeded`: all of it is stored, or none of it. It writes through a `ControlCoordinator` of its own, so a write that fails latches that one and is rolled back with it; the space's own coordinator is made after and reads only what was stored. Logged as `outcome: "seeded"`.
+1. **Checked first, changing nothing.** Its owner profile must be there (the person has signed in once); `CUA_BRIDGES` must have an entry for exactly that owner that `Cua.connect` would try (HTTPS, no credentials, query or fragment, a well-formed token, no other field); and the space must hold no marker, no control state of any kind (readable or not, human-owned, blocked, another space's), no paired computer and no Sprite.
+2. **`seeding`.** `preview_cua_fixture` is stored as `seeding`. From here on it never seeds this space again.
+3. **One transaction.** The marker, the control state (enabled, then resumed under the lease), and `preview_cua_fixture` as `seeded`: all of it is stored, or none of it. It writes through a `ControlCoordinator` of its own, so a write that fails latches that one and is rolled back with it.
 
-At every later start `seeded` does nothing (`already-seeded`): the space's marker and control state are its own from then on, whatever they have become. Nothing is re-enabled, resumed, renewed or repaired, so a request left `unknown`, a blocked state, a takeover or a removed control state stays as it is. `seeding` without `seeded` means a start stopped or failed between steps 2 and 3 (`failed` with reason `seed`, then `interrupted` at every start after): the space holds no marker and no control state, reaches no operator's computer, and the fixture does nothing more for it. The one failure it can't record is step 2's own write failing (`failed`, reason `record`, nothing stored); the next start then is a first start. If its wait fails after the write, the record may be on disk, and a later start is `interrupted`. After a failure or an interruption, tear down and start again with a fresh preview (below).
+All three happen in one synchronous turn of the constructor. The Durable Object's storage commits a turn's writes together, so a process that dies before the turn ends, or a commit that fails, stores none of them.
+
+### When the space starts
+
+**The space named starts only if it was seeded.** A space the fixture refused, failed on, or began on and didn't finish isn't constructed: its constructor throws, so every request, RPC call, alarm and socket event to it fails, and its agents, the person's routes, a paired computer's connection, a Sprite start and a live view of the browser all reach nothing. This matters because a space with neither a marker nor control state isn't a space with no computer: it is a space on the default computer, which pairs computers, starts Sprites wherever the deployment can, and lets the person take the browser over.
+
+| Outcome (logged as `{"event":"preview.cua_fixture","space":"o_…","outcome":…}`) | Stored | Starts |
+| --- | --- | --- |
+| `seeded`: this start seeded it | marker, control state, `seeded` | Yes |
+| `already-seeded`: seeded before, its marker still the one stored | unchanged | Yes |
+| `refused`, `owner`: the environment names no owner ID it could be | nothing | Yes, every space as usual: none is named |
+| `refused`, any other reason (`space`, `bridge`, `marker`, `control`, `computer`, `record`) | nothing | No, while the environment names it (except `record` and `marker` on a seeded space: never) |
+| `failed`, `seed`: the transaction failed | `seeding` only | No, and never again |
+| `interrupted`: `seeding` found at a start | `seeding` only | No, and never again |
+| `failed`, `record`: `seeding` couldn't be stored | nothing | Not this start; the next is a first start |
+
+The record is read at every start of every space, opted in or not, and only the record: a space without one is untouched unless the environment names it. So turning the fixture off doesn't let a space it began on start on the default computer, and a seeded space whose marker has since gone (`refused`, `marker`) doesn't either. A seeded space with its marker starts as it is at every later start, opted in or not: its control state is its own from then on, and nothing is re-enabled, resumed, renewed or repaired, so a request left `unknown`, a blocked state, a takeover or a removed control state stays as it is.
+
+**The one failure it can't record** is a start that stored nothing: the `seeding` write failing, the turn's commit failing, or the process dying before the turn ends. The space that failed isn't served, but nothing says a seed was tried, so the next start, if the environment still names the space, is a first start and seeds it if it can. A refusal is likewise checked again at the next start: it changed nothing.
 
 The logs carry fixed words and the space's owner ID, never the bridge's address or token, nor what failed.
 
@@ -186,11 +204,11 @@ amp orb service stop preview   # or stop `pnpm preview` however it runs
 pnpm preview --env-file "$HOME/.config/pim-preview-cua/preview.env"
 ```
 
-With `--env-file`, Wrangler reads only that file, not `.dev.vars`, and binds its values as secrets, which it doesn't print; put any other variable the preview needs (such as the trace exporter's) in the same file. The space is seeded the first time anything reaches it after the restart, such as the person opening the app: look for `"outcome":"seeded"` in the preview's output. Keep the person's approval policy at the preview's default (`majordomo`) or set it to `explicit` in Settings: `auto` approves an agent's request after 30 seconds.
+With `--env-file`, Wrangler reads only that file, not `.dev.vars`, and binds its values as secrets, which it doesn't print; put any other variable the preview needs (such as the trace exporter's) in the same file. The space is seeded the first time anything reaches it after the restart, such as the person opening the app: look for `"outcome":"seeded"` in the preview's output. Anything else leaves that person's space unusable (the app shows errors) until the cause is fixed, for a refusal, or the preview is torn down. Keep the person's approval policy at the preview's default (`majordomo`) or set it to `explicit` in Settings: `auto` approves an agent's request after 30 seconds.
 
-### Tearing it down
+### Restarting and tearing down
 
-There is no undo in place: nothing in Pim removes a marker, and the fixture never clears what it stored. Tear the whole preview down:
+Restarting the preview, with or without the file, changes nothing the fixture stored: a seeded space starts as it is, and a space it began on and didn't finish stays unstarted. Nothing resumes, renews or repairs either, and Pim has no route that does. There is no undo in place: nothing in Pim removes a marker or the fixture's record. Tear the whole preview down:
 
 ```sh
 # Stop the preview started with the file (Ctrl-C in its terminal), then:
@@ -203,6 +221,13 @@ On the VM, stop the bridge and the endpoint, and delete the bridge's token, whic
 
 ### What it shows, and what it doesn't
 
-Its tests (`test/preview-cua-fixture.test.ts`) bind the preview's own `Pim` in the test runtime (`PREVIEW_PIM`, in `vitest.config.ts` only) and start a space again by evicting its Durable Object (`evictDurableObject`), so the constructor runs anew over the stored state: a real restart of one object in workerd, not of a running `wrangler dev`. They show the refusals, the seed, a later start leaving an unknown request, a takeover or a removed control state as they are, a failure at each write leaving only `seeding` and the space reaching no computer, and the preview model's `shell` call reaching the owner's relay once, only after the person approves it. Their bridge is the relay behind an injected `fetch`, with in-memory sessions that run nothing.
+Its tests (`test/preview-cua-fixture.test.ts`) bind the preview's own `Pim` in the test runtime (`PREVIEW_PIM`, in `vitest.config.ts` only) and start a space again by evicting its Durable Object (`evictDurableObject`), so the constructor runs anew over the stored state: a real restart of one object in workerd, not of a running `wrangler dev`. Failures are injected into that constructor's writes (`PimStore.prototype.setMeta`), and the test environment configures Sprites. They show:
 
-Not shown, and left to the qualification itself: the preview's `fetch` reaching a real bridge over HTTPS, the `101` response's `x-pim-space` header as `wrangler dev` exposes it, giving up after `CONNECT_MS` and aborting against a real network, and a restart of the whole running preview.
+- the space named not starting, with nothing stored, for each unusable bridge and a missing profile, and seeding once the bridge is fixed; nor, with nothing changed, for each existing marker, control state, computer or unknown record;
+- after a refusal, a failed transaction (at each of its four writes), an interruption found at a later start (opted in or not), a seeded space whose marker is gone, and a `seeding` write that failed: starting or pairing a computer, a paired computer connecting, reading the person's files, a live view of the browser, a message asking for `shell`, approving, the alarm and an RPC call all refused before the space exists, and no request at all leaving the isolate, to Sprites or anywhere;
+- the seed, other spaces untouched, a seeded space starting as it is (an `unknown` request still blocking, the person still in control, a removed control state still removed), with the fixture on or off;
+- the preview model's `shell` call reaching the owner's relay once, only after the person approves it.
+
+Their bridge is the relay behind an injected `fetch`, with in-memory sessions that run nothing. To read the storage of a space that doesn't start, the tests make one instance with the fixture off and the record hidden from its constructor; that instance is theirs, not the fixture's. Workerd logs each refused construction as an uncaught exception; the tests don't fail on it.
+
+Not shown, and left to the qualification itself: the preview's `fetch` reaching a real bridge over HTTPS, the `101` response's `x-pim-space` header as `wrangler dev` exposes it, giving up after `CONNECT_MS` and aborting against a real network, a restart of the whole running preview, and that the storage commits a constructor's writes made before it throws as the local runtime did in these tests.

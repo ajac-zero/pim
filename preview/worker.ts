@@ -10,7 +10,7 @@ import { serve } from "../src/gateway";
 import { Pim as RealPim } from "../src/pim";
 import { INTRODUCTION } from "../src/transcript";
 import { Authenticator } from "../test/webauthn";
-import { seedCuaFixture } from "./cua-fixture";
+import { seedCuaFixture, starts } from "./cua-fixture";
 
 export { Auth, Directory, Gallery } from "../src/index";
 
@@ -173,14 +173,12 @@ const preview = previewProvider();
 export class Pim extends RealPim {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
-		// The one space the preview's private environment names gets its operator's Cua computer, once (./cua-fixture.ts).
-		// Before the space answers anything or sets up its agents' tools; it never throws, so the space starts either way.
-		void ctx.blockConcurrencyWhile(() =>
-			seedCuaFixture(
-				{ name: ctx.id.name, meta: this.store, transaction: (fn) => ctx.storage.transactionSync(fn), sync: () => ctx.storage.sync() },
-				env as unknown as Record<string, unknown>,
-			),
-		);
+		// The one space the preview's private environment names gets its operator's Cua computer, once (./cua-fixture.ts),
+		// before the space answers anything or sets up its agents' tools. A space it was asked to seed and didn't, or that it
+		// began on and didn't finish, isn't constructed: every request, call, alarm and socket event to it fails, so it reaches
+		// no computer, default or not, and takes no one's input.
+		const fixture = seedCuaFixture({ name: ctx.id.name, meta: this.store, transaction: (fn) => ctx.storage.transactionSync(fn) }, env as unknown as Record<string, unknown>);
+		if (!starts(fixture)) throw new Error("This preview space's Cua fixture didn't seed it, so it doesn't start (see docs/cua-bridge.md).");
 	}
 
 	/** The stand-in model, besides the real providers: the ChatGPT plan, and those people add, such as a model on this machine. */

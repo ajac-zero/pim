@@ -1,14 +1,14 @@
 import * as fs from "node:fs/promises";
 import { getAgentByName } from "agents";
-import { env, evictDurableObject, runInDurableObject } from "cloudflare:test";
+import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Relay, type Session, type SessionEvents, serveWithWebSocketPair } from "../computer/cua-bridge";
 import { Link, type Machine } from "../computer/pim-computer";
-import { FIXTURE_KEY, LEASE_ID, seedCuaFixture } from "../preview/cua-fixture";
+import { FIXTURE_KEY, LEASE_ID } from "../preview/cua-fixture";
 import { currentTrace } from "../src/computer-control-runtime";
 import { PROVIDER_KEY } from "../src/cua";
 import { OWNER_HEADER, Pim as RealPim } from "../src/pim";
-import type { Approval } from "../src/store";
+import { type Approval, PimStore } from "../src/store";
 import { PreviewPim } from "./worker";
 
 /**
@@ -18,9 +18,12 @@ import { PreviewPim } from "./worker";
  * Durable Object is evicted (`evictDurableObject`, which ends its instance
  * and keeps its storage) and the next call makes a new instance, whose
  * constructor runs the fixture. That is a restart of one object in the
- * local test runtime, not of a running preview (`wrangler dev`). The bridge
- * is the reviewed relay behind an injected `fetch`, with in-memory sessions
- * that run nothing.
+ * local test runtime, not of a running preview (`wrangler dev`). Failures
+ * are injected into that constructor through `PimStore.prototype.setMeta`.
+ * The bridge is the reviewed relay behind an injected `fetch`, with
+ * in-memory sessions that run nothing. The test environment configures
+ * Sprites (`SPRITES_TOKEN`), so a space that fell back to the default
+ * computer could start one.
  */
 
 const TOKEN = "preview-cua-fixture-token-0123456789abcdef";
@@ -28,28 +31,36 @@ const HOST = "https://bridge.preview-fixture.test";
 const CONTROL_KEY = "computer_control";
 /** Everything the fixture reads or writes. */
 const KEYS = [PROVIDER_KEY, CONTROL_KEY, FIXTURE_KEY, "computer_token", "computer_machine"];
+const DOES_NOT_START = /Cua fixture didn't seed it, so it doesn't start/;
 
 type Space = Awaited<ReturnType<typeof space>>;
 
 const previews = (env as unknown as { PREVIEW_PIM: DurableObjectNamespace<PreviewPim> }).PREVIEW_PIM;
 const settings = env as unknown as Record<string, unknown>;
 const bridgeOf = (owner: string, changes: Record<string, unknown> = {}) => ({ url: `${HOST}/${owner}`, token: TOKEN, ...changes });
+const bridgesOf = (owner: string) => ({ [owner]: bridgeOf(owner) });
 const marker = (owner: string) => JSON.stringify({ provider: "cua", space: owner });
+const ENV_KEYS = ["PREVIEW_CUA_FIXTURE", "PREVIEW_CUA_FIXTURE_OWNER", "CUA_BRIDGES"] as const;
 
 /** What the preview's private environment holds: the fixture's opt-in and owner, and `CUA_BRIDGES`. */
 function configure(values: { flag?: string; owner?: string; bridges?: unknown }) {
+	const bridges = values.bridges === undefined || typeof values.bridges === "string" ? values.bridges : JSON.stringify(values.bridges);
 	for (const [key, value] of [
 		["PREVIEW_CUA_FIXTURE", values.flag],
 		["PREVIEW_CUA_FIXTURE_OWNER", values.owner],
-		["CUA_BRIDGES", values.bridges === undefined || typeof values.bridges === "string" ? values.bridges : JSON.stringify(values.bridges)],
+		["CUA_BRIDGES", bridges],
 	] as const) {
 		if (value === undefined) delete settings[key];
 		else settings[key] = value;
 	}
 }
 
+/** Every request that left the isolate: to Sprites, a paired computer's relay, a bridge, anywhere. */
+const sent: string[] = [];
+
 /** A person registered and provisioned in the preview with the fixture off, as an operator gets an owner ID before opting in. */
 async function space(username: string) {
+	const saved = ENV_KEYS.map((key) => [key, settings[key]] as const);
 	configure({});
 	const directory = env.Directory.getByName("directory");
 	const registered = await directory.register({ username, ip: "192.0.2.10", claim: { window: true }, policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 } });
@@ -57,26 +68,94 @@ async function space(username: string) {
 	const owner = registered.account.ownerId;
 	await directory.activate(owner);
 	await (await getAgentByName(previews, owner)).provision({ ownerId: owner, username });
+	for (const [key, value] of saved) if (value !== undefined) settings[key] = value;
 	const stub = previews.getByName(owner);
 	const within = <T>(fn: (instance: PreviewPim, state: DurableObjectState) => T | Promise<T>) => runInDurableObject(stub, fn);
-	return {
+	/** What the space holds under the fixture's keys, read from its storage directly. */
+	const raw = (state: DurableObjectState) => Object.fromEntries(KEYS.map((key) => [key, (state.storage.sql.exec("SELECT value FROM pim_meta WHERE key = ?", key).toArray()[0]?.value as string | undefined) ?? null]));
+	const self = {
 		owner,
 		stub,
 		within,
-		/** The space ended and started again: a new instance, whose constructor runs the fixture with what `configure` set. */
+		/** The space ended and started again: a new instance, whose constructor runs the fixture with what `configure` set. "started", or what it threw. */
 		restart: async () => {
-			await evictDurableObject(stub);
-			return within((instance) => instance.constructor.name);
+			await evictDurableObject(stub).catch(() => undefined);
+			return within(() => "started").catch((error: unknown) => String(error));
 		},
-		/** What the space holds under the fixture's keys, raw. */
-		stored: () => within((instance) => Object.fromEntries(KEYS.map((key) => [key, instance.store.meta(key) ?? null]))),
+		/** What the space holds under the fixture's keys, from a running instance. */
+		stored: () => within((_instance, state) => raw(state)),
+		/**
+		 * The same, for a space that doesn't start: an instance made with the fixture off and its record
+		 * hidden from the constructor, for the test to read storage only, and evicted after.
+		 */
+		peek: async () => {
+			const kept = ENV_KEYS.map((key) => [key, settings[key]] as const);
+			configure({});
+			const meta = PimStore.prototype.meta;
+			const hide = vi.spyOn(PimStore.prototype, "meta").mockImplementation(function (this: PimStore, key: string) {
+				return key === FIXTURE_KEY ? undefined : meta.call(this, key);
+			});
+			try {
+				await evictDurableObject(stub).catch(() => undefined);
+				return await within((_instance, state) => raw(state));
+			} finally {
+				hide.mockRestore();
+				await evictDurableObject(stub).catch(() => undefined);
+				for (const [key, value] of kept) if (value !== undefined) settings[key] = value;
+			}
+		},
 		/** Asks the space's own `fetch`, as the Worker forwards an API request. */
 		fetch: async <T = any>(path: string, init: RequestInit = {}) => {
 			const response = await stub.fetch(new Request(`https://pim.test${path}`, { ...init, headers: { [OWNER_HEADER]: owner, "content-type": "application/json", ...(init.headers as Record<string, string>) } }));
 			return { status: response.status, body: (await response.json()) as T };
 		},
 	};
+	return self;
 }
+
+/**
+ * Everything that could start, pair or wake a computer, or take a person's input, tried on a space
+ * that has just ended: what each did ("refused" when the space wasn't constructed). With `call`, a
+ * call to the space's RPC method too, after which the test runtime can't evict it again, so it is
+ * the last thing done to that space.
+ */
+async function tryEverything(one: Space, { call = false } = {}) {
+	await evictDurableObject(one.stub).catch(() => undefined);
+	const attempt = async (name: string, run: () => Promise<unknown>) => {
+		try {
+			const result = await run();
+			return [name, result instanceof Response ? `answered ${result.status}` : "answered"];
+		} catch (error) {
+			return [name, DOES_NOT_START.test(String(error)) ? "refused" : `threw ${String(error)}`];
+		}
+	};
+	const request = (path: string, init: RequestInit = {}) => () => one.stub.fetch(new Request(`https://pim.test${path}`, { ...init, headers: { [OWNER_HEADER]: one.owner, ...(init.headers as Record<string, string>) } }));
+	const upgrade = { headers: { Upgrade: "websocket" } };
+	return Object.fromEntries([
+		// The first, constructing the space, and every one after it.
+		await attempt("start a Sprite", request("/computer", { method: "POST", body: JSON.stringify({ managed: true }) })),
+		await attempt("pair a computer", request("/computer", { method: "POST", body: "{}" })),
+		await attempt("a paired computer connects", request("/computer/connect", upgrade)),
+		await attempt("read the person's files", request("/files")),
+		await attempt("take the browser over", request("/browser/live", upgrade)),
+		await attempt("ask to run a command", request("/sessions/any/messages", { method: "POST", body: JSON.stringify({ content: '/tool shell {"command": "echo no"}' }) })),
+		await attempt("approve an approval", request("/approvals/any/approve", { method: "POST", body: "{}" })),
+		await attempt("its alarm", () => runDurableObjectAlarm(one.stub)),
+		...(call ? [await attempt("call the space", () => (one.stub as unknown as { usageReport(): Promise<unknown> }).usageReport())] : []),
+	]);
+}
+
+const refusedEverything = {
+	"start a Sprite": "refused",
+	"pair a computer": "refused",
+	"a paired computer connects": "refused",
+	"read the person's files": "refused",
+	"take the browser over": "refused",
+	"ask to run a command": "refused",
+	"approve an approval": "refused",
+	"its alarm": "refused",
+};
+const refusedEverythingAndCalls = { ...refusedEverything, "call the space": "refused" };
 
 const nothing = { [PROVIDER_KEY]: null, [CONTROL_KEY]: null, [FIXTURE_KEY]: null, computer_token: null, computer_machine: null };
 
@@ -90,7 +169,13 @@ const fixtureLines = () =>
 
 beforeEach(() => {
 	logged.length = 0;
+	sent.length = 0;
 	for (const method of ["error", "warn", "log", "info", "debug"] as const) vi.spyOn(console, method).mockImplementation((...args) => void logged.push(args));
+	// Nothing leaves unless a test puts a bridge here; Sprites, above all, is never reached.
+	vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+		sent.push(new URL(input instanceof Request ? input.url : String(input)).href);
+		throw new Error("This test reaches nothing");
+	});
 });
 
 afterEach(() => {
@@ -107,31 +192,32 @@ describe("the preview's Cua fixture", () => {
 		expect(own).not.toContain("seedCuaFixture");
 	});
 
-	it("does nothing when it is off, opted in with anything but `seed`, or names another space", async () => {
+	it("changes nothing when it is off, opted in with anything but `seed`, or names another space or no owner at all", async () => {
 		const ada = await space("fixtureoff");
 		const bob = await space("fixtureother");
-		const bridges = { [ada.owner]: bridgeOf(ada.owner), [bob.owner]: bridgeOf(bob.owner) };
+		const bridges = { ...bridgesOf(ada.owner), ...bridgesOf(bob.owner) };
 		for (const values of [{ owner: ada.owner, bridges }, { flag: "1", owner: ada.owner, bridges }, { flag: "SEED", owner: ada.owner, bridges }, { flag: "seed", owner: bob.owner, bridges }]) {
 			configure(values);
-			await ada.restart();
+			expect(await ada.restart(), JSON.stringify(values.flag ?? null)).toBe("started");
 			expect(await ada.stored(), JSON.stringify(values.flag ?? null)).toEqual(nothing);
 		}
 		expect(fixtureLines()).toEqual([]);
-		// The space named, but not provisioned yet, is refused before anything is stored, and a malformed owner refuses every space.
+		// An owner that can't be an owner ID selects no space: each starts as it was, and the log says why.
 		configure({ flag: "seed", owner: "o_not-an-owner", bridges });
-		await ada.restart();
+		expect(await ada.restart()).toBe("started");
 		expect(await ada.stored()).toEqual(nothing);
 		expect(fixtureLines()).toEqual([{ event: "preview.cua_fixture", space: ada.owner, outcome: "refused", reason: "owner" }]);
-		expect(await bob.stored()).toEqual(nothing);
+		expect(await ada.within((instance) => [instance.control.enabled, instance.computer.selected()])).toEqual([false, null]);
+		expect(sent).toEqual([]);
 	});
 
-	it("refuses, storing nothing, a space without a usable bridge for exactly its owner, or that isn't provisioned", async () => {
+	it("doesn't start the space named, and stores nothing, without a usable bridge for exactly its owner or a profile", async () => {
 		const ada = await space("fixturebridge");
 		const other = "o_" + "z".repeat(26);
 		const cases: [string, unknown][] = [
 			["no secret", undefined],
 			["not JSON", "{not json"],
-			["another owner's entry only", { [other]: bridgeOf(other) }],
+			["another owner's entry only", bridgesOf(other)],
 			["plain HTTP", { [ada.owner]: bridgeOf(ada.owner, { url: `http://bridge.preview-fixture.test/${ada.owner}` }) }],
 			["a query", { [ada.owner]: bridgeOf(ada.owner, { url: `${HOST}/${ada.owner}?` }) }],
 			["a fragment", { [ada.owner]: bridgeOf(ada.owner, { url: `${HOST}/${ada.owner}#x` }) }],
@@ -143,22 +229,33 @@ describe("the preview's Cua fixture", () => {
 		for (const [name, bridges] of cases) {
 			logged.length = 0;
 			configure({ flag: "seed", owner: ada.owner, bridges });
-			await ada.restart();
-			expect(await ada.stored(), name).toEqual(nothing);
+			expect(await ada.restart(), name).toMatch(DOES_NOT_START);
 			expect(fixtureLines(), name).toEqual([{ event: "preview.cua_fixture", space: ada.owner, outcome: "refused", reason: "bridge" }]);
 		}
+		// The instance that refused served nothing: no default computer, no pairing, no input, nothing sent.
+		configure({ flag: "seed", owner: ada.owner });
+		expect(await tryEverything(ada)).toEqual(refusedEverything);
+		expect(sent).toEqual([]);
+		expect(await ada.peek()).toEqual(nothing);
 
-		// A space whose owner profile isn't there (not provisioned, or erased) is refused too.
+		// Refusing changed nothing, so it is checked again: with the bridge fixed, the space is seeded.
+		configure({ flag: "seed", owner: ada.owner, bridges: bridgesOf(ada.owner) });
+		expect(await ada.restart()).toBe("started");
+		expect((await ada.stored())[FIXTURE_KEY]).toBe("seeded");
+
+		// A space named without an owner profile (not provisioned, or erased) doesn't start either.
+		const bob = await space("fixturenoprofile");
+		await bob.within((instance) => instance.store.deleteMeta("owner"));
 		logged.length = 0;
-		configure({});
-		await ada.within((instance) => instance.store.deleteMeta("owner"));
-		configure({ flag: "seed", owner: ada.owner, bridges: { [ada.owner]: bridgeOf(ada.owner) } });
-		await ada.restart();
-		expect(await ada.stored()).toEqual(nothing);
-		expect(fixtureLines()).toEqual([{ event: "preview.cua_fixture", space: ada.owner, outcome: "refused", reason: "space" }]);
+		configure({ flag: "seed", owner: bob.owner, bridges: bridgesOf(bob.owner) });
+		expect(await bob.restart()).toMatch(DOES_NOT_START);
+		expect(fixtureLines()[0]).toEqual({ event: "preview.cua_fixture", space: bob.owner, outcome: "refused", reason: "space" });
+		expect(await bob.peek()).toEqual(nothing);
+		expect(await tryEverything(bob, { call: true })).toEqual(refusedEverythingAndCalls);
+		expect(sent).toEqual([]);
 	});
 
-	it("refuses, changing nothing, a space that already holds a marker, any control state, a computer or another record", async () => {
+	it("doesn't start, and changes nothing in, a space named that already holds a marker, any control state, a computer or another record", async () => {
 		const human = JSON.stringify({ version: 1, space: "SPACE", state: { version: 1, epoch: 0, owner: "human", lease: null, inputQuiescence: "unproven", requests: [], viewers: [] }, bindings: [] });
 		const unknown = JSON.stringify({
 			version: 1,
@@ -175,31 +272,36 @@ describe("the preview's Cua fixture", () => {
 			["another space's control state", { [CONTROL_KEY]: human.replace("SPACE", "o_" + "y".repeat(26)) }, "control"],
 			["a paired computer", { computer_token: "hash" }, "computer"],
 			["a Sprite", { computer_machine: "pim-sprite" }, "computer"],
-			["a record it doesn't know", { [FIXTURE_KEY]: "done" }, "record"],
 		];
-		for (const [name, held, reason] of cases) {
-			const one = await space(`fixturec${cases.findIndex(([each]) => each === name)}`);
+		for (const [index, [name, held, reason]] of cases.entries()) {
+			const one = await space(`fixturec${index}`);
 			const values = Object.fromEntries(Object.entries(held).map(([key, value]) => [key, value.replace("SPACE", one.owner).replace("MARKER", marker(one.owner))]));
 			await one.within((instance) => {
 				for (const [key, value] of Object.entries(values)) instance.store.setMeta(key, value);
 			});
 			const before = await one.stored();
 			logged.length = 0;
-			configure({ flag: "seed", owner: one.owner, bridges: { [one.owner]: bridgeOf(one.owner) } });
-			await one.restart();
-			expect(await one.stored(), name).toEqual(before);
+			configure({ flag: "seed", owner: one.owner, bridges: bridgesOf(one.owner) });
+			expect(await one.restart(), name).toMatch(DOES_NOT_START);
 			expect(fixtureLines(), name).toEqual([{ event: "preview.cua_fixture", space: one.owner, outcome: "refused", reason }]);
-			// Nothing resumed or renewed: a blocked state stays blocked.
-			if (name.includes("unknown")) expect(await one.within((instance) => instance.control.state?.requests[0]?.status)).toBe("unknown");
+			expect(await one.peek(), name).toEqual(before);
 		}
+		expect(sent).toEqual([]);
+
+		// A record the fixture doesn't know keeps the space from starting whatever the environment says.
+		const odd = await space("fixtureodd");
+		await odd.within((instance) => instance.store.setMeta(FIXTURE_KEY, "done"));
+		logged.length = 0;
+		expect(await odd.restart()).toMatch(DOES_NOT_START);
+		expect(fixtureLines()).toEqual([{ event: "preview.cua_fixture", space: odd.owner, outcome: "refused", reason: "record" }]);
 	});
 
-	it("seeds the designated space once, with its marker and a lease, and leaves every other space as it was", async () => {
+	it("seeds the space named once, with its marker and a lease, and leaves every other space as it was", async () => {
 		const ada = await space("fixtureseed");
 		const bob = await space("fixtureseedbob");
-		configure({ flag: "seed", owner: ada.owner, bridges: { [ada.owner]: bridgeOf(ada.owner), [bob.owner]: bridgeOf(bob.owner) } });
-		await ada.restart();
-		await bob.restart();
+		configure({ flag: "seed", owner: ada.owner, bridges: { ...bridgesOf(ada.owner), ...bridgesOf(bob.owner) } });
+		expect(await ada.restart()).toBe("started");
+		expect(await bob.restart()).toBe("started");
 
 		const stored = await ada.stored();
 		expect(stored[PROVIDER_KEY]).toBe(marker(ada.owner));
@@ -213,23 +315,25 @@ describe("the preview's Cua fixture", () => {
 		});
 		expect(fixtureLines()).toEqual([{ event: "preview.cua_fixture", space: ada.owner, outcome: "seeded" }]);
 		// Neither the bridge's address nor its token is in the space's storage.
-		const everything = await runInDurableObject(ada.stub, (_instance, state) => JSON.stringify(state.storage.sql.exec("SELECT * FROM pim_meta").toArray()));
+		const everything = await ada.within((_instance, state) => JSON.stringify(state.storage.sql.exec("SELECT * FROM pim_meta").toArray()));
 		expect(everything).not.toContain(TOKEN);
 		expect(everything).not.toContain("bridge.preview-fixture.test");
 
 		// Bob, with a bridge of his own in the secret, is not the space named: nothing of his changed.
 		expect(await bob.stored()).toEqual(nothing);
 		expect(await bob.within((instance) => [instance.control.enabled, instance.computer.selected()])).toEqual([false, null]);
-		// The person's own routes offer no takeover, and keep refusing to pair or remove the computer.
+		// The person's own routes offer no takeover, and keep refusing to start, pair or remove a computer.
 		expect((await ada.fetch("/computer")).body).toMatchObject({ provider: "cua", startable: false });
 		expect((await ada.fetch("/browser")).body).toMatchObject({ takeOver: false });
+		expect((await ada.fetch("/computer", { method: "POST", body: JSON.stringify({ managed: true }) })).status).toBe(409);
 		expect((await ada.fetch("/computer", { method: "DELETE" })).status).toBe(409);
+		expect(sent).toEqual([]);
 	});
 
-	it("leaves a seeded space as it is at every later start: nothing is re-enabled, resumed or renewed", async () => {
+	it("starts a seeded space as it is at every later start, opted in or not: nothing is re-enabled, resumed or renewed", async () => {
 		const ada = await space("fixturerestart");
-		configure({ flag: "seed", owner: ada.owner, bridges: { [ada.owner]: bridgeOf(ada.owner) } });
-		await ada.restart();
+		configure({ flag: "seed", owner: ada.owner, bridges: bridgesOf(ada.owner) });
+		expect(await ada.restart()).toBe("started");
 		expect((await ada.stored())[FIXTURE_KEY]).toBe("seeded");
 
 		// A request sent and not answered leaves the state blocked by an unknown request.
@@ -241,83 +345,90 @@ describe("the preview's Cua fixture", () => {
 			}),
 		);
 		const blocked = await ada.stored();
-		logged.length = 0;
-		await ada.restart();
-		expect(await ada.stored()).toEqual(blocked);
-		expect(await ada.within((instance) => instance.control.state?.requests)).toEqual([{ requestId: "request-1", agentId: "agent", epoch: 1, status: "unknown" }]);
-		expect(fixtureLines()).toEqual([{ event: "preview.cua_fixture", space: ada.owner, outcome: "already-seeded" }]);
+		for (const values of [{ flag: "seed", owner: ada.owner, bridges: bridgesOf(ada.owner) }, {}]) {
+			logged.length = 0;
+			configure(values);
+			expect(await ada.restart()).toBe("started");
+			expect(await ada.stored()).toEqual(blocked);
+			expect(await ada.within((instance) => [instance.control.blocked, instance.control.state?.requests])).toEqual([null, [{ requestId: "request-1", agentId: "agent", epoch: 1, status: "unknown" }]]);
+			expect(fixtureLines()).toEqual([{ event: "preview.cua_fixture", space: ada.owner, outcome: "already-seeded" }]);
+		}
 
 		// The person in control (as a takeover leaves it), or the control state gone: neither is given back to the agent.
+		configure({ flag: "seed", owner: ada.owner, bridges: bridgesOf(ada.owner) });
 		await ada.within((instance) => void instance.control.apply({ type: "takeover" }));
 		const human = await ada.stored();
-		await ada.restart();
+		expect(await ada.restart()).toBe("started");
 		expect(await ada.stored()).toEqual(human);
 		expect(await ada.within((instance) => [instance.control.state?.owner, instance.control.state?.lease])).toEqual(["human", null]);
 		await ada.within((instance) => instance.store.deleteMeta(CONTROL_KEY));
-		await ada.restart();
+		expect(await ada.restart()).toBe("started");
 		expect((await ada.stored())[CONTROL_KEY]).toBeNull();
-		expect(await ada.within((instance) => instance.control.enabled)).toBe(false);
+		expect(await ada.within((instance) => [instance.control.enabled, instance.computer.selected()])).toEqual([false, "cua"]);
+
+		// Its marker gone, it would use the default computer: it doesn't start, opted in or not.
+		await ada.within((instance) => instance.store.deleteMeta(PROVIDER_KEY));
+		for (const [index, values] of [{ flag: "seed", owner: ada.owner, bridges: bridgesOf(ada.owner) }, {}].entries()) {
+			logged.length = 0;
+			configure(values);
+			expect(await tryEverything(ada, { call: index === 1 })).toEqual(index === 1 ? refusedEverythingAndCalls : refusedEverything);
+			expect(fixtureLines()[0]).toEqual({ event: "preview.cua_fixture", space: ada.owner, outcome: "refused", reason: "marker" });
+		}
+		expect(sent).toEqual([]);
 	});
 
-	it("never tries again once it began: a failed or interrupted seed leaves only its record, and the space reaches no computer", async () => {
-		const bridges = (owner: string) => ({ [owner]: bridgeOf(owner) });
-		/** Runs the fixture in the space as its constructor does, with one write or wait made to fail. */
-		const failing = (one: Space, fail: { key?: string; when?: (value: string) => boolean; sync?: boolean }) =>
-			one.within(async (instance, state) =>
-				seedCuaFixture(
-					{
-						name: state.id.name,
-						meta: {
-							meta: (key) => instance.store.meta(key),
-							setMeta: (key, value) => {
-								if (key === fail.key && (fail.when?.(value) ?? true)) throw new Error("disk full");
-								instance.store.setMeta(key, value);
-							},
-						},
-						transaction: (fn) => state.storage.transactionSync(fn),
-						sync: () => (fail.sync ? Promise.reject(new Error("disk gone")) : state.storage.sync()),
-					},
-					{ PREVIEW_CUA_FIXTURE: "seed", PREVIEW_CUA_FIXTURE_OWNER: one.owner, CUA_BRIDGES: JSON.stringify(bridges(one.owner)) },
-				),
-			);
-
-		// Each write in the transaction failing: the marker, enabling, the lease, and the `seeded` record.
-		const writes: [string, { key: string; when?: (value: string) => boolean }][] = [
-			["the marker", { key: PROVIDER_KEY }],
-			["enabling", { key: CONTROL_KEY, when: (value) => value.includes('"owner":"human"') }],
-			["the lease", { key: CONTROL_KEY, when: (value) => value.includes('"owner":"agent"') }],
-			["the seeded record", { key: FIXTURE_KEY, when: (value) => value === "seeded" }],
+	it("never starts a space whose seed failed after it began, and never tries again", async () => {
+		// Each write in the transaction failing, in the constructor of a real start: the marker, enabling, the lease, and `seeded`.
+		const setMeta = PimStore.prototype.setMeta;
+		const failing = (key: string, when: (value: string) => boolean = () => true) =>
+			vi.spyOn(PimStore.prototype, "setMeta").mockImplementation(function (this: PimStore, name: string, value: string) {
+				if (name === key && when(value)) throw new Error("disk full");
+				setMeta.call(this, name, value);
+			});
+		const writes: [string, string, ((value: string) => boolean)?][] = [
+			["the marker", PROVIDER_KEY],
+			["enabling", CONTROL_KEY, (value) => value.includes('"owner":"human"')],
+			["the lease", CONTROL_KEY, (value) => value.includes('"owner":"agent"')],
+			["the seeded record", FIXTURE_KEY, (value) => value === "seeded"],
 		];
-		for (const [index, [name, fail]] of writes.entries()) {
+		for (const [index, [name, key, when]] of writes.entries()) {
 			const one = await space(`fixturefail${index}`);
-			expect(await failing(one, fail), name).toEqual({ outcome: "failed", reason: "seed" });
-			// Only the record that it began: the transaction kept nothing else.
-			expect(await one.stored(), name).toEqual({ ...nothing, [FIXTURE_KEY]: "seeding" });
-			// The space's own coordinator, made after, reads what was stored: not opted in, and no operator's computer.
-			expect(await one.within((instance) => [instance.control.enabled, instance.computer.selected()]), name).toEqual([false, null]);
-
-			// Started again, opted in and with a usable bridge, it does nothing.
+			const fault = failing(key, when);
 			logged.length = 0;
-			configure({ flag: "seed", owner: one.owner, bridges: bridges(one.owner) });
-			await one.restart();
-			expect(await one.stored(), name).toEqual({ ...nothing, [FIXTURE_KEY]: "seeding" });
-			expect(fixtureLines(), name).toEqual([{ event: "preview.cua_fixture", space: one.owner, outcome: "interrupted" }]);
-			configure({});
+			configure({ flag: "seed", owner: one.owner, bridges: bridgesOf(one.owner) });
+			// The start that failed, and every one after it, opted in or not, serves nothing and reaches nothing.
+			expect(await tryEverything(one), name).toEqual(refusedEverything);
+			expect(fixtureLines()[0], name).toEqual({ event: "preview.cua_fixture", space: one.owner, outcome: "failed", reason: "seed" });
+			expect(fixtureLines().slice(1).every((line) => line.outcome === "interrupted"), name).toBe(true);
+			fault.mockRestore();
+			// The transaction kept nothing: only the record that it began.
+			expect(await one.peek(), name).toEqual({ ...nothing, [FIXTURE_KEY]: "seeding" });
+			for (const [round, values] of [{ flag: "seed", owner: one.owner, bridges: bridgesOf(one.owner) }, {}].entries()) {
+				logged.length = 0;
+				configure(values);
+				expect(await tryEverything(one, { call: round === 1 }), name).toEqual(round === 1 ? refusedEverythingAndCalls : refusedEverything);
+				expect(fixtureLines()[0], name).toEqual({ event: "preview.cua_fixture", space: one.owner, outcome: "interrupted" });
+			}
 		}
+		expect(sent).toEqual([]);
+	});
 
-		// The record written and not known to be on disk: the same, at the next start.
-		const unsynced = await space("fixtureunsynced");
-		expect(await failing(unsynced, { sync: true })).toEqual({ outcome: "failed", reason: "record" });
-		expect(await unsynced.stored()).toEqual({ ...nothing, [FIXTURE_KEY]: "seeding" });
-		configure({ flag: "seed", owner: unsynced.owner, bridges: bridges(unsynced.owner) });
-		await unsynced.restart();
-		expect(await unsynced.stored()).toEqual({ ...nothing, [FIXTURE_KEY]: "seeding" });
-		configure({});
-
-		// The record itself not stored: nothing is, so the next start is the first (the one failure it can't record).
-		const unrecorded = await space("fixtureunrecorded");
-		expect(await failing(unrecorded, { key: FIXTURE_KEY })).toEqual({ outcome: "failed", reason: "record" });
-		expect(await unrecorded.stored()).toEqual(nothing);
+	it("doesn't serve the start whose first write failed, which stored nothing, so the next start is a first one", async () => {
+		const one = await space("fixtureunrecorded");
+		const setMeta = PimStore.prototype.setMeta;
+		const fault = vi.spyOn(PimStore.prototype, "setMeta").mockImplementation(function (this: PimStore, key: string, value: string) {
+			if (key === FIXTURE_KEY) throw new Error("disk full");
+			setMeta.call(this, key, value);
+		});
+		configure({ flag: "seed", owner: one.owner, bridges: bridgesOf(one.owner) });
+		expect(await tryEverything(one)).toEqual(refusedEverything);
+		expect(fixtureLines()[0]).toEqual({ event: "preview.cua_fixture", space: one.owner, outcome: "failed", reason: "record" });
+		expect(sent).toEqual([]);
+		fault.mockRestore();
+		expect(await one.peek()).toEqual(nothing);
+		// Nothing says a seed was tried: this start can't know, and seeds.
+		expect(await one.restart()).toBe("started");
+		expect((await one.stored())[FIXTURE_KEY]).toBe("seeded");
 	});
 });
 
@@ -348,7 +459,10 @@ describe("a seeded preview space and its bridge", () => {
 		const relay = new Relay({ space: owner, token: TOKEN, path: `/${owner}`, open, log: () => undefined });
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 			const url = new URL(input instanceof Request ? input.url : String(input));
-			if (url.href !== `${HOST}/${owner}`) throw new Error(`This test reaches only its bridge, not ${url.href}`);
+			if (url.href !== `${HOST}/${owner}`) {
+				sent.push(url.href);
+				throw new Error(`This test reaches only its bridge, not ${url.href}`);
+			}
 			seen.connections++;
 			return await serveWithWebSocketPair(relay, new Request(input, init));
 		});
@@ -359,8 +473,8 @@ describe("a seeded preview space and its bridge", () => {
 		const ada = await space("fixtureapproval");
 		// The preview's own policy: the majordomo reviews, and the preview model asks the person about everything.
 		await ada.within((instance) => instance.applySettings({ approvalPolicy: "majordomo" }));
-		configure({ flag: "seed", owner: ada.owner, bridges: { [ada.owner]: bridgeOf(ada.owner) } });
-		await ada.restart();
+		configure({ flag: "seed", owner: ada.owner, bridges: bridgesOf(ada.owner) });
+		expect(await ada.restart()).toBe("started");
 		const seen = await bridge(ada.owner);
 
 		const root: string = (await ada.fetch("/")).body.rootSession;
@@ -373,7 +487,7 @@ describe("a seeded preview space and its bridge", () => {
 			},
 			{ timeout: 15_000, interval: 200 },
 		);
-		// Filed, reviewed and escalated: nothing has reached the bridge.
+		// Filed and waiting for the person: nothing has reached the bridge.
 		expect(seen).toEqual({ connections: 0, sent: [], ran: [] });
 
 		expect((await ada.fetch(`/approvals/${pending.id}/approve`, { method: "POST", body: "{}" })).status).toBe(200);
@@ -381,5 +495,6 @@ describe("a seeded preview space and its bridge", () => {
 		expect(seen.connections).toBe(1);
 		expect(seen.sent.filter((message) => message.includes("echo fixture"))).toHaveLength(1);
 		await vi.waitFor(async () => expect((await ada.within((instance) => instance.control.state))?.requests).toEqual([expect.objectContaining({ requestId: `approval:${pending.id}`, status: "completed" })]));
+		expect(sent).toEqual([]);
 	});
 });

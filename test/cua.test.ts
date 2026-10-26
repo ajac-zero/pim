@@ -389,6 +389,11 @@ describe("a space whose operator chose its Cua VM", () => {
 	const refused: string[] = [];
 	/** Held, a command the bridge's pim-computer got doesn't answer. */
 	let hold: Promise<void> | null = null;
+	/** Held, a bridge takes no connection yet; `held` counts those waiting. */
+	let handshake: Promise<void> | null = null;
+	let held = 0;
+	/** What answers the Sprites API, in the tests that start a Sprite. */
+	let sprites: ((request: Request) => Promise<Response>) | null = null;
 	const chrome = fakeChrome();
 	const ok = (command: string): ExecResult => ({ exitCode: 0, signal: null, stdout: `ran ${command}\n`, stderr: "", timedOut: false, truncated: false });
 
@@ -412,10 +417,15 @@ describe("a space whose operator chose its Cua VM", () => {
 	beforeEach(() => {
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 			const url = new URL(input instanceof Request ? input.url : String(input));
+			if (sprites && url.host === "api.sprites.dev") return sprites(new Request(input, init));
 			const fixture = url.origin === "https://bridge.cua.test" ? fixtures.get(url.pathname.slice(1)) : undefined;
 			if (!fixture) {
 				elsewhere.push(url.href);
 				throw new Error(`This test reaches only Cua bridges, not ${url.href}`);
+			}
+			if (handshake) {
+				held++;
+				await handshake;
 			}
 			if (refusal) {
 				refused.push(url.href);
@@ -682,6 +692,180 @@ describe("a space whose operator chose its Cua VM", () => {
 		expect(await cua.stateOf()).toEqual(before);
 	});
 
+	it("sends nothing on a warm link, or its browser, once the bridge's configuration is gone, unreadable or another, or a paired computer, a Sprite or an unreadable choice is stored beside it", async () => {
+		const valid = bridges({ [cua.owner]: bridgeOf(cua.owner) });
+		const meta = (key: string, value: string | null) => (instance: Pim) => (value === null ? instance.store.deleteMeta(key) : instance.store.setMeta(key, value));
+		const vars = (value: string | null) => (instance: Pim) => {
+			const all = (instance as unknown as { env: Record<string, unknown> }).env;
+			if (value === null) delete all.CUA_BRIDGES;
+			else all.CUA_BRIDGES = value;
+		};
+		const changes: [string, (instance: Pim) => void, (instance: Pim) => void][] = [
+			["no configuration", vars(null), vars(valid)],
+			["unreadable configuration", vars("not json"), vars(valid)],
+			["a paired computer on record", meta("computer_token", "0".repeat(64)), meta("computer_token", null)],
+			["a Sprite on record", meta("computer_machine", "pim-o-sprite-2"), meta("computer_machine", null)],
+			["an unreadable choice", meta(PROVIDER_KEY, "garbage"), meta(PROVIDER_KEY, choice(cua.owner))],
+		];
+		for (const [name, change, undo] of changes) {
+			// Warm: the link up, and the browser connected over it.
+			const opening = cua.uses("browser_open", { url: "https://example.com/" });
+			await opening.turn;
+			expect(opening.result(), name).toContain("# Fixture");
+			const link = fixture.connections.at(-1)!;
+			const [received, packets, connections] = [link.received.length, chrome.packets.length, fixture.seen.length];
+			const requests = (await cua.stateOf()).requests.length;
+
+			await cua.within(change);
+			const reading = cua.uses("browser_read", {});
+			await reading.turn;
+			expect(reading.result(), name).not.toContain("# Fixture");
+			expect((await cua.api("/browser")).status, name).not.toBe(200);
+			expect((await cua.api("/files")).status, name).not.toBe(200);
+			const writing = cua.uses("file_write", { path: "/workspace/warm.txt", content: "no" });
+			await writing.turn;
+			expect(writing.result(), name).toMatch(/nothing was sent|sent nothing/);
+			expect(await cua.run("echo warm"), name).toMatch(/nothing was sent|sent nothing/);
+
+			// Nothing reached the old connection or its browser, nothing connected again, and nothing went elsewhere.
+			expect([link.received.length, chrome.packets.length, fixture.seen.length, elsewhere], name).toEqual([received, packets, connections, []]);
+			expect(fixture.ran, name).not.toContain("echo warm");
+			// Refused before sending: no request was left unknown.
+			expect((await cua.stateOf()).requests.slice(requests).map((request) => request.status), name).not.toContain("unknown");
+			await cua.within(undo);
+		}
+
+		// The secret now names another bridge for the space: the old link takes nothing more, and is let go; what follows goes through a connection to the new one.
+		const opening = cua.uses("browser_open", { url: "https://example.com/" });
+		await opening.turn;
+		const old = fixture.connections.at(-1)!;
+		const [received, packets, connections] = [old.received.length, chrome.packets.length, fixture.seen.length];
+		const other = "another-cua-bridge-token-0123456789abcdef";
+		await cua.setBridges(bridges({ [cua.owner]: { ...bridgeOf(cua.owner), token: other } }));
+		const reading = cua.uses("browser_read", {});
+		await reading.turn;
+		expect(reading.result()).toMatch(/changed since it was connected/);
+		expect([old.received.length, chrome.packets.length, fixture.seen.length]).toEqual([received, packets, connections]);
+		expect(await cua.run("echo moved")).toContain("ran echo moved");
+		expect(old.received.length).toBe(received);
+		await vi.waitFor(() => expect(old.closed).not.toBeNull());
+		expect(fixture.seen.slice(connections).map((seen) => seen.headers.get("Authorization"))).toEqual([`Bearer ${other}`]);
+		await cua.setBridges(valid);
+	});
+
+	it("sends nothing on a link whose handshake finished after the choice or the bridge changed, and replays nothing after", async () => {
+		const valid = bridges({ [cua.owner]: bridgeOf(cua.owner) });
+		const changes: [(instance: Pim) => void, (instance: Pim) => void, RegExp][] = [
+			[
+				(instance) => void ((instance as unknown as { env: Record<string, unknown> }).env.CUA_BRIDGES = bridges({ [cua.owner]: { ...bridgeOf(cua.owner), token: "another-cua-bridge-token-0123456789abcdef" } })),
+				(instance) => void ((instance as unknown as { env: Record<string, unknown> }).env.CUA_BRIDGES = valid),
+				/changed since it was connected/,
+			],
+			[(instance) => instance.store.setMeta(PROVIDER_KEY, "garbage"), (instance) => instance.store.setMeta(PROVIDER_KEY, choice(cua.owner)), /can't be read/],
+		];
+		for (const [change, undo, message] of changes) {
+			await cua.within((instance) => instance.computer.disconnect("Asleep"));
+			let release = () => undefined as void;
+			handshake = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			held = 0;
+			const asking = cua.uses("shell", { command: "echo raced" });
+			const deciding = cua.decide((await cua.pending()).id);
+			await vi.waitFor(() => expect(held).toBe(1));
+			await cua.within(change);
+			handshake = null;
+			release();
+			await deciding;
+			await asking.turn;
+			expect(asking.result()).toMatch(message);
+			// The bridge took the connection, which carried nothing and was let go.
+			expect(fixture.connections.at(-1)!.received).toEqual([]);
+			await vi.waitFor(() => expect(fixture.connections.at(-1)!.closed).not.toBeNull());
+			expect((await cua.stateOf()).requests.at(-1)).toMatchObject({ status: "rejected" });
+			await cua.within(undo);
+		}
+		expect(await cua.run("echo after the race")).toContain("ran echo after the race");
+		expect(fixture.ran).not.toContain("echo raced");
+	});
+
+	it("sends nothing on a warm Sprite, or its browser, once the operator's choice is stored beside it, readable or not", async () => {
+		const spriteChrome = fakeChrome();
+		/** What reached pim-computer on the Sprite, a line at a time, and its launches. */
+		const lines: string[] = [];
+		let launches = 0;
+		const frame = (stream: number, text: string) => {
+			const bytes = new TextEncoder().encode(text);
+			const framed = new Uint8Array(bytes.byteLength + 1);
+			framed[0] = stream;
+			framed.set(bytes, 1);
+			return framed;
+		};
+		sprites = async (request) => {
+			const url = new URL(request.url);
+			if (url.pathname === "/v1/sprites" && request.method === "POST") return Response.json({ name: (await request.json<{ name: string }>()).name, status: "cold" }, { status: 201 });
+			if (!url.pathname.endsWith("/exec")) return new Response(null, { status: 204 });
+			const { 0: client, 1: server } = new WebSocketPair();
+			server.binaryType = "arraybuffer";
+			server.accept();
+			if (!url.searchParams.getAll("cmd").some((arg) => arg.includes("--stdio"))) {
+				server.send(Uint8Array.of(3, 0));
+				return new Response(null, { status: 101, webSocket: client });
+			}
+			launches++;
+			const root = `/tmp/cua-sprite-${crypto.randomUUID()}`;
+			await fs.mkdir(root, { recursive: true });
+			const machine: Machine = { root: await fs.realpath(root), exec: async (args) => ok(args.command), browser: spriteChrome.host };
+			const link = new Link(machine, (message) => server.send(frame(1, `${message}\n`)));
+			server.addEventListener("message", (event) => {
+				const data = new Uint8Array(event.data as ArrayBuffer);
+				if (data[0] !== 0) return;
+				for (const line of new TextDecoder().decode(data.subarray(1)).split("\n")) {
+					if (!line) continue;
+					lines.push(line);
+					link.receive(line);
+				}
+			});
+			server.addEventListener("close", () => link.close());
+			const hello = { type: "hello", version: 1, agent: "pim-computer/test", hostname: "sprite", platform: "linux", arch: "x64", user: "sprite", root: machine.root, browser: "chrome" };
+			server.send(frame(1, `${JSON.stringify(hello)}\n`));
+			return new Response(null, { status: 101, webSocket: client });
+		};
+		try {
+			// A space with no choice, whose bridge the secret names anyway: it starts a Sprite, as before, and browses there.
+			// (The Worker's secret is one for every space, so it names the other test space's bridge too.)
+			const warm = await space("warmsprite", (instance, owner) => {
+				(instance as unknown as { env: Record<string, unknown> }).env.CUA_BRIDGES = bridges({ [owner]: bridgeOf(owner), [cua.owner]: bridgeOf(cua.owner) });
+			});
+			const own = await fixtureFor(warm.owner);
+			expect((await warm.post("/computer", { managed: true })).status).toBe(201);
+			await warm.within((instance) => {
+				instance.control.enable();
+				instance.control.apply({ type: "resume", leaseId: "lease-sprite" });
+			});
+			for (const stored of [choice(warm.owner), "garbage"]) {
+				await warm.within((instance) => instance.store.deleteMeta(PROVIDER_KEY));
+				const opening = warm.uses("browser_open", { url: "https://example.com/" });
+				await opening.turn;
+				expect(opening.result()).toContain("# Fixture");
+				const [sent, packets] = [lines.length, spriteChrome.packets.length];
+
+				// The operator's choice is stored, with the Sprite still on record, and nothing disconnected.
+				await warm.within((instance) => instance.store.setMeta(PROVIDER_KEY, stored));
+				const reading = warm.uses("browser_read", {});
+				await reading.turn;
+				expect(reading.result(), stored).not.toContain("# Fixture");
+				expect((await warm.api("/browser")).status, stored).not.toBe(200);
+				expect((await warm.api("/files")).status, stored).not.toBe(200);
+				expect([lines.length, spriteChrome.packets.length], stored).toEqual([sent, packets]);
+			}
+			expect([launches, own.calls.mock.calls.length, elsewhere]).toEqual([1, 0, []]);
+			expect(await warm.within((instance) => instance.store.meta("computer_machine"))).toEqual(expect.any(String));
+		} finally {
+			sprites = null;
+		}
+	});
+
 	it("keeps an approval filed before the bridge's connection dropped, and runs it once on a new connection when decided", async () => {
 		const asking = cua.uses("shell", { command: "echo later" });
 		const approval = await cua.pending();
@@ -690,6 +874,7 @@ describe("a space whose operator chose its Cua VM", () => {
 		const connections = fixture.seen.length;
 		await cua.decide(approval.id);
 		await asking.turn;
+		expect(asking.result()).toContain("ran echo later");
 		expect(fixture.seen).toHaveLength(connections + 1);
 		expect(fixture.ran.filter((command) => command === "echo later")).toEqual(["echo later"]);
 	});

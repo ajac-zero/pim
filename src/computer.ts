@@ -34,6 +34,13 @@ import { HttpError } from "./http";
  * requests its control state admitted (./computer-control-runtime.ts), and
  * the person's reads (`asPersonRead`), reach it; a paired computer's
  * connection, or a Sprite on record, is never used in its place.
+ *
+ * A link is used only while what the space reaches its computer by
+ * (`binding`: paired computers and Sprites, or the operator's bridge as
+ * the Worker's secret names it now) is what it was made under. That, and
+ * the operator's choice, are checked right before each call or DevTools
+ * message is sent, after any wait, so a link made under another choice or
+ * another bridge sends nothing.
  */
 
 /** Where the space takes the computer's connection, behind the Worker's `/api/computer/connect`. */
@@ -183,20 +190,32 @@ export class Computer {
 	readonly #inUse: () => boolean;
 	/** The computer the space's operator chose, which is then its only one; null for paired computers and Sprites. */
 	readonly #selected: () => Selection | null;
+	/** What the space reaches its computer by now, which a link must have been made under; throws when that can't be read. */
+	readonly #binding: () => string;
 	/** pim-computer on the computer Pim started, while the space holds on to it. */
 	#link: ComputerLink | null = null;
+	/** What `#link` was made under (`#binding`), kept in memory only. */
+	#linkBinding: string | null = null;
 	#waking: Promise<void> | undefined;
 	/** What waits for pim-computer on the computer Pim started to say what it is, or to stop before it has. */
 	#arrivals: ((hello: boolean) => void)[] = [];
 	#usedAt = 0;
 	#idle: ReturnType<typeof setTimeout> | undefined;
 
-	constructor(options: { meta: Meta; sockets: () => Connection[]; wake: () => Promise<ComputerLink>; inUse: () => boolean; selected?: () => Selection | null }) {
+	constructor(options: {
+		meta: Meta;
+		sockets: () => Connection[];
+		wake: () => Promise<ComputerLink>;
+		inUse: () => boolean;
+		selected?: () => Selection | null;
+		binding?: () => string;
+	}) {
 		this.#meta = options.meta;
 		this.#sockets = options.sockets;
 		this.#wake = options.wake;
 		this.#inUse = options.inUse;
 		this.#selected = options.selected ?? (() => null);
+		this.#binding = options.binding ?? (() => "default");
 	}
 
 	/** The computer the space's operator chose, if any (./cua.ts). */
@@ -238,9 +257,26 @@ export class Computer {
 			this.#idle = setTimeout(() => this.letGoIfIdle(), Math.max(IDLE_MS - idle, 60_000));
 			return;
 		}
+		this.#letGo();
+	}
+
+	/** Lets go of the computer Pim started, or the operator's: calls and the browser waiting on it fail now. */
+	#letGo(): void {
+		const link = this.#link;
 		this.#link = null;
-		link.close();
+		link?.close();
+		clearTimeout(this.#idle);
 		this.#failPending();
+	}
+
+	/** Why the open link may not be used now, as it was made under another choice or bridge than the space's now; null when it may, or there is none. */
+	#stale(): Error | null {
+		if (this.#link?.readyState !== WebSocket.OPEN) return null;
+		try {
+			return this.#binding() === this.#linkBinding ? null : new HttpError(503, "The space's computer has changed since it was connected, so nothing was sent to it.");
+		} catch (error) {
+			return error as Error;
+		}
 	}
 
 	/** Whether a computer is paired, online or not: one the person brought, with its token, one Pim started, or the operator's. */
@@ -383,8 +419,19 @@ export class Computer {
 	/** Calls the computer and waits for its answer; one Pim started wakes first, if it's asleep. */
 	async call<T = unknown>(op: string, args: Record<string, unknown>, timeoutMs = FILE_CALL_MS, counts = true): Promise<T> {
 		if (!this.paired()) throw new HttpError(404, "No computer is connected. The person can connect one in Settings → Computer.");
-		this.#admit(op);
+		const refused = this.#refusal(op);
+		if (refused) throw refused;
+		// A link made under another choice or bridge is let go, and waking makes one under the space's now.
+		if (this.#stale()) this.#letGo();
 		await this.wake();
+		// Checked again after the wait, right before sending: the choice, or the bridge, may have changed meanwhile.
+		const stale = this.#stale();
+		if (stale) {
+			this.#letGo();
+			throw stale;
+		}
+		const late = this.#refusal(op);
+		if (late) throw late;
 		const socket = this.#socket();
 		if (!socket) throw new HttpError(503, "The computer is offline: pim-computer isn't connected. Ask the person to start it again.");
 		if (counts) this.#use();
@@ -410,26 +457,27 @@ export class Computer {
 	}
 
 	/**
-	 * On the operator's computer, refuses `op` before anything is woken or
-	 * sent unless an agent's request the control state admitted makes it, or
-	 * it is one of the person's reads; and refuses everything while the
-	 * operator's choice can't be read, or a paired computer or a Sprite is
-	 * still on record beside it, which Pim leaves for the operator to resolve.
+	 * On the operator's computer, refuses call `op` unless an agent's request
+	 * the control state admitted makes it, or it is one of the person's reads
+	 * (a DevTools message, `op` null, goes either way); and refuses everything
+	 * while the operator's choice can't be read, or a paired computer or a
+	 * Sprite is still on record beside it, which Pim leaves for the operator
+	 * to resolve. Null when it may be sent.
 	 */
-	#admit(op: string): void {
+	#refusal(op: string | null): HttpError | null {
 		const selected = this.#selected();
-		if (!selected) return;
+		if (!selected) return null;
 		if (selected === "unreadable") {
-			throw new HttpError(503, "This space's choice of computer can't be read, so Pim uses no computer for it and sent nothing. Its operator must repair it.");
+			return new HttpError(503, "This space's choice of computer can't be read, so Pim uses no computer for it and sent nothing. Its operator must repair it.");
 		}
 		if (this.#meta.meta(TOKEN_KEY) !== undefined || this.machine() !== null) {
-			throw new HttpError(
+			return new HttpError(
 				409,
 				"This space's computer is its operator's Cua VM, but a paired computer or a computer Pim started is still on record, so Pim uses none of them and sent nothing. Its operator must resolve it.",
 			);
 		}
-		if (currentTrace() || (personReads.getStore() && PERSON_READS.has(op))) return;
-		throw new HttpError(409, "This space's Cua computer takes only agents' requests its control state admits, and the person's reads, so nothing was sent to it.");
+		if (op === null || currentTrace() || (personReads.getStore() && PERSON_READS.has(op))) return null;
+		return new HttpError(409, "This space's Cua computer takes only agents' requests its control state admits, and the person's reads, so nothing was sent to it.");
 	}
 
 	/**
@@ -448,7 +496,10 @@ export class Computer {
 				});
 			});
 			try {
+				// What the link is made under, read in the same turn as the provider reads it to connect.
+				const binding = this.#binding();
 				this.#link = await this.#wake();
+				this.#linkBinding = binding;
 			} catch (error) {
 				for (const arrival of this.#arrivals.splice(0)) arrival(false);
 				throw error;
@@ -497,10 +548,20 @@ export class Computer {
 		const transport: BrowserTransport = {
 			send: (data) => {
 				const trace = currentTrace();
-				const socket = this.#socket();
-				if (this.#browser !== connection || !socket) {
+				if (this.#browser !== connection) {
 					// Nothing leaves; a request hears so now, rather than wait for an answer that can't come.
 					if (trace) throw new Error("The browser's connection has closed, so nothing was sent to it.");
+					return;
+				}
+				// Checked right before sending, as for a call: the choice, the bridge, or the connection may have changed since it connected.
+				const socket = this.#socket();
+				const refused = this.#refusal(null) ?? this.#stale() ?? (socket ? null : new Error("The browser's connection has closed, so nothing was sent to it."));
+				if (refused || !socket) {
+					// Nothing leaves, and the connection ends here, once puppeteer is done sending, so nothing more waits on it.
+					queueMicrotask(() => {
+						if (this.#browser === connection) this.#browserClosed();
+					});
+					if (trace) throw refused;
 					return;
 				}
 				this.#use();

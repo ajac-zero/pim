@@ -157,7 +157,7 @@ import { webExtension } from "./extensions/web";
 import type { ControlEvent } from "./computer-control";
 import { ControlCoordinator, ControlRefused } from "./computer-control-runtime";
 import { asPersonRead, COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerLink, type ComputerStatus } from "./computer";
-import { bridgeFor, Cua, PROVIDER_KEY, selection } from "./cua";
+import { bridgeFor, Cua, type CuaBridge, PROVIDER_KEY, selection } from "./cua";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
 import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
@@ -503,6 +503,7 @@ export class Pim extends DurableAgent<Env> {
 		},
 		inUse: () => this.browser.watched(),
 		selected: () => selection(this.store.meta(PROVIDER_KEY), this.name),
+		binding: () => this.#computerBinding(),
 	});
 	/** The person's files, on their computer, which they and their agents share (see ./files.ts). */
 	readonly files = new Files(this.computer);
@@ -5886,14 +5887,29 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Connects to the operator's Cua VM through the bridge the Worker's
-	 * `CUA_BRIDGES` secret names for this space, and only this space
-	 * (./cua.ts). Without one, it refuses, and no other computer is tried.
+	 * The operator's Cua bridge for this space, and only this space, as the
+	 * Worker's `CUA_BRIDGES` secret names it now (./cua.ts); refuses without
+	 * one, and when the operator's choice can't be read.
 	 */
-	#connectCua(): Promise<ComputerLink> {
+	#cuaBridge(): CuaBridge {
 		if (this.computer.selected() !== "cua") throw new HttpError(503, "This space's choice of computer can't be read, so Pim uses no computer for it.");
-		const bridge = bridgeFor((this.env as unknown as { CUA_BRIDGES?: unknown }).CUA_BRIDGES, this.name);
-		return new Cua(bridge).connect(
+		return bridgeFor((this.env as unknown as { CUA_BRIDGES?: unknown }).CUA_BRIDGES, this.name);
+	}
+
+	/**
+	 * What the space reaches its computer by now (see `Computer`): paired
+	 * computers and Sprites, or the operator's bridge, by its address and
+	 * token. Kept only in memory, to tell a link made under another one.
+	 */
+	#computerBinding(): string {
+		if (!this.computer.selected()) return "default";
+		const { url, token } = this.#cuaBridge();
+		return JSON.stringify(["cua", url, token]);
+	}
+
+	/** Connects to the operator's Cua VM through its bridge (`#cuaBridge`). Without one, it refuses, and no other computer is tried. */
+	#connectCua(): Promise<ComputerLink> {
+		return new Cua(this.#cuaBridge()).connect(
 			this.name,
 			(message) => this.#computerSaid(message),
 			() => this.#computerDisconnected(),

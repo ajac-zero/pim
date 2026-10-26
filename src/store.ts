@@ -798,6 +798,11 @@ export class PimStore {
 		this.#sql.exec("UPDATE pim_sessions SET archived_at = ? WHERE id = ?", Date.now(), id);
 	}
 
+	/** Lists an archived session again, by hand or by age: its activity time is now, so it is not archived again for two weeks. */
+	unarchiveSession(id: string): void {
+		this.touchSession(id);
+	}
+
 	readSession(id: string, through: number): void {
 		this.#sql.exec("UPDATE pim_sessions SET read_at = MAX(COALESCE(read_at, 0), MIN(COALESCE(response_at, 0), ?)) WHERE id = ?", through, id);
 	}

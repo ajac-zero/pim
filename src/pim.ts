@@ -4274,6 +4274,16 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 		[
+			"POST",
+			"/sessions/:session/unarchive",
+			async ({ session }) => {
+				const id = await this.#session(session!);
+				this.store.unarchiveSession(id);
+				this.broadcastMessage({ type: "sessions" });
+				return this.#sessionInfo(id);
+			},
+		],
+		[
 			"PUT",
 			"/sessions/:session",
 			async ({ session }, request) => {

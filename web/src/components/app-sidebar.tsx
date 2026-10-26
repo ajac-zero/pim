@@ -25,6 +25,7 @@ import {
   MessagesSquare,
   MoreHorizontal,
   Pencil,
+  RotateCcw,
   ScrollText,
   Search,
   Settings,
@@ -754,6 +755,12 @@ function SessionRow({
     onError: (error) => toast.error(error.message),
   });
 
+  const unarchive = useMutation({
+    mutationFn: () => pim.unarchiveSession(session.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onError: (error) => toast.error(error.message),
+  });
+
   const navigate = useNavigate();
   // Delete asks twice: the first click turns the item into a confirmation.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -947,7 +954,14 @@ function SessionRow({
           >
             <Sparkles className="size-4" /> {t("regenerate")}
           </DropdownMenuItem>
-          {!session.archived && (
+          {session.archived ? (
+            <DropdownMenuItem
+              disabled={unarchive.isPending}
+              onClick={() => unarchive.mutate()}
+            >
+              <RotateCcw className="size-4" /> {t("unarchiveChat")}
+            </DropdownMenuItem>
+          ) : (
             <DropdownMenuItem
               disabled={archive.isPending}
               onClick={() => archive.mutate()}

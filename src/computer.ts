@@ -3,10 +3,8 @@ import { Buffer } from "node:buffer";
 import type { Connection } from "agents";
 import {
 	dispatchEffect,
-	NATIVE_ARGUMENTS_CHARS,
 	NATIVE_TOOL_OP,
 	type NativeOutcome,
-	type NativeRequest,
 	readNativeOutcome,
 	readNativeRequest,
 } from "../computer/native-outcome";
@@ -495,9 +493,10 @@ export class Computer {
 	 * operator's Cua VM (paired computers and Sprites never get one), no
 	 * admitted request or one with no run, a second call in a request, a tool
 	 * that isn't curated, and arguments that aren't a plain JSON object of at
-	 * most `NATIVE_ARGUMENTS_CHARS`. What is sent is a copy, made before
-	 * anything is awaited. The host checks the arguments against the tool's
-	 * curated schema.
+	 * most `NATIVE_ARGUMENTS_CHARS` (`readNativeRequest`). What is sent is
+	 * that reader's copy, made before anything is awaited: anything JSON would
+	 * convert (a getter, `toJSON`, a date) is refused, not converted. The host
+	 * checks the arguments against the tool's curated schema.
 	 */
 	async native(tool: unknown, args: unknown, timeoutMs = NATIVE_CALL_MS): Promise<NativeOutcome> {
 		const refuse = (why: string) => new HttpError(409, `${why}, so no native-app call was sent.`);
@@ -508,16 +507,8 @@ export class Computer {
 		if (!trace || !admitted) throw refuse("A native-app call is made only within a request the control state admitted");
 		if (admitted.runId === undefined) throw refuse("The request names no run");
 		if (trace.native) throw refuse("This request has made its native-app call already");
-		let request: NativeRequest | null = null;
-		try {
-			const plain = typeof args === "object" && args !== null && !Array.isArray(args) && Object.getPrototypeOf(args) === Object.prototype;
-			const copy: unknown = plain ? JSON.parse(JSON.stringify(args)) : null;
-			if (plain && JSON.stringify(copy).length <= NATIVE_ARGUMENTS_CHARS) {
-				request = readNativeRequest({ owner: admitted.space, agentId: admitted.agentId, runId: admitted.runId, callId: admitted.requestId, tool, arguments: copy });
-			}
-		} catch {
-			// A getter, a cycle or a value JSON can't hold: refused as malformed.
-		}
+		// The shared reader copies the arguments as plain JSON data, read once each, and refuses anything else; it never throws.
+		const request = readNativeRequest({ owner: admitted.space, agentId: admitted.agentId, runId: admitted.runId, callId: admitted.requestId, tool, arguments: args });
 		if (!request) throw new HttpError(400, "The native-app call names no curated tool, or its arguments aren't a plain JSON object of a bounded size, so nothing was sent.");
 		// Spent now, whatever comes: the request's one call ID is taken.
 		trace.native = true;

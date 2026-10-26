@@ -842,6 +842,12 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 			["a getter that throws", Object.defineProperty({}, "pid", { enumerable: true, get: () => { throw new Error(LEAK); } })],
 			["a cycle", (() => { const cycle: Record<string, unknown> = { pid: 42 }; cycle.self = cycle; return cycle; })()],
 			["a bigint", { pid: 42n }],
+			// Each of these JSON would turn into something a curated schema admits; none is converted.
+			["a getter that answers", Object.defineProperty({}, "pid", { enumerable: true, get: () => 42 })],
+			["a value with toJSON", { pid: { toJSON: () => 42 } }],
+			["arguments with toJSON", { toJSON: () => ({ pid: 42 }) }],
+			["a nested date", { pid: 42, since: new Date(0) }],
+			["an undefined beside them", { pid: 42, x: undefined }],
 			["too much", { pid: 42, text: "x".repeat(40_000) }],
 		];
 		const cases: [string, () => Promise<unknown>][] = [

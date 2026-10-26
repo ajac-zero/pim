@@ -56,23 +56,113 @@ export type NativeRequest = {
 	readonly arguments: Readonly<Record<string, unknown>>;
 };
 
+/** How deep a native call's arguments may nest, the arguments object being the first level. */
+const ARGUMENT_DEPTH = 4;
+/** The most keys or items one object or array of a native call may hold. */
+const ARGUMENT_ENTRIES = 64;
+/** Keys that are never a native call's data: `JSON.stringify` would call one, and the other names a prototype. */
+const RESERVED_KEYS: ReadonlySet<string> = new Set(["toJSON", "__proto__"]);
+const REQUEST_KEYS = ["owner", "agentId", "runId", "callId", "tool", "arguments"] as const;
+const REFUSED = Symbol("refused");
+
 /**
- * `value` when it is exactly a `NativeRequest`: those six fields and no
- * others, identities of `NATIVE_IDENTITY`, a curated tool's name, and
- * arguments that are a plain object of at most `NATIVE_ARGUMENTS_CHARS` as
- * JSON. Null otherwise, also when reading it throws (a getter, a cycle).
- * What it returns is a new object of its own.
+ * The own properties of a plain object, each read once from its descriptor,
+ * or null when it is anything else, or holds anything but enumerable data
+ * properties with string keys: an accessor, a symbol, a hidden property,
+ * another prototype, or more than `ARGUMENT_ENTRIES` of them.
+ */
+function ownData(value: unknown): [string, unknown][] | null {
+	if (typeof value !== "object" || value === null || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
+	const keys = Reflect.ownKeys(value);
+	if (keys.length > ARGUMENT_ENTRIES) return null;
+	const entries: [string, unknown][] = [];
+	for (const key of keys) {
+		const descriptor = typeof key === "string" ? Object.getOwnPropertyDescriptor(value, key) : undefined;
+		if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return null;
+		entries.push([key as string, descriptor.value]);
+	}
+	return entries;
+}
+
+/**
+ * A frozen copy of `value` made only of JSON's own values (null, booleans,
+ * finite numbers, strings, arrays and plain objects, read as data, never
+ * through a getter, `toJSON` or a prototype), whose JSON is at most
+ * `maxChars`, nesting at most `ARGUMENT_DEPTH` deep. `REFUSED` for anything
+ * else: nothing is converted into something JSON could hold. Each property is
+ * read once, so what the copy holds is what was checked, whatever the
+ * original does later.
+ */
+function jsonSnapshot(value: unknown, maxChars: number): unknown {
+	let chars = 0;
+	const spend = (count: number) => (chars += count) <= maxChars;
+	const copy = (item: unknown, depth: number): unknown => {
+		switch (typeof item) {
+			case "boolean":
+				return spend(item ? 4 : 5) ? item : REFUSED;
+			case "number":
+				return Number.isFinite(item) && spend(JSON.stringify(item).length) ? item : REFUSED;
+			case "string":
+				// Its JSON is at least two characters longer, so a text that can't fit isn't escaped first.
+				return item.length + 2 <= maxChars - chars && spend(JSON.stringify(item).length) ? item : REFUSED;
+			case "object":
+				if (item === null) return spend(4) ? null : REFUSED;
+				break;
+			default:
+				return REFUSED;
+		}
+		if (depth === 0) return REFUSED;
+		if (Array.isArray(item)) {
+			if (Object.getPrototypeOf(item) !== Array.prototype) return REFUSED;
+			const length: unknown = Object.getOwnPropertyDescriptor(item, "length")?.value;
+			// Its indices and `length`, and nothing else: no holes, no named properties.
+			if (!count(length, 0, ARGUMENT_ENTRIES) || Reflect.ownKeys(item).length !== length + 1) return REFUSED;
+			if (!spend(2 + Math.max(0, length - 1))) return REFUSED;
+			const items: unknown[] = [];
+			for (let index = 0; index < length; index++) {
+				const descriptor = Object.getOwnPropertyDescriptor(item, String(index));
+				if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return REFUSED;
+				const each = copy(descriptor.value, depth - 1);
+				if (each === REFUSED) return REFUSED;
+				items.push(each);
+			}
+			return Object.freeze(items);
+		}
+		const entries = ownData(item);
+		if (!entries || !spend(2 + Math.max(0, entries.length - 1))) return REFUSED;
+		const object: Record<string, unknown> = {};
+		for (const [key, field] of entries) {
+			if (RESERVED_KEYS.has(key) || !spend(JSON.stringify(key).length + 1)) return REFUSED;
+			const each = copy(field, depth - 1);
+			if (each === REFUSED) return REFUSED;
+			Object.defineProperty(object, key, { value: each, enumerable: true });
+		}
+		return Object.freeze(object);
+	};
+	return copy(value, ARGUMENT_DEPTH);
+}
+
+/**
+ * A copy of `value` when it is exactly a `NativeRequest`: a plain object of
+ * those six data properties and no others, identities of `NATIVE_IDENTITY`,
+ * a curated tool's name, and arguments that `jsonSnapshot` copies as a plain
+ * object of at most `NATIVE_ARGUMENTS_CHARS` as JSON. Null otherwise, also
+ * when reading it throws (a getter, a proxy's trap). The copy is frozen and
+ * shares nothing with `value`: what it holds is what was checked, so a caller
+ * changing its own object afterwards changes nothing the copy says.
  */
 export function readNativeRequest(value: unknown): NativeRequest | null {
 	try {
-		const request = exactly(value, ["owner", "agentId", "runId", "callId", "tool", "arguments"]);
-		if (!request) return null;
-		const { owner, agentId, runId, callId, tool, arguments: args } = request;
+		const fields = ownData(value);
+		if (!fields || fields.length !== REQUEST_KEYS.length) return null;
+		const request = new Map(fields);
+		if (!REQUEST_KEYS.every((key) => request.has(key))) return null;
+		const [owner, agentId, runId, callId, tool] = (["owner", "agentId", "runId", "callId", "tool"] as const).map((key) => request.get(key));
 		if (![owner, agentId, runId, callId].every((part) => typeof part === "string" && NATIVE_IDENTITY.test(part))) return null;
 		if (!oneOf(NATIVE_TOOLS, tool)) return null;
-		if (typeof args !== "object" || args === null || Array.isArray(args) || Object.getPrototypeOf(args) !== Object.prototype) return null;
-		if (JSON.stringify(args).length > NATIVE_ARGUMENTS_CHARS) return null;
-		return { owner: owner as string, agentId: agentId as string, runId: runId as string, callId: callId as string, tool, arguments: args as Record<string, unknown> };
+		const args = jsonSnapshot(request.get("arguments"), NATIVE_ARGUMENTS_CHARS);
+		if (typeof args !== "object" || args === null || Array.isArray(args)) return null;
+		return Object.freeze({ owner: owner as string, agentId: agentId as string, runId: runId as string, callId: callId as string, tool, arguments: args as Record<string, unknown> });
 	} catch {
 		return null;
 	}

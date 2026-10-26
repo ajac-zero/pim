@@ -46,6 +46,7 @@ import {
 	NATIVE_WIRE_LIMITS,
 	type NativeContent,
 	type NativeOutcome,
+	type NativeRequest,
 	type PresentationIssue,
 	readNativeRequest,
 	type RejectReason,
@@ -841,8 +842,11 @@ export const MAX_RUNS = 256;
 export interface NativeDispatcher {
 	/**
 	 * Answers one `native_tool` call's args with its outcome; never throws.
-	 * Args that aren't exactly a `NativeRequest` (../native-outcome.ts), of
-	 * another owner, are refused `identity`; a tool that isn't curated,
+	 * The args are read once, into `readNativeRequest`'s frozen copy, which is
+	 * all that is checked, set up and sent. Args that aren't exactly a
+	 * `NativeRequest` (../native-outcome.ts), getters, proxies, `toJSON` and
+	 * other values JSON would convert included, or of another owner, are
+	 * refused `identity`; a tool that isn't curated,
 	 * `unknown_tool`; arguments its curated schema doesn't admit,
 	 * `invalid_arguments`. Each is refused before anything is sent to spacesd.
 	 * Otherwise the call goes to its run, which is opened on its first call
@@ -871,19 +875,30 @@ export function createNativeDispatcher(options: NativeMcpOptions): NativeDispatc
 	return {
 		async dispatch(args) {
 			const rejected = (reason: RejectReason): NativeOutcome => ({ status: "rejected", reason });
-			const request = readNativeRequest(args);
-			if (!request) return rejected(uncuratedTool(args) ? "unknown_tool" : "identity");
-			if (request.owner !== owner) return rejected("identity");
-			const tool = Object.hasOwn(TOOLS, request.tool) ? TOOLS[request.tool] : undefined;
-			if (!tool) return rejected("unknown_tool");
-			if (!curatedArguments(tool, request.arguments)) return rejected("invalid_arguments");
-			const run: TrustedRun = { owner, agentId: request.agentId, runId: request.runId };
-			const key = agentSessionOf(run);
-			let opening = runs.get(key);
-			if (!opening) {
-				if (runs.size >= MAX_RUNS) return rejected("unavailable");
-				opening = client.openRun(run).catch(() => null);
-				runs.set(key, opening);
+			let request: NativeRequest;
+			let run: TrustedRun;
+			let key: string;
+			let opening: Promise<NativeRun | null> | undefined;
+			try {
+				// From here on only the reader's frozen copy is read: the caller's object changing while the run is set up changes nothing.
+				const read = readNativeRequest(args);
+				if (!read) return rejected(uncuratedTool(args) ? "unknown_tool" : "identity");
+				request = read;
+				if (request.owner !== owner) return rejected("identity");
+				const tool = Object.hasOwn(TOOLS, request.tool) ? TOOLS[request.tool] : undefined;
+				if (!tool) return rejected("unknown_tool");
+				if (!curatedArguments(tool, request.arguments)) return rejected("invalid_arguments");
+				run = { owner, agentId: request.agentId, runId: request.runId };
+				key = agentSessionOf(run);
+				opening = runs.get(key);
+				if (!opening) {
+					if (runs.size >= MAX_RUNS) return rejected("unavailable");
+					opening = client.openRun(run).catch(() => null);
+					runs.set(key, opening);
+				}
+			} catch {
+				// Nothing above is meant to throw; if something does while the call is read, nothing has been sent to spacesd.
+				return rejected("invalid_arguments");
 			}
 			const opened = await opening;
 			if (!opened) {
@@ -891,7 +906,12 @@ export function createNativeDispatcher(options: NativeMcpOptions): NativeDispatc
 				if (runs.get(key) === opening) runs.delete(key);
 				return rejected("unavailable");
 			}
-			return opened.invoke({ ...run, callId: request.callId, tool: request.tool, arguments: request.arguments });
+			try {
+				return await opened.invoke({ ...run, callId: request.callId, tool: request.tool, arguments: request.arguments });
+			} catch {
+				// `invoke` never throws; if it did, the call may have been sent.
+				return { status: "unknown", reason: "transport" };
+			}
 		},
 	};
 }

@@ -32,7 +32,7 @@ import {
 	type TrustedRun,
 } from "../native-mcp.ts";
 import { AGENT_SESSION, CUA_COMMIT, UPSTREAM_TOOLS, UPSTREAM_TOOLS_SHA256 } from "../native-mcp-upstream.ts";
-import { BRIDGE_MESSAGE_CHARS, isBase64, NATIVE_TOOLS, NATIVE_WIRE_LIMITS, readNativeOutcome } from "../../native-outcome.ts";
+import { BRIDGE_MESSAGE_CHARS, isBase64, NATIVE_ARGUMENTS_CHARS, NATIVE_TOOLS, NATIVE_WIRE_LIMITS, readNativeOutcome, readNativeRequest } from "../../native-outcome.ts";
 import { MAX_MESSAGE_CHARS } from "../../cua-bridge.ts";
 
 const ORIGIN = "http://127.0.0.1:3211";
@@ -957,6 +957,126 @@ describe("the space's calls, through createNativeDispatcher", () => {
 			assert.deepEqual(overTheWire(outcome), outcome, what);
 		}
 		assert.deepEqual(standIn.sent, []);
+	});
+
+	it("calls only the arguments it checked when the caller changes its object while the run is set up", async () => {
+		const standIn = new StandIn();
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const native = createNativeDispatcher({
+			origin: ORIGIN,
+			token: TOKEN,
+			owner: OWNER,
+			fetch: async (url, init) => {
+				await held;
+				return standIn.fetch(url, init);
+			},
+			limits: { callMs: 1_000 },
+		});
+		// The caller's own object, not a parsed copy of it.
+		const args = { owner: OWNER, agentId: "agent-1", runId: "run-1", callId: "r1", tool: "click", arguments: { pid: 42, x: 10, y: 20 } as Record<string, unknown> };
+		const answer = native.dispatch(args);
+		await settle();
+		// Setup is pending: the call was checked, and nothing has reached the stand-in.
+		assert.equal(standIn.sent.length, 0);
+		args.arguments.pid = 7;
+		args.arguments.session = "agent-someone-else";
+		args.arguments.scope = "desktop";
+		args.tool = "type_text";
+		args.arguments.text = "rm -rf ~";
+		args.runId = "run-2";
+		args.callId = "r2";
+		release();
+		assert.deepEqual(await answer, DONE);
+		assert.deepEqual(
+			standIn.executed.map((each) => [each.name, each.arguments, each.driverSession]),
+			[["click", { pid: 42, x: 10, y: 20 }, `agent-${agentSessionOf({ owner: OWNER, agentId: "agent-1", runId: "run-1" })}`]],
+		);
+	});
+
+	it("never throws, and sends nothing, for getters, proxies, toJSON and values JSON would convert", async () => {
+		const standIn = new StandIn();
+		const native = dispatcher(standIn);
+		const valid = () => wire() as Record<string, unknown>;
+		const trapped = (target: object) =>
+			new Proxy(target, {
+				getPrototypeOf: () => {
+					throw new Error(LEAK);
+				},
+				ownKeys: () => {
+					throw new Error(LEAK);
+				},
+				getOwnPropertyDescriptor: () => {
+					throw new Error(LEAK);
+				},
+				get: () => {
+					throw new Error(LEAK);
+				},
+			});
+		/** A proxy that answers its descriptors once with what passes, then with something else. */
+		const shifting = () => {
+			let reads = 0;
+			return new Proxy({ pid: 42 } as Record<string, unknown>, {
+				getOwnPropertyDescriptor: (target, key) => ({ ...Reflect.getOwnPropertyDescriptor(target, key), value: reads++ === 0 ? 42 : "rm -rf ~" }),
+			});
+		};
+		const cases: [string, unknown][] = [
+			["a getter for the owner", Object.defineProperty(valid(), "owner", { enumerable: true, get: () => OWNER })],
+			["a getter for the tool that throws", Object.defineProperty(valid(), "tool", { enumerable: true, get: () => { throw new Error(LEAK); } })],
+			["a getter in the arguments", { ...valid(), arguments: Object.defineProperty({}, "pid", { enumerable: true, get: () => 42 }) }],
+			["a getter in the arguments that throws", { ...valid(), arguments: Object.defineProperty({}, "pid", { enumerable: true, get: () => { throw new Error(LEAK); } }) }],
+			["toJSON in the arguments", { ...valid(), arguments: { pid: 42, toJSON: () => ({ pid: 42 }) } }],
+			["toJSON on a value", { ...valid(), arguments: { pid: { toJSON: () => 42 } } }],
+			["toJSON as data", { ...valid(), arguments: { pid: 42, toJSON: "x" } }],
+			["a date", { ...valid(), tool: "get_window_state", arguments: { pid: 42, since: new Date(0) } }],
+			["arguments that are a date", { ...valid(), arguments: new Date(0) }],
+			["a map", { ...valid(), arguments: new Map([["pid", 42]]) }],
+			["a bigint", { ...valid(), arguments: { pid: 42n } }],
+			["undefined", { ...valid(), arguments: { pid: 42, x: undefined } }],
+			["a function", { ...valid(), arguments: { pid: 42, x: () => 1 } }],
+			["infinity", { ...valid(), arguments: { pid: 42, x: Number.POSITIVE_INFINITY } }],
+			["a symbol key", { ...valid(), arguments: { pid: 42, [Symbol("x")]: 1 } }],
+			["a hidden property", { ...valid(), arguments: Object.defineProperty({ pid: 42 }, "x", { value: 1, enumerable: false }) }],
+			["an array with a hole", { ...valid(), tool: "hotkey", arguments: { pid: 42, keys: [, "a"] } }],
+			["an array with a named property", { ...valid(), tool: "hotkey", arguments: { pid: 42, keys: Object.assign(["ctrl", "a"], { extra: 1 }) } }],
+			["an array of another prototype", { ...valid(), tool: "hotkey", arguments: { pid: 42, keys: Object.setPrototypeOf(["ctrl", "a"], null) } }],
+			["a cycle", { ...valid(), arguments: (() => { const cycle: Record<string, unknown> = { pid: 42 }; cycle.self = cycle; return cycle; })() }],
+			["too deep", { ...valid(), arguments: { pid: 42, a: { b: { c: { d: {} } } } } }],
+			["past the bound", { ...valid(), tool: "type_text", arguments: { pid: 42, text: "x".repeat(NATIVE_ARGUMENTS_CHARS) } }],
+			["a proxy whose traps throw", trapped(valid())],
+			["arguments behind a proxy whose traps throw", { ...valid(), arguments: trapped({ pid: 42 }) }],
+			["keys behind a proxy whose traps throw", { ...valid(), tool: "hotkey", arguments: { pid: 42, keys: trapped(["ctrl", "a"]) } }],
+		];
+		for (const [what, args] of cases) {
+			const outcome = await native.dispatch(args);
+			assert.equal(outcome.status, "rejected", what);
+			assert.ok(!JSON.stringify(outcome).includes(LEAK), what);
+		}
+		// A proxy that changes its answer after the first read: only the first is copied, and checked.
+		const changing = { ...valid(), arguments: shifting() };
+		assert.deepEqual(await native.dispatch(changing), DONE);
+		assert.deepEqual(standIn.executed.map((each) => each.arguments), [{ pid: 42 }]);
+		assert.equal(standIn.calls().length, 1);
+	});
+
+	it("reads a request into a frozen copy that shares nothing with what it read", () => {
+		const nested = { pid: 42, keys: ["ctrl", "a"] };
+		const args = { owner: OWNER, agentId: "agent-1", runId: "run-1", callId: "r1", tool: "hotkey", arguments: nested };
+		const read = readNativeRequest(args);
+		assert.deepEqual(read, args);
+		assert.notEqual(read?.arguments, nested);
+		assert.notEqual(read?.arguments.keys, nested.keys);
+		assert.ok(Object.isFrozen(read) && Object.isFrozen(read?.arguments) && Object.isFrozen(read?.arguments.keys));
+		nested.pid = 7;
+		nested.keys.push("x");
+		assert.deepEqual(read?.arguments, { pid: 42, keys: ["ctrl", "a"] });
+		// JSON's own values only, up to the bound and four levels deep; `__proto__` is never a key.
+		assert.ok(readNativeRequest({ ...args, arguments: { pid: 42, a: { b: [null, true, 1.5, "s"] } } }));
+		assert.equal(readNativeRequest({ ...args, arguments: JSON.parse('{"pid":42,"__proto__":{"x":1}}') }), null);
+		assert.ok(readNativeRequest({ ...args, arguments: { text: "x".repeat(NATIVE_ARGUMENTS_CHARS - 11) } }));
+		assert.equal(readNativeRequest({ ...args, arguments: { text: "x".repeat(NATIVE_ARGUMENTS_CHARS - 10) } }), null);
 	});
 
 	it("never opens a run twice: after an unknown outcome every call of the run is refused unsent, whatever its call ID", async () => {

@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import type { Message } from "@earendil-works/pi-ai";
 import { getAgentByName } from "agents";
 import { env, runInDurableObject } from "cloudflare:test";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { type BrowserHost, type ExecArgs, type ExecResult, Link, type Machine } from "../computer/pim-computer";
 import { Computer, IDLE_MS } from "../src/computer";
 import { ControlCoordinator, type DispatchTrace, dispatchTrace } from "../src/computer-control-runtime";
@@ -10,7 +10,7 @@ import type { ControlState } from "../src/computer-control";
 import { CONNECT_MS, Cua, type CuaBridge, MAX_MESSAGE_CHARS, PROVIDER_KEY, SPACE_HEADER } from "../src/cua";
 import type { Approval } from "../src/store";
 import { exports } from "cloudflare:workers";
-import { api, apiUrl, connectTestComputer, fakeChrome, OWNER, opens, post, toolUse } from "./helpers";
+import { api, apiUrl, connectTestComputer, fakeChrome, firstDifference, lastUserText, OWNER, opens, post, recordWaits, toolUse, waiting } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /**
@@ -392,9 +392,29 @@ describe("a space whose operator chose its Cua VM", () => {
 	/** Held, a bridge takes no connection yet; `held` counts those waiting. */
 	let handshake: Promise<void> | null = null;
 	let held = 0;
+	/**
+	 * The gates tests hold the bridge with (`hold`, `handshake`) that are still
+	 * shut. A test that fails before opening its gate would leave the bridge
+	 * holding every later test's connection or command, so after each test
+	 * any left shut are opened (below).
+	 */
+	const shut = new Set<() => void>();
+	function gate() {
+		let open = () => undefined as void;
+		const opened = new Promise<void>((resolve) => {
+			open = () => {
+				shut.delete(open);
+				resolve();
+			};
+		});
+		shut.add(open);
+		return { opened, open };
+	}
 	/** What answers the Sprites API, in the tests that start a Sprite. */
 	let sprites: ((request: Request) => Promise<Response>) | null = null;
 	const chrome = fakeChrome();
+	/** Scripted answers taken by a request other than the turn they were scripted for, by tool and step. */
+	const strays: string[] = [];
 	const ok = (command: string): ExecResult => ({ exitCode: 0, signal: null, stdout: `ran ${command}\n`, stderr: "", timedOut: false, truncated: false });
 
 	/** A bridge for `owner`'s space, whose files are made in that space's own /tmp, where its pim-computer works. */
@@ -414,7 +434,21 @@ describe("a space whose operator chose its Cua VM", () => {
 		return fixture;
 	}
 
-	beforeEach(() => {
+	beforeEach((context) => {
+		// With the waits helpers.ts reports: where the bridge stood, and which actions waited for a decision, by name only;
+		// taken as the test ran out of time, before teardown opens its gates, or else as it failed.
+		const report = async () => {
+			const connections = fixture?.connections ?? [];
+			const state = { event: "cua.state", held, handshake: handshake !== null, hold: hold !== null, connections: connections.length, open: connections.filter((each) => each.closed === null).length, strays: [...strays] };
+			const approvals = await Promise.race([
+				peek<{ approvals: Approval[] }>("/approvals?status=pending").then(({ approvals }) => approvals.map((approval) => approval.action)),
+				new Promise((resolve) => setTimeout(() => resolve("no answer within 2 s"), 2_000)),
+			]).catch(() => "unreadable");
+			return JSON.stringify({ ...state, approvals });
+		};
+		let reported: Promise<string> | undefined;
+		context.signal.addEventListener("abort", () => void (reported = report()), { once: true });
+		context.onTestFailed(async () => console.info(await (reported ?? report())));
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 			const url = new URL(input instanceof Request ? input.url : String(input));
 			if (sprites && url.host === "api.sprites.dev") return sprites(new Request(input, init));
@@ -435,6 +469,19 @@ describe("a space whose operator chose its Cua VM", () => {
 		});
 	});
 
+	/** The space's API, read after a test as its reports and teardown do: not one of its waits, which stop once it runs out of time. */
+	const peek = async <T>(path: string): Promise<T> => (await exports.default.fetch(new Request(apiUrl(path), { headers: { Authorization: `Bearer ${cua.token}` } }))).json<T>();
+
+	afterEach(async (context) => {
+		if (shut.size === 0 && context.task.result?.state !== "fail") return;
+		for (const open of [...shut]) open();
+		handshake = hold = null;
+		// What a gate held, or a failed test left under way, goes on now: the space's chat settles here rather than take a later test's scripted answers.
+		await vi
+			.waitFor(async () => expect((await peek<{ sessions: { busy: boolean }[] }>("/sessions")).sessions.some((session) => session.busy)).toBe(false), { timeout: 8_000, interval: 100 })
+			.catch(() => console.error(JSON.stringify({ event: "cua.teardown", busy: true })));
+	});
+
 	const choice = (owner: string) => JSON.stringify({ provider: "cua", space: owner });
 	const bridges = (entries: Record<string, unknown>) => JSON.stringify(entries);
 	const bridgeOf = (owner: string) => ({ url: `https://bridge.cua.test/${owner}`, token: TOKEN });
@@ -446,15 +493,15 @@ describe("a space whose operator chose its Cua VM", () => {
 	 */
 	async function space(username: string, setUp: (instance: Pim, owner: string) => void) {
 		const directory = env.Directory.getByName("directory");
-		const registered = await directory.register({ username, ip: "192.0.2.9", claim: { window: true }, policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 } });
+		const registered = await waiting("space: register", directory.register({ username, ip: "192.0.2.9", claim: { window: true }, policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 } }));
 		if (!registered.ok) throw new Error(registered.error);
 		const owner = registered.account.ownerId;
-		await directory.activate(owner);
+		await waiting("space: activate", directory.activate(owner));
 		// Before the space first starts, which sets up its tools.
-		await runInDurableObject(env.Pim.getByName(owner), (instance: Pim) => setUp(instance, owner));
-		const agent = await getAgentByName(env.Pim, owner);
-		await agent.provision({ ownerId: owner, username });
-		const token = (await env.Auth.getByName(owner).createToken(owner, "tests", Date.now())).token;
+		await waiting("space: operator's choice", runInDurableObject(env.Pim.getByName(owner), (instance: Pim) => setUp(instance, owner)));
+		const agent = await waiting("space: start", getAgentByName(env.Pim, owner));
+		await waiting("space: provision", agent.provision({ ownerId: owner, username }));
+		const token = (await waiting("space: token", env.Auth.getByName(owner).createToken(owner, "tests", Date.now()))).token;
 		return inside(owner, token);
 	}
 
@@ -463,7 +510,7 @@ describe("a space whose operator chose its Cua VM", () => {
 		const call = <T = any>(path: string, init: RequestInit = {}) =>
 			api<T>(path, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init.headers as Record<string, string> | undefined) } });
 		const root: string = (await call("/")).body.rootSession;
-		const within = <T>(fn: (instance: Pim) => T | Promise<T>) => runInDurableObject(env.Pim.getByName(owner), (instance: Pim) => fn(instance));
+		const within = <T>(fn: (instance: Pim) => T | Promise<T>) => waiting("in the space", runInDurableObject(env.Pim.getByName(owner), (instance: Pim) => fn(instance)));
 		const self = {
 			owner,
 			token,
@@ -488,30 +535,38 @@ describe("a space whose operator chose its Cua VM", () => {
 			uses(name: string, args: Record<string, unknown>) {
 				let result = "";
 				let description = "";
+				const content = `Use ${name}`;
+				/** A scripted answer some other request took, which leaves this turn without it. */
+				const stray = (context: { messages: readonly Message[] }, step: number) => void (lastUserText(context.messages) !== content && strays.push(`${name} ${step}`));
 				faux.setResponses([
 					(context) => {
+						stray(context, 1);
 						const added = context.messages.flatMap((message) => (message.role === "system" ? (message.toolsAdded ?? []) : []));
 						description = added.findLast((tool) => tool.name === name)?.description ?? "";
 						return toolUse(name, args as never);
 					},
 					(context) => {
+						stray(context, 2);
 						result = lastToolResult(context.messages);
 						return toolUse("send_to_user", { message: "Ok." });
 					},
 				]);
-				const turn = self.post(`/sessions/${root}/messages`, { content: `Use ${name}`, wait: true });
+				const turn = waiting(`turn: ${name}`, self.post(`/sessions/${root}/messages`, { content, wait: true }));
 				return { turn, result: () => result, description: () => description };
 			},
 			pending: () =>
-				vi.waitFor(
-					async () => {
-						const [approval] = (await call<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
-						expect(approval).toBeDefined();
-						return approval!;
-					},
-					{ timeout: 15_000, interval: 200 },
+				waiting(
+					"pending approval",
+					vi.waitFor(
+						async () => {
+							const [approval] = (await call<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
+							expect(approval).toBeDefined();
+							return approval!;
+						},
+						{ timeout: 15_000, interval: 200 },
+					),
 				),
-			decide: (id: string) => self.post(`/approvals/${id}/approve`),
+			decide: (id: string) => waiting("decision", self.post(`/approvals/${id}/approve`)),
 			/** The agent asks to run `command`, it is approved, and the turn ends: what the agent heard. */
 			async run(command: string) {
 				const asking = self.uses("shell", { command });
@@ -524,8 +579,10 @@ describe("a space whose operator chose its Cua VM", () => {
 	}
 
 	/** The person's API answered as it is, not as JSON. */
-	const raw = (path: string, token: string, init: RequestInit = {}) =>
-		exports.default.fetch(new Request(apiUrl(path), { ...init, headers: { Authorization: `Bearer ${token}` } }));
+	const raw = (path: string, token: string, init: RequestInit = {}) => {
+		const request = new Request(apiUrl(path), { ...init, headers: { Authorization: `Bearer ${token}` } });
+		return waiting(`${request.method} ${new URL(request.url).pathname}`, exports.default.fetch(request));
+	};
 
 	function lastToolResult(messages: readonly Message[]) {
 		const result = messages.findLast((message) => message.role === "toolResult");
@@ -538,11 +595,12 @@ describe("a space whose operator chose its Cua VM", () => {
 	let fixture: Fixture;
 
 	beforeAll(async () => {
+		recordWaits("setup");
 		cua = await space("cuaperson", (instance, owner) => {
 			instance.store.setMeta(PROVIDER_KEY, choice(owner));
 			(instance as unknown as { env: Record<string, unknown> }).env.CUA_BRIDGES = bridges({ [owner]: bridgeOf(owner) });
 		});
-		fixture = await fixtureFor(cua.owner);
+		fixture = await waiting("space: bridge", fixtureFor(cua.owner));
 	});
 
 	it("is the operator's: its status names Cua and nothing of the bridge, and no person's route starts, pairs, removes or takes it over", async () => {
@@ -671,13 +729,13 @@ describe("a space whose operator chose its Cua VM", () => {
 		expect(listed.status, JSON.stringify(listed.body)).toBe(200);
 		expect(listed.body.entries.map((entry) => entry.name)).toContain("big.bin");
 		const read = await raw(`/files/content?path=${encodeURIComponent("/workspace/big.bin")}`, cua.token);
-		expect(new Uint8Array(await read.arrayBuffer())).toEqual(big);
+		expect(firstDifference(new Uint8Array(await read.arrayBuffer()), big)).toBe(-1);
 		expect((await cua.api("/browser")).body).toMatchObject({ available: true, takeOver: false, page: { url: "https://example.com/" } });
 
 		const put = await raw(`/files/content?path=${encodeURIComponent("/workspace/big.bin")}`, cua.token, { method: "PUT", body: "replaced" });
 		expect(put.status).toBe(409);
 		expect((await cua.api(`/files?path=${encodeURIComponent("/workspace/big.bin")}`, { method: "DELETE" })).status).toBe(409);
-		expect(new Uint8Array(await cua.within(() => fs.readFile(`${fixture.root}/big.bin`)))).toEqual(big);
+		expect(firstDifference(new Uint8Array(await cua.within(() => fs.readFile(`${fixture.root}/big.bin`))), big)).toBe(-1);
 		const mark = chrome.packets.length;
 		expect((await cua.api("/browser", { method: "DELETE" })).status).toBe(409);
 		expect(chrome.sent("Target.closeTarget", mark)).toEqual([]);
@@ -765,14 +823,12 @@ describe("a space whose operator chose its Cua VM", () => {
 		];
 		for (const [change, undo, message] of changes) {
 			await cua.within((instance) => instance.computer.disconnect("Asleep"));
-			let release = () => undefined as void;
-			handshake = new Promise<void>((resolve) => {
-				release = resolve;
-			});
+			const { opened, open: release } = gate();
+			handshake = opened;
 			held = 0;
 			const asking = cua.uses("shell", { command: "echo raced" });
 			const deciding = cua.decide((await cua.pending()).id);
-			await vi.waitFor(() => expect(held).toBe(1));
+			await waiting("held handshake", vi.waitFor(() => expect(held).toBe(1)));
 			await cua.within(change);
 			handshake = null;
 			release();
@@ -781,7 +837,7 @@ describe("a space whose operator chose its Cua VM", () => {
 			expect(asking.result()).toMatch(message);
 			// The bridge took the connection, which carried nothing and was let go.
 			expect(fixture.connections.at(-1)!.received).toEqual([]);
-			await vi.waitFor(() => expect(fixture.connections.at(-1)!.closed).not.toBeNull());
+			await waiting("raced connection closed", vi.waitFor(() => expect(fixture.connections.at(-1)!.closed).not.toBeNull()));
 			expect((await cua.stateOf()).requests.at(-1)).toMatchObject({ status: "rejected" });
 			await cua.within(undo);
 		}
@@ -920,7 +976,8 @@ describe("a space whose operator chose its Cua VM", () => {
 	});
 
 	it("blocks on a command the bridge took and never answered, and never sends it again", async () => {
-		hold = new Promise<void>(() => undefined);
+		// Never opened here: the command stays unanswered for the whole test.
+		hold = gate().opened;
 		const asking = cua.uses("shell", { command: "echo hang" });
 		const deciding = cua.decide((await cua.pending()).id);
 		await vi.waitFor(() => expect(fixture.ran.at(-1)).toBe("echo hang"));

@@ -8,7 +8,7 @@ import { NATIVE_TOOL_OP, readNativeOutcome } from "../computer/native-outcome";
 import { type ExecArgs, type ExecResult, Link, type Machine } from "../computer/pim-computer";
 import { IDLE_MS } from "../src/computer";
 import type { Approval } from "../src/store";
-import { api, apiUrl, connectTestComputer, opens, OWNER, pendingApproval, post, say, TOKEN, testBrowser, toolUse } from "./helpers";
+import { api, apiUrl, connectTestComputer, firstDifference, opens, OWNER, pendingApproval, post, say, TOKEN, testBrowser, toolUse } from "./helpers";
 import { faux, paintings, type Pim } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
@@ -154,8 +154,8 @@ describe("the computer", () => {
 		// The person uploads one, larger than one message carries; it arrives whole, and the agent reads it.
 		const big = new TextEncoder().encode(`night,price\n${"1,140\n".repeat(400_000)}`);
 		expect((await upload("/workspace/receipts/hotel.csv", big)).status).toBe(201);
-		expect(new Uint8Array(await fs.readFile(`${ROOT}/receipts/hotel.csv`))).toEqual(big);
-		expect(new Uint8Array(await (await raw("/files/content?path=/workspace/receipts/hotel.csv")).arrayBuffer())).toEqual(big);
+		expect(firstDifference(new Uint8Array(await fs.readFile(`${ROOT}/receipts/hotel.csv`)), big)).toBe(-1);
+		expect(firstDifference(new Uint8Array(await (await raw("/files/content?path=/workspace/receipts/hotel.csv")).arrayBuffer()), big)).toBe(-1);
 		expect((await fs.readdir(`${ROOT}/receipts`)).length).toBe(1);
 		const read = await callTool("file_read", { path: "/workspace/receipts/hotel.csv", limit: 3 });
 		expect(read).toMatchObject({ isError: false, text: expect.stringContaining("1,140") });

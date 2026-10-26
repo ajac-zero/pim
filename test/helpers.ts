@@ -4,7 +4,7 @@ import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@e
 import { getAgentByName } from "agents";
 import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
-import { afterEach, beforeAll, expect, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, vi } from "vitest";
 import { type BrowserHost, type ExecArgs, type ExecResult, Link, type Machine } from "../computer/pim-computer";
 import { ownedCode } from "../src/auth";
 import type { Approval } from "../src/store";
@@ -23,21 +23,96 @@ export let TOKEN = "";
 /** The public id of the space's root session, where API clients talk by default. */
 export let ROOT = "";
 
-beforeAll(async () => {
-	const directory = env.Directory.getByName("directory");
-	const registered = await directory.register({
-		username: "tester",
-		ip: "192.0.2.1",
-		claim: { window: true },
-		policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 },
+/**
+ * The waits of the setup or test under way: those still open, by what each
+ * waits for, and how long finished ones took. A test that runs out of time
+ * says nothing of what it was waiting for, nor does setup; these name it.
+ * A failed test reports them, as does setup that never finished, on one
+ * line of JSON. Labels are the tests' own words: nothing a wait sends or
+ * gets back is kept.
+ */
+type Waits = { scope: "setup" | "test"; signal?: AbortSignal; open: Map<number, { label: string; at: number }>; done: { label: string; ms: number; times?: number }[]; next: number };
+let waits: Waits = { scope: "setup", open: new Map(), done: [], next: 0 };
+
+/** Starts a fresh record of waits for setup (`beforeAll`) or a test, whose `signal` says it ran out of time. */
+export function recordWaits(scope: "setup" | "test", signal?: AbortSignal) {
+	waits = { scope, ...(signal ? { signal } : {}), open: new Map(), done: [], next: 0 };
+}
+
+/** What a wait in a test that ran out of time waits for: nothing that ever comes. */
+const stopped = new Promise<never>(() => undefined);
+
+/**
+ * Waits for `work`, recording the wait under `label` in the current record of
+ * waits; only the last 20 finished are kept, one after another with the same
+ * label (a poll's requests) as one. A test that ran out of time goes
+ * on running in the background, where it would act in the tests after it in
+ * the same space: it stops at its next wait instead, which never ends (a
+ * rejection there would reach no one).
+ */
+export async function waiting<T>(label: string, work: T): Promise<Awaited<T>> {
+	const record = waits;
+	if (record.signal?.aborted) return stopped;
+	const id = record.next++;
+	const at = Date.now();
+	record.open.set(id, { label, at });
+	try {
+		const value = await work;
+		return record.signal?.aborted ? stopped : value;
+	} finally {
+		record.open.delete(id);
+		const ms = Date.now() - at;
+		const last = record.done.at(-1);
+		if (last?.label === label) Object.assign(last, { ms: last.ms + ms, times: (last.times ?? 1) + 1 });
+		else record.done = [...record.done.slice(-19), { label, ms }];
+	}
+}
+
+/** The current record of waits as one line of JSON, with the scripted model responses still unused. */
+function waitsReport(): string {
+	const now = Date.now();
+	return JSON.stringify({
+		event: "test.waits",
+		scope: waits.scope,
+		open: [...waits.open.values()].map(({ label, at }) => ({ label, ms: now - at })),
+		done: waits.done,
+		fauxPending: faux.getPendingResponseCount(),
 	});
+}
+
+beforeAll(async () => {
+	recordWaits("setup");
+	const directory = env.Directory.getByName("directory");
+	const registered = await waiting(
+		"setup: register",
+		directory.register({
+			username: "tester",
+			ip: "192.0.2.1",
+			claim: { window: true },
+			policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 },
+		}),
+	);
 	if (!registered.ok) throw new Error(registered.error);
 	OWNER = registered.account.ownerId;
-	await directory.activate(OWNER);
-	const agent = await getAgentByName(env.Pim, OWNER);
-	await agent.provision({ ownerId: OWNER, username: "tester" });
-	TOKEN = (await env.Auth.getByName(OWNER).createToken(OWNER, "tests", Date.now())).token;
+	await waiting("setup: activate", directory.activate(OWNER));
+	const agent = await waiting("setup: space", getAgentByName(env.Pim, OWNER));
+	await waiting("setup: provision", agent.provision({ ownerId: OWNER, username: "tester" }));
+	TOKEN = (await waiting("setup: token", env.Auth.getByName(OWNER).createToken(OWNER, "tests", Date.now()))).token;
 	ROOT = (await api("/")).body.rootSession;
+});
+
+beforeEach((context) => {
+	recordWaits("test", context.signal);
+	// Taken as the test runs out of time, before teardown lets what it waited for go on, or else as it fails;
+	// printed after the test's afterEach hooks, so no test's stand-in for the console swallows it.
+	let report: string | undefined;
+	context.signal.addEventListener("abort", () => void (report = waitsReport()), { once: true });
+	context.onTestFailed(() => console.error(report ?? waitsReport()));
+});
+
+afterAll(() => {
+	// Setup that never finished, which the test runner reports only as a hook that ran out of time.
+	if (waits.scope === "setup" && waits.open.size > 0) throw new Error(`Setup never finished: ${waitsReport()}`);
 });
 
 export function url(path: string) {
@@ -50,13 +125,15 @@ export function apiUrl(path: string) {
 }
 
 export async function api<T = any>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
-	const response = await exports.default.fetch(
-		new Request(apiUrl(path), {
-			...init,
-			headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json", ...init.headers },
-		}),
+	const request = new Request(apiUrl(path), {
+		...init,
+		headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json", ...init.headers },
+	});
+	// Recorded by method and path alone: the query may carry what the test sends.
+	return waiting(
+		`${request.method} ${new URL(request.url).pathname}`,
+		exports.default.fetch(request).then(async (response) => ({ status: response.status, body: (await response.json()) as T })),
 	);
-	return { status: response.status, body: (await response.json()) as T };
 }
 
 export function post<T = any>(path: string, body: unknown = {}) {
@@ -103,18 +180,21 @@ export async function comeBack(params: Record<string, string>, cookie?: string):
 
 /** Sends a message and waits for the answer. */
 export async function say(content: string, session = ROOT) {
-	const { status, body } = await post(`/sessions/${session}/messages`, { content, wait: true });
+	const { status, body } = await waiting("turn", post(`/sessions/${session}/messages`, { content, wait: true }));
 	expect(status).toBe(200);
 	return body as { status: string; text?: string; reason?: string };
 }
 
 /** The approval waiting for the user. */
 export async function pendingApproval() {
-	return vi.waitFor(async () => {
-		const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
-		expect(approval).toBeDefined();
-		return approval!;
-	});
+	return waiting(
+		"pending approval",
+		vi.waitFor(async () => {
+			const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
+			expect(approval).toBeDefined();
+			return approval!;
+		}),
+	);
 }
 
 /** Opens the WebSocket and collects every message the server sends. */
@@ -129,6 +209,17 @@ export async function connect(session?: string) {
 	});
 	socket.accept();
 	return { socket, received };
+}
+
+/**
+ * Where `actual` first differs from `expected`, or -1 when they hold the same
+ * bytes. A deep equality of a megabyte takes seconds of CPU, which a busy
+ * machine stretches past a test's timeout; this compares them in milliseconds.
+ */
+export function firstDifference(actual: Uint8Array, expected: Uint8Array): number {
+	const index = actual.findIndex((byte, at) => byte !== expected[at]);
+	if (index !== -1) return index;
+	return actual.length === expected.length ? -1 : actual.length;
 }
 
 export function systemPrompt(messages: readonly Message[]): string {

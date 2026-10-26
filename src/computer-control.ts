@@ -31,6 +31,11 @@
  *   lost across a restart, blocks admissions until a `reconcile_request` event
  *   names what happened. Nothing is replayed, and a duplicate request ID is
  *   refused, which says nothing about whether the first one ran, once or at all.
+ * - A request may name the run it belongs to (a native-app run, see
+ *   docs/cua-native-mcp.md). Once any request of a run is unknown, that run
+ *   admits nothing more, ever: reconciling the request reopens admissions
+ *   for other runs, not for it, so no new request escapes the uncertainty
+ *   through the same run.
  * - Viewer sessions are treated as input-capable; there is no read-only kind.
  *   A viewer can be requested only while the human owns the application, in the
  *   current epoch. Any viewer session not reported revoked, of any epoch, keeps
@@ -74,6 +79,8 @@ export interface ControlRequest {
 	agentId: string;
 	/** The epoch it was admitted in. */
 	epoch: number;
+	/** The run it belongs to, when it names one. */
+	runId?: string;
 	status: RequestStatus;
 	/** Reconciliation evidence, as the caller described it. */
 	evidence?: string;
@@ -101,7 +108,7 @@ export interface ControlState {
 }
 
 export type ControlEvent =
-	| { type: "admit"; requestId: string; agentId: string; lease: ControlLease }
+	| { type: "admit"; requestId: string; agentId: string; lease: ControlLease; runId?: string }
 	| { type: "request_result"; requestId: string; epoch: number; outcome: "completed" | "rejected" | "unknown" }
 	| { type: "reconcile_request"; requestId: string; resolution: "completed" | "not_executed"; evidence: string }
 	| { type: "takeover" }
@@ -117,6 +124,7 @@ export type ControlRefusal =
 	| "not_agent_owned"
 	| "blocked"
 	| "duplicate_id"
+	| "run_uncertain"
 	| "unknown_id"
 	| "epoch_mismatch"
 	| "already_final"
@@ -160,16 +168,30 @@ const refuse = (state: ControlState, reason: ControlRefusal): ControlResult => (
 const accept = (state: ControlState): ControlResult => ({ state, outcome: { ok: true } });
 
 const FINAL: readonly RequestStatus[] = ["completed", "rejected", "reconciled_completed", "reconciled_not_executed"];
+/** What a request's status says of its run: one that may have run without an answer, reconciled or not, latches the run. */
+const LATCHES_RUN: readonly RequestStatus[] = ["in_flight", "unknown", "reconciled_completed", "reconciled_not_executed"];
+
+/** Whether run `runId` admits no more requests: one of its requests was, or may yet be, unknown. A request in flight in the current epoch doesn't count. */
+export function runLatched(state: ControlState, runId: string): boolean {
+	return state.requests.some((request) => request.runId === runId && LATCHES_RUN.includes(request.status) && !(request.status === "in_flight" && request.epoch === state.epoch));
+}
 
 export function applyControlEvent(state: ControlState, event: ControlEvent): ControlResult {
 	switch (event.type) {
 		case "admit": {
-			if (!event.requestId || !event.agentId || !event.lease.leaseId) return refuse(state, "empty_value");
+			if (!event.requestId || !event.agentId || !event.lease.leaseId || event.runId === "") return refuse(state, "empty_value");
 			if (state.owner !== "agent" || !state.lease) return refuse(state, "not_agent_owned");
 			if (event.lease.epoch !== state.epoch || event.lease.leaseId !== state.lease.leaseId) return refuse(state, "stale_lease");
 			if (state.requests.some((request) => request.requestId === event.requestId)) return refuse(state, "duplicate_id");
+			if (event.runId !== undefined && runLatched(state, event.runId)) return refuse(state, "run_uncertain");
 			if (admissionBlockers(state).length > 0) return refuse(state, "blocked");
-			const request: ControlRequest = { requestId: event.requestId, agentId: event.agentId, epoch: state.epoch, status: "in_flight" };
+			const request: ControlRequest = {
+				requestId: event.requestId,
+				agentId: event.agentId,
+				epoch: state.epoch,
+				...(event.runId === undefined ? {} : { runId: event.runId }),
+				status: "in_flight",
+			};
 			return accept({ ...state, requests: [...state.requests, request] });
 		}
 		case "request_result": {
@@ -279,8 +301,9 @@ export function restoreControlState(raw: unknown): RestoreResult {
 		if (!isRecord(item) || !isName(item.requestId) || !isName(item.agentId) || !isEpoch(item.epoch) || item.epoch > epoch) return fail("invalid request");
 		if (typeof item.status !== "string" || !REQUEST_STATUSES.includes(item.status)) return fail("unknown request status");
 		if (requests.some((request) => request.requestId === item.requestId)) return fail("duplicate request ID");
+		if (item.runId !== undefined && !isName(item.runId)) return fail("invalid request run");
 		const status = item.status === "in_flight" ? "unknown" : (item.status as RequestStatus);
-		const request: ControlRequest = { requestId: item.requestId, agentId: item.agentId, epoch: item.epoch, status };
+		const request: ControlRequest = { requestId: item.requestId, agentId: item.agentId, epoch: item.epoch, ...(item.runId === undefined ? {} : { runId: item.runId }), status };
 		if (item.status.startsWith("reconciled_")) {
 			if (typeof item.evidence !== "string" || !item.evidence.trim()) return fail("reconciled request without evidence");
 			request.evidence = item.evidence;

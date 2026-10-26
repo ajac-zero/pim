@@ -57,6 +57,10 @@ export type DispatchTrace = {
 	awaiting: Set<string>;
 	/** It has been settled: what is sent after, from code it started, is no longer its own. */
 	settled: boolean;
+	/** Who makes it, as `dispatch` admitted it; only a trace `dispatch` made has one (see `Computer.native`). */
+	readonly request?: AdmittedRequest;
+	/** It has made its native-app call; a request makes at most one, whose call ID is the request's. */
+	native?: boolean;
 };
 /** The request whose calls `Computer.call` and the browser's connection are making, if the state is admitting them. */
 export const dispatchTrace = new AsyncLocalStorage<DispatchTrace>();
@@ -85,7 +89,17 @@ export type ControlRequest = {
 	requestId: string;
 	/** The approval the request was filed under, whose recorded lease must still be the current one. */
 	bindingId?: string;
+	/**
+	 * The run it belongs to, from the server's own records, for a native-app
+	 * call (docs/cua-native-mcp.md). Stored with the request: once one of a
+	 * run's requests is unknown, the run admits nothing more, also after a
+	 * restart or a reconciliation.
+	 */
+	runId?: string;
 };
+
+/** A request as `dispatch` admitted it: the space's own name, and the agent, request and run it was given by the server. */
+export type AdmittedRequest = Readonly<{ space: string; agentId: string; requestId: string; runId?: string }>;
 
 export class ControlCoordinator {
 	readonly #space: string;
@@ -225,7 +239,7 @@ export class ControlCoordinator {
 		if (!this.enabled) return send();
 		const doc = this.#usable();
 		if (request.space !== this.#space) throw new ControlRefused("wrong_space", "the request is for another space");
-		if (!request.agentId || !request.requestId) throw new ControlRefused("empty_value", "the request has no identity");
+		if (!request.agentId || !request.requestId || request.runId === "") throw new ControlRefused("empty_value", "the request has no identity");
 
 		let lease = doc.state.lease;
 		let bindings = doc.bindings;
@@ -240,7 +254,8 @@ export class ControlCoordinator {
 			}
 		}
 		if (!lease) throw new ControlRefused("not_agent_owned", "the person has control");
-		const admitted = applyControlEvent(doc.state, { type: "admit", requestId: request.requestId, agentId: request.agentId, lease });
+		const { agentId, requestId, runId } = request;
+		const admitted = applyControlEvent(doc.state, { type: "admit", requestId, agentId, lease, ...(runId === undefined ? {} : { runId }) });
 		if (!admitted.outcome.ok) {
 			if (bindings !== doc.bindings) this.#write({ ...doc, bindings });
 			throw new ControlRefused(admitted.outcome.reason, admitted.outcome.reason);
@@ -248,7 +263,8 @@ export class ControlCoordinator {
 		this.#write({ ...doc, state: admitted.state, bindings });
 		const epoch = admitted.state.epoch;
 
-		const trace: DispatchTrace = { sent: false, uncertain: false, awaiting: new Set(), settled: false };
+		const admittedRequest: AdmittedRequest = Object.freeze({ space: this.#space, agentId, requestId, ...(runId === undefined ? {} : { runId }) });
+		const trace: DispatchTrace = { sent: false, uncertain: false, awaiting: new Set(), settled: false, request: admittedRequest };
 		try {
 			return await dispatchTrace.run(trace, send);
 		} finally {

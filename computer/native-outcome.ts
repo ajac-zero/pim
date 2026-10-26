@@ -6,6 +6,10 @@
  * each other's, so it imports nothing, and uses nothing but the language
  * itself: it runs in Node and in workerd alike (docs/cua-native-mcp.md).
  *
+ * It also holds the call's own shape, `NativeRequest`, which the space builds
+ * from its trusted control context (`Computer.native`) and the host reads
+ * with `readNativeRequest` before it calls anything.
+ *
  * Nothing routes native-app calls yet: `NATIVE_TOOL_OP` names the call they
  * will be, so the space can treat its reply as an outcome, not as an
  * ordinary result.
@@ -16,6 +20,63 @@
  * read as a `NativeOutcome` (`Computer.call`); no other op's reply ever is.
  */
 export const NATIVE_TOOL_OP = "native_tool";
+
+/** The curated tools, by name. `TOOLS` in ./cua-host/native-mcp.ts has exactly these (its tests check). */
+export const NATIVE_TOOLS = Object.freeze([
+	"list_apps",
+	"list_windows",
+	"get_window_state",
+	"bring_to_front",
+	"click",
+	"type_text",
+	"press_key",
+	"hotkey",
+	"scroll",
+] as const);
+
+/** An owner, agent, run or call ID as a native call carries it: 1 to 256 printable ASCII characters, no spaces. */
+export const NATIVE_IDENTITY = /^[\x21-\x7e]{1,256}$/;
+
+/** The most characters a native call's arguments may take as JSON. The largest a curated schema admits is `type_text`'s 4,096 characters of text, escaped. */
+export const NATIVE_ARGUMENTS_CHARS = 32 * 1024;
+
+/**
+ * One native-app call, as the args of a `NATIVE_TOOL_OP` call: who makes it,
+ * from the space's own records (the space, the agent, the run and the
+ * admitted request, which is the call's ID), and the tool with its
+ * arguments, which are all a model may choose. The host checks the arguments
+ * against the tool's curated schema; nothing in them names an identity.
+ */
+export type NativeRequest = {
+	readonly owner: string;
+	readonly agentId: string;
+	readonly runId: string;
+	readonly callId: string;
+	readonly tool: (typeof NATIVE_TOOLS)[number];
+	readonly arguments: Readonly<Record<string, unknown>>;
+};
+
+/**
+ * `value` when it is exactly a `NativeRequest`: those six fields and no
+ * others, identities of `NATIVE_IDENTITY`, a curated tool's name, and
+ * arguments that are a plain object of at most `NATIVE_ARGUMENTS_CHARS` as
+ * JSON. Null otherwise, also when reading it throws (a getter, a cycle).
+ * What it returns is a new object of its own.
+ */
+export function readNativeRequest(value: unknown): NativeRequest | null {
+	try {
+		const request = exactly(value, ["owner", "agentId", "runId", "callId", "tool", "arguments"]);
+		if (!request) return null;
+		const { owner, agentId, runId, callId, tool, arguments: args } = request;
+		if (![owner, agentId, runId, callId].every((part) => typeof part === "string" && NATIVE_IDENTITY.test(part))) return null;
+		if (!oneOf(NATIVE_TOOLS, tool)) return null;
+		if (typeof args !== "object" || args === null || Array.isArray(args) || Object.getPrototypeOf(args) !== Object.prototype) return null;
+		if (JSON.stringify(args).length > NATIVE_ARGUMENTS_CHARS) return null;
+		return { owner: owner as string, agentId: agentId as string, runId: runId as string, callId: callId as string, tool, arguments: args as Record<string, unknown> };
+	} catch {
+		return null;
+	}
+}
 
 /** Why a call was refused before anything was sent to spacesd. */
 export const REJECT_REASONS = Object.freeze([
@@ -37,6 +98,8 @@ export const REJECT_REASONS = Object.freeze([
 	"invalid_arguments",
 	/** The caller's signal couldn't be read or listened to. */
 	"invalid_signal",
+	/** The host couldn't set the run's MCP session up, or holds no more runs; no tool was called. */
+	"unavailable",
 ] as const);
 export type RejectReason = (typeof REJECT_REASONS)[number];
 

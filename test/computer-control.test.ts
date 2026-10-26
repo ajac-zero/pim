@@ -100,6 +100,26 @@ describe("computer control state", () => {
 		expect(refusal(reconciled, { type: "reconcile_request", requestId: "r1", resolution: "completed", evidence: "later" })).toEqual({ ok: false, reason: "already_final" });
 	});
 
+	it("latches a run for good once one of its requests is unknown, and only that run", () => {
+		const inRun = (requestId: string, runId: string): ControlEvent => ({ type: "admit", requestId, agentId: "a", lease: lease1, runId });
+		const result = (requestId: string, outcome: "completed" | "rejected" | "unknown"): ControlEvent => ({ type: "request_result", requestId, epoch: 1, outcome });
+		expect(refusal(agentOwned(), inRun("r1", ""))).toEqual({ ok: false, reason: "empty_value" });
+		// A request of the run still in flight in this epoch, or one settled known, doesn't latch it.
+		const busy = ok(agentOwned(), inRun("r1", "R"), inRun("r2", "R"), result("r1", "completed"), result("r2", "rejected"), inRun("r3", "R"));
+		expect(busy.requests.map((request) => request.runId)).toEqual(["R", "R", "R"]);
+		const unknown = ok(busy, result("r3", "unknown"));
+		const reconciled = ok(unknown, { type: "reconcile_request", requestId: "r3", resolution: "completed", evidence: "operator saw it done" });
+		expect(refusal(reconciled, inRun("r4", "R"))).toEqual({ ok: false, reason: "run_uncertain" });
+		ok(reconciled, inRun("r4", "S"), admit("r5"));
+		// One in flight from an earlier epoch latches its run until its result is known.
+		const earlier = resumed(ok(agentOwned(), inRun("r1", "R")));
+		const lease3 = { epoch: 3, leaseId: "L3" };
+		expect(refusal(earlier, { type: "admit", requestId: "r2", agentId: "a", lease: lease3, runId: "R" })).toEqual({ ok: false, reason: "run_uncertain" });
+		ok(earlier, result("r1", "completed"), { type: "admit", requestId: "r2", agentId: "a", lease: lease3, runId: "R" });
+		expect(restoreControlState({ ...busy, requests: [{ ...busy.requests[0], runId: "" }] })).toEqual({ ok: false, error: "invalid request run" });
+		expect(restoreControlState(reconciled)).toEqual({ ok: true, state: reconciled });
+	});
+
 	const open = (sessionId: string, epoch: number): ControlEvent[] => [{ type: "viewer_open_requested", sessionId, epoch }, { type: "viewer_opened", sessionId }];
 	const revoke = (sessionId: string): ControlEvent => ({ type: "viewer_revoke_requested", sessionId });
 	const acked = (sessionId: string, attempt: number): ControlEvent => ({ type: "viewer_revoked", sessionId, attempt });

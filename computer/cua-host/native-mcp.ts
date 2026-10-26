@@ -18,7 +18,11 @@
  * unknown outcome latches the run: it sends nothing more.
  *
  * Nothing here ends a driver session (`DELETE /mcp`), signals a process, or
- * fences input; closing a run only stops it sending. Nothing routes to it yet.
+ * fences input; closing a run only stops it sending.
+ *
+ * `createNativeDispatcher` answers the space's `native_tool` calls with it:
+ * it reads each call's args as a `NativeRequest`, and opens each run once.
+ * Nothing routes to it yet: pim-computer doesn't make one.
  *
  * Importing it does nothing; `createNativeMcp(...)` makes a client.
  */
@@ -36,7 +40,17 @@ import {
 	UPSTREAM_TOOLS,
 	deepFreeze,
 } from "./native-mcp-upstream.ts";
-import { isBase64, NATIVE_WIRE_LIMITS, type NativeContent, type NativeOutcome, type PresentationIssue, type RejectReason, type UnknownReason } from "../native-outcome.ts";
+import {
+	isBase64,
+	NATIVE_IDENTITY,
+	NATIVE_WIRE_LIMITS,
+	type NativeContent,
+	type NativeOutcome,
+	type PresentationIssue,
+	readNativeRequest,
+	type RejectReason,
+	type UnknownReason,
+} from "../native-outcome.ts";
 
 /** The fetch the client sends with: Node's own in use, a stand-in in tests. */
 export type Fetch = (url: string, init: RequestInit) => Promise<Response>;
@@ -352,7 +366,7 @@ function curatedArguments(tool: Tool, raw: unknown): Record<string, unknown> | u
 
 // ---------------------------------------------------------------- identity
 
-const IDENTITY = /^[\x21-\x7e]{1,256}$/;
+const IDENTITY = NATIVE_IDENTITY;
 
 function validRun(run: TrustedRun): boolean {
 	return [run.owner, run.agentId, run.runId].every((part) => typeof part === "string" && IDENTITY.test(part));
@@ -807,4 +821,77 @@ export function createNativeMcp(options: NativeMcpOptions): NativeMcp {
 			},
 		};
 	}
+}
+
+// ---------------------------------------------------------------- the space's calls
+
+/** Whether args, which aren't a request, name a tool that isn't curated: an own string `tool` outside `TOOLS`. */
+function uncuratedTool(args: unknown): boolean {
+	try {
+		const descriptor = typeof args === "object" && args !== null ? Object.getOwnPropertyDescriptor(args, "tool") : undefined;
+		return descriptor !== undefined && typeof descriptor.value === "string" && !Object.hasOwn(TOOLS, descriptor.value);
+	} catch {
+		return false;
+	}
+}
+
+/** The most runs one dispatcher keeps; past it, a call of a new run is refused unsent. */
+export const MAX_RUNS = 256;
+
+export interface NativeDispatcher {
+	/**
+	 * Answers one `native_tool` call's args with its outcome; never throws.
+	 * Args that aren't exactly a `NativeRequest` (../native-outcome.ts), of
+	 * another owner, are refused `identity`; a tool that isn't curated,
+	 * `unknown_tool`; arguments its curated schema doesn't admit,
+	 * `invalid_arguments`. Each is refused before anything is sent to spacesd.
+	 * Otherwise the call goes to its run, which is opened on its first call
+	 * and kept: a run is never opened twice, so one whose outcome was unknown
+	 * refuses every later call (`uncertain`), whatever its call ID. A run
+	 * that can't be set up, or one past `MAX_RUNS`, is refused `unavailable`,
+	 * with no tool called; it may be set up again on a later call.
+	 */
+	dispatch(args: unknown): Promise<NativeOutcome>;
+}
+
+/**
+ * The host's side of `Computer.native` (src/computer.ts): a client of the
+ * operator's spacesd, for the one space it is made for, and the runs opened
+ * through it, in this process's memory. Making one makes no request.
+ * Across processes, the space's stored request IDs, and the runs it latches,
+ * are the guard: it never sends a request ID twice, or a call of a run that
+ * was unknown.
+ */
+export function createNativeDispatcher(options: NativeMcpOptions): NativeDispatcher {
+	const client = createNativeMcp(options);
+	const { owner } = options;
+	/** Each run's setup, by agent session, kept once it is set up. */
+	const runs = new Map<string, Promise<NativeRun | null>>();
+
+	return {
+		async dispatch(args) {
+			const rejected = (reason: RejectReason): NativeOutcome => ({ status: "rejected", reason });
+			const request = readNativeRequest(args);
+			if (!request) return rejected(uncuratedTool(args) ? "unknown_tool" : "identity");
+			if (request.owner !== owner) return rejected("identity");
+			const tool = Object.hasOwn(TOOLS, request.tool) ? TOOLS[request.tool] : undefined;
+			if (!tool) return rejected("unknown_tool");
+			if (!curatedArguments(tool, request.arguments)) return rejected("invalid_arguments");
+			const run: TrustedRun = { owner, agentId: request.agentId, runId: request.runId };
+			const key = agentSessionOf(run);
+			let opening = runs.get(key);
+			if (!opening) {
+				if (runs.size >= MAX_RUNS) return rejected("unavailable");
+				opening = client.openRun(run).catch(() => null);
+				runs.set(key, opening);
+			}
+			const opened = await opening;
+			if (!opened) {
+				// Setup calls no tool, so the run may be set up again on a later call.
+				if (runs.get(key) === opening) runs.delete(key);
+				return rejected("unavailable");
+			}
+			return opened.invoke({ ...run, callId: request.callId, tool: request.tool, arguments: request.arguments });
+		},
+	};
 }

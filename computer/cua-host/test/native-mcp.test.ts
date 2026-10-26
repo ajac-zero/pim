@@ -17,10 +17,12 @@ import { describe, it } from "node:test";
 import {
 	agentSessionOf,
 	canonical,
+	createNativeDispatcher,
 	createNativeMcp,
 	DEFAULT_LIMITS,
 	dispatchEffect,
 	LIMIT_RANGES,
+	MAX_RUNS,
 	type Fetch,
 	type NativeCall,
 	NativeMcpSetupError,
@@ -30,7 +32,7 @@ import {
 	type TrustedRun,
 } from "../native-mcp.ts";
 import { AGENT_SESSION, CUA_COMMIT, UPSTREAM_TOOLS, UPSTREAM_TOOLS_SHA256 } from "../native-mcp-upstream.ts";
-import { BRIDGE_MESSAGE_CHARS, isBase64, NATIVE_WIRE_LIMITS, readNativeOutcome } from "../../native-outcome.ts";
+import { BRIDGE_MESSAGE_CHARS, isBase64, NATIVE_TOOLS, NATIVE_WIRE_LIMITS, readNativeOutcome } from "../../native-outcome.ts";
 import { MAX_MESSAGE_CHARS } from "../../cua-bridge.ts";
 
 const ORIGIN = "http://127.0.0.1:3211";
@@ -880,5 +882,119 @@ describe("results", () => {
 	it("keeps limits that bound a screenshot of the pinned default size", () => {
 		// get_window_state delivers at most 1.15 megapixels, its long edge at most 1568 by default.
 		assert.ok(DEFAULT_LIMITS.maxImageSide >= 1568 && DEFAULT_LIMITS.maxImagePixels >= 1_150_000);
+	});
+});
+
+describe("the space's calls, through createNativeDispatcher", () => {
+	const dispatcher = (standIn: StandIn) => createNativeDispatcher({ origin: ORIGIN, token: TOKEN, owner: OWNER, fetch: standIn.fetch, limits: { callMs: 1_000 } });
+	/** A call's args as the space sends them (`Computer.native`), off the wire. */
+	const wire = (overrides: Record<string, unknown> = {}): unknown =>
+		JSON.parse(JSON.stringify({ owner: OWNER, agentId: "agent-1", runId: "run-1", callId: `request-${Math.random()}`, tool: "click", arguments: { pid: 42 }, ...overrides }));
+	const methods = (standIn: StandIn) => standIn.sent.map((sent) => (sent.body as { method: string }).method);
+	const DONE: NativeOutcome = { status: "completed", isError: false, code: null, content: [{ type: "text", text: "done" }], presentation: [] };
+
+	it("names exactly the curated tools on both sides", () => {
+		assert.deepEqual([...NATIVE_TOOLS].sort(), Object.keys(TOOLS).sort());
+	});
+
+	it("calls each request's tool once, in its run's own driver session, setting each run up once", async () => {
+		const standIn = new StandIn();
+		const native = dispatcher(standIn);
+		assert.deepEqual(await native.dispatch(wire({ callId: "r1" })), DONE);
+		assert.deepEqual(await native.dispatch(wire({ callId: "r2", tool: "list_apps", arguments: {} })), DONE);
+		assert.deepEqual(await native.dispatch(wire({ callId: "r3", agentId: "agent-2", runId: "run-2", tool: "list_apps", arguments: {} })), DONE);
+		const session = (agentId: string, runId: string) => `agent-${agentSessionOf({ owner: OWNER, agentId, runId })}`;
+		assert.deepEqual(
+			standIn.executed.map((each) => [each.name, each.arguments, each.driverSession]),
+			[
+				["click", { pid: 42 }, session("agent-1", "run-1")],
+				["list_apps", {}, session("agent-1", "run-1")],
+				["list_apps", {}, session("agent-2", "run-2")],
+			],
+		);
+		assert.equal(methods(standIn).filter((method) => method === "initialize").length, 2);
+		// The run's call ID is the request's, so the same request sent again is refused unsent.
+		assert.deepEqual(await native.dispatch(wire({ callId: "r1", tool: "list_apps", arguments: {} })), { status: "rejected", reason: "call_reused" });
+		assert.equal(standIn.calls().length, 3);
+	});
+
+	it("refuses unsent, with no setup, anything but a request of its own space for a curated tool with admitted arguments", async () => {
+		const standIn = new StandIn();
+		const native = dispatcher(standIn);
+		const valid = wire() as Record<string, unknown>;
+		const without = (key: string) => Object.fromEntries(Object.entries(valid).filter(([each]) => each !== key));
+		const cases: [string, unknown, string][] = [
+			["another space", wire({ owner: "space-bob" }), "identity"],
+			["no owner", without("owner"), "identity"],
+			["no run", without("runId"), "identity"],
+			["no call ID", without("callId"), "identity"],
+			["a session beside the call", wire({ session: "agent-x" }), "identity"],
+			["an endpoint beside the call", wire({ origin: "https://evil.test", token: LEAK }), "identity"],
+			["an agent session beside the call", wire({ agentSession: "pim-0000" }), "identity"],
+			["a numeric agent", wire({ agentId: 7 }), "identity"],
+			["an agent with a space", wire({ agentId: "agent 1" }), "identity"],
+			["a run with a newline", wire({ runId: "run-1\n" }), "identity"],
+			["a call ID of 257 characters", wire({ callId: "c".repeat(257) }), "identity"],
+			["arguments that are a list", wire({ arguments: [42] }), "identity"],
+			["arguments that are null", wire({ arguments: null }), "identity"],
+			["a list", [valid], "identity"],
+			["null", null, "identity"],
+			["a string", JSON.stringify(valid), "identity"],
+			["launch_app", wire({ tool: "launch_app", arguments: { name: "xterm" } }), "unknown_tool"],
+			["run_steps", wire({ tool: "run_steps" }), "unknown_tool"],
+			["a raw method", wire({ tool: "tools/call" }), "unknown_tool"],
+			["__proto__", wire({ tool: "__proto__" }), "unknown_tool"],
+			["a session argument", wire({ arguments: { pid: 42, session: "other" } }), "invalid_arguments"],
+			["an owner argument", wire({ arguments: { pid: 42, owner: "space-bob" } }), "invalid_arguments"],
+			["a _meta argument", wire({ arguments: { pid: 42, _meta: {} } }), "invalid_arguments"],
+			["the desktop at large", wire({ arguments: { pid: 42, scope: "desktop" } }), "invalid_arguments"],
+			["a file written", wire({ tool: "get_window_state", arguments: { pid: 42, screenshot_out_file: "/tmp/x.png" } }), "invalid_arguments"],
+			["no pid", wire({ arguments: { x: 1, y: 1 } }), "invalid_arguments"],
+		];
+		for (const [what, args, reason] of cases) {
+			const outcome = await native.dispatch(args);
+			assert.deepEqual(outcome, { status: "rejected", reason }, what);
+			assert.deepEqual(overTheWire(outcome), outcome, what);
+		}
+		assert.deepEqual(standIn.sent, []);
+	});
+
+	it("never opens a run twice: after an unknown outcome every call of the run is refused unsent, whatever its call ID", async () => {
+		const standIn = new StandIn();
+		standIn.behaviour = (_, __, session) => json({ error: LEAK }, session, { status: 500 });
+		const native = dispatcher(standIn);
+		assert.deepEqual(await native.dispatch(wire({ callId: "r1" })), { status: "unknown", reason: "http_status" });
+		standIn.behaviour = () => ({ content: [{ type: "text", text: "done" }] });
+		for (const callId of ["r1", "r2", "r3"]) {
+			assert.deepEqual(await native.dispatch(wire({ callId, tool: "list_apps", arguments: {} })), { status: "rejected", reason: "uncertain" }, callId);
+		}
+		assert.deepEqual(methods(standIn), ["initialize", "notifications/initialized", "tools/list", "tools/call"]);
+		// Another run is the space's to admit, or not; here it is a run of its own.
+		assert.deepEqual(await native.dispatch(wire({ callId: "r4", runId: "run-2", tool: "list_apps", arguments: {} })), DONE);
+		assert.equal(standIn.calls().length, 2);
+	});
+
+	it("refuses a run it can't set up as unavailable, with no tool called, and may set it up on a later call", async () => {
+		const standIn = new StandIn();
+		standIn.tools = () => advertisedTools((tools) => void tools.splice(0, tools.length));
+		const native = dispatcher(standIn);
+		const outcome = await native.dispatch(wire({ callId: "r1" }));
+		assert.deepEqual(outcome, { status: "rejected", reason: "unavailable" });
+		assert.deepEqual(overTheWire(outcome), outcome);
+		assert.equal(standIn.executed.length, 0);
+		standIn.tools = () => advertisedTools();
+		assert.deepEqual(await native.dispatch(wire({ callId: "r2" })), DONE);
+		assert.equal(standIn.executed.length, 1);
+	});
+
+	it("keeps at most MAX_RUNS runs, refusing a new one past them unsent", async () => {
+		const standIn = new StandIn();
+		const native = dispatcher(standIn);
+		for (let run = 0; run < MAX_RUNS; run++) await native.dispatch(wire({ runId: `run-${run}`, tool: "list_apps", arguments: {} }));
+		const sent = standIn.sent.length;
+		assert.deepEqual(await native.dispatch(wire({ runId: "one-more", tool: "list_apps", arguments: {} })), { status: "rejected", reason: "unavailable" });
+		assert.equal(standIn.sent.length, sent);
+		// A run it holds goes on.
+		assert.deepEqual(await native.dispatch(wire({ runId: "run-0", tool: "list_apps", arguments: {} })), DONE);
 	});
 });

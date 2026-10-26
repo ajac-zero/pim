@@ -3,7 +3,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as nativeOutcome from "../computer/native-outcome";
-import { BRIDGE_MESSAGE_CHARS, NATIVE_TOOL_OP, type NativeOutcome } from "../computer/native-outcome";
+import { BRIDGE_MESSAGE_CHARS, NATIVE_TOOL_OP, type NativeOutcome, readNativeRequest } from "../computer/native-outcome";
 import type { ExecArgs, ExecResult } from "../computer/pim-computer";
 import type { Approval } from "../src/store";
 import { Computer, type ComputerLink } from "../src/computer";
@@ -282,6 +282,8 @@ function memory(initial?: string): ControlStorage & { value: string | undefined;
 }
 
 const request = (requestId: string, agentId = "agent-a") => ({ space: "o_a", agentId, requestId });
+/** A request of native-app run `runId`, as the server would name it. */
+const inRun = (requestId: string, runId: string, agentId = "agent-a") => ({ ...request(requestId, agentId), runId });
 /** A coordinator of space `o_a`, opted in and granted to the agents. */
 const resumed = () => {
 	const storage = memory();
@@ -484,16 +486,20 @@ describe("the coordinator", () => {
 
 describe("a native-app call, through Computer.call and the coordinator", () => {
 	/**
-	 * A computer Pim started, as `Computer` sees it, whose link is the test's:
-	 * each call sent is recorded, and the test answers it as pim-computer
-	 * would, or doesn't. Nothing is installed or run, and no native-app call
-	 * goes anywhere: the reserved op has no handler yet.
+	 * An operator's Cua computer, as `Computer` sees it, with native-app
+	 * calls turned on, whose link is the test's: each call sent is recorded,
+	 * and the test answers it as pim-computer would, or doesn't. Nothing is
+	 * installed or run, and no native-app call goes anywhere: the reserved op
+	 * has no handler yet. `sprite` makes it a computer Pim started instead,
+	 * and `nativeApps` false leaves native-app calls off.
 	 */
-	function machine() {
+	function machine({ sprite = false, nativeApps = true } = {}) {
 		const sent: { type: string; id: string; op: string; args: unknown }[] = [];
 		const meta = new Map<string, string>();
 		let link: ComputerLink | null = null;
 		const computer: Computer = new Computer({
+			selected: () => (sprite ? null : "cua"),
+			nativeApps,
 			meta: { meta: (key) => meta.get(key), setMeta: (key, value) => void meta.set(key, value), deleteMeta: (key) => void meta.delete(key) },
 			sockets: () => [],
 			wake: async () => {
@@ -511,7 +517,7 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 			},
 			inUse: () => false,
 		});
-		computer.started("native-test", Date.now());
+		if (sprite) computer.started("native-test", Date.now());
 		/** Answers the `index`th call sent, with whatever `body` holds beside its type and ID. */
 		const reply = (index: number, body: Record<string, unknown>) => computer.receive(JSON.stringify({ type: "reply", id: sent[index]!.id, ...body }));
 		const calls = (count: number) => vi.waitFor(() => expect(sent).toHaveLength(count));
@@ -519,13 +525,13 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 		return { computer, sent, reply, calls, drop };
 	}
 	/** Runs `send` as request `requestId` of `coordinator`, noting what its trace said once each call it awaits settled. */
-	function traced(coordinator: ControlCoordinator, requestId: string, send: (note: () => void) => Promise<unknown>) {
+	function traced(coordinator: ControlCoordinator, requestId: string, send: (note: () => void) => Promise<unknown>, runId = "run-1") {
 		const notes: { sent: boolean; uncertain: boolean; awaiting: number }[] = [];
 		const note = () => {
 			const trace = dispatchTrace.getStore()!;
 			notes.push({ sent: trace.sent, uncertain: trace.uncertain, awaiting: trace.awaiting.size });
 		};
-		const done = coordinator.dispatch(request(requestId), () => send(note)).then(
+		const done = coordinator.dispatch(inRun(requestId, runId), () => send(note)).then(
 			(value) => ({ value }),
 			(error: unknown) => ({ error: error as Error & Record<string, unknown> }),
 		);
@@ -539,7 +545,7 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 		const { computer, sent, reply, calls } = machine();
 		const { storage, coordinator } = resumed();
 		const run = traced(coordinator, "r1", async (note) => {
-			const outcome = await computer.call<NativeOutcome>(NATIVE_TOOL_OP, { tool: "click", arguments: { pid: 42 } });
+			const outcome = await computer.native("click", { pid: 42 });
 			note();
 			return outcome;
 		});
@@ -579,7 +585,7 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 		for (const [index, outcome] of outcomes.entries()) {
 			const { coordinator } = resumed();
 			const run = traced(coordinator, "r1", async (note) => {
-				const value = await computer.call(NATIVE_TOOL_OP, {});
+				const value = await computer.native("list_apps", {});
 				note();
 				return value;
 			});
@@ -620,7 +626,7 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 			const { coordinator } = resumed();
 			const run = traced(coordinator, "r1", async (note) => {
 				try {
-					return await computer.call(NATIVE_TOOL_OP, {});
+					return await computer.native("list_apps", {});
 				} finally {
 					note();
 				}
@@ -653,45 +659,49 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 		expect(run.notes).toEqual([{ sent: true, uncertain: false, awaiting: 0 }]);
 		expect(run.status()).toBe("completed");
 
-		// Outside any request, as for a paired computer or a Sprite of a space that never opted in, a native call returns only checked outcomes too.
-		const plain = computer.call(NATIVE_TOOL_OP, {});
-		await calls(3);
-		reply(2, { result: known });
-		expect(await plain).toEqual(known);
-		const bad = computer.call(NATIVE_TOOL_OP, {}).catch((error: Error) => error.message);
-		await calls(4);
-		reply(3, { error: { message: LEAK } });
-		expect(await bad).not.toContain(LEAK);
 	});
 
-	it("is monotonic in a request: a known native outcome after an unknown one lowers nothing", async () => {
+	it("is monotonic in a request: a known native outcome after an uncertain call, or a known reply after a native unknown, lowers nothing", async () => {
 		const { computer, reply, calls } = machine();
+		for (const [index, outcome] of ([{ status: "rejected", reason: "uncertain" }, known] as NativeOutcome[]).entries()) {
+			const { coordinator } = resumed();
+			const run = traced(coordinator, "r1", async (note) => {
+				await computer.call("exec", { command: "date" }, 20).catch(() => undefined);
+				note();
+				await computer.native("list_apps", {});
+				note();
+			});
+			await calls(2 * index + 2);
+			reply(2 * index + 1, { result: outcome });
+			await run.done;
+			expect(run.notes, outcome.status).toEqual(Array(2).fill({ sent: true, uncertain: true, awaiting: 0 }));
+			expect(run.status(), outcome.status).toBe("unknown");
+		}
 		const { coordinator } = resumed();
 		const run = traced(coordinator, "r1", async (note) => {
-			for (let call = 0; call < 3; call++) {
-				await computer.call(NATIVE_TOOL_OP, {});
-				note();
-			}
+			await computer.native("list_apps", {});
+			note();
+			await computer.call("stat", { path: "/workspace" });
+			note();
 		});
-		const answers: NativeOutcome[] = [{ status: "unknown", reason: "transport" }, { status: "rejected", reason: "uncertain" }, known];
-		for (const [index, outcome] of answers.entries()) {
-			await calls(index + 1);
-			reply(index, { result: outcome });
-		}
+		await calls(5);
+		reply(4, { result: { status: "unknown", reason: "transport" } });
+		await calls(6);
+		reply(5, { result: { size: 0 } });
 		await run.done;
-		expect(run.notes).toEqual(Array(3).fill({ sent: true, uncertain: true, awaiting: 0 }));
+		expect(run.notes).toEqual(Array(2).fill({ sent: true, uncertain: true, awaiting: 0 }));
 		expect(run.status()).toBe("unknown");
 	});
 
 	it("leaves unknown a native call given up, cut off, or still awaited when its request settles, and a late reply changes nothing", async () => {
 		const { computer, sent, reply, calls, drop } = machine();
 		const { storage, coordinator: timedOut } = resumed();
-		const late = traced(timedOut, "r1", () => computer.call(NATIVE_TOOL_OP, {}, 20));
+		const late = traced(timedOut, "r1", () => computer.native("list_apps", {}, 20));
 		expect((await late.done as { error: Error }).error.message).toMatch(/didn't answer/);
 		expect(late.status()).toBe("unknown");
 
 		const { coordinator: cutOff } = resumed();
-		const dropped = traced(cutOff, "r1", () => computer.call(NATIVE_TOOL_OP, {}));
+		const dropped = traced(cutOff, "r1", () => computer.native("list_apps", {}));
 		await calls(2);
 		drop();
 		expect((await dropped.done as { error: Error }).error.message).toMatch(/disconnected/);
@@ -700,7 +710,7 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 		// A request that doesn't wait for its native call is settled before the reply.
 		const { coordinator: unwaited } = resumed();
 		const early = traced(unwaited, "r1", async () => {
-			void computer.call(NATIVE_TOOL_OP, {}).catch(() => undefined);
+			void computer.native("list_apps", {}).catch(() => undefined);
 			await calls(3);
 		});
 		await early.done;
@@ -731,7 +741,7 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 			const { coordinator } = resumed();
 			const run = traced(coordinator, "r1", async (note) => {
 				try {
-					return await computer.call(NATIVE_TOOL_OP, {});
+					return await computer.native("list_apps", {});
 				} finally {
 					note();
 				}
@@ -756,7 +766,7 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 		// A timeout well past the test's, so only the reply can settle it.
 		const run = traced(coordinator, "r1", async (note) => {
 			try {
-				return await computer.call(NATIVE_TOOL_OP, {}, 600_000);
+				return await computer.native("list_apps", {}, 600_000);
 			} finally {
 				note();
 			}
@@ -774,6 +784,152 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 		expect(computer.busy()).toBe(false);
 	});
 
+	it("binds a native call to the admitted request and the space, never to what the caller passes", async () => {
+		const { computer, sent, reply, calls } = machine();
+		const { coordinator } = resumed();
+		// What a model might write: identities, a session, an endpoint and a token, all as arguments.
+		const forged: Record<string, unknown> = { pid: 42, owner: "o_evil", agentId: "agent-evil", runId: "run-evil", callId: "c1", session: "s", origin: "https://evil.test", token: LEAK };
+		const asked = { ...forged };
+		const runs = [traced(coordinator, "r1", () => computer.native("click", forged), "run-7")];
+		// Changed after the call, it changes nothing sent: the copy was made before anything was awaited.
+		forged.pid = 1;
+		await calls(1);
+		reply(0, { result: known });
+		runs.push(traced(coordinator, "r2", () => computer.native("list_apps", {}), "run-8"));
+		await calls(2);
+		reply(1, { result: known });
+		for (const run of runs) expect(await run.done).toEqual({ value: known });
+		expect(sent.map((call) => [call.op, call.args])).toEqual([
+			[NATIVE_TOOL_OP, { owner: "o_a", agentId: "agent-a", runId: "run-7", callId: "r1", tool: "click", arguments: asked }],
+			[NATIVE_TOOL_OP, { owner: "o_a", agentId: "agent-a", runId: "run-8", callId: "r2", tool: "list_apps", arguments: {} }],
+		]);
+		// Exactly what the host reads as a call, and nothing else.
+		for (const call of sent) expect(readNativeRequest(call.args)).toEqual(call.args);
+		// Another agent's request is that agent's.
+		const other = coordinator.dispatch(inRun("r3", "run-9", "agent-b"), () => computer.native("list_apps", {}));
+		await calls(3);
+		reply(2, { result: known });
+		await other;
+		expect(sent[2]?.args).toMatchObject({ owner: "o_a", agentId: "agent-b", runId: "run-9", callId: "r3" });
+	});
+
+	it("sends no native call without an admitted request of a run, or with a tool or arguments it can't vouch for", async () => {
+		const { computer, sent, reply, calls } = machine();
+		const refusedNative = (promise: Promise<unknown>) =>
+			promise.then(
+				() => "sent",
+				(error: Error & { status?: number }) => error.status,
+			);
+
+		// Outside any request; through the plain call, in a request or not; and in a request made by hand, not admitted.
+		expect(await refusedNative(computer.native("list_apps", {}))).toBe(409);
+		expect(await refusedNative(computer.call(NATIVE_TOOL_OP, { owner: "o_a", agentId: "agent-a", runId: "run-1", callId: "x", tool: "list_apps", arguments: {} }))).toBe(400);
+		const handMade = { sent: false, uncertain: false, awaiting: new Set<string>(), settled: false };
+		expect(await refusedNative(dispatchTrace.run(handMade, () => computer.native("list_apps", {})))).toBe(409);
+		const { coordinator } = resumed();
+		expect(await refusedNative(coordinator.dispatch(inRun("raw", "run-1"), () => computer.call(NATIVE_TOOL_OP, {})))).toBe(400);
+		// Admitted, but naming no run.
+		expect(await refusedNative(coordinator.dispatch(request("no-run"), () => computer.native("list_apps", {})))).toBe(409);
+
+		const tools: unknown[] = ["launch_app", "run_steps", "page", "initialize", "tools/call", "__proto__", "toString", "", 42, null, undefined];
+		const args: [string, unknown][] = [
+			["an array", [{ pid: 42 }]],
+			["null", null],
+			["a string", "{\"pid\":42}"],
+			["a date", new Date()],
+			["a map", new Map([["pid", 42]])],
+			["an object without a prototype", Object.assign(Object.create(null), { pid: 42 })],
+			["a getter that throws", Object.defineProperty({}, "pid", { enumerable: true, get: () => { throw new Error(LEAK); } })],
+			["a cycle", (() => { const cycle: Record<string, unknown> = { pid: 42 }; cycle.self = cycle; return cycle; })()],
+			["a bigint", { pid: 42n }],
+			["too much", { pid: 42, text: "x".repeat(40_000) }],
+		];
+		const cases: [string, () => Promise<unknown>][] = [
+			...tools.map((tool): [string, () => Promise<unknown>] => [`the tool ${String(tool)}`, () => computer.native(tool, {})]),
+			...args.map(([what, value]): [string, () => Promise<unknown>] => [`arguments that are ${what}`, () => computer.native("click", value)]),
+		];
+		for (const [index, [what, call]] of cases.entries()) {
+			const run = traced(coordinator, `bad-${index}`, call);
+			const done = await run.done;
+			expect("error" in done && done.error.status, what).toBe(400);
+			expect("error" in done && done.error.message, what).not.toContain(LEAK);
+			// Nothing left the space, so the request is definitively not run.
+			expect(run.status(), what).toBe("rejected");
+		}
+
+		// A request makes one native call, whose ID is the request's; a second is refused unsent.
+		const twice = traced(coordinator, "twice", async () => {
+			const first = computer.native("list_apps", {});
+			await calls(1);
+			const second = await refusedNative(computer.native("list_apps", {}));
+			reply(0, { result: known });
+			return [await first, second];
+		});
+		expect(await twice.done).toEqual({ value: [known, 409] });
+		expect(sent.map((call) => call.args)).toEqual([expect.objectContaining({ callId: "twice" })]);
+		expect(twice.status()).toBe("completed");
+	});
+
+	it("keeps native calls off unless turned on, and never sends one to a Sprite or a paired computer, whose calls are as before", async () => {
+		for (const options of [{ nativeApps: false }, { sprite: true }]) {
+			const { computer, sent } = machine(options);
+			const { coordinator } = resumed();
+			const run = traced(coordinator, "r1", () => computer.native("list_apps", {}));
+			const done = await run.done;
+			expect("error" in done && done.error.status, JSON.stringify(options)).toBe(409);
+			expect(run.status(), JSON.stringify(options)).toBe("rejected");
+			expect(sent, JSON.stringify(options)).toEqual([]);
+		}
+		// A Sprite answers its calls outside any request, as before; only the reserved op is refused there.
+		const { computer, sent, reply, calls } = machine({ sprite: true });
+		const ran = computer.call("exec", { command: "date" });
+		await calls(1);
+		reply(0, { result: { status: "unknown", reason: "timeout" } });
+		expect(await ran).toEqual({ status: "unknown", reason: "timeout" });
+		await expect(computer.call(NATIVE_TOOL_OP, {})).rejects.toThrow(/native-app path/);
+		expect(sent.map((call) => call.op)).toEqual(["exec"]);
+		// The space's own computer, as Pim makes it, has native-app calls off.
+		expect(await inSpace((pim) => pim.computer.native("list_apps", {}).then(() => "sent", (error: Error) => error.message))).toMatch(/off/);
+	});
+
+	it("latches a run once one of its requests is unknown: reconciling reopens other runs, never it, also after a restart", async () => {
+		const { computer, sent, reply, calls } = machine();
+		const { storage, coordinator } = resumed();
+		const first = traced(coordinator, "r1", () => computer.native("click", { pid: 42 }), "run-1");
+		await calls(1);
+		reply(0, { result: { status: "unknown", reason: "transport" } });
+		await first.done;
+		expect(coordinator.apply({ type: "reconcile_request", requestId: "r1", resolution: "not_executed", evidence: "The operator checked the app." })).toEqual({ ok: true });
+
+		const send = vi.fn(async () => undefined);
+		// Neither a new request ID nor a new agent escapes it through the same run.
+		expect(await refusal(coordinator.dispatch(inRun("r2", "run-1"), send))).toBe("run_uncertain");
+		expect(await refusal(coordinator.dispatch(inRun("r3", "run-1", "agent-b"), send))).toBe("run_uncertain");
+		// A request in flight when the space restarts comes back unknown, and latches its run too.
+		const hanging = traced(coordinator, "r4", () => computer.native("list_apps", {}, 600_000), "run-2");
+		await calls(2);
+		// The space restarts on what was stored; the old process's coordinator is gone with it.
+		const restarted = new ControlCoordinator("o_a", memory(storage.value));
+		expect(restarted.state?.requests.map((each) => [each.requestId, each.runId, each.status])).toEqual([
+			["r1", "run-1", "reconciled_not_executed"],
+			["r4", "run-2", "unknown"],
+		]);
+		restarted.apply({ type: "reconcile_request", requestId: "r4", resolution: "completed", evidence: "The operator saw the list." });
+		for (const run of ["run-1", "run-2"]) expect(await refusal(restarted.dispatch(inRun(`after-${run}`, run), send)), run).toBe("run_uncertain");
+		expect(await refusal(restarted.dispatch(inRun("r1", "run-3"), send))).toBe("duplicate_id");
+		expect(send).not.toHaveBeenCalled();
+
+		// Another run is admitted, and its call carries its own run.
+		const fresh = traced(restarted, "r5", () => computer.native("list_apps", {}), "run-3");
+		await calls(3);
+		reply(2, { result: known });
+		expect(await fresh.done).toEqual({ value: known });
+		expect(fresh.status()).toBe("completed");
+		expect(sent.map((call) => (call.args as { runId: string }).runId)).toEqual(["run-1", "run-2", "run-3"]);
+		reply(1, { result: known });
+		await hanging.done;
+	});
+
 	it("keeps an outcome's budget below what one bridge message carries", () => {
 		expect(BRIDGE_MESSAGE_CHARS).toBe(MAX_MESSAGE_CHARS);
 	});
@@ -781,7 +937,7 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 	it("fails closed when a native call's settling can't be stored, and stays so after a restart", async () => {
 		const { computer, reply, calls } = machine();
 		const { storage, coordinator } = resumed();
-		const run = traced(coordinator, "r1", () => computer.call(NATIVE_TOOL_OP, {}));
+		const run = traced(coordinator, "r1", () => computer.native("list_apps", {}));
 		await calls(1);
 		storage.failWrites = true;
 		reply(0, { result: { status: "unknown", reason: "aborted" } });

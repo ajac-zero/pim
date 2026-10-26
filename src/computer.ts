@@ -1,7 +1,15 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
 import type { Connection } from "agents";
-import { dispatchEffect, NATIVE_TOOL_OP, type NativeOutcome, readNativeOutcome } from "../computer/native-outcome";
+import {
+	dispatchEffect,
+	NATIVE_ARGUMENTS_CHARS,
+	NATIVE_TOOL_OP,
+	type NativeOutcome,
+	type NativeRequest,
+	readNativeOutcome,
+	readNativeRequest,
+} from "../computer/native-outcome";
 import type { ExecArgs, ExecResult } from "../computer/pim-computer";
 import { digestHex } from "./auth/store";
 import { currentTrace, type DispatchTrace } from "./computer-control-runtime";
@@ -61,6 +69,12 @@ export const DEFAULT_COMMAND_MS = 120_000;
 export const MAX_COMMAND_MS = 600_000;
 /** How much of each of a command's outputs comes back. */
 const COMMAND_OUTPUT_BYTES = 64_000;
+/**
+ * How long a native-app call may take: longer than the host's own bounds,
+ * three setup requests of `setupMs` (10 s) and one call of `callMs` (60 s),
+ * so the space doesn't give a call up before the host has (docs/cua-native-mcp.md).
+ */
+export const NATIVE_CALL_MS = 120_000;
 
 /** How long a computer Pim started may take to wake and start pim-computer. */
 const WAKE_MS = 90_000;
@@ -199,6 +213,8 @@ export class Computer {
 	readonly #selected: () => Selection | null;
 	/** What the space reaches its computer by now, which a link must have been made under; throws when that can't be read. */
 	readonly #binding: () => string;
+	/** Whether native-app calls may be sent (`native`): only when the one who makes the computer says so, which Pim doesn't yet. */
+	readonly #nativeApps: boolean;
 	/** pim-computer on the computer Pim started, while the space holds on to it. */
 	#link: ComputerLink | null = null;
 	/** What `#link` was made under (`#binding`), kept in memory only. */
@@ -216,6 +232,8 @@ export class Computer {
 		inUse: () => boolean;
 		selected?: () => Selection | null;
 		binding?: () => string;
+		/** Lets `native` send native-app calls to the operator's Cua computer. Off unless given. */
+		nativeApps?: boolean;
 	}) {
 		this.#meta = options.meta;
 		this.#sockets = options.sockets;
@@ -223,6 +241,7 @@ export class Computer {
 		this.#inUse = options.inUse;
 		this.#selected = options.selected ?? (() => null);
 		this.#binding = options.binding ?? (() => "default");
+		this.#nativeApps = options.nativeApps === true;
 	}
 
 	/** The computer the space's operator chose, if any (./cua.ts). */
@@ -450,12 +469,62 @@ export class Computer {
 
 	/**
 	 * Calls the computer and waits for its answer; one Pim started wakes first,
-	 * if it's asleep. Op `NATIVE_TOOL_OP` resolves only with a checked
-	 * `NativeOutcome`, and, for a request the control state admitted, is
-	 * awaited in its trace until a reply comes (see `#nativeReply`); every other
-	 * op is answered as it always was. Nothing in the reply chooses which.
+	 * if it's asleep. Op `NATIVE_TOOL_OP` is refused here, unsent: only
+	 * `native` makes it, which resolves only with a checked `NativeOutcome`,
+	 * awaited in its request's trace until a reply comes (see `#nativeReply`).
+	 * Every other op is answered as it always was. Nothing in the reply
+	 * chooses which.
 	 */
 	async call<T = unknown>(op: string, args: Record<string, unknown>, timeoutMs = FILE_CALL_MS, counts = true): Promise<T> {
+		// Its args are made only by `native`, from the request being admitted, never by a caller.
+		if (op === NATIVE_TOOL_OP) throw new HttpError(400, "A native-app call is made only through the space's own native-app path, so nothing was sent.");
+		return this.#call<T>(op, args, timeoutMs, counts);
+	}
+
+	/**
+	 * Calls one curated native-app tool on the operator's Cua computer, as
+	 * the request the control state is admitting now, and resolves with the
+	 * checked `NativeOutcome` (see `call` and `#nativeReply`).
+	 *
+	 * Only `tool` and `args` come from the caller. Who calls is the admitted
+	 * request's (`DispatchTrace.request`): the owner is the space's own name,
+	 * the agent is the one the server knows, the run is the one the server
+	 * named, and the call's ID is the request's ID, so a request makes at most
+	 * one native-app call. Anything else is refused before anything is sent,
+	 * with a 4xx: native-app calls not turned on, a computer that isn't the
+	 * operator's Cua VM (paired computers and Sprites never get one), no
+	 * admitted request or one with no run, a second call in a request, a tool
+	 * that isn't curated, and arguments that aren't a plain JSON object of at
+	 * most `NATIVE_ARGUMENTS_CHARS`. What is sent is a copy, made before
+	 * anything is awaited. The host checks the arguments against the tool's
+	 * curated schema.
+	 */
+	async native(tool: unknown, args: unknown, timeoutMs = NATIVE_CALL_MS): Promise<NativeOutcome> {
+		const refuse = (why: string) => new HttpError(409, `${why}, so no native-app call was sent.`);
+		if (!this.#nativeApps) throw refuse("Native-app calls are off for this computer");
+		if (this.#selected() !== "cua") throw refuse("Only an operator's Cua computer takes native-app calls");
+		const trace = currentTrace();
+		const admitted = trace?.request;
+		if (!trace || !admitted) throw refuse("A native-app call is made only within a request the control state admitted");
+		if (admitted.runId === undefined) throw refuse("The request names no run");
+		if (trace.native) throw refuse("This request has made its native-app call already");
+		let request: NativeRequest | null = null;
+		try {
+			const plain = typeof args === "object" && args !== null && !Array.isArray(args) && Object.getPrototypeOf(args) === Object.prototype;
+			const copy: unknown = plain ? JSON.parse(JSON.stringify(args)) : null;
+			if (plain && JSON.stringify(copy).length <= NATIVE_ARGUMENTS_CHARS) {
+				request = readNativeRequest({ owner: admitted.space, agentId: admitted.agentId, runId: admitted.runId, callId: admitted.requestId, tool, arguments: copy });
+			}
+		} catch {
+			// A getter, a cycle or a value JSON can't hold: refused as malformed.
+		}
+		if (!request) throw new HttpError(400, "The native-app call names no curated tool, or its arguments aren't a plain JSON object of a bounded size, so nothing was sent.");
+		// Spent now, whatever comes: the request's one call ID is taken.
+		trace.native = true;
+		return this.#call<NativeOutcome>(NATIVE_TOOL_OP, request, timeoutMs);
+	}
+
+	async #call<T>(op: string, args: Record<string, unknown>, timeoutMs: number, counts = true): Promise<T> {
 		if (!this.paired()) throw new HttpError(404, "No computer is connected. The person can connect one in Settings → Computer.");
 		const refused = this.#refusal(op);
 		if (refused) throw refused;

@@ -123,7 +123,8 @@ export type ControlRefusal =
 	| "empty_value"
 	| "wrong_owner"
 	| "stale_attempt"
-	| "epoch_exhausted";
+	| "epoch_exhausted"
+	| "attempt_exhausted";
 
 export type ControlOutcome = { ok: true } | { ok: false; reason: ControlRefusal };
 
@@ -215,6 +216,8 @@ export function applyControlEvent(state: ControlState, event: ControlEvent): Con
 			// An open acknowledged after a revocation, or during one, means the revocation did not cover it: the session is open again.
 			if (event.type === "viewer_opened") return accept(replaceViewer(state, { ...viewer, status: "open" }));
 			if (viewer.status === "revoked") return refuse(state, "already_final");
+			// Past the last safe integer attempts would stop being distinct, so the session stays unrevoked and admissions stay closed.
+			if (viewer.revokeAttempt >= Number.MAX_SAFE_INTEGER) return refuse(state, "attempt_exhausted");
 			return accept(replaceViewer(state, { ...viewer, status: "revoking", revokeAttempt: viewer.revokeAttempt + 1 }));
 		}
 		case "viewer_revoked":
@@ -289,11 +292,13 @@ export function restoreControlState(raw: unknown): RestoreResult {
 		if (!isRecord(item) || !isName(item.sessionId) || !isEpoch(item.epoch) || item.epoch > epoch) return fail("invalid viewer");
 		if (typeof item.status !== "string" || !VIEWER_STATUSES.includes(item.status)) return fail("unknown viewer status");
 		if (viewers.some((viewer) => viewer.sessionId === item.sessionId)) return fail("duplicate viewer session");
-		if (!isEpoch(item.revokeAttempt) || (item.status === "revoking" && item.revokeAttempt < 1)) return fail("invalid revoke attempt");
+		// Only a session that was never revoked has no attempt; revoked, revoking and failed ones have each had one.
+		const attempt = item.revokeAttempt;
+		if (!isEpoch(attempt) || (item.status === "pending_open" && attempt !== 0) || (item.status !== "pending_open" && item.status !== "open" && attempt < 1)) return fail("invalid revoke attempt");
 		// A viewer is requested only while the human owns the application, so none can be of an agent-owned epoch.
 		if (raw.owner === "agent" && item.epoch === epoch) return fail("viewer of the agent's own epoch");
 		const status = item.status === "revoking" ? "revoke_failed" : (item.status as ViewerStatus);
-		viewers.push({ sessionId: item.sessionId, epoch: item.epoch, status, revokeAttempt: item.revokeAttempt });
+		viewers.push({ sessionId: item.sessionId, epoch: item.epoch, status, revokeAttempt: attempt });
 	}
 	return { ok: true, state: { version: CONTROL_STATE_VERSION, epoch, owner: raw.owner, lease, inputQuiescence: "unproven", requests, viewers } };
 }

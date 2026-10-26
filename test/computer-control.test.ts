@@ -175,6 +175,26 @@ describe("computer control state", () => {
 		expect(refusal(state, { type: "viewer_open_requested", sessionId: "v1", epoch: 0 })).toEqual({ ok: false, reason: "duplicate_id" });
 	});
 
+	it("fails closed rather than reuse a revocation attempt number at the last safe integer", () => {
+		const base = JSON.parse(JSON.stringify(ok(initialControlState(), ...open("v1", 0), { type: "resume", leaseId: "L1" })));
+		const at = (revokeAttempt: number, status = "open") => {
+			const restored = restoreControlState({ ...base, viewers: [{ ...base.viewers[0], status, revokeAttempt }] });
+			if (!restored.ok) throw new Error(restored.error);
+			return restored.state;
+		};
+		const max = Number.MAX_SAFE_INTEGER;
+		const last = ok(at(max - 1), revoke("v1"));
+		expect(last.viewers[0]).toMatchObject({ status: "revoking", revokeAttempt: max });
+		expect(refusal(last, acked("v1", max - 1))).toEqual({ ok: false, reason: "stale_attempt" });
+		const exhausted = ok(last, failed("v1", max));
+		expect(refusal(exhausted, revoke("v1"))).toEqual({ ok: false, reason: "attempt_exhausted" });
+		expect(refusal(at(max), revoke("v1"))).toEqual({ ok: false, reason: "attempt_exhausted" });
+		// A stale acknowledgment can't clear it either, and admissions stay closed.
+		expect(refusal(exhausted, acked("v1", max))).toEqual({ ok: false, reason: "stale_attempt" });
+		expect(refusal(exhausted, admit("r1"))).toEqual(BLOCKED);
+		ok(last, acked("v1", max), admit("r1"));
+	});
+
 	it("takes over without a new epoch at the last safe one, and refuses to resume there", () => {
 		const restored = restoreControlState({ ...JSON.parse(JSON.stringify(agentOwned())), epoch: Number.MAX_SAFE_INTEGER, lease: { epoch: Number.MAX_SAFE_INTEGER, leaseId: "L" } });
 		if (!restored.ok) throw new Error(restored.error);
@@ -248,6 +268,10 @@ describe("computer control state", () => {
 				"unknown viewer status": { ...good, viewers: [{ ...good.viewers[0], status: "closed" }] },
 				"unrevoked viewer of the agent's epoch": { ...good, viewers: [{ ...good.viewers[0], epoch: 1 }] },
 				"missing revoke attempt": { ...good, viewers: [{ ...good.viewers[0], revokeAttempt: undefined }] },
+				"revoked without an attempt": { ...good, viewers: [{ ...good.viewers[0], status: "revoked", revokeAttempt: 0 }] },
+				"revoke_failed without an attempt": { ...good, viewers: [{ ...good.viewers[0], status: "revoke_failed", revokeAttempt: 0 }] },
+				"pending_open after an attempt": { ...good, viewers: [{ ...good.viewers[0], status: "pending_open", revokeAttempt: 1 }] },
+				"fractional attempt": { ...good, viewers: [{ ...good.viewers[0], revokeAttempt: 1.5 }] },
 				"revoking without an attempt": { ...good, viewers: [{ ...good.viewers[0], status: "revoking", revokeAttempt: 0 }] },
 				"reconciled without evidence": { ...reconciled, requests: [{ ...reconciled.requests[0], evidence: undefined }] },
 				"reconciled with blank evidence": { ...reconciled, requests: [{ ...reconciled.requests[0], evidence: "  " }] },

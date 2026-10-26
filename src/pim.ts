@@ -154,7 +154,8 @@ import {
 import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
-import { ControlCoordinator } from "./computer-control-runtime";
+import type { ControlEvent } from "./computer-control";
+import { ControlCoordinator, ControlRefused } from "./computer-control-runtime";
 import { COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerStatus } from "./computer";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
@@ -194,6 +195,11 @@ const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory", "pim.artifa
 const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, BROWSER_CLICK, BROWSER_TYPE]);
 /** Where the space keeps its computer's control state, if it opted in (see ./computer-control-runtime.ts). */
 const CONTROL_KEY = "computer_control";
+/** What someone trying to take the browser over hears in a space under control state, where nobody can. */
+const TAKE_OVER_UNAVAILABLE =
+	"Taking over the browser isn't available in this space: Pim can't make sure its agents have stopped using it, so nothing you do is sent to it.";
+/** The close code of a browser socket the space refused, or ended, because it is under control state. */
+const TAKE_OVER_REFUSED = 4005;
 /** How a dashboard names an artifact pinned to it: `artifact:<id>`. */
 const PINNED_ARTIFACT = "artifact:";
 
@@ -379,7 +385,15 @@ function noStore(value: unknown, status = 200): Response {
 }
 const GOAL_STATUSES: readonly GoalStatus[] = ["active", "paused", "done", "abandoned"];
 
-type SocketState = { readonly session: string };
+type SocketState = {
+	readonly session: string;
+	/**
+	 * A socket taking the browser over: the viewer session the server issued
+	 * when it let the socket watch, which the control state records it by.
+	 * The server's own, never the client's (`_pk` is the client's).
+	 */
+	readonly viewer?: string;
+};
 
 function clipTitle(text: string): string {
 	const line = text.trim().split(/\r?\n/)[0]!.trim();
@@ -488,7 +502,8 @@ export class Pim extends DurableAgent<Env> {
 	readonly files = new Files(this.computer);
 	/**
 	 * Whether an agent's request may reach the computer, for a space that opted in (see ./computer-control-runtime.ts).
-	 * No route or tool turns it on or changes it: a space that hasn't opted in is unaffected.
+	 * No route or tool turns it on, takes control or gives it back: a space that hasn't opted in is unaffected.
+	 * In one that has, the browser's live views are recorded in it as they end (`#revokeView`), and none is let in.
 	 */
 	get control(): ControlCoordinator {
 		return (this.#control ??= new ControlCoordinator(this.name, {
@@ -498,8 +513,10 @@ export class Pim extends DurableAgent<Env> {
 	}
 	#control: ControlCoordinator | undefined;
 	/** Sends an agent's request to the computer, if the control state admits it; the agent is the one the server knows `session` talks as. */
-	#controlled<T>(session: string, requestId: string, send: () => Promise<T>, bindingId?: string): Promise<T> {
+	async #controlled<T>(session: string, requestId: string, send: () => Promise<T>, bindingId?: string): Promise<T> {
 		if (!this.control.enabled) return send();
+		// A live view of the browser opened before the space opted in is recorded and ended first, and one that can't be recorded refuses the request.
+		for (const connection of this.getConnections<SocketState>(BROWSER_TAG)) this.#revokeView(connection);
 		const agentId = this.#roleOf(session).agent.id;
 		return this.control.dispatch({ space: this.name, agentId, requestId, ...(bindingId ? { bindingId } : {}) }, send);
 	}
@@ -4976,12 +4993,17 @@ export class Pim extends DurableAgent<Env> {
 					return noStore({ deleted: true });
 				}),
 		],
-		// The agents' browser (see ./browser.ts): what a chat's window shows, a picture of it, closing it. Taking it over is a socket.
+		// The agents' browser (see ./browser.ts): what a chat's window shows, a picture of it, closing it. Taking it over is a socket,
+		// which a space under control state refuses (`takeOver: false`).
 		[
 			"GET",
 			"/browser",
 			async (_params, _request, url) =>
-				noStore({ available: this.browser.available, page: this.browser.available ? await this.browser.current(await this.#browserWindow(url)) : null }),
+				noStore({
+					available: this.browser.available,
+					takeOver: !this.control.enabled,
+					page: this.browser.available ? await this.browser.current(await this.#browserWindow(url)) : null,
+				}),
 		],
 		[
 			"GET",
@@ -5963,6 +5985,10 @@ export class Pim extends DurableAgent<Env> {
 	 * socket's state): it gets the page as pictures, and its mouse and
 	 * keyboard go to the page. It closes when the window does. One that
 	 * isn't open opens where it was, waking the computer if it's asleep.
+	 *
+	 * In a space under control state nobody takes the browser over: the
+	 * socket is refused before it watches, and one that started watching
+	 * before the space opted in is ended (`#revokeView`).
 	 */
 	async #watchBrowser(connection: Connection<SocketState>, request?: Request): Promise<boolean> {
 		const send = (message: BrowserLiveMessage) => {
@@ -5970,18 +5996,104 @@ export class Pim extends DurableAgent<Env> {
 		};
 		try {
 			if (!this.browser.available) throw new Error("This space has no browser: connect a computer in Settings → Computer.");
-			if (request) connection.setState({ session: await this.#browserWindow(new URL(request.url)) });
-			await this.browser.watch(connection.state?.session ?? ROOT_SESSION, connection.id, {
+			const session = request ? await this.#browserWindow(new URL(request.url)) : (connection.state?.session ?? ROOT_SESSION);
+			if (this.control.enabled) {
+				send({ type: "error", message: TAKE_OVER_UNAVAILABLE });
+				connection.close(TAKE_OVER_REFUSED, "Taking over is unavailable in this space");
+				return false;
+			}
+			connection.setState({ session, viewer: connection.state?.viewer ?? crypto.randomUUID() });
+			await this.browser.watch(session, connection.id, {
 				frame: (frame) => send({ type: "frame", ...frame }),
 				page: (page) => send({ type: "page", ...page }),
 				closed: () => connection.close(4000, "The window closed"),
 			});
-			return true;
 		} catch (error) {
 			send({ type: "error", message: errorMessage(error) });
 			connection.close(4004, "The window couldn't open");
 			return false;
 		}
+		// The space opted in while it was opening: it is ended as one that was watching before.
+		if (this.control.enabled) {
+			this.#refuseInput(connection);
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Ends a socket taking the browser over in a space under control state,
+	 * as an application channel, and records that in the control state. Its
+	 * viewer session is stored first (requested in the current epoch, and
+	 * opened: the socket is open here now) and its revocation attempt next;
+	 * only then do its pictures stop and the socket close. The socket's own
+	 * close event acknowledges the attempt (`#viewClosed`), and a close that
+	 * throws fails it; until one is acknowledged, agents are kept out.
+	 *
+	 * That the socket closed says only that nothing more comes from it: what
+	 * it sent before may still be running in the browser, so this is not
+	 * evidence the browser, or the computer, is quiet.
+	 *
+	 * Throws `ControlRefused`, leaving the socket as it is, when it can't be
+	 * recorded (the state is blocked, or the agent holds the lease and the
+	 * state takes no viewer then); its input is refused anyway.
+	 */
+	#revokeView(connection: Connection<SocketState>): void {
+		const viewer = connection.state?.viewer;
+		if (!viewer) return;
+		const control = this.control;
+		const recorded = () => control.state?.viewers.find((each) => each.sessionId === viewer);
+		const apply = (event: ControlEvent) => {
+			const outcome = control.apply(event);
+			if (!outcome.ok) throw new ControlRefused(outcome.reason, `a live view of the browser can't be recorded (${outcome.reason})`);
+		};
+		const before = recorded();
+		// One already being revoked, or revoked, only stops watching: its close is on its way, or came.
+		const ended = before?.status === "revoking" || before?.status === "revoked";
+		if (!ended) {
+			if (!before) {
+				const state = control.state;
+				if (!state) throw new ControlRefused("blocked", control.blocked ?? "the control state can't be read");
+				apply({ type: "viewer_open_requested", sessionId: viewer, epoch: state.epoch });
+				apply({ type: "viewer_opened", sessionId: viewer });
+			}
+			apply({ type: "viewer_revoke_requested", sessionId: viewer });
+		}
+		void this.browser.unwatch(connection.id);
+		if (ended) return;
+		try {
+			connection.close(TAKE_OVER_REFUSED, "Taking over is unavailable in this space");
+		} catch (error) {
+			console.error("closing a live view of the browser", error);
+			apply({ type: "viewer_revoke_failed", sessionId: viewer, attempt: recorded()!.revokeAttempt });
+		}
+	}
+
+	/** Refuses what a socket taking the browser over sent, in a space under control state, and ends it. */
+	#refuseInput(connection: Connection<SocketState>): void {
+		if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify({ type: "error", message: TAKE_OVER_UNAVAILABLE } satisfies BrowserLiveMessage));
+		try {
+			this.#revokeView(connection);
+		} catch (error) {
+			console.error("ending a live view of the browser", error);
+		}
+	}
+
+	/**
+	 * A socket taking the browser over closed: in a space under control state
+	 * that acknowledges its revocation, the one in progress or one recorded
+	 * now (it closed on its own, or after an attempt that failed or was cut
+	 * short by a restart). An error is no close, and acknowledges nothing.
+	 */
+	#viewClosed(connection: Connection<SocketState>): void {
+		const viewer = connection.state?.viewer;
+		if (!viewer || !this.control.enabled) return;
+		const control = this.control;
+		const found = control.state?.viewers.find((each) => each.sessionId === viewer);
+		if (!found || found.status === "revoked") return;
+		if (found.status !== "revoking" && !control.apply({ type: "viewer_revoke_requested", sessionId: viewer }).ok) return;
+		const attempt = control.state?.viewers.find((each) => each.sessionId === viewer)?.revokeAttempt ?? 0;
+		control.apply({ type: "viewer_revoked", sessionId: viewer, attempt });
 	}
 
 	async onConnect(connection: Connection<SocketState>, ctx: ConnectionContext): Promise<void> {
@@ -6011,8 +6123,10 @@ export class Pim extends DurableAgent<Env> {
 		if (typeof raw !== "string") return;
 		if (this.#isComputer(connection)) return this.#computerSaid(raw);
 		if (this.#isBrowserWatcher(connection)) {
-			// A space that slept since forgot who was watching: they go on where they were.
-			if (!this.browser.watching(connection.id) && !(await this.#watchBrowser(connection))) return;
+			// A space that slept since forgot who was watching: they go on where they were, unless it is under control state now.
+			if (!this.control.enabled && !this.browser.watching(connection.id) && !(await this.#watchBrowser(connection))) return;
+			// Checked after any wait, right before it would be sent: under control state nothing a person sends reaches the browser.
+			if (this.control.enabled) return this.#refuseInput(connection);
 			try {
 				await this.browser.input(connection.id, JSON.parse(raw) as BrowserInput);
 			} catch (error) {
@@ -6040,9 +6154,16 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	async onClose(connection: Connection): Promise<void> {
+	async onClose(connection: Connection<SocketState>): Promise<void> {
 		if (this.#isComputer(connection)) return this.#computerDisconnected();
-		if (this.#isBrowserWatcher(connection)) return this.browser.unwatch(connection.id);
+		if (this.#isBrowserWatcher(connection)) {
+			try {
+				this.#viewClosed(connection);
+			} catch (error) {
+				console.error("recording that a live view of the browser closed", error);
+			}
+			return this.browser.unwatch(connection.id);
+		}
 		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
 	}

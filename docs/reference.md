@@ -274,9 +274,9 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | GET | `/files/content` | `?path=`, `&download` | The file's bytes, served as inert data: HTML, SVG and unknown types come back as `text/plain` with a sandboxing CSP |
 | PUT | `/files/content` | `?path=`, the file as the body | Saves it, making its folders; `413` over 25 MB |
 | DELETE | `/files` | `?path=` | Deletes a file, or a folder with everything in it |
-| GET | `/browser` | | `{ available, page }`: whether you have a browser (a computer is paired), and the `url` and `title` it shows, or null when it's closed or the computer is offline |
+| GET | `/browser` | | `{ available, takeOver, page }`: whether you have a browser (a computer is paired), whether you can take it over (not in a space under control state, see `docs/computer-control-state.md`), and the `url` and `title` it shows, or null when it's closed or the computer is offline |
 | GET | `/browser/screenshot` | | The page it shows, as a PNG; `404` when it's closed |
-| GET | `/browser/live` | A WebSocket | Takes the browser over: it sends `{ type: "frame", data, width, height }` (a JPEG, base64, of the page `width` by `height` pixels) whenever the page changes and `{ type: "page", url, title }`, and takes `{ type: "mouse" \| "key" \| "text" \| "navigate" \| "back" \| "forward" \| "reload", … }` (`src/browser.ts`'s `BrowserInput`). Closes with `4004` when the browser isn't open, and `4000` when it closes |
+| GET | `/browser/live` | A WebSocket | Takes the browser over: it sends `{ type: "frame", data, width, height }` (a JPEG, base64, of the page `width` by `height` pixels) whenever the page changes and `{ type: "page", url, title }`, and takes `{ type: "mouse" \| "key" \| "text" \| "navigate" \| "back" \| "forward" \| "reload", … }` (`src/browser.ts`'s `BrowserInput`). Closes with `4004` when the browser isn't open, `4000` when it closes, and `4005` (after an `error` saying why) in a space under control state, where nothing sent on it reaches the browser |
 | DELETE | `/browser` | | Quits it, with its pages; what's signed in there stays in its profile |
 | GET | `/goals`, `/goals/:id` | `?status=active\|paused\|done\|abandoned` | Goals with steps and notes |
 | DELETE | `/goals/:id` | | |

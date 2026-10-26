@@ -18,6 +18,7 @@ import {
 import { Button } from "~/components/ui/button";
 import {
   BROWSER_LIVE_PATH,
+  BROWSER_TAKE_OVER_REFUSED,
   type BrowserInput,
   type BrowserLiveMessage,
 } from "~/lib/pim-api";
@@ -31,7 +32,7 @@ export const Route = createFileRoute("/browser")({
 });
 
 type Frame = { url: string; width: number; height: number };
-type Status = "connecting" | "live" | "closed";
+type Status = "connecting" | "live" | "closed" | "unavailable";
 
 /** DevTools' modifier bits: Alt 1, Ctrl 2, Meta 4, Shift 8. */
 function modifiers(event: {
@@ -56,7 +57,9 @@ const BUTTONS = ["left", "middle", "right"] as const;
  * as pictures, with their mouse, keyboard and address bar going to it, to
  * sign in or get past a check. The chat's agent goes on in the same page
  * after. A hidden text field takes the
- * keyboard, so phones bring theirs up when the page is tapped.
+ * keyboard, so phones bring theirs up when the page is tapped. Where
+ * taking over isn't available, the space refuses the socket and the page
+ * says so.
  */
 function BrowserPage() {
   const { t } = useI18n();
@@ -92,7 +95,11 @@ function BrowserPage() {
         setError(message.message);
       }
     });
-    live.addEventListener("close", () => setStatus("closed"));
+    live.addEventListener("close", (event) => {
+      if (event.code !== BROWSER_TAKE_OVER_REFUSED) return setStatus("closed");
+      setStatus("unavailable");
+      setError(null);
+    });
     return () => live.close();
   }, [session]);
 
@@ -265,7 +272,7 @@ function BrowserPage() {
         </Button>
       </header>
       <main className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-muted/40 p-3">
-        {frame && status !== "closed" ? (
+        {frame && status === "live" ? (
           <>
             <img
               src={frame.url}
@@ -303,7 +310,9 @@ function BrowserPage() {
           </>
         ) : (
           <p className="flex items-center gap-2 text-muted-foreground text-sm">
-            {status === "closed" ? (
+            {status === "unavailable" ? (
+              t("takeOverUnavailable")
+            ) : status === "closed" ? (
               t("browserGone")
             ) : (
               <>

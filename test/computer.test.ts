@@ -91,7 +91,7 @@ describe("a space without a computer", () => {
 		}
 		const permissions = (await api("/permissions")).body.tools.map((permission: { name: string }) => permission.name);
 		for (const tool of ["shell", "browser_click"]) expect(permissions).not.toContain(tool);
-		expect((await api("/browser")).body).toEqual({ available: false, page: null });
+		expect((await api("/browser")).body).toEqual({ available: false, takeOver: true, page: null });
 	});
 
 	it("keeps the files it had, and moves them to the computer once one connects", async () => {

@@ -186,8 +186,9 @@ export class ControlCoordinator {
 
 	/**
 	 * Applies one event to the state and stores the result. The only way the state
-	 * changes. Takeover, resume and viewer events are for the stages that
-	 * establish their evidence; no route or tool calls this.
+	 * changes. Viewer events come from the sockets of the browser's live views
+	 * (in ./pim.ts); takeover and resume are for the stages that establish their
+	 * evidence, and no route or tool sends them.
 	 */
 	apply(event: ControlEvent): ControlOutcome {
 		const doc = this.#usable();

@@ -203,6 +203,7 @@ export function SummaryBox({
           <BrowserView
             sessionId={sessionId}
             page={page}
+            takeOver={browser.data?.takeOver === true}
             updatedAt={browser.dataUpdatedAt}
           />
         )}

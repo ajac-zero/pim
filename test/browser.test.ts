@@ -105,7 +105,7 @@ describe("the browser", () => {
 		expect(await ordering).toMatchObject({ status: "done", replies: ["Ordered."] });
 
 		// The person can see where it is.
-		expect((await api("/browser")).body).toEqual({ available: true, page: { url: FORM, title: "Orders" } });
+		expect((await api("/browser")).body).toEqual({ available: true, takeOver: true, page: { url: FORM, title: "Orders" } });
 	});
 
 	it("refuses an element that isn't on the page, and never reuses a number for another", async () => {
@@ -128,7 +128,7 @@ describe("the browser", () => {
 	});
 
 	it("saves screenshots to the person's files, on their computer, and shows them one", async () => {
-		expect((await api("/browser")).body).toEqual({ available: true, page: null });
+		expect((await api("/browser")).body).toEqual({ available: true, takeOver: true, page: null });
 		expect((await callTool("browser_screenshot", {})).toLowerCase()).toContain("closed");
 		await callTool("browser_open", { url: FORM });
 		const saved = await callTool("browser_screenshot", { path: "/workspace/soup.png" });

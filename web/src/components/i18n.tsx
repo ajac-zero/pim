@@ -674,6 +674,8 @@ const translations = {
     summaryAndBrowser: "Summary and browser",
     browserPicture: "What the browser shows: {title}",
     takeOverBrowser: "Take over",
+    takeOverUnavailable:
+      "Taking over isn't available in this space: Pim can't yet make sure your agents have stopped using the browser.",
     closeBrowser: "Turn off browser",
     browserClosed: "Browser closed",
     browserTabTitle: "{title} · Browser",
@@ -688,6 +690,7 @@ const translations = {
     browserGone: "This window closed. Reload this page to open it again.",
     browserAsleep:
       "Your computer is asleep. Take over wakes it and opens this page again.",
+    browserAsleepNoTakeOver: "Your computer is asleep.",
     noFilePreview: "There's no preview for this file. Download it to open it.",
     deleteFileNamed: "Delete {name}",
     deleteFileConfirm:
@@ -1708,6 +1711,8 @@ const translations = {
     summaryAndBrowser: "Resumen y navegador",
     browserPicture: "Lo que muestra el navegador: {title}",
     takeOverBrowser: "Tomar el control",
+    takeOverUnavailable:
+      "Tomar el control no está disponible en este espacio: Pim aún no puede asegurarse de que tus agentes dejaron de usar el navegador.",
     closeBrowser: "Apagar el navegador",
     browserClosed: "Navegador cerrado",
     browserTabTitle: "{title} · Navegador",
@@ -1723,6 +1728,7 @@ const translations = {
       "Esta ventana se cerró. Recarga esta página para abrirla de nuevo.",
     browserAsleep:
       "Tu computadora está dormida. Tomar el control la despierta y vuelve a abrir esta página.",
+    browserAsleepNoTakeOver: "Tu computadora está dormida.",
     noFilePreview:
       "Este archivo no tiene vista previa. Descárgalo para abrirlo.",
     deleteFileNamed: "Eliminar {name}",

@@ -798,6 +798,8 @@ export type ComputerStatus = {
 /** The browser your agents share: whether this Pim has one, and the page a chat's window shows when it's open. */
 export type BrowserStatus = {
   available: boolean;
+  /** Whether you can take it over here: not in a space under control state, where Pim can't yet make sure its agents have stopped. */
+  takeOver: boolean;
   /** The page it shows; `asleep` while the computer Pim started sleeps, which taking it over wakes. */
   page: { url: string; title: string; asleep?: boolean } | null;
 };
@@ -808,6 +810,8 @@ export const browserScreenshotUrl = (sessionId: string, at: number) =>
 
 /** Where the app takes the browser over: a socket that hears the page and sends what the person does. */
 export const BROWSER_LIVE_PATH = "/api/browser/live";
+/** The code the browser's socket closes with where taking it over isn't available. */
+export const BROWSER_TAKE_OVER_REFUSED = 4005;
 
 /** What the browser's socket says: the page as a picture, which page it is, or what went wrong. */
 export type BrowserLiveMessage =

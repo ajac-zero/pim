@@ -15,15 +15,18 @@ import { type BrowserStatus, browserScreenshotUrl, pim } from "~/lib/pim-api";
  * The chat's window in the browser your agents share, in the box beside
  * the chat while it's open: expand its dropdown for a picture that keeps up
  * with them, and take it over, on a page of its own (routes/browser.tsx),
- * to sign in or finish something yourself.
+ * to sign in or finish something yourself. Where taking over isn't
+ * available (`takeOver`), it says so in place of the button.
  */
 export function BrowserView({
   sessionId,
   page,
+  takeOver,
   updatedAt,
 }: {
   sessionId: string;
   page: NonNullable<BrowserStatus["page"]>;
+  takeOver: boolean;
   /** When the status was last fetched: the picture is fetched again with it. */
   updatedAt: number;
 }) {
@@ -54,7 +57,7 @@ export function BrowserView({
           </div>
           {page.asleep ? (
             <p className="rounded-lg border bg-muted/30 px-3 py-6 text-center text-muted-foreground text-xs">
-              {t("browserAsleep")}
+              {t(takeOver ? "browserAsleep" : "browserAsleepNoTakeOver")}
             </p>
           ) : (
             <img
@@ -63,18 +66,24 @@ export function BrowserView({
               className="w-full rounded-lg border bg-background"
             />
           )}
-          <div className="grid grid-cols-[3fr_1fr] gap-2">
-            <Button className="w-full" asChild>
-              {/* A page of its own, beside the chat, where the person uses the browser. */}
-              <a
-                href={`/browser?session=${encodeURIComponent(sessionId)}`}
-                target="_blank"
-                rel="noopener"
-              >
-                <ExternalLink className="size-4" />
-                {t("takeOverBrowser")}
-              </a>
-            </Button>
+          <div className="grid grid-cols-[3fr_1fr] items-center gap-2">
+            {takeOver ? (
+              <Button className="w-full" asChild>
+                {/* A page of its own, beside the chat, where the person uses the browser. */}
+                <a
+                  href={`/browser?session=${encodeURIComponent(sessionId)}`}
+                  target="_blank"
+                  rel="noopener"
+                >
+                  <ExternalLink className="size-4" />
+                  {t("takeOverBrowser")}
+                </a>
+              </Button>
+            ) : (
+              <p className="text-muted-foreground text-xs">
+                {t("takeOverUnavailable")}
+              </p>
+            )}
             <Action
               tooltip={t("closeBrowser")}
               variant="destructive"

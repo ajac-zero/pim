@@ -341,6 +341,7 @@ export class Lines {
 	#broken: Error | null = null;
 
 	constructor(maxChars = MAX_MESSAGE_CHARS, maxChunkBytes = MAX_CHUNK_BYTES) {
+		if (![maxChars, maxChunkBytes].every((limit) => Number.isSafeInteger(limit) && limit > 0)) throw new RangeError("A line reader's limits must be positive whole numbers.");
 		this.#maxChars = maxChars;
 		this.#maxChunkBytes = maxChunkBytes;
 	}
@@ -361,13 +362,19 @@ export class Lines {
 			const piece = pieces[index]!;
 			this.#pendingChars += piece.length;
 			if (this.#pendingChars > this.#maxChars) return this.#break(new RangeError("pim-computer wrote a line longer than a message may be."));
-			this.#pending.push(piece);
+			// An empty piece adds nothing to the line, so it isn't kept: empty pushes can't grow what is held.
+			if (piece !== "") this.#pending.push(piece);
 			if (index === pieces.length - 1) break;
 			lines.push(this.#pending.join(""));
 			this.#pending = [];
 			this.#pendingChars = 0;
 		}
 		return lines;
+	}
+
+	/** How many parts the unended line is held in, which stays bounded by its characters; for checking that. */
+	get pendingParts(): number {
+		return this.#pending.length;
 	}
 
 	#break(error: Error): never {

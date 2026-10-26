@@ -614,6 +614,36 @@ describe("a Cua bridge's relay", () => {
 		expect(split.push(new Uint8Array([0xe2, 0x9c]))).toEqual([]);
 		expect(split.push(new Uint8Array([0x93, 0x0a, 0x7b]))).toEqual(["✓"]);
 
+		// Empty pushes hold nothing, around a character split across pushes and around line ends, which still complete lines.
+		const empty = new Lines();
+		const nothing = new Uint8Array(0);
+		for (let index = 0; index < 1_000; index++) expect(empty.push(nothing)).toEqual([]);
+		expect(empty.pendingParts).toBe(0);
+		expect(empty.push(new Uint8Array([0xe2, 0x9c]))).toEqual([]);
+		for (let index = 0; index < 1_000; index++) empty.push(nothing);
+		expect(empty.pendingParts).toBe(0);
+		expect(empty.push(new Uint8Array([0x93]))).toEqual([]);
+		for (let index = 0; index < 1_000; index++) empty.push(nothing);
+		expect(empty.pendingParts).toBe(1);
+		expect(empty.push(encoder.encode("{}\n\n"))).toEqual(["✓{}", ""]);
+		expect(empty.pendingParts).toBe(0);
+		expect(empty.push(encoder.encode("é\n"))).toEqual(["é"]);
+
+		// Limits that aren't positive whole numbers would turn the bounds off, so they are refused, with a fixed error.
+		for (const [maxChars, maxChunkBytes] of [
+			[Number.NaN, 1024],
+			[Number.POSITIVE_INFINITY, 1024],
+			[0, 1024],
+			[-1, 1024],
+			[1.5, 1024],
+			[8, Number.NaN],
+			[8, Number.POSITIVE_INFINITY],
+			[8, 0],
+			[8, 2 ** 53],
+		]) {
+			expect(() => new Lines(maxChars, maxChunkBytes), `${maxChars} ${maxChunkBytes}`).toThrow(new RangeError("A line reader's limits must be positive whole numbers."));
+		}
+
 		// A long line arrives in many full chunks, and comes out whole.
 		const long = new Lines();
 		const chunk = new Uint8Array(MAX_CHUNK_BYTES).fill(0x61);

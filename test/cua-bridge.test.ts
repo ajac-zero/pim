@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
-import { MAX_MESSAGE_CHARS, type OpenSession, type LogEntry, Lines, REPLACED, Relay, SPACE_HEADER, type Session, type SessionEvents, serveWithWebSocketPair } from "../computer/cua-bridge";
+import { MAX_CHUNK_BYTES, MAX_MESSAGE_CHARS, type OpenSession, type LogEntry, Lines, REPLACED, Relay, SPACE_HEADER, type Session, type SessionEvents, serveWithWebSocketPair } from "../computer/cua-bridge";
 import { type ExecArgs, Link, type Machine } from "../computer/pim-computer";
 import { Computer } from "../src/computer";
 import { type DispatchTrace, dispatchTrace } from "../src/computer-control-runtime";
@@ -50,7 +50,7 @@ const hello = (root: string) => JSON.stringify({ type: "hello", version: 1, agen
  * `fetch` is what Pim is given: it hands the request to the relay's Workers
  * adapter, and keeps each answer.
  */
-async function bridge(options: { answer?: boolean; open?: OpenSession } = {}) {
+async function bridge(options: { answer?: boolean; open?: OpenSession; maxOpeningChars?: number } = {}) {
 	const computer = await machine();
 	const sessions: Recorded[] = [];
 	const logged: LogEntry[] = [];
@@ -73,7 +73,7 @@ async function bridge(options: { answer?: boolean; open?: OpenSession } = {}) {
 				};
 			}),
 	);
-	const relay = new Relay({ space: SPACE, token: TOKEN, path: "/pim", open, log: (entry) => logged.push(entry) });
+	const relay = new Relay({ space: SPACE, token: TOKEN, path: "/pim", open, log: (entry) => logged.push(entry), ...(options.maxOpeningChars ? { maxOpeningChars: options.maxOpeningChars } : {}) });
 	const answers: Response[] = [];
 	const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 		const response = await serveWithWebSocketPair(relay, new Request(input, init));
@@ -236,6 +236,7 @@ describe("a Cua bridge's relay", () => {
 			{ space: SPACE, token: TOKEN, path: "pim" },
 			{ space: SPACE, token: TOKEN, path: "/pim?x" },
 			{ space: SPACE, token: TOKEN, path: "/a/../pim" },
+			{ space: SPACE, token: TOKEN, path: "/pim", maxOpeningChars: 0 },
 		];
 		for (const options of bad) {
 			let error: unknown;
@@ -289,7 +290,7 @@ describe("a Cua bridge's relay", () => {
 		await vi.waitFor(() => expect(order.at(-1)).toBe("second closed"));
 	});
 
-	it("closes, once and unused, a session that opens after its connection was replaced or given up", async () => {
+	it("answers a connection replaced or given up while its session opens at once, and closes that session once, unused, if it ever comes", async () => {
 		const pending: { opened: ReturnType<typeof deferred<Session>>; signal: AbortSignal }[] = [];
 		const test = await bridge({
 			open: (_events, signal) => {
@@ -303,44 +304,58 @@ describe("a Cua bridge's relay", () => {
 			return { made, session: { send: (message: string) => void made.sent.push(message), close: () => void made.closes++ } };
 		};
 
-		// Replaced while opening: the first's signal aborts at once, and its session, when it comes, is closed and answers no 101.
+		// Replaced while opening: the first is answered 502 with its session still opening, and its signal aborts.
 		const first = serveWithWebSocketPair(test.relay, request());
 		await vi.waitFor(() => expect(pending).toHaveLength(1));
 		const second = serveWithWebSocketPair(test.relay, request());
 		await vi.waitFor(() => expect(pending).toHaveLength(2));
 		expect(pending[0]!.signal.aborted).toBe(true);
+		const firstAnswer = await first;
+		expect([firstAnswer.status, firstAnswer.webSocket]).toEqual([502, null]);
+		// The first's session comes later: it is closed once, and sent nothing.
 		const late = session();
 		pending[0]!.opened.resolve(late.session);
-		expect((await first).status).toBe(502);
-		expect(late.made.closes).toBe(1);
+		await vi.waitFor(() => expect(late.made.closes).toBe(1));
 		const current = session();
 		pending[1]!.opened.resolve(current.session);
-		const answered = await second;
-		expect(answered.status).toBe(101);
-		expect(late.made.sent).toEqual([]);
+		expect((await second).status).toBe(101);
+		await tick();
+		expect(late.made).toEqual({ sent: [], closes: 1 });
+		expect(current.made.closes).toBe(0);
 
-		// Given up by Pim while opening (its request's signal aborts): the session is closed, once, when it comes.
+		// Given up by Pim while opening (its request's signal aborts): answered at once, and its session, when it comes, closed once.
 		const giveUp = new AbortController();
 		const third = serveWithWebSocketPair(test.relay, request({ signal: giveUp.signal }));
 		await vi.waitFor(() => expect(pending).toHaveLength(3));
 		giveUp.abort();
 		expect(pending[2]!.signal.aborted).toBe(true);
+		expect((await third).status).toBe(502);
 		const abandoned = session();
 		pending[2]!.opened.resolve(abandoned.session);
-		expect((await third).status).toBe(502);
-		expect(abandoned.made.closes).toBe(1);
+		await vi.waitFor(() => expect(abandoned.made.closes).toBe(1));
 		expect(test.logged.filter((entry) => entry.event === "bridge.ended").map((entry) => entry.reason)).toEqual(["replaced", "replaced", "abandoned"]);
 
-		// With no runtime between (a synthetic client socket): what Pim sends before the session is open isn't kept for it, and ends the connection.
+		// With no runtime between (a synthetic client socket): what Pim sends before the session is open isn't kept for it, and ends the connection; ready settles before the session comes.
 		const client = { sent: [] as string[], closed: [] as number[] };
 		const early = test.relay.open({ send: (message) => void client.sent.push(message), close: (code) => void client.closed.push(code) });
 		await vi.waitFor(() => expect(pending).toHaveLength(4));
 		early.receive('{"type":"call","id":"1","op":"stat","args":{}}');
 		expect([early.ended, client.closed]).toEqual([true, [1008]]);
+		expect(await early.ready).toBe(false);
 		const unused = session();
 		pending[3]!.opened.resolve(unused.session);
-		expect(await early.ready).toBe(false);
+		await vi.waitFor(() => expect(unused.made.closes).toBe(1));
+		await tick();
 		expect(unused.made).toEqual({ sent: [], closes: 1 });
+
+		// A session that never comes leaves nothing waiting: its connection is answered when replaced.
+		const never = serveWithWebSocketPair(test.relay, request());
+		await vi.waitFor(() => expect(pending).toHaveLength(5));
+		const after = serveWithWebSocketPair(test.relay, request());
+		expect((await never).status).toBe(502);
+		await vi.waitFor(() => expect(pending).toHaveLength(6));
+		pending[5]!.opened.resolve(session().session);
+		expect((await after).status).toBe(101);
 
 		// A request already given up opens nothing.
 		const before = pending.length;
@@ -350,7 +365,7 @@ describe("a Cua bridge's relay", () => {
 		expect(pending).toHaveLength(before);
 	});
 
-	it("passes Pim's own timeout on to a session still opening, through the request's signal", async () => {
+	it("passes Pim's own timeout on to a session still opening, through the request's signal, and answers then", async () => {
 		vi.useFakeTimers();
 		try {
 			const opened = deferred<Session>();
@@ -364,15 +379,61 @@ describe("a Cua bridge's relay", () => {
 			const connecting = new Cua(BRIDGE, test.fetch).connect(SPACE, () => undefined, () => undefined).catch((error: Error) => error);
 			await vi.advanceTimersByTimeAsync(CONNECT_MS);
 			expect(given?.aborted).toBe(true);
-			// This fetch, unlike the platform's, answers only once the relay does, which it does when the session comes.
-			let closes = 0;
-			opened.resolve({ send() {}, close: () => void closes++ });
+			// The relay has answered with the session still opening; Pim had given up on it.
 			expect(((await connecting) as Error).message).toMatch(/didn't answer within 30 seconds/);
 			expect(test.answers.map((answer) => answer.status)).toEqual([502]);
+			let closes = 0;
+			opened.resolve({ send() {}, close: () => void closes++ });
+			await vi.advanceTimersByTimeAsync(1);
 			expect(closes).toBe(1);
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("holds what pim-computer says while its session opens, in order and bounded, and drops it when the session doesn't open", async () => {
+		const opening = async (limit: number) => {
+			let events!: SessionEvents;
+			let signal!: AbortSignal;
+			const opened = deferred<Session>();
+			const test = await bridge({
+				maxOpeningChars: limit,
+				open: (given, aborted) => {
+					events = given;
+					signal = aborted;
+					return opened.promise;
+				},
+			});
+			const answer = serveWithWebSocketPair(test.relay, request());
+			await vi.waitFor(() => expect(events).toBeDefined());
+			return { test, events, signal: () => signal, opened, answer };
+		};
+		const helloMessage = '{"type":"hello","version":1}';
+
+		// Within the limit (29 + 8 + 8 of 100): all of it reaches Pim once the session is open, the hello first.
+		const within = await opening(100);
+		within.events.message(helloMessage);
+		within.events.message('{"n":1}');
+		within.events.message('{"n":2}');
+		within.opened.resolve({ send() {}, close() {} });
+		const open = await within.answer;
+		expect(open.status).toBe(101);
+		const pim = pimEnd(open);
+		await vi.waitFor(() => expect(pim.seen.messages).toEqual([helloMessage, '{"n":1}', '{"n":2}']));
+		pim.socket.close(1000);
+
+		// Past it, with every message valid on its own and the session still opening: answered 502 at once, and what was held is dropped.
+		const past = await opening(100);
+		past.events.message(helloMessage);
+		for (let index = 0; index < 3; index++) past.events.message(JSON.stringify({ n: "x".repeat(20) }));
+		const refused = await past.answer;
+		expect([refused.status, refused.webSocket]).toEqual([502, null]);
+		expect(past.signal().aborted).toBe(true);
+		expect(past.test.logged.at(-1)).toEqual({ event: "bridge.ended", reason: "opening-overflow" });
+		past.events.message('{"n":"after"}');
+		let closes = 0;
+		past.opened.resolve({ send() {}, close: () => void closes++ });
+		await vi.waitFor(() => expect(closes).toBe(1));
 	});
 
 	it("ends the connection, and its session once, on a binary, oversized or line-broken message either way", async () => {
@@ -533,14 +594,31 @@ describe("a Cua bridge's relay", () => {
 		expect(await fs.readFile(`${computer.root}/naïve ✓ 𝄞.md`, "utf8")).toBe("Ünïcode ✓ 𝄞");
 		expect(await new Response(await pim.fs.readFile("/workspace/naïve ✓ 𝄞.md")).text()).toBe("Ünïcode ✓ 𝄞");
 
+		// Each push takes at most a chunk's worth, refused whole before it is decoded, with a fixed error: a giant unended line, or many short ones.
+		const giant = new Lines(MAX_MESSAGE_CHARS, 1024);
+		expect(() => giant.push(new Uint8Array(1025).fill(0x61))).toThrow("pim-computer's output was handed over in a part larger than a line reader takes.");
+		// After any error, the reader stays broken, and the embedder ends the session.
+		expect(() => giant.push(encoder.encode("{}\n"))).toThrow(RangeError);
+		expect(() => new Lines(MAX_MESSAGE_CHARS, 1024).push(encoder.encode("{}\n".repeat(400)))).toThrow(RangeError);
+		expect(new Lines(MAX_MESSAGE_CHARS, 1024).push(encoder.encode("{}\n".repeat(341)))).toHaveLength(341);
+		expect(() => new Lines().push(new Uint8Array(MAX_CHUNK_BYTES + 1))).toThrow(RangeError);
+
 		// A line past the limit throws, whether it ends or not; so do bytes that aren't UTF-8; an unended line is no message.
 		const lines = new Lines(8);
 		expect(lines.push(encoder.encode("12345678\n1234"))).toEqual(["12345678"]);
-		expect(() => lines.push(encoder.encode("56789"))).toThrow(RangeError);
+		expect(() => lines.push(encoder.encode("56789"))).toThrow("pim-computer wrote a line longer than a message may be.");
+		expect(() => lines.push(encoder.encode("\n"))).toThrow(RangeError);
 		expect(() => new Lines(8).push(encoder.encode("123456789\n"))).toThrow(RangeError);
-		expect(() => new Lines().push(new Uint8Array([0x7b, 0xff, 0x0a]))).toThrow(TypeError);
+		expect(() => new Lines().push(new Uint8Array([0x7b, 0xff, 0x0a]))).toThrow("pim-computer wrote bytes that aren't UTF-8.");
 		const split = new Lines();
 		expect(split.push(new Uint8Array([0xe2, 0x9c]))).toEqual([]);
 		expect(split.push(new Uint8Array([0x93, 0x0a, 0x7b]))).toEqual(["✓"]);
+
+		// A long line arrives in many full chunks, and comes out whole.
+		const long = new Lines();
+		const chunk = new Uint8Array(MAX_CHUNK_BYTES).fill(0x61);
+		for (let index = 0; index < 64; index++) expect(long.push(chunk)).toEqual([]);
+		const [whole] = long.push(encoder.encode("\n"));
+		expect(whole).toHaveLength(64 * MAX_CHUNK_BYTES);
 	});
 });

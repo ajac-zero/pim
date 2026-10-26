@@ -32,6 +32,16 @@ export const SPACE_HEADER = "x-pim-space";
 /** The most characters one message may have, either way; Pim's own limit (`MAX_MESSAGE_CHARS` in src/cua.ts). */
 export const MAX_MESSAGE_CHARS = 16 * 1024 * 1024;
 
+/**
+ * The most characters pim-computer may say while its session opens, before
+ * Pim has the connection: its `hello`, a few hundred, and little else. Each
+ * message counts one more than its length. Past it, the connection ends.
+ */
+export const MAX_OPENING_CHARS = 1_048_576;
+
+/** The most bytes `Lines.push` takes at once: what one read of a pipe gives. */
+export const MAX_CHUNK_BYTES = 65_536;
+
 /** The close code a connection gets when a newer one replaces it, as pim-computer's `REPLACED`. */
 export const REPLACED = 4409;
 
@@ -77,7 +87,11 @@ export type ClientSocket = {
 
 /** One connection, as `Relay.open` gives it back to the embedder. */
 export type Channel = {
-	/** Whether the session opened, and the connection is still there; false means no `101` may be answered. */
+	/**
+	 * Whether the session opened, and the connection is still there; false
+	 * means no `101` may be answered. It settles false as soon as the
+	 * connection ends, whether or not the session has come yet.
+	 */
 	readonly ready: Promise<boolean>;
 	/** Whether the connection has ended. */
 	readonly ended: boolean;
@@ -100,6 +114,8 @@ export type RelayOptions = {
 	readonly open: OpenSession;
 	/** Where the relay's log entries go; by default, `console.error` as JSON. */
 	readonly log?: (entry: LogEntry) => void;
+	/** How much pim-computer may say while its session opens (`MAX_OPENING_CHARS` unless set). */
+	readonly maxOpeningChars?: number;
 };
 
 const encoder = new TextEncoder();
@@ -125,6 +141,7 @@ export class Relay {
 	readonly #digest: Promise<Uint8Array>;
 	readonly #open: OpenSession;
 	readonly #log: (entry: LogEntry) => void;
+	readonly #maxOpeningChars: number;
 	/** Ends the open connection, if there is one. */
 	#active: ((code: number, reason: string, why: string) => void) | null = null;
 
@@ -139,6 +156,8 @@ export class Relay {
 		this.#digest = digest(options.token);
 		this.#open = options.open;
 		this.#log = options.log ?? ((entry) => console.error(JSON.stringify(entry)));
+		this.#maxOpeningChars = options.maxOpeningChars ?? MAX_OPENING_CHARS;
+		if (!Number.isSafeInteger(this.#maxOpeningChars) || this.#maxOpeningChars < 1) throw new Error("A bridge's opening limit must be a positive whole number.");
 	}
 
 	/** The space this bridge serves, which a `101` names back. */
@@ -178,11 +197,12 @@ export class Relay {
 
 	/**
 	 * Opens a session for a connection `check` let through, ending the one
-	 * before it first. What pim-computer says goes to `client` from the start,
+	 * before it first. What pim-computer says while its session opens is held
+	 * here, up to `maxOpeningChars`, and goes to `client` once it is open,
 	 * which must hold it until the embedder answers `101` (a `WebSocketPair`
-	 * does); nothing Pim sends is taken before the session is open. `signal`
-	 * is the request's: when it aborts before the session is open, the
-	 * connection ends.
+	 * does); if the session doesn't open, it is dropped. Nothing Pim sends is
+	 * taken before the session is open. `signal` is the request's: when it
+	 * aborts before the session is open, the connection ends.
 	 */
 	open(client: ClientSocket, signal?: AbortSignal): Channel {
 		this.#active?.(REPLACED, "Replaced", "replaced");
@@ -191,10 +211,19 @@ export class Relay {
 		let state = "opening" as "opening" | "open" | "ended";
 		/** Read through a call, as the state changes across the awaits below. */
 		const ended = () => state === "ended";
+		/** What pim-computer said while its session opened, and how much that counts for. */
+		let held: string[] = [];
+		let heldChars = 0;
+		let settle!: (opened: boolean) => void;
+		const ready = new Promise<boolean>((resolve) => {
+			settle = resolve;
+		});
 
 		const end = (code: number, reason: string, why: string) => {
 			if (state === "ended") return;
 			state = "ended";
+			held = [];
+			settle(false);
 			if (this.#active === end) this.#active = null;
 			signal?.removeEventListener("abort", abandoned);
 			stop.abort();
@@ -215,45 +244,56 @@ export class Relay {
 		};
 		this.#active = end;
 
-		const fromSession = (message: string) => {
-			if (state === "ended") return;
-			if (typeof message !== "string" || message.length > MAX_MESSAGE_CHARS || hasLineBreak(message)) {
-				return end(1011, "Session broke the protocol", "session-protocol");
-			}
+		const toClient = (message: string) => {
 			try {
 				client.send(message);
 			} catch {
 				end(1011, "Error", "client-send");
 			}
 		};
+		const fromSession = (message: string) => {
+			if (state === "ended") return;
+			if (typeof message !== "string" || message.length > MAX_MESSAGE_CHARS || hasLineBreak(message)) {
+				return end(1011, "Session broke the protocol", "session-protocol");
+			}
+			if (state === "open") return toClient(message);
+			heldChars += message.length + 1;
+			if (heldChars > this.#maxOpeningChars) return end(1011, "Too much before open", "opening-overflow");
+			held.push(message);
+		};
 
 		if (signal?.aborted) end(1001, "Gone", "abandoned");
 		else signal?.addEventListener("abort", abandoned);
 
-		const ready = (async () => {
-			if (ended()) return false;
-			let opened: Session;
-			try {
-				opened = await this.#open({ message: fromSession, closed: () => end(1000, "Session ended", "session-closed") }, stop.signal);
-			} catch {
-				// What the factory threw may carry anything, so only that it failed is logged.
-				end(1011, "Session failed", "session-failed");
-				return false;
-			}
-			if (ended()) {
+		if (!ended()) {
+			void (async () => {
+				let opened: Session;
 				try {
-					opened.close();
+					opened = await this.#open({ message: fromSession, closed: () => end(1000, "Session ended", "session-closed") }, stop.signal);
 				} catch {
-					// Nothing more to do with it.
+					// What the factory threw may carry anything, so only that it failed is logged.
+					end(1011, "Session failed", "session-failed");
+					return;
 				}
-				return false;
-			}
-			session = opened;
-			state = "open";
-			signal?.removeEventListener("abort", abandoned);
-			this.#log({ event: "bridge.opened" });
-			return true;
-		})();
+				// A session that comes after its connection ended is closed here, once, and used for nothing.
+				if (ended()) {
+					try {
+						opened.close();
+					} catch {
+						// Nothing more to do with it.
+					}
+					return;
+				}
+				session = opened;
+				state = "open";
+				signal?.removeEventListener("abort", abandoned);
+				this.#log({ event: "bridge.opened" });
+				const said = held;
+				held = [];
+				for (const message of said) if (!ended()) toClient(message);
+				settle(!ended());
+			})();
+		}
 
 		return {
 			ready,
@@ -282,29 +322,58 @@ export class Relay {
 
 /**
  * Splits pim-computer's output, as `--stdio` writes it, into its messages,
- * one per line. Bytes that aren't UTF-8, or a line longer than a message may
- * be, throw, and the embedder must then end the session. A line not ended
- * when the output ends is no message, and is dropped. The other way, each
- * message the relay hands a session is written followed by `\n`; the relay
- * lets no message with a line break through.
+ * one per line. Each `push` takes at most `maxChunkBytes`, so what one call
+ * decodes and returns is bounded; an embedder that reads more at once hands
+ * it over in parts. A chunk over that, bytes that aren't UTF-8, or a line
+ * longer than `maxChars` throw a fixed error, after which every `push`
+ * throws, and the embedder must end the session. A line not ended when the
+ * output ends is no message, and is dropped. The other way, each message the
+ * relay hands a session is written followed by `\n`; the relay lets no
+ * message with a line break through.
  */
 export class Lines {
-	readonly #max: number;
+	readonly #maxChars: number;
+	readonly #maxChunkBytes: number;
 	readonly #decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
-	#pending = "";
+	/** The unended line so far, in parts, so a long one isn't copied on every push. */
+	#pending: string[] = [];
+	#pendingChars = 0;
+	#broken: Error | null = null;
 
-	constructor(max = MAX_MESSAGE_CHARS) {
-		this.#max = max;
+	constructor(maxChars = MAX_MESSAGE_CHARS, maxChunkBytes = MAX_CHUNK_BYTES) {
+		this.#maxChars = maxChars;
+		this.#maxChunkBytes = maxChunkBytes;
 	}
 
 	/** The messages `bytes` completes. */
 	push(bytes: Uint8Array): string[] {
-		const lines = (this.#pending + this.#decoder.decode(bytes, { stream: true })).split("\n");
-		this.#pending = lines.pop()!;
-		if (this.#pending.length > this.#max || lines.some((line) => line.length > this.#max)) {
-			throw new RangeError("pim-computer wrote a line longer than a message may be.");
+		if (this.#broken) throw this.#broken;
+		if (bytes.length > this.#maxChunkBytes) return this.#break(new RangeError("pim-computer's output was handed over in a part larger than a line reader takes."));
+		let text: string;
+		try {
+			text = this.#decoder.decode(bytes, { stream: true });
+		} catch {
+			return this.#break(new TypeError("pim-computer wrote bytes that aren't UTF-8."));
+		}
+		const pieces = text.split("\n");
+		const lines: string[] = [];
+		for (let index = 0; index < pieces.length; index++) {
+			const piece = pieces[index]!;
+			this.#pendingChars += piece.length;
+			if (this.#pendingChars > this.#maxChars) return this.#break(new RangeError("pim-computer wrote a line longer than a message may be."));
+			this.#pending.push(piece);
+			if (index === pieces.length - 1) break;
+			lines.push(this.#pending.join(""));
+			this.#pending = [];
+			this.#pendingChars = 0;
 		}
 		return lines;
+	}
+
+	#break(error: Error): never {
+		this.#broken = error;
+		this.#pending = [];
+		throw error;
 	}
 }
 

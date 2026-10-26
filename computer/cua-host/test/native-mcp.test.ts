@@ -20,6 +20,7 @@ import {
 	createNativeMcp,
 	DEFAULT_LIMITS,
 	dispatchEffect,
+	LIMIT_RANGES,
 	type Fetch,
 	type NativeCall,
 	NativeMcpSetupError,
@@ -167,6 +168,20 @@ describe("pins", () => {
 		assert.throws(() => createNativeMcp({ origin: ORIGIN, token: "a b", owner: OWNER, fetch: new StandIn().fetch }));
 		assert.doesNotThrow(() => createNativeMcp({ origin: "https://spacesd.test:8443", token: TOKEN, owner: OWNER, fetch: new StandIn().fetch }));
 	});
+
+	it("refuses limits that would switch a bound off, or aren't limits", () => {
+		const make = (limits: unknown) => () => createNativeMcp({ origin: ORIGIN, token: TOKEN, owner: OWNER, fetch: new StandIn().fetch, limits: limits as Partial<NativeMcpLimits> });
+		for (const [key, [low, high]] of Object.entries(LIMIT_RANGES)) {
+			for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1, low - 1, high + 1, low + 0.5, undefined, null, String(high), 10n]) {
+				assert.throws(make({ [key]: value }), Error, `${key}: ${String(value)}`);
+			}
+			assert.doesNotThrow(make({ [key]: key === "maxOutputBytes" ? high : low === 0 ? 0 : high }), key);
+		}
+		assert.throws(make({ maxFoo: 1 }));
+		assert.throws(make(5));
+		assert.throws(make({ maxContentItems: 1024, maxOutputBytes: 1024 }), /maxOutputBytes/);
+		assert.doesNotThrow(make({}));
+	});
 });
 
 // ---------------------------------------------------------------- setup and identity
@@ -248,6 +263,54 @@ describe("setting a run up", () => {
 			["initialize"],
 		);
 		assert.equal(standIn.calls().length + aborting.calls().length, 0);
+	});
+
+	it("turns any setup failure, malformed schemas and unreadable callers included, into a plain NativeMcpSetupError", async () => {
+		const retyped = (change: (schema: Record<string, unknown>) => void) => (s: StandIn) =>
+			(s.tools = () =>
+				advertisedTools((tools) => {
+					change((tools.find((tool) => tool.name === "click") as { inputSchema: Record<string, unknown> }).inputSchema);
+				}));
+		const cases: [string, (standIn: StandIn) => void, string][] = [
+			["required not an array", retyped((schema) => (schema.required = "pid")), "tools/list: click"],
+			["required of numbers", retyped((schema) => (schema.required = [1])), "tools/list: click"],
+			["required not iterable", retyped((schema) => (schema.required = 5)), "tools/list: click"],
+			["properties null", retyped((schema) => (schema.properties = null)), "tools/list: click"],
+			["tools not an array", (s) => (s.tools = () => ({ length: 3 }) as unknown as Record<string, unknown>[]), "tools/list: tools"],
+			[
+				"a response whose headers throw",
+				(s) => {
+					const fetch = s.fetch;
+					Object.defineProperty(s, "fetch", {
+						value: async (url: string, init: RequestInit) => {
+							await fetch(url, init);
+							return { status: 200, body: null, headers: { get: () => { throw new Error(LEAK); } } } as unknown as Response;
+						},
+					});
+				},
+				"internal",
+			],
+		];
+		for (const [what, change, reason] of cases) {
+			const standIn = new StandIn();
+			change(standIn);
+			const error = await client(standIn).openRun(RUN).then(() => assert.fail(what), (error: unknown) => error);
+			assert.ok(error instanceof NativeMcpSetupError, what);
+			assert.equal(error.reason, reason, what);
+			assert.ok(!error.message.includes(LEAK), what);
+			assert.equal(standIn.calls().length, 0, what);
+		}
+
+		const standIn = new StandIn();
+		const mcp = client(standIn);
+		const trap = () => {
+			throw new Error(LEAK);
+		};
+		await assert.rejects(mcp.openRun(new Proxy(RUN, { get: trap })), (error: unknown) => error instanceof NativeMcpSetupError && error.reason === "identity");
+		await assert.rejects(mcp.openRun(null as unknown as TrustedRun), (error: unknown) => error instanceof NativeMcpSetupError && error.reason === "identity");
+		await assert.rejects(mcp.openRun(RUN, new Proxy(new AbortController().signal, { get: trap })), (error: unknown) => error instanceof NativeMcpSetupError && error.reason === "signal");
+		assert.equal(standIn.sent.length, 0);
+		assert.equal((await mcp.openRun(RUN)).state, "ready");
 	});
 
 	it("refuses a daemon that isn't the pinned one, or whose schemas drifted, before any call", async () => {
@@ -378,6 +441,41 @@ describe("curation", () => {
 		assert.throws(() => Object.assign(UPSTREAM_TOOLS.click?.properties ?? {}, { session: { type: "string" } }), TypeError);
 	});
 
+	it("refuses unsent, never throwing, a call or signal that throws when read, and stays usable", async () => {
+		const standIn = new StandIn();
+		const run = await client(standIn).openRun(RUN);
+		const trap = () => {
+			throw new Error(LEAK);
+		};
+		const throwing = (key: string) => Object.defineProperty({ ...call({ tool: "list_windows", arguments: { pid: 42 } }) }, key, { get: trap, enumerable: true });
+		const cases: [string, () => Promise<NativeOutcome>, NativeOutcome][] = [
+			["arguments whose prototype trap throws", () => run.invoke(call({ arguments: new Proxy({}, { getPrototypeOf: trap }) })), { status: "rejected", reason: "invalid_arguments" }],
+			["arguments whose ownKeys trap throws", () => run.invoke(call({ arguments: new Proxy({}, { ownKeys: trap }) })), { status: "rejected", reason: "invalid_arguments" }],
+			["arguments whose descriptor trap throws", () => run.invoke(call({ tool: "list_windows", arguments: new Proxy({ pid: 42 }, { getOwnPropertyDescriptor: trap }) })), { status: "rejected", reason: "invalid_arguments" }],
+			["an argument getter that throws", () => run.invoke(call({ tool: "list_windows", arguments: Object.defineProperty({}, "pid", { get: trap, enumerable: true }) })), { status: "rejected", reason: "invalid_arguments" }],
+			["a nested array whose trap throws", () => run.invoke(call({ tool: "press_key", arguments: { pid: 42, key: "a", modifiers: new Proxy(["ctrl"], { getOwnPropertyDescriptor: trap }) } })), { status: "rejected", reason: "invalid_arguments" }],
+			["a call whose get trap throws", () => run.invoke(new Proxy(call(), { get: trap })), { status: "rejected", reason: "identity" }],
+			["a call whose owner getter throws", () => run.invoke(throwing("owner") as NativeCall), { status: "rejected", reason: "identity" }],
+			["a call whose callId getter throws", () => run.invoke(throwing("callId") as NativeCall), { status: "rejected", reason: "identity" }],
+			["a call whose arguments getter throws", () => run.invoke(throwing("arguments") as NativeCall), { status: "rejected", reason: "invalid_arguments" }],
+			["no call at all", () => run.invoke(null as unknown as NativeCall), { status: "rejected", reason: "identity" }],
+			["a signal whose trap throws", () => run.invoke(call(), new Proxy(new AbortController().signal, { get: trap })), { status: "rejected", reason: "invalid_signal" }],
+			["a signal that isn't one", () => run.invoke(call(), { aborted: false } as AbortSignal), { status: "rejected", reason: "invalid_signal" }],
+		];
+		for (const [what, invoke, expected] of cases) {
+			let outcome: NativeOutcome | undefined;
+			await assert.doesNotReject(async () => {
+				outcome = await invoke();
+			}, what);
+			assert.deepEqual(outcome, expected, what);
+			assert.ok(!JSON.stringify(outcome).includes(LEAK), what);
+			assert.equal(run.state, "ready", what);
+		}
+		assert.equal(standIn.calls().length, 0);
+		assert.equal((await run.invoke(call())).status, "completed");
+		assert.equal(standIn.calls().length, 1);
+	});
+
 	it("sends exactly what was admitted, however the caller's object changes afterwards", async () => {
 		const standIn = new StandIn();
 		const run = await client(standIn).openRun(RUN);
@@ -489,6 +587,16 @@ describe("one tools/call per invoke", () => {
 			} else assert.equal(run.state, "ready");
 		});
 	}
+
+	it("keeps an unexpected error after the handoff unknown, not refused", async () => {
+		const standIn = new StandIn();
+		// A response that passes for one until its headers are read, after spacesd executed the call.
+		standIn.behaviour = () => Object.setPrototypeOf({ status: 200, body: null, headers: { get: () => { throw new Error(LEAK); } } }, Response.prototype);
+		const run = await client(standIn).openRun(RUN);
+		assert.deepEqual(await run.invoke(call()), { status: "unknown", reason: "transport" });
+		assert.equal(standIn.executed.length, 1);
+		assert.equal(run.state, "uncertain");
+	});
 
 	it("ignores an answer that comes after the call was given up, and replays nothing", async () => {
 		const standIn = new StandIn();
@@ -609,6 +717,58 @@ describe("results", () => {
 			{ kind: "image_omitted", index: 4 },
 		]);
 		assert.equal(outcome.isError, false);
+	});
+
+	it("bounds what it reads, keeps and reports however many items a result has, and the outcome stays known", async () => {
+		const many = 10_000;
+		const inputs: [string, unknown[]][] = [
+			["nulls", Array(many).fill(null)],
+			["tiny texts", Array.from({ length: many }, () => ({ type: "text", text: "a" }))],
+			["empty texts", Array.from({ length: many }, () => ({ type: "text", text: "" }))],
+			["valid images", Array.from({ length: many }, () => ({ type: "image", mimeType: "image/png", data: png(8, 8) }))],
+			["bad images", Array.from({ length: many }, () => ({ type: "image", mimeType: "image/gif", data: "R0lGODlh" }))],
+			["resource links", Array.from({ length: many }, (_, i) => ({ type: "resource_link", uri: `http://evil.test/${i}` }))],
+			["a mix", Array.from({ length: many }, (_, i) => [null, 7, { type: "text", text: "é" }, { type: "audio" }][i % 4])],
+		];
+		for (const [what, content] of inputs) {
+			const { outcome, standIn } = await result({ content, isError: "maybe" });
+			const bytes = Buffer.byteLength(JSON.stringify(outcome));
+			assert.ok(outcome.content.length <= DEFAULT_LIMITS.maxContentItems, what);
+			assert.ok(outcome.presentation.length <= DEFAULT_LIMITS.maxContentItems + 2, what);
+			assert.deepEqual(outcome.presentation.at(-1), { kind: "items_unread", count: many - DEFAULT_LIMITS.maxContentItems }, what);
+			assert.equal(outcome.presentation.filter((issue) => issue.kind === "items_unread").length, 1, what);
+			assert.ok(bytes <= 64 * 1024, `${what}: ${bytes} bytes`);
+			assert.equal(outcome.isError, true, what);
+			assert.equal(standIn.executed.length, 1, what);
+		}
+	});
+
+	it("keeps an outcome within maxOutputBytes, cutting text whose JSON grows and leaving out images that don't fit", async () => {
+		const limits = { maxOutputBytes: 16 * 1024, maxContentItems: 8, maxTextBytes: 64 * 1024 };
+		const big = Buffer.concat([Buffer.from(png(8, 8), "base64"), Buffer.alloc(20_000)]).toString("base64");
+		const { outcome } = await result(
+			{
+				content: [
+					{ type: "image", mimeType: "image/png", data: big },
+					{ type: "text", text: "\u0001".repeat(100_000) },
+					{ type: "text", text: "\u0001".repeat(100_000) },
+					{ type: "image", mimeType: "image/png", data: png(8, 8) },
+					...Array(20).fill(null),
+				],
+			},
+			limits,
+		);
+		assert.ok(Buffer.byteLength(JSON.stringify(outcome)) <= limits.maxOutputBytes);
+		assert.deepEqual(outcome.presentation.slice(0, 4), [
+			{ kind: "image_omitted", index: 0 },
+			{ kind: "text_truncated", index: 1 },
+			{ kind: "text_truncated", index: 2 },
+			{ kind: "image_omitted", index: 3 },
+		]);
+		assert.equal(outcome.content.length, 1);
+		assert.ok(outcome.content[0]?.type === "text" && outcome.content[0].text.length > 2000);
+		assert.deepEqual(outcome.presentation.at(-1), { kind: "items_unread", count: 24 - 8 });
+		assert.equal(outcome.status, "completed");
 	});
 
 	it("doesn't take a malformed error flag as success", async () => {

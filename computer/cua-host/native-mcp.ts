@@ -56,6 +56,10 @@ export type NativeMcpLimits = {
 	/** Pixels on either side of one image, and in all. */
 	readonly maxImageSide: number;
 	readonly maxImagePixels: number;
+	/** The items of a result's `content` read; the rest are counted, once, as unread. */
+	readonly maxContentItems: number;
+	/** The most an outcome may be as JSON, presentation issues and all. */
+	readonly maxOutputBytes: number;
 };
 
 export const DEFAULT_LIMITS: NativeMcpLimits = {
@@ -68,7 +72,46 @@ export const DEFAULT_LIMITS: NativeMcpLimits = {
 	maxImageBytes: 8 * 1024 * 1024,
 	maxImageSide: 4096,
 	maxImagePixels: 4096 * 4096,
+	maxContentItems: 64,
+	maxOutputBytes: 16 * 1024 * 1024,
 };
+
+const MiB = 1024 * 1024;
+
+/** What each limit may be set to: integers in these ranges, no other keys. */
+export const LIMIT_RANGES: { readonly [K in keyof NativeMcpLimits]: readonly [number, number] } = {
+	setupMs: [1, 60_000],
+	callMs: [1, 600_000],
+	maxSetupBytes: [1024, 16 * MiB],
+	maxResponseBytes: [1024, 64 * MiB],
+	maxTextBytes: [1, 4 * MiB],
+	maxImages: [0, 16],
+	maxImageBytes: [1, 32 * MiB],
+	maxImageSide: [1, 16_384],
+	maxImagePixels: [1, 16_384 * 16_384],
+	maxContentItems: [1, 1024],
+	maxOutputBytes: [1024, 64 * MiB],
+};
+
+/** An outcome's JSON besides its content: the envelope, and at most `maxContentItems + 4` issues of at most `ISSUE_BYTES` each. */
+const ISSUE_BYTES = 64;
+const outputReserve = (limits: NativeMcpLimits) => 256 + (limits.maxContentItems + 4) * ISSUE_BYTES;
+
+function checkedLimits(overrides: unknown): NativeMcpLimits {
+	const limits: Record<string, number> = { ...DEFAULT_LIMITS };
+	if (overrides !== undefined) {
+		if (typeof overrides !== "object" || overrides === null) throw new Error("The limits must be an object.");
+		for (const [key, value] of Object.entries(overrides)) {
+			const range = Object.hasOwn(LIMIT_RANGES, key) ? LIMIT_RANGES[key as keyof NativeMcpLimits] : undefined;
+			if (!range) throw new Error(`There is no limit ${key}.`);
+			if (!Number.isSafeInteger(value) || value < range[0] || value > range[1]) throw new Error(`The limit ${key} must be an integer from ${range[0]} to ${range[1]}.`);
+			limits[key] = value;
+		}
+	}
+	const checked = Object.freeze(limits as NativeMcpLimits);
+	if (checked.maxOutputBytes < outputReserve(checked) + 1024) throw new Error("The limit maxOutputBytes leaves no room for content beside maxContentItems' issues.");
+	return checked;
+}
 
 export type NativeMcpOptions = {
 	/** spacesd's origin, as the operator set it: `http(s)://host:port`, https unless the host is loopback. */
@@ -87,15 +130,45 @@ export type TrustedRun = { readonly owner: string; readonly agentId: string; rea
 /** One call: the run's identity again, the call's own ID (unique in the run), and the tool with its arguments. */
 export type NativeCall = TrustedRun & { readonly callId: string; readonly tool: string; readonly arguments: unknown };
 
+/**
+ * A signal of the client's own that aborts when the caller's does, so nothing
+ * past this point reads the caller's object. Throws when that object can't be
+ * read or listened to (a proxy's trap, a getter).
+ */
+function linked(signal: AbortSignal | undefined): { readonly signal: AbortSignal; readonly aborted: boolean; unlink(): void } {
+	const controller = new AbortController();
+	if (signal === undefined) return { signal: controller.signal, aborted: false, unlink() {} };
+	if (signal.aborted === true) return { signal: controller.signal, aborted: true, unlink() {} };
+	const onAbort = () => controller.abort();
+	signal.addEventListener("abort", onAbort, { once: true });
+	return {
+		signal: controller.signal,
+		aborted: false,
+		unlink() {
+			try {
+				signal.removeEventListener("abort", onAbort);
+			} catch {
+				// The listener is once-only and aborts only a signal of the client's own.
+			}
+		},
+	};
+}
+
 export type NativeContent =
 	| { readonly type: "text"; readonly text: string }
 	| { readonly type: "image"; readonly mimeType: "image/png" | "image/jpeg"; readonly data: string; readonly width: number; readonly height: number };
 
-/** Something of a known result the client didn't pass on as it came; the call's outcome stands regardless. */
+/**
+ * Something of a known result the client didn't pass on as it came; the
+ * call's outcome stands regardless. There is at most one per item read, and
+ * `items_unread` counts, once, the items past `maxContentItems`.
+ */
 export type PresentationIssue = {
-	readonly kind: "text_truncated" | "image_omitted" | "content_omitted" | "content_malformed" | "is_error_malformed";
+	readonly kind: "text_truncated" | "image_omitted" | "content_omitted" | "content_malformed" | "is_error_malformed" | "items_unread";
 	/** The item of `content` it is about, when it is about one. */
 	readonly index?: number;
+	/** For `items_unread`, how many. */
+	readonly count?: number;
 };
 
 export type RejectReason =
@@ -113,8 +186,10 @@ export type RejectReason =
 	| "call_reused"
 	/** The tool isn't curated. */
 	| "unknown_tool"
-	/** The arguments aren't admitted by the tool's curated schema. */
-	| "invalid_arguments";
+	/** The arguments aren't admitted by the tool's curated schema, or couldn't be read. */
+	| "invalid_arguments"
+	/** The caller's signal couldn't be read or listened to. */
+	| "invalid_signal";
 
 export type UnknownReason =
 	| "timeout"
@@ -492,7 +567,11 @@ function utf8Prefix(text: string, bytes: number): string {
 	return text.slice(0, end);
 }
 
-/** A result as the caller gets it: what a known outcome carries, with what was left out of it said, not hidden. */
+/**
+ * A result as the caller gets it: what a known outcome carries, with what was
+ * left out of it said, not hidden. At most `maxContentItems` items are read,
+ * and what is kept, as JSON, fits `maxOutputBytes` with every issue beside it.
+ */
 function present(result: Record<string, unknown>, limits: NativeMcpLimits): NativeOutcome {
 	const presentation: PresentationIssue[] = [];
 	let isError = false;
@@ -507,25 +586,37 @@ function present(result: Record<string, unknown>, limits: NativeMcpLimits): Nati
 	const structured = result.structuredContent as { code?: unknown } | null | undefined;
 	const code = isError && typeof structured === "object" && structured !== null && typeof structured.code === "string" && CODE.test(structured.code) ? structured.code : null;
 	const content: NativeContent[] = [];
-	const items = Array.isArray(result.content) ? result.content : [];
+	const items = Array.isArray(result.content) ? (result.content as unknown[]) : [];
 	if (!Array.isArray(result.content)) presentation.push({ kind: "content_malformed" });
 	let textLeft = limits.maxTextBytes;
+	let outputLeft = limits.maxOutputBytes - outputReserve(limits);
 	let images = 0;
-	items.forEach((raw: unknown, index) => {
+	const read = Math.min(items.length, limits.maxContentItems);
+	for (let index = 0; index < read; index++) {
+		const raw = items[index];
 		const item = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
 		if (item.type === "text" && typeof item.text === "string") {
-			const text = utf8Prefix(item.text, textLeft);
+			// As JSON a UTF-8 byte takes at most 6 bytes (`\u0001`), so this much always fits what is left.
+			const room = Math.max(0, Math.floor((outputLeft - 32) / 6));
+			const text = utf8Prefix(item.text, Math.min(textLeft, room));
 			textLeft -= Buffer.byteLength(text);
 			if (text.length < item.text.length) presentation.push({ kind: "text_truncated", index });
-			if (text.length > 0) content.push({ type: "text", text });
+			if (text.length > 0) {
+				const entry: NativeContent = { type: "text", text };
+				outputLeft -= Buffer.byteLength(JSON.stringify(entry)) + 1;
+				content.push(entry);
+			}
 		} else if (item.type === "image") {
 			const checked = images < limits.maxImages ? image(item, limits) : null;
-			if (checked) {
+			const size = checked ? Buffer.byteLength(JSON.stringify(checked)) + 1 : 0;
+			if (checked && size <= outputLeft) {
 				images += 1;
+				outputLeft -= size;
 				content.push(checked);
 			} else presentation.push({ kind: "image_omitted", index });
 		} else presentation.push({ kind: "content_omitted", index });
-	});
+	}
+	if (items.length > read) presentation.push({ kind: "items_unread", count: items.length - read });
 	return { status: "completed", isError, code, content, presentation };
 }
 
@@ -557,14 +648,16 @@ export function canonical(value: unknown): string {
 
 /** Whether `tools/list` advertises every curated tool with the pinned schema; returns the first mismatch's name. */
 function mismatchedTool(result: Record<string, unknown>): string | null {
-	const tools = Array.isArray(result.tools) ? (result.tools as unknown[]) : [];
+	if (!Array.isArray(result.tools)) return "tools";
+	const tools = result.tools as unknown[];
 	for (const [name, pinned] of Object.entries(UPSTREAM_TOOLS)) {
 		const found = tools.filter((tool) => typeof tool === "object" && tool !== null && (tool as { name?: unknown }).name === name);
 		const schema = found.length === 1 ? (found[0] as { inputSchema?: unknown }).inputSchema : undefined;
 		if (typeof schema !== "object" || schema === null) return name;
 		const { type, required = [], properties, additionalProperties } = schema as Record<string, unknown>;
 		if (type !== "object" || additionalProperties !== false || typeof properties !== "object" || properties === null) return name;
-		if (canonical([...(required as string[])].sort()) !== canonical([...pinned.required].sort())) return name;
+		if (!Array.isArray(required) || !required.every((item) => typeof item === "string")) return name;
+		if (canonical([...required].sort()) !== canonical([...pinned.required].sort())) return name;
 		for (const [property, shape] of Object.entries(pinned.properties)) {
 			const advertised = (properties as Record<string, unknown>)[property];
 			if (typeof advertised !== "object" || advertised === null) return name;
@@ -580,7 +673,7 @@ export function createNativeMcp(options: NativeMcpOptions): NativeMcp {
 	if (typeof options.token !== "string" || !/^[\x21-\x7e]{1,4096}$/.test(options.token)) throw new Error("The spacesd token is not a usable bearer token.");
 	if (typeof options.owner !== "string" || !IDENTITY.test(options.owner)) throw new Error("The owner is not a usable identity.");
 	const { token, owner, fetch } = options;
-	const limits: NativeMcpLimits = { ...DEFAULT_LIMITS, ...options.limits };
+	const limits = checkedLimits(options.limits);
 	/** Every run ever opened here, so none is set up twice. */
 	const opened = new Set<string>();
 
@@ -592,9 +685,10 @@ export function createNativeMcp(options: NativeMcpOptions): NativeMcp {
 	 * signal ends the wait first, the client stops waiting at once, and an
 	 * answer that comes later is discarded unread.
 	 */
-	async function post(body: string, headers: Record<string, string>, ms: number, max: number, signal: AbortSignal | undefined): Promise<Exchange> {
+	async function post(body: string, headers: Record<string, string>, ms: number, max: number, signal: AbortSignal): Promise<Exchange> {
 		// Only setup can get here aborted (between its requests); `invoke` checks right before, with nothing awaited between.
-		if (signal?.aborted) return { ok: false, reason: "aborted" };
+		// `signal` is always the client's own (`linked`), so nothing here reads a caller's object.
+		if (signal.aborted) return { ok: false, reason: "aborted" };
 		const controller = new AbortController();
 		let reason: "timeout" | "aborted" | null = null;
 		const stop = (why: "timeout" | "aborted") => {
@@ -604,7 +698,7 @@ export function createNativeMcp(options: NativeMcpOptions): NativeMcp {
 		const stopped = new Promise<null>((resolve) => controller.signal.addEventListener("abort", () => resolve(null), { once: true }));
 		const timer = setTimeout(() => stop("timeout"), ms);
 		const onAbort = () => stop("aborted");
-		signal?.addEventListener("abort", onAbort, { once: true });
+		signal.addEventListener("abort", onAbort, { once: true });
 		try {
 			let pending: Promise<Response>;
 			try {
@@ -633,7 +727,7 @@ export function createNativeMcp(options: NativeMcpOptions): NativeMcp {
 			return { ok: true, status: response.status, type: response.headers.get("content-type"), session: response.headers.get(SESSION_HEADER), body: read };
 		} finally {
 			clearTimeout(timer);
-			signal?.removeEventListener("abort", onAbort);
+			signal.removeEventListener("abort", onAbort);
 		}
 	}
 
@@ -647,7 +741,7 @@ export function createNativeMcp(options: NativeMcpOptions): NativeMcp {
 	}
 
 	/** The run's MCP session: `initialize`, `notifications/initialized` and `tools/list`, and nothing else. */
-	async function setUp(agentSession: string, signal: AbortSignal | undefined): Promise<string> {
+	async function setUp(agentSession: string, signal: AbortSignal): Promise<string> {
 		const request = async (method: string, params: unknown, session: string | null) => {
 			const id = `pim-${randomUUID()}`;
 			const headers: Record<string, string> = { [AGENT_SESSION_HEADER]: agentSession };
@@ -659,7 +753,6 @@ export function createNativeMcp(options: NativeMcpOptions): NativeMcp {
 			return { result: answered.result, session: exchange.ok ? exchange.session : null };
 		};
 
-		if (signal?.aborted) fail("aborted");
 		const init = await request("initialize", { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "pim-cua-host", version: "0.1.0" } }, null);
 		const session = init.session;
 		if (!session || !MINTED_SESSION.test(session)) return fail("initialize: session");
@@ -685,18 +778,33 @@ export function createNativeMcp(options: NativeMcpOptions): NativeMcp {
 
 	return {
 		async openRun(run, signal) {
-			if (!validRun(run)) throw new NativeMcpSetupError("identity");
-			if (run.owner !== owner) throw new NativeMcpSetupError("owner");
-			const frozen: TrustedRun = Object.freeze({ owner: run.owner, agentId: run.agentId, runId: run.runId });
+			let frozen: TrustedRun;
+			try {
+				// Each value read once, into a run of the client's own.
+				frozen = Object.freeze({ owner: run.owner, agentId: run.agentId, runId: run.runId });
+			} catch {
+				throw new NativeMcpSetupError("identity");
+			}
+			if (!validRun(frozen)) throw new NativeMcpSetupError("identity");
+			if (frozen.owner !== owner) throw new NativeMcpSetupError("owner");
 			const agentSession = agentSessionOf(frozen);
 			if (opened.has(agentSession)) throw new NativeMcpSetupError("reopened");
+			let link: ReturnType<typeof linked>;
+			try {
+				link = linked(signal);
+			} catch {
+				throw new NativeMcpSetupError("signal");
+			}
+			if (link.aborted) throw new NativeMcpSetupError("aborted");
 			opened.add(agentSession);
 			try {
-				return openedRun(frozen, agentSession, await setUp(agentSession, signal));
+				return openedRun(frozen, agentSession, await setUp(agentSession, link.signal));
 			} catch (error) {
 				// Setup calls no tool, so a run whose setup failed may be set up again.
 				opened.delete(agentSession);
-				throw error;
+				throw error instanceof NativeMcpSetupError ? error : new NativeMcpSetupError("internal");
+			} finally {
+				link.unlink();
 			}
 		},
 	};
@@ -710,32 +818,49 @@ export function createNativeMcp(options: NativeMcpOptions): NativeMcp {
 			const rejected = (reason: RejectReason): NativeOutcome => ({ status: "rejected", reason });
 			if (state === "closed") return rejected("closed");
 			if (state === "uncertain") return rejected("uncertain");
-			if (typeof call !== "object" || call === null) return rejected("identity");
-			const { owner: callOwner, agentId, runId, callId, tool: name } = call;
-			if (callOwner !== run.owner || agentId !== run.agentId || runId !== run.runId) return rejected("identity");
-			if (typeof callId !== "string" || !IDENTITY.test(callId)) return rejected("identity");
-			if (calls.has(callId)) return rejected("call_reused");
-			calls.add(callId);
-			if (state === "busy") return rejected("busy");
-			const tool = typeof name === "string" && Object.hasOwn(TOOLS, name) ? TOOLS[name] : undefined;
-			if (!tool) return rejected("unknown_tool");
-			const args = curatedArguments(tool, call.arguments);
-			if (!args) return rejected("invalid_arguments");
-			if (signal?.aborted) return rejected("aborted");
-			const id = `pim-${randomUUID()}`;
-			// Serialized now, before anything is awaited: this is exactly what is sent.
-			const body = JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+			// Until the call is handed to `fetch`, everything reads the caller's objects, which may
+			// throw (a getter, a proxy's trap). Nothing has been sent then, so it is refused, by stage.
+			let stage: RejectReason = "identity";
+			let link: ReturnType<typeof linked> | undefined;
+			let id: string;
+			let body: string;
+			try {
+				if (typeof call !== "object" || call === null) return rejected("identity");
+				const { owner: callOwner, agentId, runId, callId, tool: name } = call;
+				if (callOwner !== run.owner || agentId !== run.agentId || runId !== run.runId) return rejected("identity");
+				if (typeof callId !== "string" || !IDENTITY.test(callId)) return rejected("identity");
+				if (calls.has(callId)) return rejected("call_reused");
+				calls.add(callId);
+				if (state === "busy") return rejected("busy");
+				const tool = typeof name === "string" && Object.hasOwn(TOOLS, name) ? TOOLS[name] : undefined;
+				if (!tool) return rejected("unknown_tool");
+				stage = "invalid_arguments";
+				const args = curatedArguments(tool, call.arguments);
+				if (!args) return rejected("invalid_arguments");
+				stage = "invalid_signal";
+				link = linked(signal);
+				if (link.aborted) return rejected("aborted");
+				stage = "invalid_arguments";
+				id = `pim-${randomUUID()}`;
+				// Serialized now, before anything is awaited: this is exactly what is sent.
+				body = JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+			} catch {
+				link?.unlink();
+				return rejected(stage);
+			}
 
 			state = "busy";
 			let outcome: NativeOutcome;
 			try {
-				const answered = answer(await post(body, headers, limits.callMs, limits.maxResponseBytes, signal), id, session);
+				const answered = answer(await post(body, headers, limits.callMs, limits.maxResponseBytes, link.signal), id, session);
 				if (typeof answered === "string") outcome = { status: "unknown", reason: answered };
 				else if ("error" in answered) outcome = { status: "rpc_error", code: answered.error };
 				else outcome = present(answered.result, limits);
 			} catch {
 				// Nothing above is meant to throw; if something does, the call may still have been sent.
 				outcome = { status: "unknown", reason: "transport" };
+			} finally {
+				link.unlink();
 			}
 			if (outcome.status === "unknown") state = "uncertain";
 			else if (state === "busy") state = "ready";

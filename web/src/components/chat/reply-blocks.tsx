@@ -143,14 +143,11 @@ function Gallery({
   items: Item[];
   images: ReplyContext["images"];
 }) {
-  // Once the copies are kept, an image Pim couldn't load is left out.
-  const shown = images
-    ? items.filter((item) => item.image && images[item.image])
-    : items;
-  if (shown.length === 0) return null;
+  // Once the copies are kept, an image Pim couldn't load shows as unavailable,
+  // keeping its caption and the page it's from.
   return (
-    <div className={cn("my-4 grid gap-3", shown.length > 1 && "grid-cols-2")}>
-      {shown.map((item, index) => {
+    <div className={cn("my-4 grid gap-3", items.length > 1 && "grid-cols-2")}>
+      {items.map((item, index) => {
         const copy = item.image ? images?.[item.image] : undefined;
         const picture = copy ? (
           <img
@@ -158,6 +155,10 @@ function Gallery({
             alt={item.caption ?? ""}
             className="aspect-[5/4] w-full rounded-2xl bg-muted object-cover"
           />
+        ) : images ? (
+          <div className="flex aspect-[5/4] w-full items-center justify-center rounded-2xl bg-muted px-3 text-center text-[13px] text-muted-foreground">
+            Image unavailable
+          </div>
         ) : (
           <div className="aspect-[5/4] w-full animate-pulse rounded-2xl bg-muted" />
         );

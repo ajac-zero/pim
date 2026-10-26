@@ -100,41 +100,87 @@ describe("computer control state", () => {
 		expect(refusal(reconciled, { type: "reconcile_request", requestId: "r1", resolution: "completed", evidence: "later" })).toEqual({ ok: false, reason: "already_final" });
 	});
 
-	it("blocks resume's admissions until every viewer session of an earlier epoch is revoked", () => {
-		const base = ok(agentOwned(), { type: "viewer_open_requested", sessionId: "v1" }, { type: "viewer_open_requested", sessionId: "v2" }, { type: "viewer_opened", sessionId: "v1" }, { type: "takeover" });
-		const state = ok(base, { type: "resume", leaseId: "L3" });
-		const lease3 = { epoch: 3, leaseId: "L3" };
-		expect(refusal(state, admit("r1", "a", lease3))).toEqual({ ok: false, reason: "blocked" });
-		const one = ok(state, { type: "viewer_revoked", sessionId: "v1" });
-		expect(refusal(one, admit("r1", "a", lease3))).toEqual({ ok: false, reason: "blocked" });
-		ok(one, { type: "viewer_revoked", sessionId: "v2" }, admit("r1", "a", lease3));
+	const open = (sessionId: string, epoch: number): ControlEvent[] => [{ type: "viewer_open_requested", sessionId, epoch }, { type: "viewer_opened", sessionId }];
+	const revoke = (sessionId: string): ControlEvent => ({ type: "viewer_revoke_requested", sessionId });
+	const acked = (sessionId: string, attempt: number): ControlEvent => ({ type: "viewer_revoked", sessionId, attempt });
+	const failed = (sessionId: string, attempt: number): ControlEvent => ({ type: "viewer_revoke_failed", sessionId, attempt });
+	const BLOCKED = { ok: false, reason: "blocked" };
+
+	it("blocks admissions after resume until every viewer session is revoked by its own attempt", () => {
+		const state = ok(initialControlState(), ...open("v1", 0), { type: "viewer_open_requested", sessionId: "v2", epoch: 0 }, { type: "resume", leaseId: "L1" });
+		expect(refusal(state, admit("r1"))).toEqual(BLOCKED);
+		// An acknowledgment with no attempt in progress, or of the wrong one, is refused.
+		expect(refusal(state, acked("v1", 1))).toEqual({ ok: false, reason: "stale_attempt" });
+		const one = ok(state, revoke("v1"), acked("v1", 1));
+		expect(refusal(one, admit("r1"))).toEqual(BLOCKED);
+		ok(one, revoke("v2"), acked("v2", 1), admit("r1"));
 	});
 
-	it("stays blocked when a viewer's revocation fails, until it is later revoked", () => {
-		const lease3 = { epoch: 3, leaseId: "L3" };
-		const state = ok(agentOwned(), { type: "viewer_open_requested", sessionId: "v1" }, { type: "viewer_opened", sessionId: "v1" }, { type: "takeover" }, { type: "resume", leaseId: "L3" }, { type: "viewer_revoke_failed", sessionId: "v1" });
-		expect(refusal(state, admit("r1", "a", lease3))).toEqual({ ok: false, reason: "blocked" });
-		ok(state, { type: "viewer_revoked", sessionId: "v1" }, admit("r1", "a", lease3));
+	it("admits viewer requests only while the human owns the application, in the current epoch", () => {
+		const agent = agentOwned();
+		expect(refusal(agent, { type: "viewer_open_requested", sessionId: "v1", epoch: 1 })).toEqual({ ok: false, reason: "wrong_owner" });
+		const human = ok(agent, { type: "takeover" });
+		expect(refusal(human, { type: "viewer_open_requested", sessionId: "v1", epoch: 1 })).toEqual({ ok: false, reason: "epoch_mismatch" });
+		expect(refusal(initialControlState(), { type: "viewer_open_requested", sessionId: "", epoch: 0 })).toEqual({ ok: false, reason: "empty_value" });
+		// The viewer opened under the old human epoch can't be minted again under the agent's.
+		const resumedAgain = ok(initialControlState(), ...open("v1", 0), { type: "resume", leaseId: "L1" }, revoke("v1"), acked("v1", 1));
+		expect(refusal(resumedAgain, { type: "viewer_open_requested", sessionId: "v2", epoch: 0 })).toEqual({ ok: false, reason: "wrong_owner" });
+		ok(resumedAgain, admit("r1"));
 	});
 
-	it("treats a viewer that opens late, after its revocation, as open again and blocked", () => {
-		const lease3 = { epoch: 3, leaseId: "L3" };
-		const pending = ok(agentOwned(), { type: "viewer_open_requested", sessionId: "v1" }, { type: "takeover" }, { type: "resume", leaseId: "L3" });
-		const revoked = ok(pending, { type: "viewer_revoked", sessionId: "v1" });
-		ok(revoked, admit("r1", "a", lease3));
+	it("keeps a pending or open viewer fencing admissions in the same epoch too", () => {
+		const state = ok(initialControlState(), { type: "viewer_open_requested", sessionId: "v1", epoch: 0 });
+		expect(admissionBlockers(state)).toContain("human owns the application");
+		expect(admissionBlockers(state)).toContain("viewer v1 not revoked");
+		const opened = ok(state, { type: "viewer_opened", sessionId: "v1" });
+		expect(admissionBlockers(opened)).toContain("viewer v1 not revoked");
+	});
+
+	it("stays blocked when a revocation fails, until a new attempt is acknowledged", () => {
+		const state = ok(initialControlState(), ...open("v1", 0), { type: "resume", leaseId: "L1" }, revoke("v1"), failed("v1", 1));
+		expect(state.viewers[0]?.status).toBe("revoke_failed");
+		expect(refusal(state, admit("r1"))).toEqual(BLOCKED);
+		// The failed attempt's own acknowledgment can't be reused, nor can it be repeated.
+		expect(refusal(state, acked("v1", 1))).toEqual({ ok: false, reason: "stale_attempt" });
+		const retry = ok(state, revoke("v1"));
+		expect(retry.viewers[0]?.revokeAttempt).toBe(2);
+		expect(refusal(retry, acked("v1", 1))).toEqual({ ok: false, reason: "stale_attempt" });
+		ok(retry, acked("v1", 2), admit("r1"));
+	});
+
+	it("does not let a duplicate or delayed acknowledgment certify a later open", () => {
+		const revoked = ok(initialControlState(), ...open("v1", 0), { type: "resume", leaseId: "L1" }, revoke("v1"), acked("v1", 1));
+		ok(revoked, admit("r1"));
+		// The open arrives late: the session is open again and admissions close.
 		const late = ok(revoked, { type: "viewer_opened", sessionId: "v1" });
-		expect(late.viewers[0]?.status).toBe("open");
-		expect(refusal(late, admit("r1", "a", lease3))).toEqual({ ok: false, reason: "blocked" });
-		// A reconnect under a new session ID in the new epoch is a new session, and does not block.
-		const fresh = ok(revoked, { type: "viewer_open_requested", sessionId: "v2" }, { type: "viewer_opened", sessionId: "v2" });
-		ok(fresh, admit("r1", "a", lease3));
+		expect(refusal(late, admit("r2"))).toEqual(BLOCKED);
+		// A repeat of the earlier acknowledgment clears nothing.
+		expect(refusal(late, acked("v1", 1))).toEqual({ ok: false, reason: "stale_attempt" });
+		expect(refusal(late, admit("r2"))).toEqual(BLOCKED);
+		// An open landing during a revocation voids that attempt.
+		const mid = ok(late, revoke("v1"), { type: "viewer_opened", sessionId: "v1" });
+		expect(refusal(mid, acked("v1", 2))).toEqual({ ok: false, reason: "stale_attempt" });
+		const fresh = ok(mid, revoke("v1"), acked("v1", 3));
+		ok(fresh, admit("r2"));
+		// A delayed acknowledgment of attempt 1 or 2 after attempt 3 still changes nothing.
+		expect(refusal(fresh, acked("v1", 1))).toEqual({ ok: false, reason: "stale_attempt" });
+		expect(refusal(fresh, revoke("v1"))).toEqual({ ok: false, reason: "already_final" });
 	});
 
 	it("refuses acknowledgments for sessions it never saw, and reused session IDs", () => {
-		const state = ok(agentOwned(), { type: "viewer_open_requested", sessionId: "v1" });
+		const state = ok(initialControlState(), { type: "viewer_open_requested", sessionId: "v1", epoch: 0 });
 		expect(refusal(state, { type: "viewer_opened", sessionId: "ghost" })).toEqual({ ok: false, reason: "unknown_id" });
-		expect(refusal(state, { type: "viewer_revoked", sessionId: "ghost" })).toEqual({ ok: false, reason: "unknown_id" });
-		expect(refusal(state, { type: "viewer_open_requested", sessionId: "v1" })).toEqual({ ok: false, reason: "duplicate_id" });
+		expect(refusal(state, revoke("ghost"))).toEqual({ ok: false, reason: "unknown_id" });
+		expect(refusal(state, acked("ghost", 1))).toEqual({ ok: false, reason: "unknown_id" });
+		expect(refusal(state, { type: "viewer_open_requested", sessionId: "v1", epoch: 0 })).toEqual({ ok: false, reason: "duplicate_id" });
+	});
+
+	it("takes over without a new epoch at the last safe one, and refuses to resume there", () => {
+		const restored = restoreControlState({ ...JSON.parse(JSON.stringify(agentOwned())), epoch: Number.MAX_SAFE_INTEGER, lease: { epoch: Number.MAX_SAFE_INTEGER, leaseId: "L" } });
+		if (!restored.ok) throw new Error(restored.error);
+		const taken = ok(restored.state, { type: "takeover" });
+		expect([taken.owner, taken.lease, taken.epoch]).toEqual(["human", null, Number.MAX_SAFE_INTEGER]);
+		expect(refusal(taken, { type: "resume", leaseId: "L2" })).toEqual({ ok: false, reason: "epoch_exhausted" });
 	});
 
 	it("refuses to resume when the agent already owns the application, and empty IDs", () => {
@@ -146,7 +192,7 @@ describe("computer control state", () => {
 		const roundTrip = (state: ControlState) => restoreControlState(JSON.parse(JSON.stringify(state)));
 
 		it("restores a settled state exactly", () => {
-			const state = ok(agentOwned(), admit("r1"), { type: "request_result", requestId: "r1", epoch: 1, outcome: "completed" }, { type: "viewer_open_requested", sessionId: "v1" });
+			const state = ok(agentOwned(), admit("r1"), { type: "request_result", requestId: "r1", epoch: 1, outcome: "completed" }, { type: "takeover" }, { type: "viewer_open_requested", sessionId: "v1", epoch: 2 });
 			expect(roundTrip(state)).toEqual({ ok: true, state });
 		});
 
@@ -164,13 +210,23 @@ describe("computer control state", () => {
 			if (!taken.ok) throw new Error(taken.error);
 			expect(taken.state.owner).toBe("human");
 			expect(taken.state.requests[0]?.status).toBe("unknown");
-			const resuming = roundTrip(ok(agentOwned(), { type: "viewer_open_requested", sessionId: "v1" }, { type: "takeover" }, { type: "resume", leaseId: "L3" }));
+			const resuming = roundTrip(ok(initialControlState(), ...open("v1", 0), { type: "resume", leaseId: "L1" }));
 			if (!resuming.ok) throw new Error(resuming.error);
-			expect(refusal(resuming.state, admit("r1", "a", { epoch: 3, leaseId: "L3" }))).toEqual({ ok: false, reason: "blocked" });
+			expect(refusal(resuming.state, admit("r1"))).toEqual(BLOCKED);
+		});
+
+		it("restores a revocation in progress as failed, so an acknowledgment from before the restart is refused", () => {
+			const restored = roundTrip(ok(initialControlState(), ...open("v1", 0), { type: "resume", leaseId: "L1" }, revoke("v1")));
+			if (!restored.ok) throw new Error(restored.error);
+			expect(restored.state.viewers[0]?.status).toBe("revoke_failed");
+			expect(refusal(restored.state, acked("v1", 1))).toEqual({ ok: false, reason: "stale_attempt" });
+			expect(refusal(restored.state, admit("r1"))).toEqual(BLOCKED);
+			ok(restored.state, revoke("v1"), acked("v1", 2), admit("r1"));
 		});
 
 		it("refuses malformed, unversioned, future-versioned and inconsistent state", () => {
-			const good = JSON.parse(JSON.stringify(ok(agentOwned(), admit("r1"), { type: "viewer_open_requested", sessionId: "v1" })));
+			const good = JSON.parse(JSON.stringify(ok(initialControlState(), ...open("v1", 0), { type: "resume", leaseId: "L1" }, revoke("v1"), acked("v1", 1), admit("r1"))));
+			const reconciled = JSON.parse(JSON.stringify(ok(agentOwned(), admit("r1"), { type: "request_result", requestId: "r1", epoch: 1, outcome: "unknown" }, { type: "reconcile_request", requestId: "r1", resolution: "completed", evidence: "seen" })));
 			const bad: Record<string, unknown> = {
 				"null": null,
 				"array": [],
@@ -190,10 +246,17 @@ describe("computer control state", () => {
 				"duplicate request": { ...good, requests: [good.requests[0], good.requests[0]] },
 				"empty agent": { ...good, requests: [{ ...good.requests[0], agentId: "" }] },
 				"unknown viewer status": { ...good, viewers: [{ ...good.viewers[0], status: "closed" }] },
+				"unrevoked viewer of the agent's epoch": { ...good, viewers: [{ ...good.viewers[0], epoch: 1 }] },
+				"missing revoke attempt": { ...good, viewers: [{ ...good.viewers[0], revokeAttempt: undefined }] },
+				"revoking without an attempt": { ...good, viewers: [{ ...good.viewers[0], status: "revoking", revokeAttempt: 0 }] },
+				"reconciled without evidence": { ...reconciled, requests: [{ ...reconciled.requests[0], evidence: undefined }] },
+				"reconciled with blank evidence": { ...reconciled, requests: [{ ...reconciled.requests[0], evidence: "  " }] },
+				"reconciled with non-string evidence": { ...reconciled, requests: [{ ...reconciled.requests[0], evidence: 3 }] },
 				"duplicate viewer": { ...good, viewers: [good.viewers[0], good.viewers[0]] },
 			};
 			for (const [name, raw] of Object.entries(bad)) expect(restoreControlState(raw), name).toMatchObject({ ok: false });
 			expect(restoreControlState(good)).toMatchObject({ ok: true });
+			expect(restoreControlState(reconciled)).toMatchObject({ ok: true });
 		});
 	});
 });

@@ -31,9 +31,16 @@
  *   lost across a restart, blocks admissions until a `reconcile_request` event
  *   names what happened. Nothing is replayed, and a duplicate request ID is
  *   refused, which says nothing about whether the first one ran, once or at all.
- * - Resume starts a new epoch, so every viewer session of an earlier epoch
- *   must be reported revoked before admissions reopen. A revocation failure,
- *   or a viewer that opens late after its revocation, keeps them closed.
+ * - Viewer sessions are treated as input-capable; there is no read-only kind.
+ *   A viewer can be requested only while the human owns the application, in the
+ *   current epoch. Any viewer session not reported revoked, of any epoch, keeps
+ *   admissions closed, so a resume reopens them only after every session is revoked.
+ * - A revocation is an attempt with a number the state assigns. Only an
+ *   acknowledgment naming the attempt in progress counts, so a duplicate or
+ *   delayed acknowledgment of an earlier attempt can't certify a later one. An
+ *   open acknowledged after a revocation reopens the session, and needs a fresh
+ *   attempt. A late open can't be told from a duplicate one, and is treated as
+ *   the worse case.
  */
 
 export const CONTROL_STATE_VERSION = 1;
@@ -55,7 +62,7 @@ export type RequestStatus =
 	/** Reconciliation evidence says it did not run. */
 	| "reconciled_not_executed";
 
-export type ViewerStatus = "pending_open" | "open" | "revoked" | "revoke_failed";
+export type ViewerStatus = "pending_open" | "open" | "revoking" | "revoked" | "revoke_failed";
 
 export interface ControlLease {
 	epoch: number;
@@ -77,6 +84,8 @@ export interface ControlViewer {
 	/** The epoch the session was requested in. */
 	epoch: number;
 	status: ViewerStatus;
+	/** The number of the latest revocation attempt, 0 if none; acknowledgments must name it. */
+	revokeAttempt: number;
 }
 
 export interface ControlState {
@@ -97,10 +106,11 @@ export type ControlEvent =
 	| { type: "reconcile_request"; requestId: string; resolution: "completed" | "not_executed"; evidence: string }
 	| { type: "takeover" }
 	| { type: "resume"; leaseId: string }
-	| { type: "viewer_open_requested"; sessionId: string }
+	| { type: "viewer_open_requested"; sessionId: string; epoch: number }
 	| { type: "viewer_opened"; sessionId: string }
-	| { type: "viewer_revoked"; sessionId: string }
-	| { type: "viewer_revoke_failed"; sessionId: string };
+	| { type: "viewer_revoke_requested"; sessionId: string }
+	| { type: "viewer_revoked"; sessionId: string; attempt: number }
+	| { type: "viewer_revoke_failed"; sessionId: string; attempt: number };
 
 export type ControlRefusal =
 	| "stale_lease"
@@ -111,7 +121,9 @@ export type ControlRefusal =
 	| "epoch_mismatch"
 	| "already_final"
 	| "empty_value"
-	| "wrong_owner";
+	| "wrong_owner"
+	| "stale_attempt"
+	| "epoch_exhausted";
 
 export type ControlOutcome = { ok: true } | { ok: false; reason: ControlRefusal };
 
@@ -133,7 +145,7 @@ export function admissionBlockers(state: ControlState): string[] {
 		else if (request.status === "in_flight" && request.epoch < state.epoch) blockers.push(`request ${request.requestId} from an earlier epoch unresolved`);
 	}
 	for (const viewer of state.viewers) {
-		if (viewer.epoch < state.epoch && viewer.status !== "revoked") blockers.push(`viewer ${viewer.sessionId} of an earlier epoch not revoked`);
+		if (viewer.status !== "revoked") blockers.push(`viewer ${viewer.sessionId} not revoked`);
 	}
 	return blockers;
 }
@@ -177,30 +189,46 @@ export function applyControlEvent(state: ControlState, event: ControlEvent): Con
 		}
 		case "takeover": {
 			if (state.owner === "human") return accept(state);
-			return accept({ ...state, epoch: state.epoch + 1, owner: "human", lease: null });
+			// Closing admissions can't wait on a new epoch number, so the last one is kept; resume is what refuses it.
+			const epoch = state.epoch < Number.MAX_SAFE_INTEGER ? state.epoch + 1 : state.epoch;
+			return accept({ ...state, epoch, owner: "human", lease: null });
 		}
 		case "resume": {
 			if (!event.leaseId) return refuse(state, "empty_value");
 			if (state.owner === "agent") return refuse(state, "wrong_owner");
+			if (state.epoch >= Number.MAX_SAFE_INTEGER) return refuse(state, "epoch_exhausted");
 			const epoch = state.epoch + 1;
 			return accept({ ...state, epoch, owner: "agent", lease: { epoch, leaseId: event.leaseId } });
 		}
 		case "viewer_open_requested": {
 			if (!event.sessionId) return refuse(state, "empty_value");
+			if (state.owner !== "human") return refuse(state, "wrong_owner");
+			if (event.epoch !== state.epoch) return refuse(state, "epoch_mismatch");
 			if (state.viewers.some((viewer) => viewer.sessionId === event.sessionId)) return refuse(state, "duplicate_id");
-			const viewer: ControlViewer = { sessionId: event.sessionId, epoch: state.epoch, status: "pending_open" };
+			const viewer: ControlViewer = { sessionId: event.sessionId, epoch: state.epoch, status: "pending_open", revokeAttempt: 0 };
 			return accept({ ...state, viewers: [...state.viewers, viewer] });
 		}
 		case "viewer_opened":
+		case "viewer_revoke_requested": {
+			const viewer = state.viewers.find((candidate) => candidate.sessionId === event.sessionId);
+			if (!viewer) return refuse(state, "unknown_id");
+			// An open acknowledged after a revocation, or during one, means the revocation did not cover it: the session is open again.
+			if (event.type === "viewer_opened") return accept(replaceViewer(state, { ...viewer, status: "open" }));
+			if (viewer.status === "revoked") return refuse(state, "already_final");
+			return accept(replaceViewer(state, { ...viewer, status: "revoking", revokeAttempt: viewer.revokeAttempt + 1 }));
+		}
 		case "viewer_revoked":
 		case "viewer_revoke_failed": {
 			const viewer = state.viewers.find((candidate) => candidate.sessionId === event.sessionId);
 			if (!viewer) return refuse(state, "unknown_id");
-			// An open acknowledged after a revocation means the revocation did not cover it: the session is open again.
-			const status: ViewerStatus = event.type === "viewer_opened" ? "open" : event.type === "viewer_revoked" ? "revoked" : "revoke_failed";
-			return accept({ ...state, viewers: state.viewers.map((candidate) => (candidate === viewer ? { ...viewer, status } : candidate)) });
+			if (viewer.status !== "revoking" || viewer.revokeAttempt !== event.attempt) return refuse(state, "stale_attempt");
+			return accept(replaceViewer(state, { ...viewer, status: event.type === "viewer_revoked" ? "revoked" : "revoke_failed" }));
 		}
 	}
+}
+
+function replaceViewer(state: ControlState, next: ControlViewer): ControlState {
+	return { ...state, viewers: state.viewers.map((viewer) => (viewer.sessionId === next.sessionId ? next : viewer)) };
 }
 
 function replaceRequest(state: ControlState, next: ControlRequest): ControlState {
@@ -208,7 +236,7 @@ function replaceRequest(state: ControlState, next: ControlRequest): ControlState
 }
 
 const REQUEST_STATUSES: readonly string[] = ["in_flight", "completed", "rejected", "unknown", "reconciled_completed", "reconciled_not_executed"];
-const VIEWER_STATUSES: readonly string[] = ["pending_open", "open", "revoked", "revoke_failed"];
+const VIEWER_STATUSES: readonly string[] = ["pending_open", "open", "revoking", "revoked", "revoke_failed"];
 
 export type RestoreResult = { ok: true; state: ControlState } | { ok: false; error: string };
 
@@ -224,7 +252,9 @@ const isName = (value: unknown): value is string => typeof value === "string" &&
  *
  * Requests still `in_flight` were admitted by an earlier process that may have
  * died before or after sending them, so they come back `unknown` and block
- * admissions until reconciled. Nothing is re-sent.
+ * admissions until reconciled. Nothing is re-sent. Likewise a viewer revoking
+ * comes back `revoke_failed`, so an acknowledgment from before the restart
+ * can't certify it and a fresh attempt is needed.
  */
 export function restoreControlState(raw: unknown): RestoreResult {
 	const fail = (error: string): RestoreResult => ({ ok: false, error });
@@ -248,7 +278,10 @@ export function restoreControlState(raw: unknown): RestoreResult {
 		if (requests.some((request) => request.requestId === item.requestId)) return fail("duplicate request ID");
 		const status = item.status === "in_flight" ? "unknown" : (item.status as RequestStatus);
 		const request: ControlRequest = { requestId: item.requestId, agentId: item.agentId, epoch: item.epoch, status };
-		if (typeof item.evidence === "string") request.evidence = item.evidence;
+		if (item.status.startsWith("reconciled_")) {
+			if (typeof item.evidence !== "string" || !item.evidence.trim()) return fail("reconciled request without evidence");
+			request.evidence = item.evidence;
+		}
 		requests.push(request);
 	}
 	const viewers: ControlViewer[] = [];
@@ -256,7 +289,11 @@ export function restoreControlState(raw: unknown): RestoreResult {
 		if (!isRecord(item) || !isName(item.sessionId) || !isEpoch(item.epoch) || item.epoch > epoch) return fail("invalid viewer");
 		if (typeof item.status !== "string" || !VIEWER_STATUSES.includes(item.status)) return fail("unknown viewer status");
 		if (viewers.some((viewer) => viewer.sessionId === item.sessionId)) return fail("duplicate viewer session");
-		viewers.push({ sessionId: item.sessionId, epoch: item.epoch, status: item.status as ViewerStatus });
+		if (!isEpoch(item.revokeAttempt) || (item.status === "revoking" && item.revokeAttempt < 1)) return fail("invalid revoke attempt");
+		// A viewer is requested only while the human owns the application, so none can be of an agent-owned epoch.
+		if (raw.owner === "agent" && item.epoch === epoch) return fail("viewer of the agent's own epoch");
+		const status = item.status === "revoking" ? "revoke_failed" : (item.status as ViewerStatus);
+		viewers.push({ sessionId: item.sessionId, epoch: item.epoch, status, revokeAttempt: item.revokeAttempt });
 	}
 	return { ok: true, state: { version: CONTROL_STATE_VERSION, epoch, owner: raw.owner, lease, inputQuiescence: "unproven", requests, viewers } };
 }

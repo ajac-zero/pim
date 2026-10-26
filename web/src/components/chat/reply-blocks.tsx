@@ -9,12 +9,14 @@ import {
 } from "react";
 import { useTheme } from "~/components/theme";
 import { cn } from "~/lib/utils";
+import { Video, youtubeId } from "./video-block";
 
 /**
- * Blocks an agent's message draws instead of showing as code. ```cards
- * and ```gallery fences are JSON arrays, drawn with the app's own
+ * Blocks an agent's message draws instead of showing as code. ```cards,
+ * ```gallery and ```videos fences are JSON arrays, drawn with the app's own
  * components: things it found, as rows with their images, and images in a
- * grid. A ```mermaid fence is a diagram, drawn in a sandboxed frame. Pim checks each block when the
+ * grid, and YouTube players that load only when played. A ```mermaid fence is a
+ * diagram, drawn in a sandboxed frame. Pim checks each block when the
  * message is sent and keeps copies of its images; the send's result maps
  * each image's address on the web to its copy here.
  */
@@ -30,7 +32,7 @@ type Item = {
 };
 
 /** The fences drawn here, and the field each of their items needs. */
-const KINDS = { cards: "title", gallery: "image" } as const;
+const KINDS = { cards: "title", gallery: "image", videos: "url" } as const;
 type Kind = keyof typeof KINDS;
 
 export function isReplyBlock(language: string): language is Kind {
@@ -123,6 +125,10 @@ export function ReplyBlock({
   const { images, streaming } = useContext(Reply);
   const items = arrayItems(source)?.filter((item) => isItem(kind, item)) ?? [];
   if (items.length === 0) return streaming ? <Placeholder /> : fallback;
+  if (kind === "videos")
+    return (
+      <Videos items={items} fallback={streaming ? <Placeholder /> : fallback} />
+    );
   if (kind === "gallery") return <Gallery items={items} images={images} />;
   return (
     <div className="my-4 divide-y divide-border/60">
@@ -130,6 +136,23 @@ export function ReplyBlock({
         // Items have no ids: their order is all a block gives.
         // biome-ignore lint/suspicious/noArrayIndexKey: see above
         <CardRow key={index} card={card} images={images} />
+      ))}
+    </div>
+  );
+}
+
+/** Players for the videos whose addresses name a YouTube video; any other item is left out. */
+function Videos({ items, fallback }: { items: Item[]; fallback: ReactNode }) {
+  const videos = items.flatMap((item) => {
+    const id = item.url ? youtubeId(item.url) : null;
+    return id ? [{ id, title: item.title }] : [];
+  });
+  if (videos.length === 0) return fallback;
+  return (
+    <div className="my-4 grid gap-4">
+      {videos.map((video, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: as for cards
+        <Video key={`${index}-${video.id}`} {...video} />
       ))}
     </div>
   );

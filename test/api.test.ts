@@ -508,6 +508,30 @@ describe("conversation", () => {
 		expect(Buffer.from(await served.arrayBuffer())).toEqual(png);
 	});
 
+	it("shows YouTube videos as links elsewhere, and refuses other addresses and malformed ids", async () => {
+		const videos = (items: unknown[]) => `Try:\n\n\`\`\`videos\n${JSON.stringify(items)}\n\`\`\``;
+		const id = "dQw4w9WgXcQ";
+		faux.setResponses([
+			toolUse("send_to_user", { message: videos([{ url: `https://evil.example.test/watch?v=${id}` }]) }),
+			toolUse("send_to_user", { message: videos([{ url: `https://www.youtube.com/watch?v=${id}x` }]) }),
+			toolUse("send_to_user", { message: videos([{ url: `https://youtu.be/${id}`, embed: "https://evil.example.test" }]) }),
+			toolUse("send_to_user", { message: videos([{ url: `https://youtube.com.evil.example.test/shorts/${id}` }]) }),
+			toolUse("send_to_user", { message: videos([{ url: `https://www.youtube.com/watch?v=${id}`, title: "Squat form" }, { url: `https://youtube.com/shorts/${id}` }]) }),
+		]);
+		const { id: session } = (await post("/sessions")).body;
+		const answer = await say("Show me a squat", session);
+		expect(answer.text).toBe(`Try:\n\n- [Squat form](https://www.youtube.com/watch?v=${id})\n- [Video](https://youtube.com/shorts/${id})`);
+		const results = ((await api(`/sessions/${session}/messages`)).body.messages as TranscriptMessage[]).flatMap((message) =>
+			message.parts.flatMap((part) => (part.type === "tool-result" && part.name === "send_to_user" ? [part.content.map((content) => (content.type === "text" ? content.text : "")).join("")] : [])),
+		);
+		expect(results.slice(0, 4).map((result) => result.slice(0, 60))).toEqual([
+			"Not sent: in a ```videos block, an item's url must be a YouT",
+			"Not sent: in a ```videos block, an item's url must be a YouT",
+			"Not sent: in a ```videos block, an item has no embed.",
+			"Not sent: in a ```videos block, an item's url must be a YouT",
+		]);
+	});
+
 	it("gives a model whose API fetches images a signed URL instead, which serves the image without the token", async () => {
 		const png = "iVBORw0KGgo=";
 		const { body: created } = await post("/sessions");

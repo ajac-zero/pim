@@ -11,6 +11,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { Markdown, UNTRUSTED_SCHEMA } from "~/components/chat/markdown";
 import { ReplyImages } from "~/components/chat/reply-blocks";
+import { embedAddress, youtubeId } from "~/components/chat/video-block";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
 
 /** Everything Markdown or raw HTML could use to load, run or send something. */
@@ -501,5 +502,109 @@ describe("chats an agent names", () => {
       "/files?path=%2Fworkspace%2Ftrip+notes.md",
       false,
     ]);
+  });
+});
+
+describe("videos an agent shows", () => {
+  const fence = (items: unknown) =>
+    `Watch:\n\n\`\`\`videos\n${typeof items === "string" ? items : JSON.stringify(items)}\n\`\`\``;
+
+  it("draws a poster and the original link, and loads nothing from the provider", () => {
+    const html = renderToStaticMarkup(
+      <Markdown
+        text={fence([
+          { url: "https://youtu.be/dQw4w9WgXcQ", title: "Squat form" },
+        ])}
+      />,
+    );
+    expect(html).toContain("Play video: Squat form");
+    expect(html).toContain("may collect data");
+    expect(html).toContain(
+      'href="https://www.youtube.com/watch?v=dQw4w9WgXcQ"',
+    );
+    expect(html).not.toContain("<iframe");
+    expect(html).not.toContain("youtube-nocookie");
+    expect(html).not.toContain("<img");
+  });
+
+  it("builds the player's address from the id alone, with a fixed host", () => {
+    expect(embedAddress("dQw4w9WgXcQ")).toBe(
+      "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?autoplay=1&rel=0&playsinline=1",
+    );
+  });
+
+  it("recognises watch, youtu.be and shorts addresses, and nothing else", () => {
+    const id = "dQw4w9WgXcQ";
+    for (const ok of [
+      `https://www.youtube.com/watch?v=${id}`,
+      `https://m.youtube.com/watch?v=${id}&feature=x`,
+      `https://youtube.com/shorts/${id}`,
+      `https://youtu.be/${id}?t=3`,
+    ]) {
+      expect(youtubeId(ok), ok).toBe(id);
+    }
+    for (const bad of [
+      `https://youtube.com.evil.test/watch?v=${id}`,
+      `https://evil.test/watch?v=${id}`,
+      `https://www.youtube.com/embed/${id}`,
+      `https://www.youtube.com/watch?v=${id}x`,
+      `https://www.youtube.com/watch?v=short`,
+      `https://www.youtube.com/watch?v="><script>`,
+      `https://www.youtube.com/watch?v=${id}%22onload`,
+      `https://user:pw@www.youtube.com/watch?v=${id}`,
+      `https://www.youtube.com:8443/watch?v=${id}`,
+      `https://youtu.be/${id}/extra`,
+      `javascript:alert(1)//youtu.be/${id}`,
+      "not a url",
+    ]) {
+      expect(youtubeId(bad), bad).toBeNull();
+    }
+  });
+
+  it("leaves out hostile items, shows the rest, and shows code when none are valid", () => {
+    const mixed = renderToStaticMarkup(
+      <Markdown
+        text={fence([
+          { url: "https://evil.test/watch?v=dQw4w9WgXcQ", title: "Bad" },
+          { url: "https://youtu.be/dQw4w9WgXcQ", title: "Good <b>x</b>" },
+        ])}
+      />,
+    );
+    expect(mixed).not.toContain("Bad");
+    expect(mixed).toContain("Good &lt;b&gt;x&lt;/b&gt;");
+    const none = renderToStaticMarkup(
+      <Markdown text={fence([{ url: "https://evil.test/x" }])} />,
+    );
+    expect(none).not.toContain("Play video");
+    expect(none).toContain("evil.test");
+  });
+
+  it("shows a placeholder, not code, while a block streams, and whole items as they arrive", () => {
+    const streamed = (source: string) =>
+      renderToStaticMarkup(
+        <ReplyImages images={null} streaming>
+          <Markdown text={`\`\`\`videos\n${source}`} />
+        </ReplyImages>,
+      );
+    expect(streamed('[{"url": "https://youtu.be/dQw4')).not.toContain(
+      "youtu.be",
+    );
+    expect(streamed('[{"url": "https://youtu.be/dQw4')).toContain(
+      "animate-pulse",
+    );
+    expect(
+      streamed('[{"url": "https://youtu.be/dQw4w9WgXcQ"}, {"url": "ht'),
+    ).toContain("Play video");
+  });
+
+  it("is code in a shared chat", () => {
+    const html = renderToStaticMarkup(
+      <Markdown
+        untrusted
+        text={fence([{ url: "https://youtu.be/dQw4w9WgXcQ" }])}
+      />,
+    );
+    expect(html).not.toContain("Play video");
+    expect(html).toContain("youtu.be");
   });
 });

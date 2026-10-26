@@ -1,6 +1,6 @@
 {
   "name": "pim-cua-host",
-  "description": "The Node host that serves a Cua bridge's relay over HTTPS and WebSockets. Not part of the Worker or the web app.",
+  "description": "A Cua bridge's programs: the Node host that serves its relay over HTTPS and WebSockets, and the desktop session endpoint it reaches over a Unix socket. Not part of the Worker or the web app.",
   "version": "0.1.0",
   "private": true,
   "type": "module",

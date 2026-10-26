@@ -9,7 +9,7 @@ Run them one at a time. An orb has 2 CPUs and 3 GB of memory, and parallel runs 
 ```sh
 pnpm exec vitest run test/goals.test.ts   # one file of Worker tests, while iterating
 pnpm --filter pim-web test                # the web app's tests (seconds)
-pnpm --filter pim-cua-host test           # the Cua bridge's Node host, over loopback sockets (seconds)
+pnpm --filter pim-cua-host test           # the Cua bridge's Node host and desktop endpoint, over loopback and Unix sockets (seconds)
 pnpm typecheck                            # about 30 s
 pnpm lint                                 # Biome, for web/; `pnpm --filter pim-web format` fixes formatting
 pnpm test                                 # every test, about 3 min

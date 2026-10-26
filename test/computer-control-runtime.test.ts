@@ -2,9 +2,11 @@ import type { Message } from "@earendil-works/pi-ai";
 import { env, runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { NATIVE_TOOL_OP, type NativeOutcome } from "../computer/native-outcome";
 import type { ExecArgs, ExecResult } from "../computer/pim-computer";
 import type { Approval } from "../src/store";
-import { type ControlStorage, ControlCoordinator, ControlRefused } from "../src/computer-control-runtime";
+import { Computer, type ComputerLink } from "../src/computer";
+import { type ControlStorage, ControlCoordinator, ControlRefused, dispatchTrace } from "../src/computer-control-runtime";
 import type { ControlState } from "../src/computer-control";
 import * as fs from "node:fs/promises";
 import { api, connectTestComputer, fakeChrome, OWNER, post, say, toolUse } from "./helpers";
@@ -270,17 +272,18 @@ function memory(initial?: string): ControlStorage & { value: string | undefined;
 	};
 }
 
-describe("the coordinator", () => {
-	const request = (requestId: string, agentId = "agent-a") => ({ space: "o_a", agentId, requestId });
-	const resumed = () => {
-		const storage = memory();
-		const coordinator = new ControlCoordinator("o_a", storage);
-		coordinator.enable();
-		coordinator.apply({ type: "resume", leaseId: "L1" });
-		return { storage, coordinator };
-	};
-	const refusal = (promise: Promise<unknown>) => promise.then(() => null, (error: unknown) => (error instanceof ControlRefused ? error.reason : error));
+const request = (requestId: string, agentId = "agent-a") => ({ space: "o_a", agentId, requestId });
+/** A coordinator of space `o_a`, opted in and granted to the agents. */
+const resumed = () => {
+	const storage = memory();
+	const coordinator = new ControlCoordinator("o_a", storage);
+	coordinator.enable();
+	coordinator.apply({ type: "resume", leaseId: "L1" });
+	return { storage, coordinator };
+};
+const refusal = (promise: Promise<unknown>) => promise.then(() => null, (error: unknown) => (error instanceof ControlRefused ? error.reason : error));
 
+describe("the coordinator", () => {
 	it("admits two agents under distinct requests and sends a duplicate ID once", async () => {
 		const { coordinator } = resumed();
 		const sent: string[] = [];
@@ -467,6 +470,259 @@ describe("the coordinator", () => {
 		const coordinator = new ControlCoordinator("o_a", memory());
 		expect(await coordinator.dispatch(request("r1"), async () => "ran")).toBe("ran");
 		expect(coordinator.state).toBeNull();
+	});
+});
+
+describe("a native-app call, through Computer.call and the coordinator", () => {
+	/**
+	 * A computer Pim started, as `Computer` sees it, whose link is the test's:
+	 * each call sent is recorded, and the test answers it as pim-computer
+	 * would, or doesn't. Nothing is installed or run, and no native-app call
+	 * goes anywhere: the reserved op has no handler yet.
+	 */
+	function machine() {
+		const sent: { type: string; id: string; op: string; args: unknown }[] = [];
+		const meta = new Map<string, string>();
+		let link: ComputerLink | null = null;
+		const computer: Computer = new Computer({
+			meta: { meta: (key) => meta.get(key), setMeta: (key, value) => void meta.set(key, value), deleteMeta: (key) => void meta.delete(key) },
+			sockets: () => [],
+			wake: async () => {
+				setTimeout(() => computer.receive(JSON.stringify({ type: "hello", agent: "pim-computer/test" })), 0);
+				const opened = {
+					readyState: WebSocket.OPEN,
+					send: (message: string) => void sent.push(JSON.parse(message)),
+					close() {
+						opened.readyState = WebSocket.CLOSED;
+						computer.disconnected();
+					},
+				};
+				link = opened;
+				return opened;
+			},
+			inUse: () => false,
+		});
+		computer.started("native-test", Date.now());
+		/** Answers the `index`th call sent, with whatever `body` holds beside its type and ID. */
+		const reply = (index: number, body: Record<string, unknown>) => computer.receive(JSON.stringify({ type: "reply", id: sent[index]!.id, ...body }));
+		const calls = (count: number) => vi.waitFor(() => expect(sent).toHaveLength(count));
+		const drop = () => link?.close();
+		return { computer, sent, reply, calls, drop };
+	}
+	/** Runs `send` as request `requestId` of `coordinator`, noting what its trace said once each call it awaits settled. */
+	function traced(coordinator: ControlCoordinator, requestId: string, send: (note: () => void) => Promise<unknown>) {
+		const notes: { sent: boolean; uncertain: boolean; awaiting: number }[] = [];
+		const note = () => {
+			const trace = dispatchTrace.getStore()!;
+			notes.push({ sent: trace.sent, uncertain: trace.uncertain, awaiting: trace.awaiting.size });
+		};
+		const done = coordinator.dispatch(request(requestId), () => send(note)).then(
+			(value) => ({ value }),
+			(error: unknown) => ({ error: error as Error & Record<string, unknown> }),
+		);
+		const status = () => coordinator.state?.requests.find((each) => each.requestId === requestId)?.status;
+		return { done, notes, status };
+	}
+	const LEAK = "Bearer pimc_o_leak-0123456789 /home/desktop/.cua/token";
+	const known: NativeOutcome = { status: "completed", isError: false, code: null, content: [{ type: "text", text: "[1] button \"OK\"" }], presentation: [] };
+
+	it("leaves a request unknown on a native unknown, before its caller hears, and nothing is sent again, also after a restart", async () => {
+		const { computer, sent, reply, calls } = machine();
+		const { storage, coordinator } = resumed();
+		const run = traced(coordinator, "r1", async (note) => {
+			const outcome = await computer.call<NativeOutcome>(NATIVE_TOOL_OP, { tool: "click", arguments: { pid: 42 } });
+			note();
+			return outcome;
+		});
+		await calls(1);
+		expect(sent[0]).toMatchObject({ type: "call", op: NATIVE_TOOL_OP });
+		reply(0, { result: { status: "unknown", reason: "timeout" } });
+		// The outcome is the caller's to read, as a value; the request is already uncertain when it does.
+		expect(await run.done).toEqual({ value: { status: "unknown", reason: "timeout" } });
+		expect(run.notes).toEqual([{ sent: true, uncertain: true, awaiting: 0 }]);
+		expect(run.status()).toBe("unknown");
+
+		const send = vi.fn(async () => undefined);
+		expect(await refusal(coordinator.dispatch(request("r2"), send))).toBe("blocked");
+		const restarted = new ControlCoordinator("o_a", storage);
+		expect(restarted.state?.requests).toEqual([expect.objectContaining({ requestId: "r1", status: "unknown" })]);
+		expect(await refusal(restarted.dispatch(request("r2"), send))).toBe("blocked");
+		expect(await refusal(restarted.dispatch(request("r1"), send))).toBe("duplicate_id");
+		expect(send).not.toHaveBeenCalled();
+		expect(sent).toHaveLength(1);
+	});
+
+	it("keeps a known native outcome known: a result, the tool's refusal, a JSON-RPC error and a refusal unsent", async () => {
+		const { computer, reply, calls } = machine();
+		const outcomes: NativeOutcome[] = [
+			{
+				status: "completed",
+				isError: false,
+				code: null,
+				content: [{ type: "text", text: "ok" }, { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=", width: 8, height: 8 }],
+				presentation: [{ kind: "text_truncated", index: 0 }, { kind: "image_omitted", index: 2 }, { kind: "items_unread", count: 3 }, { kind: "is_error_malformed" }],
+			},
+			{ status: "completed", isError: true, code: "permission_denied", content: [{ type: "text", text: "denied" }], presentation: [] },
+			{ status: "rpc_error", code: -32602 },
+			// Nothing reached spacesd, but the call did reach the computer: the request's `sent` stands.
+			{ status: "rejected", reason: "busy" },
+		];
+		for (const [index, outcome] of outcomes.entries()) {
+			const { coordinator } = resumed();
+			const run = traced(coordinator, "r1", async (note) => {
+				const value = await computer.call(NATIVE_TOOL_OP, {});
+				note();
+				return value;
+			});
+			await calls(index + 1);
+			reply(index, { result: outcome });
+			expect(await run.done, outcome.status).toEqual({ value: outcome });
+			expect(run.notes, outcome.status).toEqual([{ sent: true, uncertain: false, awaiting: 0 }]);
+			expect(run.status(), outcome.status).toBe("completed");
+		}
+	});
+
+	it("leaves a request unknown on a reply that is no outcome, an error or anything malformed, and passes none of it on", async () => {
+		const { computer, reply, calls } = machine();
+		const completed = { status: "completed", isError: false, code: null, content: [], presentation: [] };
+		const replies: Record<string, Record<string, unknown>> = {
+			"an error, which can't say whether the app was acted on": { error: { message: `ENOSYS ${LEAK}`, code: "ENOSYS" } },
+			"an error beside a result": { error: null, result: completed },
+			"no result": {},
+			"a null result": { result: null },
+			"a string": { result: "completed" },
+			"an unknown status": { result: { status: "done" } },
+			"an unknown status that looks like success": { result: { ...completed, status: "ok" } },
+			"an unknown reason": { result: { status: "unknown", reason: LEAK } },
+			"an unknown refusal": { result: { status: "rejected", reason: "nope" } },
+			"an extra field": { result: { status: "rejected", reason: "busy", detail: LEAK } },
+			"a missing field": { result: { status: "completed", isError: false, content: [], presentation: [] } },
+			"a code without an error": { result: { ...completed, code: "permission_denied" } },
+			"a code that isn't plain": { result: { ...completed, isError: true, code: LEAK } },
+			"an error flag that isn't a boolean": { result: { ...completed, isError: "false" } },
+			"a resource link": { result: { ...completed, content: [{ type: "resource_link", uri: `https://evil.test/${LEAK}` }] } },
+			"an image of another type": { result: { ...completed, content: [{ type: "image", mimeType: "image/svg+xml", data: "PHN2Zy8+", width: 1, height: 1 }] } },
+			"an unknown issue": { result: { ...completed, presentation: [{ kind: "fine" }] } },
+			"a JSON-RPC error code that isn't an integer": { result: { status: "rpc_error", code: 1.5 } },
+			"more items than any limit allows": { result: { ...completed, content: Array.from({ length: 1025 }, () => ({ type: "text", text: "" })) } },
+			"more text than any limit allows": { result: { ...completed, content: [{ type: "text", text: "é".repeat(2 * 1024 * 1024 + 1) }] } },
+		};
+		for (const [index, [what, body]] of Object.entries(replies).entries()) {
+			const { coordinator } = resumed();
+			const run = traced(coordinator, "r1", async (note) => {
+				try {
+					return await computer.call(NATIVE_TOOL_OP, {});
+				} finally {
+					note();
+				}
+			});
+			await calls(index + 1);
+			reply(index, body);
+			const done = await run.done;
+			expect("error" in done && done.error.message, what).toBe("The computer's answer to a native-app call couldn't be read, so whether it acted is unknown.");
+			expect("error" in done && [done.error.answered, done.error.code], what).toEqual([undefined, undefined]);
+			expect(run.notes, what).toEqual([{ sent: true, uncertain: true, awaiting: 0 }]);
+			expect(run.status(), what).toBe("unknown");
+		}
+	});
+
+	it("answers every other op as before, whatever its result holds", async () => {
+		const { computer, reply, calls } = machine();
+		const { coordinator } = resumed();
+		const run = traced(coordinator, "r1", async (note) => {
+			const result = await computer.call("exec", { command: "date" });
+			const missing = await computer.call("stat", { path: "/workspace/x" }).catch((error: Error) => error);
+			note();
+			return [result, missing];
+		});
+		await calls(1);
+		reply(0, { result: { status: "unknown", reason: "timeout" } });
+		await calls(2);
+		reply(1, { error: { message: "No such file", code: "ENOENT" } });
+		const done = await run.done;
+		expect("value" in done && done.value).toEqual([{ status: "unknown", reason: "timeout" }, expect.objectContaining({ message: "No such file", code: "ENOENT", answered: true })]);
+		expect(run.notes).toEqual([{ sent: true, uncertain: false, awaiting: 0 }]);
+		expect(run.status()).toBe("completed");
+
+		// Outside any request, as for a paired computer or a Sprite of a space that never opted in, a native call returns only checked outcomes too.
+		const plain = computer.call(NATIVE_TOOL_OP, {});
+		await calls(3);
+		reply(2, { result: known });
+		expect(await plain).toEqual(known);
+		const bad = computer.call(NATIVE_TOOL_OP, {}).catch((error: Error) => error.message);
+		await calls(4);
+		reply(3, { error: { message: LEAK } });
+		expect(await bad).not.toContain(LEAK);
+	});
+
+	it("is monotonic in a request: a known native outcome after an unknown one lowers nothing", async () => {
+		const { computer, reply, calls } = machine();
+		const { coordinator } = resumed();
+		const run = traced(coordinator, "r1", async (note) => {
+			for (let call = 0; call < 3; call++) {
+				await computer.call(NATIVE_TOOL_OP, {});
+				note();
+			}
+		});
+		const answers: NativeOutcome[] = [{ status: "unknown", reason: "transport" }, { status: "rejected", reason: "uncertain" }, known];
+		for (const [index, outcome] of answers.entries()) {
+			await calls(index + 1);
+			reply(index, { result: outcome });
+		}
+		await run.done;
+		expect(run.notes).toEqual(Array(3).fill({ sent: true, uncertain: true, awaiting: 0 }));
+		expect(run.status()).toBe("unknown");
+	});
+
+	it("leaves unknown a native call given up, cut off, or still awaited when its request settles, and a late reply changes nothing", async () => {
+		const { computer, sent, reply, calls, drop } = machine();
+		const { storage, coordinator: timedOut } = resumed();
+		const late = traced(timedOut, "r1", () => computer.call(NATIVE_TOOL_OP, {}, 20));
+		expect((await late.done as { error: Error }).error.message).toMatch(/didn't answer/);
+		expect(late.status()).toBe("unknown");
+
+		const { coordinator: cutOff } = resumed();
+		const dropped = traced(cutOff, "r1", () => computer.call(NATIVE_TOOL_OP, {}));
+		await calls(2);
+		drop();
+		expect((await dropped.done as { error: Error }).error.message).toMatch(/disconnected/);
+		expect(dropped.status()).toBe("unknown");
+
+		// A request that doesn't wait for its native call is settled before the reply.
+		const { coordinator: unwaited } = resumed();
+		const early = traced(unwaited, "r1", async () => {
+			void computer.call(NATIVE_TOOL_OP, {}).catch(() => undefined);
+			await calls(3);
+		});
+		await early.done;
+		expect(early.status()).toBe("unknown");
+
+		// Their replies come at last, each a known result: nothing reopens, and nothing is sent again.
+		for (let index = 0; index < 3; index++) reply(index, { result: known });
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect([late.status(), dropped.status(), early.status()]).toEqual(["unknown", "unknown", "unknown"]);
+		expect(new ControlCoordinator("o_a", storage).state?.requests[0]?.status).toBe("unknown");
+		expect(sent.map((call) => call.op)).toEqual([NATIVE_TOOL_OP, NATIVE_TOOL_OP, NATIVE_TOOL_OP]);
+	});
+
+	it("fails closed when a native call's settling can't be stored, and stays so after a restart", async () => {
+		const { computer, reply, calls } = machine();
+		const { storage, coordinator } = resumed();
+		const run = traced(coordinator, "r1", () => computer.call(NATIVE_TOOL_OP, {}));
+		await calls(1);
+		storage.failWrites = true;
+		reply(0, { result: { status: "unknown", reason: "aborted" } });
+		expect(await run.done).toEqual({ value: { status: "unknown", reason: "aborted" } });
+		storage.failWrites = false;
+		expect(coordinator.blocked).toEqual(expect.any(String));
+		const send = vi.fn(async () => undefined);
+		expect(await refusal(coordinator.dispatch(request("r2"), send))).toBe("blocked");
+		// Stored, it is still in flight, which a restart reads as unknown.
+		expect(JSON.parse(storage.value!).state.requests[0].status).toBe("in_flight");
+		const restarted = new ControlCoordinator("o_a", storage);
+		expect(restarted.state?.requests[0]?.status).toBe("unknown");
+		expect(await refusal(restarted.dispatch(request("r2"), send))).toBe("blocked");
+		expect(send).not.toHaveBeenCalled();
 	});
 });
 

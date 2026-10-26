@@ -30,6 +30,7 @@ import {
 	type TrustedRun,
 } from "../native-mcp.ts";
 import { AGENT_SESSION, CUA_COMMIT, UPSTREAM_TOOLS, UPSTREAM_TOOLS_SHA256 } from "../native-mcp-upstream.ts";
+import { NATIVE_WIRE_LIMITS, readNativeOutcome } from "../../native-outcome.ts";
 
 const ORIGIN = "http://127.0.0.1:3211";
 const TOKEN = "spacesd-root-token-of-the-stand-in-0123456789";
@@ -119,6 +120,9 @@ function client(standIn: StandIn, limits: Partial<NativeMcpLimits> = {}) {
 
 const call = (overrides: Partial<NativeCall> = {}): NativeCall => ({ ...RUN, callId: `call-${Math.random()}`, tool: "list_apps", arguments: {}, ...overrides });
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+
+/** `outcome` as the space reads it from pim-computer's reply: the same, or null. */
+const overTheWire = (outcome: NativeOutcome) => readNativeOutcome(JSON.parse(JSON.stringify(outcome)));
 
 /** A PNG or JPEG of `width` × `height`, as far as its header goes, which is all the client reads. */
 function png(width: number, height: number): string {
@@ -574,13 +578,16 @@ describe("one tools/call per invoke", () => {
 			const outcome = await run.invoke(call({ tool: "click", arguments: { pid: 42, window_id: 7, x: 1, y: 2 } }), controller.signal);
 			for (const [key, value] of Object.entries(expect)) assert.deepEqual((outcome as Record<string, unknown>)[key], value, `${what}: ${key}`);
 			assert.ok(!JSON.stringify(outcome).includes(LEAK) && !JSON.stringify(outcome).includes(TOKEN), what);
+			assert.deepEqual(overTheWire(outcome), outcome, what);
 			await settle();
 			assert.equal(standIn.executed.length, 1, what);
 			assert.equal(standIn.sent.length, before + 1, what);
 			if (outcome.status === "unknown") {
 				// Latched: nothing more is sent for this run, and nothing clears it.
 				assert.equal(run.state, "uncertain");
-				assert.deepEqual(await run.invoke(call()), { status: "rejected", reason: "uncertain" });
+				const refused = await run.invoke(call());
+				assert.deepEqual(refused, { status: "rejected", reason: "uncertain" });
+				assert.deepEqual(overTheWire(refused), refused);
 				run.close();
 				assert.deepEqual(await run.invoke(call()), { status: "rejected", reason: "uncertain" });
 				assert.equal(standIn.sent.length, before + 1, what);
@@ -668,6 +675,7 @@ describe("results", () => {
 		const run = await client(standIn, limits).openRun(RUN);
 		const outcome = await run.invoke(call({ tool: "get_window_state", arguments: { pid: 42 } }));
 		assert.equal(outcome.status, "completed");
+		assert.deepEqual(overTheWire(outcome), outcome);
 		return { outcome: outcome as Extract<NativeOutcome, { status: "completed" }>, standIn };
 	}
 
@@ -775,6 +783,43 @@ describe("results", () => {
 		const { outcome } = await result({ content: "nope", isError: "false" });
 		assert.equal(outcome.isError, true);
 		assert.deepEqual(outcome.presentation, [{ kind: "is_error_malformed" }, { kind: "content_malformed" }]);
+	});
+
+	it("is read on the wire as kept at the client's highest limits, and not past the wire's own bounds", async () => {
+		const highest = { maxContentItems: LIMIT_RANGES.maxContentItems[1], maxImages: LIMIT_RANGES.maxImages[1], maxTextBytes: LIMIT_RANGES.maxTextBytes[1] };
+		assert.deepEqual(highest, { maxContentItems: NATIVE_WIRE_LIMITS.maxContentItems, maxImages: NATIVE_WIRE_LIMITS.maxImages, maxTextBytes: NATIVE_WIRE_LIMITS.maxTextBytes });
+		const many = [
+			{ type: "text", text: "é".repeat(2 * 1024 * 1024 + 10) },
+			...Array.from({ length: 20 }, () => ({ type: "image", mimeType: "image/png", data: png(8, 8) })),
+			...Array.from({ length: 2000 }, (_, i) => [null, { type: "text", text: "a" }, { type: "audio" }][i % 3]),
+		];
+		const { outcome } = await result({ content: many, isError: true, structuredContent: { code: "permission_denied" } }, highest);
+		// Kept to the full, as `result` reads it on the wire.
+		assert.equal(outcome.content.filter((item) => item.type === "image").length, NATIVE_WIRE_LIMITS.maxImages);
+		assert.ok(outcome.content.length > 300 && outcome.presentation.length > 600 && outcome.code === "permission_denied");
+
+		// One past each bound, and each bound itself.
+		const base = { status: "completed", isError: false, code: null, content: [], presentation: [] };
+		const text = (value: string) => ({ type: "text", text: value });
+		const image = { type: "image", mimeType: "image/png", data: png(8, 8), width: 8, height: 8 };
+		const cases: [string, unknown, boolean][] = [
+			["items at the bound", { ...base, content: Array(1024).fill(text("")) }, true],
+			["items past it", { ...base, content: Array(1025).fill(text("")) }, false],
+			["images at the bound", { ...base, content: Array(16).fill(image) }, true],
+			["images past it", { ...base, content: Array(17).fill(image) }, false],
+			["text at the bound", { ...base, content: [text("é".repeat(2 * 1024 * 1024))] }, true],
+			["text past it, in bytes", { ...base, content: [text("é".repeat(2 * 1024 * 1024)), text("a")] }, false],
+			["an image wider than any", { ...base, content: [{ ...image, width: 16_385 }] }, false],
+			["JSON past the wire's, from escapes", { ...base, content: [text("\u0001".repeat(3 * 1024 * 1024))] }, false],
+			["images past the wire's JSON", { ...base, content: Array(16).fill({ ...image, data: "A".repeat(1024 * 1024 + 4) }) }, false],
+			["issues at the bound", { ...base, presentation: Array(1028).fill({ kind: "content_omitted", index: 1023 }) }, true],
+			["issues past it", { ...base, presentation: Array(1029).fill({ kind: "content_omitted", index: 0 }) }, false],
+			["an index past the items", { ...base, presentation: [{ kind: "image_omitted", index: 1024 }] }, false],
+			["no items unread", { ...base, presentation: [{ kind: "items_unread", count: 0 }] }, false],
+			["an index on the result", { ...base, presentation: [{ kind: "content_malformed", index: 0 }] }, false],
+			["an inherited-looking key", JSON.parse('{"status":"rejected","reason":"busy","__proto__":{"x":1}}'), false],
+		];
+		for (const [what, value, read] of cases) assert.equal(readNativeOutcome(value) !== null, read, what);
 	});
 
 	it("keeps limits that bound a screenshot of the pinned default size", () => {

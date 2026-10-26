@@ -11,7 +11,8 @@
  * checks against the pins) and derives its `X-Cua-Agent-Session`, so the
  * run's calls share one cua-driver session that no other owner, agent or run
  * shares. Each `invoke` sends exactly one `tools/call` and never retries,
- * re-initializes or replays it. What became of it is the typed `NativeOutcome`:
+ * re-initializes or replays it. What became of it is the typed `NativeOutcome`
+ * (../native-outcome.ts, which the space reads it with):
  * refused before anything was sent, known from a valid answer to that call,
  * or unknown once it may have reached spacesd without such an answer. An
  * unknown outcome latches the run: it sends nothing more.
@@ -35,6 +36,7 @@ import {
 	UPSTREAM_TOOLS,
 	deepFreeze,
 } from "./native-mcp-upstream.ts";
+import { NATIVE_WIRE_LIMITS, type NativeContent, type NativeOutcome, type PresentationIssue, type RejectReason, type UnknownReason } from "../native-outcome.ts";
 
 /** The fetch the client sends with: Node's own in use, a stand-in in tests. */
 export type Fetch = (url: string, init: RequestInit) => Promise<Response>;
@@ -78,18 +80,23 @@ export const DEFAULT_LIMITS: NativeMcpLimits = {
 
 const MiB = 1024 * 1024;
 
-/** What each limit may be set to: integers in these ranges, no other keys. */
+/**
+ * What each limit may be set to: integers in these ranges, no other keys. The
+ * ceilings of the items, images and text an outcome holds are the wire's
+ * (../native-outcome.ts); an outcome past the wire's 16 MiB, which only a
+ * `maxOutputBytes` above it allows, the space takes as unknown.
+ */
 export const LIMIT_RANGES: { readonly [K in keyof NativeMcpLimits]: readonly [number, number] } = {
 	setupMs: [1, 60_000],
 	callMs: [1, 600_000],
 	maxSetupBytes: [1024, 16 * MiB],
 	maxResponseBytes: [1024, 64 * MiB],
-	maxTextBytes: [1, 4 * MiB],
-	maxImages: [0, 16],
+	maxTextBytes: [1, NATIVE_WIRE_LIMITS.maxTextBytes],
+	maxImages: [0, NATIVE_WIRE_LIMITS.maxImages],
 	maxImageBytes: [1, 32 * MiB],
-	maxImageSide: [1, 16_384],
-	maxImagePixels: [1, 16_384 * 16_384],
-	maxContentItems: [1, 1024],
+	maxImageSide: [1, NATIVE_WIRE_LIMITS.maxImageSide],
+	maxImagePixels: [1, NATIVE_WIRE_LIMITS.maxImageSide * NATIVE_WIRE_LIMITS.maxImageSide],
+	maxContentItems: [1, NATIVE_WIRE_LIMITS.maxContentItems],
 	maxOutputBytes: [1024, 64 * MiB],
 };
 
@@ -154,86 +161,8 @@ function linked(signal: AbortSignal | undefined): { readonly signal: AbortSignal
 	};
 }
 
-export type NativeContent =
-	| { readonly type: "text"; readonly text: string }
-	| { readonly type: "image"; readonly mimeType: "image/png" | "image/jpeg"; readonly data: string; readonly width: number; readonly height: number };
-
-/**
- * Something of a known result the client didn't pass on as it came; the
- * call's outcome stands regardless. There is at most one per item read, and
- * `items_unread` counts, once, the items past `maxContentItems`.
- */
-export type PresentationIssue = {
-	readonly kind: "text_truncated" | "image_omitted" | "content_omitted" | "content_malformed" | "is_error_malformed" | "items_unread";
-	/** The item of `content` it is about, when it is about one. */
-	readonly index?: number;
-	/** For `items_unread`, how many. */
-	readonly count?: number;
-};
-
-export type RejectReason =
-	/** The caller's signal was aborted before sending. */
-	| "aborted"
-	/** The run was closed. */
-	| "closed"
-	/** An earlier call of the run has an unknown outcome. */
-	| "uncertain"
-	/** Another call of the run is in flight. */
-	| "busy"
-	/** The call's owner, agent or run isn't the run's. */
-	| "identity"
-	/** The call ID was used before in this run. */
-	| "call_reused"
-	/** The tool isn't curated. */
-	| "unknown_tool"
-	/** The arguments aren't admitted by the tool's curated schema, or couldn't be read. */
-	| "invalid_arguments"
-	/** The caller's signal couldn't be read or listened to. */
-	| "invalid_signal";
-
-export type UnknownReason =
-	| "timeout"
-	| "aborted"
-	/** `fetch` threw, or the answer's body failed while it was read. */
-	| "transport"
-	| "http_status"
-	| "content_type"
-	/** The answer named another MCP session. */
-	| "session_mismatch"
-	| "oversized"
-	/** The body wasn't one JSON-RPC response object. */
-	| "malformed"
-	/** The response answered another request ID. */
-	| "id_mismatch";
-
-export type NativeOutcome =
-	/** Nothing was sent. */
-	| { readonly status: "rejected"; readonly reason: RejectReason }
-	/**
-	 * spacesd answered this call with a result. `isError` is the tool's own
-	 * error or refusal (`code` is its `structuredContent.code`, when it has a
-	 * plain one), which is final and not an invitation to retry.
-	 */
-	| {
-			readonly status: "completed";
-			readonly isError: boolean;
-			readonly code: string | null;
-			readonly content: readonly NativeContent[];
-			readonly presentation: readonly PresentationIssue[];
-	  }
-	/** spacesd answered this call with a JSON-RPC error; at the pinned commit it answers `tools/call` so only before the tool runs. */
-	| { readonly status: "rpc_error"; readonly code: number }
-	/** The call may have reached spacesd and run; nothing says whether it did. */
-	| { readonly status: "unknown"; readonly reason: UnknownReason };
-
-/**
- * What an outcome means for `DispatchTrace` (src/computer-control-runtime.ts)
- * once a later change carries it through `Computer.call`: whether something
- * was sent, and whether it may have run without an answer saying so.
- */
-export function dispatchEffect(outcome: NativeOutcome): { readonly sent: boolean; readonly uncertain: boolean } {
-	return { sent: outcome.status !== "rejected", uncertain: outcome.status === "unknown" };
-}
+export type { NativeContent, NativeOutcome, PresentationIssue, RejectReason, UnknownReason } from "../native-outcome.ts";
+export { dispatchEffect } from "../native-outcome.ts";
 
 /** Why a run couldn't be set up. Nothing was called; only setup requests may have been sent. */
 export class NativeMcpSetupError extends Error {

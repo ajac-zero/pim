@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
 import type { Connection } from "agents";
+import { dispatchEffect, NATIVE_TOOL_OP, readNativeOutcome } from "../computer/native-outcome";
 import type { ExecArgs, ExecResult } from "../computer/pim-computer";
 import { digestHex } from "./auth/store";
 import { currentTrace, type DispatchTrace } from "./computer-control-runtime";
@@ -148,7 +149,13 @@ export type BrowserTransport = {
 	onclose?: () => void;
 };
 
-type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
+type Pending = {
+	resolve(value: unknown): void;
+	reject(error: Error): void;
+	timer: ReturnType<typeof setTimeout>;
+	/** Set for a native-app call (`NATIVE_TOOL_OP`): the request it was sent for, if any, and its key in that request's `awaiting`. */
+	native?: { trace: DispatchTrace | undefined; key: string };
+};
 
 /**
  * The browser's DevTools connection, and who waits for answers on it: each
@@ -412,11 +419,35 @@ export class Computer {
 		if (!pending) return;
 		this.#pending.delete(message.id);
 		clearTimeout(pending.timer);
-		if (message.error) pending.reject(remoteError(message.error));
+		if (pending.native) this.#nativeReply(pending, message, pending.native);
+		else if (message.error) pending.reject(remoteError(message.error));
 		else pending.resolve(message.result ?? null);
 	}
 
-	/** Calls the computer and waits for its answer; one Pim started wakes first, if it's asleep. */
+	/**
+	 * The reply to a native-app call, which is known only when it is exactly a
+	 * `NativeOutcome` (../computer/native-outcome.ts). An unknown one, or a reply
+	 * that is no outcome (an error, which can't say whether the app was acted
+	 * on, or anything malformed), leaves the request uncertain, before whoever
+	 * waits hears of it. A known one clears only its own wait: it never lowers
+	 * `sent` or `uncertain`, which may stand for the request's other calls.
+	 * Nothing the computer said is passed on but a checked outcome.
+	 */
+	#nativeReply(pending: Pending, message: { result?: unknown }, { trace, key }: { trace: DispatchTrace | undefined; key: string }): void {
+		const outcome = Object.hasOwn(message, "error") ? null : readNativeOutcome(message.result);
+		if (trace && (!outcome || dispatchEffect(outcome).uncertain)) trace.uncertain = true;
+		trace?.awaiting.delete(key);
+		if (outcome) pending.resolve(outcome);
+		else pending.reject(new HttpError(502, "The computer's answer to a native-app call couldn't be read, so whether it acted is unknown."));
+	}
+
+	/**
+	 * Calls the computer and waits for its answer; one Pim started wakes first,
+	 * if it's asleep. Op `NATIVE_TOOL_OP` resolves only with a checked
+	 * `NativeOutcome`, and, for a request the control state admitted, is
+	 * awaited in its trace until a reply comes (see `#nativeReply`); every other
+	 * op is answered as it always was. Nothing in the reply chooses which.
+	 */
 	async call<T = unknown>(op: string, args: Record<string, unknown>, timeoutMs = FILE_CALL_MS, counts = true): Promise<T> {
 		if (!this.paired()) throw new HttpError(404, "No computer is connected. The person can connect one in Settings → Computer.");
 		const refused = this.#refusal(op);
@@ -438,14 +469,17 @@ export class Computer {
 		const id = crypto.randomUUID();
 		// A request the control state admitted (see ./computer-control-runtime.ts) learns what became of its calls.
 		const trace = currentTrace();
+		const native = op === NATIVE_TOOL_OP ? { trace, key: `native:${id}` } : undefined;
 		const answer = new Promise<T>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.#pending.delete(id);
 				reject(new HttpError(504, `The computer didn't answer within ${Math.round(timeoutMs / 1000)} seconds.`));
 			}, timeoutMs);
-			this.#pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
+			this.#pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, ...(native ? { native } : {}) });
 			socket.send(JSON.stringify({ type: "call", id, op, args }));
 			if (trace) trace.sent = true;
+			// Settled before its reply, the request is unknown: the app may yet be acted on.
+			if (trace && native) trace.awaiting.add(native.key);
 		});
 		// A call that was sent and wasn't answered, by a timeout or a disconnect, may have run.
 		return trace

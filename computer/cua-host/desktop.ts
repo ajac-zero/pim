@@ -16,7 +16,10 @@
  * connection is refused (closed unanswered), so two never share the
  * browser's profile. When its connection ends, its input is ended, and, if
  * it hasn't exited after `exitMs`, it is asked to (`SIGTERM`), then ended
- * (`SIGKILL`) after `closeMs`. That is all the endpoint knows of: only the
+ * (`SIGKILL`) after `closeMs`. A connection whose bytes can't be handed on,
+ * either way, for `stallMs` (pim-computer not reading its input, or the
+ * bridge not reading the socket) is ended the same way, since a paused
+ * socket would not notice its peer leaving. That is all the endpoint knows of: only the
  * process it started, never its process group or anything else on the VM.
  * Its exit doesn't show that what it started, or anything else running as
  * the desktop user, has stopped.
@@ -62,9 +65,25 @@ export type EndpointLimits = {
 	readonly exitMs: number;
 	/** How long it has after being asked before it is ended; and how long its output has to finish after it exits. */
 	readonly closeMs: number;
+	/**
+	 * How long bytes may wait, either way, for the side they go to to take
+	 * more (pim-computer's input, or the socket) before the connection is
+	 * ended. Each time that side takes more, the wait starts again, so a slow
+	 * side that keeps taking is never ended for it.
+	 */
+	readonly stallMs: number;
 };
 
-export const DEFAULT_ENDPOINT_LIMITS: EndpointLimits = { maxConnections: 4, exitMs: 30_000, closeMs: 5_000 };
+export const DEFAULT_ENDPOINT_LIMITS: EndpointLimits = { maxConnections: 4, exitMs: 30_000, closeMs: 5_000, stallMs: 30_000 };
+
+/** Why the endpoint refused to start: a fixed reason, which is all its program logs of it. */
+export class EndpointRefused extends Error {
+	readonly reason: string;
+	constructor(reason: string, message: string) {
+		super(message);
+		this.reason = reason;
+	}
+}
 
 /**
  * The variables pim-computer gets from the endpoint's own environment, and
@@ -112,25 +131,30 @@ export type EndpointOptions = {
 export type Endpoint = {
 	/** Starts listening, when nothing is at the socket's path. */
 	listen(): Promise<void>;
-	/** Stops listening, ends the open connection, and resolves once the pim-computer it started has exited. */
+	/**
+	 * Stops listening, ends the open connection, and resolves once the
+	 * pim-computer it started is seen to exit. After `SIGKILL` that is up to
+	 * the OS: if it never reports the exit, this never resolves, rather than
+	 * take a signal for an exit.
+	 */
 	close(): Promise<void>;
 };
 
 /** `file`, when it is absolute and is its own real path (no `..`, no link anywhere on it). */
-function canonical(file: string, what: string): string {
+function canonical(file: string, what: string, reason: string): string {
 	let real: string | null = null;
 	try {
 		real = realpathSync(file);
 	} catch {
 		// Refused below.
 	}
-	if (typeof file !== "string" || !path.isAbsolute(file) || real !== file) throw new Error(`The ${what} must be an existing absolute path with no links in it.`);
+	if (typeof file !== "string" || !path.isAbsolute(file) || real !== file) throw new EndpointRefused(reason, `The ${what} must be an existing absolute path with no links in it.`);
 	return file;
 }
 
 /** A program the operator installed: a regular file that neither its group nor others can write. */
-function program(file: string, what: string, executable: boolean): string {
-	const stat = fs.statSync(canonical(file, what));
+function program(file: string, what: string, reason: string, executable: boolean): string {
+	const stat = fs.statSync(canonical(file, what, reason));
 	let runnable = true;
 	if (executable) {
 		try {
@@ -139,30 +163,34 @@ function program(file: string, what: string, executable: boolean): string {
 			runnable = false;
 		}
 	}
-	if (!stat.isFile() || (stat.mode & 0o022) !== 0 || !runnable) throw new Error(`The ${what} must be a regular file${executable ? " the desktop user can run" : ""}, writable by neither its group nor others.`);
+	if (!stat.isFile() || (stat.mode & 0o022) !== 0 || !runnable) throw new EndpointRefused(reason, `The ${what} must be a regular file${executable ? " the desktop user can run" : ""}, writable by neither its group nor others.`);
 	return file;
 }
 
 export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 	const uid = options.uid ?? process.geteuid?.();
-	if (uid === undefined) throw new Error("The desktop endpoint runs only where users have IDs.");
-	if (uid === 0) throw new Error("The desktop endpoint doesn't run as root: run it as the desktop user.");
+	if (uid === undefined) throw new EndpointRefused("user", "The desktop endpoint runs only where users have IDs.");
+	if (uid === 0) throw new EndpointRefused("root-user", "The desktop endpoint doesn't run as root: run it as the desktop user.");
 	const limits: EndpointLimits = { ...DEFAULT_ENDPOINT_LIMITS, ...options.limits };
 	for (const [name, value] of Object.entries(limits)) {
-		if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`An endpoint's ${name} must be a positive whole number.`);
+		if (!Number.isSafeInteger(value) || value < 1) throw new EndpointRefused("limits", `An endpoint's ${name} must be a positive whole number.`);
 	}
 
-	checkSocketPath(options.socketPath);
-	const socketPath = options.socketPath;
-	const directory = fs.statSync(canonical(path.dirname(socketPath), "session socket's directory"));
-	if (!directory.isDirectory() || directory.uid !== uid || (directory.mode & 0o027) !== 0) {
-		throw new Error("The session socket's directory must be the desktop user's, writable by no one else, and reachable by no one outside its group.");
+	try {
+		checkSocketPath(options.socketPath);
+	} catch {
+		throw new EndpointRefused("socket-path", "The session socket's path must be absolute and normalized, short enough for a Unix socket.");
 	}
-	const root = canonical(options.root, "root folder");
+	const socketPath = options.socketPath;
+	const directory = fs.statSync(canonical(path.dirname(socketPath), "session socket's directory", "socket-directory"));
+	if (!directory.isDirectory() || directory.uid !== uid || (directory.mode & 0o027) !== 0) {
+		throw new EndpointRefused("socket-directory", "The session socket's directory must be the desktop user's, writable by no one else, and reachable by no one outside its group.");
+	}
+	const root = canonical(options.root, "root folder", "root-folder");
 	const rootStat = fs.statSync(root);
-	if (!rootStat.isDirectory() || rootStat.uid !== uid) throw new Error("The root folder must be a directory the desktop user owns.");
-	const pimComputer = program(options.pimComputer, "pim-computer program", false);
-	const browser = program(options.browser, "browser", true);
+	if (!rootStat.isDirectory() || rootStat.uid !== uid) throw new EndpointRefused("root-folder", "The root folder must be a directory the desktop user owns.");
+	const pimComputer = program(options.pimComputer, "pim-computer program", "pim-computer", false);
+	const browser = program(options.browser, "browser", "browser", true);
 
 	const environment = options.environment ?? process.env;
 	const env: Record<string, string> = {};
@@ -197,7 +225,7 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 			return;
 		}
 		const timers: ReturnType<typeof setTimeout>[] = [];
-		let inputEnded = false;
+		let ended = false;
 		let markExited!: () => void;
 		const run = {
 			done: false,
@@ -209,15 +237,34 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 		current = run;
 		log({ event: "endpoint.started" });
 
+		/** A wait, per way bytes go, for the side they go to to take more; past `stallMs`, the connection ends. */
+		const stalls = new Map<"input" | "output", ReturnType<typeof setTimeout>>();
+		/** Hands `chunk` on to `to`; when `to` holds all it will, `from` is paused until `to` takes more. */
+		const forward = (way: "input" | "output", from: Readable, to: Writable, chunk: Buffer) => {
+			if (ended || to.write(chunk) || stalls.has(way)) return;
+			from.pause();
+			stalls.set(
+				way,
+				setTimeout(() => {
+					log({ event: "endpoint.stalled", reason: way });
+					socket.destroy();
+				}, limits.stallMs),
+			);
+			to.once("drain", () => {
+				clearTimeout(stalls.get(way));
+				stalls.delete(way);
+				if (!ended) from.resume();
+			});
+		};
+
 		/** The connection is over: pim-computer's input ends, what it says from now goes nowhere, and it has `exitMs` to exit. */
 		const transportEnded = () => {
-			if (inputEnded) return;
-			inputEnded = true;
-			socket.unpipe(child.stdin);
+			if (ended) return;
+			ended = true;
+			for (const stall of stalls.values()) clearTimeout(stall);
+			stalls.clear();
 			child.stdin.end();
-			child.stdout.unpipe(socket);
 			// Read and dropped, so a pim-computer still writing as it exits isn't held up.
-			child.stdout.on("data", () => {});
 			child.stdout.resume();
 			if (run.done) return;
 			log({ event: "endpoint.input-ended" });
@@ -234,6 +281,7 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 				}, limits.exitMs),
 			);
 		};
+		// Only an exit the OS reports counts: a signal sent is not an exit, and the endpoint stays busy until one comes.
 		const exited = () => {
 			if (run.done) return;
 			run.done = true;
@@ -255,8 +303,11 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 		child.stdout.on("error", () => socket.destroy());
 		socket.on("end", transportEnded);
 		socket.on("close", transportEnded);
-		socket.pipe(child.stdin, { end: false });
-		child.stdout.pipe(socket);
+		socket.on("data", (chunk: Buffer) => forward("input", socket, child.stdin, chunk));
+		child.stdout.on("data", (chunk: Buffer) => forward("output", child.stdout, socket, chunk));
+		child.stdout.on("end", () => {
+			if (!ended) socket.end();
+		});
 	}
 
 	server.on("connection", serve);
@@ -270,11 +321,12 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 			} catch (error) {
 				existing = (error as NodeJS.ErrnoException).code !== "ENOENT";
 			}
-			if (existing) throw new Error("Something is already at the session socket's path; it is left as it is.");
+			if (existing) throw new EndpointRefused("socket-exists", "Something is already at the session socket's path; it is left as it is.");
 			await new Promise<void>((resolve, reject) => {
-				server.once("error", reject);
+				const failed = () => reject(new EndpointRefused("listen", "The endpoint couldn't listen on the session socket."));
+				server.once("error", failed);
 				server.listen({ path: socketPath, exclusive: true }, () => {
-					server.off("error", reject);
+					server.off("error", failed);
 					resolve();
 				});
 			});
@@ -282,7 +334,7 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 			const made = fs.lstatSync(socketPath);
 			if (!made.isSocket() || made.uid !== uid || made.gid !== directory.gid || (made.mode & 0o777) !== 0o660) {
 				await new Promise<void>((resolve) => server.close(() => resolve()));
-				throw new Error("The session socket couldn't be given its directory's group and mode 0660.");
+				throw new EndpointRefused("socket-mode", "The session socket couldn't be given its directory's group and mode 0660.");
 			}
 			log({ event: "endpoint.listening" });
 		},
@@ -320,11 +372,14 @@ async function main(): Promise<void> {
 		process.exit(2);
 	}
 	let endpoint: Endpoint;
+	let stage = "settings";
 	try {
 		endpoint = createDesktopEndpoint({ socketPath: values.socket, root: values.root, browser: values.browser, pimComputer: values["pim-computer"], headful: values.headful === true });
+		stage = "listen";
 		await endpoint.listen();
 	} catch (error) {
-		console.error(JSON.stringify({ event: "endpoint.failed", reason: error instanceof Error ? error.message : "unknown" }));
+		// Only a fixed reason: what Node threw may name paths or anything else.
+		console.error(JSON.stringify({ event: "endpoint.failed", reason: error instanceof EndpointRefused ? error.reason : stage }));
 		process.exit(1);
 	}
 	const stop = () => {

@@ -472,6 +472,101 @@ describe("a session over the endpoint's socket", () => {
 		}
 	});
 
+	it("ends a connection whose pim-computer stops reading, though the bridge has gone unnoticed, and stays busy until that pim-computer is seen to exit", async () => {
+		const served = await endpoint({
+			limits: { stallMs: 150, exitMs: 100, closeMs: 100 },
+			make: () => {
+				const child = new FakeChild({ reads: false });
+				child.say(HELLO);
+				return child;
+			},
+		});
+		const { seen, given } = events();
+		const session = await unixSession({ socketPath: served.socketPath, closeMs: 50 })(given, new AbortController().signal);
+		const child = served.children[0]!;
+		// More than pim-computer's input holds, so the endpoint stops reading the socket, and can't see the bridge leave.
+		session.send("x".repeat(64 * 1024));
+		await until(() => child.stdin.writableNeedDrain, "the endpoint to stop reading");
+		session.close();
+		await until(() => child.signals.length === 2, "SIGTERM and SIGKILL");
+		assert.deepEqual(child.signals, ["SIGTERM", "SIGKILL"]);
+		const said = served.log.map((entry) => (entry.reason ? `${entry.event} ${entry.reason}` : entry.event));
+		assert.deepEqual(said, ["endpoint.listening", "endpoint.started", "endpoint.stalled input", "endpoint.input-ended", "endpoint.stopping SIGTERM", "endpoint.stopping SIGKILL"]);
+		assert.equal(child.inputEnded || child.stdin.writableEnded, true, "its input was ended");
+
+		// A signal is not an exit: the next session is refused until the exit is seen.
+		assert.equal((await settle(unixSession({ socketPath: served.socketPath })(events().given, new AbortController().signal))).ok, false);
+		await tick(300);
+		assert.equal(served.calls.length, 1);
+		assert.deepEqual(child.signals, ["SIGTERM", "SIGKILL"], "nothing more is signalled");
+		assert.ok(!served.log.some((entry) => entry.event === "endpoint.exited"));
+		child.exit();
+		const next = await unixSession({ socketPath: served.socketPath })(events().given, new AbortController().signal);
+		assert.equal(served.calls.length, 2);
+		assert.equal(seen.closed, 0);
+		next.close();
+	});
+
+	it("ends a connection whose peer stops reading what pim-computer says", async () => {
+		const served = await endpoint({ limits: { stallMs: 150, exitMs: 100, closeMs: 100 } });
+		const peer = net.connect({ path: served.socketPath });
+		peer.pause();
+		cleanups.push(() => peer.destroy());
+		await until(() => served.children.length === 1, "pim-computer to start");
+		const child = served.children[0]!;
+		const part = Buffer.alloc(64 * 1024, 0x61);
+		for (let index = 0; index < 32; index++) child.stdout.write(part);
+		await until(() => child.signals.length === 2, "SIGTERM and SIGKILL");
+		assert.ok(served.log.some((entry) => entry.event === "endpoint.stalled" && entry.reason === "output"));
+		assert.equal(child.inputEnded, true);
+	});
+
+	it("keeps a connection whose pim-computer and peer are slow but keep taking more", async () => {
+		const served = await endpoint({
+			limits: { stallMs: 150, exitMs: 100, closeMs: 100 },
+			make: () => {
+				const child = new FakeChild({ reads: false });
+				child.say(HELLO);
+				return child;
+			},
+		});
+		const { seen, given } = events();
+		const session = await unixSession({ socketPath: served.socketPath })(given, new AbortController().signal);
+		const child = served.children[0]!;
+		const started = Date.now();
+		// pim-computer takes what its input holds every 30 ms, much less than stallMs, while 1 MiB comes.
+		const slowly = setInterval(() => {
+			for (let chunk = child.stdin.read(); chunk !== null; chunk = child.stdin.read()) child.input += chunk.toString("utf8");
+		}, 30);
+		cleanups.push(() => clearInterval(slowly));
+		for (let index = 0; index < 16; index++) session.send("i".repeat(64 * 1024));
+		await until(() => child.input.length === 16 * (64 * 1024 + 1), "every message", 20_000);
+		assert.ok(Date.now() - started > 300, `it took ${Date.now() - started} ms, longer than stallMs twice`);
+
+		// A peer reading what it holds every 30 ms, while pim-computer says 1 MiB.
+		const peerServed = await endpoint({ limits: { stallMs: 150, exitMs: 100, closeMs: 100 } });
+		const peer = net.connect({ path: peerServed.socketPath });
+		peer.pause();
+		cleanups.push(() => peer.destroy());
+		let received = 0;
+		const reading = setInterval(() => {
+			for (let chunk = peer.read(); chunk !== null; chunk = peer.read()) received += chunk.length;
+		}, 30);
+		cleanups.push(() => clearInterval(reading));
+		await until(() => peerServed.children.length === 1, "the second pim-computer to start");
+		const part = Buffer.alloc(64 * 1024, 0x61);
+		const speaking = Date.now();
+		for (let index = 0; index < 16; index++) peerServed.children[0]!.stdout.write(part);
+		await until(() => received === HELLO.length + 1 + 16 * part.length, "every byte", 20_000);
+		assert.ok(Date.now() - speaking > 300, `it took ${Date.now() - speaking} ms, longer than stallMs twice`);
+
+		for (const log of [served.log, peerServed.log]) assert.ok(!log.some((entry) => entry.event === "endpoint.stalled" || entry.event === "endpoint.input-ended"));
+		assert.deepEqual(child.signals, []);
+		assert.deepEqual(peerServed.children[0]!.signals, []);
+		assert.equal(seen.closed, 0);
+		session.close();
+	});
+
 	it("splits a large write into bounded parts, passes many empty messages on in order, and ends on a line longer than a message may be", async () => {
 		const served = await endpoint();
 		const { seen, given } = events();
@@ -581,25 +676,56 @@ describe("the bridge and the endpoint as programs", () => {
 		assert.equal(await bridge.exited, 0);
 	});
 
-	it("refuses to start the bridge with a token file others can read, saying only where it failed", async () => {
-		const where = place();
-		const token = "cua-session-test-token-0123456789abcdef";
-		const file = path.join(where.dir, "token");
-		fs.writeFileSync(file, token, { mode: 0o644 });
-		fs.chmodSync(file, 0o644);
-		const result = await new Promise<{ code: number | null; stderr: string }>((resolve) => {
-			const child = spawnProcess(
-				process.execPath,
-				[path.join(HOST_DIR, "bridge.ts"), "--space", "o_0123456789abcdefghijklmnop", "--path", "/pim", "--socket", where.socketPath, "--host", "127.0.0.1", "--port", "0"],
-				{ env: { PATH: process.env.PATH ?? "/usr/bin", PIM_BRIDGE_TOKEN_FILE: file }, stdio: ["ignore", "ignore", "pipe"] },
-			);
+	/** Runs one of the programs to its exit: its exit code, and what it wrote to standard error. */
+	const runToExit = (file: string, args: string[], env: Record<string, string>) =>
+		new Promise<{ code: number | null; stderr: string }>((resolve) => {
+			const child = spawnProcess(process.execPath, [path.join(HOST_DIR, file), ...args], { env: { PATH: process.env.PATH ?? "/usr/bin", ...env }, stdio: ["ignore", "ignore", "pipe"] });
 			let stderr = "";
 			child.stderr!.on("data", (chunk: Buffer) => {
 				stderr += chunk.toString("utf8");
 			});
 			child.once("exit", (code) => resolve({ code, stderr }));
 		});
+
+	it("refuses to start the bridge with a token file others can read, saying only where it failed", async () => {
+		const where = place();
+		const file = path.join(where.dir, "token");
+		fs.writeFileSync(file, "cua-session-test-token-0123456789abcdef", { mode: 0o644 });
+		fs.chmodSync(file, 0o644);
+		const result = await runToExit("bridge.ts", ["--space", "o_0123456789abcdefghijklmnop", "--path", "/pim", "--socket", where.socketPath, "--host", "127.0.0.1", "--port", "0"], { PIM_BRIDGE_TOKEN_FILE: file });
 		assert.equal(result.code, 1);
 		assert.equal(result.stderr.trim(), JSON.stringify({ event: "bridge.failed", reason: "token" }));
+	});
+
+	it("says only a fixed reason when the endpoint can't start, never a path or what was thrown", async () => {
+		const sentinel = "SENTINEL-7f3a9c";
+		const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `cua-${sentinel}-`)));
+		cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+		const root = path.join(dir, `root-${sentinel}`);
+		fs.mkdirSync(root);
+		const browser = path.join(dir, `browser-${sentinel}`);
+		fs.writeFileSync(browser, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+		const occupied = path.join(dir, `taken-${sentinel}.sock`);
+		fs.writeFileSync(occupied, sentinel);
+		const open = path.join(dir, `open-${sentinel}`);
+		fs.mkdirSync(open);
+		fs.chmodSync(open, 0o755);
+		const settings = (change: Record<string, string>) => {
+			const values: Record<string, string> = { socket: path.join(dir, `s-${sentinel}.sock`), root, browser, "pim-computer": PIM_COMPUTER, ...change };
+			return Object.entries(values).flatMap(([name, value]) => [`--${name}`, value]);
+		};
+		const cases: [string, Record<string, string>][] = [
+			["root-folder", { root: path.join(dir, `missing-${sentinel}`) }],
+			["socket-exists", { socket: occupied }],
+			["socket-directory", { socket: path.join(open, `s-${sentinel}.sock`) }],
+			["browser", { browser: path.join(dir, `no-browser-${sentinel}`) }],
+		];
+		for (const [reason, change] of cases) {
+			const result = await runToExit("desktop.ts", settings(change), { HOME: dir });
+			assert.equal(result.code, 1, reason);
+			assert.equal(result.stderr.trim(), JSON.stringify({ event: "endpoint.failed", reason }));
+			assert.ok(!result.stderr.includes(sentinel), `${reason}: nothing of the settings is in what it said`);
+		}
+		assert.equal(fs.readFileSync(occupied, "utf8"), sentinel, "what was at the socket's path is left as it is");
 	});
 });

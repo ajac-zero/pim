@@ -780,6 +780,12 @@ export type ComputerStatus = {
   /** Whether this Pim starts computers for people, so you needn't bring one. */
   startable?: boolean;
   pairedAt: number | null;
+  /**
+   * Set when the operator chose this space's computer: `cua`, a VM the operator
+   * runs, or `unreadable`, a choice Pim can't read, so it uses no computer.
+   * Absent for a paired or started computer.
+   */
+  provider?: "cua" | "unreadable";
   /** What it said about itself when it last connected. */
   computer: {
     agent: string;

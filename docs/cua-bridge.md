@@ -64,7 +64,6 @@ Pim doesn't create, start, stop, replace or delete an operator's VM, and never c
 ## What is not done
 
 - **The operator's tooling.** Writing the marker, enabling the control state and giving the agent a lease are outside this repository; only tests do them here. Human takeover stays unavailable.
-- **Settings → Computer** shows an operator's computer as a paired one that is offline or online; its pairing and removing buttons are there, and the server refuses them.
 - **The bridge itself** is not in this repository, and nothing here has run against a real one or a real Cua VM: every test answers `fetch` in the same process, with a `WebSocketPair` and pim-computer's own `Link`. How a deployed Worker's `fetch` upgrades, times out and aborts against a real bridge is untested. That Workers expose the `101` response's `x-pim-space` header to `fetch` is assumed from the platform, not tested against it; if they don't, every connection is refused.
 - **Versions.** A Sprite fetches pim-computer from its Pim each time it starts; the bridge's operator must keep its copy in step.
 - **Control and takeover.** A Cua VM is a whole desktop. Nothing here shows that a person's input there is quiescent or exclusive, so human takeover stays unavailable, as in `docs/computer-control-state.md`. Local transport tests say nothing about what else drives the VM.

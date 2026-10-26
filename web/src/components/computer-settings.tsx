@@ -35,6 +35,68 @@ function Command({ label, text }: { label: string; text: string }) {
 }
 
 /**
+ * A computer the operator manages, or a choice of one Pim can't read. Setup,
+ * removal and the choice itself are the operator's, so nothing here changes them.
+ */
+function OperatorComputer({ status }: { status: ComputerStatus }) {
+  const { t } = useI18n();
+  const machine = status.computer;
+  if (status.provider === "unreadable")
+    return (
+      <Section
+        title={t("computer")}
+        description={t("computerUnreadableDescription")}
+      >
+        <div className="flex items-center gap-3 rounded-2xl border bg-muted/20 px-4 py-3">
+          <Server className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
+          <span className="font-medium text-sm">
+            {t("computerUnavailable")}
+          </span>
+        </div>
+      </Section>
+    );
+  return (
+    <Section
+      title={t("computer")}
+      description={t("computerOperatorDescription")}
+    >
+      <div className="flex items-center gap-3 rounded-2xl border bg-muted/20 px-4 py-3">
+        <Server className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-2">
+            <span className="truncate font-medium text-sm">
+              {machine?.hostname ?? t("computerOperatorManaged")}
+            </span>
+            <Badge
+              variant={status.state === "online" ? "success" : "secondary"}
+              className="text-[11px]"
+            >
+              {status.state === "online"
+                ? t("computerOnline")
+                : t("computerOffline")}
+            </Badge>
+          </span>
+          {machine && (
+            <span className="block truncate text-muted-foreground text-xs">
+              {[
+                t("computerOperatorManaged"),
+                `${machine.platform} ${machine.arch}`,
+                machine.user,
+                t("computerFilesIn", { folder: machine.root }),
+                ...(machine.browser ? [] : [t("computerNoBrowser")]),
+              ].join(" · ")}
+            </span>
+          )}
+        </span>
+      </div>
+      <p className="text-[13px] text-muted-foreground">
+        {t("computerOperatorNote")}
+      </p>
+    </Section>
+  );
+}
+
+/**
  * Your computer: a machine of yours that runs pim-computer, where your
  * agents run commands and keep your files. Connecting one makes a token,
  * shown once with the commands that start pim-computer with it.
@@ -79,6 +141,7 @@ export function ComputerSection() {
     onError: (error) => toast.error(error.message),
   });
   if (!status) return null;
+  if (status.provider) return <OperatorComputer status={status} />;
   const machine = status.computer;
   const shown = token ? commands(token) : null;
 

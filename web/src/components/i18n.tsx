@@ -638,6 +638,14 @@ const translations = {
       "Connect a computer of yours, such as a server, a VM or a box at home, and your agents run commands, browse and keep your files there. Files shows its folder.",
     computerDescriptionStartable:
       "Your agents run commands, browse and keep your files on a computer: one Pim starts for you, or one of yours, such as a server, a VM or a box at home. Files shows its folder.",
+    computerOperatorDescription:
+      "Your agents run commands, browse and keep your files on a computer your operator manages. It is shared by everyone in your space.",
+    computerOperatorManaged: "Managed by your operator",
+    computerOperatorNote:
+      "Your operator sets it up and removes it, so you can't connect, start or remove it here. Taking over its screen isn't available. Online only means it was connected a moment ago.",
+    computerUnreadableDescription:
+      "Your operator chose a computer for your space, but Pim can't read that choice, so your agents have no computer for now.",
+    computerUnavailable: "Computer unavailable: ask your operator to fix it",
     computerWaiting: "Waiting for its first connection",
     computerOnline: "Online",
     computerOffline: "Offline",
@@ -1675,6 +1683,15 @@ const translations = {
       "Conecta una computadora tuya, como un servidor, una máquina virtual o un equipo en casa, y tus agentes ejecutarán comandos, navegarán y guardarán tus archivos allí. Archivos muestra su carpeta.",
     computerDescriptionStartable:
       "Tus agentes ejecutan comandos, navegan y guardan tus archivos en una computadora: una que Pim inicia para ti, o una tuya, como un servidor, una máquina virtual o un equipo en casa. Archivos muestra su carpeta.",
+    computerOperatorDescription:
+      "Tus agentes ejecutan comandos, navegan y guardan tus archivos en una computadora que administra tu operador. La comparte todo tu espacio.",
+    computerOperatorManaged: "Administrada por tu operador",
+    computerOperatorNote:
+      "Tu operador la configura y la quita, así que no puedes conectarla, iniciarla ni quitarla aquí. Tomar el control de su pantalla no está disponible. En línea solo significa que se conectó hace un momento.",
+    computerUnreadableDescription:
+      "Tu operador eligió una computadora para tu espacio, pero Pim no puede leer esa elección, así que por ahora tus agentes no tienen computadora.",
+    computerUnavailable:
+      "Computadora no disponible: pide a tu operador que lo arregle",
     computerWaiting: "Esperando su primera conexión",
     computerOnline: "En línea",
     computerOffline: "Sin conexión",

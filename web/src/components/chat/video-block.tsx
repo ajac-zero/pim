@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
  * A ```videos block's players. Each is a poster with a play button: nothing
@@ -55,12 +55,18 @@ function watchAddress(id: string): string {
 
 export function Video({ id, title }: { id: string; title?: string }) {
   const [playing, setPlaying] = useState(false);
+  const frame = useRef<HTMLIFrameElement>(null);
   const label = title || "YouTube video";
+  // The button is gone once the player replaces it: keep keyboard focus in the page.
+  useEffect(() => {
+    if (playing) frame.current?.focus();
+  }, [playing]);
   return (
     <figure className="min-w-0">
       <div className="relative aspect-video w-full overflow-hidden rounded-2xl bg-muted">
         {playing ? (
           <iframe
+            ref={frame}
             src={embedAddress(id)}
             title={label}
             className="absolute inset-0 size-full border-0"

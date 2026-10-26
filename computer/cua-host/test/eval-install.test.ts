@@ -21,7 +21,7 @@ import { after, before, describe, it } from "node:test";
 import * as zlib from "node:zlib";
 import { KEPT_ENVIRONMENT } from "../desktop.ts";
 import { type Config, parseConfig, renderTmpfiles, renderUnits } from "../eval-install/config.ts";
-import { type Action, ApplyFailure, apply, checkAccounts, type Facts, type Host, inspectedPaths, type PathFact, type Probe, plan, readText, type Staged, start, status, systemHost } from "../eval-install/install.ts";
+import { type Action, ApplyFailure, apply, checkAccounts, cleanlyStopped, type Facts, type Host, inspectedPaths, type PathFact, type Probe, plan, readText, type Staged, start, status, systemHost } from "../eval-install/install.ts";
 import { BUNDLE_SOURCES, bundleEntries, lockedIntegrity, renderCloudConfig, renderScripts, TREE_DIGEST_BASH, treeDigest, untarPackage, writePrivate, writeTree } from "../eval-install/operator.ts";
 
 const REPOSITORY = path.resolve(import.meta.dirname, "../../..");
@@ -740,6 +740,9 @@ describe("start", () => {
 		const bridgeOnly = ["/usr/bin/systemctl start pim-cua-bridge.service"];
 		assert.deepEqual(attempt(ready, shown("inactive", "dead", "success", NEVER)), { started: both, reason: undefined });
 		assert.deepEqual(attempt(ready, shown("inactive", "dead", "success", EXITED_0)), { started: both, reason: undefined });
+		// At the edges of each domain: the largest PID and times, an exit in the same microsecond as its start.
+		assert.deepEqual(attempt(ready, shown("inactive", "dead", "success", { ...EXITED_0, pid: "4294967295", started: "18446744073709551614", exited: "18446744073709551615" })), { started: both, reason: undefined });
+		assert.deepEqual(attempt(ready, shown("inactive", "dead", "success", { ...EXITED_0, started: "81234567", exited: "81234567" })), { started: both, reason: undefined });
 		// Running: no start is sent for it at all, so one that ends between the query and the call isn't started again.
 		assert.deepEqual(attempt(ready, shown("active", "running", "success", { ...NEVER, pid: "4100", started: "81234567" })), { started: bridgeOnly, reason: undefined });
 		// The bridge starts nothing of its own: a bridge that failed (as it does at boot before seal) may be started again.
@@ -780,6 +783,18 @@ describe("start", () => {
 			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, pid: "0" })],
 			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, status: "00" })],
 			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, code: "" })],
+			// Values outside each property's D-Bus type (PID `u`, times `t`), or an exit before its start, are refused, compared exactly.
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, pid: "-1" })],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, started: "-1" })],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, exited: "-2" })],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, pid: "-1", started: "-1", exited: "-2" })],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, pid: "4294967296" })],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, exited: "18446744073709551616" })],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, status: "-0" })],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, code: "2147483648" })],
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, started: "91234567", exited: "81234567" })],
+			// Reversed by one at the top of the range, where a Number would round both to the same value.
+			["desktop-not-clean", ready, shown("inactive", "dead", "success", { ...EXITED_0, started: "18446744073709551615", exited: "18446744073709551614" })],
 			// What can't be read whole is refused, not taken as clean.
 			["desktop-not-clean", ready, { status: 1, stdout: "" }],
 			["desktop-not-clean", ready, { status: null, stdout: "" }],
@@ -792,6 +807,10 @@ describe("start", () => {
 			["bridge-state", ready, clean, shown("inactive", "dead", "success", NEVER, "masked")],
 		];
 		for (const [reason, entries, desktop, bridge] of cases) assert.deepEqual(attempt(entries, desktop, bridge), { started: [], reason }, `${reason}: ${desktop.stdout}`);
+		// The predicate holds the same line when handed a record that never went through the parser.
+		const base = { LoadState: "loaded", ActiveState: "inactive", SubState: "dead", Result: "success", ExecMainCode: "1", ExecMainStatus: "0" };
+		assert.equal(cleanlyStopped({ ...base, ExecMainPID: "-1", ExecMainStartTimestampMonotonic: "-1", ExecMainExitTimestampMonotonic: "-2" }), false);
+		assert.equal(cleanlyStopped({ ...base, ExecMainPID: "4100", ExecMainStartTimestampMonotonic: "81234567", ExecMainExitTimestampMonotonic: "91234567" }), true);
 	});
 });
 

@@ -556,6 +556,25 @@ export const UNIT_STATE = (unit: string) => [TOOLS.systemctl, "show", `--propert
 
 type UnitState = Record<(typeof UNIT_PROPERTIES)[number], string>;
 
+const UINT32_MAX = 2n ** 32n - 1n;
+const UINT64_MAX = 2n ** 64n - 1n;
+const INT32 = [-(2n ** 31n), 2n ** 31n - 1n] as const;
+
+/**
+ * Whether `value` is in the D-Bus type systemd gives `name`, in canonical
+ * decimal: the states lowercase words; `ExecMainPID` a `u` (unsigned 32-bit);
+ * `ExecMainCode` and `ExecMainStatus` an `i` (signed 32-bit); the
+ * monotonic times a `t` (unsigned 64-bit). Compared as BigInt, exactly.
+ */
+function inDomain(name: (typeof UNIT_PROPERTIES)[number], value: string): boolean {
+	if (!name.startsWith("ExecMain")) return /^[a-z-]+$/.test(value);
+	const signed = name === "ExecMainCode" || name === "ExecMainStatus";
+	if (!(signed ? /^(0|-?[1-9][0-9]{0,9})$/ : /^(0|[1-9][0-9]{0,19})$/).test(value)) return false;
+	const number = BigInt(value);
+	if (signed) return number >= INT32[0] && number <= INT32[1];
+	return number <= (name === "ExecMainPID" ? UINT32_MAX : UINT64_MAX);
+}
+
 /** A unit's states and its main process's record, as systemd says them; `null` unless every property comes exactly once, in its expected form. */
 export function unitState(query: Probe["query"], unit: string): UnitState | null {
 	const answer = query(UNIT_STATE(unit));
@@ -565,7 +584,7 @@ export function unitState(query: Probe["query"], unit: string): UnitState | null
 		const match = /^([A-Za-z]+)=(.*)$/.exec(line);
 		const name = match?.[1] as (typeof UNIT_PROPERTIES)[number] | undefined;
 		if (!match || !name || !UNIT_PROPERTIES.includes(name) || Object.hasOwn(state, name)) return null;
-		if (!(name.startsWith("ExecMain") ? /^(0|-?[1-9][0-9]{0,19})$/ : /^[a-z-]+$/).test(match[2]!)) return null;
+		if (!inDomain(name, match[2]!)) return null;
 		state[name] = match[2]!;
 	}
 	return Object.keys(state).length === UNIT_PROPERTIES.length ? (state as UnitState) : null;
@@ -582,9 +601,13 @@ export function unitState(query: Probe["query"], unit: string): UnitState | null
  * which waits for that exit, then `exit(0)`) is how the program exits 0.
  */
 export function cleanlyStopped(state: UnitState | null): boolean {
-	if (state?.LoadState !== "loaded" || state.ActiveState !== "inactive" || state.SubState !== "dead" || state.Result !== "success") return false;
+	if (state === null || !UNIT_PROPERTIES.every((name) => inDomain(name, state[name]))) return false;
+	if (state.LoadState !== "loaded" || state.ActiveState !== "inactive" || state.SubState !== "dead" || state.Result !== "success") return false;
 	const neverStarted = ["ExecMainPID", "ExecMainCode", "ExecMainStatus", "ExecMainStartTimestampMonotonic", "ExecMainExitTimestampMonotonic"].every((name) => state[name as keyof UnitState] === "0");
-	const exitedZero = state.ExecMainCode === "1" && state.ExecMainStatus === "0" && state.ExecMainPID !== "0" && state.ExecMainStartTimestampMonotonic !== "0" && state.ExecMainExitTimestampMonotonic !== "0";
+	// Every field is in its domain by now, here as in `unitState`; an exited process had a PID, started, and exited no earlier than it started.
+	const started = BigInt(state.ExecMainStartTimestampMonotonic);
+	const exited = BigInt(state.ExecMainExitTimestampMonotonic);
+	const exitedZero = state.ExecMainCode === "1" && state.ExecMainStatus === "0" && BigInt(state.ExecMainPID) > 0n && started > 0n && exited >= started;
 	return neverStarted || exitedZero;
 }
 

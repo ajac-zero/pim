@@ -529,7 +529,7 @@ describe("videos an agent shows", () => {
 
   it("builds the player's address from the id alone, with a fixed host", () => {
     expect(embedAddress("dQw4w9WgXcQ")).toBe(
-      "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?autoplay=1&rel=0&playsinline=1",
+      "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?rel=0&playsinline=1",
     );
   });
 

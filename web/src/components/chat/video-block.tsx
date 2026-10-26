@@ -45,7 +45,7 @@ export function youtubeId(address: string): string | null {
 
 /** The player's address, from an id `youtubeId` returned. */
 export function embedAddress(id: string): string {
-  return `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&rel=0&playsinline=1`;
+  return `https://www.youtube-nocookie.com/embed/${id}?rel=0&playsinline=1`;
 }
 
 /** The video's page, from an id `youtubeId` returned. */
@@ -64,7 +64,7 @@ export function Video({ id, title }: { id: string; title?: string }) {
             src={embedAddress(id)}
             title={label}
             className="absolute inset-0 size-full border-0"
-            sandbox="allow-scripts allow-same-origin allow-presentation allow-popups allow-popups-to-escape-sandbox"
+            sandbox="allow-scripts allow-same-origin allow-presentation"
             allow="encrypted-media; picture-in-picture; fullscreen"
             allowFullScreen
             referrerPolicy="strict-origin-when-cross-origin"

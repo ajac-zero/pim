@@ -35,6 +35,13 @@ export const MAX_HEADER_BYTES = 16 * 1024;
 /** The most bytes one WebSocket message from Pim may take: `MAX_MESSAGE_CHARS` of UTF-16, at three bytes each at most. */
 export const MAX_PAYLOAD_BYTES = 3 * MAX_MESSAGE_CHARS;
 
+/**
+ * What each message held for Pim counts beyond its bytes, for what holding
+ * it costs: its entry in a queue, its frame's header and the socket's record
+ * of the write. Even an empty message counts this much.
+ */
+export const MESSAGE_OVERHEAD_BYTES = 256;
+
 /** How the host is reached. */
 export type Transport =
 	/** HTTPS with the operator's certificate chain and private key (PEM), on any address. */
@@ -60,10 +67,12 @@ export type Limits = {
 	/** How long a closing socket has to finish closing before it is destroyed. */
 	readonly closeMs: number;
 	/**
-	 * The most bytes held for Pim, not yet written to the network: what the
-	 * session says before `101`, and after it what the socket hasn't taken.
-	 * A message that would pass it ends the connection; nothing waits for Pim
-	 * to read, as a session can't be slowed down.
+	 * The most held for Pim and not yet handed to the network: what the
+	 * session says before `101`, and after it what the socket hasn't sent.
+	 * Each message counts its UTF-8 bytes and `MESSAGE_OVERHEAD_BYTES`, so
+	 * this bounds how many are held too. A message that would pass it ends
+	 * the connection; nothing waits for Pim to read, as a session can't be
+	 * slowed down.
 	 */
 	readonly maxOutboundBytes: number;
 };
@@ -164,13 +173,17 @@ function answerRaw(socket: Duplex, answer: Refusal, closeMs: number): void {
  * The relay's client socket for one connection. Before `101` it holds what
  * the session says (the relay's channel is ready only after the session
  * opened, and the socket exists only after `101`), and after it writes to
- * the WebSocket; either way it throws, which the relay takes as the
- * connection failing, rather than hold more than `maxOutboundBytes`.
+ * the WebSocket. Each message is charged its UTF-8 bytes and
+ * `MESSAGE_OVERHEAD_BYTES` from when it is taken until the socket has
+ * handed it to the network, so many small or empty messages cost what
+ * holding them does. Rather than hold more than `maxOutboundBytes`, it
+ * throws, which the relay takes as the connection failing.
  */
 class Outbound implements ClientSocket {
 	readonly #max: number;
-	#held: string[] = [];
-	#heldBytes = 0;
+	#held: { message: string; charge: number }[] = [];
+	/** What every message held, or written and not yet handed to the network, is charged. */
+	#charged = 0;
 	#socket: WebSocket | null = null;
 	#closed = false;
 	#overflowed = false;
@@ -181,18 +194,14 @@ class Outbound implements ClientSocket {
 
 	send(message: string): void {
 		if (this.#closed) throw new Error("The connection has ended.");
-		const bytes = Buffer.byteLength(message);
-		const queued = this.#socket ? this.#socket.bufferedAmount : this.#heldBytes;
-		if (queued + bytes > this.#max) {
+		const charge = Buffer.byteLength(message) + MESSAGE_OVERHEAD_BYTES;
+		if (this.#charged + charge > this.#max) {
 			this.#overflowed = true;
 			throw new Error("Pim isn't reading what it is sent.");
 		}
-		if (this.#socket) {
-			this.#socket.send(message);
-		} else {
-			this.#held.push(message);
-			this.#heldBytes += bytes;
-		}
+		this.#charged += charge;
+		if (this.#socket) this.#write(this.#socket, message, charge);
+		else this.#held.push({ message, charge });
 	}
 
 	close(code: number, reason: string): void {
@@ -209,8 +218,14 @@ class Outbound implements ClientSocket {
 		this.#socket = socket;
 		const held = this.#held;
 		this.#held = [];
-		this.#heldBytes = 0;
-		for (const message of held) socket.send(message);
+		for (const { message, charge } of held) this.#write(socket, message, charge);
+	}
+
+	/** `ws` calls back once the socket has handed the message on, or failed to, which ends the charge either way. */
+	#write(socket: WebSocket, message: string, charge: number): void {
+		socket.send(message, () => {
+			this.#charged -= charge;
+		});
 	}
 }
 
@@ -361,7 +376,11 @@ export function createHost(options: HostOptions): Host {
 				socket.off("end", gone);
 			},
 		};
-		/** Pim gave the request up, or broke HTTP by sending before `101`: the relay is told, and the socket ends unanswered. */
+		/**
+		 * Pim gave the request up, or broke HTTP by sending before `101`: the
+		 * socket ends unanswered, and the relay is told, which ends the session
+		 * already asked for, if one is.
+		 */
 		const gone = () => {
 			opening.settle();
 			abort.abort();
@@ -429,10 +448,12 @@ export function createHost(options: HostOptions): Host {
 	});
 
 	server.on("clientError", (error: NodeJS.ErrnoException, socket: Duplex) => {
-		const status = error.code === "HPE_HEADER_OVERFLOW" ? 431 : error.code === "ERR_HTTP_REQUEST_TIMEOUT" ? 408 : 400;
+		const code = error.code ?? "";
+		const status = code === "HPE_HEADER_OVERFLOW" ? 431 : code === "ERR_HTTP_REQUEST_TIMEOUT" ? 408 : code.startsWith("HPE_") ? 400 : null;
+		// Only a request HTTP couldn't take is answered; a socket that failed (a reset, or TLS that never began) has no one to answer.
+		if (status === null || !socket.writable) return socket.destroy();
 		log({ event: "host.refused", status, reason: "http" });
-		if (socket.writable && error.code !== "ECONNRESET") answerRaw(socket, { status, headers: [], body: "" }, limits.closeMs);
-		else socket.destroy();
+		answerRaw(socket, { status, headers: [], body: "" }, limits.closeMs);
 	});
 	server.on("tlsClientError", () => log({ event: "host.refused", reason: "tls" }));
 

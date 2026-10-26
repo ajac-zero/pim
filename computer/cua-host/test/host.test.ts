@@ -21,7 +21,7 @@ import { after, before, describe, it } from "node:test";
 import * as tls from "node:tls";
 import { WebSocket } from "ws";
 import { type LogEntry, MAX_MESSAGE_CHARS, type OpenSession, REPLACED, Relay, SPACE_HEADER, type Session, type SessionEvents } from "../../cua-bridge.ts";
-import { createHost, type Limits } from "../host.ts";
+import { createHost, type Host, type Limits } from "../host.ts";
 
 const SPACE = "o_0123456789abcdefghijklmnop";
 const OTHER = "o_zyxwvutsrqponmlkjihgfedcba";
@@ -71,7 +71,7 @@ async function until(condition: () => boolean, what: string, ms = 5_000) {
  * once, as pim-computer does, and answers each call with a reply naming its
  * ID; `open` replaces that. `order` records when sessions open and close.
  */
-async function serve(options: { open?: OpenSession; limits?: Partial<Limits>; transport?: "https" | "loopback-http" } = {}) {
+async function serve(options: { open?: OpenSession; limits?: Partial<Limits>; transport?: "https" | "loopback-http"; onRelayLog?: (entry: LogEntry) => void } = {}) {
 	const made: Made[] = [];
 	const order: string[] = [];
 	const relayLog: LogEntry[] = [];
@@ -99,7 +99,11 @@ async function serve(options: { open?: OpenSession; limits?: Partial<Limits>; tr
 		opens++;
 		return (options.open ?? standard)(events, signal);
 	};
-	const relay = new Relay({ space: SPACE, token: TOKEN, path: "/pim", open, log: (entry) => relayLog.push(entry) });
+	const log = (entry: LogEntry) => {
+		relayLog.push(entry);
+		options.onRelayLog?.(entry);
+	};
+	const relay = new Relay({ space: SPACE, token: TOKEN, path: "/pim", open, log });
 	const kind = options.transport ?? "https";
 	const host = createHost({
 		relay,
@@ -161,17 +165,22 @@ function connect(served: Served, options: { path?: string; headers?: Record<stri
 	return { socket, seen, opened, closed };
 }
 
-/** Writes `text` on a raw TLS (or TCP) connection to the host, and answers everything that comes back until it closes. */
-function raw(served: Served, text: string | Buffer, options: { keepOpen?: boolean } = {}): Promise<string> {
-	return new Promise((resolve) => {
-		const socket: Duplex = served.scheme === "wss" ? tls.connect({ host: "127.0.0.1", port: served.port, ca: cert }) : net.connect(served.port, "127.0.0.1");
-		const chunks: Buffer[] = [];
-		socket.on("data", (chunk: Buffer) => chunks.push(chunk));
-		socket.on("error", () => {});
-		socket.on("close", () => resolve(Buffer.concat(chunks).toString("latin1")));
-		socket.write(text);
-		if (!options.keepOpen) setTimeout(() => socket.destroy(), 3_000).unref();
-	});
+/** A raw TLS (or, for plain HTTP, TCP) connection to the host: the socket, and everything that comes back until it closes. */
+function rawSocket(served: Served) {
+	const socket: Duplex = served.scheme === "wss" ? tls.connect({ host: "127.0.0.1", port: served.port, ca: cert }) : net.connect(served.port, "127.0.0.1");
+	const chunks: Buffer[] = [];
+	socket.on("data", (chunk: Buffer) => chunks.push(chunk));
+	socket.on("error", () => {});
+	const answer = new Promise<string>((resolve) => socket.on("close", () => resolve(Buffer.concat(chunks).toString("latin1"))));
+	return { socket, answer };
+}
+
+/** Writes `text` on a raw connection to the host, and answers everything that comes back until it closes (or 3 seconds pass). */
+function raw(served: Served, text: string | Buffer): Promise<string> {
+	const { socket, answer } = rawSocket(served);
+	socket.write(text);
+	setTimeout(() => socket.destroy(), 3_000).unref();
+	return answer;
 }
 
 const handshake = (lines: string[]) => `${lines.join("\r\n")}\r\n\r\n`;
@@ -230,7 +239,7 @@ describe("refusing a request before anything is opened", () => {
 		}
 	});
 
-	it("ends a connection that sends before 101, without asking for a session", async () => {
+	it("ends a connection whose bytes come with its headers, before a session is asked for", async () => {
 		const served = await serve();
 		try {
 			const frame = Buffer.from([0x81, 0x82, 0, 0, 0, 0, 0x7b, 0x7d]);
@@ -240,6 +249,55 @@ describe("refusing a request before anything is opened", () => {
 			assert.equal(served.opens(), 0);
 			assert.ok(served.hostLog.some((entry) => entry.reason === "early-data"));
 		} finally {
+			await served.host.close();
+		}
+	});
+	it("answers 408 to a request whose headers don't come within headersMs, and drops a TLS handshake that doesn't", async () => {
+		const served = await serve({ limits: { headersMs: 300 } });
+		try {
+			let started = Date.now();
+			const partial = rawSocket(served);
+			partial.socket.write("GET /pim HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+			assert.match(await partial.answer, /^HTTP\/1\.1 408 /);
+			assert.ok(Date.now() - started < 2_000, `the request ended after ${Date.now() - started} ms`);
+			started = Date.now();
+			const silent = net.connect(served.port, "127.0.0.1");
+			silent.on("error", () => {});
+			await new Promise((resolve) => silent.on("close", resolve));
+			assert.ok(Date.now() - started < 2_000, `the TLS handshake ended after ${Date.now() - started} ms`);
+			assert.ok(served.hostLog.some((entry) => entry.reason === "tls"));
+			assert.equal(served.opens(), 0);
+		} finally {
+			await served.host.close();
+		}
+	});
+
+	it("drops connections past maxConnections, and takes one again when another ends", async () => {
+		const served = await serve({ limits: { maxConnections: 2 } });
+		const held: tls.TLSSocket[] = [];
+		try {
+			for (let index = 0; index < 2; index++) {
+				const socket = tls.connect({ host: "127.0.0.1", port: served.port, ca: cert });
+				socket.on("error", () => {});
+				await new Promise((resolve) => socket.once("secureConnect", resolve));
+				held.push(socket);
+			}
+			const third = tls.connect({ host: "127.0.0.1", port: served.port, ca: cert });
+			let secured = false;
+			third.on("secureConnect", () => {
+				secured = true;
+			});
+			third.on("error", () => {});
+			await new Promise((resolve) => third.on("close", resolve));
+			assert.equal(secured, false, "the third connection never gets TLS");
+			held.pop()!.destroy();
+			let answer = "";
+			const wrong = handshake(["GET /pim HTTP/1.1", ...upgradeHeaders, `Authorization: Bearer ${"x".repeat(40)}`, `${SPACE_HEADER}: ${SPACE}`]);
+			// The server counts the ended connection out once it has closed, so a few tries may be needed.
+			for (let attempt = 0; attempt < 20 && !answer.startsWith("HTTP/1.1 401 "); attempt++) answer = await raw(served, wrong);
+			assert.match(answer, /^HTTP\/1\.1 401 /);
+		} finally {
+			for (const socket of held) socket.destroy();
 			await served.host.close();
 		}
 	});
@@ -462,6 +520,151 @@ describe("serving Pim's connection", () => {
 			assert.equal(pim.seen.closed, null);
 			pim.socket.close(1000);
 			await until(() => session.state.closed, "the session to close");
+		} finally {
+			await served.host.close();
+		}
+	});
+
+	it("charges each message held before 101, so many empty ones end the connection before 101 and close the session once", async () => {
+		let closes = 0;
+		const served = await serve({
+			limits: { maxOutboundBytes: 4096 },
+			open: async (events) => {
+				// 64 empty messages: 64 characters by the relay's count, far under its own opening limit, and 0 bytes each.
+				for (let index = 0; index < 64; index++) events.message("");
+				await tick(10);
+				return { send: () => assert.fail("nothing reaches a session whose connection ended"), close: () => closes++ };
+			},
+		});
+		try {
+			const pim = connect(served);
+			assert.equal(await pim.opened, false);
+			assert.equal(pim.seen.status, 502);
+			assert.equal(pim.seen.headers?.[SPACE_HEADER], undefined);
+			await until(() => closes === 1, "the session to close");
+			await tick(50);
+			assert.equal(closes, 1);
+			assert.ok(served.relayLog.some((entry) => entry.event === "bridge.ended" && entry.reason === "client-send"));
+		} finally {
+			await served.host.close();
+		}
+	});
+
+	/**
+	 * A session that says `opening` while it opens, and `between` right after
+	 * it opened and before `101`: in a microtask queued as the relay logs
+	 * `bridge.opened`, which runs after the relay's channel is ready and
+	 * before the host's `101`.
+	 */
+	function sayingAround(opening: string[], between: string[]) {
+		let events: SessionEvents | null = null;
+		const session = { closes: 0 };
+		const open: OpenSession = async (given) => {
+			events = given;
+			for (const message of opening) given.message(message);
+			await tick(10);
+			return { send() {}, close: () => session.closes++ };
+		};
+		const onRelayLog = (entry: LogEntry) => {
+			if (entry.event === "bridge.opened") queueMicrotask(() => between.forEach((message) => events!.message(message)));
+		};
+		return { session, open, onRelayLog };
+	}
+
+	it("keeps the session's messages, empty ones too, in order, whether said while it opens or between its opening and 101", async () => {
+		const around = sayingAround([HELLO, "", "1"], ["", "2"]);
+		const served = await serve({ limits: { maxOutboundBytes: 4096 }, open: around.open, onRelayLog: around.onRelayLog });
+		try {
+			const pim = connect(served);
+			assert.equal(await pim.opened, true);
+			await until(() => pim.seen.messages.length === 5, "every message");
+			assert.deepEqual(pim.seen.messages, [HELLO, "", "1", "", "2"]);
+			assert.equal(around.session.closes, 0);
+			pim.socket.terminate();
+			await until(() => around.session.closes === 1, "the session to close");
+		} finally {
+			await served.host.close();
+		}
+	});
+
+	it("ends the connection before 101 when what the session says between its opening and 101 passes the limit", async () => {
+		const around = sayingAround([HELLO], Array.from({ length: 32 }, () => ""));
+		const served = await serve({ limits: { maxOutboundBytes: 4096 }, open: around.open, onRelayLog: around.onRelayLog });
+		try {
+			const pim = connect(served);
+			assert.equal(await pim.opened, false);
+			assert.equal(pim.seen.status, 502);
+			await until(() => around.session.closes === 1, "the session to close");
+			await tick(50);
+			assert.equal(around.session.closes, 1);
+			assert.ok(served.relayLog.some((entry) => entry.reason === "client-send"));
+		} finally {
+			await served.host.close();
+		}
+	});
+
+	it("answers no 101 on a socket destroyed after the session opened and before 101, and closes that session once", async () => {
+		let host: Host | null = null;
+		const served = await serve({
+			onRelayLog: (entry) => {
+				// The relay has the session and is about to settle its channel ready; the host's sockets go now.
+				if (entry.event === "bridge.opened") void host!.close();
+			},
+		});
+		host = served.host;
+		const pim = connect(served);
+		assert.equal(await pim.opened, false);
+		assert.equal(pim.seen.status, null);
+		await until(() => served.made[0]?.closes === 1, "the session to close");
+		await tick(50);
+		assert.equal(served.made[0]!.closes, 1);
+		assert.ok(!served.hostLog.some((entry) => entry.event === "host.upgraded"));
+	});
+
+	it("returns from close() at once while a session is still opening, aborting it and closing it once when it comes late", async () => {
+		const late = deferred<Session>();
+		let signal: AbortSignal | null = null;
+		const served = await serve({
+			open: (_events, given) => {
+				signal = given;
+				return late.promise;
+			},
+		});
+		const pim = connect(served);
+		await until(() => signal !== null, "the session to be asked for");
+		const started = Date.now();
+		await served.host.close();
+		assert.ok(Date.now() - started < 1_000, `close() took ${Date.now() - started} ms`);
+		assert.equal(signal!.aborted, true);
+		assert.equal(await pim.opened, false);
+		assert.equal(pim.seen.status, null);
+		let closes = 0;
+		late.resolve({ send: () => assert.fail("a late session is never sent to"), close: () => closes++ });
+		await until(() => closes === 1, "the late session to close");
+		await tick(50);
+		assert.equal(closes, 1);
+	});
+
+	it("ends the connection when bytes come while its session opens, and closes that session once when it comes", async () => {
+		const late = deferred<Session>();
+		let signal: AbortSignal | null = null;
+		const served = await serve({
+			open: (_events, given) => {
+				signal = given;
+				return late.promise;
+			},
+		});
+		try {
+			const pim = rawSocket(served);
+			pim.socket.write(handshake(["GET /pim HTTP/1.1", ...upgradeHeaders, `Authorization: Bearer ${TOKEN}`, `${SPACE_HEADER}: ${SPACE}`]));
+			await until(() => signal !== null, "the session to be asked for");
+			pim.socket.write(Buffer.from([0x81, 0x82, 0, 0, 0, 0, 0x7b, 0x7d]));
+			assert.equal(await pim.answer, "");
+			assert.equal(signal!.aborted, true);
+			assert.ok(served.hostLog.some((entry) => entry.reason === "early-data"));
+			let closes = 0;
+			late.resolve({ send: () => assert.fail("a late session is never sent to"), close: () => closes++ });
+			await until(() => closes === 1, "the late session to close");
 		} finally {
 			await served.host.close();
 		}

@@ -812,6 +812,9 @@ export const browserScreenshotUrl = (sessionId: string, at: number) =>
 export const BROWSER_LIVE_PATH = "/api/browser/live";
 /** The code the browser's socket closes with where taking it over isn't available. */
 export const BROWSER_TAKE_OVER_REFUSED = 4005;
+/** What the takeover page says once the browser's socket closed with `code`: that taking over isn't available here, or that the window closed. */
+export const browserClosedStatus = (code: number): "unavailable" | "closed" =>
+  code === BROWSER_TAKE_OVER_REFUSED ? "unavailable" : "closed";
 
 /** What the browser's socket says: the page as a picture, which page it is, or what went wrong. */
 export type BrowserLiveMessage =

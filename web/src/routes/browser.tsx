@@ -18,9 +18,9 @@ import {
 import { Button } from "~/components/ui/button";
 import {
   BROWSER_LIVE_PATH,
-  BROWSER_TAKE_OVER_REFUSED,
   type BrowserInput,
   type BrowserLiveMessage,
+  browserClosedStatus,
 } from "~/lib/pim-api";
 
 export const Route = createFileRoute("/browser")({
@@ -96,9 +96,10 @@ function BrowserPage() {
       }
     });
     live.addEventListener("close", (event) => {
-      if (event.code !== BROWSER_TAKE_OVER_REFUSED) return setStatus("closed");
-      setStatus("unavailable");
-      setError(null);
+      const closed = browserClosedStatus(event.code);
+      setStatus(closed);
+      // The page says why itself.
+      if (closed === "unavailable") setError(null);
     });
     return () => live.close();
   }, [session]);

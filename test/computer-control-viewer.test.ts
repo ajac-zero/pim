@@ -124,7 +124,7 @@ describe("taking the browser over in a space that has not opted in", () => {
 describe("a space that opts in while people take the browser over", () => {
 	/** Views admitted before the space opted in, by the name their client gave them. */
 	const views: Record<string, View> = {};
-	let stuckViewer = "";
+	let legacyViewer = "";
 
 	it("refuses input from a view admitted before, and from one that finishes opening after, ending each once recorded", async () => {
 		// One view is still opening: its pictures haven't started when the space opts in.
@@ -132,10 +132,17 @@ describe("a space that opts in while people take the browser over", () => {
 		const before = chrome.packets.length;
 		const opening = liveView("opening");
 		await vi.waitFor(() => expect(chrome.sent("Page.startScreencast", before)).toHaveLength(1));
-		for (const name of ["early", "quiet", "failing", "stuck", "spare"]) {
+		for (const name of ["early", "quiet", "failing", "legacy", "spare"]) {
 			views[name] = await liveView(name);
 			await watching(views[name]);
 		}
+		// One was let watch by the code before viewer sessions: its socket's attachment has only the session it watches.
+		const legacy = await inSpace((instance) => {
+			const connection = [...instance.getConnections<{ session: string; viewer?: string }>("browser")].find((each) => each.id === "legacy")!;
+			connection.setState({ session: connection.state!.session });
+			return connection.state;
+		});
+		expect(Object.keys(legacy!)).toEqual(["session"]);
 
 		await inSpace((instance) => instance.control.enable());
 		const mark = chrome.packets.length;
@@ -207,9 +214,9 @@ describe("a space that opts in while people take the browser over", () => {
 				if (code !== REFUSED) return close.call(this, code, reason);
 				const document = JSON.parse(instance.store.meta("computer_control")!) as { state: ControlState };
 				stored.push({ view: this.id, status: document.state.viewers.find((viewer) => viewer.sessionId === this.state.viewer)?.status });
-				// One close throws, and one never completes.
+				// One close throws, and the legacy view's never completes.
 				if (this.id === "failing") throw new Error("close failed");
-				if (this.id === "stuck") return;
+				if (this.id === "legacy") return;
 				return close.call(this, code, reason);
 			});
 		});
@@ -217,26 +224,28 @@ describe("a space that opts in while people take the browser over", () => {
 		// Refused anyway: the person has control.
 		expect(await agentUses("browser_read")).toContain("nothing was sent to it");
 		vi.restoreAllMocks();
-		expect(stored.sort((a, b) => a.view.localeCompare(b.view))).toEqual(["failing", "quiet", "spare", "stuck"].map((view) => ({ view, status: "revoking" })));
+		expect(stored.sort((a, b) => a.view.localeCompare(b.view))).toEqual(["failing", "legacy", "quiet", "spare"].map((view) => ({ view, status: "revoking" })));
 		expect((await views.quiet!.closed).code).toBe(REFUSED);
 		expect((await views.spare!.closed).code).toBe(REFUSED);
 		const viewerOf = (name: string) => inSpace((instance) => [...instance.getConnections<{ viewer: string }>("browser")].find((connection) => connection.id === name)!.state!.viewer);
 		const failing = await viewerOf("failing");
-		const stuck = await viewerOf("stuck");
+		const legacy = await viewerOf("legacy");
+		// The legacy view was given a viewer session of the server's own, not its client's name, before it was recorded and closed.
+		expect(legacy).toMatch(/^[0-9a-f-]{36}$/);
 		await vi.waitFor(async () => {
 			const recorded = (await stateOf())!.viewers;
 			expect(recorded.map(({ status }) => status).sort()).toEqual(["revoke_failed", "revoked", "revoked", "revoked", "revoked", "revoking"]);
 			expect(recorded.find((viewer) => viewer.sessionId === failing)).toMatchObject({ status: "revoke_failed", revokeAttempt: 1, epoch: 2 });
-			expect(recorded.find((viewer) => viewer.sessionId === stuck)).toMatchObject({ status: "revoking", revokeAttempt: 1, epoch: 2 });
+			expect(recorded.find((viewer) => viewer.sessionId === legacy)).toMatchObject({ status: "revoking", revokeAttempt: 1, epoch: 2 });
 		});
-		expect([views.failing!.closedWith(), views.stuck!.closedWith()]).toEqual([null, null]);
+		expect([views.failing!.closedWith(), views.legacy!.closedWith()]).toEqual([null, null]);
 
 		// The one whose close failed is still open, and still refused; what it sends next ends it, on a new attempt.
 		views.failing!.use();
 		expect((await views.failing!.closed).code).toBe(REFUSED);
 		await vi.waitFor(async () => expect((await stateOf())!.viewers.find((viewer) => viewer.sessionId === failing)).toMatchObject({ status: "revoked", revokeAttempt: 2 }));
 		expect(inputSince(mark)).toEqual([]);
-		stuckViewer = stuck;
+		legacyViewer = legacy;
 	});
 
 	it("refuses a new view, and one reconnecting under an earlier view's name, watching and recording nothing", async () => {
@@ -252,7 +261,7 @@ describe("a space that opts in while people take the browser over", () => {
 	});
 
 	it("keeps agents out until the last view's close is acknowledged, from any epoch, and a restart doesn't count an attempt cut short", async () => {
-		const stuck = () => stateOf().then((state) => state!.viewers.find((viewer) => viewer.sessionId === stuckViewer));
+		const legacy = () => stateOf().then((state) => state!.viewers.find((viewer) => viewer.sessionId === legacyViewer));
 		expect(await inSpace((instance) => instance.control.apply({ type: "resume", leaseId: "lease-2" }))).toEqual({ ok: true });
 		const mark = chrome.packets.length;
 		// The view that never closed was recorded in epoch 2; the agent holds epoch 3's lease, and is still kept out.
@@ -262,12 +271,25 @@ describe("a space that opts in while people take the browser over", () => {
 		// The space restarts; the view's socket survives it, as hibernated ones do. The attempt in progress is restored as failed.
 		await restart();
 		const restarted = chrome.packets.length;
-		expect(await stuck()).toMatchObject({ status: "revoke_failed", revokeAttempt: 1, epoch: 2 });
-		// What the view sends wakes the space: it doesn't watch again, nothing it sends reaches the browser, and it is ended on a new attempt.
-		views.stuck!.use();
-		expect((await views.stuck!.closed).code).toBe(REFUSED);
-		expect(views.stuck!.heard).toContainEqual(UNAVAILABLE);
-		await vi.waitFor(async () => expect(await stuck()).toMatchObject({ status: "revoked", revokeAttempt: 2 }));
+		expect(await legacy()).toMatchObject({ status: "revoke_failed", revokeAttempt: 1, epoch: 2 });
+		// What the view sends wakes the space: it doesn't watch again, nothing it sends reaches the browser, and a new attempt is stored.
+		// That close doesn't complete either.
+		await inSpace(() => {
+			const close = WebSocket.prototype.close;
+			vi.spyOn(WebSocket.prototype, "close").mockImplementation(function (this: WebSocket, code, reason) {
+				if (code !== REFUSED) return close.call(this, code, reason);
+			});
+		});
+		views.legacy!.use();
+		await vi.waitFor(() => expect(views.legacy!.heard.filter((message) => message.type === "error")).toEqual(Array(4).fill(UNAVAILABLE)));
+		expect(await legacy()).toMatchObject({ status: "revoking", revokeAttempt: 2 });
+		vi.restoreAllMocks();
+		expect(await agentUses("browser_read")).toContain("nothing was sent to it");
+		expect(chrome.packets.slice(restarted)).toEqual([]);
+
+		// Only the socket's own close, here the person's tab closing it, acknowledges the attempt.
+		views.legacy!.socket.close(1000, "Done");
+		await vi.waitFor(async () => expect(await legacy()).toMatchObject({ status: "revoked", revokeAttempt: 2 }));
 		expect(chrome.packets.slice(restarted)).toEqual([]);
 
 		// Every view acknowledged, the agent's request is admitted.

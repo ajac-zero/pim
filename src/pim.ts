@@ -6034,13 +6034,27 @@ export class Pim extends DurableAgent<Env> {
 	 * it sent before may still be running in the browser, so this is not
 	 * evidence the browser, or the computer, is quiet.
 	 *
+	 * A socket the code before viewer sessions let watch has only its
+	 * session; it is given a viewer session of the server's own first. A
+	 * socket with no state was never let watch, and is refused before it
+	 * does (`#watchBrowser`).
+	 *
 	 * Throws `ControlRefused`, leaving the socket as it is, when it can't be
-	 * recorded (the state is blocked, or the agent holds the lease and the
-	 * state takes no viewer then); its input is refused anyway.
+	 * given a viewer session or recorded (the state is blocked, or the agent
+	 * holds the lease and the state takes no viewer then); its input is
+	 * refused anyway.
 	 */
 	#revokeView(connection: Connection<SocketState>): void {
-		const viewer = connection.state?.viewer;
-		if (!viewer) return;
+		const socket = connection.state;
+		if (typeof socket?.session !== "string") return;
+		const viewer = socket.viewer ?? crypto.randomUUID();
+		if (!socket.viewer) {
+			try {
+				connection.setState({ session: socket.session, viewer });
+			} catch (error) {
+				throw new ControlRefused("viewer_unassigned", `a live view of the browser can't be given a viewer session (${errorMessage(error)})`);
+			}
+		}
 		const control = this.control;
 		const recorded = () => control.state?.viewers.find((each) => each.sessionId === viewer);
 		const apply = (event: ControlEvent) => {

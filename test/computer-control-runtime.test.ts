@@ -3,9 +3,10 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { describe, expect, it, vi } from "vitest";
 import type { ExecArgs, ExecResult } from "../computer/pim-computer";
+import type { Approval } from "../src/store";
 import { type ControlStorage, ControlCoordinator, ControlRefused } from "../src/computer-control-runtime";
 import type { ControlState } from "../src/computer-control";
-import { api, connectTestComputer, OWNER, pendingApproval, post, say, testBrowser, toolUse } from "./helpers";
+import { api, connectTestComputer, OWNER, post, say, testBrowser, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 /**
@@ -52,6 +53,17 @@ function asksToRun(command: string) {
 	const turn = say(`Run ${command}`);
 	return { turn, result: () => result };
 }
+
+/** The approval waiting for the person; given time, as a busy machine may be slow to file it. */
+const pendingApproval = () =>
+	vi.waitFor(
+		async () => {
+			const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
+			expect(approval).toBeDefined();
+			return approval!;
+		},
+		{ timeout: 15_000 },
+	);
 
 const decide = (id: string) => post(`/approvals/${id}/approve`);
 const control = <T>(fn: (state: Pim["control"]) => T) => inSpace((instance) => fn(instance.control));
@@ -293,6 +305,44 @@ describe("the coordinator", () => {
 		expect(again.blocked).toEqual(expect.any(String));
 		expect(await refusal(again.dispatch(request("r3"), send))).toBe("blocked");
 		expect(send).not.toHaveBeenCalled();
+	});
+
+	it("latches blocked when the first write fails, whether or not it was stored, and a retry doesn't clear it", async () => {
+		for (const stored of [false, true]) {
+			const storage = memory();
+			const real = storage.write.bind(storage);
+			// Throws, after storing the document or before.
+			storage.write = (value) => {
+				if (stored) real(value);
+				throw new Error("disk full");
+			};
+			const coordinator = new ControlCoordinator("o_a", storage);
+			expect(() => coordinator.enable()).toThrow("disk full");
+			storage.write = real;
+			expect(coordinator.enabled, `stored ${stored}`).toBe(true);
+			expect(coordinator.blocked).toEqual(expect.any(String));
+			const send = vi.fn(async () => undefined);
+			expect(await refusal(coordinator.dispatch(request("r1"), send))).toBe("blocked");
+			coordinator.enable();
+			expect(coordinator.blocked).toEqual(expect.any(String));
+			expect(await refusal(coordinator.dispatch(request("r1"), send))).toBe("blocked");
+			expect(send).not.toHaveBeenCalled();
+			expect(storage.value !== undefined).toBe(stored);
+			// A restart reads what is stored: opted in if it was, else not.
+			expect(new ControlCoordinator("o_a", storage).enabled).toBe(stored);
+		}
+	});
+
+	it("changes nothing when asked to bind while blocked", async () => {
+		const { storage, coordinator } = resumed();
+		await coordinator.dispatch(request("r1"), async () => {
+			storage.failWrites = true;
+		});
+		storage.failWrites = false;
+		const before = storage.value;
+		coordinator.bind("a1");
+		expect(storage.value).toBe(before);
+		expect(coordinator.state?.requests).toHaveLength(1);
 	});
 
 	it("refuses to restore lease bindings that repeat, have impossible epochs, or contradict the lease", async () => {

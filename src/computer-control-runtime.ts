@@ -156,8 +156,8 @@ export class ControlCoordinator {
 		try {
 			this.#storage.write(JSON.stringify(doc));
 		} catch (error) {
-			// The write may or may not have happened, so nothing more is admitted until a restart reads what is stored.
-			if (this.#doc) this.#latched = "the control state could not be stored";
+			// The write may or may not have happened, even the first one that opts the space in, so nothing is admitted until a restart reads what is stored.
+			this.#latched = "the control state could not be stored";
 			throw error;
 		}
 		this.#doc = doc;
@@ -187,7 +187,8 @@ export class ControlCoordinator {
 	 * Filed with no lease to hold (the human owns the computer), it will be refused.
 	 */
 	bind(approvalId: string): void {
-		if (!this.#doc || this.#doc.bindings.some((binding) => binding.id === approvalId)) return;
+		// A blocked coordinator changes nothing, stored or remembered.
+		if (!this.#doc || this.blocked || this.#doc.bindings.some((binding) => binding.id === approvalId)) return;
 		const { state } = this.#doc;
 		const bindings = [...this.#doc.bindings, { id: approvalId, lease: state.owner === "agent" ? state.lease : null }].slice(-MAX_BINDINGS);
 		this.#write({ ...this.#doc, bindings });

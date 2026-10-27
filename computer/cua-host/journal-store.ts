@@ -9,12 +9,12 @@
  * the file system grants to one process, and the store holds it until
  * `close()`. A lock that is already there is **refused, and left where it
  * is**: it may be a live host's, or one that died, and nothing here can tell
- * which. No stale lock is removed, replaced or recovered by this program; an
- * operator who has stopped every host removes it by hand. A host that died
- * therefore keeps its successor from starting, and that is the intended
- * failure: it fails closed. While it lives, every write also checks that the
- * lock file is still the one it made (same device and inode, one link), so a
- * lock removed from under a live host stops its writes.
+ * which. This program never removes, replaces or recovers a lock, and this
+ * release supports no recovery from one that is left: a host that died keeps
+ * its successor from starting. That fails closed, and is intended. While it
+ * lives, every write also checks that the lock file is still the one it
+ * made (same device and inode, one link), so a lock removed from under a
+ * live host stops its writes.
  *
  * **The write.** Under the lock the stored revision can't move except by
  * this store, so `write(journal, expected)` reads the stored journal, refuses
@@ -26,10 +26,17 @@
  *
  * **What it never does.** It never creates `journal.json`. A missing journal
  * reads as `undefined`, and a write to a missing one is refused, so the
- * manager stays blocked (docs/cua-observation.md) until an operator
- * provisions one, outside this program. It never repairs, resets or
- * reinitializes a journal that is invalid; the manager refuses it, and so
- * does this store's write.
+ * manager stays blocked (docs/cua-observation.md). It never repairs, resets
+ * or reinitializes a journal that is missing, lost or invalid; the manager
+ * refuses it, and so does this store's write. No recovery from a lost
+ * journal is supported in this release.
+ *
+ * **Descriptors.** Every descriptor is closed once. A close that fails is
+ * never taken as done and never retried by number, since the number may by
+ * then name another file: the store latches, every later read and write is
+ * refused, and the lock is left where it is. The error of a failed close is
+ * kept beside the error of the work it followed, if there was one, in an
+ * `AggregateError`.
  *
  * The directory and files must be the host account's own, and no one else's
  * to read or write: a directory with no group or other permissions, a
@@ -87,6 +94,20 @@ export type JournalFiles = {
 	uid(): number | undefined;
 };
 
+/**
+ * Writes all of `data` with `writeSync`, which must make progress: a write
+ * that takes nothing, or reports more than was left, is an error, so a file
+ * that stops taking bytes can't hang the process in a synchronous loop.
+ */
+export function writeFully(descriptor: number, data: Buffer, writeSync: (descriptor: number, data: Buffer, offset: number, length: number) => number): void {
+	let offset = 0;
+	while (offset < data.length) {
+		const count = writeSync(descriptor, data, offset, data.length - offset);
+		if (!Number.isSafeInteger(count) || count < 1 || count > data.length - offset) throw new Error("A journal write made no progress.");
+		offset += count;
+	}
+}
+
 export const NODE_JOURNAL_FILES: JournalFiles = {
 	open: (file, flags, mode) => fs.openSync(file, flags, mode),
 	fstat: (descriptor) => fs.fstatSync(descriptor),
@@ -101,10 +122,7 @@ export const NODE_JOURNAL_FILES: JournalFiles = {
 		}
 		return buffer.subarray(0, length);
 	},
-	write: (descriptor, data) => {
-		let offset = 0;
-		while (offset < data.length) offset += fs.writeSync(descriptor, data, offset, data.length - offset);
-	},
+	write: (descriptor, data) => writeFully(descriptor, data, (fd, buffer, offset, length) => fs.writeSync(fd, buffer, offset, length)),
 	fsync: (descriptor) => fs.fsyncSync(descriptor),
 	close: (descriptor) => fs.closeSync(descriptor),
 	rename: (from, to) => fs.renameSync(from, to),
@@ -115,8 +133,8 @@ export const NODE_JOURNAL_FILES: JournalFiles = {
 /** Why a journal store wasn't opened: a fixed reason, never a path or an error's text. */
 export class JournalStoreRefused extends Error {
 	readonly reason: string;
-	constructor(reason: string) {
-		super(`The viewer journal store was refused (${reason}).`);
+	constructor(reason: string, cause?: unknown) {
+		super(`The viewer journal store was refused (${reason}).`, cause === undefined ? undefined : { cause });
 		this.reason = reason;
 	}
 }
@@ -129,12 +147,44 @@ export type JournalStoreOptions = {
 
 export type OpenJournalStore = {
 	readonly store: JournalStore;
-	/** Releases the lock, once the host has stopped writing. A lock that isn't this store's any more is left where it is. */
-	readonly close: () => void;
+	/**
+	 * Waits for the writes already queued to settle, refuses every later
+	 * one, and releases the lock. It leaves the lock where it is, and
+	 * rejects, if any descriptor's close failed, or the lock isn't this
+	 * store's any more. A write that was refused or failed before this left
+	 * the journal as it was.
+	 */
+	readonly close: () => Promise<void>;
 };
 
 const { O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW, O_DIRECTORY } = fs.constants;
 const code = (error: unknown) => (typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined);
+
+/**
+ * Runs `work` on `descriptor` and then closes it, once. A close that fails
+ * latches the store through `retain`, since the descriptor may still be open;
+ * its error is then kept beside the work's, if the work failed too.
+ */
+function withDescriptor<T>(files: JournalFiles, descriptor: number, retain: () => void, work: () => T): T {
+	let result: T | undefined;
+	let failed = false;
+	let failure: unknown;
+	try {
+		result = work();
+	} catch (error) {
+		failed = true;
+		failure = error;
+	}
+	try {
+		files.close(descriptor);
+	} catch (cleanup) {
+		retain();
+		if (failed) throw new AggregateError([failure, cleanup], "A journal operation failed, and so did closing its descriptor.");
+		throw new Error("A journal descriptor couldn't be closed.", { cause: cleanup });
+	}
+	if (failed) throw failure;
+	return result as T;
+}
 
 /** Takes the lock for good, or refuses without changing anything. */
 export function openJournalStore(options: JournalStoreOptions): OpenJournalStore {
@@ -162,30 +212,37 @@ export function openJournalStore(options: JournalStoreOptions): OpenJournalStore
 	} catch (error) {
 		throw new JournalStoreRefused(code(error) === "EEXIST" ? "locked" : "lock");
 	}
-	let held = true;
 	let lockIdentity: { dev: number; ino: number };
 	try {
 		const stat = files.fstat(lock);
 		if (!stat.isFile() || !own(stat) || (stat.mode & 0o077) !== 0 || stat.nlink !== 1) throw new Error("lock");
 		lockIdentity = { dev: stat.dev, ino: stat.ino };
-	} catch {
-		// Made here a moment ago and not as it must be: taken back, so no lock of ours is left behind.
+	} catch (original) {
+		// Made here a moment ago and not as it must be: taken back, but only if its descriptor is seen to close. One that may still be open leaves the lock where it is.
 		try {
 			files.close(lock);
-		} catch {
-			// Nothing more can be done with it.
+		} catch (cleanup) {
+			throw new JournalStoreRefused("lock", new AggregateError([original, cleanup], "The lock was refused, and so was closing it."));
 		}
 		try {
 			files.unlink(lockFile);
 		} catch {
 			// A lock left behind blocks, which fails closed.
 		}
-		throw new JournalStoreRefused("lock");
+		throw new JournalStoreRefused("lock", original);
 	}
 
-	/** Whether the lock file at its path is still the one this store made. */
+	/** Whether the lock descriptor was closed, or its close was tried: never tried again by number. */
+	let lockClosed = false;
+	/** Set when a descriptor's close failed, so one may still be open: the store takes no more work and leaves its lock. */
+	let retained = false;
+	const retain = () => {
+		retained = true;
+	};
+
+	/** Whether this store may still read and write: its lock file at its path is the one it made, and no descriptor is retained. */
 	const lockIsOurs = (): boolean => {
-		if (!held) return false;
+		if (lockClosed || retained) return false;
 		try {
 			const stat = files.lstat(lockFile);
 			return !stat.isSymbolicLink() && stat.isFile() && stat.dev === lockIdentity.dev && stat.ino === lockIdentity.ino && stat.nlink === 1;
@@ -203,19 +260,13 @@ export function openJournalStore(options: JournalStoreOptions): OpenJournalStore
 			if (code(error) === "ENOENT") return undefined;
 			throw new Error("journal open");
 		}
-		try {
+		return withDescriptor(files, descriptor, retain, () => {
 			const stat = files.fstat(descriptor);
 			if (!stat.isFile() || !own(stat) || (stat.mode & 0o077) !== 0 || stat.nlink !== 1 || stat.size > MAX_JOURNAL_BYTES) throw new Error("journal file");
 			const bytes = files.read(descriptor, MAX_JOURNAL_BYTES);
 			if (bytes.length > MAX_JOURNAL_BYTES) throw new Error("journal size");
 			return bytes;
-		} finally {
-			try {
-				files.close(descriptor);
-			} catch {
-				// A read is done either way.
-			}
-		}
+		});
 	};
 
 	/** The stored journal's revision, or `undefined` if there is no journal; throws if it isn't JSON with a whole revision. */
@@ -231,18 +282,12 @@ export function openJournalStore(options: JournalStoreOptions): OpenJournalStore
 	/** Flushes the directory, so a rename in it is durable. */
 	const flushDirectory = () => {
 		const descriptor = files.open(directory, O_RDONLY | O_DIRECTORY);
-		try {
-			files.fsync(descriptor);
-		} finally {
-			try {
-				files.close(descriptor);
-			} catch {
-				// Flushed or not, nothing more can be done with it.
-			}
-		}
+		withDescriptor(files, descriptor, retain, () => files.fsync(descriptor));
 	};
 
 	let queue: Promise<unknown> = Promise.resolve();
+	let closing = false;
+	let closed: Promise<void> | undefined;
 
 	const store: JournalStore = {
 		async read() {
@@ -251,8 +296,10 @@ export function openJournalStore(options: JournalStoreOptions): OpenJournalStore
 			return bytes === undefined ? undefined : JSON.parse(bytes.toString("utf8"));
 		},
 		write(journal: Journal, expectedRevision: number): Promise<void> {
+			// A write asked for after `close` began is refused; one asked for before it still runs.
+			const late = closing;
 			const run = async (): Promise<void> => {
-				if (!lockIsOurs()) throw new Error("lock lost");
+				if (late || !lockIsOurs()) throw new Error("lock lost");
 				if (!Number.isSafeInteger(expectedRevision) || journal.revision !== expectedRevision + 1) throw new Error("revision");
 				// Under the lock nothing else writes, so this is a check and then a swap with no one between.
 				const stored = storedRevision();
@@ -267,16 +314,10 @@ export function openJournalStore(options: JournalStoreOptions): OpenJournalStore
 					if (code(error) !== "ENOENT") throw new Error("temporary file");
 				}
 				const descriptor = files.open(temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600);
-				try {
+				withDescriptor(files, descriptor, retain, () => {
 					files.write(descriptor, data);
 					files.fsync(descriptor);
-				} finally {
-					try {
-						files.close(descriptor);
-					} catch {
-						// Written and flushed, or the error above is the one that counts.
-					}
-				}
+				});
 				if (!lockIsOurs()) throw new Error("lock lost");
 				files.rename(temp, file);
 				flushDirectory();
@@ -291,20 +332,28 @@ export function openJournalStore(options: JournalStoreOptions): OpenJournalStore
 	return {
 		store,
 		close() {
-			if (!held) return;
-			const ours = lockIsOurs();
-			held = false;
-			try {
-				files.close(lock);
-			} catch {
-				// The descriptor is of no use any more.
-			}
-			if (!ours) return;
-			try {
-				files.unlink(lockFile);
-			} catch {
-				// A lock left behind blocks the next host, which fails closed.
-			}
+			// Once: later calls get the first one's outcome.
+			closed ??= (async () => {
+				// No new write is taken, and those already queued settle first.
+				closing = true;
+				await queue;
+				const ours = lockIsOurs();
+				lockClosed = true;
+				try {
+					files.close(lock);
+				} catch (cleanup) {
+					retained = true;
+					throw new JournalStoreRefused("close", cleanup);
+				}
+				// Left in place when a descriptor may still be open, or when it isn't this store's lock.
+				if (!ours) throw new JournalStoreRefused("close");
+				try {
+					files.unlink(lockFile);
+				} catch (cleanup) {
+					throw new JournalStoreRefused("close", cleanup);
+				}
+			})();
+			return closed;
 		},
 	};
 }

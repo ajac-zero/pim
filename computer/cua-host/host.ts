@@ -421,19 +421,32 @@ export function createHost(options: HostOptions): Host {
 			log({ event: "host.refused", status: request.refused.status, reason: request.reason });
 			return reply(res, request.refused);
 		}
+		/** The client has gone: its connection is destroyed or ended unanswered. Nothing is asked of the manager for it. */
+		const lost = () => res.destroyed || req.socket?.destroyed !== false;
 		// Before the body is read, as `check` is before anything: the bearer token and the space, not an upgrade.
 		const refused = await relay.authorize(request);
+		if (lost()) return void res.destroy();
 		if (refused) return reply(res, await fromResponse(refused));
 		if (req.headers["content-type"] !== "application/json" || req.headers["content-encoding"] !== undefined) return reply(res, refusal(415, "Send application/json."));
 		const length = req.headers["content-length"];
 		if (length !== undefined && !(Number(length) <= MAX_MANAGEMENT_BYTES)) return reply(res, refusal(413, "Too large."));
 		const chunks: Buffer[] = [];
 		let size = 0;
-		for await (const chunk of req as AsyncIterable<Buffer>) {
-			size += chunk.length;
-			if (size > MAX_MANAGEMENT_BYTES) return reply(res, refusal(413, "Too large."));
-			chunks.push(chunk);
+		// A body that is slow or never ends is cut off here, not left to the server's own, longer timeout.
+		const slow = setTimeout(() => req.destroy(), limits.headersMs);
+		try {
+			for await (const chunk of req as AsyncIterable<Buffer>) {
+				size += chunk.length;
+				if (size > MAX_MANAGEMENT_BYTES) return reply(res, refusal(413, "Too large."));
+				chunks.push(chunk);
+			}
+		} catch {
+			// The client went, or the body was cut off: nothing was asked of the manager.
+			return void res.destroy();
+		} finally {
+			clearTimeout(slow);
 		}
+		if (lost() || !req.complete) return void res.destroy();
 		let body: unknown;
 		try {
 			body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -443,6 +456,8 @@ export function createHost(options: HostOptions): Host {
 		if (typeof body !== "object" || body === null || Array.isArray(body)) return reply(res, refusal(400, "Bad request."));
 		// One bridge serves one space: a request for another owner is refused here, never passed to the manager.
 		if ((body as { owner?: unknown }).owner !== relay.space) return reply(res, refusal(403, "This bridge serves another space."));
+		// Read last, right before the manager is asked: a client seen gone by now starts nothing.
+		if (lost()) return void res.destroy();
 		const answer = action === "launch" ? await viewer!.manager.launch(body as LaunchRequestKey) : action === "end" ? await viewer!.manager.end(body as KeyRequest) : await viewer!.manager.status(body as KeyRequest);
 		log({ event: "host.managed", reason: action, status: 200 });
 		// A launch's answer holds the viewer path, whose fragment is the launch's credential: it goes to this caller only.

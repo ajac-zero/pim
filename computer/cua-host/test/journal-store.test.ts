@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { JOURNAL_FILE, JOURNAL_LOCK_FILE, JOURNAL_TEMP_FILE, JournalStoreRefused, openJournalStore } from "../journal-store.ts";
+import { JOURNAL_FILE, JOURNAL_LOCK_FILE, JOURNAL_TEMP_FILE, JournalStoreRefused, openJournalStore, writeFully } from "../journal-store.ts";
 import type { Journal } from "../viewer-launch-manager.ts";
 import { FakeFiles, OWNER_UID } from "./fake-journal-files.ts";
 
@@ -36,14 +36,14 @@ const refusal = (open: () => unknown): string | undefined => {
 };
 
 describe("the journal store's lock", () => {
-	it("is taken once, and a second store is refused while it is held", () => {
+	it("is taken once, and a second store is refused while it is held", async () => {
 		const files = provisioned();
 		const first = openJournalStore({ directory: DIR, files });
 		assert.equal(refusal(() => openJournalStore({ directory: DIR, files })), "locked");
 		assert.ok(files.nodes.has(LOCK));
-		first.close();
+		await first.close();
 		assert.equal(files.nodes.has(LOCK), false);
-		openJournalStore({ directory: DIR, files }).close();
+		await openJournalStore({ directory: DIR, files }).close();
 	});
 
 	it("refuses a lock left behind and leaves it where it is", () => {
@@ -81,7 +81,7 @@ describe("the journal store's lock", () => {
 		// Another process's lock at the same path is not this store's, and `close` leaves it.
 		files.file(LOCK, "someone else's");
 		await assert.rejects(store.write(journal(2), 1));
-		close();
+		await assert.rejects(close());
 		assert.equal(files.text(LOCK), "someone else's");
 	});
 });
@@ -164,5 +164,93 @@ describe("the journal store's reads and writes", () => {
 		files.nodes.get(FILE)!.nlink = 1;
 		files.nodes.get(FILE)!.data = Buffer.alloc(1024 * 1024 + 1, "a");
 		await assert.rejects(store.read());
+	});
+});
+
+describe("the journal store's descriptors", () => {
+	it("refuses everything after a descriptor couldn't be seen to close, and keeps both errors when the work failed too", async () => {
+		const files = provisioned();
+		const { store } = openJournalStore({ directory: DIR, files });
+		files.failNext.add("close");
+		await assert.rejects(store.read(), /couldn't be closed/);
+		const closes = files.log.filter((entry) => entry.startsWith("close")).length;
+		await assert.rejects(store.read());
+		await assert.rejects(store.write(journal(2), 1));
+		assert.equal(files.log.filter((entry) => entry.startsWith("close")).length, closes, "a number whose close failed is not closed again");
+		assert.equal(files.text(FILE), JSON.stringify(journal(1, "provisioned")));
+
+		const both = provisioned();
+		const second = openJournalStore({ directory: DIR, files: both });
+		both.failNext.add("read");
+		both.failNext.add("close");
+		await assert.rejects(second.store.read(), (error: unknown) => error instanceof AggregateError && error.errors.length === 2);
+	});
+
+	it("leaves the lock where it is, and says so, when the lock's own descriptor can't be seen to close", async () => {
+		const files = provisioned();
+		const { close } = openJournalStore({ directory: DIR, files });
+		files.failNext.add("close");
+		await assert.rejects(close(), (error: unknown) => error instanceof JournalStoreRefused && error.reason === "close");
+		assert.equal(files.nodes.has(LOCK), true);
+		assert.equal(files.log.some((entry) => entry.startsWith("unlink")), false);
+		await assert.rejects(close(), JournalStoreRefused, "a second close gets the first one's answer");
+	});
+
+	it("leaves the lock in place after a data descriptor failed to close, even though the lock's own closes", async () => {
+		const files = provisioned();
+		const { store, close } = openJournalStore({ directory: DIR, files });
+		files.failNext.add("close");
+		await assert.rejects(store.read());
+		await assert.rejects(close());
+		assert.equal(files.nodes.has(LOCK), true);
+	});
+
+	it("doesn't unlink a lock it made but couldn't close, when the lock isn't as it must be", () => {
+		// A directory that is right but whose lock comes out another account's: the made lock is checked, refused, closed and removed.
+		const refusedFiles = new FakeFiles();
+		refusedFiles.directory(DIR);
+		const open = refusedFiles.open.bind(refusedFiles);
+		refusedFiles.open = (path: string, flags: number, mode?: number) => {
+			const descriptor = open(path, flags, mode);
+			if (path === LOCK) refusedFiles.nodes.get(LOCK)!.uid = OWNER_UID + 1;
+			return descriptor;
+		};
+		refusedFiles.failNext.add("close");
+		assert.equal(refusal(() => openJournalStore({ directory: DIR, files: refusedFiles })), "lock");
+		assert.equal(refusedFiles.nodes.has(LOCK), true, "its descriptor may still be open, so the lock stays");
+		assert.equal(refusedFiles.log.some((entry) => entry.startsWith("unlink")), false);
+	});
+
+	it("waits for the writes already queued before it releases the lock, and takes no later one", async () => {
+		const files = provisioned();
+		const { store, close } = openJournalStore({ directory: DIR, files });
+		const written = store.write(journal(2, "queued"), 1);
+		const closed = close();
+		await written;
+		await closed;
+		assert.equal((JSON.parse(files.text(FILE)!) as Journal).generation, "queued");
+		assert.equal(files.nodes.has(LOCK), false);
+		await assert.rejects(store.write(journal(3), 2));
+	});
+});
+
+describe("the native write loop", () => {
+	const data = Buffer.from("0123456789");
+	it("writes everything through partial writes", () => {
+		const seen: number[] = [];
+		writeFully(3, data, (_fd, _buffer, offset, length) => {
+			seen.push(offset);
+			return Math.min(4, length);
+		});
+		assert.deepEqual(seen, [0, 4, 8]);
+	});
+
+	it("rejects a write that takes nothing, or claims more than was left, instead of looping", () => {
+		let calls = 0;
+		assert.throws(() => writeFully(3, data, () => (calls++, 0)), /no progress/);
+		assert.equal(calls, 1);
+		assert.throws(() => writeFully(3, data, () => data.length + 1), /no progress/);
+		assert.throws(() => writeFully(3, data, () => -1), /no progress/);
+		assert.throws(() => writeFully(3, data, () => Number.NaN), /no progress/);
 	});
 });

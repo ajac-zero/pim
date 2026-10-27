@@ -9,10 +9,11 @@
  *   PIM_BRIDGE_KEY_FILE=/etc/pim-bridge/key.pem \
  *   node bridge.ts --space o_… --path /pim --socket /run/pim-session/session.sock --host 0.0.0.0 --port 8443
  *
- * Given `--viewer-origin`, `--viewer-journal-dir` and PIM_VIEWER_ROOT_TOKEN_FILE
+ * Given all of `--viewer-origin`, `--viewer-journal-dir` and PIM_VIEWER_ROOT_TOKEN_FILE
  * (and optionally `--viewer-display`, `primary` by default), it also serves
  * the view-only desktop viewer (./viewer-host.ts, docs/cua-viewer-first-preview.md);
- * without them it serves the relay alone. The root token's file is checked and
+ * given none of them it serves the relay alone, and given some, or an invalid
+ * one, it refuses to start. The root token's file is checked and
  * read for each launch, like the others never from a flag, and never logged.
  *
  * The token and the key are read from the files the environment names,
@@ -75,6 +76,7 @@ async function main(): Promise<void> {
 		process.exit(2);
 	}
 	let stage = "settings";
+	let viewer: Awaited<ReturnType<typeof import("./viewer-host.ts").createViewerHost>> | undefined;
 	try {
 		const open = unixSession({ socketPath: values.socket });
 		stage = "token";
@@ -84,30 +86,37 @@ async function main(): Promise<void> {
 		const key = secret("PIM_BRIDGE_KEY_FILE");
 		stage = "relay";
 		const relay = new Relay({ space: values.space, token, path: values.path, open });
-		// The viewer is all or nothing: a part of its settings is a mistake, not a smaller bridge.
-		let viewer: Awaited<ReturnType<typeof import("./viewer-host.ts").createViewerHost>> | undefined;
-		const viewerSettings = [values["viewer-origin"], values["viewer-journal-dir"]];
-		if (viewerSettings.some((value) => value !== undefined)) {
-			stage = "viewer";
-			const rootTokenFile = process.env.PIM_VIEWER_ROOT_TOKEN_FILE;
-			if (viewerSettings.some((value) => !value) || !rootTokenFile) throw new Error("incomplete");
-			const { createViewerHost } = await import("./viewer-host.ts");
-			viewer = await createViewerHost({ origin: values["viewer-origin"]!, displayId: values["viewer-display"] ?? "primary", journalDirectory: values["viewer-journal-dir"]!, rootTokenFile });
+		// The viewer is all or nothing: some of its settings given, or any invalid, is a mistake, not a smaller bridge.
+		stage = "viewer";
+		const flags = { origin: values["viewer-origin"], journalDirectory: values["viewer-journal-dir"], display: values["viewer-display"] };
+		const env = { PIM_VIEWER_ROOT_TOKEN_FILE: process.env.PIM_VIEWER_ROOT_TOKEN_FILE };
+		// A bridge with none of the viewer's settings never loads its code.
+		if (Object.values({ ...flags, ...env }).some((value) => value !== undefined)) {
+			const viewerModule = await import("./viewer-host.ts");
+			viewer = await viewerModule.createViewerHost(viewerModule.parseViewerSettings(flags, env)!);
 		}
 		stage = "host";
 		const host = createHost({ relay, ...(viewer ? { viewer: viewer.routes } : {}), transport: { kind: "https", cert, key, host: values.host, port: Number(values.port) } });
 		await host.listen();
+		let stopping = false;
 		const stop = () => {
-			void host.close().then(() => {
-				viewer?.close();
+			if (stopping) return;
+			stopping = true;
+			void (async () => {
+				// The viewer first: it stops admitting launches and asks its launches to end, and says what it saw.
+				const shutdown = await viewer?.close().catch(() => undefined);
+				if (viewer) console.error(JSON.stringify({ event: "bridge.viewer_stopped", ...(shutdown ?? { reason: "failed" }) }));
+				await host.close();
 				process.exit(0);
-			});
+			})();
 		};
 		process.once("SIGTERM", stop);
 		process.once("SIGINT", stop);
 	} catch {
 		// What failed may carry a secret's contents or path, so only where it failed is said.
 		console.error(JSON.stringify({ event: "bridge.failed", reason: stage }));
+		// A viewer that was opened releases its journal's lock before the bridge exits.
+		await viewer?.close().catch(() => undefined);
 		process.exit(1);
 	}
 }

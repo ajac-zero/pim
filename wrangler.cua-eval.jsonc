@@ -7,6 +7,12 @@
 // value replaces it: the bucket names aren't valid R2 names, so Wrangler refuses this file, and the
 // KV and rate-limit IDs are set, so nothing is created to fill them. Nothing here has been deployed,
 // created or checked against an account, and no part of it is known to fit Cloudflare's free plan.
+// Which binding each step of the evaluation uses, and why each is kept, is the binding manifest in
+// docs/cua-viewer-first-cloudflare.md. Left out, because Pim's source runs without them:
+//   ai                 No Workers AI binding at all, not even the preview's KV stand-in for one: Pim
+//                      treats a missing `AI` as no Workers AI (src/pim.ts, `AiEnv`, `NO_WORKERS_AI`),
+//                      and chats use the preview's stand-in model.
+//   version_metadata   Read only for the claim window (src/runtime.ts), which the evaluation keeps shut.
 //
 // Deploy only by hand, from a reviewed commit, with this file named (`wrangler deploy -c
 // wrangler.cua-eval.jsonc`, after `pnpm --filter pim-web build`). It has no build step, and no
@@ -29,12 +35,9 @@
     // `/__dev/*` stays here so the Worker answers it (404), rather than the web app's page.
     "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp", "/oauth/*", "/.well-known/*", "/authorize", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*", "/shared/*", "/app-pages/*", "/__dev/*", "/p/*"]
   },
-  // Pim needs an `AI` binding to start. As in the preview, it is a KV namespace, never Workers AI,
-  // so no model is ever billed through it; chats use the preview's stand-in model.
-  "kv_namespaces": [
-    { "binding": "AI", "id": "REPLACE-WITH-REVIEWED-KV-ID-AI-STAND-IN" },
-    { "binding": "OAUTH_KV", "id": "REPLACE-WITH-REVIEWED-KV-ID-OAUTH" }
-  ],
+  // Unresolved, so kept: no step of the evaluation uses it, but Pim has no fallback without it (the manifest).
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "REPLACE-WITH-REVIEWED-KV-ID-OAUTH" }],
+  // Required: erasing a space, as a failed or lapsed claim does, lists and deletes under both.
   "r2_buckets": [
     { "binding": "BLOBS", "bucket_name": "REPLACE_WITH_REVIEWED_R2_BUCKET_BLOBS" },
     { "binding": "ARTIFACTS", "bucket_name": "REPLACE_WITH_REVIEWED_R2_BUCKET_ARTIFACTS" }
@@ -70,8 +73,6 @@
     "PIM_REGISTRATION": "closed",
     "PIM_MODELS": "preview-model"
   },
-  // Bound as in Pim's deployment; the evaluation mode hides it from the claim window, which never opens.
-  "version_metadata": { "binding": "CF_VERSION_METADATA" },
   // Pim's own log lines (never a claim code, bearer token or viewer address), kept in the account.
   "observability": { "enabled": true }
 }

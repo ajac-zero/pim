@@ -32,14 +32,14 @@ This page says what the review branch now has for that, and what it doesn't. **N
 - a request whose URL isn't exactly `PIM_PUBLIC_URL` is `421`;
 - one owner is set up once, with the operator's claim code, and the claim's record is never reset.
 
-**The claim window stays shut on Cloudflare.** Plain Pim on Cloudflare lets whoever comes first claim a Pim with no admin for 15 minutes after each deploy (`claimWindowOpen`, `src/runtime.ts`). The evaluation's Directory already refuses any registration without the operator's code. The mode also hides the deploy's date from the window, so the sign-in page never offers a claim (`canClaim` stays false). This matters because setting the owner's secrets after the claim makes a new version.
+**The claim window stays shut on Cloudflare.** Plain Pim on Cloudflare lets whoever comes first claim a Pim with no admin for 15 minutes after each deploy (`claimWindowOpen`, `src/runtime.ts`). The evaluation's Directory already refuses any registration without the operator's code. The configuration doesn't bind the deploy's date, and the mode hides it from the window even where it is bound, so the sign-in page never offers a claim (`canClaim` stays false). This matters because setting the owner's secrets after the claim makes a new version.
 
 **A separate configuration, `wrangler.cua-eval.jsonc`.** It is not Pim's `wrangler.jsonc` and not the local preview's `wrangler.preview.jsonc`, which is never deployed. It has:
 
 - **Its own name**, `pim-cua-eval`, so its Durable Objects are its own.
 - **One custom domain**, `pim-cua-eval.ajac-zero.com`, with `workers_dev` and `preview_urls` off.
 - **No build step.** No repository is to be connected to it through Workers Builds, so nothing on `main` deploys it.
-- **No Workers AI binding.** The `AI` binding is a KV namespace, as in the preview, so no model is billed through it.
+- **No `AI` binding at all**, and no `version_metadata`: Pim's source runs without either (the manifest below). No model can be billed through the Worker.
 - **`/__dev/*` among the paths the Worker answers first**, so the Worker refuses them (`404`) rather than the web app's page answering.
 - **Every variable in the file,** with no `keep_vars`: `PREVIEW_MODE`, `PIM_RUNTIME`, `PIM_PUBLIC_URL`, `PIM_REGISTRATION` and `PIM_MODELS`.
 
@@ -51,12 +51,42 @@ This page says what the review branch now has for that, and what it doesn't. **N
 
 **Tests** (fake-only, not run): the evaluation-mode tests in `test/preview-cua-fixture.test.ts` now name the runtime. One new test covers Cloudflare's: the control that plain Cloudflare would open the window a minute after a deploy; the closed sign-in page; `404` and `421`; the claim with no code, a wrong code, the operator's code, and again; the record `claimed`; the limiter counting by `CF-Connecting-IP`; and `503` without either limiter. The misconfiguration test adds an empty and an unknown runtime. The file has 19 tests.
 
+## The binding manifest
+
+What each binding of `wrangler.cua-eval.jsonc` does along the evaluation's path, read from the source and not run. The path is: the owner's claim and passkey, signing in, Settings, and launching, reading and ending an observation. It leaves out MCP OAuth, images, skills and files, artifacts, account deletion and a real model.
+
+Each binding is described three ways:
+- **Startup:** whether the Worker or a Durable Object needs it to construct.
+- **Used on the path:** storage operations along the path.
+- **Optional paths:** where else it is used.
+
+A binding is left out only where the source has a supported path without it. Otherwise it is kept, and making it is gated with the rest of the resources.
+
+| Binding | Startup | Used on the path | Optional paths | Decision |
+| --- | --- | --- | --- | --- |
+| `ASSETS` (the web app's files) | No constructor reads it | Every page and script (`src/gateway.ts` L434–460) | MCP's default handler; the preview's stand-in image | **Required.** Uploaded with the deploy; no resource is created |
+| `Pim`, `Auth`, `Directory`, `Gallery` (Durable Objects) | Classes the deploy's migrations make | The Directory and the claim record, the Auth object's passkeys and sessions, the space and its observation ledger, and the Gallery's default agent at registration (`src/accounts.ts` L242) | Everything else | **Required.** Made by the deploy; no separate resource |
+| `AUTH_LIMITER`, `API_LIMITER` | The evaluation refuses to serve without both (`preview/cua-eval.ts`) | Every sign-in and registration attempt, and every API request | — | **Required.** Namespace IDs are chosen integers, not created |
+| `BLOBS` (R2) | Handed to the space's image, skill and legacy-file stores as a field. Their constructors only keep it (`src/pim.ts` L465–546; `src/images.ts` L120; `src/legacy-files.ts` L59) | On the claim's failure paths. A registration that fails after the account is made is abandoned (`src/accounts.ts` L254–257), and a claim whose passkey isn't made in time lapses (`src/directory.ts` L343–344). Either queues the Directory's cleanup, which erases the space: `deleteEverything` lists and deletes under the owner's prefix (`images.deleteAll`, `src/pim.ts` L4017), and `remainingData` lists again (L3983). | Images sent in chat; skills' files; legacy files, which an operator's computer never moves (L6291–6292); account deletion | **Required.** Nothing in the source runs without it: unbound, the claim's cleanup would throw rather than erase |
+| `ARTIFACTS` (R2) | Handed to the artifact store, whose constructor only keeps it (`src/artifacts.ts` L392) | The same cleanup: `artifacts.deleteAllFiles` and `anyFiles` list under the owner's prefix (`src/pim.ts` L4018, L3984) | Artifacts made by a tool, which the stand-in model can call with `/tool`; shared and published artifacts | **Required**, for the same reason |
+| `OAUTH_KV` | No constructor reads it. The OAuth provider is made on the first `/mcp`, `/oauth/*` or `/.well-known/*` request (`src/mcp-auth.ts` L38–63) | None on the path | Settings → Account: its MCP section asks `GET /auth/connections`, which lists grants in this namespace (`src/mcp-auth.ts` L86–92; `web/src/components/account-settings.tsx` L428–437). Also MCP OAuth itself | **Unresolved, kept.** Nothing on the path uses it, but the source has no fallback: unbound, those requests would fail with a TypeError, not a refusal. Its creation is gated with the rest |
+| `AI` | Optional: `AiEnv` types it optional, and without it a request to Workers AI gets `NO_WORKERS_AI`'s error (`src/pim.ts` L337–343, L556, L1273) | None: the preview overrides the default, memory, utility and image models with its stand-ins (`preview/worker.ts`) | Workers AI models | **Left out.** `deploy/celld/wrangler.jsonc` leaves it out the same way |
+| `CF_VERSION_METADATA` | Optional: read as `env.CF_VERSION_METADATA?.timestamp`, only for the claim window (`src/runtime.ts` L172–175) | None: the evaluation hides it from the window anyway | — | **Left out**, as celld's profile does |
+
+**The preview's `AI` stand-in is a type filler only.** In `wrangler.preview.jsonc`, `AI` is bound to a KV namespace. Pim never calls a KV method on it: `AI` is used only as Workers AI (`createAI`, `run`). But a bound `AI` makes Pim believe Workers AI is there (`#hasWorkersAi`):
+- Settings → Model would offer `preview-model` as a Workers AI model;
+- choosing one for a chat would call `run` on the KV namespace, which has no such method.
+
+Leaving `AI` out avoids that.
+
+**What leaving `AI` out changes.** Chats still default to the stand-in model (`chooseModel(null)` on start, `src/pim.ts` L1203, and the preview's `defaultModel`), but Settings → Model lists it as the default, not among the choices (L4635). This is read from the source; no test runs the preview's Pim without `AI`.
+
 ## What it would take, in order (not authorized)
 
 Each step below needs its own approval. Nothing here authorizes a deploy, a resource or a DNS change.
 
 1. **Radia's preflight**, below: whether the account and zone allow this within the free plan, and which limits bind.
-2. **The resources, reviewed:** two KV namespaces, two R2 buckets and two rate-limit namespace IDs, made once, with their real IDs and names put in the file in a reviewed commit.
+2. **The resources, reviewed:** one KV namespace (`OAUTH_KV`) and two R2 buckets, made once, and two rate-limit namespace IDs chosen (integers, not created), with the real IDs and names put in the file in a reviewed commit.
 3. **The web app built** from that commit (`pnpm --filter pim-web build`), and the deploy run by hand with this file named: `wrangler deploy -c wrangler.cua-eval.jsonc`.
    - Deploying a custom domain makes its DNS record and certificate in the `ajac-zero.com` zone. That is part of what the deploy does, so the deploy itself is the provisioning step.
 4. **The claim digest** set as a secret, `PREVIEW_EVAL_CLAIM_SHA256`. Only the code's SHA-256 goes to Cloudflare. The operator makes the code privately and gives it to the owner, who opens `/#claim=<code>`.
@@ -98,7 +128,7 @@ None of these is checked. Each is a question, not a claim:
 
 - **Workers Free** limits on requests per day, CPU time per request and subrequests per request. Pim's agents run inside Durable Objects, and whether a run fits Free's CPU limit is unknown.
 - **Durable Objects** with SQLite storage on Workers Free, and their limits.
-- **KV:** two namespaces, within Free's daily reads and writes.
+- **KV:** one namespace, within Free's daily reads and writes.
 - **R2:** two buckets. Whether R2 can be turned on for the account without a paid plan or a payment method on file.
 - **Rate limiting bindings:** whether they are available on the account's plan.
 - **The custom domain:** `ajac-zero.com` must be a zone on the same Cloudflare account. Its certificate comes from Cloudflare.

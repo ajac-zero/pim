@@ -535,7 +535,7 @@ function renderFetch(config: Config, viewer: NonNullable<Config["viewer"]>, pins
 		download("ws", "ws.tgz", pins.ws.url, "512", integrityHex(pins.ws.sha512), null, pins.ws.maxBytes),
 		download("protobuf", "protobuf.tgz", pins.protobuf.url, "512", integrityHex(pins.protobuf.sha512), null, pins.protobuf.maxBytes),
 	].join("");
-	const tools = ["curl", "tar", "dpkg-deb", "sha256sum", "sha512sum", "stat", "cut", "find", "chmod", "mkdir", "ln", "sort", "rm", "install", "dirname"].map((tool) => `trusted_file /usr/bin/${tool} || fail tools`).join("\n");
+	const tools = ["curl", "tar", "dpkg-deb", "sha256sum", "sha512sum", "stat", "cut", "find", "chmod", "mkdir", "ln", "sort", "cmp", "rm", "install", "dirname"].map((tool) => `trusted_file /usr/bin/${tool} || fail tools`).join("\n");
 	return `${prologue(config, "fetch", false)}
 ${tools}
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy NO_PROXY CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
@@ -589,17 +589,44 @@ absent() { [[ ! -e "$1" && ! -L "$1" ]] || fail "exists-$2"; }
 publish_file() {
 	ln -P -T -- "$1" "$2" || fail "place-$3"
 }
+# A tree's listing, written to a file of the stage by a pipeline whose failure is the function's: pipefail makes `find` or `sort` failing fail the subshell,
+# which a process substitution feeding a loop would never report. $2 is d (directories) or f (everything else); the file is bounded and, for f, not empty.
+list_tree() {
+	local size
+	if [[ "$2" == d ]]; then
+		( cd -- "$1" && find . -mindepth 1 -type d -printf '%P\0' | LC_ALL=C sort -z >"$3" ) || return 1
+	else
+		( cd -- "$1" && find . -mindepth 1 ! -type d -printf '%P\0' | LC_ALL=C sort -z >"$3" ) || return 1
+	fi
+	size="$(stat -c %s -- "$3")" || return 1
+	(( size <= 16777216 )) || return 1
+	[[ "$2" == d || "$size" -gt 0 ]]
+}
+
+# The listings of a staged tree, made and checked before anything is placed: every name is plain.
+prepare_tree() {
+	local kind name
+	list_tree "$1" d "$STAGE/m/$2.dirs" || fail "manifest-$2"
+	list_tree "$1" f "$STAGE/m/$2.files" || fail "manifest-$2"
+	for kind in dirs files; do
+		while IFS= read -r -d '' name; do
+			[[ "$name" =~ ^[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$ ]] || fail "manifest-$2"
+		done <"$STAGE/m/$2.$kind" || fail "manifest-$2"
+	done
+}
+
 publish_tree() {
 	local entry
 	mkdir -m 0755 -- "$2" || fail "place-$3"
 	while IFS= read -r -d '' entry; do
-		[[ "$entry" =~ ^[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$ ]] || fail "place-$3"
 		mkdir -m "$(stat -c %a -- "$1/$entry")" -- "$2/$entry" || fail "place-$3"
-	done < <(cd -- "$1" && find . -mindepth 1 -type d -printf '%P\0' | LC_ALL=C sort -z)
+	done <"$STAGE/m/$3.dirs" || fail "place-$3"
 	while IFS= read -r -d '' entry; do
-		[[ "$entry" =~ ^[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$ ]] || fail "place-$3"
 		ln -P -T -- "$1/$entry" "$2/$entry" || fail "place-$3"
-	done < <(cd -- "$1" && find . -mindepth 1 ! -type d -printf '%P\0' | LC_ALL=C sort -z)
+	done <"$STAGE/m/$3.files" || fail "place-$3"
+	# Every listed entry is there and nothing else is: the destination's own listing is the stage's, byte for byte.
+	list_tree "$2" d "$STAGE/m/$3.placed.dirs" && list_tree "$2" f "$STAGE/m/$3.placed.files" || fail "placed-$3"
+	cmp -s -- "$STAGE/m/$3.dirs" "$STAGE/m/$3.placed.dirs" && cmp -s -- "$STAGE/m/$3.files" "$STAGE/m/$3.placed.files" || fail "placed-$3"
 }
 
 # Every directory above $1 exists, made here when missing (root's, 0755), and is root's, not a link, and writable by no one else.
@@ -632,7 +659,7 @@ absent "$BUNDLE" bundle
 trusted_dirs /var/lib || fail stage-parent
 mkdir -m 0700 -- "$STAGE" || fail stage-exists
 CREATED=1
-mkdir -m 0700 -- "$STAGE/dl" "$STAGE/node" "$STAGE/caddy" "$STAGE/chrome" "$STAGE/src" "$STAGE/spacesd"
+mkdir -m 0700 -- "$STAGE/m" "$STAGE/dl" "$STAGE/node" "$STAGE/caddy" "$STAGE/chrome" "$STAGE/src" "$STAGE/spacesd"
 
 ${downloads}
 # Unpacked only now: each archive matched its pin, as root, without restoring any owner.
@@ -659,7 +686,11 @@ digest="$(tree_digest "$STAGE/bundle")" || fail bundle-digest
 [[ "$digest" == "$BUNDLE_SHA256" ]] || fail bundle-digest
 staged_ok "$STAGE/bundle"
 
-# In place, none replacing (publish_file, publish_tree). A failure partway keeps the stage and what was placed; that VM is discarded, never resumed.
+# In place, none replacing (publish_file, publish_tree), each tree then compared whole against its listing. A failure partway keeps the stage and what was placed; that VM is discarded, never resumed.
+# Every listing is made and checked here, before the first thing is placed.
+prepare_tree "$STAGE/node" node
+prepare_tree "$STAGE/chrome$CHROME_DIR" chrome
+prepare_tree "$STAGE/bundle" bundle
 ensure_parent "$NODE_ROOT"; ensure_parent "$CADDY"; ensure_parent "$SPACESD"; ensure_parent "$CHROME_DIR"; ensure_parent "$BUNDLE"
 PLACING=1
 publish_tree "$STAGE/node" "$NODE_ROOT" node
@@ -667,7 +698,7 @@ publish_file "$STAGE/caddy/caddy" "$CADDY" caddy
 publish_file "$STAGE/spacesd/spacesd" "$SPACESD" spacesd
 publish_tree "$STAGE/chrome$CHROME_DIR" "$CHROME_DIR" chrome
 publish_tree "$STAGE/bundle" "$BUNDLE" bundle
-# What was placed is what was checked (a listing that silently came up short would show here).
+# The programs are the ones checked, and (above) every tree's placed listing equals its staged one.
 [[ "$(sum256 "$NODE_ROOT/bin/node")" == "$NODE_SHA256" && "$(sum256 "$CADDY")" == "$CADDY_SHA256" && "$(sum256 "$SPACESD")" == "$SPACESD_SHA256" && "$(sum256 "$CHROME_DIR/chrome")" == "$CHROME_SHA256" ]] || fail placed-programs
 [[ "$(tree_digest "$BUNDLE")" == "$BUNDLE_SHA256" ]] || fail placed-bundle
 PLACING=0
@@ -676,7 +707,7 @@ printf '{"event":"pim-cua-eval.fetched","evaluation":"%s"}\\n' ${quote(config.ev
 }
 
 /**
- * `support.sh`: the read-only checks a startup needs to pass before `start`, run as root after `install`: every package of the
+
  * base is installed, every delivered program resolves its shared libraries, Node and Caddy are the pinned versions, Caddy accepts its
  * configuration (`caddy validate`, as the ingress account with its own state directory), headless Chrome starts as the desktop
  * account with its own sandbox on, and spacesd answers `--help` as that account. It starts no service and opens no port; it prints one line per

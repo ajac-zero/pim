@@ -882,11 +882,25 @@ const pipesToShell = (script: string) => [...script.matchAll(/\|\s*(?:\/(?:usr\/
 /** Each place a script runs `curl` or `wget` as a command word (after a line start, space, `;`, `&`, `|`, `(` or `/`), never as part of a package name such as `libcurl4t64` or a quoted package name in a list. */
 const runsCurl = (script: string) => [...script.matchAll(/(?:^|[\s;&|(/])(?:curl|wget)(?=\s|$|;|&|\))/gm)].map((m) => m[0]);
 
+/** Each process substitution feeding a loop (`< <(...)`), whose pipeline failure the parent's `set -e` and `pipefail` never see. */
+const unobservedSubstitutions = (text: string) => [...text.matchAll(/<\s*<\(/g)].map((m) => m[0]);
+/** The text of a bash function `name() {` up to its closing brace at the line start. */
+const bashFunction = (script: string, name: string) => {
+	const start = script.indexOf(`\n${name}() {`);
+	const end = script.indexOf("\n}\n", start);
+	return start < 0 || end < 0 ? "" : script.slice(start, end + 3);
+};
+
 describe("the test's own command detectors", () => {
 	it("reject truly unsafe samples and accept the legitimate ones they once confused", () => {
 		for (const unsafe of ["curl -s https://x | sh", "curl https://x |sh", "wget -qO- https://x | bash -s", "echo hi | /bin/sh", "cat f | /usr/bin/bash\n", "x | dash;"]) assert.equal(pipesToShell(unsafe).length, 1, unsafe);
 		for (const safe of ["find . | sort | sha256sum", "x | sha512sum | cut -d' ' -f1", "printf '%s\\n' \"$listing\" | sha256sum", "x | shuf", "a || bash_function"]) assert.deepEqual(pipesToShell(safe), [], safe);
 		for (const unsafe of ["curl -s https://x", "run && curl x", "x | curl -T- u", "/usr/bin/curl https://x", "$(curl u)", "trusted_file /usr/bin/curl || fail tools", "wget"]) assert.ok(runsCurl(unsafe).length > 0, unsafe);
+		// The shape the review found: a listing through a process substitution, whose failure the loop does not report.
+		const old = 'publish_tree() {\n\twhile IFS= read -r -d \'\' entry; do\n\t\tmkdir x\n\tdone < <(cd -- "$1" && find . -type d -printf \'%P\\0\' | sort -z)\n}\n';
+		assert.equal(unobservedSubstitutions(old).length, 1);
+		assert.deepEqual(unobservedSubstitutions("x=$(a); done <\"$file\" || fail"), []);
+		assert.equal(bashFunction(`\nf() {\n  a\n}\n`, "f"), "\nf() {\n  a\n}\n");
 		for (const safe of ["'libcurl4t64'", "for package in 'curl' 'wget'; do", "libcurl4t64 wget-not", "echo curlish", "mycurl x"]) assert.deepEqual(runsCurl(safe), [], safe);
 	});
 });
@@ -993,6 +1007,32 @@ describe("the pinned delivery", () => {
 		assert.ok(script.includes("fail placed-programs") && script.includes("fail placed-bundle"));
 		assert.ok(script.includes("readonly NODE_ROOT='/opt/pim-node'"));
 		assert.ok(script.includes("readonly CHROME_DIR='/opt/google/chrome'"));
+	});
+
+	it("lists every tree into a file of the stage by a pipeline whose failure is seen, before anything is placed, and compares the placed tree whole against it", () => {
+		const script = fetchScript();
+		for (const name of ["list_tree", "prepare_tree", "publish_tree"]) {
+			const body = bashFunction(script, name);
+			assert.ok(body.length > 0, name);
+			assert.deepEqual(unobservedSubstitutions(body), [], `${name}: no process substitution`);
+		}
+		const list = bashFunction(script, "list_tree");
+		// The pipeline's own status is the subshell's (pipefail is set in the prologue), and the subshell's is the function's.
+		assert.ok(script.includes("set -euo pipefail"));
+		assert.equal(list.match(/\| LC_ALL=C sort -z >"\$3" \) \|\| return 1/g)?.length, 2);
+		assert.ok(list.includes("(( size <= 16777216 )) || return 1"));
+		// The loops read a regular file of the stage and fail if it can't be read.
+		const publish = bashFunction(script, "publish_tree");
+		assert.equal(publish.match(/done <"\$STAGE\/m\/\$3\.(?:dirs|files)" \|\| fail "place-\$3"/g)?.length, 2);
+		assert.ok(publish.includes('cmp -s -- "$STAGE/m/$3.dirs" "$STAGE/m/$3.placed.dirs" && cmp -s -- "$STAGE/m/$3.files" "$STAGE/m/$3.placed.files" || fail "placed-$3"'));
+		// All three listings are made and checked before the first placement.
+		const first = script.indexOf("\nPLACING=1\n");
+		for (const tree of ['prepare_tree "$STAGE/node" node', 'prepare_tree "$STAGE/chrome$CHROME_DIR" chrome', 'prepare_tree "$STAGE/bundle" bundle']) {
+			assert.ok(script.includes(tree), tree);
+			assert.ok(script.indexOf(tree) < first, tree);
+		}
+		assert.ok(script.includes('mkdir -m 0700 -- "$STAGE/m" '));
+		assert.ok(script.includes("trusted_file /usr/bin/cmp"));
 	});
 
 	it("checks each unpacked program against the configured digest, then builds the bundle with the staged Node and checks its tree digest, before any move", () => {

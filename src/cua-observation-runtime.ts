@@ -10,7 +10,7 @@ import {
 	restoreObservationState,
 	unresolvedObservations,
 } from "./cua-observation";
-import type { CuaViewerClient, HostReply, LaunchAnswer } from "./cua-viewer";
+import type { CuaViewerClient, HostReply, LaunchAnswer, Watch } from "./cua-viewer";
 
 /**
  * A space's observation ledger kept durably, and the person's routes to
@@ -83,6 +83,8 @@ export class ObservationDesk {
 	#state: ObservationState | null = null;
 	/** Why the stored ledger can't be used, or a change couldn't be stored; never cleared in this instance. */
 	#blocked: string | null = null;
+	/** Per open record, what aborts its viewer requests and media relays when it stops being admitted. */
+	readonly #cancels = new Map<string, AbortController>();
 
 	/** Loads the stored ledger. Records left `pending_open` or `revoking` come back `unconfirmed`, and are written back so. */
 	constructor(options: ObservationDeskOptions) {
@@ -128,15 +130,29 @@ export class ObservationDesk {
 			return true;
 		} catch {
 			this.#blocked = "a change to the ledger couldn't be stored";
+			this.#cancelAll();
 			return false;
 		}
+	}
+
+	/** Ends whatever the browser holds of `id`'s launch through this space: its requests in flight and its media relays. */
+	#cancel(id: string): void {
+		this.#cancels.get(id)?.abort();
+		this.#cancels.delete(id);
+	}
+
+	#cancelAll(): void {
+		for (const id of [...this.#cancels.keys()]) this.#cancel(id);
 	}
 
 	/** Applies `event` and stores the result, synchronously. A refusal stores only what it changes (a conflict). */
 	#apply(event: ObservationEvent): ObservationOutcome | { ok: false; reason: "storage" } {
 		if (!this.#state || this.#blocked) return { ok: false, reason: "storage" };
+		const before = this.#record(event.observationId)?.status;
 		const result = applyObservationEvent(this.#state, event);
 		if (result.state !== this.#state && !this.#store(result.state)) return { ok: false, reason: "storage" };
+		// A record that stops being open is admitted no more: what is under way for it ends now, before the host is asked anything.
+		if (before === "open" && this.#record(event.observationId)?.status !== "open") this.#cancel(event.observationId);
 		return result.outcome;
 	}
 
@@ -147,6 +163,7 @@ export class ObservationDesk {
 			return true;
 		} catch {
 			this.#blocked = "the ledger couldn't be made durable";
+			this.#cancelAll();
 			return false;
 		}
 	}
@@ -306,7 +323,8 @@ export class ObservationDesk {
 		const host = reply.answer;
 		if (host.outcome !== "found" || host.key !== id || host.launchId !== record.hostLaunchId || host.generation !== record.hostGeneration) {
 			this.#apply({ type: "unconfirmed", observationId: id, evidence: `the host's status doesn't name this launch (${host.outcome})` });
-		} else if (host.state === "closed_observed") {
+		} else if (host.state === "closed_observed" && host.launch !== null && host.launch.phase === "closed" && host.launch.unconfirmed === 0) {
+			// Closure only from the read on which the host observed it: its own launch, in its generation, every transport closed.
 			this.#apply({
 				type: "closure_observed",
 				observationId: id,
@@ -314,6 +332,9 @@ export class ObservationDesk {
 				hostGeneration: host.generation,
 				evidence: `the host observed every transport closed${host.evidence ? `: ${host.evidence}` : ""}`,
 			});
+		} else if (host.state === "closed_observed") {
+			// The host recorded closure on a read whose answer Pim didn't see, and no longer holds the launch to show it: not closure here.
+			this.#apply({ type: "unconfirmed", observationId: id, evidence: "the host recorded closure on a read Pim didn't see; it can't be shown again" });
 		} else if (host.state === "unconfirmed" || host.state === "start_failed" || host.state === "reconciled") {
 			this.#apply({ type: "unconfirmed", observationId: id, evidence: `the host holds this launch as ${host.state}` });
 		}
@@ -331,7 +352,25 @@ export class ObservationDesk {
 		} catch {
 			return observationResponse(new Response(null, { status: 503 }));
 		}
-		if (admitted.kind === "media") return observationResponse(await client.media(admitted.hostTarget, record.notAfter, this.#now()));
-		return observationResponse(await client.viewer(admitted.hostTarget, request, admitted.kind, record.notAfter, this.#now()));
+		let cancel = this.#cancels.get(record.observationId);
+		if (!cancel) this.#cancels.set(record.observationId, (cancel = new AbortController()));
+		// Read again after every wait: admitted when the request came isn't admitted when the host answers.
+		const watch: Watch = {
+			notAfter: record.notAfter,
+			now: this.#now(),
+			cancel: cancel.signal,
+			admitted: () => {
+				const current = this.#record(admitted.observationId);
+				return (
+					!this.#blocked &&
+					current?.status === "open" &&
+					current.hostLaunchId === admitted.hostLaunchId &&
+					current.hostGeneration === admitted.hostGeneration &&
+					this.#now() < current.notAfter
+				);
+			},
+		};
+		if (admitted.kind === "media") return observationResponse(await client.media(admitted.hostTarget, watch));
+		return observationResponse(await client.viewer(admitted.hostTarget, request, admitted.kind, watch));
 	}
 }

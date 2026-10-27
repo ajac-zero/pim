@@ -24,6 +24,8 @@ import { OBSERVATION_MEDIA_PROTOCOL } from "./cua-observation";
  * never goes on them. Only the headers the host adapter reads are carried,
  * bodies are bounded both ways, and the media socket is relayed message by
  * message within the adapter's own bounds until the observation's deadline.
+ * Each is tied to the observation's cancellation, and admitted again after
+ * the host answers and before anything reaches the browser (`Watch`).
  * This is not a proxy: the caller passes only a target that
  * `admitObservationRequest` (./cua-observation.ts) built.
  *
@@ -129,6 +131,10 @@ export const MAX_MEDIA_PACKET_BYTES = 16 * 1024 * 1024;
 /** The host's own refusals before it reads a request: bad method, path, headers, token, space, type or size. Nothing was done for it. */
 export const REFUSED_BEFORE_ACTING: ReadonlySet<number> = new Set([400, 401, 403, 404, 405, 413, 415]);
 
+/** Where the host serves a launch's files and calls: `/<launch id>/…`, a launch id being 22 characters. */
+const ADAPTER_TARGET = /^\/[A-Za-z0-9_-]{22}\//;
+/** The one media target the host takes: `/<launch id>/media?ticket=<43-character attach token>`. */
+const MEDIA_TARGET = /^\/[A-Za-z0-9_-]{22}\/media\?ticket=[A-Za-z0-9_-]{43}$/;
 /** The presence call, the one call whose answer is a stream: it lasts until the observation's deadline, frame-bounded by the adapter. */
 const PRESENCE_JOIN = "cua.env.v1.PresenceService/Join";
 /** The request headers the adapter reads of a call; nothing else is carried, the bridge's or the browser's `Authorization` least of all. */
@@ -361,8 +367,8 @@ export class CuaViewerClient {
 				}
 				return lost("status");
 			}
-			const type = response.headers.get("content-type") ?? "";
-			if (!/^application\/json(;|$)/.test(type)) {
+			// The host answers exactly `application/json`; anything else isn't its answer.
+			if (response.headers.get("content-type") !== "application/json") {
 				await response.body?.cancel().catch(() => undefined);
 				return lost("malformed");
 			}
@@ -386,9 +392,16 @@ export class CuaViewerClient {
 	 * Carries one of the viewer's file or call requests to `target`, which
 	 * `admitObservationRequest` built (`/<hostLaunchId>/<rest>`), and answers
 	 * what the adapter answered, bounded. The presence stream lasts until
-	 * `notAfter` at most.
+	 * `notAfter` at most. `cancel` ends it, at any point, when the
+	 * observation stops being admitted.
 	 */
-	async viewer(target: string, request: Request, kind: "file" | "call", notAfter: number, now = Date.now()): Promise<Response> {
+	async viewer(target: string, request: Request, kind: "file" | "call", watch: Watch): Promise<Response> {
+		// The host serves the adapter's files to GET and its calls to POST only, at `/<22 characters>/…`, with no query.
+		if (!ADAPTER_TARGET.test(target) || target.includes("?")) return plain(404);
+		if (request.method !== (kind === "file" ? "GET" : "POST")) {
+			await request.body?.cancel().catch(() => undefined);
+			return plain(405);
+		}
 		const headers = new Headers();
 		let body: Uint8Array | undefined;
 		if (kind === "call") {
@@ -405,20 +418,25 @@ export class CuaViewerClient {
 			await request.body?.cancel().catch(() => undefined);
 		}
 		const stream = kind === "call" && target.endsWith(`/${PRESENCE_JOIN}`);
-		const left = notAfter - now;
-		if (left <= 0) return plain(404);
+		const left = watch.notAfter - (watch.now ?? Date.now());
+		if (left <= 0 || watch.cancel.aborted) return plain(404);
 		const giveUp = new AbortController();
 		const headersDue = setTimeout(() => giveUp.abort(), VIEWER_MS);
-		// A file or call has `VIEWER_MS` in all; the presence stream, until the deadline.
-		const signal = AbortSignal.any([giveUp.signal, AbortSignal.timeout(stream ? left : Math.min(left, VIEWER_MS))]);
+		// A file or call has `VIEWER_MS` in all; the presence stream, until the deadline; any of them, until the observation is cancelled.
+		const signal = AbortSignal.any([giveUp.signal, watch.cancel, AbortSignal.timeout(stream ? left : Math.min(left, VIEWER_MS))]);
 		let response: Response;
 		try {
 			response = await this.#fetch(this.#origin + target, { method: request.method, headers, ...(body ? { body } : {}), redirect: "manual", signal });
 		} catch {
 			log("cua.viewer.unreachable", { kind });
-			return plain(signal.aborted ? 504 : 502);
+			return plain(watch.cancel.aborted ? 404 : signal.aborted ? 504 : 502);
 		} finally {
 			clearTimeout(headersDue);
+		}
+		// Admitted before it was sent is not admitted now: what came back while the observation ended is dropped.
+		if (watch.cancel.aborted || !watch.admitted()) {
+			await response.body?.cancel().catch(() => undefined);
+			return plain(404);
 		}
 		if (!VIEWER_STATUSES.has(response.status)) {
 			await response.body?.cancel().catch(() => undefined);
@@ -438,31 +456,40 @@ export class CuaViewerClient {
 	/**
 	 * Opens the media socket at `target` (`/<hostLaunchId>/media?ticket=…`,
 	 * built by `admitObservationRequest`), offering only `rcdp.v2`, and
-	 * answers the browser's side of a relay to it, or the host's refusal.
+	 * answers the browser's side of a relay to it, or a refusal.
+	 *
+	 * Nothing is handed to the browser until the observation is admitted
+	 * again after the host's socket opened: one cancelled or no longer
+	 * admitted by then (an end requested, a lost answer, the deadline) has
+	 * its socket closed, and the browser gets `404`. A cancellation while the
+	 * host is being asked aborts the request. Once relayed, a cancellation
+	 * ends both sides.
 	 */
-	async media(target: string, notAfter: number, now = Date.now()): Promise<Response> {
-		const left = notAfter - now;
-		if (left <= 0) return plain(404);
+	async media(target: string, watch: Watch): Promise<Response> {
+		// The host takes media upgrades only at exactly `/<22 characters>/media?ticket=<43 characters>`.
+		if (!MEDIA_TARGET.test(target)) return plain(404);
+		const left = watch.notAfter - (watch.now ?? Date.now());
+		if (left <= 0 || watch.cancel.aborted) return plain(404);
 		const giveUp = new AbortController();
 		const timer = setTimeout(() => giveUp.abort(), VIEWER_MS);
+		const signal = AbortSignal.any([giveUp.signal, watch.cancel]);
 		let response: Response;
 		try {
 			// No `Authorization`: the attach token in the target is the adapter's to check, and the bridge's token never goes to a viewer route.
 			response = await this.#fetch(this.#origin + target, {
 				headers: { Upgrade: "websocket", "Sec-WebSocket-Protocol": OBSERVATION_MEDIA_PROTOCOL },
 				redirect: "manual",
-				signal: giveUp.signal,
+				signal,
 			});
 		} catch {
 			log("cua.viewer.unreachable", { kind: "media" });
-			return plain(giveUp.signal.aborted ? 504 : 502);
+			return plain(watch.cancel.aborted ? 404 : giveUp.signal.aborted ? 504 : 502);
 		} finally {
 			clearTimeout(timer);
 		}
 		const upstream = response.webSocket;
 		const protocol = response.headers.get("sec-websocket-protocol");
-		// The adapter completes only with `rcdp.v2`; whether the platform shows the header on a `101` is not known, so only another value refuses.
-		if (giveUp.signal.aborted || response.status !== 101 || !upstream || (protocol !== null && protocol !== OBSERVATION_MEDIA_PROTOCOL)) {
+		const refuse = async (status: number) => {
 			if (upstream) {
 				try {
 					upstream.accept();
@@ -472,16 +499,31 @@ export class CuaViewerClient {
 				}
 			}
 			await response.body?.cancel().catch(() => undefined);
+			return plain(status);
+		};
+		if (signal.aborted || !watch.admitted()) return refuse(signal.aborted && !watch.cancel.aborted ? 504 : 404);
+		// The adapter completes only with `rcdp.v2`; whether the platform shows the header on a `101` is not known, so only another value refuses.
+		if (response.status !== 101 || !upstream || (protocol !== null && protocol !== OBSERVATION_MEDIA_PROTOCOL)) {
 			log("cua.viewer.refused", { kind: "media", status: response.status });
-			return plain(response.status === 400 || response.status === 401 || response.status === 404 ? response.status : 502);
+			return refuse(response.status === 400 || response.status === 401 || response.status === 404 ? response.status : 502);
 		}
 		upstream.accept();
 		const { 0: client, 1: browser } = new WebSocketPair();
 		browser.accept();
-		relayMedia(browser, upstream, left);
+		relayMedia(browser, upstream, watch.notAfter - (watch.now ?? Date.now()), watch.cancel);
 		return new Response(null, { status: 101, webSocket: client, headers: { "Sec-WebSocket-Protocol": OBSERVATION_MEDIA_PROTOCOL } });
 	}
 }
+
+/** What a viewer request is carried under: the observation's deadline, its cancellation, and a check that it is still admitted. */
+export type Watch = {
+	readonly notAfter: number;
+	readonly now?: number;
+	/** Aborts when the observation stops being admitted: its record leaves `open`, or the ledger is blocked. */
+	readonly cancel: AbortSignal;
+	/** Whether the observation is admitted now, read again after the host answered and before anything is handed on. */
+	readonly admitted: () => boolean;
+};
 
 /** A close code one side may send on: the other side's own, when it is one a socket may send, or `1011`; `1000` when there was none. */
 function passedCode(code: number | undefined): number {
@@ -492,14 +534,14 @@ function passedCode(code: number | undefined): number {
 
 /**
  * Relays one media socket between the browser and the host, until either
- * closes or `lifetimeMs` passes. Up go only text messages within the
+ * closes, `lifetimeMs` passes or `cancel` aborts. Up go only text messages within the
  * adapter's bound for the browser (it rebuilds or refuses each); down go text
  * and packets within its bounds. Anything else ends both sides with `1008`
  * or `1009`. Workers' sockets say nothing of what they hold unsent, so this
  * can't apply backpressure: a browser far behind is the host's to end
  * (`MAX_BROWSER_BUFFERED_BYTES`), as it sees its own socket back up.
  */
-export function relayMedia(browser: WebSocket, upstream: WebSocket, lifetimeMs: number): void {
+export function relayMedia(browser: WebSocket, upstream: WebSocket, lifetimeMs: number, cancel?: AbortSignal): void {
 	let ended = false;
 	const shut = (socket: WebSocket, code: number, reason: string) => {
 		try {
@@ -512,10 +554,14 @@ export function relayMedia(browser: WebSocket, upstream: WebSocket, lifetimeMs: 
 		if (ended) return;
 		ended = true;
 		clearTimeout(deadline);
+		cancel?.removeEventListener("abort", cancelled);
 		shut(browser, code, reason);
 		shut(upstream, code, reason);
 	};
-	const deadline = setTimeout(() => end(1000, "Observation ended"), lifetimeMs);
+	const cancelled = () => end(1000, "Observation ended");
+	const deadline = setTimeout(cancelled, Math.max(0, lifetimeMs));
+	if (cancel?.aborted) return cancelled();
+	cancel?.addEventListener("abort", cancelled, { once: true });
 	browser.addEventListener("message", (event) => {
 		if (ended) return;
 		if (typeof event.data !== "string") return end(1008, "Only text from the viewer");

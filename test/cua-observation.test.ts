@@ -255,6 +255,18 @@ const CREDENTIAL = "c".repeat(43);
 const ATTACH = "t".repeat(43);
 const LIFETIME = 30 * 60 * 1000;
 const empty = () => JSON.stringify(initialObservationState(SPACE));
+/** A launch as the host reads it on the read that observes its closure: every transport closed, nothing unconfirmed. */
+const CLOSED = {
+	phase: "closed",
+	reason: "ended",
+	remainingMs: 0,
+	transports: { "media-viewer": 0, "media-upstream": 0, "presence-rpc": 0 },
+	refused: 0,
+	closeFailures: 0,
+	sessions: 0,
+	unconfirmed: 0,
+	cleanup: { requested: 1, answered: 1, failed: 0 },
+};
 
 /** One request the desk's client sent, with the ledger as stored, and the flushes made, when it left. */
 type Asked = { url: string; method: string; headers: Headers; body: string; ledger: string | undefined; flushes: number };
@@ -387,6 +399,7 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 			["a redirect", () => new Response(null, { status: 302, headers: { location: "https://elsewhere.test/" } })],
 			["a server error", () => new Response("no", { status: 500 })],
 			["not JSON", () => new Response("launched", { headers: { "content-type": "text/plain" } })],
+			["JSON under another type than exactly application/json", () => new Response(JSON.stringify({ outcome: "start_failed", key: id(1) }), { headers: { "content-type": "application/json; charset=utf-8" } })],
 			["an extra field", () => Response.json({ outcome: "start_failed", key: id(1), viewerPath: "/x" })],
 			["too big", () => Response.json({ outcome: "start_failed", key: id(1), pad: "x".repeat(20_000) })],
 			["another key", () => Response.json({ outcome: "start_failed", key: id(9) })],
@@ -445,7 +458,7 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		expect((JSON.parse(t.asked[1]!.ledger!) as ObservationState).records[0]!.status).toBe("revoking");
 
 		const found = (state: string, changes: Record<string, unknown> = {}) => () =>
-			Response.json({ outcome: "found", key: id(1), state, generation: "gen-1", launchId: LAUNCH, notAfter: NOW + LIFETIME, evidence: state === "closed_observed" ? "cleanup 1/1" : null, launch: null, ...changes });
+			Response.json({ outcome: "found", key: id(1), state, generation: "gen-1", launchId: LAUNCH, notAfter: NOW + LIFETIME, evidence: state === "closed_observed" ? "cleanup 1/1" : null, launch: state === "closed_observed" ? CLOSED : { ...CLOSED, phase: "closing", reason: "ended" }, ...changes });
 		answer = found("ending");
 		expect((await body(await t.desk.status(id(1)))).observation).toMatchObject({ status: "revoking" });
 		answer = () => new Response("down", { status: 503 });
@@ -465,18 +478,24 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		]);
 	});
 
-	it("doesn't close a record on the host's report for another launch or generation", async () => {
-		let answer: (asked: Asked) => Response = launched;
-		const t = desk({ stored: empty(), host: (asked) => answer(asked) });
-		await t.desk.launch();
-		for (const changes of [{ launchId: "M".repeat(22) }, { generation: "gen-2" }]) {
-			answer = () => Response.json({ outcome: "found", key: id(1), state: "closed_observed", generation: "gen-1", launchId: LAUNCH, notAfter: NOW + LIFETIME, evidence: "closed", launch: null, ...changes });
+	it("closes a record only on the host's read that observed it: this launch, this generation, every transport closed", async () => {
+		const cases: [string, Record<string, unknown>][] = [
+			["another launch", { launchId: "M".repeat(22) }],
+			["another generation", { generation: "gen-2" }],
+			["no launch to show (a read Pim didn't see)", { launch: null }],
+			["a launch still closing", { launch: { ...CLOSED, phase: "closing" } }],
+			["a presence stream unconfirmed", { launch: { ...CLOSED, unconfirmed: 1 } }],
+			["the host's generation changed", { outcome: "generation_mismatch", generation: "gen-2" }],
+		];
+		for (const [name, changes] of cases) {
+			let answer: (asked: Asked) => Response = launched;
+			const t = desk({ stored: empty(), host: (asked) => answer(asked) });
+			await t.desk.launch();
+			const reply = { outcome: "found", key: id(1), state: "closed_observed", generation: "gen-1", launchId: LAUNCH, notAfter: NOW + LIFETIME, evidence: "closed", launch: CLOSED, ...changes };
+			answer = () => Response.json(changes.outcome ? { outcome: changes.outcome, generation: changes.generation } : reply);
 			await t.desk.status(id(1));
-			expect(t.records()[0]!.status, JSON.stringify(changes)).toBe("unconfirmed");
+			expect(t.records()[0]!.status, name).toBe("unconfirmed");
 		}
-		answer = () => Response.json({ outcome: "generation_mismatch", generation: "gen-2" });
-		await t.desk.status(id(1));
-		expect(t.records()[0]!.status).toBe("unconfirmed");
 	});
 
 	it("restores a record left pending as unconfirmed, writes it back, and refuses new ones at the limit without evicting", async () => {
@@ -548,6 +567,10 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		expect((await serve(at("viewer/"), false)).status).toBe(401);
 		expect((await serve(at("files"))).status).toBe(404);
 		expect((await serve(at("viewer/", { headers: { authorization: "Bearer pim_x_y" } }))).status).toBe(401);
+		// The host serves files to GET only, and media only at a 43-character attach token, though admission takes more.
+		expect((await serve(at("viewer/", { method: "HEAD" }))).status).toBe(405);
+		const shortTicket = at(`media?ticket=${"u".repeat(20)}`, { headers: { upgrade: "websocket", origin: ORIGIN, "sec-websocket-protocol": "rcdp.v2" } });
+		expect((await serve(shortTicket)).status).toBe(404);
 		expect(t.asked).toHaveLength(before);
 		expect(t.asked.slice(1).every((asked) => asked.headers.get("authorization") === null && asked.headers.get("x-pim-space") === null)).toBe(true);
 	});
@@ -590,5 +613,52 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		viewer.send(new Uint8Array([9]));
 		await vi.waitFor(() => expect(closed).toBe(1008));
 		expect(fromViewer).toHaveLength(1);
+	});
+
+	it("hands no media socket on once the observation stops being admitted, and ends a relay when its end is asked for", async () => {
+		type Host = { socket: WebSocket; closed: number | null };
+		const media = (t: ReturnType<typeof desk>) =>
+			t.desk.serve(new Request(`${ORIGIN}/api/observations/${id(1)}/media?ticket=${ATTACH}`, { headers: { upgrade: "websocket", origin: ORIGIN, "sec-websocket-protocol": "rcdp.v2" } }), { viaSession: true }, ORIGIN);
+		const host = (hosts: Host[], held: { release?: () => void; hold: boolean }) => async (asked: Asked) => {
+			if (asked.url.endsWith("/observations/launch")) return launched(asked);
+			if (asked.url.endsWith("/observations/end")) return Response.json({ outcome: "requested", recorded: true });
+			if (held.hold) await new Promise<void>((resolve) => (held.release = resolve));
+			const { 0: client, 1: server } = new WebSocketPair();
+			server.accept();
+			const entry: Host = { socket: server, closed: null };
+			server.addEventListener("close", (event) => (entry.closed = event.code));
+			hosts.push(entry);
+			return new Response(null, { status: 101, webSocket: client, headers: { "sec-websocket-protocol": "rcdp.v2" } });
+		};
+
+		// An end asked for while the host's socket is opening: the socket that opens is closed, and the browser gets nothing.
+		const opening: Host[] = [];
+		const held: { release?: () => void; hold: boolean } = { hold: true };
+		const first = desk({ stored: empty(), host: host(opening, held) });
+		await first.desk.launch();
+		const pending = media(first);
+		await vi.waitFor(() => expect(held.release).toBeDefined());
+		expect((await first.desk.end(id(1))).status).toBe(202);
+		held.release!();
+		const refused = await pending;
+		expect(refused.status).toBe(404);
+		expect(refused.webSocket).toBeNull();
+		await vi.waitFor(() => expect(opening[0]?.closed).toBe(1008));
+
+		// A relay under way when the end is asked for ends on both sides, before the host is asked to end the launch.
+		const relayed: Host[] = [];
+		const second = desk({ stored: empty(), host: host(relayed, { hold: false }) });
+		await second.desk.launch();
+		const response = await media(second);
+		expect(response.status).toBe(101);
+		const viewer = response.webSocket!;
+		let closed: number | null = null;
+		viewer.accept();
+		viewer.addEventListener("close", (event) => {
+			closed = event.code;
+		});
+		expect((await second.desk.end(id(1))).status).toBe(202);
+		await vi.waitFor(() => expect(closed).toBe(1000));
+		await vi.waitFor(() => expect(relayed[0]?.closed).toBe(1000));
 	});
 });

@@ -1,4 +1,6 @@
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { getAgentByName } from "agents";
 import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -439,40 +441,113 @@ describe("the preview's Cua fixture", () => {
 });
 
 describe("a seeded preview space and its bridge", () => {
-	/** The space's bridge: the relay, whose sessions record what reached them and run nothing. */
+	const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+	/** Throws what failed: one error as it is, several together, none at all when nothing did. */
+	function rethrow(errors: readonly unknown[], summary: string): void {
+		if (errors.length === 1) throw errors[0];
+		if (errors.length > 1) throw new AggregateError(errors, `${summary} (${errors.map(messageOf).join("; ")})`);
+	}
+
+	/**
+	 * Runs `body`, then `cleanup` however `body` ended, as test/cua-native-identity.test.ts does:
+	 * the body's failure, the cleanup's, or both in one AggregateError, the body's first. Neither
+	 * hides the other.
+	 */
+	async function afterwards(body: () => Promise<void>, cleanup: () => Promise<void>): Promise<void> {
+		let failure: { readonly error: unknown } | undefined;
+		try {
+			await body();
+		} catch (error) {
+			failure = { error };
+		}
+		let cleaned: { readonly error: unknown } | undefined;
+		try {
+			await cleanup();
+		} catch (error) {
+			cleaned = { error };
+		}
+		if (failure && cleaned) {
+			throw new AggregateError([failure.error, cleaned.error], `The test failed (${messageOf(failure.error)}), and cleaning up after it failed too (${messageOf(cleaned.error)})`);
+		}
+		if (failure) throw failure.error;
+		if (cleaned) throw cleaned.error;
+	}
+
+	/**
+	 * The space's bridge: the relay, whose sessions record what reached them and run nothing. The
+	 * test owns a temporary directory, made fresh under `os.tmpdir()` for the machine's root, and
+	 * every session the relay opens. `cleanup` refuses any session after it starts, ends each owned
+	 * one (its Link closes, and the relay ends its connection), and removes that directory only.
+	 * When anything fails before the bridge is handed back, the directory is removed here.
+	 */
 	async function bridge(owner: string) {
-		const root = `/tmp/preview-cua-fixture-${crypto.randomUUID()}`;
-		await fs.mkdir(root, { recursive: true });
-		const seen = { connections: 0, sent: [] as string[], ran: [] as string[] };
-		const machine: Machine = {
-			root: await fs.realpath(root),
-			exec: async (args) => {
-				seen.ran.push(args.command);
-				return { exitCode: 0, signal: null, stdout: `ran ${args.command}\n`, stderr: "", timedOut: false, truncated: false };
-			},
-		};
-		const open = async (events: SessionEvents): Promise<Session> => {
-			const link = new Link(machine, (message) => events.message(message));
-			events.message(JSON.stringify({ type: "hello", version: 1, agent: "pim-computer/test", hostname: "cua-vm", platform: "linux", arch: "x64", user: "desktop", root: machine.root, browser: null }));
-			return {
-				send(message) {
-					seen.sent.push(message);
-					link.receive(message);
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "preview-cua-fixture-"));
+		try {
+			const seen = { connections: 0, sent: [] as string[], ran: [] as string[] };
+			const owned: (() => void)[] = [];
+			let closing = false;
+			const machine: Machine = {
+				root: await fs.realpath(root),
+				exec: async (args) => {
+					seen.ran.push(args.command);
+					return { exitCode: 0, signal: null, stdout: `ran ${args.command}\n`, stderr: "", timedOut: false, truncated: false };
 				},
-				close: () => link.close(),
 			};
-		};
-		const relay = new Relay({ space: owner, token: TOKEN, path: `/${owner}`, open, log: () => undefined });
-		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-			const url = new URL(input instanceof Request ? input.url : String(input));
-			if (url.href !== `${HOST}/${owner}`) {
-				sent.push(url.href);
-				throw new Error(`This test reaches only its bridge, not ${url.href}`);
+			const open = async (events: SessionEvents): Promise<Session> => {
+				if (closing) throw new Error("This test's bridge is being cleaned up and opens no more sessions");
+				const link = new Link(machine, (message) => events.message(message));
+				owned.push(() => {
+					link.close();
+					events.closed();
+				});
+				events.message(JSON.stringify({ type: "hello", version: 1, agent: "pim-computer/test", hostname: "cua-vm", platform: "linux", arch: "x64", user: "desktop", root: machine.root, browser: null }));
+				return {
+					send(message) {
+						seen.sent.push(message);
+						link.receive(message);
+					},
+					close: () => link.close(),
+				};
+			};
+			const relay = new Relay({ space: owner, token: TOKEN, path: `/${owner}`, open, log: () => undefined });
+			vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+				const url = new URL(input instanceof Request ? input.url : String(input));
+				if (url.href !== `${HOST}/${owner}`) {
+					sent.push(url.href);
+					throw new Error(`This test reaches only its bridge, not ${url.href}`);
+				}
+				seen.connections++;
+				return await serveWithWebSocketPair(relay, new Request(input, init));
+			});
+			const cleanup = async () => {
+				closing = true;
+				const errors: unknown[] = [];
+				for (const end of owned.splice(0)) {
+					try {
+						end();
+					} catch (error) {
+						errors.push(error);
+					}
+				}
+				try {
+					await fs.rm(root, { recursive: true });
+				} catch (error) {
+					errors.push(error);
+				}
+				rethrow(errors, "Cleaning up the bridge failed");
+			};
+			return { seen, cleanup };
+		} catch (error) {
+			const errors: unknown[] = [error];
+			try {
+				await fs.rm(root, { recursive: true });
+			} catch (cleanup) {
+				errors.push(cleanup);
 			}
-			seen.connections++;
-			return await serveWithWebSocketPair(relay, new Request(input, init));
-		});
-		return seen;
+			rethrow(errors, "Making the bridge failed, and removing its directory failed too");
+			throw error;
+		}
 	}
 
 	it("sends the preview model's shell call only after the person approves it, once, to the owner's bridge", async () => {
@@ -481,27 +556,28 @@ describe("a seeded preview space and its bridge", () => {
 		await ada.within((instance) => instance.applySettings({ approvalPolicy: "majordomo" }));
 		configure({ flag: "seed", owner: ada.owner, bridges: bridgesOf(ada.owner) });
 		expect(await ada.restart()).toBe("started");
-		const seen = await bridge(ada.owner);
+		const { seen, cleanup } = await bridge(ada.owner);
+		await afterwards(async () => {
+			const root: string = (await ada.fetch("/")).body.rootSession;
+			await ada.fetch(`/sessions/${root}/messages`, { method: "POST", body: JSON.stringify({ content: '/tool shell {"command": "echo fixture"}' }) });
+			const pending = await vi.waitFor(
+				async () => {
+					const [approval] = (await ada.fetch<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
+					expect(approval).toBeDefined();
+					return approval!;
+				},
+				{ timeout: 15_000, interval: 200 },
+			);
+			// Filed and waiting for the person: nothing has reached the bridge.
+			expect(seen).toEqual({ connections: 0, sent: [], ran: [] });
 
-		const root: string = (await ada.fetch("/")).body.rootSession;
-		await ada.fetch(`/sessions/${root}/messages`, { method: "POST", body: JSON.stringify({ content: '/tool shell {"command": "echo fixture"}' }) });
-		const pending = await vi.waitFor(
-			async () => {
-				const [approval] = (await ada.fetch<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
-				expect(approval).toBeDefined();
-				return approval!;
-			},
-			{ timeout: 15_000, interval: 200 },
-		);
-		// Filed and waiting for the person: nothing has reached the bridge.
-		expect(seen).toEqual({ connections: 0, sent: [], ran: [] });
-
-		expect((await ada.fetch(`/approvals/${pending.id}/approve`, { method: "POST", body: "{}" })).status).toBe(200);
-		await vi.waitFor(() => expect(seen.ran).toEqual(["echo fixture"]), { timeout: 15_000, interval: 200 });
-		expect(seen.connections).toBe(1);
-		expect(seen.sent.filter((message) => message.includes("echo fixture"))).toHaveLength(1);
-		await vi.waitFor(async () => expect((await ada.within((instance) => instance.control.state))?.requests).toEqual([expect.objectContaining({ requestId: `approval:${pending.id}`, status: "completed" })]));
-		expect(sent).toEqual([]);
+			expect((await ada.fetch(`/approvals/${pending.id}/approve`, { method: "POST", body: "{}" })).status).toBe(200);
+			await vi.waitFor(() => expect(seen.ran).toEqual(["echo fixture"]), { timeout: 15_000, interval: 200 });
+			expect(seen.connections).toBe(1);
+			expect(seen.sent.filter((message) => message.includes("echo fixture"))).toHaveLength(1);
+			await vi.waitFor(async () => expect((await ada.within((instance) => instance.control.state))?.requests).toEqual([expect.objectContaining({ requestId: `approval:${pending.id}`, status: "completed" })]));
+			expect(sent).toEqual([]);
+		}, cleanup);
 	});
 
 	it("lets the seeded owner's browser session start watching on the bridge's viewer host, view only, and leaves the agent's lease as it was", async () => {

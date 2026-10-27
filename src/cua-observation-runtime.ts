@@ -226,6 +226,11 @@ export class ObservationDesk {
 		const recorded = this.#apply({ type: "open_requested", owner: this.#options.owner, observationId: id, notAfter, now });
 		if (!recorded.ok) return failure(recorded.reason === "storage" ? 503 : 409, `The observation couldn't be recorded (${recorded.reason}), so nothing was asked of the computer.`);
 		if (!(await this.#flush())) return failure(503, "The observation couldn't be made durable, so nothing was asked of the computer.");
+		// The flush was a wait: another flush may have failed and blocked the ledger, or the record changed. Only the exact intent stored, unblocked, is sent.
+		const intent = this.#record(id);
+		if (this.#blocked || intent?.status !== "pending_open" || intent.notAfter !== notAfter || intent.hostLaunchId !== null) {
+			return failure(this.#blocked ? 503 : 409, "The observation changed before the computer was asked, so nothing was asked of it.", { observation: this.#view(id) });
+		}
 		const reply = await client.launch({ key: id, owner: this.#options.owner, notAfter });
 		return this.#launched(id, notAfter, reply);
 	}
@@ -259,6 +264,10 @@ export class ObservationDesk {
 		if (reply.kind !== "answer") return failure(502, "The computer's answer was lost; try again.", { observation: view(record) });
 		const host = reply.answer;
 		if (host.outcome === "launched" && host.key === record.observationId && host.launchId === record.hostLaunchId && host.generation === record.hostGeneration && host.notAfter === record.notAfter) {
+			// The host was a wait: the page is handed out only if the record is still this open launch, before its deadline, unblocked.
+			const current = this.#record(record.observationId);
+			const still = !this.#blocked && current?.status === "open" && current.hostLaunchId === host.launchId && current.hostGeneration === host.generation && this.#now() < current.notAfter;
+			if (!still) return failure(409, "This observation changed while the computer answered. Check it again.", { observation: this.#view(record.observationId) });
 			return this.#viewer(record.observationId, host.launchId, host.viewerPath);
 		}
 		if (host.outcome === "launched" && host.key === record.observationId) {
@@ -287,6 +296,8 @@ export class ObservationDesk {
 		const record = this.#record(id);
 		if (!record) return failure(404, "No such observation");
 		if (FINAL.includes(record.status)) return answer({ observation: view(record) });
+		// A launch still being recorded or asked for is left to finish: its answer names what to end. Revoking it now would leave a record no host answer can settle.
+		if (record.status === "pending_open") return failure(409, "This observation is still starting. Stop it once it has started.", { observation: view(record) });
 		const revoked = this.#apply({ type: "revoke_requested", observationId: id });
 		if (!revoked.ok) return failure(503, "Stopping couldn't be recorded, so nothing was asked of the computer.", { observation: view(record) });
 		const current = this.#record(id)!;
@@ -298,6 +309,10 @@ export class ObservationDesk {
 			return failure(503, "This space's computer has no usable bridge, so nothing was asked of it.", { observation: view(current) });
 		}
 		if (!(await this.#flush())) return failure(503, "Stopping couldn't be made durable, so nothing was asked of the computer.", { observation: view(current) });
+		// The flush was a wait: the ledger may have blocked, or the record settled, meanwhile.
+		const still = this.#record(id);
+		if (this.#blocked) return failure(503, "Stopping couldn't be made durable, so nothing was asked of the computer.", { observation: this.#view(id) });
+		if (!still || FINAL.includes(still.status) || still.hostLaunchId !== current.hostLaunchId || still.hostGeneration !== current.hostGeneration) return answer({ observation: this.#view(id) });
 		const reply = await client.end({ owner: this.#options.owner, key: id, generation: current.hostGeneration });
 		if (reply.kind === "lost" || reply.kind === "unavailable") {
 			this.#apply({ type: "unconfirmed", observationId: id, evidence: `the host's answer to end was lost (${reply.kind === "lost" ? reply.reason : "unavailable"})` });
@@ -367,7 +382,7 @@ export class ObservationDesk {
 		// Read again after every wait: admitted when the request came isn't admitted when the host answers.
 		const watch: Watch = {
 			notAfter: record.notAfter,
-			now: this.#now(),
+			now: this.#now,
 			cancel: cancel.signal,
 			admitted: () => {
 				const current = this.#record(admitted.observationId);

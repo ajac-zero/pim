@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { admissionBlockers, applyControlEvent, type ControlState, initialControlState } from "../src/computer-control";
 import { ObservationDesk, type ObservationStorage } from "../src/cua-observation-runtime";
-import { CuaViewerClient, MAX_CALL_REQUEST_BYTES, parseEndAnswer, parseLaunchAnswer, parseStatusAnswer } from "../src/cua-viewer";
+import { type ClientLimits, CuaViewerClient, MAX_CALL_REQUEST_BYTES, parseEndAnswer, parseLaunchAnswer, parseStatusAnswer, readBounded } from "../src/cua-viewer";
 import {
 	admitObservationRequest,
 	applyObservationEvent,
@@ -281,7 +281,15 @@ const launched = (asked: Asked, changes: Record<string, unknown> = {}) => {
  * A desk over a ledger held in memory (`stored`, the raw value; undefined for
  * none), whose client's `fetch` records what it is sent and lets `host` answer.
  */
-function desk(options: { stored?: string; host?: (asked: Asked) => Response | Promise<Response>; failWrite?: (value: string) => boolean }) {
+function desk(options: {
+	stored?: string;
+	host?: (asked: Asked) => Response | Promise<Response>;
+	failWrite?: (value: string) => boolean;
+	/** What each flush waits on; by default none. */
+	flush?: () => Promise<void>;
+	openObservations?: number;
+	limits?: Partial<ClientLimits>;
+}) {
 	const store = { value: options.stored, flushes: 0 };
 	const storage: ObservationStorage = {
 		read: () => store.value,
@@ -291,6 +299,7 @@ function desk(options: { stored?: string; host?: (asked: Asked) => Response | Pr
 		},
 		flush: async () => {
 			store.flushes++;
+			await options.flush?.();
 		},
 	};
 	const asked: Asked[] = [];
@@ -306,15 +315,21 @@ function desk(options: { stored?: string; host?: (asked: Asked) => Response | Pr
 	const instance = new ObservationDesk({
 		owner: SPACE,
 		storage,
-		client: () => new CuaViewerClient(BRIDGE, SPACE, fetcher),
+		client: () => new CuaViewerClient(BRIDGE, SPACE, fetcher, options.limits),
 		observationMs: LIFETIME,
-		openObservations: 1,
+		openObservations: options.openObservations ?? 1,
 		now: () => clock.now,
 		newId: () => id(++made),
 	});
 	const records = () => (JSON.parse(store.value!) as ObservationState).records;
 	return { desk: instance, store, asked, clock, records };
 }
+
+/** Flushes that wait until the test settles each, in the order they were asked for. */
+const heldFlushes = () => {
+	const held: { resolve: () => void; reject: (error: Error) => void }[] = [];
+	return { held, flush: () => new Promise<void>((resolve, reject) => held.push({ resolve, reject })) };
+};
 
 const body = async (response: Response) => (await response.json()) as Record<string, any>;
 const viewerPage = (n: number) => `/api/observations/${id(n)}/viewer/#ticket=${CREDENTIAL}&clipboard=0`;
@@ -687,5 +702,157 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		expect((await second.desk.end(id(1))).status).toBe(202);
 		await vi.waitFor(() => expect(closed).toBe(1000));
 		await vi.waitFor(() => expect(relayed[0]?.closed).toBe(1000));
+	});
+
+	it("asks the host nothing after a flush it waited on, once another flush failed meanwhile", async () => {
+		// Two launches in flight: the second's flush fails and blocks the ledger, so the first sends nothing, though its own flush succeeds.
+		const flushes = heldFlushes();
+		const t = desk({ stored: empty(), host: launched, flush: flushes.flush, openObservations: 2 });
+		const first = t.desk.launch();
+		const second = t.desk.launch();
+		expect(flushes.held).toHaveLength(2);
+		flushes.held[1]!.reject(new Error("disk gone"));
+		expect((await second).status).toBe(503);
+		flushes.held[0]!.resolve();
+		expect((await first).status).toBe(503);
+		expect(t.asked).toEqual([]);
+		expect(t.desk.blocked).not.toBeNull();
+		expect(t.records().map((record) => record.status)).toEqual(["pending_open", "pending_open"]);
+
+		// An end whose flush fails while a launch waits on its own: neither the end nor the launch is sent.
+		const later = heldFlushes();
+		let holding = false;
+		const u = desk({
+			stored: empty(),
+			host: (asked) => (asked.url.endsWith("/observations/end") ? Response.json({ outcome: "requested", recorded: true }) : launched(asked)),
+			flush: () => (holding ? later.flush() : Promise.resolve()),
+			openObservations: 2,
+		});
+		expect((await u.desk.launch()).status).toBe(200);
+		holding = true;
+		const starting = u.desk.launch();
+		const stopping = u.desk.end(id(1));
+		expect(later.held).toHaveLength(2);
+		later.held[1]!.reject(new Error("disk gone"));
+		expect((await stopping).status).toBe(503);
+		later.held[0]!.resolve();
+		expect((await starting).status).toBe(503);
+		expect(u.asked.map((asked) => asked.url)).toEqual(["https://bridge.cua.test/pim/observations/launch"]);
+		expect(JSON.parse(u.asked[0]!.body)).toMatchObject({ key: id(1) });
+	});
+
+	it("leaves an observation that is still starting to finish when its end is asked for, and sends its launch once", async () => {
+		const flushes = heldFlushes();
+		const t = desk({ stored: empty(), host: launched, flush: flushes.flush });
+		const starting = t.desk.launch();
+		const stop = await t.desk.end(id(1));
+		expect(stop.status).toBe(409);
+		expect((await body(stop)).observation).toMatchObject({ id: id(1), status: "pending_open" });
+		expect(t.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "pending_open" })]);
+		expect(flushes.held).toHaveLength(1);
+		flushes.held[0]!.resolve();
+		expect((await starting).status).toBe(200);
+		expect(t.asked).toHaveLength(1);
+		expect(t.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "open", hostLaunchId: LAUNCH })]);
+	});
+
+	it("stops reading a viewer call's body that never ends, at the observation's end or the call's bound, and sends nothing", async () => {
+		const host = (asked: Asked) => (asked.url.endsWith("/observations/end") ? Response.json({ outcome: "requested", recorded: true }) : launched(asked));
+		const stalled = () =>
+			new Request(`${ORIGIN}/api/observations/${id(1)}/cua.env.v1.SystemService/GetCapabilities`, {
+				method: "POST",
+				headers: { origin: ORIGIN, "content-type": "application/grpc-web+proto" },
+				body: new ReadableStream<Uint8Array>({ pull: () => new Promise<void>(() => undefined) }),
+			});
+		const t = desk({ stored: empty(), host });
+		await t.desk.launch();
+		const pending = t.desk.serve(stalled(), { viaSession: true }, ORIGIN);
+		expect((await t.desk.end(id(1))).status).toBe(202);
+		expect((await pending).status).toBe(404);
+		expect(t.asked.map((asked) => asked.url)).toEqual(["https://bridge.cua.test/pim/observations/launch", "https://bridge.cua.test/pim/observations/end"]);
+
+		const u = desk({ stored: empty(), host, limits: { viewerMs: 50 } });
+		await u.desk.launch();
+		expect((await u.desk.serve(stalled(), { viaSession: true }, ORIGIN)).status).toBe(408);
+		expect(u.asked).toHaveLength(1);
+	});
+
+	it("gives a media relay only what is left of the observation once its socket opens", async () => {
+		type Gate = { release?: () => void };
+		const hosts: { closed: number | null }[] = [];
+		const host = (gate: Gate) => async (asked: Asked) => {
+			if (asked.url.endsWith("/observations/launch")) return launched(asked);
+			await new Promise<void>((resolve) => (gate.release = resolve));
+			const { 0: client, 1: server } = new WebSocketPair();
+			server.accept();
+			const entry: { closed: number | null } = { closed: null };
+			server.addEventListener("close", (event) => (entry.closed = event.code));
+			hosts.push(entry);
+			return new Response(null, { status: 101, webSocket: client, headers: { "sec-websocket-protocol": "rcdp.v2" } });
+		};
+		const media = (t: ReturnType<typeof desk>) =>
+			t.desk.serve(new Request(`${ORIGIN}/api/observations/${id(1)}/media?ticket=${ATTACH}`, { headers: { upgrade: "websocket", origin: ORIGIN, "sec-websocket-protocol": "rcdp.v2" } }), { viaSession: true }, ORIGIN);
+
+		// The socket took until 50 ms before the deadline to open: the relay ends then, not a whole lifetime later.
+		const soon: Gate = {};
+		const t = desk({ stored: empty(), host: host(soon) });
+		await t.desk.launch();
+		const opening = media(t);
+		await vi.waitFor(() => expect(soon.release).toBeDefined());
+		t.clock.now = NOW + LIFETIME - 50;
+		soon.release!();
+		const response = await opening;
+		expect(response.status).toBe(101);
+		const viewer = response.webSocket!;
+		let closed: number | null = null;
+		viewer.accept();
+		viewer.addEventListener("close", (event) => {
+			closed = event.code;
+		});
+		await vi.waitFor(() => expect(closed).toBe(1000));
+		await vi.waitFor(() => expect(hosts[0]?.closed).toBe(1000));
+
+		// It opened at the deadline: the socket is closed unread, and the browser gets nothing.
+		hosts.length = 0;
+		const deadline: Gate = {};
+		const u = desk({ stored: empty(), host: host(deadline) });
+		await u.desk.launch();
+		const late = media(u);
+		await vi.waitFor(() => expect(deadline.release).toBeDefined());
+		u.clock.now = NOW + LIFETIME;
+		deadline.release!();
+		const refused = await late;
+		expect(refused.status).toBe(404);
+		expect(refused.webSocket).toBeNull();
+		await vi.waitFor(() => expect(hosts[0]?.closed).toBe(1008));
+	});
+
+	it("gives up on a management answer that never comes or never ends within its bound, and holds the record unconfirmed", async () => {
+		const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+		const endless = () =>
+			new ReadableStream<Uint8Array>({
+				start: (controller) => controller.enqueue(new TextEncoder().encode('{"outcome":')),
+				pull: () => new Promise<void>(() => undefined),
+				cancel: () => new Promise<void>(() => undefined),
+			});
+		try {
+			const silent = desk({ stored: empty(), host: () => new Promise<Response>(() => undefined), limits: { manageMs: 50 } });
+			expect((await silent.desk.launch()).status).toBe(502);
+			expect(silent.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "unconfirmed" })]);
+
+			const halfway = desk({ stored: empty(), host: () => new Response(endless(), { headers: { "content-type": "application/json" } }), limits: { manageMs: 50 } });
+			expect((await halfway.desk.launch()).status).toBe(502);
+			expect(halfway.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "unconfirmed" })]);
+			const logged = errors.mock.calls.map(([line]) => String(line));
+			expect(logged.filter((line) => line === JSON.stringify({ event: "cua.viewer.lost", action: "launch", reason: "timeout" }))).toHaveLength(2);
+
+			// A read that stalls stops at its signal, and a cancel that never settles is left after CLEANUP_MS, said to be unsettled.
+			const stop = new AbortController();
+			setTimeout(() => stop.abort(), 20);
+			expect(await readBounded(endless(), 1024, stop.signal)).toEqual({ kind: "stopped", cleaned: false });
+			expect(errors.mock.calls.map(([line]) => String(line))).toContain(JSON.stringify({ event: "cua.viewer.cleanup_unsettled", what: "body", outcome: "stopped" }));
+		} finally {
+			errors.mockRestore();
+		}
 	});
 });

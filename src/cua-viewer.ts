@@ -256,27 +256,139 @@ export function parseStatusAnswer(value: unknown): StatusAnswer | undefined {
 	}
 }
 
+// ---------------------------------------------------------------- waits
+
+/** How long a cancel of a body Pim holds may take to be seen; past it, it is left, and logged as unsettled. */
+export const CLEANUP_MS = 1_000;
+
+/** How a wait ended: its value, its rejection, or the signal or bound that stopped it first. */
+type Settled<T> = { readonly kind: "value"; readonly value: T } | { readonly kind: "error" } | { readonly kind: "stopped" };
+
+/**
+ * Waits for `promise` until `signal` aborts or `ms` passes, whichever comes
+ * first. It leaves no timer or listener behind: both are removed the moment
+ * any of the three settles. A promise that never settles is left to itself,
+ * holding nothing of this wait.
+ */
+export function settle<T>(promise: Promise<T>, signal: AbortSignal | null, ms: number | null): Promise<Settled<T>> {
+	return new Promise((resolve) => {
+		let done = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const finish = (result: Settled<T>) => {
+			if (done) return;
+			done = true;
+			if (timer !== undefined) clearTimeout(timer);
+			signal?.removeEventListener("abort", stop);
+			resolve(result);
+		};
+		const stop = () => finish({ kind: "stopped" });
+		if (signal?.aborted) return stop();
+		signal?.addEventListener("abort", stop, { once: true });
+		if (ms !== null) timer = setTimeout(stop, Math.max(0, ms));
+		promise.then(
+			(value) => finish({ kind: "value", value }),
+			() => finish({ kind: "error" }),
+		);
+	});
+}
+
+/**
+ * A signal that aborts when any of `sources` does, or `abort()` is called,
+ * and `release()`, which removes what it added to the sources. Unlike
+ * `AbortSignal.any`, nothing stays attached to a long-lived source (an
+ * observation's cancellation) once a request is done.
+ */
+function linked(...sources: AbortSignal[]): { readonly signal: AbortSignal; readonly abort: () => void; readonly release: () => void } {
+	const controller = new AbortController();
+	const abort = () => controller.abort();
+	for (const source of sources) {
+		if (source.aborted) controller.abort();
+		else source.addEventListener("abort", abort, { once: true });
+	}
+	return { signal: controller.signal, abort, release: () => sources.forEach((source) => source.removeEventListener("abort", abort)) };
+}
+
+/** Whether a cancel was seen to settle within `CLEANUP_MS`; one that wasn't is logged and left. */
+async function cleaned(what: string, cancel: () => Promise<unknown>): Promise<boolean> {
+	let started: Promise<unknown>;
+	try {
+		started = cancel();
+	} catch {
+		started = Promise.reject(new Error("cancel threw"));
+	}
+	const seen = await settle(started, null, CLEANUP_MS);
+	if (seen.kind !== "value") log("cua.viewer.cleanup_unsettled", { what, outcome: seen.kind });
+	return seen.kind === "value";
+}
+
+/** Cancels `reader` and releases its lock, waiting at most `CLEANUP_MS`; whether the cancel was seen to settle. */
+async function discardReader(reader: ReadableStreamDefaultReader<Uint8Array>, what: string): Promise<boolean> {
+	const settled = await cleaned(what, () => reader.cancel());
+	try {
+		reader.releaseLock();
+	} catch {
+		// A read still pending keeps the lock; the cancel above already ended the stream if it could.
+	}
+	return settled;
+}
+
+/** Cancels a body Pim won't read, waiting at most `CLEANUP_MS`; whether the cancel was seen to settle. */
+async function discardBody(body: ReadableStream<Uint8Array> | null, what: string): Promise<boolean> {
+	if (!body) return true;
+	return cleaned(what, () => body.cancel());
+}
+
+/** Lets go of an answer that came after Pim stopped waiting for it: its socket closed, its body cancelled, neither awaited. */
+function abandon(late: Promise<Response>, what: string): void {
+	late.then(
+		(response) => {
+			if (response.webSocket) {
+				try {
+					response.webSocket.accept();
+					response.webSocket.close(1008, "Too late");
+				} catch {
+					// It ends by itself.
+				}
+			}
+			void discardBody(response.body, what);
+		},
+		() => undefined,
+	);
+}
+
 // ---------------------------------------------------------------- bodies
 
-/** A body read whole, or `null` when it has more than `max` bytes or fails. */
-export async function readBounded(body: ReadableStream<Uint8Array> | null, max: number): Promise<Uint8Array | null> {
-	if (!body) return new Uint8Array(0);
-	const reader = body.getReader();
+/** A body read whole, or why not, and for a body left unread whether its cancel was seen to settle. */
+export type BodyRead = { readonly kind: "read"; readonly bytes: Uint8Array } | { readonly kind: "too_big" | "stopped" | "failed"; readonly cleaned: boolean };
+
+/**
+ * Reads `body` whole, at most `max` bytes, each read raced against
+ * `signal`: a read that stalls, or a body that never ends, stops when the
+ * signal aborts, and the reader is cancelled (within `CLEANUP_MS`) and
+ * released. Nothing here waits on the body after that.
+ */
+export async function readBounded(body: ReadableStream<Uint8Array> | null, max: number, signal: AbortSignal): Promise<BodyRead> {
+	if (!body) return { kind: "read", bytes: new Uint8Array(0) };
+	let reader: ReadableStreamDefaultReader<Uint8Array>;
+	try {
+		reader = body.getReader();
+	} catch {
+		return { kind: "failed", cleaned: false };
+	}
 	const chunks: Uint8Array[] = [];
 	let size = 0;
+	for (;;) {
+		const step = await settle(reader.read(), signal, null);
+		if (step.kind !== "value") return { kind: step.kind === "stopped" ? "stopped" : "failed", cleaned: await discardReader(reader, "body") };
+		if (step.value.done) break;
+		size += step.value.value.byteLength;
+		if (size > max) return { kind: "too_big", cleaned: await discardReader(reader, "body") };
+		chunks.push(step.value.value);
+	}
 	try {
-		for (;;) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			size += value.byteLength;
-			if (size > max) {
-				await reader.cancel().catch(() => undefined);
-				return null;
-			}
-			chunks.push(value);
-		}
+		reader.releaseLock();
 	} catch {
-		return null;
+		// Done reading: nothing is pending.
 	}
 	const whole = new Uint8Array(size);
 	let at = 0;
@@ -284,25 +396,68 @@ export async function readBounded(body: ReadableStream<Uint8Array> | null, max: 
 		whole.set(chunk, at);
 		at += chunk.byteLength;
 	}
-	return whole;
+	return { kind: "read", bytes: whole };
 }
 
-/** `body`, passed on as it arrives, failing once it has had more than `max` bytes (no limit for `null`). */
-function capped(body: ReadableStream<Uint8Array>, max: number | null): ReadableStream<Uint8Array> {
+/**
+ * `body`, passed on as the browser reads it, failing once it has had more
+ * than `max` bytes (no limit for `null`) or `signal` aborts. Each read of
+ * the host's body is raced against `signal`, so a stalled one doesn't hold
+ * the browser's. `ended` runs once, however it ends: done, failed, too big,
+ * stopped, or cancelled by the browser.
+ */
+function passOn(body: ReadableStream<Uint8Array>, max: number | null, signal: AbortSignal, ended: () => void): ReadableStream<Uint8Array> {
+	const reader = body.getReader();
 	let size = 0;
-	const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>({
-		transform(chunk, controller) {
-			size += chunk.byteLength;
-			if (max !== null && size > max) {
-				controller.error(new Error("The desktop's answer was too big."));
-				return;
+	let finished = false;
+	let output: ReadableStreamDefaultController<Uint8Array> | undefined;
+	const finish = (error?: Error) => {
+		if (finished) return;
+		finished = true;
+		signal.removeEventListener("abort", stopped);
+		ended();
+		if (error) {
+			void discardReader(reader, "answer");
+			try {
+				output?.error(error);
+			} catch {
+				// Already closed or errored.
 			}
-			controller.enqueue(chunk);
+		}
+	};
+	const stopped = () => finish(new Error("The observation ended."));
+	return new ReadableStream<Uint8Array>({
+		start(controller) {
+			output = controller;
+			if (signal.aborted) stopped();
+			else signal.addEventListener("abort", stopped, { once: true });
+		},
+		async pull(controller) {
+			if (finished) return;
+			const step = await settle(reader.read(), signal, null);
+			if (finished) return;
+			if (step.kind !== "value") return finish(new Error("The desktop's answer ended."));
+			if (step.value.done) {
+				finish();
+				try {
+					reader.releaseLock();
+				} catch {
+					// Nothing is pending.
+				}
+				return controller.close();
+			}
+			size += step.value.value.byteLength;
+			if (max !== null && size > max) return finish(new Error("The desktop's answer was too big."));
+			controller.enqueue(step.value.value);
+		},
+		cancel() {
+			if (finished) return;
+			finished = true;
+			signal.removeEventListener("abort", stopped);
+			ended();
+			void discardReader(reader, "answer");
 		},
 	});
-	// A failure here reaches the browser as its read failing; nothing more is owed to it.
-	body.pipeTo(writable).catch(() => undefined);
-	return readable;
 }
 
 const plain = (status: number) => new Response(null, { status, headers: { "cache-control": "no-store" } });
@@ -311,23 +466,37 @@ const log = (event: string, detail: Record<string, unknown> = {}) => console.err
 
 // ---------------------------------------------------------------- the client
 
+/** Bounds a client is made with; tests shorten them. */
+export type ClientLimits = { readonly manageMs: number; readonly viewerMs: number };
+
 export class CuaViewerClient {
 	readonly #bridge: CuaBridge;
 	readonly #space: string;
 	readonly #fetch: typeof fetch;
+	readonly #limits: ClientLimits;
 	/** `https://host`: where the viewer's launches are, at the root. */
 	readonly #origin: string;
 	/** `https://host/<bridge path>`, without a trailing slash: where management is. */
 	readonly #base: string;
 
 	/** Checks the bridge as `Cua.connect` does, before anything is sent; throws its `HttpError` otherwise. `fetcher` is the Worker's `fetch`; tests give their own. */
-	constructor(bridge: CuaBridge, space: string, fetcher: typeof fetch = fetch) {
+	constructor(bridge: CuaBridge, space: string, fetcher: typeof fetch = fetch, limits: Partial<ClientLimits> = {}) {
 		const url = bridgeAddress(bridge, space);
 		this.#bridge = bridge;
 		this.#space = space;
 		this.#fetch = fetcher;
+		this.#limits = { manageMs: MANAGE_MS, viewerMs: VIEWER_MS, ...limits };
 		this.#origin = url.origin;
 		this.#base = url.origin + url.pathname.replace(/\/+$/, "");
+	}
+
+	/** The fetcher's answer as a promise, even when it throws as it is called. */
+	#send(url: string, init: RequestInit): Promise<Response> {
+		try {
+			return this.#fetch(url, init);
+		} catch (error) {
+			return Promise.reject(error);
+		}
 	}
 
 	launch(request: LaunchRequestKey): Promise<HostReply<LaunchAnswer>> {
@@ -342,31 +511,39 @@ export class CuaViewerClient {
 		return this.#manage("status", request, parseStatusAnswer);
 	}
 
+	/**
+	 * One management call, bounded by `manageMs` in all: the request, the
+	 * answer's headers and every read of its body are raced against one
+	 * timer, which is cleared however the call ends. An answer that comes
+	 * after it is let go unread.
+	 */
 	async #manage<T>(action: "launch" | "end" | "status", request: object, parse: (value: unknown) => T | undefined): Promise<HostReply<T>> {
 		const body = JSON.stringify(request);
 		if (byteLength(body) > MAX_MANAGE_REQUEST_BYTES) throw new RangeError("A management request is too big to send.");
 		const giveUp = new AbortController();
-		const timer = setTimeout(() => giveUp.abort(), MANAGE_MS);
+		const timer = setTimeout(() => giveUp.abort(), this.#limits.manageMs);
 		const lost = (reason: Extract<HostReply<T>, { kind: "lost" }>["reason"]): HostReply<T> => {
 			log("cua.viewer.lost", { action, reason });
 			return { kind: "lost", reason };
 		};
 		try {
-			let response: Response;
-			try {
-				response = await this.#fetch(`${this.#base}/observations/${action}`, {
-					method: "POST",
-					headers: { Authorization: `Bearer ${this.#bridge.token}`, [SPACE_HEADER]: this.#space, "content-type": "application/json" },
-					body,
-					redirect: "manual",
-					signal: giveUp.signal,
-				});
-			} catch {
-				// What was thrown may carry anything, the token included: only what happened is told.
-				return lost(giveUp.signal.aborted ? "timeout" : "unreachable");
+			const sent = this.#send(`${this.#base}/observations/${action}`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${this.#bridge.token}`, [SPACE_HEADER]: this.#space, "content-type": "application/json" },
+				body,
+				redirect: "manual",
+				signal: giveUp.signal,
+			});
+			const answered = await settle(sent, giveUp.signal, null);
+			if (answered.kind === "stopped") {
+				abandon(sent, "management");
+				return lost("timeout");
 			}
+			// What was thrown may carry anything, the token included: only what happened is told.
+			if (answered.kind === "error") return lost(giveUp.signal.aborted ? "timeout" : "unreachable");
+			const response = answered.value;
 			if (response.status !== 200) {
-				await response.body?.cancel().catch(() => undefined);
+				await discardBody(response.body, "management");
 				if (response.status >= 300 && response.status < 400) return lost("redirect");
 				if (REFUSED_BEFORE_ACTING.has(response.status)) {
 					log("cua.viewer.refused", { action, status: response.status });
@@ -381,15 +558,15 @@ export class CuaViewerClient {
 			}
 			// The host answers exactly `application/json`; anything else isn't its answer.
 			if (response.headers.get("content-type") !== "application/json") {
-				await response.body?.cancel().catch(() => undefined);
+				await discardBody(response.body, "management");
 				return lost("malformed");
 			}
-			const bytes = await readBounded(response.body, MAX_REPLY_BYTES);
-			if (giveUp.signal.aborted) return lost("timeout");
-			if (!bytes) return lost("malformed");
+			const read = await readBounded(response.body, MAX_REPLY_BYTES, giveUp.signal);
+			if (read.kind === "stopped") return lost("timeout");
+			if (read.kind !== "read") return lost("malformed");
 			let value: unknown;
 			try {
-				value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+				value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(read.bytes));
 			} catch {
 				return lost("malformed");
 			}
@@ -403,66 +580,86 @@ export class CuaViewerClient {
 	/**
 	 * Carries one of the viewer's file or call requests to `target`, which
 	 * `admitObservationRequest` built (`/<hostLaunchId>/<rest>`), and answers
-	 * what the adapter answered, bounded. The presence stream lasts until
-	 * `notAfter` at most. `cancel` ends it, at any point, when the
-	 * observation stops being admitted.
+	 * what the adapter answered, bounded.
+	 *
+	 * The observation is admitted again (`live`) after the browser's body is
+	 * read and immediately before the request leaves, and again when the
+	 * host answers. Reading the body, waiting for the answer and passing the
+	 * answer on all stop when the observation is cancelled or its deadline
+	 * comes; a file or call also when `viewerMs` passes. The presence stream
+	 * lasts until the deadline at most.
 	 */
 	async viewer(target: string, request: Request, kind: "file" | "call", watch: Watch): Promise<Response> {
 		// The host serves the adapter's files to GET and its calls to POST only, at `/<22 characters>/…`, with no query.
-		if (!ADAPTER_TARGET.test(target) || target.includes("?")) return plain(404);
-		if (request.method !== (kind === "file" ? "GET" : "POST")) {
-			await request.body?.cancel().catch(() => undefined);
-			return plain(405);
+		const wrongMethod = request.method !== (kind === "file" ? "GET" : "POST");
+		if (!ADAPTER_TARGET.test(target) || target.includes("?") || wrongMethod || (kind === "file" && request.body)) {
+			await discardBody(request.body, "request");
+			return plain(wrongMethod ? 405 : 404);
 		}
-		const headers = new Headers();
-		let body: Uint8Array | undefined;
-		if (kind === "call") {
-			for (const name of CALL_HEADERS) {
-				const value = request.headers.get(name);
-				if (value !== null) headers.set(name, value);
-			}
-			const length = request.headers.get("content-length");
-			if (length !== null && !(Number(length) <= MAX_CALL_REQUEST_BYTES)) return plain(413);
-			const read = await readBounded(request.body, MAX_CALL_REQUEST_BYTES);
-			if (!read) return plain(413);
-			body = read;
-		} else {
-			await request.body?.cancel().catch(() => undefined);
-		}
+		if (!live(watch)) return plain(404);
 		const stream = kind === "call" && target.endsWith(`/${PRESENCE_JOIN}`);
-		const left = watch.notAfter - (watch.now ?? Date.now());
-		if (left <= 0 || watch.cancel.aborted) return plain(404);
-		const giveUp = new AbortController();
-		const headersDue = setTimeout(() => giveUp.abort(), VIEWER_MS);
-		// A file or call has `VIEWER_MS` in all; the presence stream, until the deadline; any of them, until the observation is cancelled.
-		const signal = AbortSignal.any([giveUp.signal, watch.cancel, AbortSignal.timeout(stream ? left : Math.min(left, VIEWER_MS))]);
-		let response: Response;
+		const link = linked(watch.cancel);
+		// One timer at a time bounds the whole request; it is replaced once the answer's headers come, and cleared when it ends.
+		let timer = setTimeout(link.abort, Math.min(this.#limits.viewerMs, remaining(watch)));
+		const started = watch.now();
+		let handedOn = false;
+		const done = () => {
+			clearTimeout(timer);
+			link.release();
+		};
 		try {
-			response = await this.#fetch(this.#origin + target, { method: request.method, headers, ...(body ? { body } : {}), redirect: "manual", signal });
-		} catch {
-			log("cua.viewer.unreachable", { kind });
-			return plain(watch.cancel.aborted ? 404 : signal.aborted ? 504 : 502);
+			const headers = new Headers();
+			let body: Uint8Array | undefined;
+			if (kind === "call") {
+				for (const name of CALL_HEADERS) {
+					const value = request.headers.get(name);
+					if (value !== null) headers.set(name, value);
+				}
+				const length = request.headers.get("content-length");
+				if (length !== null && !(Number(length) <= MAX_CALL_REQUEST_BYTES)) {
+					await discardBody(request.body, "request");
+					return plain(413);
+				}
+				const read = await readBounded(request.body, MAX_CALL_REQUEST_BYTES, link.signal);
+				if (read.kind === "too_big") return plain(413);
+				if (read.kind !== "read") return plain(watch.cancel.aborted || !live(watch) ? 404 : 408);
+				body = read.bytes;
+			}
+			// Admitted when the request came isn't admitted now: the body's read was a wait.
+			if (link.signal.aborted || !live(watch)) return plain(404);
+			const sent = this.#send(this.#origin + target, { method: request.method, headers, ...(body ? { body } : {}), redirect: "manual", signal: link.signal });
+			const answered = await settle(sent, link.signal, null);
+			if (answered.kind !== "value") {
+				if (answered.kind === "stopped") abandon(sent, "viewer");
+				log("cua.viewer.unreachable", { kind });
+				return plain(watch.cancel.aborted || !live(watch) ? 404 : link.signal.aborted ? 504 : 502);
+			}
+			const response = answered.value;
+			// What came back while the observation stopped being admitted is dropped.
+			if (link.signal.aborted || !live(watch)) {
+				await discardBody(response.body, "viewer");
+				return plain(404);
+			}
+			if (!VIEWER_STATUSES.has(response.status)) {
+				await discardBody(response.body, "viewer");
+				log("cua.viewer.refused", { kind, status: response.status });
+				return plain(502);
+			}
+			const answer = new Headers();
+			for (const name of ANSWER_HEADERS) {
+				const value = response.headers.get(name);
+				if (value !== null) answer.set(name, value);
+			}
+			if (!response.body) return new Response(null, { status: response.status, headers: answer });
+			clearTimeout(timer);
+			// A file or call keeps what is left of its `viewerMs`; the presence stream, what is left until the deadline.
+			timer = setTimeout(link.abort, stream ? remaining(watch) : Math.min(this.#limits.viewerMs - (watch.now() - started), remaining(watch)));
+			const max = kind === "file" ? MAX_FILE_BYTES : stream ? null : MAX_CALL_REPLY_BYTES;
+			handedOn = true;
+			return new Response(passOn(response.body, max, link.signal, done), { status: response.status, headers: answer });
 		} finally {
-			clearTimeout(headersDue);
+			if (!handedOn) done();
 		}
-		// Admitted before it was sent is not admitted now: what came back while the observation ended is dropped.
-		if (watch.cancel.aborted || !watch.admitted()) {
-			await response.body?.cancel().catch(() => undefined);
-			return plain(404);
-		}
-		if (!VIEWER_STATUSES.has(response.status)) {
-			await response.body?.cancel().catch(() => undefined);
-			log("cua.viewer.refused", { kind, status: response.status });
-			return plain(502);
-		}
-		const answer = new Headers();
-		for (const name of ANSWER_HEADERS) {
-			const value = response.headers.get(name);
-			if (value !== null) answer.set(name, value);
-		}
-		const max = kind === "file" ? MAX_FILE_BYTES : stream ? null : MAX_CALL_REPLY_BYTES;
-		const passed = response.body ? capped(response.body, max) : null;
-		return new Response(passed, { status: response.status, headers: answer });
 	}
 
 	/**
@@ -470,34 +667,36 @@ export class CuaViewerClient {
 	 * built by `admitObservationRequest`), offering only `rcdp.v2`, and
 	 * answers the browser's side of a relay to it, or a refusal.
 	 *
-	 * Nothing is handed to the browser until the observation is admitted
-	 * again after the host's socket opened: one cancelled or no longer
-	 * admitted by then (an end requested, a lost answer, the deadline) has
-	 * its socket closed, and the browser gets `404`. A cancellation while the
-	 * host is being asked aborts the request. Once relayed, a cancellation
-	 * ends both sides.
+	 * The observation is admitted again immediately before the request
+	 * leaves and once the host's socket is open, before anything reaches the
+	 * browser. Opening is raced against `viewerMs`, the deadline and the
+	 * observation's cancellation; a socket that opens after any of them is
+	 * closed unread. The relay gets only what is left until the deadline,
+	 * read when it starts, and ends on a cancellation.
 	 */
 	async media(target: string, watch: Watch): Promise<Response> {
 		// The host takes media upgrades only at exactly `/<22 characters>/media?ticket=<43 characters>`.
-		if (!MEDIA_TARGET.test(target)) return plain(404);
-		const left = watch.notAfter - (watch.now ?? Date.now());
-		if (left <= 0 || watch.cancel.aborted) return plain(404);
-		const giveUp = new AbortController();
-		const timer = setTimeout(() => giveUp.abort(), VIEWER_MS);
-		const signal = AbortSignal.any([giveUp.signal, watch.cancel]);
+		if (!MEDIA_TARGET.test(target) || !live(watch)) return plain(404);
+		const link = linked(watch.cancel);
+		const timer = setTimeout(link.abort, Math.min(this.#limits.viewerMs, remaining(watch)));
 		let response: Response;
 		try {
 			// No `Authorization`: the attach token in the target is the adapter's to check, and the bridge's token never goes to a viewer route.
-			response = await this.#fetch(this.#origin + target, {
+			const sent = this.#send(this.#origin + target, {
 				headers: { Upgrade: "websocket", "Sec-WebSocket-Protocol": OBSERVATION_MEDIA_PROTOCOL },
 				redirect: "manual",
-				signal,
+				signal: link.signal,
 			});
-		} catch {
-			log("cua.viewer.unreachable", { kind: "media" });
-			return plain(watch.cancel.aborted ? 404 : giveUp.signal.aborted ? 504 : 502);
+			const answered = await settle(sent, link.signal, null);
+			if (answered.kind !== "value") {
+				if (answered.kind === "stopped") abandon(sent, "media");
+				log("cua.viewer.unreachable", { kind: "media" });
+				return plain(watch.cancel.aborted || !live(watch) ? 404 : link.signal.aborted ? 504 : 502);
+			}
+			response = answered.value;
 		} finally {
 			clearTimeout(timer);
+			link.release();
 		}
 		const upstream = response.webSocket;
 		const protocol = response.headers.get("sec-websocket-protocol");
@@ -510,10 +709,12 @@ export class CuaViewerClient {
 					// It ends by itself.
 				}
 			}
-			await response.body?.cancel().catch(() => undefined);
+			await discardBody(response.body, "media");
 			return plain(status);
 		};
-		if (signal.aborted || !watch.admitted()) return refuse(signal.aborted && !watch.cancel.aborted ? 504 : 404);
+		// Read once more, now: the opening was a wait, and the relay gets only what is left of it.
+		const lifetime = remaining(watch);
+		if (!live(watch) || lifetime <= 0) return refuse(404);
 		// The adapter completes only with `rcdp.v2`; whether the platform shows the header on a `101` is not known, so only another value refuses.
 		if (response.status !== 101 || !upstream || (protocol !== null && protocol !== OBSERVATION_MEDIA_PROTOCOL)) {
 			log("cua.viewer.refused", { kind: "media", status: response.status });
@@ -522,20 +723,26 @@ export class CuaViewerClient {
 		upstream.accept();
 		const { 0: client, 1: browser } = new WebSocketPair();
 		browser.accept();
-		relayMedia(browser, upstream, watch.notAfter - (watch.now ?? Date.now()), watch.cancel);
+		relayMedia(browser, upstream, lifetime, watch.cancel);
 		return new Response(null, { status: 101, webSocket: client, headers: { "Sec-WebSocket-Protocol": OBSERVATION_MEDIA_PROTOCOL } });
 	}
 }
 
-/** What a viewer request is carried under: the observation's deadline, its cancellation, and a check that it is still admitted. */
+/** What a viewer request is carried under: the observation's deadline and clock, its cancellation, and a check that it is still admitted. */
 export type Watch = {
 	readonly notAfter: number;
-	readonly now?: number;
+	/** The clock `notAfter` is read against, read anew after every wait. */
+	readonly now: () => number;
 	/** Aborts when the observation stops being admitted: its record leaves `open`, or the ledger is blocked. */
 	readonly cancel: AbortSignal;
-	/** Whether the observation is admitted now, read again after the host answered and before anything is handed on. */
+	/** Whether the observation is admitted now: read immediately before each request leaves and again after the host answers. */
 	readonly admitted: () => boolean;
 };
+
+/** Milliseconds left until the deadline, read now. */
+const remaining = (watch: Watch) => watch.notAfter - watch.now();
+/** Whether the observation may still be carried: not cancelled, admitted, before its deadline, all read now. */
+const live = (watch: Watch) => !watch.cancel.aborted && watch.admitted() && remaining(watch) > 0;
 
 /** A close code one side may send on: the other side's own, when it is one a socket may send, or `1011`; `1000` when there was none. */
 function passedCode(code: number | undefined): number {

@@ -367,6 +367,8 @@ export type Mounts = { readonly observations?: boolean };
 const OBSERVATION_MEDIA = /^\/observations\/[A-Za-z0-9_-]{16,64}\/media$/;
 /** The most an observation request's body may be: a viewer call is at most 4 KiB, management has none. */
 const MAX_OBSERVATION_BODY = 4096;
+/** How long an observation request's body has to arrive; past it, the request is refused unread. */
+const OBSERVATION_BODY_MS = 10_000;
 
 /**
  * The person watching their Cua desktop, where mounted: `/api/observations/…`,
@@ -382,9 +384,23 @@ async function serveObservation(request: Request, env: Env, owner: string, viaSe
 	let forwarded = request;
 	if (request.body) {
 		const length = request.headers.get("content-length");
-		const body = length !== null && !(Number(length) <= MAX_OBSERVATION_BODY) ? null : await readBounded(request.body, MAX_OBSERVATION_BODY);
-		if (!body) return observationResponse(fail(413, "Too large"));
-		forwarded = new Request(request, { body });
+		if (length !== null && !(Number(length) <= MAX_OBSERVATION_BODY)) {
+			void request.body.cancel().catch(() => undefined);
+			return observationResponse(fail(413, "Too large"));
+		}
+		// Bounded in time as in size: a body that stalls is cut off, and the timer is cleared however the read ends.
+		const giveUp = new AbortController();
+		const timer = setTimeout(() => giveUp.abort(), OBSERVATION_BODY_MS);
+		let read: Awaited<ReturnType<typeof readBounded>>;
+		try {
+			read = await readBounded(request.body, MAX_OBSERVATION_BODY, giveUp.signal);
+		} finally {
+			clearTimeout(timer);
+		}
+		if (read.kind === "too_big") return observationResponse(fail(413, "Too large"));
+		if (read.kind === "stopped") return observationResponse(fail(408, "The request's body didn't arrive in time."));
+		if (read.kind === "failed") return observationResponse(fail(400, "The request's body couldn't be read."));
+		forwarded = new Request(request, { body: read.bytes });
 	}
 	return observationResponse(await toAgent(forwarded, env, owner, `/api${path}`, true));
 }

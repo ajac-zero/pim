@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentByName } from "agents";
-import { createExecutionContext, env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { createExecutionContext, env, evictDurableObject, runDurableObjectAlarm, runInDurableObject, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Relay, type Session, type SessionEvents, serveWithWebSocketPair } from "../computer/cua-bridge";
 import { Link, type Machine } from "../computer/pim-computer";
@@ -411,14 +411,18 @@ describe("the preview's Cua fixture", () => {
 		];
 		for (const [index, [name, key, when]] of writes.entries()) {
 			const one = await space(`fixturefail${index}`);
+			// The fault is the test's own, and is taken off however its assertions end, so no later test meets it.
 			const fault = failing(key, when);
-			logged.length = 0;
-			configure({ flag: "seed", owner: one.owner, bridges: bridgesOf(one.owner) });
-			// The start that failed, and every one after it, opted in or not, serves nothing and reaches nothing.
-			expect(await tryEverything(one), name).toEqual(refusedEverything);
-			expect(fixtureLines()[0], name).toEqual({ event: "preview.cua_fixture", space: one.owner, outcome: "failed", reason: "seed" });
-			expect(fixtureLines().slice(1).every((line) => line.outcome === "interrupted"), name).toBe(true);
-			fault.mockRestore();
+			try {
+				logged.length = 0;
+				configure({ flag: "seed", owner: one.owner, bridges: bridgesOf(one.owner) });
+				// The start that failed, and every one after it, opted in or not, serves nothing and reaches nothing.
+				expect(await tryEverything(one), name).toEqual(refusedEverything);
+				expect(fixtureLines()[0], name).toEqual({ event: "preview.cua_fixture", space: one.owner, outcome: "failed", reason: "seed" });
+				expect(fixtureLines().slice(1).every((line) => line.outcome === "interrupted"), name).toBe(true);
+			} finally {
+				fault.mockRestore();
+			}
 			// The transaction kept nothing: only the record that it began.
 			expect(await one.peek(), name).toEqual({ ...nothing, [FIXTURE_KEY]: "seeding" });
 			for (const [round, values] of [{ flag: "seed", owner: one.owner, bridges: bridgesOf(one.owner) }, {}].entries()) {
@@ -438,11 +442,14 @@ describe("the preview's Cua fixture", () => {
 			if (key === FIXTURE_KEY) throw new Error("disk full");
 			setMeta.call(this, key, value);
 		});
-		configure({ flag: "seed", owner: one.owner, bridges: bridgesOf(one.owner) });
-		expect(await tryEverything(one)).toEqual(refusedEverything);
-		expect(fixtureLines()[0]).toEqual({ event: "preview.cua_fixture", space: one.owner, outcome: "failed", reason: "record" });
-		expect(sent).toEqual([]);
-		fault.mockRestore();
+		try {
+			configure({ flag: "seed", owner: one.owner, bridges: bridgesOf(one.owner) });
+			expect(await tryEverything(one)).toEqual(refusedEverything);
+			expect(fixtureLines()[0]).toEqual({ event: "preview.cua_fixture", space: one.owner, outcome: "failed", reason: "record" });
+			expect(sent).toEqual([]);
+		} finally {
+			fault.mockRestore();
+		}
 		expect(await one.peek()).toEqual(nothing);
 		// Nothing says a seed was tried: this start can't know, and seeds.
 		expect(await one.restart()).toBe("started");
@@ -450,40 +457,40 @@ describe("the preview's Cua fixture", () => {
 	});
 });
 
+const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/** Throws what failed: one error as it is, several together, none at all when nothing did. */
+function rethrow(errors: readonly unknown[], summary: string): void {
+	if (errors.length === 1) throw errors[0];
+	if (errors.length > 1) throw new AggregateError(errors, `${summary} (${errors.map(messageOf).join("; ")})`);
+}
+
+/**
+ * Runs `body`, then `cleanup` however `body` ended, as test/cua-native-identity.test.ts does:
+ * the body's failure, the cleanup's, or both in one AggregateError, the body's first. Neither
+ * hides the other.
+ */
+async function afterwards(body: () => Promise<void>, cleanup: () => Promise<void>): Promise<void> {
+	let failure: { readonly error: unknown } | undefined;
+	try {
+		await body();
+	} catch (error) {
+		failure = { error };
+	}
+	let cleaned: { readonly error: unknown } | undefined;
+	try {
+		await cleanup();
+	} catch (error) {
+		cleaned = { error };
+	}
+	if (failure && cleaned) {
+		throw new AggregateError([failure.error, cleaned.error], `The test failed (${messageOf(failure.error)}), and cleaning up after it failed too (${messageOf(cleaned.error)})`);
+	}
+	if (failure) throw failure.error;
+	if (cleaned) throw cleaned.error;
+}
+
 describe("a seeded preview space and its bridge", () => {
-	const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
-
-	/** Throws what failed: one error as it is, several together, none at all when nothing did. */
-	function rethrow(errors: readonly unknown[], summary: string): void {
-		if (errors.length === 1) throw errors[0];
-		if (errors.length > 1) throw new AggregateError(errors, `${summary} (${errors.map(messageOf).join("; ")})`);
-	}
-
-	/**
-	 * Runs `body`, then `cleanup` however `body` ended, as test/cua-native-identity.test.ts does:
-	 * the body's failure, the cleanup's, or both in one AggregateError, the body's first. Neither
-	 * hides the other.
-	 */
-	async function afterwards(body: () => Promise<void>, cleanup: () => Promise<void>): Promise<void> {
-		let failure: { readonly error: unknown } | undefined;
-		try {
-			await body();
-		} catch (error) {
-			failure = { error };
-		}
-		let cleaned: { readonly error: unknown } | undefined;
-		try {
-			await cleanup();
-		} catch (error) {
-			cleaned = { error };
-		}
-		if (failure && cleaned) {
-			throw new AggregateError([failure.error, cleaned.error], `The test failed (${messageOf(failure.error)}), and cleaning up after it failed too (${messageOf(cleaned.error)})`);
-		}
-		if (failure) throw failure.error;
-		if (cleaned) throw cleaned.error;
-	}
-
 	/**
 	 * The space's bridge: the relay, whose sessions record what reached them and run nothing. The
 	 * test owns a temporary directory, made fresh under `os.tmpdir()` for the machine's root, and
@@ -716,10 +723,23 @@ describe("the preview's Cua evaluation mode", () => {
 			}
 			const method = init.method ?? (init.body === undefined ? "GET" : "POST");
 			const request = new Request(`${init.at ?? "https://pim.test"}${path}`, { method, headers, ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }) });
-			return await previewWorker.fetch(request as never, target, createExecutionContext());
+			return await served(request, target);
 		};
 		const register = (username: string, claim?: string) => ask("/auth/register", { body: { username, ...(claim === undefined ? {} : { claim }) } });
 		return { directory, ask, register };
+	}
+
+	/** The preview's Worker's answer, once whatever it handed its context to wait on has ended too. */
+	async function served(request: Request, target: Env): Promise<Response> {
+		const ctx = createExecutionContext();
+		let answer: Response | undefined;
+		await afterwards(
+			async () => {
+				answer = await previewWorker.fetch(request as never, target, ctx);
+			},
+			() => waitOnExecutionContext(ctx),
+		);
+		return answer!;
 	}
 
 	const refusal = async (answer: Response) => [answer.status, ((await answer.json()) as { error: string }).error];
@@ -728,7 +748,7 @@ describe("the preview's Cua evaluation mode", () => {
 		await space("evallocal");
 		settings.PIM_PUBLIC_URL = "http://localhost:8787";
 		const local = (headers: Record<string, string> = {}) =>
-			previewWorker.fetch(new Request("http://localhost:8787/__dev/sign-in/evallocal?returnTo=/settings", { headers }) as never, env as unknown as Env, createExecutionContext());
+			served(new Request("http://localhost:8787/__dev/sign-in/evallocal?returnTo=/settings", { headers }), env as unknown as Env);
 		// As the preview has always signed people in: a passkey made here, and the session cookie.
 		const signedIn = await local();
 		expect(signedIn.status).toBe(302);
@@ -900,10 +920,11 @@ describe("the preview's Cua evaluation mode", () => {
 		const { register, directory } = worker();
 		const dir = directory("directory");
 		const registering = vi.spyOn(BaseDirectory.prototype, "register");
-		const unwritable = vi.spyOn(ClaimRecord.prototype, "begin").mockImplementationOnce(() => {
-			throw new Error("The disk is full");
-		});
+		const unwritable = vi.spyOn(ClaimRecord.prototype, "begin");
 		try {
+			unwritable.mockImplementationOnce(() => {
+				throw new Error("The disk is full");
+			});
 			expect(await refusal(await register("evalfirst", CODE))).toEqual([503, "The claim couldn't be recorded, so nobody was set up."]);
 			// Nothing was recorded and nobody registered, so the claim is still to be made.
 			expect(registering).not.toHaveBeenCalled();
@@ -911,7 +932,12 @@ describe("the preview's Cua evaluation mode", () => {
 			expect(await claimRow(dir)).toBeNull();
 			unwritable.mockRestore();
 			// Two claims with the operator's code at once: one is recorded and registers its owner; the other is refused.
-			const answers = await Promise.all([register("evala", CODE), register("evalb", CODE)]);
+			// Both are awaited however either ends, so neither is left running past the test.
+			const settled = await Promise.allSettled([register("evala", CODE), register("evalb", CODE)]);
+			const answers = settled.map((outcome) => {
+				if (outcome.status === "rejected") throw outcome.reason;
+				return outcome.value;
+			});
 			expect(answers.map((answer) => answer.status).sort()).toEqual([201, 403]);
 			const loser = answers.find((answer) => answer.status === 403)!;
 			expect(((await loser.json()) as { error: string }).error).toBe(ONCE);
@@ -941,11 +967,13 @@ describe("the preview's Cua evaluation mode", () => {
 		// The registration throws, and the record can't be moved on either: it stays `claiming`, and the first failure is the one thrown.
 		const thrownOne = worker();
 		const thrownDir = thrownOne.directory("directory");
-		const throwing = vi.spyOn(BaseDirectory.prototype, "register").mockRejectedValueOnce(new Error("The Directory went away"));
-		const stuck = vi.spyOn(ClaimRecord.prototype, "finish").mockImplementationOnce(() => {
-			throw new Error("The disk is full");
-		});
+		const throwing = vi.spyOn(BaseDirectory.prototype, "register");
+		const stuck = vi.spyOn(ClaimRecord.prototype, "finish");
 		try {
+			throwing.mockRejectedValueOnce(new Error("The Directory went away"));
+			stuck.mockImplementationOnce(() => {
+				throw new Error("The disk is full");
+			});
 			await expect(thrownDir.register(later("evalthrown"))).rejects.toThrow(/The Directory went away/);
 		} finally {
 			throwing.mockRestore();
@@ -958,11 +986,12 @@ describe("the preview's Cua evaluation mode", () => {
 		// The owner is registered but the last write fails: the record stays `claiming`, which refuses as surely, and says so in the log.
 		const unrecordedOne = worker();
 		const unrecordedDir = unrecordedOne.directory("directory");
-		const unfinished = vi.spyOn(ClaimRecord.prototype, "finish").mockImplementationOnce(() => {
-			throw new Error("The disk is full");
-		});
+		const unfinished = vi.spyOn(ClaimRecord.prototype, "finish");
 		let owner = "";
 		try {
+			unfinished.mockImplementationOnce(() => {
+				throw new Error("The disk is full");
+			});
 			const claimed = await unrecordedOne.register("evalunrecorded", CODE);
 			expect(claimed.status).toBe(201);
 			owner = ((await claimed.json()) as { setup: string }).setup.split(".")[0]!;

@@ -345,22 +345,29 @@ describe("the viewer launch manager", () => {
 		assert.equal(none.blockers().length, 1);
 	});
 
-	it("never starts a key again after its journal is lost, whatever recovery is tried", async () => {
+	it("never starts a key again after its journal is lost, whatever recovery is tried, not even for a delayed request from before the loss", async () => {
 		const { time, memory, desk, manager } = await setUp();
 		const first = await manager.launch(request(1));
 		assert.equal(first.outcome, "launched");
+		// A repeat of key 1 sent before the loss, whose delivery is delayed until after it: still within its deadline.
+		const delayed = request(1);
 		memory.lose();
 		for (const generation of ["gen-c", "gen-d", "gen-e"]) {
 			const next = await restart(memory, time, generation);
-			assert.equal("initialize" in next.manager, false);
+			// Every way the runtime might be asked to start over: none exists, or none takes.
+			assert.equal("initialize" in next.manager, false, "there is no runtime reinitialization");
+			assert.equal((next.manager as unknown as { initialize?: unknown }).initialize, undefined);
 			assert.equal(next.manager.blockers().length, 1);
 			assert.equal(await next.manager.reconcile(key(1), "operator: the key is retired and nothing is open"), false, "evidence retires nothing");
 			assert.deepEqual(await next.manager.status(ada(1, generation)), { outcome: "not_found" });
 			assert.deepEqual(await next.manager.end(ada(1, generation)), { outcome: "not_found" });
-			// The prior key, resent as a repeat of a request whose reply was lost.
+			// The delayed request arrives, and the same key is resent as a repeat of a request whose reply was lost.
+			assert.ok(delayed.notAfter > time.wall(), "the delayed request has not expired");
+			assert.deepEqual(await next.manager.launch(delayed), { outcome: "refused", reason: "blocked" });
 			assert.deepEqual(await next.manager.launch(request(1)), { outcome: "refused", reason: "blocked" });
 			assert.deepEqual(await next.manager.launch(request(2)), { outcome: "refused", reason: "blocked" });
 			assert.equal(next.desk.calls.length, 0, "the adapter is never called again");
+			assert.equal(memory.raw(), undefined, "nothing recreated the journal");
 		}
 		assert.equal(memory.raw(), undefined, "no manager recreated the journal");
 		assert.equal(desk.calls.length, 1);

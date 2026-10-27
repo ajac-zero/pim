@@ -123,7 +123,7 @@ Mounting is a separate, reviewed change. `src/gateway.ts` and the space's routes
 - Conflicts and other owners.
 - Intent writes that fail before or after they land.
 - Crashes before the start answered and after it was acknowledged. A test's crash severs that process's view of the store and fails its unanswered adapter calls, so its waits settle. Nothing it does after dying reaches the journal, and the old launch is still not claimed closed.
-- Missing, lost, unreadable, invalid and same-generation journals. After a loss, restarts in three generations try `reconcile` with evidence, `status`, `end` and a resend of the prior key: none calls the adapter, and nothing recreates the journal.
+- Missing, lost, unreadable, invalid and same-generation journals. After a loss, restarts in three generations find no way to reinitialize, and try `reconcile` with evidence, `status`, `end`, a delayed request for the prior key sent before the loss and still within its deadline, and a resend of that key: none calls the adapter, and nothing recreates the journal.
 - A second writer.
 - A launch that can't be recorded.
 - Timeouts with late success and late failure.

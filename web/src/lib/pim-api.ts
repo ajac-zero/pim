@@ -1074,6 +1074,13 @@ export type Observations = {
   observations: Observation[];
   /** What drives your agents in a preview: its stand-in model, which acts only on `/tool` lines, or a real one. */
   agent?: "stand-in" | "real";
+  /**
+   * Whether the computer can be told to let this page frame its viewer: only
+   * when Pim is at an HTTPS address (`embeddable`). At a local preview's
+   * plain HTTP address (`local_http`), or one it can't use (`refused`), the
+   * viewer's frame is refused.
+   */
+  frame?: "embeddable" | "local_http" | "refused";
 };
 
 /** An API answer that isn't a success, with its status. */

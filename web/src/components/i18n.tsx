@@ -657,6 +657,8 @@ const translations = {
     watchDesktopBlocked: "Watching isn't available here: {reason}",
     stopWatching: "Stop watching",
     askToEnd: "Ask to end it",
+    watchDesktopNoFrame:
+      "This Pim isn't at an HTTPS address, so the computer won't let its desktop be shown on this page.",
     checkObservation: "Check again",
     observationStarting: "Starting",
     observationOpen: "Watching",
@@ -1719,6 +1721,8 @@ const translations = {
     watchDesktopBlocked: "Ver no está disponible aquí: {reason}",
     stopWatching: "Dejar de ver",
     askToEnd: "Pedir que termine",
+    watchDesktopNoFrame:
+      "Este Pim no está en una dirección HTTPS, así que la computadora no dejará mostrar su escritorio en esta página.",
     checkObservation: "Comprobar de nuevo",
     observationStarting: "Iniciando",
     observationOpen: "Viendo",

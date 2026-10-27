@@ -523,7 +523,8 @@ describe("a seeded preview space and its bridge", () => {
 			throw new Error("This test reaches only its bridge's viewer host");
 		});
 		const session = { [SIGNED_IN_HEADER]: "1", origin: "https://pim.test" };
-		expect((await ada.fetch("/api/observations", { headers: session })).body).toEqual({ agent: "stand-in", blocked: null, observations: [] });
+		// At an HTTPS address, the computer can be told to let this page frame the viewer.
+		expect((await ada.fetch("/api/observations", { headers: session })).body).toEqual({ agent: "stand-in", frame: "embeddable", blocked: null, observations: [] });
 		// Not the browser's session: nothing is recorded or asked.
 		expect((await ada.fetch("/api/observations", { method: "POST", headers: { origin: "https://pim.test" } })).status).toBe(401);
 		expect(asked).toEqual([]);

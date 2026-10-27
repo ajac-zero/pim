@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { admissionBlockers, applyControlEvent, type ControlState, initialControlState } from "../src/computer-control";
 import { ObservationDesk, type ObservationStorage } from "../src/cua-observation-runtime";
-import { type ClientLimits, CuaViewerClient, isHttpsOrigin, parseEndAnswer, parseLaunchAnswer, parseStatusAnswer, readBounded } from "../src/cua-viewer";
+import { appOrigin, type ClientLimits, CuaViewerClient, isHttpsOrigin, parseEndAnswer, parseLaunchAnswer, parseStatusAnswer, readBounded, settle } from "../src/cua-viewer";
 import {
 	admitObservationRequest,
 	applyObservationEvent,
@@ -315,7 +315,7 @@ function desk(options: {
 	const instance = new ObservationDesk({
 		owner: SPACE,
 		storage,
-		client: () => new CuaViewerClient(BRIDGE, SPACE, ORIGIN, fetcher, options.limits),
+		client: () => new CuaViewerClient(BRIDGE, SPACE, appOrigin(ORIGIN, false), fetcher, options.limits),
 		observationMs: LIFETIME,
 		openObservations: options.openObservations ?? 1,
 		now: () => clock.now,
@@ -364,7 +364,7 @@ describe("the Worker's client to the viewer host", () => {
 
 	it("builds the viewer's address only from the bridge's own origin and the adapter's path for that launch", () => {
 		const unsent = (() => Promise.reject(new Error("nothing is sent"))) as typeof fetch;
-		const client = new CuaViewerClient({ ...BRIDGE, url: "https://bridge.cua.test:8443/pim/" }, SPACE, ORIGIN, unsent);
+		const client = new CuaViewerClient({ ...BRIDGE, url: "https://bridge.cua.test:8443/pim/" }, SPACE, appOrigin(ORIGIN, false), unsent);
 		const path = `/${LAUNCH}/viewer/#ticket=${CREDENTIAL}&clipboard=0`;
 		// At the bridge's root, not under its management path, and nothing of the bridge's token.
 		expect(client.viewerUrl(LAUNCH, path)).toBe(`https://bridge.cua.test:8443${path}`);
@@ -382,13 +382,13 @@ describe("the Worker's client to the viewer host", () => {
 		}
 		expect(() => client.viewerUrl("../x", path)).toThrow(RangeError);
 		// A bridge that isn't HTTPS, or is another space's, makes no client at all.
-		expect(() => new CuaViewerClient({ ...BRIDGE, url: "http://bridge.cua.test/pim" }, SPACE, ORIGIN, unsent)).toThrow();
-		expect(() => new CuaViewerClient(BRIDGE, "o_zyxwvutsrqponmlkjihgfedcba", ORIGIN, unsent)).toThrow();
+		expect(() => new CuaViewerClient({ ...BRIDGE, url: "http://bridge.cua.test/pim" }, SPACE, appOrigin(ORIGIN, false), unsent)).toThrow();
+		expect(() => new CuaViewerClient(BRIDGE, "o_zyxwvutsrqponmlkjihgfedcba", appOrigin(ORIGIN, false), unsent)).toThrow();
 	});
 
 	it("takes as the viewer's origin only a bridge origin written as a browser writes it, on another host than Pim's", () => {
 		const unsent = (() => Promise.reject(new Error("nothing is sent"))) as typeof fetch;
-		const make = (url: string, app = ORIGIN) => () => new CuaViewerClient({ ...BRIDGE, url }, SPACE, app, unsent);
+		const make = (url: string, app = ORIGIN) => () => new CuaViewerClient({ ...BRIDGE, url }, SPACE, appOrigin(app, true), unsent);
 		for (const good of ["https://bridge.cua.test/pim", "https://bridge.cua.test", "https://bridge.cua.test:8443/pim", "https://10.0.0.7/pim", "https://[2001:db8::1]:8443/pim"]) {
 			expect(make(good), good).not.toThrow();
 		}
@@ -399,11 +399,74 @@ describe("the Worker's client to the viewer host", () => {
 		// Pim's own host, on any port, would make the frame Pim's origin, or share its cookies.
 		expect(make("https://pim.example/pim")).toThrow(RangeError);
 		expect(make("https://pim.example:8443/pim")).toThrow(RangeError);
-		expect(make("https://bridge.cua.test/pim", "not an address")).toThrow(RangeError);
+		expect(make("https://localhost/pim", "http://localhost:8787")).toThrow(RangeError);
 
 		expect(isHttpsOrigin("https://bridge.cua.test")).toBe(true);
 		for (const bad of ["https://bridge.cua.test/", "https://bridge.cua.test/pim", "https://user@bridge.cua.test", "http://bridge.cua.test", "https://bridge.cua.test:443", "https://BRIDGE.cua.test", "https://bridge.cua.test.", "https://*.cua.test", "https://bridge.cua.test?x", "https://bridge.cua.test#x"]) {
 			expect(isHttpsOrigin(bad), bad).toBe(false);
+		}
+	});
+
+	it("takes Pim's own address only as an exact HTTPS origin, or a local preview's loopback HTTP one, which is never embeddable", () => {
+		expect(appOrigin("https://pim.example", false)).toEqual({ origin: "https://pim.example", embeddable: true });
+		expect(appOrigin("https://pim.example:8443", true)).toEqual({ origin: "https://pim.example:8443", embeddable: true });
+		for (const local of ["http://localhost:8787", "http://127.0.0.1:8787", "http://[::1]:8787", "http://localhost"]) {
+			expect(appOrigin(local, true), local).toEqual({ origin: local, embeddable: false });
+			// Only where the caller says it is a local preview.
+			expect(() => appOrigin(local, false), local).toThrow(RangeError);
+		}
+		// Nothing is normalized into one: another scheme, a path, a query, a fragment, credentials, uppercase, a default port written out, plain HTTP elsewhere.
+		for (const bad of [
+			"",
+			"not an address",
+			"file:///pim",
+			"data:text/plain,pim",
+			"https://pim.example/",
+			"https://pim.example/app",
+			"https://pim.example?x=1",
+			"https://pim.example#x",
+			"https://ada@pim.example",
+			"HTTPS://pim.example",
+			"https://pim.example:443",
+			"http://pim.example",
+			"http://localhost:8787/",
+			"http://LOCALHOST:8787",
+			"http://localhost:80",
+			"http://ada@localhost:8787",
+		]) {
+			expect(() => appOrigin(bad, true), bad).toThrow(RangeError);
+		}
+	});
+
+	it("observes a promise it no longer waits for, and leaves no timer or listener behind", async () => {
+		const timers = vi.spyOn(globalThis, "setTimeout");
+		const cleared = vi.spyOn(globalThis, "clearTimeout");
+		try {
+			const signal = (aborted: boolean) => ({ aborted, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+			// settle's own timers, told apart by their bound; anything else the runtime sets is not its.
+			const bounded = (ms: number) => timers.mock.calls.flatMap(([, delay], index) => (delay === ms ? [timers.mock.results[index]!.value] : []));
+			// Already aborted: stopped at once, with no timer or listener set, and the promise's rejection still handled (an unhandled one fails the run).
+			const early = signal(true);
+			expect(await settle(Promise.reject(new Error("refused")), early as unknown as AbortSignal, 1_000)).toEqual({ kind: "stopped" });
+			expect(early.addEventListener).not.toHaveBeenCalled();
+			expect(bounded(1_000)).toEqual([]);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			// Settled by its value: the timer cleared, and the listener it added removed.
+			const live = signal(false);
+			expect(await settle(Promise.resolve(7), live as unknown as AbortSignal, 1_000)).toEqual({ kind: "value", value: 7 });
+			const listener = live.addEventListener.mock.calls[0]![1];
+			expect(live.removeEventListener).toHaveBeenCalledWith("abort", listener);
+			expect(bounded(1_000)).toHaveLength(1);
+			expect(cleared).toHaveBeenCalledWith(bounded(1_000)[0]);
+
+			// Stopped by its bound: the listener removed too.
+			const slow = signal(false);
+			expect(await settle(new Promise(() => undefined), slow as unknown as AbortSignal, 1)).toEqual({ kind: "stopped" });
+			expect(slow.removeEventListener).toHaveBeenCalledWith("abort", slow.addEventListener.mock.calls[0]![1]);
+		} finally {
+			timers.mockRestore();
+			cleared.mockRestore();
 		}
 	});
 });
@@ -695,6 +758,35 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		expect((await starting).status).toBe(503);
 		expect(u.asked.map((asked) => asked.url)).toEqual(["https://bridge.cua.test/pim/observations/launch"]);
 		expect(JSON.parse(u.asked[0]!.body)).toMatchObject({ key: id(1) });
+	});
+
+	it("asks nothing once the deadline came during the flush, and hands out no viewer once it came during the host's answer", async () => {
+		// The flush outlasted the deadline: nothing is asked, the record says nothing was opened, and the next one may start.
+		const flushes = heldFlushes();
+		const t = desk({ stored: empty(), host: launched, flush: flushes.flush });
+		const starting = t.desk.launch();
+		t.clock.now = NOW + LIFETIME;
+		flushes.held[0]!.resolve();
+		const late = await starting;
+		expect(late.status).toBe(409);
+		expect((await body(late)).viewer).toBeUndefined();
+		expect(t.asked).toEqual([]);
+		expect(t.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "not_opened" })]);
+
+		// The host answered at the deadline: its launch is recorded, so it can still be ended and checked, but its credential goes to no one.
+		const u = desk({
+			stored: empty(),
+			host: (asked) => {
+				u.clock.now = NOW + LIFETIME;
+				return launched(asked);
+			},
+		});
+		const answered = await u.desk.launch();
+		expect(answered.status).toBe(409);
+		const text = await answered.text();
+		expect(text).not.toContain(CREDENTIAL);
+		expect(JSON.parse(text).viewer).toBeUndefined();
+		expect(u.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "open", hostLaunchId: LAUNCH, hostGeneration: "gen-1" })]);
 	});
 
 	it("leaves an observation that is still starting to finish when its end is asked for, and sends its launch once", async () => {

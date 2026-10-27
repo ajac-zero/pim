@@ -235,7 +235,9 @@ type Settled<T> = { readonly kind: "value"; readonly value: T } | { readonly kin
 /**
  * Waits for `promise` until `signal` aborts or `ms` passes, whichever comes
  * first. It leaves no timer or listener behind: both are removed the moment
- * any of the three settles. A promise that never settles is left to itself,
+ * any of the three settles, and neither is set when the signal has already
+ * aborted. The promise is always observed, even then, so its rejection is
+ * never left unhandled. A promise that never settles is left to itself,
  * holding nothing of this wait.
  */
 export function settle<T>(promise: Promise<T>, signal: AbortSignal | null, ms: number | null): Promise<Settled<T>> {
@@ -250,13 +252,14 @@ export function settle<T>(promise: Promise<T>, signal: AbortSignal | null, ms: n
 			resolve(result);
 		};
 		const stop = () => finish({ kind: "stopped" });
-		if (signal?.aborted) return stop();
-		signal?.addEventListener("abort", stop, { once: true });
-		if (ms !== null) timer = setTimeout(stop, Math.max(0, ms));
+		// Observed first: its handlers run in a later turn, so an abort already chosen below still wins.
 		promise.then(
 			(value) => finish({ kind: "value", value }),
 			() => finish({ kind: "error" }),
 		);
+		if (signal?.aborted) return stop();
+		signal?.addEventListener("abort", stop, { once: true });
+		if (ms !== null) timer = setTimeout(stop, Math.max(0, ms));
 	});
 }
 
@@ -371,6 +374,39 @@ export function isHttpsOrigin(value: string): boolean {
 	return url.protocol === "https:" && url.origin === value && !url.username && !url.password && wellFormed;
 }
 
+/** The loopback hosts a local preview may serve Pim at over plain HTTP. */
+const LOOPBACK = ["localhost", "127.0.0.1", "[::1]"];
+
+/**
+ * Pim's own address, as the viewer's client takes it: `origin`, and whether
+ * the host could ever let a page there frame the viewer (`embeddable`). The
+ * host takes only an exact HTTPS origin as `--viewer-embed-origin`, so only
+ * one is embeddable.
+ */
+export type AppOrigin = { readonly origin: string; readonly embeddable: boolean };
+
+/**
+ * `value` as Pim's own address: exactly an HTTPS origin as a browser writes
+ * it (`isHttpsOrigin`), which is embeddable; or, only when the caller says
+ * this is a local preview (`localPreview`), exactly `http://localhost[:port]`,
+ * `http://127.0.0.1[:port]` or `http://[::1][:port]`, which is not. Nothing is
+ * normalized: a path, query, fragment, credentials, another scheme or any
+ * form a browser wouldn't write is refused (a `RangeError`).
+ */
+export function appOrigin(value: string, localPreview: boolean): AppOrigin {
+	if (isHttpsOrigin(value)) return { origin: value, embeddable: true };
+	let url: URL | null = null;
+	try {
+		url = new URL(value);
+	} catch {
+		// Refused below.
+	}
+	if (localPreview && url && url.protocol === "http:" && url.origin === value && !url.username && !url.password && LOOPBACK.includes(url.hostname)) {
+		return { origin: value, embeddable: false };
+	}
+	throw new RangeError("Pim's own address must be exactly an HTTPS origin, or a local preview's loopback HTTP origin.");
+}
+
 // ---------------------------------------------------------------- the client
 
 /** Bounds a client is made with; tests shorten them. */
@@ -391,23 +427,20 @@ export class CuaViewerClient {
 	 * throws otherwise. The bridge's address must also be written with its
 	 * origin exactly as a browser serializes it (`isHttpsOrigin`), since that
 	 * origin is the viewer's, and must equal the host's
-	 * `--viewer-public-origin`; and it must be another host than `appOrigin`,
-	 * Pim's own address, so the viewer's frame is of another origin than the
-	 * app's and shares none of its cookies. `fetcher` is the Worker's `fetch`;
-	 * tests give their own.
+	 * `--viewer-public-origin`; and it must be another host than `app`, Pim's
+	 * own address (`appOrigin`), so that the viewer's frame is never of the
+	 * app's origin and receives none of Pim's own cookies, which are all
+	 * host-only (`__Host-`, src/auth/index.ts). Another host keeps out only
+	 * host-only cookies: a cookie some other site sets for a parent domain
+	 * of the bridge's host would still reach it (docs/cua-viewer-first-worker.md).
+	 * `fetcher` is the Worker's `fetch`; tests give their own.
 	 */
-	constructor(bridge: CuaBridge, space: string, appOrigin: string, fetcher: typeof fetch = fetch, limits: Partial<ClientLimits> = {}) {
+	constructor(bridge: CuaBridge, space: string, app: AppOrigin, fetcher: typeof fetch = fetch, limits: Partial<ClientLimits> = {}) {
 		const url = bridgeAddress(bridge, space);
 		if (!isHttpsOrigin(url.origin) || (bridge.url !== url.origin && !bridge.url.startsWith(`${url.origin}/`))) {
 			throw new RangeError("The bridge's address must start with its origin exactly as a browser writes it, as the viewer's public origin.");
 		}
-		let app: URL;
-		try {
-			app = new URL(appOrigin);
-		} catch {
-			throw new RangeError("Pim's own address is needed to keep the viewer apart from it.");
-		}
-		if (app.hostname === url.hostname) throw new RangeError("The viewer's host must be another host than Pim's.");
+		if (new URL(app.origin).hostname === url.hostname) throw new RangeError("The viewer's host must be another host than Pim's.");
 		this.#bridge = bridge;
 		this.#space = space;
 		this.#fetch = fetcher;

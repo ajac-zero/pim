@@ -104,6 +104,16 @@ it("offers watching the Cua desktop, view only, only where this Pim offers it, a
   expect(offered).toContain("You can&#x27;t take over");
   expect(offered).toContain("stand-in model");
   expect(offered).not.toMatch(/Take over|Stop watching|Ask to end it/);
+  // Said only where the frame would be refused: a local preview's plain HTTP address, never taken for an embeddable one.
+  expect(offered).not.toContain("isn&#x27;t at an HTTPS address");
+  expect(
+    section(cua, {
+      blocked: null,
+      observations: [],
+      agent: "stand-in",
+      frame: "local_http",
+    }),
+  ).toContain("isn&#x27;t at an HTTPS address");
 
   const unsettled = section(cua, {
     blocked: null,

@@ -222,6 +222,11 @@ function WatchDesktop() {
           {t("watchDesktopBlocked", { reason: data.blocked })}
         </p>
       )}
+      {data.frame !== undefined && data.frame !== "embeddable" && (
+        <p className="text-[13px] text-muted-foreground">
+          {t("watchDesktopNoFrame")}
+        </p>
+      )}
       {data.agent === "stand-in" && (
         <p className="text-[13px] text-muted-foreground">
           {t("watchDesktopStandIn")}

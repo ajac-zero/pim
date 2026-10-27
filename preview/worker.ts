@@ -7,7 +7,7 @@ import { ownedCode } from "../src/auth";
 import { bridgeFor } from "../src/cua";
 import { OBSERVATION_PATH_PREFIX, observationResponse } from "../src/cua-observation";
 import { OBSERVATION_KEY, ObservationDesk } from "../src/cua-observation-runtime";
-import { CuaViewerClient } from "../src/cua-viewer";
+import { appOrigin, CuaViewerClient } from "../src/cua-viewer";
 import { deploymentSettings } from "../src/deployment";
 import type { ImageModel } from "../src/extensions/image-generation";
 import { serve } from "../src/gateway";
@@ -203,6 +203,16 @@ export class Pim extends RealPim {
 		const fixture = seedCuaFixture({ name: ctx.id.name, meta: this.store, transaction: (fn) => ctx.storage.transactionSync(fn) }, env as unknown as Record<string, unknown>);
 		if (!starts(fixture)) throw new Error("This preview space's Cua fixture didn't seed it, so it doesn't start (see docs/cua-bridge.md).");
 		const owner = ctx.id.name;
+		// Pim's own address, which keeps the viewer's host apart from it. This is a local preview: it may be loopback HTTP, which the
+		// host can never let frame the viewer, and is then said to be so, never taken for an embeddable one (src/cua-viewer.ts).
+		const app = () => appOrigin(deploymentSettings(env).publicUrl ?? "", true);
+		const frame = () => {
+			try {
+				return app().embeddable ? "embeddable" : "local_http";
+			} catch {
+				return "refused";
+			}
+		};
 		// The ledger is read here, and only the fixture's seed ever wrote one: a space without it can't watch (src/cua-observation-runtime.ts).
 		this.#desk = watches(fixture, owner, env)
 			? new ObservationDesk({
@@ -212,11 +222,10 @@ export class Pim extends RealPim {
 						write: (value) => this.store.setMeta(OBSERVATION_KEY, value),
 						flush: () => ctx.storage.sync(),
 					},
-					// Pim's own address, so that the viewer's, on the bridge's host, is never the app's (src/cua-viewer.ts).
-					client: () => new CuaViewerClient(bridgeFor((env as unknown as { CUA_BRIDGES?: unknown }).CUA_BRIDGES, owner), owner, deploymentSettings(env).publicUrl ?? ""),
+					client: () => new CuaViewerClient(bridgeFor((env as unknown as { CUA_BRIDGES?: unknown }).CUA_BRIDGES, owner), owner, app()),
 					observationMs: VIEWER_FIRST.observationMs,
 					openObservations: VIEWER_FIRST.openObservations,
-					listing: () => ({ agent: agentMode(this.chosenModel().provider) }),
+					listing: () => ({ agent: agentMode(this.chosenModel().provider), frame: frame() }),
 				})
 			: null;
 	}

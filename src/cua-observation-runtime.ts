@@ -216,6 +216,11 @@ export class ObservationDesk {
 		if (this.#blocked || intent?.status !== "pending_open" || intent.notAfter !== notAfter || intent.hostLaunchId !== null) {
 			return failure(this.#blocked ? 503 : 409, "The observation changed before the computer was asked, so nothing was asked of it.", { observation: this.#view(id) });
 		}
+		// Nor once its deadline has come: nothing was asked, so the record says so, and the next observation may start.
+		if (this.#now() >= notAfter) {
+			this.#apply({ type: "open_refused", observationId: id, evidence: "its deadline came while it was being recorded; the host was never asked" });
+			return failure(409, "The observation's time ran out before the computer was asked, so nothing was asked of it.", { observation: this.#view(id) });
+		}
 		const reply = await client.launch({ key: id, owner: this.#options.owner, notAfter });
 		return this.#launched(client, id, notAfter, reply);
 	}
@@ -240,6 +245,10 @@ export class ObservationDesk {
 		const acknowledged = this.#apply({ type: "open_acknowledged", observationId: id, hostLaunchId: host.launchId, hostGeneration: host.generation });
 		if (!acknowledged.ok) return failure(acknowledged.reason === "storage" ? 503 : 502, "The observation couldn't be recorded as open.", { observation: this.#view(id) });
 		if (host.notAfter !== notAfter || host.replayed) return settle({ type: "unconfirmed", observationId: id, evidence: "the host acknowledged another deadline, or a replay for a new key" }, 502, "The computer's answer doesn't match this observation.");
+		// The host was a wait: its page is handed out only if the record is still this launch, open, unblocked and before its deadline.
+		if (!this.#deliverable(id, host.launchId, host.generation)) {
+			return failure(409, "The observation's time ran out, or it changed, while the computer answered. Check it again.", { observation: this.#view(id) });
+		}
 		return this.#viewer(client, id, host.launchId, host.viewerPath);
 	}
 
@@ -250,9 +259,9 @@ export class ObservationDesk {
 		const host = reply.answer;
 		if (host.outcome === "launched" && host.key === record.observationId && host.launchId === record.hostLaunchId && host.generation === record.hostGeneration && host.notAfter === record.notAfter) {
 			// The host was a wait: the page is handed out only if the record is still this open launch, before its deadline, unblocked.
-			const current = this.#record(record.observationId);
-			const still = !this.#blocked && current?.status === "open" && current.hostLaunchId === host.launchId && current.hostGeneration === host.generation && this.#now() < current.notAfter;
-			if (!still) return failure(409, "This observation changed while the computer answered. Check it again.", { observation: this.#view(record.observationId) });
+			if (!this.#deliverable(record.observationId, host.launchId, host.generation)) {
+				return failure(409, "This observation changed while the computer answered. Check it again.", { observation: this.#view(record.observationId) });
+			}
 			return this.#viewer(client, record.observationId, host.launchId, host.viewerPath);
 		}
 		if (host.outcome === "launched" && host.key === record.observationId) {
@@ -272,6 +281,12 @@ export class ObservationDesk {
 	 */
 	#viewer(client: CuaViewerClient, id: string, launchId: string, viewerPath: string): Response {
 		return answer({ observation: this.#view(id), viewer: client.viewerUrl(launchId, viewerPath) });
+	}
+
+	/** Whether `id`'s viewer may be handed out now: the ledger unblocked, the record open with exactly this launch and generation, and before its deadline. */
+	#deliverable(id: string, launchId: string, generation: string): boolean {
+		const current = this.#record(id);
+		return !this.#blocked && current?.status === "open" && current.hostLaunchId === launchId && current.hostGeneration === generation && this.#now() < current.notAfter;
 	}
 
 	#view(id: string): ObservationView | null {

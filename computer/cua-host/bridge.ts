@@ -103,11 +103,26 @@ async function main(): Promise<void> {
 			if (stopping) return;
 			stopping = true;
 			void (async () => {
-				// The viewer first: it stops admitting launches and asks its launches to end, and says what it saw.
-				const shutdown = await viewer?.close().catch(() => undefined);
-				if (viewer) console.error(JSON.stringify({ event: "bridge.viewer_stopped", ...(shutdown ?? { reason: "failed" }) }));
-				await host.close();
-				process.exit(0);
+				// Exits 0 only when everything was seen settled. Pending, unsettled or unobserved work, or a failure, is a nonzero status, and one failure doesn't hide another.
+				let status = 0;
+				try {
+					// The viewer first: it stops admitting launches and asks its launches to end, and says what it saw.
+					const shutdown = viewer ? await viewer.close() : undefined;
+					if (shutdown) {
+						console.error(JSON.stringify({ event: "bridge.viewer_stopped", ...shutdown }));
+						if (!shutdown.settled) status = 3;
+					}
+				} catch {
+					console.error(JSON.stringify({ event: "bridge.viewer_stopped", reason: "failed" }));
+					status = 3;
+				}
+				try {
+					await host.close();
+				} catch {
+					console.error(JSON.stringify({ event: "bridge.failed", reason: "close" }));
+					if (status === 0) status = 1;
+				}
+				process.exit(status);
 			})();
 		};
 		process.once("SIGTERM", stop);
@@ -115,8 +130,11 @@ async function main(): Promise<void> {
 	} catch {
 		// What failed may carry a secret's contents or path, so only where it failed is said.
 		console.error(JSON.stringify({ event: "bridge.failed", reason: stage }));
-		// A viewer that was opened releases its journal's lock before the bridge exits.
-		await viewer?.close().catch(() => undefined);
+		// A viewer that was opened is shut down, and says what it saw; the status stays the failure's.
+		if (viewer) {
+			const shutdown = await viewer.close().catch(() => undefined);
+			console.error(JSON.stringify({ event: "bridge.viewer_stopped", ...(shutdown ?? { reason: "failed" }) }));
+		}
 		process.exit(1);
 	}
 }

@@ -15,12 +15,12 @@ import {
 	createMediaOpener,
 	createRootTokenReader,
 	createViewerHost,
-	endOwnedLaunches,
+	createLaunchAdmission,
 	MAX_ROOT_TOKEN_BYTES,
 	parseViewerSettings,
 	type UpstreamSocket,
 } from "../viewer-host.ts";
-import type { EndAnswer, KeyRequest, StatusAnswer } from "../viewer-launch-manager.ts";
+import type { EndAnswer, EntryState, KeyRequest, LaunchAnswer, LaunchRequestKey, StatusAnswer } from "../viewer-launch-manager.ts";
 import { FakeFiles, OWNER_UID } from "./fake-journal-files.ts";
 
 const SPACE = "o_0123456789abcdefghijklmnop";
@@ -190,53 +190,243 @@ describe("the media opener", () => {
 	});
 });
 
-describe("a shutdown's launches", () => {
-	const key = (name: string): KeyRequest => ({ owner: SPACE, key: name.padEnd(16, "k"), generation: "g" });
-	/** A manager whose launches close after `after[key]` status reads (never when absent), on a clock the sleeps advance. */
-	function world(after: Record<string, number>, finalOnEnd: string[] = []) {
-		let time = 0;
-		const reads: Record<string, number> = {};
-		const ends: string[] = [];
+/** Lets every promise that is ready run, without any timer. */
+const settle = async () => {
+	for (let index = 0; index < 40; index++) await Promise.resolve();
+};
+
+/** A clock that moves only when a test moves it: `sleep` answers once `advance` reaches it. */
+function clock() {
+	let time = 0;
+	const timers: { at: number; wake: () => void }[] = [];
+	return {
+		now: () => time,
+		sleep: (ms: number) => new Promise<void>((wake) => timers.push({ at: time + ms, wake })),
+		async advance(ms: number) {
+			const target = time + ms;
+			for (;;) {
+				timers.sort((a, b) => a.at - b.at);
+				const next = timers[0];
+				if (!next || next.at > target) break;
+				timers.shift();
+				time = Math.max(time, next.at);
+				next.wake();
+				await settle();
+			}
+			time = target;
+			await settle();
+		},
+	};
+}
+
+/** Something a test holds back and then settles or severs, always in a `finally`. */
+function gate<T>() {
+	let settleIt!: (value: T) => void;
+	let severIt!: (error: Error) => void;
+	const promise = new Promise<T>((resolve, reject) => {
+		settleIt = resolve;
+		severIt = reject;
+	});
+	// A severed gate that nothing awaits any more is not an unhandled rejection.
+	promise.catch(() => undefined);
+	return { promise, settle: settleIt, sever: () => severIt(new Error("severed")) };
+}
+
+/** Moves `time` in steps until `work` finishes, at most a bounded number of them. */
+async function drive<T>(time: ReturnType<typeof clock>, work: Promise<T>): Promise<T> {
+	let finished = false;
+	work.then(
+		() => (finished = true),
+		() => (finished = true),
+	);
+	await settle();
+	for (let step = 0; step < 100 && !finished; step++) await time.advance(100);
+	assert.ok(finished, "the shutdown finished within the bounded steps");
+	return work;
+}
+
+describe("a shutdown", () => {
+	const key = (name: string) => name.padEnd(16, "k");
+	const launchRequest = (name: string): LaunchRequestKey => ({ key: key(name), owner: SPACE, notAfter: 1 });
+	const launched = (name: string): LaunchAnswer => ({ outcome: "launched", key: key(name), launchId: "l".repeat(22), generation: "g", notAfter: 1, viewerPath: "/x", replayed: false });
+	const found = (name: string, state: EntryState): StatusAnswer => ({ outcome: "found", key: key(name), state, generation: "g", launchId: "l", notAfter: 1, evidence: null, launch: null });
+	const options = (time: ReturnType<typeof clock>) => ({ graceMs: 1000, pollMs: 300, now: time.now, sleep: time.sleep });
+	const journal = () => {
+		const seen = { closes: 0 };
+		return { seen, close: async () => void seen.closes++ };
+	};
+	/** A manager whose launch, end and status answer from `script`, and which records the keys it was asked about. */
+	function manager(script: { launch?: (request: LaunchRequestKey) => Promise<LaunchAnswer>; end?: (request: KeyRequest) => Promise<EndAnswer>; status?: (request: KeyRequest) => Promise<StatusAnswer> } = {}) {
+		const seen = { ends: [] as string[], statuses: [] as string[] };
 		return {
-			ends,
-			options: { graceMs: 1000, pollMs: 300, now: () => time, sleep: async (ms: number) => void (time += ms) },
+			seen,
 			manager: {
-				end: async (request: KeyRequest): Promise<EndAnswer> => {
-					ends.push(request.key);
-					return finalOnEnd.includes(request.key) ? { outcome: "final", state: "closed_observed" } : { outcome: "requested", recorded: true };
+				launch: script.launch ?? (async (request: LaunchRequestKey) => launched(request.key.replace(/k+$/, ""))),
+				end: async (request: KeyRequest) => {
+					seen.ends.push(request.key);
+					return script.end ? script.end(request) : ({ outcome: "requested", recorded: true } as const);
 				},
-				status: async (request: KeyRequest): Promise<StatusAnswer> => {
-					reads[request.key] = (reads[request.key] ?? 0) + 1;
-					const done = request.key in after && reads[request.key]! > after[request.key]!;
-					return { outcome: "found", key: request.key, state: done ? "closed_observed" : "ending", generation: "g", launchId: "l", notAfter: 1, evidence: null, launch: null };
+				status: async (request: KeyRequest) => {
+					seen.statuses.push(request.key);
+					return script.status ? script.status(request) : found(request.key.replace(/k+$/, ""), "ending");
 				},
 			},
 		};
 	}
 
-	it("asks each to end, reads each until it is seen closed, and reports what it saw", async () => {
-		const a = key("a");
-		const b = key("b");
-		const c = key("c");
-		const w = world({ [a.key]: 2 }, [c.key]);
-		assert.deepEqual(await endOwnedLaunches(w.manager, [a, b, c], w.options), { requested: 3, closed: 2, pending: 1 });
-		assert.deepEqual(w.ends, [a.key, b.key, c.key]);
+	it("asks each launch to end, reads each until it is seen closed, and reports what it saw", async () => {
+		const reads: Record<string, number> = {};
+		const w = manager({
+			end: async (request) => (request.key === key("c") ? { outcome: "final", state: "closed_observed" } : { outcome: "requested", recorded: true }),
+			status: async (request) => {
+				const name = request.key.replace(/k+$/, "");
+				reads[name] = (reads[name] ?? 0) + 1;
+				return found(name, name === "a" && reads[name]! > 2 ? "closed_observed" : "ending");
+			},
+		});
+		const admission = createLaunchAdmission(w.manager);
+		for (const name of ["a", "b", "c"]) await admission.manager.launch(launchRequest(name));
+		const time = clock();
+		const j = journal();
+		const report = await drive(time, admission.shutdown(options(time), j));
+		assert.deepEqual(report, { requested: 3, closed: 2, pending: 1, unconfirmed: 0, inFlight: 0, unsettled: 0, lockLeft: false, settled: false });
+		assert.deepEqual(w.seen.ends, [key("a"), key("b"), key("c")]);
+		assert.equal(j.seen.closes, 1, "nothing was outstanding, so the lock was released, though one launch is pending");
 	});
 
 	it("gives up when the grace has passed and calls what it didn't see closed pending, not closed", async () => {
-		const a = key("a");
-		const w = world({});
-		let reads = 0;
-		const manager = { ...w.manager, status: async (request: KeyRequest) => (reads++, w.manager.status(request)) };
-		assert.deepEqual(await endOwnedLaunches(manager, [a], w.options), { requested: 1, closed: 0, pending: 1 });
-		assert.ok(reads >= 2 && reads <= 6, "bounded by the grace");
+		const w = manager();
+		const admission = createLaunchAdmission(w.manager);
+		await admission.manager.launch(launchRequest("a"));
+		const time = clock();
+		const report = await drive(time, admission.shutdown(options(time), journal()));
+		assert.equal(report.closed, 0);
+		assert.equal(report.pending, 1);
+		assert.ok(w.seen.statuses.length >= 2 && w.seen.statuses.length <= 6, "bounded by the grace");
 	});
 
-	it("leaves a launch pending when the manager throws, and asks about none when there are none", async () => {
-		const a = key("a");
-		const throwing = { end: async () => Promise.reject(new Error("x")), status: async () => Promise.reject(new Error("x")) };
-		assert.deepEqual(await endOwnedLaunches(throwing, [a], world({}).options), { requested: 1, closed: 0, pending: 1 });
-		assert.deepEqual(await endOwnedLaunches(throwing, [], world({}).options), { requested: 0, closed: 0, pending: 0 });
+	it("counts a launch whose last read was unconfirmed", async () => {
+		const w = manager({ status: async (request) => found(request.key.replace(/k+$/, ""), "unconfirmed") });
+		const admission = createLaunchAdmission(w.manager);
+		await admission.manager.launch(launchRequest("a"));
+		const time = clock();
+		const report = await drive(time, admission.shutdown(options(time), journal()));
+		assert.deepEqual([report.pending, report.unconfirmed, report.settled], [1, 1, false]);
+	});
+
+	it("leaves a launch pending when the manager throws, and has nothing to ask when it has no launch", async () => {
+		const throwing = manager({ end: () => Promise.reject(new Error("x")), status: () => Promise.reject(new Error("x")) });
+		const admission = createLaunchAdmission(throwing.manager);
+		await admission.manager.launch(launchRequest("a"));
+		const time = clock();
+		const report = await drive(time, admission.shutdown(options(time), journal()));
+		assert.deepEqual([report.requested, report.closed, report.pending, report.unsettled], [1, 0, 1, 0]);
+
+		const none = createLaunchAdmission(manager().manager);
+		const quiet = clock();
+		assert.deepEqual(await drive(quiet, none.shutdown(options(quiet), journal())), { requested: 0, closed: 0, pending: 0, unconfirmed: 0, inFlight: 0, unsettled: 0, lockLeft: false, settled: true });
+	});
+
+	it("is not held by an end that never answers, and leaves the lock held and the call counted", async () => {
+		const held = gate<EndAnswer>();
+		try {
+			const w = manager({ end: () => held.promise });
+			const admission = createLaunchAdmission(w.manager);
+			await admission.manager.launch(launchRequest("a"));
+			const time = clock();
+			const j = journal();
+			const report = await drive(time, admission.shutdown(options(time), j));
+			assert.deepEqual([report.pending, report.unsettled, report.inFlight, report.lockLeft, report.settled], [1, 1, 0, true, false]);
+			assert.equal(j.seen.closes, 0, "a call that could still write holds the lock");
+		} finally {
+			held.settle({ outcome: "requested", recorded: true });
+		}
+	});
+
+	it("is not held by a status that never answers, and reads a launch one at a time", async () => {
+		const held = gate<StatusAnswer>();
+		try {
+			const w = manager({ status: () => held.promise });
+			const admission = createLaunchAdmission(w.manager);
+			await admission.manager.launch(launchRequest("a"));
+			const time = clock();
+			const j = journal();
+			const report = await drive(time, admission.shutdown(options(time), j));
+			assert.deepEqual([report.pending, report.unsettled, report.lockLeft, report.settled], [1, 1, true, false]);
+			assert.equal(w.seen.statuses.length, 1, "a held read isn't piled on");
+			assert.equal(j.seen.closes, 0);
+		} finally {
+			held.sever();
+		}
+	});
+
+	it("is held by no launch that is still starting, refuses new ones, and ends a late one when it answers", async () => {
+		const start = gate<LaunchAnswer>();
+		try {
+			const w = manager({ launch: () => start.promise });
+			const admission = createLaunchAdmission(w.manager);
+			const starting = admission.manager.launch(launchRequest("a"));
+			const time = clock();
+			const j = journal();
+			const done = admission.shutdown(options(time), j);
+			await settle();
+			assert.deepEqual(await admission.manager.launch(launchRequest("b")), { outcome: "refused", reason: "blocked" });
+			const report = await drive(time, done);
+			assert.deepEqual([report.inFlight, report.unsettled, report.pending, report.lockLeft, report.settled], [1, 0, 0, true, false]);
+			assert.equal(j.seen.closes, 0);
+			assert.deepEqual(w.seen.ends, []);
+			// It answers after the deadline: nothing waits for it, and it is ended at once.
+			start.settle(launched("a"));
+			assert.equal((await starting).outcome, "launched");
+			await settle();
+			assert.deepEqual(w.seen.ends, [key("a")]);
+		} finally {
+			start.settle(launched("a"));
+		}
+	});
+
+	it("ends a launch that answers while it is waiting, and sees it closed", async () => {
+		const start = gate<LaunchAnswer>();
+		try {
+			const w = manager({ launch: () => start.promise, end: async () => ({ outcome: "final", state: "closed_observed" }) });
+			const admission = createLaunchAdmission(w.manager);
+			void admission.manager.launch(launchRequest("a"));
+			const time = clock();
+			const j = journal();
+			const done = admission.shutdown(options(time), j);
+			await settle();
+			start.settle(launched("a"));
+			const report = await drive(time, done);
+			assert.deepEqual(report, { requested: 1, closed: 1, pending: 0, unconfirmed: 0, inFlight: 0, unsettled: 0, lockLeft: false, settled: true });
+			assert.equal(j.seen.closes, 1);
+		} finally {
+			start.settle(launched("a"));
+		}
+	});
+
+	it("leaves the lock held, and says so, when the journal's drain never finishes or fails", async () => {
+		const held = gate<void>();
+		try {
+			const admission = createLaunchAdmission(manager().manager);
+			const time = clock();
+			const report = await drive(time, admission.shutdown(options(time), { close: () => held.promise }));
+			assert.deepEqual([report.lockLeft, report.settled], [true, false]);
+		} finally {
+			held.settle();
+		}
+		const failing = createLaunchAdmission(manager().manager);
+		const time = clock();
+		const report = await drive(time, failing.shutdown(options(time), { close: () => Promise.reject(new Error("x")) }));
+		assert.deepEqual([report.lockLeft, report.settled], [true, false]);
+	});
+
+	it("gives the first call's answer to a second, and admits nothing after", async () => {
+		const admission = createLaunchAdmission(manager().manager);
+		const time = clock();
+		const first = admission.shutdown(options(time), journal());
+		assert.equal(admission.shutdown(options(time), journal()), first);
+		await drive(time, first);
+		assert.deepEqual(await admission.manager.launch(launchRequest("a")), { outcome: "refused", reason: "blocked" });
 	});
 });
 
@@ -252,7 +442,11 @@ describe("the viewer host", () => {
 		},
 	};
 	const launch = { key: "k".repeat(16), owner: SPACE, notAfter: Date.now() + 3_600_000 };
-	const make = (files: FakeFiles) => createViewerHost({ origin: "http://127.0.0.1:3211", displayId: "primary", journalDirectory: DIR, rootTokenFile: ROOT, files, upstream: noSpacesd, generation: "host-test" });
+	// No real timer: the shutdown's clock is a test's, and its work finishes without waiting on it.
+	const make = (files: FakeFiles) => {
+		const time = clock();
+		return createViewerHost({ origin: "http://127.0.0.1:3211", displayId: "primary", journalDirectory: DIR, rootTokenFile: ROOT, files, upstream: noSpacesd, generation: "host-test", shutdown: { now: time.now, sleep: time.sleep } });
+	};
 
 	it("takes only an origin that is https, or http on a loopback address", () => {
 		assert.equal(checkedOrigin("https://desktop.example"), true);
@@ -302,7 +496,7 @@ describe("the viewer host", () => {
 		assert.deepEqual(viewer.blockers(), []);
 		assert.deepEqual(await viewer.routes.manager.launch(launch), { outcome: "refused", reason: "no_credential" });
 		assert.deepEqual((JSON.parse(files.text(`${DIR}/journal.json`)!) as { entries: unknown[] }).entries, []);
-		assert.deepEqual(await viewer.close(), { requested: 0, closed: 0, pending: 0, lockLeft: false });
+		assert.deepEqual(await viewer.close(), { requested: 0, closed: 0, pending: 0, unconfirmed: 0, inFlight: 0, unsettled: 0, lockLeft: false, settled: true });
 		assert.equal(files.nodes.has(`${DIR}/journal.lock`), false);
 	});
 

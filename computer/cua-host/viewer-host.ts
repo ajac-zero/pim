@@ -26,11 +26,13 @@
  * with the reason in `blockers()`, and nothing is written.
  *
  * **Shutdown** stops admitting launches first, asks every launch this host
- * answered to end, waits a bounded time for each to be seen closed, and
- * reports how many were requested, seen closed and still pending. It does
- * not claim closure it didn't see, and it doesn't wait forever: what is
- * pending stays unresolved in the journal, and the next process finds it
- * unconfirmed. Only then does it release the journal's lock.
+ * answered to end (those still starting too, as they answer), and reads
+ * their status until each is seen closed or one deadline passes. Every wait
+ * races that deadline, so a held call can't hold the shutdown, and nothing
+ * is taken as settled that wasn't seen to be. It reports what was requested,
+ * seen closed, pending, in flight and unsettled, and leaves the journal's
+ * lock held when a call could still write it. What is pending stays
+ * unresolved in the journal, and the next process finds it unconfirmed.
  *
  * Importing it does nothing; `createViewerHost(...)` opens the journal.
  */
@@ -226,48 +228,167 @@ export function parseViewerSettings(flags: { readonly origin?: string; readonly 
 }
 
 export type ShutdownOptions = {
-	/** How long to wait, in all, for launches to be seen closed. */
+	/** How long, in all, the shutdown may wait: every stage of it races this one deadline. */
 	readonly graceMs: number;
 	readonly pollMs: number;
 	readonly now: () => number;
 	readonly sleep: (ms: number) => Promise<void>;
 };
 
-/** What a shutdown saw of the launches it was asked about: the launches asked to end, those seen closed, and those not. */
-export type LaunchShutdown = { readonly requested: number; readonly closed: number; readonly pending: number };
-
 /**
- * Asks every launch in `owned` to end, then reads each one's status until it
- * is seen `closed_observed` or `graceMs` passes. A launch not seen closed is
- * `pending`: its end was requested, nothing is known of its transports, and
- * its journal entry stays unresolved. A manager that throws leaves its
- * launch pending. It doesn't wait longer than `graceMs`.
+ * What a shutdown saw. Nothing here claims more than was seen: a call that
+ * hadn't answered by the deadline is counted as such, and its work is not
+ * taken as settled.
  */
-export async function endOwnedLaunches(manager: Pick<ViewerLaunchManager, "end" | "status">, owned: Iterable<KeyRequest>, options: ShutdownOptions): Promise<LaunchShutdown> {
-	const keys = [...owned];
-	const deadline = options.now() + options.graceMs;
-	const open = new Set(keys.map((_, index) => index));
-	for (const [index, key] of keys.entries()) {
-		try {
-			const answer = await manager.end(key);
-			if (answer.outcome === "final" && answer.state === "closed_observed") open.delete(index);
-		} catch {
-			// Left pending.
+export type ViewerShutdown = {
+	/** Launches the shutdown asked to end. */
+	readonly requested: number;
+	/** Launches whose status was seen `closed_observed`. */
+	readonly closed: number;
+	/** Launches this host answered and didn't see closed. Their end was requested; their journal entries stay unresolved, and the next process finds them unconfirmed. */
+	readonly pending: number;
+	/** Of those, the ones whose last status read was `unconfirmed`. */
+	readonly unconfirmed: number;
+	/** `launch` calls that hadn't answered at the deadline. A launch may still come of one, and is ended when it does. */
+	readonly inFlight: number;
+	/** `end` and `status` calls that hadn't answered at the deadline. */
+	readonly unsettled: number;
+	/** The journal's lock is still held, or its close wasn't seen to finish. That blocks the next process, which is what keeps unobserved work from being started over. */
+	readonly lockLeft: boolean;
+	/** Nothing is pending, in flight or unsettled, and the lock was released. */
+	readonly settled: boolean;
+};
+
+/** A launch manager whose admission a shutdown can stop, and the shutdown. */
+export type LaunchAdmission = {
+	/** The manager the host's routes call: launches are refused once a shutdown began, and every call is tracked until it answers. */
+	readonly manager: Pick<ViewerLaunchManager, "launch" | "end" | "status">;
+	/**
+	 * Stops admitting launches, asks every launch this host answered to end
+	 * (those still starting too, as they answer), and reads their status
+	 * until each is seen closed or the one deadline passes. Every wait races
+	 * that deadline: a call that is held doesn't hold the shutdown. The
+	 * journal's `close` is called only when no call is outstanding, since
+	 * one could still write it, and races a bounded wait of its own (at least
+	 * one poll interval) when the deadline has already passed. A launch that
+	 * answers after the deadline is ended then, and nothing waits for it.
+	 * A second call gets the first one's answer.
+	 */
+	readonly shutdown: (options: ShutdownOptions, journal?: { readonly close: () => Promise<void> }) => Promise<ViewerShutdown>;
+};
+
+export function createLaunchAdmission(manager: Pick<ViewerLaunchManager, "launch" | "end" | "status">): LaunchAdmission {
+	let closing = false;
+	/** The deadline passed: a launch that answers now is ended at once, and nothing waits for it. */
+	let expired = false;
+	let result: Promise<ViewerShutdown> | undefined;
+	/** The launches this host answered `launched`, until the process ends. */
+	const owned = new Map<string, KeyRequest>();
+	/** Calls to the manager that haven't answered. A launch call adds its launch to `owned` before it settles. */
+	const calls = new Map<Promise<unknown>, "launch" | "call">();
+	const track = <T>(kind: "launch" | "call", call: Promise<T>): Promise<T> => {
+		calls.set(call, kind);
+		const forget = () => void calls.delete(call);
+		call.then(forget, forget);
+		return call;
+	};
+
+	const admitting: LaunchAdmission["manager"] = {
+		launch: (request) => {
+			if (closing) return Promise.resolve({ outcome: "refused", reason: "blocked" } as const);
+			return track(
+				"launch",
+				manager.launch(request).then((answer) => {
+					if (answer.outcome === "launched") {
+						const key = { owner: request.owner, key: answer.key, generation: answer.generation };
+						owned.set(answer.key, key);
+						// Answered after the deadline: no one waits for it, so it is ended now.
+						if (expired) void manager.end(key).catch(() => undefined);
+					}
+					return answer;
+				}),
+			);
+		},
+		end: (request) => track("call", manager.end(request)),
+		status: (request) => track("call", manager.status(request)),
+	};
+
+	async function run(options: ShutdownOptions, journal?: { readonly close: () => Promise<void> }): Promise<ViewerShutdown> {
+		closing = true;
+		const deadline = options.now() + options.graceMs;
+		const remaining = () => Math.max(0, deadline - options.now());
+		/** Waits for `work` to answer or the deadline, whichever is first; the work itself is never stopped or assumed done. */
+		const within = async (work: Promise<unknown>): Promise<void> => {
+			const left = remaining();
+			if (left <= 0) return;
+			await Promise.race([work.then(() => undefined, () => undefined), options.sleep(left)]);
+		};
+		const closed = new Set<string>();
+		const asked = new Set<string>();
+		const reading = new Set<string>();
+		const unconfirmed = new Set<string>();
+		for (;;) {
+			// Nothing new is asked once everything is seen settled, or the deadline has passed: a call begun now couldn't be waited for.
+			if (owned.size === closed.size && calls.size === 0) break;
+			if (remaining() <= 0) break;
+			const batch: Promise<unknown>[] = [];
+			for (const [key, request] of owned) {
+				if (closed.has(key)) continue;
+				if (!asked.has(key)) {
+					asked.add(key);
+					batch.push(
+						track("call", manager.end(request)).then(
+							(answer) => {
+								if (answer.outcome === "final" && answer.state === "closed_observed") closed.add(key);
+							},
+							() => undefined,
+						),
+					);
+				} else if (!reading.has(key)) {
+					// One status read at a time for a launch, so a held one isn't piled on.
+					reading.add(key);
+					batch.push(
+						track("call", manager.status(request))
+							.then(
+								(answer) => {
+									if (answer.outcome !== "found") return;
+									if (answer.state === "closed_observed") {
+										closed.add(key);
+										unconfirmed.delete(key);
+									} else if (answer.state === "unconfirmed") unconfirmed.add(key);
+									else unconfirmed.delete(key);
+								},
+								() => undefined,
+							)
+							.finally(() => reading.delete(key)),
+					);
+				}
+			}
+			if (batch.length > 0) await within(Promise.all(batch));
+			if (owned.size === closed.size && calls.size === 0) break;
+			if (remaining() > 0) await options.sleep(Math.min(options.pollMs, remaining()));
 		}
-	}
-	for (;;) {
-		for (const index of [...open]) {
-			try {
-				const answer = await manager.status(keys[index]!);
-				if (answer.outcome === "found" && answer.state === "closed_observed") open.delete(index);
-			} catch {
-				// Left pending.
+		expired = true;
+
+		let inFlight = 0;
+		for (const kind of calls.values()) if (kind === "launch") inFlight++;
+		const unsettled = calls.size - inFlight;
+		let lockLeft = false;
+		if (journal) {
+			if (calls.size > 0) {
+				// A call outstanding could still write the journal: its lock stays held, and `close` isn't asked for.
+				lockLeft = true;
+			} else {
+				const bound = Math.max(remaining(), options.pollMs);
+				const released = await Promise.race([journal.close().then(() => true, () => false), options.sleep(bound).then(() => false)]);
+				lockLeft = !released;
 			}
 		}
-		if (open.size === 0 || options.now() >= deadline) break;
-		await options.sleep(Math.min(options.pollMs, Math.max(1, deadline - options.now())));
+		const pending = owned.size - closed.size;
+		return { requested: asked.size, closed: closed.size, pending, unconfirmed: unconfirmed.size, inFlight, unsettled, lockLeft, settled: pending === 0 && calls.size === 0 && !lockLeft };
 	}
-	return { requested: keys.length, closed: keys.length - open.size, pending: open.size };
+
+	return { manager: admitting, shutdown: (options, journal) => (result ??= run(options, journal)) };
 }
 
 export type ViewerHostOptions = {
@@ -288,19 +409,11 @@ export type ViewerHostOptions = {
 	readonly shutdown?: Partial<ShutdownOptions>;
 };
 
-/** What a viewer host's shutdown did and saw. `lockLeft` is true when the journal's lock was left in place, which blocks the next process. */
-export type ViewerShutdown = LaunchShutdown & { readonly lockLeft: boolean };
-
 export type ViewerHost = {
 	readonly routes: ViewerRoutes;
 	/** Why no launch is admitted; empty when launches are. Includes a journal store that wasn't opened and a root token reader that latched. */
 	readonly blockers: () => readonly string[];
-	/**
-	 * Stops admitting launches, asks each launch this host answered to end,
-	 * waits a bounded time, and then releases the journal's lock once its
-	 * queued writes settled. It says what it saw and doesn't claim closure it
-	 * didn't see. A second call gets the first one's answer.
-	 */
+	/** The shutdown of `LaunchAdmission`, with the journal's lock released only when it is seen safe to. A second call gets the first one's answer. */
 	readonly close: () => Promise<ViewerShutdown>;
 };
 
@@ -326,48 +439,19 @@ export async function createViewerHost(options: ViewerHostOptions): Promise<View
 		rootToken: () => reader.read(),
 	});
 
-	let closing = false;
-	/** The launches this host answered `launched`, until their shutdown. */
-	const owned = new Map<string, KeyRequest>();
-	const ending = (key: KeyRequest) => {
-		void manager.end(key).catch(() => undefined);
-	};
-	const admitting: ViewerLaunchManager = {
-		...manager,
-		// After shutdown began, nothing new starts; and a launch that was starting meanwhile is ended as soon as it is answered.
-		launch: async (request) => {
-			if (closing) return { outcome: "refused", reason: "blocked" };
-			const answer = await manager.launch(request);
-			if (answer.outcome === "launched") {
-				const key = { owner: request.owner, key: answer.key, generation: answer.generation };
-				owned.set(answer.key, key);
-				if (closing) ending(key);
-			}
-			return answer;
-		},
-	};
-
-	let shutdown: Promise<ViewerShutdown> | undefined;
+	const admission = createLaunchAdmission(manager);
 	return {
-		routes: { manager: admitting, adapter },
+		routes: { manager: admission.manager, adapter },
 		blockers: () => [...(refused ? [refused] : []), ...(reader.latched() ? ["root token reader: descriptor retained"] : []), ...manager.blockers()],
 		close: () =>
-			(shutdown ??= (async () => {
-				closing = true;
-				const launches = await endOwnedLaunches(manager, owned.values(), {
+			admission.shutdown(
+				{
 					graceMs: options.shutdown?.graceMs ?? 5_000,
 					pollMs: options.shutdown?.pollMs ?? 100,
 					now: options.shutdown?.now ?? Date.now,
 					sleep: options.shutdown?.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
-				});
-				let lockLeft = false;
-				try {
-					await journal?.close();
-				} catch {
-					// The lock is left where it is; the result says so.
-					lockLeft = true;
-				}
-				return { ...launches, lockLeft };
-			})()),
+				},
+				journal,
+			),
 	};
 }

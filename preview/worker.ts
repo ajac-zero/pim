@@ -46,8 +46,10 @@ export { EvalDirectory as Directory } from "./cua-eval";
  * With `PREVIEW_MODE=cua-eval` it is the Cua evaluation's preview instead
  * (./cua-eval.ts, docs/cua-viewer-first-vm-plan.md): no `/__dev` route,
  * closed registration, one owner set up once with the operator's claim code,
- * and only requests through the operator's ingress. The stand-in model, the
- * fixture and watching are as above.
+ * and only requests at Pim's own address, through the operator's ingress
+ * (`PIM_RUNTIME=celld`) or Cloudflare's (`PIM_RUNTIME=cloudflare`, a Worker
+ * of its own, wrangler.cua-eval.jsonc). The stand-in model, the fixture and
+ * watching are as above: a real model is a separate step.
  */
 
 const PREVIEW_MODEL = "preview-model";
@@ -361,8 +363,9 @@ export default {
 /**
  * The evaluation mode's requests (./cua-eval.ts): none under `/__dev` and no
  * setup link, by any method; then only a request whose URL is at Pim's own
- * address, which is what Wrangler hands the Worker when it runs with
- * `--host <Pim's host> --upstream-protocol https` (docs/cua-viewer-first-vm-plan.md).
+ * address: on Cloudflare, the custom domain it was reached at, and locally what
+ * Wrangler hands the Worker when it runs with `--host <Pim's host>
+ * --upstream-protocol https` (docs/cua-viewer-first-vm-plan.md).
  * Nothing is rewritten: a request at any other authority, loopback included,
  * is misdirected, and no header (`Host`, `X-Forwarded-*`, `Forwarded`) is
  * taken as the authority. The request's `Origin` is left as it came.

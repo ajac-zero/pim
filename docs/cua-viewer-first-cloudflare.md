@@ -1,0 +1,107 @@
+# The Cua evaluation's Pim on Cloudflare: the proposed pivot
+
+Pim can't run on the evaluation's VM under `wrangler dev` with every developer listener off: there is no supported way to turn off its inspectors (`docs/cua-viewer-first-vm-plan.md`, "Wrangler's developer listeners"). The pivot proposed instead runs Pim as a Worker of its own on Cloudflare. A deployed Worker opens no inspector, dev registry or Miniflare listener. The VM keeps only the Cua host, and the person's browser still reaches the viewer directly on it.
+
+This page says what the review branch now has for that, and what it doesn't. **Nothing is deployed, created or provisioned, and nothing here has run.** No resource exists, no part of it is checked against an account, and it isn't known to fit Cloudflare's free plan.
+
+```diagram
+┌─────────────────────┐  passkey session   ┌────────────────────────────────────┐
+│ The owner's browser │───────────────────▶│ pim-cua-eval, a Worker of its own  │
+│                     │                    │ https://pim-cua-eval.ajac-zero.com │
+│                     │                    └─────────────────┬──────────────────┘
+│                     │                                      │ launch, end, status
+│                     │                                      │ (bridge bearer token)
+│                     │  viewer: page,     ┌─────────────────▼──────────────────┐
+│                     │  RPC and media     │ The Cua VM: the host only          │
+│                     │───────────────────▶│ https://cua-eval.ajac-zero.com     │
+└─────────────────────┘  (the launch's     └────────────────────────────────────┘
+                          capability)
+```
+
+## What the source now has
+
+**An explicit Cloudflare profile for the evaluation mode** (`preview/cua-eval.ts`). The mode no longer assumes celld. `PIM_RUNTIME` must name one of two runtimes; unset or anything else refuses every request (`503`, logged as `runtime`).
+
+- **`celld`:** the operator's ingress in front of a local Worker, as before.
+- **`cloudflare`:** Cloudflare reports the client's address in `CF-Connecting-IP`, and the `AUTH_LIMITER` and `API_LIMITER` bindings count the rate limits. Without either binding the mode answers nothing (`503`, logged as `limiters`), because `limited` in `src/runtime.ts` would otherwise let everything through.
+
+**On both, everything else stays as reviewed:**
+
+- registration is closed, whatever `PIM_REGISTRATION` says;
+- `/__dev/…` and `/auth/setup-link` are `404` by any method or spelling;
+- a request whose URL isn't exactly `PIM_PUBLIC_URL` is `421`;
+- one owner is set up once, with the operator's claim code, and the claim's record is never reset.
+
+**The claim window stays shut on Cloudflare.** Plain Pim on Cloudflare lets whoever comes first claim a Pim with no admin for 15 minutes after each deploy (`claimWindowOpen`, `src/runtime.ts`). The evaluation's Directory already refuses any registration without the operator's code. The mode also hides the deploy's date from the window, so the sign-in page never offers a claim (`canClaim` stays false). This matters because setting the owner's secrets after the claim makes a new version.
+
+**A separate configuration, `wrangler.cua-eval.jsonc`.** It is not Pim's `wrangler.jsonc` and not the local preview's `wrangler.preview.jsonc`, which is never deployed. It has:
+
+- **Its own name**, `pim-cua-eval`, so its Durable Objects are its own.
+- **One custom domain**, `pim-cua-eval.ajac-zero.com`, with `workers_dev` and `preview_urls` off.
+- **No build step.** No repository is to be connected to it through Workers Builds, so nothing on `main` deploys it.
+- **No Workers AI binding.** The `AI` binding is a KV namespace, as in the preview, so no model is billed through it.
+- **`/__dev/*` among the paths the Worker answers first**, so the Worker refuses them (`404`) rather than the web app's page answering.
+- **Every variable in the file,** with no `keep_vars`: `PREVIEW_MODE`, `PIM_RUNTIME`, `PIM_PUBLIC_URL`, `PIM_REGISTRATION` and `PIM_MODELS`.
+
+**It can't be deployed as it stands.** Every resource is a placeholder that can't be filled in by Wrangler on its own (read from the installed `wrangler@4.148.0`, `wrangler-dist/cli.js`):
+
+- **The R2 bucket names aren't valid R2 names** (`REPLACE_WITH_REVIEWED_R2_BUCKET_…`). This is the important one: Wrangler creates a named bucket that doesn't exist yet when it deploys (`isConnectedToExistingResource` L170849, then "Resource name found in config" L170462). An invalid name is refused while the configuration is read (`isValidR2BucketName` L20290, checked at L24659), so the whole file is refused before anything is created.
+- **The KV IDs are set, to placeholders.** A KV binding with an `id` is fully specified and never provisioned (`isFullySpecified` L171127), and Cloudflare's API refuses a made-up ID.
+- **The rate-limit namespace IDs are placeholders**, which Cloudflare's API refuses. They must become integers of their own, not Pim's.
+
+**Tests** (fake-only, not run): the evaluation-mode tests in `test/preview-cua-fixture.test.ts` now name the runtime. One new test covers Cloudflare's: the control that plain Cloudflare would open the window a minute after a deploy; the closed sign-in page; `404` and `421`; the claim with no code, a wrong code, the operator's code, and again; the record `claimed`; the limiter counting by `CF-Connecting-IP`; and `503` without either limiter. The misconfiguration test adds an empty and an unknown runtime. The file has 19 tests.
+
+## What it would take, in order (not authorized)
+
+Each step below needs its own approval. Nothing here authorizes a deploy, a resource or a DNS change.
+
+1. **Radia's preflight**, below: whether the account and zone allow this within the free plan, and which limits bind.
+2. **The resources, reviewed:** two KV namespaces, two R2 buckets and two rate-limit namespace IDs, made once, with their real IDs and names put in the file in a reviewed commit.
+3. **The web app built** from that commit (`pnpm --filter pim-web build`), and the deploy run by hand with this file named: `wrangler deploy -c wrangler.cua-eval.jsonc`.
+   - Deploying a custom domain makes its DNS record and certificate in the `ajac-zero.com` zone. That is part of what the deploy does, so the deploy itself is the provisioning step.
+4. **The claim digest** set as a secret, `PREVIEW_EVAL_CLAIM_SHA256`. Only the code's SHA-256 goes to Cloudflare. The operator makes the code privately and gives it to the owner, who opens `/#claim=<code>`.
+   - The code isn't in the page's address: a fragment is never sent.
+   - It is in the registration's JSON body. So it passes through Cloudflare's TLS termination and the Worker's memory, where it is hashed and compared, and is neither stored nor logged.
+5. **The owner's claim and passkey**, then the Cua secrets, which need the owner's ID:
+   - `CUA_BRIDGES`, the bridge's HTTPS address and bearer token;
+   - `PREVIEW_CUA_FIXTURE=seed`;
+   - `PREVIEW_CUA_FIXTURE_OWNER`, the owner's ID.
+6. **The host**, started on the VM with `--viewer-public-origin https://cua-eval.ajac-zero.com` and `--viewer-embed-origin https://pim-cua-eval.ajac-zero.com`, its journal made once as `docs/cua-viewer-first-vm-plan.md` says.
+
+## What follows from it
+
+**Sign-in.**
+- Passkeys are made for `pim-cua-eval.ajac-zero.com`.
+- The session cookie is `__Host-pim-session`, which is host-only. No credential may be scoped to `ajac-zero.com` itself, or it would reach the viewer's host too.
+- No OAuth sign-in is configured.
+
+**The bridge's bearer token.**
+- It lives in two places: as a Cloudflare secret in `CUA_BRIDGES`, and with the host, under the bridge's own account on the VM.
+- It is never given to `pim-desktop` or its agents, and never to a browser.
+- Cloudflare's network carries it to the host's public HTTPS address on each launch, end or status, with `x-pim-space`.
+- Anyone who can read the Worker's secrets in the Cloudflare account can read it.
+
+**Logs.**
+- Workers Logs are on.
+- Pim's lines (`preview.refused`, `preview.eval_claim` and the observation records) never hold a claim code, a bearer token or a viewer address. The viewer's capability never passes through Pim at all.
+- The logs stay in the Cloudflare account, readable by its members, for that plan's retention.
+
+**The model.** The Worker has only the preview's stand-in model, which is enough to demonstrate the viewer with `/tool` calls. Whether a real agent keeps acting while it is watched is a separate qualification. It needs a real provider added later, under its own approval and cost, and none is configured here.
+
+**No recovery.** The observation ledger and the claim's record live in this Worker's Durable Objects.
+- Deleting the Worker, its objects or its resources disposes of them. It never authorizes a new claim, a new space, a new journal or a fresh identity to get past a record left blocked or unconfirmed.
+- Settling one needs its own reviewed migration or reconciliation.
+
+## For Radia's preflight: free plan, unverified
+
+None of these is checked. Each is a question, not a claim:
+
+- **Workers Free** limits on requests per day, CPU time per request and subrequests per request. Pim's agents run inside Durable Objects, and whether a run fits Free's CPU limit is unknown.
+- **Durable Objects** with SQLite storage on Workers Free, and their limits.
+- **KV:** two namespaces, within Free's daily reads and writes.
+- **R2:** two buckets. Whether R2 can be turned on for the account without a paid plan or a payment method on file.
+- **Rate limiting bindings:** whether they are available on the account's plan.
+- **The custom domain:** `ajac-zero.com` must be a zone on the same Cloudflare account. Its certificate comes from Cloudflare.
+- **Workers Logs:** the plan's daily volume and retention.
+
+If any of these needs a paid plan, the pivot stops there for a decision. The Azure budget ($50) and the 48-hour bound are for the VM, not for Cloudflare.

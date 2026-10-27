@@ -1,0 +1,77 @@
+// The Cua evaluation's Pim on Cloudflare: the preview's Worker (preview/worker.ts) in its evaluation
+// mode, as a Worker of its own, for one owner, beside a Cua VM that serves the viewer directly
+// (docs/cua-viewer-first-cloudflare.md). It is not Pim's deployment and shares nothing with it: its
+// own name, Durable Objects, KV namespaces, buckets and rate limits, and one custom domain.
+//
+// Not deployable as it stands, on purpose. Every resource below is a placeholder until a reviewed
+// value replaces it: the bucket names aren't valid R2 names, so Wrangler refuses this file, and the
+// KV and rate-limit IDs are set, so nothing is created to fill them. Nothing here has been deployed,
+// created or checked against an account, and no part of it is known to fit Cloudflare's free plan.
+//
+// Deploy only by hand, from a reviewed commit, with this file named (`wrangler deploy -c
+// wrangler.cua-eval.jsonc`, after `pnpm --filter pim-web build`). It has no build step, and no
+// repository is to be connected to it through Workers Builds.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "pim-cua-eval",
+  "main": "preview/worker.ts",
+  "compatibility_date": "2026-09-24",
+  "compatibility_flags": ["nodejs_compat"],
+  // Only at its custom domain: no workers.dev address and no preview URLs, where the evaluation
+  // would answer nothing anyway (it serves only at PIM_PUBLIC_URL).
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "pim-cua-eval.ajac-zero.com", "custom_domain": true }],
+  "assets": {
+    "directory": "./web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    // `/__dev/*` stays here so the Worker answers it (404), rather than the web app's page.
+    "run_worker_first": ["/api", "/api/*", "/auth/*", "/health", "/mcp", "/oauth/*", "/.well-known/*", "/authorize", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*", "/shared/*", "/app-pages/*", "/__dev/*", "/p/*"]
+  },
+  // Pim needs an `AI` binding to start. As in the preview, it is a KV namespace, never Workers AI,
+  // so no model is ever billed through it; chats use the preview's stand-in model.
+  "kv_namespaces": [
+    { "binding": "AI", "id": "REPLACE-WITH-REVIEWED-KV-ID-AI-STAND-IN" },
+    { "binding": "OAUTH_KV", "id": "REPLACE-WITH-REVIEWED-KV-ID-OAUTH" }
+  ],
+  "r2_buckets": [
+    { "binding": "BLOBS", "bucket_name": "REPLACE_WITH_REVIEWED_R2_BUCKET_BLOBS" },
+    { "binding": "ARTIFACTS", "bucket_name": "REPLACE_WITH_REVIEWED_R2_BUCKET_ARTIFACTS" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "Pim", "class_name": "Pim" },
+      { "name": "Auth", "class_name": "Auth" },
+      { "name": "Directory", "class_name": "Directory" },
+      { "name": "Gallery", "class_name": "Gallery" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Pim"] },
+    { "tag": "v2", "new_sqlite_classes": ["Auth"] },
+    { "tag": "v3", "new_sqlite_classes": ["Directory"] },
+    { "tag": "v4", "new_sqlite_classes": ["Gallery"] }
+  ],
+  // The evaluation refuses every request without both (preview/cua-eval.ts). Their namespace IDs
+  // must be positive integers of their own in the account, not Pim's.
+  "ratelimits": [
+    { "name": "AUTH_LIMITER", "namespace_id": "REPLACE-WITH-REVIEWED-RATELIMIT-ID-AUTH", "simple": { "limit": 30, "period": 60 } },
+    { "name": "API_LIMITER", "namespace_id": "REPLACE-WITH-REVIEWED-RATELIMIT-ID-API", "simple": { "limit": 600, "period": 60 } }
+  ],
+  // Everything is here, so a deploy sets exactly this. The secrets, set with `wrangler secret put
+  // -c wrangler.cua-eval.jsonc`, are PREVIEW_EVAL_CLAIM_SHA256 (the operator's claim code's
+  // SHA-256, never the code), and, once the owner exists, CUA_BRIDGES, PREVIEW_CUA_FIXTURE=seed and
+  // PREVIEW_CUA_FIXTURE_OWNER (docs/cua-viewer-first-cloudflare.md).
+  "vars": {
+    "PREVIEW_MODE": "cua-eval",
+    "PIM_RUNTIME": "cloudflare",
+    "PIM_PUBLIC_URL": "https://pim-cua-eval.ajac-zero.com",
+    "PIM_REGISTRATION": "closed",
+    "PIM_MODELS": "preview-model"
+  },
+  // Bound as in Pim's deployment; the evaluation mode hides it from the claim window, which never opens.
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+  // Pim's own log lines (never a claim code, bearer token or viewer address), kept in the account.
+  "observability": { "enabled": true }
+}

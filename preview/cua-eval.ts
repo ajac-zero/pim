@@ -14,10 +14,14 @@ import { CLIENT_IP_HEADER, INGRESS_SECRET_HEADER, runtimeOf } from "../src/runti
  *   spelling, and no setup link is written to the logs (`/auth/setup-link` is
  *   not found), so a session comes only from a passkey ceremony at
  *   `PIM_PUBLIC_URL`, as in a deployment.
- * - **Only through the operator's ingress.** The Worker runs with the ingress
- *   profile a celld deployment uses (src/runtime.ts): every request must carry
- *   `PIM_INGRESS_SECRET` and the client's address, as the ingress proxy sets
- *   them, and the Directory counts the rate limits. No claim window opens.
+ * - **One named runtime** (src/runtime.ts), `PIM_RUNTIME`, which must be set:
+ *   - `celld`: the operator's ingress in front of a local Worker. Every request
+ *     must carry `PIM_INGRESS_SECRET` and the client's address, as the ingress
+ *     proxy sets them, and the Directory counts the rate limits.
+ *   - `cloudflare`: a Worker of its own on Cloudflare (wrangler.cua-eval.jsonc).
+ *     Cloudflare reports the client's address, and the `AUTH_LIMITER` and
+ *     `API_LIMITER` bindings must be there to count the rate limits.
+ *   On either, no claim window opens.
  * - **Only at Pim's address.** A request whose URL isn't at `PIM_PUBLIC_URL`
  *   is misdirected (`421`), loopback included; nothing is rewritten onto it,
  *   and no `Host` or forwarded header is taken as the authority.
@@ -34,9 +38,9 @@ import { CLIENT_IP_HEADER, INGRESS_SECRET_HEADER, runtimeOf } from "../src/runti
  *
  * A misconfigured preview refuses every request rather than run in the local
  * mode by mistake: an HTTPS `PIM_PUBLIC_URL` without this mode, this mode
- * without an exact HTTPS address, a usable ingress secret or a well-formed
- * claim digest, and, in the local mode, any request that carries the ingress's
- * headers.
+ * without an exact HTTPS address, a named runtime, that runtime's ingress
+ * secret or rate limits, or a well-formed claim digest, and, in the local
+ * mode, any request that carries the ingress's headers.
  */
 
 export const EVAL_MODE = "cua-eval";
@@ -71,9 +75,16 @@ export function previewMode(env: Env): PreviewMode {
 	if (typeof publicUrl !== "string" || !isHttpsOrigin(publicUrl)) return { refused: "public-url" };
 	const digest = vars(env).PREVIEW_EVAL_CLAIM_SHA256;
 	if (digest !== undefined && (typeof digest !== "string" || !CLAIM_DIGEST.test(digest))) return { refused: "claim-digest" };
-	// Read through to the real environment for everything else, bindings included.
-	const hardened = Object.assign(Object.create(env as object), { PIM_RUNTIME: "celld", PIM_REGISTRATION: "closed" }) as Env;
-	if (runtimeOf(hardened) !== "celld") return { refused: "ingress" };
+	// The runtime is named, never assumed: unset would mean Cloudflare to the rest of Pim.
+	const runtime = vars(env).PIM_RUNTIME;
+	if (runtime !== "celld" && runtime !== "cloudflare") return { refused: "runtime" };
+	// On Cloudflare, without the rate limits, nothing would slow guessing down (src/runtime.ts's `limited`).
+	if (runtime === "cloudflare" && (!vars(env).AUTH_LIMITER || !vars(env).API_LIMITER)) return { refused: "limiters" };
+	// Read through to the real environment for everything else, bindings included. On Cloudflare, no deploy's
+	// date reaches the claim window, so none opens and the sign-in page never offers one.
+	const overrides = { PIM_RUNTIME: runtime, PIM_REGISTRATION: "closed", ...(runtime === "cloudflare" ? { CF_VERSION_METADATA: undefined } : {}) };
+	const hardened = Object.assign(Object.create(env as object), overrides) as Env;
+	if (runtimeOf(hardened) !== runtime) return { refused: "ingress" };
 	return { mode: EVAL_MODE, env: hardened };
 }
 

@@ -15,6 +15,7 @@ import { initialObservationState, type ObservationState } from "../src/cua-obser
 import { Directory as BaseDirectory } from "../src/directory";
 import { OBSERVATION_KEY } from "../src/cua-observation-runtime";
 import { OWNER_HEADER, Pim as RealPim, SIGNED_IN_HEADER } from "../src/pim";
+import { claimWindowOpen } from "../src/runtime";
 import { type Approval, PimStore } from "../src/store";
 import { Authenticator } from "./webauthn";
 import { PreviewPim } from "./worker";
@@ -673,7 +674,7 @@ describe("the preview's Cua evaluation mode", () => {
 	/** The operator's claim code, made privately, of which the preview is given only the SHA-256. */
 	const CODE = "evalclaim".padEnd(43, "x");
 	const ONCE = "This evaluation's owner was set up once already, and isn't set up again.";
-	const EVAL_KEYS = ["PREVIEW_MODE", "PIM_INGRESS_SECRET", "PREVIEW_EVAL_CLAIM_SHA256", "PIM_PUBLIC_URL", "PIM_REGISTRATION"] as const;
+	const EVAL_KEYS = ["PREVIEW_MODE", "PIM_RUNTIME", "PIM_INGRESS_SECRET", "PREVIEW_EVAL_CLAIM_SHA256", "PIM_PUBLIC_URL", "PIM_REGISTRATION"] as const;
 	const previewDirectories = (env as unknown as { PREVIEW_DIRECTORY: DurableObjectNamespace<EvalDirectory> }).PREVIEW_DIRECTORY;
 	let kept: (readonly [string, unknown])[] = [];
 
@@ -689,9 +690,14 @@ describe("the preview's Cua evaluation mode", () => {
 
 	const hexOf = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
-	/** What the operator's private environment adds for the evaluation. Pim's address stays the tests' `https://pim.test`. */
-	async function evaluation() {
+	/**
+	 * What the operator's private environment adds for the evaluation, on the runtime it names: the operator's
+	 * ingress in front of a local Worker (`celld`) unless a test asks for Cloudflare's. Pim's address stays the
+	 * tests' `https://pim.test`.
+	 */
+	async function evaluation(runtime: "celld" | "cloudflare" = "celld") {
 		settings.PREVIEW_MODE = "cua-eval";
+		settings.PIM_RUNTIME = runtime;
 		settings.PIM_INGRESS_SECRET = SECRET;
 		settings.PREVIEW_EVAL_CLAIM_SHA256 = hexOf(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(CODE)));
 	}
@@ -703,12 +709,13 @@ describe("the preview's Cua evaluation mode", () => {
 	 * The preview's Worker, reached as the ingress reaches it through Wrangler run with `--host pim.test
 	 * --upstream-protocol https`: at Pim's own address (or at `at`), with the ingress's secret and the client's
 	 * address unless `ingress` is null, and, for a body, this app's `Origin` unless the test sends another. Each call
-	 * of `worker` has a Directory of its own, of the preview's class, and the preview's Pim.
+	 * of `worker` has a Directory of its own, of the preview's class, and the preview's Pim, and `bindings`
+	 * over the tests' own.
 	 */
-	function worker() {
+	function worker(bindings: Record<string, unknown> = {}) {
 		const run = crypto.randomUUID();
 		const directory = (name: string) => previewDirectories.getByName(`${run}:${name}`);
-		const target = Object.assign(Object.create(env as object) as object, { Directory: { getByName: directory }, Pim: previews }) as Env;
+		const target = Object.assign(Object.create(env as object) as object, { Directory: { getByName: directory }, Pim: previews }, bindings) as Env;
 		const ask = async (path: string, init: { method?: string; body?: unknown; cookie?: string; headers?: Record<string, string>; ingress?: string | null; at?: string } = {}) => {
 			const headers = new Headers(init.headers);
 			const ingress = init.ingress === undefined ? SECRET : init.ingress;
@@ -817,6 +824,8 @@ describe("the preview's Cua evaluation mode", () => {
 			["PIM_PUBLIC_URL", "http://localhost:8787"],
 			["PIM_PUBLIC_URL", "https://PIM.test"],
 			["PREVIEW_MODE", "eval"],
+			["PIM_RUNTIME", ""],
+			["PIM_RUNTIME", "workerd"],
 		] as const) {
 			const before = settings[key];
 			settings[key] = value;
@@ -824,7 +833,7 @@ describe("the preview's Cua evaluation mode", () => {
 			expect([key, value, (await ask("/__dev/sign-in/mallory", { ingress: null })).status]).toEqual([key, value, 503]);
 			settings[key] = before;
 		}
-		expect(refusals()).toEqual(["ingress", "ingress", "claim-digest", "claim-digest", "public-url", "public-url", "public-url", "public-url", "mode", "mode"]);
+		expect(refusals()).toEqual(["ingress", "ingress", "claim-digest", "claim-digest", "public-url", "public-url", "public-url", "public-url", "mode", "mode", "runtime", "runtime", "runtime", "runtime"]);
 		expect(await directory("directory").resolve("mallory")).toBeNull();
 		expect(JSON.stringify(logged)).not.toMatch(/#claim=|#setup=/);
 	});
@@ -929,6 +938,53 @@ describe("the preview's Cua evaluation mode", () => {
 			return (state.storage.sql.exec("SELECT state, username, owner_id FROM preview_eval_claim").toArray() as Record<string, unknown>[])[0] ?? null;
 		});
 	const evalClaims = () => logged.flatMap(([line]) => (typeof line === "string" && line.includes('"preview.eval_claim"') ? [JSON.parse(line) as Record<string, unknown>] : []));
+
+	it("on Cloudflare's own runtime, serves only with its rate limits, counts by the address Cloudflare reports, opens no claim window after a deploy, and still sets one owner up once", async () => {
+		await evaluation("cloudflare");
+		const keys: string[] = [];
+		const limiter = {
+			limit: async ({ key }: { key: string }) => {
+				keys.push(key);
+				return { success: true };
+			},
+		};
+		// Deployed a minute ago: plain Cloudflare would let whoever comes first claim it now, as the control shows.
+		const deployed = { id: "eval-version", tag: "", timestamp: new Date(Date.now() - 60_000).toISOString() };
+		expect(claimWindowOpen(Object.assign(Object.create(env as object) as object, { PIM_RUNTIME: "cloudflare", CF_VERSION_METADATA: deployed }) as Env, Date.now())).toBe(true);
+		const bindings = { AUTH_LIMITER: limiter, API_LIMITER: limiter, CF_VERSION_METADATA: deployed };
+		const { ask, directory } = worker(bindings);
+		const from = { "cf-connecting-ip": "192.0.2.50" };
+		const claim = (username: string, code?: string) => ask("/auth/register", { ingress: null, headers: from, body: { username, ...(code === undefined ? {} : { claim: code }) } });
+
+		// No ingress secret is asked for, and the sign-in page offers no claim: registration is closed.
+		const session = await ask("/auth/session", { ingress: null, headers: from });
+		expect(session.status).toBe(200);
+		expect(await session.json()).toMatchObject({ signedIn: false, claimed: false, canClaim: false, registration: "closed" });
+		// Still nothing under /__dev, and nothing at another address.
+		expect((await ask("/__dev/sign-in/mallory", { ingress: null, headers: from })).status).toBe(404);
+		expect((await ask("/auth/session", { ingress: null, headers: from, at: "https://evil.example" })).status).toBe(421);
+		// Within the window, no code registers nobody, a wrong one nobody; the operator's sets the owner up, once.
+		expect(await refusal(await claim("evalnone"))).toEqual([403, "Registration is closed."]);
+		expect(await refusal(await claim("evalwrong", "wrongclaim".padEnd(43, "y")))).toEqual([403, "That setup link isn't valid."]);
+		const claimed = await claim("evalowner", CODE);
+		expect(claimed.status).toBe(201);
+		expect(((await claimed.json()) as { role: string }).role).toBe("admin");
+		expect(await refusal(await claim("evalsecond", CODE))).toEqual([403, ONCE]);
+		const dir = directory("directory");
+		expect(await claimRow(dir)).toMatchObject({ state: "claimed", username: "evalowner" });
+		expect(await dir.resolve("evalnone")).toBeNull();
+		expect(await dir.resolve("evalwrong")).toBeNull();
+		// Each attempt was counted against the address Cloudflare reported.
+		expect(keys.filter((key) => key === "192.0.2.50")).toHaveLength(4);
+
+		// Without either rate limit, it answers nothing at all.
+		for (const missing of ["AUTH_LIMITER", "API_LIMITER"]) {
+			const bare = worker({ ...bindings, [missing]: undefined });
+			expect([missing, (await bare.ask("/auth/session", { ingress: null, headers: from })).status]).toEqual([missing, 503]);
+		}
+		expect(refusals()).toEqual(["limiters", "limiters"]);
+		expect(JSON.stringify(logged)).not.toContain(CODE);
+	});
 
 	it("records its one claim before anyone is registered: a claim it can't record registers nobody, and two at once make one owner", async () => {
 		await evaluation();

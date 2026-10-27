@@ -1,5 +1,7 @@
 # Starting and qualifying the viewer-first preview on one VM: the plan
 
+**Superseded for Pim's hosting.** Running Pim on the VM under `wrangler dev` stays no-go (below, "Wrangler's developer listeners"), and the proposed pivot puts Pim on Cloudflare as a Worker of its own instead: `docs/cua-viewer-first-cloudflare.md`. The VM's own part here (the host, its principals, the journal made once, and the viewer's origin) still applies. The parts about running Pim on the VM are kept as the record of why that was no-go.
+
 This is a plan for review, in prose. It is not a script. Nothing in it has been done, and nothing in it is authorized by being written down. It creates no cloud resource, certificate, DNS name, account, file or service. It doesn't touch main or deploy a Cloudflare Worker, and it runs no type check, build or install.
 
 It is meant to be approved once, as one bounded package with a single go or no-go: the topology, the stages, the checks, the stop conditions, the $15 and 48-hour bound, and the cleanup below. It is not a sequence of separate approvals. Until that decision, execution is held. **The decision today is no-go**, because of the open blocker in "Wrangler's developer listeners".
@@ -51,12 +53,13 @@ The preview has an explicit evaluation mode, `PREVIEW_MODE=cua-eval` (`preview/c
 In the mode, these hold whatever the ingress or the rest of the environment does:
 
 - **No dev sign-in and no setup link.** Every path under `/__dev`, by any method, case, percent-encoding or doubled slash, is `404`, and so is `/auth/setup-link`. Both are refused before the request is read further. No claim or admin setup link is ever written to the logs.
-- **Only through the ingress.** The Worker serves with the ingress profile celld uses (`src/runtime.ts`), so a request without `PIM_INGRESS_SECRET` and a client address is `403`. The Directory counts the rate limits, and no claim window opens.
+- **Only through the ingress.** The runtime must be named. On the VM it is `PIM_RUNTIME=celld`, the ingress profile celld uses (`src/runtime.ts`), so a request without `PIM_INGRESS_SECRET` and a client address is `403`, and the Directory counts the rate limits. (`PIM_RUNTIME=cloudflare` is the pivot's, in `docs/cua-viewer-first-cloudflare.md`.) No claim window opens on either.
 - **Registration is closed**, whatever `PIM_REGISTRATION` says. The preview's own `wrangler.preview.jsonc` says `open`, and the mode ignores it.
 - **Only at Pim's address.** A request whose URL isn't exactly at `PIM_PUBLIC_URL` is `421`: loopback, another host, plain HTTP or another port. Nothing is rewritten onto Pim's address. `Host`, `X-Forwarded-*`, `Forwarded` and `MF-Original-Hostname` are never read as the authority, and the browser's `Origin` is left as it came. Passkeys are made for the host `pim-cua-eval.ajac-zero.com`, and the session cookie is `__Host-pim-session`: `Secure`, `Path=/`, no `Domain`, so host-only.
 - **Watching needs the owner's passkey session.** An API token or an anonymous request is refused (`401`), as in every mode.
 - **Set up wrong, it answers nothing.** The Worker answers `503` to every request in any of these cases:
   - the mode is named but `PIM_PUBLIC_URL` isn't an exact, canonical HTTPS origin;
+  - `PIM_RUNTIME` is unset, or neither `celld` nor `cloudflare`;
   - the ingress secret is missing or too short (at least 32 visible characters, and not `APP_CREDENTIALS_KEY`);
   - the claim digest is malformed;
   - `PIM_PUBLIC_URL` is HTTPS but the mode isn't named;
@@ -65,7 +68,7 @@ In the mode, these hold whatever the ingress or the rest of the environment does
   So a preview whose evaluation settings didn't load can't be reached through Caddy as an open local preview.
 - **Native tools, the optional Cua child and takeover stay off.** The ledger has no recovery, reset or eviction, as before (`preview/cua-viewer-first.ts`, `docs/cua-observation.md`).
 
-The tests that check this are fake-only. They are the seven evaluation-mode tests in `test/preview-cua-fixture.test.ts`, listed in `docs/cua-viewer-first-worker.md`, and none has run yet.
+The tests that check this are fake-only. They are the eight evaluation-mode tests in `test/preview-cua-fixture.test.ts`, listed in `docs/cua-viewer-first-worker.md`. Seven ran at `96f46b7` (all 18 of the file's tests passed, but the run failed on two unhandled rejections); the file has not run since.
 
 ## Setting up the one owner
 

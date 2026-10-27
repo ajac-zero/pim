@@ -986,6 +986,66 @@ describe("the preview's Cua evaluation mode", () => {
 		expect(JSON.stringify(logged)).not.toContain(CODE);
 	});
 
+	it("runs the preview's Pim with no AI binding and no deploy date, as wrangler.cua-eval.jsonc binds it: the stand-in model answers, and neither Workers AI nor a claim is offered", async () => {
+		const unbound = ["AI", "CF_VERSION_METADATA"] as const;
+		const kept = unbound.map((key) => [key, settings[key]] as const);
+		const limiter = { limit: async () => ({ success: true }) };
+		/** One message to a space's root chat, answered before this returns: what the stand-in model sent back. */
+		const chat = async (one: Space, content: string) => {
+			const root: string = (await one.fetch("/")).body.rootSession;
+			const said = await one.fetch<{ status: string; replies: string[] }>(`/sessions/${root}/messages`, { method: "POST", body: JSON.stringify({ content, wait: true }) });
+			expect(said.status).toBe(200);
+			expect(said.body.status).toBe("done");
+			return said.body.replies.join("\n");
+		};
+		await afterwards(
+			async () => {
+				// The candidate's environment: neither is bound, not even as a stand-in, from before the space is made.
+				for (const key of unbound) delete settings[key];
+				expect(unbound.filter((key) => key in settings)).toEqual([]);
+				const one = await space("evalnoai");
+				// The stand-in is the default and the chosen model; without Workers AI there is nothing else to choose.
+				expect((await one.fetch("/model")).body).toMatchObject({
+					workersAi: false,
+					model: { provider: "preview", id: "preview-model" },
+					default: { provider: "preview", id: "preview-model" },
+					choices: [],
+				});
+				expect(await chat(one, "Watching without Workers AI")).toMatch(/You said: [\s\S]*Watching without Workers AI/);
+				// Nothing reached for Workers AI: its stand-in for a missing binding says "No model is set up" (src/pim.ts).
+				expect(JSON.stringify(logged)).not.toContain("No model is set up");
+				// No deploy date: no claim window, plain Cloudflare's or the evaluation's, and the sign-in page offers none.
+				expect(claimWindowOpen(Object.assign(Object.create(env as object) as object, { PIM_RUNTIME: "cloudflare" }) as Env, Date.now())).toBe(false);
+				await evaluation("cloudflare");
+				const session = await worker({ AUTH_LIMITER: limiter, API_LIMITER: limiter }).ask("/auth/session", { ingress: null });
+				expect(session.status).toBe(200);
+				expect(await session.json()).toMatchObject({ claimed: false, canClaim: false, registration: "closed" });
+
+				// For comparison, the local preview's KV namespace bound as `AI`: no KV call is made on it, but Pim takes it for Workers AI.
+				const calls: string[] = [];
+				settings.AI = Object.fromEntries(
+					["get", "getWithMetadata", "put", "list", "delete"].map((name) => [
+						name,
+						async () => {
+							calls.push(name);
+							return null;
+						},
+					]),
+				);
+				const two = await space("evalkvai");
+				expect((await two.fetch("/model")).body).toMatchObject({ workersAi: true, model: { provider: "preview", id: "preview-model" } });
+				expect(await chat(two, "Watching beside a KV namespace")).toMatch(/You said: [\s\S]*Watching beside a KV namespace/);
+				expect(calls).toEqual([]);
+			},
+			async () => {
+				for (const [key, value] of kept) {
+					if (value === undefined) delete settings[key];
+					else settings[key] = value;
+				}
+			},
+		);
+	});
+
 	it("records its one claim before anyone is registered: a claim it can't record registers nobody, and two at once make one owner", async () => {
 		await evaluation();
 		const { register, directory } = worker();

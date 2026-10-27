@@ -2,7 +2,7 @@
 
 Pim can't run on the evaluation's VM under `wrangler dev` with every developer listener off: there is no supported way to turn off its inspectors (`docs/cua-viewer-first-vm-plan.md`, "Wrangler's developer listeners"). The pivot proposed instead runs Pim as a Worker of its own on Cloudflare. A deployed Worker opens no inspector, dev registry or Miniflare listener. The VM keeps only the Cua host, and the person's browser still reaches the viewer directly on it.
 
-This page says what the review branch now has for that, and what it doesn't. **Nothing is deployed, created or provisioned, and nothing here has run.** No resource exists, no part of it is checked against an account, and it isn't known to fit Cloudflare's free plan.
+This page says what the review branch now has for that, and what it doesn't. **Nothing is deployed, created or provisioned, and nothing here has run.** No resource exists, no part of it is checked against an account, and it isn't known to fit within what the account's existing plan includes.
 
 ```diagram
 ┌─────────────────────┐  passkey session   ┌────────────────────────────────────┐
@@ -49,7 +49,15 @@ This page says what the review branch now has for that, and what it doesn't. **N
 - **The KV IDs are set, to placeholders.** A KV binding with an `id` is fully specified and never provisioned (`isFullySpecified` L171127), and Cloudflare's API refuses a made-up ID.
 - **The rate-limit namespace IDs are placeholders**, which Cloudflare's API refuses. They must become integers of their own, not Pim's.
 
-**Tests** (fake-only, not run): the evaluation-mode tests in `test/preview-cua-fixture.test.ts` now name the runtime. One new test covers Cloudflare's: the control that plain Cloudflare would open the window a minute after a deploy; the closed sign-in page; `404` and `421`; the claim with no code, a wrong code, the operator's code, and again; the record `claimed`; the limiter counting by `CF-Connecting-IP`; and `503` without either limiter. The misconfiguration test adds an empty and an unknown runtime. The file has 19 tests.
+**Tests** (fake-only, not run): the evaluation-mode tests in `test/preview-cua-fixture.test.ts` now name the runtime. One new test covers Cloudflare's: the control that plain Cloudflare would open the window a minute after a deploy; the closed sign-in page; `404` and `421`; the claim with no code, a wrong code, the operator's code, and again; the record `claimed`; the limiter counting by `CF-Connecting-IP`; and `503` without either limiter. The misconfiguration test adds an empty and an unknown runtime.
+
+Another new test makes a preview space with `AI` and `CF_VERSION_METADATA` unbound, as the candidate binds them. It checks:
+- Settings → Model reports `workersAi: false`, with the stand-in as the default and chosen model and nothing else to choose;
+- a chat message gets the stand-in's echo;
+- nothing logs the missing-binding error ("No model is set up");
+- no claim window opens, and the evaluation's sign-in page offers no claim.
+
+For comparison, it then binds a KV-shaped stand-in as `AI`, as the local preview does. The chat still works and no KV method is called, but Pim reports `workersAi: true`. The file has 20 tests.
 
 ## The binding manifest
 
@@ -79,13 +87,13 @@ A binding is left out only where the source has a supported path without it. Oth
 
 Leaving `AI` out avoids that.
 
-**What leaving `AI` out changes.** Chats still default to the stand-in model (`chooseModel(null)` on start, `src/pim.ts` L1203, and the preview's `defaultModel`), but Settings → Model lists it as the default, not among the choices (L4635). This is read from the source; no test runs the preview's Pim without `AI`.
+**What leaving `AI` out changes.** Chats still default to the stand-in model (`chooseModel(null)` on start, `src/pim.ts` L1203, and the preview's `defaultModel`), but Settings → Model lists it as the default, not among the choices (L4635). `test/preview-cua-fixture.test.ts` checks this with `AI` unbound (written, not run).
 
-## What it would take, in order (not authorized)
+## What it would take, in order (conditional, not done)
 
-Each step below needs its own approval. Nothing here authorizes a deploy, a resource or a DNS change.
+These steps are covered by one conditional approval, not one approval each ("Authorization and budget", below). Nothing has been done, and nothing goes ahead unless the conditions hold.
 
-1. **Radia's preflight**, below: whether the account and zone allow this within the free plan, and which limits bind.
+1. **Radia's preflight**, below: whether the account and zone allow this within the existing plan's included allowances, with no added charge, and which limits bind.
 2. **The resources, reviewed:** one KV namespace (`OAUTH_KV`) and two R2 buckets, made once, and two rate-limit namespace IDs chosen (integers, not created), with the real IDs and names put in the file in a reviewed commit.
 3. **The web app built** from that commit (`pnpm --filter pim-web build`), and the deploy run by hand with this file named: `wrangler deploy -c wrangler.cua-eval.jsonc`.
    - Deploying a custom domain makes its DNS record and certificate in the `ajac-zero.com` zone. That is part of what the deploy does, so the deploy itself is the provisioning step.
@@ -111,10 +119,12 @@ Each step below needs its own approval. Nothing here authorizes a deploy, a reso
 - Cloudflare's network carries it to the host's public HTTPS address on each launch, end or status, with `x-pim-space`.
 - Anyone who can read the Worker's secrets in the Cloudflare account can read it.
 
-**Logs.**
-- Workers Logs are on.
-- Pim's lines (`preview.refused`, `preview.eval_claim` and the observation records) never hold a claim code, a bearer token or a viewer address. The viewer's capability never passes through Pim at all.
-- The logs stay in the Cloudflare account, readable by its members, for that plan's retention.
+**Logs and traces: off.**
+- The configuration turns Workers Logs and Cloudflare's traces off (`observability` with `enabled`, `logs` and `traces` all `false`), so neither keeps anything or can add a charge. They stay off unless Radia establishes that turning them on adds no charge.
+- Pim's own OpenTelemetry traces stay off as well: nothing sets `OTEL_EXPORTER_OTLP_ENDPOINT` (`src/telemetry.ts`, `exporterFrom`).
+- The Worker still writes its console: Pim's JSON lines, such as `preview.refused`, `preview.eval_claim`, `pim.runtime_misconfigured` and the observation records. With logs off, those lines are kept nowhere. They can be seen only live, by an account member running `wrangler tail -c wrangler.cua-eval.jsonc` while they happen. Whether a tail session adds any charge is one more question for Radia.
+- A person sees only the response. A refused claim or a `421` says why. A misconfigured evaluation answers only `503` "This preview isn't set up to answer requests.", and its reason (such as `runtime` or `limiters`) is in the console alone. So a misconfiguration found after the fact can't be read back: it has to be reproduced while a tail is running.
+- None of those lines holds a claim code, a bearer token or a viewer address, and the viewer's capability never passes through Pim at all.
 
 **The model.** The Worker has only the preview's stand-in model, which is enough to demonstrate the viewer with `/tool` calls. Whether a real agent keeps acting while it is watched is a separate qualification. It needs a real provider added later, under its own approval and cost, and none is configured here.
 
@@ -122,16 +132,24 @@ Each step below needs its own approval. Nothing here authorizes a deploy, a reso
 - Deleting the Worker, its objects or its resources disposes of them. It never authorizes a new claim, a new space, a new journal or a fresh identity to get past a record left blocked or unconfirmed.
 - Settling one needs its own reviewed migration or reconciliation.
 
-## For Radia's preflight: free plan, unverified
+## Authorization and budget
 
-None of these is checked. Each is a question, not a claim:
+- **The account:** the Cloudflare account has Workers Paid ($5 a month), which already exists; it is not a Free account. Its Workers and R2 usage is reported by its owner as 0% of the included allowances. That figure is the owner's report, not checked here.
+- **No incremental charge is authorized.** The evaluation may use only what the existing plan already includes. Anything that would add to the bill, past the included allowances or as a new paid feature, stops the work for a decision.
+- **Preparation is authorized.** The deployment itself is approved on conditions, not step by step: that it fits the included allowances, as Radia confirms, and that the security checks here hold. Nothing has been created yet.
+- **The VM:** Azure, $50 in total, within 48 hours of its creation.
 
-- **Workers Free** limits on requests per day, CPU time per request and subrequests per request. Pim's agents run inside Durable Objects, and whether a run fits Free's CPU limit is unknown.
-- **Durable Objects** with SQLite storage on Workers Free, and their limits.
-- **KV:** one namespace, within Free's daily reads and writes.
-- **R2:** two buckets. Whether R2 can be turned on for the account without a paid plan or a payment method on file.
+## For Radia's preflight: included allowances, unverified
+
+None of these is checked. Each is a question, not a claim: whether the existing Workers Paid plan includes it without an added charge at the evaluation's scale.
+
+- **Workers:** the requests, CPU time and subrequests included with Workers Paid. Pim's agents run inside Durable Objects, and how much CPU time a run uses is unmeasured.
+- **Durable Objects** with SQLite storage: the requests, duration and storage included.
+- **KV:** one namespace, within the included reads, writes and storage.
+- **R2:** two buckets, within the included storage and operations.
 - **Rate limiting bindings:** whether they are available on the account's plan.
 - **The custom domain:** `ajac-zero.com` must be a zone on the same Cloudflare account. Its certificate comes from Cloudflare.
-- **Workers Logs:** the plan's daily volume and retention.
 
-If any of these needs a paid plan, the pivot stops there for a decision. The Azure budget ($50) and the 48-hour bound are for the VM, not for Cloudflare.
+- **`wrangler tail`:** whether a live tail adds any charge.
+
+If any of these would add a charge, the pivot stops there for a decision. The Azure budget is for the VM, not for Cloudflare.

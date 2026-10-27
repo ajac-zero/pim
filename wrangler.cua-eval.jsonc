@@ -6,7 +6,8 @@
 // Not deployable as it stands, on purpose. Every resource below is a placeholder until a reviewed
 // value replaces it: the bucket names aren't valid R2 names, so Wrangler refuses this file, and the
 // KV and rate-limit IDs are set, so nothing is created to fill them. Nothing here has been deployed,
-// created or checked against an account, and no part of it is known to fit Cloudflare's free plan.
+// created or checked against an account, and no part of it is known to fit within what the account's
+// existing Workers Paid plan includes: no charge beyond that is authorized.
 // Which binding each step of the evaluation uses, and why each is kept, is the binding manifest in
 // docs/cua-viewer-first-cloudflare.md. Left out, because Pim's source runs without them:
 //   ai                 No Workers AI binding at all, not even the preview's KV stand-in for one: Pim
@@ -73,6 +74,9 @@
     "PIM_REGISTRATION": "closed",
     "PIM_MODELS": "preview-model"
   },
-  // Pim's own log lines (never a claim code, bearer token or viewer address), kept in the account.
-  "observability": { "enabled": true }
+  // Off: no Workers Logs and no Cloudflare traces are kept, so neither can add a charge. The Worker's
+  // console (Pim's JSON lines, never a claim code, bearer token or viewer address) is then seen only
+  // live, by whoever runs `wrangler tail` while it happens, and kept nowhere. Pim's own OpenTelemetry
+  // traces stay off too: no OTEL_EXPORTER_OTLP_ENDPOINT is set (src/telemetry.ts).
+  "observability": { "enabled": false, "logs": { "enabled": false }, "traces": { "enabled": false } }
 }

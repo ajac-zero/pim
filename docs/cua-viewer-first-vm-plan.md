@@ -68,7 +68,7 @@ In the mode, these hold whatever the ingress or the rest of the environment does
   So a preview whose evaluation settings didn't load can't be reached through Caddy as an open local preview.
 - **Native tools, the optional Cua child and takeover stay off.** The ledger has no recovery, reset or eviction, as before (`preview/cua-viewer-first.ts`, `docs/cua-observation.md`).
 
-The tests that check this are fake-only. They are the eight evaluation-mode tests in `test/preview-cua-fixture.test.ts`, listed in `docs/cua-viewer-first-worker.md`. Seven ran at `96f46b7` (all 18 of the file's tests passed, but the run failed on two unhandled rejections); the file has not run since.
+The tests that check this are fake-only. They are the nine evaluation-mode tests in `test/preview-cua-fixture.test.ts`, listed in `docs/cua-viewer-first-worker.md`. Seven ran at `96f46b7`, where all 18 of the file's tests passed but the run failed on two unhandled rejections, and again at `9ec4882`, where the file passed 18/18. The two Cloudflare tests added since have not run.
 
 ## Setting up the one owner
 

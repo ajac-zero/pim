@@ -224,8 +224,8 @@ These steps come from the bounded plan in `docs/cua-viewer-first-worker.md`, eac
 
 1. Watch, and see the desktop in the frame.
 2. Check `Origin`, the frame's policy and the media socket's bound.
-3. Check the launch's state, at most 5 times, before the End.
-4. End once, as the launch's only End, with the reply deliberately lost: no retry, no second End, no new launch. Read the record afterwards (at most 2 Status calls): the claim is that it stays `unconfirmed` and is not shown closed. A successful-reply End is a separate, deferred qualification, because a second End on an already closed launch cannot show uncertainty.
+3. Check the launch's state with Status, at most 5 calls in total.
+4. End once, a normal End whose reply is received, as the launch's only End: no retry, no second End, no new launch. A lost-reply End is not run live and not qualified (no reviewed mechanism makes the reply be lost, and no fault injector is added); the fake tests cover what the record does then.
 5. The ordinary shell, files and Chrome are not run and not qualified in the initial viewer run.
 
 The exact counts and the cleanup are in `docs/cua-viewer-first-startup.md`.

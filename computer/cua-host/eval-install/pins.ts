@@ -2,7 +2,7 @@
  * What the viewer-first startup downloads, pinned (docs/cua-viewer-first-startup.md, "Delivery"): each
  * artifact's exact HTTPS address, its SHA-256 (or, for an npm package, its SHA-512 integrity), and a size
  * bound, so `fetch.sh` refuses anything else before it unpacks a byte. The values were read from each
- * publisher's own record on the date in the docs; none has been downloaded or run here.
+ * publisher's own record on the date in the docs; each artifact has since been downloaded and hashed on two machines, and none has been executed.
  *
  * The commit whose archive is the bundle's source (B) and that archive's SHA-256 are pinned too; `missingPins` names any that is empty,
  * and the render refuses while one is, and refuses a configuration whose `commit` is not B. The digests of the

@@ -43,7 +43,7 @@ import * as fs from "node:fs";
 import type { IncomingMessage } from "node:http";
 import * as path from "node:path";
 import { WebSocket } from "ws";
-import type { ViewerRoutes } from "./host.ts";
+import { isHttpsOrigin, type ViewerRoutes } from "./host.ts";
 import { type JournalFiles, JournalStoreRefused, NODE_JOURNAL_FILES, openJournalStore } from "./journal-store.ts";
 import { createViewerAdapter, MAX_MEDIA_PACKET_BYTES, type MediaEvents, type MediaSocket, type UpstreamOptions } from "./viewer-adapter.ts";
 import { type KeyRequest, openViewerLaunchManager, type ViewerLaunchManager } from "./viewer-launch-manager.ts";
@@ -200,10 +200,15 @@ export const nodeOpenMedia = createMediaOpener(nodeSocket);
 
 /** What `bridge.ts` was given for the viewer, checked whole. */
 export type ViewerSettings = {
+	/** spacesd's origin, the host's upstream. Not what a browser connects to. */
 	readonly origin: string;
 	readonly displayId: string;
 	readonly journalDirectory: string;
 	readonly rootTokenFile: string;
+	/** The exact HTTPS origin the browser loads the viewer from and connects to: the bridge's own public address. */
+	readonly publicOrigin: string;
+	/** The exact HTTPS origin of the Pim app that may frame the viewer, if embedding is chosen; none otherwise. */
+	readonly embedOrigin?: string;
 };
 
 const DISPLAY_ID = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -213,19 +218,28 @@ const DISPLAY_ID = /^[A-Za-z0-9._:-]{1,128}$/;
  * `undefined` when none of them is given, the settings when every one that
  * is required is given and valid, and a thrown `RangeError` (with a fixed
  * message) when some are given and some missing or invalid. A lone root
- * token file or display flag is a mistake, not a bridge without a viewer.
+ * token file, display or embedding flag is a mistake, not a bridge without a
+ * viewer. `publicOrigin` is required and is separate from `origin`, which is
+ * where spacesd is, not where a browser goes.
  */
-export function parseViewerSettings(flags: { readonly origin?: string; readonly journalDirectory?: string; readonly display?: string }, env: { readonly PIM_VIEWER_ROOT_TOKEN_FILE?: string }): ViewerSettings | undefined {
-	const given = [flags.origin, flags.journalDirectory, flags.display, env.PIM_VIEWER_ROOT_TOKEN_FILE];
+export function parseViewerSettings(
+	flags: { readonly origin?: string; readonly journalDirectory?: string; readonly display?: string; readonly publicOrigin?: string; readonly embedOrigin?: string },
+	env: { readonly PIM_VIEWER_ROOT_TOKEN_FILE?: string },
+): ViewerSettings | undefined {
+	const given = [flags.origin, flags.journalDirectory, flags.display, flags.publicOrigin, flags.embedOrigin, env.PIM_VIEWER_ROOT_TOKEN_FILE];
 	if (given.every((value) => value === undefined)) return undefined;
-	const { origin, journalDirectory, display } = flags;
+	const { origin, journalDirectory, display, publicOrigin, embedOrigin } = flags;
 	const rootTokenFile = env.PIM_VIEWER_ROOT_TOKEN_FILE;
-	if (origin === undefined || journalDirectory === undefined || rootTokenFile === undefined) throw new RangeError("The viewer needs its origin, journal directory and root token file together.");
+	if (origin === undefined || journalDirectory === undefined || rootTokenFile === undefined || publicOrigin === undefined) {
+		throw new RangeError("The viewer needs its spacesd origin, public origin, journal directory and root token file together.");
+	}
 	if (!checkedOrigin(origin)) throw new RangeError("The viewer's origin must be exactly https://host[:port], or http:// on a loopback address.");
+	if (!isHttpsOrigin(publicOrigin)) throw new RangeError("The viewer's public origin must be exactly an https origin.");
+	if (embedOrigin !== undefined && !isHttpsOrigin(embedOrigin)) throw new RangeError("The viewer's embedding origin must be exactly an https origin.");
 	if (!path.isAbsolute(journalDirectory) || path.resolve(journalDirectory) !== journalDirectory) throw new RangeError("The viewer's journal directory must be an absolute, canonical path.");
 	if (!path.isAbsolute(rootTokenFile) || path.resolve(rootTokenFile) !== rootTokenFile) throw new RangeError("The viewer's root token file must be an absolute, canonical path.");
 	if (display !== undefined && !DISPLAY_ID.test(display)) throw new RangeError("The viewer's display must be a display ID.");
-	return { origin, displayId: display ?? "primary", journalDirectory, rootTokenFile };
+	return { origin, displayId: display ?? "primary", journalDirectory, rootTokenFile, publicOrigin, ...(embedOrigin === undefined ? {} : { embedOrigin }) };
 }
 
 export type ShutdownOptions = {
@@ -437,6 +451,10 @@ export type ViewerHostOptions = {
 	readonly journalDirectory: string;
 	/** The file holding spacesd's root token, read for each launch. */
 	readonly rootTokenFile: string;
+	/** The exact HTTPS origin a browser loads the viewer from and connects to (the bridge's own); not `origin`. */
+	readonly publicOrigin: string;
+	/** The exact HTTPS origin of the Pim app that may frame the viewer, if embedding is chosen. */
+	readonly embedOrigin?: string;
 	readonly files?: JournalFiles;
 	/** Tests give stand-ins for spacesd; by default Node's `fetch` and `ws`. */
 	readonly upstream?: Pick<UpstreamOptions, "fetch" | "openMedia">;
@@ -456,6 +474,7 @@ export type ViewerHost = {
 
 export async function createViewerHost(options: ViewerHostOptions): Promise<ViewerHost> {
 	if (!checkedOrigin(options.origin)) throw new RangeError("spacesd's origin must be exactly https://host[:port], or http:// on a loopback address.");
+	if (!isHttpsOrigin(options.publicOrigin) || (options.embedOrigin !== undefined && !isHttpsOrigin(options.embedOrigin))) throw new RangeError("The viewer's public and embedding origins must each be exactly an https origin.");
 	const files = options.files ?? NODE_JOURNAL_FILES;
 	const adapter = createViewerAdapter({
 		upstream: { origin: options.origin, fetch: options.upstream?.fetch ?? ((url, init) => globalThis.fetch(url, init)), openMedia: options.upstream?.openMedia ?? nodeOpenMedia },
@@ -478,7 +497,7 @@ export async function createViewerHost(options: ViewerHostOptions): Promise<View
 
 	const admission = createLaunchAdmission(manager);
 	return {
-		routes: { manager: admission.manager, adapter },
+		routes: { manager: admission.manager, adapter, publicOrigin: options.publicOrigin, ...(options.embedOrigin === undefined ? {} : { embedOrigin: options.embedOrigin }) },
 		blockers: () => [...(refused ? [refused] : []), ...(reader.latched() ? ["root token reader: descriptor retained"] : []), ...manager.blockers()],
 		close: () =>
 			admission.shutdown(

@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { describe, it } from "node:test";
+import { isHttpsOrigin, originAllowed, viewerHeaders } from "../host.ts";
 import {
 	checkedOrigin,
 	createMediaOpener,
@@ -96,18 +97,34 @@ describe("the viewer host's root token", () => {
 });
 
 describe("the viewer's settings", () => {
-	const all = { origin: "http://127.0.0.1:3211", journalDirectory: "/var/lib/pim-viewer" };
+	const all = { origin: "http://127.0.0.1:3211", journalDirectory: "/var/lib/pim-viewer", publicOrigin: "https://bridge.example:8443" };
 	const env = { PIM_VIEWER_ROOT_TOKEN_FILE: "/etc/pim-viewer/root-token" };
 
 	it("are none when none is given, and checked whole when any is", () => {
 		assert.equal(parseViewerSettings({}, {}), undefined);
-		assert.deepEqual(parseViewerSettings(all, env), { origin: "http://127.0.0.1:3211", displayId: "primary", journalDirectory: "/var/lib/pim-viewer", rootTokenFile: "/etc/pim-viewer/root-token" });
+		assert.deepEqual(parseViewerSettings(all, env), {
+			origin: "http://127.0.0.1:3211",
+			displayId: "primary",
+			journalDirectory: "/var/lib/pim-viewer",
+			rootTokenFile: "/etc/pim-viewer/root-token",
+			publicOrigin: "https://bridge.example:8443",
+		});
 		assert.equal(parseViewerSettings({ ...all, display: "DP-1" }, env)?.displayId, "DP-1");
+		assert.equal(parseViewerSettings({ ...all, embedOrigin: "https://pim.example" }, env)?.embedOrigin, "https://pim.example");
+	});
+
+	it("keep spacesd's origin apart from the browser's: both are needed, and neither stands in for the other", () => {
+		assert.throws(() => parseViewerSettings({ origin: all.origin, journalDirectory: all.journalDirectory }, env), RangeError);
+		assert.throws(() => parseViewerSettings({ publicOrigin: all.publicOrigin, journalDirectory: all.journalDirectory }, env), RangeError);
+		assert.equal(parseViewerSettings(all, env)?.origin, "http://127.0.0.1:3211");
+		assert.equal(parseViewerSettings(all, env)?.publicOrigin, "https://bridge.example:8443");
 	});
 
 	it("refuse a part given without the rest, however small the part", () => {
 		assert.throws(() => parseViewerSettings({}, env), RangeError);
 		assert.throws(() => parseViewerSettings({ display: "primary" }, {}), RangeError);
+		assert.throws(() => parseViewerSettings({ embedOrigin: "https://pim.example" }, {}), RangeError);
+		assert.throws(() => parseViewerSettings({ publicOrigin: all.publicOrigin }, {}), RangeError);
 		assert.throws(() => parseViewerSettings({ origin: all.origin }, env), RangeError);
 		assert.throws(() => parseViewerSettings({ journalDirectory: all.journalDirectory }, env), RangeError);
 		assert.throws(() => parseViewerSettings(all, {}), RangeError);
@@ -121,6 +138,40 @@ describe("the viewer's settings", () => {
 		assert.throws(() => parseViewerSettings(all, { PIM_VIEWER_ROOT_TOKEN_FILE: "token" }), RangeError);
 		assert.throws(() => parseViewerSettings({ ...all, display: "not a display" }, env), RangeError);
 		assert.throws(() => parseViewerSettings({ ...all, display: "" }, env), RangeError);
+		for (const bad of ["http://bridge.example", "http://127.0.0.1:8443", "https://bridge.example/", "https://bridge.example/path", "https://u:p@bridge.example", "https://bridge.example?q", "*", "", "bridge.example"]) {
+			assert.throws(() => parseViewerSettings({ ...all, publicOrigin: bad }, env), RangeError, `public origin ${bad}`);
+			assert.throws(() => parseViewerSettings({ ...all, embedOrigin: bad }, env), RangeError, `embedding origin ${bad}`);
+		}
+	});
+});
+
+describe("a browser's origin and the viewer's headers", () => {
+	const PUBLIC = "https://bridge.example:8443";
+
+	it("takes only exact https origins", () => {
+		assert.equal(isHttpsOrigin(PUBLIC), true);
+		assert.equal(isHttpsOrigin("https://pim.example"), true);
+		for (const bad of ["http://pim.example", "https://pim.example/", "https://pim.example/a", "https://*.example", "https://PIM.example", "null", "", undefined, 1]) assert.equal(isHttpsOrigin(bad), false, String(bad));
+	});
+
+	it("lets a media socket or call through only with exactly one Origin, the public one", () => {
+		assert.equal(originAllowed([PUBLIC], PUBLIC), true);
+		assert.equal(originAllowed(undefined, PUBLIC), false, "absent fails closed");
+		assert.equal(originAllowed([], PUBLIC), false);
+		assert.equal(originAllowed(["https://pim.example"], PUBLIC), false, "the Pim app's origin is not the viewer's");
+		assert.equal(originAllowed(["https://bridge.example:8444"], PUBLIC), false);
+		assert.equal(originAllowed(["http://bridge.example:8443"], PUBLIC), false);
+		assert.equal(originAllowed(["null"], PUBLIC), false);
+		assert.equal(originAllowed([PUBLIC, PUBLIC], PUBLIC), false, "repeated is refused");
+		assert.equal(originAllowed([PUBLIC, "https://evil.example"], PUBLIC), false);
+	});
+
+	it("allows framing by one exact origin or no one, and no clipboard, microphone or capture", () => {
+		assert.deepEqual(viewerHeaders(undefined)[0], ["content-security-policy", "frame-ancestors 'none'"]);
+		assert.deepEqual(viewerHeaders("https://pim.example")[0], ["content-security-policy", "frame-ancestors https://pim.example"]);
+		const policy = Object.fromEntries(viewerHeaders(undefined))["permissions-policy"]!;
+		for (const feature of ["clipboard-read", "clipboard-write", "microphone", "camera", "display-capture"]) assert.ok(policy.includes(`${feature}=()`), feature);
+		assert.equal(viewerHeaders("https://pim.example").some(([name]) => name.startsWith("access-control-")), false, "no CORS header");
 	});
 });
 
@@ -498,7 +549,7 @@ describe("the viewer host", () => {
 	// No real timer: the shutdown's clock is a test's, and its work finishes without waiting on it.
 	const make = (files: FakeFiles) => {
 		const time = clock();
-		return createViewerHost({ origin: "http://127.0.0.1:3211", displayId: "primary", journalDirectory: DIR, rootTokenFile: ROOT, files, upstream: noSpacesd, generation: "host-test", shutdown: { timers: time.timers } });
+		return createViewerHost({ origin: "http://127.0.0.1:3211", displayId: "primary", journalDirectory: DIR, rootTokenFile: ROOT, publicOrigin: "https://bridge.example", files, upstream: noSpacesd, generation: "host-test", shutdown: { timers: time.timers } });
 	};
 
 	it("takes only an origin that is https, or http on a loopback address", () => {

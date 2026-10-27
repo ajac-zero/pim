@@ -9,8 +9,10 @@
  *   PIM_BRIDGE_KEY_FILE=/etc/pim-bridge/key.pem \
  *   node bridge.ts --space o_… --path /pim --socket /run/pim-session/session.sock --host 0.0.0.0 --port 8443
  *
- * Given all of `--viewer-origin`, `--viewer-journal-dir` and PIM_VIEWER_ROOT_TOKEN_FILE
- * (and optionally `--viewer-display`, `primary` by default), it also serves
+ * Given all of `--viewer-origin` (where spacesd is), `--viewer-public-origin` (the
+ * HTTPS origin a browser loads the viewer from: this bridge's own), `--viewer-journal-dir`
+ * and PIM_VIEWER_ROOT_TOKEN_FILE (and optionally `--viewer-display`, `primary` by
+ * default, and `--viewer-embed-origin`, the one Pim app origin that may frame it), it also serves
  * the view-only desktop viewer (./viewer-host.ts, docs/cua-viewer-first-preview.md);
  * given none of them it serves the relay alone, and given some, or an invalid
  * one, it refuses to start. The root token's file is checked and
@@ -54,7 +56,7 @@ function secret(variable: string): Buffer {
 
 async function main(): Promise<void> {
 	const { parseArgs } = await import("node:util");
-	let values: { space?: string; path?: string; socket?: string; host?: string; port?: string; "viewer-origin"?: string; "viewer-journal-dir"?: string; "viewer-display"?: string };
+	let values: { space?: string; path?: string; socket?: string; host?: string; port?: string; "viewer-origin"?: string; "viewer-journal-dir"?: string; "viewer-display"?: string; "viewer-public-origin"?: string; "viewer-embed-origin"?: string };
 	try {
 		({ values } = parseArgs({
 			options: {
@@ -66,6 +68,8 @@ async function main(): Promise<void> {
 				"viewer-origin": { type: "string" },
 				"viewer-journal-dir": { type: "string" },
 				"viewer-display": { type: "string" },
+				"viewer-public-origin": { type: "string" },
+				"viewer-embed-origin": { type: "string" },
 			},
 		}));
 	} catch {
@@ -88,7 +92,7 @@ async function main(): Promise<void> {
 		const relay = new Relay({ space: values.space, token, path: values.path, open });
 		// The viewer is all or nothing: some of its settings given, or any invalid, is a mistake, not a smaller bridge.
 		stage = "viewer";
-		const flags = { origin: values["viewer-origin"], journalDirectory: values["viewer-journal-dir"], display: values["viewer-display"] };
+		const flags = { origin: values["viewer-origin"], journalDirectory: values["viewer-journal-dir"], display: values["viewer-display"], publicOrigin: values["viewer-public-origin"], embedOrigin: values["viewer-embed-origin"] };
 		const env = { PIM_VIEWER_ROOT_TOKEN_FILE: process.env.PIM_VIEWER_ROOT_TOKEN_FILE };
 		// A bridge with none of the viewer's settings never loads its code.
 		if (Object.values({ ...flags, ...env }).some((value) => value !== undefined)) {

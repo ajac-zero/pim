@@ -109,7 +109,49 @@ export const DEFAULT_LIMITS: Limits = {
 export type ViewerRoutes = {
 	readonly manager: Pick<ViewerLaunchManager, "launch" | "end" | "status">;
 	readonly adapter: Pick<ViewerAdapter, "fetch" | "media">;
+	/**
+	 * The one exact HTTPS origin the viewer is served from and a browser
+	 * connects to: the bridge's own public address, which is **not** spacesd's
+	 * origin. A browser's media socket must carry exactly this `Origin`, and
+	 * any other adapter request that carries an `Origin` must too. Without a
+	 * match the media socket is refused (`403`), so an absent `Origin` fails
+	 * closed there. No CORS header is ever sent: the viewer calls its own
+	 * origin, and a cross-origin call fails at its preflight.
+	 */
+	readonly publicOrigin: string;
+	/** The one exact HTTPS origin of the Pim app that may frame the viewer, if embedding is chosen; otherwise no one may (`frame-ancestors 'none'`). */
+	readonly embedOrigin?: string;
 };
+
+/** Whether `value` is exactly an `https://host[:port]` origin: no path, query, fragment or credentials, as a browser writes it in `Origin`. */
+export function isHttpsOrigin(value: unknown): value is string {
+	if (typeof value !== "string") return false;
+	try {
+		const url = new URL(value);
+		return url.protocol === "https:" && url.origin === value && !url.username && !url.password;
+	} catch {
+		return false;
+	}
+}
+
+/** Whether a browser's `Origin` header (every occurrence of it) is exactly `publicOrigin`; absent, repeated or different is no. */
+export function originAllowed(values: readonly string[] | undefined, publicOrigin: string): boolean {
+	return values !== undefined && values.length === 1 && values[0] === publicOrigin;
+}
+
+/**
+ * What the host adds to every adapter response beside the adapter's own
+ * headers (its content security policy for the page, `nosniff` and
+ * no-referrer stay): who may frame it, exactly one origin or no one, and a
+ * permissions policy with no clipboard, microphone, camera or screen capture.
+ * A second `content-security-policy` header is enforced beside the first.
+ */
+export function viewerHeaders(embedOrigin: string | undefined): [string, string][] {
+	return [
+		["content-security-policy", `frame-ancestors ${embedOrigin ?? "'none'"}`],
+		["permissions-policy", "clipboard-read=(), clipboard-write=(), microphone=(), camera=(), display-capture=(), geolocation=()"],
+	];
+}
 
 /** The most bytes a management request's body may take. */
 export const MAX_MANAGEMENT_BYTES = 4096;
@@ -302,6 +344,10 @@ export function createHost(options: HostOptions): Host {
 	const viewer = options.viewer;
 	const managementPrefix = `${relay.path}/observations/`;
 	if (viewer && ADAPTER_TARGET.test(`${relay.path}/`)) throw new Error("A bridge's path can't look like a viewer launch's.");
+	if (viewer && (!isHttpsOrigin(viewer.publicOrigin) || (viewer.embedOrigin !== undefined && !isHttpsOrigin(viewer.embedOrigin)))) {
+		throw new Error("A viewer's public and embedding origins must each be exactly an https origin.");
+	}
+	const extraHeaders = viewer ? viewerHeaders(viewer.embedOrigin) : [];
 
 	const serverOptions: http.ServerOptions = {
 		maxHeaderSize: MAX_HEADER_BYTES,
@@ -477,6 +523,11 @@ export function createHost(options: HostOptions): Host {
 		const target = canonical(req.url);
 		if (target === null) return reply(res, refusal(404, "Not found."));
 		if (req.method !== "GET" && req.method !== "POST") return reply(res, refusal(405, "Not allowed.", [["allow", "GET, POST"]]));
+		// The viewer calls its own origin, so a browser's `Origin`, when it sends one, is the public origin; any other is refused, and no CORS answer is ever given.
+		if (req.headersDistinct.origin !== undefined && !originAllowed(req.headersDistinct.origin, viewer!.publicOrigin)) {
+			log({ event: "host.refused", status: 403, reason: "origin" });
+			return reply(res, refusal(403, "Refused."));
+		}
 		const headers = new Headers();
 		for (const name of ADAPTER_HEADERS) {
 			const values = req.headersDistinct[name];
@@ -502,7 +553,7 @@ export function createHost(options: HostOptions): Host {
 			return reply(res, refusal(400, "Bad request."));
 		}
 		const response = await viewer!.adapter.fetch(request);
-		res.writeHead(response.status, [...response.headers].flat());
+		res.writeHead(response.status, [...[...response.headers].flat(), ...extraHeaders.flat()]);
 		if (!response.body) return void res.end();
 		// A presence stream is long; when the client goes, the pipeline ends and cancels the adapter's body.
 		pipeline(Readable.fromWeb(response.body as unknown as WebReadableStream), res, () => undefined);
@@ -545,6 +596,8 @@ export function createHost(options: HostOptions): Host {
 		) {
 			return refuse(target === null ? 404 : 400, "handshake");
 		}
+		// A browser's media socket must come from the viewer's own origin; absent, repeated or different fails closed, before the adapter learns the token.
+		if (!originAllowed(req.headersDistinct.origin, viewer!.publicOrigin)) return refuse(403, "origin");
 		const result = viewer!.adapter.media(target, (offered[0] ?? "").split(",").map((protocol) => protocol.trim()).filter((protocol) => protocol !== ""));
 		if (result.status !== 101) return refuse(result.status, "media");
 		const status = result.attach((events) => {

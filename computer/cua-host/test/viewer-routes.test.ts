@@ -24,6 +24,8 @@ const TOKEN = "viewer-routes-test-token-0123456789abcdef";
 const LAUNCH = "AAAAAAAAAAAAAAAAAAAAAA";
 const ATTACH = "B".repeat(43);
 const CREDENTIAL = "C".repeat(43);
+const PUBLIC = "https://bridge.example";
+const PIM = "https://pim.example";
 
 type Reply = { status: number; headers: http.IncomingHttpHeaders; body: string };
 
@@ -53,7 +55,7 @@ after(async () => {
 	for (const host of hosts) await host.close();
 });
 
-async function serve(options: { viewer?: boolean; fetch?: (request: Request) => Response | Promise<Response>; media?: (target: string, protocols: readonly string[]) => MediaUpgrade; limits?: Partial<Limits> } = {}) {
+async function serve(options: { viewer?: boolean; fetch?: (request: Request) => Response | Promise<Response>; media?: (target: string, protocols: readonly string[]) => MediaUpgrade; limits?: Partial<Limits>; embed?: boolean } = {}) {
 	const seen: Recorded = { manager: [], adapter: [], media: [] };
 	const routes: ViewerRoutes = {
 		manager: {
@@ -84,6 +86,8 @@ async function serve(options: { viewer?: boolean; fetch?: (request: Request) => 
 				return options.media ? options.media(target, protocols) : { status: 404 };
 			},
 		},
+		publicOrigin: PUBLIC,
+		...(options.embed ? { embedOrigin: PIM } : {}),
 	};
 	const relay = new Relay({
 		space: SPACE,
@@ -209,6 +213,25 @@ describe("the adapter's routes", () => {
 		assert.equal((await request(port, { method: "POST", path: `/${LAUNCH}/x`, headers: { "content-type": "a" } })).status, 200);
 	});
 
+	it("refuse another origin and answer no CORS, and frame-ancestors and a permissions policy go on every answer", async () => {
+		const { port, seen } = await serve({ embed: true });
+		const path = `/${LAUNCH}/cua.env.v1.SystemService/GetCapabilities`;
+		const headers = { "content-type": "application/grpc-web+proto", "x-cua-env-authorization": `Bearer ${CREDENTIAL}` };
+		assert.equal((await request(port, { method: "POST", path, headers: { ...headers, origin: "https://evil.example" }, body: "x" })).status, 403);
+		assert.equal((await request(port, { method: "POST", path, headers: { ...headers, origin: PIM }, body: "x" })).status, 403, "framing is not calling");
+		assert.equal((await request(port, { method: "OPTIONS", path, headers: { origin: "https://evil.example", "access-control-request-method": "POST" } })).status, 405, "a preflight is not answered");
+		assert.deepEqual(seen.adapter, []);
+		const ok = await request(port, { method: "POST", path, headers: { ...headers, origin: PUBLIC }, body: "x" });
+		assert.equal(ok.status, 200);
+		assert.equal(Object.keys(ok.headers).some((name) => name.startsWith("access-control-")), false);
+		assert.ok([ok.headers["content-security-policy"]].flat().join(",").includes(`frame-ancestors ${PIM}`));
+		assert.ok(String(ok.headers["permissions-policy"]).includes("clipboard-read=()"));
+		const same = await request(port, { path: `/${LAUNCH}/viewer/` });
+		assert.equal(same.status, 200, "a same-origin page load sends no Origin");
+		const closed = await serve();
+		assert.ok([(await request(closed.port, { path: `/${LAUNCH}/viewer/` })).headers["content-security-policy"]].flat().join(",").includes("frame-ancestors 'none'"));
+	});
+
 	it("end the adapter's stream when the client goes away", async () => {
 		let cancelled!: () => void;
 		const done = new Promise<void>((resolve) => {
@@ -243,9 +266,9 @@ describe("the adapter's routes", () => {
 
 describe("the media socket", () => {
 	const target = `/${LAUNCH}/media?ticket=${ATTACH}`;
-	const refused = (port: number, protocols?: string) =>
+	const refused = (port: number, protocols?: string, origin: string | null = PUBLIC) =>
 		new Promise<number>((resolve, reject) => {
-			const ws = new WebSocket(`ws://127.0.0.1:${port}${target}`, protocols === undefined ? [] : [protocols]);
+			const ws = new WebSocket(`ws://127.0.0.1:${port}${target}`, protocols === undefined ? [] : [protocols], origin === null ? {} : { headers: { origin } });
 			ws.on("unexpected-response", (_req, res) => {
 				res.resume();
 				resolve(res.statusCode ?? 0);
@@ -273,6 +296,17 @@ describe("the media socket", () => {
 		assert.equal(late.seen.media.length, before);
 	});
 
+	it("fails closed without exactly the public origin, before the adapter learns the token", async () => {
+		let attached = 0;
+		const { port, seen } = await serve({ media: () => ({ status: 101, protocol: "rcdp.v2", attach: () => (attached++, 101) }) });
+		assert.equal(await refused(port, "rcdp.v2", null), 403, "no Origin");
+		assert.equal(await refused(port, "rcdp.v2", PIM), 403, "the Pim app's origin");
+		assert.equal(await refused(port, "rcdp.v2", "https://bridge.example:8444"), 403, "another port");
+		assert.equal(await refused(port, "rcdp.v2", "null"), 403);
+		assert.deepEqual(seen.media, []);
+		assert.equal(attached, 0);
+	});
+
 	it("carries messages both ways once attached, and reports its closure", async () => {
 		let socket: MediaSocket | undefined;
 		const got: (string | Uint8Array)[] = [];
@@ -287,7 +321,7 @@ describe("the media socket", () => {
 				},
 			}),
 		});
-		const ws = new WebSocket(`ws://127.0.0.1:${port}${target}`, ["rcdp.v2"]);
+		const ws = new WebSocket(`ws://127.0.0.1:${port}${target}`, ["rcdp.v2"], { headers: { origin: PUBLIC } });
 		const received = new Promise<string>((resolve) => ws.once("message", (data) => resolve(data.toString())));
 		await new Promise<void>((resolve, reject) => {
 			ws.once("open", () => resolve());

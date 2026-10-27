@@ -225,20 +225,25 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
  * to its object afterwards reaches it. Values are not converted.
  */
 function snapshot(value: unknown, required: readonly string[], optional: readonly string[] = []): Readonly<Record<string, unknown>> | undefined {
-	if (!isRecord(value)) return undefined;
-	const prototype = Object.getPrototypeOf(value);
-	if (prototype !== Object.prototype && prototype !== null) return undefined;
-	const keys = Reflect.ownKeys(value);
-	if (keys.length > required.length + optional.length) return undefined;
-	const copy: Record<string, unknown> = {};
-	for (const name of keys) {
-		if (typeof name !== "string" || (!required.includes(name) && !optional.includes(name))) return undefined;
-		const descriptor = Object.getOwnPropertyDescriptor(value, name);
-		if (!descriptor || !("value" in descriptor)) return undefined;
-		copy[name] = descriptor.value;
+	// A proxy's traps can throw, or a revoked proxy can, at any of these reads: that is a malformed request too, not an error for the caller.
+	try {
+		if (!isRecord(value)) return undefined;
+		const prototype = Object.getPrototypeOf(value);
+		if (prototype !== Object.prototype && prototype !== null) return undefined;
+		const keys = Reflect.ownKeys(value);
+		if (keys.length > required.length + optional.length) return undefined;
+		const copy: Record<string, unknown> = {};
+		for (const name of keys) {
+			if (typeof name !== "string" || (!required.includes(name) && !optional.includes(name))) return undefined;
+			const descriptor = Object.getOwnPropertyDescriptor(value, name);
+			if (!descriptor || !("value" in descriptor)) return undefined;
+			copy[name] = descriptor.value;
+		}
+		if (required.some((name) => !(name in copy))) return undefined;
+		return Object.freeze(copy);
+	} catch {
+		return undefined;
 	}
-	if (required.some((name) => !(name in copy))) return undefined;
-	return Object.freeze(copy);
 }
 
 /** A launch request as a frozen copy taken before anything waits, or `undefined` if it is malformed. */

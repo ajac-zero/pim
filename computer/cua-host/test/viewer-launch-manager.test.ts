@@ -18,6 +18,7 @@ import {
 	DEFAULT_START_TIMEOUT_MS,
 	type Journal,
 	type JournalStore,
+	type KeyRequest,
 	type LaunchRequestKey,
 	MAX_UNRESOLVED_LAUNCHES,
 	openViewerLaunchManager,
@@ -498,6 +499,31 @@ describe("the viewer launch manager", () => {
 		];
 		for (const bad of malformed) assert.deepEqual(await manager.launch(bad as LaunchRequestKey), { outcome: "refused", reason: "invalid" });
 		assert.equal(reads, 0, "an accessor is never called");
+		assert.equal(memory.entry(key(2)), undefined);
+		assert.equal(desk.calls.length, 1);
+	});
+
+	it("answers a request whose proxy traps throw as malformed, and never rejects", async () => {
+		const { memory, desk, manager } = await setUp();
+		assert.equal((await manager.launch(request(1))).outcome, "launched");
+		const fail = (): never => {
+			throw new Error("a trap that throws");
+		};
+		const handlers: ProxyHandler<object>[] = [{ getPrototypeOf: fail }, { ownKeys: fail }, { getOwnPropertyDescriptor: fail }];
+		const revoked = (target: object) => {
+			const { proxy, revoke } = Proxy.revocable(target, {});
+			revoke();
+			return proxy;
+		};
+		const launches: unknown[] = [...handlers.map((handler) => new Proxy({ ...request(2) }, handler)), revoked({ ...request(2) })];
+		for (const bad of launches) assert.deepEqual(await manager.launch(bad as LaunchRequestKey), { outcome: "refused", reason: "invalid" });
+		// Key 1's launch is live: a throwing request for it ends nothing and shows nothing.
+		const keys: unknown[] = [...handlers.map((handler) => new Proxy({ ...ada(1) }, handler)), revoked({ ...ada(1) })];
+		for (const bad of keys) {
+			assert.deepEqual(await manager.end(bad as KeyRequest), { outcome: "not_found" });
+			assert.deepEqual(await manager.status(bad as KeyRequest), { outcome: "not_found" });
+		}
+		assert.equal(desk.launches[0]?.lifetime.live(), true);
 		assert.equal(memory.entry(key(2)), undefined);
 		assert.equal(desk.calls.length, 1);
 	});

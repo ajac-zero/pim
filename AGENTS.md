@@ -31,7 +31,7 @@ Use the preview. `amp orb services ensure` starts it (`.amp/services.yaml`) at `
 
 For UI changes, follow `web/DESIGN.md`. Sign in with `agent-browser` through the portal link or `http://localhost:8787/__dev/sign-in/ada`, set the viewport to 2x (`agent-browser set viewport 1280 800 2`), and inspect screenshots of every state you changed. `.agents/setup` installs Inter so screenshots look right.
 
-Never run `pnpm dev` or `pnpm deploy` here: `wrangler dev` uses the remote Workers AI binding, which needs a Cloudflare login and bills that account. Never deploy `wrangler.preview.jsonc`. `docs/deployments/` is private and not in the repository. A deployment's own settings aren't in `wrangler.jsonc`: they are variables set in the Cloudflare dashboard, with defaults in `src/deployment.ts`. Tests set theirs in `vitest.config.ts`, and the preview in `wrangler.preview.jsonc`.
+Never run `pnpm dev` or `pnpm deploy` here: `wrangler dev` uses the remote Workers AI binding, which needs a Cloudflare login and bills that account. Never deploy `wrangler.preview.jsonc`. `docs/deployments/` is private and not in the repository. A deployment's own settings aren't in `wrangler.jsonc`: they are variables set in the Cloudflare dashboard, with defaults in `src/deployment.ts`. Tests set theirs in `vitest.bindings.ts`, and the preview in `wrangler.preview.jsonc`.
 
 ## Code and docs
 

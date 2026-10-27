@@ -122,7 +122,7 @@ spacesd captures X11 (or Hyprland): GNOME and KDE Wayland, Ubuntu's default sess
 
 ## Delivery, and the support checks
 
-Delivery is ordinary startup source, not an executive decision: `fetch.sh` (root, once, written, **never run here**) brings every pinned file to the VM, with no credential, no SSH, and nothing from the cloud's user data. Every artifact comes from its publisher over HTTPS only (no downgrade, TLS 1.2 or later, no proxy, no `curl` configuration file) in one request with no retry, and must answer `200`, be within its size bound (exactly its size where that is pinned) and match its pinned digest **before one byte is unpacked**. Then it stages everything in `/var/lib/pim-cua-fetch` (new, root's, `0700`, which must not exist; removed on exit, the original failure still reported, a failed removal reported too), unpacks without restoring any owner, drops Chrome's setuid helper bit, checks that no staged file is group- or world-writable or setuid, **checks each unpacked program against the digest the configuration records**, builds the bundle from the pinned archive with the staged Node (`operator.ts bundle --source-dir`, no git) and checks its tree digest against `bundle.sha256`, and only then moves each into place with `mv -T`. A destination that exists is never replaced, and a run that fails partway is not resumed: the VM is discarded.
+Delivery is ordinary startup source, not an executive decision: `fetch.sh` (root, once, written, **never run here**) brings every pinned file to the VM, with no credential, no SSH, and nothing from the cloud's user data. Every artifact comes from its publisher over HTTPS only (no downgrade, TLS 1.2 or later, no proxy, no `curl` configuration file) in one request with no retry, and must answer `200`, be within its size bound (exactly its size where that is pinned) and match its pinned digest **before one byte is unpacked**. Then it stages everything in `/var/lib/pim-cua-fetch` (new, root's, `0700`, which must not exist; removed on exit, the original failure still reported, a failed removal reported too), unpacks without restoring any owner, drops Chrome's setuid helper bit, checks that no staged file is group- or world-writable or setuid, **checks each unpacked program against the digest the configuration records**, builds the bundle from the pinned archive with the staged Node (`operator.ts bundle --source-dir`, no git) and checks its tree digest against `bundle.sha256`, and only then publishes each into place **without ever replacing**: a file by a hard link (`ln -P -T`), which the kernel refuses if the destination exists however it came to; a directory by an exclusive `mkdir` of its destination and then the same, entry by entry, under it. `mv` is not used: its rename replaces an existing regular file (and an empty directory), so a check for absence before it would not be a guarantee, and `mv -n` would skip with a zero exit. The hard link needs the stage and the destinations on one filesystem, as on the base; on two it fails and copies nothing. Afterwards the placed programs and the bundle are checked again against the same digests. If anything fails once placing has begun, **the stage and whatever was placed are kept as evidence** (`partial-placement-kept`), nothing resumes from them, and the next run refuses on both: that VM is discarded. A tree entry whose name falls outside letters, digits and `._@+-` also fails closed, which may stop a package that has an unusual name; that is a finding, not a switch.
 
 | Artifact | From | Pin |
 | --- | --- | --- |
@@ -135,14 +135,31 @@ Delivery is ordinary startup source, not an executive decision: `fetch.sh` (root
 
 Google keeps only the current Chrome in its pool, so the Chrome pin may stop resolving; if so `fetch.sh` fails on `status`, and a new pin is a new review.
 
-### The missing pins, exactly
+### The missing pins, exactly, and the procedure that fills them
 
-`render` refuses (`pin-missing:repository-commit,repository-sha256`) until these are filled into `pins.ts`, and refuses a pin for any other commit than the configuration's (`pin-commit`):
+`render` refuses (`pin-missing:repository-commit,repository-sha256`) until the archive pin is filled into `pins.ts`, and refuses a pin for any commit other than the configuration's (`pin-commit`). Nothing below has been done.
 
-1. **The commit** whose archive is the bundle: the reviewed final commit of this work. It doesn't exist until the source is accepted.
-2. **That commit's archive SHA-256**: of the file GitHub serves at the address above, taken once off the VM from that commit. GitHub does not publish it; a tarball's bytes are not promised stable by GitHub across time, so if they change `fetch.sh` fails on `digest` and the bundle is delivered another way (a decision then, not before).
+**Two commits, so the hash does not chase itself.** The archive's SHA-256 can't be written inside the commit it hashes. So:
 
-Also recorded by the operator from a trusted unpack, off the VM, into the configuration, not here: the digests of the extracted `node`, `caddy` and Chrome binaries. Nothing is guessed in their place.
+- **B, the bundle commit:** an already reviewed commit that has all the code `fetch.sh` runs (`operator.ts` with `bundle --source-dir`, `config.ts`, `origin.ts`, the bundle sources) and **empty** archive pins. B is the configuration's `commit` and the archive's commit. Once chosen, B is final; nothing is amended into it. Its own `pins.ts` is not in the bundle and is never run on the VM.
+- **P, the pin commit:** a later commit, B plus one change to `pins.ts` (`repository: { commit: B, sha256: <the archive's> }`) and this page. The scripts are rendered from P, so P is what is reviewed and accepted; the VM runs P's scripts and B's bundle.
+
+**Procedure, for the operator, off the VM and the cloud, in a new empty scratch directory** (run only on a reviewed approval, by hand, one step at a time):
+
+1. Choose B, a full 40-character commit that is an ancestor of P and has been accepted. Record it with where it came from (the review that accepted it).
+2. Download `https://codeload.github.com/ajac-zero/pim/tar.gz/<B>` once, over HTTPS, with no credentials, and record the HTTP status, the byte count and the SHA-256. **A second machine repeats step 2 independently; the two digests must match**, or GitHub's bytes are not stable enough to pin and the bundle needs another delivery (a decision, not a workaround).
+3. Check the archive is B and only B's tree: unpack it into the scratch directory and compare its file list and each file's SHA-256 with `git ls-tree -r <B>` and `git cat-file` of the same commit from a clone. Any difference stops the procedure.
+4. Fill `pins.ts` as P above, and record each program's digest in the configuration (next step).
+
+**The extracted programs' digests** (`node.sha256`, `browser.sha256`, `viewer.caddy.sha256`), by the same two-machine rule, each from an archive that first matches its pin in this page:
+
+| Program | Take the SHA-256 of | Unpack with |
+| --- | --- | --- |
+| `node.sha256` | `bin/node` | `tar -xzf node-v22.18.0-linux-x64.tar.gz --strip-components=1` |
+| `viewer.caddy.sha256` | `caddy` | `tar -xzf caddy_2.11.7_linux_amd64.tar.gz caddy` |
+| `browser.sha256` | `opt/google/chrome/chrome` | `dpkg-deb --extract google-chrome-stable_156.0.8078.47-1_amd64.deb <dir>` |
+
+None of these publishers lists a digest for the extracted program, so each is derived, and its trust is the archive's pin plus the two matching unpackings. `viewer.spacesd.sha256` is already the pinned asset's own digest. The bundle's `bundle.sha256` is `operator.ts bundle --commit <B> ...` followed by `digest`, off the VM, also twice. The configuration is then complete, and `render` can be run for P; until then it can't.
 
 ### `support.sh`: what acceptance of the startup includes
 

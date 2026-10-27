@@ -959,15 +959,29 @@ describe("the pinned delivery", () => {
 			assert.ok(script.includes(`absent "$${variable}" ${name}`), name);
 			assert.ok(script.indexOf(`absent "$${variable}" ${name}`) < script.indexOf("mkdir -m 0700 --"), name);
 		}
-		assert.equal(script.match(/^mv -T -- /gm)?.length, 5);
-		assert.equal(/\bmv -f|cp |rsync|ln -s/.test(script), false);
+		// Publication is by exclusive creation: a hard link (refused if the destination exists) and an exclusive mkdir. `mv` is nowhere: its rename replaces a file.
+		assert.deepEqual(script.match(/^publish_(?:file|tree) "\$STAGE[^\n]*/gm), [
+			'publish_tree "$STAGE/node" "$NODE_ROOT" node',
+			'publish_file "$STAGE/caddy/caddy" "$CADDY" caddy',
+			'publish_file "$STAGE/spacesd/spacesd" "$SPACESD" spacesd',
+			'publish_tree "$STAGE/chrome$CHROME_DIR" "$CHROME_DIR" chrome',
+			'publish_tree "$STAGE/bundle" "$BUNDLE" bundle',
+		]);
+		assert.ok(script.includes('ln -P -T -- "$1" "$2" || fail "place-$3"'));
+		assert.ok(script.includes('mkdir -m 0755 -- "$2" || fail "place-$3"'));
+		assert.equal(/\bmv\b|\bcp\b|rsync|ln -s|ln -f|--force/.test(script), false);
+		// A failed run keeps what it placed and the stage: the stage is removed only by a run that did not fail while placing.
+		assert.ok(script.includes('if [[ "$PLACING" == 1 && "$status" != 0 ]]; then'));
+		assert.ok(script.includes('"reason":"partial-placement-kept"'));
+		assert.ok(script.indexOf("\nPLACING=1\n") > script.indexOf("ensure_parent") && script.indexOf("\nPLACING=1\n") < script.indexOf("\npublish_tree \"$STAGE/node\""));
+		assert.ok(script.includes("fail placed-programs") && script.includes("fail placed-bundle"));
 		assert.ok(script.includes("readonly NODE_ROOT='/opt/pim-node'"));
 		assert.ok(script.includes("readonly CHROME_DIR='/opt/google/chrome'"));
 	});
 
 	it("checks each unpacked program against the configured digest, then builds the bundle with the staged Node and checks its tree digest, before any move", () => {
 		const script = fetchScript();
-		const moves = script.indexOf("\nmv -T -- ");
+		const moves = script.indexOf("\nPLACING=1\n");
 		for (const check of ["fail digest-node-program", "fail digest-caddy-program", "fail digest-chrome-program", "fail digest-spacesd-program", "fail bundle-build", "fail bundle-digest", "staged_ok \"$STAGE/bundle\""]) {
 			assert.ok(script.includes(check), check);
 			assert.ok(script.indexOf(check) < moves, check);

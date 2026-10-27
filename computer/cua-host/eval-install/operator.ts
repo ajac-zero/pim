@@ -535,7 +535,7 @@ function renderFetch(config: Config, viewer: NonNullable<Config["viewer"]>, pins
 		download("ws", "ws.tgz", pins.ws.url, "512", integrityHex(pins.ws.sha512), null, pins.ws.maxBytes),
 		download("protobuf", "protobuf.tgz", pins.protobuf.url, "512", integrityHex(pins.protobuf.sha512), null, pins.protobuf.maxBytes),
 	].join("");
-	const tools = ["curl", "tar", "dpkg-deb", "sha256sum", "sha512sum", "stat", "cut", "find", "chmod", "mkdir", "mv", "rm", "install", "dirname"].map((tool) => `trusted_file /usr/bin/${tool} || fail tools`).join("\n");
+	const tools = ["curl", "tar", "dpkg-deb", "sha256sum", "sha512sum", "stat", "cut", "find", "chmod", "mkdir", "ln", "sort", "rm", "install", "dirname"].map((tool) => `trusted_file /usr/bin/${tool} || fail tools`).join("\n");
 	return `${prologue(config, "fetch", false)}
 ${tools}
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy NO_PROXY CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
@@ -551,10 +551,14 @@ readonly CHROME_SHA256=${quote(config.browser.sha256)}
 readonly SPACESD_SHA256=${quote(pins.spacesd.sha256)}
 
 # Only the stage this run made is removed, on any exit; a failed removal is reported without hiding why the run ended.
+# Once placing has begun, a failed run keeps the stage and whatever was placed as evidence, and nothing resumes from it: the next run refuses on both.
 CREATED=0
+PLACING=0
 cleanup() {
 	local status="$1"
-	if [[ "$CREATED" == 1 ]]; then
+	if [[ "$PLACING" == 1 && "$status" != 0 ]]; then
+		printf '{"event":"pim-cua-eval.failed","command":"%s","reason":"partial-placement-kept"}\n' "$COMMAND" >&2
+	elif [[ "$CREATED" == 1 ]]; then
 		rm -rf --one-file-system -- "$STAGE" || { printf '{"event":"pim-cua-eval.failed","command":"%s","reason":"cleanup"}\\n' "$COMMAND" >&2; [[ "$status" != 0 ]] || status=1; }
 	fi
 	exit "$status"
@@ -578,6 +582,25 @@ download() {
 }
 
 absent() { [[ ! -e "$1" && ! -L "$1" ]] || fail "exists-$2"; }
+
+# Publication never replaces. A file is published by a hard link, which the kernel refuses if the destination exists, however it appeared; a directory by an
+# exclusive mkdir of its destination and then the same for each entry under it. Neither is a check followed by a rename, which would replace a file that appeared between the two.
+# The link needs the stage and the destination on one filesystem, as the base has; across two it fails and nothing is copied.
+publish_file() {
+	ln -P -T -- "$1" "$2" || fail "place-$3"
+}
+publish_tree() {
+	local entry
+	mkdir -m 0755 -- "$2" || fail "place-$3"
+	while IFS= read -r -d '' entry; do
+		[[ "$entry" =~ ^[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$ ]] || fail "place-$3"
+		mkdir -m "$(stat -c %a -- "$1/$entry")" -- "$2/$entry" || fail "place-$3"
+	done < <(cd -- "$1" && find . -mindepth 1 -type d -printf '%P\0' | LC_ALL=C sort -z)
+	while IFS= read -r -d '' entry; do
+		[[ "$entry" =~ ^[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$ ]] || fail "place-$3"
+		ln -P -T -- "$1/$entry" "$2/$entry" || fail "place-$3"
+	done < <(cd -- "$1" && find . -mindepth 1 ! -type d -printf '%P\0' | LC_ALL=C sort -z)
+}
 
 # Every directory above $1 exists, made here when missing (root's, 0755), and is root's, not a link, and writable by no one else.
 ensure_parent() {
@@ -636,13 +659,18 @@ digest="$(tree_digest "$STAGE/bundle")" || fail bundle-digest
 [[ "$digest" == "$BUNDLE_SHA256" ]] || fail bundle-digest
 staged_ok "$STAGE/bundle"
 
-# In place, each by one rename (the stage and the destinations are one filesystem on the base). A failure partway leaves a VM that is discarded, never resumed.
+# In place, none replacing (publish_file, publish_tree). A failure partway keeps the stage and what was placed; that VM is discarded, never resumed.
 ensure_parent "$NODE_ROOT"; ensure_parent "$CADDY"; ensure_parent "$SPACESD"; ensure_parent "$CHROME_DIR"; ensure_parent "$BUNDLE"
-mv -T -- "$STAGE/node" "$NODE_ROOT" || fail place-node
-mv -T -- "$STAGE/caddy/caddy" "$CADDY" || fail place-caddy
-mv -T -- "$STAGE/spacesd/spacesd" "$SPACESD" || fail place-spacesd
-mv -T -- "$STAGE/chrome$CHROME_DIR" "$CHROME_DIR" || fail place-chrome
-mv -T -- "$STAGE/bundle" "$BUNDLE" || fail place-bundle
+PLACING=1
+publish_tree "$STAGE/node" "$NODE_ROOT" node
+publish_file "$STAGE/caddy/caddy" "$CADDY" caddy
+publish_file "$STAGE/spacesd/spacesd" "$SPACESD" spacesd
+publish_tree "$STAGE/chrome$CHROME_DIR" "$CHROME_DIR" chrome
+publish_tree "$STAGE/bundle" "$BUNDLE" bundle
+# What was placed is what was checked (a listing that silently came up short would show here).
+[[ "$(sum256 "$NODE_ROOT/bin/node")" == "$NODE_SHA256" && "$(sum256 "$CADDY")" == "$CADDY_SHA256" && "$(sum256 "$SPACESD")" == "$SPACESD_SHA256" && "$(sum256 "$CHROME_DIR/chrome")" == "$CHROME_SHA256" ]] || fail placed-programs
+[[ "$(tree_digest "$BUNDLE")" == "$BUNDLE_SHA256" ]] || fail placed-bundle
+PLACING=0
 printf '{"event":"pim-cua-eval.fetched","evaluation":"%s"}\\n' ${quote(config.evaluation)}
 `;
 }

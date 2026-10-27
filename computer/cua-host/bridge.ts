@@ -9,6 +9,15 @@
  *   PIM_BRIDGE_KEY_FILE=/etc/pim-bridge/key.pem \
  *   node bridge.ts --space o_… --path /pim --socket /run/pim-session/session.sock --host 0.0.0.0 --port 8443
  *
+ * Given all of `--viewer-origin` (where spacesd is), `--viewer-public-origin` (the
+ * HTTPS origin a browser loads the viewer from: this bridge's own), `--viewer-journal-dir`
+ * and PIM_VIEWER_ROOT_TOKEN_FILE (and optionally `--viewer-display`, `primary` by
+ * default, and `--viewer-embed-origin`, the one Pim app origin that may frame it), it also serves
+ * the view-only desktop viewer (./viewer-host.ts, docs/cua-viewer-first-preview.md);
+ * given none of them it serves the relay alone, and given some, or an invalid
+ * one, it refuses to start. The root token's file is checked and
+ * read for each launch, like the others never from a flag, and never logged.
+ *
  * The token and the key are read from the files the environment names,
  * never from flags, so they don't show in a process list; each must be a
  * regular file of this account's that its group and others can't read.
@@ -47,9 +56,22 @@ function secret(variable: string): Buffer {
 
 async function main(): Promise<void> {
 	const { parseArgs } = await import("node:util");
-	let values: { space?: string; path?: string; socket?: string; host?: string; port?: string };
+	let values: { space?: string; path?: string; socket?: string; host?: string; port?: string; "viewer-origin"?: string; "viewer-journal-dir"?: string; "viewer-display"?: string; "viewer-public-origin"?: string; "viewer-embed-origin"?: string };
 	try {
-		({ values } = parseArgs({ options: { space: { type: "string" }, path: { type: "string" }, socket: { type: "string" }, host: { type: "string" }, port: { type: "string" } } }));
+		({ values } = parseArgs({
+			options: {
+				space: { type: "string" },
+				path: { type: "string" },
+				socket: { type: "string" },
+				host: { type: "string" },
+				port: { type: "string" },
+				"viewer-origin": { type: "string" },
+				"viewer-journal-dir": { type: "string" },
+				"viewer-display": { type: "string" },
+				"viewer-public-origin": { type: "string" },
+				"viewer-embed-origin": { type: "string" },
+			},
+		}));
 	} catch {
 		values = {};
 	}
@@ -58,6 +80,7 @@ async function main(): Promise<void> {
 		process.exit(2);
 	}
 	let stage = "settings";
+	let viewer: Awaited<ReturnType<typeof import("./viewer-host.ts").createViewerHost>> | undefined;
 	try {
 		const open = unixSession({ socketPath: values.socket });
 		stage = "token";
@@ -67,17 +90,55 @@ async function main(): Promise<void> {
 		const key = secret("PIM_BRIDGE_KEY_FILE");
 		stage = "relay";
 		const relay = new Relay({ space: values.space, token, path: values.path, open });
+		// The viewer is all or nothing: some of its settings given, or any invalid, is a mistake, not a smaller bridge.
+		stage = "viewer";
+		const flags = { origin: values["viewer-origin"], journalDirectory: values["viewer-journal-dir"], display: values["viewer-display"], publicOrigin: values["viewer-public-origin"], embedOrigin: values["viewer-embed-origin"] };
+		const env = { PIM_VIEWER_ROOT_TOKEN_FILE: process.env.PIM_VIEWER_ROOT_TOKEN_FILE };
+		// A bridge with none of the viewer's settings never loads its code.
+		if (Object.values({ ...flags, ...env }).some((value) => value !== undefined)) {
+			const viewerModule = await import("./viewer-host.ts");
+			viewer = await viewerModule.createViewerHost(viewerModule.parseViewerSettings(flags, env)!);
+		}
 		stage = "host";
-		const host = createHost({ relay, transport: { kind: "https", cert, key, host: values.host, port: Number(values.port) } });
+		const host = createHost({ relay, ...(viewer ? { viewer: viewer.routes } : {}), transport: { kind: "https", cert, key, host: values.host, port: Number(values.port) } });
 		await host.listen();
+		let stopping = false;
 		const stop = () => {
-			void host.close().then(() => process.exit(0));
+			if (stopping) return;
+			stopping = true;
+			void (async () => {
+				// Exits 0 only when everything was seen settled. Pending, unsettled or unobserved work, or a failure, is a nonzero status, and one failure doesn't hide another.
+				let status = 0;
+				try {
+					// The viewer first: it stops admitting launches and asks its launches to end, and says what it saw.
+					const shutdown = viewer ? await viewer.close() : undefined;
+					if (shutdown) {
+						console.error(JSON.stringify({ event: "bridge.viewer_stopped", ...shutdown }));
+						if (!shutdown.settled) status = 3;
+					}
+				} catch {
+					console.error(JSON.stringify({ event: "bridge.viewer_stopped", reason: "failed" }));
+					status = 3;
+				}
+				try {
+					await host.close();
+				} catch {
+					console.error(JSON.stringify({ event: "bridge.failed", reason: "close" }));
+					if (status === 0) status = 1;
+				}
+				process.exit(status);
+			})();
 		};
 		process.once("SIGTERM", stop);
 		process.once("SIGINT", stop);
 	} catch {
 		// What failed may carry a secret's contents or path, so only where it failed is said.
 		console.error(JSON.stringify({ event: "bridge.failed", reason: stage }));
+		// A viewer that was opened is shut down, and says what it saw; the status stays the failure's.
+		if (viewer) {
+			const shutdown = await viewer.close().catch(() => undefined);
+			console.error(JSON.stringify({ event: "bridge.viewer_stopped", ...(shutdown ?? { reason: "failed" }) }));
+		}
 		process.exit(1);
 	}
 }

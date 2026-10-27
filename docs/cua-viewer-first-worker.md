@@ -1,8 +1,8 @@
 # The viewer-first preview: the Worker's half
 
-The Worker and web app side of the viewer-first single-user preview (`docs/cua-viewer-first-preview.md`, milestone 2, items 4 to 7): the client to the bridge's viewer host for launching, ending and reading observations, the space's durable observation ledger, the person's management routes, and a Watch desktop action that opens the viewer **directly on the host**. **Only the preview composes it.** A deployment mounts no route, constructs no desk and provisions no ledger: `serve` mounts `/api/observations` only when the preview passes `{ observations: true }`, and the preview does that only while its private environment opts into the Cua fixture. **Nothing here has been run, type-checked, linted or tested.** The tests below are written for an independent source audit before anything runs.
+The Worker and web app side of the viewer-first single-user preview (`docs/cua-viewer-first-preview.md`, milestone 2, items 4 to 7): the client to the bridge's viewer host for launching, ending and reading observations, the space's durable observation ledger, the person's management routes, and a Watch desktop action that opens the viewer **directly on the host**. **Only the preview composes it.** A deployment mounts no route, constructs no desk and provisions no ledger: `serve` mounts `/api/observations` only when the preview passes `{ observations: true }`, and the preview does that only while its private environment opts into the Cua fixture. **What has run:** only `test/cua-observation.test.ts`, 32 of 32 at `d9b6b20`, independently, under `vitest.cua-prerequisite.config.ts`, alone. Nothing else of the Worker's half has been run, type-checked, linted or built, and nothing of it has met a real host, browser or VM.
 
-The host's half is separate and not merged here: `review/linus-cua-viewer-first-20261027` at `aef4c79` (the management API frozen in `a142011`'s `docs/cua-viewer-first-preview.md`, with `3bdf5bb`'s shutdown addition, unchanged since; `566e9a7` and `aef4c79` add the direct viewer path and its origins). Its source was accepted at `917fa25`, with fake-host tests 29 of 29 there and fake-journal tests 17 of 17 at the unchanged `3bdf5bb`; at `aef4c79` its fake viewer-host tests passed 34 of 34, each run independently. Those are its own stand-ins: no live host and no route has been qualified, and the earlier failed run (143 of 144) and the stalls nobody diagnosed stay on the record. This client is written against that frozen API. Merging the two will conflict in `preview/cua-viewer-first.ts`'s header comment, which both changed.
+The host's half is merged into this review branch at exactly `aef4c79` (`review/linus-cua-viewer-first-20261027`: the management API frozen in `a142011`, with `3bdf5bb`'s shutdown addition, unchanged since; `566e9a7` and `aef4c79` add the direct viewer path and its origins). Its fake viewer-host tests passed 34 of 34 at `aef4c79` (29 of 29 at `917fa25` before that), and its fake-journal tests 17 of 17 at `3bdf5bb`, whose journal store is unchanged since; each was run independently. Those are its own stand-ins: no live host and no route has been qualified. The earlier failures stay on the record: the host's 28/29 at `3bdf5bb` (a test defect, fixed in `917fa25`), and the stand-in lane's failed 143/144 run and the stalls nobody diagnosed (`docs/cua-standin-lane.md`); the earlier 67/67 and 144-twice results are stand-in evidence only. **The integrated branch itself has not been run:** nothing here claims the two halves work together until it is checked independently. The merge's one conflict, `preview/cua-viewer-first.ts`'s header comment and the comment over `initialJournal`, kept both halves' statements: the file is data, the preview's Worker reads `VIEWER_FIRST` and `agentMode`, and the journal's first file is the separate provisioning step's, never the host's.
 
 ## What is wired
 
@@ -92,7 +92,7 @@ The whole pinned viewer, its page, files, calls and media socket, goes from the 
 ## Where this differs from the host's plan
 
 - The management answers are read without requiring `x-pim-space` back; the host's plan doesn't send it.
-- The host's plan has the Worker pipe media; here the browser reaches the host directly, and the Worker carries no viewer traffic.
+- The ledger lives in `src/cua-observation-runtime.ts` under `cua_observations`, constructed only by the preview's `Pim`, rather than in `src/pim.ts`; and only the fixture's seed provisions it.
 - Whether the frame loads is the host's `--viewer-embed-origin` to say; nothing here relies on it either way, and the page shows an empty frame when it refuses.
 - `admitObservationRequest` (`src/cua-observation.ts`) is unchanged and now unused: it was for viewer traffic through Pim.
 - The host's status answers `launch: null` once it has recorded closure and dropped the launch. A Worker that lost the answer of the read that observed closure can't see it again, so that record stays `unconfirmed`, and no procedure here settles it.
@@ -109,7 +109,7 @@ The listing says which drives the space's agents (`agent`, `preview/cua-viewer-f
 
 The ordinary shell, files and Chrome through pim-computer, approvals and the control state are as they were: the desk reads and writes nothing of the control state, takes no lease and admits or blocks no agent request. Native-app tools, the optional Cua child and takeover stay off. Sprites stay as they are, for migration; nothing here adds a Sprite feature or a provider abstraction.
 
-## Tests (written, not run)
+## Tests
 
 Only these files, each run on its own, one after another. All are stand-ins in the test's own runtime: a `fetch` written in the test stands for the viewer host's management, and nothing reaches the network. None opens a WebSocket, renders the viewer or loads a frame.
 
@@ -128,7 +128,8 @@ What they check:
 - A bridge whose origin isn't written as a browser writes it (uppercase, `:443`, a trailing dot, an empty label, a wildcard) makes no client; DNS, IPv4 and bracketed IPv6 hosts with ports do. A bridge on Pim's own host, on any port, makes none, a loopback one included.
 - Pim's own address is taken as an exact HTTPS origin (embeddable), or a loopback HTTP origin only in a local preview (never embeddable); an empty or unreadable address, `file:`, `data:`, a path, query, fragment, credentials, uppercase, `:443`, `:80`, or plain HTTP elsewhere is refused.
 - `settle` with a signal already aborted stops at once, sets no timer or listener and still handles the promise's rejection; settled by its value or its bound, it clears its timer and removes its listener.
-- A deadline that comes during the launch's flush sends nothing and makes the record `not_opened`; one that comes while the host answers records the launch `open` and hands out no viewer. `isHttpsOrigin` refuses a path, credentials, HTTP, `:443`, uppercase, a trailing dot, a wildcard, a query and a fragment.
+- A deadline that comes during the launch's flush sends nothing and makes the record `not_opened` (valid only because the host was never asked); one that comes while the host answers records the launch `open` and hands out no viewer.
+- `isHttpsOrigin` refuses a path, credentials, HTTP, `:443`, uppercase, a trailing dot, a wildcard, a query and a fragment.
 - The ledger is stored and flushed before the host is asked; the viewer's credential is never stored or listed, and the bridge's token is in neither the ledger, the listing nor the browser's answer.
 - Only management is answered: no session, an API token, or a write without this app's `Origin` is refused before anything is recorded or asked; the viewer's page, files, calls, media upgrade and a query are `404` with nothing sent.
 - Missing, unreadable, other-owner and other-version ledgers block without being recreated; a failed write asks nothing.
@@ -146,10 +147,37 @@ What they check:
 
 Not covered: the production gateway with no mount (only by reading `src/index.ts` and `serve`), the gateway's dropping of a body, a real browser loading the viewer in the frame (its `allow` included), and anything against a real host.
 
+## Narrow stand-in commands, for independent runs
+
+Each is one file in its own process, one after another, never in parallel, under the bounded step wrapper of `docs/cua-prerequisite-tests.md` (its own `TMPDIR`, deadline, process-group termination, and the folder and `git status` checks). None reaches the network, a browser, a VM or a real route. The Worker's files run in workerd through the named Vitest configuration with the file named, so the configuration's other files don't run; the host's run directly in Node (22.18 or later), not through `node --test`. Every count must be all passed, with nothing failed, skipped, todo or cancelled.
+
+| Step | Command | Passes with | Last result |
+| --- | --- | --- | --- |
+| Worker: observation | `node_modules/.bin/vitest run --config vitest.cua-prerequisite.config.ts test/cua-observation.test.ts` | 1 file, 32 tests | 32/32 at `d9b6b20` |
+| Worker: preview fixture | `node_modules/.bin/vitest run --config vitest.cua-standin.config.ts test/preview-cua-fixture.test.ts` | 1 file, 11 tests | not run since this change |
+| Web: computer settings | `pnpm --filter pim-web exec vitest run src/components/computer-settings.test.tsx` | 1 file, 4 tests | not run since this change |
+| Host: viewer host | `node computer/cua-host/test/viewer-host.test.ts` | `tests 34`, `pass 34` | 34/34 at `aef4c79` |
+| Host: journal store | `node computer/cua-host/test/journal-store.test.ts` | `tests 17`, `pass 17` | 17/17 at `3bdf5bb` |
+| Host: launch manager | `node computer/cua-host/test/viewer-launch-manager.test.ts` | `tests 18`, `pass 18` | not run at `aef4c79` |
+| Host: lifetime | `node computer/cua-host/test/viewer-lifetime.test.ts` | `tests 21`, `pass 21` | not run at `aef4c79` |
+| Host: adapter | `node computer/cua-host/test/viewer-adapter.test.ts` | `tests 17`, `pass 17` | not run at `aef4c79` |
+
+The counts are the files' `it(`/`test(` calls as written; a different count is a finding. Excluded by name, as the host's page says: `viewer-routes.test.ts` (12, real loopback HTTP and `ws` sockets), `host.test.ts`, `session.test.ts`, `cua-endpoint.test.ts`, `cua-computer.test.ts`, `native-mcp.test.ts`, `eval-credentials.test.ts` and `eval-install.test.ts`, and never the host package's `test/*.test.ts` glob. No type-check of either half is claimed.
+
+## Bounded future browser and VM qualification (needs its own approval)
+
+Nothing below is done or authorized now: no VM, certificate, DNS name, provisioning, deployment or cloud resource. It is the smallest plan that would turn the remaining blockers into evidence, for review:
+
+1. **Two exact, separate HTTPS origins**, chosen and approved: one for Pim (its `PIM_PUBLIC_URL`, which the host names as `--viewer-embed-origin`) and one for the bridge (the bridge address's origin, which the host names as `--viewer-public-origin`), on different hosts with no credential scoped to a shared parent domain. No portal origin is assumed; the local preview's `http://localhost:8787` stays refused for embedding.
+2. **One approved VM**, with the host's journal provisioned once by the separate provisioning step (never by the host, never made again after a loss), spacesd and its root-token file as the host's page requires, and one preview space seeded once by the fixture.
+3. **One owner session, in one browser**: Watch, see the desktop, check `Origin`, the frame's policy and the media socket's bound, then Stop and Check again until `closed_observed`; then an end whose answer is lost on purpose, which must leave the record `unconfirmed` and refuse the next Watch. Each step bounded in time, recorded, and stopped at the first unexpected result.
+4. **Evidence kept, nothing reset**: the ledger, the journal and the host's logs are read, not edited. A record left `unconfirmed` stays so and blocks watching; no new space, journal or identity is made to get past it, and no reconciliation is attempted without its own reviewed procedure.
+5. **A real model** only as a separate, later gate (`agent` in the listing says which mode ran).
+
 ## Remaining qualification blockers
 
-1. **The host's half is unmerged, its source accepted and its tests passed only against its own fakes** (29/29 fake host at `917fa25`, 17/17 fake journal at `3bdf5bb`), and no journal is provisioned, so every launch is refused (`blocked`) until one is. The two halves have never met: nothing has checked this client against those routes by running them.
-2. **Nothing here has run**: no type check, lint, test or build. The tests above are the audit's starting point, not evidence.
+1. **The halves are merged but have never run together**, and no journal is provisioned, so every launch is refused (`blocked`) until one is. The host's tests passed only against its own fakes (34/34 viewer host at `aef4c79`, 17/17 journal at `3bdf5bb`); nothing has checked this client against the host's routes by running them.
+2. **Little has run on the Worker's side**: `test/cua-observation.test.ts` alone (32/32 at `d9b6b20`). The fixture and web files, a type check, lint and build have not run since these changes.
 3. **The browser reaching the host**: the bridge's origin must be reachable from the person's browser over HTTPS with a certificate it trusts, and the viewer's page must load in a frame under Pim's address. Neither is set up or tried (the preview page's blocker 3). The host's `--viewer-embed-origin` must be an exact HTTPS origin, and must be the origin the browser actually shows Pim at. The local preview's `PIM_PUBLIC_URL` is `http://localhost:8787`, which can't be one: there the frame is refused, and the card says so. A Pim at an exact HTTPS public origin, named as the embed origin, is part of the planned VM qualification; no other origin is assumed here. The host's own media path to the browser (its `ws` server, `bufferedAmount` bound) has run only against fakes.
 4. **The viewer in a browser**: the pinned viewer has never run in the dialog's frame against any adapter. Its content security policy, WebCodecs, audio and resizing there are untested.
 5. **A leaked address is a bearer capability** until the host ends the launch or `notAfter` passes; nothing on Pim's side can revoke it when the end's answer, or the network, is lost.

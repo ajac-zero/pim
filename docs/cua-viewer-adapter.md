@@ -1,6 +1,6 @@
 # The Cua viewer adapter
 
-`computer/cua-host/viewer-adapter.ts` is the host-side boundary for showing Cua's own HTML5 viewer through Pim: the viewer spacesd 0.7.0 ships, unchanged, watching one display of the computer, view only. The browser never reaches spacesd. It reaches only the adapter, which serves the viewer's pinned files and answers the handful of calls that viewer makes to watch a display. Each call is decoded strictly and rebuilt as a new request to spacesd that contains only what the adapter allows. **Nothing routes to it yet.** It adds no route, setting, listener or credential to the Node host, and the evaluation installer doesn't bundle it. See "Not wired yet".
+`computer/cua-host/viewer-adapter.ts` is the host-side boundary for showing Cua's own HTML5 viewer through Pim: the viewer spacesd 0.7.0 ships, unchanged, watching one display of the computer, view only. The browser never reaches spacesd. It reaches only the adapter, which serves the viewer's pinned files and answers the handful of calls that viewer makes to watch a display. Each call is decoded strictly and rebuilt as a new request to spacesd that contains only what the adapter allows. **Nothing routes to it yet in a deployment.** The Node host can now be given it as an option (`docs/cua-viewer-first-preview.md`, unrun), and the evaluation installer doesn't bundle it. See "Not wired yet".
 
 ## What is pinned
 

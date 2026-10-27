@@ -1,10 +1,10 @@
 /**
  * The viewer-first single-user preview's settings, in one place so the
  * Worker side and the host side name the same numbers (docs/cua-viewer-first-preview.md).
- * Importing it starts nothing and adds no route, binding or setting to a
- * deployment; nothing in `src/` imports it, and the preview's Worker
- * (preview/worker.ts) reads it. It has no imports, so the Node host can
- * read it too.
+ * It is data only: importing it starts nothing and adds no route, binding or
+ * setting to a deployment. Nothing in `src/` or the Node host imports it; the
+ * preview's Worker (preview/worker.ts) reads `VIEWER_FIRST` and `agentMode`.
+ * It has no imports, so the Node host could read it too.
  */
 
 export const VIEWER_FIRST = {
@@ -43,12 +43,13 @@ export type AgentMode = "stand-in" | "real";
 export const agentMode = (provider: string): AgentMode => (provider === "preview" ? "stand-in" : "real");
 
 /**
- * The journal a viewer host starts from, written once by the operator when
- * it makes the preview's VM, before the host ever starts, and never by the
- * host (`openViewerLaunchManager` blocks on a missing journal and creates
- * none). Its shape is `Journal` in computer/cua-host/viewer-launch-manager.ts:
- * `revision` must be at least 1, and `generation` any name, which the host's
- * first start replaces. `initialized` says who made it and for which preview.
+ * The shape of the journal's first file, as a statement for whoever writes the
+ * provisioning step. That step is separate and not written: the host never
+ * calls this, never creates a journal (`openViewerLaunchManager` blocks on a
+ * missing one and `openJournalStore` refuses to create one), and a lost journal
+ * is not made again from it. The shape is `Journal` in
+ * computer/cua-host/viewer-launch-manager.ts: `revision` must be at least 1,
+ * and `generation` any name. `initialized` says who made it.
  */
 export function initialJournal(initialized: string) {
 	return { version: 1, revision: 1, generation: "provisioned", initialized, entries: [] as never[] };

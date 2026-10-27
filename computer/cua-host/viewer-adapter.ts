@@ -128,6 +128,14 @@ export type UpstreamOptions = {
 
 export type ViewerAdapterOptions = {
 	readonly upstream: UpstreamOptions;
+	/**
+	 * The exact HTTPS origin a browser loads the viewer from, when it is
+	 * served directly. Its media socket is then named in `connect-src` beside
+	 * `'self'` (`wss://host[:port]`), so the page doesn't rely on a browser
+	 * counting `'self'` as the `wss:` origin. Absent, the policy is `'self'`
+	 * alone.
+	 */
+	readonly publicOrigin?: string;
 	/** The one display every launch shows: a display id, or `primary`. */
 	readonly displayId: string;
 	readonly clock?: MonotonicClock;
@@ -576,6 +584,21 @@ type LaunchState = {
 	unconfirmed: number;
 	readonly cleanup: { requested: number; answered: number; failed: number };
 };
+
+/**
+ * The content security policy of the viewer page. Everything is `'self'`
+ * only, and connections are to this origin: `'self'`, and with `publicOrigin`
+ * (an exact https origin, else a `RangeError`) its `wss:` origin written out.
+ */
+export function viewerCsp(publicOrigin?: string): string {
+	let connect = "'self'";
+	if (publicOrigin !== undefined) {
+		const url = new URL(publicOrigin);
+		if (url.protocol !== "https:" || url.origin !== publicOrigin) throw new RangeError("The viewer's public origin must be exactly an https origin.");
+		connect = `'self' wss://${url.host}`;
+	}
+	return `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ${connect}; worker-src 'self'; base-uri 'none'; form-action 'none'`;
+}
 
 export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapter {
 	const origin = new URL(options.upstream.origin);
@@ -1360,7 +1383,7 @@ export function createViewerAdapter(options: ViewerAdapterOptions): ViewerAdapte
 
 	// -------------------------------------------------------------- HTTP
 
-	const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'";
+	const CSP = viewerCsp(options.publicOrigin);
 
 	async function handle(request: Request): Promise<Response> {
 		const url = new URL(request.url);

@@ -25,9 +25,12 @@ import { Buffer } from "node:buffer";
 import * as http from "node:http";
 import * as https from "node:https";
 import * as net from "node:net";
-import type { Duplex } from "node:stream";
+import { type Duplex, Readable, pipeline } from "node:stream";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { type ServerOptions, WebSocketServer, type WebSocket } from "ws";
 import { type Channel, type ClientSocket, type LogEntry, MAX_MESSAGE_CHARS, type Relay, SPACE_HEADER } from "../cua-bridge.ts";
+import type { MediaSocket, ViewerAdapter } from "./viewer-adapter.ts";
+import type { KeyRequest, LaunchRequestKey, ViewerLaunchManager } from "./viewer-launch-manager.ts";
 
 /** The most bytes a request's line and headers may take. Pim's are a few hundred, with a token of at most 4096. */
 export const MAX_HEADER_BYTES = 16 * 1024;
@@ -88,8 +91,101 @@ export const DEFAULT_LIMITS: Limits = {
 	maxOutboundBytes: 64 * 1024 * 1024,
 };
 
+/**
+ * What the host routes to for a viewer (./viewer-host.ts), when it is given
+ * one; without it the host serves the relay alone, as it always has.
+ *
+ * - `POST <relay path>/observations/launch|end|status` is the management
+ *   API: Pim's, with the relay's own bearer token and space (`Relay.authorize`),
+ *   a JSON body of at most `MAX_MANAGEMENT_BYTES`, and an `owner` that is the
+ *   bridge's space. Each calls the manager and answers its answer as JSON.
+ * - `/<launch>/…` is the adapter's: its files, its gRPC-Web calls and its
+ *   media socket. These carry no bridge token. The adapter's own capability
+ *   admits them (the launch's credential in `x-cua-env-authorization`, the
+ *   attach token in the media target), and Pim's Worker, which checks the
+ *   person's session first, is the only thing meant to reach them. A browser
+ *   never holds the bridge token.
+ */
+export type ViewerRoutes = {
+	readonly manager: Pick<ViewerLaunchManager, "launch" | "end" | "status">;
+	readonly adapter: Pick<ViewerAdapter, "fetch" | "media">;
+	/**
+	 * The one exact HTTPS origin the viewer is served from and a browser
+	 * connects to: the bridge's own public address, which is **not** spacesd's
+	 * origin. A browser's media socket must carry exactly this `Origin`, and
+	 * any other adapter request that carries an `Origin` must too. Without a
+	 * match the media socket is refused (`403`), so an absent `Origin` fails
+	 * closed there. No CORS header is ever sent: the viewer calls its own
+	 * origin, and a cross-origin call fails at its preflight.
+	 */
+	readonly publicOrigin: string;
+	/** The one exact HTTPS origin of the Pim app that may frame the viewer, if embedding is chosen; otherwise no one may (`frame-ancestors 'none'`). */
+	readonly embedOrigin?: string;
+};
+
+/** One DNS label: letters, digits and inner hyphens, at most 63 characters. A `*` is not a letter or a digit. */
+const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/** Whether `hostname`, as a URL writes it, is a DNS name of well-formed labels, an IPv4 address, or a bracketed IPv6 address. No wildcard, empty label or trailing dot. */
+function wellFormedHost(hostname: string): boolean {
+	if (hostname.startsWith("[")) return hostname.endsWith("]") && net.isIPv6(hostname.slice(1, -1));
+	if (net.isIPv4(hostname)) return true;
+	return hostname.length <= 253 && hostname.split(".").every((label) => LABEL.test(label));
+}
+
+/**
+ * Whether `value` is exactly an `https://host[:port]` origin, as a browser
+ * writes it in `Origin`: nothing after the port (no path, query, fragment or
+ * credentials), no default port written out (`:443`), no uppercase or other
+ * form a browser wouldn't send, and a host that is a well-formed DNS name or
+ * an IP address, never a wildcard. The URL parser accepts a `*` host, so the
+ * host is checked on its own.
+ */
+export function isHttpsOrigin(value: unknown): value is string {
+	if (typeof value !== "string") return false;
+	let url: URL;
+	try {
+		url = new URL(value);
+	} catch {
+		return false;
+	}
+	return url.protocol === "https:" && url.origin === value && !url.username && !url.password && wellFormedHost(url.hostname);
+}
+
+/** Whether a browser's `Origin` header (every occurrence of it) is exactly `publicOrigin`; absent, repeated or different is no. */
+export function originAllowed(values: readonly string[] | undefined, publicOrigin: string): boolean {
+	return values !== undefined && values.length === 1 && values[0] === publicOrigin;
+}
+
+/**
+ * What the host adds to every adapter response beside the adapter's own
+ * headers (its content security policy for the page, `nosniff` and
+ * no-referrer stay): who may frame it, exactly one origin or no one, and a
+ * permissions policy with no clipboard, microphone, camera or screen capture.
+ * A second `content-security-policy` header is enforced beside the first.
+ */
+export function viewerHeaders(embedOrigin: string | undefined): [string, string][] {
+	return [
+		["content-security-policy", `frame-ancestors ${embedOrigin ?? "'none'"}`],
+		["permissions-policy", "clipboard-read=(), clipboard-write=(), microphone=(), camera=(), display-capture=(), geolocation=()"],
+	];
+}
+
+/** The most bytes a management request's body may take. */
+export const MAX_MANAGEMENT_BYTES = 4096;
+
+const MANAGEMENT_ACTIONS = ["launch", "end", "status"] as const;
+/** What the adapter serves: `/<22 characters>/…`, and for a media socket exactly `media?ticket=<43 characters>`. */
+const ADAPTER_TARGET = /^\/[A-Za-z0-9_-]{22}\//;
+const MEDIA_TARGET = /^\/[A-Za-z0-9_-]{22}\/media\?ticket=[A-Za-z0-9_-]{43}$/;
+/** The headers the adapter reads from a request: all it is handed, each at most once. It refuses `authorization` itself. */
+const ADAPTER_HEADERS = ["content-type", "content-length", "content-encoding", "grpc-encoding", "x-cua-env-authorization", "authorization"] as const;
+/** What a browser's media socket may send: a keyframe request or a frame ack, at most 1 KiB, with room to spare. */
+const MEDIA_UP_BYTES = 4096;
+
 export type HostOptions = {
 	readonly relay: Relay;
+	readonly viewer?: ViewerRoutes;
 	readonly transport: Transport;
 	readonly limits?: Partial<Limits>;
 	/** Where the host's own log entries go (the relay has its own); by default, `console.error` as JSON. */
@@ -124,6 +220,16 @@ const refusal = (status: number, body: string, headers: [string, string][] = [])
 
 async function fromResponse(response: Response): Promise<Refusal> {
 	return { status: response.status, headers: [...response.headers], body: await response.text() };
+}
+
+/** `target` when it is a canonical path (which `URL` would not normalize), or `null`. */
+function canonical(target: string | undefined): string | null {
+	if (target === undefined || !target.startsWith("/")) return null;
+	try {
+		return new URL(target, ORIGIN).href === ORIGIN + target ? target : null;
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -253,6 +359,13 @@ export function createHost(options: HostOptions): Host {
 		throw new Error("A host serves HTTPS, or plain HTTP on a loopback address.");
 	}
 	const log = options.log ?? ((entry: LogEntry) => console.error(JSON.stringify(entry)));
+	const viewer = options.viewer;
+	const managementPrefix = `${relay.path}/observations/`;
+	if (viewer && ADAPTER_TARGET.test(`${relay.path}/`)) throw new Error("A bridge's path can't look like a viewer launch's.");
+	if (viewer && (!isHttpsOrigin(viewer.publicOrigin) || (viewer.embedOrigin !== undefined && !isHttpsOrigin(viewer.embedOrigin)))) {
+		throw new Error("A viewer's public and embedding origins must each be exactly an https origin.");
+	}
+	const extraHeaders = viewer ? viewerHeaders(viewer.embedOrigin) : [];
 
 	const serverOptions: http.ServerOptions = {
 		maxHeaderSize: MAX_HEADER_BYTES,
@@ -305,6 +418,17 @@ export function createHost(options: HostOptions): Host {
 		headers.push(`${SPACE_HEADER}: ${relay.space}`);
 	});
 
+	/** The browser's media sockets, for the adapter's relays: `rcdp.v2` only, and only small messages up. */
+	const mediaOptions: ServerOptions & { closeTimeout: number } = {
+		noServer: true,
+		clientTracking: false,
+		perMessageDeflate: false,
+		maxPayload: MEDIA_UP_BYTES,
+		closeTimeout: limits.closeMs,
+		handleProtocols: (protocols: Set<string>) => (protocols.has("rcdp.v2") ? "rcdp.v2" : false),
+	};
+	const mediaWss = new WebSocketServer(mediaOptions);
+
 	async function openSession(opening: Opening, upgrade: () => void): Promise<void> {
 		const channel = relay.open(opening.outbound, opening.abort.signal);
 		opening.channel = channel;
@@ -344,15 +468,194 @@ export function createHost(options: HostOptions): Host {
 		res.end(answer.body);
 	}
 
+	/** Answers with `answer`, and `extra` headers beside its own; the viewer's routes pass their policy here, so a refusal carries it too. */
+	const reply = (res: http.ServerResponse, answer: Refusal, extra: [string, string][] = []) => {
+		res.writeHead(answer.status, [...answer.headers.flat(), ...extra.flat(), "connection", "close"]);
+		res.end(answer.body);
+	};
+
+	/** A management request: Pim's, authenticated before its body is read, and for this bridge's space. */
+	async function manage(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+		res.shouldKeepAlive = false;
+		const target = canonical(req.url);
+		const action = target === null || target.includes("?") ? undefined : MANAGEMENT_ACTIONS.find((name) => target === managementPrefix + name);
+		if (action === undefined) return reply(res, refusal(404, "Not found."));
+		if (req.method !== "POST") return reply(res, refusal(405, "Only POST is served here.", [["allow", "POST"]]));
+		const request = toRequest(req);
+		if (!(request instanceof Request)) {
+			log({ event: "host.refused", status: request.refused.status, reason: request.reason });
+			return reply(res, request.refused);
+		}
+		/** The client has gone: its connection is destroyed or ended unanswered. Nothing is asked of the manager for it. */
+		const lost = () => res.destroyed || req.socket?.destroyed !== false;
+		// Before the body is read, as `check` is before anything: the bearer token and the space, not an upgrade.
+		const refused = await relay.authorize(request);
+		if (lost()) return void res.destroy();
+		if (refused) return reply(res, await fromResponse(refused));
+		if (req.headers["content-type"] !== "application/json" || req.headers["content-encoding"] !== undefined) return reply(res, refusal(415, "Send application/json."));
+		const length = req.headers["content-length"];
+		if (length !== undefined && !(Number(length) <= MAX_MANAGEMENT_BYTES)) return reply(res, refusal(413, "Too large."));
+		const chunks: Buffer[] = [];
+		let size = 0;
+		// A body that is slow or never ends is cut off here, not left to the server's own, longer timeout.
+		const slow = setTimeout(() => req.destroy(), limits.headersMs);
+		try {
+			for await (const chunk of req as AsyncIterable<Buffer>) {
+				size += chunk.length;
+				if (size > MAX_MANAGEMENT_BYTES) return reply(res, refusal(413, "Too large."));
+				chunks.push(chunk);
+			}
+		} catch {
+			// The client went, or the body was cut off: nothing was asked of the manager.
+			return void res.destroy();
+		} finally {
+			clearTimeout(slow);
+		}
+		if (lost() || !req.complete) return void res.destroy();
+		let body: unknown;
+		try {
+			body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+		} catch {
+			return reply(res, refusal(400, "Bad request."));
+		}
+		if (typeof body !== "object" || body === null || Array.isArray(body)) return reply(res, refusal(400, "Bad request."));
+		// One bridge serves one space: a request for another owner is refused here, never passed to the manager.
+		if ((body as { owner?: unknown }).owner !== relay.space) return reply(res, refusal(403, "This bridge serves another space."));
+		// Read last, right before the manager is asked: a client seen gone by now starts nothing.
+		if (lost()) return void res.destroy();
+		let answer: unknown;
+		try {
+			answer = action === "launch" ? await viewer!.manager.launch(body as LaunchRequestKey) : action === "end" ? await viewer!.manager.end(body as KeyRequest) : await viewer!.manager.status(body as KeyRequest);
+		} catch {
+			// The manager is not taking calls (the viewer is shutting down, or it failed): nothing is said of why, and the caller may ask again later.
+			log({ event: "host.refused", status: 503, reason: "viewer" });
+			return reply(res, refusal(503, "The viewer isn't taking requests.", [["retry-after", "5"]]));
+		}
+		log({ event: "host.managed", reason: action, status: 200 });
+		// A launch's answer holds the viewer path, whose fragment is the launch's credential: it goes to this caller only.
+		reply(res, { status: 200, headers: [["content-type", "application/json"], ["cache-control", "no-store"]], body: JSON.stringify(answer) });
+	}
+
+	/** An adapter request: rebuilt from only the headers it reads, and streamed back, which ends when the client does. */
+	async function adapterRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+		res.shouldKeepAlive = false;
+		/** Every HTTP answer on a viewer route, refusals included, carries the viewer's framing and permissions policy. */
+		const answer = (refused: Refusal) => reply(res, refused, extraHeaders);
+		const target = canonical(req.url);
+		if (target === null) return answer(refusal(404, "Not found."));
+		if (req.method !== "GET" && req.method !== "POST") return answer(refusal(405, "Not allowed.", [["allow", "GET, POST"]]));
+		// The viewer calls its own origin, so a browser's `Origin`, when it sends one, is the public origin; any other is refused, and no CORS answer is ever given.
+		if (req.headersDistinct.origin !== undefined && !originAllowed(req.headersDistinct.origin, viewer!.publicOrigin)) {
+			log({ event: "host.refused", status: 403, reason: "origin" });
+			return answer(refusal(403, "Refused."));
+		}
+		const headers = new Headers();
+		for (const name of ADAPTER_HEADERS) {
+			const values = req.headersDistinct[name];
+			if (!values) continue;
+			try {
+				if (values.length !== 1) throw new Error("repeated");
+				headers.set(name, values[0]!);
+			} catch {
+				return answer(refusal(400, "Bad request."));
+			}
+		}
+		const abort = new AbortController();
+		res.once("close", () => abort.abort());
+		let request: Request;
+		try {
+			const init: RequestInit & { duplex?: "half" } = { method: req.method, headers, signal: abort.signal };
+			if (req.method === "POST") {
+				init.body = Readable.toWeb(req) as unknown as ReadableStream;
+				init.duplex = "half";
+			}
+			request = new Request(ORIGIN + target, init);
+		} catch {
+			return answer(refusal(400, "Bad request."));
+		}
+		const response = await viewer!.adapter.fetch(request);
+		res.writeHead(response.status, [...[...response.headers].flat(), ...extraHeaders.flat()]);
+		if (!response.body) return void res.end();
+		// A presence stream is long; when the client goes, the pipeline ends and cancels the adapter's body.
+		pipeline(Readable.fromWeb(response.body as unknown as WebReadableStream), res, () => undefined);
+	}
+
 	server.on("request", (req: http.IncomingMessage, res: http.ServerResponse) => {
-		plainRequest(req, res).catch(() => {
+		const target = req.url ?? "";
+		const handle = viewer && target.startsWith(managementPrefix) ? manage(req, res) : viewer && ADAPTER_TARGET.test(target) ? adapterRequest(req, res) : plainRequest(req, res);
+		handle.catch(() => {
 			log({ event: "host.failed" });
 			res.destroy();
 		});
 	});
 
+	/**
+	 * A browser's media socket, through the adapter: the adapter checks the
+	 * target and offered protocols, and `attach` checks them again and then
+	 * calls `open`, which completes the upgrade. When `attach` refuses, no
+	 * upgrade happened and the refusal is answered instead. Nothing of the
+	 * request but its target and its offered subprotocols reaches the adapter,
+	 * and the target, which carries an attach token, is never logged.
+	 */
+	function viewerMedia(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
+		const refuse = (status: number, reason: string) => {
+			log({ event: "host.refused", status, reason });
+			answerRaw(socket, refusal(status, "Refused."), limits.closeMs);
+		};
+		if (head.length > 0) return socket.destroy();
+		const target = canonical(req.url);
+		const key = req.headers["sec-websocket-key"];
+		const offered = req.headersDistinct["sec-websocket-protocol"] ?? [];
+		if (
+			target === null ||
+			req.method !== "GET" ||
+			req.headers.upgrade?.toLowerCase() !== "websocket" ||
+			req.headers["sec-websocket-version"] !== "13" ||
+			typeof key !== "string" ||
+			!/^[A-Za-z0-9+/]{22}==$/.test(key) ||
+			offered.length > 1
+		) {
+			return refuse(target === null ? 404 : 400, "handshake");
+		}
+		// A browser's media socket must come from the viewer's own origin; absent, repeated or different fails closed, before the adapter learns the token.
+		if (!originAllowed(req.headersDistinct.origin, viewer!.publicOrigin)) return refuse(403, "origin");
+		const result = viewer!.adapter.media(target, (offered[0] ?? "").split(",").map((protocol) => protocol.trim()).filter((protocol) => protocol !== ""));
+		if (result.status !== 101) return refuse(result.status, "media");
+		const status = result.attach((events) => {
+			let made: WebSocket | undefined;
+			// `ws` answers `101` and hands over the socket synchronously, once the handshake it can't refuse (checked above) is done.
+			mediaWss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+				made = ws;
+			});
+			if (!made) throw new Error("The upgrade wasn't completed.");
+			const ws: WebSocket = made;
+			if (socket instanceof net.Socket) socket.setKeepAlive(true, 30_000);
+			ws.on("message", (data: Buffer, isBinary: boolean) => events.message(isBinary ? new Uint8Array(data.buffer, data.byteOffset, data.length) : data.toString("utf8")));
+			ws.on("close", (code: number) => events.closed(code));
+			ws.on("error", () => {
+				// `ws` closes the socket after an error, and `close` follows.
+			});
+			const media: MediaSocket = {
+				send: (data) => ws.send(data, { binary: typeof data !== "string" }),
+				close: (code) => {
+					try {
+						ws.close(code);
+					} catch {
+						ws.terminate();
+					}
+				},
+				terminate: () => ws.terminate(),
+				bufferedAmount: () => ws.bufferedAmount,
+			};
+			return media;
+		});
+		if (status !== 101) refuse(status, "media");
+		else log({ event: "host.upgraded", reason: "viewer" });
+	}
+
 	async function upgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
 		socket.on("error", () => socket.destroy());
+		if (viewer && MEDIA_TARGET.test(req.url ?? "")) return viewerMedia(req, socket, head);
 		if (pending >= limits.maxPendingUpgrades) {
 			log({ event: "host.refused", status: 503, reason: "busy" });
 			answerRaw(socket, refusal(503, "Too many connections are opening.", [["retry-after", "1"]]), limits.closeMs);

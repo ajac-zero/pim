@@ -707,10 +707,11 @@ printf '{"event":"pim-cua-eval.fetched","evaluation":"%s"}\\n' ${quote(config.ev
 }
 
 /**
-
- * base is installed, every delivered program resolves its shared libraries, Node and Caddy are the pinned versions, Caddy accepts its
- * configuration (`caddy validate`, as the ingress account with its own state directory), headless Chrome starts as the desktop
- * account with its own sandbox on, and spacesd answers `--help` as that account. It starts no service and opens no port; it prints one line per
+ * `support.sh`: the checks a startup needs to pass before `start`, run as root after `install`: every package of the base is installed,
+ * every delivered program resolves its shared libraries, Node and Caddy are the pinned versions, Caddy accepts its configuration
+ * (`caddy validate`, as the ingress account with its own state directory), headless Chrome starts as the desktop account with its own
+ * sandbox on, and spacesd answers `--help` as that account. It starts no service and opens no port, but it is not data inspection:
+ * `ldd` runs the dynamic loader in each program's context and the other checks run the delivered programs. It prints one line per
  * check and exits nonzero if any failed.
  */
 function renderSupport(config: Config, viewer: NonNullable<Config["viewer"]>): string {

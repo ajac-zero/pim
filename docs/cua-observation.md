@@ -8,7 +8,7 @@ An observation is a person watching one display of their Cua computer through th
 | The admission check | `src/cua-observation.ts` (`admitObservationRequest`) | Whether a browser request may reach an observation, and where on the host. A function, not a route. |
 | The launch manager | `computer/cua-host/viewer-launch-manager.ts` | Starts the adapter's launches at most once per observation, through a journal that outlives the host process. |
 
-A deployment still mounts none of them. The local preview alone now composes the ledger and the admission check, for the one space its Cua fixture seeded, behind the owner's browser session (`docs/cua-viewer-first-worker.md`). The host does not yet route to the launch manager.
+A deployment still mounts none of them. The local preview alone now composes the ledger, for the one space its Cua fixture seeded, behind the owner's browser session (`docs/cua-viewer-first-worker.md`). The viewer goes from that browser straight to the host, so nothing calls the admission check. Routing the host to the launch manager is on the host's own review branch, not merged here.
 
 ## Observation is not control
 

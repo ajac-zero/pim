@@ -110,11 +110,12 @@ const UNSETTLED: Partial<Record<Observation["status"], TranslationKey>> = {
  * Watching the operator's Cua desktop, view only, where this Pim offers it
  * (only a preview does: elsewhere `/api/observations` is not found, and this
  * shows nothing). The desktop is shown in Cua's own viewer while the agents
- * keep using it; nothing here takes over or sends input. For now the viewer
- * opens without the desktop's picture: Pim refuses its media socket until it
- * can relay it within a bound (docs/cua-viewer-first-worker.md), and the card
- * says so. Closing the viewer asks the computer to end the observation, and
- * Check again asks whether it closed.
+ * keep using it; nothing here takes over or sends input. The viewer is
+ * loaded from the computer's host itself, at the address Watch answers
+ * with, which holds the launch's credential: it is kept only in this
+ * component's state while the dialog is open, and never reloaded or asked
+ * for again by itself. Closing the viewer asks the computer, through Pim, to
+ * end the observation, and Check again asks whether it closed.
  */
 function WatchDesktop() {
   const { t } = useI18n();
@@ -221,9 +222,6 @@ function WatchDesktop() {
           {t("watchDesktopBlocked", { reason: data.blocked })}
         </p>
       )}
-      <p className="text-[13px] text-muted-foreground">
-        {t("watchDesktopNoPicture")}
-      </p>
       {data.agent === "stand-in" && (
         <p className="text-[13px] text-muted-foreground">
           {t("watchDesktopStandIn")}
@@ -255,12 +253,12 @@ function WatchDesktop() {
               </Button>
             </div>
             {/*
-              Not isolated: the viewer is served under this app's own origin, so
-              its pinned script runs with the app's privileges and is trusted as
-              pinned code, not contained by the frame. `allow` only denies the
-              permissions a viewer might ask for; the launch itself turns the
-              clipboard off, and the media socket that would carry input is
-              refused.
+              The viewer is on the computer's host, another origin: it can't
+              reach this page, and this page can't reach it. `allow` grants it
+              no microphone, camera, clipboard or screen capture. Closing the
+              frame closes its sockets here, but only the computer ends the
+              launch: its credential lasts until the end Pim asks for, or its
+              deadline.
             */}
             {viewer && (
               <iframe

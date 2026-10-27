@@ -504,7 +504,7 @@ describe("a seeded preview space and its bridge", () => {
 		expect(sent).toEqual([]);
 	});
 
-	it("lets the seeded owner's browser session watch through the bridge's viewer host, view only, and leaves the agent's lease as it was", async () => {
+	it("lets the seeded owner's browser session start watching on the bridge's viewer host, view only, and leaves the agent's lease as it was", async () => {
 		const ada = await space("fixturewatch");
 		configure({ flag: "seed", owner: ada.owner, bridges: bridgesOf(ada.owner) });
 		expect(await ada.restart()).toBe("started");
@@ -519,7 +519,6 @@ describe("a seeded preview space and its bridge", () => {
 				const { key, notAfter } = JSON.parse(entry.body) as { key: string; notAfter: number };
 				return Response.json({ outcome: "launched", key, launchId: launch, generation: "gen-1", notAfter, viewerPath: `/${launch}/viewer/#ticket=${credential}&clipboard=0`, replayed: false });
 			}
-			if (entry.url === `${HOST}/${launch}/viewer/`) return new Response("<!doctype html>", { headers: { "content-type": "text/html; charset=utf-8" } });
 			sent.push(entry.url);
 			throw new Error("This test reaches only its bridge's viewer host");
 		});
@@ -533,24 +532,24 @@ describe("a seeded preview space and its bridge", () => {
 		expect(watched.status).toBe(200);
 		const { observation, viewer } = watched.body as { observation: { id: string; status: string; notAfter: number }; viewer: string };
 		expect(observation.status).toBe("open");
-		expect(viewer).toBe(`/api/observations/${observation.id}/viewer/#ticket=${credential}&clipboard=0`);
+		// The browser opens the viewer on the host itself; the address carries the launch's credential and nothing of the bridge's.
+		expect(viewer).toBe(`${HOST}/${launch}/viewer/#ticket=${credential}&clipboard=0`);
+		expect(viewer).not.toContain(TOKEN);
 		expect(asked[0]!.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
 		expect(asked[0]!.headers.get("x-pim-space")).toBe(ada.owner);
 		expect(JSON.parse(asked[0]!.body)).toEqual({ key: observation.id, owner: ada.owner, notAfter: observation.notAfter });
 
+		// Pim carries nothing of the viewer: its page under Pim's path doesn't exist, and nothing is sent for it.
 		const page = await ada.stub.fetch(new Request(`https://pim.test/api/observations/${observation.id}/viewer/`, { headers: { [OWNER_HEADER]: ada.owner, [SIGNED_IN_HEADER]: "1" } }));
-		expect(page.status).toBe(200);
-		expect(await page.text()).toBe("<!doctype html>");
-		expect(page.headers.get("cache-control")).toBe("no-store");
-		expect(asked[1]!.url).toBe(`${HOST}/${launch}/viewer/`);
-		expect(asked[1]!.headers.get("authorization")).toBeNull();
+		expect(page.status).toBe(404);
 
 		const ledger = JSON.parse((await ada.stored())[OBSERVATION_KEY] as string) as ObservationState;
 		expect(ledger.records).toEqual([expect.objectContaining({ observationId: observation.id, status: "open", hostLaunchId: launch, hostGeneration: "gen-1" })]);
 		expect(JSON.stringify(ledger)).not.toContain(credential);
 		// Watching took no lease and changed nothing of control: the agent still holds the fixture's.
 		expect(await ada.within((instance) => instance.control.state)).toMatchObject({ owner: "agent", lease: { epoch: 1, leaseId: LEASE_ID }, viewers: [] });
-		expect(asked).toHaveLength(2);
+		expect(JSON.stringify(ledger)).not.toContain(TOKEN);
+		expect(asked).toHaveLength(1);
 		expect(sent).toEqual([]);
 	});
 

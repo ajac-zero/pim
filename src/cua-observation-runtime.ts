@@ -1,5 +1,4 @@
 import {
-	admitObservationRequest,
 	applyObservationEvent,
 	type ObservationEvent,
 	type ObservationOutcome,
@@ -10,7 +9,7 @@ import {
 	restoreObservationState,
 	unresolvedObservations,
 } from "./cua-observation";
-import type { CuaViewerClient, HostReply, LaunchAnswer, Watch } from "./cua-viewer";
+import type { CuaViewerClient, HostReply, LaunchAnswer } from "./cua-viewer";
 
 /**
  * A space's observation ledger kept durably, and the person's routes to
@@ -36,6 +35,10 @@ import type { CuaViewerClient, HostReply, LaunchAnswer, Watch } from "./cua-view
  * - **Answers mapped, never guessed.** A lost answer makes a record
  *   `unconfirmed`; only the host's own report of closure, for the launch and
  *   generation the record names, closes one.
+ * - **Management only.** The desk launches, ends and reads observations for
+ *   the owner's browser session. The viewer itself goes from that browser
+ *   straight to the host, at the address a launch answers with; nothing of
+ *   it passes through here.
  */
 
 /** Where a space keeps its ledger, in its own metadata. */
@@ -83,8 +86,6 @@ export class ObservationDesk {
 	#state: ObservationState | null = null;
 	/** Why the stored ledger can't be used, or a change couldn't be stored; never cleared in this instance. */
 	#blocked: string | null = null;
-	/** Per open record, what aborts its viewer requests when it stops being admitted. */
-	readonly #cancels = new Map<string, AbortController>();
 
 	/** Loads the stored ledger. Records left `pending_open` or `revoking` come back `unconfirmed`, and are written back so. */
 	constructor(options: ObservationDeskOptions) {
@@ -130,29 +131,15 @@ export class ObservationDesk {
 			return true;
 		} catch {
 			this.#blocked = "a change to the ledger couldn't be stored";
-			this.#cancelAll();
 			return false;
 		}
-	}
-
-	/** Ends whatever the browser holds of `id`'s launch through this space: its requests in flight, and the presence stream. */
-	#cancel(id: string): void {
-		this.#cancels.get(id)?.abort();
-		this.#cancels.delete(id);
-	}
-
-	#cancelAll(): void {
-		for (const id of [...this.#cancels.keys()]) this.#cancel(id);
 	}
 
 	/** Applies `event` and stores the result, synchronously. A refusal stores only what it changes (a conflict). */
 	#apply(event: ObservationEvent): ObservationOutcome | { ok: false; reason: "storage" } {
 		if (!this.#state || this.#blocked) return { ok: false, reason: "storage" };
-		const before = this.#record(event.observationId)?.status;
 		const result = applyObservationEvent(this.#state, event);
 		if (result.state !== this.#state && !this.#store(result.state)) return { ok: false, reason: "storage" };
-		// A record that stops being open is admitted no more: what is under way for it ends now, before the host is asked anything.
-		if (before === "open" && this.#record(event.observationId)?.status !== "open") this.#cancel(event.observationId);
 		return result.outcome;
 	}
 
@@ -163,7 +150,6 @@ export class ObservationDesk {
 			return true;
 		} catch {
 			this.#blocked = "the ledger couldn't be made durable";
-			this.#cancelAll();
 			return false;
 		}
 	}
@@ -178,20 +164,19 @@ export class ObservationDesk {
 	}
 
 	/**
-	 * Answers the person's request under `/api/observations`. The space has
-	 * checked the owner; `caller.viaSession` must say the Worker found the
-	 * person's browser session. Anything that isn't management goes through
-	 * `admitObservationRequest` to the viewer, and only there.
+	 * Answers the person's request under `/api/observations`: only the
+	 * management routes, never the viewer, which the person's browser opens
+	 * on the host itself. The space has checked the owner; `caller.viaSession`
+	 * must say the Worker found the person's browser session, and a write must
+	 * come from `publicOrigin`.
 	 */
 	async serve(request: Request, caller: DeskCaller, publicOrigin: string): Promise<Response> {
 		const url = new URL(request.url);
 		if (!caller.viaSession || request.headers.has("authorization") || url.searchParams.has("token")) return failure(401, "Only your signed-in browser can watch your desktop.");
 		const path = url.pathname;
 		const management = path === OBSERVATION_PATH_PREFIX.slice(0, -1) || ONE.test(path) || END.test(path);
-		if (management) {
-			if (url.search !== "" || request.headers.get("upgrade")) return failure(404, "Not found");
-			if (request.method !== "GET" && request.headers.get("origin") !== publicOrigin) return failure(403, "Requests must come from this app");
-		}
+		if (!management || url.search !== "" || request.headers.get("upgrade")) return failure(404, "Not found");
+		if (request.method !== "GET" && request.headers.get("origin") !== publicOrigin) return failure(403, "Requests must come from this app");
 		if (path === OBSERVATION_PATH_PREFIX.slice(0, -1)) {
 			if (request.method === "GET") return answer(this.list());
 			if (request.method === "POST") return this.launch();
@@ -201,7 +186,7 @@ export class ObservationDesk {
 		if (one) return request.method === "GET" ? this.status(one[1]!) : failure(405, "Use GET");
 		const end = END.exec(path);
 		if (end) return request.method === "POST" ? this.end(end[1]!) : failure(405, "Use POST");
-		return this.#forward(request, publicOrigin);
+		return failure(404, "Not found");
 	}
 
 	/** Starts an observation, or gives back the open one's viewer, recording it before the host is asked. */
@@ -232,10 +217,10 @@ export class ObservationDesk {
 			return failure(this.#blocked ? 503 : 409, "The observation changed before the computer was asked, so nothing was asked of it.", { observation: this.#view(id) });
 		}
 		const reply = await client.launch({ key: id, owner: this.#options.owner, notAfter });
-		return this.#launched(id, notAfter, reply);
+		return this.#launched(client, id, notAfter, reply);
 	}
 
-	#launched(id: string, notAfter: number, reply: HostReply<LaunchAnswer>): Response {
+	#launched(client: CuaViewerClient, id: string, notAfter: number, reply: HostReply<LaunchAnswer>): Response {
 		const settle = (event: ObservationEvent, status: number, error: string) => {
 			this.#apply(event);
 			return failure(status, error, { observation: this.#view(id) });
@@ -255,7 +240,7 @@ export class ObservationDesk {
 		const acknowledged = this.#apply({ type: "open_acknowledged", observationId: id, hostLaunchId: host.launchId, hostGeneration: host.generation });
 		if (!acknowledged.ok) return failure(acknowledged.reason === "storage" ? 503 : 502, "The observation couldn't be recorded as open.", { observation: this.#view(id) });
 		if (host.notAfter !== notAfter || host.replayed) return settle({ type: "unconfirmed", observationId: id, evidence: "the host acknowledged another deadline, or a replay for a new key" }, 502, "The computer's answer doesn't match this observation.");
-		return this.#viewer(id, host.launchId, host.viewerPath);
+		return this.#viewer(client, id, host.launchId, host.viewerPath);
 	}
 
 	/** The open record's launch again: the host gives back the same launch and page for a key it holds, and starts nothing new. */
@@ -268,7 +253,7 @@ export class ObservationDesk {
 			const current = this.#record(record.observationId);
 			const still = !this.#blocked && current?.status === "open" && current.hostLaunchId === host.launchId && current.hostGeneration === host.generation && this.#now() < current.notAfter;
 			if (!still) return failure(409, "This observation changed while the computer answered. Check it again.", { observation: this.#view(record.observationId) });
-			return this.#viewer(record.observationId, host.launchId, host.viewerPath);
+			return this.#viewer(client, record.observationId, host.launchId, host.viewerPath);
 		}
 		if (host.outcome === "launched" && host.key === record.observationId) {
 			// Another launch or generation for the same record: neither replaces the first.
@@ -279,10 +264,14 @@ export class ObservationDesk {
 		return failure(409, "The computer no longer offers this observation's viewer. Check it again.", { observation: this.#view(record.observationId) });
 	}
 
-	/** The viewer's page, under Pim's own path for the observation; its fragment is the launch's credential, for this answer only. */
-	#viewer(id: string, launchId: string, hostPath: string): Response {
-		const viewer = `${OBSERVATION_PATH_PREFIX}${id}/${hostPath.slice(`/${launchId}/`.length)}`;
-		return answer({ observation: this.#view(id), viewer });
+	/**
+	 * The viewer's address on the host itself (`CuaViewerClient.viewerUrl`),
+	 * which the person's browser opens directly. Its fragment is the launch's
+	 * credential: it is in this answer only, never in the ledger, the listing
+	 * or a log.
+	 */
+	#viewer(client: CuaViewerClient, id: string, launchId: string, viewerPath: string): Response {
+		return answer({ observation: this.#view(id), viewer: client.viewerUrl(launchId, viewerPath) });
 	}
 
 	#view(id: string): ObservationView | null {
@@ -367,39 +356,5 @@ export class ObservationDesk {
 			this.#apply({ type: "unconfirmed", observationId: id, evidence: `the host holds this launch as ${host.state}` });
 		}
 		return answer({ observation: this.#view(id), phase: host.outcome === "found" ? (host.launch?.phase ?? null) : null });
-	}
-
-	/** One of the viewer's requests, admitted against the ledger, carried to the host. */
-	async #forward(request: Request, publicOrigin: string): Promise<Response> {
-		const admitted = admitObservationRequest(request, { owner: this.#options.owner, viaSession: true }, this.state, this.#now(), publicOrigin);
-		if (!admitted.ok) return observationResponse(new Response(null, { status: admitted.status }));
-		// No bounded relay for the media socket exists yet (./cua-viewer.ts): refused, and the host is never asked for one.
-		if (admitted.kind === "media") return observationResponse(new Response(null, { status: 503 }));
-		const record = this.#record(admitted.observationId)!;
-		let client: CuaViewerClient;
-		try {
-			client = this.#options.client();
-		} catch {
-			return observationResponse(new Response(null, { status: 503 }));
-		}
-		let cancel = this.#cancels.get(record.observationId);
-		if (!cancel) this.#cancels.set(record.observationId, (cancel = new AbortController()));
-		// Read again after every wait: admitted when the request came isn't admitted when the host answers.
-		const watch: Watch = {
-			notAfter: record.notAfter,
-			now: this.#now,
-			cancel: cancel.signal,
-			admitted: () => {
-				const current = this.#record(admitted.observationId);
-				return (
-					!this.#blocked &&
-					current?.status === "open" &&
-					current.hostLaunchId === admitted.hostLaunchId &&
-					current.hostGeneration === admitted.hostGeneration &&
-					this.#now() < current.notAfter
-				);
-			},
-		};
-		return observationResponse(await client.viewer(admitted.hostTarget, request, admitted.kind, watch));
 	}
 }

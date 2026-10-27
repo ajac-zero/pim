@@ -6,7 +6,6 @@ import { accountApi, adminApi, contentOrigin, handleRegistration, resolveAccount
 import { COMPUTER_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
 import { BROWSER_LIVE_PATH } from "./browser";
 import { observationResponse } from "./cua-observation";
-import { readBounded } from "./cua-viewer";
 import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER, SIGNED_IN_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
@@ -363,45 +362,22 @@ function serveThemes(request: Request, path: string): Response {
  */
 export type Mounts = { readonly observations?: boolean };
 
-/** The one observation path that takes a WebSocket: the viewer's media socket. */
-const OBSERVATION_MEDIA = /^\/observations\/[A-Za-z0-9_-]{16,64}\/media$/;
-/** The most an observation request's body may be: a viewer call is at most 4 KiB, management has none. */
-const MAX_OBSERVATION_BODY = 4096;
-/** How long an observation request's body has to arrive; past it, the request is refused unread. */
-const OBSERVATION_BODY_MS = 10_000;
-
 /**
  * The person watching their Cua desktop, where mounted: `/api/observations/…`,
- * for their browser's session only, handed to their space with its full path,
- * which admits each request against its ledger (src/cua-observation-runtime.ts).
- * Only the media socket upgrades, bodies are bounded, and no answer is kept.
- * This is no proxy: the space answers only its own management routes and the
- * viewer's allowlisted files, calls and socket.
+ * for their browser's session only, handed to their space with its full path
+ * (src/cua-observation-runtime.ts). Only management is here: it takes no
+ * body and no socket, so any body is cancelled unread and not passed on, and
+ * no answer is kept. The viewer itself goes from the browser to the host
+ * directly; nothing of it comes through the Worker.
  */
 async function serveObservation(request: Request, env: Env, owner: string, viaSession: boolean, path: string): Promise<Response> {
+	void request.body?.cancel().catch(() => undefined);
 	if (!viaSession) return observationResponse(fail(401, "Only your signed-in browser can watch your desktop."));
-	if (request.headers.get("Upgrade")?.toLowerCase() === "websocket" && !OBSERVATION_MEDIA.test(path)) return observationResponse(fail(404, "Not found"));
-	let forwarded = request;
-	if (request.body) {
-		const length = request.headers.get("content-length");
-		if (length !== null && !(Number(length) <= MAX_OBSERVATION_BODY)) {
-			void request.body.cancel().catch(() => undefined);
-			return observationResponse(fail(413, "Too large"));
-		}
-		// Bounded in time as in size: a body that stalls is cut off, and the timer is cleared however the read ends.
-		const giveUp = new AbortController();
-		const timer = setTimeout(() => giveUp.abort(), OBSERVATION_BODY_MS);
-		let read: Awaited<ReturnType<typeof readBounded>>;
-		try {
-			read = await readBounded(request.body, MAX_OBSERVATION_BODY, giveUp.signal);
-		} finally {
-			clearTimeout(timer);
-		}
-		if (read.kind === "too_big") return observationResponse(fail(413, "Too large"));
-		if (read.kind === "stopped") return observationResponse(fail(408, "The request's body didn't arrive in time."));
-		if (read.kind === "failed") return observationResponse(fail(400, "The request's body couldn't be read."));
-		forwarded = new Request(request, { body: read.bytes });
-	}
+	if (request.headers.get("Upgrade")) return observationResponse(fail(404, "Not found"));
+	const headers = new Headers(request.headers);
+	headers.delete("content-length");
+	headers.delete("content-type");
+	const forwarded = new Request(request.url, { method: request.method, headers });
 	return observationResponse(await toAgent(forwarded, env, owner, `/api${path}`, true));
 }
 

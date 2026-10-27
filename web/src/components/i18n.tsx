@@ -657,8 +657,6 @@ const translations = {
     watchDesktopBlocked: "Watching isn't available here: {reason}",
     stopWatching: "Stop watching",
     askToEnd: "Ask to end it",
-    watchDesktopNoPicture:
-      "The desktop's picture isn't shown yet: Pim can't pass it on to your browser within a safe limit, so the viewer opens without it.",
     checkObservation: "Check again",
     observationStarting: "Starting",
     observationOpen: "Watching",
@@ -1721,8 +1719,6 @@ const translations = {
     watchDesktopBlocked: "Ver no está disponible aquí: {reason}",
     stopWatching: "Dejar de ver",
     askToEnd: "Pedir que termine",
-    watchDesktopNoPicture:
-      "La imagen del escritorio aún no se muestra: Pim no puede pasarla a tu navegador dentro de un límite seguro, así que el visor se abre sin ella.",
     checkObservation: "Comprobar de nuevo",
     observationStarting: "Iniciando",
     observationOpen: "Viendo",

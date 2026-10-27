@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { admissionBlockers, applyControlEvent, type ControlState, initialControlState } from "../src/computer-control";
 import { ObservationDesk, type ObservationStorage } from "../src/cua-observation-runtime";
-import { type ClientLimits, CuaViewerClient, MAX_CALL_REQUEST_BYTES, parseEndAnswer, parseLaunchAnswer, parseStatusAnswer, readBounded } from "../src/cua-viewer";
+import { type ClientLimits, CuaViewerClient, parseEndAnswer, parseLaunchAnswer, parseStatusAnswer, readBounded } from "../src/cua-viewer";
 import {
 	admitObservationRequest,
 	applyObservationEvent,
@@ -332,7 +332,8 @@ const heldFlushes = () => {
 };
 
 const body = async (response: Response) => (await response.json()) as Record<string, any>;
-const viewerPage = (n: number) => `/api/observations/${id(n)}/viewer/#ticket=${CREDENTIAL}&clipboard=0`;
+/** The launch's viewer on the host itself, at the bridge's origin, not under its `/pim` path. */
+const VIEWER = `https://bridge.cua.test/${LAUNCH}/viewer/#ticket=${CREDENTIAL}&clipboard=0`;
 
 describe("the Worker's client to the viewer host", () => {
 	it("reads only the launch manager's own answers, field for field", () => {
@@ -360,6 +361,28 @@ describe("the Worker's client to the viewer host", () => {
 		expect(parseStatusAnswer({ ...found, launch: { phase: "closed" } })).toBeUndefined();
 		expect(parseStatusAnswer({ ...found, evidence: "" })).toBeUndefined();
 	});
+
+	it("builds the viewer's address only from the bridge's own origin and the adapter's path for that launch", () => {
+		const client = new CuaViewerClient({ ...BRIDGE, url: "https://bridge.cua.test:8443/pim/" }, SPACE, (() => Promise.reject(new Error("nothing is sent"))) as typeof fetch);
+		const path = `/${LAUNCH}/viewer/#ticket=${CREDENTIAL}&clipboard=0`;
+		// At the bridge's root, not under its management path, and nothing of the bridge's token.
+		expect(client.viewerUrl(LAUNCH, path)).toBe(`https://bridge.cua.test:8443${path}`);
+		for (const bad of [
+			`//evil.example/${LAUNCH}/viewer/#ticket=${CREDENTIAL}&clipboard=0`,
+			`https://evil.example/${LAUNCH}/viewer/#ticket=${CREDENTIAL}&clipboard=0`,
+			`@evil.example/${LAUNCH}/viewer/#ticket=${CREDENTIAL}&clipboard=0`,
+			`/${"M".repeat(22)}/viewer/#ticket=${CREDENTIAL}&clipboard=0`,
+			`/${LAUNCH}/viewer/#ticket=${CREDENTIAL}&clipboard=1`,
+			`/${LAUNCH}/viewer/?x=1#ticket=${CREDENTIAL}&clipboard=0`,
+			`/${LAUNCH}/../viewer/#ticket=${CREDENTIAL}&clipboard=0`,
+		]) {
+			expect(() => client.viewerUrl(LAUNCH, bad), bad).toThrow(RangeError);
+		}
+		expect(() => client.viewerUrl("../x", path)).toThrow(RangeError);
+		// A bridge that isn't HTTPS, or is another space's, makes no client at all.
+		expect(() => new CuaViewerClient({ ...BRIDGE, url: "http://bridge.cua.test/pim" }, SPACE)).toThrow();
+		expect(() => new CuaViewerClient(BRIDGE, "o_zyxwvutsrqponmlkjihgfedcba")).toThrow();
+	});
 });
 
 describe("the desk: a space's observations, recorded before the host is asked", () => {
@@ -369,7 +392,8 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		expect(response.status).toBe(200);
 		expect(response.headers.get("cache-control")).toBe("no-store");
 		expect(response.headers.get("referrer-policy")).toBe("no-referrer");
-		expect(await body(response)).toEqual({ observation: { id: id(1), status: "open", notAfter: NOW + LIFETIME, evidence: null }, viewer: viewerPage(1) });
+		const answered = await body(response);
+		expect(answered).toEqual({ observation: { id: id(1), status: "open", notAfter: NOW + LIFETIME, evidence: null }, viewer: VIEWER });
 
 		expect(t.asked).toHaveLength(1);
 		const [ask] = t.asked;
@@ -386,6 +410,8 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		expect(t.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "open", hostLaunchId: LAUNCH, hostGeneration: "gen-1" })]);
 		expect(t.store.value).not.toContain(CREDENTIAL);
 		expect(JSON.stringify(t.desk.list())).not.toContain(CREDENTIAL);
+		// The bridge's token goes only on the management request: never in the ledger, the listing or the browser's answer.
+		for (const seen of [t.store.value, JSON.stringify(t.desk.list()), JSON.stringify(answered)]) expect(seen).not.toContain(BRIDGE.token);
 	});
 
 	it("fails closed on a ledger that is missing, unreadable or another owner's, and never makes one", async () => {
@@ -451,7 +477,7 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		answer = (asked) => launched(asked, { replayed: true });
 		const again = await t.desk.launch();
 		expect(again.status).toBe(200);
-		expect((await body(again)).viewer).toBe(viewerPage(1));
+		expect((await body(again)).viewer).toBe(VIEWER);
 		expect(JSON.parse(t.asked[1]!.body)).toEqual({ key: id(1), owner: SPACE, notAfter: NOW + LIFETIME });
 		expect(t.records()).toHaveLength(1);
 
@@ -560,73 +586,32 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		expect(t.records().every((record) => record.status === "not_opened")).toBe(true);
 	});
 
-	it("carries the viewer's allowlisted files and calls to the launch at the host's root, without the bridge's token", async () => {
-		const host = (asked: Asked) => {
-			if (asked.url.endsWith("/observations/launch")) return launched(asked);
-			if (asked.url === `https://bridge.cua.test/${LAUNCH}/viewer/`) {
-				return new Response("<!doctype html>", { headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'", "set-cookie": "a=b", "x-upstream": "1" } });
-			}
-			if (asked.url === `https://bridge.cua.test/${LAUNCH}/viewer/viewer.js`) return new Response(null, { status: 302, headers: { location: "https://elsewhere.test/" } });
-			if (asked.url === `https://bridge.cua.test/${LAUNCH}/cua.env.v1.SystemService/GetCapabilities`) return new Response(new Uint8Array(5), { headers: { "content-type": "application/grpc-web+proto", "grpc-status": "0" } });
-			throw new Error(`unexpected ${asked.url}`);
-		};
-		const t = desk({ stored: empty(), host });
-		await t.desk.launch();
-		const at = (path: string, init: RequestInit = {}) => new Request(`${ORIGIN}/api/observations/${id(1)}/${path}`, init);
-		const serve = (request: Request, viaSession = true) => t.desk.serve(request, { viaSession }, ORIGIN);
-
-		const page = await serve(at("viewer/", { headers: { cookie: "pim_session=secret", "x-extra": "1" } }));
-		expect(page.status).toBe(200);
-		expect(await page.text()).toBe("<!doctype html>");
-		expect(page.headers.get("content-security-policy")).toBe("default-src 'none'");
-		expect(page.headers.get("set-cookie")).toBeNull();
-		expect(page.headers.get("x-upstream")).toBeNull();
-		expect(page.headers.get("cache-control")).toBe("no-store");
-		expect([...t.asked[1]!.headers]).toEqual([]);
-
-		const call = await serve(
-			at("cua.env.v1.SystemService/GetCapabilities", {
-				method: "POST",
-				headers: { origin: ORIGIN, "content-type": "application/grpc-web+proto", "x-cua-env-authorization": `Bearer ${CREDENTIAL}`, "x-grpc-web": "1", cookie: "pim_session=secret" },
-				body: new Uint8Array(5),
-			}),
-		);
-		expect(call.status).toBe(200);
-		expect(call.headers.get("grpc-status")).toBe("0");
-		const forwarded = t.asked[2]!;
-		expect(forwarded.method).toBe("POST");
-		expect(forwarded.headers.get("content-type")).toBe("application/grpc-web+proto");
-		expect(forwarded.headers.get("x-cua-env-authorization")).toBe(`Bearer ${CREDENTIAL}`);
-		for (const name of ["x-grpc-web", "cookie", "origin", "authorization", "x-pim-space"]) expect(forwarded.headers.get(name), name).toBeNull();
-		expect(forwarded.body).toBe("\0\0\0\0\0");
-
-		// A redirect from the host is never passed on or followed.
-		expect((await serve(at("viewer/viewer.js"))).status).toBe(502);
-		const before = t.asked.length;
-		// Refused before anything is sent: too big, not a session, a path the viewer doesn't have, an API token.
-		const big = at("cua.env.v1.StreamService/OpenMedia", { method: "POST", headers: { origin: ORIGIN, "content-type": "application/grpc-web+proto" }, body: new Uint8Array(MAX_CALL_REQUEST_BYTES + 1) });
-		expect((await serve(big)).status).toBe(413);
-		expect((await serve(at("viewer/"), false)).status).toBe(401);
-		expect((await serve(at("files"))).status).toBe(404);
-		expect((await serve(at("viewer/", { headers: { authorization: "Bearer pim_x_y" } }))).status).toBe(401);
-		// The host serves files to GET only, though admission takes HEAD.
-		expect((await serve(at("viewer/", { method: "HEAD" }))).status).toBe(405);
-		expect(t.asked).toHaveLength(before);
-		expect(t.asked.slice(1).every((asked) => asked.headers.get("authorization") === null && asked.headers.get("x-pim-space") === null)).toBe(true);
-	});
-
-	it("refuses the viewer's media socket before anything is sent, as no bounded relay exists", async () => {
+	it("answers only management, for the owner's session from this app, and carries nothing of the viewer", async () => {
 		const t = desk({ stored: empty(), host: launched });
-		await t.desk.launch();
-		const upgrade = new Request(`${ORIGIN}/api/observations/${id(1)}/media?ticket=${ATTACH}`, { headers: { upgrade: "websocket", origin: ORIGIN, "sec-websocket-protocol": "rcdp.v2" } });
-		const response = await t.desk.serve(upgrade, { viaSession: true }, ORIGIN);
-		expect(response.status).toBe(503);
-		expect(response.webSocket).toBeNull();
-		expect(t.asked).toHaveLength(1);
-		// Admission still answers first: another observation's media is not found, as before.
-		const other = new Request(`${ORIGIN}/api/observations/${id(9)}/media?ticket=${ATTACH}`, { headers: { upgrade: "websocket", origin: ORIGIN, "sec-websocket-protocol": "rcdp.v2" } });
-		expect((await t.desk.serve(other, { viaSession: true }, ORIGIN)).status).toBe(404);
-		expect(t.asked).toHaveLength(1);
+		const serve = (path: string, init: RequestInit = {}, viaSession = true) => t.desk.serve(new Request(`${ORIGIN}${path}`, init), { viaSession }, ORIGIN);
+		// Not the browser's session, an API token, or a write from another site: refused, and nothing is recorded or asked.
+		expect((await serve("/api/observations", { method: "POST", headers: { origin: ORIGIN } }, false)).status).toBe(401);
+		expect((await serve("/api/observations", { method: "POST", headers: { origin: ORIGIN, authorization: "Bearer pim_x_y" } })).status).toBe(401);
+		expect((await serve("/api/observations", { method: "POST", headers: { origin: "https://evil.example" } })).status).toBe(403);
+		expect((await serve("/api/observations", { method: "POST" })).status).toBe(403);
+		expect(t.asked).toEqual([]);
+		expect(t.records()).toEqual([]);
+
+		expect((await serve("/api/observations", { method: "POST", headers: { origin: ORIGIN } })).status).toBe(200);
+		// The viewer's page, files, calls and media are the host's, opened by the browser there: here they don't exist, and nothing is sent.
+		const grpc = { origin: ORIGIN, "content-type": "application/grpc-web+proto", "x-cua-env-authorization": `Bearer ${CREDENTIAL}` };
+		for (const [path, init] of [
+			[`/api/observations/${id(1)}/viewer/`, {}],
+			[`/api/observations/${id(1)}/viewer/viewer.js`, {}],
+			[`/api/observations/${id(1)}/cua.env.v1.SystemService/GetCapabilities`, { method: "POST", headers: grpc, body: new Uint8Array(5) }],
+			[`/api/observations/${id(1)}/media?ticket=${ATTACH}`, { headers: { upgrade: "websocket", origin: ORIGIN, "sec-websocket-protocol": "rcdp.v2" } }],
+			[`/api/observations/${id(1)}?x=1`, {}],
+		] as [string, RequestInit][]) {
+			const answered = await serve(path, init);
+			expect(answered.status, path).toBe(404);
+			expect(answered.webSocket, path).toBeNull();
+		}
+		expect(t.asked.map((asked) => asked.url)).toEqual(["https://bridge.cua.test/pim/observations/launch"]);
 	});
 
 	it("asks the computer to end an unconfirmed observation's known launch again, without calling that closure", async () => {
@@ -702,27 +687,6 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		expect((await starting).status).toBe(200);
 		expect(t.asked).toHaveLength(1);
 		expect(t.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "open", hostLaunchId: LAUNCH })]);
-	});
-
-	it("stops reading a viewer call's body that never ends, at the observation's end or the call's bound, and sends nothing", async () => {
-		const host = (asked: Asked) => (asked.url.endsWith("/observations/end") ? Response.json({ outcome: "requested", recorded: true }) : launched(asked));
-		const stalled = () =>
-			new Request(`${ORIGIN}/api/observations/${id(1)}/cua.env.v1.SystemService/GetCapabilities`, {
-				method: "POST",
-				headers: { origin: ORIGIN, "content-type": "application/grpc-web+proto" },
-				body: new ReadableStream<Uint8Array>({ pull: () => new Promise<void>(() => undefined) }),
-			});
-		const t = desk({ stored: empty(), host });
-		await t.desk.launch();
-		const pending = t.desk.serve(stalled(), { viaSession: true }, ORIGIN);
-		expect((await t.desk.end(id(1))).status).toBe(202);
-		expect((await pending).status).toBe(404);
-		expect(t.asked.map((asked) => asked.url)).toEqual(["https://bridge.cua.test/pim/observations/launch", "https://bridge.cua.test/pim/observations/end"]);
-
-		const u = desk({ stored: empty(), host, limits: { viewerMs: 50 } });
-		await u.desk.launch();
-		expect((await u.desk.serve(stalled(), { viaSession: true }, ORIGIN)).status).toBe(408);
-		expect(u.asked).toHaveLength(1);
 	});
 
 	it("gives up on a management answer that never comes or never ends within its bound, and holds the record unconfirmed", async () => {

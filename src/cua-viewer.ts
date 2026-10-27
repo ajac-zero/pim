@@ -2,9 +2,9 @@ import { bridgeAddress, type CuaBridge, SPACE_HEADER } from "./cua";
 
 /**
  * Pim's client to a Cua bridge's viewer host (docs/cua-viewer-first-preview.md):
- * the three management calls of the host's launch manager, and the browser's
- * requests to one launch's view-only viewer, carried through. Nothing in a
- * deployment calls it: only the preview composes it (preview/worker.ts).
+ * the three management calls of the host's launch manager, and the address
+ * the person's browser opens a launch's viewer at. Nothing in a deployment
+ * calls it: only the preview composes it (preview/worker.ts).
  *
  * Management goes to `POST <bridge path>/observations/{launch,end,status}`
  * with the bridge's bearer token and `x-pim-space`, as `Cua.connect` sends
@@ -18,22 +18,12 @@ import { bridgeAddress, type CuaBridge, SPACE_HEADER } from "./cua";
  * the host makes before reading the request (`REFUSED_BEFORE_ACTING`) says
  * the host did nothing.
  *
- * The viewer's requests go to `/<hostLaunchId>/…` at the bridge's origin,
- * which only the launch's own credential opens there: the bridge's token
- * never goes on them. Only the headers the host adapter reads are carried,
- * and bodies are bounded both ways. Each is tied to the observation's
- * cancellation, and admitted again after the host answers and before
- * anything reaches the browser (`Watch`).
- *
- * The media socket is not carried at all. A relay in the Worker reads the
- * host's socket as fast as it comes, and a Worker's socket shows nothing of
- * what it holds unsent to a slow browser, so the Worker would buffer without
- * bound, and the host, which sees only its own socket to the Worker, would
- * never see it back up. Until a relay with a bound the platform supports
- * exists, the desk refuses media before anything is sent
- * (./cua-observation-runtime.ts).
- * This is not a proxy: the caller passes only a target that
- * `admitObservationRequest` (./cua-observation.ts) built.
+ * The viewer itself, its page, files, calls and media socket, goes from the
+ * person's browser straight to the host (`viewerUrl`), never through the
+ * Worker: Pim carries none of it, and no bridge token or Pim credential goes
+ * with it. What opens it there is the launch's own credential, in the
+ * viewer address's fragment, which the host checks on every call and
+ * exchanges for the media socket's attach token.
  *
  * Nothing is logged but fixed event names: never a target, token, viewer
  * path or anything the host said.
@@ -126,28 +116,8 @@ export const MANAGE_MS = 25_000;
 export const MAX_MANAGE_REQUEST_BYTES = 4096;
 /** The most a management answer may be; a status answer is a few hundred bytes. */
 export const MAX_REPLY_BYTES = 16 * 1024;
-/** How long a viewer request has for its answer's headers, and a file or call for its whole body. */
-export const VIEWER_MS = 30_000;
-/** The most a viewer call's body may be, as the adapter's `MAX_REQUEST_BYTES`. */
-export const MAX_CALL_REQUEST_BYTES = 4 * 1024;
-/** The most one of the viewer's files may be: the largest pinned one, `viewer.js`, is about 253 KiB. */
-export const MAX_FILE_BYTES = 512 * 1024;
-/** The most a unary call's answer may be: the adapter's 256 KiB, its frame headers and its trailer. */
-export const MAX_CALL_REPLY_BYTES = 256 * 1024 + 1024;
-
 /** The host's own refusals before it reads a request: bad method, path, headers, token, space, type or size. Nothing was done for it. */
 export const REFUSED_BEFORE_ACTING: ReadonlySet<number> = new Set([400, 401, 403, 404, 405, 413, 415]);
-
-/** Where the host serves a launch's files and calls: `/<launch id>/…`, a launch id being 22 characters. */
-const ADAPTER_TARGET = /^\/[A-Za-z0-9_-]{22}\//;
-/** The presence call, the one call whose answer is a stream: it lasts until the observation's deadline, frame-bounded by the adapter. */
-const PRESENCE_JOIN = "cua.env.v1.PresenceService/Join";
-/** The request headers the adapter reads of a call; nothing else is carried, the bridge's or the browser's `Authorization` least of all. */
-const CALL_HEADERS = ["content-type", "x-cua-env-authorization", "grpc-encoding", "content-encoding"] as const;
-/** The answer headers the browser may see: those the adapter sets on files and calls. */
-const ANSWER_HEADERS = ["content-type", "grpc-status", "grpc-message", "content-security-policy", "cross-origin-resource-policy", "x-content-type-options", "referrer-policy"] as const;
-/** The adapter's answers passed on as they are; any other becomes `502`. */
-const VIEWER_STATUSES: ReadonlySet<number> = new Set([200, 400, 401, 404, 405, 413, 415]);
 
 // ---------------------------------------------------------------- strict answers
 
@@ -290,22 +260,6 @@ export function settle<T>(promise: Promise<T>, signal: AbortSignal | null, ms: n
 	});
 }
 
-/**
- * A signal that aborts when any of `sources` does, or `abort()` is called,
- * and `release()`, which removes what it added to the sources. Unlike
- * `AbortSignal.any`, nothing stays attached to a long-lived source (an
- * observation's cancellation) once a request is done.
- */
-function linked(...sources: AbortSignal[]): { readonly signal: AbortSignal; readonly abort: () => void; readonly release: () => void } {
-	const controller = new AbortController();
-	const abort = () => controller.abort();
-	for (const source of sources) {
-		if (source.aborted) controller.abort();
-		else source.addEventListener("abort", abort, { once: true });
-	}
-	return { signal: controller.signal, abort, release: () => sources.forEach((source) => source.removeEventListener("abort", abort)) };
-}
-
 /** Whether a cancel was seen to settle within `CLEANUP_MS`; one that wasn't is logged and left. */
 async function cleaned(what: string, cancel: () => Promise<unknown>): Promise<boolean> {
 	let started: Promise<unknown>;
@@ -336,20 +290,10 @@ async function discardBody(body: ReadableStream<Uint8Array> | null, what: string
 	return cleaned(what, () => body.cancel());
 }
 
-/** Lets go of an answer that came after Pim stopped waiting for it: its socket closed, its body cancelled, neither awaited. */
+/** Lets go of an answer that came after Pim stopped waiting for it: its body cancelled, not awaited. */
 function abandon(late: Promise<Response>, what: string): void {
 	late.then(
-		(response) => {
-			if (response.webSocket) {
-				try {
-					response.webSocket.accept();
-					response.webSocket.close(1008, "Too late");
-				} catch {
-					// It ends by itself.
-				}
-			}
-			void discardBody(response.body, what);
-		},
+		(response) => void discardBody(response.body, what),
 		() => undefined,
 	);
 }
@@ -397,75 +341,13 @@ export async function readBounded(body: ReadableStream<Uint8Array> | null, max: 
 	return { kind: "read", bytes: whole };
 }
 
-/**
- * `body`, passed on as the browser reads it, failing once it has had more
- * than `max` bytes (no limit for `null`) or `signal` aborts. Each read of
- * the host's body is raced against `signal`, so a stalled one doesn't hold
- * the browser's. `ended` runs once, however it ends: done, failed, too big,
- * stopped, or cancelled by the browser.
- */
-function passOn(body: ReadableStream<Uint8Array>, max: number | null, signal: AbortSignal, ended: () => void): ReadableStream<Uint8Array> {
-	const reader = body.getReader();
-	let size = 0;
-	let finished = false;
-	let output: ReadableStreamDefaultController<Uint8Array> | undefined;
-	const finish = (error?: Error) => {
-		if (finished) return;
-		finished = true;
-		signal.removeEventListener("abort", stopped);
-		ended();
-		if (error) {
-			void discardReader(reader, "answer");
-			try {
-				output?.error(error);
-			} catch {
-				// Already closed or errored.
-			}
-		}
-	};
-	const stopped = () => finish(new Error("The observation ended."));
-	return new ReadableStream<Uint8Array>({
-		start(controller) {
-			output = controller;
-			if (signal.aborted) stopped();
-			else signal.addEventListener("abort", stopped, { once: true });
-		},
-		async pull(controller) {
-			if (finished) return;
-			const step = await settle(reader.read(), signal, null);
-			if (finished) return;
-			if (step.kind !== "value") return finish(new Error("The desktop's answer ended."));
-			if (step.value.done) {
-				finish();
-				try {
-					reader.releaseLock();
-				} catch {
-					// Nothing is pending.
-				}
-				return controller.close();
-			}
-			size += step.value.value.byteLength;
-			if (max !== null && size > max) return finish(new Error("The desktop's answer was too big."));
-			controller.enqueue(step.value.value);
-		},
-		cancel() {
-			if (finished) return;
-			finished = true;
-			signal.removeEventListener("abort", stopped);
-			ended();
-			void discardReader(reader, "answer");
-		},
-	});
-}
-
-const plain = (status: number) => new Response(null, { status, headers: { "cache-control": "no-store" } });
 const byteLength = (text: string) => new TextEncoder().encode(text).byteLength;
 const log = (event: string, detail: Record<string, unknown> = {}) => console.error(JSON.stringify({ event, ...detail }));
 
 // ---------------------------------------------------------------- the client
 
 /** Bounds a client is made with; tests shorten them. */
-export type ClientLimits = { readonly manageMs: number; readonly viewerMs: number };
+export type ClientLimits = { readonly manageMs: number };
 
 export class CuaViewerClient {
 	readonly #bridge: CuaBridge;
@@ -483,7 +365,7 @@ export class CuaViewerClient {
 		this.#bridge = bridge;
 		this.#space = space;
 		this.#fetch = fetcher;
-		this.#limits = { manageMs: MANAGE_MS, viewerMs: VIEWER_MS, ...limits };
+		this.#limits = { manageMs: MANAGE_MS, ...limits };
 		this.#origin = url.origin;
 		this.#base = url.origin + url.pathname.replace(/\/+$/, "");
 	}
@@ -576,103 +458,16 @@ export class CuaViewerClient {
 	}
 
 	/**
-	 * Carries one of the viewer's file or call requests to `target`, which
-	 * `admitObservationRequest` built (`/<hostLaunchId>/<rest>`), and answers
-	 * what the adapter answered, bounded.
-	 *
-	 * The observation is admitted again (`live`) after the browser's body is
-	 * read and immediately before the request leaves, and again when the
-	 * host answers. Reading the body, waiting for the answer and passing the
-	 * answer on all stop when the observation is cancelled or its deadline
-	 * comes; a file or call also when `viewerMs` passes. The presence stream
-	 * lasts until the deadline at most.
+	 * The address the person's browser opens the launch's viewer at, directly
+	 * on the host: the bridge's checked HTTPS origin and the viewer path the
+	 * host answered, which must be exactly the adapter's for `launchId`
+	 * (`/<launchId>/viewer/#ticket=<43 characters>&clipboard=0`). Nothing
+	 * else of the host's answer, and no other host, goes into it. Its fragment
+	 * is the launch's credential: the caller hands it to the person's browser
+	 * for that answer only, and neither stores nor logs it.
 	 */
-	async viewer(target: string, request: Request, kind: "file" | "call", watch: Watch): Promise<Response> {
-		// The host serves the adapter's files to GET and its calls to POST only, at `/<22 characters>/…`, with no query.
-		const wrongMethod = request.method !== (kind === "file" ? "GET" : "POST");
-		if (!ADAPTER_TARGET.test(target) || target.includes("?") || wrongMethod || (kind === "file" && request.body)) {
-			await discardBody(request.body, "request");
-			return plain(wrongMethod ? 405 : 404);
-		}
-		if (!live(watch)) return plain(404);
-		const stream = kind === "call" && target.endsWith(`/${PRESENCE_JOIN}`);
-		const link = linked(watch.cancel);
-		// One timer at a time bounds the whole request; it is replaced once the answer's headers come, and cleared when it ends.
-		let timer = setTimeout(link.abort, Math.min(this.#limits.viewerMs, remaining(watch)));
-		const started = watch.now();
-		let handedOn = false;
-		const done = () => {
-			clearTimeout(timer);
-			link.release();
-		};
-		try {
-			const headers = new Headers();
-			let body: Uint8Array | undefined;
-			if (kind === "call") {
-				for (const name of CALL_HEADERS) {
-					const value = request.headers.get(name);
-					if (value !== null) headers.set(name, value);
-				}
-				const length = request.headers.get("content-length");
-				if (length !== null && !(Number(length) <= MAX_CALL_REQUEST_BYTES)) {
-					await discardBody(request.body, "request");
-					return plain(413);
-				}
-				const read = await readBounded(request.body, MAX_CALL_REQUEST_BYTES, link.signal);
-				if (read.kind === "too_big") return plain(413);
-				if (read.kind !== "read") return plain(watch.cancel.aborted || !live(watch) ? 404 : 408);
-				body = read.bytes;
-			}
-			// Admitted when the request came isn't admitted now: the body's read was a wait.
-			if (link.signal.aborted || !live(watch)) return plain(404);
-			const sent = this.#send(this.#origin + target, { method: request.method, headers, ...(body ? { body } : {}), redirect: "manual", signal: link.signal });
-			const answered = await settle(sent, link.signal, null);
-			if (answered.kind !== "value") {
-				if (answered.kind === "stopped") abandon(sent, "viewer");
-				log("cua.viewer.unreachable", { kind });
-				return plain(watch.cancel.aborted || !live(watch) ? 404 : link.signal.aborted ? 504 : 502);
-			}
-			const response = answered.value;
-			// What came back while the observation stopped being admitted is dropped.
-			if (link.signal.aborted || !live(watch)) {
-				await discardBody(response.body, "viewer");
-				return plain(404);
-			}
-			if (!VIEWER_STATUSES.has(response.status)) {
-				await discardBody(response.body, "viewer");
-				log("cua.viewer.refused", { kind, status: response.status });
-				return plain(502);
-			}
-			const answer = new Headers();
-			for (const name of ANSWER_HEADERS) {
-				const value = response.headers.get(name);
-				if (value !== null) answer.set(name, value);
-			}
-			if (!response.body) return new Response(null, { status: response.status, headers: answer });
-			clearTimeout(timer);
-			// A file or call keeps what is left of its `viewerMs`; the presence stream, what is left until the deadline.
-			timer = setTimeout(link.abort, stream ? remaining(watch) : Math.min(this.#limits.viewerMs - (watch.now() - started), remaining(watch)));
-			const max = kind === "file" ? MAX_FILE_BYTES : stream ? null : MAX_CALL_REPLY_BYTES;
-			handedOn = true;
-			return new Response(passOn(response.body, max, link.signal, done), { status: response.status, headers: answer });
-		} finally {
-			if (!handedOn) done();
-		}
+	viewerUrl(launchId: string, viewerPath: string): string {
+		if (!LAUNCH_ID.test(launchId) || !viewerPathOf(launchId).test(viewerPath)) throw new RangeError("The host's viewer path is not the adapter's.");
+		return this.#origin + viewerPath;
 	}
 }
-
-/** What a viewer request is carried under: the observation's deadline and clock, its cancellation, and a check that it is still admitted. */
-export type Watch = {
-	readonly notAfter: number;
-	/** The clock `notAfter` is read against, read anew after every wait. */
-	readonly now: () => number;
-	/** Aborts when the observation stops being admitted: its record leaves `open`, or the ledger is blocked. */
-	readonly cancel: AbortSignal;
-	/** Whether the observation is admitted now: read immediately before each request leaves and again after the host answers. */
-	readonly admitted: () => boolean;
-};
-
-/** Milliseconds left until the deadline, read now. */
-const remaining = (watch: Watch) => watch.notAfter - watch.now();
-/** Whether the observation may still be carried: not cancelled, admitted, before its deadline, all read now. */
-const live = (watch: Watch) => !watch.cancel.aborted && watch.admitted() && remaining(watch) > 0;

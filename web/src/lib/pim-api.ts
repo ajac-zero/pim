@@ -1261,7 +1261,7 @@ export const pim = {
       throw error;
     }
   },
-  /** Starts watching, or gives back the open observation's viewer; `viewer` holds its credential, for this page only. */
+  /** Starts watching, or gives back the open observation's viewer: `viewer` is its address on the computer's host, holding its credential, for this page only. */
   watchDesktop: () =>
     call<{ observation: Observation; viewer: string }>("/observations", {
       method: "POST",

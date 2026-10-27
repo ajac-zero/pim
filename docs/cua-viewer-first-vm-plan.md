@@ -1,6 +1,8 @@
 # Starting and qualifying the viewer-first preview on one VM: the plan
 
-This is a plan for review, in prose. It is not a script. Nothing in it has been done, and nothing in it is authorized by being written down. It creates no cloud resource, certificate, DNS name, account, file or service. It doesn't touch main or deploy a Cloudflare Worker, and it runs no type check, build or install. Each stage below needs its own approval before anyone runs it.
+This is a plan for review, in prose. It is not a script. Nothing in it has been done, and nothing in it is authorized by being written down. It creates no cloud resource, certificate, DNS name, account, file or service. It doesn't touch main or deploy a Cloudflare Worker, and it runs no type check, build or install.
+
+It is meant to be approved once, as one bounded package with a single go or no-go: the topology, the stages, the checks, the stop conditions, the $15 and 48-hour bound, and the cleanup below. It is not a sequence of separate approvals. Until that decision, execution is held. **The decision today is no-go**, because of the open blocker in "Wrangler's developer listeners".
 
 It gathers into one order what these documents already say: `docs/cua-viewer-first-preview.md`, `docs/cua-viewer-first-worker.md`, `docs/cua-bridge.md`, `docs/cua-eval-install.md`, `docs/cua-eval-credentials.md` and `docs/celld.md`. It adds the preview's evaluation mode (`preview/cua-eval.ts`). Where they leave something open, it says so and doesn't fill the gap.
 
@@ -25,7 +27,17 @@ Two hostnames point at one VM, by DNS only (no proxy in front), and nothing is r
 ```
 
 - **Pim's side:** the preview Worker runs locally under `wrangler dev`, bound to loopback, with its own persistent local Durable Objects, KV and R2. No Cloudflare Worker is deployed, and `pnpm dev` is never used because it bills the remote Workers AI binding.
-- **The ingress:** Caddy, pinned as `deploy/celld/versions.env` pins it (v2.11.7, by SHA-256), gets both certificates by ACME HTTP-01, so ports 80 and 443 must be open. For Pim's host it does what `deploy/celld/caddy/Caddyfile` does for celld. It sets `X-Pim-Client-IP` from the connection and `X-Pim-Ingress-Secret` from its own environment, replacing whatever the client sent, and drops other address headers. It also answers `404` for `/__dev*` before proxying. That is defense in depth only: the application refuses those paths itself.
+- **Pim's address, set in Wrangler:** wrangler runs with `--host pim-cua-eval.ajac-zero.com --upstream-protocol https`. With those, the URL the Worker sees is `https://pim-cua-eval.ajac-zero.com/…` whatever `Host` the request came with. In `wrangler@4.148.0`'s `wrangler-dist/cli.js`, `--host` and `--upstream-protocol` become the dev origin (L370035–370038). That origin sets the inner URL (L365054–365068) and Miniflare's `upstream` (L365172–365173). Then:
+  - **The ProxyWorker** (`wrangler-dist/ProxyWorker.js` L116–132) sets `MF-Original-URL` to the inner URL, replacing any the client sent.
+  - **Miniflare's entry** (`miniflare/dist/src/workers/core/entry.worker.js` L5082–5106) rebuilds the URL on `upstream`.
+
+  Without those flags, the URL's host is the request's `Host`. The evaluation then answers `421` to everything, because it serves only at `PIM_PUBLIC_URL` and rewrites nothing onto it.
+- **The ingress:** Caddy, pinned as `deploy/celld/versions.env` pins it (v2.11.7, by SHA-256), gets both certificates by ACME HTTP-01, so ports 80 and 443 must be open. Plain HTTP only redirects.
+  - **What it does for Pim's host**, as `deploy/celld/caddy/Caddyfile` does for celld:
+    - it sets `X-Pim-Client-IP` from the connection and `X-Pim-Ingress-Secret` from its own environment, replacing whatever the client sent;
+    - it drops other address headers;
+    - it answers `404` for `/__dev*` before proxying. That is defense in depth only: the application refuses those paths itself.
+  - **`Host` passes unchanged**, which is Caddy's default. Wrangler's ProxyWorker rewrites any header value that names the incoming host into Pim's origin (`rewriteUrlRelatedHeaders`, `ProxyWorker.js` L300–320). So the incoming host must be Pim's own, where only Caddy's redirect is served. Rewriting `Host` to `127.0.0.1:8787` would let Wrangler turn an `Origin` of `http://127.0.0.1:8787` into Pim's origin before the Worker reads it.
 - **Accounts:** four, none of them root and none in another's group:
   - `pim-preview`: wrangler, its state and its private environment;
   - Caddy's account: its certificates and the ingress secret;
@@ -41,7 +53,7 @@ In the mode, these hold whatever the ingress or the rest of the environment does
 - **No dev sign-in and no setup link.** Every path under `/__dev`, by any method, case, percent-encoding or doubled slash, is `404`, and so is `/auth/setup-link`. Both are refused before the request is read further. No claim or admin setup link is ever written to the logs.
 - **Only through the ingress.** The Worker serves with the ingress profile celld uses (`src/runtime.ts`), so a request without `PIM_INGRESS_SECRET` and a client address is `403`. The Directory counts the rate limits, and no claim window opens.
 - **Registration is closed**, whatever `PIM_REGISTRATION` says. The preview's own `wrangler.preview.jsonc` says `open`, and the mode ignores it.
-- **Every request is at Pim's address.** The request URL is rewritten onto `PIM_PUBLIC_URL`, and the browser's `Origin` is left as it was. Passkeys are made for the host `pim-cua-eval.ajac-zero.com`, and the session cookie is `__Host-pim-session`: `Secure`, `Path=/`, no `Domain`, so host-only.
+- **Only at Pim's address.** A request whose URL isn't exactly at `PIM_PUBLIC_URL` is `421`: loopback, another host, plain HTTP or another port. Nothing is rewritten onto Pim's address. `Host`, `X-Forwarded-*`, `Forwarded` and `MF-Original-Hostname` are never read as the authority, and the browser's `Origin` is left as it came. Passkeys are made for the host `pim-cua-eval.ajac-zero.com`, and the session cookie is `__Host-pim-session`: `Secure`, `Path=/`, no `Domain`, so host-only.
 - **Watching needs the owner's passkey session.** An API token or an anonymous request is refused (`401`), as in every mode.
 - **Set up wrong, it answers nothing.** The Worker answers `503` to every request in any of these cases:
   - the mode is named but `PIM_PUBLIC_URL` isn't an exact, canonical HTTPS origin;
@@ -53,16 +65,23 @@ In the mode, these hold whatever the ingress or the rest of the environment does
   So a preview whose evaluation settings didn't load can't be reached through Caddy as an open local preview.
 - **Native tools, the optional Cua child and takeover stay off.** The ledger has no recovery, reset or eviction, as before (`preview/cua-viewer-first.ts`, `docs/cua-observation.md`).
 
-The tests that check this are fake-only. They are the five evaluation-mode tests in `test/preview-cua-fixture.test.ts`, listed in `docs/cua-viewer-first-worker.md`, and none has run yet.
+The tests that check this are fake-only. They are the seven evaluation-mode tests in `test/preview-cua-fixture.test.ts`, listed in `docs/cua-viewer-first-worker.md`, and none has run yet.
 
 ## Setting up the one owner
 
 This reuses Pim's own claim, the way the first account of any Pim becomes its admin. The claim code comes from the operator instead of the Worker's logs, and is accepted once.
 
 1. **The operator makes the code**, on their own machine, not on the VM: 32 random bytes written as unpadded base64url, which is 43 characters.
-2. **The preview gets only the code's SHA-256**, in lowercase hex, as `PREVIEW_EVAL_CLAIM_SHA256` in its private environment. The code itself is never on the VM, in a log, an environment, a flag or a response.
-3. **The person registers.** With the preview running in the mode and the fixture off, they open `https://pim-cua-eval.ajac-zero.com/#claim=<code>` in the browser they will watch from. The web app shows the claim form for it and takes the fragment out of the address bar and history once used; a fragment never reaches a server or Caddy. They choose a username, keep the recovery codes the page shows once, and make a passkey. That is the real WebAuthn ceremony for the relying party `pim-cua-eval.ajac-zero.com`, with no forged session and no dev passkey.
-4. **The Directory records the claim before registering anyone.** The preview's Directory (`EvalDirectory`) compares the code's digest in constant time. Before it registers the admin, it writes that a claim began. From then on, it refuses every claim, whether that one succeeded, failed or never got a passkey. It also never claims a Directory that already holds any account, and records that refusal for good. A wrong code changes nothing.
+2. **The preview is provisioned with only the code's SHA-256**, in lowercase hex, as `PREVIEW_EVAL_CLAIM_SHA256` in its private environment. The code itself is not provisioned, stored or logged anywhere on the VM, and no response carries it.
+   - **It does reach the VM, once.** The registration's JSON body carries it: over TLS to Caddy, then over loopback HTTP through Wrangler's ProxyWorker to the Worker.
+   - **Where it exists, and how long:** it sits briefly in those processes' memory, and the Worker hashes and compares it. Nothing claims it can't be read there by root or by those processes' accounts.
+3. **The person registers.** With the preview running in the mode and the fixture off, they open `https://pim-cua-eval.ajac-zero.com/#claim=<code>` in the browser they will watch from. The fragment isn't part of the HTTP request target, so it isn't in Caddy's or Wrangler's request line. The web app shows the claim form and takes the fragment out of the address bar and history once used, then sends the code in the registration's body, as above. They choose a username, keep the recovery codes the page shows once, and make a passkey. That is the real WebAuthn ceremony for the relying party `pim-cua-eval.ajac-zero.com`, with no forged session and no dev passkey.
+4. **The Directory records the claim before registering anyone.** The preview's Directory (`EvalDirectory`) compares the code's digest in constant time.
+   - **One record, written first.** Before it registers the admin, it inserts the evaluation's one claim record (`claiming`). The insert is plain, never a replace, and no wait comes between the last check and it, so of two claims at once only one is recorded.
+   - **Nothing is registered unless that write succeeds.** If the write fails, nobody is registered and the request is refused (`503`).
+   - **Afterwards the record only moves on** from `claiming`, to `claimed` or `failed`. If that last write fails, or the registration throws, the record stays `claiming`. That is logged and refuses as surely. Nothing deletes or replaces the record.
+   - **Every later claim is refused**, whether that one succeeded, failed or never got a passkey, and also after the Directory restarts or the registration's day has passed.
+   - **A Directory that already holds any account** is never claimed, and that refusal is recorded for good. A wrong code changes nothing.
 5. **The operator reads the owner ID** from the person's own session, such as Settings or `/api/account`, not from a log. It is then named in `PREVIEW_CUA_FIXTURE_OWNER` with `PREVIEW_CUA_FIXTURE=seed` and `CUA_BRIDGES`, and the preview is restarted once to seed. The digest may stay or go: the record refuses it either way.
 
 The risks, stated plainly:
@@ -80,26 +99,17 @@ None of these is readable by `pim-desktop` or any desktop group:
 | Secret | Who holds it |
 | --- | --- |
 | `PIM_INGRESS_SECRET` | The preview's private environment file (`pim-preview`, mode `0600` in a `0700` directory) and Caddy's environment, never its config file. Never sent to the bridge's host. |
-| The claim code's digest | The preview's private environment. The code itself stays with the operator. |
+| The claim code's digest | The preview's private environment. The code itself is never provisioned or stored; it reaches the Worker once, in the registration's body. |
 | Pim's state: sessions, passkeys, the ledger, the cookie key | `wrangler dev --persist-to` in `pim-preview`'s own `0700` directory |
 | `CUA_BRIDGES` (the bridge's URL and bearer token) | The preview's private environment, delivered as `docs/cua-eval-credentials.md` says |
 | The TLS keys for both hosts | Caddy's own storage |
 | The bridge's bearer token, its loopback TLS key, spacesd's root token, the journal | `pim-bridge`'s own `0700` directories, as `docs/cua-viewer-first-preview.md` and `docs/cua-bridge.md` say |
 
-## Gates to decide before anything is created
+## What the package must settle
 
-These are consequential, and none is decided here.
+These are consequential, and none is decided here. They are part of the one package, not separate approvals.
 
-1. **The desktop user shares the VM's loopback.**
-   - **The problem:** binding wrangler to `127.0.0.1` keeps workerd off the network, not away from `pim-desktop`, which every agent runs as.
-     - The preview's port is safe: it refuses requests without the ingress secret.
-     - Wrangler's own developer ports are not. Its DevTools inspector defaults to 9229 on loopback, by its config schema, and Miniflare's internal loopback servers take no credential. A process there could read Pim's state and secrets.
-     - Whether this wrangler version starts the inspector unasked is unverified.
-   - **Options:**
-     - **(a) Pim on its own VM.** `pim-cua-eval.ajac-zero.com` then points elsewhere. This is the simplest isolation.
-     - **(b) The preview in its own network namespace**, reached by Caddy over a veth and given outbound access through it.
-     - **(c) Firewall marks** that drop loopback connections from `pim-desktop` to the preview's sockets (`meta skuid` on output, `socket cgroupv2` on input). This is unverified.
-   - **Recommendation:** the same-VM topology is not safe without one of these. (a) or (b) is the recommendation.
+1. **Wrangler's developer listeners**, the blocker; see the section of that name below. The topology stays one VM.
 2. **The bridge's TLS behind Caddy.**
    - **The pinned build's option:** a stock Caddy terminates TLS and re-encrypts to the bridge's loopback HTTPS (`bridge.ts` serves HTTPS only). Caddy must then trust the bridge's private certificate explicitly.
    - **Caddy must not change the requests:** it passes `Authorization`, `x-pim-space`, `Origin`, the request target and WebSocket upgrades unchanged. It sends neither Pim's ingress headers nor the client's address headers.
@@ -124,6 +134,32 @@ These are consequential, and none is decided here.
    - the VM;
    - the budget.
 
+## Wrangler's developer listeners: the open blocker
+
+**Why it matters.** `pim-desktop`, which every agent runs as, shares the VM's loopback with wrangler. That is not changed here: the topology stays one VM. What matters is which loopback listeners `wrangler dev` opens and what each one checks. Read from the installed source only, with no process run or inspected:
+
+- **Wrangler's DevTools inspector proxy: on, with no credential.**
+  - **Always on for `wrangler dev`:** the `dev` command always passes an inspector object, `{ hostname: --inspector-ip, port: --inspector-port }` (`wrangler@4.148.0/wrangler-dist/cli.js` L370031–370034), never `false`.
+  - **No configuration turns it off:** `resolveInspectorConfig` turns it off only for `dev.inspector === false`. Otherwise it listens on `inspector_ip` or `127.0.0.1`, on `inspector_port` or the first free port from 9229 (L207242–207251, L206911, L207657). The proxy then runs `InspectorProxyWorker` on that socket (L208288–208320).
+  - **What it checks:** only that `Host` names localhost and that `Origin` is a local one. A request without an `Origin` and without a `User-Agent` counts as local (`wrangler-dist/InspectorProxyWorker.js` L47–58, L369–396). That stops a browser page, not a local process.
+- **workerd's own inspector: also on.**
+  - Unless `dev.inspector === false`, the user Worker's Miniflare gets `inspect: true, inspectorPort: 0` (`cli.js` L365156–365164).
+  - Miniflare then starts workerd with `--inspector-addr=127.0.0.1:<random port>` (`miniflare/dist/src/index.js` L107310–107312, L124925–124942). No credential is passed to it, and nothing installed shows workerd checking one.
+  - `VSCODE_INSPECTOR_OPTIONS` turns off only the proxy (`cli.js` L208489–208495), not this inspector, so it is no remedy.
+- **The dev registry's debug port.** Miniflare starts workerd with `--debug-port=127.0.0.1:0` whenever the registry path is non-empty (`index.js` L107313–107315, L124914–124916, L121389–121391).
+  - `wrangler dev` always passes `getRegistryPath()` (`cli.js` L370043), which defaults to a directory unless `WRANGLER_REGISTRY_PATH` is set (L19833–19838). No `dev` flag disables it.
+  - Whether an empty `WRANGLER_REGISTRY_PATH` turns the port off, and what the port allows, are unverified. It is counted as unauthenticated control until shown otherwise.
+- **Miniflare's Node loopback server: authenticated.** It requires `MF-Loopback-Secret`, compared in constant time (`index.js` L124109–124115). The only exception is a module-fallback service, which `wrangler dev` isn't shown to configure.
+- **The user Worker's own entry socket: open, but it reaches only Pim.**
+  - It sits on `127.0.0.1` at a random port, and it takes `MF-Original-URL` without the shared secret (`entry.worker.js` L5082–5099).
+  - With `upstream` set, the URL is rebuilt on Pim's origin anyway. What arrives is still the Worker's, which refuses requests without the ingress secret.
+  - The magic-proxy operations on that socket require a secret (`entry.worker.js` L4939–4950).
+- **The ProxyWorker's control requests: authenticated.** They require `Authorization` equal to a random secret (`ProxyWorker.js` L216–218).
+
+**What disables the inspectors.** The only path in this version's source that turns both inspectors off is `dev.inspector: false` through the programmatic `unstable_startWorker` export (`cli.js` L372743, L364969–364972). That leads to L207243, L208494 and L365156. The same path can leave `dev.registry` unset, and with it the debug port. That would be a small reviewed launcher in place of `wrangler dev`, built on an experimental API. It isn't written here.
+
+**Until such a launcher, or another supported way, is accepted and its listeners are checked at start, the live evaluation is no-go.**
+
 ## The pinned base
 
 The base is pinned only as far as the documents pin it. The rest is blocker 1 of the preview page.
@@ -147,9 +183,9 @@ The step never makes `journal.lock` and never runs again. A left lock, a loss or
 
 ## Order
 
-Each step is one approved action. The plan stops at the first refusal or surprise. A failed install means a new VM, never a repair.
+Once the package is approved as a whole, these steps run in this order. They stop at the first refusal, surprise or bound, with no retry. A failed install means a new VM, never a repair.
 
-1. **Approvals:** gates 1 to 6 decided and approved.
+1. **The package's go:** items 1 to 6 above settled.
 2. **The base, and the accounts:** `pim-preview`, Caddy's, `pim-bridge` and `pim-desktop`.
 3. **The bridge:**
    - the bundle with the viewer host, delivered root-owned;
@@ -157,10 +193,11 @@ Each step is one approved action. The plan stops at the first refusal or surpris
    - the journal, made once;
    - the root token's file;
    - `seal`, then the operator's `open`, which delivers `CUA_BRIDGES`.
-4. **The preview:** checkout, locked install and web build as `pim-preview`. Its private environment holds `PREVIEW_MODE=cua-eval`, `PIM_PUBLIC_URL=https://pim-cua-eval.ajac-zero.com`, `PIM_INGRESS_SECRET` and `PREVIEW_EVAL_CLAIM_SHA256`, with the fixture off. Its state directory is under `pim-preview`, and wrangler's telemetry is off.
+4. **The preview:** checkout, locked install and web build as `pim-preview`. Wrangler runs with `--ip 127.0.0.1 --host pim-cua-eval.ajac-zero.com --upstream-protocol https`, plus whatever the listener blocker's resolution requires. Its private environment holds `PREVIEW_MODE=cua-eval`, `PIM_PUBLIC_URL=https://pim-cua-eval.ajac-zero.com`, `PIM_INGRESS_SECRET` and `PREVIEW_EVAL_CLAIM_SHA256`, with the fixture off. Its state directory is under `pim-preview`, and wrangler's telemetry is off.
 5. **Start, inside out:** the desktop endpoint, then the bridge with the viewer's settings, then the preview, then Caddy last, so nothing is public before the application runs in its mode.
 6. **Check before anyone signs in:**
    - **on loopback:** the preview answers `403` without the ingress secret;
+   - **the listeners:** only those the listener blocker's resolution allows are open;
    - **through Caddy:** `/__dev/sign-in/x` is `404` and `/health` answers;
    - **in the logs:** there is no `preview.refused` line.
 7. **The owner:** set up once, as above.

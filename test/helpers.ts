@@ -264,7 +264,9 @@ export const opens = (path: string, token: string) =>
  * is a DevTools socket to one session it keeps until stopped.
  */
 export function testBrowser(): BrowserHost {
-	const binding = (env as unknown as { BROWSER: Fetcher }).BROWSER;
+	const binding = (env as unknown as { BROWSER?: Fetcher }).BROWSER;
+	// A run without the tests' Chrome, such as the Cua stand-in lane (vitest.cua-standin.config.ts), fails here, before anything starts.
+	if (!binding) throw new Error("This run has no Browser Run binding, so the tests' Chrome isn't available to it.");
 	let session: string | undefined;
 	const open = async (id: string) => {
 		const response = await binding.fetch(`https://fake.host/v1/devtools/browser/${id}`, { headers: { Upgrade: "websocket" } });

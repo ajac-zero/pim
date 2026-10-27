@@ -16,7 +16,7 @@ pnpm test                                 # every test, about 3 min
 pnpm check                                # typecheck, lint and test, as CI does
 ```
 
-Worker tests run in workerd against `test/worker.ts`: the real Worker, with pi-ai's faux model in place of Workers AI. Tests script the model with `faux.setResponses(...)`, and every scripted response must be used. The browser's tests drive a local Chrome in place of Browser Run; `node scripts/install-test-browser.mjs` puts it where wrangler looks (`.agents/setup` and CI run it). Helpers are in `test/helpers.ts`. Extend an existing test file before adding one. `pnpm test:live` reaches real third-party servers and is opt-in.
+Worker tests run in workerd against `test/worker.ts`: the real Worker, with pi-ai's faux model in place of Workers AI. Tests script the model with `faux.setResponses(...)`, and every scripted response must be used. The browser's tests drive a local Chrome in place of Browser Run; `node scripts/install-test-browser.mjs` puts it where wrangler looks (`.agents/setup` and CI run it). The Cua stand-in lane (`vitest.cua-standin.config.ts`, `docs/cua-standin-lane.md`) runs the Cua tests without that Chrome. Helpers are in `test/helpers.ts`. Extend an existing test file before adding one. `pnpm test:live` reaches real third-party servers and is opt-in.
 
 After editing `wrangler.jsonc`, run `pnpm types` to regenerate `worker-configuration.d.ts`.
 

@@ -47,6 +47,7 @@ import type { ViewerRoutes } from "./host.ts";
 import { type JournalFiles, JournalStoreRefused, NODE_JOURNAL_FILES, openJournalStore } from "./journal-store.ts";
 import { createViewerAdapter, MAX_MEDIA_PACKET_BYTES, type MediaEvents, type MediaSocket, type UpstreamOptions } from "./viewer-adapter.ts";
 import { type KeyRequest, openViewerLaunchManager, type ViewerLaunchManager } from "./viewer-launch-manager.ts";
+import type { Timers } from "./viewer-lifetime.ts";
 
 /** The longest root token spacesd's clients take, as in ./cua-credential.ts. */
 export const MAX_ROOT_TOKEN_BYTES = 4096;
@@ -228,11 +229,12 @@ export function parseViewerSettings(flags: { readonly origin?: string; readonly 
 }
 
 export type ShutdownOptions = {
-	/** How long, in all, the shutdown may wait: every stage of it races this one deadline. */
+	/** How long, in all, the shutdown may wait: every stage of it races this one deadline, held by one timer. */
 	readonly graceMs: number;
+	/** The pause between status reads, and the grace the journal's drain gets when the deadline had already passed when it began. */
 	readonly pollMs: number;
-	readonly now: () => number;
-	readonly sleep: (ms: number) => Promise<void>;
+	/** Every timer the shutdown sets, each cleared once it is no longer needed: nothing is left running. Tests give their own. */
+	readonly timers: Timers;
 };
 
 /**
@@ -261,18 +263,27 @@ export type ViewerShutdown = {
 
 /** A launch manager whose admission a shutdown can stop, and the shutdown. */
 export type LaunchAdmission = {
-	/** The manager the host's routes call: launches are refused once a shutdown began, and every call is tracked until it answers. */
+	/**
+	 * The manager the host's routes call. Once a shutdown began, **none of
+	 * its three calls reaches the underlying manager**: a launch is refused
+	 * (`blocked`), an end answers `unconfirmed`, and a status rejects (the
+	 * host answers `503`), since a status has no answer that says "not now".
+	 * Calls begun before then are tracked until they answer.
+	 */
 	readonly manager: Pick<ViewerLaunchManager, "launch" | "end" | "status">;
 	/**
-	 * Stops admitting launches, asks every launch this host answered to end
-	 * (those still starting too, as they answer), and reads their status
-	 * until each is seen closed or the one deadline passes. Every wait races
-	 * that deadline: a call that is held doesn't hold the shutdown. The
-	 * journal's `close` is called only when no call is outstanding, since
-	 * one could still write it, and races a bounded wait of its own (at least
-	 * one poll interval) when the deadline has already passed. A launch that
-	 * answers after the deadline is ended then, and nothing waits for it.
-	 * A second call gets the first one's answer.
+	 * Stops admission, asks every launch this host answered to end (those
+	 * still starting too, as they answer) through the underlying manager, and
+	 * reads their status until each is seen closed or the one deadline
+	 * passes. Every wait races that deadline, held by a single timer that is
+	 * cleared when the shutdown ends, and so is every pause between reads: a
+	 * held call doesn't hold the shutdown and no timer outlives it. The
+	 * journal's `close` is asked for only when no call is outstanding, since
+	 * one could still write it. It races the deadline, or, if the deadline had
+	 * already passed, one more poll interval, so the shutdown can take
+	 * `graceMs` plus at most `pollMs`. A launch that answers after the
+	 * deadline is ended then, and nothing waits for it. A second call gets
+	 * the first one's answer.
 	 */
 	readonly shutdown: (options: ShutdownOptions, journal?: { readonly close: () => Promise<void> }) => Promise<ViewerShutdown>;
 };
@@ -284,7 +295,7 @@ export function createLaunchAdmission(manager: Pick<ViewerLaunchManager, "launch
 	let result: Promise<ViewerShutdown> | undefined;
 	/** The launches this host answered `launched`, until the process ends. */
 	const owned = new Map<string, KeyRequest>();
-	/** Calls to the manager that haven't answered. A launch call adds its launch to `owned` before it settles. */
+	/** Calls to the underlying manager that haven't answered. A launch call adds its launch to `owned` before it settles. */
 	const calls = new Map<Promise<unknown>, "launch" | "call">();
 	const track = <T>(kind: "launch" | "call", call: Promise<T>): Promise<T> => {
 		calls.set(call, kind);
@@ -309,83 +320,109 @@ export function createLaunchAdmission(manager: Pick<ViewerLaunchManager, "launch
 				}),
 			);
 		},
-		end: (request) => track("call", manager.end(request)),
-		status: (request) => track("call", manager.status(request)),
+		// Not touched once shutdown began: a new call could write the journal while its lock is being released and the result reported.
+		end: (request) => (closing ? Promise.resolve({ outcome: "unconfirmed" } as const) : track("call", manager.end(request))),
+		status: (request) => (closing ? Promise.reject(new Error("The viewer host is shutting down.")) : track("call", manager.status(request))),
 	};
 
 	async function run(options: ShutdownOptions, journal?: { readonly close: () => Promise<void> }): Promise<ViewerShutdown> {
 		closing = true;
-		const deadline = options.now() + options.graceMs;
-		const remaining = () => Math.max(0, deadline - options.now());
+		const { timers } = options;
+		let pastDeadline = false;
+		let deadlineTimer: unknown;
+		const deadline = new Promise<void>((resolve) => {
+			deadlineTimer = timers.set(() => {
+				pastDeadline = true;
+				resolve();
+			}, options.graceMs);
+		});
 		/** Waits for `work` to answer or the deadline, whichever is first; the work itself is never stopped or assumed done. */
 		const within = async (work: Promise<unknown>): Promise<void> => {
-			const left = remaining();
-			if (left <= 0) return;
-			await Promise.race([work.then(() => undefined, () => undefined), options.sleep(left)]);
+			if (pastDeadline) return;
+			await Promise.race([work.then(() => undefined, () => undefined), deadline]);
 		};
-		const closed = new Set<string>();
-		const asked = new Set<string>();
-		const reading = new Set<string>();
-		const unconfirmed = new Set<string>();
-		for (;;) {
-			// Nothing new is asked once everything is seen settled, or the deadline has passed: a call begun now couldn't be waited for.
-			if (owned.size === closed.size && calls.size === 0) break;
-			if (remaining() <= 0) break;
-			const batch: Promise<unknown>[] = [];
-			for (const [key, request] of owned) {
-				if (closed.has(key)) continue;
-				if (!asked.has(key)) {
-					asked.add(key);
-					batch.push(
-						track("call", manager.end(request)).then(
-							(answer) => {
-								if (answer.outcome === "final" && answer.state === "closed_observed") closed.add(key);
-							},
-							() => undefined,
-						),
-					);
-				} else if (!reading.has(key)) {
-					// One status read at a time for a launch, so a held one isn't piled on.
-					reading.add(key);
-					batch.push(
-						track("call", manager.status(request))
-							.then(
+		/** Pauses for `ms`, or until the deadline; the pause's own timer is cleared either way. */
+		const pause = async (ms: number): Promise<void> => {
+			let handle: unknown;
+			try {
+				await Promise.race([new Promise<void>((resolve) => (handle = timers.set(resolve, ms))), deadline]);
+			} finally {
+				timers.clear(handle);
+			}
+		};
+		try {
+			const closed = new Set<string>();
+			const asked = new Set<string>();
+			const reading = new Set<string>();
+			const unconfirmed = new Set<string>();
+			for (;;) {
+				// Nothing new is asked once everything is seen settled, or the deadline has passed: a call begun now couldn't be waited for.
+				if (owned.size === closed.size && calls.size === 0) break;
+				if (pastDeadline) break;
+				const batch: Promise<unknown>[] = [];
+				for (const [key, request] of owned) {
+					if (closed.has(key)) continue;
+					if (!asked.has(key)) {
+						asked.add(key);
+						batch.push(
+							track("call", manager.end(request)).then(
 								(answer) => {
-									if (answer.outcome !== "found") return;
-									if (answer.state === "closed_observed") {
-										closed.add(key);
-										unconfirmed.delete(key);
-									} else if (answer.state === "unconfirmed") unconfirmed.add(key);
-									else unconfirmed.delete(key);
+									if (answer.outcome === "final" && answer.state === "closed_observed") closed.add(key);
 								},
 								() => undefined,
-							)
-							.finally(() => reading.delete(key)),
-					);
+							),
+						);
+					} else if (!reading.has(key)) {
+						// One status read at a time for a launch, so a held one isn't piled on.
+						reading.add(key);
+						batch.push(
+							track("call", manager.status(request))
+								.then(
+									(answer) => {
+										if (answer.outcome !== "found") return;
+										if (answer.state === "closed_observed") {
+											closed.add(key);
+											unconfirmed.delete(key);
+										} else if (answer.state === "unconfirmed") unconfirmed.add(key);
+										else unconfirmed.delete(key);
+									},
+									() => undefined,
+								)
+								.finally(() => reading.delete(key)),
+						);
+					}
+				}
+				if (batch.length > 0) await within(Promise.all(batch));
+				if (owned.size === closed.size && calls.size === 0) break;
+				if (!pastDeadline) await pause(options.pollMs);
+			}
+			expired = true;
+
+			let inFlight = 0;
+			for (const kind of calls.values()) if (kind === "launch") inFlight++;
+			const unsettled = calls.size - inFlight;
+			let lockLeft = false;
+			if (journal) {
+				if (calls.size > 0) {
+					// A call outstanding could still write the journal: its lock stays held, and `close` isn't asked for.
+					lockLeft = true;
+				} else {
+					// The deadline, or one poll interval more if it had already passed; the extra timer is cleared too.
+					let grace: unknown;
+					const limit = pastDeadline ? new Promise<void>((resolve) => (grace = timers.set(resolve, options.pollMs))) : deadline;
+					try {
+						lockLeft = !(await Promise.race([journal.close().then(() => true, () => false), limit.then(() => false)]));
+					} finally {
+						if (grace !== undefined) timers.clear(grace);
+					}
 				}
 			}
-			if (batch.length > 0) await within(Promise.all(batch));
-			if (owned.size === closed.size && calls.size === 0) break;
-			if (remaining() > 0) await options.sleep(Math.min(options.pollMs, remaining()));
+			const pending = owned.size - closed.size;
+			return { requested: asked.size, closed: closed.size, pending, unconfirmed: unconfirmed.size, inFlight, unsettled, lockLeft, settled: pending === 0 && calls.size === 0 && !lockLeft };
+		} finally {
+			// The one deadline timer, and the pause's, never outlive the shutdown.
+			timers.clear(deadlineTimer);
 		}
-		expired = true;
-
-		let inFlight = 0;
-		for (const kind of calls.values()) if (kind === "launch") inFlight++;
-		const unsettled = calls.size - inFlight;
-		let lockLeft = false;
-		if (journal) {
-			if (calls.size > 0) {
-				// A call outstanding could still write the journal: its lock stays held, and `close` isn't asked for.
-				lockLeft = true;
-			} else {
-				const bound = Math.max(remaining(), options.pollMs);
-				const released = await Promise.race([journal.close().then(() => true, () => false), options.sleep(bound).then(() => false)]);
-				lockLeft = !released;
-			}
-		}
-		const pending = owned.size - closed.size;
-		return { requested: asked.size, closed: closed.size, pending, unconfirmed: unconfirmed.size, inFlight, unsettled, lockLeft, settled: pending === 0 && calls.size === 0 && !lockLeft };
 	}
 
 	return { manager: admitting, shutdown: (options, journal) => (result ??= run(options, journal)) };
@@ -405,7 +442,7 @@ export type ViewerHostOptions = {
 	readonly upstream?: Pick<UpstreamOptions, "fetch" | "openMedia">;
 	/** This process's generation: `crypto.randomUUID()` unless a test gives one. */
 	readonly generation?: string;
-	/** Shutdown's bounds, and the clock and sleep it uses; 5 s, 100 ms and the real ones by default. */
+	/** Shutdown's bounds and timers: 5 s, 100 ms and the real timers by default. */
 	readonly shutdown?: Partial<ShutdownOptions>;
 };
 
@@ -448,8 +485,7 @@ export async function createViewerHost(options: ViewerHostOptions): Promise<View
 				{
 					graceMs: options.shutdown?.graceMs ?? 5_000,
 					pollMs: options.shutdown?.pollMs ?? 100,
-					now: options.shutdown?.now ?? Date.now,
-					sleep: options.shutdown?.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
+					timers: options.shutdown?.timers ?? { set: (callback, ms) => setTimeout(callback, ms), clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>) },
 				},
 				journal,
 			),

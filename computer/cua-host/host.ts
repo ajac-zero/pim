@@ -458,7 +458,14 @@ export function createHost(options: HostOptions): Host {
 		if ((body as { owner?: unknown }).owner !== relay.space) return reply(res, refusal(403, "This bridge serves another space."));
 		// Read last, right before the manager is asked: a client seen gone by now starts nothing.
 		if (lost()) return void res.destroy();
-		const answer = action === "launch" ? await viewer!.manager.launch(body as LaunchRequestKey) : action === "end" ? await viewer!.manager.end(body as KeyRequest) : await viewer!.manager.status(body as KeyRequest);
+		let answer: unknown;
+		try {
+			answer = action === "launch" ? await viewer!.manager.launch(body as LaunchRequestKey) : action === "end" ? await viewer!.manager.end(body as KeyRequest) : await viewer!.manager.status(body as KeyRequest);
+		} catch {
+			// The manager is not taking calls (the viewer is shutting down, or it failed): nothing is said of why, and the caller may ask again later.
+			log({ event: "host.refused", status: 503, reason: "viewer" });
+			return reply(res, refusal(503, "The viewer isn't taking requests.", [["retry-after", "5"]]));
+		}
 		log({ event: "host.managed", reason: action, status: 200 });
 		// A launch's answer holds the viewer path, whose fragment is the launch's credential: it goes to this caller only.
 		reply(res, { status: 200, headers: [["content-type", "application/json"], ["cache-control", "no-store"]], body: JSON.stringify(answer) });

@@ -195,22 +195,29 @@ const settle = async () => {
 	for (let index = 0; index < 40; index++) await Promise.resolve();
 };
 
-/** A clock that moves only when a test moves it: `sleep` answers once `advance` reaches it. */
+/** A clock that moves only when a test moves it, with timers that can be set and cleared: `active` counts those still set. */
 function clock() {
 	let time = 0;
-	const timers: { at: number; wake: () => void }[] = [];
+	let next = 0;
+	const timers = new Map<number, { at: number; wake: () => void }>();
 	return {
-		now: () => time,
-		sleep: (ms: number) => new Promise<void>((wake) => timers.push({ at: time + ms, wake })),
+		timers: {
+			set: (wake: () => void, ms: number): unknown => {
+				const handle = next++;
+				timers.set(handle, { at: time + ms, wake });
+				return handle;
+			},
+			clear: (handle: unknown) => void timers.delete(handle as number),
+		},
+		active: () => timers.size,
 		async advance(ms: number) {
 			const target = time + ms;
 			for (;;) {
-				timers.sort((a, b) => a.at - b.at);
-				const next = timers[0];
-				if (!next || next.at > target) break;
-				timers.shift();
-				time = Math.max(time, next.at);
-				next.wake();
+				const due = [...timers.entries()].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0];
+				if (!due) break;
+				timers.delete(due[0]);
+				time = Math.max(time, due[1].at);
+				due[1].wake();
 				await settle();
 			}
 			time = target;
@@ -219,20 +226,37 @@ function clock() {
 	};
 }
 
-/** Something a test holds back and then settles or severs, always in a `finally`. */
-function gate<T>() {
+/** Something a test holds back; `release` settles it with a harmless answer, `settle` with a chosen one. */
+function gate<T>(fallback: T) {
 	let settleIt!: (value: T) => void;
-	let severIt!: (error: Error) => void;
-	const promise = new Promise<T>((resolve, reject) => {
+	const promise = new Promise<T>((resolve) => {
 		settleIt = resolve;
-		severIt = reject;
 	});
-	// A severed gate that nothing awaits any more is not an unhandled rejection.
-	promise.catch(() => undefined);
-	return { promise, settle: settleIt, sever: () => severIt(new Error("severed")) };
+	return { promise, settle: settleIt, release: () => settleIt(fallback) };
 }
 
-/** Moves `time` in steps until `work` finishes, at most a bounded number of them. */
+/**
+ * Runs `body`, then, whatever happened, releases every gate and waits for
+ * every operation the body handed it, so no continuation outlives the test.
+ * A failure of the body and any failure in the cleanup are all kept, in an
+ * `AggregateError` when there is more than one.
+ */
+async function withGates(gates: { release: () => void }[], body: (owned: Promise<unknown>[]) => Promise<void>): Promise<void> {
+	const owned: Promise<unknown>[] = [];
+	const errors: unknown[] = [];
+	try {
+		await body(owned);
+	} catch (error) {
+		errors.push(error);
+	}
+	for (const held of gates) held.release();
+	await settle();
+	for (const result of await Promise.allSettled(owned)) if (result.status === "rejected") errors.push(result.reason);
+	if (errors.length === 1) throw errors[0];
+	if (errors.length > 1) throw new AggregateError(errors, "The test failed, and so did its cleanup.");
+}
+
+/** Moves time in steps until `work` finishes, at most a bounded number of them, and checks no timer is left set. */
 async function drive<T>(time: ReturnType<typeof clock>, work: Promise<T>): Promise<T> {
 	let finished = false;
 	work.then(
@@ -242,26 +266,32 @@ async function drive<T>(time: ReturnType<typeof clock>, work: Promise<T>): Promi
 	await settle();
 	for (let step = 0; step < 100 && !finished; step++) await time.advance(100);
 	assert.ok(finished, "the shutdown finished within the bounded steps");
-	return work;
+	const report = await work;
+	assert.equal(time.active(), 0, "every timer the shutdown set was cleared");
+	return report;
 }
 
 describe("a shutdown", () => {
 	const key = (name: string) => name.padEnd(16, "k");
 	const launchRequest = (name: string): LaunchRequestKey => ({ key: key(name), owner: SPACE, notAfter: 1 });
+	const keyRequest = (name: string): KeyRequest => ({ owner: SPACE, key: key(name), generation: "g" });
 	const launched = (name: string): LaunchAnswer => ({ outcome: "launched", key: key(name), launchId: "l".repeat(22), generation: "g", notAfter: 1, viewerPath: "/x", replayed: false });
 	const found = (name: string, state: EntryState): StatusAnswer => ({ outcome: "found", key: key(name), state, generation: "g", launchId: "l", notAfter: 1, evidence: null, launch: null });
-	const options = (time: ReturnType<typeof clock>) => ({ graceMs: 1000, pollMs: 300, now: time.now, sleep: time.sleep });
+	const options = (time: ReturnType<typeof clock>) => ({ graceMs: 1000, pollMs: 300, timers: time.timers });
 	const journal = () => {
 		const seen = { closes: 0 };
 		return { seen, close: async () => void seen.closes++ };
 	};
 	/** A manager whose launch, end and status answer from `script`, and which records the keys it was asked about. */
 	function manager(script: { launch?: (request: LaunchRequestKey) => Promise<LaunchAnswer>; end?: (request: KeyRequest) => Promise<EndAnswer>; status?: (request: KeyRequest) => Promise<StatusAnswer> } = {}) {
-		const seen = { ends: [] as string[], statuses: [] as string[] };
+		const seen = { launches: [] as string[], ends: [] as string[], statuses: [] as string[] };
 		return {
 			seen,
 			manager: {
-				launch: script.launch ?? (async (request: LaunchRequestKey) => launched(request.key.replace(/k+$/, ""))),
+				launch: async (request: LaunchRequestKey) => {
+					seen.launches.push(request.key);
+					return script.launch ? script.launch(request) : launched(request.key.replace(/k+$/, ""));
+				},
 				end: async (request: KeyRequest) => {
 					seen.ends.push(request.key);
 					return script.end ? script.end(request) : ({ outcome: "requested", recorded: true } as const);
@@ -328,8 +358,8 @@ describe("a shutdown", () => {
 	});
 
 	it("is not held by an end that never answers, and leaves the lock held and the call counted", async () => {
-		const held = gate<EndAnswer>();
-		try {
+		const held = gate<EndAnswer>({ outcome: "requested", recorded: true });
+		await withGates([held], async () => {
 			const w = manager({ end: () => held.promise });
 			const admission = createLaunchAdmission(w.manager);
 			await admission.manager.launch(launchRequest("a"));
@@ -338,14 +368,12 @@ describe("a shutdown", () => {
 			const report = await drive(time, admission.shutdown(options(time), j));
 			assert.deepEqual([report.pending, report.unsettled, report.inFlight, report.lockLeft, report.settled], [1, 1, 0, true, false]);
 			assert.equal(j.seen.closes, 0, "a call that could still write holds the lock");
-		} finally {
-			held.settle({ outcome: "requested", recorded: true });
-		}
+		});
 	});
 
 	it("is not held by a status that never answers, and reads a launch one at a time", async () => {
-		const held = gate<StatusAnswer>();
-		try {
+		const held = gate<StatusAnswer>(found("a", "ending"));
+		await withGates([held], async () => {
 			const w = manager({ status: () => held.promise });
 			const admission = createLaunchAdmission(w.manager);
 			await admission.manager.launch(launchRequest("a"));
@@ -355,22 +383,22 @@ describe("a shutdown", () => {
 			assert.deepEqual([report.pending, report.unsettled, report.lockLeft, report.settled], [1, 1, true, false]);
 			assert.equal(w.seen.statuses.length, 1, "a held read isn't piled on");
 			assert.equal(j.seen.closes, 0);
-		} finally {
-			held.sever();
-		}
+		});
 	});
 
 	it("is held by no launch that is still starting, refuses new ones, and ends a late one when it answers", async () => {
-		const start = gate<LaunchAnswer>();
-		try {
+		const start = gate<LaunchAnswer>(launched("a"));
+		await withGates([start], async (owned) => {
 			const w = manager({ launch: () => start.promise });
 			const admission = createLaunchAdmission(w.manager);
 			const starting = admission.manager.launch(launchRequest("a"));
+			owned.push(starting);
 			const time = clock();
 			const j = journal();
 			const done = admission.shutdown(options(time), j);
 			await settle();
 			assert.deepEqual(await admission.manager.launch(launchRequest("b")), { outcome: "refused", reason: "blocked" });
+			assert.deepEqual(w.seen.launches, [key("a")], "the refused launch never reached the manager");
 			const report = await drive(time, done);
 			assert.deepEqual([report.inFlight, report.unsettled, report.pending, report.lockLeft, report.settled], [1, 0, 0, true, false]);
 			assert.equal(j.seen.closes, 0);
@@ -380,17 +408,15 @@ describe("a shutdown", () => {
 			assert.equal((await starting).outcome, "launched");
 			await settle();
 			assert.deepEqual(w.seen.ends, [key("a")]);
-		} finally {
-			start.settle(launched("a"));
-		}
+		});
 	});
 
 	it("ends a launch that answers while it is waiting, and sees it closed", async () => {
-		const start = gate<LaunchAnswer>();
-		try {
+		const start = gate<LaunchAnswer>(launched("a"));
+		await withGates([start], async (owned) => {
 			const w = manager({ launch: () => start.promise, end: async () => ({ outcome: "final", state: "closed_observed" }) });
 			const admission = createLaunchAdmission(w.manager);
-			void admission.manager.launch(launchRequest("a"));
+			owned.push(admission.manager.launch(launchRequest("a")));
 			const time = clock();
 			const j = journal();
 			const done = admission.shutdown(options(time), j);
@@ -399,25 +425,52 @@ describe("a shutdown", () => {
 			const report = await drive(time, done);
 			assert.deepEqual(report, { requested: 1, closed: 1, pending: 0, unconfirmed: 0, inFlight: 0, unsettled: 0, lockLeft: false, settled: true });
 			assert.equal(j.seen.closes, 1);
-		} finally {
-			start.settle(launched("a"));
-		}
+		});
 	});
 
 	it("leaves the lock held, and says so, when the journal's drain never finishes or fails", async () => {
-		const held = gate<void>();
-		try {
+		const held = gate<void>(undefined);
+		await withGates([held], async () => {
 			const admission = createLaunchAdmission(manager().manager);
 			const time = clock();
 			const report = await drive(time, admission.shutdown(options(time), { close: () => held.promise }));
 			assert.deepEqual([report.lockLeft, report.settled], [true, false]);
-		} finally {
-			held.settle();
-		}
+		});
 		const failing = createLaunchAdmission(manager().manager);
 		const time = clock();
 		const report = await drive(time, failing.shutdown(options(time), { close: () => Promise.reject(new Error("x")) }));
 		assert.deepEqual([report.lockLeft, report.settled], [true, false]);
+	});
+
+	it("gives a drain one more poll interval when the deadline had already passed, and no more", async () => {
+		const held = gate<void>(undefined);
+		await withGates([held], async () => {
+			// One launch never seen closed, so the deadline passes before the drain begins; the drain's own timer is cleared too.
+			const admission = createLaunchAdmission(manager().manager);
+			await admission.manager.launch(launchRequest("a"));
+			const time = clock();
+			const report = await drive(time, admission.shutdown(options(time), { close: () => held.promise }));
+			assert.deepEqual([report.pending, report.lockLeft, report.settled], [1, true, false]);
+		});
+	});
+
+	it("admits nothing through any of its three calls while the journal drain is held, and the underlying manager is not asked", async () => {
+		const held = gate<void>(undefined);
+		await withGates([held], async (owned) => {
+			const w = manager();
+			const admission = createLaunchAdmission(w.manager);
+			const time = clock();
+			const done = admission.shutdown(options(time), { close: () => held.promise });
+			owned.push(done);
+			await settle();
+			assert.deepEqual(await admission.manager.launch(launchRequest("a")), { outcome: "refused", reason: "blocked" });
+			assert.deepEqual(await admission.manager.end(keyRequest("a")), { outcome: "unconfirmed" });
+			await assert.rejects(admission.manager.status(keyRequest("a")), /shutting down/);
+			assert.deepEqual(w.seen, { launches: [], ends: [], statuses: [] });
+			const report = await drive(time, done);
+			assert.deepEqual([report.lockLeft, report.settled], [true, false]);
+			assert.deepEqual(w.seen, { launches: [], ends: [], statuses: [] });
+		});
 	});
 
 	it("gives the first call's answer to a second, and admits nothing after", async () => {
@@ -445,7 +498,7 @@ describe("the viewer host", () => {
 	// No real timer: the shutdown's clock is a test's, and its work finishes without waiting on it.
 	const make = (files: FakeFiles) => {
 		const time = clock();
-		return createViewerHost({ origin: "http://127.0.0.1:3211", displayId: "primary", journalDirectory: DIR, rootTokenFile: ROOT, files, upstream: noSpacesd, generation: "host-test", shutdown: { now: time.now, sleep: time.sleep } });
+		return createViewerHost({ origin: "http://127.0.0.1:3211", displayId: "primary", journalDirectory: DIR, rootTokenFile: ROOT, files, upstream: noSpacesd, generation: "host-test", shutdown: { timers: time.timers } });
 	};
 
 	it("takes only an origin that is https, or http on a loopback address", () => {

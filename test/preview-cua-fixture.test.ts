@@ -744,6 +744,21 @@ describe("the preview's Cua evaluation mode", () => {
 
 	const refusal = async (answer: Response) => [answer.status, ((await answer.json()) as { error: string }).error];
 
+	/**
+	 * What a call on the Directory throws, caught inside the Directory and handed back as its message.
+	 * Thrown across RPC, the pool reported the rejection as unhandled even though the test awaited it
+	 * (the independent run at 96f46b7), so the tests observe it where it is thrown.
+	 */
+	const thrownWithin = (dir: DurableObjectStub<EvalDirectory>, call: (instance: EvalDirectory) => unknown) =>
+		runInDurableObject(dir, async (instance: EvalDirectory) => {
+			try {
+				await call(instance);
+				return { threw: false } as const;
+			} catch (error) {
+				return { threw: true, message: messageOf(error) } as const;
+			}
+		});
+
 	it("leaves the local preview as it was, refuses it behind an ingress or at an HTTPS address, and changes no deployment's Directory", async () => {
 		await space("evallocal");
 		settings.PIM_PUBLIC_URL = "http://localhost:8787";
@@ -842,7 +857,7 @@ describe("the preview's Cua evaluation mode", () => {
 		expect(await dir.register(later)).toEqual({ ok: false, status: 403, error: ONCE });
 		await evictDurableObject(dir);
 		expect(await dir.register(later)).toEqual({ ok: false, status: 403, error: ONCE });
-		await expect(dir.claimCode()).rejects.toThrow(/makes none/);
+		expect(await thrownWithin(dir, (instance) => instance.claimCode())).toEqual({ threw: true, message: "This preview is set up with the operator's claim code, and makes none." });
 		expect(await dir.account(owner)).toMatchObject({ role: "admin", status: "pending" });
 		expect(await dir.resolve("evalsecond")).toBeNull();
 		expect(await dir.resolve("evallater")).toBeNull();
@@ -974,7 +989,7 @@ describe("the preview's Cua evaluation mode", () => {
 			stuck.mockImplementationOnce(() => {
 				throw new Error("The disk is full");
 			});
-			await expect(thrownDir.register(later("evalthrown"))).rejects.toThrow(/The Directory went away/);
+			expect(await thrownWithin(thrownDir, (instance) => instance.register(later("evalthrown")))).toEqual({ threw: true, message: "The Directory went away" });
 		} finally {
 			throwing.mockRestore();
 			stuck.mockRestore();

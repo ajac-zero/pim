@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import type { Message } from "@earendil-works/pi-ai";
 import { getAgentByName } from "agents";
 import { env, runInDurableObject } from "cloudflare:test";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { type BrowserHost, type ExecArgs, type ExecResult, Link, type Machine } from "../computer/pim-computer";
 import { Computer, IDLE_MS } from "../src/computer";
 import { ControlCoordinator, type DispatchTrace, dispatchTrace } from "../src/computer-control-runtime";
@@ -10,7 +10,8 @@ import type { ControlState } from "../src/computer-control";
 import { CONNECT_MS, Cua, type CuaBridge, MAX_MESSAGE_CHARS, PROVIDER_KEY, SPACE_HEADER } from "../src/cua";
 import type { Approval } from "../src/store";
 import { exports } from "cloudflare:workers";
-import { api, apiUrl, connectTestComputer, fakeChrome, OWNER, opens, post, toolUse } from "./helpers";
+import { api, apiUrl, connectTestComputer, fakeChrome, lastUserText, OWNER, opens, post, recordSetup, toolUse, waits } from "./helpers";
+import { requestLabel } from "./waits";
 import { faux, type Pim } from "./worker";
 
 /**
@@ -387,11 +388,13 @@ describe("a space whose operator chose its Cua VM", () => {
 	/** What a bridge answers in place of taking the connection, when a test says so, and the requests it answered so. */
 	let refusal: (() => Response) | null = null;
 	const refused: string[] = [];
-	/** Held, a command the bridge's pim-computer got doesn't answer. */
+	/** Held, a command the bridge's pim-computer got doesn't answer. Each is a test's gate (`waits().gate`), opened after it at the latest. */
 	let hold: Promise<void> | null = null;
 	/** Held, a bridge takes no connection yet; `held` counts those waiting. */
 	let handshake: Promise<void> | null = null;
 	let held = 0;
+	/** Scripted answers some request other than the turn they were scripted for took, by tool and step. */
+	const strays: string[] = [];
 	/** What answers the Sprites API, in the tests that start a Sprite. */
 	let sprites: ((request: Request) => Promise<Response>) | null = null;
 	const chrome = fakeChrome();
@@ -414,7 +417,15 @@ describe("a space whose operator chose its Cua VM", () => {
 		return fixture;
 	}
 
-	beforeEach(() => {
+	beforeEach((context) => {
+		// Beside the waits helpers.ts reports: where the bridge stood, as the test ran out of time if it did, by counts only.
+		const state = () => {
+			const connections = fixture?.connections ?? [];
+			return JSON.stringify({ event: "cua.state", held, handshake: handshake !== null, hold: hold !== null, connections: connections.length, open: connections.filter((each) => each.closed === null).length, strays: [...strays] });
+		};
+		let atTimeout: string | undefined;
+		context.signal.addEventListener("abort", () => void (atTimeout = state()), { once: true });
+		context.onTestFailed(() => console.info(atTimeout ?? state()));
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 			const url = new URL(input instanceof Request ? input.url : String(input));
 			if (sprites && url.host === "api.sprites.dev") return sprites(new Request(input, init));
@@ -435,6 +446,11 @@ describe("a space whose operator chose its Cua VM", () => {
 		});
 	});
 
+	afterEach(() => {
+		// The gates themselves are opened after this, with the test's waits (test/helpers.ts); later requests aren't held.
+		handshake = hold = null;
+	});
+
 	const choice = (owner: string) => JSON.stringify({ provider: "cua", space: owner });
 	const bridges = (entries: Record<string, unknown>) => JSON.stringify(entries);
 	const bridgeOf = (owner: string) => ({ url: `https://bridge.cua.test/${owner}`, token: TOKEN });
@@ -446,24 +462,30 @@ describe("a space whose operator chose its Cua VM", () => {
 	 */
 	async function space(username: string, setUp: (instance: Pim, owner: string) => void) {
 		const directory = env.Directory.getByName("directory");
-		const registered = await directory.register({ username, ip: "192.0.2.9", claim: { window: true }, policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 } });
+		const registered = await waits().start("space: register", () => directory.register({ username, ip: "192.0.2.9", claim: { window: true }, policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 } }));
 		if (!registered.ok) throw new Error(registered.error);
 		const owner = registered.account.ownerId;
-		await directory.activate(owner);
+		await waits().start("space: activate", () => directory.activate(owner));
 		// Before the space first starts, which sets up its tools.
-		await runInDurableObject(env.Pim.getByName(owner), (instance: Pim) => setUp(instance, owner));
-		const agent = await getAgentByName(env.Pim, owner);
-		await agent.provision({ ownerId: owner, username });
-		const token = (await env.Auth.getByName(owner).createToken(owner, "tests", Date.now())).token;
+		await waits().start("space: operator's choice", () => runInDurableObject(env.Pim.getByName(owner), (instance: Pim) => setUp(instance, owner)));
+		const agent = await waits().start("space: start", () => getAgentByName(env.Pim, owner));
+		await waits().start("space: provision", () => agent.provision({ ownerId: owner, username }));
+		const token = (await waits().start("space: token", () => env.Auth.getByName(owner).createToken(owner, "tests", Date.now()))).token;
 		return inside(owner, token);
 	}
 
 	/** A space, through the person's API with `token`, and from inside, as tests reach it. */
 	async function inside(owner: string, token: string) {
-		const call = <T = any>(path: string, init: RequestInit = {}) =>
-			api<T>(path, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init.headers as Record<string, string> | undefined) } });
+		// Each request, and each step inside the space, is started through the test's waits: none starts once the test has run out of time, and each must finish after it.
+		const call = <T = any>(path: string, init: RequestInit = {}) => {
+			const request = new Request(apiUrl(path), { ...init, headers: { Authorization: `Bearer ${token}`, "content-type": "application/json", ...(init.headers as Record<string, string> | undefined) } });
+			return waits().start(requestLabel(request), async () => {
+				const response = await exports.default.fetch(request);
+				return { status: response.status, body: (await response.json()) as T };
+			});
+		};
 		const root: string = (await call("/")).body.rootSession;
-		const within = <T>(fn: (instance: Pim) => T | Promise<T>) => runInDurableObject(env.Pim.getByName(owner), (instance: Pim) => fn(instance));
+		const within = <T>(fn: (instance: Pim) => T | Promise<T>) => waits().start("in the space", () => runInDurableObject(env.Pim.getByName(owner), (instance: Pim) => fn(instance)));
 		const self = {
 			owner,
 			token,
@@ -488,28 +510,37 @@ describe("a space whose operator chose its Cua VM", () => {
 			uses(name: string, args: Record<string, unknown>) {
 				let result = "";
 				let description = "";
-				faux.setResponses([
-					(context) => {
-						const added = context.messages.flatMap((message) => (message.role === "system" ? (message.toolsAdded ?? []) : []));
-						description = added.findLast((tool) => tool.name === name)?.description ?? "";
-						return toolUse(name, args as never);
-					},
-					(context) => {
-						result = lastToolResult(context.messages);
-						return toolUse("send_to_user", { message: "Ok." });
-					},
-				]);
-				const turn = self.post(`/sessions/${root}/messages`, { content: `Use ${name}`, wait: true });
+				const content = `Use ${name}`;
+				const stray = (context: { messages: readonly Message[] }, step: number) => void (lastUserText(context.messages) !== content && strays.push(`${name} ${step}`));
+				// The scripted answers are set as the turn starts, so a test that ran out of time sets none.
+				const turn = waits().start(`turn: ${name}`, () => {
+					faux.setResponses([
+						(context) => {
+							stray(context, 1);
+							const added = context.messages.flatMap((message) => (message.role === "system" ? (message.toolsAdded ?? []) : []));
+							description = added.findLast((tool) => tool.name === name)?.description ?? "";
+							return toolUse(name, args as never);
+						},
+						(context) => {
+							stray(context, 2);
+							result = lastToolResult(context.messages);
+							return toolUse("send_to_user", { message: "Ok." });
+						},
+					]);
+					return self.post(`/sessions/${root}/messages`, { content, wait: true });
+				});
 				return { turn, result: () => result, description: () => description };
 			},
 			pending: () =>
-				vi.waitFor(
-					async () => {
-						const [approval] = (await call<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
-						expect(approval).toBeDefined();
-						return approval!;
-					},
-					{ timeout: 15_000, interval: 200 },
+				waits().start("pending approval", () =>
+					vi.waitFor(
+						async () => {
+							const [approval] = (await call<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
+							expect(approval).toBeDefined();
+							return approval!;
+						},
+						{ timeout: 15_000, interval: 200 },
+					),
 				),
 			decide: (id: string) => self.post(`/approvals/${id}/approve`),
 			/** The agent asks to run `command`, it is approved, and the turn ends: what the agent heard. */
@@ -524,8 +555,10 @@ describe("a space whose operator chose its Cua VM", () => {
 	}
 
 	/** The person's API answered as it is, not as JSON. */
-	const raw = (path: string, token: string, init: RequestInit = {}) =>
-		exports.default.fetch(new Request(apiUrl(path), { ...init, headers: { Authorization: `Bearer ${token}` } }));
+	const raw = (path: string, token: string, init: RequestInit = {}) => {
+		const request = new Request(apiUrl(path), { ...init, headers: { Authorization: `Bearer ${token}` } });
+		return waits().start(requestLabel(request), () => exports.default.fetch(request));
+	};
 
 	function lastToolResult(messages: readonly Message[]) {
 		const result = messages.findLast((message) => message.role === "toolResult");
@@ -538,6 +571,7 @@ describe("a space whose operator chose its Cua VM", () => {
 	let fixture: Fixture;
 
 	beforeAll(async () => {
+		recordSetup();
 		cua = await space("cuaperson", (instance, owner) => {
 			instance.store.setMeta(PROVIDER_KEY, choice(owner));
 			(instance as unknown as { env: Record<string, unknown> }).env.CUA_BRIDGES = bridges({ [owner]: bridgeOf(owner) });
@@ -754,6 +788,10 @@ describe("a space whose operator chose its Cua VM", () => {
 	});
 
 	it("sends nothing on a link whose handshake finished after the choice or the bridge changed, and replays nothing after", async () => {
+		// The agent's own lease, whatever the tests before left: the space opted in, taken back by the person, then resumed for the agent.
+		await cua.within((instance) => instance.control.enable());
+		expect(await cua.within((instance) => instance.control.apply({ type: "takeover" }))).toEqual({ ok: true });
+		expect(await cua.grant("lease-race")).toEqual({ ok: true });
 		const valid = bridges({ [cua.owner]: bridgeOf(cua.owner) });
 		const changes: [(instance: Pim) => void, (instance: Pim) => void, RegExp][] = [
 			[
@@ -765,25 +803,29 @@ describe("a space whose operator chose its Cua VM", () => {
 		];
 		for (const [change, undo, message] of changes) {
 			await cua.within((instance) => instance.computer.disconnect("Asleep"));
-			let release = () => undefined as void;
-			handshake = new Promise<void>((resolve) => {
-				release = resolve;
-			});
+			const { opened, open: release } = waits().gate("bridge handshake");
+			handshake = opened;
 			held = 0;
-			const asking = cua.uses("shell", { command: "echo raced" });
-			const deciding = cua.decide((await cua.pending()).id);
-			await vi.waitFor(() => expect(held).toBe(1));
-			await cua.within(change);
-			handshake = null;
-			release();
-			await deciding;
-			await asking.turn;
-			expect(asking.result()).toMatch(message);
-			// The bridge took the connection, which carried nothing and was let go.
-			expect(fixture.connections.at(-1)!.received).toEqual([]);
-			await vi.waitFor(() => expect(fixture.connections.at(-1)!.closed).not.toBeNull());
-			expect((await cua.stateOf()).requests.at(-1)).toMatchObject({ status: "rejected" });
-			await cua.within(undo);
+			try {
+				const asking = cua.uses("shell", { command: "echo raced" });
+				const deciding = cua.decide((await cua.pending()).id);
+				await waits().watch("held handshake", vi.waitFor(() => expect(held).toBe(1)));
+				await cua.within(change);
+				handshake = null;
+				release();
+				await deciding;
+				await asking.turn;
+				expect(asking.result()).toMatch(message);
+				// The bridge took the connection, which carried nothing and was let go: its close event was seen.
+				expect(fixture.connections.at(-1)!.received).toEqual([]);
+				await waits().watch("raced connection's close event", vi.waitFor(() => expect(fixture.connections.at(-1)!.closed).not.toBeNull()));
+				expect((await cua.stateOf()).requests.at(-1)).toMatchObject({ status: "rejected" });
+			} finally {
+				// The gate is this test's own, and the change too: undone however the iteration ends.
+				handshake = null;
+				release();
+				await cua.within(undo);
+			}
 		}
 		expect(await cua.run("echo after the race")).toContain("ran echo after the race");
 		expect(fixture.ran).not.toContain("echo raced");
@@ -920,7 +962,8 @@ describe("a space whose operator chose its Cua VM", () => {
 	});
 
 	it("blocks on a command the bridge took and never answered, and never sends it again", async () => {
-		hold = new Promise<void>(() => undefined);
+		// Shut for the whole test, so the command is never answered here; opened after the test, with its waits.
+		hold = waits().gate("unanswered command").opened;
 		const asking = cua.uses("shell", { command: "echo hang" });
 		const deciding = cua.decide((await cua.pending()).id);
 		await vi.waitFor(() => expect(fixture.ran.at(-1)).toBe("echo hang"));

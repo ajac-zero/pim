@@ -4,12 +4,13 @@ import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@e
 import { getAgentByName } from "agents";
 import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
-import { afterEach, beforeAll, expect, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, vi } from "vitest";
 import { type BrowserHost, type ExecArgs, type ExecResult, Link, type Machine } from "../computer/pim-computer";
 import { ownedCode } from "../src/auth";
 import type { Approval } from "../src/store";
 import type { TranscriptMessage } from "../src/transcript";
 import { faux } from "./worker";
+import { requestLabel, Waits } from "./waits";
 import { Authenticator } from "./webauthn";
 
 /**
@@ -23,21 +24,60 @@ export let TOKEN = "";
 /** The public id of the space's root session, where API clients talk by default. */
 export let ROOT = "";
 
+/**
+ * The waits of the setup or test under way (./waits.ts). A failed test
+ * reports them, as they stood when it ran out of time if it did, and setup
+ * that never finished reports its own. After each test, the work it started
+ * through `waits().start` must finish within `SETTLE_MS` of its gates
+ * opening, or the test fails.
+ */
+let current = new Waits("setup");
+const SETTLE_MS = 5_000;
+
+/** The current setup's or test's waits. */
+export function waits(): Waits {
+	return current;
+}
+
+/** Starts recording a `beforeAll`'s waits, so setup that never finishes says where it stopped. */
+export function recordSetup(): void {
+	current = new Waits("setup");
+}
+
+const report = () => current.report({ fauxPending: faux.getPendingResponseCount() });
+
 beforeAll(async () => {
+	recordSetup();
 	const directory = env.Directory.getByName("directory");
-	const registered = await directory.register({
-		username: "tester",
-		ip: "192.0.2.1",
-		claim: { window: true },
-		policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 },
-	});
+	const registered = await current.watch(
+		"setup: register",
+		directory.register({
+			username: "tester",
+			ip: "192.0.2.1",
+			claim: { window: true },
+			policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 },
+		}),
+	);
 	if (!registered.ok) throw new Error(registered.error);
 	OWNER = registered.account.ownerId;
-	await directory.activate(OWNER);
-	const agent = await getAgentByName(env.Pim, OWNER);
-	await agent.provision({ ownerId: OWNER, username: "tester" });
-	TOKEN = (await env.Auth.getByName(OWNER).createToken(OWNER, "tests", Date.now())).token;
+	await current.watch("setup: activate", directory.activate(OWNER));
+	const agent = await current.watch("setup: space", getAgentByName(env.Pim, OWNER));
+	await current.watch("setup: provision", agent.provision({ ownerId: OWNER, username: "tester" }));
+	TOKEN = (await current.watch("setup: token", env.Auth.getByName(OWNER).createToken(OWNER, "tests", Date.now()))).token;
 	ROOT = (await api("/")).body.rootSession;
+});
+
+beforeEach((context) => {
+	current = new Waits("test", context.signal);
+	// Taken as the test runs out of time, before its gates are opened after it; printed once its afterEach hooks have run.
+	let atTimeout: string | undefined;
+	context.signal.addEventListener("abort", () => void (atTimeout = report()), { once: true });
+	context.onTestFailed(() => console.error(atTimeout ?? report()));
+});
+
+afterAll(() => {
+	// Setup that never finished, which the test runner reports only as a hook that ran out of time.
+	if (current.scope === "setup" && current.waiting) throw new Error(`Setup never finished: ${report()}`);
 });
 
 export function url(path: string) {
@@ -50,12 +90,11 @@ export function apiUrl(path: string) {
 }
 
 export async function api<T = any>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
-	const response = await exports.default.fetch(
-		new Request(apiUrl(path), {
-			...init,
-			headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json", ...init.headers },
-		}),
-	);
+	const request = new Request(apiUrl(path), {
+		...init,
+		headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json", ...init.headers },
+	});
+	const response = await current.watch(requestLabel(request), exports.default.fetch(request));
 	return { status: response.status, body: (await response.json()) as T };
 }
 
@@ -110,11 +149,14 @@ export async function say(content: string, session = ROOT) {
 
 /** The approval waiting for the user. */
 export async function pendingApproval() {
-	return vi.waitFor(async () => {
-		const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
-		expect(approval).toBeDefined();
-		return approval!;
-	});
+	return current.watch(
+		"pending approval",
+		vi.waitFor(async () => {
+			const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
+			expect(approval).toBeDefined();
+			return approval!;
+		}),
+	);
 }
 
 /** Opens the WebSocket and collects every message the server sends. */
@@ -200,8 +242,14 @@ export async function messagesOf(session: string, role: "user" | "assistant" | "
 	return messages.filter((message) => message.role === role).map(textOf);
 }
 
-afterEach(() => {
+afterEach(async () => {
+	// Before the test's stand-ins are restored, which what it started may still use.
+	const unsettled = await current.settle(SETTLE_MS).then(
+		() => null,
+		(error: unknown) => error,
+	);
 	vi.restoreAllMocks();
+	if (unsettled) throw unsettled;
 	// Every scripted model response was used: the space did what the test expected.
 	expect(faux.getPendingResponseCount()).toBe(0);
 });

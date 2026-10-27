@@ -40,7 +40,7 @@ Checked by reading the files and what they import, not by running them:
 
 ## Running it
 
-Not yet run. It needs the Node and workerd infrastructure Vitest's Workers pool starts, the same as the whole suite, which is to be authorized after review. The commands, once it is:
+It needs the Node and workerd infrastructure Vitest's Workers pool starts, the same as the whole suite, and is run only once authorized after review. The commands:
 
 ```sh
 node_modules/.bin/vitest run --config vitest.cua-standin.config.ts   # the lane: 144 tests expected
@@ -48,6 +48,10 @@ node_modules/.bin/tsc --noEmit                                       # types of 
 ```
 
 The configuration files at the root (`vitest*.ts`) aren't in `tsconfig.json`'s `include`, so `tsc` doesn't check them.
+
+### Runs so far
+
+- **At `876b773`, once, by the reviewer, without `tsc`:** exit 1, 143 of 144 passed, 8 of 9 files, in 131 s; `test/waits.test.ts`'s nine passed. The one failure was `test/computer-control-runtime.test.ts`'s "fails closed when checking a native reply throws": the call settled with the computer's outcome rather than the expected error, so the throwing check its `vi.mock` puts in place of `readNativeOutcome` never ran on that reply. `src/computer.ts` settles a check that throws as the test expects, read as written; the mock didn't reach it. A module evaluated in a file's run before that file's `vi.mock` is registered keeps the real import: Vitest resets modules between files, but every event a Durable Object gets runs through the plugin's wrapper, which imports the Worker (`test/worker.ts`, and with it `src/computer.ts`) through the same module runner, so a Durable Object of an earlier file that wakes in that window would leave the real check in place. Which module was evaluated early, and by what, isn't known: the run's log has no record of it, and the lane's setup file imports only `cloudflare:test`. The test now clears the module registry before its mock is registered, and checks that the throwing check read the reply before its other assertions, which are unchanged. Not run since.
 
 ## Waits and what a test starts
 
@@ -61,7 +65,7 @@ The configuration files at the root (`vitest*.ts`) aren't in `tsconfig.json`'s `
 
 That only says those tasks and that cleanup finished: a socket is counted closed when its close event is seen, and nothing here shows that the space, or anything else, is idle. A stale continuation that changes shared state without starting work through a scope, such as assigning a fixture variable, isn't held back; the race test clears only its own gate for that reason.
 
-**Not yet shown.** Nothing here has run. That workerd carries the async context into promise continuations and timer callbacks, and that Vitest runs a test's hooks and body inside its `aroundEach` hook's call, is assumed from their documentation and source; `test/waits.test.ts` checks the first when it runs, and a test whose code ran unowned would fail at `waits()` rather than start anything. `src/` already relies on the same `AsyncLocalStorage` in workerd.
+**What one run shows.** That workerd carries the async context into promise continuations and timer callbacks, and that Vitest runs a test's hooks and body inside its `aroundEach` hook's call, were taken from their documentation and source. The one run above is evidence for both, not proof: `test/waits.test.ts` checks the first, and passed; `test/cua.test.ts`, whose every request and turn goes through `waits()`, passed, where code run unowned would have failed at `waits()` rather than start anything. `src/` already relies on the same `AsyncLocalStorage` in workerd.
 
 ## What it doesn't settle
 

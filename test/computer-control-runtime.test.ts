@@ -16,6 +16,10 @@ import { api, connectTestComputer, fakeChrome, OWNER, post, say, toolUse } from 
 import { faux, type Pim } from "./worker";
 
 // The space's own check of native-app outcomes, as it is, but replaceable for one reply (see "fails closed when checking a native reply throws").
+// The module registry is cleared first, before the mock is registered and before anything here is imported: a module the runtime evaluated
+// earlier in this file's run, such as src/computer.ts from a setup file or from the Worker being imported for a Durable Object between files,
+// would otherwise keep the real check, and the mock would never reach the space's code.
+vi.hoisted(() => vi.resetModules());
 vi.mock("../computer/native-outcome", async (original) => {
 	const actual = await original<typeof import("../computer/native-outcome")>();
 	return { ...actual, readNativeOutcome: vi.fn(actual.readNativeOutcome) };
@@ -774,6 +778,8 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 		await calls(1);
 		expect(computer.busy()).toBe(true);
 		expect(() => reply(0, { result: known })).not.toThrow();
+		// The throwing check is the one that read this reply: the injection reached the space's code, so what follows is about how it failed.
+		expect(vi.mocked(nativeOutcome.readNativeOutcome).mock.results.at(-1)?.type).toBe("throw");
 		const done = await run.done;
 		expect("error" in done && [done.error.message, done.error.answered]).toEqual([
 			"The computer's answer to a native-app call couldn't be read, so whether it acted is unknown.",

@@ -568,10 +568,15 @@ describe("the viewer host", () => {
 		stuck.directory(DIR);
 		stuck.file(`${DIR}/journal.json`, JSON.stringify({ version: 1, revision: 1, generation: "provisioned", initialized: "a test", entries: [] }));
 		const held = await make(stuck);
+		// Starting the host already wrote the journal (and so unlinked a temporary file, which is not the lock); only what the shutdown does is judged.
+		const lock = `${DIR}/journal.lock`;
+		const setup = stuck.log.length;
 		stuck.failNext.add("close");
 		assert.equal((await held.close()).lockLeft, true);
-		assert.equal(stuck.nodes.has(`${DIR}/journal.lock`), true);
-		assert.equal(stuck.log.some((entry) => entry.startsWith("unlink")), false);
+		assert.equal(stuck.nodes.has(lock), true);
+		const shutdown = stuck.log.slice(setup);
+		assert.deepEqual(shutdown.filter((entry) => entry.startsWith("unlink")), [], "the shutdown unlinked nothing: the lock's descriptor wasn't seen to close");
+		assert.equal(shutdown.filter((entry) => entry === `close ${lock}`).length, 1, "the lock's descriptor was closed once, and never again by number");
 	});
 
 	it("reports a root token reader that latched", async () => {

@@ -1,9 +1,10 @@
 /**
  * The viewer-first single-user preview's settings, in one place so the
  * Worker side and the host side name the same numbers (docs/cua-viewer-first-preview.md).
- * It is data only: importing it starts nothing, adds no route, binding or
- * setting to a deployment, and nothing in `src/` imports it. It has no imports,
- * so the preview's Worker and the Node host can both read it.
+ * Importing it starts nothing and adds no route, binding or setting to a
+ * deployment; nothing in `src/` imports it, and the preview's Worker
+ * (preview/worker.ts) reads it. It has no imports, so the Node host can
+ * read it too.
  */
 
 export const VIEWER_FIRST = {
@@ -18,6 +19,28 @@ export const VIEWER_FIRST = {
 	/** What stays off: the agent's native-app tools, the optional Cua child (`desktop.ts`'s `cua` option), and takeover. */
 	off: ["native-tools", "cua-child", "human-takeover"],
 } as const;
+
+/**
+ * What drives a preview space's agents while the person watches, which
+ * decides what the preview can show. The listing of observations names it
+ * (`GET /api/observations`, `agent`).
+ *
+ * - `stand-in`: the preview's own model (preview/worker.ts), the default. It
+ *   calls a tool only when the person's message says `/tool <name> {json}`,
+ *   such as `/tool shell {"command": "xdg-open https://example.com"}`, and
+ *   the approval that files is the person's to answer. Watching then shows
+ *   the wiring: the ordinary shell, files and Chrome reaching the Cua VM and
+ *   the viewer showing their effect beside them. It never shows an agent
+ *   working the desktop by itself, and isn't evidence that one can.
+ * - `real`: a model the person chose in Settings (a ChatGPT plan, or a
+ *   provider of their own). Only in this mode can the preview show an agent
+ *   acting by itself while it is watched. No real model has driven a Cua VM
+ *   here: that is unqualified.
+ */
+export type AgentMode = "stand-in" | "real";
+
+/** The mode a space's chosen model's provider gives: the preview's own is `preview`. */
+export const agentMode = (provider: string): AgentMode => (provider === "preview" ? "stand-in" : "real");
 
 /**
  * The journal a viewer host starts from, written once by the operator when

@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { admissionBlockers, applyControlEvent, type ControlState, initialControlState } from "../src/computer-control";
+import { ObservationDesk, type ObservationStorage } from "../src/cua-observation-runtime";
+import { CuaViewerClient, MAX_CALL_REQUEST_BYTES, parseEndAnswer, parseLaunchAnswer, parseStatusAnswer } from "../src/cua-viewer";
 import {
 	admitObservationRequest,
 	applyObservationEvent,
@@ -17,6 +19,13 @@ import {
  * The observation ledger and its admission check (src/cua-observation.ts),
  * alone: no route, Durable Object, host, browser or network. Requests are
  * built in the test and only read.
+ *
+ * Then the Worker's side of watching (src/cua-viewer.ts,
+ * src/cua-observation-runtime.ts): the desk over a ledger in memory, and its
+ * client to a viewer host that is a `fetch` written in the test, answering as
+ * computer/cua-host/viewer-launch-manager.ts's types say the host would. No
+ * host, adapter, spacesd, browser or network is involved, and nothing here
+ * says what a real bridge answers.
  */
 
 const NOW = 1_800_000_000_000;
@@ -234,5 +243,352 @@ describe("admitting a browser to an observation", () => {
 		expect(answered.headers.get("referrer-policy")).toBe("no-referrer");
 		expect(answered.headers.get("x-content-type-options")).toBe("nosniff");
 		expect(await answered.text()).toBe("body");
+	});
+});
+
+// ---------------------------------------------------------------- the Worker's side
+
+const SPACE = "o_0123456789abcdefghijklmnop";
+const BRIDGE = { space: SPACE, url: "https://bridge.cua.test/pim", token: "cua-viewer-test-token-0123456789abcdef" };
+const LAUNCH = "L".repeat(21) + "a";
+const CREDENTIAL = "c".repeat(43);
+const ATTACH = "t".repeat(43);
+const LIFETIME = 30 * 60 * 1000;
+const empty = () => JSON.stringify(initialObservationState(SPACE));
+
+/** One request the desk's client sent, with the ledger as stored, and the flushes made, when it left. */
+type Asked = { url: string; method: string; headers: Headers; body: string; ledger: string | undefined; flushes: number };
+
+/** The host's answer to a launch request: the launch it asked for, with `changes`. */
+const launched = (asked: Asked, changes: Record<string, unknown> = {}) => {
+	const { key, notAfter } = JSON.parse(asked.body) as { key: string; notAfter: number };
+	return Response.json({ outcome: "launched", key, launchId: LAUNCH, generation: "gen-1", notAfter, viewerPath: `/${LAUNCH}/viewer/#ticket=${CREDENTIAL}&clipboard=0`, replayed: false, ...changes });
+};
+
+/**
+ * A desk over a ledger held in memory (`stored`, the raw value; undefined for
+ * none), whose client's `fetch` records what it is sent and lets `host` answer.
+ */
+function desk(options: { stored?: string; host?: (asked: Asked) => Response | Promise<Response>; failWrite?: (value: string) => boolean }) {
+	const store = { value: options.stored, flushes: 0 };
+	const storage: ObservationStorage = {
+		read: () => store.value,
+		write: (value) => {
+			if (options.failWrite?.(value)) throw new Error("disk full");
+			store.value = value;
+		},
+		flush: async () => {
+			store.flushes++;
+		},
+	};
+	const asked: Asked[] = [];
+	const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+		const request = new Request(input, init);
+		const entry: Asked = { url: request.url, method: request.method, headers: request.headers, body: await request.text(), ledger: store.value, flushes: store.flushes };
+		asked.push(entry);
+		if (!options.host) throw new Error("This test's host answers nothing");
+		return options.host(entry);
+	}) as typeof fetch;
+	let made = 0;
+	const clock = { now: NOW };
+	const instance = new ObservationDesk({
+		owner: SPACE,
+		storage,
+		client: () => new CuaViewerClient(BRIDGE, SPACE, fetcher),
+		observationMs: LIFETIME,
+		openObservations: 1,
+		now: () => clock.now,
+		newId: () => id(++made),
+	});
+	const records = () => (JSON.parse(store.value!) as ObservationState).records;
+	return { desk: instance, store, asked, clock, records };
+}
+
+const body = async (response: Response) => (await response.json()) as Record<string, any>;
+const viewerPage = (n: number) => `/api/observations/${id(n)}/viewer/#ticket=${CREDENTIAL}&clipboard=0`;
+
+describe("the Worker's client to the viewer host", () => {
+	it("reads only the launch manager's own answers, field for field", () => {
+		const good = { outcome: "launched", key: id(1), launchId: LAUNCH, generation: "gen-1", notAfter: NOW, viewerPath: `/${LAUNCH}/viewer/#ticket=${CREDENTIAL}&clipboard=0`, replayed: false };
+		expect(parseLaunchAnswer(good)).toEqual(good);
+		for (const bad of [
+			{ ...good, extra: 1 },
+			{ ...good, replayed: "no" },
+			{ ...good, notAfter: String(NOW) },
+			{ ...good, launchId: "short" },
+			{ ...good, viewerPath: `/${LAUNCH}/viewer/#ticket=${CREDENTIAL}` },
+			{ ...good, viewerPath: `/other${LAUNCH}/viewer/#ticket=${CREDENTIAL}&clipboard=0` },
+			{ outcome: "refused", reason: "maybe" },
+			{ outcome: "unconfirmed", key: id(1) },
+			{ outcome: "launched" },
+			"launched",
+		]) {
+			expect(parseLaunchAnswer(bad), JSON.stringify(bad)).toBeUndefined();
+		}
+		expect(parseEndAnswer({ outcome: "requested", recorded: true })).toEqual({ outcome: "requested", recorded: true });
+		expect(parseEndAnswer({ outcome: "final", state: "closed" })).toBeUndefined();
+		expect(parseEndAnswer({ outcome: "not_found", generation: "gen-1" })).toBeUndefined();
+		const found = { outcome: "found", key: id(1), state: "open", generation: "gen-1", launchId: LAUNCH, notAfter: NOW, evidence: null, launch: null };
+		expect(parseStatusAnswer(found)).toEqual(found);
+		expect(parseStatusAnswer({ ...found, launch: { phase: "closed" } })).toBeUndefined();
+		expect(parseStatusAnswer({ ...found, evidence: "" })).toBeUndefined();
+	});
+});
+
+describe("the desk: a space's observations, recorded before the host is asked", () => {
+	it("records and flushes the observation before asking, and hands its viewer only to that answer", async () => {
+		const t = desk({ stored: empty(), host: launched });
+		const response = await t.desk.launch();
+		expect(response.status).toBe(200);
+		expect(response.headers.get("cache-control")).toBe("no-store");
+		expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+		expect(await body(response)).toEqual({ observation: { id: id(1), status: "open", notAfter: NOW + LIFETIME, evidence: null }, viewer: viewerPage(1) });
+
+		expect(t.asked).toHaveLength(1);
+		const [ask] = t.asked;
+		expect(ask!.url).toBe("https://bridge.cua.test/pim/observations/launch");
+		expect(ask!.method).toBe("POST");
+		expect(ask!.headers.get("authorization")).toBe(`Bearer ${BRIDGE.token}`);
+		expect(ask!.headers.get("x-pim-space")).toBe(SPACE);
+		expect(ask!.headers.get("content-type")).toBe("application/json");
+		expect(JSON.parse(ask!.body)).toEqual({ key: id(1), owner: SPACE, notAfter: NOW + LIFETIME });
+		// Stored, and made durable, before the request left.
+		expect((JSON.parse(ask!.ledger!) as ObservationState).records).toEqual([expect.objectContaining({ observationId: id(1), status: "pending_open", hostLaunchId: null })]);
+		expect(ask!.flushes).toBe(1);
+		// The launch is recorded; its credential never is.
+		expect(t.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "open", hostLaunchId: LAUNCH, hostGeneration: "gen-1" })]);
+		expect(t.store.value).not.toContain(CREDENTIAL);
+		expect(JSON.stringify(t.desk.list())).not.toContain(CREDENTIAL);
+	});
+
+	it("fails closed on a ledger that is missing, unreadable or another owner's, and never makes one", async () => {
+		for (const stored of [undefined, "not json", JSON.stringify(initialObservationState("o_zyxwvutsrqponmlkjihgfedcba")), JSON.stringify({ version: 2, owner: SPACE, records: [] })]) {
+			const t = desk({ stored, host: launched });
+			expect(t.desk.blocked, String(stored)).not.toBeNull();
+			expect((await t.desk.launch()).status, String(stored)).toBe(503);
+			expect(t.desk.list().blocked).not.toBeNull();
+			expect(t.asked).toEqual([]);
+			expect(t.store.value).toBe(stored);
+		}
+	});
+
+	it("asks nothing when the observation can't be stored or made durable, and stays blocked", async () => {
+		const unwritten = desk({ stored: empty(), host: launched, failWrite: (value) => value.includes("pending_open") });
+		expect((await unwritten.desk.launch()).status).toBe(503);
+		expect(unwritten.asked).toEqual([]);
+		expect(unwritten.desk.blocked).not.toBeNull();
+		expect((await unwritten.desk.launch()).status).toBe(503);
+		expect(unwritten.asked).toEqual([]);
+	});
+
+	it("makes a record whose answer was lost or unreadable unconfirmed, and starts no fresh observation past it", async () => {
+		const answers: [string, () => Response | Promise<Response>][] = [
+			["no answer", () => Promise.reject(new Error("reset"))],
+			["a redirect", () => new Response(null, { status: 302, headers: { location: "https://elsewhere.test/" } })],
+			["a server error", () => new Response("no", { status: 500 })],
+			["not JSON", () => new Response("launched", { headers: { "content-type": "text/plain" } })],
+			["an extra field", () => Response.json({ outcome: "start_failed", key: id(1), viewerPath: "/x" })],
+			["too big", () => Response.json({ outcome: "start_failed", key: id(1), pad: "x".repeat(20_000) })],
+			["another key", () => Response.json({ outcome: "start_failed", key: id(9) })],
+			["the host unsure", () => Response.json({ outcome: "unconfirmed", key: id(1), reason: "timeout" })],
+		];
+		for (const [name, answer] of answers) {
+			const t = desk({ stored: empty(), host: answer });
+			expect((await t.desk.launch()).status, name).toBe(502);
+			expect(t.records(), name).toEqual([expect.objectContaining({ observationId: id(1), status: "unconfirmed" })]);
+			// No new id escapes it: the next Watch is refused, and nothing is asked.
+			const again = await t.desk.launch();
+			expect(again.status, name).toBe(409);
+			expect((await body(again)).observation, name).toMatchObject({ id: id(1), status: "unconfirmed" });
+			expect(t.asked, name).toHaveLength(1);
+			expect(t.records(), name).toHaveLength(1);
+		}
+	});
+
+	it("takes a refusal the host made before acting as nothing started, and lets the next observation start", async () => {
+		let refuse = true;
+		const t = desk({ stored: empty(), host: (asked) => (refuse ? new Response("Unauthorized", { status: 401 }) : launched(asked)) });
+		expect((await t.desk.launch()).status).toBe(502);
+		expect(t.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "not_opened" })]);
+		refuse = false;
+		expect((await t.desk.launch()).status).toBe(200);
+		expect(JSON.parse(t.asked[1]!.body)).toMatchObject({ key: id(2) });
+	});
+
+	it("gives back the open observation by asking for its own key again, and keeps a different launch unconfirmed", async () => {
+		let answer: (asked: Asked) => Response = launched;
+		const t = desk({ stored: empty(), host: (asked) => answer(asked) });
+		await t.desk.launch();
+		answer = (asked) => launched(asked, { replayed: true });
+		const again = await t.desk.launch();
+		expect(again.status).toBe(200);
+		expect((await body(again)).viewer).toBe(viewerPage(1));
+		expect(JSON.parse(t.asked[1]!.body)).toEqual({ key: id(1), owner: SPACE, notAfter: NOW + LIFETIME });
+		expect(t.records()).toHaveLength(1);
+
+		answer = (asked) => launched(asked, { replayed: true, launchId: "M".repeat(22), viewerPath: `/${"M".repeat(22)}/viewer/#ticket=${CREDENTIAL}&clipboard=0` });
+		expect((await t.desk.launch()).status).toBe(409);
+		expect(t.records()).toEqual([expect.objectContaining({ status: "unconfirmed", hostLaunchId: LAUNCH, conflicting: true })]);
+	});
+
+	it("takes an end as requested, not closure: only the host's status for this launch and generation closes it", async () => {
+		let answer: (asked: Asked) => Response = launched;
+		const t = desk({ stored: empty(), host: (asked) => answer(asked) });
+		await t.desk.launch();
+		answer = () => Response.json({ outcome: "requested", recorded: true });
+		const ended = await t.desk.end(id(1));
+		expect(ended.status).toBe(202);
+		expect((await body(ended)).observation).toMatchObject({ status: "revoking" });
+		expect(t.asked[1]!.url).toBe("https://bridge.cua.test/pim/observations/end");
+		expect(JSON.parse(t.asked[1]!.body)).toEqual({ owner: SPACE, key: id(1), generation: "gen-1" });
+		// Recorded as revoking before the end was asked for.
+		expect((JSON.parse(t.asked[1]!.ledger!) as ObservationState).records[0]!.status).toBe("revoking");
+
+		const found = (state: string, changes: Record<string, unknown> = {}) => () =>
+			Response.json({ outcome: "found", key: id(1), state, generation: "gen-1", launchId: LAUNCH, notAfter: NOW + LIFETIME, evidence: state === "closed_observed" ? "cleanup 1/1" : null, launch: null, ...changes });
+		answer = found("ending");
+		expect((await body(await t.desk.status(id(1)))).observation).toMatchObject({ status: "revoking" });
+		answer = () => new Response("down", { status: 503 });
+		expect((await t.desk.status(id(1))).status).toBe(502);
+		expect(t.records()[0]!.status).toBe("revoking");
+		// Still no new observation while this one isn't settled.
+		expect((await t.desk.launch()).status).toBe(409);
+		answer = found("closed_observed");
+		expect((await body(await t.desk.status(id(1)))).observation).toMatchObject({ status: "closed_observed" });
+		expect(t.asked.filter((asked) => asked.url.endsWith("/observations/status")).map((asked) => JSON.parse(asked.body))).toEqual(Array(3).fill({ owner: SPACE, key: id(1), generation: "gen-1" }));
+
+		answer = launched;
+		expect((await t.desk.launch()).status).toBe(200);
+		expect(t.records().map((record) => [record.observationId, record.status])).toEqual([
+			[id(1), "closed_observed"],
+			[id(2), "open"],
+		]);
+	});
+
+	it("doesn't close a record on the host's report for another launch or generation", async () => {
+		let answer: (asked: Asked) => Response = launched;
+		const t = desk({ stored: empty(), host: (asked) => answer(asked) });
+		await t.desk.launch();
+		for (const changes of [{ launchId: "M".repeat(22) }, { generation: "gen-2" }]) {
+			answer = () => Response.json({ outcome: "found", key: id(1), state: "closed_observed", generation: "gen-1", launchId: LAUNCH, notAfter: NOW + LIFETIME, evidence: "closed", launch: null, ...changes });
+			await t.desk.status(id(1));
+			expect(t.records()[0]!.status, JSON.stringify(changes)).toBe("unconfirmed");
+		}
+		answer = () => Response.json({ outcome: "generation_mismatch", generation: "gen-2" });
+		await t.desk.status(id(1));
+		expect(t.records()[0]!.status).toBe("unconfirmed");
+	});
+
+	it("restores a record left pending as unconfirmed, writes it back, and refuses new ones at the limit without evicting", async () => {
+		const pending = ok(initialObservationState(SPACE), { type: "open_requested", owner: SPACE, observationId: id(1), notAfter: NOW + 60_000, now: NOW });
+		const restored = desk({ stored: JSON.stringify(pending), host: launched });
+		expect(restored.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "unconfirmed" })]);
+		expect((await restored.desk.launch()).status).toBe(409);
+		expect(restored.asked).toEqual([]);
+
+		let full = initialObservationState(SPACE);
+		// Ids the desk won't mint, so that what refuses its next one is the limit, not a repeated id.
+		for (let n = 101; n < 101 + MAX_OBSERVATION_RECORDS; n++) {
+			full = ok(full, { type: "open_requested", owner: SPACE, observationId: id(n), notAfter: NOW + 60_000, now: NOW }, { type: "open_refused", observationId: id(n), evidence: "refused" });
+		}
+		expect(applyObservationEvent(full, { type: "open_requested", owner: SPACE, observationId: id(1), notAfter: NOW + 60_000, now: NOW }).outcome).toEqual({ ok: false, reason: "limit" });
+		const t = desk({ stored: JSON.stringify(full), host: launched });
+		expect((await t.desk.launch()).status).toBe(409);
+		expect(t.asked).toEqual([]);
+		expect(t.records()).toHaveLength(MAX_OBSERVATION_RECORDS);
+		expect(t.records().every((record) => record.status === "not_opened")).toBe(true);
+	});
+
+	it("carries the viewer's allowlisted files and calls to the launch at the host's root, without the bridge's token", async () => {
+		const host = (asked: Asked) => {
+			if (asked.url.endsWith("/observations/launch")) return launched(asked);
+			if (asked.url === `https://bridge.cua.test/${LAUNCH}/viewer/`) {
+				return new Response("<!doctype html>", { headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'", "set-cookie": "a=b", "x-upstream": "1" } });
+			}
+			if (asked.url === `https://bridge.cua.test/${LAUNCH}/viewer/viewer.js`) return new Response(null, { status: 302, headers: { location: "https://elsewhere.test/" } });
+			if (asked.url === `https://bridge.cua.test/${LAUNCH}/cua.env.v1.SystemService/GetCapabilities`) return new Response(new Uint8Array(5), { headers: { "content-type": "application/grpc-web+proto", "grpc-status": "0" } });
+			throw new Error(`unexpected ${asked.url}`);
+		};
+		const t = desk({ stored: empty(), host });
+		await t.desk.launch();
+		const at = (path: string, init: RequestInit = {}) => new Request(`${ORIGIN}/api/observations/${id(1)}/${path}`, init);
+		const serve = (request: Request, viaSession = true) => t.desk.serve(request, { viaSession }, ORIGIN);
+
+		const page = await serve(at("viewer/", { headers: { cookie: "pim_session=secret", "x-extra": "1" } }));
+		expect(page.status).toBe(200);
+		expect(await page.text()).toBe("<!doctype html>");
+		expect(page.headers.get("content-security-policy")).toBe("default-src 'none'");
+		expect(page.headers.get("set-cookie")).toBeNull();
+		expect(page.headers.get("x-upstream")).toBeNull();
+		expect(page.headers.get("cache-control")).toBe("no-store");
+		expect([...t.asked[1]!.headers]).toEqual([]);
+
+		const call = await serve(
+			at("cua.env.v1.SystemService/GetCapabilities", {
+				method: "POST",
+				headers: { origin: ORIGIN, "content-type": "application/grpc-web+proto", "x-cua-env-authorization": `Bearer ${CREDENTIAL}`, "x-grpc-web": "1", cookie: "pim_session=secret" },
+				body: new Uint8Array(5),
+			}),
+		);
+		expect(call.status).toBe(200);
+		expect(call.headers.get("grpc-status")).toBe("0");
+		const forwarded = t.asked[2]!;
+		expect(forwarded.method).toBe("POST");
+		expect(forwarded.headers.get("content-type")).toBe("application/grpc-web+proto");
+		expect(forwarded.headers.get("x-cua-env-authorization")).toBe(`Bearer ${CREDENTIAL}`);
+		for (const name of ["x-grpc-web", "cookie", "origin", "authorization", "x-pim-space"]) expect(forwarded.headers.get(name), name).toBeNull();
+		expect(forwarded.body).toBe("\0\0\0\0\0");
+
+		// A redirect from the host is never passed on or followed.
+		expect((await serve(at("viewer/viewer.js"))).status).toBe(502);
+		const before = t.asked.length;
+		// Refused before anything is sent: too big, not a session, a path the viewer doesn't have, an API token.
+		const big = at("cua.env.v1.StreamService/OpenMedia", { method: "POST", headers: { origin: ORIGIN, "content-type": "application/grpc-web+proto" }, body: new Uint8Array(MAX_CALL_REQUEST_BYTES + 1) });
+		expect((await serve(big)).status).toBe(413);
+		expect((await serve(at("viewer/"), false)).status).toBe(401);
+		expect((await serve(at("files"))).status).toBe(404);
+		expect((await serve(at("viewer/", { headers: { authorization: "Bearer pim_x_y" } }))).status).toBe(401);
+		expect(t.asked).toHaveLength(before);
+		expect(t.asked.slice(1).every((asked) => asked.headers.get("authorization") === null && asked.headers.get("x-pim-space") === null)).toBe(true);
+	});
+
+	it("relays the media socket within the adapter's bounds, offering only rcdp.v2 and no token", async () => {
+		const hosts: WebSocket[] = [];
+		const fromViewer: unknown[] = [];
+		const host = (asked: Asked) => {
+			if (asked.url.endsWith("/observations/launch")) return launched(asked);
+			const { 0: client, 1: server } = new WebSocketPair();
+			server.accept();
+			server.addEventListener("message", (event) => fromViewer.push(event.data));
+			hosts.push(server);
+			return new Response(null, { status: 101, webSocket: client, headers: { "sec-websocket-protocol": "rcdp.v2" } });
+		};
+		const t = desk({ stored: empty(), host });
+		await t.desk.launch();
+		const upgrade = new Request(`${ORIGIN}/api/observations/${id(1)}/media?ticket=${ATTACH}`, { headers: { upgrade: "websocket", origin: ORIGIN, "sec-websocket-protocol": "rcdp.v2" } });
+		const response = await t.desk.serve(upgrade, { viaSession: true }, ORIGIN);
+		expect(response.status).toBe(101);
+		expect(response.headers.get("sec-websocket-protocol")).toBe("rcdp.v2");
+		const asked = t.asked[1]!;
+		expect(asked.url).toBe(`https://bridge.cua.test/${LAUNCH}/media?ticket=${ATTACH}`);
+		expect(asked.headers.get("authorization")).toBeNull();
+		expect(asked.headers.get("sec-websocket-protocol")).toBe("rcdp.v2");
+
+		const viewer = response.webSocket!;
+		const toViewer: unknown[] = [];
+		let closed: number | null = null;
+		viewer.accept();
+		viewer.addEventListener("message", (event) => toViewer.push(event.data));
+		viewer.addEventListener("close", (event) => {
+			closed = event.code;
+		});
+		viewer.send(JSON.stringify({ type: "request_keyframe" }));
+		hosts[0]!.send(new Uint8Array([1, 2, 3]));
+		await vi.waitFor(() => expect(fromViewer).toEqual([JSON.stringify({ type: "request_keyframe" })]));
+		await vi.waitFor(() => expect(toViewer).toHaveLength(1));
+		// A binary message from the viewer would be microphone input: the relay ends, and none of it goes up.
+		viewer.send(new Uint8Array([9]));
+		await vi.waitFor(() => expect(closed).toBe(1008));
+		expect(fromViewer).toHaveLength(1);
 	});
 });

@@ -8,6 +8,8 @@ An observation is a person watching one display of their Cua computer through th
 | The admission check | `src/cua-observation.ts` (`admitObservationRequest`) | Whether a browser request may reach an observation, and where on the host. A function, not a route. |
 | The launch manager | `computer/cua-host/viewer-launch-manager.ts` | Starts the adapter's launches at most once per observation, through a journal that outlives the host process. |
 
+A deployment still mounts none of them. The local preview alone now composes the ledger and the admission check, for the one space its Cua fixture seeded, behind the owner's browser session (`docs/cua-viewer-first-worker.md`). The host does not yet route to the launch manager.
+
 ## Observation is not control
 
 `src/computer-control.ts` treats every viewer as input-capable and admits one (`viewer_open_requested`) only while the human owns the application. That rule, and the control state's owner and epoch, are unchanged. The observation ledger is separate: it imports nothing from the control state and the control state reads nothing of it. An observation can't grant input, claim a pause or takeover, change whether an agent request is admitted, or settle a request whose outcome is unknown. It can be open while the agent owns the application, and an unconfirmed observation keeps no agent out. Closing an observation's transports is not quiescence of the desktop.

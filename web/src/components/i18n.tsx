@@ -646,6 +646,21 @@ const translations = {
     computerUnreadableDescription:
       "Your operator chose a computer for your space, but Pim can't read that choice, so your agents have no computer for now.",
     computerUnavailable: "Computer unavailable: ask your operator to fix it",
+    watchDesktop: "Watch desktop",
+    watchDesktopTitle: "Your computer's desktop",
+    watchDesktopNote:
+      "View only: you see the whole desktop while your agents keep using it. You can't take over or type into it.",
+    watchDesktopViewOnly: "View only",
+    watchDesktopAgentsContinue: "Your agents keep working while you watch.",
+    watchDesktopStandIn:
+      "This preview's agents use its stand-in model: they act only when you send /tool lines, so what you see is the wiring, not an agent working by itself.",
+    watchDesktopBlocked: "Watching isn't available here: {reason}",
+    stopWatching: "Stop watching",
+    checkObservation: "Check again",
+    observationStarting: "Starting",
+    observationOpen: "Watching",
+    observationStopping: "Stopping",
+    observationUnconfirmed: "Not confirmed closed",
     computerWaiting: "Waiting for its first connection",
     computerOnline: "Online",
     computerOffline: "Offline",
@@ -1692,6 +1707,21 @@ const translations = {
       "Tu operador eligió una computadora para tu espacio, pero Pim no puede leer esa elección, así que por ahora tus agentes no tienen computadora.",
     computerUnavailable:
       "Computadora no disponible: pide a tu operador que lo arregle",
+    watchDesktop: "Ver escritorio",
+    watchDesktopTitle: "El escritorio de tu computadora",
+    watchDesktopNote:
+      "Solo vista: ves todo el escritorio mientras tus agentes lo siguen usando. No puedes tomar el control ni escribir en él.",
+    watchDesktopViewOnly: "Solo vista",
+    watchDesktopAgentsContinue: "Tus agentes siguen trabajando mientras miras.",
+    watchDesktopStandIn:
+      "Los agentes de esta vista previa usan su modelo de prueba: solo actúan cuando envías líneas /tool, así que lo que ves es la conexión, no un agente trabajando por su cuenta.",
+    watchDesktopBlocked: "Ver no está disponible aquí: {reason}",
+    stopWatching: "Dejar de ver",
+    checkObservation: "Comprobar de nuevo",
+    observationStarting: "Iniciando",
+    observationOpen: "Viendo",
+    observationStopping: "Deteniendo",
+    observationUnconfirmed: "Cierre no confirmado",
     computerWaiting: "Esperando su primera conexión",
     computerOnline: "En línea",
     computerOffline: "Sin conexión",

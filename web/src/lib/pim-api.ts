@@ -1049,6 +1049,33 @@ export type ServerMessage =
   | { type: "result"; id: string; result: unknown }
   | { type: "error"; id?: string; message: string };
 
+/**
+ * An observation of your Cua desktop: you watching it, view only, while your
+ * agents keep using it. Its status is the space's record of it; only the
+ * computer's own report that it closed makes it `closed_observed`.
+ */
+export type Observation = {
+  id: string;
+  status:
+    | "pending_open"
+    | "open"
+    | "revoking"
+    | "unconfirmed"
+    | "closed_observed"
+    | "not_opened"
+    | "reconciled";
+  notAfter: number;
+  evidence: string | null;
+};
+
+/** Your observations, newest first, and why watching isn't available, if it isn't. */
+export type Observations = {
+  blocked: string | null;
+  observations: Observation[];
+  /** What drives your agents in a preview: its stand-in model, which acts only on `/tool` lines, or a real one. */
+  agent?: "stand-in" | "real";
+};
+
 /** An API answer that isn't a success, with its status. */
 export class ApiError extends Error {
   constructor(
@@ -1225,6 +1252,31 @@ export const pim = {
       body: JSON.stringify({ managed: true }),
     }),
   removeComputer: () => call<ComputerStatus>("/computer", { method: "DELETE" }),
+  /** Observations of your Cua desktop, view only; null where this Pim doesn't offer them (only a preview does). */
+  observations: async (): Promise<Observations | null> => {
+    try {
+      return await call<Observations>("/observations");
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  },
+  /** Starts watching, or gives back the open observation's viewer; `viewer` holds its credential, for this page only. */
+  watchDesktop: () =>
+    call<{ observation: Observation; viewer: string }>("/observations", {
+      method: "POST",
+    }),
+  /** Asks the computer to end an observation; that it closed shows only once it is checked again. */
+  stopWatching: (id: string) =>
+    call<{ observation: Observation }>(
+      `/observations/${encodeURIComponent(id)}/end`,
+      { method: "POST" },
+    ),
+  /** Asks the computer how an observation is, which records its closure once the computer saw it. */
+  checkObservation: (id: string) =>
+    call<{ observation: Observation }>(
+      `/observations/${encodeURIComponent(id)}`,
+    ),
   browser: (sessionId: string) =>
     call<BrowserStatus>(`/browser?session=${encodeURIComponent(sessionId)}`),
   closeBrowser: (sessionId: string) =>

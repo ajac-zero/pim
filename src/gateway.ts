@@ -5,6 +5,8 @@ import { deploymentSettings } from "./deployment";
 import { accountApi, adminApi, contentOrigin, handleRegistration, resolveAccount, servePublicArtifact, siteFor, sites, socialApi } from "./accounts";
 import { COMPUTER_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
 import { BROWSER_LIVE_PATH } from "./browser";
+import { observationResponse } from "./cua-observation";
+import { readBounded } from "./cua-viewer";
 import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER, SIGNED_IN_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
@@ -354,7 +356,40 @@ function serveThemes(request: Request, path: string): Response {
 	return new Response(deployedThemes.stylesheet(), { headers: { ...headers, "Content-Type": "text/css; charset=utf-8" } });
 }
 
-export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+/**
+ * Routes a composition adds to the API, which a deployment doesn't have: it
+ * passes none (./index.ts). Only the preview mounts `observations`
+ * (preview/worker.ts, docs/cua-viewer-first-preview.md).
+ */
+export type Mounts = { readonly observations?: boolean };
+
+/** The one observation path that takes a WebSocket: the viewer's media socket. */
+const OBSERVATION_MEDIA = /^\/observations\/[A-Za-z0-9_-]{16,64}\/media$/;
+/** The most an observation request's body may be: a viewer call is at most 4 KiB, management has none. */
+const MAX_OBSERVATION_BODY = 4096;
+
+/**
+ * The person watching their Cua desktop, where mounted: `/api/observations/…`,
+ * for their browser's session only, handed to their space with its full path,
+ * which admits each request against its ledger (src/cua-observation-runtime.ts).
+ * Only the media socket upgrades, bodies are bounded, and no answer is kept.
+ * This is no proxy: the space answers only its own management routes and the
+ * viewer's allowlisted files, calls and socket.
+ */
+async function serveObservation(request: Request, env: Env, owner: string, viaSession: boolean, path: string): Promise<Response> {
+	if (!viaSession) return observationResponse(fail(401, "Only your signed-in browser can watch your desktop."));
+	if (request.headers.get("Upgrade")?.toLowerCase() === "websocket" && !OBSERVATION_MEDIA.test(path)) return observationResponse(fail(404, "Not found"));
+	let forwarded = request;
+	if (request.body) {
+		const length = request.headers.get("content-length");
+		const body = length !== null && !(Number(length) <= MAX_OBSERVATION_BODY) ? null : await readBounded(request.body, MAX_OBSERVATION_BODY);
+		if (!body) return observationResponse(fail(413, "Too large"));
+		forwarded = new Request(request, { body });
+	}
+	return observationResponse(await toAgent(forwarded, env, owner, `/api${path}`, true));
+}
+
+export async function serve(arrived: Request, env: Env, ctx: ExecutionContext, mounts: Mounts = {}): Promise<Response> {
 	const admitted = await admitIngress(arrived, env);
 	if (admitted instanceof Response) return admitted;
 	const { request, address } = admitted;
@@ -448,6 +483,7 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 		const answered = await extension(path, request);
 		if (answered) return withCors(answered);
 	}
+	if (mounts.observations && under(path, "/observations")) return serveObservation(request, env, account.ownerId, viaSession, path);
 	// The space accepts sockets on any path; keep them on one.
 	const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
 	if (upgrade !== (path === "/ws" || path === BROWSER_LIVE_PATH)) {

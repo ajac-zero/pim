@@ -1,13 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Dialog } from "radix-ui";
 import { useState } from "react";
 import { toast } from "sonner";
 import { CopyButton, Section } from "~/components/account-settings";
-import { useI18n } from "~/components/i18n";
-import { Loader2, Server, Trash2 } from "~/components/icons";
+import { type TranslationKey, useI18n } from "~/components/i18n";
+import { Eye, Loader2, Server, Trash2 } from "~/components/icons";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
-import { type ComputerStatus, pim } from "~/lib/pim-api";
-import { computerQuery } from "~/lib/queries";
+import { type ComputerStatus, type Observation, pim } from "~/lib/pim-api";
+import { computerQuery, observationsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 /**
@@ -92,7 +93,173 @@ function OperatorComputer({ status }: { status: ComputerStatus }) {
       <p className="text-[13px] text-muted-foreground">
         {t("computerOperatorNote")}
       </p>
+      {status.provider === "cua" && <WatchDesktop />}
     </Section>
+  );
+}
+
+/** What a record that isn't settled yet shows as; settled ones show nothing. */
+const UNSETTLED: Partial<Record<Observation["status"], TranslationKey>> = {
+  pending_open: "observationStarting",
+  open: "observationOpen",
+  revoking: "observationStopping",
+  unconfirmed: "observationUnconfirmed",
+};
+
+/**
+ * Watching the operator's Cua desktop, view only, where this Pim offers it
+ * (only a preview does: elsewhere `/api/observations` is not found, and this
+ * shows nothing). The whole desktop is shown in Cua's own viewer while the
+ * agents keep using it; nothing here takes over or sends input. Closing the
+ * viewer asks the computer to end the observation, and Check again asks
+ * whether it closed.
+ */
+function WatchDesktop() {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const { data } = useQuery(observationsQuery());
+  const [viewer, setViewer] = useState<{ id: string; url: string } | null>(
+    null,
+  );
+  const refresh = () =>
+    void queryClient.invalidateQueries({ queryKey: ["observations"] });
+  const failed = (error: Error) => {
+    toast.error(error.message);
+    refresh();
+  };
+  const watch = useMutation({
+    mutationFn: pim.watchDesktop,
+    onSuccess: ({ observation, viewer: url }) => {
+      setViewer({ id: observation.id, url });
+      refresh();
+    },
+    onError: failed,
+  });
+  const stop = useMutation({
+    mutationFn: pim.stopWatching,
+    onSuccess: refresh,
+    onError: failed,
+  });
+  const check = useMutation({
+    mutationFn: pim.checkObservation,
+    onSuccess: refresh,
+    onError: failed,
+  });
+  if (!data) return null;
+  const current = data.observations.find(
+    (observation) => UNSETTLED[observation.status] !== undefined,
+  );
+  const label = current && UNSETTLED[current.status];
+  const close = () => {
+    if (!viewer) return;
+    stop.mutate(viewer.id);
+    setViewer(null);
+  };
+
+  return (
+    <div className="space-y-3 rounded-2xl border px-4 py-3">
+      <div className="flex items-center gap-3">
+        <Eye className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
+        <span className="min-w-0 flex-1">
+          <span className="block font-medium text-sm">
+            {t("watchDesktopTitle")}
+          </span>
+          <span className="block text-muted-foreground text-xs">
+            {t("watchDesktopNote")}
+          </span>
+        </span>
+        <Button
+          onClick={() => watch.mutate()}
+          disabled={
+            data.blocked !== null ||
+            watch.isPending ||
+            (current !== undefined && current.status !== "open")
+          }
+        >
+          {watch.isPending && <Loader2 className="animate-spin" />}
+          {t("watchDesktop")}
+        </Button>
+      </div>
+      {current && label && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge
+            variant={current.status === "open" ? "success" : "secondary"}
+            className="text-[11px]"
+          >
+            {t(label)}
+          </Badge>
+          {current.evidence && (
+            <span className="min-w-0 flex-1 truncate text-[13px] text-muted-foreground">
+              {current.evidence}
+            </span>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={check.isPending}
+            onClick={() => check.mutate(current.id)}
+          >
+            {t("checkObservation")}
+          </Button>
+          {current.status !== "unconfirmed" && (
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={stop.isPending}
+              onClick={() => stop.mutate(current.id)}
+            >
+              {t("stopWatching")}
+            </Button>
+          )}
+        </div>
+      )}
+      {data.blocked && (
+        <p className="text-[13px] text-destructive">
+          {t("watchDesktopBlocked", { reason: data.blocked })}
+        </p>
+      )}
+      {data.agent === "stand-in" && (
+        <p className="text-[13px] text-muted-foreground">
+          {t("watchDesktopStandIn")}
+        </p>
+      )}
+      <Dialog.Root
+        open={viewer !== null}
+        onOpenChange={(open) => !open && close()}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
+          <Dialog.Content
+            aria-describedby={undefined}
+            className="fixed inset-0 z-50 flex flex-col overflow-clip bg-background data-[state=open]:animate-in data-[state=open]:fade-in-0 sm:inset-4 sm:rounded-2xl sm:border sm:shadow-xl"
+          >
+            <div className="flex items-center gap-3 border-b px-4 py-3">
+              <Dialog.Title className="truncate font-semibold text-xl">
+                {t("watchDesktopTitle")}
+              </Dialog.Title>
+              <Badge variant="secondary" className="text-[11px]">
+                <Eye />
+                {t("watchDesktopViewOnly")}
+              </Badge>
+              <span className="min-w-0 flex-1 truncate text-[13px] text-muted-foreground">
+                {t("watchDesktopAgentsContinue")}
+              </span>
+              <Button variant="secondary" onClick={close}>
+                {t("stopWatching")}
+              </Button>
+            </div>
+            {viewer && (
+              <iframe
+                title={t("watchDesktopTitle")}
+                src={viewer.url}
+                referrerPolicy="no-referrer"
+                className="min-h-0 w-full flex-1 border-0 bg-black"
+              />
+            )}
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+    </div>
   );
 }
 

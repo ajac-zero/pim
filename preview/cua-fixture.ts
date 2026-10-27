@@ -1,5 +1,7 @@
 import { ControlCoordinator } from "../src/computer-control-runtime";
 import { bridgeFor, PROVIDER_KEY } from "../src/cua";
+import { initialObservationState } from "../src/cua-observation";
+import { OBSERVATION_KEY } from "../src/cua-observation-runtime";
 
 /**
  * The preview's one-shot Cua fixture: it makes one space of a local preview
@@ -20,15 +22,19 @@ import { bridgeFor, PROVIDER_KEY } from "../src/cua";
  * It seeds a space once, and only a fresh one. Before it changes anything it
  * checks that the space is provisioned for its owner, that `CUA_BRIDGES` has
  * a usable bridge for exactly that owner, and that the space holds no marker,
- * no control state (of any kind, readable or not), no paired computer and no
- * Sprite. A refusal there changes nothing, and the space named doesn't start
+ * no control state (of any kind, readable or not), no observation ledger, no
+ * paired computer and no Sprite. A refusal there changes nothing, and the space named doesn't start
  * while the environment names it. Then, in one synchronous turn of the
  * constructor:
  *
  * 1. `FIXTURE_KEY` is stored as `seeding`. From here on the fixture never
  *    seeds this space again.
  * 2. In one transaction: the marker, the control state (enabled, then resumed
- *    under `LEASE_ID`), and `FIXTURE_KEY` as `seeded`. If any of it fails,
+ *    under `LEASE_ID`), the space's empty observation ledger
+ *    (`OBSERVATION_KEY`, src/cua-observation-runtime.ts), and `FIXTURE_KEY`
+ *    as `seeded`. That is the only place a ledger is ever provisioned: a
+ *    space seeded before the ledger existed has none, and stays unable to
+ *    watch until the preview is disposed. If any of it fails,
  *    the transaction keeps none of it, `seeding` stays, and the space doesn't
  *    start.
  *
@@ -88,7 +94,7 @@ export type FixtureResult =
 	 * owner ID it could be) selects no space, so every space starts; for the
 	 * others, the space named doesn't.
 	 */
-	| { outcome: "refused"; reason: "owner" | "record" | "space" | "bridge" | "marker" | "control" | "computer" }
+	| { outcome: "refused"; reason: "owner" | "record" | "space" | "bridge" | "marker" | "control" | "observations" | "computer" }
 	/** Failed while changing the space, which doesn't start: `record` with nothing stored, or `seed` with only `seeding` stored. */
 	| { outcome: "failed"; reason: "record" | "seed" };
 
@@ -140,6 +146,7 @@ function seed(space: FixtureSpace, env: Record<string, unknown>): FixtureResult 
 		if (!usable(env.CUA_BRIDGES, owner)) return { outcome: "refused", reason: "bridge" };
 		if (meta.meta(PROVIDER_KEY) !== undefined) return { outcome: "refused", reason: "marker" };
 		if (meta.meta(CONTROL_KEY) !== undefined) return { outcome: "refused", reason: "control" };
+		if (meta.meta(OBSERVATION_KEY) !== undefined) return { outcome: "refused", reason: "observations" };
 		if (COMPUTER_KEYS.some((key) => meta.meta(key) !== undefined)) return { outcome: "refused", reason: "computer" };
 	} catch {
 		// Storage that can't be read is refused like a conflict: nothing is written.
@@ -157,6 +164,7 @@ function seed(space: FixtureSpace, env: Record<string, unknown>): FixtureResult 
 			const control = new ControlCoordinator(owner, { read: () => meta.meta(CONTROL_KEY), write: (value) => meta.setMeta(CONTROL_KEY, value) });
 			control.enable();
 			if (!control.apply({ type: "resume", leaseId: LEASE_ID }).ok || control.state?.owner !== "agent") throw new Error("not leased");
+			meta.setMeta(OBSERVATION_KEY, JSON.stringify(initialObservationState(owner)));
 			meta.setMeta(FIXTURE_KEY, "seeded");
 		});
 	} catch {

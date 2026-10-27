@@ -7,7 +7,9 @@ import { Link, type Machine } from "../computer/pim-computer";
 import { FIXTURE_KEY, LEASE_ID } from "../preview/cua-fixture";
 import { currentTrace } from "../src/computer-control-runtime";
 import { PROVIDER_KEY } from "../src/cua";
-import { OWNER_HEADER, Pim as RealPim } from "../src/pim";
+import { initialObservationState, type ObservationState } from "../src/cua-observation";
+import { OBSERVATION_KEY } from "../src/cua-observation-runtime";
+import { OWNER_HEADER, Pim as RealPim, SIGNED_IN_HEADER } from "../src/pim";
 import { type Approval, PimStore } from "../src/store";
 import { PreviewPim } from "./worker";
 
@@ -30,7 +32,7 @@ const TOKEN = "preview-cua-fixture-token-0123456789abcdef";
 const HOST = "https://bridge.preview-fixture.test";
 const CONTROL_KEY = "computer_control";
 /** Everything the fixture reads or writes. */
-const KEYS = [PROVIDER_KEY, CONTROL_KEY, FIXTURE_KEY, "computer_token", "computer_machine"];
+const KEYS = [PROVIDER_KEY, CONTROL_KEY, FIXTURE_KEY, OBSERVATION_KEY, "computer_token", "computer_machine"];
 const DOES_NOT_START = /Cua fixture didn't seed it, so it doesn't start/;
 
 type Space = Awaited<ReturnType<typeof space>>;
@@ -157,7 +159,7 @@ const refusedEverything = {
 };
 const refusedEverythingAndCalls = { ...refusedEverything, "call the space": "refused" };
 
-const nothing = { [PROVIDER_KEY]: null, [CONTROL_KEY]: null, [FIXTURE_KEY]: null, computer_token: null, computer_machine: null };
+const nothing = { [PROVIDER_KEY]: null, [CONTROL_KEY]: null, [FIXTURE_KEY]: null, [OBSERVATION_KEY]: null, computer_token: null, computer_machine: null };
 
 const logged: unknown[][] = [];
 /** The fixture's own log lines, parsed. */
@@ -270,6 +272,7 @@ describe("the preview's Cua fixture", () => {
 			["control state blocked by an unknown request", { [CONTROL_KEY]: unknown }, "control"],
 			["damaged control state", { [CONTROL_KEY]: "not json" }, "control"],
 			["another space's control state", { [CONTROL_KEY]: human.replace("SPACE", "o_" + "y".repeat(26)) }, "control"],
+			["an observation ledger", { [OBSERVATION_KEY]: JSON.stringify({ version: 1, owner: "SPACE", records: [] }) }, "observations"],
 			["a paired computer", { computer_token: "hash" }, "computer"],
 			["a Sprite", { computer_machine: "pim-sprite" }, "computer"],
 		];
@@ -306,6 +309,8 @@ describe("the preview's Cua fixture", () => {
 		const stored = await ada.stored();
 		expect(stored[PROVIDER_KEY]).toBe(marker(ada.owner));
 		expect(stored[FIXTURE_KEY]).toBe("seeded");
+		// The one place a ledger is provisioned: empty, for this owner, in the seed's own transaction.
+		expect(stored[OBSERVATION_KEY]).toBe(JSON.stringify(initialObservationState(ada.owner)));
 		const state = await ada.within((instance) => ({ enabled: instance.control.enabled, blocked: instance.control.blocked, state: instance.control.state, selected: instance.computer.selected() }));
 		expect(state).toEqual({
 			enabled: true,
@@ -389,6 +394,7 @@ describe("the preview's Cua fixture", () => {
 			["the marker", PROVIDER_KEY],
 			["enabling", CONTROL_KEY, (value) => value.includes('"owner":"human"')],
 			["the lease", CONTROL_KEY, (value) => value.includes('"owner":"agent"')],
+			["the observation ledger", OBSERVATION_KEY],
 			["the seeded record", FIXTURE_KEY, (value) => value === "seeded"],
 		];
 		for (const [index, [name, key, when]] of writes.entries()) {
@@ -495,6 +501,76 @@ describe("a seeded preview space and its bridge", () => {
 		expect(seen.connections).toBe(1);
 		expect(seen.sent.filter((message) => message.includes("echo fixture"))).toHaveLength(1);
 		await vi.waitFor(async () => expect((await ada.within((instance) => instance.control.state))?.requests).toEqual([expect.objectContaining({ requestId: `approval:${pending.id}`, status: "completed" })]));
+		expect(sent).toEqual([]);
+	});
+
+	it("lets the seeded owner's browser session watch through the bridge's viewer host, view only, and leaves the agent's lease as it was", async () => {
+		const ada = await space("fixturewatch");
+		configure({ flag: "seed", owner: ada.owner, bridges: bridgesOf(ada.owner) });
+		expect(await ada.restart()).toBe("started");
+		const launch = "V".repeat(22);
+		const credential = "k".repeat(43);
+		const asked: { url: string; headers: Headers; body: string }[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			const entry = { url: request.url, headers: request.headers, body: await request.text() };
+			asked.push(entry);
+			if (entry.url === `${HOST}/${ada.owner}/observations/launch`) {
+				const { key, notAfter } = JSON.parse(entry.body) as { key: string; notAfter: number };
+				return Response.json({ outcome: "launched", key, launchId: launch, generation: "gen-1", notAfter, viewerPath: `/${launch}/viewer/#ticket=${credential}&clipboard=0`, replayed: false });
+			}
+			if (entry.url === `${HOST}/${launch}/viewer/`) return new Response("<!doctype html>", { headers: { "content-type": "text/html; charset=utf-8" } });
+			sent.push(entry.url);
+			throw new Error("This test reaches only its bridge's viewer host");
+		});
+		const session = { [SIGNED_IN_HEADER]: "1", origin: "https://pim.test" };
+		expect((await ada.fetch("/api/observations", { headers: session })).body).toEqual({ agent: "stand-in", blocked: null, observations: [] });
+		// Not the browser's session: nothing is recorded or asked.
+		expect((await ada.fetch("/api/observations", { method: "POST", headers: { origin: "https://pim.test" } })).status).toBe(401);
+		expect(asked).toEqual([]);
+
+		const watched = await ada.fetch("/api/observations", { method: "POST", headers: session });
+		expect(watched.status).toBe(200);
+		const { observation, viewer } = watched.body as { observation: { id: string; status: string; notAfter: number }; viewer: string };
+		expect(observation.status).toBe("open");
+		expect(viewer).toBe(`/api/observations/${observation.id}/viewer/#ticket=${credential}&clipboard=0`);
+		expect(asked[0]!.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
+		expect(asked[0]!.headers.get("x-pim-space")).toBe(ada.owner);
+		expect(JSON.parse(asked[0]!.body)).toEqual({ key: observation.id, owner: ada.owner, notAfter: observation.notAfter });
+
+		const page = await ada.stub.fetch(new Request(`https://pim.test/api/observations/${observation.id}/viewer/`, { headers: { [OWNER_HEADER]: ada.owner, [SIGNED_IN_HEADER]: "1" } }));
+		expect(page.status).toBe(200);
+		expect(await page.text()).toBe("<!doctype html>");
+		expect(page.headers.get("cache-control")).toBe("no-store");
+		expect(asked[1]!.url).toBe(`${HOST}/${launch}/viewer/`);
+		expect(asked[1]!.headers.get("authorization")).toBeNull();
+
+		const ledger = JSON.parse((await ada.stored())[OBSERVATION_KEY] as string) as ObservationState;
+		expect(ledger.records).toEqual([expect.objectContaining({ observationId: observation.id, status: "open", hostLaunchId: launch, hostGeneration: "gen-1" })]);
+		expect(JSON.stringify(ledger)).not.toContain(credential);
+		// Watching took no lease and changed nothing of control: the agent still holds the fixture's.
+		expect(await ada.within((instance) => instance.control.state)).toMatchObject({ owner: "agent", lease: { epoch: 1, leaseId: LEASE_ID }, viewers: [] });
+		expect(asked).toHaveLength(2);
+		expect(sent).toEqual([]);
+	});
+
+	it("fails closed in a seeded space whose ledger is gone, and mounts nothing in a space it didn't seed", async () => {
+		const ada = await space("fixturenoledger");
+		const bob = await space("fixturenoledgerbob");
+		configure({ flag: "seed", owner: ada.owner, bridges: bridgesOf(ada.owner) });
+		expect(await ada.restart()).toBe("started");
+		await ada.within((instance) => instance.store.deleteMeta(OBSERVATION_KEY));
+		expect(await ada.restart()).toBe("started");
+		const session = { [SIGNED_IN_HEADER]: "1", origin: "https://pim.test" };
+		expect((await ada.fetch("/api/observations", { headers: session })).body.blocked).toMatch(/no ledger is stored/);
+		expect((await ada.fetch("/api/observations", { method: "POST", headers: session })).status).toBe(503);
+		// Nothing made one, and nothing was asked of the bridge.
+		expect((await ada.stored())[OBSERVATION_KEY]).toBeNull();
+		// Bob's space, which the fixture didn't seed, has no observations; nor has Ada's once the environment stops naming it.
+		expect((await bob.fetch("/api/observations", { headers: session })).status).toBe(404);
+		configure({});
+		expect(await ada.restart()).toBe("started");
+		expect((await ada.fetch("/api/observations", { headers: session })).status).toBe(404);
 		expect(sent).toEqual([]);
 	});
 });

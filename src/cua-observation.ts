@@ -1,6 +1,6 @@
 /**
  * A space's record of its Cua display observations (docs/cua-observation.md),
- * and the check a future route would make before a browser reaches one.
+ * and the check its route makes before a browser reaches one.
  *
  * DECISION RECORD. An observation is a person watching one display of their
  * Cua computer through the view-only viewer adapter (docs/cua-viewer-adapter.md):
@@ -34,8 +34,9 @@
  *   its record is kept, and records are never evicted: at the limits, new
  *   observations are refused.
  *
- * Nothing calls it. It adds no route, tool, setting or storage, and importing
- * it does nothing.
+ * It adds no route, tool, setting or storage, and importing it does nothing.
+ * Only the preview calls it, through ./cua-observation-runtime.ts, which
+ * stores the ledger; a deployment mounts nothing that does.
  */
 
 export const OBSERVATION_STATE_VERSION = 1;
@@ -290,7 +291,7 @@ export function restoreObservationState(raw: unknown, owner: string): Observatio
 
 // ---------------------------------------------------------------- admission
 
-/** Where a future route would serve observations, under the API: `/api/observations/<id>/…`. No route serves it yet. */
+/** Where observations are served, under the API: `/api/observations/<id>/…`. Only the preview mounts it (src/gateway.ts, `Mounts`). */
 export const OBSERVATION_PATH_PREFIX = "/api/observations/";
 
 /** The one subprotocol the viewer offers for its media socket, as the host adapter's `MEDIA_PROTOCOL`. */
@@ -335,7 +336,7 @@ export type ObservationAdmission =
 
 /**
  * Whether a browser request may reach an observation, and where on the
- * host. Not mounted: nothing calls it.
+ * host. Only the preview's observation desk calls it (./cua-observation-runtime.ts).
  *
  * Only the person's active browser session admits, for their own space's
  * record that is `open` and before its `notAfter`; anything else answers as

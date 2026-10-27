@@ -100,8 +100,12 @@ const OWNER = /^o_[0-9a-z]{26}$/;
 /** A token is printable ASCII without spaces, as a header value can carry it unchanged. */
 const TOKEN = /^[\x21-\x7e]{32,4096}$/;
 
-/** Refuses, before anything leaves, a bridge that isn't for `space` or isn't safe to send its token to; returns its address. */
-function address(bridge: CuaBridge, space: string): URL {
+/**
+ * Refuses, before anything leaves, a bridge that isn't for `space` or isn't
+ * safe to send its token to; returns its address. The viewer's client
+ * (./cua-viewer.ts) checks a bridge with it too.
+ */
+export function bridgeAddress(bridge: CuaBridge, space: string): URL {
 	if (!OWNER.test(space) || bridge.space !== space) {
 		throw new HttpError(403, "This computer's bridge is for another space, so Pim didn't connect to it.");
 	}
@@ -144,7 +148,7 @@ export class Cua {
 	 * the connection ends, whoever ends it.
 	 */
 	async connect(space: string, receive: (message: string) => void, closed: () => void): Promise<ComputerLink> {
-		const url = address(this.#bridge, space);
+		const url = bridgeAddress(this.#bridge, space);
 		const giveUp = new AbortController();
 		const timer = setTimeout(() => giveUp.abort(), CONNECT_MS);
 		const late = new HttpError(504, `The computer's bridge didn't answer within ${CONNECT_MS / 1000} seconds.`);

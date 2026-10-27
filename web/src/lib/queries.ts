@@ -81,6 +81,10 @@ export const filesQuery = (path: string) =>
 export const computerQuery = () =>
   queryOptions({ queryKey: ["computer"], queryFn: pim.computer });
 
+/** Your observations of your Cua desktop; null where this Pim doesn't offer them. */
+export const observationsQuery = () =>
+  queryOptions({ queryKey: ["observations"], queryFn: pim.observations });
+
 /** A chat's window in the agents' browser: its own, or that of a task it handed out. */
 export const browserQuery = (sessionId: string) =>
   queryOptions({

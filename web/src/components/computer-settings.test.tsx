@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
 import { ComputerSection } from "~/components/computer-settings";
 import { I18nProvider } from "~/components/i18n";
-import type { ComputerStatus } from "~/lib/pim-api";
+import type { ComputerStatus, Observations } from "~/lib/pim-api";
 
 const machine = {
   agent: "pim-computer",
@@ -22,10 +22,12 @@ const base: ComputerStatus = {
   computer: null,
 };
 
-/** The section as the person sees it for a computer status. */
-function section(status: ComputerStatus) {
+/** The section as the person sees it for a computer status, and the observations this Pim offers, if it offers them. */
+function section(status: ComputerStatus, observations?: Observations | null) {
   const queryClient = new QueryClient();
   queryClient.setQueryData(["computer"], status);
+  if (observations !== undefined)
+    queryClient.setQueryData(["observations"], observations);
   return renderToStaticMarkup(
     <QueryClientProvider client={queryClient}>
       <I18nProvider>
@@ -79,4 +81,63 @@ it("keeps the paired and started computer controls when no provider is set", () 
   expect(offline).toContain("Offline");
   expect(offline).toContain('aria-label="Remove computer"');
   expect(offline).toContain("Make a new one");
+});
+
+it("offers watching the Cua desktop, view only, only where this Pim offers it, and says when an observation isn't settled", () => {
+  const cua: ComputerStatus = {
+    ...base,
+    state: "online",
+    provider: "cua",
+    startable: false,
+    computer: machine,
+  };
+  // Not offered (a deployment answers not found): nothing to press, as before.
+  expect(section(cua, null)).not.toMatch(/<button|Watch desktop/);
+
+  const offered = section(cua, {
+    blocked: null,
+    observations: [],
+    agent: "stand-in",
+  });
+  expect(offered).toContain("Watch desktop");
+  expect(offered).toContain("View only");
+  expect(offered).toContain("You can&#x27;t take over");
+  expect(offered).toContain("stand-in model");
+  expect(offered).not.toMatch(/Take over|Stop watching/);
+
+  const unsettled = section(cua, {
+    blocked: null,
+    agent: "real",
+    observations: [
+      {
+        id: "observation-000001",
+        status: "unconfirmed",
+        notAfter: 1,
+        evidence: "the host's answer to launch was lost (timeout)",
+      },
+    ],
+  });
+  expect(unsettled).toContain("Not confirmed closed");
+  expect(unsettled).toContain("Check again");
+  expect(unsettled).not.toContain("Stop watching");
+  expect(unsettled).not.toContain("stand-in model");
+  // Watching again waits for it to settle.
+  expect(unsettled).toMatch(/<button[^>]*disabled=""[^>]*>Watch desktop/);
+
+  const blocked = section(cua, {
+    blocked: "no ledger is stored",
+    observations: [],
+  });
+  expect(blocked).toContain(
+    "Watching isn&#x27;t available here: no ledger is stored",
+  );
+  expect(blocked).toMatch(/<button[^>]*disabled=""[^>]*>Watch desktop/);
+
+  // An unreadable choice never offers it.
+  expect(
+    section(
+      { ...base, provider: "unreadable", startable: false },
+      { blocked: null, observations: [] },
+    ),
+  ).not.toContain("Watch desktop");
 });

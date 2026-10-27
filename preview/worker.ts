@@ -4,13 +4,18 @@ import { createFauxCore, fauxAssistantMessage, fauxToolCall, type FauxResponseFa
 import type { ModelRef } from "@earendil-works/pi-durable";
 import type { PiModel } from "agents/harness/pi";
 import { ownedCode } from "../src/auth";
+import { bridgeFor } from "../src/cua";
+import { OBSERVATION_PATH_PREFIX, observationResponse } from "../src/cua-observation";
+import { OBSERVATION_KEY, ObservationDesk } from "../src/cua-observation-runtime";
+import { CuaViewerClient } from "../src/cua-viewer";
 import { deploymentSettings } from "../src/deployment";
 import type { ImageModel } from "../src/extensions/image-generation";
 import { serve } from "../src/gateway";
-import { Pim as RealPim } from "../src/pim";
+import { OWNER_HEADER, Pim as RealPim, SIGNED_IN_HEADER } from "../src/pim";
 import { INTRODUCTION } from "../src/transcript";
 import { Authenticator } from "../test/webauthn";
-import { seedCuaFixture, starts } from "./cua-fixture";
+import { type FixtureResult, seedCuaFixture, starts } from "./cua-fixture";
+import { agentMode, VIEWER_FIRST } from "./cua-viewer-first";
 
 export { Auth, Directory, Gallery } from "../src/index";
 
@@ -31,7 +36,10 @@ export { Auth, Directory, Gallery } from "../src/index";
  *   that person, making the account if it's new, with a passkey made here.
  *
  * Opted into by its private environment only, it also seeds one space with an
- * operator's Cua computer, once (./cua-fixture.ts, docs/cua-bridge.md).
+ * operator's Cua computer, once (./cua-fixture.ts, docs/cua-bridge.md), and
+ * lets that space's owner watch its desktop, view only, from their browser's
+ * session (`/api/observations`, docs/cua-viewer-first-preview.md). A
+ * deployment mounts neither.
  */
 
 const PREVIEW_MODEL = "preview-model";
@@ -170,7 +178,22 @@ function previewProvider() {
 
 const preview = previewProvider();
 
+/** Whether the preview's private environment opts into its Cua fixture, and with it the observation routes, for one owner. */
+function watching(env: Env): boolean {
+	const settings = env as unknown as Record<string, unknown>;
+	return settings.PREVIEW_CUA_FIXTURE === "seed" && typeof settings.PREVIEW_CUA_FIXTURE_OWNER === "string" && /^o_[0-9a-z]{26}$/.test(settings.PREVIEW_CUA_FIXTURE_OWNER);
+}
+
+/** Whether `name` is the space the fixture seeded, and the environment still names it: the one space that may watch. */
+function watches(fixture: FixtureResult, name: string | undefined, env: Env): name is string {
+	const seeded = fixture.outcome === "seeded" || fixture.outcome === "already-seeded";
+	return seeded && watching(env) && name !== undefined && (env as unknown as Record<string, unknown>).PREVIEW_CUA_FIXTURE_OWNER === name;
+}
+
 export class Pim extends RealPim {
+	/** The space's observations of its Cua desktop: only in the one space the fixture seeded; null in every other. */
+	readonly #desk: ObservationDesk | null;
+
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		// The one space the preview's private environment names gets its operator's Cua computer, once (./cua-fixture.ts),
@@ -179,6 +202,40 @@ export class Pim extends RealPim {
 		// no computer, default or not, and takes no one's input.
 		const fixture = seedCuaFixture({ name: ctx.id.name, meta: this.store, transaction: (fn) => ctx.storage.transactionSync(fn) }, env as unknown as Record<string, unknown>);
 		if (!starts(fixture)) throw new Error("This preview space's Cua fixture didn't seed it, so it doesn't start (see docs/cua-bridge.md).");
+		const owner = ctx.id.name;
+		// The ledger is read here, and only the fixture's seed ever wrote one: a space without it can't watch (src/cua-observation-runtime.ts).
+		this.#desk = watches(fixture, owner, env)
+			? new ObservationDesk({
+					owner,
+					storage: {
+						read: () => this.store.meta(OBSERVATION_KEY),
+						write: (value) => this.store.setMeta(OBSERVATION_KEY, value),
+						flush: () => ctx.storage.sync(),
+					},
+					client: () => new CuaViewerClient(bridgeFor((env as unknown as { CUA_BRIDGES?: unknown }).CUA_BRIDGES, owner), owner),
+					observationMs: VIEWER_FIRST.observationMs,
+					openObservations: VIEWER_FIRST.openObservations,
+					listing: () => ({ agent: agentMode(this.chosenModel().provider) }),
+				})
+			: null;
+	}
+
+	/**
+	 * `/api/observations/…`, which only the preview's Worker forwards, from the
+	 * owner's browser session (`serve`'s `observations` mount): checked as the
+	 * real space checks every request, then answered by the desk, or `404`
+	 * in a space that has none. Everything else is the real space's.
+	 */
+	override async fetch(request: Request): Promise<Response> {
+		const { pathname } = new URL(request.url);
+		if (pathname !== OBSERVATION_PATH_PREFIX.slice(0, -1) && !pathname.startsWith(OBSERVATION_PATH_PREFIX)) return super.fetch(request);
+		const refuse = (status: number, error: string) => observationResponse(Response.json({ error }, { status }));
+		if (request.headers.get(OWNER_HEADER) !== this.name) return refuse(421, "This request is not for this space");
+		if (this.store.erasedAt() !== null) return refuse(410, "This space was erased");
+		if (this.status() !== "active") return refuse(403, "This space is suspended");
+		const publicUrl = deploymentSettings(this.env).publicUrl;
+		if (!this.#desk || !publicUrl) return refuse(404, "Not found");
+		return this.#desk.serve(request, { viaSession: request.headers.get(SIGNED_IN_HEADER) === "1" }, publicUrl);
 	}
 
 	/** The stand-in model, besides the real providers: the ChatGPT plan, and those people add, such as a model on this machine. */
@@ -267,6 +324,6 @@ export default {
 		}
 		const signIn = request.method === "GET" ? DEV_SIGN_IN.exec(new URL(request.url).pathname) : null;
 		if (signIn) return devSignIn(request, env, ctx, decodeURIComponent(signIn[1]!).toLowerCase());
-		return serve(request, env, ctx);
+		return serve(request, env, ctx, { observations: watching(env) });
 	},
 } satisfies ExportedHandler<Env>;

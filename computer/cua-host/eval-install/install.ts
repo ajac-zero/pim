@@ -693,6 +693,13 @@ export function unitState(query: Probe["query"], unit: string): UnitState | null
  * never saw its pim-computer exit. Its own stop path (desktop.ts: `close()`,
  * which waits for that exit, then `exit(0)`) is how the program exits 0.
  */
+/** Whether a unit is loaded, inactive and dead, with a result of `success`, and systemd has never run a main process for it (every `ExecMain…` field 0). */
+export function neverStarted(state: UnitState | null): boolean {
+	if (state === null || !UNIT_PROPERTIES.every((name) => inDomain(name, state[name]))) return false;
+	if (state.LoadState !== "loaded" || state.ActiveState !== "inactive" || state.SubState !== "dead" || state.Result !== "success") return false;
+	return ["ExecMainPID", "ExecMainCode", "ExecMainStatus", "ExecMainStartTimestampMonotonic", "ExecMainExitTimestampMonotonic"].every((name) => state[name as keyof UnitState] === "0");
+}
+
 export function cleanlyStopped(state: UnitState | null): boolean {
 	if (state === null || !UNIT_PROPERTIES.every((name) => inDomain(name, state[name]))) return false;
 	if (state.LoadState !== "loaded" || state.ActiveState !== "inactive" || state.SubState !== "dead" || state.Result !== "success") return false;
@@ -756,18 +763,22 @@ export function start(config: Config, probe: Probe, run: (argv: readonly string[
 	// The bridge starts nothing of its own, so a failed one may be started again; a state that can't be read, or a change under way, may not.
 	const bridgeState = unitState(probe.query, UNITS.bridge);
 	if (bridgeState?.LoadState !== "loaded" || !["active", "inactive", "failed"].includes(bridgeState.ActiveState)) throw new Refusal("bridge-state");
+	const leftRunning = new Set<string>();
 	if (config.viewer) {
-		// spacesd and the ingress start only once, each from a state that can be read whole: a unit that ended, or is changing, is not started again.
+		// spacesd and the ingress start once, as the units say: one systemd says is running is left alone (no start is sent), and any other is started only if systemd has never run it.
+		// A unit that ran and ended (failed, inactive after running, killed), is changing, or can't be read whole is not started again: the VM is rebooted or discarded, as for the desktop endpoint.
 		for (const unit of [VIEWER_UNITS.spacesd, VIEWER_UNITS.ingress]) {
 			const state = unitState(probe.query, unit);
-			if (state?.LoadState !== "loaded" || !["active", "inactive", "failed"].includes(state.ActiveState)) throw new Refusal("viewer-unit-state");
+			const alive = state?.LoadState === "loaded" && state.ActiveState === "active" && state.SubState === "running";
+			if (!alive && !neverStarted(state)) throw new Refusal("viewer-unit-state");
+			if (alive) leftRunning.add(unit);
 		}
 	}
 	if (!running) run([TOOLS.systemctl, "start", UNITS.desktop]);
 	// Inside out: the desktop, spacesd, the bridge, and the one public listener last, so nothing is public before what it fronts is up.
-	if (config.viewer) run([TOOLS.systemctl, "start", VIEWER_UNITS.spacesd]);
+	if (config.viewer && !leftRunning.has(VIEWER_UNITS.spacesd)) run([TOOLS.systemctl, "start", VIEWER_UNITS.spacesd]);
 	run([TOOLS.systemctl, "start", UNITS.bridge]);
-	if (config.viewer) run([TOOLS.systemctl, "start", VIEWER_UNITS.ingress]);
+	if (config.viewer && !leftRunning.has(VIEWER_UNITS.ingress)) run([TOOLS.systemctl, "start", VIEWER_UNITS.ingress]);
 }
 
 // ---- The real VM ----

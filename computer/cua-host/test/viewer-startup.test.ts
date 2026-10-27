@@ -21,6 +21,7 @@ import {
 	parseConfig,
 	renderCaddyfile,
 	renderUnits,
+	UNITS,
 	VIEWER_ACCOUNTS,
 	VIEWER_ASSET_NAMES,
 	VIEWER_ASSET_SHA256,
@@ -302,7 +303,7 @@ describe("start with a viewer, over a stand-in probe", () => {
 	const fact = (kind: "file" | "dir", uid: number, mode: number): PathFact => ({ kind, uid, gid: uid, mode });
 
 	/** A probe whose files are as a provisioned VM's, with `change` making one wrong. */
-	function probe(change: (files: Record<string, PathFact>) => void = () => {}): Probe {
+	function probe(change: (files: Record<string, PathFact>) => void = () => {}, query: Probe["query"] = () => ({ status: 1, stdout: "" })): Probe {
 		const files: Record<string, PathFact> = {
 			[PATHS.token]: fact("file", BRIDGE_UID, 0o600),
 			[VIEWER_PATHS.rootToken]: fact("file", BRIDGE_UID, 0o600),
@@ -319,8 +320,8 @@ describe("start with a viewer, over a stand-in probe", () => {
 		return {
 			lstat: (f) => files[f] ?? null,
 			readText: (f) => (f === "/etc/passwd" ? PASSWD : null),
-			// Every check that must refuse does so before the units are asked; one that got there would fail this.
-			query: () => ({ status: 1, stdout: "" }),
+			// By default every check that must refuse does so before the units are asked; one that got there would fail this.
+			query,
 		};
 	}
 	const refusal = (p: Probe) => {
@@ -366,6 +367,54 @@ describe("start with a viewer, over a stand-in probe", () => {
 
 	it("gets past every viewer check when the files are as they must be, and then asks about the units", () => {
 		assert.equal(refusal(probe()), "desktop-not-clean");
+	});
+
+	describe("and the units, as systemd records them", () => {
+		/** What `systemctl show` prints for a unit, by default one that is loaded and has never run. */
+		const show = (change: Record<string, string> = {}) => ({
+			status: 0,
+			stdout: `${Object.entries({ LoadState: "loaded", ActiveState: "inactive", SubState: "dead", Result: "success", ExecMainPID: "0", ExecMainCode: "0", ExecMainStatus: "0", ExecMainStartTimestampMonotonic: "0", ExecMainExitTimestampMonotonic: "0", ...change })
+				.map(([name, value]) => `${name}=${value}`)
+				.join("\n")}\n`,
+		});
+		const RUNNING = { ActiveState: "active", SubState: "running", ExecMainPID: "4100", ExecMainCode: "0", ExecMainStartTimestampMonotonic: "100" };
+		const FAILED = { ActiveState: "failed", SubState: "failed", Result: "exit-code", ExecMainPID: "4200", ExecMainCode: "1", ExecMainStatus: "1", ExecMainStartTimestampMonotonic: "100", ExecMainExitTimestampMonotonic: "200" };
+		/** Inactive after exiting 0: the desktop endpoint's rule accepts this, the viewer's units' does not. */
+		const EXITED = { ExecMainPID: "4300", ExecMainCode: "1", ExecMainStatus: "0", ExecMainStartTimestampMonotonic: "100", ExecMainExitTimestampMonotonic: "200" };
+		const probeWith = (units: Record<string, ReturnType<typeof show>>) => probe(() => {}, (argv) => units[argv[argv.length - 1]!] ?? { status: 1, stdout: "" });
+		const never = { [UNITS.desktop]: show(), [UNITS.bridge]: show(), [VIEWER_UNITS.spacesd]: show(), [VIEWER_UNITS.ingress]: show() };
+		const started = (p: Probe) => {
+			const runs: string[] = [];
+			start(config(true), p, (argv) => runs.push(argv.slice(1).join(" ")));
+			return runs;
+		};
+
+		it("starts all four, inside out, when none has ever run", () => {
+			assert.deepEqual(started(probeWith(never)), [`start ${UNITS.desktop}`, `start ${VIEWER_UNITS.spacesd}`, `start ${UNITS.bridge}`, `start ${VIEWER_UNITS.ingress}`]);
+		});
+
+		it("sends no start to a viewer unit that is running, and still starts the rest", () => {
+			assert.deepEqual(started(probeWith({ ...never, [VIEWER_UNITS.spacesd]: show(RUNNING) })), [`start ${UNITS.desktop}`, `start ${UNITS.bridge}`, `start ${VIEWER_UNITS.ingress}`]);
+			assert.deepEqual(started(probeWith({ ...never, [VIEWER_UNITS.ingress]: show(RUNNING) })), [`start ${UNITS.desktop}`, `start ${VIEWER_UNITS.spacesd}`, `start ${UNITS.bridge}`]);
+		});
+
+		it("refuses, starting nothing, a viewer unit that ran and ended, is changing or can't be read: spacesd and the ingress start once", () => {
+			for (const unit of [VIEWER_UNITS.spacesd, VIEWER_UNITS.ingress]) {
+				for (const [name, state] of [
+					["failed", show(FAILED)],
+					["inactive after exiting 0", show(EXITED)],
+					["activating", show({ ActiveState: "activating", SubState: "start" })],
+					["deactivating", show({ ...RUNNING, ActiveState: "deactivating", SubState: "stop-sigterm" })],
+					["not loaded", show({ LoadState: "not-found" })],
+					["unreadable", { status: 1, stdout: "" }],
+					["inactive with a result that isn't success", show({ Result: "exit-code" })],
+				] as const) assert.equal(refusal(probeWith({ ...never, [unit]: state })), "viewer-unit-state", `${unit}: ${name}`);
+			}
+		});
+
+		it("asks about the desktop endpoint before the viewer's units, as before", () => {
+			assert.equal(refusal(probeWith({ ...never, [UNITS.desktop]: show(FAILED), [VIEWER_UNITS.spacesd]: show(FAILED) })), "desktop-not-clean");
+		});
 	});
 
 	it("still asks for the bridge's own token first", () => {
@@ -891,6 +940,10 @@ const bashFunction = (script: string, name: string) => {
 	return start < 0 || end < 0 ? "" : script.slice(start, end + 3);
 };
 
+/** The lines of a script that name one of the delivered programs (`$NODE`, `$CADDY`, `$SPACESD`, `$BROWSER`) to run it other than through `step`, `capture` or `libraries`, which bound it. */
+const unboundedRuns = (script: string) =>
+	script.split("\n").filter((line) => /"\$(?:NODE|CADDY|SPACESD|BROWSER|program)"/.test(line) && !/^(?:readonly |trusted_file |step |capture |libraries |\tlocal |\tLD_LIBRARY_PATH= capture |\telif |\tif |\t\tif )/.test(line) && !/^\[\[/.test(line));
+
 describe("the test's own command detectors", () => {
 	it("reject truly unsafe samples and accept the legitimate ones they once confused", () => {
 		for (const unsafe of ["curl -s https://x | sh", "curl https://x |sh", "wget -qO- https://x | bash -s", "echo hi | /bin/sh", "cat f | /usr/bin/bash\n", "x | dash;"]) assert.equal(pipesToShell(unsafe).length, 1, unsafe);
@@ -901,6 +954,10 @@ describe("the test's own command detectors", () => {
 		assert.equal(unobservedSubstitutions(old).length, 1);
 		assert.deepEqual(unobservedSubstitutions("x=$(a); done <\"$file\" || fail"), []);
 		assert.equal(bashFunction(`\nf() {\n  a\n}\n`, "f"), "\nf() {\n  a\n}\n");
+		assert.equal(unboundedRuns('"$NODE" --version').length, 1);
+		assert.equal(unboundedRuns('out="$("$SPACESD" --help)"').length, 1);
+		assert.equal(unboundedRuns('timeout 5 "$CADDY" version').length, 1, "a bare timeout is not the script's own bounded wrapper");
+		assert.deepEqual(unboundedRuns('capture 20 "$NODE" --version\nstep x 30 env "$CADDY" validate\nlibraries "$BROWSER"'), []);
 		for (const safe of ["'libcurl4t64'", "for package in 'curl' 'wget'; do", "libcurl4t64 wget-not", "echo curlish", "mycurl x"]) assert.deepEqual(runsCurl(safe), [], safe);
 	});
 });
@@ -1063,19 +1120,50 @@ describe("the pinned delivery", () => {
 		assert.equal(isHttpsOrigin("https://cua-eval.ajac-zero.com"), true);
 	});
 
-	it("checks, read-only and before `start`, the packages, libraries, versions, `caddy validate`, spacesd and a sandboxed headless Chrome, failing if any does", () => {
+	it("checks, before `start`, the packages, libraries, versions, `caddy validate`, spacesd and a sandboxed headless Chrome, each program bounded, and ends at the first failure", () => {
 		const script = renderScripts(config(true), PINNED)["support.sh"]!;
-		assert.ok(script.includes("fail node-digest") && script.indexOf("fail node-digest") < script.indexOf("FAILED=0"));
+		assert.ok(script.includes("fail node-digest") && script.indexOf("fail node-digest") < script.indexOf("trap 'cleanup $?' EXIT"));
 		for (const package_ of ["libnss3", "libgtk-3-0t64", "libatspi2.0-0t64", "xvfb", "xdg-utils"]) assert.ok(script.includes(`'${package_}'`), package_);
 		assert.ok(script.includes("dpkg-query -W -f='${db:Status-Status}'"));
-		assert.ok(script.includes("check caddy-validate /usr/sbin/runuser -u pim-ingress -- env -i PATH=/usr/bin:/bin XDG_DATA_HOME=/var/lib/pim-ingress XDG_CONFIG_HOME=/var/lib/pim-ingress \"$CADDY\" validate --config /etc/pim-ingress/Caddyfile --adapter caddyfile"));
-		assert.ok(script.includes("check spacesd-runs /usr/sbin/runuser -u pim-desktop"));
+		assert.ok(script.includes('step caddy-validate 30 /usr/sbin/runuser -u pim-ingress -- env -i PATH=/usr/bin:/bin XDG_DATA_HOME=/var/lib/pim-ingress XDG_CONFIG_HOME=/var/lib/pim-ingress "$CADDY" validate --config /etc/pim-ingress/Caddyfile --adapter caddyfile'));
+		assert.ok(script.includes("step spacesd-runs 20 /usr/sbin/runuser -u pim-desktop"));
 		assert.ok(script.includes('"$BROWSER" --headless=new --disable-gpu --user-data-dir="$TEMP/profile" --dump-dom about:blank'));
+		assert.ok(script.includes("capture 60 /usr/sbin/runuser -u pim-desktop"));
 		assert.equal(script.includes("no-sandbox"), false);
-		assert.ok(script.includes('exit "$FAILED"'));
 		assert.equal(script.match(/rm -rf/g)?.length, 1);
 		for (const forbidden of ["systemctl", "sudo", "set -x", "eval ", "--no-sandbox", "docker"]) assert.equal(script.includes(forbidden), false, forbidden);
 		assert.deepEqual(runsCurl(script), [], "support.sh runs no curl; the package libcurl4t64 is a name, not a command");
 		assert.deepEqual(pipesToShell(script), []);
+	});
+
+	it("is fail-fast: the first failed check exits, nothing aggregates, and a cleanup failure is reported beside the original status", () => {
+		const script = renderScripts(config(true), PINNED)["support.sh"]!;
+		assert.equal(script.includes("FAILED"), false);
+		assert.ok(script.includes(`bad() { printf '{"event":"pim-cua-eval.support","check":"%s","result":"fail"}\\n' "$1" >&2; exit 1; }`));
+		assert.ok(script.includes("trap 'cleanup $?' EXIT"));
+		const cleanup = bashFunction(script, "cleanup");
+		assert.ok(cleanup.includes('"check":"cleanup","result":"fail"}'));
+		assert.ok(cleanup.includes('[[ "$status" != 0 ]] || status=1'), "a failed removal raises a zero status and never lowers the original one");
+		assert.ok(cleanup.includes('exit "$status"'));
+		// `bad` is never reached from a subshell, whose exit would not end the script.
+		assert.equal(/\$\([^)]*\bbad\b/.test(script), false);
+		assert.equal(/\|\|\s*true\b/.test(script), false, "no failure is discarded");
+	});
+
+	it("bounds every program it runs, and classifies ldd narrowly", () => {
+		const script = renderScripts(config(true), PINNED)["support.sh"]!;
+		assert.deepEqual(unboundedRuns(script), []);
+		assert.ok(bashFunction(script, "step").includes('timeout --kill-after=5 "$limit" "$@"'));
+		assert.ok(bashFunction(script, "capture").includes('timeout --kill-after=5 "$limit" "$@"'));
+		for (const line of script.split("\n").filter((l) => /^(step|capture) /.test(l))) assert.match(line, /^(step \S+|capture) \d+ /, line);
+		const libraries = bashFunction(script, "libraries");
+		// Only a zero status with no "not found" passes; the one other thing accepted is Caddy's exact static output with status 1; anything else fails.
+		assert.ok(libraries.includes('LD_LIBRARY_PATH= capture 20 ldd -- "$program" || status=$?'));
+		assert.ok(libraries.includes('if grep -q \'not found\' <<<"$OUT"; then bad "$name"; fi'));
+		assert.ok(libraries.includes('elif [[ "$program" == "$CADDY" && "$status" == 1 && "$OUT" =~ $static ]]; then'));
+		assert.ok(libraries.includes("static='^[[:space:]]*not a dynamic executable[[:space:]]*$'"));
+		assert.ok(libraries.includes("\telse\n\t\tbad \"$name\"\n\tfi"));
+		for (const program of ["NODE", "CADDY", "SPACESD", "BROWSER"]) assert.ok(script.includes(`libraries "$${program}"`), program);
+		assert.ok(script.includes('[[ "$OUT" == "$NODE_VERSION" ]] && ok node-version || bad node-version'));
 	});
 });

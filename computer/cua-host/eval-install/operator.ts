@@ -716,57 +716,84 @@ printf '{"event":"pim-cua-eval.fetched","evaluation":"%s"}\\n' ${quote(config.ev
  */
 function renderSupport(config: Config, viewer: NonNullable<Config["viewer"]>): string {
 	const packages = BASE_PACKAGES.map((name) => quote(name)).join(" ");
+	const runuser = `${TOOLS.runuser} -u`;
 	return `${prologue(config, "support")}
 trusted_file ${TOOLS.runuser} || fail tools
-for tool in dpkg-query ldd timeout mktemp chown grep rm; do trusted_file "/usr/bin/$tool" || fail tools; done
+for tool in dpkg-query ldd timeout mktemp chown grep rm basename; do trusted_file "/usr/bin/$tool" || fail tools; done
 readonly CADDY=${quote(viewer.caddy.path)}
 readonly SPACESD=${quote(viewer.spacesd.path)}
 readonly BROWSER=${quote(config.browser.path)}
 readonly NODE_VERSION=${quote(config.node.version)}
 readonly CADDY_VERSION=${quote(viewer.caddy.version)}
 
-FAILED=0
+# Fail fast: the first check that fails ends the run, with nothing after it run. bad is only called from this shell, never from a subshell, so its exit is the script's.
 ok() { printf '{"event":"pim-cua-eval.support","check":"%s","result":"ok"}\\n' "$1"; }
-bad() { printf '{"event":"pim-cua-eval.support","check":"%s","result":"fail"}\\n' "$1"; FAILED=1; }
-check() { if "\${@:2}" >/dev/null 2>&1; then ok "$1"; else bad "$1"; fi; }
+bad() { printf '{"event":"pim-cua-eval.support","check":"%s","result":"fail"}\\n' "$1" >&2; exit 1; }
 
+# The profile directory Chrome gets is removed on any exit; a failed removal is reported next to the failure that ended the run, never in place of it.
 TEMP=""
 cleanup() {
 	local status="$1"
-	if [[ -n "$TEMP" ]]; then rm -rf --one-file-system -- "$TEMP" || { bad cleanup; status=1; }; fi
+	if [[ -n "$TEMP" ]]; then
+		rm -rf --one-file-system -- "$TEMP" || { printf '{"event":"pim-cua-eval.support","check":"cleanup","result":"fail"}\\n' >&2; [[ "$status" != 0 ]] || status=1; }
+	fi
 	exit "$status"
 }
 trap 'cleanup $?' EXIT
 
+# Every program that runs is bounded: a check that doesn't end in its limit is killed and fails. (An absent timeout, a program that ignores TERM: KILL follows 5 seconds later.)
+# step NAME SECONDS COMMAND...: one bounded command, output discarded.
+step() {
+	local name="$1" limit="$2"
+	shift 2
+	if timeout --kill-after=5 "$limit" "$@" >/dev/null 2>&1; then ok "$name"; else bad "$name"; fi
+}
+# capture SECONDS COMMAND...: one bounded command whose output (stdout and stderr) is left in $OUT; its failure, including the time limit, is the function's.
+capture() {
+	local limit="$1"
+	shift
+	OUT="$(timeout --kill-after=5 "$limit" "$@" 2>&1)"
+}
+
 for package in ${packages}; do
-	check "package-$package" test "$(dpkg-query -W -f='\${db:Status-Status}' -- "$package" 2>/dev/null)" = installed
+	if [[ "$(dpkg-query -W -f='\${db:Status-Status}' -- "$package" 2>/dev/null)" == installed ]]; then ok "package-$package"; else bad "package-$package"; fi
 done
 
-# A program with no missing shared library. A static one has none to miss.
-libs_ok() { local out; out="$(LD_LIBRARY_PATH= ldd -- "$1" 2>&1)" || true; ! grep -q 'not found' <<<"$out"; }
-for program in "$NODE" "$CADDY" "$SPACESD" "$BROWSER"; do check "libraries-$(basename -- "$program")" libs_ok "$program"; done
+# Shared libraries. A program that ldd can't read, or can't run the loader for, fails; "not found" in a successful listing fails. The one thing taken as no missing library is Caddy's
+# own static build (Go, no cgo), whose ldd output is exactly "not a dynamic executable" with status 1; Node, spacesd and Chrome are dynamic and have no such exemption.
+libraries() {
+	local program="$1" name="libraries-$(basename -- "$1")" status=0 static='^[[:space:]]*not a dynamic executable[[:space:]]*$'
+	LD_LIBRARY_PATH= capture 20 ldd -- "$program" || status=$?
+	if [[ "$status" == 0 ]]; then
+		if grep -q 'not found' <<<"$OUT"; then bad "$name"; fi
+	elif [[ "$program" == "$CADDY" && "$status" == 1 && "$OUT" =~ $static ]]; then
+		:
+	else
+		bad "$name"
+	fi
+	ok "$name"
+}
+libraries "$NODE"
+libraries "$CADDY"
+libraries "$SPACESD"
+libraries "$BROWSER"
 
-version_is() { local out; out="$("$1" "\${@:3}" 2>&1)" && [[ "$out" == "$2"* ]]; }
-check node-version version_is "$NODE" "$NODE_VERSION" --version
-version_ok() { local out; out="$(${TOOLS.runuser} -u ${VIEWER_ACCOUNTS.ingress} -- "$CADDY" version 2>&1)" && [[ "$out" == "$CADDY_VERSION"* ]]; }
-check caddy-version-pinned version_ok
+capture 20 "$NODE" --version || bad node-version
+[[ "$OUT" == "$NODE_VERSION" ]] && ok node-version || bad node-version
+capture 20 ${runuser} ${VIEWER_ACCOUNTS.ingress} -- env -i PATH=/usr/bin:/bin "$CADDY" version || bad caddy-version
+[[ "$OUT" == "$CADDY_VERSION "* ]] && ok caddy-version || bad caddy-version
 
 # Caddy parses and provisions the installed Caddyfile as its own account, as the unit does; nothing is started, no certificate is asked for.
-check caddy-validate ${TOOLS.runuser} -u ${VIEWER_ACCOUNTS.ingress} -- env -i PATH=/usr/bin:/bin XDG_DATA_HOME=${VIEWER_PATHS.ingressState} XDG_CONFIG_HOME=${VIEWER_PATHS.ingressState} "$CADDY" validate --config ${VIEWER_PATHS.caddyfile} --adapter caddyfile
+step caddy-validate 30 ${runuser} ${VIEWER_ACCOUNTS.ingress} -- env -i PATH=/usr/bin:/bin XDG_DATA_HOME=${VIEWER_PATHS.ingressState} XDG_CONFIG_HOME=${VIEWER_PATHS.ingressState} "$CADDY" validate --config ${VIEWER_PATHS.caddyfile} --adapter caddyfile
 
 # spacesd runs, as the desktop account, as far as printing its help.
-check spacesd-runs ${TOOLS.runuser} -u ${ACCOUNTS.desktop} -- env -i PATH=/usr/bin:/bin "$SPACESD" --help
+step spacesd-runs 20 ${runuser} ${ACCOUNTS.desktop} -- env -i PATH=/usr/bin:/bin "$SPACESD" --help
 
 # Chrome with its own sandbox left on, as the desktop account, headless, with a profile directory made here and removed on exit.
-TEMP="$(mktemp -d)" && chown ${ACCOUNTS.desktop}: -- "$TEMP" || bad chrome-profile
-if [[ -n "$TEMP" ]]; then
-	chrome_runs() {
-		local out
-		out="$(timeout 60 ${TOOLS.runuser} -u ${ACCOUNTS.desktop} -- env -i PATH=/usr/bin:/bin HOME="$TEMP" "$BROWSER" --headless=new --disable-gpu --user-data-dir="$TEMP/profile" --dump-dom about:blank 2>&1)" && grep -q '<html' <<<"$out"
-	}
-	check chrome-headless-sandboxed chrome_runs
-fi
-exit "$FAILED"
+TEMP="$(mktemp -d)" || bad chrome-profile
+chown ${ACCOUNTS.desktop}: -- "$TEMP" || bad chrome-profile
+capture 60 ${runuser} ${ACCOUNTS.desktop} -- env -i PATH=/usr/bin:/bin HOME="$TEMP" "$BROWSER" --headless=new --disable-gpu --user-data-dir="$TEMP/profile" --dump-dom about:blank || bad chrome-headless-sandboxed
+grep -q '<html' <<<"$OUT" && ok chrome-headless-sandboxed || bad chrome-headless-sandboxed
 `;
 }
 

@@ -47,7 +47,9 @@ The nine-file stand-in lane (`vitest.cua-standin.config.ts`) and its files are u
 2. Answers the old call with a known outcome, the case most likely to wrongly settle it.
 3. Waits for that dispatch to finish.
 
-`dispose` runs once, however often it is called. Each test's original assertions run in a `try`, unchanged: the restart takes the dispatch as `unknown`, sends nothing more, and latches the run. The `try` then calls `dispose` and checks that the stored document didn't change, that the restarted binder still has the call `unknown` (and, in the first test, its neighbour `closed`), and that nothing was sent. The `finally` calls `dispose` again, so an assertion that fails first still leaves nothing pending.
+`dispose` runs once, however often it is called. Each test's original assertions run, unchanged, in the body given to `deadDispatch`'s `own`: the restart takes the dispatch as `unknown`, sends nothing more, and latches the run. The body then calls `dispose` and checks three things: the stored document didn't change, the restarted binder still has the call `unknown` (and, in the first test, its neighbour `closed`), and nothing was sent. `own` calls `dispose` again after the body, whatever the body did, so an assertion that fails first still leaves nothing pending.
+
+**A cleanup failure never replaces the test's own.** If only the assertions failed, `own` throws their error as it was, so Vitest shows the original assertion and its diff. If only `dispose` failed, its error is thrown. If both failed, one `AggregateError` holds both, the assertions' error first, and its message names each.
 
 The wait for the call to be out also ends if the dispatch ends without sending, so a dispatch that never sends fails the test's assertions rather than hanging it. No assertion was removed or weakened: the file has the 129 `expect` calls it had at `168964e`, and 8 more. No other prerequisite test leaves a promise pending: the observation manager's crash test settles through its own `crash()`.
 
@@ -59,7 +61,11 @@ The wait for the call to be out also ends if the dispatch ends without sending, 
 - A Node script in place of pim-computer ("passes on only what a real child writes…").
 - `openssl`, and the bridge and endpoint programs with the real `pim-computer.ts` ("the bridge and the endpoint as programs").
 
-A name filter (`--test-name-pattern`) would still load the file and report the other tests as skipped, which can't be told from unexpected skips. So the "starting the Cua computer" block was moved, character for character, to `computer/cua-host/test/cua-endpoint.test.ts`, with copies of the helpers it uses (`HELLO`, the program paths, `tick`, `until`, `place`, `FakeChild`, `endpoint`, `events`, `settle`), also unchanged. The one helper that changed is its `afterEach`: it tries every registered cleanup, last first, even when an earlier one throws or doesn't finish, and gives each 5 s. Then it fails the test with an `AggregateError` naming every cleanup that threw or wasn't seen to finish. A cleanup that wasn't seen to finish may still be running, and is reported so, not taken as done. Checked by counting: the 8 tests and 87 `assert.` calls of the block are all in the new file, `session.test.ts` keeps its other 21 tests, and the two files together hold the original 29 tests and 190 `assert.` calls. `session.test.ts` lost only the block, the now-unused imports and `CUA_COMPUTER`, and the sentence of its header about the Cua credential.
+A name filter (`--test-name-pattern`) would still load the file and report the other tests as skipped, which can't be told from unexpected skips. So the "starting the Cua computer" block was moved, character for character, to `computer/cua-host/test/cua-endpoint.test.ts`, with copies of the helpers it uses (`HELLO`, the program paths, `tick`, `until`, `place`, `FakeChild`, `endpoint`, `events`, `settle`), also unchanged. The one helper that changed is its `afterEach`. It tries every registered cleanup, last first, even when an earlier one throws or doesn't finish, and gives each 5 s. A cleanup that wasn't seen to finish may still be running, and is reported so, not taken as done. Every failed cleanup is reported without replacing the test's own failure:
+
+- **Diagnostics.** Each failed cleanup is written as a diagnostic of the test (`t.diagnostic`), which is reported with the test whether it passed or failed.
+- **The hook's own failure.** The hook then throws an `AggregateError` whose message names each failed cleanup. That fails a test that had passed. A test that had already failed keeps its own error: node:test may report only a test's first error, which is why the diagnostics are there.
+- **The file's `after`.** It throws if any cleanup in the file failed, so the run fails, with the count, even when every failing test already had its own error. Checked by counting: the 8 tests and 87 `assert.` calls of the block are all in the new file, `session.test.ts` keeps its other 21 tests, and the two files together hold the original 29 tests and 190 `assert.` calls. `session.test.ts` lost only the block, the now-unused imports and `CUA_COMPUTER`, and the sentence of its header about the Cua credential.
 
 **What `cua-endpoint.test.ts` can reach, by reading it and what it imports:**
 
@@ -80,10 +86,10 @@ A name filter (`--test-name-pattern`) would still load the file and report the o
 
 Nothing here is authorized yet. The plan has four steps, each its own shell invocation and its own temporary folder, run one after another. It stops at the first step that fails, times out or leaves anything behind. Type checks aren't part of it and need their own gate. Nothing is installed: a missing dependency stops the plan.
 
-**What `timeout` signals, and what it doesn't show.** GNU `timeout` without `--foreground` puts itself and the command in a new process group. At the deadline it sends `TERM` to that whole group, and `KILL` to the group after the grace (15 s for the Worker step, 10 s for the host steps).
+**What `timeout` asks for, and what it doesn't show.** GNU `timeout` without `--foreground` puts itself and the command in a new process group. At the deadline it asks for termination by sending `TERM` to that whole group. If its command hasn't exited after the grace (15 s for the Worker step, 10 s for the host steps), it sends `KILL` to the group. Both are requests delivered as signals. Neither is an observation that any process ended.
 
 - **What is in the group:** everything the step started that stayed in it. For the Worker step that includes Vitest, its pool, and the workerd processes the pool starts, if they stayed in the group. Whether they do isn't checked here. A process that moved to another group or session isn't signalled at all.
-- **A signal isn't closure.** `timeout` exiting (124 after `TERM`, 137 after `KILL`) doesn't show that anything in the group has exited.
+- **A signal isn't termination.** After a deadline, `timeout` exits with 124 when its command ended after `TERM`, or 137 when it had to send `KILL`. That shows only what `timeout` requested and that its direct command ended. It doesn't show that anything else in the group, such as workerd, has exited.
 - **On a timeout:** the step's cleanup is marked unconfirmed and the plan stops. Its folder is left as it is. Nothing is inferred about workerd or anything else, and no process is looked for, signalled or cleaned up. Taking an inventory of anything left behind needs its own approval later.
 
 **Preconditions.** These read state and print a version only. Any failure stops the plan.
@@ -104,7 +110,7 @@ TMPDIR="$RUN_TMP" timeout --signal=TERM --kill-after="$GRACE" "$LIMIT" $COMMAND
 status=$?
 echo "step $NAME: exit status $status"
 if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
-  echo "step $NAME: timed out; cleanup unconfirmed; $RUN_TMP left as it is; stopping"
+  echo "step $NAME: deadline reached; TERM (and KILL after $GRACE) requested of its process group; termination not observed; cleanup unconfirmed; $RUN_TMP left as it is; stopping"
   exit "$status"
 fi
 leftover=$(find "$RUN_TMP" -mindepth 1 -print | head -n 20)
@@ -123,7 +129,7 @@ if [ "$status" -ne 0 ] || [ -n "$leftover" ] || [ -n "$dirty" ]; then echo "step
 | 4 | `launch-manager` | `60s` | `10s` | `node computer/cua-host/test/viewer-launch-manager.test.ts` | `tests 18`, `pass 18` |
 
 - **Step 1's deadline:** the stand-in lane's 144 tests took 131 s, and these 30 need no Durable Object.
-- **Host steps:** each runs one file directly as its own Node process, not through `node --test`, so no test runner starts another process. Each must also report `fail`, `skipped`, `todo` and `cancelled` as 0, and exit 0.
+- **Host steps:** each runs one file directly as its own Node process, not through `node --test`, so no test runner starts another process. Each must also report `fail`, `skipped`, `todo` and `cancelled` as 0, and exit 0. For step 2, any `cleanup failed` diagnostic fails the step even if the counts look right.
 - **The folder check** covers only the step's own `TMPDIR`. A folder that isn't empty is reported with what it holds and left in place.
 
 ## What it doesn't settle

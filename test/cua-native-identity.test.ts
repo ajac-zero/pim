@@ -136,9 +136,14 @@ function sender(answer: () => Promise<unknown> = async () => known) {
  * test owns. `out` settles once the call is out (or the dispatch ended
  * without sending). `dispose` cuts off the dead process's storage, so
  * nothing it does is stored, then answers its call with a known outcome and
- * waits for its dispatch to finish. It answers what was stored just before.
- * It runs once, however often it is called; tests call it in a `finally`, so
- * a failed assertion leaves nothing pending.
+ * waits for its dispatch to finish. It answers what was stored just before,
+ * and runs once, however often it is called.
+ *
+ * `own(body)` runs the test's assertions and then `dispose`, whatever the
+ * assertions did, so a failed one leaves nothing pending. Neither failure
+ * hides the other: the assertions' error is thrown as it is when only they
+ * failed, the cleanup's when only it did, and both, the assertions' first,
+ * in one `AggregateError` whose message names each when both did.
  */
 function deadDispatch(binder: NativeIdentityBinder, disk: ReturnType<typeof memory>["disk"]) {
 	const sent = gate();
@@ -156,8 +161,29 @@ function deadDispatch(binder: NativeIdentityBinder, disk: ReturnType<typeof memo
 			await late;
 			return stored;
 		})());
-	return { out: Promise.race([sent.promise, late.then(() => undefined)]), dispose };
+	const own = async (body: () => Promise<void>): Promise<void> => {
+		let failure: { readonly error: unknown } | undefined;
+		try {
+			await body();
+		} catch (error) {
+			failure = { error };
+		}
+		let cleanup: { readonly error: unknown } | undefined;
+		try {
+			await dispose();
+		} catch (error) {
+			cleanup = { error };
+		}
+		if (failure && cleanup) {
+			throw new AggregateError([failure.error, cleanup.error], `The test failed (${messageOf(failure.error)}), and settling its dead dispatch failed too (${messageOf(cleanup.error)})`);
+		}
+		if (failure) throw failure.error;
+		if (cleanup) throw cleanup.error;
+	};
+	return { out: Promise.race([sent.promise, late.then(() => undefined)]), dispose, own };
 }
+
+const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 const bindingId = async (binder: NativeIdentityBinder, ...args: Parameters<NativeIdentityBinder["bind"]>) => {
 	const bound = await binder.bind(...args);
@@ -345,7 +371,7 @@ describe("binding a native-app call to who makes it", () => {
 		// After a restart that finds the first call's dispatch without an end.
 		const restarted = await twoBound();
 		const dead = deadDispatch(restarted.binder, restarted.disk);
-		try {
+		await dead.own(async () => {
 			await dead.out;
 			const next = restarted.make();
 			expect(next.status("b1")).toBe("unknown");
@@ -357,9 +383,7 @@ describe("binding a native-app call to who makes it", () => {
 			expect(next.status("b1")).toBe("unknown");
 			expect(next.status("b2")).toBe("closed");
 			expect(sent).toEqual([]);
-		} finally {
-			await dead.dispose();
-		}
+		});
 	});
 
 	it("checks the run again after the authority answers, right before sending", async () => {
@@ -533,7 +557,7 @@ describe("binding a native-app call to who makes it", () => {
 		await bindingId(binder, claim(), "click", click());
 		// The process ends while the call is out: its reply never comes to anything that is still running.
 		const dead = deadDispatch(binder, disk);
-		try {
+		await dead.own(async () => {
 			await dead.out;
 			expect(JSON.parse(disk.value!).records[0]).toMatchObject({ status: "claimed", arguments: null });
 
@@ -553,9 +577,7 @@ describe("binding a native-app call to who makes it", () => {
 			expect(JSON.parse(disk.value!).records[0].status).toBe("unknown");
 			expect(restarted.status("b1")).toBe("unknown");
 			expect(sent).toEqual([]);
-		} finally {
-			await dead.dispose();
-		}
+		});
 	});
 
 	it("latches on a failed write, sending nothing more until a restart reads what was stored", async () => {

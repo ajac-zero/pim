@@ -24,7 +24,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, describe, it } from "node:test";
+import { after, afterEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { SessionEvents } from "../../cua-bridge.ts";
 import { type CredentialFiles, type CredentialStat, MAX_CREDENTIAL_BYTES } from "../cua-credential.ts";
@@ -50,8 +50,19 @@ async function until(condition: () => boolean, what: string, ms = 5_000) {
 const CLEANUP_MS = 5_000;
 
 const cleanups: (() => unknown)[] = [];
-// Every cleanup is tried, last registered first, even when an earlier one throws or doesn't finish; then the test fails naming each that did.
-afterEach(async () => {
+/** Cleanups in this file that threw or weren't seen to finish. */
+let cleanupFailures = 0;
+const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/**
+ * Every cleanup is tried, last registered first, even when an earlier one
+ * throws or doesn't finish. Each failure is written as a diagnostic of the
+ * test, then the hook fails with all of them. A test that already failed
+ * keeps its own error: node:test may report only a test's first error, so
+ * the diagnostics are what show its cleanup failures beside it, and the
+ * file's `after` fails the run once more, counting them.
+ */
+afterEach(async (t) => {
 	const failures: unknown[] = [];
 	for (const cleanup of cleanups.splice(0).reverse()) {
 		let timer: ReturnType<typeof setTimeout> | undefined;
@@ -66,7 +77,13 @@ afterEach(async () => {
 			clearTimeout(timer);
 		}
 	}
-	if (failures.length > 0) throw new AggregateError(failures, `${failures.length} cleanup(s) failed or weren't seen to finish.`);
+	if (failures.length === 0) return;
+	cleanupFailures += failures.length;
+	for (const failure of failures) if ("diagnostic" in t) t.diagnostic(`cleanup failed or wasn't seen to finish: ${messageOf(failure)}`);
+	throw new AggregateError(failures, `${failures.length} cleanup(s) failed or weren't seen to finish: ${failures.map(messageOf).join("; ")}`);
+});
+after(() => {
+	if (cleanupFailures > 0) throw new Error(`${cleanupFailures} cleanup(s) in this file failed or weren't seen to finish; each test's diagnostics name them.`);
 });
 
 /** A folder for one test: the socket's directory (0700), a root, and a browser that is never run. */

@@ -1,5 +1,4 @@
 import { bridgeAddress, type CuaBridge, SPACE_HEADER } from "./cua";
-import { OBSERVATION_MEDIA_PROTOCOL } from "./cua-observation";
 
 /**
  * Pim's client to a Cua bridge's viewer host (docs/cua-viewer-first-preview.md):
@@ -22,10 +21,17 @@ import { OBSERVATION_MEDIA_PROTOCOL } from "./cua-observation";
  * The viewer's requests go to `/<hostLaunchId>/…` at the bridge's origin,
  * which only the launch's own credential opens there: the bridge's token
  * never goes on them. Only the headers the host adapter reads are carried,
- * bodies are bounded both ways, and the media socket is relayed message by
- * message within the adapter's own bounds until the observation's deadline.
- * Each is tied to the observation's cancellation, and admitted again after
- * the host answers and before anything reaches the browser (`Watch`).
+ * and bodies are bounded both ways. Each is tied to the observation's
+ * cancellation, and admitted again after the host answers and before
+ * anything reaches the browser (`Watch`).
+ *
+ * The media socket is not carried at all. A relay in the Worker reads the
+ * host's socket as fast as it comes, and a Worker's socket shows nothing of
+ * what it holds unsent to a slow browser, so the Worker would buffer without
+ * bound, and the host, which sees only its own socket to the Worker, would
+ * never see it back up. Until a relay with a bound the platform supports
+ * exists, the desk refuses media before anything is sent
+ * (./cua-observation-runtime.ts).
  * This is not a proxy: the caller passes only a target that
  * `admitObservationRequest` (./cua-observation.ts) built.
  *
@@ -128,20 +134,12 @@ export const MAX_CALL_REQUEST_BYTES = 4 * 1024;
 export const MAX_FILE_BYTES = 512 * 1024;
 /** The most a unary call's answer may be: the adapter's 256 KiB, its frame headers and its trailer. */
 export const MAX_CALL_REPLY_BYTES = 256 * 1024 + 1024;
-/** The most a text message from the browser's media socket may be, as the adapter's `MAX_BROWSER_CONTROL_BYTES`. */
-export const MAX_BROWSER_MEDIA_TEXT_BYTES = 1024;
-/** The most a text message from the host's media socket may be, as the adapter's `MAX_MEDIA_CONTROL_BYTES`. */
-export const MAX_HOST_MEDIA_TEXT_BYTES = 64 * 1024;
-/** The most a media packet may be, as the adapter's `MAX_MEDIA_PACKET_BYTES`. */
-export const MAX_MEDIA_PACKET_BYTES = 16 * 1024 * 1024;
 
 /** The host's own refusals before it reads a request: bad method, path, headers, token, space, type or size. Nothing was done for it. */
 export const REFUSED_BEFORE_ACTING: ReadonlySet<number> = new Set([400, 401, 403, 404, 405, 413, 415]);
 
 /** Where the host serves a launch's files and calls: `/<launch id>/…`, a launch id being 22 characters. */
 const ADAPTER_TARGET = /^\/[A-Za-z0-9_-]{22}\//;
-/** The one media target the host takes: `/<launch id>/media?ticket=<43-character attach token>`. */
-const MEDIA_TARGET = /^\/[A-Za-z0-9_-]{22}\/media\?ticket=[A-Za-z0-9_-]{43}$/;
 /** The presence call, the one call whose answer is a stream: it lasts until the observation's deadline, frame-bounded by the adapter. */
 const PRESENCE_JOIN = "cua.env.v1.PresenceService/Join";
 /** The request headers the adapter reads of a call; nothing else is carried, the bridge's or the browser's `Authorization` least of all. */
@@ -661,71 +659,6 @@ export class CuaViewerClient {
 			if (!handedOn) done();
 		}
 	}
-
-	/**
-	 * Opens the media socket at `target` (`/<hostLaunchId>/media?ticket=…`,
-	 * built by `admitObservationRequest`), offering only `rcdp.v2`, and
-	 * answers the browser's side of a relay to it, or a refusal.
-	 *
-	 * The observation is admitted again immediately before the request
-	 * leaves and once the host's socket is open, before anything reaches the
-	 * browser. Opening is raced against `viewerMs`, the deadline and the
-	 * observation's cancellation; a socket that opens after any of them is
-	 * closed unread. The relay gets only what is left until the deadline,
-	 * read when it starts, and ends on a cancellation.
-	 */
-	async media(target: string, watch: Watch): Promise<Response> {
-		// The host takes media upgrades only at exactly `/<22 characters>/media?ticket=<43 characters>`.
-		if (!MEDIA_TARGET.test(target) || !live(watch)) return plain(404);
-		const link = linked(watch.cancel);
-		const timer = setTimeout(link.abort, Math.min(this.#limits.viewerMs, remaining(watch)));
-		let response: Response;
-		try {
-			// No `Authorization`: the attach token in the target is the adapter's to check, and the bridge's token never goes to a viewer route.
-			const sent = this.#send(this.#origin + target, {
-				headers: { Upgrade: "websocket", "Sec-WebSocket-Protocol": OBSERVATION_MEDIA_PROTOCOL },
-				redirect: "manual",
-				signal: link.signal,
-			});
-			const answered = await settle(sent, link.signal, null);
-			if (answered.kind !== "value") {
-				if (answered.kind === "stopped") abandon(sent, "media");
-				log("cua.viewer.unreachable", { kind: "media" });
-				return plain(watch.cancel.aborted || !live(watch) ? 404 : link.signal.aborted ? 504 : 502);
-			}
-			response = answered.value;
-		} finally {
-			clearTimeout(timer);
-			link.release();
-		}
-		const upstream = response.webSocket;
-		const protocol = response.headers.get("sec-websocket-protocol");
-		const refuse = async (status: number) => {
-			if (upstream) {
-				try {
-					upstream.accept();
-					upstream.close(1008, "Refused");
-				} catch {
-					// It ends by itself.
-				}
-			}
-			await discardBody(response.body, "media");
-			return plain(status);
-		};
-		// Read once more, now: the opening was a wait, and the relay gets only what is left of it.
-		const lifetime = remaining(watch);
-		if (!live(watch) || lifetime <= 0) return refuse(404);
-		// The adapter completes only with `rcdp.v2`; whether the platform shows the header on a `101` is not known, so only another value refuses.
-		if (response.status !== 101 || !upstream || (protocol !== null && protocol !== OBSERVATION_MEDIA_PROTOCOL)) {
-			log("cua.viewer.refused", { kind: "media", status: response.status });
-			return refuse(response.status === 400 || response.status === 401 || response.status === 404 ? response.status : 502);
-		}
-		upstream.accept();
-		const { 0: client, 1: browser } = new WebSocketPair();
-		browser.accept();
-		relayMedia(browser, upstream, lifetime, watch.cancel);
-		return new Response(null, { status: 101, webSocket: client, headers: { "Sec-WebSocket-Protocol": OBSERVATION_MEDIA_PROTOCOL } });
-	}
 }
 
 /** What a viewer request is carried under: the observation's deadline and clock, its cancellation, and a check that it is still admitted. */
@@ -743,66 +676,3 @@ export type Watch = {
 const remaining = (watch: Watch) => watch.notAfter - watch.now();
 /** Whether the observation may still be carried: not cancelled, admitted, before its deadline, all read now. */
 const live = (watch: Watch) => !watch.cancel.aborted && watch.admitted() && remaining(watch) > 0;
-
-/** A close code one side may send on: the other side's own, when it is one a socket may send, or `1011`; `1000` when there was none. */
-function passedCode(code: number | undefined): number {
-	if (code === undefined || code === 1005) return 1000;
-	if (code === 1000 || code === 1001 || code === 1003 || (code >= 1007 && code <= 1011) || (code >= 3000 && code <= 4999)) return code;
-	return 1011;
-}
-
-/**
- * Relays one media socket between the browser and the host, until either
- * closes, `lifetimeMs` passes or `cancel` aborts. Up go only text messages within the
- * adapter's bound for the browser (it rebuilds or refuses each); down go text
- * and packets within its bounds. Anything else ends both sides with `1008`
- * or `1009`. Workers' sockets say nothing of what they hold unsent, so this
- * can't apply backpressure: a browser far behind is the host's to end
- * (`MAX_BROWSER_BUFFERED_BYTES`), as it sees its own socket back up.
- */
-export function relayMedia(browser: WebSocket, upstream: WebSocket, lifetimeMs: number, cancel?: AbortSignal): void {
-	let ended = false;
-	const shut = (socket: WebSocket, code: number, reason: string) => {
-		try {
-			if (socket.readyState !== WebSocket.CLOSED) socket.close(code, reason);
-		} catch {
-			// It ends by itself.
-		}
-	};
-	const end = (code: number, reason: string) => {
-		if (ended) return;
-		ended = true;
-		clearTimeout(deadline);
-		cancel?.removeEventListener("abort", cancelled);
-		shut(browser, code, reason);
-		shut(upstream, code, reason);
-	};
-	const cancelled = () => end(1000, "Observation ended");
-	const deadline = setTimeout(cancelled, Math.max(0, lifetimeMs));
-	if (cancel?.aborted) return cancelled();
-	cancel?.addEventListener("abort", cancelled, { once: true });
-	browser.addEventListener("message", (event) => {
-		if (ended) return;
-		if (typeof event.data !== "string") return end(1008, "Only text from the viewer");
-		if (byteLength(event.data) > MAX_BROWSER_MEDIA_TEXT_BYTES) return end(1009, "Message too big");
-		try {
-			upstream.send(event.data);
-		} catch {
-			end(1011, "Error");
-		}
-	});
-	upstream.addEventListener("message", (event) => {
-		if (ended) return;
-		const data = event.data as string | ArrayBuffer;
-		if (typeof data === "string" ? byteLength(data) > MAX_HOST_MEDIA_TEXT_BYTES : data.byteLength > MAX_MEDIA_PACKET_BYTES) return end(1009, "Message too big");
-		try {
-			browser.send(data);
-		} catch {
-			end(1011, "Error");
-		}
-	});
-	browser.addEventListener("close", (event) => end(passedCode(event.code), "Closed"));
-	upstream.addEventListener("close", (event) => end(passedCode(event.code), "Closed"));
-	browser.addEventListener("error", () => end(1011, "Error"));
-	upstream.addEventListener("error", () => end(1011, "Error"));
-}

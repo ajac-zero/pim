@@ -34,7 +34,8 @@ import { OBSERVATION_KEY } from "../src/cua-observation-runtime";
  *    (`OBSERVATION_KEY`, src/cua-observation-runtime.ts), and `FIXTURE_KEY`
  *    as `seeded`. That is the only place a ledger is ever provisioned: a
  *    space seeded before the ledger existed has none, and stays unable to
- *    watch until the preview is disposed. If any of it fails,
+ *    watch. Nothing gives it one later; that would be a separate, reviewed
+ *    migration. If any of it fails,
  *    the transaction keeps none of it, `seeding` stays, and the space doesn't
  *    start.
  *
@@ -50,7 +51,11 @@ import { OBSERVATION_KEY } from "../src/cua-observation-runtime";
  * person in control), and nothing is re-enabled, resumed, renewed or
  * repaired. `seeding`, or `seeded` without the marker, never starts again,
  * as such a space would otherwise use the default computer. Only tearing
- * down the preview's state undoes it.
+ * down the preview's state undoes it, and that settles nothing the space
+ * recorded: its ledger's records and tombstones are Pim's authoritative
+ * history, and neither tearing down nor a space, journal or identity seeded
+ * afresh is a way past an observation left unsettled
+ * (docs/cua-viewer-first-worker.md).
  *
  * The transaction writes through its own `ControlCoordinator`, never the
  * space's: if a write fails, that coordinator latches and is dropped with

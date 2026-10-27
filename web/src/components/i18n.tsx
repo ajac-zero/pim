@@ -656,6 +656,9 @@ const translations = {
       "This preview's agents use its stand-in model: they act only when you send /tool lines, so what you see is the wiring, not an agent working by itself.",
     watchDesktopBlocked: "Watching isn't available here: {reason}",
     stopWatching: "Stop watching",
+    askToEnd: "Ask to end it",
+    watchDesktopNoPicture:
+      "The desktop's picture isn't shown yet: Pim can't pass it on to your browser within a safe limit, so the viewer opens without it.",
     checkObservation: "Check again",
     observationStarting: "Starting",
     observationOpen: "Watching",
@@ -1717,6 +1720,9 @@ const translations = {
       "Los agentes de esta vista previa usan su modelo de prueba: solo actúan cuando envías líneas /tool, así que lo que ves es la conexión, no un agente trabajando por su cuenta.",
     watchDesktopBlocked: "Ver no está disponible aquí: {reason}",
     stopWatching: "Dejar de ver",
+    askToEnd: "Pedir que termine",
+    watchDesktopNoPicture:
+      "La imagen del escritorio aún no se muestra: Pim no puede pasarla a tu navegador dentro de un límite seguro, así que el visor se abre sin ella.",
     checkObservation: "Comprobar de nuevo",
     observationStarting: "Iniciando",
     observationOpen: "Viendo",

@@ -609,99 +609,47 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		expect((await serve(at("viewer/"), false)).status).toBe(401);
 		expect((await serve(at("files"))).status).toBe(404);
 		expect((await serve(at("viewer/", { headers: { authorization: "Bearer pim_x_y" } }))).status).toBe(401);
-		// The host serves files to GET only, and media only at a 43-character attach token, though admission takes more.
+		// The host serves files to GET only, though admission takes HEAD.
 		expect((await serve(at("viewer/", { method: "HEAD" }))).status).toBe(405);
-		const shortTicket = at(`media?ticket=${"u".repeat(20)}`, { headers: { upgrade: "websocket", origin: ORIGIN, "sec-websocket-protocol": "rcdp.v2" } });
-		expect((await serve(shortTicket)).status).toBe(404);
 		expect(t.asked).toHaveLength(before);
 		expect(t.asked.slice(1).every((asked) => asked.headers.get("authorization") === null && asked.headers.get("x-pim-space") === null)).toBe(true);
 	});
 
-	it("relays the media socket within the adapter's bounds, offering only rcdp.v2 and no token", async () => {
-		const hosts: WebSocket[] = [];
-		const fromViewer: unknown[] = [];
-		const host = (asked: Asked) => {
-			if (asked.url.endsWith("/observations/launch")) return launched(asked);
-			const { 0: client, 1: server } = new WebSocketPair();
-			server.accept();
-			server.addEventListener("message", (event) => fromViewer.push(event.data));
-			hosts.push(server);
-			return new Response(null, { status: 101, webSocket: client, headers: { "sec-websocket-protocol": "rcdp.v2" } });
-		};
-		const t = desk({ stored: empty(), host });
+	it("refuses the viewer's media socket before anything is sent, as no bounded relay exists", async () => {
+		const t = desk({ stored: empty(), host: launched });
 		await t.desk.launch();
 		const upgrade = new Request(`${ORIGIN}/api/observations/${id(1)}/media?ticket=${ATTACH}`, { headers: { upgrade: "websocket", origin: ORIGIN, "sec-websocket-protocol": "rcdp.v2" } });
 		const response = await t.desk.serve(upgrade, { viaSession: true }, ORIGIN);
-		expect(response.status).toBe(101);
-		expect(response.headers.get("sec-websocket-protocol")).toBe("rcdp.v2");
-		const asked = t.asked[1]!;
-		expect(asked.url).toBe(`https://bridge.cua.test/${LAUNCH}/media?ticket=${ATTACH}`);
-		expect(asked.headers.get("authorization")).toBeNull();
-		expect(asked.headers.get("sec-websocket-protocol")).toBe("rcdp.v2");
-
-		const viewer = response.webSocket!;
-		const toViewer: unknown[] = [];
-		let closed: number | null = null;
-		viewer.accept();
-		viewer.addEventListener("message", (event) => toViewer.push(event.data));
-		viewer.addEventListener("close", (event) => {
-			closed = event.code;
-		});
-		viewer.send(JSON.stringify({ type: "request_keyframe" }));
-		hosts[0]!.send(new Uint8Array([1, 2, 3]));
-		await vi.waitFor(() => expect(fromViewer).toEqual([JSON.stringify({ type: "request_keyframe" })]));
-		await vi.waitFor(() => expect(toViewer).toHaveLength(1));
-		// A binary message from the viewer would be microphone input: the relay ends, and none of it goes up.
-		viewer.send(new Uint8Array([9]));
-		await vi.waitFor(() => expect(closed).toBe(1008));
-		expect(fromViewer).toHaveLength(1);
+		expect(response.status).toBe(503);
+		expect(response.webSocket).toBeNull();
+		expect(t.asked).toHaveLength(1);
+		// Admission still answers first: another observation's media is not found, as before.
+		const other = new Request(`${ORIGIN}/api/observations/${id(9)}/media?ticket=${ATTACH}`, { headers: { upgrade: "websocket", origin: ORIGIN, "sec-websocket-protocol": "rcdp.v2" } });
+		expect((await t.desk.serve(other, { viaSession: true }, ORIGIN)).status).toBe(404);
+		expect(t.asked).toHaveLength(1);
 	});
 
-	it("hands no media socket on once the observation stops being admitted, and ends a relay when its end is asked for", async () => {
-		type Host = { socket: WebSocket; closed: number | null };
-		const media = (t: ReturnType<typeof desk>) =>
-			t.desk.serve(new Request(`${ORIGIN}/api/observations/${id(1)}/media?ticket=${ATTACH}`, { headers: { upgrade: "websocket", origin: ORIGIN, "sec-websocket-protocol": "rcdp.v2" } }), { viaSession: true }, ORIGIN);
-		const host = (hosts: Host[], held: { release?: () => void; hold: boolean }) => async (asked: Asked) => {
-			if (asked.url.endsWith("/observations/launch")) return launched(asked);
-			if (asked.url.endsWith("/observations/end")) return Response.json({ outcome: "requested", recorded: true });
-			if (held.hold) await new Promise<void>((resolve) => (held.release = resolve));
-			const { 0: client, 1: server } = new WebSocketPair();
-			server.accept();
-			const entry: Host = { socket: server, closed: null };
-			server.addEventListener("close", (event) => (entry.closed = event.code));
-			hosts.push(entry);
-			return new Response(null, { status: 101, webSocket: client, headers: { "sec-websocket-protocol": "rcdp.v2" } });
-		};
+	it("asks the computer to end an unconfirmed observation's known launch again, without calling that closure", async () => {
+		let answer: (asked: Asked) => Response = () => Response.json({ outcome: "unconfirmed", key: id(1), reason: "timeout" });
+		const t = desk({ stored: empty(), host: (asked) => answer(asked) });
+		// The launch's answer was lost: no launch is known, so there is nothing to end, and nothing is asked.
+		await t.desk.launch();
+		expect((await t.desk.end(id(1))).status).toBe(409);
+		expect(t.asked).toHaveLength(1);
 
-		// An end asked for while the host's socket is opening: the socket that opens is closed, and the browser gets nothing.
-		const opening: Host[] = [];
-		const held: { release?: () => void; hold: boolean } = { hold: true };
-		const first = desk({ stored: empty(), host: host(opening, held) });
-		await first.desk.launch();
-		const pending = media(first);
-		await vi.waitFor(() => expect(held.release).toBeDefined());
-		expect((await first.desk.end(id(1))).status).toBe(202);
-		held.release!();
-		const refused = await pending;
-		expect(refused.status).toBe(404);
-		expect(refused.webSocket).toBeNull();
-		await vi.waitFor(() => expect(opening[0]?.closed).toBe(1008));
-
-		// A relay under way when the end is asked for ends on both sides, before the host is asked to end the launch.
-		const relayed: Host[] = [];
-		const second = desk({ stored: empty(), host: host(relayed, { hold: false }) });
-		await second.desk.launch();
-		const response = await media(second);
-		expect(response.status).toBe(101);
-		const viewer = response.webSocket!;
-		let closed: number | null = null;
-		viewer.accept();
-		viewer.addEventListener("close", (event) => {
-			closed = event.code;
-		});
-		expect((await second.desk.end(id(1))).status).toBe(202);
-		await vi.waitFor(() => expect(closed).toBe(1000));
-		await vi.waitFor(() => expect(relayed[0]?.closed).toBe(1000));
+		// A known launch whose end's answer was unconfirmed: asking again reaches the host, and the record stays unconfirmed.
+		const u = desk({ stored: empty(), host: (asked) => answer(asked) });
+		answer = launched;
+		await u.desk.launch();
+		answer = () => Response.json({ outcome: "unconfirmed" });
+		expect((await u.desk.end(id(1))).status).toBe(502);
+		expect(u.records()[0]!.status).toBe("unconfirmed");
+		answer = () => Response.json({ outcome: "requested", recorded: true });
+		const again = await u.desk.end(id(1));
+		expect(again.status).toBe(202);
+		expect((await body(again)).observation).toMatchObject({ status: "unconfirmed" });
+		expect(u.asked.filter((asked) => asked.url.endsWith("/observations/end")).map((asked) => JSON.parse(asked.body))).toEqual(Array(2).fill({ owner: SPACE, key: id(1), generation: "gen-1" }));
+		expect(u.records()).toEqual([expect.objectContaining({ status: "unconfirmed", hostLaunchId: LAUNCH, hostGeneration: "gen-1" })]);
 	});
 
 	it("asks the host nothing after a flush it waited on, once another flush failed meanwhile", async () => {
@@ -775,56 +723,6 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		await u.desk.launch();
 		expect((await u.desk.serve(stalled(), { viaSession: true }, ORIGIN)).status).toBe(408);
 		expect(u.asked).toHaveLength(1);
-	});
-
-	it("gives a media relay only what is left of the observation once its socket opens", async () => {
-		type Gate = { release?: () => void };
-		const hosts: { closed: number | null }[] = [];
-		const host = (gate: Gate) => async (asked: Asked) => {
-			if (asked.url.endsWith("/observations/launch")) return launched(asked);
-			await new Promise<void>((resolve) => (gate.release = resolve));
-			const { 0: client, 1: server } = new WebSocketPair();
-			server.accept();
-			const entry: { closed: number | null } = { closed: null };
-			server.addEventListener("close", (event) => (entry.closed = event.code));
-			hosts.push(entry);
-			return new Response(null, { status: 101, webSocket: client, headers: { "sec-websocket-protocol": "rcdp.v2" } });
-		};
-		const media = (t: ReturnType<typeof desk>) =>
-			t.desk.serve(new Request(`${ORIGIN}/api/observations/${id(1)}/media?ticket=${ATTACH}`, { headers: { upgrade: "websocket", origin: ORIGIN, "sec-websocket-protocol": "rcdp.v2" } }), { viaSession: true }, ORIGIN);
-
-		// The socket took until 50 ms before the deadline to open: the relay ends then, not a whole lifetime later.
-		const soon: Gate = {};
-		const t = desk({ stored: empty(), host: host(soon) });
-		await t.desk.launch();
-		const opening = media(t);
-		await vi.waitFor(() => expect(soon.release).toBeDefined());
-		t.clock.now = NOW + LIFETIME - 50;
-		soon.release!();
-		const response = await opening;
-		expect(response.status).toBe(101);
-		const viewer = response.webSocket!;
-		let closed: number | null = null;
-		viewer.accept();
-		viewer.addEventListener("close", (event) => {
-			closed = event.code;
-		});
-		await vi.waitFor(() => expect(closed).toBe(1000));
-		await vi.waitFor(() => expect(hosts[0]?.closed).toBe(1000));
-
-		// It opened at the deadline: the socket is closed unread, and the browser gets nothing.
-		hosts.length = 0;
-		const deadline: Gate = {};
-		const u = desk({ stored: empty(), host: host(deadline) });
-		await u.desk.launch();
-		const late = media(u);
-		await vi.waitFor(() => expect(deadline.release).toBeDefined());
-		u.clock.now = NOW + LIFETIME;
-		deadline.release!();
-		const refused = await late;
-		expect(refused.status).toBe(404);
-		expect(refused.webSocket).toBeNull();
-		await vi.waitFor(() => expect(hosts[0]?.closed).toBe(1008));
 	});
 
 	it("gives up on a management answer that never comes or never ends within its bound, and holds the record unconfirmed", async () => {

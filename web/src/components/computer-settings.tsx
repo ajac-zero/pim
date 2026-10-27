@@ -109,10 +109,12 @@ const UNSETTLED: Partial<Record<Observation["status"], TranslationKey>> = {
 /**
  * Watching the operator's Cua desktop, view only, where this Pim offers it
  * (only a preview does: elsewhere `/api/observations` is not found, and this
- * shows nothing). The whole desktop is shown in Cua's own viewer while the
- * agents keep using it; nothing here takes over or sends input. Closing the
- * viewer asks the computer to end the observation, and Check again asks
- * whether it closed.
+ * shows nothing). The desktop is shown in Cua's own viewer while the agents
+ * keep using it; nothing here takes over or sends input. For now the viewer
+ * opens without the desktop's picture: Pim refuses its media socket until it
+ * can relay it within a bound (docs/cua-viewer-first-worker.md), and the card
+ * says so. Closing the viewer asks the computer to end the observation, and
+ * Check again asks whether it closed.
  */
 function WatchDesktop() {
   const { t } = useI18n();
@@ -201,16 +203,17 @@ function WatchDesktop() {
           >
             {t("checkObservation")}
           </Button>
-          {current.status !== "unconfirmed" && (
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={stop.isPending}
-              onClick={() => stop.mutate(current.id)}
-            >
-              {t("stopWatching")}
-            </Button>
-          )}
+          {/* On an unconfirmed record this only asks the computer to end its launch again: it stays not confirmed closed until Check again sees closure. */}
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={stop.isPending}
+            onClick={() => stop.mutate(current.id)}
+          >
+            {t(
+              current.status === "unconfirmed" ? "askToEnd" : "stopWatching",
+            )}
+          </Button>
         </div>
       )}
       {data.blocked && (
@@ -218,6 +221,9 @@ function WatchDesktop() {
           {t("watchDesktopBlocked", { reason: data.blocked })}
         </p>
       )}
+      <p className="text-[13px] text-muted-foreground">
+        {t("watchDesktopNoPicture")}
+      </p>
       {data.agent === "stand-in" && (
         <p className="text-[13px] text-muted-foreground">
           {t("watchDesktopStandIn")}
@@ -248,11 +254,20 @@ function WatchDesktop() {
                 {t("stopWatching")}
               </Button>
             </div>
+            {/*
+              Not isolated: the viewer is served under this app's own origin, so
+              its pinned script runs with the app's privileges and is trusted as
+              pinned code, not contained by the frame. `allow` only denies the
+              permissions a viewer might ask for; the launch itself turns the
+              clipboard off, and the media socket that would carry input is
+              refused.
+            */}
             {viewer && (
               <iframe
                 title={t("watchDesktopTitle")}
                 src={viewer.url}
                 referrerPolicy="no-referrer"
+                allow="microphone 'none'; camera 'none'; clipboard-read 'none'; clipboard-write 'none'; display-capture 'none'"
                 className="min-h-0 w-full flex-1 border-0 bg-black"
               />
             )}

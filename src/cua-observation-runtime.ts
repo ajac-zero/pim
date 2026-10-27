@@ -83,7 +83,7 @@ export class ObservationDesk {
 	#state: ObservationState | null = null;
 	/** Why the stored ledger can't be used, or a change couldn't be stored; never cleared in this instance. */
 	#blocked: string | null = null;
-	/** Per open record, what aborts its viewer requests and media relays when it stops being admitted. */
+	/** Per open record, what aborts its viewer requests when it stops being admitted. */
 	readonly #cancels = new Map<string, AbortController>();
 
 	/** Loads the stored ledger. Records left `pending_open` or `revoking` come back `unconfirmed`, and are written back so. */
@@ -135,7 +135,7 @@ export class ObservationDesk {
 		}
 	}
 
-	/** Ends whatever the browser holds of `id`'s launch through this space: its requests in flight and its media relays. */
+	/** Ends whatever the browser holds of `id`'s launch through this space: its requests in flight, and the presence stream. */
 	#cancel(id: string): void {
 		this.#cancels.get(id)?.abort();
 		this.#cancels.delete(id);
@@ -298,10 +298,13 @@ export class ObservationDesk {
 		if (FINAL.includes(record.status)) return answer({ observation: view(record) });
 		// A launch still being recorded or asked for is left to finish: its answer names what to end. Revoking it now would leave a record no host answer can settle.
 		if (record.status === "pending_open") return failure(409, "This observation is still starting. Stop it once it has started.", { observation: view(record) });
+		// An unconfirmed record whose answer named no launch gives the computer nothing to end.
+		const { hostLaunchId: launchId, hostGeneration: generation } = record;
+		if (launchId === null || generation === null) return failure(409, "The computer never named a launch for this observation, so there is nothing to ask it to end.", { observation: view(record) });
+		// On an unconfirmed record this changes nothing: asking for an end is not closure, and it stays unconfirmed whatever the host answers.
 		const revoked = this.#apply({ type: "revoke_requested", observationId: id });
 		if (!revoked.ok) return failure(503, "Stopping couldn't be recorded, so nothing was asked of the computer.", { observation: view(record) });
 		const current = this.#record(id)!;
-		if (current.hostLaunchId === null || current.hostGeneration === null) return answer({ observation: view(current) }, 202);
 		let client: CuaViewerClient;
 		try {
 			client = this.#options.client();
@@ -312,8 +315,8 @@ export class ObservationDesk {
 		// The flush was a wait: the ledger may have blocked, or the record settled, meanwhile.
 		const still = this.#record(id);
 		if (this.#blocked) return failure(503, "Stopping couldn't be made durable, so nothing was asked of the computer.", { observation: this.#view(id) });
-		if (!still || FINAL.includes(still.status) || still.hostLaunchId !== current.hostLaunchId || still.hostGeneration !== current.hostGeneration) return answer({ observation: this.#view(id) });
-		const reply = await client.end({ owner: this.#options.owner, key: id, generation: current.hostGeneration });
+		if (!still || FINAL.includes(still.status) || still.hostLaunchId !== launchId || still.hostGeneration !== generation) return answer({ observation: this.#view(id) });
+		const reply = await client.end({ owner: this.#options.owner, key: id, generation });
 		if (reply.kind === "lost" || reply.kind === "unavailable") {
 			this.#apply({ type: "unconfirmed", observationId: id, evidence: `the host's answer to end was lost (${reply.kind === "lost" ? reply.reason : "unavailable"})` });
 			return failure(502, "The computer's answer was lost; the observation may still be open.", { observation: this.#view(id) });
@@ -370,6 +373,8 @@ export class ObservationDesk {
 	async #forward(request: Request, publicOrigin: string): Promise<Response> {
 		const admitted = admitObservationRequest(request, { owner: this.#options.owner, viaSession: true }, this.state, this.#now(), publicOrigin);
 		if (!admitted.ok) return observationResponse(new Response(null, { status: admitted.status }));
+		// No bounded relay for the media socket exists yet (./cua-viewer.ts): refused, and the host is never asked for one.
+		if (admitted.kind === "media") return observationResponse(new Response(null, { status: 503 }));
 		const record = this.#record(admitted.observationId)!;
 		let client: CuaViewerClient;
 		try {
@@ -395,7 +400,6 @@ export class ObservationDesk {
 				);
 			},
 		};
-		if (admitted.kind === "media") return observationResponse(await client.media(admitted.hostTarget, watch));
 		return observationResponse(await client.viewer(admitted.hostTarget, request, admitted.kind, watch));
 	}
 }

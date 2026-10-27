@@ -103,7 +103,9 @@ it("offers watching the Cua desktop, view only, only where this Pim offers it, a
   expect(offered).toContain("View only");
   expect(offered).toContain("You can&#x27;t take over");
   expect(offered).toContain("stand-in model");
-  expect(offered).not.toMatch(/Take over|Stop watching/);
+  // The media socket is refused until a bounded relay exists: said, not hidden.
+  expect(offered).toContain("picture isn&#x27;t shown yet");
+  expect(offered).not.toMatch(/Take over|Stop watching|Ask to end it/);
 
   const unsettled = section(cua, {
     blocked: null,
@@ -119,6 +121,8 @@ it("offers watching the Cua desktop, view only, only where this Pim offers it, a
   });
   expect(unsettled).toContain("Not confirmed closed");
   expect(unsettled).toContain("Check again");
+  // Its end may be asked for again, which is not closure: never offered as stopping it.
+  expect(unsettled).toContain("Ask to end it");
   expect(unsettled).not.toContain("Stop watching");
   expect(unsettled).not.toContain("stand-in model");
   // Watching again waits for it to settle.

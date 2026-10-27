@@ -986,11 +986,17 @@ describe("the pinned delivery", () => {
 		refusedWith(() => bundleInputs((file) => { if (file === BUNDLE_SOURCES[3]) throw new Error("gone"); return inRepository(file); }, false), "source");
 	});
 
-	it("still lacks exactly two pins, the commit and its archive's SHA-256, and renders nothing until they are filled in, for the same commit", () => {
-		assert.deepEqual(missingPins(PINS), ["repository-commit", "repository-sha256"]);
-		assert.deepEqual(missingPins(PINNED), []);
-		refusedWith(() => renderScripts(config(true)), "pin-missing:repository-commit,repository-sha256");
+	it("pins the bundle commit B and its archive, renders only for B, and refuses any empty or mismatched pin", () => {
+		const B = "afc9371a75f1c21b3b22627222b9791ef283692d";
+		assert.deepEqual(PINS.repository, { commit: B, sha256: "582716ed2cac76e546980d0e856160e45e6b5f64e2dfde0aa2b2173b3236aae8", maxBytes: 64 * 1024 * 1024 });
+		assert.deepEqual(missingPins(PINS), []);
+		assert.deepEqual(missingPins({ ...PINS, repository: { ...PINS.repository, commit: null, sha256: null } }), ["repository-commit", "repository-sha256"]);
+		const fetch = renderScripts(config(true, (raw) => { raw.commit = B; }), PINS)["fetch.sh"]!;
+		assert.ok(fetch.includes(`'https://codeload.github.com/ajac-zero/pim/tar.gz/${B}' 256 '582716ed2cac76e546980d0e856160e45e6b5f64e2dfde0aa2b2173b3236aae8'`));
+		// A configuration for any other commit is refused: the pin is for B alone.
+		refusedWith(() => renderScripts(config(true)), "pin-commit");
 		refusedWith(() => renderScripts(config(true), { ...PINNED, repository: { ...PINNED.repository, sha256: null } }), "pin-missing:repository-sha256");
+		refusedWith(() => renderScripts(config(true), { ...PINNED, repository: { ...PINNED.repository, commit: null } }), "pin-missing:repository-commit");
 		refusedWith(() => renderScripts(config(true), { ...PINNED, repository: { ...PINNED.repository, commit: "f".repeat(40) } }), "pin-commit");
 		refusedWith(() => renderScripts(config(true), { ...PINNED, spacesd: { ...PINNED.spacesd, sha256: "0".repeat(64) } }), "pin-mismatch");
 		refusedWith(() => renderScripts(config(true), { ...PINNED, node: { ...PINNED.node, version: "v22.19.0" } }), "pin-mismatch");
@@ -1000,6 +1006,7 @@ describe("the pinned delivery", () => {
 		// Without a viewer nothing is delivered, so the pins are not consulted.
 		assert.equal(Object.keys(renderScripts(config(false))).includes("fetch.sh"), false);
 	});
+
 
 	it("refuses a layout `fetch.sh` cannot place: Node not at bin/node, Chrome not where its package puts it, a destination inside another", () => {
 		const render = (change: (raw: Raw) => void) => renderScripts(config(true, change), PINNED);

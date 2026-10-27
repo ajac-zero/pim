@@ -4,8 +4,8 @@
  * bound, so `fetch.sh` refuses anything else before it unpacks a byte. The values were read from each
  * publisher's own record on the date in the docs; none has been downloaded or run here.
  *
- * Two things are not pinned here and are named by `missingPins`: the commit whose archive is the bundle's
- * source, and that archive's SHA-256. The render refuses until both are filled in. The digests of the
+ * The commit whose archive is the bundle's source (B) and that archive's SHA-256 are pinned too; `missingPins` names any that is empty,
+ * and the render refuses while one is, and refuses a configuration whose `commit` is not B. The digests of the
  * extracted programs are the configuration's (`node.sha256`, `browser.sha256`, `viewer.caddy.sha256`),
  * which the operator records from a trusted unpack; `fetch.sh` checks the unpacked program against them.
  */
@@ -57,7 +57,8 @@ export const PINS: Pins = {
 		bytes: 144_849_192,
 		maxBytes: 144_849_192,
 	},
-	repository: { commit: null, sha256: null, maxBytes: 64 * 1024 * 1024 },
+	// B, the bundle-source commit (docs/cua-viewer-first-startup.md, "The bundle-source candidate"): the archive GitHub's codeload serves for it, 2,693,038 bytes, taken on two machines.
+	repository: { commit: "afc9371a75f1c21b3b22627222b9791ef283692d", sha256: "582716ed2cac76e546980d0e856160e45e6b5f64e2dfde0aa2b2173b3236aae8", maxBytes: 64 * 1024 * 1024 },
 	ws: {
 		url: "https://registry.npmjs.org/ws/-/ws-8.22.0.tgz",
 		sha512: "Ydggc987+RO0AnWtZ/7Wq9FtNvcrL1b/RO0ud9mWjUPgDrsAAwQSF51sm2hm1XofbU/4jkpGEsLFsZZxU+1DOg==",

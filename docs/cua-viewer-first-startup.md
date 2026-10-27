@@ -22,7 +22,7 @@ All of it is additive: a configuration with no `viewer` renders, plans, starts a
 | `eval-install/install.ts` | With a viewer: the planner also needs the viewer's bundle files and the two pinned binaries (digests checked), makes the `pim-ingress` account, the ingress's and spacesd's directories and files, and both units; `start` starts inside out and refuses without what each needs, and sends no `start` to spacesd or the ingress unless systemd says it has **never run** (a unit running is left alone; one that failed, exited, is changing or can't be read refuses with `viewer-unit-state`: reboot or discard, no restart); `status` reports them. It makes neither the journal nor the root token. |
 | `eval-install/journal-provision.ts` | The one place a first journal and spacesd's root token are made, each once, as root: `journal`, `root-token`. |
 | `eval-install/operator.ts` | `bundle ... --protobuf-tarball` carries the viewer, and `--source-dir` reads the sources from an unpacked archive instead of git (what the VM does); `render` writes five more scripts (`bridge-cert.sh`, `journal.sh`, `root-token.sh`, `fetch.sh`, `support.sh`) and `base-cloud-config.yaml`, only with a viewer, and only from complete pins. |
-| `eval-install/pins.ts` (new) | The pinned artifacts: each one's HTTPS address, SHA-256 (npm packages: SHA-512 integrity) and size bound. Two pins are empty (see Delivery). |
+| `eval-install/pins.ts` (new) | The pinned artifacts: each one's HTTPS address, SHA-256 (npm packages: SHA-512 integrity) and size bound. The bundle commit B and its archive's digest are filled in (see Delivery). |
 | `origin.ts` (new) | `isHttpsOrigin`, moved out of `host.ts` (which re-exports it) so the operator's and the installer's programs, which run on the VM before `ws` exists, don't import the bridge. It is in the bundle's base sources, so a bundle's digest differs from one made before this change. |
 | `journal-store.ts` | `withDescriptor` exported. |
 | `preview/cua-viewer-first.ts` | An observation lasts 10 minutes. |
@@ -130,14 +130,14 @@ Delivery is ordinary startup source, not an executive decision: `fetch.sh` (root
 | Caddy v2.11.7 | the GitHub release's `caddy_2.11.7_linux_amd64.tar.gz` | SHA-256 `727b9170…4f8b` (celld's pin); the extracted binary is `viewer.caddy.sha256` |
 | spacesd 0.7.0 | the `cua-spacesd-v0.7.0` release's Linux x86_64 asset | SHA-256 `78622428…08fd` and exactly 121,121,848 bytes; the same digest is `viewer.spacesd.sha256` |
 | Chrome 156.0.8078.47-1 | Google's apt pool, `google-chrome-stable_156.0.8078.47-1_amd64.deb` | SHA-256 `6c92cd22…7ac8` and exactly 144,849,192 bytes (from Google's own `Packages`); the extracted `chrome` is `browser.sha256`; only `/opt/google/chrome` is kept |
-| The bundle's sources | `codeload.github.com/ajac-zero/pim/tar.gz/<commit>` | **the commit and the archive's SHA-256: not pinned yet** |
+| The bundle's sources | `codeload.github.com/ajac-zero/pim/tar.gz/<commit>` | B, `afc9371a75f1c21b3b22627222b9791ef283692d`, and SHA-256 `582716ed…aae8` (2,693,038 bytes), pinned |
 | `ws` 8.22.0, `@bufbuild/protobuf` 2.15.0 | the npm registry's tarballs | SHA-512 integrity, as `pnpm-lock.yaml` has it (the bundle build checks the lockfile too) |
 
 Google keeps only the current Chrome in its pool, so the Chrome pin may stop resolving; if so `fetch.sh` fails on `status`, and a new pin is a new review.
 
 ### The missing pins, exactly, and the procedure that fills them
 
-`render` refuses (`pin-missing:repository-commit,repository-sha256`) until the archive pin is filled into `pins.ts`, and refuses a pin for any commit other than the configuration's (`pin-commit`). Nothing below has been done.
+B and its archive's SHA-256 are now in `pins.ts` (the pin commit P is the commit that adds them, with this page; B itself is unchanged). `render` refuses (`pin-missing:…`) if either is ever empty again, and refuses a configuration whose `commit` is not B (`pin-commit`). The procedure below is what produced them; it was run as recorded under "The second machine".
 
 **Two commits, so the hash does not chase itself.** The archive's SHA-256 can't be written inside the commit it hashes. So:
 
@@ -168,7 +168,7 @@ None of these publishers lists a digest for the extracted program, so each is de
 - **Run at `95150a8`:** the same file **passed 48 of 48** (11 suites, 1056.56 ms, exit 0, no skip, cancel or todo), fake-only, run by an independent reviewer.
 - **Run at `afc9371`:** **passed 54 of 54** (12 suites, 900.74 ms, exit 0, no skip, cancel or todo), same boundary. These pass the fake and text specifications only; no script has been run, so they say nothing about a real VM.
 - **Independent off-VM preparation (reported, by public download and extraction, no program executed):** the Node, Caddy and Chrome archives matched their pins above, against Node's published SHA-256, Caddy's official SHA-512 checksums and Google's `Packages` SHA-256; no signature was verified. The archive of `243988f` had SHA-256 `086c6faf831e449529db0e76e4293c6e3771a5a6dcea7e3c51b57198bcc452e6`, and its 431 blobs matched git. That archive is of a commit that is not the bundle commit B, so **it is not the pin**.
-- **Derived program digests, one derivation, not yet the two-machine rule:** `bin/node` `ccacb2d6d87ba6d118b2bffc1ae33747a05cc5fc6b1f1ec4fc1d420b687e952d`; `caddy` `678ade3bfc088749c81a681adc603333ee0bb023b6a6cfe3c0f58bef8ff854e9`; Chrome's `chrome` `95dc9473b4f904cb3ab0800fc7206081fcae12abc094a088bd741a13f1747b72`. They are kept here as provenance for the operator's configuration. The repository pins stay empty until B is accepted, and no second-machine verification is claimed.
+- **Derived program digests** (the same values were derived again on a second machine; see "The second machine"): `bin/node` `ccacb2d6d87ba6d118b2bffc1ae33747a05cc5fc6b1f1ec4fc1d420b687e952d`; `caddy` `678ade3bfc088749c81a681adc603333ee0bb023b6a6cfe3c0f58bef8ff854e9`; Chrome's `chrome` `95dc9473b4f904cb3ab0800fc7206081fcae12abc094a088bd741a13f1747b72`. They are the values for the operator's configuration (`node.sha256`, `viewer.caddy.sha256`, `browser.sha256`).
 
 ### The bundle-source candidate: `afc9371a75f1c21b3b22627222b9791ef283692d`
 
@@ -180,7 +180,28 @@ Selected as the immutable bundle-source candidate **B**. No further source chang
 | The same, recomputed independently in Python from the output's manifest (389 files, 422 entries) | the same value |
 | GitHub's codeload archive of B, fetched fresh | HTTP 200, 2,693,038 bytes, SHA-256 `582716ed2cac76e546980d0e856160e45e6b5f64e2dfde0aa2b2173b3236aae8`; all 431 file and symlink entries match their git blob hashes |
 
-**These were all made on one machine. They are not the two-machine verification the procedure above requires, and are not claimed to be.** The repository pins in `pins.ts` therefore stay empty (`pin-missing` stays true), and `bundle.sha256` is not recorded in a configuration, until that requirement is met. No startup has been run on this evidence, and no VM, certificate, DNS name or secret exists.
+The first derivation was on one machine. The second, below, is what the procedure required.
+
+### The second machine (done once, assembly only)
+
+Run on a different machine from the first (a separate orb: hostname `e2b.local`, working directory `/home/user/workspace/repo`, its own filesystem; `/home/sprite/pim` does not exist there), with its already-installed Node `v26.12.1` (nothing installed), by plain `curl`, `tar`, `dpkg-deb`, `sha256sum`, `sha512sum` and Node running the reviewed `operator.ts`. **No downloaded program was executed**: the archives were hashed and unpacked, the three programs were only hashed, and nothing was built, type-checked or installed. Stage: a new `0700` directory `/tmp/pim-pin-second-1793125633` (kept as evidence). Each download used `curl -q --noproxy '*' --proto '=https' --proto-redir '=https' --tlsv1.2 --max-redirs 5 --fail --retry 0 --max-time 300`, one attempt, the same flags `fetch.sh` uses, and every command returned 0.
+
+| Download | HTTP | Bytes | Digest | Equals the pin |
+| --- | --- | --- | --- | --- |
+| Node v22.18.0 linux-x64 | 200 | 54,824,343 | SHA-256 `a2e70372…8c8a` | yes |
+| Caddy v2.11.7 linux_amd64 | 200 | 18,113,754 | SHA-256 `727b9170…4f8b` | yes |
+| Chrome 156.0.8078.47-1 `.deb` | 200 | 144,849,192 | SHA-256 `6c92cd22…7ac8` | yes |
+| B's codeload archive | 200 | 2,693,038 | SHA-256 `582716ed2cac76e546980d0e856160e45e6b5f64e2dfde0aa2b2173b3236aae8` | yes, equal to the first machine's |
+| `ws` 8.22.0 | 200 | 35,094 | SHA-512 = the lockfile's integrity | yes |
+| `@bufbuild/protobuf` 2.15.0 | 200 | 243,826 | SHA-512 = the lockfile's integrity | yes |
+
+Unpacked without executing: `bin/node` `ccacb2d6…952d`, `caddy` `678ade3b…54e9`, `opt/google/chrome/chrome` `95dc9473…7b72`, each **equal to the first machine's**; the source archive unpacked to 431 files and links. Then, with the installed Node, `operator.ts bundle --commit B --source-dir <the unpacked archive> --ws-tarball … --protobuf-tarball …` (the way `fetch.sh` builds it) and `operator.ts digest` both gave `5c7764a89e785f1e150ac6d64622ddb69a5aed68410a7298b71c11d01078e7b4`, **equal to the first machine's**; the same bundle built from B's git objects (the way the first machine did) was byte-identical to it (`diff -r`), 389 files and 422 entries. Both machines used a Node new enough to strip types, but not the same one, and the digest does not depend on it.
+
+**Verified by two machines:** the archive pins, the three extracted-program digests, and `bundle.sha256` `5c7764a8…78e7b4`. **Not verified, and not claimed:** that either machine's network path was not intercepted at the same moment (each trusted the publishers' TLS and the pins, and no signature was checked); that a different Node 22.18.0 gives the same bundle (`fetch.sh` uses the pinned one, and this has not been run); anything about a VM.
+
+### Before provisioning, and during the qualification
+
+**Blockers to creating any resource** (all now met by source, or a decision, and none by a run on a VM): the pins above; the configuration's digests (the table above) and `bundle.sha256`; this page and the Worker's pages reviewed; the approval of gate 2 below. **Not blockers; these are what the qualification is for, and are not proven beforehand:** whether Caddy gets its certificate and serves the viewer's page and WebSocket over TLS to the backend; Chrome's sandbox as the desktop account; spacesd's libraries and behavior; `support.sh` and `fetch.sh` themselves; `render` of the final scripts on the operator's machine; and the observed cleanup. Each is a step of the live plan with its own bound, and a failure there ends the evaluation at that step without a retry.
 
 ## The live gates, consolidated
 
@@ -274,4 +295,4 @@ Test: `computer/cua-host/test/viewer-startup.test.ts` (new, with `fake-journal-f
 
 ## What is not claimed
 
-No bundle was made, no script rendered or run, no VM, certificate, DNS name, Worker, secret or account created, and nothing was started, installed, built or type-checked. The viewer does not start on this source alone: two pins are empty (above), the extracted programs' digests are the operator's to record, and `fetch.sh` and `support.sh` have never run, so the package list, spacesd's libraries and behavior under Xvfb, Chrome's sandbox, Caddy's acceptance of its file and every cost are unmeasured. Placement A makes the root token known to the desktop account.
+No script was rendered for a VM or run, and no VM, certificate, DNS name, Worker, secret or account created, and nothing was started, installed, built or type-checked. The viewer does not start on this source alone: `fetch.sh` and `support.sh` have never run, so the package list, spacesd's libraries and behavior under Xvfb, Chrome's sandbox, Caddy's acceptance of its file and every cost are unmeasured. Placement A makes the root token known to the desktop account.

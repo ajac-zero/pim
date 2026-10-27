@@ -131,6 +131,34 @@ function sender(answer: () => Promise<unknown> = async () => known) {
 	return { sent, send };
 }
 
+/**
+ * Dispatches b1 from a process that dies while its call is out, which the
+ * test owns. `out` settles once the call is out (or the dispatch ended
+ * without sending). `dispose` cuts off the dead process's storage, so
+ * nothing it does is stored, then answers its call with a known outcome and
+ * waits for its dispatch to finish. It answers what was stored just before.
+ * It runs once, however often it is called; tests call it in a `finally`, so
+ * a failed assertion leaves nothing pending.
+ */
+function deadDispatch(binder: NativeIdentityBinder, disk: ReturnType<typeof memory>["disk"]) {
+	const sent = gate();
+	const reply = gate<NativeOutcome>();
+	const late = binder.dispatch("b1", async () => {
+		sent.open();
+		return reply.promise;
+	});
+	let disposed: Promise<string | undefined> | undefined;
+	const dispose = () =>
+		(disposed ??= (async () => {
+			const stored = disk.value;
+			disk.fail = "before";
+			reply.open(known);
+			await late;
+			return stored;
+		})());
+	return { out: Promise.race([sent.promise, late.then(() => undefined)]), dispose };
+}
+
 const bindingId = async (binder: NativeIdentityBinder, ...args: Parameters<NativeIdentityBinder["bind"]>) => {
 	const bound = await binder.bind(...args);
 	if (!bound.ok) throw new Error(`not bound: ${bound.reason}`);
@@ -316,26 +344,22 @@ describe("binding a native-app call to who makes it", () => {
 
 		// After a restart that finds the first call's dispatch without an end.
 		const restarted = await twoBound();
-		const out = gate();
-		const reply = gate<NativeOutcome>();
-		const late = restarted.binder.dispatch("b1", async () => {
-			out.open();
-			return reply.promise;
-		});
-		await out.promise;
-		const next = restarted.make();
-		expect(next.status("b1")).toBe("unknown");
-		expect(await next.dispatch("b2", send)).toMatchObject({ ok: false, reason: "run_uncertain" });
-		expect(sent).toEqual([]);
-		// The process that sent b1 is gone, so nothing it does now is stored. Its reply still comes, as known, and settles only its own wait.
-		const stored = restarted.disk.value;
-		restarted.disk.fail = "before";
-		reply.open(known);
-		await late;
-		expect(restarted.disk.value).toBe(stored);
-		expect(next.status("b1")).toBe("unknown");
-		expect(next.status("b2")).toBe("closed");
-		expect(sent).toEqual([]);
+		const dead = deadDispatch(restarted.binder, restarted.disk);
+		try {
+			await dead.out;
+			const next = restarted.make();
+			expect(next.status("b1")).toBe("unknown");
+			expect(await next.dispatch("b2", send)).toMatchObject({ ok: false, reason: "run_uncertain" });
+			expect(sent).toEqual([]);
+			// The process that sent b1 is gone, so nothing it does now is stored. Its reply still comes, as known, and settles only its own wait.
+			const stored = await dead.dispose();
+			expect(restarted.disk.value).toBe(stored);
+			expect(next.status("b1")).toBe("unknown");
+			expect(next.status("b2")).toBe("closed");
+			expect(sent).toEqual([]);
+		} finally {
+			await dead.dispose();
+		}
 	});
 
 	it("checks the run again after the authority answers, right before sending", async () => {
@@ -507,35 +531,31 @@ describe("binding a native-app call to who makes it", () => {
 	it("takes a dispatch whose end wasn't recorded as unknown after a restart, and never sends it again", async () => {
 		const { binder, disk, harness, make } = setup();
 		await bindingId(binder, claim(), "click", click());
-		const out = gate();
-		const reply = gate<NativeOutcome>();
 		// The process ends while the call is out: its reply never comes to anything that is still running.
-		const late = binder.dispatch("b1", async () => {
-			out.open();
-			return reply.promise;
-		});
-		await out.promise;
-		expect(JSON.parse(disk.value!).records[0]).toMatchObject({ status: "claimed", arguments: null });
+		const dead = deadDispatch(binder, disk);
+		try {
+			await dead.out;
+			expect(JSON.parse(disk.value!).records[0]).toMatchObject({ status: "claimed", arguments: null });
 
-		const restarted = make();
-		expect(restarted.status("b1")).toBe("unknown");
-		expect(JSON.parse(disk.value!).records[0].status).toBe("unknown");
-		const { sent, send } = sender();
-		expect(await restarted.dispatch("b1", send)).toMatchObject({ ok: false, reason: "uncertain" });
-		expect(await restarted.bind(claim(), "click", click())).toMatchObject({ ok: false, reason: "uncertain" });
-		harness.call("c1", "t2", "call-2");
-		expect(await restarted.bind(claim("t2", "call-2"), "click", click())).toMatchObject({ ok: false, reason: "run_uncertain" });
-		expect(sent).toEqual([]);
+			const restarted = make();
+			expect(restarted.status("b1")).toBe("unknown");
+			expect(JSON.parse(disk.value!).records[0].status).toBe("unknown");
+			const { sent, send } = sender();
+			expect(await restarted.dispatch("b1", send)).toMatchObject({ ok: false, reason: "uncertain" });
+			expect(await restarted.bind(claim(), "click", click())).toMatchObject({ ok: false, reason: "uncertain" });
+			harness.call("c1", "t2", "call-2");
+			expect(await restarted.bind(claim("t2", "call-2"), "click", click())).toMatchObject({ ok: false, reason: "run_uncertain" });
+			expect(sent).toEqual([]);
 
-		// The process that sent it is gone, so nothing it does now is stored. Its reply still comes, as known, and settles only its own wait.
-		const stored = disk.value;
-		disk.fail = "before";
-		reply.open(known);
-		await late;
-		expect(disk.value).toBe(stored);
-		expect(JSON.parse(disk.value!).records[0].status).toBe("unknown");
-		expect(restarted.status("b1")).toBe("unknown");
-		expect(sent).toEqual([]);
+			// The process that sent it is gone, so nothing it does now is stored. Its reply still comes, as known, and settles only its own wait.
+			const stored = await dead.dispose();
+			expect(disk.value).toBe(stored);
+			expect(JSON.parse(disk.value!).records[0].status).toBe("unknown");
+			expect(restarted.status("b1")).toBe("unknown");
+			expect(sent).toEqual([]);
+		} finally {
+			await dead.dispose();
+		}
 	});
 
 	it("latches on a failed write, sending nothing more until a restart reads what was stored", async () => {

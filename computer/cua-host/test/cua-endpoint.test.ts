@@ -46,9 +46,27 @@ async function until(condition: () => boolean, what: string, ms = 5_000) {
 	}
 }
 
+/** How long each cleanup may take before it is reported as not seen to finish. */
+const CLEANUP_MS = 5_000;
+
 const cleanups: (() => unknown)[] = [];
+// Every cleanup is tried, last registered first, even when an earlier one throws or doesn't finish; then the test fails naming each that did.
 afterEach(async () => {
-	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+	const failures: unknown[] = [];
+	for (const cleanup of cleanups.splice(0).reverse()) {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const bound = new Promise<never>((_, reject) => {
+			timer = setTimeout(() => reject(new Error(`A cleanup wasn't seen to finish within ${CLEANUP_MS} ms; it may still be running.`)), CLEANUP_MS);
+		});
+		try {
+			await Promise.race([Promise.resolve().then(cleanup), bound]);
+		} catch (error) {
+			failures.push(error);
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+	if (failures.length > 0) throw new AggregateError(failures, `${failures.length} cleanup(s) failed or weren't seen to finish.`);
 });
 
 /** A folder for one test: the socket's directory (0700), a root, and a browser that is never run. */

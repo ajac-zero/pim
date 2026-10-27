@@ -38,7 +38,7 @@ The typed API establishes the parts of a claim: the tool task's ID, its conversa
 - that a call suspended by Pim's patch keeps its generation as `run.taskId` for as long as it waits. This follows from §5.5's waits, but the patch is outside the document;
 - that `api.agent()` is Pim's agent. It is the harness's agent configuration, while Pim's record of which agent a conversation is comes from its own store (`#roleOf` in `src/pim.ts`).
 
-**The missing contract** is a run identity for a tool invocation that the harness publishes and types. Examples are a `ToolExecutionApi.runId`, or a documented, stable ID on `LiveState.run`. It must stay the same across handover, steering, `onYield`, suspension and restart. It must be different for every successor run. It must be readable together with the tool task's status and owner in one transaction. Without it, Pim's owner would have to accept §6 and §9.4 as that contract explicitly, with the version pinned and a conformance test against the real harness. docs/pi-durable-run-identity.md proposes the smallest such change to pi-durable; it is not patched in. Until one of these happens, **there is no harness authority**: nothing resolves a real run, and the binder takes its identity only from an authority it is given.
+**The missing contract** is a run identity for a tool invocation that the harness publishes and types. Examples are a `ToolExecutionApi.runId`, or a documented, stable ID on `LiveState.run`. It must stay the same across handover, steering, `onYield`, suspension and restart. It must be different for every successor run. It must be readable together with the tool task's status and owner in one transaction. The derivation from §6 and the experimental §9.4 is not an option, whether pinned or tested: only a contract the harness supports publicly will do. docs/pi-durable-run-identity.md proposes the smallest such change to pi-durable; it is not patched in. Until a pinned, reviewed release provides one, **there is no harness authority**: nothing resolves a real run, and the binder takes its identity only from an authority it is given.
 
 ## The authority
 
@@ -62,7 +62,7 @@ The binder accepts only an answer of exactly that shape. Every identity must be 
 
 1. The binding must be `bound`, and its run must not hold it (see "Runs" below).
 2. The authority vouches for it again. A refusal or a changed identity closes the binding. An authority that throws, or answers something that isn't an answer, leaves it `bound` and sends nothing, since that says nothing about the call. A later dispatch, asked for explicitly, goes through every step again: a fresh answer from the authority, the same identity, the same lease, and a run that doesn't hold it.
-3. After the authority answers, with nothing awaited from here to the claim, the binding must still be `bound`, its run must not hold it, and its lease must still be the current one. If the lease isn't current, the binding is closed (`stale_lease`): epochs only grow, so the lease can never be current again.
+3. After the authority answers, the binding must still be `bound`, its run must not hold it, and its lease must still be the current one. Nothing is awaited from here to the claim, but that holds only for the binder's own document. The authority's answer was read earlier, in its own transaction (see "The gap between the authority and the claim"). If the lease isn't current, the binding is closed (`stale_lease`): epochs only grow, so the lease can never be current again.
 4. It is stored as `claimed`, without its arguments, before `send` is called with the frozen binding. A second dispatch, or a replay, finds it `claimed` and sends nothing.
 5. A known outcome (`completed`, `rpc_error` or `rejected`) closes the binding. An `unknown` outcome, an answer `readNativeOutcome` doesn't accept, or a `send` that throws leaves it `unknown` for good. A `ControlRefused` closes it, because the dispatch authority sent nothing, so `send` must throw that only when nothing was sent.
 
@@ -74,6 +74,39 @@ The binder accepts only an answer of exactly that shape. Every identity must be 
 - **Another call of the run is `claimed`, that is, being sent.** The bound call is refused (`run_busy`) and stays `bound`, to be dispatched again once that call's end is known. One call of a run is out at a time, as the host's run allows (`busy` in docs/cua-native-mcp.md). If that call ends `unknown`, the bound call is then closed. Binding itself sends nothing, so a call may still be bound while another of its run is being sent.
 
 `send` is the caller's. A later change would route it through `ControlCoordinator.dispatch` with the binding's run anchor as `runId`, and then through `Computer.native`. The coordinator stays the dispatch authority, and the binder doesn't bypass it: whatever the binder allows, the coordinator can still refuse. Its stored request IDs and `unknown` status block replays and successors until reconciliation, also after a restart, and its run latch outlives reconciliation. The binder's own guards don't depend on it. They are its tombstones, which are never let go (see below), and its run latch. There is no new run, call or provider to fall back to.
+
+## The gap between the authority and the claim
+
+**The binder as it stands does not close this gap, and it can't.** `verify` reads the harness in its own transaction, and that transaction has committed and returned before the binder's claim. The binder's check after the answer is free of awaits only against its own document. Between the authority's read and the claim, the harness can commit anything on its line, for example:
+
+- `Conversation.abort()` ending the run;
+- a reset ending it;
+- the chat being deleted;
+- the tool task being aborted.
+
+The binder would still claim and send a call that the harness, by then, no longer has in a live run. The coordinator doesn't catch this either: `ControlCoordinator.dispatch` checks the space, the lease, the request ID and its own run latch, not whether the harness still has the call in that run. So this is a time-of-check-to-time-of-use gap in any wiring of the present binder, and **it is a required part of the integration contract, not an improvement**.
+
+**What wiring must do.** The authority's check and the durable native claim must be linearized on the harness's commit line. They must happen in one `harness.commit` (or in a supported admission primitive the harness gives for it):
+
+1. The binder's document is a Pim-defined harness document (`defineDoc`), not separate storage.
+2. In one transaction, read the tool task and the run (with docs/pi-durable-run-identity.md, `tx.task()` and `tx.run()`), check the binding's status and its run latch, and write the binding `claimed`.
+
+Every abort, reset or deletion is a commit on the same line, so each one is ordered entirely before or entirely after that transaction:
+
+- **Before:** the transaction sees the run ended or the task terminal. The binding is closed in that transaction, and nothing is sent.
+- **After:** the claim is the commit point, as `fetch` is in the host's client (docs/cua-native-mcp.md). From the claim on, the call is taken as possibly sent. An abort that commits after it ends the run and the tool task as usual, but it can't make the call unsent. The call goes on to the coordinator and the computer, and its outcome is recorded against the binding. That includes `unknown`, which latches the run even though the run has ended. Whatever the person sees about the approval must say it may have run, not that the abort stopped it.
+
+The lease stays the coordinator's to check, because the control state lives in the space's own storage, not the harness's. So the order is:
+
+1. the harness transaction, with identity, run and claim;
+2. then, synchronously, `ControlCoordinator.dispatch`, which checks the lease and records the request before anything is sent;
+3. then the send.
+
+A takeover between steps 1 and 2 is refused in step 2, with nothing sent. The binding is then closed in a later harness commit. If the process dies before that commit, it restarts `claimed`.
+
+**Racing an approval.** If the chat stops while its approval waits, Pim denies the approval when the call no longer waits (`#waitingCall`). That check is a separate read too, so it doesn't order anything. The harness transaction above does: whichever of the stop and the claim commits first wins, exactly as above. A decision that loses to a stop sends nothing. A stop that loses to a decision doesn't recall the call.
+
+**Restarts.** A binding stored `claimed` comes back `unknown` and latches its run, whether or not the process got as far as the coordinator or the computer. That is conservative: a call that never left can never be sent, and its run admits nothing more. The coordinator, for its part, reads a request it recorded in flight as `unknown`. A crash between the harness claim and the coordinator's admission leaves the coordinator with no record and the binder with `unknown`. That is still fail-closed, because the binder never sends that binding again.
 
 ## Storage and its bounds
 
@@ -95,10 +128,11 @@ On loading, the document is checked whole: its size, its JSON, its version, its 
 This is for a separate, reviewed change, after the harness's run is settled as above:
 
 1. An authority for Pim's harness that meets the contract, with its own tests against the real harness.
-2. A binder per space, made with the Durable Object's name, its own storage key, and the coordinator's lease only while the agent owns the computer.
-3. `bind` called inside the tool's call, before `fileApproval` and before `#approvalFiled` can approve it at once. The approval then shows and stores the binding's frozen arguments and the binding's ID.
-4. `decideApproval` dispatching through `binder.dispatch`, and a denial or a stopped chat calling `release`.
-5. `#controlled` passing the binding's run anchor as `runId`, and Pim's `Computer` made with `nativeApps` for the operator's Cua computer.
+2. **Required:** the authority's check and the claim made in one harness transaction, as "The gap between the authority and the claim" describes. The binder's document lives in the harness as a Pim-defined document. The present binder takes synchronous storage and calls the authority in a separate step, so its document logic has to run inside that transaction instead. That is a reviewed change to the binder, with tests for an abort, a reset and a deletion committed on each side of the claim.
+3. A binder per space, made with the Durable Object's name and the coordinator's lease only while the agent owns the computer. The lease is still checked by the coordinator's synchronous admission after the claim.
+4. `bind` called inside the tool's call, before `fileApproval` and before `#approvalFiled` can approve it at once. The approval then shows and stores the binding's frozen arguments and the binding's ID.
+5. `decideApproval` dispatching through the binder, and a denial or a stopped chat calling `release`.
+6. `#controlled` passing the binding's run anchor as `runId`, and Pim's `Computer` made with `nativeApps` for the operator's Cua computer.
 
 ## Tests
 

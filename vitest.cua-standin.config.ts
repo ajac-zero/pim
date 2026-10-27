@@ -41,8 +41,8 @@ export default defineConfig({
 			wrangler: { configPath: "./wrangler.jsonc" },
 			remoteBindings: false,
 			miniflare: {
-				// The preview's own Pim, for its Cua fixture's tests. No `browserRendering`: the lane has no Chrome.
-				durableObjects: { PREVIEW_PIM: { className: "PreviewPim", useSQLite: true } },
+				// The preview's own Pim and Directory, for its Cua fixture's and evaluation mode's tests. No `browserRendering`: the lane has no Chrome.
+				durableObjects: { PREVIEW_PIM: { className: "PreviewPim", useSQLite: true }, PREVIEW_DIRECTORY: { className: "PreviewDirectory", useSQLite: true } },
 				bindings: testBindings,
 			},
 		}),

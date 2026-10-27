@@ -14,10 +14,12 @@ import { serve } from "../src/gateway";
 import { OWNER_HEADER, Pim as RealPim, SIGNED_IN_HEADER } from "../src/pim";
 import { INTRODUCTION } from "../src/transcript";
 import { Authenticator } from "../test/webauthn";
+import { closedInEvaluation, EVAL_MODE, evaluating, previewMode, throughIngress } from "./cua-eval";
 import { type FixtureResult, seedCuaFixture, starts } from "./cua-fixture";
 import { agentMode, VIEWER_FIRST } from "./cua-viewer-first";
 
-export { Auth, Directory, Gallery } from "../src/index";
+export { Auth, Gallery } from "../src/index";
+export { EvalDirectory as Directory } from "./cua-eval";
 
 /**
  * The Worker `pnpm preview` runs (wrangler.preview.jsonc): the real Pim, with
@@ -40,6 +42,12 @@ export { Auth, Directory, Gallery } from "../src/index";
  * lets that space's owner watch its desktop, view only, from their browser's
  * session (`/api/observations`, docs/cua-viewer-first-preview.md). A
  * deployment mounts neither.
+ *
+ * With `PREVIEW_MODE=cua-eval` it is the Cua evaluation's preview instead
+ * (./cua-eval.ts, docs/cua-viewer-first-vm-plan.md): no `/__dev` route,
+ * closed registration, one owner set up once with the operator's claim code,
+ * and only requests through the operator's ingress. The stand-in model, the
+ * fixture and watching are as above.
  */
 
 const PREVIEW_MODEL = "preview-model";
@@ -203,9 +211,10 @@ export class Pim extends RealPim {
 		const fixture = seedCuaFixture({ name: ctx.id.name, meta: this.store, transaction: (fn) => ctx.storage.transactionSync(fn) }, env as unknown as Record<string, unknown>);
 		if (!starts(fixture)) throw new Error("This preview space's Cua fixture didn't seed it, so it doesn't start (see docs/cua-bridge.md).");
 		const owner = ctx.id.name;
-		// Pim's own address, which keeps the viewer's host apart from it. This is a local preview: it may be loopback HTTP, which the
-		// host can never let frame the viewer, and is then said to be so, never taken for an embeddable one (src/cua-viewer.ts).
-		const app = () => appOrigin(deploymentSettings(env).publicUrl ?? "", true);
+		// Pim's own address, which keeps the viewer's host apart from it. A local preview may be at loopback HTTP, which the host
+		// can never let frame the viewer, and is then said to be so, never taken for an embeddable one (src/cua-viewer.ts).
+		// The evaluation mode is never at one (./cua-eval.ts).
+		const app = () => appOrigin(deploymentSettings(env).publicUrl ?? "", !evaluating(env));
 		const frame = () => {
 			try {
 				return app().embeddable ? "embeddable" : "local_http";
@@ -323,7 +332,18 @@ async function devSignIn(request: Request, env: Env, ctx: ExecutionContext, user
 }
 
 export default {
-	fetch(request, env, ctx): Promise<Response> {
+	async fetch(request, env, ctx): Promise<Response> {
+		const mode = previewMode(env);
+		if ("refused" in mode) {
+			console.error(JSON.stringify({ event: "preview.refused", reason: mode.refused }));
+			return Response.json({ error: "This preview isn't set up to answer requests." }, { status: 503, headers: { "cache-control": "no-store" } });
+		}
+		if (mode.mode === EVAL_MODE) return evaluation(request, mode.env, ctx);
+		// Only the evaluation mode may be reached through an ingress: a local preview there would let anyone sign in as anyone.
+		if (throughIngress(request)) {
+			console.error(JSON.stringify({ event: "preview.refused", reason: "ingress-without-mode" }));
+			return Response.json({ error: "This preview isn't set up to answer requests." }, { status: 503, headers: { "cache-control": "no-store" } });
+		}
 		// The preview is reached under other names too, such as an orb's portal: it is the same Pim at each.
 		const url = new URL(request.url);
 		const home = deploymentSettings(env).publicUrl;
@@ -337,3 +357,18 @@ export default {
 		return serve(request, env, ctx, { observations: watching(env) });
 	},
 } satisfies ExportedHandler<Env>;
+
+/**
+ * The evaluation mode's requests (./cua-eval.ts): none under `/__dev` and no
+ * setup link, by any method; then the request at Pim's address, where the
+ * ingress sent it from the loopback address the preview listens on, and the
+ * real gateway with the ingress profile and closed registration. The
+ * request's `Origin` is left as the browser sent it.
+ */
+function evaluation(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+	const url = new URL(request.url);
+	if (closedInEvaluation(url.pathname)) return Promise.resolve(Response.json({ error: "Not found" }, { status: 404, headers: { "cache-control": "no-store" } }));
+	const home = deploymentSettings(env).publicUrl!;
+	const canonical = url.origin === home ? request : new Request(new URL(url.pathname + url.search, home), request);
+	return serve(canonical, env, ctx, { observations: watching(env) });
+}

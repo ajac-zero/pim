@@ -284,5 +284,8 @@ export class Pim extends RealPim {
 	}
 }
 
-/** The preview's own Pim (preview/worker.ts), bound as `PREVIEW_PIM` in vitest.config.ts only, for the preview's Cua fixture's tests. */
-export { Pim as PreviewPim } from "../preview/worker";
+/**
+ * The preview's own Pim and Directory (preview/worker.ts), bound as `PREVIEW_PIM` and `PREVIEW_DIRECTORY` in the test
+ * configurations only, for the preview's Cua fixture's and evaluation mode's tests.
+ */
+export { Directory as PreviewDirectory, Pim as PreviewPim } from "../preview/worker";

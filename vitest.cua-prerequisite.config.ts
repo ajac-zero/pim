@@ -33,7 +33,7 @@ export default defineConfig({
 			remoteBindings: false,
 			miniflare: {
 				// As the stand-in lane's Worker, so that both lanes load the same Worker. No `browserRendering`: the lane has no Chrome.
-				durableObjects: { PREVIEW_PIM: { className: "PreviewPim", useSQLite: true } },
+				durableObjects: { PREVIEW_PIM: { className: "PreviewPim", useSQLite: true }, PREVIEW_DIRECTORY: { className: "PreviewDirectory", useSQLite: true } },
 				bindings: testBindings,
 			},
 		}),

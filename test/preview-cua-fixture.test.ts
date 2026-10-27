@@ -2,17 +2,20 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentByName } from "agents";
-import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { createExecutionContext, env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Relay, type Session, type SessionEvents, serveWithWebSocketPair } from "../computer/cua-bridge";
 import { Link, type Machine } from "../computer/pim-computer";
+import type { EvalDirectory } from "../preview/cua-eval";
 import { FIXTURE_KEY, LEASE_ID } from "../preview/cua-fixture";
+import previewWorker from "../preview/worker";
 import { currentTrace } from "../src/computer-control-runtime";
 import { PROVIDER_KEY } from "../src/cua";
 import { initialObservationState, type ObservationState } from "../src/cua-observation";
 import { OBSERVATION_KEY } from "../src/cua-observation-runtime";
 import { OWNER_HEADER, Pim as RealPim, SIGNED_IN_HEADER } from "../src/pim";
 import { type Approval, PimStore } from "../src/store";
+import { Authenticator } from "./webauthn";
 import { PreviewPim } from "./worker";
 
 /**
@@ -28,6 +31,12 @@ import { PreviewPim } from "./worker";
  * in-memory sessions that run nothing. The test environment configures
  * Sprites (`SPRITES_TOKEN`), so a space that fell back to the default
  * computer could start one.
+ *
+ * The preview's Cua evaluation mode (preview/cua-eval.ts) is tested here too:
+ * the preview's own Worker called directly, as the ingress would reach it,
+ * with the preview's Directory (`PREVIEW_DIRECTORY`, a fresh one for each
+ * test) and its Pim. Passkeys are made by the tests' software authenticator
+ * in the real ceremony. Nothing leaves the isolate.
  */
 
 const TOKEN = "preview-cua-fixture-token-0123456789abcdef";
@@ -647,6 +656,213 @@ describe("a seeded preview space and its bridge", () => {
 		configure({});
 		expect(await ada.restart()).toBe("started");
 		expect((await ada.fetch("/api/observations", { headers: session })).status).toBe(404);
+		expect(sent).toEqual([]);
+	});
+});
+
+describe("the preview's Cua evaluation mode", () => {
+	const SECRET = "preview-eval-ingress-secret-0123456789abcdef";
+	/** The operator's claim code, made privately, of which the preview is given only the SHA-256. */
+	const CODE = "evalclaim".padEnd(43, "x");
+	const ONCE = "This evaluation's owner was set up once already, and isn't set up again.";
+	const EVAL_KEYS = ["PREVIEW_MODE", "PIM_INGRESS_SECRET", "PREVIEW_EVAL_CLAIM_SHA256", "PIM_PUBLIC_URL", "PIM_REGISTRATION"] as const;
+	const previewDirectories = (env as unknown as { PREVIEW_DIRECTORY: DurableObjectNamespace<EvalDirectory> }).PREVIEW_DIRECTORY;
+	let kept: (readonly [string, unknown])[] = [];
+
+	beforeEach(() => {
+		kept = EVAL_KEYS.map((key) => [key, settings[key]] as const);
+	});
+	afterEach(() => {
+		for (const [key, value] of kept) {
+			if (value === undefined) delete settings[key];
+			else settings[key] = value;
+		}
+	});
+
+	const hexOf = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+
+	/** What the operator's private environment adds for the evaluation. Pim's address stays the tests' `https://pim.test`. */
+	async function evaluation() {
+		settings.PREVIEW_MODE = "cua-eval";
+		settings.PIM_INGRESS_SECRET = SECRET;
+		settings.PREVIEW_EVAL_CLAIM_SHA256 = hexOf(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(CODE)));
+	}
+
+	/** Why the preview refused to serve, as it logged it. */
+	const refusals = () => logged.flatMap(([line]) => (typeof line === "string" && line.includes('"preview.refused"') ? [(JSON.parse(line) as { reason: string }).reason] : []));
+
+	/**
+	 * The preview's Worker, reached as the ingress reaches it on the loopback address: with the ingress's secret and
+	 * the client's address unless `ingress` is null. Each call of `worker` has a Directory of its own, of the preview's
+	 * class, and the preview's Pim.
+	 */
+	function worker() {
+		const run = crypto.randomUUID();
+		const directory = (name: string) => previewDirectories.getByName(`${run}:${name}`);
+		const target = Object.assign(Object.create(env as object) as object, { Directory: { getByName: directory }, Pim: previews }) as Env;
+		const ask = async (path: string, init: { method?: string; body?: unknown; cookie?: string; headers?: Record<string, string>; ingress?: string | null } = {}) => {
+			const headers = new Headers(init.headers);
+			const ingress = init.ingress === undefined ? SECRET : init.ingress;
+			if (ingress !== null) {
+				headers.set("x-pim-ingress-secret", ingress);
+				headers.set("x-pim-client-ip", "192.0.2.40");
+			}
+			if (init.cookie) headers.set("cookie", init.cookie);
+			if (init.body !== undefined) {
+				headers.set("content-type", "application/json");
+				headers.set("origin", "https://pim.test");
+			}
+			const method = init.method ?? (init.body === undefined ? "GET" : "POST");
+			const request = new Request(`http://127.0.0.1:8787${path}`, { method, headers, ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }) });
+			return await previewWorker.fetch(request as never, target, createExecutionContext());
+		};
+		const register = (username: string, claim?: string) => ask("/auth/register", { body: { username, ...(claim === undefined ? {} : { claim }) } });
+		return { directory, ask, register };
+	}
+
+	const refusal = async (answer: Response) => [answer.status, ((await answer.json()) as { error: string }).error];
+
+	it("leaves the local preview as it was, refuses it behind an ingress or at an HTTPS address, and changes no deployment's Directory", async () => {
+		await space("evallocal");
+		settings.PIM_PUBLIC_URL = "http://localhost:8787";
+		const local = (headers: Record<string, string> = {}) =>
+			previewWorker.fetch(new Request("http://localhost:8787/__dev/sign-in/evallocal?returnTo=/settings", { headers }) as never, env as unknown as Env, createExecutionContext());
+		// As the preview has always signed people in: a passkey made here, and the session cookie.
+		const signedIn = await local();
+		expect(signedIn.status).toBe(302);
+		expect(signedIn.headers.get("location")).toBe("/settings");
+		expect(signedIn.headers.getSetCookie().some((cookie) => cookie.startsWith("__Host-pim-session="))).toBe(true);
+		// Reached through an ingress, a local preview answers nothing, so nobody signs in as anybody through it.
+		expect((await local({ "x-pim-ingress-secret": SECRET, "x-pim-client-ip": "192.0.2.40" })).status).toBe(503);
+		expect((await local({ "x-pim-client-ip": "192.0.2.40" })).status).toBe(503);
+		// Nor does one at an HTTPS address without the evaluation mode.
+		settings.PIM_PUBLIC_URL = "https://pim.test";
+		expect((await local()).status).toBe(503);
+		expect(refusals()).toEqual(["ingress-without-mode", "ingress-without-mode", "https-without-mode"]);
+		// The mode is the preview's Directory's alone: a deployment's still makes claim codes with it set, and the preview's does without it.
+		await expect(previewDirectories.getByName(crypto.randomUUID()).claimCode()).resolves.toMatchObject({ code: expect.any(String) });
+		await evaluation();
+		await expect(env.Directory.getByName(crypto.randomUUID()).claimCode()).resolves.toMatchObject({ code: expect.any(String) });
+	});
+
+	it("answers nothing under /__dev or for a setup link, by any method or spelling, nothing that didn't come through the ingress, and nothing when it is set up wrong", async () => {
+		await evaluation();
+		const { ask, directory } = worker();
+		const paths = ["/__dev/sign-in/mallory", "/__DEV/sign-in/mallory", "/%5F%5Fdev/sign-in/mallory", "/%5f_DeV/sign-in/mallory", "//__dev/sign-in/mallory", "/__dev", "/__dev/", "/auth/setup-link", "/auth/setup-link/", "/AUTH/Setup-Link"];
+		for (const path of paths) {
+			for (const method of ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"]) {
+				for (const ingress of [SECRET, null]) {
+					const answer = await ask(path, { method, ingress, headers: { origin: "https://pim.test" } });
+					expect([path, method, answer.status, answer.headers.getSetCookie()]).toEqual([path, method, 404, []]);
+				}
+			}
+		}
+		expect(await directory("directory").resolve("mallory")).toBeNull();
+		// Only what the ingress sent reaches the gateway.
+		expect((await ask("/auth/username?name=mallory", { ingress: null })).status).toBe(403);
+		expect((await ask("/auth/username?name=mallory", { ingress: "another-secret-0123456789abcdef0123456789" })).status).toBe(403);
+		expect((await ask("/auth/username?name=mallory")).status).toBe(200);
+		// Set up wrong, it answers nothing at all rather than fall back to the local preview.
+		for (const [key, value] of [
+			["PIM_INGRESS_SECRET", "short"],
+			["PREVIEW_EVAL_CLAIM_SHA256", "not-a-digest"],
+			["PIM_PUBLIC_URL", "http://localhost:8787"],
+			["PIM_PUBLIC_URL", "https://PIM.test"],
+			["PREVIEW_MODE", "eval"],
+		] as const) {
+			const before = settings[key];
+			settings[key] = value;
+			expect([key, value, (await ask("/auth/username?name=mallory")).status]).toEqual([key, value, 503]);
+			expect([key, value, (await ask("/__dev/sign-in/mallory", { ingress: null })).status]).toEqual([key, value, 503]);
+			settings[key] = before;
+		}
+		expect(refusals()).toEqual(["ingress", "ingress", "claim-digest", "claim-digest", "public-url", "public-url", "public-url", "public-url", "mode", "mode"]);
+		expect(await directory("directory").resolve("mallory")).toBeNull();
+		expect(JSON.stringify(logged)).not.toMatch(/#claim=|#setup=/);
+	});
+
+	it("sets its one owner up once, with the operator's claim code, keeps registration closed whatever the environment says, and never sets one up again", async () => {
+		await evaluation();
+		// The environment says registration is open; the evaluation doesn't take it.
+		expect(settings.PIM_REGISTRATION).toBe("open");
+		const { register, directory } = worker();
+		expect(await refusal(await register("mallory"))).toEqual([403, "Registration is closed."]);
+		expect(await refusal(await register("mallory", "evalclaim".padEnd(43, "y")))).toEqual([403, "That setup link isn't valid."]);
+		expect(await refusal(await register("mallory", "evalclaim"))).toEqual([403, "That setup link isn't valid."]);
+		// A wrong code changes nothing: the operator's still claims, once.
+		const claimed = await register("evalowner", CODE);
+		expect(claimed.status).toBe(201);
+		const body = (await claimed.json()) as { role: string; setup: string };
+		expect(body.role).toBe("admin");
+		const owner = body.setup.split(".")[0]!;
+		expect(await refusal(await register("evalsecond", CODE))).toEqual([403, ONCE]);
+		expect(await refusal(await register("evalowner", CODE))).toEqual([403, ONCE]);
+		expect(await refusal(await register("evalsecond"))).toEqual([403, "Registration is closed."]);
+		// Asked directly, two days later, when the owner's registration would have lapsed without a passkey, and after the Directory restarted.
+		const dir = directory("directory");
+		const later = { username: "evallater", ip: "192.0.2.41", claim: { window: true, code: CODE }, policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 }, now: Date.now() + 2 * 24 * 60 * 60 * 1000 } as const;
+		expect(await dir.register(later)).toEqual({ ok: false, status: 403, error: ONCE });
+		await evictDurableObject(dir);
+		expect(await dir.register(later)).toEqual({ ok: false, status: 403, error: ONCE });
+		await expect(dir.claimCode()).rejects.toThrow(/makes none/);
+		expect(await dir.account(owner)).toMatchObject({ role: "admin", status: "pending" });
+		expect(await dir.resolve("evalsecond")).toBeNull();
+		expect(await dir.resolve("evallater")).toBeNull();
+		// Its record says the claim began before anyone was registered; nothing logged the code or a link.
+		const claims = logged.flatMap(([line]) => (typeof line === "string" && line.includes('"preview.eval_claim"') ? [JSON.parse(line) as Record<string, unknown>] : []));
+		expect(claims).toEqual([
+			{ event: "preview.eval_claim", state: "claiming" },
+			{ event: "preview.eval_claim", state: "claimed", owner },
+		]);
+		const logs = JSON.stringify(logged);
+		expect(logs).not.toContain(CODE);
+		expect(logs).not.toContain(body.setup);
+		expect(logs).not.toMatch(/#claim=|#setup=/);
+	});
+
+	it("isn't set up over a Directory that already holds an account, and stays refused", async () => {
+		const { register, directory } = worker();
+		// Made before the mode was on, as a local preview would have.
+		expect((await directory("directory").register({ username: "evalearlier", ip: "192.0.2.42", claim: { window: true }, policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 } })).ok).toBe(true);
+		await evaluation();
+		expect(await refusal(await register("evalowner", CODE))).toEqual([403, "This Pim already has accounts, so it isn't set up for an evaluation."]);
+		expect(await refusal(await register("evalowner", CODE))).toEqual([403, ONCE]);
+		expect(await directory("directory").resolve("evalowner")).toBeNull();
+	});
+
+	it("lets only its owner's passkey session at Pim's address watch: not an anonymous request or an API token", async () => {
+		await evaluation();
+		const { ask, register } = worker();
+		// The person's sign-up as the web app makes it: the claim, then a passkey made in the ceremony for Pim's own host, which gives the session.
+		const claimed = await register("evalwatcher", CODE);
+		expect(claimed.status).toBe(201);
+		const { setup } = (await claimed.json()) as { setup: string };
+		const owner = setup.split(".")[0]!;
+		const options = await ask("/auth/passkeys/options", { body: { setup } });
+		expect(options.status).toBe(200);
+		const challenge = options.headers.getSetCookie().map((cookie) => cookie.split(";")[0]).join("; ");
+		const authenticator = await Authenticator.make("ES256", { rpId: "pim.test", origin: "https://pim.test" });
+		const registration = await authenticator.register((await options.json()) as { challenge: string; user: { id: string } });
+		const created = await ask("/auth/passkeys", { body: { ...registration, name: "Evaluation" }, cookie: challenge });
+		expect(created.ok).toBe(true);
+		const session = created.headers.getSetCookie().find((cookie) => cookie.startsWith("__Host-pim-session="));
+		// Host-only: no Domain, so no other host under a shared parent gets it.
+		expect(session).toMatch(/^__Host-pim-session=[^;]+; Path=\/; Secure; HttpOnly; SameSite=/);
+		expect(session).not.toMatch(/domain=/i);
+		const cookie = session!.split(";")[0]!;
+
+		// The fixture seeds the owner's space, as the operator's environment names it once the owner exists.
+		configure({ flag: "seed", owner, bridges: bridgesOf(owner) });
+		await evictDurableObject(previews.getByName(owner)).catch(() => undefined);
+		const listing = await ask("/api/observations", { cookie });
+		expect(listing.status).toBe(200);
+		expect(await listing.json()).toEqual({ agent: "stand-in", frame: "embeddable", blocked: null, observations: [] });
+		expect((await ask("/api/observations")).status).toBe(401);
+		const made = await ask("/auth/tokens", { body: { name: "cli" }, cookie });
+		expect(made.status).toBe(201);
+		const { token } = (await made.json()) as { token: string };
+		expect((await ask("/api/observations", { headers: { authorization: `Bearer ${token}` } })).status).toBe(401);
+		expect((await ask("/api/observations", { method: "POST", headers: { authorization: `Bearer ${token}`, origin: "https://pim.test" } })).status).toBe(401);
 		expect(sent).toEqual([]);
 	});
 });

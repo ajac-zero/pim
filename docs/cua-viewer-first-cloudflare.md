@@ -52,12 +52,13 @@ This page says what the review branch now has for that, and what it doesn't. **N
 **Tests** (fake-only, not run): the evaluation-mode tests in `test/preview-cua-fixture.test.ts` now name the runtime. One new test covers Cloudflare's: the control that plain Cloudflare would open the window a minute after a deploy; the closed sign-in page; `404` and `421`; the claim with no code, a wrong code, the operator's code, and again; the record `claimed`; the limiter counting by `CF-Connecting-IP`; and `503` without either limiter. The misconfiguration test adds an empty and an unknown runtime.
 
 Another new test makes a preview space with `AI` and `CF_VERSION_METADATA` unbound, as the candidate binds them. It checks:
-- Settings → Model reports `workersAi: false`, with the stand-in as the default and chosen model and nothing else to choose;
-- a chat message gets the stand-in's echo;
-- nothing logs the missing-binding error ("No model is set up");
+- the space was constructed without them;
+- Settings → Model reports `workersAi: false`, with the stand-in as the default and chosen model and the utility model's default, and nothing else to choose;
 - no claim window opens, and the evaluation's sign-in page offers no claim.
 
-For comparison, it then binds a KV-shaped stand-in as `AI`, as the local preview does. The chat still works and no KV method is called, but Pim reports `workersAi: true`. The file has 20 tests.
+For comparison, it then binds a KV-shaped stand-in as `AI`, as the local preview does: no KV method is called, but Pim reports `workersAi: true`.
+
+Its coverage is narrow on purpose. It sends no chat and starts no run or background job, so all its work has settled before it puts the environment back, and its cleanup runs however its assertions end. It doesn't show that a chat, or a real agent, works without `AI`. The file has 20 tests.
 
 ## The binding manifest
 
@@ -87,7 +88,7 @@ A binding is left out only where the source has a supported path without it. Oth
 
 Leaving `AI` out avoids that.
 
-**What leaving `AI` out changes.** Chats still default to the stand-in model (`chooseModel(null)` on start, `src/pim.ts` L1203, and the preview's `defaultModel`), but Settings → Model lists it as the default, not among the choices (L4635). `test/preview-cua-fixture.test.ts` checks this with `AI` unbound (written, not run).
+**What leaving `AI` out changes.** Chats would still default to the stand-in model (`chooseModel(null)` on start, `src/pim.ts` L1203, and the preview's `defaultModel`), but Settings → Model lists it as the default, not among the choices (L4635). `test/preview-cua-fixture.test.ts` checks the models Settings reports with `AI` unbound, without sending a chat (written, not run).
 
 ## What it would take, in order (conditional, not done)
 
@@ -120,9 +121,9 @@ These steps are covered by one conditional approval, not one approval each ("Aut
 - Anyone who can read the Worker's secrets in the Cloudflare account can read it.
 
 **Logs and traces: off.**
-- The configuration turns Workers Logs and Cloudflare's traces off (`observability` with `enabled`, `logs` and `traces` all `false`), so neither keeps anything or can add a charge. They stay off unless Radia establishes that turning them on adds no charge.
+- The configuration turns Workers Logs and Cloudflare's traces off (`observability` with `enabled`, `logs` and `traces` all `false`), so the account keeps no Workers Logs or traces of the evaluation and they can't add a charge. They stay off unless Radia establishes that turning them on adds no charge.
 - Pim's own OpenTelemetry traces stay off as well: nothing sets `OTEL_EXPORTER_OTLP_ENDPOINT` (`src/telemetry.ts`, `exporterFrom`).
-- The Worker still writes its console: Pim's JSON lines, such as `preview.refused`, `preview.eval_claim`, `pim.runtime_misconfigured` and the observation records. With logs off, those lines are kept nowhere. They can be seen only live, by an account member running `wrangler tail -c wrangler.cua-eval.jsonc` while they happen. Whether a tail session adds any charge is one more question for Radia.
+- The Worker still writes its console: Pim's JSON lines, such as `preview.refused`, `preview.eval_claim`, `pim.runtime_misconfigured` and the observation records. With Workers Logs off, the account keeps no record of them. What Cloudflare's platform does with console output internally isn't known here, so nothing more than that is claimed. For the operator, the lines are available only live, through `wrangler tail -c wrangler.cua-eval.jsonc` while they happen, and only where a tail is authorized. Whether a tail session adds any charge is one more question for Radia.
 - A person sees only the response. A refused claim or a `421` says why. A misconfigured evaluation answers only `503` "This preview isn't set up to answer requests.", and its reason (such as `runtime` or `limiters`) is in the console alone. So a misconfiguration found after the fact can't be read back: it has to be reproduced while a tail is running.
 - None of those lines holds a claim code, a bearer token or a viewer address, and the viewer's capability never passes through Pim at all.
 

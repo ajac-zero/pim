@@ -74,9 +74,10 @@
     "PIM_REGISTRATION": "closed",
     "PIM_MODELS": "preview-model"
   },
-  // Off: no Workers Logs and no Cloudflare traces are kept, so neither can add a charge. The Worker's
-  // console (Pim's JSON lines, never a claim code, bearer token or viewer address) is then seen only
-  // live, by whoever runs `wrangler tail` while it happens, and kept nowhere. Pim's own OpenTelemetry
-  // traces stay off too: no OTEL_EXPORTER_OTLP_ENDPOINT is set (src/telemetry.ts).
+  // Off: the account keeps no Workers Logs or Cloudflare traces of this Worker, so neither can add a
+  // charge. The Worker's console (Pim's JSON lines, never a claim code, bearer token or viewer
+  // address) is then available to the operator only live, through an authorized `wrangler tail`.
+  // Pim's own OpenTelemetry traces stay off too: no OTEL_EXPORTER_OTLP_ENDPOINT is set
+  // (src/telemetry.ts).
   "observability": { "enabled": false, "logs": { "enabled": false }, "traces": { "enabled": false } }
 }

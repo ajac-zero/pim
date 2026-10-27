@@ -986,34 +986,27 @@ describe("the preview's Cua evaluation mode", () => {
 		expect(JSON.stringify(logged)).not.toContain(CODE);
 	});
 
-	it("runs the preview's Pim with no AI binding and no deploy date, as wrangler.cua-eval.jsonc binds it: the stand-in model answers, and neither Workers AI nor a claim is offered", async () => {
+	it("constructs the preview's Pim with no AI binding and no deploy date, as wrangler.cua-eval.jsonc binds it: its models are the stand-ins, no Workers AI is offered, and no claim is", async () => {
+		// Narrow on purpose: every request here is awaited and starts no chat, run or background job, so nothing is left
+		// running when the environment is put back. No chat is sent: the stand-in model answering one isn't covered here.
 		const unbound = ["AI", "CF_VERSION_METADATA"] as const;
 		const kept = unbound.map((key) => [key, settings[key]] as const);
 		const limiter = { limit: async () => ({ success: true }) };
-		/** One message to a space's root chat, answered before this returns: what the stand-in model sent back. */
-		const chat = async (one: Space, content: string) => {
-			const root: string = (await one.fetch("/")).body.rootSession;
-			const said = await one.fetch<{ status: string; replies: string[] }>(`/sessions/${root}/messages`, { method: "POST", body: JSON.stringify({ content, wait: true }) });
-			expect(said.status).toBe(200);
-			expect(said.body.status).toBe("done");
-			return said.body.replies.join("\n");
-		};
 		await afterwards(
 			async () => {
 				// The candidate's environment: neither is bound, not even as a stand-in, from before the space is made.
 				for (const key of unbound) delete settings[key];
-				expect(unbound.filter((key) => key in settings)).toEqual([]);
 				const one = await space("evalnoai");
-				// The stand-in is the default and the chosen model; without Workers AI there is nothing else to choose.
+				// The space was constructed without them: it sees the same environment.
+				expect(await one.within((instance) => unbound.filter((key) => key in (instance as unknown as { env: object }).env))).toEqual([]);
+				// The stand-ins are the chat and side-job models; without Workers AI there is nothing else to choose.
 				expect((await one.fetch("/model")).body).toMatchObject({
 					workersAi: false,
 					model: { provider: "preview", id: "preview-model" },
 					default: { provider: "preview", id: "preview-model" },
 					choices: [],
+					utility: { default: { provider: "preview", id: "preview-utility" } },
 				});
-				expect(await chat(one, "Watching without Workers AI")).toMatch(/You said: [\s\S]*Watching without Workers AI/);
-				// Nothing reached for Workers AI: its stand-in for a missing binding says "No model is set up" (src/pim.ts).
-				expect(JSON.stringify(logged)).not.toContain("No model is set up");
 				// No deploy date: no claim window, plain Cloudflare's or the evaluation's, and the sign-in page offers none.
 				expect(claimWindowOpen(Object.assign(Object.create(env as object) as object, { PIM_RUNTIME: "cloudflare" }) as Env, Date.now())).toBe(false);
 				await evaluation("cloudflare");
@@ -1034,9 +1027,9 @@ describe("the preview's Cua evaluation mode", () => {
 				);
 				const two = await space("evalkvai");
 				expect((await two.fetch("/model")).body).toMatchObject({ workersAi: true, model: { provider: "preview", id: "preview-model" } });
-				expect(await chat(two, "Watching beside a KV namespace")).toMatch(/You said: [\s\S]*Watching beside a KV namespace/);
 				expect(calls).toEqual([]);
 			},
+			// Only after everything above has settled, however it ended.
 			async () => {
 				for (const [key, value] of kept) {
 					if (value === undefined) delete settings[key];

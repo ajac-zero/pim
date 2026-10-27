@@ -147,7 +147,8 @@ These are consequential, and none is decided here. They are part of the one pack
   - Miniflare then starts workerd with `--inspector-addr=127.0.0.1:<random port>` (`miniflare/dist/src/index.js` L107310–107312, L124925–124942). No credential is passed to it, and nothing installed shows workerd checking one.
   - `VSCODE_INSPECTOR_OPTIONS` turns off only the proxy (`cli.js` L208489–208495), not this inspector, so it is no remedy.
 - **The dev registry's debug port.** Miniflare starts workerd with `--debug-port=127.0.0.1:0` whenever the registry path is non-empty (`index.js` L107313–107315, L124914–124916, L121389–121391).
-  - `wrangler dev` always passes `getRegistryPath()` (`cli.js` L370043), which defaults to a directory unless `WRANGLER_REGISTRY_PATH` is set (L19833–19838). No `dev` flag disables it.
+  - The dev server passes `registry: args.disableDevRegistry ? void 0 : getRegistryPath()` (`cli.js` L370043), and `getRegistryPath()` defaults to a directory unless `WRANGLER_REGISTRY_PATH` is set (L19833–19838).
+  - `disableDevRegistry` is set only by the experimental programmatic `unstable_dev` export (L370168–370214, and L369914 for its auxiliary Workers). The `wrangler dev` command has no flag for it, so under `wrangler dev` the registry path is always set.
   - Whether an empty `WRANGLER_REGISTRY_PATH` turns the port off, and what the port allows, are unverified. It is counted as unauthenticated control until shown otherwise.
 - **Miniflare's Node loopback server: authenticated.** It requires `MF-Loopback-Secret`, compared in constant time (`index.js` L124109–124115). The only exception is a module-fallback service, which `wrangler dev` isn't shown to configure.
 - **The user Worker's own entry socket: open, but it reaches only Pim.**
@@ -156,9 +157,18 @@ These are consequential, and none is decided here. They are part of the one pack
   - The magic-proxy operations on that socket require a secret (`entry.worker.js` L4939–4950).
 - **The ProxyWorker's control requests: authenticated.** They require `Authorization` equal to a random secret (`ProxyWorker.js` L216–218).
 
-**What disables the inspectors.** The only path in this version's source that turns both inspectors off is `dev.inspector: false` through the programmatic `unstable_startWorker` export (`cli.js` L372743, L364969–364972). That leads to L207243, L208494 and L365156. The same path can leave `dev.registry` unset, and with it the debug port. That would be a small reviewed launcher in place of `wrangler dev`, built on an experimental API. It isn't written here.
+**What disables the inspectors.** The only path in this version's source that turns both inspectors off is `dev.inspector: false` through the programmatic `unstable_startWorker` export (`cli.js` L372743, L364969–364972). That leads to L207243, L208494 and L365156. The same path can leave `dev.registry` unset, and with it the debug port. That export is experimental, and it is not accepted as a supported way, so no launcher is written on it.
 
-**Until such a launcher, or another supported way, is accepted and its listeners are checked at start, the live evaluation is no-go.**
+**The documented interfaces offer no off switch either.** Cloudflare's Wrangler configuration reference lists `dev.inspector_port` (default 9229) and `dev.inspector_ip` (default `127.0.0.1`), and nothing that disables the inspector (https://developers.cloudflare.com/workers/wrangler/configuration/). Its command reference lists `--inspector-port` for `wrangler dev`, and no flag that disables the inspector or the dev registry (https://developers.cloudflare.com/workers/wrangler/commands/workers/).
+
+**So there is no supported, stable way to run Pim under `wrangler dev` with every developer and control listener off, and the live evaluation is no-go until a person chooses how Pim runs on the VM.** The choices, none of them implemented here:
+
+1. **Accept a reviewed launcher on `unstable_startWorker`,** with `dev.inspector: false` and no registry, and a start-time check that only the declared loopback port listens. It is the smallest change, but it rests on an API Cloudflare marks experimental, which can change in any Wrangler release.
+2. **Run workerd directly** from a generated, reviewed configuration with no `--inspector-addr` and no `--debug-port`. workerd is a supported runtime, but Pim's KV, R2, assets and Durable Object storage would need their own configuration in place of Miniflare's, which is substantial new work to write and review.
+3. **Run Pim on the reviewed celld runtime** (`deploy/celld`, with Caddy pinned in `deploy/celld/versions.env`). That reuses reviewed operations, but it changes how the evaluation is hosted, and it doesn't remove the problem: celld's peer and operator API has no authentication and listens on loopback (`docs/celld.md`, "How it fits together" and "The proxy"), which `pim-desktop` shares on one VM.
+4. **Accept the listeners as they are,** with any local process, `pim-desktop` and its agents included, able to reach unauthenticated inspectors. Not recommended: an inspector can run code inside Pim.
+
+The bundle inclusion, the service units, the Caddy configuration and the journal step wait on this choice, because each depends on how Pim is started.
 
 ## The pinned base
 

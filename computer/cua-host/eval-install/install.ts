@@ -37,7 +37,7 @@ import * as fs from "node:fs";
 import { realpathSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { ACCOUNTS, BUNDLE_FILES, BUNDLE_FORMAT, type Config, MIN_NODE, nodeVersionAtLeast, PATHS, parseConfig, Refusal, renderTmpfiles, renderUnits, TOOLS, UNITS, within } from "./config.ts";
+import { ACCOUNTS, BUNDLE_FILES, BUNDLE_FORMAT, type Config, MIN_NODE, nodeVersionAtLeast, PATHS, parseConfig, Refusal, renderTmpfiles, renderUnits, TOOLS, UNITS, VIEWER_PATHS, viewerBundleFiles, within } from "./config.ts";
 
 export type PathFact = { readonly kind: "file" | "dir" | "link" | "socket" | "other"; readonly uid: number; readonly gid: number; readonly mode: number } | null;
 
@@ -112,6 +112,7 @@ export function inspectedPaths(config: Config, desktopHome: string | null): stri
 		config.node.path,
 		config.browser.path,
 		...Object.values(BUNDLE_FILES).map((file) => `${config.bundle.dir}/${file}`),
+		...(config.viewer ? [...viewerBundleFiles().map((file) => `${config.bundle.dir}/${file}`), ...Object.values(VIEWER_PATHS)] : []),
 		config.tls.cert,
 		config.tls.key,
 		...Object.values(PATHS),
@@ -187,6 +188,9 @@ export function plan(config: Config, facts: Facts): Action[] {
 	if (facts.execPath !== config.node.path || !trustedFile(facts, config.node.path, true)) throw new Refusal("node-path");
 	if (facts.nodeVersion !== config.node.version || !nodeVersionAtLeast(facts.nodeVersion, MIN_NODE)) throw new Refusal("node-version");
 	if (!Object.values(BUNDLE_FILES).every((file) => trustedFile(facts, `${config.bundle.dir}/${file}`, false))) throw new Refusal("bundle");
+	// With a viewer, its programs and pinned files are in the bundle too, and its marker names the pinned package.
+	if (config.viewer && !viewerBundleFiles().every((file) => trustedFile(facts, `${config.bundle.dir}/${file}`, false))) throw new Refusal("bundle");
+	if (config.viewer && !/^protobuf [0-9.]+ sha512-[A-Za-z0-9+/]{86}==$/m.test(facts.bundleMarker ?? "")) throw new Refusal("bundle-commit");
 	if (facts.bundleMarker === null || !facts.bundleMarker.startsWith(`${BUNDLE_FORMAT}\ncommit ${config.commit}\n`)) throw new Refusal("bundle-commit");
 	if (!trustedFile(facts, config.browser.path, true)) throw new Refusal("browser");
 	if (facts.browserSha256 !== config.browser.sha256) throw new Refusal("browser-digest");
@@ -217,8 +221,9 @@ export function plan(config: Config, facts: Facts): Action[] {
 	}
 	if (within(config.workspace, desktop.home)) throw new Refusal("config-overlap");
 
-	const targets = [PATHS.bridgeDir, PATHS.evalDir, PATHS.socketDir, PATHS.tmpfiles, PATHS.desktopUnit, PATHS.bridgeUnit, ...unitDropins(), config.workspace];
-	if (targets.some((target) => facts.paths[target] !== null)) throw new Refusal("preexisting-path");
+	// The journal's directory and its tombstone are made later, once, by `journal-provision.ts`: neither may exist before the installation, or on a VM that had a journal. (The tombstone sits in `/etc/pim-eval`, which this installation makes, so it is checked on its own.)
+	const targets = [PATHS.bridgeDir, PATHS.evalDir, PATHS.socketDir, PATHS.tmpfiles, PATHS.desktopUnit, PATHS.bridgeUnit, ...unitDropins(), config.workspace, ...(config.viewer ? [VIEWER_PATHS.journalDir] : [])];
+	if (targets.some((target) => facts.paths[target] !== null) || (config.viewer && facts.paths[VIEWER_PATHS.tombstone] !== null)) throw new Refusal("preexisting-path");
 	if (!targets.every((target) => trustedChain(facts, path.posix.dirname(target)))) throw new Refusal("unsafe-parent");
 
 	const staging = path.posix.dirname(config.tls.cert);
@@ -485,7 +490,7 @@ export function status(config: Config, probe: Probe): Record<string, unknown> {
 	} catch {
 		accounts = "unexpected";
 	}
-	const watched = [PATHS.bridgeDir, PATHS.token, PATHS.cert, PATHS.key, PATHS.evalDir, PATHS.publicKey, PATHS.socketDir, PATHS.socket, config.workspace, config.tls.cert, config.tls.key];
+	const watched = [PATHS.bridgeDir, PATHS.token, PATHS.cert, PATHS.key, PATHS.evalDir, PATHS.publicKey, PATHS.socketDir, PATHS.socket, config.workspace, config.tls.cert, config.tls.key, ...(config.viewer ? Object.values(VIEWER_PATHS) : [])];
 	const facts = Object.fromEntries(watched.map((file) => [file, probe.lstat(file)]));
 	const paths = Object.fromEntries(watched.map((file) => [file, describePath(facts[file]!, names, groupNames)]));
 
@@ -505,7 +510,7 @@ export function status(config: Config, probe: Probe): Record<string, unknown> {
 	const opens = (file: string) => probe.query([TOOLS.runuser, "-u", ACCOUNTS.desktop, "--", TOOLS.head, "-c", "0", "--", file]).status === 0;
 	const control = facts[PATHS.publicKey]?.kind === "file" && opens(PATHS.publicKey);
 	const denied: Record<string, string> = {};
-	for (const file of [PATHS.token, PATHS.cert, PATHS.key]) {
+	for (const file of [PATHS.token, PATHS.cert, PATHS.key, ...(config.viewer ? [VIEWER_PATHS.rootToken, VIEWER_PATHS.journal] : [])]) {
 		if (facts[file]?.kind !== "file") denied[file] = "absent";
 		else if (!control) denied[file] = "unknown";
 		else denied[file] = opens(file) ? "READABLE" : "denied";
@@ -630,6 +635,18 @@ export function start(config: Config, probe: Probe, run: (argv: readonly string[
 	const desktop = users.find((user) => user.name === ACCOUNTS.desktop);
 	const token = probe.lstat(PATHS.token);
 	if (!bridge || token?.kind !== "file" || token.uid !== bridge.uid || (token.mode & 0o7777) !== 0o600) throw new Refusal("token-missing");
+	if (config.viewer) {
+		// The viewer starts only with what it needs, each as it must be: spacesd's root token (the bridge's, 0600), the journal made once (directory 0700, file 0600, the bridge's), its tombstone (root's, 0444), and no lock left by a host that ended. Nothing is made or removed here.
+		const rootToken = probe.lstat(VIEWER_PATHS.rootToken);
+		if (!bridge || rootToken?.kind !== "file" || rootToken.uid !== bridge.uid || (rootToken.mode & 0o7777) !== 0o600) throw new Refusal("viewer-root-token-missing");
+		const dir = probe.lstat(VIEWER_PATHS.journalDir);
+		const journal = probe.lstat(VIEWER_PATHS.journal);
+		const tombstone = probe.lstat(VIEWER_PATHS.tombstone);
+		if (dir?.kind !== "dir" || dir.uid !== bridge.uid || (dir.mode & 0o7777) !== 0o700 || journal?.kind !== "file" || journal.uid !== bridge.uid || (journal.mode & 0o7777) !== 0o600 || tombstone?.kind !== "file" || tombstone.uid !== 0 || (tombstone.mode & 0o7777) !== 0o444) {
+			throw new Refusal("journal-missing");
+		}
+		if (probe.lstat(VIEWER_PATHS.journalLock) !== null) throw new Refusal("journal-locked");
+	}
 	if (config.desktop.headful && config.desktop.display) {
 		const socket = probe.lstat(`/tmp/.X11-unix/X${config.desktop.display.slice(1)}`);
 		const runtime = desktop ? probe.lstat(`/run/user/${desktop.uid}`) : null;

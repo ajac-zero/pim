@@ -10,8 +10,8 @@
 export const VIEWER_FIRST = {
 	/** The one display every launch shows (`ViewerAdapterOptions.displayId`): the VM's primary one. */
 	displayId: "primary",
-	/** How long Pim lets one observation last, from when it records it: well under `MAX_OBSERVATION_MS` (4 hours). */
-	observationMs: 30 * 60 * 1000,
+	/** How long Pim lets one observation last, from when it records it: 10 minutes for the evaluation (docs/cua-viewer-first-startup.md), well under `MAX_OBSERVATION_MS` (4 hours). */
+	observationMs: 10 * 60 * 1000,
 	/** Observations that may be open at once: one person, one desktop. The ledger allows 2 unresolved and the manager 4. */
 	openObservations: 1,
 	/** The preview's own `PREVIEW_CUA_FIXTURE_OWNER` names the one space; no other space is given a computer, an observation or a lease. */

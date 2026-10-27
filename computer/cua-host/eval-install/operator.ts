@@ -35,7 +35,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import * as zlib from "node:zlib";
-import { ACCOUNTS, BUNDLE_FILES, BUNDLE_FORMAT, type Config, isPlainPath, PATHS, parseConfig, Refusal, TOOLS } from "./config.ts";
+import { ACCOUNTS, BUNDLE_FILES, BUNDLE_FORMAT, type Config, isPlainPath, PATHS, parseConfig, Refusal, TOOLS, VIEWER_ASSET_DIR, VIEWER_ASSET_NAMES, VIEWER_ASSET_SHA256, VIEWER_BUNDLE_FILES, viewerBundleFiles } from "./config.ts";
 
 /** The repository's files a bundle holds, as they are at its commit. */
 export const BUNDLE_SOURCES = [
@@ -128,9 +128,17 @@ export function lockedIntegrity(lockfile: string, version: string): string {
 	return match[1]!;
 }
 
-function octal(header: Buffer, start: number, length: number): number {
+/** The integrity pnpm-lock.yaml pins for any package at an exact version (a scoped name is quoted there). */
+export function lockedPackageIntegrity(lockfile: string, name: string, version: string): string {
+	const escape = (text: string) => text.replace(/[.\\/@]/g, "\\$&");
+	const match = new RegExp(`^  '?${escape(name)}@${escape(version)}'?:\\n    resolution: \\{integrity: (sha512-[A-Za-z0-9+/]{86}==)\\}$`, "m").exec(lockfile);
+	if (!match) throw new Refusal("package-lock");
+	return match[1]!;
+}
+
+function octal(header: Buffer, start: number, length: number, reason = "ws-tarball"): number {
 	const text = header.subarray(start, start + length).toString("latin1").replace(/[\0 ]+$/, "");
-	if (!/^[0-7]{1,12}$/.test(text)) throw new Refusal("ws-tarball");
+	if (!/^[0-7]{1,12}$/.test(text)) throw new Refusal(reason);
 	return Number.parseInt(text, 8);
 }
 
@@ -147,12 +155,13 @@ function cString(header: Buffer, start: number, length: number): string {
  * `package/` or with `..`, `.` or an unusual character, a duplicate, and
  * more than the bounds allow.
  */
-export function untarPackage(tarball: Buffer): Map<string, Buffer> {
+export function untarPackage(tarball: Buffer, limits: { maxUnpacked?: number; maxEntries?: number; reason?: string } = {}): Map<string, Buffer> {
+	const { maxUnpacked = MAX_UNPACKED_BYTES, maxEntries = MAX_ENTRIES, reason = "ws-tarball" } = limits;
 	let tar: Buffer;
 	try {
-		tar = zlib.gunzipSync(tarball, { maxOutputLength: MAX_UNPACKED_BYTES });
+		tar = zlib.gunzipSync(tarball, { maxOutputLength: maxUnpacked });
 	} catch {
-		throw new Refusal("ws-tarball");
+		throw new Refusal(reason);
 	}
 	const files = new Map<string, Buffer>();
 	let offset = 0;
@@ -164,34 +173,34 @@ export function untarPackage(tarball: Buffer): Map<string, Buffer> {
 			ended = true;
 			break;
 		}
-		if (++entries > MAX_ENTRIES) throw new Refusal("ws-tarball");
+		if (++entries > maxEntries) throw new Refusal(reason);
 		const sum = header.reduce((total, byte, i) => total + (i >= 148 && i < 156 ? 0x20 : byte), 0);
-		if (sum !== octal(header, 148, 8)) throw new Refusal("ws-tarball");
-		if (header.subarray(257, 262).toString("latin1") !== "ustar") throw new Refusal("ws-tarball");
+		if (sum !== octal(header, 148, 8, reason)) throw new Refusal(reason);
+		if (header.subarray(257, 262).toString("latin1") !== "ustar") throw new Refusal(reason);
 		const name = cString(header, 0, 100);
 		const prefix = cString(header, 345, 155);
 		const full = prefix ? `${prefix}/${name}` : name;
-		const size = octal(header, 124, 12);
+		const size = octal(header, 124, 12, reason);
 		const type = String.fromCharCode(header[156]!);
 		const start = offset + 512;
 		offset = start + Math.ceil(size / 512) * 512;
-		if (offset > tar.length) throw new Refusal("ws-tarball");
+		if (offset > tar.length) throw new Refusal(reason);
 		const parts = full.replace(/\/$/, "").split("/");
 		if (type === "5" && size === 0 && parts.length === 1 && parts[0] === "package") continue;
-		if (parts[0] !== "package" || parts.length < 2 || !parts.slice(1).every((part) => ENTRY.test(part) && part !== "." && part !== "..")) throw new Refusal("ws-tarball");
+		if (parts[0] !== "package" || parts.length < 2 || !parts.slice(1).every((part) => ENTRY.test(part) && part !== "." && part !== "..")) throw new Refusal(reason);
 		const relative = parts.slice(1).join("/");
 		if (type === "5") {
-			if (size !== 0) throw new Refusal("ws-tarball");
+			if (size !== 0) throw new Refusal(reason);
 			continue;
 		}
-		if ((type !== "0" && type !== "\0") || full.endsWith("/")) throw new Refusal("ws-tarball");
-		if (files.has(relative)) throw new Refusal("ws-tarball");
+		if ((type !== "0" && type !== "\0") || full.endsWith("/")) throw new Refusal(reason);
+		if (files.has(relative)) throw new Refusal(reason);
 		files.set(relative, Buffer.from(tar.subarray(start, start + size)));
 	}
-	if (!ended || files.size === 0) throw new Refusal("ws-tarball");
+	if (!ended || files.size === 0) throw new Refusal(reason);
 	// No file may also be a directory of another.
 	for (const file of files.keys()) {
-		if ([...files.keys()].some((other) => other.startsWith(`${file}/`))) throw new Refusal("ws-tarball");
+		if ([...files.keys()].some((other) => other.startsWith(`${file}/`))) throw new Refusal(reason);
 	}
 	return files;
 }
@@ -201,7 +210,7 @@ export function untarPackage(tarball: Buffer): Map<string, Buffer> {
  * the commit, `ws` from its tarball once its SHA-512 is the locked
  * integrity, and the `BUNDLE` marker naming the commit and `ws`.
  */
-export function bundleEntries(options: { commit: string; sources: ReadonlyMap<string, Buffer>; wsVersion: string; wsIntegrity: string; wsTarball: Buffer }): Map<string, Buffer> {
+export function bundleEntries(options: { commit: string; sources: ReadonlyMap<string, Buffer>; wsVersion: string; wsIntegrity: string; wsTarball: Buffer; viewer?: ViewerBundle }): Map<string, Buffer> {
 	const { commit, sources, wsVersion, wsIntegrity, wsTarball } = options;
 	if (!/^[0-9a-f]{40}$/.test(commit)) throw new Refusal("commit");
 	if (wsTarball.length > MAX_TARBALL_BYTES) throw new Refusal("ws-tarball");
@@ -217,8 +226,44 @@ export function bundleEntries(options: { commit: string; sources: ReadonlyMap<st
 	const manifest = JSON.parse(ws.get("package.json")?.toString("utf8") ?? "null") as { name?: unknown; version?: unknown } | null;
 	if (manifest?.name !== "ws" || manifest.version !== wsVersion) throw new Refusal("ws-package");
 	for (const [file, content] of ws) entries.set(`${WS_DIR}/${file}`, content);
-	entries.set(BUNDLE_FILES.marker, Buffer.from(`${BUNDLE_FORMAT}\ncommit ${commit}\nws ${wsVersion} ${wsIntegrity}\n`));
+	// Without a viewer the marker is exactly what it always was.
+	const viewerMarker = options.viewer ? addViewer(entries, sources, options.viewer) : "";
+	entries.set(BUNDLE_FILES.marker, Buffer.from(`${BUNDLE_FORMAT}\ncommit ${commit}\nws ${wsVersion} ${wsIntegrity}\n${viewerMarker}`));
 	return entries;
+}
+
+/** What a bundle with the viewer adds: the one package it needs, from its tarball at the locked integrity. */
+export type ViewerBundle = { readonly protobufVersion: string; readonly protobufIntegrity: string; readonly protobufTarball: Buffer };
+
+/** The viewer's own sources in the repository at the commit: everything it adds to the bundle but the pinned package's files. */
+export const VIEWER_SOURCES = viewerBundleFiles().filter((file) => file !== VIEWER_BUNDLE_FILES.protobuf);
+
+const PROTOBUF_DIR = "computer/cua-host/node_modules/@bufbuild/protobuf";
+const MAX_PROTOBUF_TARBALL_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Adds the viewer's programs, its pinned page and scripts (each checked against its pinned SHA-256: nothing
+ * about them is taken on trust) and the pinned `@bufbuild/protobuf` (its tarball's SHA-512 must be the locked
+ * integrity). Answers the marker line that names the package. Nothing is fetched and no package manager runs.
+ */
+function addViewer(entries: Map<string, Buffer>, sources: ReadonlyMap<string, Buffer>, viewer: ViewerBundle): string {
+	for (const source of VIEWER_SOURCES) {
+		const content = sources.get(source);
+		if (!content) throw new Refusal("source");
+		entries.set(source, content);
+	}
+	for (const name of VIEWER_ASSET_NAMES) {
+		const content = entries.get(`${VIEWER_ASSET_DIR}/assets/${name}`)!;
+		if (crypto.createHash("sha256").update(content).digest("hex") !== VIEWER_ASSET_SHA256[name]) throw new Refusal("viewer-asset");
+	}
+	if (viewer.protobufTarball.length > MAX_PROTOBUF_TARBALL_BYTES) throw new Refusal("protobuf-tarball");
+	if (`sha512-${crypto.createHash("sha512").update(viewer.protobufTarball).digest("base64")}` !== viewer.protobufIntegrity) throw new Refusal("protobuf-integrity");
+	// The package has hundreds of files, so its bounds are wider than `ws`'s; every other rule of `untarPackage` holds.
+	const files = untarPackage(viewer.protobufTarball, { maxUnpacked: 16 * 1024 * 1024, maxEntries: 4096, reason: "protobuf-tarball" });
+	const manifest = JSON.parse(files.get("package.json")?.toString("utf8") ?? "null") as { name?: unknown; version?: unknown } | null;
+	if (manifest?.name !== "@bufbuild/protobuf" || manifest.version !== viewer.protobufVersion) throw new Refusal("protobuf-package");
+	for (const [file, content] of files) entries.set(`${PROTOBUF_DIR}/${file}`, content);
+	return `protobuf ${viewer.protobufVersion} ${viewer.protobufIntegrity}\n`;
 }
 
 /** Writes `entries` into `out`, a new directory: files 0644, directories 0755. */
@@ -388,7 +433,20 @@ exec ${TOOLS.runuser} -u ${ACCOUNTS.bridge} -- "$NODE" "$BUNDLE/${BUNDLE_FILES.c
 	--public-key ${PATHS.publicKey} --fingerprint ${quote(config.evalKey.fingerprint)} \\
 	--token-file ${PATHS.token} </dev/null
 `;
-	return { "plan.sh": installer("plan"), "install.sh": installer("install"), "seal.sh": seal, "start.sh": installer("start"), "status.sh": installer("status") };
+	// Only with a viewer: makes its journal once, as root, from the bundle's own copy of the program (docs/cua-viewer-first-startup.md).
+	const journal = `${prologue(config, "journal")}
+exec "$NODE" "$BUNDLE/${VIEWER_BUNDLE_FILES.provision}" <<'${HEREDOC}'
+${json}
+${HEREDOC}
+`;
+	return {
+		"plan.sh": installer("plan"),
+		"install.sh": installer("install"),
+		"seal.sh": seal,
+		"start.sh": installer("start"),
+		"status.sh": installer("status"),
+		...(config.viewer ? { "journal.sh": journal } : {}),
+	};
 }
 
 /**
@@ -409,7 +467,7 @@ function git(args: string[]): Buffer {
 	return execFileSync("git", ["-C", REPOSITORY, ...args], { maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
 }
 
-function bundle(commit: string, wsTarball: string, out: string): string {
+function bundle(commit: string, wsTarball: string, out: string, protobufTarball?: string): string {
 	if (!/^[0-9a-f]{40}$/.test(commit)) throw new Refusal("commit");
 	let resolved: string;
 	try {
@@ -432,7 +490,23 @@ function bundle(commit: string, wsTarball: string, out: string): string {
 	const wsIntegrity = lockedIntegrity(git(["show", `${commit}:pnpm-lock.yaml`]).toString("utf8"), wsVersion);
 	if (!isPlainPath(wsTarball)) throw new Refusal("ws-tarball");
 	const tarball = fs.readFileSync(wsTarball);
-	writeTree(out, bundleEntries({ commit, sources, wsVersion, wsIntegrity, wsTarball: tarball }));
+	let viewer: ViewerBundle | undefined;
+	if (protobufTarball !== undefined) {
+		// The viewer's files are read from the commit's objects too, and its one package is locked like `ws`.
+		for (const source of VIEWER_SOURCES) {
+			try {
+				sources.set(source, git(["show", `${commit}:${source}`]));
+			} catch {
+				throw new Refusal("source");
+			}
+		}
+		const protobufVersion = hostPackage.dependencies?.["@bufbuild/protobuf"];
+		if (typeof protobufVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(protobufVersion)) throw new Refusal("protobuf-version");
+		const protobufIntegrity = lockedPackageIntegrity(git(["show", `${commit}:pnpm-lock.yaml`]).toString("utf8"), "@bufbuild/protobuf", protobufVersion);
+		if (!isPlainPath(protobufTarball)) throw new Refusal("protobuf-tarball");
+		viewer = { protobufVersion, protobufIntegrity, protobufTarball: fs.readFileSync(protobufTarball) };
+	}
+	writeTree(out, bundleEntries({ commit, sources, wsVersion, wsIntegrity, wsTarball: tarball, ...(viewer ? { viewer } : {}) }));
 	return treeDigest(out);
 }
 
@@ -448,11 +522,13 @@ function render(configFile: string, out: string): string[] {
 
 const USAGE = `The operator's side of a Cua evaluation VM's installation. See docs/cua-eval-install.md.
 
-  node operator.ts bundle --commit <sha> --ws-tarball <file> --out <new directory>
+  node operator.ts bundle --commit <sha> --ws-tarball <file> --out <new directory> [--protobuf-tarball <file>]
   node operator.ts digest --dir <directory>
   node operator.ts render --config <file> --out <new directory>`;
 
 const COMMANDS = { bundle: ["commit", "ws-tarball", "out"], digest: ["dir"], render: ["config", "out"] } as const;
+/** Options a command may also take; `--protobuf-tarball` makes the bundle carry the viewer. */
+const OPTIONAL: Record<string, readonly string[]> = { bundle: ["protobuf-tarball"] };
 
 function main(argv: string[]): void {
 	const command = argv[0] as keyof typeof COMMANDS;
@@ -460,7 +536,7 @@ function main(argv: string[]): void {
 	let values: Record<string, string> = {};
 	try {
 		if (!names) throw new Error();
-		values = parseArgs({ args: argv.slice(1), options: Object.fromEntries(names.map((name) => [name, { type: "string" as const }])), strict: true, allowPositionals: false }).values as Record<string, string>;
+		values = parseArgs({ args: argv.slice(1), options: Object.fromEntries([...names, ...(OPTIONAL[command] ?? [])].map((name) => [name, { type: "string" as const }])), strict: true, allowPositionals: false }).values as Record<string, string>;
 		if (names.some((name) => !values[name])) throw new Error();
 	} catch {
 		process.stderr.write(`${USAGE}\n`);
@@ -468,7 +544,7 @@ function main(argv: string[]): void {
 	}
 	try {
 		if (command === "bundle") {
-			const sha256 = bundle(values.commit!, values["ws-tarball"]!, values.out!);
+			const sha256 = bundle(values.commit!, values["ws-tarball"]!, values.out!, values["protobuf-tarball"]);
 			process.stdout.write(`${JSON.stringify({ event: "pim-cua-eval.bundled", commit: values.commit, sha256 })}\n`);
 		} else if (command === "digest") {
 			process.stdout.write(`${JSON.stringify({ event: "pim-cua-eval.digest", sha256: treeDigest(values.dir!) })}\n`);

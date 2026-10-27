@@ -133,4 +133,23 @@ export class FakeFiles implements JournalFiles {
 	uid(): number | undefined {
 		return this.user;
 	}
+
+	/** `mkdir(2)` without `-p`: a directory of the effective user's, `EEXIST` if anything is there. */
+	mkdir(path: string, mode: number): void {
+		this.#step("mkdir", path);
+		if (this.nodes.has(path)) throw error("EEXIST");
+		this.nodes.set(path, { kind: "dir", ino: this.#ino++, uid: this.user ?? 0, mode, nlink: 2, data: Buffer.alloc(0) });
+	}
+
+	chown(path: string, uid: number, _gid: number): void {
+		this.#step("chown", path);
+		const node = this.nodes.get(path);
+		if (!node) throw error("ENOENT");
+		node.uid = uid;
+	}
+
+	fchown(descriptor: number, uid: number, _gid: number): void {
+		this.#step("fchown", this.#held(descriptor).path);
+		this.#held(descriptor).node.uid = uid;
+	}
 }

@@ -16,6 +16,7 @@
 import * as crypto from "node:crypto";
 import * as net from "node:net";
 import * as path from "node:path";
+import { isHttpsOrigin } from "../host.ts";
 
 /** The three accounts and groups. The desktop account is a prerequisite; the other two are made by the installer. */
 export const ACCOUNTS = { desktop: "pim-desktop", bridge: "pim-bridge", session: "pim-session" } as const;
@@ -59,6 +60,56 @@ export const BUNDLE_FILES = {
 	ws: "computer/cua-host/node_modules/ws/package.json",
 } as const;
 
+/**
+ * What the viewer adds, when the configuration has a `viewer` (docs/cua-viewer-first-startup.md): the root
+ * token's file, which the bridge's account reads and the desktop's can't, and the journal's directory and
+ * the tombstone of its one-time provisioning. The installer makes none of them: the root token is a
+ * separate gate's, and the journal is made once by `journal-provision.ts`.
+ */
+export const VIEWER_PATHS = {
+	rootToken: "/etc/pim-bridge/viewer-root-token",
+	journalDir: "/var/lib/pim-viewer",
+	journal: "/var/lib/pim-viewer/journal.json",
+	journalLock: "/var/lib/pim-viewer/journal.lock",
+	/** Root's, `0444`, made before the journal and never removed or replaced by this tooling: a journal was provisioned, so none is provisioned again. */
+	tombstone: "/etc/pim-eval/journal-provisioned",
+} as const;
+
+/** The files the viewer adds to the bundle, relative to its directory; `protobuf` is the pinned package's manifest. */
+export const VIEWER_BUNDLE_FILES = {
+	viewerHost: "computer/cua-host/viewer-host.ts",
+	journalStore: "computer/cua-host/journal-store.ts",
+	adapter: "computer/cua-host/viewer-adapter.ts",
+	manager: "computer/cua-host/viewer-launch-manager.ts",
+	lifetime: "computer/cua-host/viewer-lifetime.ts",
+	upstream: "computer/cua-host/viewer-upstream.ts",
+	provision: "computer/cua-host/eval-install/journal-provision.ts",
+	protobuf: "computer/cua-host/node_modules/@bufbuild/protobuf/package.json",
+} as const;
+
+/** The viewer's pinned page and scripts, in the bundle under this directory (their SHA-256 is `VIEWER_ASSETS`'s in ./viewer-upstream.ts). */
+export const VIEWER_ASSET_DIR = "computer/cua-host/cua-viewer";
+
+/** The names, under `VIEWER_ASSET_DIR`, of the viewer's pinned page and scripts (./viewer-upstream.ts `VIEWER_ASSETS`). */
+export const VIEWER_ASSET_NAMES = ["index.html", "viewer.js", "index.css", "audioWorklet.js", "captureWorklet.js"] as const;
+
+/**
+ * The SHA-256 of each pinned viewer file, as ./viewer-upstream.ts `VIEWER_ASSETS` pins them. Written out here so the operator's
+ * bundle step needs no protobuf install to check them; a test holds the two tables equal.
+ */
+export const VIEWER_ASSET_SHA256 = {
+	"index.html": "6373b22307c629bbb6811e3baaf046bcdcd0074fb87245a6ef79f5d3f0913228",
+	"viewer.js": "5a5ee19a184bab0bdbd081c756e127d138030d86a1395dd988e93291ff9bb2f7",
+	"index.css": "e4753e6ac86c2142a1912b79823c5edb2149dde8a69272d899df2b7713da921b",
+	"audioWorklet.js": "427569b615fe24104fcd5ca8a8f71269d24faa9155a0767ef1f0234a23c6befc",
+	"captureWorklet.js": "9cdafdbe7bb59622a9d0cdd63bfd4d9e87644c65210a9b7050e80aef2c4062b0",
+} as const;
+
+/** Every file a viewer adds to the bundle, relative to its directory: its programs, its pinned package, and its pinned page and scripts beside their licence. */
+export function viewerBundleFiles(): string[] {
+	return [...Object.values(VIEWER_BUNDLE_FILES), ...VIEWER_ASSET_NAMES.map((name) => `${VIEWER_ASSET_DIR}/assets/${name}`), `${VIEWER_ASSET_DIR}/LICENSE`];
+}
+
 /** The first line of the bundle's `BUNDLE` file, followed by `commit <sha>`. */
 export const BUNDLE_FORMAT = "pim-cua-eval-bundle v1";
 
@@ -78,6 +129,20 @@ export type Config = {
 	readonly evalKey: { readonly fingerprint: string; readonly publicKeyPem: string };
 	readonly bridge: { readonly host: string; readonly port: number; readonly path: string };
 	readonly desktop: { readonly headful: boolean; readonly display: string | null; readonly xauthority: string | null };
+	/** Present only when the bridge also serves the view-only viewer (docs/cua-viewer-first-startup.md). */
+	readonly viewer?: ViewerConfig;
+};
+
+/** What the bridge's viewer flags take (computer/cua-host/viewer-host.ts `parseViewerSettings`), all of them exact. */
+export type ViewerConfig = {
+	/** Where spacesd is: plain HTTP on 127.0.0.1, never reached from outside. */
+	readonly origin: string;
+	/** The exact HTTPS origin a browser loads the viewer from: the bridge's own public address. */
+	readonly publicOrigin: string;
+	/** The exact HTTPS origin of the Pim app that may frame it. */
+	readonly embedOrigin: string;
+	/** The one display the viewer shows. */
+	readonly display: string;
 };
 
 /** A refusal with a fixed reason, the only thing said about it. */
@@ -99,6 +164,8 @@ const NODE_VERSION = /^v(\d{1,4})\.(\d{1,4})\.(\d{1,4})$/;
 const COMPONENT = /^[A-Za-z0-9._-]+$/;
 const URL_COMPONENT = /^[A-Za-z0-9._~-]+$/;
 const DISPLAY = /^:[0-9]{1,2}$/;
+const SPACESD_ORIGIN = /^http:\/\/127\.0\.0\.1:[0-9]{2,5}$/;
+const VIEWER_DISPLAY = /^[A-Za-z0-9._:-]{1,128}$/;
 const PEM = /^-----BEGIN PUBLIC KEY-----\n(?:[A-Za-z0-9+/=]{1,64}\n){1,40}-----END PUBLIC KEY-----\n$/;
 
 /** Whether `value` is an absolute, normalized path of plain components, at most 255 bytes. */
@@ -131,12 +198,14 @@ export function fingerprintOf(pem: string): string {
 
 type Shape = { readonly [key: string]: Shape | ((value: unknown) => boolean) };
 
-function check(value: unknown, shape: Shape, where: string): void {
+function check(value: unknown, shape: Shape, where: string, optional: readonly string[] = []): void {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Refusal(`config-${where}`);
 	const record = value as Record<string, unknown>;
 	const keys = Object.keys(shape);
-	if (Object.keys(record).length !== keys.length || !keys.every((key) => Object.hasOwn(record, key))) throw new Refusal(`config-${where}`);
+	// Exactly the fields of the shape; only those named optional may be absent.
+	if (!Object.keys(record).every((key) => keys.includes(key)) || !keys.every((key) => optional.includes(key) || Object.hasOwn(record, key))) throw new Refusal(`config-${where}`);
 	for (const key of keys) {
+		if (!Object.hasOwn(record, key)) continue;
 		const rule = shape[key]!;
 		if (typeof rule === "function") {
 			if (!rule(record[key])) throw new Refusal(`config-${key}`);
@@ -178,8 +247,10 @@ export function parseConfig(text: string): Config {
 				path: (v) => typeof v === "string" && v.length <= 128 && v.startsWith("/") && v.slice(1).split("/").every((part) => URL_COMPONENT.test(part) && part !== "." && part !== ".."),
 			},
 			desktop: { headful: (v) => typeof v === "boolean", display: (v) => v === null || matches(DISPLAY)(v), xauthority: (v) => v === null || isPlainPath(v) },
+			viewer: { origin: matches(SPACESD_ORIGIN), publicOrigin: isHttpsOrigin, embedOrigin: isHttpsOrigin, display: matches(VIEWER_DISPLAY) },
 		},
 		"object",
+		["viewer"],
 	);
 	const config = value as Config;
 
@@ -199,7 +270,9 @@ export function parseConfig(text: string): Config {
 	if (!config.workspace.startsWith("/srv/")) throw new Refusal("config-workspace");
 	// The two staged TLS files sit side by side in one staging directory, apart from everything the installation makes or runs.
 	if (path.posix.dirname(config.tls.cert) !== path.posix.dirname(config.tls.key) || config.tls.cert === config.tls.key) throw new Refusal("config-tls");
-	const fixed = [PATHS.bridgeDir, PATHS.evalDir, PATHS.socketDir, PATHS.tmpfiles, PATHS.desktopUnit, PATHS.bridgeUnit];
+	// The viewer's two origins are two different places: the bridge's own, and the Pim app's.
+	if (config.viewer && config.viewer.publicOrigin === config.viewer.embedOrigin) throw new Refusal("config-viewer");
+	const fixed = [PATHS.bridgeDir, PATHS.evalDir, PATHS.socketDir, PATHS.tmpfiles, PATHS.desktopUnit, PATHS.bridgeUnit, ...(config.viewer ? [VIEWER_PATHS.journalDir] : [])];
 	const own = [config.bundle.dir, config.workspace, path.posix.dirname(config.tls.cert), config.node.path, config.browser.path];
 	for (const [i, a] of own.entries()) {
 		if (fixed.some((b) => within(a, b) || within(b, a))) throw new Refusal("config-overlap");
@@ -231,6 +304,11 @@ export function renderUnits(config: Config, desktopUid: number): { desktop: stri
 	const node = config.node.path;
 	const bundle = config.bundle.dir;
 	const headful = config.desktop.headful;
+	const viewer = config.viewer;
+	// The reviewed flags of bridge.ts, each exact: spacesd's origin, the bridge's own public origin, the one Pim origin that may frame the page, the journal's directory and the display.
+	const viewerFlags = viewer
+		? ` --viewer-origin ${viewer.origin} --viewer-public-origin ${viewer.publicOrigin} --viewer-embed-origin ${viewer.embedOrigin} --viewer-journal-dir ${VIEWER_PATHS.journalDir} --viewer-display ${viewer.display}`
+		: "";
 	const display = headful
 		? [
 				`Environment=DISPLAY=${config.desktop.display}`,
@@ -279,7 +357,8 @@ export function renderUnits(config: Config, desktopUid: number): { desktop: stri
 		`Environment=PIM_BRIDGE_TOKEN_FILE=${PATHS.token}`,
 		`Environment=PIM_BRIDGE_CERT_FILE=${PATHS.cert}`,
 		`Environment=PIM_BRIDGE_KEY_FILE=${PATHS.key}`,
-		`ExecStart=${node} ${bundle}/${BUNDLE_FILES.bridge} --space ${config.owner} --path ${config.bridge.path} --socket ${PATHS.socket} --host ${config.bridge.host} --port ${config.bridge.port}`,
+		...(viewer ? [`Environment=PIM_VIEWER_ROOT_TOKEN_FILE=${VIEWER_PATHS.rootToken}`] : []),
+		`ExecStart=${node} ${bundle}/${BUNDLE_FILES.bridge} --space ${config.owner} --path ${config.bridge.path} --socket ${PATHS.socket} --host ${config.bridge.host} --port ${config.bridge.port}${viewerFlags}`,
 		"KillMode=process",
 		"Restart=no",
 		"",

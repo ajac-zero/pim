@@ -25,7 +25,7 @@ Based on `ce65a77`. Nothing from main, and not the unaccepted `4c11a30`, is in i
 | Native-app tools | Off. `Computer.native` stays off; `desktop.ts` is never given `cua`; no credential file for `cua-computer.ts` is provisioned; no `RunId` is invented for them. | Off |
 | Human takeover | Off, as in `docs/computer-control-state.md`. Observation is not control and grants no input. | Off |
 
-The settings (`VIEWER_FIRST`): display `primary`; an observation lasts 30 minutes; one observation open at a time; one space.
+The settings (`VIEWER_FIRST`): display `primary`; an observation lasts 10 minutes; one observation open at a time; one space.
 
 
 ## The control lease, for ordinary tools only

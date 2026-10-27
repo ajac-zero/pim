@@ -14,6 +14,8 @@
 
 The space's agents all run as the one `pim-desktop` account, as `docs/cua-bridge.md` describes. The workspace is where their files are kept, not a sandbox, and nothing here isolates agents from each other or confines either account.
 
+**With a viewer.** An optional `viewer` field in the configuration makes the bridge also serve the view-only desktop viewer, adds the viewer's pinned files and package to the bundle, and adds `journal.sh`, which makes the viewer's journal once. That is `docs/cua-viewer-first-startup.md`; a configuration without it is exactly what this page describes.
+
 ## What it is made of
 
 - **`config.ts`**: the fixed accounts (`pim-desktop`, `pim-bridge`, `pim-session`), paths, tools and service names, and the one configuration, checked strictly (below); the tmpfiles.d entry and the two unit files are rendered from it.

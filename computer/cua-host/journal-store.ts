@@ -165,7 +165,7 @@ const code = (error: unknown) => (typeof error === "object" && error !== null ? 
  * latches the store through `retain`, since the descriptor may still be open;
  * its error is then kept beside the work's, if the work failed too.
  */
-function withDescriptor<T>(files: JournalFiles, descriptor: number, retain: () => void, work: () => T): T {
+export function withDescriptor<T>(files: JournalFiles, descriptor: number, retain: () => void, work: () => T): T {
 	let result: T | undefined;
 	let failed = false;
 	let failure: unknown;

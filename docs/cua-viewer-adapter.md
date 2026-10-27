@@ -70,6 +70,8 @@ The adapter is a module with three entry points and injected upstream calls. No 
 
 Until then nothing here is reachable, and passing tests here doesn't qualify a live boundary.
 
+`docs/cua-observation.md` describes the unmounted pieces that prepare for steps 1 and 2: a space's observation ledger, kept apart from the control state, the check a future route would make before a browser reaches a launch, and a launch manager that starts each launch at most once through a journal.
+
 ## Tests
 
 `computer/cua-host/test/viewer-adapter.test.ts` is part of `pnpm --filter pim-cua-host test`. Its first two tests load the pinned `viewer.js` itself, fetched from the adapter, in the test process. Its DOM, `fetch` and `WebSocket` are records in memory that reach only the adapter, and WebCodecs claims H.264. Behind the adapter is a stand-in for spacesd, written in the test from spacesd's source: tickets cap the policy, an unset ticket policy means `ALLOW_ACTIVATION`, and a window session with bidirectional geometry and input on a socket are counted as reaching the desktop. It records what the adapter sends. It is not spacesd, and nothing here shows the real binary behaving as described above; those statements come from reading its source.

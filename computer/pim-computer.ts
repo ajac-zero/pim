@@ -759,6 +759,79 @@ Options (or the environment variables in brackets):
 
 The browser keeps its profile, with what you sign in to there, in ~/.pim-computer/browser.`;
 
+/** What a run of this program serves: its folder, its browser, and, only from an embedder, a native-app dispatcher. */
+export type ServeSettings = {
+	/** The folder `/workspace` stands for; it is made when it isn't there. */
+	readonly folder: string;
+	/** The browser, when one is named; otherwise the one found where it usually is. */
+	readonly chrome: string | undefined;
+	readonly headful: boolean;
+	/** `Machine.native`. This program's own startup never gives one. */
+	readonly native?: Machine["native"];
+};
+
+/** The machine a run serves, the `hello` it says first, and how it logs; standard output is the space's with `stdio`. */
+async function prepare(settings: ServeSettings, stdio: boolean) {
+	const os = await import("node:os");
+	const env = process.env;
+	await fs.mkdir(settings.folder, { recursive: true });
+	const root = await fs.realpath(settings.folder);
+	const log = (line: string) => (stdio ? console.error : console.log)(`${new Date().toISOString()} ${line}`);
+	const chrome = settings.chrome ?? (await findChrome());
+	const browser = chrome ? localBrowser(chrome, path.join(os.homedir(), ".pim-computer", "browser"), settings.headful, log) : undefined;
+	if (!chrome) log("No Chrome or Chromium found, so your agents have no browser here. Install one, or name it with --chrome.");
+	const machine: Machine = { root, exec: (args, cwd) => runCommand(args, cwd, root), ...(browser ? { browser } : {}), ...(settings.native ? { native: settings.native } : {}) };
+	const hello = {
+		type: "hello",
+		version: 1,
+		agent: `pim-computer/${VERSION}`,
+		hostname: os.hostname(),
+		platform: os.platform(),
+		arch: os.arch(),
+		release: os.release(),
+		user: os.userInfo().username,
+		root: machine.root,
+		shell: env.SHELL || "/bin/bash",
+		browser: chrome ?? null,
+	};
+	const logRun = (message: string) => {
+		if (message.startsWith('{"type":"call"') && message.includes('"op":"exec"')) {
+			const call = JSON.parse(message) as { args?: { command?: unknown } };
+			log(`Running: ${String(call.args?.command)}`);
+		}
+	};
+	return { machine, hello, log, logRun, browser };
+}
+
+/** Speaks with the space over standard input and output, a message a line, until the input ends; then the browser quits, and so does this. */
+async function serveLines({ machine, hello, logRun, browser }: Awaited<ReturnType<typeof prepare>>): Promise<void> {
+	const link = new Link(machine, (message) => process.stdout.write(`${message}\n`));
+	process.stdout.write(`${JSON.stringify(hello)}\n`);
+	const { createInterface } = await import("node:readline");
+	const lines = createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
+	lines.on("line", (line) => {
+		logRun(line);
+		link.receive(line);
+	});
+	// The space let go: the browser quits, so what's signed in there is saved, and so does this.
+	lines.on("close", async () => {
+		link.close();
+		await browser?.stop().catch(() => undefined);
+		process.exit(0);
+	});
+}
+
+/**
+ * What `--stdio` does, for an embedder's own program that gives the machine
+ * a native-app dispatcher (computer/cua-host/cua-computer.ts). This file
+ * imports nothing of the embedder's, and its own startup (`main`) gives no
+ * dispatcher, so Sprites and paired computers serve as before and answer
+ * `native_tool` with `ENOSYS`. Nothing runs until it is called.
+ */
+export async function serveStdio(settings: ServeSettings): Promise<void> {
+	await serveLines(await prepare(settings, true));
+}
+
 async function main(): Promise<void> {
 	const { parseArgs } = await import("node:util");
 	const os = await import("node:os");
@@ -782,51 +855,14 @@ async function main(): Promise<void> {
 		process.exit(values.help ? 0 : 1);
 	}
 	const folder = path.resolve(values.root ?? env.PIM_COMPUTER_ROOT ?? path.join(os.homedir(), "pim"));
-	await fs.mkdir(folder, { recursive: true });
-	const root = await fs.realpath(folder);
-	// Standard output is the space's, with --stdio.
-	const log = (line: string) => (values.stdio ? console.error : console.log)(`${new Date().toISOString()} ${line}`);
-	const chrome = values.chrome ?? env.PIM_CHROME ?? (await findChrome());
 	const headful = values.headful === true || env.PIM_BROWSER_HEADFUL === "1";
-	const browser = chrome ? localBrowser(chrome, path.join(os.homedir(), ".pim-computer", "browser"), headful, log) : undefined;
-	if (!chrome) log("No Chrome or Chromium found, so your agents have no browser here. Install one, or name it with --chrome.");
-	const machine: Machine = { root, exec: (args, cwd) => runCommand(args, cwd, root), ...(browser ? { browser } : {}) };
-	const hello = {
-		type: "hello",
-		version: 1,
-		agent: `pim-computer/${VERSION}`,
-		hostname: os.hostname(),
-		platform: os.platform(),
-		arch: os.arch(),
-		release: os.release(),
-		user: os.userInfo().username,
-		root: machine.root,
-		shell: env.SHELL || "/bin/bash",
-		browser: chrome ?? null,
-	};
-	const logRun = (message: string) => {
-		if (message.startsWith('{"type":"call"') && message.includes('"op":"exec"')) {
-			const call = JSON.parse(message) as { args?: { command?: unknown } };
-			log(`Running: ${String(call.args?.command)}`);
-		}
-	};
+	// Standard output is the space's, with --stdio. No native-app dispatcher: only an embedder's program gives one (`serveStdio`).
+	const served = await prepare({ folder, chrome: values.chrome ?? env.PIM_CHROME, headful }, values.stdio === true);
 	if (values.stdio) {
-		const link = new Link(machine, (message) => process.stdout.write(`${message}\n`));
-		process.stdout.write(`${JSON.stringify(hello)}\n`);
-		const { createInterface } = await import("node:readline");
-		const lines = createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
-		lines.on("line", (line) => {
-			logRun(line);
-			link.receive(line);
-		});
-		// The space let go: the browser quits, so what's signed in there is saved, and so does this.
-		lines.on("close", async () => {
-			link.close();
-			await browser?.stop().catch(() => undefined);
-			process.exit(0);
-		});
+		await serveLines(served);
 		return;
 	}
+	const { machine, hello, log, logRun } = served;
 	const address = new URL("/api/computer/connect", url!.replace(/^http/, "ws"));
 	let wait = 1_000;
 	const connect = () => {

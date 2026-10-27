@@ -123,15 +123,33 @@ export type ViewerRoutes = {
 	readonly embedOrigin?: string;
 };
 
-/** Whether `value` is exactly an `https://host[:port]` origin: no path, query, fragment or credentials, as a browser writes it in `Origin`. */
+/** One DNS label: letters, digits and inner hyphens, at most 63 characters. A `*` is not a letter or a digit. */
+const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/** Whether `hostname`, as a URL writes it, is a DNS name of well-formed labels, an IPv4 address, or a bracketed IPv6 address. No wildcard, empty label or trailing dot. */
+function wellFormedHost(hostname: string): boolean {
+	if (hostname.startsWith("[")) return hostname.endsWith("]") && net.isIPv6(hostname.slice(1, -1));
+	if (net.isIPv4(hostname)) return true;
+	return hostname.length <= 253 && hostname.split(".").every((label) => LABEL.test(label));
+}
+
+/**
+ * Whether `value` is exactly an `https://host[:port]` origin, as a browser
+ * writes it in `Origin`: nothing after the port (no path, query, fragment or
+ * credentials), no default port written out (`:443`), no uppercase or other
+ * form a browser wouldn't send, and a host that is a well-formed DNS name or
+ * an IP address, never a wildcard. The URL parser accepts a `*` host, so the
+ * host is checked on its own.
+ */
 export function isHttpsOrigin(value: unknown): value is string {
 	if (typeof value !== "string") return false;
+	let url: URL;
 	try {
-		const url = new URL(value);
-		return url.protocol === "https:" && url.origin === value && !url.username && !url.password;
+		url = new URL(value);
 	} catch {
 		return false;
 	}
+	return url.protocol === "https:" && url.origin === value && !url.username && !url.password && wellFormedHost(url.hostname);
 }
 
 /** Whether a browser's `Origin` header (every occurrence of it) is exactly `publicOrigin`; absent, repeated or different is no. */
@@ -450,8 +468,9 @@ export function createHost(options: HostOptions): Host {
 		res.end(answer.body);
 	}
 
-	const reply = (res: http.ServerResponse, answer: Refusal) => {
-		res.writeHead(answer.status, [...answer.headers.flat(), "connection", "close"]);
+	/** Answers with `answer`, and `extra` headers beside its own; the viewer's routes pass their policy here, so a refusal carries it too. */
+	const reply = (res: http.ServerResponse, answer: Refusal, extra: [string, string][] = []) => {
+		res.writeHead(answer.status, [...answer.headers.flat(), ...extra.flat(), "connection", "close"]);
 		res.end(answer.body);
 	};
 
@@ -520,13 +539,15 @@ export function createHost(options: HostOptions): Host {
 	/** An adapter request: rebuilt from only the headers it reads, and streamed back, which ends when the client does. */
 	async function adapterRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
 		res.shouldKeepAlive = false;
+		/** Every HTTP answer on a viewer route, refusals included, carries the viewer's framing and permissions policy. */
+		const answer = (refused: Refusal) => reply(res, refused, extraHeaders);
 		const target = canonical(req.url);
-		if (target === null) return reply(res, refusal(404, "Not found."));
-		if (req.method !== "GET" && req.method !== "POST") return reply(res, refusal(405, "Not allowed.", [["allow", "GET, POST"]]));
+		if (target === null) return answer(refusal(404, "Not found."));
+		if (req.method !== "GET" && req.method !== "POST") return answer(refusal(405, "Not allowed.", [["allow", "GET, POST"]]));
 		// The viewer calls its own origin, so a browser's `Origin`, when it sends one, is the public origin; any other is refused, and no CORS answer is ever given.
 		if (req.headersDistinct.origin !== undefined && !originAllowed(req.headersDistinct.origin, viewer!.publicOrigin)) {
 			log({ event: "host.refused", status: 403, reason: "origin" });
-			return reply(res, refusal(403, "Refused."));
+			return answer(refusal(403, "Refused."));
 		}
 		const headers = new Headers();
 		for (const name of ADAPTER_HEADERS) {
@@ -536,7 +557,7 @@ export function createHost(options: HostOptions): Host {
 				if (values.length !== 1) throw new Error("repeated");
 				headers.set(name, values[0]!);
 			} catch {
-				return reply(res, refusal(400, "Bad request."));
+				return answer(refusal(400, "Bad request."));
 			}
 		}
 		const abort = new AbortController();
@@ -550,7 +571,7 @@ export function createHost(options: HostOptions): Host {
 			}
 			request = new Request(ORIGIN + target, init);
 		} catch {
-			return reply(res, refusal(400, "Bad request."));
+			return answer(refusal(400, "Bad request."));
 		}
 		const response = await viewer!.adapter.fetch(request);
 		res.writeHead(response.status, [...[...response.headers].flat(), ...extraHeaders.flat()]);

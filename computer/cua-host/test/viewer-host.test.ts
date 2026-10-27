@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { describe, it } from "node:test";
 import { isHttpsOrigin, originAllowed, viewerHeaders } from "../host.ts";
+import { viewerCsp } from "../viewer-adapter.ts";
 import {
 	checkedOrigin,
 	createMediaOpener,
@@ -148,10 +149,33 @@ describe("the viewer's settings", () => {
 describe("a browser's origin and the viewer's headers", () => {
 	const PUBLIC = "https://bridge.example:8443";
 
-	it("takes only exact https origins", () => {
-		assert.equal(isHttpsOrigin(PUBLIC), true);
-		assert.equal(isHttpsOrigin("https://pim.example"), true);
-		for (const bad of ["http://pim.example", "https://pim.example/", "https://pim.example/a", "https://*.example", "https://PIM.example", "null", "", undefined, 1]) assert.equal(isHttpsOrigin(bad), false, String(bad));
+	it("takes only exact https origins a browser would write", () => {
+		for (const good of [PUBLIC, "https://pim.example", "https://localhost", "https://a-b.c1.example:444", "https://203.0.113.7", "https://203.0.113.7:8443", "https://[::1]", "https://[2001:db8::1]:8443", `https://${"a".repeat(63)}.example`]) {
+			assert.equal(isHttpsOrigin(good), true, good);
+		}
+		const bad = [
+			// Scheme, path, query, fragment, credentials.
+			"http://pim.example", "https://pim.example/", "https://pim.example/a", "https://pim.example?q=1", "https://pim.example#f", "https://pim.example/?q", "https://u@pim.example", "https://u:p@pim.example",
+			// A default port written out is not what a browser sends: it writes the origin without it.
+			"https://pim.example:443", "https://pim.example:", "https://[::1]:443",
+			// Wildcards, which the URL parser lets through as a host.
+			"https://*.example", "https://*", "https://a*.example", "https://pim.*", "https://%2A.example", "*", "https://*.example:8443",
+			// Empty or malformed hostnames.
+			"https://", "https://.example", "https://example.", "https://example..com", "https://-a.example", "https://a-.example", "https://exa_mple.example", "https://exa mple.example", `https://${"a".repeat(64)}.example`, "https://[::1", "https://[zz::1]",
+			// Other forms of the same origin: not what `Origin` carries.
+			"https://PIM.example", "https://pim.example\\", "HTTPS://pim.example", " https://pim.example", "https://pim.example ", "null", "", "pim.example",
+		];
+		for (const value of bad) assert.equal(isHttpsOrigin(value), false, JSON.stringify(value));
+		for (const value of [undefined, null, 1, {}, ["https://pim.example"]]) assert.equal(isHttpsOrigin(value), false, String(value));
+	});
+
+	it("names the media socket's origin in the page's policy as well as 'self', and keeps the rest", () => {
+		const plain = viewerCsp();
+		assert.ok(plain.includes("connect-src 'self';"));
+		assert.equal(plain, "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'");
+		assert.equal(viewerCsp(PUBLIC), plain.replace("connect-src 'self';", "connect-src 'self' wss://bridge.example:8443;"));
+		assert.ok(viewerCsp("https://bridge.example").includes("connect-src 'self' wss://bridge.example;"), "a default port is not written");
+		for (const bad of ["http://bridge.example", "https://bridge.example/", "https://bridge.example:443", "*"]) assert.throws(() => viewerCsp(bad), bad === "*" ? TypeError : RangeError, bad);
 	});
 
 	it("lets a media socket or call through only with exactly one Origin, the public one", () => {

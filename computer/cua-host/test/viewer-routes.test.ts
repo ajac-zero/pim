@@ -217,7 +217,13 @@ describe("the adapter's routes", () => {
 		const { port, seen } = await serve({ embed: true });
 		const path = `/${LAUNCH}/cua.env.v1.SystemService/GetCapabilities`;
 		const headers = { "content-type": "application/grpc-web+proto", "x-cua-env-authorization": `Bearer ${CREDENTIAL}` };
-		assert.equal((await request(port, { method: "POST", path, headers: { ...headers, origin: "https://evil.example" }, body: "x" })).status, 403);
+		const refusedOrigin = await request(port, { method: "POST", path, headers: { ...headers, origin: "https://evil.example" }, body: "x" });
+		assert.equal(refusedOrigin.status, 403);
+		// A refusal on a viewer route carries the same policy as an answer, whether the host or the adapter made it.
+		for (const refusal of [refusedOrigin, await request(port, { method: "PUT", path: `/${LAUNCH}/viewer/` })]) {
+			assert.ok([refusal.headers["content-security-policy"]].flat().join(",").includes(`frame-ancestors ${PIM}`));
+			assert.ok(String(refusal.headers["permissions-policy"]).includes("clipboard-read=()"));
+		}
 		assert.equal((await request(port, { method: "POST", path, headers: { ...headers, origin: PIM }, body: "x" })).status, 403, "framing is not calling");
 		assert.equal((await request(port, { method: "OPTIONS", path, headers: { origin: "https://evil.example", "access-control-request-method": "POST" } })).status, 405, "a preflight is not answered");
 		assert.deepEqual(seen.adapter, []);

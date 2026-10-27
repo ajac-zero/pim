@@ -479,6 +479,7 @@ export async function createViewerHost(options: ViewerHostOptions): Promise<View
 	const adapter = createViewerAdapter({
 		upstream: { origin: options.origin, fetch: options.upstream?.fetch ?? ((url, init) => globalThis.fetch(url, init)), openMedia: options.upstream?.openMedia ?? nodeOpenMedia },
 		displayId: options.displayId,
+		publicOrigin: options.publicOrigin,
 	});
 	let journal: ReturnType<typeof openJournalStore> | undefined;
 	let refused: string | undefined;

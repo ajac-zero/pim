@@ -9,8 +9,9 @@
  *
  * Nothing that arrives on the socket chooses what runs: the program, its
  * arguments, its working directory, its environment and its user are fixed
- * when the endpoint starts, and no shell is involved. It gets no secret: the
- * bridge's token and TLS key stay in the bridge's account (./bridge.ts).
+ * when the endpoint starts, and no shell is involved. It gets no secret of the
+ * bridge's: the bridge's token and TLS key stay in the bridge's account
+ * (./bridge.ts).
  *
  * One pim-computer at a time. While the one it started hasn't exited, a new
  * connection is refused (closed unanswered), so two never share the
@@ -28,6 +29,20 @@
  * agents: anything running as the desktop user can connect to it, as it can
  * run pim-computer itself.
  *
+ * Code that makes an endpoint may give it `cua`, and its program never does:
+ * then it starts the Cua computer (./cua-computer.ts), pim-computer with a
+ * native-app dispatcher for the VM's spacesd, in pim-computer's place, with
+ * the same folder, environment, limits and one-at-a-time rule. spacesd's token
+ * is the one secret it hands on, and only as a descriptor: for each child it
+ * opens the desktop user's credential file (./cua-credential.ts), checks it,
+ * hands it over as descriptor 3, and closes its own, once, as soon as the
+ * spawn returns or throws, never reading it. A close that fails is not taken
+ * as closed: the endpoint refuses every later connection for good, and a child
+ * it started then gets its input ended and is watched to its exit as any
+ * other, keeping the endpoint busy until then. A descriptor keeps the token
+ * out of arguments, environments and logs; it doesn't keep it from the agents,
+ * which run as the desktop user and can read the file.
+ *
  *   node desktop.ts --socket /run/pim-session/session.sock --root /home/desktop/workspace \
  *     --browser /opt/google/chrome/chrome --pim-computer /opt/pim/pim-computer.ts [--headful]
  *
@@ -42,6 +57,8 @@ import * as path from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import type { LogEntry } from "../cua-bridge.ts";
+import { NATIVE_IDENTITY } from "../native-outcome.ts";
+import { type CredentialFiles, CredentialRefused, closeCredential, NODE_CREDENTIAL_FILES, openCredential } from "./cua-credential.ts";
 import { checkSocketPath } from "./session.ts";
 
 /** What the endpoint needs of a process it started; tests give stand-ins. */
@@ -54,8 +71,17 @@ export type Child = {
 	once(event: "error", listener: () => void): unknown;
 };
 
-/** How pim-computer is started. The endpoint passes fixed values only. */
-export type SpawnOptions = { readonly cwd: string; readonly env: Record<string, string>; readonly stdio: ["pipe", "pipe", "ignore"]; readonly shell: false };
+/**
+ * How pim-computer is started. The endpoint passes fixed values only. A
+ * fourth stdio entry, the descriptor of the credential file, is there only
+ * for the Cua computer (`EndpointOptions.cua`).
+ */
+export type SpawnOptions = {
+	readonly cwd: string;
+	readonly env: Record<string, string>;
+	readonly stdio: ["pipe", "pipe", "ignore"] | ["pipe", "pipe", "ignore", number];
+	readonly shell: false;
+};
 export type Spawn = (command: string, args: readonly string[], options: SpawnOptions) => Child;
 
 export type EndpointLimits = {
@@ -126,6 +152,35 @@ export type EndpointOptions = {
 	readonly uid?: number;
 	/** The environment `KEPT_ENVIRONMENT` is taken from; `process.env` unless a test gives its own. */
 	readonly environment?: Readonly<Record<string, string | undefined>>;
+	/**
+	 * Starts the Cua computer (./cua-computer.ts) in place of pim-computer,
+	 * with a native-app dispatcher for this VM's spacesd. Absent, as the
+	 * endpoint's own program leaves it, the endpoint starts pim-computer
+	 * exactly as before. Only code that makes an endpoint can give it: no
+	 * flag, variable or installer step does.
+	 */
+	readonly cua?: CuaChild;
+	/** What the credential file is opened with; Node's `fs` unless a test gives its own. */
+	readonly credentialFiles?: CredentialFiles;
+};
+
+/**
+ * The Cua computer's fixed settings. The owner and origin go in its
+ * arguments; the token doesn't go anywhere but the descriptor it reads.
+ */
+export type CuaChild = {
+	/** cua-computer.ts, which Node runs, checked as pim-computer is. */
+	readonly program: string;
+	/** The space whose VM this is. */
+	readonly owner: string;
+	/** spacesd's origin: `https://host[:port]`, or `http://` on a loopback host. */
+	readonly origin: string;
+	/**
+	 * spacesd's token, in a file of the desktop user's, mode 0600, with one
+	 * name, at a path with no links (./cua-credential.ts). It is opened for
+	 * each child and handed over as descriptor 3, never read here.
+	 */
+	readonly credentialFile: string;
 };
 
 export type Endpoint = {
@@ -167,6 +222,42 @@ function program(file: string, what: string, reason: string, executable: boolean
 	return file;
 }
 
+/** Whether `origin` is exactly `https://host[:port]`, or `http://` on a loopback host: what `createNativeMcp` takes, which the Cua computer checks again. */
+function exactOrigin(origin: unknown): boolean {
+	if (typeof origin !== "string") return false;
+	let url: URL;
+	try {
+		url = new URL(origin);
+	} catch {
+		return false;
+	}
+	const loopback = ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname);
+	return url.origin === origin && (url.protocol === "https:" || (url.protocol === "http:" && loopback));
+}
+
+/**
+ * The Cua computer's settings, read once and checked: its program as
+ * pim-computer's is, the owner and origin as the dispatcher takes them, and a
+ * credential file that opens as `openCredential` requires, which is opened,
+ * checked and closed again here, unread.
+ */
+function cuaChild(cua: CuaChild, uid: number, files: CredentialFiles): CuaChild {
+	const { program: file, owner, origin, credentialFile } = cua;
+	const checked = { program: program(file, "Cua computer program", "cua-computer", false), owner, origin, credentialFile };
+	if (typeof owner !== "string" || !NATIVE_IDENTITY.test(owner)) throw new EndpointRefused("cua-owner", "The Cua computer's owner must be a space's identity.");
+	if (!exactOrigin(origin)) throw new EndpointRefused("cua-origin", "spacesd's origin must be exactly https://host[:port], or http:// on a loopback host.");
+	try {
+		closeCredential(openCredential(credentialFile, uid, files), files);
+	} catch (error) {
+		// A descriptor that couldn't be closed may still be open in this process: say so, apart from a file that was refused.
+		if (error instanceof CredentialRefused && error.retained) {
+			throw new EndpointRefused("credential-close", "The spacesd credential couldn't be closed after it was checked, so a descriptor of it may still be open in this process.");
+		}
+		throw new EndpointRefused("credential", "The spacesd credential must be a regular file of the desktop user's, mode 0600, with one name, at a path with no links, and no larger than a token.");
+	}
+	return Object.freeze(checked);
+}
+
 export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 	const uid = options.uid ?? process.geteuid?.();
 	if (uid === undefined) throw new EndpointRefused("user", "The desktop endpoint runs only where users have IDs.");
@@ -192,6 +283,9 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 	const pimComputer = program(options.pimComputer, "pim-computer program", "pim-computer", false);
 	const browser = program(options.browser, "browser", "browser", true);
 
+	const files = options.credentialFiles ?? NODE_CREDENTIAL_FILES;
+	const cua = options.cua ? cuaChild(options.cua, uid, files) : undefined;
+
 	const environment = options.environment ?? process.env;
 	const env: Record<string, string> = {};
 	for (const name of KEPT_ENVIRONMENT) {
@@ -199,7 +293,9 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 		if (value !== undefined) env[name] = value;
 	}
 	const command = process.execPath;
-	const args = [pimComputer, "--stdio", "--root", root, "--chrome", browser, ...(options.headful ? ["--headful"] : [])];
+	const args = cua
+		? [cua.program, "--root", root, "--chrome", browser, "--owner", cua.owner, "--origin", cua.origin, ...(options.headful ? ["--headful"] : [])]
+		: [pimComputer, "--stdio", "--root", root, "--chrome", browser, ...(options.headful ? ["--headful"] : [])];
 	const spawn: Spawn = options.spawn ?? ((file, argv, spawnOptions) => spawnProcess(file, argv, spawnOptions) as ChildProcess & Child);
 	const log = options.log ?? ((entry: LogEntry) => console.error(JSON.stringify(entry)));
 
@@ -208,22 +304,59 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 	let closing = false;
 	/** The pim-computer this endpoint started last, until it has exited. */
 	let current: { exited: Promise<void>; done: boolean; end(): void } | null = null;
+	/**
+	 * Set, for good, when a descriptor of the Cua computer's credential
+	 * couldn't be closed: the endpoint may still hold it, so it takes no
+	 * other connection and opens the file no more. A child already started
+	 * is ended and watched as any other, until its exit is seen.
+	 */
+	let retained = false;
 
 	function serve(socket: net.Socket): void {
 		socket.on("error", () => socket.destroy());
-		if (closing || (current && !current.done)) {
-			log({ event: "endpoint.refused", reason: closing ? "closing" : "busy" });
+		if (closing || retained || (current && !current.done)) {
+			log({ event: "endpoint.refused", reason: closing ? "closing" : retained ? "credential-close" : "busy" });
 			socket.destroy();
 			return;
 		}
-		let child: Child;
+		// The Cua computer's credential, opened afresh for each child and checked again; refused, nothing starts.
+		let credential: number | undefined = undefined;
+		if (cua) {
+			try {
+				credential = openCredential(cua.credentialFile, uid, files);
+			} catch (error) {
+				// Refused after opening it, and then not closed: nothing more is opened or started.
+				if (error instanceof CredentialRefused && error.retained) retained = true;
+				log({ event: "endpoint.refused", reason: retained ? "credential-close" : "credential" });
+				socket.destroy();
+				return;
+			}
+		}
+		let spawned: Child | undefined;
 		try {
-			child = spawn(command, args, { cwd: root, env, stdio: ["pipe", "pipe", "ignore"], shell: false });
+			spawned = spawn(command, args, { cwd: root, env, stdio: credential === undefined ? ["pipe", "pipe", "ignore"] : ["pipe", "pipe", "ignore", credential], shell: false });
 		} catch {
+			// Nothing started; the descriptor is closed below.
+		}
+		// The child has its own copy once the spawn returns (Node starts it before returning), so the endpoint closes its own, started or not.
+		// Closed once: a close that throws is never taken as closed, and the number isn't closed again.
+		let unclosed = false;
+		if (credential !== undefined) {
+			try {
+				closeCredential(credential, files);
+			} catch {
+				// Logged only once a child that was started is tracked, so nothing can leave it untracked.
+				unclosed = true;
+				retained = true;
+			}
+		}
+		if (!spawned) {
+			if (unclosed) log({ event: "endpoint.refused", reason: "credential-close" });
 			log({ event: "endpoint.refused", reason: "spawn" });
 			socket.destroy();
 			return;
 		}
+		const child = spawned;
 		const timers: ReturnType<typeof setTimeout>[] = [];
 		let ended = false;
 		let markExited!: () => void;
@@ -308,6 +441,14 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 		child.stdout.on("end", () => {
 			if (!ended) socket.end();
 		});
+		// Started, but the endpoint couldn't close its copy of the credential: the child is tracked like any
+		// other, but carries nothing. Its input ends now, so it has `exitMs` to exit, then SIGTERM and SIGKILL,
+		// and the endpoint stays busy until its exit is seen, then refuses every connection (`retained`).
+		if (unclosed) {
+			transportEnded();
+			socket.destroy();
+			log({ event: "endpoint.refused", reason: "credential-close" });
+		}
 	}
 
 	server.on("connection", serve);

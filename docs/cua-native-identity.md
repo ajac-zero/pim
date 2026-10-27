@@ -1,6 +1,6 @@
 # Binding a native-app call to who makes it
 
-`src/cua-native-identity.ts` binds a native-app call (docs/cua-native-mcp.md) to who makes it before anyone is asked to approve it. The binding records the space, agent, conversation, tool task, call and run, the curated tool with a frozen copy of its arguments, and the agent's control lease. It is stored before it is returned. An approval filed after it, or approved automatically, can only be about that exact call. The binding is sent at most once, and only after the call's identity and lease are checked again.
+`src/cua-native-identity.ts` binds a native-app call (docs/cua-native-mcp.md) to who makes it before anyone is asked to approve it. The binding records the space, agent, conversation, tool task, call and run, the curated tool with a frozen copy of its arguments, and the agent's control lease. It is stored before it is returned. An approval filed after it, or approved automatically, can only be about that exact call. The binding is sent at most once, only when asked to, and only after the call's identity, lease and run are checked again. Every binding is kept, so a spent tool task or call is never bound again.
 
 **Nothing uses it.** No tool, route, approval, setting or startup code imports the file, and Pim has no identity authority to give it. The harness doesn't publish a run identity that a tool call can be checked against (see "The harness's run"). `Computer.native` keeps its guards: `nativeApps` is off unless given, it needs a trace that `ControlCoordinator.dispatch` made with a `runId`, it needs the operator's Cua computer, and it makes one call per request. `Computer.call` still refuses `native_tool`. `#controlled` in `src/pim.ts` still passes no `runId`, and the stored approvals (`Approval` in `src/store.ts`) and the coordinator's lease bindings are unchanged.
 
@@ -52,37 +52,43 @@ The binder accepts only an answer of exactly that shape. Every identity must be 
 
 `bind(claim, tool, arguments)`, before an approval is filed:
 
-1. The authority vouches for the claim. Nothing of the tool or arguments is read before that.
-2. `readNativeRequest` copies the tool and arguments, with the vouched identity and the run anchor as the run. The copy is a frozen copy of JSON's own values within `NATIVE_ARGUMENTS_CHARS`, the same copy that a native call carries.
-3. A tool task bound before gets its original binding back (`replayed`), including the lease it was bound under, but only when the identity, tool and arguments are exactly the same. Arguments are compared as JSON, so the same keys in another order count as a change. A suspended call woken by its approval, or rerun after a restart, finds its binding this way. If anything differs, the binding is closed (`changed`). A binding that was already dispatched or closed isn't returned.
-4. A new binding is refused if another tool task of the same run used the same call ID (`ambiguous_call`), if a call of the run has an unknown end (`run_uncertain`), or if the person has control (`not_agent_owned`).
+1. The claim is read, and `readNativeRequest` copies the tool and arguments before anything is awaited. The copy holds only JSON's own values, read as data within `NATIVE_ARGUMENTS_CHARS`, and is frozen: the same copy a native call carries. No getter, `toJSON` or prototype is called or followed. Anything else refuses the call before the authority is asked. The copy's agent and run are a fixed placeholder (`unverified`), which is never stored, sent or compared. So the caller changing its objects while the authority answers changes nothing that is bound.
+2. The authority vouches for the claim. The binding combines the vouched identity, with its run anchor as the run, with the copy made in step 1.
+3. Everything from here to the write is checked with nothing awaited. A tool task bound before gets its original binding back (`replayed`), including the lease it was bound under. That happens only while it is still `bound`, its identity, tool and arguments are exactly the same, and no call of its run is unknown. Arguments are compared as JSON, so the same keys in another order count as a change. A suspended call woken by its approval, or rerun after a restart, finds its binding this way. A changed call closes the binding (`changed`), and so does an unknown call of its run (`run_uncertain`). A tool task whose binding is spent (dispatched, unknown or closed) is refused and never bound again.
+4. A new binding is refused if another tool task of the same run used the same call ID (`ambiguous_call`), even one that is spent. It is also refused if a call of the run has an unknown end (`run_uncertain`), if the person has control (`not_agent_owned`), or if the binder is full (`full`).
 5. It is stored (`bound`), and then returned.
 
-`dispatch(bindingId, send)`, once the approval is decided:
+`dispatch(bindingId, send)` is called once the approval is decided. It sends only when asked, and nothing in the binder retries it:
 
-1. The binding must be `bound`. The authority vouches for it again. A refusal or a changed identity closes the binding. An authority that throws leaves it bound, since that says nothing about the call.
-2. The binding's lease must still be the current one. Otherwise the binding is closed (`stale_lease`): epochs only grow, so it can never be current again.
-3. It is stored as `claimed` before `send` is called with the frozen binding. A second dispatch, or a replay, finds it `claimed` and sends nothing.
-4. A known outcome (`completed`, `rpc_error` or `rejected`) closes the binding. An `unknown` outcome, an answer `readNativeOutcome` doesn't accept, or a `send` that throws leaves it `unknown` for good, which latches its run. A `ControlRefused` closes it, because the dispatch authority sent nothing. So `send` must throw that only when nothing was sent.
+1. The binding must be `bound`, and its run must not hold it (see "Runs" below).
+2. The authority vouches for it again. A refusal or a changed identity closes the binding. An authority that throws, or answers something that isn't an answer, leaves it `bound` and sends nothing, since that says nothing about the call. A later dispatch, asked for explicitly, goes through every step again: a fresh answer from the authority, the same identity, the same lease, and a run that doesn't hold it.
+3. After the authority answers, with nothing awaited from here to the claim, the binding must still be `bound`, its run must not hold it, and its lease must still be the current one. If the lease isn't current, the binding is closed (`stale_lease`): epochs only grow, so the lease can never be current again.
+4. It is stored as `claimed`, without its arguments, before `send` is called with the frozen binding. A second dispatch, or a replay, finds it `claimed` and sends nothing.
+5. A known outcome (`completed`, `rpc_error` or `rejected`) closes the binding. An `unknown` outcome, an answer `readNativeOutcome` doesn't accept, or a `send` that throws leaves it `unknown` for good. A `ControlRefused` closes it, because the dispatch authority sent nothing, so `send` must throw that only when nothing was sent.
 
 `release(bindingId)` closes a binding that is still `bound`, for example after its approval is denied or its chat stopped.
 
-`send` is the caller's. A later change would route it through `ControlCoordinator.dispatch` with the binding's run anchor as `runId`, and then through `Computer.native`. The coordinator stays the dispatch authority: its stored request IDs and its `unknown` status block replays and successors until reconciliation, also after a restart, and its run latch outlives reconciliation. The binder's latch adds nothing new to that. It refuses only bindings for a run whose call is unknown, and nothing it does reopens a run. There is no new run, call or provider to fall back to.
+**Runs.** A run holds a bound call in two cases:
+
+- **A call of the run is `unknown`.** This is a call dispatched in this process or before a restart, of any agent or tool task, that may have run without an answer saying so. The run sends nothing more, and the bound call is closed (`run_uncertain`), whether it is dispatched or replayed. Nothing reopens the run. The check is keyed only on the run anchor, so a run whose calls the authority says are different agents' is latched as a whole.
+- **Another call of the run is `claimed`, that is, being sent.** The bound call is refused (`run_busy`) and stays `bound`, to be dispatched again once that call's end is known. One call of a run is out at a time, as the host's run allows (`busy` in docs/cua-native-mcp.md). If that call ends `unknown`, the bound call is then closed. Binding itself sends nothing, so a call may still be bound while another of its run is being sent.
+
+`send` is the caller's. A later change would route it through `ControlCoordinator.dispatch` with the binding's run anchor as `runId`, and then through `Computer.native`. The coordinator stays the dispatch authority, and the binder doesn't bypass it: whatever the binder allows, the coordinator can still refuse. Its stored request IDs and `unknown` status block replays and successors until reconciliation, also after a restart, and its run latch outlives reconciliation. The binder's own guards don't depend on it. They are its tombstones, which are never let go (see below), and its run latch. There is no new run, call or provider to fall back to.
 
 ## Storage and its bounds
 
 The document is `{ version: 1, owner, records }`, with records in the order they were bound, each with its status. Every change is one synchronous write of the whole document, made after deciding and before anything is returned or sent. No await separates the last check from the write. The order is:
 
-- **bind:** verify, copy, decide, write `bound`, return;
-- **dispatch:** verify, decide, write `claimed`, send, write `closed` or `unknown`.
+- **bind:** copy, verify, decide, write `bound`, return;
+- **dispatch:** check, verify, check again, write `claimed`, send, write `closed` or `unknown`.
 
 A crash before the `bound` write leaves nothing bound, so the call binds again after a restart. A crash after it leaves the binding for the call to find. A crash after `claimed` comes back `unknown`, since no one can tell whether the call ran.
 
 A write that fails latches the binder for as long as the process lives. Nothing more is written, bound or sent, because the stored and remembered documents may disagree. A restart reads what was stored.
 
-On loading, the document is checked whole: its size, its JSON, its version, its owner, every record's exact fields, statuses, identities and lease, and its tool and arguments through `readNativeRequest`. Repeated binding IDs, tool tasks, and calls within a run are not allowed. A document that fails any check is left as it is, and everything is refused. A document of another version, which is a legacy or a future one, gets the same treatment. Records that were `claimed` come back `unknown` and are written back.
+On loading, the document is checked whole: its size, its JSON, its version, its owner, and every record's exact fields, status, identity and lease. A record's tool and arguments are checked through `readNativeRequest`; a `bound` record must have arguments, and any other must have `null`. Repeated binding IDs, tool tasks, and calls within a run are not allowed. A document that fails any check is left as it is, and everything is refused. A document of another version, which is a legacy or a future one, gets the same treatment. Records that were `claimed` come back `unknown` and are written back.
 
-At most `MAX_NATIVE_BINDINGS` (64) bindings and `MAX_NATIVE_BINDINGS_CHARS` (1 MiB) of JSON are kept. To make room, the oldest **closed** binding is let go. A `bound`, `claimed` or `unknown` binding is never let go, so when only those would fit, a new binding is refused (`full`). A call ID repeated within a run is refused only while the earlier binding is remembered. Across all time, the coordinator's request IDs are what keep a request from being sent twice.
+**No binding is ever let go.** A binding that leaves `bound` becomes a tombstone: it keeps its ID, identity, tool, lease and status, and its arguments become `null`. A tombstone is enough to refuse its tool task (`closed`, `dispatched` or `uncertain`) and its call ID within its run (`ambiguous_call`), and an `unknown` one latches its run, all after a restart too. The document holds at most `MAX_NATIVE_BINDINGS` (512) records and `MAX_NATIVE_BINDINGS_CHARS` (1 MiB) of JSON. A binding that would pass either bound is refused (`full`), and nothing is let go to make room. Only a binding whose arguments become `null` frees space, and its tombstone stays. Once the count is reached, the binder binds nothing more. That is deliberate: letting a record go safely would need a retirement contract from the authority proving its tool task and run can never verify again, and there is none.
 
 ## What a wiring change would need
 
@@ -98,19 +104,26 @@ This is for a separate, reviewed change, after the harness's run is settled as a
 
 `test/cua-native-identity.test.ts` drives the binder with in-memory storage and a stand-in authority. The stand-in models runs as the design document describes them: the generation named in `pi.live.run` owns its tool tasks and hands the run over, steering inputs join the run, and the first input is the anchor. It is not the harness, and it shows only what the binder does given such an authority. The tests cover the following:
 
-- The arguments aren't read before the authority vouches for the call.
 - The binding is stored before it is returned, and it is `claimed` in storage when `send` runs.
+- Arguments the caller changes while the authority is held (a value changed, a `session` added, `pid` deleted) bind and send the original copy.
+- A getter, a `toJSON` on the arguments and a nested `toJSON` are refused without being called, and the authority isn't asked.
 - Changing the caller's object afterwards changes nothing that is sent, and a binding is sent once.
 - Every authority refusal is refused unsent and nothing is stored, and so are malformed answers, another space, task, call or conversation, a throwing authority, claims with a `runId` or a bad field, uncurated tools, and arguments that aren't JSON's own values or are too large.
 - A binding survives suspension and a restart and is sent from the restarted binder.
 - A run's anchor stays the same across handover and steering, an unknown end latches the run after a restart too, and a tool task of the generation that handed the run over isn't the run's.
+- Run latches:
+  - When a call bound beside another of its run ends `unknown`, the other is closed unsent, whether dispatched, replayed, or dispatched after a restart that found the first call without an end.
+  - A call whose authority is held while another of its run becomes `unknown` is refused after the authority answers, before sending.
+  - A call whose authority answers while another of its run is being sent is refused `run_busy`, stays bound, and is sent once that call's end is known.
+  - A run is latched for every agent the authority vouches for in it.
+  - A call left bound by a failing authority is sent on a later explicit dispatch, unless another call of its run became `unknown` meanwhile.
 - A successor run binds a call ID seen in an earlier run, and a call ID repeated within one run is refused.
 - A changed agent, run, tool or arguments, a stopped run or a missing task closes the binding unsent. Another space's binder leaves the document alone.
 - A takeover after binding is refused as `stale_lease`, even though a replay returns the original lease.
 - A crash before or after the `bound` write, and a crash during a dispatch, behave as described above.
 - A failed write latches the binder, and a settlement that can't be stored comes back `unknown`.
 - Each kind of answer from `send` settles as described above.
-- The bounds hold: only closed bindings are let go, and large arguments reach the size bound first.
-- Thirteen malformed stored documents are refused without being changed.
+- No binding is let go. At 512 records, closing bindings frees nothing, and new bindings are refused `full`. Tombstones keep `null` arguments and still refuse their tool tasks and call IDs after a restart. With large arguments the size bound is reached first, and a released binding's tombstone frees room while still refusing its task.
+- Fifteen malformed stored documents are refused without being changed, including a bound record without arguments and a closed one with them.
 
 **These tests haven't been run.** They were written with this change, and no test, typecheck or build was run for it.

@@ -44,23 +44,33 @@ function memory() {
 	return { disk, storage };
 }
 
+/** A promise and the function that settles it. */
+function gate<T = void>() {
+	let open!: (value: T) => void;
+	const promise = new Promise<T>((resolve) => (open = resolve));
+	return { promise, open };
+}
+
 /**
  * The harness's runs as pi-durable 1.1.0's design document describes them:
  * a conversation is busy while `pi.live.run` names the generation that
  * settles its inputs; a tool task is owned by the generation that called it,
  * which keeps the run during its tool round and then hands it over; steering
  * inputs join the run, and a successor run starts with other inputs. Its run
- * anchor is the run's first input. `answer` replaces what it says.
+ * anchor is the run's first input. `answer` replaces what it says, and a
+ * tool task in `held` waits for its promise before it is answered.
  */
 class StandInHarness implements NativeIdentityAuthority {
 	readonly agents = new Map<string, string>();
 	readonly runs = new Map<string, { taskId: string; inputs: string[] }>();
 	readonly tasks = new Map<string, { conversationId: string; callId: string; owner: string; live: boolean }>();
+	readonly held = new Map<string, Promise<void>>();
 	readonly verified: NativeIdentityClaim[] = [];
 	answer: ((claim: NativeIdentityClaim) => unknown) | null = null;
 
 	async verify(claim: NativeIdentityClaim): Promise<AuthorityAnswer> {
 		this.verified.push(claim);
+		await this.held.get(claim.toolTaskId);
 		if (this.answer) return this.answer(claim) as AuthorityAnswer;
 		const task = this.tasks.get(claim.toolTaskId);
 		if (!task || task.conversationId !== claim.conversationId || task.callId !== claim.callId) return { status: "refused", reason: "missing" };
@@ -127,22 +137,19 @@ const bindingId = async (binder: NativeIdentityBinder, ...args: Parameters<Nativ
 	return bound.binding.id;
 };
 
-describe("binding a native-app call to who makes it", () => {
-	it("verifies the call first, stores the binding before returning it, and sends that frozen copy once", async () => {
-		const { binder, disk, harness } = setup();
-		// What the arguments are is read only after the authority vouched for the call.
-		const reads: string[] = [];
-		const args = new Proxy(click(), {
-			getOwnPropertyDescriptor: (target, key) => {
-				reads.push(String(key));
-				return Reflect.getOwnPropertyDescriptor(target, key);
-			},
-		});
-		harness.answer = () => ({ status: "refused", reason: "stopped" });
-		expect(await binder.bind(claim(), "click", args)).toMatchObject({ ok: false, reason: "stopped" });
-		expect(reads).toEqual([]);
-		harness.answer = null;
+/** The setup with a second call, t2, of the same run bound as b2 beside t1's b1. */
+async function twoBound() {
+	const context = setup();
+	context.harness.call("c1", "t2", "call-2");
+	await bindingId(context.binder, claim(), "click", click());
+	await bindingId(context.binder, claim("t2", "call-2"), "click", click());
+	return context;
+}
 
+describe("binding a native-app call to who makes it", () => {
+	it("stores the binding before returning it, and sends that frozen copy once", async () => {
+		const { binder, disk } = setup();
+		const args = click();
 		const bound = await binder.bind(claim(), "click", args);
 		if (!bound.ok) throw new Error(bound.reason);
 		expect(bound).toMatchObject({ replayed: false });
@@ -171,6 +178,38 @@ describe("binding a native-app call to who makes it", () => {
 		expect(await binder.dispatch("b1", send)).toMatchObject({ ok: false, reason: "closed" });
 		expect(await binder.bind(claim(), "click", click())).toMatchObject({ ok: false, reason: "closed" });
 		expect(sent).toHaveLength(1);
+	});
+
+	it("copies the tool and arguments before the authority answers, so a change while it answers binds nothing", async () => {
+		const { binder, harness } = setup();
+		const held = gate();
+		harness.held.set("t1", held.promise);
+		const args: Record<string, unknown> = click();
+		const binding = binder.bind(claim(), "click", args);
+		// While the authority answers, the caller changes everything it can.
+		args.x = 999;
+		args.session = "other";
+		delete args.pid;
+		held.open();
+		const bound = await binding;
+		expect(bound).toMatchObject({ ok: true, binding: { tool: "click", arguments: { pid: 42, x: 10, y: 20 } } });
+		const { sent, send } = sender();
+		expect(await binder.dispatch("b1", send)).toEqual({ ok: true, outcome: known });
+		expect(sent.map((each) => each.arguments)).toEqual([{ pid: 42, x: 10, y: 20 }]);
+	});
+
+	it("refuses arguments JSON would coerce without calling anything of them, and asks the authority nothing", async () => {
+		const { binder, disk, harness } = setup();
+		let called = 0;
+		const getter = Object.defineProperty({ pid: 1 }, "x", { enumerable: true, get: () => ++called });
+		const toJSON = { pid: 1, toJSON: () => ++called };
+		const nested = { pid: 1, at: { toJSON: () => ++called } };
+		for (const args of [getter, toJSON, nested]) {
+			expect(await binder.bind(claim(), "click", args)).toMatchObject({ ok: false, reason: "invalid_request" });
+		}
+		expect(called).toBe(0);
+		expect(harness.verified).toEqual([]);
+		expect(disk.writes).toBe(0);
 	});
 
 	it("refuses unsent, storing nothing, whatever the authority can't vouch for", async () => {
@@ -212,7 +251,6 @@ describe("binding a native-app call to who makes it", () => {
 		for (const [tool, args] of [
 			["launch_app", { name: "xterm" }],
 			["click", [1]],
-			["click", { pid: 1, toJSON: () => ({}) }],
 			["click", { pid: 1, when: new Date() }],
 			["click", { pid: 1, text: "x".repeat(40_000) }],
 		] as const) {
@@ -259,6 +297,87 @@ describe("binding a native-app call to who makes it", () => {
 		harness.call("c1", "t3", "call-1");
 		const next = await restarted.bind(claim("t3", "call-1"), "click", click());
 		expect(next).toMatchObject({ ok: true, binding: { identity: { runAnchor: "s3", callId: "call-1" } } });
+	});
+
+	it("sends nothing more of a run once a call bound beside it is unknown, whether dispatched or replayed", async () => {
+		const dispatched = await twoBound();
+		expect(await dispatched.binder.dispatch("b1", sender(async () => unknown).send)).toMatchObject({ ok: true });
+		const { sent, send } = sender();
+		expect(await dispatched.binder.dispatch("b2", send)).toMatchObject({ ok: false, reason: "run_uncertain" });
+		expect(dispatched.binder.status("b2")).toBe("closed");
+		expect(await dispatched.binder.dispatch("b2", send)).toMatchObject({ ok: false, reason: "closed" });
+		expect(sent).toEqual([]);
+
+		// The call woken from its approval asks again: it gets no binding.
+		const replayed = await twoBound();
+		expect(await replayed.binder.dispatch("b1", sender(async () => unknown).send)).toMatchObject({ ok: true });
+		expect(await replayed.binder.bind(claim("t2", "call-2"), "click", click())).toMatchObject({ ok: false, reason: "run_uncertain" });
+		expect(replayed.binder.status("b2")).toBe("closed");
+
+		// After a restart that finds the first call's dispatch without an end.
+		const restarted = await twoBound();
+		const out = gate();
+		void restarted.binder.dispatch("b1", async () => {
+			out.open();
+			return new Promise<NativeOutcome>(() => {});
+		});
+		await out.promise;
+		const next = restarted.make();
+		expect(next.status("b1")).toBe("unknown");
+		expect(await next.dispatch("b2", send)).toMatchObject({ ok: false, reason: "run_uncertain" });
+		expect(sent).toEqual([]);
+	});
+
+	it("checks the run again after the authority answers, right before sending", async () => {
+		// The first call becomes unknown while the authority answers for the second.
+		const { binder, harness } = await twoBound();
+		const held = gate();
+		harness.held.set("t2", held.promise);
+		const { sent, send } = sender();
+		const second = binder.dispatch("b2", send);
+		expect(await binder.dispatch("b1", sender(async () => unknown).send)).toMatchObject({ ok: true });
+		held.open();
+		expect(await second).toMatchObject({ ok: false, reason: "run_uncertain" });
+		expect(binder.status("b2")).toBe("closed");
+		expect(sent).toEqual([]);
+
+		// The first call is being sent when the authority answers for the second: the second waits, still bound.
+		const busy = await twoBound();
+		const heldAgain = gate();
+		busy.harness.held.set("t2", heldAgain.promise);
+		const waiting = busy.binder.dispatch("b2", send);
+		const reply = gate<NativeOutcome>();
+		const out = gate();
+		const first = busy.binder.dispatch("b1", () => {
+			out.open();
+			return reply.promise;
+		});
+		await out.promise;
+		expect(busy.binder.status("b1")).toBe("claimed");
+		heldAgain.open();
+		expect(await waiting).toMatchObject({ ok: false, reason: "run_busy" });
+		expect(busy.binder.status("b2")).toBe("bound");
+		// Asked again before the first call's end is known, it is still refused; asked once it is known, it is sent.
+		expect(await busy.binder.dispatch("b2", send)).toMatchObject({ ok: false, reason: "run_busy" });
+		reply.open(known);
+		expect(await first).toEqual({ ok: true, outcome: known });
+		expect(await busy.binder.dispatch("b2", send)).toEqual({ ok: true, outcome: known });
+		expect(sent).toHaveLength(1);
+	});
+
+	it("latches a run for every agent the authority vouches for in it", async () => {
+		const { binder, harness } = setup();
+		harness.answer = (claim) => ({
+			status: "verified",
+			identity: { owner: SPACE, agentId: claim.toolTaskId === "t1" ? "agent-a" : "agent-b", ...claim, runAnchor: "s1" },
+		});
+		await bindingId(binder, claim(), "click", click());
+		await bindingId(binder, claim("t2", "call-2"), "click", click());
+		expect(await binder.dispatch("b1", sender(async () => unknown).send)).toMatchObject({ ok: true });
+		const { sent, send } = sender();
+		expect(await binder.dispatch("b2", send)).toMatchObject({ ok: false, reason: "run_uncertain" });
+		expect(await binder.bind(claim("t3", "call-3"), "click", click())).toMatchObject({ ok: false, reason: "run_uncertain" });
+		expect(sent).toEqual([]);
 	});
 
 	it("refuses a call ID seen before in the same run", async () => {
@@ -313,17 +432,27 @@ describe("binding a native-app call to who makes it", () => {
 		expect(disk.value).toBe(stored);
 	});
 
-	it("an authority that fails at dispatch leaves the call bound and unsent", async () => {
-		const { binder, harness } = setup();
-		await bindingId(binder, claim(), "click", click());
+	it("leaves a call bound and unsent when the authority fails at dispatch, and checks it all afresh when asked again", async () => {
+		const { binder, harness } = await twoBound();
 		harness.answer = () => {
 			throw new Error("the harness is closing");
 		};
 		const { sent, send } = sender();
-		expect(await binder.dispatch("b1", send)).toMatchObject({ ok: false, reason: "authority_failed" });
-		expect(binder.status("b1")).toBe("bound");
+		expect(await binder.dispatch("b2", send)).toMatchObject({ ok: false, reason: "authority_failed" });
+		expect(binder.status("b2")).toBe("bound");
 		harness.answer = null;
-		expect(await binder.dispatch("b1", send)).toEqual({ ok: true, outcome: known });
+		expect(await binder.dispatch("b2", send)).toEqual({ ok: true, outcome: known });
+		expect(sent).toHaveLength(1);
+
+		// Asked again after another call of its run became unknown, it isn't sent.
+		const again = await twoBound();
+		again.harness.answer = () => {
+			throw new Error("the harness is closing");
+		};
+		expect(await again.binder.dispatch("b2", send)).toMatchObject({ ok: false, reason: "authority_failed" });
+		again.harness.answer = null;
+		expect(await again.binder.dispatch("b1", sender(async () => unknown).send)).toMatchObject({ ok: true });
+		expect(await again.binder.dispatch("b2", send)).toMatchObject({ ok: false, reason: "run_uncertain" });
 		expect(sent).toHaveLength(1);
 	});
 
@@ -368,15 +497,14 @@ describe("binding a native-app call to who makes it", () => {
 	it("takes a dispatch whose end wasn't recorded as unknown after a restart, and never sends it again", async () => {
 		const { binder, disk, harness, make } = setup();
 		await bindingId(binder, claim(), "click", click());
-		let started!: () => void;
-		const sending = new Promise<void>((resolve) => (started = resolve));
+		const out = gate();
 		// The process ends while the call is out: its reply never comes.
 		void binder.dispatch("b1", async () => {
-			started();
+			out.open();
 			return new Promise<NativeOutcome>(() => {});
 		});
-		await sending;
-		expect(JSON.parse(disk.value!).records[0].status).toBe("claimed");
+		await out.promise;
+		expect(JSON.parse(disk.value!).records[0]).toMatchObject({ status: "claimed", arguments: null });
 
 		const restarted = make();
 		expect(restarted.status("b1")).toBe("unknown");
@@ -436,27 +564,35 @@ describe("binding a native-app call to who makes it", () => {
 		}
 	});
 
-	it("remembers a bounded number of bindings, letting go only of closed ones", async () => {
-		const { binder, disk, harness } = setup();
+	it("never lets a binding go, so a spent tool task or call never binds again, also after a restart", async () => {
+		const { binder, disk, harness, make } = setup();
 		for (let index = 0; index < MAX_NATIVE_BINDINGS; index++) {
 			harness.call("c1", `t${index}`, `call-${index}`);
 			await bindingId(binder, claim(`t${index}`, `call-${index}`), "click", click());
 		}
 		harness.call("c1", "t-next", "call-next");
 		expect(await binder.bind(claim("t-next", "call-next"), "click", click())).toMatchObject({ ok: false, reason: "full" });
-		// One left unknown and one closed: only the closed one is let go, for a call of the next run.
-		expect(await binder.dispatch("b1", sender(async () => unknown).send)).toMatchObject({ ok: true });
-		expect(binder.release("b2")).toBe(true);
-		harness.end("c1");
-		harness.start("c1", "g9", "s9");
-		harness.call("c1", "t-next", "call-next");
-		const next = await binder.bind(claim("t-next", "call-next"), "click", click());
-		expect(next).toMatchObject({ ok: true });
-		expect(binder.status("b2")).toBeNull();
-		expect(binder.status("b1")).toBe("unknown");
-		expect(JSON.parse(disk.value!).records).toHaveLength(MAX_NATIVE_BINDINGS);
+		// Closing bindings frees nothing: each stays, as a tombstone without its arguments.
+		expect(binder.release("b1")).toBe(true);
+		expect(await binder.dispatch("b2", sender().send)).toMatchObject({ ok: true });
+		expect(await binder.bind(claim("t-next", "call-next"), "click", click())).toMatchObject({ ok: false, reason: "full" });
+		const stored = JSON.parse(disk.value!).records;
+		expect(stored).toHaveLength(MAX_NATIVE_BINDINGS);
+		expect(stored.slice(0, 3)).toEqual([
+			expect.objectContaining({ id: "b1", status: "closed", arguments: null }),
+			expect.objectContaining({ id: "b2", status: "closed", arguments: null }),
+			expect.objectContaining({ id: "b3", status: "bound", arguments: click() }),
+		]);
 
-		// Large arguments reach the document's bound before the count does.
+		// After a restart, the spent task's tombstone still refuses it, and its call ID within the run.
+		const restarted = make();
+		expect(await restarted.bind(claim("t0", "call-0"), "click", click())).toMatchObject({ ok: false, reason: "closed" });
+		expect(await restarted.bind(claim("t1", "call-1"), "click", click())).toMatchObject({ ok: false, reason: "closed" });
+		harness.call("c1", "t-again", "call-0");
+		expect(await restarted.bind(claim("t-again", "call-0"), "click", click())).toMatchObject({ ok: false, reason: "ambiguous_call" });
+		expect(await restarted.dispatch("b1", sender().send)).toMatchObject({ ok: false, reason: "closed" });
+
+		// Large arguments reach the document's bound before the count does; a closed one's tombstone makes room, and stays.
 		const big = setup();
 		let bound = 0;
 		for (;;) {
@@ -470,6 +606,9 @@ describe("binding a native-app call to who makes it", () => {
 		}
 		expect(bound).toBeLessThan(MAX_NATIVE_BINDINGS);
 		expect(big.disk.value!.length).toBeLessThanOrEqual(MAX_NATIVE_BINDINGS_CHARS);
+		expect(big.binder.release("b1")).toBe(true);
+		expect(await big.binder.bind(claim(`t${bound}`, `call-${bound}`), "type_text", { pid: 1, text: "x".repeat(30_000) })).toMatchObject({ ok: true });
+		expect(await big.binder.bind(claim("t0", "call-0"), "type_text", { pid: 1, text: "x".repeat(30_000) })).toMatchObject({ ok: false, reason: "closed" });
 	});
 
 	it("refuses everything over a stored document it can't read, and leaves it as it is", async () => {
@@ -483,6 +622,8 @@ describe("binding a native-app call to who makes it", () => {
 			JSON.stringify({ ...good, records: undefined }),
 			JSON.stringify({ ...good, extra: 1 }),
 			JSON.stringify({ ...good, records: [{ ...record, status: "sent" }] }),
+			JSON.stringify({ ...good, records: [{ ...record, arguments: null }] }),
+			JSON.stringify({ ...good, records: [{ ...record, status: "closed" }] }),
 			JSON.stringify({ ...good, records: [{ ...record, identity: { ...record.identity, owner: "space-2" } }] }),
 			JSON.stringify({ ...good, records: [{ ...record, identity: { ...record.identity, runAnchor: undefined } }] }),
 			JSON.stringify({ ...good, records: [{ ...record, tool: "launch_app" }] }),

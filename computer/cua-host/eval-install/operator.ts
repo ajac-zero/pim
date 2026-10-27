@@ -557,7 +557,7 @@ PLACING=0
 cleanup() {
 	local status="$1"
 	if [[ "$PLACING" == 1 && "$status" != 0 ]]; then
-		printf '{"event":"pim-cua-eval.failed","command":"%s","reason":"partial-placement-kept"}\n' "$COMMAND" >&2
+		printf '{"event":"pim-cua-eval.failed","command":"%s","reason":"partial-placement-kept"}\\n' "$COMMAND" >&2
 	elif [[ "$CREATED" == 1 ]]; then
 		rm -rf --one-file-system -- "$STAGE" || { printf '{"event":"pim-cua-eval.failed","command":"%s","reason":"cleanup"}\\n' "$COMMAND" >&2; [[ "$status" != 0 ]] || status=1; }
 	fi
@@ -589,14 +589,14 @@ absent() { [[ ! -e "$1" && ! -L "$1" ]] || fail "exists-$2"; }
 publish_file() {
 	ln -P -T -- "$1" "$2" || fail "place-$3"
 }
-# A tree's listing, written to a file of the stage by a pipeline whose failure is the function's: pipefail makes `find` or `sort` failing fail the subshell,
+# A tree's listing, written to a file of the stage by a pipeline whose failure is the function's: pipefail makes a failing find or sort fail the subshell,
 # which a process substitution feeding a loop would never report. $2 is d (directories) or f (everything else); the file is bounded and, for f, not empty.
 list_tree() {
 	local size
 	if [[ "$2" == d ]]; then
-		( cd -- "$1" && find . -mindepth 1 -type d -printf '%P\0' | LC_ALL=C sort -z >"$3" ) || return 1
+		( cd -- "$1" && find . -mindepth 1 -type d -printf '%P\\0' | LC_ALL=C sort -z >"$3" ) || return 1
 	else
-		( cd -- "$1" && find . -mindepth 1 ! -type d -printf '%P\0' | LC_ALL=C sort -z >"$3" ) || return 1
+		( cd -- "$1" && find . -mindepth 1 ! -type d -printf '%P\\0' | LC_ALL=C sort -z >"$3" ) || return 1
 	fi
 	size="$(stat -c %s -- "$3")" || return 1
 	(( size <= 16777216 )) || return 1

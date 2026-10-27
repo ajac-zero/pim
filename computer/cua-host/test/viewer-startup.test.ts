@@ -1019,6 +1019,10 @@ describe("the pinned delivery", () => {
 		const list = bashFunction(script, "list_tree");
 		// The pipeline's own status is the subshell's (pipefail is set in the prologue), and the subshell's is the function's.
 		assert.ok(script.includes("set -euo pipefail"));
+		// The template's escapes: the script holds the two characters backslash and 0 for find's NUL, never a NUL itself, and no printf format is broken by a real newline.
+		for (const rendered of [script, renderScripts(config(true), PINNED)["support.sh"]!]) assert.equal(rendered.includes("\0"), false);
+		assert.equal(list.match(/-printf '%P\\0'/g)?.length, 2);
+		assert.equal(/printf '[^']*\n[^']*'/.test(script), false);
 		assert.equal(list.match(/\| LC_ALL=C sort -z >"\$3" \) \|\| return 1/g)?.length, 2);
 		assert.ok(list.includes("(( size <= 16777216 )) || return 1"));
 		// The loops read a regular file of the stage and fail if it can't be read.

@@ -315,8 +315,10 @@ describe("starting the Cua computer", () => {
 
 	/**
 	 * A stand-in for the credential file at `CREDENTIAL`, and nowhere else:
-	 * each descriptor opened, which are open now, and each closed. It has no
-	 * way to be read, as the endpoint has none.
+	 * each descriptor opened, which are open now, each close tried, and each
+	 * closed. With `closeFails`, a close throws before it records or releases
+	 * anything, so the descriptor stays open. It has no way to be read, as the
+	 * endpoint has none.
 	 */
 	function credentials() {
 		const state = {
@@ -326,8 +328,10 @@ describe("starting the Cua computer", () => {
 				return file;
 			},
 			openFails: false,
+			closeFails: false,
 			opened: [] as { file: string; flags: number; fd: number }[],
 			open: new Set<number>(),
+			tried: [] as number[],
 			closed: [] as number[],
 		};
 		let next = 40;
@@ -345,6 +349,8 @@ describe("starting the Cua computer", () => {
 				return state.stat;
 			},
 			close: (fd) => {
+				state.tried.push(fd);
+				if (state.closeFails) throw Object.assign(new Error("EIO"), { code: "EIO" });
 				if (!state.open.delete(fd)) throw Object.assign(new Error("EBADF"), { code: "EBADF" });
 				state.closed.push(fd);
 			},
@@ -553,6 +559,119 @@ describe("starting the Cua computer", () => {
 		assert.equal(state.opened.length, 4);
 		assert.equal(state.open.size, 0);
 		next.close();
+	});
+
+	it("refuses to start, apart from a refused file, when the credential it checked can't be closed, and doesn't close it again", () => {
+		const where = place();
+		const make = (files: CredentialFiles) => () =>
+			createDesktopEndpoint({
+				socketPath: where.socketPath,
+				root: where.root,
+				browser: where.browser,
+				pimComputer: PIM_COMPUTER,
+				cua,
+				credentialFiles: files,
+				spawn: () => assert.fail("nothing starts"),
+			});
+		const reason = (expected: string) => (error: unknown) => error instanceof EndpointRefused && error.reason === expected;
+
+		// A good file whose close throws.
+		const good = credentials();
+		good.state.closeFails = true;
+		assert.throws(make(good.files), reason("credential-close"));
+		assert.deepEqual(good.state.tried, [good.state.opened[0]!.fd], "tried once");
+		assert.deepEqual([...good.state.open], [good.state.opened[0]!.fd], "and, as far as anyone knows, still open");
+
+		// A refused file whose close throws is that, not merely refused.
+		const refused = credentials();
+		refused.state.stat = { ...refused.state.stat, mode: 0o100644 };
+		refused.state.closeFails = true;
+		assert.throws(make(refused.files), reason("credential-close"));
+		assert.equal(refused.state.tried.length, 1);
+
+		// A refused file closed as it should be, and a file never opened, are only refused.
+		const closed = credentials();
+		closed.state.stat = { ...closed.state.stat, mode: 0o100644 };
+		assert.throws(make(closed.files), reason("credential"));
+		assert.equal(closed.state.open.size, 0);
+		const unopened = credentials();
+		unopened.state.openFails = true;
+		unopened.state.closeFails = true;
+		assert.throws(make(unopened.files), reason("credential"));
+		assert.deepEqual(unopened.state.tried, [], "nothing to close");
+		assert.equal(fs.existsSync(where.socketPath), false);
+	});
+
+	it("takes nothing more once it can't close the credential it handed a child, and ends and watches that child to its exit", async () => {
+		const { state, files } = credentials();
+		const served = await endpoint({ cua, credentialFiles: files, limits: { exitMs: 50, closeMs: 50 } });
+		state.closeFails = true;
+		// The child is started, then the endpoint's copy can't be closed: the session never opens.
+		assert.equal((await settle(unixSession({ socketPath: served.socketPath })(events().given, new AbortController().signal))).ok, false);
+		assert.equal(served.calls.length, 1);
+		const fd = state.opened[1]!.fd;
+		assert.deepEqual(served.calls[0]!.options.stdio, ["pipe", "pipe", "ignore", fd]);
+		assert.deepEqual(state.tried, [state.opened[0]!.fd, fd], "its close was tried once");
+		assert.ok(state.open.has(fd), "and it may still be open");
+		assert.ok(served.log.some((entry) => entry.event === "endpoint.refused" && entry.reason === "credential-close"));
+
+		// The child is tracked as any other: its input ends, then SIGTERM, then SIGKILL; its input got nothing.
+		const child = served.children[0]!;
+		await until(() => child.inputEnded, "its input to end");
+		await until(() => child.signals.length === 2, "SIGTERM and SIGKILL");
+		assert.deepEqual(child.signals, ["SIGTERM", "SIGKILL"]);
+		assert.equal(child.input, "");
+
+		// Refused, opening and starting nothing, both before its exit is seen and after.
+		const opened = state.opened.length;
+		assert.equal((await settle(unixSession({ socketPath: served.socketPath })(events().given, new AbortController().signal))).ok, false);
+		let stopped = false;
+		const stopping = served.endpoint.close().then(() => {
+			stopped = true;
+		});
+		await tick(150);
+		assert.equal(stopped, false, "closing the endpoint waits for the child's exit");
+		assert.ok(!served.log.some((entry) => entry.event === "endpoint.exited"));
+		child.exit();
+		await stopping;
+		assert.ok(served.log.some((entry) => entry.event === "endpoint.exited"));
+		assert.equal(served.calls.length, 1);
+		assert.equal(state.opened.length, opened);
+		assert.deepEqual(state.tried, [state.opened[0]!.fd, fd], "never closed again");
+		assert.equal(served.log.filter((entry) => entry.event === "endpoint.refused" && entry.reason === "busy").length, 0, "refused for the credential, not as busy");
+	});
+
+	it("takes nothing more once a file refused as its child would start can't be closed, or once the spawn throws and it can't be closed", async () => {
+		const first = credentials();
+		const served = await endpoint({ cua, credentialFiles: first.files });
+		first.state.stat = { ...first.state.stat, mode: 0o100644 };
+		first.state.closeFails = true;
+		assert.equal((await settle(unixSession({ socketPath: served.socketPath })(events().given, new AbortController().signal))).ok, false);
+		assert.equal(served.calls.length, 0);
+		// It passes again, and closes again, but the descriptor that wasn't closed is still held: refused, nothing opened.
+		first.state.stat = { ...first.state.stat, mode: 0o100600 };
+		first.state.closeFails = false;
+		const opened = first.state.opened.length;
+		assert.equal((await settle(unixSession({ socketPath: served.socketPath })(events().given, new AbortController().signal))).ok, false);
+		assert.equal(served.calls.length, 0);
+		assert.equal(first.state.opened.length, opened);
+		assert.deepEqual(
+			served.log.filter((entry) => entry.event === "endpoint.refused").map((entry) => entry.reason),
+			["credential-close", "credential-close"],
+		);
+
+		const second = credentials();
+		const failing = await endpoint({ cua, credentialFiles: second.files, spawn: () => assert.fail("EAGAIN") });
+		second.state.closeFails = true;
+		assert.equal((await settle(unixSession({ socketPath: failing.socketPath })(events().given, new AbortController().signal))).ok, false);
+		const reasons = () => failing.log.filter((entry) => entry.event === "endpoint.refused").map((entry) => entry.reason);
+		assert.deepEqual(reasons(), ["credential-close", "spawn"]);
+		second.state.closeFails = false;
+		const before = second.state.opened.length;
+		assert.equal((await settle(unixSession({ socketPath: failing.socketPath })(events().given, new AbortController().signal))).ok, false);
+		assert.deepEqual(reasons(), ["credential-close", "spawn", "credential-close"]);
+		assert.equal(second.state.opened.length, before);
+		assert.equal(second.state.tried.length, 2, "once at the start, once after the spawn: never again");
 	});
 });
 

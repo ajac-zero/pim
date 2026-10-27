@@ -26,14 +26,19 @@ const ORIGIN = "https://spacesd.test:7443";
 
 /**
  * Descriptor 3 as a stand-in: `bytes` behind a status, read at most `chunk`
- * bytes at a time. It records each read and each close, every buffer it was
- * handed, and whether a read came after the close.
+ * bytes at a time. It records each read, each close tried and each that
+ * returned, every buffer it was handed, and whether a read came after the
+ * close.
  */
-function descriptor(bytes: Buffer | string, options: { stat?: Partial<CredentialStat>; chunk?: number; fstatThrows?: boolean; readThrows?: boolean; grows?: number } = {}) {
+function descriptor(
+	bytes: Buffer | string,
+	options: { stat?: Partial<CredentialStat>; chunk?: number; fstatThrows?: boolean; readThrows?: boolean; grows?: number; closeThrows?: boolean } = {},
+) {
 	const data = typeof bytes === "string" ? Buffer.from(bytes, "latin1") : bytes;
 	const record = {
 		reads: [] as { fd: number; offset: number; length: number; position: number }[],
 		buffers: [] as Buffer[],
+		tried: [] as number[],
 		closed: [] as number[],
 		readAfterClose: false,
 	};
@@ -55,6 +60,9 @@ function descriptor(bytes: Buffer | string, options: { stat?: Partial<Credential
 			return part.length;
 		},
 		close: (fd) => {
+			record.tried.push(fd);
+			// A close that fails throws before anything is recorded or released.
+			if (options.closeThrows) throw Object.assign(new Error(`EIO ${SECRET}`), { code: "EIO" });
 			record.closed.push(fd);
 		},
 	};
@@ -121,6 +129,25 @@ describe("reading the credential from descriptor 3", () => {
 		}
 	});
 
+	it("returns no token and refuses `close`, retained, when closing the descriptor throws, whatever the read did, and never closes it again", () => {
+		for (const [name, made] of [
+			["after a good read", descriptor(`${SECRET}\n`, { closeThrows: true })],
+			["after a refused file", descriptor(SECRET, { closeThrows: true, stat: { mode: 0o100644 } })],
+			["after a read that throws", descriptor(SECRET, { closeThrows: true, readThrows: true })],
+			["with no descriptor 3 at all", descriptor(SECRET, { closeThrows: true, fstatThrows: true })],
+		] as const) {
+			assert.throws(() => readCredential(CREDENTIAL_FD, UID, made.reader), (error: unknown) => refusedFor("close")(error) && (error as CredentialRefused).retained, name);
+			assert.deepEqual(made.record.tried, [CREDENTIAL_FD], `${name}: tried once`);
+			assert.deepEqual(made.record.closed, [], `${name}: not taken as closed`);
+			for (const buffer of made.record.buffers) assert.ok(buffer.every((byte) => byte === 0), `${name}: zeroed`);
+		}
+		// A refusal whose close returned isn't retained.
+		assert.throws(
+			() => readCredential(CREDENTIAL_FD, UID, descriptor("").reader),
+			(error: unknown) => error instanceof CredentialRefused && error.reason === "size" && !error.retained,
+		);
+	});
+
 	it("refuses a reader that says it read more than it was asked for", () => {
 		const { record } = descriptor(SECRET);
 		const lying: CredentialReader = {
@@ -135,8 +162,8 @@ describe("reading the credential from descriptor 3", () => {
 
 describe("starting the Cua computer", () => {
 	/** A start with stand-ins: what `serve` was given and when, what was sent to spacesd, and the descriptor's record. */
-	function start(options: { bytes?: string; owner?: string; origin?: string; root?: string; serveThrows?: boolean; stat?: Partial<CredentialStat> } = {}) {
-		const { reader, record } = descriptor(options.bytes ?? `${SECRET}\n`, options.stat ? { stat: options.stat } : {});
+	function start(options: { bytes?: string; owner?: string; origin?: string; root?: string; serveThrows?: boolean; stat?: Partial<CredentialStat>; closeThrows?: boolean } = {}) {
+		const { reader, record } = descriptor(options.bytes ?? `${SECRET}\n`, { ...(options.stat ? { stat: options.stat } : {}), closeThrows: options.closeThrows === true });
 		const served: { settings: ServeSettings; closedBefore: number[] }[] = [];
 		const sent: { url: string; authorization: string | null }[] = [];
 		const fetch: Fetch = async (url, init) => {
@@ -176,6 +203,7 @@ describe("starting the Cua computer", () => {
 
 	it("refuses another owner's call unsent, and sends its own only to spacesd's origin, with the token only as the bearer", async () => {
 		const { started, served, sent } = start();
+		// It resolves once `serve` has, which the stand-in does at once, as `serveStdio` does once serving has begun; the dispatcher goes on answering after.
 		await started;
 		const native = served[0]!.settings.native!;
 		for (const owner of ["o_other-space", `${OWNER} `, ""]) {
@@ -221,6 +249,15 @@ describe("starting the Cua computer", () => {
 		const relative = start({ root: "workspace" });
 		await assert.rejects(relative.started, (error: unknown) => error instanceof CuaComputerRefused && error.reason === "settings");
 		assert.deepEqual(relative.record.closed, [CREDENTIAL_FD]);
+	});
+
+	it("doesn't make a dispatcher, send anything or serve when closing the descriptor throws", async () => {
+		const { started, served, sent, record } = start({ closeThrows: true });
+		await assert.rejects(started, (error: unknown) => error instanceof CuaComputerRefused && error.reason === "credential-close" && !error.message.includes(SECRET));
+		assert.deepEqual(served, []);
+		assert.deepEqual(sent, []);
+		assert.deepEqual(record.tried, [CREDENTIAL_FD], "tried once");
+		assert.deepEqual(record.closed, []);
 	});
 
 	it("passes on a failure to serve as it came, with the descriptor already closed", async () => {

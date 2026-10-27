@@ -35,10 +35,13 @@
  * the same folder, environment, limits and one-at-a-time rule. spacesd's token
  * is the one secret it hands on, and only as a descriptor: for each child it
  * opens the desktop user's credential file (./cua-credential.ts), checks it,
- * hands it over as descriptor 3, and closes its own as soon as the spawn
- * returns or throws, never reading it. That keeps the token out of arguments,
- * environments and logs; it doesn't keep it from the agents, which run as the
- * desktop user and can read the file.
+ * hands it over as descriptor 3, and closes its own, once, as soon as the
+ * spawn returns or throws, never reading it. A close that fails is not taken
+ * as closed: the endpoint refuses every later connection for good, and a child
+ * it started then gets its input ended and is watched to its exit as any
+ * other, keeping the endpoint busy until then. A descriptor keeps the token
+ * out of arguments, environments and logs; it doesn't keep it from the agents,
+ * which run as the desktop user and can read the file.
  *
  *   node desktop.ts --socket /run/pim-session/session.sock --root /home/desktop/workspace \
  *     --browser /opt/google/chrome/chrome --pim-computer /opt/pim/pim-computer.ts [--headful]
@@ -55,7 +58,7 @@ import type { Readable, Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import type { LogEntry } from "../cua-bridge.ts";
 import { NATIVE_IDENTITY } from "../native-outcome.ts";
-import { type CredentialFiles, closeCredential, NODE_CREDENTIAL_FILES, openCredential } from "./cua-credential.ts";
+import { type CredentialFiles, CredentialRefused, closeCredential, NODE_CREDENTIAL_FILES, openCredential } from "./cua-credential.ts";
 import { checkSocketPath } from "./session.ts";
 
 /** What the endpoint needs of a process it started; tests give stand-ins. */
@@ -245,7 +248,11 @@ function cuaChild(cua: CuaChild, uid: number, files: CredentialFiles): CuaChild 
 	if (!exactOrigin(origin)) throw new EndpointRefused("cua-origin", "spacesd's origin must be exactly https://host[:port], or http:// on a loopback host.");
 	try {
 		closeCredential(openCredential(credentialFile, uid, files), files);
-	} catch {
+	} catch (error) {
+		// A descriptor that couldn't be closed may still be open in this process: say so, apart from a file that was refused.
+		if (error instanceof CredentialRefused && error.retained) {
+			throw new EndpointRefused("credential-close", "The spacesd credential couldn't be closed after it was checked, so a descriptor of it may still be open in this process.");
+		}
 		throw new EndpointRefused("credential", "The spacesd credential must be a regular file of the desktop user's, mode 0600, with one name, at a path with no links, and no larger than a token.");
 	}
 	return Object.freeze(checked);
@@ -297,11 +304,18 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 	let closing = false;
 	/** The pim-computer this endpoint started last, until it has exited. */
 	let current: { exited: Promise<void>; done: boolean; end(): void } | null = null;
+	/**
+	 * Set, for good, when a descriptor of the Cua computer's credential
+	 * couldn't be closed: the endpoint may still hold it, so it takes no
+	 * other connection and opens the file no more. A child already started
+	 * is ended and watched as any other, until its exit is seen.
+	 */
+	let retained = false;
 
 	function serve(socket: net.Socket): void {
 		socket.on("error", () => socket.destroy());
-		if (closing || (current && !current.done)) {
-			log({ event: "endpoint.refused", reason: closing ? "closing" : "busy" });
+		if (closing || retained || (current && !current.done)) {
+			log({ event: "endpoint.refused", reason: closing ? "closing" : retained ? "credential-close" : "busy" });
 			socket.destroy();
 			return;
 		}
@@ -310,23 +324,39 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 		if (cua) {
 			try {
 				credential = openCredential(cua.credentialFile, uid, files);
-			} catch {
-				log({ event: "endpoint.refused", reason: "credential" });
+			} catch (error) {
+				// Refused after opening it, and then not closed: nothing more is opened or started.
+				if (error instanceof CredentialRefused && error.retained) retained = true;
+				log({ event: "endpoint.refused", reason: retained ? "credential-close" : "credential" });
 				socket.destroy();
 				return;
 			}
 		}
-		let child: Child;
+		let spawned: Child | undefined;
 		try {
-			child = spawn(command, args, { cwd: root, env, stdio: credential === undefined ? ["pipe", "pipe", "ignore"] : ["pipe", "pipe", "ignore", credential], shell: false });
+			spawned = spawn(command, args, { cwd: root, env, stdio: credential === undefined ? ["pipe", "pipe", "ignore"] : ["pipe", "pipe", "ignore", credential], shell: false });
 		} catch {
+			// Nothing started; the descriptor is closed below.
+		}
+		// The child has its own copy once the spawn returns (Node starts it before returning), so the endpoint closes its own, started or not.
+		// Closed once: a close that throws is never taken as closed, and the number isn't closed again.
+		let unclosed = false;
+		if (credential !== undefined) {
+			try {
+				closeCredential(credential, files);
+			} catch {
+				// Logged only once a child that was started is tracked, so nothing can leave it untracked.
+				unclosed = true;
+				retained = true;
+			}
+		}
+		if (!spawned) {
+			if (unclosed) log({ event: "endpoint.refused", reason: "credential-close" });
 			log({ event: "endpoint.refused", reason: "spawn" });
 			socket.destroy();
 			return;
-		} finally {
-			// The child has its own copy once the spawn returns (Node starts it before returning), so the endpoint keeps none, started or not.
-			if (credential !== undefined) closeCredential(credential, files);
 		}
+		const child = spawned;
 		const timers: ReturnType<typeof setTimeout>[] = [];
 		let ended = false;
 		let markExited!: () => void;
@@ -411,6 +441,14 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 		child.stdout.on("end", () => {
 			if (!ended) socket.end();
 		});
+		// Started, but the endpoint couldn't close its copy of the credential: the child is tracked like any
+		// other, but carries nothing. Its input ends now, so it has `exitMs` to exit, then SIGTERM and SIGKILL,
+		// and the endpoint stays busy until its exit is seen, then refuses every connection (`retained`).
+		if (unclosed) {
+			transportEnded();
+			socket.destroy();
+			log({ event: "endpoint.refused", reason: "credential-close" });
+		}
 	}
 
 	server.on("connection", serve);

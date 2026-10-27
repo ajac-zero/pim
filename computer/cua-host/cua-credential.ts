@@ -7,6 +7,11 @@
  * input or output, a log, an error or a result; the endpoint never reads them
  * at all.
  *
+ * Every close is tried once and reported: one that throws, for whatever
+ * reason, is refused `close` with `retained` set, never taken as done, and the
+ * number is never closed again, since it may by then name another file. The
+ * endpoint then takes no more connections; the child doesn't start serving.
+ *
  * What it guards against is accidents: the token turning up in a process
  * listing, an environment a command inherits, a log line, or a descriptor a
  * shell or browser the child starts would keep. It is not a boundary between
@@ -36,9 +41,16 @@ export const MAX_CREDENTIAL_BYTES = MAX_TOKEN_BYTES + 1;
 /** Why a credential was refused: a fixed reason, never the file's path or bytes. */
 export class CredentialRefused extends Error {
 	readonly reason: string;
-	constructor(reason: string) {
+	/**
+	 * Whether a descriptor of the credential may still be open: only when
+	 * closing it failed (`close`). Its number is never closed again, since by
+	 * then it may name another file; whoever holds it must stop taking work.
+	 */
+	readonly retained: boolean;
+	constructor(reason: string, retained = false) {
 		super(`The Cua spacesd credential was refused (${reason}).`);
 		this.reason = reason;
+		this.retained = retained;
 	}
 }
 
@@ -101,25 +113,34 @@ function checkStat(stat: CredentialStat, uid: number): void {
 	if (!Number.isSafeInteger(stat.size) || stat.size < 1 || stat.size > MAX_CREDENTIAL_BYTES) throw new CredentialRefused("size");
 }
 
-function closeQuietly(close: () => void): void {
+/**
+ * Closes `fd`, once. A close that throws is not taken as closed, whatever the
+ * error: it throws `CredentialRefused("close")` with `retained` set, and the
+ * caller must neither close that number again (it may since name another
+ * file) nor go on as if the descriptor were gone.
+ */
+function closeOnce(close: (fd: number) => void, fd: number): void {
 	try {
-		close();
+		close(fd);
 	} catch {
-		// On Linux a descriptor is released even when close reports an error.
+		throw new CredentialRefused("close", true);
 	}
 }
 
-/** Closes a descriptor `openCredential` returned; an error closing it changes nothing, as it is released anyway. */
+/** Closes a descriptor `openCredential` returned, once; throws `CredentialRefused("close")`, `retained`, when that fails. */
 export function closeCredential(fd: number, files: CredentialFiles = NODE_CREDENTIAL_FILES): void {
-	closeQuietly(() => files.close(fd));
+	closeOnce((open) => files.close(open), fd);
 }
 
 /**
  * Opens the credential file for one child and checks what was opened: the
  * endpoint's side. `file` must be absolute and its own real path (no `..`,
  * no link anywhere on it). Returns the descriptor, which the caller hands to
- * the child as `CREDENTIAL_FD` and closes as soon as the spawn returns or
- * throws. On any refusal, nothing is left open. The bytes are not read.
+ * the child as `CREDENTIAL_FD` and closes with `closeCredential` as soon as
+ * the spawn returns or throws. The bytes are not read. A refusal before a
+ * descriptor was returned (`user`, `root-user`, `path`, `open`) holds none to
+ * close; one after (the file's status) closes it once, and if that close
+ * throws, the refusal is `close`, `retained`, instead.
  */
 export function openCredential(file: string, uid: number | undefined, files: CredentialFiles = NODE_CREDENTIAL_FILES): number {
 	const owner = user(uid);
@@ -139,54 +160,74 @@ export function openCredential(file: string, uid: number | undefined, files: Cre
 	try {
 		checkStat(files.fstat(fd), owner);
 	} catch (error) {
-		closeQuietly(() => files.close(fd));
-		throw error instanceof CredentialRefused ? error : new CredentialRefused("stat");
+		const refusal = error instanceof CredentialRefused ? error : new CredentialRefused("stat");
+		closeCredential(fd, files);
+		throw refusal;
 	}
 	return fd;
 }
 
 /**
- * Reads the token from `fd` and closes it, whatever happens: the child's
- * side, before it takes any call. The descriptor must be a regular file as
- * `openCredential` checks; it is read from its start, by position, to its end
- * or one byte past `MAX_CREDENTIAL_BYTES`, whichever comes first. The token is
- * its bytes, less one newline at the end: 1 to `MAX_TOKEN_BYTES` printable
- * ASCII characters, no spaces. The buffer it was read into is zeroed; the
- * string returned can't be, and stays in the process's memory.
+ * Reads the token from `fd` and then closes it, once, whatever the read did:
+ * the child's side, before it takes any call. The descriptor must be a
+ * regular file as `openCredential` checks; it is read from its start, by
+ * position, to its end or one byte past `MAX_CREDENTIAL_BYTES`, whichever
+ * comes first. The token is its bytes, less one newline at the end: 1 to
+ * `MAX_TOKEN_BYTES` printable ASCII characters, no spaces. The buffer it was
+ * read into is zeroed; the string returned can't be, and stays in the
+ * process's memory.
+ *
+ * The token is returned only when the close returned. A close that throws,
+ * after a good read or a refused one, is refused `close`, `retained`, and the
+ * token read is dropped: the caller must not go on to take work. The
+ * descriptor is closed even when its status can't be read, since it may still
+ * be open; if it wasn't (no descriptor 3), that close fails too, and the start
+ * is refused all the same.
  */
 export function readCredential(fd: number, uid: number | undefined, reader: CredentialReader = NODE_CREDENTIAL_READER): string {
 	const buffer = Buffer.alloc(MAX_CREDENTIAL_BYTES + 1);
+	let token: string | undefined;
+	let refusal: CredentialRefused | undefined;
 	try {
-		const owner = user(uid);
-		let stat: CredentialStat;
-		try {
-			stat = reader.fstat(fd);
-		} catch {
-			throw new CredentialRefused("descriptor");
-		}
-		checkStat(stat, owner);
-		let length = 0;
-		while (length < buffer.length) {
-			let read: number;
-			try {
-				read = reader.read(fd, buffer, length, buffer.length - length, length);
-			} catch {
-				throw new CredentialRefused("read");
-			}
-			if (!Number.isSafeInteger(read) || read < 0 || read > buffer.length - length) throw new CredentialRefused("read");
-			if (read === 0) break;
-			length += read;
-		}
-		if (length > MAX_CREDENTIAL_BYTES) throw new CredentialRefused("size");
-		const end = length > 0 && buffer[length - 1] === 0x0a ? length - 1 : length;
-		if (end < 1 || end > MAX_TOKEN_BYTES) throw new CredentialRefused("format");
-		for (let index = 0; index < end; index++) {
-			const byte = buffer[index]!;
-			if (byte < 0x21 || byte > 0x7e) throw new CredentialRefused("format");
-		}
-		return buffer.toString("latin1", 0, end);
+		token = readOpen(fd, uid, reader, buffer);
+	} catch (error) {
+		refusal = error instanceof CredentialRefused ? error : new CredentialRefused("read");
 	} finally {
 		buffer.fill(0);
-		closeQuietly(() => reader.close(fd));
 	}
+	closeOnce((open) => reader.close(open), fd);
+	if (refusal || token === undefined) throw refusal ?? new CredentialRefused("read");
+	return token;
+}
+
+/** The token in `fd`, read into `buffer`, which the caller zeroes; `fd` is left open. */
+function readOpen(fd: number, uid: number | undefined, reader: CredentialReader, buffer: Buffer): string {
+	const owner = user(uid);
+	let stat: CredentialStat;
+	try {
+		stat = reader.fstat(fd);
+	} catch {
+		throw new CredentialRefused("descriptor");
+	}
+	checkStat(stat, owner);
+	let length = 0;
+	while (length < buffer.length) {
+		let read: number;
+		try {
+			read = reader.read(fd, buffer, length, buffer.length - length, length);
+		} catch {
+			throw new CredentialRefused("read");
+		}
+		if (!Number.isSafeInteger(read) || read < 0 || read > buffer.length - length) throw new CredentialRefused("read");
+		if (read === 0) break;
+		length += read;
+	}
+	if (length > MAX_CREDENTIAL_BYTES) throw new CredentialRefused("size");
+	const end = length > 0 && buffer[length - 1] === 0x0a ? length - 1 : length;
+	if (end < 1 || end > MAX_TOKEN_BYTES) throw new CredentialRefused("format");
+	for (let index = 0; index < end; index++) {
+		const byte = buffer[index]!;
+		if (byte < 0x21 || byte > 0x7e) throw new CredentialRefused("format");
+	}
+	return buffer.toString("latin1", 0, end);
 }

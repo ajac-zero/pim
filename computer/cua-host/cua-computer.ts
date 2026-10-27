@@ -16,22 +16,28 @@
  * hands it over. Its start, in order:
  *
  * 1. It reads the token from descriptor 3, bounded, and closes the
- *    descriptor, whether the read succeeds, is refused or throws
- *    (`readCredential` in ./cua-credential.ts). So no command, shell or
- *    browser it starts later gets the descriptor; Node doesn't mark an
- *    inherited descriptor close-on-exec.
+ *    descriptor once, whether the read succeeds, is refused or throws
+ *    (`readCredential` in ./cua-credential.ts). It goes on only if that close
+ *    returned: one that throws is refused `credential-close`, so nothing is
+ *    served while the descriptor may still be open, and a command, shell or
+ *    browser it would start can't inherit it (Node doesn't mark an inherited
+ *    descriptor close-on-exec).
  * 2. It makes the dispatcher for the owner and origin it was given, which
  *    checks them and the token and sends nothing yet. A call of another
  *    owner is refused unsent, and requests go only to that origin.
  * 3. Only then does it say its hello and take calls, as pim-computer's
- *    `--stdio` does, until its input ends.
+ *    `--stdio` does. Serving goes on after `startCuaComputer` resolves: with
+ *    `serveStdio`, it resolves once the hello is written and the input is
+ *    being read, not when serving ends. Serving ends when the input does:
+ *    the browser quits and the process exits. Nothing here hands back a way
+ *    to watch that; the endpoint watches the process's exit.
  *
  * Any refusal ends it before step 3, with exit code 1 and one fixed reason on
  * standard error (which the endpoint discards), never a path, the token, or
  * what Node threw. The endpoint sees that as the child's exit, and starts no
  * other until it has seen it.
  *
- * Importing it does nothing; `startCuaComputer(...)` serves.
+ * Importing it does nothing; `startCuaComputer(...)` starts serving.
  */
 
 import { realpathSync } from "node:fs";
@@ -66,7 +72,7 @@ export type CuaComputerOptions = {
 	readonly uid?: number;
 	/** What the dispatcher sends with; Node's `fetch` unless a test gives its own. */
 	readonly fetch?: Fetch;
-	/** What serves the space once the dispatcher is made; `serveStdio` unless a test gives its own. */
+	/** What serves the space once the dispatcher is made, resolving once serving has begun; `serveStdio` unless a test gives its own. */
 	readonly serve?: (settings: ServeSettings) => Promise<void>;
 };
 
@@ -75,7 +81,12 @@ export type CuaComputerOptions = {
  * descriptor closed first, whatever else is wrong, then the dispatcher is
  * made, then `serve` is called, once, with a `native` that hands each request
  * to the dispatcher and nothing else of the credential. Throws
- * `CuaComputerRefused` before `serve` on any refusal.
+ * `CuaComputerRefused` before `serve` on any refusal, `credential-close` when
+ * the descriptor's close threw, which is never taken as closed.
+ *
+ * It resolves when `serve` resolves, which for `serveStdio` is once serving
+ * has begun: a start, not a lifetime. Awaiting it observes nothing of how or
+ * when serving ends.
  */
 export async function startCuaComputer(options: CuaComputerOptions): Promise<void> {
 	let token: string;

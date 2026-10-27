@@ -803,7 +803,12 @@ async function prepare(settings: ServeSettings, stdio: boolean) {
 	return { machine, hello, log, logRun, browser };
 }
 
-/** Speaks with the space over standard input and output, a message a line, until the input ends; then the browser quits, and so does this. */
+/**
+ * Starts speaking with the space over standard input and output, a message a
+ * line, and resolves once the hello is written and the input is being read:
+ * serving goes on after. When the input ends, the browser quits and the
+ * process exits; nothing resolves or settles then.
+ */
 async function serveLines({ machine, hello, logRun, browser }: Awaited<ReturnType<typeof prepare>>): Promise<void> {
 	const link = new Link(machine, (message) => process.stdout.write(`${message}\n`));
 	process.stdout.write(`${JSON.stringify(hello)}\n`);
@@ -827,6 +832,10 @@ async function serveLines({ machine, hello, logRun, browser }: Awaited<ReturnTyp
  * imports nothing of the embedder's, and its own startup (`main`) gives no
  * dispatcher, so Sprites and paired computers serve as before and answer
  * `native_tool` with `ENOSYS`. Nothing runs until it is called.
+ *
+ * The promise is a start, not a lifetime: it resolves once serving has begun
+ * (`serveLines`), and nothing observes its end, which is the process's exit
+ * when the input ends.
  */
 export async function serveStdio(settings: ServeSettings): Promise<void> {
 	await serveLines(await prepare(settings, true));

@@ -187,6 +187,22 @@ export class Relay {
 		if (path !== this.#path || request.url.includes("?") || request.url.includes("#")) return refuse(404, "path", "Not found.");
 		if (request.method !== "GET") return refuse(405, "method", "Only GET is served here.", { allow: "GET" });
 		if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return refuse(426, "upgrade", "Only WebSocket connections are served here.", { upgrade: "websocket" });
+		return this.authorize(request);
+	}
+
+	/**
+	 * Null when `request` carries this bridge's token and names this space;
+	 * otherwise the answer refusing it. It reads only the Authorization and
+	 * `x-pim-space` headers, never the method, address or body: `check`
+	 * calls it last for the upgrade, and the host calls it for the
+	 * management requests of a viewer (docs/cua-viewer-first-preview.md),
+	 * which are not upgrades.
+	 */
+	async authorize(request: Request): Promise<Response | null> {
+		const refuse = (status: number, reason: string, message: string, headers: Record<string, string> = {}) => {
+			this.#log({ event: "bridge.refused", status, reason });
+			return new Response(message, { status, headers: { "content-type": "text/plain; charset=utf-8", ...headers } });
+		};
 		const authorization = request.headers.get("authorization") ?? "";
 		const presented = authorization.length <= MAX_AUTHORIZATION ? BEARER.exec(authorization)?.[1] : undefined;
 		if (presented === undefined || !same(await digest(presented), await this.#digest)) {
@@ -194,6 +210,11 @@ export class Relay {
 		}
 		if (request.headers.get(SPACE_HEADER) !== this.#space) return refuse(403, "space", "This bridge serves another space.");
 		return null;
+	}
+
+	/** The path the bridge takes connections at. */
+	get path(): string {
+		return this.#path;
 	}
 
 	/**

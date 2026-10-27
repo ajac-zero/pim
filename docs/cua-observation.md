@@ -90,6 +90,8 @@ An operator's `reconcile(key, evidence)` settles an `unconfirmed` entry that thi
 
 ## What mounting needs later
 
+The host's side (item 3 below, apart from the provisioned journal) is now written as unrun source: `docs/cua-viewer-first-preview.md` has the frozen management API, the journal store's single-writer lock and the test allowlist. The Worker's side is not.
+
 Mounting is a separate, reviewed change. `src/gateway.ts` and the space's routes are untouched here: the gateway's upgrade allowlist is still `/ws` and the browser's live view only. A mount needs at least:
 
 1. **A narrow gateway route** for `/api/observations/`, checked with `signedIn` (session and same-site checks) and never `authorize`'s token path, passing the session's owner to `admitObservationRequest` and to `toAgent`, which overwrites the owner and signed-in headers. One more entry in the upgrade allowlist, for `media` only. No generic proxy to the host.

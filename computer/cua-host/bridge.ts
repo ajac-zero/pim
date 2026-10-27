@@ -9,6 +9,12 @@
  *   PIM_BRIDGE_KEY_FILE=/etc/pim-bridge/key.pem \
  *   node bridge.ts --space o_… --path /pim --socket /run/pim-session/session.sock --host 0.0.0.0 --port 8443
  *
+ * Given `--viewer-origin`, `--viewer-journal-dir` and PIM_VIEWER_ROOT_TOKEN_FILE
+ * (and optionally `--viewer-display`, `primary` by default), it also serves
+ * the view-only desktop viewer (./viewer-host.ts, docs/cua-viewer-first-preview.md);
+ * without them it serves the relay alone. The root token's file is checked and
+ * read for each launch, like the others never from a flag, and never logged.
+ *
  * The token and the key are read from the files the environment names,
  * never from flags, so they don't show in a process list; each must be a
  * regular file of this account's that its group and others can't read.
@@ -47,9 +53,20 @@ function secret(variable: string): Buffer {
 
 async function main(): Promise<void> {
 	const { parseArgs } = await import("node:util");
-	let values: { space?: string; path?: string; socket?: string; host?: string; port?: string };
+	let values: { space?: string; path?: string; socket?: string; host?: string; port?: string; "viewer-origin"?: string; "viewer-journal-dir"?: string; "viewer-display"?: string };
 	try {
-		({ values } = parseArgs({ options: { space: { type: "string" }, path: { type: "string" }, socket: { type: "string" }, host: { type: "string" }, port: { type: "string" } } }));
+		({ values } = parseArgs({
+			options: {
+				space: { type: "string" },
+				path: { type: "string" },
+				socket: { type: "string" },
+				host: { type: "string" },
+				port: { type: "string" },
+				"viewer-origin": { type: "string" },
+				"viewer-journal-dir": { type: "string" },
+				"viewer-display": { type: "string" },
+			},
+		}));
 	} catch {
 		values = {};
 	}
@@ -67,11 +84,24 @@ async function main(): Promise<void> {
 		const key = secret("PIM_BRIDGE_KEY_FILE");
 		stage = "relay";
 		const relay = new Relay({ space: values.space, token, path: values.path, open });
+		// The viewer is all or nothing: a part of its settings is a mistake, not a smaller bridge.
+		let viewer: Awaited<ReturnType<typeof import("./viewer-host.ts").createViewerHost>> | undefined;
+		const viewerSettings = [values["viewer-origin"], values["viewer-journal-dir"]];
+		if (viewerSettings.some((value) => value !== undefined)) {
+			stage = "viewer";
+			const rootTokenFile = process.env.PIM_VIEWER_ROOT_TOKEN_FILE;
+			if (viewerSettings.some((value) => !value) || !rootTokenFile) throw new Error("incomplete");
+			const { createViewerHost } = await import("./viewer-host.ts");
+			viewer = await createViewerHost({ origin: values["viewer-origin"]!, displayId: values["viewer-display"] ?? "primary", journalDirectory: values["viewer-journal-dir"]!, rootTokenFile });
+		}
 		stage = "host";
-		const host = createHost({ relay, transport: { kind: "https", cert, key, host: values.host, port: Number(values.port) } });
+		const host = createHost({ relay, ...(viewer ? { viewer: viewer.routes } : {}), transport: { kind: "https", cert, key, host: values.host, port: Number(values.port) } });
 		await host.listen();
 		const stop = () => {
-			void host.close().then(() => process.exit(0));
+			void host.close().then(() => {
+				viewer?.close();
+				process.exit(0);
+			});
 		};
 		process.once("SIGTERM", stop);
 		process.once("SIGINT", stop);

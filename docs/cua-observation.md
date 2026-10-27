@@ -49,8 +49,10 @@ An observation is a person watching one display of their Cua computer through th
 | `start_failed` | No launch is held: the deadline passed before the start, or the adapter refused. A viewer ticket the adapter minted may last until `notAfter`; it was never answered to anyone. | `open_refused` |
 | `unconfirmed` | A launch may exist and none is offered: `timeout`, `storage`, `ended`, `earlier_generation`, or `unconfirmed`. | `unconfirmed` |
 
+- **The request is copied before anything waits.** `launch` takes a frozen copy of the request's own data fields before its first wait and uses only that copy from then on, so changing the caller's object while the intent is stored changes nothing. The copy must be a plain object with `key`, `owner`, `notAfter` and optionally `displayName`, and nothing else. Accessors, symbols, other prototypes and values of another type (a string or `Number` deadline, for one) are refused (`invalid`), not read or converted. `end` and `status` copy their requests the same way.
 - **Timeouts and late results.** A start that hasn't answered within `startTimeoutMs` (15 s by default) is stored and answered `unconfirmed`. If it answers later, the launch is ended at once, since nobody was given its page; its id is recorded, and a later `status` can observe its closure. If it fails later, the entry stays `unconfirmed`.
 - **A launch the journal can't name is not handed out.** If storing `open` fails, the launch is ended and the answer is `unconfirmed`.
+- **An end requested while the intent is being stored** cancels the start before the adapter is called, so nothing is minted. The entry becomes `start_failed`, and the request is answered `start_failed`.
 - **An end requested during the start** ends the launch as soon as it comes, or at once if it came and is being stored, and the request is answered `unconfirmed` (`ended`), with no viewer path. A start answered `unconfirmed` on its timeout can't be reconciled until the adapter's call settles.
 - **`end` requests; `status` observes.** `end` calls the launch's `end()` and stores `ending`. Ending comes first, and it still happens after the journal has failed. `status` reads the launch. Only a read where its phase is `closed` (every transport it took or refused reported itself closed) and no presence stream is `unconfirmed` stores `closed_observed`, with the launch's `cleanup` counts in the evidence. Those counts are `CloseMedia` requests and spacesd's answers, not closures. `status` returns the snapshot: transports by kind, refused, close failures, sessions, unconfirmed streams and cleanup.
 - **The deadline is read once.** `notAfter` is converted with `lifetimeUntil` against the wall clock just before the start, and the launch's monotonic deadline is fixed from there (`docs/cua-viewer-lifetime.md`). A `notAfter` that has passed, or is more than 4 hours ahead, is refused before anything is stored; one that passes while the intent is being stored makes the entry `start_failed` without a start.
@@ -121,7 +123,9 @@ Mounting is a separate, reviewed change. `src/gateway.ts` and the space's routes
 - A second writer.
 - A launch that can't be recorded.
 - Timeouts with late success and late failure.
+- An end while the intent is being stored, which calls the adapter zero times.
 - An end during the start, and one while the launch is being stored.
+- A caller changing its request while the intent is being stored, and requests with accessors, symbols, other prototypes, unknown fields or values of another type.
 - Requested ends against observed closure, with `CloseMedia` answers and unconfirmed streams.
 - The deadline read once.
 - The limits.

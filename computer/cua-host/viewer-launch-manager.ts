@@ -218,6 +218,48 @@ const isName = (value: unknown): value is string => typeof value === "string" &&
 const isTime = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
+/**
+ * The named fields of a plain object, read once each, or `undefined` when
+ * it isn't one: another prototype, a symbol or unknown key, an accessor, or
+ * a required field missing. The copy is frozen, so nothing the caller does
+ * to its object afterwards reaches it. Values are not converted.
+ */
+function snapshot(value: unknown, required: readonly string[], optional: readonly string[] = []): Readonly<Record<string, unknown>> | undefined {
+	if (!isRecord(value)) return undefined;
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) return undefined;
+	const keys = Reflect.ownKeys(value);
+	if (keys.length > required.length + optional.length) return undefined;
+	const copy: Record<string, unknown> = {};
+	for (const name of keys) {
+		if (typeof name !== "string" || (!required.includes(name) && !optional.includes(name))) return undefined;
+		const descriptor = Object.getOwnPropertyDescriptor(value, name);
+		if (!descriptor || !("value" in descriptor)) return undefined;
+		copy[name] = descriptor.value;
+	}
+	if (required.some((name) => !(name in copy))) return undefined;
+	return Object.freeze(copy);
+}
+
+/** A launch request as a frozen copy taken before anything waits, or `undefined` if it is malformed. */
+function launchSnapshot(request: unknown): LaunchRequestKey | undefined {
+	const fields = snapshot(request, ["key", "owner", "notAfter"], ["displayName"]);
+	if (!fields) return undefined;
+	const { key, owner, notAfter, displayName } = fields;
+	if (typeof key !== "string" || !KEY.test(key) || !isName(owner) || !isTime(notAfter)) return undefined;
+	if (displayName !== undefined && (typeof displayName !== "string" || displayName.length > 64)) return undefined;
+	return Object.freeze({ key, owner, notAfter, ...(typeof displayName === "string" ? { displayName } : {}) });
+}
+
+/** A key request as a frozen copy, or `undefined` if it is malformed. */
+function keySnapshot(request: unknown): KeyRequest | undefined {
+	const fields = snapshot(request, ["owner", "key", "generation"]);
+	if (!fields) return undefined;
+	const { owner, key, generation } = fields;
+	if (!isName(owner) || typeof key !== "string" || !KEY.test(key) || !isName(generation)) return undefined;
+	return Object.freeze({ owner, key, generation });
+}
+
 const defaultTimers: Timers = {
 	set: (callback, ms) => setTimeout(callback, ms).unref(),
 	clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
@@ -381,6 +423,15 @@ export async function openViewerLaunchManager(options: LaunchManagerOptions): Pr
 			return failed("the start's timer could not be set; nothing was started");
 		}
 		const launchRequest: LaunchRequest = { lifetimeMs, rootToken, ...(request.displayName === undefined ? {} : { displayName: request.displayName }) };
+		// An end requested while the intent was stored cancels the start before the adapter is called: nothing is minted.
+		if (endRequested.has(key)) {
+			try {
+				timers.clear(timer);
+			} catch {
+				// A timer that fires later finds the race settled.
+			}
+			return failed("its end was requested before the start; nothing was started");
+		}
 		let started: Promise<LaunchHandle>;
 		try {
 			started = adapter.startLaunch(launchRequest);
@@ -435,11 +486,10 @@ export async function openViewerLaunchManager(options: LaunchManagerOptions): Pr
 		return { outcome: "launched", key, launchId: handle.id, generation, notAfter: request.notAfter, viewerPath: handle.viewerPath, replayed: false };
 	}
 
-	async function launch(request: LaunchRequestKey): Promise<LaunchAnswer> {
-		if (!isRecord(request) || typeof request.key !== "string" || !KEY.test(request.key) || !isName(request.owner) || !isTime(request.notAfter)) {
-			return { outcome: "refused", reason: "invalid" };
-		}
-		if (request.displayName !== undefined && (typeof request.displayName !== "string" || request.displayName.length > 64)) return { outcome: "refused", reason: "invalid" };
+	async function launch(given: LaunchRequestKey): Promise<LaunchAnswer> {
+		// Everything below reads this copy, taken before the first wait: the intent stored is what starts.
+		const request = launchSnapshot(given);
+		if (!request) return { outcome: "refused", reason: "invalid" };
 		const { key, owner, notAfter } = request;
 		if (blocker !== undefined) return { outcome: "refused", reason: "blocked" };
 		const pending = starting.get(key);
@@ -473,17 +523,20 @@ export async function openViewerLaunchManager(options: LaunchManagerOptions): Pr
 	}
 
 	/** The key's entry for `request`, or why there's none to show. */
-	function lookup(request: KeyRequest): { entry: JournalEntry } | { answer: { outcome: "not_found" } | { outcome: "generation_mismatch"; generation: string } } {
-		if (!isRecord(request) || !isName(request.generation)) return { answer: { outcome: "not_found" } };
+	function lookup(given: KeyRequest): { entry: JournalEntry } | { answer: { outcome: "not_found" } | { outcome: "generation_mismatch"; generation: string } } {
+		const request = keySnapshot(given);
+		if (!request) return { answer: { outcome: "not_found" } };
 		if (request.generation !== generation) return { answer: { outcome: "generation_mismatch", generation } };
-		const entry = typeof request.key === "string" ? find(request.key) : undefined;
+		const entry = find(request.key);
 		// Another owner's key answers as if it didn't exist.
 		if (!entry || entry.owner !== request.owner) return { answer: { outcome: "not_found" } };
 		return { entry };
 	}
 
-	async function end(request: KeyRequest): Promise<EndAnswer> {
-		const pending = isRecord(request) && request.generation === generation ? starting.get(request.key) : undefined;
+	async function end(given: KeyRequest): Promise<EndAnswer> {
+		const request = keySnapshot(given);
+		if (!request) return { outcome: "not_found" };
+		const pending = request.generation === generation ? starting.get(request.key) : undefined;
 		if (pending && pending.owner === request.owner) {
 			endRequested.add(request.key);
 			// A start that already has its launch, and is storing it, ends it now.

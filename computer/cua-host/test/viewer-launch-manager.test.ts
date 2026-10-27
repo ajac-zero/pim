@@ -388,6 +388,66 @@ describe("the viewer launch manager", () => {
 		assert.equal(memory.entry(key(2))?.state, "ending");
 	});
 
+	it("cancels a start whose end is requested while its intent is being stored, before the adapter is called", async () => {
+		const { memory, desk, manager } = await setUp({ auto: false });
+		const release = memory.hold();
+		const answer = manager.launch(request(1));
+		await flush();
+		assert.deepEqual(await manager.end(ada(1)), { outcome: "requested", recorded: false });
+		release();
+		assert.deepEqual(await answer, { outcome: "start_failed", key: key(1) });
+		assert.equal(desk.calls.length, 0, "the adapter was never called, so nothing was minted");
+		assert.equal(memory.entry(key(1))?.state, "start_failed");
+		assert.match(memory.entry(key(1))?.evidence ?? "", /end was requested before the start/);
+		assert.deepEqual(await manager.launch(request(1)), { outcome: "start_failed", key: key(1) });
+		assert.equal(desk.calls.length, 0);
+	});
+
+	it("starts what its stored intent says, from a copy taken before it waits, and refuses accessors, coercion and unknown fields", async () => {
+		const { memory, desk, manager } = await setUp();
+		const given = { key: key(1), owner: "ada", notAfter: WALL + 60_000, displayName: "Ada" };
+		const release = memory.hold();
+		const answer = manager.launch(given);
+		await flush();
+		// The caller changes its object while the intent is being stored.
+		given.key = key(9);
+		given.owner = "grace";
+		given.notAfter = WALL + 3_600_000;
+		given.displayName = "Mallory";
+		release();
+		const launched = await answer;
+		assert.equal(launched.outcome, "launched");
+		if (launched.outcome !== "launched") return;
+		assert.deepEqual([launched.key, launched.notAfter], [key(1), WALL + 60_000]);
+		assert.deepEqual([desk.calls[0]?.lifetimeMs, desk.calls[0]?.displayName], [60_000, "Ada"]);
+		assert.deepEqual(memory.entry(key(1)), { key: key(1), owner: "ada", notAfter: WALL + 60_000, generation: "gen-b", launchId: launched.launchId, state: "open" });
+		assert.equal(memory.entry(key(9)), undefined);
+
+		let reads = 0;
+		const accessor = Object.defineProperty({ key: key(2), owner: "ada" }, "notAfter", {
+			enumerable: true,
+			get: () => {
+				reads++;
+				return WALL + 60_000;
+			},
+		});
+		const malformed: unknown[] = [
+			accessor,
+			Object.assign(Object.create({ inherited: true }) as object, request(2)),
+			{ ...request(2), extra: 1 },
+			{ ...request(2), [Symbol("extra")]: 1 },
+			{ ...request(2), notAfter: String(WALL + 60_000) },
+			{ ...request(2), notAfter: new Number(WALL + 60_000) },
+			{ ...request(2), displayName: 7 },
+			{ key: key(2), owner: "ada" },
+			null,
+		];
+		for (const bad of malformed) assert.deepEqual(await manager.launch(bad as LaunchRequestKey), { outcome: "refused", reason: "invalid" });
+		assert.equal(reads, 0, "an accessor is never called");
+		assert.equal(memory.entry(key(2)), undefined);
+		assert.equal(desk.calls.length, 1);
+	});
+
 	it("tells a requested end from an observed closure, which neither CloseMedia answers nor an unconfirmed stream make", async () => {
 		const { memory, desk, manager } = await setUp();
 		const first = await manager.launch(request(1));

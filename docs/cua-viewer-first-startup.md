@@ -165,8 +165,38 @@ None of these publishers lists a digest for the extracted program, so each is de
 
 - **Test run at `243988f`:** an independent, fake-only `node --test` of `viewer-startup.test.ts` **passed 44 of 46 and failed 2** (two assertions, exit 1, 693.69 ms) and was stopped, with no retry. Both were over-broad substring checks in the test, not in the scripts: `"| sh"` matched the legitimate `| sha256sum` of the tree digest, and `"curl"` matched the package name `libcurl4t64`. The test now detects command words (a pipe into a shell interpreter; `curl` or `wget` run as a command) and a test of those detectors shows unsafe samples rejected and the legitimate ones accepted. The fixed file has not been run.
 - **Rerun at `ef10895`:** the file **failed before any test ran** (0 tests, exit 1, 271 ms): `ERR_INVALID_TYPESCRIPT_SYNTAX` at `operator.ts:592`, unescaped backticks in a bash comment inside the `renderFetch` template. Its `find -printf '%P\0'` and one `printf` `\n` also had single backslashes, which a template turns into a real NUL and newline; all are now escaped (`\\0`, `\\n`), and the test asserts the rendered script holds no NUL and no newline inside a `printf` format. The fixed source has not been run.
+- **Run at `95150a8`:** the same file **passed 48 of 48** (11 suites, 1056.56 ms, exit 0, no skip, cancel or todo), fake-only, run by an independent reviewer.
+- **Run at `afc9371`:** **passed 54 of 54** (12 suites, 900.74 ms, exit 0, no skip, cancel or todo), same boundary. These pass the fake and text specifications only; no script has been run, so they say nothing about a real VM.
 - **Independent off-VM preparation (reported, by public download and extraction, no program executed):** the Node, Caddy and Chrome archives matched their pins above, against Node's published SHA-256, Caddy's official SHA-512 checksums and Google's `Packages` SHA-256; no signature was verified. The archive of `243988f` had SHA-256 `086c6faf831e449529db0e76e4293c6e3771a5a6dcea7e3c51b57198bcc452e6`, and its 431 blobs matched git. That archive is of a commit that is not the bundle commit B, so **it is not the pin**.
 - **Derived program digests, one derivation, not yet the two-machine rule:** `bin/node` `ccacb2d6d87ba6d118b2bffc1ae33747a05cc5fc6b1f1ec4fc1d420b687e952d`; `caddy` `678ade3bfc088749c81a681adc603333ee0bb023b6a6cfe3c0f58bef8ff854e9`; Chrome's `chrome` `95dc9473b4f904cb3ab0800fc7206081fcae12abc094a088bd741a13f1747b72`. They are kept here as provenance for the operator's configuration. The repository pins stay empty until B is accepted, and no second-machine verification is claimed.
+
+### The bundle-source candidate: `afc9371a75f1c21b3b22627222b9791ef283692d`
+
+Selected as the immutable bundle-source candidate **B**. No further source change goes into B; anything later is the pin commit P or after (above). What was derived from it, once, off the VM and the cloud, by the reported local steps (already-installed Node, the exact git objects and the verified npm archives; no compilation, install, lifecycle script or downloaded program executed):
+
+| Item | Value |
+| --- | --- |
+| Bundle tree digest (`operator.ts bundle`, then `digest`) | `5c7764a89e785f1e150ac6d64622ddb69a5aed68410a7298b71c11d01078e7b4` |
+| The same, recomputed independently in Python from the output's manifest (389 files, 422 entries) | the same value |
+| GitHub's codeload archive of B, fetched fresh | HTTP 200, 2,693,038 bytes, SHA-256 `582716ed2cac76e546980d0e856160e45e6b5f64e2dfde0aa2b2173b3236aae8`; all 431 file and symlink entries match their git blob hashes |
+
+**These were all made on one machine. They are not the two-machine verification the procedure above requires, and are not claimed to be.** The repository pins in `pins.ts` therefore stay empty (`pin-missing` stays true), and `bundle.sha256` is not recorded in a configuration, until that requirement is met. No startup has been run on this evidence, and no VM, certificate, DNS name or secret exists.
+
+## The live gates, consolidated
+
+Nothing below is open. Each is a separate gate with its own explicit approval, taken in order, and passing one opens nothing after it. The numbers are the page's own, not new ones.
+
+| Gate | What it is | Exactly what it is limited to |
+| --- | --- | --- |
+| 1. Pins | two-machine derivation of B's archive digest, the three extracted-program digests and `bundle.sha256`; commit P | off the VM and the cloud; no resource |
+| 2. Resources | the proposed names in the table below, no others, no IDs invented | **Azure $50 total within 48 hours of the first resource** (pre-tax, from Azure's cost view, with the VM size chosen against it); **Cloudflare's existing Workers Paid $5/month within included allowances only, no incremental charge**; the 48-hour clock is written down at the first creation, in either cloud |
+| 3. Delivery and install | `fetch.sh`, `bridge-cert.sh`, `plan.sh`, `install.sh`, `journal.sh`, `root-token.sh`, `seal.sh`, then `support.sh` | `support.sh` runs the delivered programs (Node, Caddy, spacesd, Chrome and `ldd`'s loader) and is **its own approval**, not part of the delivery's |
+| 4. Start | `start.sh`, `status.sh`; Caddy's one ACME order | no retry by hand; `viewer-unit-state` ends it, there is no restart |
+| 5. Worker | the reviewed commit's web build, one `wrangler deploy`, the owner's claim and passkey (once), then `CUA_BRIDGES` and the seed | nothing else created |
+| 6. Qualification | the table in the live plan: one owner, one launch, 10 minutes, at most 5 status calls, one end, one deliberately lost end | no upload, no model, no load generation, no automatic retry; stops at the first refusal, surprise or bound |
+| 7. Cleanup | the ordered list in the live plan: evidence first, credentials, **DNS removed and verified from two resolvers before the IP is released**, Azure, then Cloudflare | unresolved records and tombstones are kept and reported, never abandoned under a new identity |
+
+**What a timeout is, and isn't.** The `timeout` around `support.sh`'s checks, and any limit in the qualification, bounds how long a check is *waited for* and then signals the command (and, with `--kill-after`, kills it). It is **not** proof that the command's children are gone, that the system is quiet, or that a service did not change something before it was stopped: a program that started its own session or process group can outlive it. Nothing here is a termination or quiescence claim; the cleanup list's own inventory is the only thing that settles what exists.
 
 ### `support.sh`: what acceptance of the startup includes
 

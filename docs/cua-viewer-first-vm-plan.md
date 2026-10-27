@@ -129,7 +129,7 @@ These are consequential, and none is decided here. They are part of the one pack
    - **The journal's provisioning step** must be written (below).
    - **The root token's file** needs a decided place.
    - **The preview's own unit**, the `pim-preview` account, and **Caddy's configuration** for these two hosts must be written.
-5. **Installing the preview on the VM.** It runs from a checkout of the review branch at one exact commit, with `pnpm install --frozen-lockfile` and the web app built once, owned by `pim-preview` and writable by no one else. That is an install, with its own approval.
+5. **Installing the preview on the VM.** It runs from a checkout of the review branch at one exact commit, with `pnpm install --frozen-lockfile` and the web app built once, owned by `pim-preview` and writable by no one else. That is an install, a phase of the evaluation's one approval (`docs/cua-viewer-first-startup.md`), not a separate one.
 6. **Approvals:**
    - the Radia preflight's confirmation of both names, no shared-parent cookies and no portal;
    - DNS records;

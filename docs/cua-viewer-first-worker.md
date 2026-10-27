@@ -168,7 +168,7 @@ The counts are the files' `it(`/`test(` calls as written; a different count is a
 
 ## Bounded future browser and VM qualification (needs its own approval)
 
-Nothing below is done or authorized now: no VM, certificate, DNS name, provisioning, deployment or cloud resource. It is the smallest plan that would turn the remaining blockers into evidence, for review:
+Nothing below is done or authorized now: no VM, certificate, DNS name, provisioning, deployment or cloud resource. It is the smallest plan that would turn the remaining blockers into evidence, for review. `docs/cua-viewer-first-vm-plan.md` puts it in order with the VM's base, principals, journal, origins, start order and cleanup:
 
 1. **Two exact, separate HTTPS origins**, chosen and approved: one for Pim (its `PIM_PUBLIC_URL`, which the host names as `--viewer-embed-origin`) and one for the bridge (the bridge address's origin, which the host names as `--viewer-public-origin`), on different hosts with no credential scoped to a shared parent domain. No portal origin is assumed; the local preview's `http://localhost:8787` stays refused for embedding.
 2. **One approved VM**, with the host's journal provisioned once by the separate provisioning step (never by the host, never made again after a loss), spacesd and its root-token file as the host's page requires, and one preview space seeded once by the fixture.

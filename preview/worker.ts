@@ -360,15 +360,17 @@ export default {
 
 /**
  * The evaluation mode's requests (./cua-eval.ts): none under `/__dev` and no
- * setup link, by any method; then the request at Pim's address, where the
- * ingress sent it from the loopback address the preview listens on, and the
- * real gateway with the ingress profile and closed registration. The
- * request's `Origin` is left as the browser sent it.
+ * setup link, by any method; then only a request whose URL is at Pim's own
+ * address, which is what Wrangler hands the Worker when it runs with
+ * `--host <Pim's host> --upstream-protocol https` (docs/cua-viewer-first-vm-plan.md).
+ * Nothing is rewritten: a request at any other authority, loopback included,
+ * is misdirected, and no header (`Host`, `X-Forwarded-*`, `Forwarded`) is
+ * taken as the authority. The request's `Origin` is left as it came.
  */
 function evaluation(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 	const url = new URL(request.url);
-	if (closedInEvaluation(url.pathname)) return Promise.resolve(Response.json({ error: "Not found" }, { status: 404, headers: { "cache-control": "no-store" } }));
-	const home = deploymentSettings(env).publicUrl!;
-	const canonical = url.origin === home ? request : new Request(new URL(url.pathname + url.search, home), request);
-	return serve(canonical, env, ctx, { observations: watching(env) });
+	const refuse = (status: number, error: string) => Promise.resolve(Response.json({ error }, { status, headers: { "cache-control": "no-store" } }));
+	if (closedInEvaluation(url.pathname)) return refuse(404, "Not found");
+	if (url.origin !== deploymentSettings(env).publicUrl) return refuse(421, "This preview answers only at its own address.");
+	return serve(request, env, ctx, { observations: watching(env) });
 }

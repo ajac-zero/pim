@@ -18,14 +18,19 @@ import { CLIENT_IP_HEADER, INGRESS_SECRET_HEADER, runtimeOf } from "../src/runti
  *   profile a celld deployment uses (src/runtime.ts): every request must carry
  *   `PIM_INGRESS_SECRET` and the client's address, as the ingress proxy sets
  *   them, and the Directory counts the rate limits. No claim window opens.
+ * - **Only at Pim's address.** A request whose URL isn't at `PIM_PUBLIC_URL`
+ *   is misdirected (`421`), loopback included; nothing is rewritten onto it,
+ *   and no `Host` or forwarded header is taken as the authority.
  * - **Registration is closed**, whatever `PIM_REGISTRATION` says.
  * - **One owner, set up once.** The operator makes a claim code privately and
  *   gives the preview only its SHA-256 (`PREVIEW_EVAL_CLAIM_SHA256`). The
  *   person opens `/#claim=<code>` and registers as Pim's admin with it, then
- *   makes their passkey. `EvalDirectory` records that the claim began before it
- *   registers anyone, and from then on refuses every claim, whatever became of
- *   that one: a claim that didn't finish leaves the evaluation without an owner,
- *   for good. A Directory that already holds any account is never claimed.
+ *   makes their passkey. The registration's JSON carries the code to the
+ *   Worker, which hashes and compares it and keeps and logs none of it.
+ *   `EvalDirectory` records that the claim began before it registers anyone,
+ *   and from then on refuses every claim, whatever became of that one: a claim
+ *   that didn't finish leaves the evaluation without an owner, for good. A
+ *   Directory that already holds any account is never claimed.
  *
  * A misconfigured preview refuses every request rather than run in the local
  * mode by mistake: an HTTPS `PIM_PUBLIC_URL` without this mode, this mode
@@ -95,32 +100,47 @@ const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((byte) => byt
 const refused = (error: string): Registration => ({ ok: false, status: 403, error });
 
 /** What the evaluation's Directory keeps of its one claim. */
-type Claimed = { readonly state: "claiming" | "claimed" | "failed" | "refused"; readonly username: string; readonly ownerId: string | null; readonly at: number };
+export type Claimed = { readonly state: "claiming" | "claimed" | "failed" | "refused"; readonly username: string; readonly ownerId: string | null; readonly at: number };
+
+const ONCE = "This evaluation's owner was set up once already, and isn't set up again.";
+
+/**
+ * The evaluation's one claim, as its Directory keeps it: one row, made once by
+ * a plain insert (`begin`) before anyone is registered, and afterwards only
+ * moved on from `claiming` (`finish`). Nothing replaces or deletes it. It is a
+ * class of its own rather than methods of the Directory, so it adds nothing
+ * anyone could call on the Directory, and tests can make its writes fail.
+ */
+export class ClaimRecord {
+	constructor(readonly sql: SqlStorage) {
+		sql.exec(
+			"CREATE TABLE IF NOT EXISTS preview_eval_claim (id INTEGER PRIMARY KEY CHECK (id = 1), state TEXT NOT NULL, username TEXT NOT NULL, owner_id TEXT, at INTEGER NOT NULL)",
+		);
+	}
+
+	read(): Claimed | null {
+		const row = this.sql.exec("SELECT state, username, owner_id, at FROM preview_eval_claim WHERE id = 1").toArray()[0];
+		return row ? { state: row.state as Claimed["state"], username: String(row.username), ownerId: row.owner_id === null ? null : String(row.owner_id), at: Number(row.at) } : null;
+	}
+
+	/** The one claim, recorded: `claiming` before a registration, or `refused` for good. A second insert fails. */
+	begin(state: "claiming" | "refused", username: string, at: number): void {
+		this.sql.exec("INSERT INTO preview_eval_claim (id, state, username, owner_id, at) VALUES (1, ?, ?, NULL, ?)", state, username, at);
+	}
+
+	/** What became of a claim still `claiming`; anything else is left as it is. */
+	finish(state: "claimed" | "failed", ownerId: string | null): void {
+		this.sql.exec("UPDATE preview_eval_claim SET state = ?, owner_id = ? WHERE id = 1 AND state = 'claiming'", state, ownerId);
+	}
+}
+
+const logClaim = (fields: Record<string, unknown>) => console.log(JSON.stringify({ event: "preview.eval_claim", ...fields }));
 
 /**
  * The preview's Directory: the real one, and in the evaluation mode one claim
  * at most, with the operator's code, into a Directory that has no account.
  */
 export class EvalDirectory extends RealDirectory {
-	#claimed(): Claimed | null {
-		this.ctx.storage.sql.exec(
-			"CREATE TABLE IF NOT EXISTS preview_eval_claim (id INTEGER PRIMARY KEY CHECK (id = 1), state TEXT NOT NULL, username TEXT NOT NULL, owner_id TEXT, at INTEGER NOT NULL)",
-		);
-		const row = this.ctx.storage.sql.exec("SELECT state, username, owner_id, at FROM preview_eval_claim WHERE id = 1").toArray()[0];
-		return row ? { state: row.state as Claimed["state"], username: String(row.username), ownerId: row.owner_id === null ? null : String(row.owner_id), at: Number(row.at) } : null;
-	}
-
-	#record(claimed: Claimed): void {
-		this.ctx.storage.sql.exec(
-			"INSERT OR REPLACE INTO preview_eval_claim (id, state, username, owner_id, at) VALUES (1, ?, ?, ?, ?)",
-			claimed.state,
-			claimed.username,
-			claimed.ownerId,
-			claimed.at,
-		);
-		console.log(JSON.stringify({ event: "preview.eval_claim", state: claimed.state, ...(claimed.ownerId ? { owner: claimed.ownerId } : {}) }));
-	}
-
 	/** Whether `code` is the operator's: its SHA-256 is the one the environment gives, compared in constant time. */
 	async #matches(code: string): Promise<boolean> {
 		const expected = vars(this.env).PREVIEW_EVAL_CLAIM_SHA256;
@@ -129,30 +149,48 @@ export class EvalDirectory extends RealDirectory {
 		return crypto.subtle.timingSafeEqual(given, new TextEncoder().encode(expected));
 	}
 
+	/**
+	 * Says what became of the claim. A record that can't be moved on stays
+	 * `claiming`, which refuses every later claim as surely, and that is logged.
+	 */
+	#finish(claims: ClaimRecord, state: "claimed" | "failed", ownerId: string | null): void {
+		try {
+			claims.finish(state, ownerId);
+			logClaim({ state, ...(ownerId ? { owner: ownerId } : {}) });
+		} catch {
+			logClaim({ state: "claiming", unrecorded: state, ...(ownerId ? { owner: ownerId } : {}) });
+		}
+	}
+
 	override async register(input: Parameters<RealDirectory["register"]>[0]): Promise<Registration> {
 		if (!evaluating(this.env)) return super.register(input);
 		const now = input.now ?? Date.now();
 		const code = input.claim?.code;
 		if (code === undefined) return refused("Registration is closed.");
-		if (this.#claimed() !== null) return refused("This evaluation's owner was set up once already, and isn't set up again.");
+		const claims = new ClaimRecord(this.ctx.storage.sql);
+		if (claims.read() !== null) return refused(ONCE);
 		if (!(await this.#matches(code))) return refused("That setup link isn't valid.");
-		// From here to the record, nothing waits, so two claims can't both pass.
-		if (this.#claimed() !== null) return refused("This evaluation's owner was set up once already, and isn't set up again.");
-		if (this.ctx.storage.sql.exec("SELECT 1 FROM accounts LIMIT 1").toArray().length > 0) {
-			this.#record({ state: "refused", username: input.username, ownerId: null, at: now });
-			return refused("This Pim already has accounts, so it isn't set up for an evaluation.");
+		// From this check to the record nothing waits, so of two claims at once only one is recorded.
+		if (claims.read() !== null) return refused(ONCE);
+		const occupied = this.ctx.storage.sql.exec("SELECT 1 FROM accounts LIMIT 1").toArray().length > 0;
+		try {
+			claims.begin(occupied ? "refused" : "claiming", input.username, now);
+		} catch {
+			// Nothing was recorded, so nobody is registered.
+			logClaim({ state: "unrecorded" });
+			return { ok: false, status: 503, error: "The claim couldn't be recorded, so nobody was set up." };
 		}
-		// Recorded before anyone is registered: whatever happens next, this was the one claim.
-		this.#record({ state: "claiming", username: input.username, ownerId: null, at: now });
+		logClaim({ state: occupied ? "refused" : "claiming" });
+		if (occupied) return refused("This Pim already has accounts, so it isn't set up for an evaluation.");
 		let result: Registration;
 		try {
 			result = await super.register({ username: input.username, ip: input.ip, policy: { ...input.policy, mode: "closed" }, claim: { window: true }, now });
 		} catch (error) {
-			this.#record({ state: "failed", username: input.username, ownerId: null, at: now });
+			this.#finish(claims, "failed", null);
 			throw error;
 		}
 		const ok = result.ok && result.account.role === "admin";
-		this.#record({ state: ok ? "claimed" : "failed", username: input.username, ownerId: ok ? result.account.ownerId : null, at: now });
+		this.#finish(claims, ok ? "claimed" : "failed", ok ? result.account.ownerId : null);
 		return result;
 	}
 

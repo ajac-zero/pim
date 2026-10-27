@@ -6,12 +6,13 @@ import { createExecutionContext, env, evictDurableObject, runDurableObjectAlarm,
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Relay, type Session, type SessionEvents, serveWithWebSocketPair } from "../computer/cua-bridge";
 import { Link, type Machine } from "../computer/pim-computer";
-import type { EvalDirectory } from "../preview/cua-eval";
+import { ClaimRecord, type EvalDirectory } from "../preview/cua-eval";
 import { FIXTURE_KEY, LEASE_ID } from "../preview/cua-fixture";
 import previewWorker from "../preview/worker";
 import { currentTrace } from "../src/computer-control-runtime";
 import { PROVIDER_KEY } from "../src/cua";
 import { initialObservationState, type ObservationState } from "../src/cua-observation";
+import { Directory as BaseDirectory } from "../src/directory";
 import { OBSERVATION_KEY } from "../src/cua-observation-runtime";
 import { OWNER_HEADER, Pim as RealPim, SIGNED_IN_HEADER } from "../src/pim";
 import { type Approval, PimStore } from "../src/store";
@@ -692,15 +693,16 @@ describe("the preview's Cua evaluation mode", () => {
 	const refusals = () => logged.flatMap(([line]) => (typeof line === "string" && line.includes('"preview.refused"') ? [(JSON.parse(line) as { reason: string }).reason] : []));
 
 	/**
-	 * The preview's Worker, reached as the ingress reaches it on the loopback address: with the ingress's secret and
-	 * the client's address unless `ingress` is null. Each call of `worker` has a Directory of its own, of the preview's
-	 * class, and the preview's Pim.
+	 * The preview's Worker, reached as the ingress reaches it through Wrangler run with `--host pim.test
+	 * --upstream-protocol https`: at Pim's own address (or at `at`), with the ingress's secret and the client's
+	 * address unless `ingress` is null, and, for a body, this app's `Origin` unless the test sends another. Each call
+	 * of `worker` has a Directory of its own, of the preview's class, and the preview's Pim.
 	 */
 	function worker() {
 		const run = crypto.randomUUID();
 		const directory = (name: string) => previewDirectories.getByName(`${run}:${name}`);
 		const target = Object.assign(Object.create(env as object) as object, { Directory: { getByName: directory }, Pim: previews }) as Env;
-		const ask = async (path: string, init: { method?: string; body?: unknown; cookie?: string; headers?: Record<string, string>; ingress?: string | null } = {}) => {
+		const ask = async (path: string, init: { method?: string; body?: unknown; cookie?: string; headers?: Record<string, string>; ingress?: string | null; at?: string } = {}) => {
 			const headers = new Headers(init.headers);
 			const ingress = init.ingress === undefined ? SECRET : init.ingress;
 			if (ingress !== null) {
@@ -710,10 +712,10 @@ describe("the preview's Cua evaluation mode", () => {
 			if (init.cookie) headers.set("cookie", init.cookie);
 			if (init.body !== undefined) {
 				headers.set("content-type", "application/json");
-				headers.set("origin", "https://pim.test");
+				if (!headers.has("origin")) headers.set("origin", "https://pim.test");
 			}
 			const method = init.method ?? (init.body === undefined ? "GET" : "POST");
-			const request = new Request(`http://127.0.0.1:8787${path}`, { method, headers, ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }) });
+			const request = new Request(`${init.at ?? "https://pim.test"}${path}`, { method, headers, ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }) });
 			return await previewWorker.fetch(request as never, target, createExecutionContext());
 		};
 		const register = (username: string, claim?: string) => ask("/auth/register", { body: { username, ...(claim === undefined ? {} : { claim }) } });
@@ -745,7 +747,7 @@ describe("the preview's Cua evaluation mode", () => {
 		await expect(env.Directory.getByName(crypto.randomUUID()).claimCode()).resolves.toMatchObject({ code: expect.any(String) });
 	});
 
-	it("answers nothing under /__dev or for a setup link, by any method or spelling, nothing that didn't come through the ingress, and nothing when it is set up wrong", async () => {
+	it("answers nothing under /__dev or for a setup link, by any method or spelling, nothing that didn't come through the ingress or isn't at Pim's address, and nothing when it is set up wrong", async () => {
 		await evaluation();
 		const { ask, directory } = worker();
 		const paths = ["/__dev/sign-in/mallory", "/__DEV/sign-in/mallory", "/%5F%5Fdev/sign-in/mallory", "/%5f_DeV/sign-in/mallory", "//__dev/sign-in/mallory", "/__dev", "/__dev/", "/auth/setup-link", "/auth/setup-link/", "/AUTH/Setup-Link"];
@@ -762,6 +764,17 @@ describe("the preview's Cua evaluation mode", () => {
 		expect((await ask("/auth/username?name=mallory", { ingress: null })).status).toBe(403);
 		expect((await ask("/auth/username?name=mallory", { ingress: "another-secret-0123456789abcdef0123456789" })).status).toBe(403);
 		expect((await ask("/auth/username?name=mallory")).status).toBe(200);
+		// Only at Pim's own address: not loopback, another host, plain HTTP or another port, and no header makes one so.
+		const spoofs = { "x-forwarded-host": "pim.test", "x-forwarded-proto": "https", forwarded: "host=pim.test;proto=https", "x-original-host": "pim.test", "mf-original-hostname": "pim.test" };
+		for (const at of ["http://127.0.0.1:8787", "http://localhost:8787", "https://evil.example", "http://pim.test", "https://pim.test:8443", "https://sub.pim.test"]) {
+			for (const headers of [{}, spoofs]) {
+				const answer = await ask("/auth/username?name=mallory", { at, headers });
+				expect([at, answer.status, await answer.json()]).toEqual([at, 421, { error: "This preview answers only at its own address." }]);
+			}
+			expect([at, (await ask("/auth/register", { at, body: { username: "mallory", claim: CODE } })).status]).toEqual([at, 421]);
+		}
+		// At Pim's address, the same headers change nothing.
+		expect((await ask("/auth/username?name=mallory", { headers: { "x-forwarded-host": "evil.example", "x-forwarded-proto": "http", forwarded: "host=evil.example;proto=http" } })).status).toBe(200);
 		// Set up wrong, it answers nothing at all rather than fall back to the local preview.
 		for (const [key, value] of [
 			["PIM_INGRESS_SECRET", "short"],
@@ -785,11 +798,16 @@ describe("the preview's Cua evaluation mode", () => {
 		await evaluation();
 		// The environment says registration is open; the evaluation doesn't take it.
 		expect(settings.PIM_REGISTRATION).toBe("open");
-		const { register, directory } = worker();
+		const { ask, register, directory } = worker();
 		expect(await refusal(await register("mallory"))).toEqual([403, "Registration is closed."]);
 		expect(await refusal(await register("mallory", "evalclaim".padEnd(43, "y")))).toEqual([403, "That setup link isn't valid."]);
 		expect(await refusal(await register("mallory", "evalclaim"))).toEqual([403, "That setup link isn't valid."]);
-		// A wrong code changes nothing: the operator's still claims, once.
+		// The browser's Origin is taken as it came: from another site, or from the loopback address Wrangler listens on, the operator's code claims nothing.
+		for (const origin of ["https://evil.example", "http://127.0.0.1:8787", "http://pim.test"]) {
+			const answer = await ask("/auth/register", { body: { username: "mallory", claim: CODE }, headers: { origin } });
+			expect([origin, ...(await refusal(answer))]).toEqual([origin, 403, "Requests must come from this app"]);
+		}
+		// A wrong code, or one from another site, changes nothing: the operator's still claims, once.
 		const claimed = await register("evalowner", CODE);
 		expect(claimed.status).toBe(201);
 		const body = (await claimed.json()) as { role: string; setup: string };
@@ -838,11 +856,14 @@ describe("the preview's Cua evaluation mode", () => {
 		expect(claimed.status).toBe(201);
 		const { setup } = (await claimed.json()) as { setup: string };
 		const owner = setup.split(".")[0]!;
-		const options = await ask("/auth/passkeys/options", { body: { setup } });
+		// Forwarded headers naming another host change nothing: the passkey is for Pim's own host.
+		const options = await ask("/auth/passkeys/options", { body: { setup }, headers: { "x-forwarded-host": "evil.example", "x-forwarded-proto": "http", forwarded: "host=evil.example;proto=http" } });
 		expect(options.status).toBe(200);
 		const challenge = options.headers.getSetCookie().map((cookie) => cookie.split(";")[0]).join("; ");
+		const asked = (await options.json()) as { challenge: string; user: { id: string }; rp: { id: string } };
+		expect(asked.rp.id).toBe("pim.test");
 		const authenticator = await Authenticator.make("ES256", { rpId: "pim.test", origin: "https://pim.test" });
-		const registration = await authenticator.register((await options.json()) as { challenge: string; user: { id: string } });
+		const registration = await authenticator.register(asked);
 		const created = await ask("/auth/passkeys", { body: { ...registration, name: "Evaluation" }, cookie: challenge });
 		expect(created.ok).toBe(true);
 		const session = created.headers.getSetCookie().find((cookie) => cookie.startsWith("__Host-pim-session="));
@@ -864,5 +885,97 @@ describe("the preview's Cua evaluation mode", () => {
 		expect((await ask("/api/observations", { headers: { authorization: `Bearer ${token}` } })).status).toBe(401);
 		expect((await ask("/api/observations", { method: "POST", headers: { authorization: `Bearer ${token}`, origin: "https://pim.test" } })).status).toBe(401);
 		expect(sent).toEqual([]);
+	});
+
+	/** The evaluation's claim record as the Directory's storage holds it, read with SQL of the test's own. */
+	const claimRow = (dir: DurableObjectStub<EvalDirectory>) =>
+		runInDurableObject(dir, (_instance, state) => {
+			if (state.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'preview_eval_claim'").toArray().length === 0) return null;
+			return (state.storage.sql.exec("SELECT state, username, owner_id FROM preview_eval_claim").toArray() as Record<string, unknown>[])[0] ?? null;
+		});
+	const evalClaims = () => logged.flatMap(([line]) => (typeof line === "string" && line.includes('"preview.eval_claim"') ? [JSON.parse(line) as Record<string, unknown>] : []));
+
+	it("records its one claim before anyone is registered: a claim it can't record registers nobody, and two at once make one owner", async () => {
+		await evaluation();
+		const { register, directory } = worker();
+		const dir = directory("directory");
+		const registering = vi.spyOn(BaseDirectory.prototype, "register");
+		const unwritable = vi.spyOn(ClaimRecord.prototype, "begin").mockImplementationOnce(() => {
+			throw new Error("The disk is full");
+		});
+		try {
+			expect(await refusal(await register("evalfirst", CODE))).toEqual([503, "The claim couldn't be recorded, so nobody was set up."]);
+			// Nothing was recorded and nobody registered, so the claim is still to be made.
+			expect(registering).not.toHaveBeenCalled();
+			expect(await dir.resolve("evalfirst")).toBeNull();
+			expect(await claimRow(dir)).toBeNull();
+			unwritable.mockRestore();
+			// Two claims with the operator's code at once: one is recorded and registers its owner; the other is refused.
+			const answers = await Promise.all([register("evala", CODE), register("evalb", CODE)]);
+			expect(answers.map((answer) => answer.status).sort()).toEqual([201, 403]);
+			const loser = answers.find((answer) => answer.status === 403)!;
+			expect(((await loser.json()) as { error: string }).error).toBe(ONCE);
+			expect(registering).toHaveBeenCalledTimes(1);
+			const winner = (await claimRow(dir)) as { state: string; username: string; owner_id: string };
+			expect(winner.state).toBe("claimed");
+			expect(await dir.account(winner.owner_id)).toMatchObject({ username: winner.username, role: "admin" });
+			expect(await dir.resolve(winner.username === "evala" ? "evalb" : "evala")).toBeNull();
+			expect(evalClaims().map((line) => line.state)).toEqual(["unrecorded", "claiming", "claimed"]);
+		} finally {
+			unwritable.mockRestore();
+			registering.mockRestore();
+		}
+	});
+
+	it("keeps its record however the registration ends, refused, thrown or unrecorded at the end, and never claims again", async () => {
+		await evaluation();
+		const later = (username: string) => ({ username, ip: "192.0.2.43", claim: { window: false, code: CODE }, policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 } }) as const;
+
+		// The Directory refuses the registration (no registrations left for the address): the claim is spent.
+		const refusedOne = worker();
+		const refusedDir = refusedOne.directory("directory");
+		expect(await refusedDir.register({ ...later("evalrefused"), policy: { mode: "open", maxAccounts: null, perAddressPerDay: 0 } })).toMatchObject({ ok: false, status: 429 });
+		expect(await claimRow(refusedDir)).toMatchObject({ state: "failed", owner_id: null });
+		expect(await refusal(await refusedOne.register("evalrefused", CODE))).toEqual([403, ONCE]);
+
+		// The registration throws, and the record can't be moved on either: it stays `claiming`, and the first failure is the one thrown.
+		const thrownOne = worker();
+		const thrownDir = thrownOne.directory("directory");
+		const throwing = vi.spyOn(BaseDirectory.prototype, "register").mockRejectedValueOnce(new Error("The Directory went away"));
+		const stuck = vi.spyOn(ClaimRecord.prototype, "finish").mockImplementationOnce(() => {
+			throw new Error("The disk is full");
+		});
+		try {
+			await expect(thrownDir.register(later("evalthrown"))).rejects.toThrow(/The Directory went away/);
+		} finally {
+			throwing.mockRestore();
+			stuck.mockRestore();
+		}
+		expect(await claimRow(thrownDir)).toMatchObject({ state: "claiming", owner_id: null });
+		expect(await thrownDir.resolve("evalthrown")).toBeNull();
+		expect(await refusal(await thrownOne.register("evalthrown", CODE))).toEqual([403, ONCE]);
+
+		// The owner is registered but the last write fails: the record stays `claiming`, which refuses as surely, and says so in the log.
+		const unrecordedOne = worker();
+		const unrecordedDir = unrecordedOne.directory("directory");
+		const unfinished = vi.spyOn(ClaimRecord.prototype, "finish").mockImplementationOnce(() => {
+			throw new Error("The disk is full");
+		});
+		let owner = "";
+		try {
+			const claimed = await unrecordedOne.register("evalunrecorded", CODE);
+			expect(claimed.status).toBe(201);
+			owner = ((await claimed.json()) as { setup: string }).setup.split(".")[0]!;
+		} finally {
+			unfinished.mockRestore();
+		}
+		expect(await claimRow(unrecordedDir)).toMatchObject({ state: "claiming", owner_id: null });
+		expect(evalClaims().at(-1)).toEqual({ event: "preview.eval_claim", state: "claiming", unrecorded: "claimed", owner });
+		// Restarted, and two days later: still refused, and nothing reset the record.
+		await evictDurableObject(unrecordedDir);
+		expect(await unrecordedDir.register({ ...later("evalagain"), now: Date.now() + 2 * 24 * 60 * 60 * 1000 })).toEqual({ ok: false, status: 403, error: ONCE });
+		expect(await claimRow(unrecordedDir)).toMatchObject({ state: "claiming" });
+		expect(await unrecordedDir.account(owner)).toMatchObject({ role: "admin" });
+		expect(JSON.stringify(logged)).not.toContain(CODE);
 	});
 });

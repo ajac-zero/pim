@@ -877,6 +877,20 @@ describe("the rendered scripts with a viewer", () => {
 	});
 });
 
+/** Each place a script pipes into a shell interpreter, by command word: `| sh`, `|bash -s`, but not `| sha256sum`. */
+const pipesToShell = (script: string) => [...script.matchAll(/\|\s*(?:\/(?:usr\/)?bin\/)?(?:sh|bash|dash|zsh)(?=\s|$|;|&|\))/gm)].map((m) => m[0]);
+/** Each place a script runs `curl` or `wget` as a command word (after a line start, space, `;`, `&`, `|`, `(` or `/`), never as part of a package name such as `libcurl4t64` or a quoted package name in a list. */
+const runsCurl = (script: string) => [...script.matchAll(/(?:^|[\s;&|(/])(?:curl|wget)(?=\s|$|;|&|\))/gm)].map((m) => m[0]);
+
+describe("the test's own command detectors", () => {
+	it("reject truly unsafe samples and accept the legitimate ones they once confused", () => {
+		for (const unsafe of ["curl -s https://x | sh", "curl https://x |sh", "wget -qO- https://x | bash -s", "echo hi | /bin/sh", "cat f | /usr/bin/bash\n", "x | dash;"]) assert.equal(pipesToShell(unsafe).length, 1, unsafe);
+		for (const safe of ["find . | sort | sha256sum", "x | sha512sum | cut -d' ' -f1", "printf '%s\\n' \"$listing\" | sha256sum", "x | shuf", "a || bash_function"]) assert.deepEqual(pipesToShell(safe), [], safe);
+		for (const unsafe of ["curl -s https://x", "run && curl x", "x | curl -T- u", "/usr/bin/curl https://x", "$(curl u)", "trusted_file /usr/bin/curl || fail tools", "wget"]) assert.ok(runsCurl(unsafe).length > 0, unsafe);
+		for (const safe of ["'libcurl4t64'", "for package in 'curl' 'wget'; do", "libcurl4t64 wget-not", "echo curlish", "mycurl x"]) assert.deepEqual(runsCurl(safe), [], safe);
+	});
+});
+
 describe("the pinned delivery", () => {
 	const inRepository = (file: string) => fs.readFileSync(path.join(REPOSITORY, file));
 
@@ -937,7 +951,9 @@ describe("the pinned delivery", () => {
 		assert.ok(script.includes(`'${integrityHex(PINS.ws.sha512)}'`));
 		assert.ok(script.includes("curl -q --noproxy '*' --proto '=https' --proto-redir '=https' --tlsv1.2 --max-redirs 5 --fail"));
 		assert.ok(script.includes("--retry 0"));
-		for (const forbidden of ["-k ", "--insecure", "--cacert", "Authorization", "--header", "-H ", "--user", "-u ", "--netrc", "| sh", "| bash", "http://", "--retry-", "sudo", "ssh", "az ", "set -x", "eval "]) assert.equal(script.includes(forbidden), false, forbidden);
+		for (const forbidden of ["-k ", "--insecure", "--cacert", "Authorization", "--header", "-H ", "--user", "-u ", "--netrc", "http://", "--retry-", "sudo", "ssh", "az ", "set -x", "eval "]) assert.equal(script.includes(forbidden), false, forbidden);
+		assert.deepEqual(pipesToShell(script), [], "no output is piped into a shell");
+		assert.deepEqual(runsCurl(script).length > 0, true, "fetch.sh does run curl, exactly where it downloads");
 		for (const unpack of ["tar --extract", "dpkg-deb --extract", "install -m 0755"]) assert.ok(script.indexOf(unpack) > script.lastIndexOf("\ndownload '"), unpack);
 		assert.ok(script.indexOf("status-$name") < script.indexOf("digest-$name"));
 		assert.ok(script.includes('[[ "$status" == 200 ]] || fail "status-$name"'));
@@ -1014,6 +1030,8 @@ describe("the pinned delivery", () => {
 		assert.equal(script.includes("no-sandbox"), false);
 		assert.ok(script.includes('exit "$FAILED"'));
 		assert.equal(script.match(/rm -rf/g)?.length, 1);
-		for (const forbidden of ["systemctl", "curl", "sudo", "set -x", "eval ", "--no-sandbox", "docker"]) assert.equal(script.includes(forbidden), false, forbidden);
+		for (const forbidden of ["systemctl", "sudo", "set -x", "eval ", "--no-sandbox", "docker"]) assert.equal(script.includes(forbidden), false, forbidden);
+		assert.deepEqual(runsCurl(script), [], "support.sh runs no curl; the package libcurl4t64 is a name, not a command");
+		assert.deepEqual(pipesToShell(script), []);
 	});
 });

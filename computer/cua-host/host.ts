@@ -28,6 +28,7 @@ import * as net from "node:net";
 import { type Duplex, Readable, pipeline } from "node:stream";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { type ServerOptions, WebSocketServer, type WebSocket } from "ws";
+import { isHttpsOrigin } from "./origin.ts";
 import { type Channel, type ClientSocket, type LogEntry, MAX_MESSAGE_CHARS, type Relay, SPACE_HEADER } from "../cua-bridge.ts";
 import type { MediaSocket, ViewerAdapter } from "./viewer-adapter.ts";
 import type { KeyRequest, LaunchRequestKey, ViewerLaunchManager } from "./viewer-launch-manager.ts";
@@ -123,34 +124,7 @@ export type ViewerRoutes = {
 	readonly embedOrigin?: string;
 };
 
-/** One DNS label: letters, digits and inner hyphens, at most 63 characters. A `*` is not a letter or a digit. */
-const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-
-/** Whether `hostname`, as a URL writes it, is a DNS name of well-formed labels, an IPv4 address, or a bracketed IPv6 address. No wildcard, empty label or trailing dot. */
-function wellFormedHost(hostname: string): boolean {
-	if (hostname.startsWith("[")) return hostname.endsWith("]") && net.isIPv6(hostname.slice(1, -1));
-	if (net.isIPv4(hostname)) return true;
-	return hostname.length <= 253 && hostname.split(".").every((label) => LABEL.test(label));
-}
-
-/**
- * Whether `value` is exactly an `https://host[:port]` origin, as a browser
- * writes it in `Origin`: nothing after the port (no path, query, fragment or
- * credentials), no default port written out (`:443`), no uppercase or other
- * form a browser wouldn't send, and a host that is a well-formed DNS name or
- * an IP address, never a wildcard. The URL parser accepts a `*` host, so the
- * host is checked on its own.
- */
-export function isHttpsOrigin(value: unknown): value is string {
-	if (typeof value !== "string") return false;
-	let url: URL;
-	try {
-		url = new URL(value);
-	} catch {
-		return false;
-	}
-	return url.protocol === "https:" && url.origin === value && !url.username && !url.password && wellFormedHost(url.hostname);
-}
+export { isHttpsOrigin } from "./origin.ts";
 
 /** Whether a browser's `Origin` header (every occurrence of it) is exactly `publicOrigin`; absent, repeated or different is no. */
 export function originAllowed(values: readonly string[] | undefined, publicOrigin: string): boolean {

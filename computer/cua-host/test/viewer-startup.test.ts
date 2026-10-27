@@ -31,7 +31,9 @@ import {
 } from "../eval-install/config.ts";
 import { checkAccounts, checkBackendName, checkUnits, type Facts, inspectedPaths, type PathFact, type Probe, plan, start } from "../eval-install/install.ts";
 import { initialJournalText, newRootToken, provisionJournal, provisionRootToken, ProvisionFailure, tombstoneText } from "../eval-install/journal-provision.ts";
-import { BASE_DESKTOP_UID, BUNDLE_SOURCES, bundleEntries, lockedPackageIntegrity, renderBaseCloudConfig, renderCloudConfig, renderScripts, untarPackage, VIEWER_SOURCES } from "../eval-install/operator.ts";
+import { BASE_DESKTOP_UID, BUNDLE_SOURCES, bundleEntries, bundleInputs, lockedPackageIntegrity, renderBaseCloudConfig, renderCloudConfig, renderScripts, untarPackage, VIEWER_SOURCES } from "../eval-install/operator.ts";
+import { integrityHex, missingPins, PINS, type Pins } from "../eval-install/pins.ts";
+import { isHttpsOrigin } from "../origin.ts";
 import { openJournalStore } from "../journal-store.ts";
 import { initialJournal } from "../../../preview/cua-viewer-first.ts";
 import { FakeFiles } from "./fake-journal-files.ts";
@@ -42,6 +44,9 @@ const COMMIT = "0123456789abcdef0123456789abcdef01234567";
 const PIM = "https://pim-cua-eval.ajac-zero.com";
 const VIEWER = "https://cua-eval.ajac-zero.com";
 const SPACESD_SHA256 = "78622428711f3778127ad661ba2976ae27bf23ae5e05439d60d5b95511c808fd";
+
+/** The pins with the one commit and archive digest PINS leaves empty filled in, for the commit these tests configure. */
+const PINNED: Pins = { ...PINS, repository: { commit: COMMIT, sha256: "a".repeat(64), maxBytes: PINS.repository.maxBytes } };
 
 let publicKeyPem = "";
 let fingerprint = "";
@@ -727,7 +732,7 @@ describe("the ingress, the units spacesd and Caddy run under, and the base", () 
 		assert.ok(!("groups" in data.users[1]));
 		assert.equal(data.disable_root, true);
 		assert.equal(data.ssh_pwauth, false);
-		for (const pkg of ["xvfb", "openbox", "dbus-user-session", "openssl", "libx11-6", "libxtst6"]) assert.ok(data.packages.includes(pkg), pkg);
+		for (const pkg of ["xvfb", "openbox", "dbus-user-session", "openssl", "curl", "libx11-6", "libxtst6", "libnss3", "libgtk-3-0t64", "libvulkan1"]) assert.ok(data.packages.includes(pkg), pkg);
 		assert.deepEqual(data.runcmd[0], ["loginctl", "enable-linger", "pim-desktop"]);
 		const units = Object.fromEntries(data.write_files.map((f: { path: string; content: string }) => [f.path, f.content]));
 		const xvfb = units["/etc/systemd/system/pim-cua-xvfb.service"];
@@ -735,7 +740,7 @@ describe("the ingress, the units spacesd and Caddy run under, and the base", () 
 		assert.ok(units["/etc/systemd/system/pim-cua-wm.service"].includes("ExecStart=/usr/bin/openbox"));
 		assert.ok(xvfb.includes(`user@${BASE_DESKTOP_UID}.service`) && xvfb.includes(`XDG_RUNTIME_DIR=/run/user/${BASE_DESKTOP_UID}`));
 		// It installs none of the pinned programs and holds no secret.
-		for (const word of ["node", "chrome", "caddy", "spacesd", "token", "sha256", "curl", "wget"]) assert.equal(text.toLowerCase().includes(word), false, word);
+		for (const word of ["node", "chrome", "caddy", "spacesd", "token", "sha256"]) assert.equal(text.toLowerCase().includes(word), false, word);
 		refusedWith(() => renderBaseCloudConfig(config(false)), "config-viewer");
 	});
 });
@@ -832,16 +837,16 @@ describe("spacesd's root token, made once", () => {
 });
 
 describe("the rendered scripts with a viewer", () => {
-	it("add three scripts, `bridge-cert.sh`, `journal.sh` and `root-token.sh`, and none without a viewer", () => {
+	it("add five scripts, `bridge-cert.sh`, `journal.sh`, `root-token.sh`, `fetch.sh` and `support.sh`, and none without a viewer", () => {
 		const plain = renderScripts(config(false));
 		assert.deepEqual(Object.keys(plain), ["plan.sh", "install.sh", "seal.sh", "start.sh", "status.sh"]);
-		const withViewer = renderScripts(config(true));
-		assert.deepEqual(Object.keys(withViewer), ["plan.sh", "install.sh", "seal.sh", "start.sh", "status.sh", "bridge-cert.sh", "journal.sh", "root-token.sh"]);
+		const withViewer = renderScripts(config(true), PINNED);
+		assert.deepEqual(Object.keys(withViewer), ["plan.sh", "install.sh", "seal.sh", "start.sh", "status.sh", "bridge-cert.sh", "journal.sh", "root-token.sh", "fetch.sh", "support.sh"]);
 		for (const name of Object.keys(plain)) assert.equal(withViewer[name]!.replace(/\{"version":1.*\}/, ""), plain[name]!.replace(/\{"version":1.*\}/, ""), `${name} is unchanged but for its configuration`);
 	});
 
 	it("run only the bundle's provisioning program, each with its one command, after the pins are checked", () => {
-		const scripts = renderScripts(config(true));
+		const scripts = renderScripts(config(true), PINNED);
 		for (const [name, command] of [["journal.sh", "journal"], ["root-token.sh", "root-token"]] as const) {
 			const script = scripts[name]!;
 			assert.equal(script.match(/^exec .*/gm)?.length, 1, name);
@@ -853,7 +858,7 @@ describe("the rendered scripts with a viewer", () => {
 	});
 
 	it("make the bridge's own certificate on the VM, once, into a new 0700 staging directory, for the one name Caddy checks, so its key never travels", () => {
-		const script = renderScripts(config(true))["bridge-cert.sh"]!;
+		const script = renderScripts(config(true), PINNED)["bridge-cert.sh"]!;
 		assert.equal(script.match(/^exec .*/gm)?.length, 1);
 		assert.ok(script.includes("mkdir -m 0700 -- '/var/lib/pim-cua-install'"));
 		assert.ok(script.includes("[[ ! -e '/var/lib/pim-cua-install' && ! -L '/var/lib/pim-cua-install' ]] || fail staging-exists"));
@@ -866,8 +871,135 @@ describe("the rendered scripts with a viewer", () => {
 	});
 
 	it("travel in cloud-init data, which writes them and runs none", () => {
-		const data = renderCloudConfig(renderScripts(config(true)));
-		for (const name of ["bridge-cert", "journal", "root-token"]) assert.ok(data.includes(`/usr/local/sbin/pim-cua-eval-${name}`), name);
+		const data = renderCloudConfig(renderScripts(config(true), PINNED));
+		for (const name of ["bridge-cert", "journal", "root-token", "fetch", "support"]) assert.ok(data.includes(`/usr/local/sbin/pim-cua-eval-${name}`), name);
 		assert.equal(data.includes("runcmd"), false);
+	});
+});
+
+describe("the pinned delivery", () => {
+	const inRepository = (file: string) => fs.readFileSync(path.join(REPOSITORY, file));
+
+	it("pins the npm packages to the lockfile's own integrity and version, derived here from the repository, not from the pins", () => {
+		const inputs = bundleInputs(inRepository, true);
+		assert.equal(`sha512-${PINS.ws.sha512}`, inputs.wsIntegrity);
+		assert.equal(`sha512-${PINS.protobuf.sha512}`, inputs.protobuf!.integrity);
+		assert.ok(PINS.ws.url.endsWith(`/ws-${inputs.wsVersion}.tgz`));
+		assert.ok(PINS.protobuf.url.endsWith(`/protobuf-${inputs.protobuf!.version}.tgz`));
+		// The hex `sha512sum` prints is the same 64 bytes as the base64 integrity.
+		assert.equal(integrityHex(PINS.ws.sha512), Buffer.from(PINS.ws.sha512, "base64").toString("hex"));
+		assert.equal(integrityHex(PINS.ws.sha512).length, 128);
+		refusedWith(() => integrityHex("AAAA"), "pin-integrity");
+	});
+
+	it("reads a bundle's inputs through any reader, the viewer's only when asked, and refuses a missing file as `source`", () => {
+		const base = bundleInputs(inRepository, false);
+		assert.equal(base.protobuf, undefined);
+		assert.deepEqual([...base.sources.keys()], [...BUNDLE_SOURCES]);
+		assert.deepEqual([...bundleInputs(inRepository, true).sources.keys()], [...BUNDLE_SOURCES, ...VIEWER_SOURCES]);
+		refusedWith(() => bundleInputs((file) => (file === "pnpm-lock.yaml" ? Buffer.from("") : inRepository(file)), false), "ws-lock");
+		refusedWith(() => bundleInputs((file) => { if (file === BUNDLE_SOURCES[3]) throw new Error("gone"); return inRepository(file); }, false), "source");
+	});
+
+	it("still lacks exactly two pins, the commit and its archive's SHA-256, and renders nothing until they are filled in, for the same commit", () => {
+		assert.deepEqual(missingPins(PINS), ["repository-commit", "repository-sha256"]);
+		assert.deepEqual(missingPins(PINNED), []);
+		refusedWith(() => renderScripts(config(true)), "pin-missing:repository-commit,repository-sha256");
+		refusedWith(() => renderScripts(config(true), { ...PINNED, repository: { ...PINNED.repository, sha256: null } }), "pin-missing:repository-sha256");
+		refusedWith(() => renderScripts(config(true), { ...PINNED, repository: { ...PINNED.repository, commit: "f".repeat(40) } }), "pin-commit");
+		refusedWith(() => renderScripts(config(true), { ...PINNED, spacesd: { ...PINNED.spacesd, sha256: "0".repeat(64) } }), "pin-mismatch");
+		refusedWith(() => renderScripts(config(true), { ...PINNED, node: { ...PINNED.node, version: "v22.19.0" } }), "pin-mismatch");
+		refusedWith(() => renderScripts(config(true), { ...PINNED, caddy: { ...PINNED.caddy, version: "v2.11.8" } }), "pin-mismatch");
+		refusedWith(() => renderScripts(config(true), { ...PINNED, chrome: { ...PINNED.chrome, url: "http://dl.google.com/chrome.deb" } }), "pin-mismatch");
+		refusedWith(() => renderScripts(config(true), { ...PINNED, caddy: { ...PINNED.caddy, sha256: "XYZ" } }), "pin-mismatch");
+		// Without a viewer nothing is delivered, so the pins are not consulted.
+		assert.equal(Object.keys(renderScripts(config(false))).includes("fetch.sh"), false);
+	});
+
+	it("refuses a layout `fetch.sh` cannot place: Node not at bin/node, Chrome not where its package puts it, a destination inside another", () => {
+		const render = (change: (raw: Raw) => void) => renderScripts(config(true, change), PINNED);
+		refusedWith(() => render((raw) => { raw.node.path = "/opt/pim-node/node"; }), "pin-layout");
+		refusedWith(() => render((raw) => { raw.browser.path = "/opt/chrome/chrome"; }), "pin-layout");
+		refusedWith(() => render((raw) => { raw.bundle.dir = "/opt/pim-node/bundle"; }), "pin-layout");
+		assert.ok(render(() => {})["fetch.sh"]);
+	});
+
+	const fetchScript = () => renderScripts(config(true), PINNED)["fetch.sh"]!;
+
+	it("fetches each pinned artifact once over HTTPS with no credential, retry or downgrade, and checks status, size and digest before any is unpacked", () => {
+		const script = fetchScript();
+		for (const [name, url] of [["node", PINS.node.url], ["caddy", PINS.caddy.url], ["spacesd", PINS.spacesd.url], ["chrome", PINS.chrome.url], ["ws", PINS.ws.url], ["protobuf", PINS.protobuf.url], ["repository", `https://codeload.github.com/ajac-zero/pim/tar.gz/${COMMIT}`]]) {
+			assert.equal(script.split(`'${url}'`).length - 1, 1, name);
+			assert.ok(script.includes(`download '${name}' `), name);
+		}
+		assert.equal(script.match(/^download '/gm)?.length, 7);
+		assert.ok(script.includes(`'${PINS.spacesd.sha256}' ${PINS.spacesd.bytes} ${PINS.spacesd.maxBytes}`));
+		assert.ok(script.includes(`'${integrityHex(PINS.ws.sha512)}'`));
+		assert.ok(script.includes("curl -q --noproxy '*' --proto '=https' --proto-redir '=https' --tlsv1.2 --max-redirs 5 --fail"));
+		assert.ok(script.includes("--retry 0"));
+		for (const forbidden of ["-k ", "--insecure", "--cacert", "Authorization", "--header", "-H ", "--user", "-u ", "--netrc", "| sh", "| bash", "http://", "--retry-", "sudo", "ssh", "az ", "set -x", "eval "]) assert.equal(script.includes(forbidden), false, forbidden);
+		for (const unpack of ["tar --extract", "dpkg-deb --extract", "install -m 0755"]) assert.ok(script.indexOf(unpack) > script.lastIndexOf("\ndownload '"), unpack);
+		assert.ok(script.indexOf("status-$name") < script.indexOf("digest-$name"));
+		assert.ok(script.includes('[[ "$status" == 200 ]] || fail "status-$name"'));
+		assert.ok(script.includes('[[ "$sum" == "$hex" ]] || fail "digest-$name"'));
+	});
+
+	it("runs as root without verifying Node or the bundle it is about to bring, in a new 0700 stage it alone removes, never replacing a destination", () => {
+		const script = fetchScript();
+		assert.ok(script.includes("fail root-required"));
+		assert.equal(script.includes("fail node-digest"), false);
+		assert.equal(script.includes("fail bundle-ownership"), false);
+		assert.ok(script.includes("readonly STAGE='/var/lib/pim-cua-fetch'"));
+		assert.ok(script.includes("mkdir -m 0700 -- \"$STAGE\" || fail stage-exists"));
+		assert.ok(script.indexOf("CREATED=1") > script.indexOf("fail stage-exists"));
+		assert.ok(script.includes("rm -rf --one-file-system -- \"$STAGE\""));
+		assert.ok(script.includes("trap 'cleanup $?' EXIT"));
+		assert.equal(script.match(/rm -rf/g)?.length, 1);
+		for (const [variable, name] of [["NODE_ROOT", "node"], ["CADDY", "caddy"], ["SPACESD", "spacesd"], ["CHROME_DIR", "chrome"], ["BUNDLE", "bundle"]]) {
+			assert.ok(script.includes(`absent "$${variable}" ${name}`), name);
+			assert.ok(script.indexOf(`absent "$${variable}" ${name}`) < script.indexOf("mkdir -m 0700 --"), name);
+		}
+		assert.equal(script.match(/^mv -T -- /gm)?.length, 5);
+		assert.equal(/\bmv -f|cp |rsync|ln -s/.test(script), false);
+		assert.ok(script.includes("readonly NODE_ROOT='/opt/pim-node'"));
+		assert.ok(script.includes("readonly CHROME_DIR='/opt/google/chrome'"));
+	});
+
+	it("checks each unpacked program against the configured digest, then builds the bundle with the staged Node and checks its tree digest, before any move", () => {
+		const script = fetchScript();
+		const moves = script.indexOf("\nmv -T -- ");
+		for (const check of ["fail digest-node-program", "fail digest-caddy-program", "fail digest-chrome-program", "fail digest-spacesd-program", "fail bundle-build", "fail bundle-digest", "staged_ok \"$STAGE/bundle\""]) {
+			assert.ok(script.includes(check), check);
+			assert.ok(script.indexOf(check) < moves, check);
+		}
+		assert.ok(script.includes("readonly CADDY_SHA256='" + "e".repeat(64) + "'"));
+		assert.ok(script.includes("readonly CHROME_SHA256='" + "d".repeat(64) + "'"));
+		assert.ok(script.includes(`readonly SPACESD_SHA256='${SPACESD_SHA256}'`));
+		assert.ok(script.includes('"$STAGE/node/bin/node" "$STAGE/src/computer/cua-host/eval-install/operator.ts" bundle --commit "$COMMIT" --source-dir "$STAGE/src"'));
+		assert.ok(script.includes("--no-same-owner"));
+		assert.ok(script.includes('chmod 0755 -- "$STAGE/chrome$CHROME_DIR/chrome-sandbox"'));
+	});
+
+	it("is the program of the operator a VM can run: neither it nor the files it imports reach `ws` or the bridge", () => {
+		const importsOf = (file: string) => [...fs.readFileSync(path.join(REPOSITORY, file), "utf8").matchAll(/^import .* from "([^"]+)"/gm)].map((m) => m[1]!);
+		assert.deepEqual(importsOf("computer/cua-host/origin.ts"), ["node:net"]);
+		for (const file of ["computer/cua-host/eval-install/config.ts", "computer/cua-host/eval-install/operator.ts", "computer/cua-host/eval-install/pins.ts"]) for (const specifier of importsOf(file)) assert.ok(specifier.startsWith("node:") || /^\.\/(config|pins)\.ts$|^\.\.\/origin\.ts$/.test(specifier), `${file}: ${specifier}`);
+		assert.ok(BUNDLE_SOURCES.includes("computer/cua-host/origin.ts"));
+		for (const value of ["https://*.example.com", "https://example.com:443", "https://example.com/", "https://user@example.com", "https://EXAMPLE.com", ""]) assert.equal(isHttpsOrigin(value), false, value);
+		assert.equal(isHttpsOrigin("https://cua-eval.ajac-zero.com"), true);
+	});
+
+	it("checks, read-only and before `start`, the packages, libraries, versions, `caddy validate`, spacesd and a sandboxed headless Chrome, failing if any does", () => {
+		const script = renderScripts(config(true), PINNED)["support.sh"]!;
+		assert.ok(script.includes("fail node-digest") && script.indexOf("fail node-digest") < script.indexOf("FAILED=0"));
+		for (const package_ of ["libnss3", "libgtk-3-0t64", "libatspi2.0-0t64", "xvfb", "xdg-utils"]) assert.ok(script.includes(`'${package_}'`), package_);
+		assert.ok(script.includes("dpkg-query -W -f='${db:Status-Status}'"));
+		assert.ok(script.includes("check caddy-validate /usr/sbin/runuser -u pim-ingress -- env -i PATH=/usr/bin:/bin XDG_DATA_HOME=/var/lib/pim-ingress XDG_CONFIG_HOME=/var/lib/pim-ingress \"$CADDY\" validate --config /etc/pim-ingress/Caddyfile --adapter caddyfile"));
+		assert.ok(script.includes("check spacesd-runs /usr/sbin/runuser -u pim-desktop"));
+		assert.ok(script.includes('"$BROWSER" --headless=new --disable-gpu --user-data-dir="$TEMP/profile" --dump-dom about:blank'));
+		assert.equal(script.includes("no-sandbox"), false);
+		assert.ok(script.includes('exit "$FAILED"'));
+		assert.equal(script.match(/rm -rf/g)?.length, 1);
+		for (const forbidden of ["systemctl", "curl", "sudo", "set -x", "eval ", "--no-sandbox", "docker"]) assert.equal(script.includes(forbidden), false, forbidden);
 	});
 });

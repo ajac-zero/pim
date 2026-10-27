@@ -16,7 +16,7 @@
 import * as crypto from "node:crypto";
 import * as net from "node:net";
 import * as path from "node:path";
-import { isHttpsOrigin } from "../host.ts";
+import { isHttpsOrigin } from "../origin.ts";
 
 /** The three accounts and groups. The desktop account is a prerequisite; the other two are made by the installer. */
 export const ACCOUNTS = { desktop: "pim-desktop", bridge: "pim-bridge", session: "pim-session" } as const;

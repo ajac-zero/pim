@@ -35,7 +35,8 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import * as zlib from "node:zlib";
-import { ACCOUNTS, BRIDGE_CERT_DAYS, BUNDLE_FILES, BUNDLE_FORMAT, type Config, isPlainPath, PATHS, parseConfig, Refusal, TOOLS, VIEWER_ASSET_DIR, VIEWER_ASSET_NAMES, VIEWER_ASSET_SHA256, VIEWER_BUNDLE_FILES, viewerBundleFiles } from "./config.ts";
+import { ACCOUNTS, BRIDGE_CERT_DAYS, BUNDLE_FILES, BUNDLE_FORMAT, type Config, isPlainPath, PATHS, parseConfig, Refusal, TOOLS, VIEWER_ACCOUNTS, VIEWER_ASSET_DIR, VIEWER_ASSET_NAMES, VIEWER_ASSET_SHA256, VIEWER_BUNDLE_FILES, VIEWER_PATHS, viewerBundleFiles } from "./config.ts";
+import { integrityHex, missingPins, PINS, type Pins } from "./pins.ts";
 
 /** The repository's files a bundle holds, as they are at its commit. */
 export const BUNDLE_SOURCES = [
@@ -47,6 +48,7 @@ export const BUNDLE_SOURCES = [
 	"computer/cua-host/desktop.ts",
 	"computer/cua-host/session.ts",
 	"computer/cua-host/host.ts",
+	"computer/cua-host/origin.ts",
 	"computer/cua-host/eval-credentials.ts",
 	"computer/cua-host/eval-install/config.ts",
 	"computer/cua-host/eval-install/install.ts",
@@ -343,11 +345,23 @@ function quote(value: string): string {
 
 const HEREDOC = "PIM_CUA_EVAL_CONFIG";
 
-function prologue(config: Config, command: string): string {
+/** What every script but `fetch` checks before it runs anything from the bundle: the pinned Node, then the bundle's ownership and tree digest. */
+const CHECKS = `trusted_file "$NODE" || fail node-path
+[[ "$(sha256sum <"$NODE" | cut -d' ' -f1)" == "$NODE_SHA256" ]] || fail node-digest
+trusted_dirs "$BUNDLE" || fail bundle-path
+# Everything in the bundle is root's, a regular file or a directory, with no write for others and no special bits.
+unexpected="$(find "$BUNDLE" \\( ! -uid 0 -o -perm /022 -o -perm /7000 -o \\( ! -type f ! -type d \\) \\) -print -quit)" || fail bundle-ownership
+[[ -z "$unexpected" ]] || fail bundle-ownership
+digest="$(tree_digest "$BUNDLE")" || fail bundle-digest
+[[ "$digest" == "$BUNDLE_SHA256" ]] || fail bundle-digest
+`;
+
+/** With `verify` false (only `fetch.sh`, which runs before Node and the bundle exist) it checks root and nothing else. */
+function prologue(config: Config, command: string, verify = true): string {
 	return `#!/bin/bash
 # Pim Cua evaluation: ${command} (docs/cua-eval-install.md), for evaluation ${config.evaluation}.
 # Rendered by computer/cua-host/eval-install/operator.ts. It holds no secret and prints none.
-# Before running anything from them, it checks the pinned Node and the bundle's tree digest.
+# Before running anything from them, it checks the pinned Node and the bundle's tree digest (all but fetch, which brings them).
 if [ -z "\${BASH_VERSION:-}" ]; then exec /bin/bash "$0" "$@"; fi
 set -euo pipefail
 umask 077
@@ -398,15 +412,7 @@ trusted_file() {
 ${TREE_DIGEST_BASH}
 
 [[ "$(id -u)" == 0 ]] || fail root-required
-trusted_file "$NODE" || fail node-path
-[[ "$(sha256sum <"$NODE" | cut -d' ' -f1)" == "$NODE_SHA256" ]] || fail node-digest
-trusted_dirs "$BUNDLE" || fail bundle-path
-# Everything in the bundle is root's, a regular file or a directory, with no write for others and no special bits.
-unexpected="$(find "$BUNDLE" \\( ! -uid 0 -o -perm /022 -o -perm /7000 -o \\( ! -type f ! -type d \\) \\) -print -quit)" || fail bundle-ownership
-[[ -z "$unexpected" ]] || fail bundle-ownership
-digest="$(tree_digest "$BUNDLE")" || fail bundle-digest
-[[ "$digest" == "$BUNDLE_SHA256" ]] || fail bundle-digest
-`;
+${verify ? CHECKS : ""}`;
 }
 
 /**
@@ -416,7 +422,7 @@ digest="$(tree_digest "$BUNDLE")" || fail bundle-digest
  * runs eval-credentials.ts's `seal` once, as the bridge's account, with
  * fixed arguments; its standard output is the envelope and nothing else.
  */
-export function renderScripts(config: Config): Record<string, string> {
+export function renderScripts(config: Config, pins: Pins = PINS): Record<string, string> {
 	const json = JSON.stringify(config);
 	if (json.split("\n").length !== 1 || json.includes(HEREDOC)) throw new Refusal("render-value");
 	const installer = (command: string) =>
@@ -441,6 +447,7 @@ ${json}
 ${HEREDOC}
 `;
 	const viewer = config.viewer;
+	if (viewer) checkPins(config, viewer, pins);
 	const staging = path.posix.dirname(config.tls.cert);
 	const bridgeCert = viewer
 		? `${prologue(config, "bridge-cert")}
@@ -461,8 +468,246 @@ exec /usr/bin/openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1
 		"seal.sh": seal,
 		"start.sh": installer("start"),
 		"status.sh": installer("status"),
-		...(viewer ? { "bridge-cert.sh": bridgeCert, "journal.sh": provision("journal"), "root-token.sh": provision("root-token") } : {}),
+		...(viewer ? { "bridge-cert.sh": bridgeCert, "journal.sh": provision("journal"), "root-token.sh": provision("root-token"), "fetch.sh": renderFetch(config, viewer, pins), "support.sh": renderSupport(config, viewer) } : {}),
 	};
+}
+
+// ---- The delivery and support scripts (viewer only) ----
+
+/**
+ * The Ubuntu packages the base must have: the desktop's (X, a window manager, a session bus), `openssl` and `curl` for the scripts,
+ * and what Google's Chrome 156 package lists as its dependencies, by their Ubuntu 24.04 names (`t64` where that release renamed them).
+ * `support.sh` checks each is installed.
+ */
+export const BASE_PACKAGES = [
+	"xvfb", "openbox", "dbus-user-session", "x11-xserver-utils", "openssl", "curl", "ca-certificates", "wget", "xdg-utils",
+	"fonts-liberation", "libasound2t64", "libatk-bridge2.0-0t64", "libatk1.0-0t64", "libatspi2.0-0t64", "libcairo2", "libcups2t64", "libcurl4t64",
+	"libdbus-1-3", "libdrm2", "libexpat1", "libgbm1", "libglib2.0-0t64", "libgtk-3-0t64", "libnspr4", "libnss3", "libpango-1.0-0", "libudev1", "libvulkan1",
+	"libx11-6", "libxcb-shm0", "libxcb-xfixes0", "libxcb1", "libxcomposite1", "libxdamage1", "libxext6", "libxfixes3", "libxkbcommon0", "libxrandr2", "libxtst6",
+] as const;
+
+/** Where Chrome's package puts its program, and so where `fetch.sh` does. */
+const CHROME_DIR = "/opt/google/chrome";
+
+/** Where `fetch.sh` stages everything. It must not exist: a second run, or a leftover, refuses. */
+const FETCH_STAGE = "/var/lib/pim-cua-fetch";
+
+/** What `fetch.sh` puts in place, as paths; none may be, or be inside, another. */
+function fetchDestinations(config: Config, viewer: NonNullable<Config["viewer"]>): { nodeRoot: string; caddy: string; spacesd: string; chrome: string; bundle: string } {
+	const nodeBin = path.posix.dirname(config.node.path);
+	const nodeRoot = path.posix.dirname(nodeBin);
+	if (path.posix.basename(config.node.path) !== "node" || path.posix.basename(nodeBin) !== "bin" || nodeRoot === "/") throw new Refusal("pin-layout");
+	if (config.browser.path !== `${CHROME_DIR}/chrome`) throw new Refusal("pin-layout");
+	const all = [nodeRoot, viewer.caddy.path, viewer.spacesd.path, CHROME_DIR, config.bundle.dir];
+	for (const a of all) for (const b of all) if (a !== b && (a + "/").startsWith(`${b}/`)) throw new Refusal("pin-layout");
+	if (new Set(all).size !== all.length) throw new Refusal("pin-layout");
+	return { nodeRoot, caddy: viewer.caddy.path, spacesd: viewer.spacesd.path, chrome: CHROME_DIR, bundle: config.bundle.dir };
+}
+
+/** The render's checks of the pins against the configuration; it renders nothing from a pin set that is incomplete or is for something else. */
+function checkPins(config: Config, viewer: NonNullable<Config["viewer"]>, pins: Pins): void {
+	const missing = missingPins(pins);
+	if (missing.length > 0) throw new Refusal(`pin-missing:${missing.join(",")}`);
+	if (pins.repository.commit !== config.commit) throw new Refusal("pin-commit");
+	if (pins.node.version !== config.node.version || pins.caddy.version !== viewer.caddy.version || pins.spacesd.version !== viewer.spacesd.version || pins.spacesd.sha256 !== viewer.spacesd.sha256) throw new Refusal("pin-mismatch");
+	for (const sha of [pins.node.sha256, pins.caddy.sha256, pins.spacesd.sha256, pins.chrome.sha256, pins.repository.sha256!]) if (!/^[0-9a-f]{64}$/.test(sha)) throw new Refusal("pin-mismatch");
+	for (const url of [pins.node.url, pins.caddy.url, pins.spacesd.url, pins.chrome.url, pins.ws.url, pins.protobuf.url]) if (!url.startsWith("https://")) throw new Refusal("pin-mismatch");
+}
+
+/**
+ * `fetch.sh`: delivers the pinned programs and the commit's bundle, once, as root, with nothing from the cloud's user data and no
+ * credential. Every artifact is fetched over HTTPS only (no downgrade, TLS 1.2 or later, no proxy, no configuration file, no retry),
+ * must answer 200, must be within its size bound (and exactly its size where that is pinned), and must match its pinned digest
+ * before one byte of it is unpacked. Everything is staged in a directory made here (new, root's, 0700) and removed on exit, the
+ * original failure still reported; a destination that exists is never replaced, and a half-delivered VM is not resumed.
+ */
+function renderFetch(config: Config, viewer: NonNullable<Config["viewer"]>, pins: Pins): string {
+	const dest = fetchDestinations(config, viewer);
+	const repository = `https://codeload.github.com/ajac-zero/pim/tar.gz/${config.commit}`;
+	const download = (name: string, file: string, url: string, algo: "256" | "512", hex: string, bytes: number | null, max: number) =>
+		`download ${quote(name)} ${quote(file)} ${quote(url)} ${algo} ${quote(hex)} ${bytes === null ? "-" : bytes} ${max}\n`;
+	const downloads = [
+		download("node", "node.tar.gz", pins.node.url, "256", pins.node.sha256, null, pins.node.maxBytes),
+		download("caddy", "caddy.tar.gz", pins.caddy.url, "256", pins.caddy.sha256, null, pins.caddy.maxBytes),
+		download("spacesd", "spacesd", pins.spacesd.url, "256", pins.spacesd.sha256, pins.spacesd.bytes, pins.spacesd.maxBytes),
+		download("chrome", "chrome.deb", pins.chrome.url, "256", pins.chrome.sha256, pins.chrome.bytes, pins.chrome.maxBytes),
+		download("repository", "source.tar.gz", repository, "256", pins.repository.sha256!, null, pins.repository.maxBytes),
+		download("ws", "ws.tgz", pins.ws.url, "512", integrityHex(pins.ws.sha512), null, pins.ws.maxBytes),
+		download("protobuf", "protobuf.tgz", pins.protobuf.url, "512", integrityHex(pins.protobuf.sha512), null, pins.protobuf.maxBytes),
+	].join("");
+	const tools = ["curl", "tar", "dpkg-deb", "sha256sum", "sha512sum", "stat", "cut", "find", "chmod", "mkdir", "mv", "rm", "install", "dirname"].map((tool) => `trusted_file /usr/bin/${tool} || fail tools`).join("\n");
+	return `${prologue(config, "fetch", false)}
+${tools}
+unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy NO_PROXY CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
+
+readonly STAGE=${quote(FETCH_STAGE)}
+readonly COMMIT=${quote(config.commit)}
+readonly NODE_ROOT=${quote(dest.nodeRoot)}
+readonly CADDY=${quote(dest.caddy)}
+readonly SPACESD=${quote(dest.spacesd)}
+readonly CHROME_DIR=${quote(dest.chrome)}
+readonly CADDY_SHA256=${quote(viewer.caddy.sha256)}
+readonly CHROME_SHA256=${quote(config.browser.sha256)}
+readonly SPACESD_SHA256=${quote(pins.spacesd.sha256)}
+
+# Only the stage this run made is removed, on any exit; a failed removal is reported without hiding why the run ended.
+CREATED=0
+cleanup() {
+	local status="$1"
+	if [[ "$CREATED" == 1 ]]; then
+		rm -rf --one-file-system -- "$STAGE" || { printf '{"event":"pim-cua-eval.failed","command":"%s","reason":"cleanup"}\\n' "$COMMAND" >&2; [[ "$status" != 0 ]] || status=1; }
+	fi
+	exit "$status"
+}
+trap 'cleanup $?' EXIT
+
+sum256() { sha256sum <"$1" | cut -d' ' -f1; }
+sum512() { sha512sum <"$1" | cut -d' ' -f1; }
+
+# download NAME FILE URL ALGO HEX BYTES MAX: one fetch, no retry, into the stage; every check before the file is used.
+download() {
+	local name="$1" file="$STAGE/dl/$2" url="$3" algo="$4" hex="$5" bytes="$6" max="$7" status size sum
+	status="$(curl -q --noproxy '*' --proto '=https' --proto-redir '=https' --tlsv1.2 --max-redirs 5 --fail --silent --show-error --location \\
+		--retry 0 --connect-timeout 20 --max-time 900 --max-filesize "$max" --output "$file" --write-out '%{http_code}' -- "$url")" || fail "download-$name"
+	[[ "$status" == 200 ]] || fail "status-$name"
+	size="$(stat -c %s -- "$file")"
+	(( size > 0 && size <= max )) || fail "size-$name"
+	[[ "$bytes" == - || "$size" == "$bytes" ]] || fail "size-$name"
+	sum="$("sum$algo" "$file")"
+	[[ "$sum" == "$hex" ]] || fail "digest-$name"
+}
+
+absent() { [[ ! -e "$1" && ! -L "$1" ]] || fail "exists-$2"; }
+
+# Every directory above $1 exists, made here when missing (root's, 0755), and is root's, not a link, and writable by no one else.
+ensure_parent() {
+	local dir current="" part
+	local -a parts
+	dir="$(dirname -- "$1")"
+	IFS=/ read -r -a parts <<<"\${dir#/}"
+	for part in "\${parts[@]}"; do
+		[[ -n "$part" && "$part" != . && "$part" != .. ]] || fail dest-path
+		current="$current/$part"
+		if [[ ! -e "$current" && ! -L "$current" ]]; then mkdir -m 0755 -- "$current" || fail dest-parent; fi
+	done
+	trusted_dirs "$dir" || fail dest-parent
+}
+
+# A staged tree is all root's, with no write for group or others and no setuid or setgid.
+staged_ok() {
+	local unexpected
+	unexpected="$(find "$@" \\( ! -uid 0 -o -perm /022 -o -perm /6000 \\) -print -quit)" || fail "stage-ownership"
+	[[ -z "$unexpected" ]] || fail "stage-ownership"
+}
+
+# Nothing is replaced, and nothing is begun if anything is already there.
+absent "$NODE_ROOT" node
+absent "$CADDY" caddy
+absent "$SPACESD" spacesd
+absent "$CHROME_DIR" chrome
+absent "$BUNDLE" bundle
+trusted_dirs /var/lib || fail stage-parent
+mkdir -m 0700 -- "$STAGE" || fail stage-exists
+CREATED=1
+mkdir -m 0700 -- "$STAGE/dl" "$STAGE/node" "$STAGE/caddy" "$STAGE/chrome" "$STAGE/src" "$STAGE/spacesd"
+
+${downloads}
+# Unpacked only now: each archive matched its pin, as root, without restoring any owner.
+tar --extract --gzip --file "$STAGE/dl/node.tar.gz" --directory "$STAGE/node" --strip-components=1 --no-same-owner --same-permissions || fail unpack-node
+tar --extract --gzip --file "$STAGE/dl/caddy.tar.gz" --directory "$STAGE/caddy" --no-same-owner --same-permissions caddy || fail unpack-caddy
+tar --extract --gzip --file "$STAGE/dl/source.tar.gz" --directory "$STAGE/src" --strip-components=1 --no-same-owner || fail unpack-repository
+dpkg-deb --extract "$STAGE/dl/chrome.deb" "$STAGE/chrome" || fail unpack-chrome
+install -m 0755 -o root -g root -- "$STAGE/dl/spacesd" "$STAGE/spacesd/spacesd" || fail unpack-spacesd
+# Chrome runs as the desktop account with its own sandbox on: the package's setuid helper is not kept, and the user-namespace sandbox is what the support check proves.
+[[ -f "$STAGE/chrome$CHROME_DIR/chrome" && -f "$STAGE/chrome$CHROME_DIR/chrome-sandbox" ]] || fail unpack-chrome
+chmod 0755 -- "$STAGE/chrome$CHROME_DIR/chrome-sandbox" || fail unpack-chrome
+staged_ok "$STAGE/node" "$STAGE/caddy" "$STAGE/chrome$CHROME_DIR" "$STAGE/spacesd"
+
+# The programs themselves match the digests the configuration records.
+[[ -f "$STAGE/node/bin/node" && "$(sum256 "$STAGE/node/bin/node")" == "$NODE_SHA256" ]] || fail digest-node-program
+[[ -f "$STAGE/caddy/caddy" && "$(sum256 "$STAGE/caddy/caddy")" == "$CADDY_SHA256" ]] || fail digest-caddy-program
+[[ "$(sum256 "$STAGE/chrome$CHROME_DIR/chrome")" == "$CHROME_SHA256" ]] || fail digest-chrome-program
+[[ "$(sum256 "$STAGE/spacesd/spacesd")" == "$SPACESD_SHA256" ]] || fail digest-spacesd-program
+
+# The bundle is built from the pinned archive by the archive's own program, with the staged Node and the two pinned packages, and must come to the configured tree digest.
+"$STAGE/node/bin/node" "$STAGE/src/computer/cua-host/eval-install/operator.ts" bundle --commit "$COMMIT" --source-dir "$STAGE/src" \\
+	--ws-tarball "$STAGE/dl/ws.tgz" --protobuf-tarball "$STAGE/dl/protobuf.tgz" --out "$STAGE/bundle" >/dev/null || fail bundle-build
+digest="$(tree_digest "$STAGE/bundle")" || fail bundle-digest
+[[ "$digest" == "$BUNDLE_SHA256" ]] || fail bundle-digest
+staged_ok "$STAGE/bundle"
+
+# In place, each by one rename (the stage and the destinations are one filesystem on the base). A failure partway leaves a VM that is discarded, never resumed.
+ensure_parent "$NODE_ROOT"; ensure_parent "$CADDY"; ensure_parent "$SPACESD"; ensure_parent "$CHROME_DIR"; ensure_parent "$BUNDLE"
+mv -T -- "$STAGE/node" "$NODE_ROOT" || fail place-node
+mv -T -- "$STAGE/caddy/caddy" "$CADDY" || fail place-caddy
+mv -T -- "$STAGE/spacesd/spacesd" "$SPACESD" || fail place-spacesd
+mv -T -- "$STAGE/chrome$CHROME_DIR" "$CHROME_DIR" || fail place-chrome
+mv -T -- "$STAGE/bundle" "$BUNDLE" || fail place-bundle
+printf '{"event":"pim-cua-eval.fetched","evaluation":"%s"}\\n' ${quote(config.evaluation)}
+`;
+}
+
+/**
+ * `support.sh`: the read-only checks a startup needs to pass before `start`, run as root after `install`: every package of the
+ * base is installed, every delivered program resolves its shared libraries, Node and Caddy are the pinned versions, Caddy accepts its
+ * configuration (`caddy validate`, as the ingress account with its own state directory), headless Chrome starts as the desktop
+ * account with its own sandbox on, and spacesd answers `--help` as that account. It starts no service and opens no port; it prints one line per
+ * check and exits nonzero if any failed.
+ */
+function renderSupport(config: Config, viewer: NonNullable<Config["viewer"]>): string {
+	const packages = BASE_PACKAGES.map((name) => quote(name)).join(" ");
+	return `${prologue(config, "support")}
+trusted_file ${TOOLS.runuser} || fail tools
+for tool in dpkg-query ldd timeout mktemp chown grep rm; do trusted_file "/usr/bin/$tool" || fail tools; done
+readonly CADDY=${quote(viewer.caddy.path)}
+readonly SPACESD=${quote(viewer.spacesd.path)}
+readonly BROWSER=${quote(config.browser.path)}
+readonly NODE_VERSION=${quote(config.node.version)}
+readonly CADDY_VERSION=${quote(viewer.caddy.version)}
+
+FAILED=0
+ok() { printf '{"event":"pim-cua-eval.support","check":"%s","result":"ok"}\\n' "$1"; }
+bad() { printf '{"event":"pim-cua-eval.support","check":"%s","result":"fail"}\\n' "$1"; FAILED=1; }
+check() { if "\${@:2}" >/dev/null 2>&1; then ok "$1"; else bad "$1"; fi; }
+
+TEMP=""
+cleanup() {
+	local status="$1"
+	if [[ -n "$TEMP" ]]; then rm -rf --one-file-system -- "$TEMP" || { bad cleanup; status=1; }; fi
+	exit "$status"
+}
+trap 'cleanup $?' EXIT
+
+for package in ${packages}; do
+	check "package-$package" test "$(dpkg-query -W -f='\${db:Status-Status}' -- "$package" 2>/dev/null)" = installed
+done
+
+# A program with no missing shared library. A static one has none to miss.
+libs_ok() { local out; out="$(LD_LIBRARY_PATH= ldd -- "$1" 2>&1)" || true; ! grep -q 'not found' <<<"$out"; }
+for program in "$NODE" "$CADDY" "$SPACESD" "$BROWSER"; do check "libraries-$(basename -- "$program")" libs_ok "$program"; done
+
+version_is() { local out; out="$("$1" "\${@:3}" 2>&1)" && [[ "$out" == "$2"* ]]; }
+check node-version version_is "$NODE" "$NODE_VERSION" --version
+version_ok() { local out; out="$(${TOOLS.runuser} -u ${VIEWER_ACCOUNTS.ingress} -- "$CADDY" version 2>&1)" && [[ "$out" == "$CADDY_VERSION"* ]]; }
+check caddy-version-pinned version_ok
+
+# Caddy parses and provisions the installed Caddyfile as its own account, as the unit does; nothing is started, no certificate is asked for.
+check caddy-validate ${TOOLS.runuser} -u ${VIEWER_ACCOUNTS.ingress} -- env -i PATH=/usr/bin:/bin XDG_DATA_HOME=${VIEWER_PATHS.ingressState} XDG_CONFIG_HOME=${VIEWER_PATHS.ingressState} "$CADDY" validate --config ${VIEWER_PATHS.caddyfile} --adapter caddyfile
+
+# spacesd runs, as the desktop account, as far as printing its help.
+check spacesd-runs ${TOOLS.runuser} -u ${ACCOUNTS.desktop} -- env -i PATH=/usr/bin:/bin "$SPACESD" --help
+
+# Chrome with its own sandbox left on, as the desktop account, headless, with a profile directory made here and removed on exit.
+TEMP="$(mktemp -d)" && chown ${ACCOUNTS.desktop}: -- "$TEMP" || bad chrome-profile
+if [[ -n "$TEMP" ]]; then
+	chrome_runs() {
+		local out
+		out="$(timeout 60 ${TOOLS.runuser} -u ${ACCOUNTS.desktop} -- env -i PATH=/usr/bin:/bin HOME="$TEMP" "$BROWSER" --headless=new --disable-gpu --user-data-dir="$TEMP/profile" --dump-dom about:blank 2>&1)" && grep -q '<html' <<<"$out"
+	}
+	check chrome-headless-sandboxed chrome_runs
+fi
+exit "$FAILED"
+`;
 }
 
 /** The desktop account's UID in the base: above a cloud's own admin user's (1000), and inside what the installer takes (1000 to 59999). */
@@ -492,34 +737,7 @@ export function renderBaseCloudConfig(config: Config): string {
 		disable_root: true,
 		ssh_pwauth: false,
 		users: ["default", { name: ACCOUNTS.desktop, uid, homedir: `/home/${ACCOUNTS.desktop}`, shell: "/bin/bash", lock_passwd: true, sudo: false }],
-		packages: [
-			"xvfb",
-			"openbox",
-			"dbus-user-session",
-			"x11-xserver-utils",
-			"openssl",
-			"ca-certificates",
-			"fonts-liberation",
-			"libnss3",
-			"libatk1.0-0t64",
-			"libatk-bridge2.0-0t64",
-			"libcups2t64",
-			"libdrm2",
-			"libxkbcommon0",
-			"libxcomposite1",
-			"libxdamage1",
-			"libxfixes3",
-			"libxrandr2",
-			"libgbm1",
-			"libasound2t64",
-			"libpango-1.0-0",
-			"libcairo2",
-			"libx11-6",
-			"libxext6",
-			"libxtst6",
-			"libxcb-shm0",
-			"libxcb-xfixes0",
-		],
+		packages: [...BASE_PACKAGES],
 		write_files: [
 			{ path: "/etc/systemd/system/pim-cua-xvfb.service", owner: "root:root", permissions: "0644", content: xvfb },
 			{ path: "/etc/systemd/system/pim-cua-wm.service", owner: "root:root", permissions: "0644", content: wm },
@@ -547,46 +765,66 @@ function git(args: string[]): Buffer {
 	return execFileSync("git", ["-C", REPOSITORY, ...args], { maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
 }
 
-function bundle(commit: string, wsTarball: string, out: string, protobufTarball?: string): string {
-	if (!/^[0-9a-f]{40}$/.test(commit)) throw new Refusal("commit");
-	let resolved: string;
-	try {
-		resolved = git(["rev-parse", "--verify", "--end-of-options", `${commit}^{commit}`]).toString("utf8").trim();
-	} catch {
-		throw new Refusal("commit");
-	}
-	if (resolved !== commit) throw new Refusal("commit");
-	const sources = new Map<string, Buffer>();
-	for (const source of BUNDLE_SOURCES) {
+/** A regular file of a source directory (an unpacked archive of the commit), never a link or anything else. */
+function readRegular(dir: string, file: string): Buffer {
+	const target = path.join(dir, file);
+	const stat = fs.lstatSync(target);
+	if (!stat.isFile() || stat.size > 16 * 1024 * 1024) throw new Refusal("source");
+	return fs.readFileSync(target);
+}
+
+/**
+ * What a bundle is built from, read through `read` (a commit's git objects, or a source directory): the base's sources,
+ * the viewer's too when there is one, the version `ws` and the viewer's package are locked at, and each one's integrity.
+ */
+export function bundleInputs(read: (file: string) => Buffer, withViewer: boolean): { sources: Map<string, Buffer>; wsVersion: string; wsIntegrity: string; protobuf?: { version: string; integrity: string } } {
+	const get = (file: string): Buffer => {
 		try {
-			sources.set(source, git(["show", `${commit}:${source}`]));
+			return read(file);
 		} catch {
 			throw new Refusal("source");
 		}
-	}
+	};
+	const sources = new Map<string, Buffer>();
+	for (const source of BUNDLE_SOURCES) sources.set(source, get(source));
 	const hostPackage = JSON.parse(sources.get("computer/cua-host/package.json")!.toString("utf8")) as { dependencies?: Record<string, string> };
 	const wsVersion = hostPackage.dependencies?.ws;
 	if (typeof wsVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(wsVersion)) throw new Refusal("ws-version");
-	const wsIntegrity = lockedIntegrity(git(["show", `${commit}:pnpm-lock.yaml`]).toString("utf8"), wsVersion);
+	const lockfile = get("pnpm-lock.yaml").toString("utf8");
+	const wsIntegrity = lockedIntegrity(lockfile, wsVersion);
+	if (!withViewer) return { sources, wsVersion, wsIntegrity };
+	for (const source of VIEWER_SOURCES) sources.set(source, get(source));
+	const version = hostPackage.dependencies?.["@bufbuild/protobuf"];
+	if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) throw new Refusal("protobuf-version");
+	return { sources, wsVersion, wsIntegrity, protobuf: { version, integrity: lockedPackageIntegrity(lockfile, "@bufbuild/protobuf", version) } };
+}
+
+function bundle(commit: string, wsTarball: string, out: string, protobufTarball?: string, sourceDir?: string): string {
+	if (!/^[0-9a-f]{40}$/.test(commit)) throw new Refusal("commit");
+	let read: (file: string) => Buffer;
+	if (sourceDir === undefined) {
+		let resolved: string;
+		try {
+			resolved = git(["rev-parse", "--verify", "--end-of-options", `${commit}^{commit}`]).toString("utf8").trim();
+		} catch {
+			throw new Refusal("commit");
+		}
+		if (resolved !== commit) throw new Refusal("commit");
+		read = (file) => git(["show", `${commit}:${file}`]);
+	} else {
+		// On the VM, with no git: the pinned archive of the commit, unpacked. Its digest was checked before it was unpacked, and the bundle's own digest is checked after.
+		if (!isPlainPath(sourceDir)) throw new Refusal("source-dir");
+		read = (file) => readRegular(sourceDir, file);
+	}
+	const inputs = bundleInputs(read, protobufTarball !== undefined);
 	if (!isPlainPath(wsTarball)) throw new Refusal("ws-tarball");
 	const tarball = fs.readFileSync(wsTarball);
 	let viewer: ViewerBundle | undefined;
 	if (protobufTarball !== undefined) {
-		// The viewer's files are read from the commit's objects too, and its one package is locked like `ws`.
-		for (const source of VIEWER_SOURCES) {
-			try {
-				sources.set(source, git(["show", `${commit}:${source}`]));
-			} catch {
-				throw new Refusal("source");
-			}
-		}
-		const protobufVersion = hostPackage.dependencies?.["@bufbuild/protobuf"];
-		if (typeof protobufVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(protobufVersion)) throw new Refusal("protobuf-version");
-		const protobufIntegrity = lockedPackageIntegrity(git(["show", `${commit}:pnpm-lock.yaml`]).toString("utf8"), "@bufbuild/protobuf", protobufVersion);
 		if (!isPlainPath(protobufTarball)) throw new Refusal("protobuf-tarball");
-		viewer = { protobufVersion, protobufIntegrity, protobufTarball: fs.readFileSync(protobufTarball) };
+		viewer = { protobufVersion: inputs.protobuf!.version, protobufIntegrity: inputs.protobuf!.integrity, protobufTarball: fs.readFileSync(protobufTarball) };
 	}
-	writeTree(out, bundleEntries({ commit, sources, wsVersion, wsIntegrity, wsTarball: tarball, ...(viewer ? { viewer } : {}) }));
+	writeTree(out, bundleEntries({ commit, sources: inputs.sources, wsVersion: inputs.wsVersion, wsIntegrity: inputs.wsIntegrity, wsTarball: tarball, ...(viewer ? { viewer } : {}) }));
 	return treeDigest(out);
 }
 
@@ -602,13 +840,13 @@ function render(configFile: string, out: string): string[] {
 
 const USAGE = `The operator's side of a Cua evaluation VM's installation. See docs/cua-eval-install.md.
 
-  node operator.ts bundle --commit <sha> --ws-tarball <file> --out <new directory> [--protobuf-tarball <file>]
+  node operator.ts bundle --commit <sha> --ws-tarball <file> --out <new directory> [--protobuf-tarball <file>] [--source-dir <directory>]
   node operator.ts digest --dir <directory>
   node operator.ts render --config <file> --out <new directory>`;
 
 const COMMANDS = { bundle: ["commit", "ws-tarball", "out"], digest: ["dir"], render: ["config", "out"] } as const;
-/** Options a command may also take; `--protobuf-tarball` makes the bundle carry the viewer. */
-const OPTIONAL: Record<string, readonly string[]> = { bundle: ["protobuf-tarball"] };
+/** Options a command may also take; `--protobuf-tarball` makes the bundle carry the viewer, and `--source-dir` reads the sources from an unpacked archive instead of git. */
+const OPTIONAL: Record<string, readonly string[]> = { bundle: ["protobuf-tarball", "source-dir"] };
 
 function main(argv: string[]): void {
 	const command = argv[0] as keyof typeof COMMANDS;
@@ -624,7 +862,7 @@ function main(argv: string[]): void {
 	}
 	try {
 		if (command === "bundle") {
-			const sha256 = bundle(values.commit!, values["ws-tarball"]!, values.out!, values["protobuf-tarball"]);
+			const sha256 = bundle(values.commit!, values["ws-tarball"]!, values.out!, values["protobuf-tarball"], values["source-dir"]);
 			process.stdout.write(`${JSON.stringify({ event: "pim-cua-eval.bundled", commit: values.commit, sha256 })}\n`);
 		} else if (command === "digest") {
 			process.stdout.write(`${JSON.stringify({ event: "pim-cua-eval.digest", sha256: treeDigest(values.dir!) })}\n`);

@@ -325,10 +325,127 @@ function desk(options: {
 	return { desk: instance, store, asked, clock, records };
 }
 
-/** Flushes that wait until the test settles each, in the order they were asked for. */
-const heldFlushes = () => {
-	const held: { resolve: () => void; reject: (error: Error) => void }[] = [];
-	return { held, flush: () => new Promise<void>((resolve, reject) => held.push({ resolve, reject })) };
+/** A wait the test holds: settled by the test, or let go by `owning` when the test ends. */
+type Gate<T> = { readonly promise: Promise<T>; resolve(value: T): void; reject(error: Error): void; readonly settled: boolean };
+
+/** What a test owns while it runs, for `owning` to let go of when it ends. */
+type Owner = {
+	/** A wait the test holds; if the test hasn't settled it when it ends, it is resolved with `release()`, which may also end what is waiting on it. */
+	gate<T>(release: () => T): Gate<T>;
+	/** An operation the test started and may not await, such as a launch waiting on a held flush. */
+	track<T>(operation: Promise<T>): Promise<T>;
+	/** A timer the test sets; cleared when the test ends if it hasn't run. */
+	timeout(run: () => void, ms: number): void;
+};
+
+const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/**
+ * Runs a test's `body` with an `Owner`, then, whatever the body did, lets go
+ * of everything it owns: its timers cleared, every gate it still holds
+ * released, and every operation it started awaited, again until nothing is
+ * held, a few times at most. Nothing is tried again and nothing is swallowed:
+ * an operation that rejected, one that didn't settle within five seconds, or
+ * a gate still held at the end is a cleanup failure. The body's error is
+ * thrown as it is when only it failed, the cleanup's when only it did, and
+ * both, the body's first, in one `AggregateError` naming each, as
+ * test/cua-native-identity.test.ts does.
+ */
+async function owning(body: (own: Owner) => Promise<void>): Promise<void> {
+	const held: { gate: Gate<unknown>; release: () => void }[] = [];
+	const operations: Promise<unknown>[] = [];
+	const timers = new Set<ReturnType<typeof setTimeout>>();
+	const own: Owner = {
+		gate<T>(release: () => T): Gate<T> {
+			let settled = false;
+			let resolve!: (value: T) => void;
+			let reject!: (error: Error) => void;
+			const promise = new Promise<T>((yes, no) => {
+				resolve = yes;
+				reject = no;
+			});
+			const gate: Gate<T> = {
+				promise,
+				resolve: (value) => {
+					settled = true;
+					resolve(value);
+				},
+				reject: (error) => {
+					settled = true;
+					reject(error);
+				},
+				get settled() {
+					return settled;
+				},
+			};
+			held.push({ gate, release: () => gate.resolve(release()) });
+			return gate;
+		},
+		track<T>(operation: Promise<T>): Promise<T> {
+			operations.push(operation);
+			return operation;
+		},
+		timeout(run, ms) {
+			const timer = setTimeout(() => {
+				timers.delete(timer);
+				run();
+			}, ms);
+			timers.add(timer);
+		},
+	};
+	let failure: { readonly error: unknown } | undefined;
+	try {
+		await body(own);
+	} catch (error) {
+		failure = { error };
+	}
+	const problems: unknown[] = [];
+	for (const timer of timers) clearTimeout(timer);
+	timers.clear();
+	for (let pass = 1; ; pass++) {
+		for (const { gate, release } of held) {
+			if (gate.settled) continue;
+			try {
+				release();
+			} catch (error) {
+				problems.push(error);
+				gate.reject(new Error("Its release failed."));
+			}
+		}
+		let stuck: ReturnType<typeof setTimeout> | undefined;
+		const outcome = await Promise.race([Promise.allSettled(operations), new Promise<"stuck">((resolve) => (stuck = setTimeout(() => resolve("stuck"), 5_000)))]);
+		clearTimeout(stuck);
+		// One turn more, for what was let go late (an abandoned answer, a cancel) to run its course.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const open = held.filter(({ gate }) => !gate.settled).length;
+		if (outcome !== "stuck" && open === 0) {
+			for (const result of outcome) if (result.status === "rejected") problems.push(result.reason);
+			break;
+		}
+		if (pass === 5) {
+			problems.push(new Error(outcome === "stuck" ? "An operation the test started never settled." : `${open} waits the test held were never let go.`));
+			break;
+		}
+	}
+	const cleanup = problems.length === 0 ? undefined : { error: problems.length === 1 ? problems[0] : new AggregateError(problems, problems.map(messageOf).join("; ")) };
+	if (failure && cleanup) {
+		throw new AggregateError([failure.error, cleanup.error], `The test failed (${messageOf(failure.error)}), and letting go of what it owned failed too (${messageOf(cleanup.error)})`);
+	}
+	if (failure) throw failure.error;
+	if (cleanup) throw cleanup.error;
+}
+
+/** Flushes that wait until the test settles each, in the order they were asked for, owned by `own`. */
+const heldFlushes = (own: Owner) => {
+	const held: Gate<void>[] = [];
+	return {
+		held,
+		flush: () => {
+			const flush = own.gate<void>(() => undefined);
+			held.push(flush);
+			return flush.promise;
+		},
+	};
 };
 
 const body = async (response: Response) => (await response.json()) as Record<string, any>;
@@ -438,37 +555,39 @@ describe("the Worker's client to the viewer host", () => {
 		}
 	});
 
-	it("observes a promise it no longer waits for, and leaves no timer or listener behind", async () => {
-		const timers = vi.spyOn(globalThis, "setTimeout");
-		const cleared = vi.spyOn(globalThis, "clearTimeout");
-		try {
-			const signal = (aborted: boolean) => ({ aborted, addEventListener: vi.fn(), removeEventListener: vi.fn() });
-			// settle's own timers, told apart by their bound; anything else the runtime sets is not its.
-			const bounded = (ms: number) => timers.mock.calls.flatMap(([, delay], index) => (delay === ms ? [timers.mock.results[index]!.value] : []));
-			// Already aborted: stopped at once, with no timer or listener set, and the promise's rejection still handled (an unhandled one fails the run).
-			const early = signal(true);
-			expect(await settle(Promise.reject(new Error("refused")), early as unknown as AbortSignal, 1_000)).toEqual({ kind: "stopped" });
-			expect(early.addEventListener).not.toHaveBeenCalled();
-			expect(bounded(1_000)).toEqual([]);
-			await new Promise((resolve) => setTimeout(resolve, 0));
+	it("observes a promise it no longer waits for, and leaves no timer or listener behind", () =>
+		owning(async (own) => {
+			const timers = vi.spyOn(globalThis, "setTimeout");
+			const cleared = vi.spyOn(globalThis, "clearTimeout");
+			try {
+				const signal = (aborted: boolean) => ({ aborted, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+				// settle's own timers, told apart by their bound; anything else the runtime sets is not its.
+				const bounded = (ms: number) => timers.mock.calls.flatMap(([, delay], index) => (delay === ms ? [timers.mock.results[index]!.value] : []));
+				// Already aborted: stopped at once, with no timer or listener set, and the promise's rejection still handled (an unhandled one fails the run).
+				const early = signal(true);
+				expect(await settle(Promise.reject(new Error("refused")), early as unknown as AbortSignal, 1_000)).toEqual({ kind: "stopped" });
+				expect(early.addEventListener).not.toHaveBeenCalled();
+				expect(bounded(1_000)).toEqual([]);
+				await new Promise((resolve) => setTimeout(resolve, 0));
 
-			// Settled by its value: the timer cleared, and the listener it added removed.
-			const live = signal(false);
-			expect(await settle(Promise.resolve(7), live as unknown as AbortSignal, 1_000)).toEqual({ kind: "value", value: 7 });
-			const listener = live.addEventListener.mock.calls[0]![1];
-			expect(live.removeEventListener).toHaveBeenCalledWith("abort", listener);
-			expect(bounded(1_000)).toHaveLength(1);
-			expect(cleared).toHaveBeenCalledWith(bounded(1_000)[0]);
+				// Settled by its value: the timer cleared, and the listener it added removed.
+				const live = signal(false);
+				expect(await settle(Promise.resolve(7), live as unknown as AbortSignal, 1_000)).toEqual({ kind: "value", value: 7 });
+				const listener = live.addEventListener.mock.calls[0]![1];
+				expect(live.removeEventListener).toHaveBeenCalledWith("abort", listener);
+				expect(bounded(1_000)).toHaveLength(1);
+				expect(cleared).toHaveBeenCalledWith(bounded(1_000)[0]);
 
-			// Stopped by its bound: the listener removed too.
-			const slow = signal(false);
-			expect(await settle(new Promise(() => undefined), slow as unknown as AbortSignal, 1)).toEqual({ kind: "stopped" });
-			expect(slow.removeEventListener).toHaveBeenCalledWith("abort", slow.addEventListener.mock.calls[0]![1]);
-		} finally {
-			timers.mockRestore();
-			cleared.mockRestore();
-		}
-	});
+				// Stopped by its bound: the listener removed too.
+				const slow = signal(false);
+				// Its promise is held until the test ends, then settled.
+				expect(await settle(own.gate(() => undefined).promise, slow as unknown as AbortSignal, 1)).toEqual({ kind: "stopped" });
+				expect(slow.removeEventListener).toHaveBeenCalledWith("abort", slow.addEventListener.mock.calls[0]![1]);
+			} finally {
+				timers.mockRestore();
+				cleared.mockRestore();
+			}
+		}));
 });
 
 describe("the desk: a space's observations, recorded before the host is asked", () => {
@@ -589,8 +708,9 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 			Response.json({ outcome: "found", key: id(1), state, generation: "gen-1", launchId: LAUNCH, notAfter: NOW + LIFETIME, evidence: state === "closed_observed" ? "cleanup 1/1" : null, launch: state === "closed_observed" ? CLOSED : { ...CLOSED, phase: "closing", reason: "ended" }, ...changes });
 		answer = found("ending");
 		expect((await body(await t.desk.status(id(1)))).observation).toMatchObject({ status: "revoking" });
+		// The host not taking calls: passed on as such, with nothing changed.
 		answer = () => new Response("down", { status: 503 });
-		expect((await t.desk.status(id(1))).status).toBe(502);
+		expect((await t.desk.status(id(1))).status).toBe(503);
 		expect(t.records()[0]!.status).toBe("revoking");
 		// Still no new observation while this one isn't settled.
 		expect((await t.desk.launch()).status).toBe(409);
@@ -723,113 +843,128 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		expect(u.records()).toEqual([expect.objectContaining({ status: "unconfirmed", hostLaunchId: LAUNCH, hostGeneration: "gen-1" })]);
 	});
 
-	it("asks the host nothing after a flush it waited on, once another flush failed meanwhile", async () => {
-		// Two launches in flight: the second's flush fails and blocks the ledger, so the first sends nothing, though its own flush succeeds.
-		const flushes = heldFlushes();
-		const t = desk({ stored: empty(), host: launched, flush: flushes.flush, openObservations: 2 });
-		const first = t.desk.launch();
-		const second = t.desk.launch();
-		expect(flushes.held).toHaveLength(2);
-		flushes.held[1]!.reject(new Error("disk gone"));
-		expect((await second).status).toBe(503);
-		flushes.held[0]!.resolve();
-		expect((await first).status).toBe(503);
-		expect(t.asked).toEqual([]);
-		expect(t.desk.blocked).not.toBeNull();
-		expect(t.records().map((record) => record.status)).toEqual(["pending_open", "pending_open"]);
+	it("asks the host nothing after a flush it waited on, once another flush failed meanwhile", () =>
+		owning(async (own) => {
+			// Two launches in flight: the second's flush fails and blocks the ledger, so the first sends nothing, though its own flush succeeds.
+			const flushes = heldFlushes(own);
+			const t = desk({ stored: empty(), host: launched, flush: flushes.flush, openObservations: 2 });
+			const first = own.track(t.desk.launch());
+			const second = own.track(t.desk.launch());
+			expect(flushes.held).toHaveLength(2);
+			flushes.held[1]!.reject(new Error("disk gone"));
+			expect((await second).status).toBe(503);
+			flushes.held[0]!.resolve();
+			expect((await first).status).toBe(503);
+			expect(t.asked).toEqual([]);
+			expect(t.desk.blocked).not.toBeNull();
+			expect(t.records().map((record) => record.status)).toEqual(["pending_open", "pending_open"]);
 
-		// An end whose flush fails while a launch waits on its own: neither the end nor the launch is sent.
-		const later = heldFlushes();
-		let holding = false;
-		const u = desk({
-			stored: empty(),
-			host: (asked) => (asked.url.endsWith("/observations/end") ? Response.json({ outcome: "requested", recorded: true }) : launched(asked)),
-			flush: () => (holding ? later.flush() : Promise.resolve()),
-			openObservations: 2,
-		});
-		expect((await u.desk.launch()).status).toBe(200);
-		holding = true;
-		const starting = u.desk.launch();
-		const stopping = u.desk.end(id(1));
-		expect(later.held).toHaveLength(2);
-		later.held[1]!.reject(new Error("disk gone"));
-		expect((await stopping).status).toBe(503);
-		later.held[0]!.resolve();
-		expect((await starting).status).toBe(503);
-		expect(u.asked.map((asked) => asked.url)).toEqual(["https://bridge.cua.test/pim/observations/launch"]);
-		expect(JSON.parse(u.asked[0]!.body)).toMatchObject({ key: id(1) });
-	});
-
-	it("asks nothing once the deadline came during the flush, and hands out no viewer once it came during the host's answer", async () => {
-		// The flush outlasted the deadline: nothing is asked, the record says nothing was opened, and the next one may start.
-		const flushes = heldFlushes();
-		const t = desk({ stored: empty(), host: launched, flush: flushes.flush });
-		const starting = t.desk.launch();
-		t.clock.now = NOW + LIFETIME;
-		flushes.held[0]!.resolve();
-		const late = await starting;
-		expect(late.status).toBe(409);
-		expect((await body(late)).viewer).toBeUndefined();
-		expect(t.asked).toEqual([]);
-		expect(t.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "not_opened" })]);
-
-		// The host answered at the deadline: its launch is recorded, so it can still be ended and checked, but its credential goes to no one.
-		const u = desk({
-			stored: empty(),
-			host: (asked) => {
-				u.clock.now = NOW + LIFETIME;
-				return launched(asked);
-			},
-		});
-		const answered = await u.desk.launch();
-		expect(answered.status).toBe(409);
-		const text = await answered.text();
-		expect(text).not.toContain(CREDENTIAL);
-		expect(JSON.parse(text).viewer).toBeUndefined();
-		expect(u.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "open", hostLaunchId: LAUNCH, hostGeneration: "gen-1" })]);
-	});
-
-	it("leaves an observation that is still starting to finish when its end is asked for, and sends its launch once", async () => {
-		const flushes = heldFlushes();
-		const t = desk({ stored: empty(), host: launched, flush: flushes.flush });
-		const starting = t.desk.launch();
-		const stop = await t.desk.end(id(1));
-		expect(stop.status).toBe(409);
-		expect((await body(stop)).observation).toMatchObject({ id: id(1), status: "pending_open" });
-		expect(t.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "pending_open" })]);
-		expect(flushes.held).toHaveLength(1);
-		flushes.held[0]!.resolve();
-		expect((await starting).status).toBe(200);
-		expect(t.asked).toHaveLength(1);
-		expect(t.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "open", hostLaunchId: LAUNCH })]);
-	});
-
-	it("gives up on a management answer that never comes or never ends within its bound, and holds the record unconfirmed", async () => {
-		const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
-		const endless = () =>
-			new ReadableStream<Uint8Array>({
-				start: (controller) => controller.enqueue(new TextEncoder().encode('{"outcome":')),
-				pull: () => new Promise<void>(() => undefined),
-				cancel: () => new Promise<void>(() => undefined),
+			// An end whose flush fails while a launch waits on its own: neither the end nor the launch is sent.
+			const later = heldFlushes(own);
+			let holding = false;
+			const u = desk({
+				stored: empty(),
+				host: (asked) => (asked.url.endsWith("/observations/end") ? Response.json({ outcome: "requested", recorded: true }) : launched(asked)),
+				flush: () => (holding ? later.flush() : Promise.resolve()),
+				openObservations: 2,
 			});
-		try {
-			const silent = desk({ stored: empty(), host: () => new Promise<Response>(() => undefined), limits: { manageMs: 50 } });
-			expect((await silent.desk.launch()).status).toBe(502);
-			expect(silent.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "unconfirmed" })]);
+			expect((await u.desk.launch()).status).toBe(200);
+			holding = true;
+			const starting = own.track(u.desk.launch());
+			const stopping = own.track(u.desk.end(id(1)));
+			expect(later.held).toHaveLength(2);
+			later.held[1]!.reject(new Error("disk gone"));
+			expect((await stopping).status).toBe(503);
+			later.held[0]!.resolve();
+			expect((await starting).status).toBe(503);
+			expect(u.asked.map((asked) => asked.url)).toEqual(["https://bridge.cua.test/pim/observations/launch"]);
+			expect(JSON.parse(u.asked[0]!.body)).toMatchObject({ key: id(1) });
+		}));
 
-			const halfway = desk({ stored: empty(), host: () => new Response(endless(), { headers: { "content-type": "application/json" } }), limits: { manageMs: 50 } });
-			expect((await halfway.desk.launch()).status).toBe(502);
-			expect(halfway.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "unconfirmed" })]);
-			const logged = errors.mock.calls.map(([line]) => String(line));
-			expect(logged.filter((line) => line === JSON.stringify({ event: "cua.viewer.lost", action: "launch", reason: "timeout" }))).toHaveLength(2);
+	it("asks nothing once the deadline came during the flush, and hands out no viewer once it came during the host's answer", () =>
+		owning(async (own) => {
+			// The flush outlasted the deadline: nothing is asked, the record says nothing was opened, and the next one may start.
+			const flushes = heldFlushes(own);
+			const t = desk({ stored: empty(), host: launched, flush: flushes.flush });
+			const starting = own.track(t.desk.launch());
+			t.clock.now = NOW + LIFETIME;
+			flushes.held[0]!.resolve();
+			const late = await starting;
+			expect(late.status).toBe(409);
+			expect((await body(late)).viewer).toBeUndefined();
+			expect(t.asked).toEqual([]);
+			expect(t.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "not_opened" })]);
 
-			// A read that stalls stops at its signal, and a cancel that never settles is left after CLEANUP_MS, said to be unsettled.
-			const stop = new AbortController();
-			setTimeout(() => stop.abort(), 20);
-			expect(await readBounded(endless(), 1024, stop.signal)).toEqual({ kind: "stopped", cleaned: false });
-			expect(errors.mock.calls.map(([line]) => String(line))).toContain(JSON.stringify({ event: "cua.viewer.cleanup_unsettled", what: "body", outcome: "stopped" }));
-		} finally {
-			errors.mockRestore();
-		}
-	});
+			// The host answered at the deadline: its launch is recorded, so it can still be ended and checked, but its credential goes to no one.
+			const u = desk({
+				stored: empty(),
+				host: (asked) => {
+					u.clock.now = NOW + LIFETIME;
+					return launched(asked);
+				},
+			});
+			const answered = await u.desk.launch();
+			expect(answered.status).toBe(409);
+			const text = await answered.text();
+			expect(text).not.toContain(CREDENTIAL);
+			expect(JSON.parse(text).viewer).toBeUndefined();
+			expect(u.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "open", hostLaunchId: LAUNCH, hostGeneration: "gen-1" })]);
+		}));
+
+	it("leaves an observation that is still starting to finish when its end is asked for, and sends its launch once", () =>
+		owning(async (own) => {
+			const flushes = heldFlushes(own);
+			const t = desk({ stored: empty(), host: launched, flush: flushes.flush });
+			const starting = own.track(t.desk.launch());
+			const stop = await t.desk.end(id(1));
+			expect(stop.status).toBe(409);
+			expect((await body(stop)).observation).toMatchObject({ id: id(1), status: "pending_open" });
+			expect(t.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "pending_open" })]);
+			expect(flushes.held).toHaveLength(1);
+			flushes.held[0]!.resolve();
+			expect((await starting).status).toBe(200);
+			expect(t.asked).toHaveLength(1);
+			expect(t.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "open", hostLaunchId: LAUNCH })]);
+		}));
+
+	it("gives up on a management answer that never comes or never ends within its bound, and holds the record unconfirmed", () =>
+		owning(async (own) => {
+			const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+			try {
+				// A body that stops halfway: each pull, and its cancel, wait on gates held through the bounded result. Let go when the test ends,
+				// a pull ends the stream, so nothing pulls again, and the cancel settles.
+				const endless = () =>
+					new ReadableStream<Uint8Array>({
+						start: (controller) => controller.enqueue(new TextEncoder().encode('{"outcome":')),
+						pull: (controller) =>
+							own.gate(() => {
+								try {
+									controller.close();
+								} catch {
+									// Already cancelled: nothing to end.
+								}
+							}).promise,
+						cancel: () => own.gate(() => undefined).promise,
+					});
+
+				// No answer: held until the test ends, then a late one, which the client lets go unread.
+				const silent = desk({ stored: empty(), host: () => own.gate(() => new Response(null, { status: 500 })).promise, limits: { manageMs: 50 } });
+				expect((await silent.desk.launch()).status).toBe(502);
+				expect(silent.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "unconfirmed" })]);
+
+				const halfway = desk({ stored: empty(), host: () => new Response(endless(), { headers: { "content-type": "application/json" } }), limits: { manageMs: 50 } });
+				expect((await halfway.desk.launch()).status).toBe(502);
+				expect(halfway.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "unconfirmed" })]);
+				const logged = errors.mock.calls.map(([line]) => String(line));
+				expect(logged.filter((line) => line === JSON.stringify({ event: "cua.viewer.lost", action: "launch", reason: "timeout" }))).toHaveLength(2);
+
+				// A read that stalls stops at its signal, and a cancel that hasn't settled is left after CLEANUP_MS, said to be unsettled.
+				const stop = new AbortController();
+				own.timeout(() => stop.abort(), 20);
+				expect(await readBounded(endless(), 1024, stop.signal)).toEqual({ kind: "stopped", cleaned: false });
+				expect(errors.mock.calls.map(([line]) => String(line))).toContain(JSON.stringify({ event: "cua.viewer.cleanup_unsettled", what: "body", outcome: "stopped" }));
+			} finally {
+				errors.mockRestore();
+			}
+		}));
 });

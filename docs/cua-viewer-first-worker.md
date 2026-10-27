@@ -119,7 +119,7 @@ Only these files, each run on its own, one after another. All are stand-ins in t
 | `test/preview-cua-fixture.test.ts` | stand-in (`vitest.cua-standin.config.ts`) and the whole suite | 11 (9 before, 2 added, 3 extended) | `initialObservationState`, `type ObservationState` from `src/cua-observation`; `OBSERVATION_KEY` from `src/cua-observation-runtime`; `SIGNED_IN_HEADER` from `src/pim` |
 | `web/src/components/computer-settings.test.tsx` | `pnpm --filter pim-web test` | 4 (3 before, 1 added, then extended) | `type Observations` from `~/lib/pim-api` |
 
-Neither lane's file list changes. None of these files names the tests' Chrome, its binding or live checks.
+Neither lane's file list changes. None of these files names the tests' Chrome, its binding or live checks. In `test/cua-observation.test.ts`, every test that holds a wait (a flush, a host's answer, a body's pull or cancel, a promise `settle` waits on) or sets a timer runs inside `owning`: whatever its assertions did, it then clears its timers, releases every wait it still holds and awaits every operation it started, and throws its own failure and any cleanup failure together (an `AggregateError`, as in `test/cua-native-identity.test.ts`), so a failed assertion leaves nothing of the test pending.
 
 What they check:
 
@@ -134,7 +134,7 @@ What they check:
 - Missing, unreadable, other-owner and other-version ledgers block without being recreated; a failed write asks nothing.
 - A lost answer leaves the record unconfirmed, and no new observation starts past it; a refusal before acting does let the next one start.
 - Watching again asks for the same key; a different launch makes the record unconfirmed and conflicting.
-- An end is a request; a lost status changes nothing; only the host's read that observed closure (this launch, exact generation, `phase` `closed`, nothing unconfirmed) closes it. Another launch or generation, no launch snapshot, a launch still closing, an unconfirmed stream or `generation_mismatch` leave it unconfirmed.
+- An end is a request; a lost status changes nothing, and a status `503` is passed on as `503` with the record and the request counts unchanged; only the host's read that observed closure (this launch, exact generation, `phase` `closed`, nothing unconfirmed) closes it. Another launch or generation, no launch snapshot, a launch still closing, an unconfirmed stream or `generation_mismatch` leave it unconfirmed.
 - An end whose answer is unconfirmed leaves the record unconfirmed, not stopped; asking again reaches the host and leaves it so; with no launch named, `409` and nothing asked.
 - The host's shutdown answers: a launch `refused` `blocked` lets the next start; a status `503` changes nothing, passes `retry-after: 5` on and is asked once; an end `unconfirmed` makes the record unconfirmed and stops new observations. A launch `503` is lost.
 - Management answers whose type isn't exactly `application/json` are lost.

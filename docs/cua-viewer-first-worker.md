@@ -2,7 +2,7 @@
 
 The Worker and web app side of the viewer-first single-user preview (`docs/cua-viewer-first-preview.md`, milestone 2, items 4 to 7): the client to the bridge's viewer host, the space's durable observation ledger, the person's routes, and a Watch desktop action. **Only the preview composes it.** A deployment mounts no route, constructs no desk and provisions no ledger: `serve` mounts `/api/observations` only when the preview passes `{ observations: true }`, and the preview does that only while its private environment opts into the Cua fixture. **Nothing here has been run, type-checked, linted or tested.** The tests below are written for an independent source audit before anything runs.
 
-The host's half is separate and not merged here: `a1420114eab658e1eee464310e8192bffee0f91b` on `review/linus-cua-viewer-first-20261027` (the management API frozen in that commit's `docs/cua-viewer-first-preview.md`, `host.ts`, `viewer-host.ts` and `journal-store.ts`), also unrun. This client is written against that frozen API. Merging the two will conflict in `preview/cua-viewer-first.ts`'s header comment, which both changed.
+The host's half is separate and not merged here: `review/linus-cua-viewer-first-20261027` at `3bdf5bb` (the management API frozen in `a142011`'s `docs/cua-viewer-first-preview.md`, with `3bdf5bb`'s shutdown addition), also unrun. This client is written against that frozen API. Merging the two will conflict in `preview/cua-viewer-first.ts`'s header comment, which both changed.
 
 ## What is wired
 
@@ -44,14 +44,15 @@ All need the owner's browser session (`x-pim-signed-in`, set only by the Worker)
 
 | Host's answer | Ledger |
 | --- | --- |
-| No answer, a timeout, a redirect, a status other than `200` and the refusals below, a type other than JSON, more than 16 KiB, or anything that isn't exactly one of the launch manager's answer types | `unconfirmed` (launch, end); nothing (status) |
+| `503` (the manager threw, or the host is shutting down), with or without `retry-after` | `unconfirmed` (launch, end): the host doesn't say what it did; nothing (status): the person is answered `503` with the host's `retry-after`, and nothing asks again |
+| No answer, a timeout, a redirect, a status other than `200`, `503` and the refusals below, a type other than JSON, more than 16 KiB, or anything that isn't exactly one of the launch manager's answer types | `unconfirmed` (launch, end); nothing (status) |
 | `400`, `401`, `403`, `404`, `405`, `413`, `415`: the host refused before reading the request | `not_opened` (launch); nothing (end, status) |
 | `launched`, for this key and deadline, not replayed | `open_acknowledged` |
 | `launched` for this key with another deadline, or `replayed` for a new key | `open_acknowledged`, then `unconfirmed` |
-| `refused`, `start_failed` | `not_opened` |
+| `refused` (`blocked` included, as while the host shuts down), `start_failed` | `not_opened` |
 | `unconfirmed`, or an answer for another key | `unconfirmed` |
 | End: `requested`, or `final` `closed_observed` | stays `revoking` |
-| End: anything else | `unconfirmed` |
+| End: anything else, `unconfirmed` included (as while the host shuts down) | `unconfirmed` |
 | Status: `found` `closed_observed` for this launch and exact generation, with `launch.phase` `closed` and `launch.unconfirmed` 0 | `closed_observed` |
 | Status: `found` `closed_observed` without that launch read (the host recorded closure on a read whose answer Pim didn't see, and no longer holds the launch) | `unconfirmed`: not closure here, and it can't be shown again |
 | Status: `found` `unconfirmed`, `start_failed` or `reconciled`, another launch or generation, `not_found`, `generation_mismatch` | `unconfirmed` |
@@ -62,6 +63,7 @@ Limits and tombstones stay as `src/cua-observation.ts` has them: nothing is evic
 
 ## What the client sends and passes back
 
+- **No automatic retry anywhere.** No management call, viewer request or socket is sent again by the client or the desk; the web app's actions are mutations, which don't retry. Only the person asks again.
 - **Management:** `POST`, `Authorization: Bearer <bridge token>`, `x-pim-space`, `content-type: application/json` exactly, no encoding, no query, the manager's request type as JSON, at most 4096 bytes; `redirect: manual`; 25 s in all; never retried. The answer must be `200` with `content-type` exactly `application/json`. Nothing requires the host to name the space back on these answers, and the host doesn't.
 - **Files and calls:** to `https://<bridge host>/<hostLaunchId>/…` (22 characters), files by `GET` and calls by `POST` only, never with the bridge's token or any `Authorization`. Only `content-type`, `x-cua-env-authorization`, `grpc-encoding` and `content-encoding` are carried; call bodies at most 4 KiB. Answers keep only `content-type`, `grpc-status`, `grpc-message`, `content-security-policy`, `cross-origin-resource-policy`, `x-content-type-options` and `referrer-policy`, and only the statuses `200`, `400`, `401`, `404`, `405`, `413` and `415` (others are `502`). Files are capped at 512 KiB and unary calls at 257 KiB; the presence stream at the observation's deadline. Files and calls have 30 s; the presence stream 30 s for its headers.
 - **Media:** only at exactly `/<22 characters>/media?ticket=<43 characters>`, the host's own pattern, though admission takes a token of 16 to 128; `Upgrade: websocket` and `Sec-WebSocket-Protocol: rcdp.v2` only. Up: text only, 1 KiB each. Down: text up to 64 KiB and packets up to 16 MiB. Anything else ends both sides (`1008`, `1009`). The relay ends at the deadline. Workers' sockets don't expose what they hold unsent, so there is no backpressure here: the host's own bound (`MAX_BROWSER_BUFFERED_BYTES`) ends a viewer far behind.
@@ -92,7 +94,7 @@ Only these files, each run on its own, one after another. All are stand-ins in t
 
 | File | Lane | Tests | Imports added |
 | --- | --- | --- | --- |
-| `test/cua-observation.test.ts` | prerequisite (`vitest.cua-prerequisite.config.ts`) and the whole suite | 24 (11 before, 13 added) | `vi`; `ObservationDesk`, `type ObservationStorage` from `src/cua-observation-runtime`; `CuaViewerClient`, `MAX_CALL_REQUEST_BYTES`, `parseEndAnswer`, `parseLaunchAnswer`, `parseStatusAnswer` from `src/cua-viewer` |
+| `test/cua-observation.test.ts` | prerequisite (`vitest.cua-prerequisite.config.ts`) and the whole suite | 25 (11 before, 14 added) | `vi`; `ObservationDesk`, `type ObservationStorage` from `src/cua-observation-runtime`; `CuaViewerClient`, `MAX_CALL_REQUEST_BYTES`, `parseEndAnswer`, `parseLaunchAnswer`, `parseStatusAnswer` from `src/cua-viewer` |
 | `test/preview-cua-fixture.test.ts` | stand-in (`vitest.cua-standin.config.ts`) and the whole suite | 11 (9 before, 2 added, 3 extended) | `initialObservationState`, `type ObservationState` from `src/cua-observation`; `OBSERVATION_KEY` from `src/cua-observation-runtime`; `SIGNED_IN_HEADER` from `src/pim` |
 | `web/src/components/computer-settings.test.tsx` | `pnpm --filter pim-web test` | 4 (3 before, 1 added) | `type Observations` from `~/lib/pim-api` |
 
@@ -107,6 +109,7 @@ What they check:
 - Watching again asks for the same key; a different launch makes the record unconfirmed and conflicting.
 - An end is a request; a lost status changes nothing; only the host's read that observed closure (this launch, exact generation, `phase` `closed`, nothing unconfirmed) closes it. Another launch or generation, no launch snapshot, a launch still closing, an unconfirmed stream or `generation_mismatch` leave it unconfirmed.
 - An end asked for while the host's media socket is opening closes that socket and gives the browser `404`; an end asked for during a relay ends both sides.
+- The host's shutdown answers: a launch `refused` `blocked` lets the next start; a status `503` changes nothing, passes `retry-after: 5` on and is asked once; an end `unconfirmed` makes the record unconfirmed and stops new observations. A launch `503` is lost.
 - Management answers whose type isn't exactly `application/json` are lost; `HEAD` and attach tokens of another length are refused before sending.
 - Records restore conservatively; at the limit nothing is evicted.
 - Viewer requests reach the launch at the host's root with only the allowlisted headers and no bridge token; redirects, oversize bodies, other paths, tokens and non-session callers are refused before sending.

@@ -398,6 +398,7 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 			["no answer", () => Promise.reject(new Error("reset"))],
 			["a redirect", () => new Response(null, { status: 302, headers: { location: "https://elsewhere.test/" } })],
 			["a server error", () => new Response("no", { status: 500 })],
+			["the manager not taking calls", () => new Response("The viewer isn't taking requests.", { status: 503, headers: { "retry-after": "5" } })],
 			["not JSON", () => new Response("launched", { headers: { "content-type": "text/plain" } })],
 			["JSON under another type than exactly application/json", () => new Response(JSON.stringify({ outcome: "start_failed", key: id(1) }), { headers: { "content-type": "application/json; charset=utf-8" } })],
 			["an extra field", () => Response.json({ outcome: "start_failed", key: id(1), viewerPath: "/x" })],
@@ -476,6 +477,32 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 			[id(1), "closed_observed"],
 			[id(2), "open"],
 		]);
+	});
+
+	it("takes the host's shutdown answers as they are, and never asks again by itself", async () => {
+		let answer: (asked: Asked) => Response = () => Response.json({ outcome: "refused", reason: "blocked" });
+		const t = desk({ stored: empty(), host: (asked) => answer(asked) });
+		// A launch refused while the host shuts down started nothing: the next one may start.
+		expect((await t.desk.launch()).status).toBe(503);
+		expect(t.records()).toEqual([expect.objectContaining({ observationId: id(1), status: "not_opened" })]);
+		answer = launched;
+		expect((await t.desk.launch()).status).toBe(200);
+
+		// A status while it shuts down is "not now": nothing changes, the person is told when to ask, and Pim asks once.
+		answer = () => new Response("The viewer isn't taking requests.", { status: 503, headers: { "retry-after": "5" } });
+		const asked = t.asked.length;
+		const later = await t.desk.status(id(2));
+		expect(later.status).toBe(503);
+		expect(later.headers.get("retry-after")).toBe("5");
+		expect(t.asked).toHaveLength(asked + 1);
+		expect(t.records()[1]!.status).toBe("open");
+
+		// An end while it shuts down answers unconfirmed: so is the record, and no new observation starts past it.
+		answer = () => Response.json({ outcome: "unconfirmed" });
+		expect((await t.desk.end(id(2))).status).toBe(502);
+		expect(t.records()[1]!.status).toBe("unconfirmed");
+		expect((await t.desk.launch()).status).toBe(409);
+		expect(t.asked).toHaveLength(asked + 2);
 	});
 
 	it("closes a record only on the host's read that observed it: this launch, this generation, every transport closed", async () => {

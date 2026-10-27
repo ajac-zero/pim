@@ -235,7 +235,11 @@ export class ObservationDesk {
 			this.#apply(event);
 			return failure(status, error, { observation: this.#view(id) });
 		};
-		if (reply.kind === "lost") return settle({ type: "unconfirmed", observationId: id, evidence: `the host's answer to launch was lost (${reply.reason})` }, 502, "The computer's answer was lost; the observation may be open.");
+		if (reply.kind === "lost" || reply.kind === "unavailable") {
+			// A `503` doesn't say whether the manager stored or started anything before it failed: as lost.
+			const reason = reply.kind === "lost" ? reply.reason : "unavailable";
+			return settle({ type: "unconfirmed", observationId: id, evidence: `the host's answer to launch was lost (${reason})` }, 502, "The computer's answer was lost; the observation may be open.");
+		}
 		if (reply.kind === "refused") return settle({ type: "open_refused", observationId: id, evidence: `the host refused the launch request before reading it (${reply.status})` }, 502, "The computer refused to start watching.");
 		const host = reply.answer;
 		if (host.outcome === "refused") return settle({ type: "open_refused", observationId: id, evidence: `the host refused the launch (${host.reason})` }, 503, `The computer didn't start watching (${host.reason}).`);
@@ -295,8 +299,8 @@ export class ObservationDesk {
 		}
 		if (!(await this.#flush())) return failure(503, "Stopping couldn't be made durable, so nothing was asked of the computer.", { observation: view(current) });
 		const reply = await client.end({ owner: this.#options.owner, key: id, generation: current.hostGeneration });
-		if (reply.kind === "lost") {
-			this.#apply({ type: "unconfirmed", observationId: id, evidence: `the host's answer to end was lost (${reply.reason})` });
+		if (reply.kind === "lost" || reply.kind === "unavailable") {
+			this.#apply({ type: "unconfirmed", observationId: id, evidence: `the host's answer to end was lost (${reply.kind === "lost" ? reply.reason : "unavailable"})` });
 			return failure(502, "The computer's answer was lost; the observation may still be open.", { observation: this.#view(id) });
 		}
 		if (reply.kind === "refused") return failure(502, "The computer refused the request to stop.", { observation: this.#view(id) });
@@ -319,6 +323,12 @@ export class ObservationDesk {
 			return failure(503, "This space's computer has no usable bridge, so nothing was asked of it.", { observation: view(record) });
 		}
 		const reply = await client.status({ owner: this.#options.owner, key: id, generation: record.hostGeneration });
+		if (reply.kind === "unavailable") {
+			// The host's "not now": nothing changes, and the person, not Pim, asks again after `retry-after`.
+			const response = failure(503, "The computer isn't taking requests right now. Check again in a few seconds.", { observation: view(record) });
+			if (reply.retryAfter !== null) response.headers.set("retry-after", String(reply.retryAfter));
+			return response;
+		}
 		if (reply.kind !== "answer") return failure(502, "The computer's answer was lost.", { observation: view(record) });
 		const host = reply.answer;
 		if (host.outcome !== "found" || host.key !== id || host.launchId !== record.hostLaunchId || host.generation !== record.hostGeneration) {

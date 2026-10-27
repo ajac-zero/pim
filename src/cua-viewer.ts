@@ -103,7 +103,14 @@ export type HostReply<T> =
 	/** The host refused before reading the request (`REFUSED_BEFORE_ACTING`): it did nothing for it. */
 	| { readonly kind: "refused"; readonly status: number }
 	/** No answer Pim can read: the host may or may not have acted. */
-	| { readonly kind: "lost"; readonly reason: "timeout" | "unreachable" | "redirect" | "status" | "malformed" };
+	| { readonly kind: "lost"; readonly reason: "timeout" | "unreachable" | "redirect" | "status" | "malformed" }
+	/**
+	 * `503`: the host's manager isn't taking calls (shutting down, or it
+	 * threw), and the host said when to ask again (`retryAfter`, seconds, or
+	 * null). What it did for this request is not said, so for a launch or an
+	 * end it is read as lost. Nothing here asks again by itself.
+	 */
+	| { readonly kind: "unavailable"; readonly retryAfter: number | null };
 
 // ---------------------------------------------------------------- bounds
 
@@ -364,6 +371,11 @@ export class CuaViewerClient {
 				if (REFUSED_BEFORE_ACTING.has(response.status)) {
 					log("cua.viewer.refused", { action, status: response.status });
 					return { kind: "refused", status: response.status };
+				}
+				if (response.status === 503) {
+					log("cua.viewer.unavailable", { action });
+					const retry = response.headers.get("retry-after");
+					return { kind: "unavailable", retryAfter: retry !== null && /^[0-9]{1,4}$/.test(retry) ? Number(retry) : null };
 				}
 				return lost("status");
 			}

@@ -92,33 +92,56 @@ Nothing here is authorized yet. The plan has four steps, each its own shell invo
 - **A signal isn't termination.** After a deadline, `timeout` exits with 124 when its command ended after `TERM`, or 137 when it had to send `KILL`. That shows only what `timeout` requested and that its direct command ended. It doesn't show that anything else in the group, such as workerd, has exited.
 - **On a timeout:** the step's cleanup is marked unconfirmed and the plan stops. Its folder is left as it is. Nothing is inferred about workerd or anything else, and no process is looked for, signalled or cleaned up. Taking an inventory of anything left behind needs its own approval later.
 
-**Preconditions.** These read state and print a version only. Any failure stops the plan.
+**Every snippet below runs with errexit off.** Each begins with `set +e`, so a caller's `set -e` can't end it between a command and the check of that command's status. Every status is checked by hand, and no output goes through a pipe, so no command's failure is hidden behind another's.
+
+**Preconditions.** These read state and print a version only. Each check's status is printed, and any failure stops the plan:
 
 ```sh
-git rev-parse HEAD                     # the prepared commit
-test -z "$(git status --porcelain)"    # a clean tree
-node --version                         # at least v22.18.0
-test -x node_modules/.bin/vitest       # the root's installed Vitest
-test -d computer/cua-host/node_modules/ws   # the host package, for step 2's ws; nothing is installed if it's missing
+set +e
+failed=0
+head_sha=$(git rev-parse HEAD);         s=$?; echo "HEAD $head_sha (status $s)";        [ "$s" -eq 0 ] || failed=1
+dirty=$(git status --porcelain);        s=$?; echo "git status: status $s";             [ "$s" -eq 0 ] && [ -z "$dirty" ] || { echo "$dirty"; failed=1; }
+node_version=$(node --version);         s=$?; echo "node $node_version (status $s)";    [ "$s" -eq 0 ] || failed=1   # must be at least v22.18.0, checked by the reader
+test -x node_modules/.bin/vitest;       s=$?; echo "vitest installed: status $s";       [ "$s" -eq 0 ] || failed=1
+test -d computer/cua-host/node_modules/ws; s=$?; echo "host ws installed: status $s";   [ "$s" -eq 0 ] || failed=1   # nothing is installed if it's missing
+[ "$failed" -eq 0 ] || { echo "preconditions failed; stopping"; exit 1; }
 ```
 
-**Each step**, with its `NAME`, `LIMIT`, `GRACE` and `COMMAND` from the table below. The exit status is kept before any cleanup check, and no check can turn a failure into a pass:
+**Each step**, with its `NAME`, `LIMIT`, `GRACE` and `COMMAND` from the table below. The command's status is kept before any cleanup check. Each check's status is kept apart from it, all of them are printed together, and the step fails if any of them failed. The step then exits with the command's status if that failed, or 1 if only a check did:
 
 ```sh
-RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/pim-prereq-$NAME-XXXXXX") || exit 1
+set +e
+RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/pim-prereq-$NAME-XXXXXX")
+mktemp_status=$?
+if [ "$mktemp_status" -ne 0 ] || [ -z "$RUN_TMP" ]; then echo "step $NAME: mktemp failed (status $mktemp_status); nothing ran; stopping"; exit 1; fi
+
 TMPDIR="$RUN_TMP" timeout --signal=TERM --kill-after="$GRACE" "$LIMIT" $COMMAND
 status=$?
-echo "step $NAME: exit status $status"
+echo "step $NAME: command exit status $status"
 if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
   echo "step $NAME: deadline reached; TERM (and KILL after $GRACE) requested of its process group; termination not observed; cleanup unconfirmed; $RUN_TMP left as it is; stopping"
   exit "$status"
 fi
-leftover=$(find "$RUN_TMP" -mindepth 1 -print | head -n 20)
-if [ -n "$leftover" ]; then echo "step $NAME: left behind:"; echo "$leftover"; fi
+
+leftover=$(find "$RUN_TMP" -mindepth 1 -print)
+find_status=$?
+if [ -n "$leftover" ]; then echo "step $NAME: left behind in $RUN_TMP:"; echo "$leftover"; fi
+
 dirty=$(git status --porcelain)
+git_status=$?
 if [ -n "$dirty" ]; then echo "step $NAME: the tree changed:"; echo "$dirty"; fi
-if [ -z "$leftover" ]; then rmdir "$RUN_TMP"; fi
-if [ "$status" -ne 0 ] || [ -n "$leftover" ] || [ -n "$dirty" ]; then echo "step $NAME: failed; stopping"; exit 1; fi
+
+rmdir_status=not-tried
+if [ "$find_status" -eq 0 ] && [ -z "$leftover" ]; then rmdir "$RUN_TMP"; rmdir_status=$?; fi
+
+echo "step $NAME: command $status; find $find_status; git status $git_status; rmdir $rmdir_status"
+checks_failed=0
+[ "$find_status" -eq 0 ] && [ -z "$leftover" ] || checks_failed=1
+[ "$git_status" -eq 0 ] && [ -z "$dirty" ] || checks_failed=1
+[ "$rmdir_status" = 0 ] || checks_failed=1
+if [ "$status" -ne 0 ]; then echo "step $NAME: failed (command); stopping"; exit "$status"; fi
+if [ "$checks_failed" -ne 0 ]; then echo "step $NAME: failed (cleanup checks); stopping"; exit 1; fi
+echo "step $NAME: passed its checks; read its test counts against the table"
 ```
 
 | Step | `NAME` | `LIMIT` | `GRACE` | `COMMAND` | Passes with |
@@ -130,7 +153,8 @@ if [ "$status" -ne 0 ] || [ -n "$leftover" ] || [ -n "$dirty" ]; then echo "step
 
 - **Step 1's deadline:** the stand-in lane's 144 tests took 131 s, and these 30 need no Durable Object.
 - **Host steps:** each runs one file directly as its own Node process, not through `node --test`, so no test runner starts another process. Each must also report `fail`, `skipped`, `todo` and `cancelled` as 0, and exit 0. For step 2, any `cleanup failed` diagnostic fails the step even if the counts look right.
-- **The folder check** covers only the step's own `TMPDIR`. A folder that isn't empty is reported with what it holds and left in place.
+- **The folder check** covers only the step's own `TMPDIR`. `find` lists every path left there, which is at most a few test folders, and its own status is checked. A folder that isn't empty, or that `find` couldn't read, is reported and left in place: `rmdir` isn't tried, and the step fails.
+- **A failed command keeps its status.** It is printed beside every check's status, and the checks still run and print. The step then exits with the command's status, so a check never replaces it, and a check that fails after a passing command still fails the step.
 
 ## What it doesn't settle
 

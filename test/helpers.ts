@@ -4,13 +4,13 @@ import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@e
 import { getAgentByName } from "agents";
 import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
-import { afterAll, afterEach, beforeAll, beforeEach, expect, vi } from "vitest";
+import { afterAll, afterEach, aroundEach, beforeAll, beforeEach, expect, vi } from "vitest";
 import { type BrowserHost, type ExecArgs, type ExecResult, Link, type Machine } from "../computer/pim-computer";
 import { ownedCode } from "../src/auth";
 import type { Approval } from "../src/store";
 import type { TranscriptMessage } from "../src/transcript";
 import { faux } from "./worker";
-import { requestLabel, Waits } from "./waits";
+import { type Budget, owned, ownedBy, owner, requestLabel, Waits } from "./waits";
 import { Authenticator } from "./webauthn";
 
 /**
@@ -25,59 +25,89 @@ export let TOKEN = "";
 export let ROOT = "";
 
 /**
- * The waits of the setup or test under way (./waits.ts). A failed test
- * reports them, as they stood when it ran out of time if it did, and setup
- * that never finished reports its own. After each test, the work it started
- * through `waits().start` must finish within `SETTLE_MS` of its gates
- * opening, or the test fails.
+ * Each setup's and test's waits (./waits.ts), each owning the code it runs
+ * through the runtime's async context: a test's own scope owns its
+ * `beforeEach` hooks, its body, its `afterEach` hooks and every continuation
+ * and timer they lead to, so work a test asks for after it ran out of time
+ * or ended is refused by its own scope, never admitted by the next test's.
+ * A failed test reports its waits, as they stood when it ran out of time if
+ * it did, and setup that never finished reports its own. After each test
+ * (`afterEach`), its scope closes and settles: work it started through
+ * `waits().start` must finish within `SETTLE.tasks` of its gates opening,
+ * and its cleanup (`waits().defer`) within `SETTLE.cleanup`, or the test
+ * fails. Both together stay within the runner's ten-second hook timeout.
  */
-let current = new Waits("setup");
-const SETTLE_MS = 5_000;
+const SETTLE: Budget = { tasks: 4_000, cleanup: 4_000 };
+/** The setup scopes of this file, settled after its tests. */
+const setups: Waits[] = [];
 
-/** The current setup's or test's waits. */
+/** The waits of the setup, test or cleanup that owns the code running now; code none owns fails here. */
 export function waits(): Waits {
-	return current;
+	return owned();
 }
 
-/** Starts recording a `beforeAll`'s waits, so setup that never finishes says where it stopped. */
-export function recordSetup(): void {
-	current = new Waits("setup");
+/** Runs a `beforeAll`'s work as a setup scope of its own, so setup that never finishes says where it stopped. */
+export function setup<T>(work: () => Promise<T>): Promise<T> {
+	const scope = new Waits("setup");
+	setups.push(scope);
+	return ownedBy(scope, work);
 }
 
-const report = () => current.report({ fauxPending: faux.getPendingResponseCount() });
+/** Records `work` under `what` with the scope that owns the code running now, if any; passes it on unchanged either way. */
+function watched<T>(what: string, work: T): Promise<Awaited<T>> {
+	const scope = owner();
+	return scope ? scope.watch(what, work) : (Promise.resolve(work) as Promise<Awaited<T>>);
+}
 
-beforeAll(async () => {
-	recordSetup();
-	const directory = env.Directory.getByName("directory");
-	const registered = await current.watch(
-		"setup: register",
-		directory.register({
-			username: "tester",
-			ip: "192.0.2.1",
-			claim: { window: true },
-			policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 },
-		}),
-	);
-	if (!registered.ok) throw new Error(registered.error);
-	OWNER = registered.account.ownerId;
-	await current.watch("setup: activate", directory.activate(OWNER));
-	const agent = await current.watch("setup: space", getAgentByName(env.Pim, OWNER));
-	await current.watch("setup: provision", agent.provision({ ownerId: OWNER, username: "tester" }));
-	TOKEN = (await current.watch("setup: token", env.Auth.getByName(OWNER).createToken(OWNER, "tests", Date.now()))).token;
-	ROOT = (await api("/")).body.rootSession;
+beforeAll(() =>
+	setup(async () => {
+		const directory = env.Directory.getByName("directory");
+		const registered = await watched(
+			"setup: register",
+			directory.register({
+				username: "tester",
+				ip: "192.0.2.1",
+				claim: { window: true },
+				policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 },
+			}),
+		);
+		if (!registered.ok) throw new Error(registered.error);
+		OWNER = registered.account.ownerId;
+		await watched("setup: activate", directory.activate(OWNER));
+		const agent = await watched("setup: space", getAgentByName(env.Pim, OWNER));
+		await watched("setup: provision", agent.provision({ ownerId: OWNER, username: "tester" }));
+		TOKEN = (await watched("setup: token", env.Auth.getByName(OWNER).createToken(OWNER, "tests", Date.now()))).token;
+		ROOT = (await api("/")).body.rootSession;
+	}),
+);
+
+// The test's own scope, made before its beforeEach hooks run and owning everything the test runs until its afterEach hooks are done.
+aroundEach(async (runTest, context) => {
+	await ownedBy(new Waits("test", context.signal), runTest);
 });
 
 beforeEach((context) => {
-	current = new Waits("test", context.signal);
+	const scope = waits();
+	const report = () => scope.report({ fauxPending: faux.getPendingResponseCount() });
 	// Taken as the test runs out of time, before its gates are opened after it; printed once its afterEach hooks have run.
 	let atTimeout: string | undefined;
 	context.signal.addEventListener("abort", () => void (atTimeout = report()), { once: true });
 	context.onTestFailed(() => console.error(atTimeout ?? report()));
 });
 
-afterAll(() => {
-	// Setup that never finished, which the test runner reports only as a hook that ran out of time.
-	if (current.scope === "setup" && current.waiting) throw new Error(`Setup never finished: ${report()}`);
+afterAll(async () => {
+	// Setup that never finished, which the test runner reports only as a hook that ran out of time, and work setup started that wasn't seen to finish.
+	const failures = await Promise.all(
+		setups.splice(0).map(async (scope) => {
+			const failure = await scope.settle(SETTLE).then(
+				() => (scope.waiting ? "it was still waiting." : null),
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			);
+			return failure && `${failure} ${scope.report()}`;
+		}),
+	);
+	const failed = failures.filter((failure) => failure !== null);
+	if (failed.length > 0) throw new Error(`Setup never finished: ${failed.join(" ")}`);
 });
 
 export function url(path: string) {
@@ -94,7 +124,7 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
 		...init,
 		headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json", ...init.headers },
 	});
-	const response = await current.watch(requestLabel(request), exports.default.fetch(request));
+	const response = await watched(requestLabel(request), exports.default.fetch(request));
 	return { status: response.status, body: (await response.json()) as T };
 }
 
@@ -149,7 +179,7 @@ export async function say(content: string, session = ROOT) {
 
 /** The approval waiting for the user. */
 export async function pendingApproval() {
-	return current.watch(
+	return watched(
 		"pending approval",
 		vi.waitFor(async () => {
 			const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals;
@@ -244,7 +274,7 @@ export async function messagesOf(session: string, role: "user" | "assistant" | "
 
 afterEach(async () => {
 	// Before the test's stand-ins are restored, which what it started may still use.
-	const unsettled = await current.settle(SETTLE_MS).then(
+	const unsettled = await waits().settle(SETTLE).then(
 		() => null,
 		(error: unknown) => error,
 	);

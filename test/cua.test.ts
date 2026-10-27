@@ -10,7 +10,7 @@ import type { ControlState } from "../src/computer-control";
 import { CONNECT_MS, Cua, type CuaBridge, MAX_MESSAGE_CHARS, PROVIDER_KEY, SPACE_HEADER } from "../src/cua";
 import type { Approval } from "../src/store";
 import { exports } from "cloudflare:workers";
-import { api, apiUrl, connectTestComputer, fakeChrome, lastUserText, OWNER, opens, post, recordSetup, toolUse, waits } from "./helpers";
+import { api, apiUrl, connectTestComputer, fakeChrome, lastUserText, OWNER, opens, post, setup, toolUse, waits } from "./helpers";
 import { requestLabel } from "./waits";
 import { faux, type Pim } from "./worker";
 
@@ -570,14 +570,15 @@ describe("a space whose operator chose its Cua VM", () => {
 	let cua: Awaited<ReturnType<typeof space>>;
 	let fixture: Fixture;
 
-	beforeAll(async () => {
-		recordSetup();
-		cua = await space("cuaperson", (instance, owner) => {
-			instance.store.setMeta(PROVIDER_KEY, choice(owner));
-			(instance as unknown as { env: Record<string, unknown> }).env.CUA_BRIDGES = bridges({ [owner]: bridgeOf(owner) });
-		});
-		fixture = await fixtureFor(cua.owner);
-	});
+	beforeAll(() =>
+		setup(async () => {
+			cua = await space("cuaperson", (instance, owner) => {
+				instance.store.setMeta(PROVIDER_KEY, choice(owner));
+				(instance as unknown as { env: Record<string, unknown> }).env.CUA_BRIDGES = bridges({ [owner]: bridgeOf(owner) });
+			});
+			fixture = await fixtureFor(cua.owner);
+		}),
+	);
 
 	it("is the operator's: its status names Cua and nothing of the bridge, and no person's route starts, pairs, removes or takes it over", async () => {
 		const status = await cua.api("/computer");
@@ -804,6 +805,8 @@ describe("a space whose operator chose its Cua VM", () => {
 		for (const [change, undo, message] of changes) {
 			await cua.within((instance) => instance.computer.disconnect("Asleep"));
 			const { opened, open: release } = waits().gate("bridge handshake");
+			// The change is this test's own: undone below, or else after the test by its cleanup, which runs even once the test has run out of time.
+			const undone = waits().defer("undo the race's change", () => cua.within(undo));
 			handshake = opened;
 			held = 0;
 			try {
@@ -811,7 +814,7 @@ describe("a space whose operator chose its Cua VM", () => {
 				const deciding = cua.decide((await cua.pending()).id);
 				await waits().watch("held handshake", vi.waitFor(() => expect(held).toBe(1)));
 				await cua.within(change);
-				handshake = null;
+				if (handshake === opened) handshake = null;
 				release();
 				await deciding;
 				await asking.turn;
@@ -821,11 +824,12 @@ describe("a space whose operator chose its Cua VM", () => {
 				await waits().watch("raced connection's close event", vi.waitFor(() => expect(fixture.connections.at(-1)!.closed).not.toBeNull()));
 				expect((await cua.stateOf()).requests.at(-1)).toMatchObject({ status: "rejected" });
 			} finally {
-				// The gate is this test's own, and the change too: undone however the iteration ends.
-				handshake = null;
+				// The gate is this iteration's own, opened however it ends; a later continuation of it clears no other gate.
+				if (handshake === opened) handshake = null;
 				release();
-				await cua.within(undo);
 			}
+			await cua.within(undo);
+			undone();
 		}
 		expect(await cua.run("echo after the race")).toContain("ran echo after the race");
 		expect(fixture.ran).not.toContain("echo raced");

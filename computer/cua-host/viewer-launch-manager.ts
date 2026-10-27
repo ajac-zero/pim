@@ -25,9 +25,11 @@
  *   here can see them. A caller naming another generation is answered
  *   `generation_mismatch`, never closure.
  * - Missing and empty. A journal that is missing, unreadable or invalid
- *   blocks every launch and is left as it is; only an operator's
- *   `initialize`, given evidence, creates one where none is stored. Nothing
- *   clears entries, and the limits refuse new launches rather than evict.
+ *   blocks every launch and is left as it is. The manager never creates
+ *   one: a missing journal can't be told from a lost one, and a lost one
+ *   took with it the keys that must never start again. A journal is
+ *   provisioned outside this module, under its own gate. Nothing clears
+ *   entries, and the limits refuse new launches rather than evict.
  *
  * The root token is read for each launch and passed to `startLaunch`; it is
  * never stored, returned or logged, and neither is a launch's viewer path,
@@ -89,7 +91,7 @@ export type Journal = {
 	readonly revision: number;
 	/** The generation that wrote it last. */
 	readonly generation: string;
-	/** The operator's evidence when it was created. */
+	/** What whoever provisioned it, outside the manager, recorded when they did. The manager only carries it. */
 	readonly initialized: string;
 	readonly entries: readonly JournalEntry[];
 };
@@ -102,7 +104,7 @@ export type JournalStore = {
 	/** The stored journal, parsed, or `undefined` when none is stored. Rejects when it can't be read. */
 	readonly read: () => Promise<unknown>;
 	/**
-	 * Replaces the journal at `expectedRevision` (`0`: none is stored) with
+	 * Replaces the journal at `expectedRevision` with
 	 * `journal`, atomically and durably: when it resolves, every later `read`,
 	 * by any process, gives `journal` or a later one. A crash during it
 	 * leaves the old journal or the new one whole, never a mix (write a
@@ -207,8 +209,6 @@ export type ViewerLaunchManager = {
 	readonly launch: (request: LaunchRequestKey) => Promise<LaunchAnswer>;
 	readonly end: (request: KeyRequest) => Promise<EndAnswer>;
 	readonly status: (request: KeyRequest) => Promise<StatusAnswer>;
-	/** Creates an empty journal where none is stored, on an operator's evidence that no earlier launch is open. */
-	readonly initialize: (evidence: string) => Promise<boolean>;
 	/** Settles an unconfirmed entry this process holds no launch for, on an operator's evidence. */
 	readonly reconcile: (key: string, evidence: string) => Promise<boolean>;
 };
@@ -309,8 +309,6 @@ export async function openViewerLaunchManager(options: LaunchManagerOptions): Pr
 	let journal: Journal | undefined;
 	/** Why nothing is admitted. Once set by a failure it stays for this process's life: what is stored and what is remembered may disagree. */
 	let blocker: string | undefined;
-	/** Only a journal found missing may be initialized. */
-	let missing = false;
 	/** Launches this process holds, by key, until their closure is recorded. */
 	const handles = new Map<string, LaunchHandle>();
 	/** Starts in progress, by key, which repeats share. */
@@ -354,8 +352,8 @@ export async function openViewerLaunchManager(options: LaunchManagerOptions): Pr
 			blocker = "the journal could not be read";
 		}
 		if (blocker === undefined && raw === undefined) {
-			missing = true;
-			blocker = "no journal is stored: an operator must confirm that no earlier launch is open, then initialize one";
+			// Never created here: a lost journal took its keys with it, and starting from an empty one would let them start again.
+			blocker = "no journal is stored, and this manager never creates one: launches stay refused until a journal is provisioned outside it";
 		} else if (blocker === undefined) {
 			const read = readJournal(raw);
 			if (!read.ok) blocker = `the journal is invalid (${read.error}) and is left as it is`;
@@ -579,21 +577,6 @@ export async function openViewerLaunchManager(options: LaunchManagerOptions): Pr
 		};
 	}
 
-	async function initialize(evidence: string): Promise<boolean> {
-		if (!missing || store === undefined || typeof evidence !== "string" || !evidence.trim()) return false;
-		missing = false;
-		const created: Journal = { version: JOURNAL_VERSION, revision: 1, generation, initialized: evidence, entries: [] };
-		try {
-			await store.write(created, 0);
-		} catch {
-			blocker = "creating the journal failed, so what is stored is not known; restart the host to read it again";
-			return false;
-		}
-		journal = created;
-		blocker = undefined;
-		return true;
-	}
-
 	async function reconcile(key: string, evidence: string): Promise<boolean> {
 		const entry = find(key);
 		if (!entry || entry.state !== "unconfirmed" || handles.has(key) || lateStarts.has(key) || typeof evidence !== "string" || !evidence.trim()) return false;
@@ -606,7 +589,6 @@ export async function openViewerLaunchManager(options: LaunchManagerOptions): Pr
 		launch,
 		end,
 		status,
-		initialize,
 		reconcile,
 	});
 }

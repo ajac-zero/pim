@@ -126,7 +126,7 @@ function memoryStore(initial?: Journal) {
 /** A stand-in for the adapter's `startLaunch`: each call waits for the test to answer it, unless `auto`. */
 function standIn(time: ReturnType<typeof fakeTime>, options: { auto?: boolean | "fail" } = {}) {
 	const calls: LaunchRequest[] = [];
-	const answers: Array<{ readonly resolve: () => void; readonly reject: () => void }> = [];
+	const answers: Array<{ readonly resolve: () => void; readonly reject: () => void; settled: boolean }> = [];
 	const launches: Array<{ readonly id: string; readonly lifetime: ViewerLaunch; unconfirmed: number; cleanup: { requested: number; answered: number; failed: number } }> = [];
 	const make = (request: LaunchRequest): LaunchHandle => {
 		const lifetime = startViewerLaunch({ lifetimeMs: request.lifetimeMs, clock: time.clock, timers: time.timers });
@@ -149,12 +149,27 @@ function standIn(time: ReturnType<typeof fakeTime>, options: { auto?: boolean | 
 				if (options.auto === true) return Promise.resolve(make(request));
 				if (options.auto === "fail") return Promise.reject(new Error("The desktop did not grant a view-only viewer ticket for this launch."));
 				return new Promise((resolve, reject) => {
-					answers.push({ resolve: () => resolve(make(request)), reject: () => reject(new Error("The desktop did not grant a view-only viewer ticket for this launch.")) });
+					const answer = {
+						settled: false,
+						resolve: () => {
+							answer.settled = true;
+							resolve(make(request));
+						},
+						reject: () => {
+							answer.settled = true;
+							reject(new Error("The desktop did not grant a view-only viewer ticket for this launch."));
+						},
+					};
+					answers.push(answer);
 				});
 			},
 		},
 		answer: (n: number) => answers[n]!.resolve(),
 		fail: (n: number) => answers[n]!.reject(),
+		/** The process dies: every call it has not answered fails with it, so nothing the test started is left pending. */
+		crash() {
+			for (const answer of answers) if (!answer.settled) answer.reject();
+		},
 	};
 }
 
@@ -162,15 +177,28 @@ async function setUp(options: { journal?: Journal | null; auto?: boolean | "fail
 	const time = fakeTime();
 	const memory = memoryStore(options.journal === null ? undefined : (options.journal ?? fresh()));
 	const desk = standIn(time, { auto: options.auto ?? true });
+	// This process's own view of the store, which its crash severs: nothing it does after dying is stored.
+	let severed = false;
+	const gone = () => Promise.reject(new Error("the process is gone"));
+	const store: JournalStore = {
+		read: () => (severed ? gone() : memory.store.read()),
+		write: (journal, expectedRevision) => (severed ? gone() : memory.store.write(journal, expectedRevision)),
+	};
 	const manager = await openViewerLaunchManager({
 		adapter: desk.adapter,
-		store: memory.store,
+		store,
 		generation: options.generation ?? "gen-b",
 		rootToken: options.rootToken ?? (() => ROOT_TOKEN),
 		wallClock: time.wall,
 		timers: time.timers,
 	});
-	return { time, memory, desk, manager };
+	/** Simulates the process dying: its store view is severed, its adapter calls fail, and what it was waiting on settles. */
+	const crash = async () => {
+		severed = true;
+		desk.crash();
+		await flush();
+	};
+	return { time, memory, desk, manager, crash };
 }
 
 /** The same store, opened by the next process: a new generation and a new adapter with no launches. */
@@ -249,10 +277,16 @@ describe("the viewer launch manager", () => {
 	});
 
 	it("leaves a key unconfirmed under the next generation after a crash before its start answered or after it was acknowledged", async () => {
-		const { memory, desk, manager } = await setUp({ auto: false });
-		void manager.launch(request(1));
+		const { memory, desk, manager, crash } = await setUp({ auto: false });
+		const hanging = manager.launch(request(1));
 		await flush();
 		assert.equal(desk.calls.length, 1, "started, and never answered: the process dies here");
+		const stored = memory.raw();
+		await crash();
+		// The dead process's own wait settles, and nothing it did after dying reached the journal.
+		assert.deepEqual(await hanging, { outcome: "start_failed", key: key(1) });
+		assert.equal(memory.raw(), stored);
+		assert.equal(memory.entry(key(1))?.state, "intent");
 		// The next process reads what the first stored. Its own launch is acknowledged, and then it dies too.
 		const acked = await setUp({ journal: memory.journal()!, generation: "gen-c" });
 		assert.equal((await acked.manager.launch(request(2))).outcome, "launched");
@@ -275,11 +309,10 @@ describe("the viewer launch manager", () => {
 		const missing = await setUp({ journal: null });
 		assert.match(missing.manager.blockers()[0] ?? "", /no journal is stored/);
 		assert.deepEqual(await missing.manager.launch(request(1)), { outcome: "refused", reason: "blocked" });
-		assert.equal(await missing.manager.initialize("  "), false);
+		assert.equal("initialize" in missing.manager, false, "the manager never creates a journal");
 		assert.equal(missing.desk.calls.length, 0);
-		assert.equal(await missing.manager.initialize("operator: checked spacesd has no media sessions"), true);
-		assert.equal(await missing.manager.initialize("again"), false);
-		assert.deepEqual(missing.manager.blockers(), []);
+		assert.equal(missing.memory.raw(), undefined, "nothing was written");
+		assert.equal(missing.manager.blockers().length, 1);
 
 		const ready = await setUp();
 		const launched = await ready.manager.launch(request(1));
@@ -294,7 +327,7 @@ describe("the viewer launch manager", () => {
 		unreadable.failReads();
 		const blind = await openViewerLaunchManager({ adapter: standIn(fakeTime()).adapter, store: unreadable.store, generation: "gen-b", rootToken: () => ROOT_TOKEN });
 		assert.match(blind.blockers()[0] ?? "", /could not be read/);
-		assert.equal(await blind.initialize("operator"), false, "only a journal found missing is created");
+		assert.deepEqual(await blind.launch(request(1)), { outcome: "refused", reason: "blocked" });
 
 		const garbled = { ...fresh(), entries: [{ key: key(1), owner: "ada", notAfter: WALL, generation: "gen-a", launchId: null, state: "open" }] } as unknown as Journal;
 		const bad = memoryStore(garbled);
@@ -308,7 +341,28 @@ describe("the viewer launch manager", () => {
 
 		const none = await openViewerLaunchManager({ adapter: standIn(fakeTime()).adapter, generation: "gen-b", rootToken: () => ROOT_TOKEN });
 		assert.deepEqual(await none.launch(request(1)), { outcome: "refused", reason: "blocked" });
-		assert.equal(await none.initialize("operator"), false);
+		assert.equal(none.blockers().length, 1);
+	});
+
+	it("never starts a key again after its journal is lost, whatever recovery is tried", async () => {
+		const { time, memory, desk, manager } = await setUp();
+		const first = await manager.launch(request(1));
+		assert.equal(first.outcome, "launched");
+		memory.lose();
+		for (const generation of ["gen-c", "gen-d", "gen-e"]) {
+			const next = await restart(memory, time, generation);
+			assert.equal("initialize" in next.manager, false);
+			assert.equal(next.manager.blockers().length, 1);
+			assert.equal(await next.manager.reconcile(key(1), "operator: the key is retired and nothing is open"), false, "evidence retires nothing");
+			assert.deepEqual(await next.manager.status(ada(1, generation)), { outcome: "not_found" });
+			assert.deepEqual(await next.manager.end(ada(1, generation)), { outcome: "not_found" });
+			// The prior key, resent as a repeat of a request whose reply was lost.
+			assert.deepEqual(await next.manager.launch(request(1)), { outcome: "refused", reason: "blocked" });
+			assert.deepEqual(await next.manager.launch(request(2)), { outcome: "refused", reason: "blocked" });
+			assert.equal(next.desk.calls.length, 0, "the adapter is never called again");
+		}
+		assert.equal(memory.raw(), undefined, "no manager recreated the journal");
+		assert.equal(desk.calls.length, 1);
 	});
 
 	it("refuses a second writer of the same journal", async () => {

@@ -35,7 +35,7 @@ An observation is a person watching one display of their Cua computer through th
 
 ## The launch manager
 
-`openViewerLaunchManager({ adapter, store, generation, rootToken, wallClock, timers, startTimeoutMs })` reads the journal and answers a manager with `launch`, `end`, `status`, `blockers`, `initialize` and `reconcile`. Its key is the ledger's `observationId`; owner and `notAfter` come with the first request and are fixed by it.
+`openViewerLaunchManager({ adapter, store, generation, rootToken, wallClock, timers, startTimeoutMs })` reads the journal and answers a manager with `launch`, `end`, `status`, `blockers` and `reconcile`. Its key is the ledger's `observationId`; owner and `notAfter` come with the first request and are fixed by it.
 
 **Idempotency comes before the side effect.** The adapter's `startLaunch` mints a spacesd viewer ticket and answers an in-memory `LaunchHandle` that nothing can look up again. So `launch` stores the key's `intent` durably before calling it, and never calls it for a key already in the journal:
 
@@ -66,12 +66,16 @@ An observation is a person watching one display of their Cua computer through th
 `JournalStore` is `{ read, write }`, injected. The manager serializes its own writes and awaits each before acting on it. The contract, which the store must keep and which no implementation here provides:
 
 - `read()` answers the stored journal parsed, `undefined` when none is stored, and rejects when it can't read.
-- `write(journal, expectedRevision)` replaces the journal at `expectedRevision` (`0` for none) atomically and durably. When it resolves, every later read by any process gives this journal or a later one. A crash during it leaves the old journal or the new one whole: write a temporary file, flush it, rename it over the old one, flush the directory. It rejects if the stored revision has moved, so a second writer is refused.
+- `write(journal, expectedRevision)` replaces the journal at `expectedRevision` atomically and durably. When it resolves, every later read by any process gives this journal or a later one. A crash during it leaves the old journal or the new one whole: write a temporary file, flush it, rename it over the old one, flush the directory. It rejects if the stored revision has moved, so a second writer is refused.
 - A rejected write says nothing about which journal is stored. The manager then refuses every launch for the rest of its life. `end` still ends the launches it holds, though it can't record that.
 
 What follows from it: no upstream side effect precedes a durable intent, so after a crash the journal holds the intent of any key whose start may have begun. A restart finds that intent, or the `open` written after the start, and makes it `unconfirmed`. It never starts the key again.
 
-**Missing, unreadable or invalid journals block, and are left as they are.** No store, a read that fails, a journal that is malformed, of another version, or inconsistent: every launch is refused, with the reason in `blockers()`, and nothing is written. A journal that is missing can't be told from one that was lost. Only an operator's `initialize(evidence)`, with non-blank evidence that no earlier launch is open, creates an empty one, and only where the read found none. An operator's `reconcile(key, evidence)` settles an `unconfirmed` entry this process holds no launch for.
+**Missing, unreadable or invalid journals block, and are left as they are.** No store, a read that fails, a journal that is malformed, of another version, or inconsistent: every launch is refused, with the reason in `blockers()`, and nothing is written, for the life of the process and every process after it.
+
+**The manager never creates a journal.** A missing journal can't be told from a lost one, and a lost one took with it the keys that must never start again. Repeats of a key are expected (a lost reply is answered by resending it), and evidence that nothing is open retires no key and doesn't stop a delayed request. So a missing journal never authorizes a launch, and no evidence string recovers one. A journal is provisioned outside this module, under its own gate (see Remaining blockers).
+
+An operator's `reconcile(key, evidence)` settles an `unconfirmed` entry that this process holds no launch for, and that has no start still pending. A reconciled key is final, and a repeat of it is refused (`closed`): reconciling never lets a key start.
 
 ## The admission check
 
@@ -90,13 +94,13 @@ Mounting is a separate, reviewed change. `src/gateway.ts` and the space's routes
 
 1. **A narrow gateway route** for `/api/observations/`, checked with `signedIn` (session and same-site checks) and never `authorize`'s token path, passing the session's owner to `admitObservationRequest` and to `toAgent`, which overwrites the owner and signed-in headers. One more entry in the upgrade allowlist, for `media` only. No generic proxy to the host.
 2. **The space's ledger**, stored per space and written synchronously before the host is asked, as `src/computer-control-runtime.ts` stores control, with an opt-in marker so a missing ledger is told from a new one. The space mints `observationId` and sets `notAfter`; a client's retry must find its record rather than make a second.
-3. **The host's side**: a real `JournalStore` keeping the contract above, a fresh generation per process, a narrow host route through the bridge to `launch`, `end` and `status`, and the adapter's routes as `docs/cua-viewer-adapter.md` describes.
+3. **The host's side**: a real `JournalStore` keeping the contract above, a provisioned journal (see Remaining blockers), a fresh generation per process, a narrow host route through the bridge to `launch`, `end` and `status`, and the adapter's routes as `docs/cua-viewer-adapter.md` describes.
 4. **Delivery of the viewer path.** Its fragment is the launch's credential: it goes only to the owner's session, is never logged, and is answered with `no-store` and `no-referrer`. Request targets carry attach tokens and must not be logged either.
 
 ## Remaining blockers
 
 - **Restart.** A host that dies leaves spacesd's media sessions and the viewer ticket it minted to their own lifetimes. The ticket lasts until `notAfter` at most, and an attached media session until its socket closes. Nothing here revokes either, or sees them after a restart, so those entries stay `unconfirmed` until an operator reconciles them. The operator procedure, and what evidence counts, is not written.
-- **Journal loss.** A lost journal blocks the host until an operator initializes a new one. After that, the host knows no earlier key; only the space's ledger, which never repeats an id, keeps a key from starting twice.
+- **Journal provisioning and loss.** Nothing here creates a journal, so a host can't launch until one is provisioned, and after a loss it stays blocked. Provisioning has its own gate, not written here. A fresh journal must not let any key from before start again: that needs a durable, never-reused admission namespace bound into every key and request, with every earlier namespace refused for good, or an equivalent retirement authority. Operator evidence alone is not enough.
 - **Retirement.** Neither the ledger nor the journal retires final records. Both refuse at their limits, so retiring them (with tombstones, so an id can't come back) is needed before real use.
 - **Credentials.** Where spacesd's root token lives, and how it is kept from agents running as the desktop account, is still open (`docs/cua-viewer-adapter.md`). The tests use a string.
 - **Not run.** Neither test file below has been run, and nothing here has been type-checked.
@@ -118,8 +122,8 @@ Mounting is a separate, reviewed change. `src/gateway.ts` and the space's routes
 - Concurrent and later repeats.
 - Conflicts and other owners.
 - Intent writes that fail before or after they land.
-- Crashes before the start answered and after it was acknowledged.
-- Missing, lost, unreadable, invalid and same-generation journals.
+- Crashes before the start answered and after it was acknowledged. A test's crash severs that process's view of the store and fails its unanswered adapter calls, so its waits settle. Nothing it does after dying reaches the journal, and the old launch is still not claimed closed.
+- Missing, lost, unreadable, invalid and same-generation journals. After a loss, restarts in three generations try `reconcile` with evidence, `status`, `end` and a resend of the prior key: none calls the adapter, and nothing recreates the journal.
 - A second writer.
 - A launch that can't be recorded.
 - Timeouts with late success and late failure.

@@ -317,14 +317,24 @@ describe("binding a native-app call to who makes it", () => {
 		// After a restart that finds the first call's dispatch without an end.
 		const restarted = await twoBound();
 		const out = gate();
-		void restarted.binder.dispatch("b1", async () => {
+		const reply = gate<NativeOutcome>();
+		const late = restarted.binder.dispatch("b1", async () => {
 			out.open();
-			return new Promise<NativeOutcome>(() => {});
+			return reply.promise;
 		});
 		await out.promise;
 		const next = restarted.make();
 		expect(next.status("b1")).toBe("unknown");
 		expect(await next.dispatch("b2", send)).toMatchObject({ ok: false, reason: "run_uncertain" });
+		expect(sent).toEqual([]);
+		// The process that sent b1 is gone, so nothing it does now is stored. Its reply still comes, as known, and settles only its own wait.
+		const stored = restarted.disk.value;
+		restarted.disk.fail = "before";
+		reply.open(known);
+		await late;
+		expect(restarted.disk.value).toBe(stored);
+		expect(next.status("b1")).toBe("unknown");
+		expect(next.status("b2")).toBe("closed");
 		expect(sent).toEqual([]);
 	});
 
@@ -498,10 +508,11 @@ describe("binding a native-app call to who makes it", () => {
 		const { binder, disk, harness, make } = setup();
 		await bindingId(binder, claim(), "click", click());
 		const out = gate();
-		// The process ends while the call is out: its reply never comes.
-		void binder.dispatch("b1", async () => {
+		const reply = gate<NativeOutcome>();
+		// The process ends while the call is out: its reply never comes to anything that is still running.
+		const late = binder.dispatch("b1", async () => {
 			out.open();
-			return new Promise<NativeOutcome>(() => {});
+			return reply.promise;
 		});
 		await out.promise;
 		expect(JSON.parse(disk.value!).records[0]).toMatchObject({ status: "claimed", arguments: null });
@@ -514,6 +525,16 @@ describe("binding a native-app call to who makes it", () => {
 		expect(await restarted.bind(claim(), "click", click())).toMatchObject({ ok: false, reason: "uncertain" });
 		harness.call("c1", "t2", "call-2");
 		expect(await restarted.bind(claim("t2", "call-2"), "click", click())).toMatchObject({ ok: false, reason: "run_uncertain" });
+		expect(sent).toEqual([]);
+
+		// The process that sent it is gone, so nothing it does now is stored. Its reply still comes, as known, and settles only its own wait.
+		const stored = disk.value;
+		disk.fail = "before";
+		reply.open(known);
+		await late;
+		expect(disk.value).toBe(stored);
+		expect(JSON.parse(disk.value!).records[0].status).toBe("unknown");
+		expect(restarted.status("b1")).toBe("unknown");
 		expect(sent).toEqual([]);
 	});
 

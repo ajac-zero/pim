@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { admissionBlockers, applyControlEvent, type ControlState, initialControlState } from "../src/computer-control";
 import { ObservationDesk, type ObservationStorage } from "../src/cua-observation-runtime";
-import { type ClientLimits, CuaViewerClient, parseEndAnswer, parseLaunchAnswer, parseStatusAnswer, readBounded } from "../src/cua-viewer";
+import { type ClientLimits, CuaViewerClient, isHttpsOrigin, parseEndAnswer, parseLaunchAnswer, parseStatusAnswer, readBounded } from "../src/cua-viewer";
 import {
 	admitObservationRequest,
 	applyObservationEvent,
@@ -315,7 +315,7 @@ function desk(options: {
 	const instance = new ObservationDesk({
 		owner: SPACE,
 		storage,
-		client: () => new CuaViewerClient(BRIDGE, SPACE, fetcher, options.limits),
+		client: () => new CuaViewerClient(BRIDGE, SPACE, ORIGIN, fetcher, options.limits),
 		observationMs: LIFETIME,
 		openObservations: options.openObservations ?? 1,
 		now: () => clock.now,
@@ -363,10 +363,12 @@ describe("the Worker's client to the viewer host", () => {
 	});
 
 	it("builds the viewer's address only from the bridge's own origin and the adapter's path for that launch", () => {
-		const client = new CuaViewerClient({ ...BRIDGE, url: "https://bridge.cua.test:8443/pim/" }, SPACE, (() => Promise.reject(new Error("nothing is sent"))) as typeof fetch);
+		const unsent = (() => Promise.reject(new Error("nothing is sent"))) as typeof fetch;
+		const client = new CuaViewerClient({ ...BRIDGE, url: "https://bridge.cua.test:8443/pim/" }, SPACE, ORIGIN, unsent);
 		const path = `/${LAUNCH}/viewer/#ticket=${CREDENTIAL}&clipboard=0`;
 		// At the bridge's root, not under its management path, and nothing of the bridge's token.
 		expect(client.viewerUrl(LAUNCH, path)).toBe(`https://bridge.cua.test:8443${path}`);
+		expect(new URL(client.viewerUrl(LAUNCH, path)).origin).toBe("https://bridge.cua.test:8443");
 		for (const bad of [
 			`//evil.example/${LAUNCH}/viewer/#ticket=${CREDENTIAL}&clipboard=0`,
 			`https://evil.example/${LAUNCH}/viewer/#ticket=${CREDENTIAL}&clipboard=0`,
@@ -380,8 +382,29 @@ describe("the Worker's client to the viewer host", () => {
 		}
 		expect(() => client.viewerUrl("../x", path)).toThrow(RangeError);
 		// A bridge that isn't HTTPS, or is another space's, makes no client at all.
-		expect(() => new CuaViewerClient({ ...BRIDGE, url: "http://bridge.cua.test/pim" }, SPACE)).toThrow();
-		expect(() => new CuaViewerClient(BRIDGE, "o_zyxwvutsrqponmlkjihgfedcba")).toThrow();
+		expect(() => new CuaViewerClient({ ...BRIDGE, url: "http://bridge.cua.test/pim" }, SPACE, ORIGIN, unsent)).toThrow();
+		expect(() => new CuaViewerClient(BRIDGE, "o_zyxwvutsrqponmlkjihgfedcba", ORIGIN, unsent)).toThrow();
+	});
+
+	it("takes as the viewer's origin only a bridge origin written as a browser writes it, on another host than Pim's", () => {
+		const unsent = (() => Promise.reject(new Error("nothing is sent"))) as typeof fetch;
+		const make = (url: string, app = ORIGIN) => () => new CuaViewerClient({ ...BRIDGE, url }, SPACE, app, unsent);
+		for (const good of ["https://bridge.cua.test/pim", "https://bridge.cua.test", "https://bridge.cua.test:8443/pim", "https://10.0.0.7/pim", "https://[2001:db8::1]:8443/pim"]) {
+			expect(make(good), good).not.toThrow();
+		}
+		// As the host's --viewer-public-origin refuses them: an uppercase host, :443 written out, a trailing dot, an empty label, a wildcard.
+		for (const bad of ["https://Bridge.cua.test/pim", "https://bridge.cua.test:443/pim", "https://bridge.cua.test./pim", "https://bridge..cua.test/pim", "https://*.cua.test/pim"]) {
+			expect(make(bad), bad).toThrow();
+		}
+		// Pim's own host, on any port, would make the frame Pim's origin, or share its cookies.
+		expect(make("https://pim.example/pim")).toThrow(RangeError);
+		expect(make("https://pim.example:8443/pim")).toThrow(RangeError);
+		expect(make("https://bridge.cua.test/pim", "not an address")).toThrow(RangeError);
+
+		expect(isHttpsOrigin("https://bridge.cua.test")).toBe(true);
+		for (const bad of ["https://bridge.cua.test/", "https://bridge.cua.test/pim", "https://user@bridge.cua.test", "http://bridge.cua.test", "https://bridge.cua.test:443", "https://BRIDGE.cua.test", "https://bridge.cua.test.", "https://*.cua.test", "https://bridge.cua.test?x", "https://bridge.cua.test#x"]) {
+			expect(isHttpsOrigin(bad), bad).toBe(false);
+		}
 	});
 });
 

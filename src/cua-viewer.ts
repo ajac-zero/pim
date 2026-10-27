@@ -344,6 +344,33 @@ export async function readBounded(body: ReadableStream<Uint8Array> | null, max: 
 const byteLength = (text: string) => new TextEncoder().encode(text).byteLength;
 const log = (event: string, detail: Record<string, unknown> = {}) => console.error(JSON.stringify({ event, ...detail }));
 
+// ---------------------------------------------------------------- the viewer's origin
+
+/** One DNS label, as a URL writes it: letters, digits and inner hyphens, at most 63 characters. A `*` is neither. */
+const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/**
+ * Whether `value` is exactly an `https://host[:port]` origin as a browser
+ * serializes it, as the host's `isHttpsOrigin` (computer/cua-host/host.ts)
+ * requires of `--viewer-public-origin` and `--viewer-embed-origin`: nothing
+ * after the port, no credentials, no `:443` written out, nothing uppercase,
+ * and a host that is a bracketed IPv6 address (which the URL parser has
+ * checked) or dot-separated labels (IPv4 included), never a wildcard, an
+ * empty label or a trailing dot. The URL parser takes a `*` host, so the host
+ * is checked on its own.
+ */
+export function isHttpsOrigin(value: string): boolean {
+	let url: URL;
+	try {
+		url = new URL(value);
+	} catch {
+		return false;
+	}
+	const host = url.hostname;
+	const wellFormed = host.startsWith("[") ? host.endsWith("]") : host.length <= 253 && host.split(".").every((label) => LABEL.test(label));
+	return url.protocol === "https:" && url.origin === value && !url.username && !url.password && wellFormed;
+}
+
 // ---------------------------------------------------------------- the client
 
 /** Bounds a client is made with; tests shorten them. */
@@ -354,14 +381,33 @@ export class CuaViewerClient {
 	readonly #space: string;
 	readonly #fetch: typeof fetch;
 	readonly #limits: ClientLimits;
-	/** `https://host`: where the viewer's launches are, at the root. */
+	/** `https://host[:port]`: the viewer's origin, where its launches are, at the root; another host than Pim's. */
 	readonly #origin: string;
 	/** `https://host/<bridge path>`, without a trailing slash: where management is. */
 	readonly #base: string;
 
-	/** Checks the bridge as `Cua.connect` does, before anything is sent; throws its `HttpError` otherwise. `fetcher` is the Worker's `fetch`; tests give their own. */
-	constructor(bridge: CuaBridge, space: string, fetcher: typeof fetch = fetch, limits: Partial<ClientLimits> = {}) {
+	/**
+	 * Checks the bridge as `Cua.connect` does, before anything is sent, and
+	 * throws otherwise. The bridge's address must also be written with its
+	 * origin exactly as a browser serializes it (`isHttpsOrigin`), since that
+	 * origin is the viewer's, and must equal the host's
+	 * `--viewer-public-origin`; and it must be another host than `appOrigin`,
+	 * Pim's own address, so the viewer's frame is of another origin than the
+	 * app's and shares none of its cookies. `fetcher` is the Worker's `fetch`;
+	 * tests give their own.
+	 */
+	constructor(bridge: CuaBridge, space: string, appOrigin: string, fetcher: typeof fetch = fetch, limits: Partial<ClientLimits> = {}) {
 		const url = bridgeAddress(bridge, space);
+		if (!isHttpsOrigin(url.origin) || (bridge.url !== url.origin && !bridge.url.startsWith(`${url.origin}/`))) {
+			throw new RangeError("The bridge's address must start with its origin exactly as a browser writes it, as the viewer's public origin.");
+		}
+		let app: URL;
+		try {
+			app = new URL(appOrigin);
+		} catch {
+			throw new RangeError("Pim's own address is needed to keep the viewer apart from it.");
+		}
+		if (app.hostname === url.hostname) throw new RangeError("The viewer's host must be another host than Pim's.");
 		this.#bridge = bridge;
 		this.#space = space;
 		this.#fetch = fetcher;
@@ -468,6 +514,10 @@ export class CuaViewerClient {
 	 */
 	viewerUrl(launchId: string, viewerPath: string): string {
 		if (!LAUNCH_ID.test(launchId) || !viewerPathOf(launchId).test(viewerPath)) throw new RangeError("The host's viewer path is not the adapter's.");
-		return this.#origin + viewerPath;
+		const address = this.#origin + viewerPath;
+		// Read back as a browser would: the same origin, and nothing the parser would rewrite.
+		const read = new URL(address);
+		if (read.origin !== this.#origin || read.href !== address) throw new RangeError("The viewer's address doesn't read back as itself.");
+		return address;
 	}
 }

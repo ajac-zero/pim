@@ -212,7 +212,8 @@ export class Pim extends RealPim {
 						write: (value) => this.store.setMeta(OBSERVATION_KEY, value),
 						flush: () => ctx.storage.sync(),
 					},
-					client: () => new CuaViewerClient(bridgeFor((env as unknown as { CUA_BRIDGES?: unknown }).CUA_BRIDGES, owner), owner),
+					// Pim's own address, so that the viewer's, on the bridge's host, is never the app's (src/cua-viewer.ts).
+					client: () => new CuaViewerClient(bridgeFor((env as unknown as { CUA_BRIDGES?: unknown }).CUA_BRIDGES, owner), owner, deploymentSettings(env).publicUrl ?? ""),
 					observationMs: VIEWER_FIRST.observationMs,
 					openObservations: VIEWER_FIRST.openObservations,
 					listing: () => ({ agent: agentMode(this.chosenModel().provider) }),

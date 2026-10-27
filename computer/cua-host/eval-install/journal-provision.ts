@@ -21,12 +21,13 @@
  * test holds equal to it. Importing this file does nothing.
  */
 
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import { realpathSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { type JournalFiles, JournalStoreRefused, NODE_JOURNAL_FILES, withDescriptor } from "../journal-store.ts";
-import { type Config, parseConfig, Refusal, VIEWER_BUNDLE_FILES, VIEWER_PATHS } from "./config.ts";
+import { type Config, PATHS, parseConfig, Refusal, VIEWER_BUNDLE_FILES, VIEWER_PATHS } from "./config.ts";
 import { checkAccounts } from "./install.ts";
 
 /** What provisioning needs beyond reading and writing a file: a directory, and a new owner. */
@@ -150,9 +151,91 @@ export function provisionJournal(config: Config, bridge: { uid: number; gid: num
 	flush(path.posix.dirname(VIEWER_PATHS.journalDir), "journal");
 }
 
+/** The bytes of the root token: 32 random bytes as unpadded base64url, 43 characters of `[A-Za-z0-9_-]`, which spacesd takes (16 to 4096 of `[A-Za-z0-9-._~+/=]`). */
+export function newRootToken(random: (bytes: number) => Buffer): string {
+	const token = random(32).toString("base64url");
+	if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new ProvisionFailure("root-token", "random", false);
+	return token;
+}
+
+/**
+ * Makes spacesd's root token once, on the VM, as root: the same 43 characters in two files, each created
+ * exclusively and flushed, and the token is never printed, put in an argument or a variable, or sent
+ * anywhere. One is the bridge's (`0600`, in its own `0700` directory) for the viewer host; the other is
+ * spacesd's own token file (`0600`, the desktop account's, in a root's directory), because spacesd runs as
+ * the desktop account. So the desktop account knows this token by design: it is spacesd's own authority
+ * and nothing of the bridge's (docs/cua-viewer-first-startup.md, "spacesd").
+ *
+ * Nothing is replaced, rotated or removed: if either file exists, nothing is made, and a failure after the
+ * first file leaves it, which blocks `start`. A second try is a new VM.
+ */
+export function provisionRootToken(
+	config: Config,
+	ids: { bridge: { uid: number; gid: number }; desktop: { uid: number; gid: number } },
+	files: ProvisionFiles = NODE_PROVISION_FILES,
+	random: (bytes: number) => Buffer = (bytes) => crypto.randomBytes(bytes),
+): void {
+	if (!config.viewer) throw new ProvisionFailure("config", "no-viewer", false);
+	if (files.uid() !== 0) throw new ProvisionFailure("root", "root-required", false);
+	let changed = false;
+	const fail = (step: string, reason: string): never => {
+		throw new ProvisionFailure(step, reason, changed);
+	};
+	const stat = (file: string) => {
+		try {
+			return files.lstat(file);
+		} catch (error) {
+			if (code(error) === "ENOENT") return null;
+			return fail("check", "unreadable");
+		}
+	};
+	if (stat(VIEWER_PATHS.rootToken) !== null || stat(VIEWER_PATHS.spacesdToken) !== null) fail("check", "exists");
+	// Their directories are made by the installer: the bridge's own (0700) and spacesd's (root's), nothing else.
+	const bridgeDir = stat(PATHS.bridgeDir);
+	const spacesdDir = stat(VIEWER_PATHS.spacesdDir);
+	if (!bridgeDir?.isDirectory() || bridgeDir.uid !== ids.bridge.uid || (bridgeDir.mode & 0o077) !== 0) fail("check", "unsafe-parent");
+	if (!spacesdDir?.isDirectory() || spacesdDir.uid !== 0 || (spacesdDir.mode & 0o022) !== 0) fail("check", "unsafe-parent");
+	const token = newRootToken(random);
+	const make = (file: string, owner: { uid: number; gid: number }, directory: string, step: string) => {
+		let descriptor: number;
+		try {
+			descriptor = files.open(file, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600);
+		} catch {
+			return fail(step, "create");
+		}
+		changed = true;
+		let retained = false;
+		try {
+			withDescriptor(files, descriptor, () => (retained = true), () => {
+				files.fchown(descriptor, owner.uid, owner.gid);
+				files.write(descriptor, Buffer.from(`${token}\n`, "utf8"));
+				files.fsync(descriptor);
+			});
+		} catch {
+			fail(step, retained ? "descriptor-retained" : "write");
+		}
+		const folder = files.open(directory, O_RDONLY | O_DIRECTORY);
+		let folderRetained = false;
+		try {
+			withDescriptor(files, folder, () => (folderRetained = true), () => files.fsync(folder));
+		} catch {
+			fail(step, folderRetained ? "descriptor-retained" : "flush");
+		}
+	};
+	make(VIEWER_PATHS.rootToken, ids.bridge, PATHS.bridgeDir, "bridge-copy");
+	make(VIEWER_PATHS.spacesdToken, ids.desktop, VIEWER_PATHS.spacesdDir, "spacesd-copy");
+}
+
 // ---- The program ----
 
-async function main(): Promise<void> {
+const COMMANDS = ["journal", "root-token"] as const;
+
+async function main(argv: string[]): Promise<void> {
+	const command = argv[0] as (typeof COMMANDS)[number];
+	if (argv.length !== 1 || !COMMANDS.includes(command)) {
+		process.stderr.write(`${JSON.stringify({ event: "pim-cua-eval.failed", command: "provision", reason: "usage", changed: false })}\n`);
+		process.exit(2);
+	}
 	let step = "config";
 	try {
 		if (process.geteuid?.() !== 0) throw new Refusal("root-required");
@@ -171,18 +254,24 @@ async function main(): Promise<void> {
 		const read = (file: string) => fs.readFileSync(file, "utf8");
 		const accounts = checkAccounts(read("/etc/passwd"), read("/etc/group"), read("/etc/shadow"));
 		step = "provision";
-		provisionJournal(config, { uid: accounts.bridge.uid, gid: accounts.bridge.gid });
-		process.stdout.write(`${JSON.stringify({ event: "pim-cua-eval.journal-provisioned", evaluation: config.evaluation })}\n`);
+		if (command === "journal") {
+			provisionJournal(config, { uid: accounts.bridge.uid, gid: accounts.bridge.gid });
+			process.stdout.write(`${JSON.stringify({ event: "pim-cua-eval.journal-provisioned", evaluation: config.evaluation })}\n`);
+		} else {
+			provisionRootToken(config, { bridge: { uid: accounts.bridge.uid, gid: accounts.bridge.gid }, desktop: { uid: accounts.desktop.uid, gid: accounts.desktop.gid } });
+			// Said without the token: only that it was made.
+			process.stdout.write(`${JSON.stringify({ event: "pim-cua-eval.root-token-provisioned", evaluation: config.evaluation })}\n`);
+		}
 	} catch (error) {
 		// What was thrown may name a path; only fixed words are said.
 		const entry =
 			error instanceof ProvisionFailure
-				? { event: "pim-cua-eval.failed", command: "journal", step: error.step, reason: error.reason, changed: error.changed }
-				: { event: "pim-cua-eval.failed", command: "journal", step, reason: error instanceof Refusal ? error.reason : error instanceof JournalStoreRefused ? error.reason : "internal", changed: false };
+				? { event: "pim-cua-eval.failed", command, step: error.step, reason: error.reason, changed: error.changed }
+				: { event: "pim-cua-eval.failed", command, step, reason: error instanceof Refusal ? error.reason : error instanceof JournalStoreRefused ? error.reason : "internal", changed: false };
 		process.stderr.write(`${JSON.stringify(entry)}\n`);
 		process.exit(1);
 	}
 }
 
 // Run as a program, never when imported.
-if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) void main();
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) void main(process.argv.slice(2));

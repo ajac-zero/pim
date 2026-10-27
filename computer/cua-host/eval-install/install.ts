@@ -37,7 +37,7 @@ import * as fs from "node:fs";
 import { realpathSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { ACCOUNTS, BUNDLE_FILES, BUNDLE_FORMAT, type Config, MIN_NODE, nodeVersionAtLeast, PATHS, parseConfig, Refusal, renderTmpfiles, renderUnits, TOOLS, UNITS, VIEWER_PATHS, viewerBundleFiles, within } from "./config.ts";
+import { ACCOUNTS, BUNDLE_FILES, BUNDLE_FORMAT, type Config, MIN_NODE, nodeVersionAtLeast, PATHS, parseConfig, Refusal, renderTmpfiles, renderUnits, TOOLS, UNITS, VIEWER_ACCOUNTS, VIEWER_PATHS, VIEWER_UNITS, renderCaddyfile, viewerBundleFiles, within } from "./config.ts";
 
 export type PathFact = { readonly kind: "file" | "dir" | "link" | "socket" | "other"; readonly uid: number; readonly gid: number; readonly mode: number } | null;
 
@@ -60,6 +60,9 @@ export type Facts = {
 	/** `lstat` of every path in `inspectedPaths`, and of each directory above it; `null` when nothing is there. */
 	readonly paths: Readonly<Record<string, PathFact>>;
 	readonly browserSha256: string | null;
+	/** With a viewer: the SHA-256 of the pinned spacesd and Caddy binaries; `null` when unreadable. */
+	readonly spacesdSha256?: string | null;
+	readonly caddySha256?: string | null;
 	readonly bundleMarker: string | null;
 	/** /proc/sys/kernel/yama/ptrace_scope, at 1 or more, as docs/cua-bridge.md assumes of the OS. */
 	readonly ptraceScope: string | null;
@@ -99,8 +102,8 @@ function chain(file: string): string[] {
 	return out;
 }
 
-function unitDropins(): string[] {
-	return [`${PATHS.desktopUnit}.d`, `${PATHS.bridgeUnit}.d`];
+function unitDropins(config?: Config): string[] {
+	return [`${PATHS.desktopUnit}.d`, `${PATHS.bridgeUnit}.d`, ...(config?.viewer ? [`${VIEWER_PATHS.spacesdUnit}.d`, `${VIEWER_PATHS.ingressUnit}.d`] : [])];
 }
 
 /** The paths the planner looks at, each with every directory above it. */
@@ -112,11 +115,11 @@ export function inspectedPaths(config: Config, desktopHome: string | null): stri
 		config.node.path,
 		config.browser.path,
 		...Object.values(BUNDLE_FILES).map((file) => `${config.bundle.dir}/${file}`),
-		...(config.viewer ? [...viewerBundleFiles().map((file) => `${config.bundle.dir}/${file}`), ...Object.values(VIEWER_PATHS)] : []),
+		...(config.viewer ? [...viewerBundleFiles().map((file) => `${config.bundle.dir}/${file}`), ...Object.values(VIEWER_PATHS), config.viewer.spacesd.path, config.viewer.caddy.path] : []),
 		config.tls.cert,
 		config.tls.key,
 		...Object.values(PATHS),
-		...unitDropins(),
+		...unitDropins(config),
 		config.workspace,
 		...(desktopHome ? [desktopHome] : []),
 	];
@@ -143,7 +146,7 @@ function trustedFile(facts: Facts, file: string, executable: boolean): boolean {
 }
 
 /** Who owns what the installer makes: root, or an account's own user and primary group. */
-export type Owner = "root" | typeof ACCOUNTS.bridge | typeof ACCOUNTS.desktop;
+export type Owner = "root" | typeof ACCOUNTS.bridge | typeof ACCOUNTS.desktop | typeof VIEWER_ACCOUNTS.ingress;
 
 export type Action =
 	| { readonly step: string; readonly kind: "read-tls" }
@@ -191,18 +194,26 @@ export function plan(config: Config, facts: Facts): Action[] {
 	// With a viewer, its programs and pinned files are in the bundle too, and its marker names the pinned package.
 	if (config.viewer && !viewerBundleFiles().every((file) => trustedFile(facts, `${config.bundle.dir}/${file}`, false))) throw new Refusal("bundle");
 	if (config.viewer && !/^protobuf [0-9.]+ sha512-[A-Za-z0-9+/]{86}==$/m.test(facts.bundleMarker ?? "")) throw new Refusal("bundle-commit");
+	// With a viewer, the pinned spacesd and Caddy are root's files of the pinned digests, runnable by their accounts.
+	if (config.viewer) {
+		if (!trustedFile(facts, config.viewer.spacesd.path, true)) throw new Refusal("spacesd");
+		if (facts.spacesdSha256 !== config.viewer.spacesd.sha256) throw new Refusal("spacesd-digest");
+		if (!trustedFile(facts, config.viewer.caddy.path, true)) throw new Refusal("caddy");
+		if (facts.caddySha256 !== config.viewer.caddy.sha256) throw new Refusal("caddy-digest");
+	}
 	if (facts.bundleMarker === null || !facts.bundleMarker.startsWith(`${BUNDLE_FORMAT}\ncommit ${config.commit}\n`)) throw new Refusal("bundle-commit");
 	if (!trustedFile(facts, config.browser.path, true)) throw new Refusal("browser");
 	if (facts.browserSha256 !== config.browser.sha256) throw new Refusal("browser-digest");
 	// pim-bridge and pim-desktop run Node, read the bundle and start the browser, and the desktop reaches its workspace.
-	if (![path.posix.dirname(config.node.path), config.bundle.dir, path.posix.dirname(config.browser.path), path.posix.dirname(config.workspace)].every((dir) => reachableChain(facts, dir))) {
+	if (![path.posix.dirname(config.node.path), config.bundle.dir, path.posix.dirname(config.browser.path), path.posix.dirname(config.workspace), ...(config.viewer ? [path.posix.dirname(config.viewer.spacesd.path), path.posix.dirname(config.viewer.caddy.path)] : [])].every((dir) => reachableChain(facts, dir))) {
 		throw new Refusal("unreachable");
 	}
 
 	if (facts.passwd === null || facts.group === null) throw new Refusal("accounts-unreadable");
 	const users = parsePasswd(facts.passwd);
 	const groups = parseGroup(facts.group);
-	if (users.some((user) => user.name === ACCOUNTS.bridge || user.name === ACCOUNTS.session) || groups.some((group) => group.name === ACCOUNTS.bridge || group.name === ACCOUNTS.session)) {
+	const made: string[] = [ACCOUNTS.bridge, ACCOUNTS.session, ...(config.viewer ? [VIEWER_ACCOUNTS.ingress] : [])];
+	if (users.some((user) => made.includes(user.name)) || groups.some((group) => made.includes(group.name))) {
 		throw new Refusal("preexisting-account");
 	}
 	const desktop = users.find((user) => user.name === ACCOUNTS.desktop);
@@ -214,7 +225,7 @@ export function plan(config: Config, facts: Facts): Action[] {
 	if (groups.some((group) => group.gid !== desktop.gid && group.members.includes(ACCOUNTS.desktop))) throw new Refusal("desktop-groups");
 	// A tripwire, not an interpretation of sudo's policy: any file that can't be read refuses, and any mention of the accounts does.
 	if (facts.sudoers === null || facts.sudoers.length === 0 || facts.sudoers.some((text) => text === null)) throw new Refusal("sudoers-unreadable");
-	if (facts.sudoers.some((text) => NAMES.some((name) => mentions(text!, name)))) throw new Refusal("sudoers");
+	if (facts.sudoers.some((text) => [...NAMES, ...(config.viewer ? [VIEWER_ACCOUNTS.ingress] : [])].some((name) => mentions(text!, name)))) throw new Refusal("sudoers");
 	const home = facts.paths[desktop.home];
 	if (!path.posix.isAbsolute(desktop.home) || !trustedChain(facts, path.posix.dirname(desktop.home)) || home?.kind !== "dir" || home.uid !== desktop.uid || (home.mode & 0o022) !== 0) {
 		throw new Refusal("desktop-home");
@@ -222,7 +233,17 @@ export function plan(config: Config, facts: Facts): Action[] {
 	if (within(config.workspace, desktop.home)) throw new Refusal("config-overlap");
 
 	// The journal's directory and its tombstone are made later, once, by `journal-provision.ts`: neither may exist before the installation, or on a VM that had a journal. (The tombstone sits in `/etc/pim-eval`, which this installation makes, so it is checked on its own.)
-	const targets = [PATHS.bridgeDir, PATHS.evalDir, PATHS.socketDir, PATHS.tmpfiles, PATHS.desktopUnit, PATHS.bridgeUnit, ...unitDropins(), config.workspace, ...(config.viewer ? [VIEWER_PATHS.journalDir] : [])];
+	const targets = [
+		PATHS.bridgeDir,
+		PATHS.evalDir,
+		PATHS.socketDir,
+		PATHS.tmpfiles,
+		PATHS.desktopUnit,
+		PATHS.bridgeUnit,
+		...unitDropins(config),
+		config.workspace,
+		...(config.viewer ? [VIEWER_PATHS.journalDir, VIEWER_PATHS.spacesdDir, VIEWER_PATHS.spacesdData, VIEWER_PATHS.ingressDir, VIEWER_PATHS.ingressState, VIEWER_PATHS.spacesdUnit, VIEWER_PATHS.ingressUnit] : []),
+	];
 	if (targets.some((target) => facts.paths[target] !== null) || (config.viewer && facts.paths[VIEWER_PATHS.tombstone] !== null)) throw new Refusal("preexisting-path");
 	if (!targets.every((target) => trustedChain(facts, path.posix.dirname(target)))) throw new Refusal("unsafe-parent");
 
@@ -246,6 +267,23 @@ export function plan(config: Config, facts: Facts): Action[] {
 	}
 
 	const units = renderUnits(config, desktop.uid);
+	const viewer = config.viewer;
+	const viewerAccount: Action[] = viewer
+		? [{ step: "ingress-account", kind: "run", argv: [TOOLS.useradd, "--system", "--user-group", "--no-create-home", "--home-dir", "/nonexistent", "--shell", TOOLS.nologin, VIEWER_ACCOUNTS.ingress] }]
+		: [];
+	// The ingress's own files: root's configuration, the bridge's certificate's public part (which Caddy alone trusts), and its state, the ingress account's alone; and spacesd's, the desktop's own.
+	const viewerFiles: Action[] = viewer
+		? [
+				{ step: "spacesd-dir", kind: "mkdir", path: VIEWER_PATHS.spacesdDir, mode: 0o755, owner: "root" },
+				{ step: "spacesd-data", kind: "mkdir", path: VIEWER_PATHS.spacesdData, mode: 0o700, owner: ACCOUNTS.desktop },
+				{ step: "ingress-dir", kind: "mkdir", path: VIEWER_PATHS.ingressDir, mode: 0o755, owner: "root" },
+				{ step: "bridge-trust", kind: "write", path: VIEWER_PATHS.bridgeTrust, mode: 0o644, owner: "root", content: { staged: "cert" } },
+				{ step: "caddyfile", kind: "write", path: VIEWER_PATHS.caddyfile, mode: 0o644, owner: "root", content: { text: renderCaddyfile(config) } },
+				{ step: "ingress-state", kind: "mkdir", path: VIEWER_PATHS.ingressState, mode: 0o700, owner: VIEWER_ACCOUNTS.ingress },
+				{ step: "spacesd-unit", kind: "write", path: VIEWER_PATHS.spacesdUnit, mode: 0o644, owner: "root", content: { text: units.spacesd! } },
+				{ step: "ingress-unit", kind: "write", path: VIEWER_PATHS.ingressUnit, mode: 0o644, owner: "root", content: { text: units.ingress! } },
+			]
+		: [];
 	return [
 		{ step: "tls", kind: "read-tls" },
 		{ step: "session-group", kind: "run", argv: [TOOLS.groupadd, "--system", ACCOUNTS.session] },
@@ -254,6 +292,7 @@ export function plan(config: Config, facts: Facts): Action[] {
 			kind: "run",
 			argv: [TOOLS.useradd, "--system", "--user-group", "--no-create-home", "--home-dir", "/nonexistent", "--shell", TOOLS.nologin, "--groups", ACCOUNTS.session, ACCOUNTS.bridge],
 		},
+		...viewerAccount,
 		{ step: "accounts", kind: "check-accounts" },
 		{ step: "eval-dir", kind: "mkdir", path: PATHS.evalDir, mode: 0o755, owner: "root" },
 		{ step: "public-key", kind: "write", path: PATHS.publicKey, mode: 0o644, owner: "root", content: { text: config.evalKey.publicKeyPem } },
@@ -266,11 +305,12 @@ export function plan(config: Config, facts: Facts): Action[] {
 		{ step: "tmpfiles", kind: "write", path: PATHS.tmpfiles, mode: 0o644, owner: "root", content: { text: renderTmpfiles() } },
 		{ step: "desktop-unit", kind: "write", path: PATHS.desktopUnit, mode: 0o644, owner: "root", content: { text: units.desktop } },
 		{ step: "bridge-unit", kind: "write", path: PATHS.bridgeUnit, mode: 0o644, owner: "root", content: { text: units.bridge } },
+		...viewerFiles,
 		{ step: "socket-dir", kind: "run", argv: [TOOLS.tmpfiles, "--create", PATHS.tmpfiles] },
 		{ step: "daemon-reload", kind: "run", argv: [TOOLS.systemctl, "daemon-reload"] },
 		// What systemd will run is these files alone: no drop-in from anywhere changes them.
 		{ step: "units", kind: "check-units" },
-		{ step: "enable", kind: "run", argv: [TOOLS.systemctl, "enable", UNITS.desktop, UNITS.bridge] },
+		{ step: "enable", kind: "run", argv: [TOOLS.systemctl, "enable", UNITS.desktop, UNITS.bridge, ...(viewer ? [VIEWER_UNITS.spacesd, VIEWER_UNITS.ingress] : [])] },
 		{ step: "staged-tls", kind: "remove-staged" },
 	];
 }
@@ -281,7 +321,7 @@ export function plan(config: Config, facts: Facts): Action[] {
  * password, in its own group and the session group only; the session group
  * holding the bridge alone; the desktop account in no group but its own.
  */
-export function checkAccounts(passwd: string, group: string, shadow: string): { desktop: User; bridge: User; sessionGid: number } {
+export function checkAccounts(passwd: string, group: string, shadow: string, ingress = false): { desktop: User; bridge: User; sessionGid: number; ingress?: User } {
 	const users = parsePasswd(passwd);
 	const groups = parseGroup(group);
 	const one = <T extends { name: string }>(list: T[], name: string): T => {
@@ -314,7 +354,30 @@ export function checkAccounts(passwd: string, group: string, shadow: string): { 
 		desktop.gid !== bridgeGroup.gid &&
 		desktop.gid !== session.gid;
 	if (!ok) throw new Refusal("accounts");
-	return { desktop, bridge, sessionGid: session.gid };
+	if (!ingress) return { desktop, bridge, sessionGid: session.gid };
+	// The ingress account, as the bridge's is: a system account of its own with no login, no home, a locked password, its own group, and no other group, apart from the desktop's and the bridge's.
+	const caddy = one(users, VIEWER_ACCOUNTS.ingress);
+	const caddyGroup = one(groups, VIEWER_ACCOUNTS.ingress);
+	const caddyLocked = shadow
+		.split("\n")
+		.filter((line) => line.split(":")[0] === VIEWER_ACCOUNTS.ingress)
+		.map((line) => line.split(":")[1] ?? "");
+	const caddyOk =
+		caddy.uid > 0 &&
+		caddy.uid < 1000 &&
+		users.filter((user) => user.uid === caddy.uid).length === 1 &&
+		caddy.gid === caddyGroup.gid &&
+		groups.filter((g) => g.gid === caddyGroup.gid).length === 1 &&
+		caddy.gid !== desktop.gid &&
+		caddy.gid !== bridge.gid &&
+		caddy.home === "/nonexistent" &&
+		caddy.shell === TOOLS.nologin &&
+		caddyLocked.length === 1 &&
+		/^[!*]/.test(caddyLocked[0]!) &&
+		groups.every((g) => !g.members.includes(VIEWER_ACCOUNTS.ingress)) &&
+		caddyGroup.members.length === 0;
+	if (!caddyOk) throw new Refusal("accounts");
+	return { desktop, bridge, sessionGid: session.gid, ingress: caddy };
 }
 
 export type Staged = { readonly bytes: Buffer; readonly dev: number; readonly ino: number };
@@ -339,11 +402,18 @@ export type Host = {
 };
 
 /** What `systemctl show` says of each unit, which must be what the installer wrote, as the account it names, with nothing merged in. */
-export function checkUnits(show: (unit: string) => string): void {
-	for (const [unit, file, user] of [
+export function checkUnits(show: (unit: string) => string, viewer = false): void {
+	const units: readonly (readonly [string, string, string])[] = [
 		[UNITS.desktop, PATHS.desktopUnit, ACCOUNTS.desktop],
 		[UNITS.bridge, PATHS.bridgeUnit, ACCOUNTS.bridge],
-	] as const) {
+		...(viewer
+			? ([
+					[VIEWER_UNITS.spacesd, VIEWER_PATHS.spacesdUnit, ACCOUNTS.desktop],
+					[VIEWER_UNITS.ingress, VIEWER_PATHS.ingressUnit, VIEWER_ACCOUNTS.ingress],
+				] as const)
+			: []),
+	];
+	for (const [unit, file, user] of units) {
 		const properties = new Map(
 			show(unit)
 				.split("\n")
@@ -385,6 +455,17 @@ export function checkTls(cert: Buffer, key: Buffer, now = Date.now()): void {
 	if (!ok) throw new Refusal("tls");
 }
 
+/** Whether the staged certificate is for `name` (a subject alternative name, which Node matches exactly: no wildcard is taken for another name). */
+export function checkBackendName(cert: Buffer, name: string): void {
+	let ok = false;
+	try {
+		ok = new crypto.X509Certificate(cert).checkHost(name, { subject: "never", wildcards: false }) === name;
+	} catch {
+		ok = false;
+	}
+	if (!ok) throw new Refusal("tls-name");
+}
+
 const MAX_TLS_BYTES = 64 * 1024;
 
 /** Does the planned actions in order, and stops at the first that fails, undoing nothing. */
@@ -404,6 +485,8 @@ export function apply(config: Config, actions: readonly Action[], host: Host, no
 					case "read-tls": {
 						staged = { cert: host.readStaged(config.tls.cert, MAX_TLS_BYTES), key: host.readStaged(config.tls.key, MAX_TLS_BYTES) };
 						checkTls(staged.cert.bytes, staged.key.bytes, now);
+						// With a viewer the staged certificate is the bridge's own private one, and it must name what Caddy will check it for.
+						if (config.viewer) checkBackendName(staged.cert.bytes, config.viewer.backendName);
 						break;
 					}
 					case "run":
@@ -415,11 +498,16 @@ export function apply(config: Config, actions: readonly Action[], host: Host, no
 						const answer = host.query(SHOW_UNIT(unit));
 						if (answer.status !== 0) throw new Refusal("unit-check");
 						return answer.stdout;
-					});
+					}, config.viewer !== undefined);
 					break;
 				case "check-accounts": {
-						const accounts = checkAccounts(host.readText("/etc/passwd"), host.readText("/etc/group"), host.readText("/etc/shadow"));
-						ids = { root: { uid: 0, gid: 0 }, [ACCOUNTS.bridge]: { uid: accounts.bridge.uid, gid: accounts.bridge.gid }, [ACCOUNTS.desktop]: { uid: accounts.desktop.uid, gid: accounts.desktop.gid } };
+						const accounts = checkAccounts(host.readText("/etc/passwd"), host.readText("/etc/group"), host.readText("/etc/shadow"), config.viewer !== undefined);
+						ids = {
+							root: { uid: 0, gid: 0 },
+							[ACCOUNTS.bridge]: { uid: accounts.bridge.uid, gid: accounts.bridge.gid },
+							[ACCOUNTS.desktop]: { uid: accounts.desktop.uid, gid: accounts.desktop.gid },
+							[VIEWER_ACCOUNTS.ingress]: accounts.ingress ? { uid: accounts.ingress.uid, gid: accounts.ingress.gid } : { uid: 0, gid: 0 },
+						};
 						break;
 					}
 					case "mkdir": {
@@ -518,7 +606,7 @@ export function status(config: Config, probe: Probe): Record<string, unknown> {
 
 	// What systemd says of each unit, nothing more: it says nothing of what the unit's programs started.
 	const units: Record<string, Record<string, string>> = {};
-	for (const unit of [UNITS.desktop, UNITS.bridge]) {
+	for (const unit of [UNITS.desktop, UNITS.bridge, ...(config.viewer ? [VIEWER_UNITS.spacesd, VIEWER_UNITS.ingress] : [])]) {
 		const enabled = probe.query([TOOLS.systemctl, "is-enabled", unit]).stdout.trim();
 		const state = unitState(probe.query, unit);
 		units[unit] = { enabled: /^[a-z-]+$/.test(enabled) ? enabled : "unknown", ...(state ?? { state: "unknown" }) };
@@ -636,6 +724,16 @@ export function start(config: Config, probe: Probe, run: (argv: readonly string[
 	const token = probe.lstat(PATHS.token);
 	if (!bridge || token?.kind !== "file" || token.uid !== bridge.uid || (token.mode & 0o7777) !== 0o600) throw new Refusal("token-missing");
 	if (config.viewer) {
+		// spacesd's token, the desktop account's own 0600 file: spacesd runs as that account and is its authority.
+		const spacesdToken = probe.lstat(VIEWER_PATHS.spacesdToken);
+		if (!desktop || spacesdToken?.kind !== "file" || spacesdToken.uid !== desktop.uid || (spacesdToken.mode & 0o7777) !== 0o600) throw new Refusal("viewer-root-token-missing");
+		// The bridge's certificate's public part, which Caddy alone trusts, and Caddy's configuration, both root's and as written.
+		for (const file of [VIEWER_PATHS.bridgeTrust, VIEWER_PATHS.caddyfile]) {
+			const fact = probe.lstat(file);
+			if (fact?.kind !== "file" || fact.uid !== 0 || (fact.mode & 0o7777) !== 0o644) throw new Refusal("ingress-missing");
+		}
+	}
+	if (config.viewer) {
 		// The viewer starts only with what it needs, each as it must be: spacesd's root token (the bridge's, 0600), the journal made once (directory 0700, file 0600, the bridge's), its tombstone (root's, 0444), and no lock left by a host that ended. Nothing is made or removed here.
 		const rootToken = probe.lstat(VIEWER_PATHS.rootToken);
 		if (!bridge || rootToken?.kind !== "file" || rootToken.uid !== bridge.uid || (rootToken.mode & 0o7777) !== 0o600) throw new Refusal("viewer-root-token-missing");
@@ -658,8 +756,18 @@ export function start(config: Config, probe: Probe, run: (argv: readonly string[
 	// The bridge starts nothing of its own, so a failed one may be started again; a state that can't be read, or a change under way, may not.
 	const bridgeState = unitState(probe.query, UNITS.bridge);
 	if (bridgeState?.LoadState !== "loaded" || !["active", "inactive", "failed"].includes(bridgeState.ActiveState)) throw new Refusal("bridge-state");
+	if (config.viewer) {
+		// spacesd and the ingress start only once, each from a state that can be read whole: a unit that ended, or is changing, is not started again.
+		for (const unit of [VIEWER_UNITS.spacesd, VIEWER_UNITS.ingress]) {
+			const state = unitState(probe.query, unit);
+			if (state?.LoadState !== "loaded" || !["active", "inactive", "failed"].includes(state.ActiveState)) throw new Refusal("viewer-unit-state");
+		}
+	}
 	if (!running) run([TOOLS.systemctl, "start", UNITS.desktop]);
+	// Inside out: the desktop, spacesd, the bridge, and the one public listener last, so nothing is public before what it fronts is up.
+	if (config.viewer) run([TOOLS.systemctl, "start", VIEWER_UNITS.spacesd]);
 	run([TOOLS.systemctl, "start", UNITS.bridge]);
+	if (config.viewer) run([TOOLS.systemctl, "start", VIEWER_UNITS.ingress]);
 }
 
 // ---- The real VM ----
@@ -766,6 +874,7 @@ export function gatherFacts(config: Config): Facts {
 		sudoers,
 		paths,
 		browserSha256: sha256File(config.browser.path),
+		...(config.viewer ? { spacesdSha256: sha256File(config.viewer.spacesd.path), caddySha256: sha256File(config.viewer.caddy.path) } : {}),
 		bundleMarker: readText(`${config.bundle.dir}/${BUNDLE_FILES.marker}`),
 		ptraceScope: readText("/proc/sys/kernel/yama/ptrace_scope"),
 	};
@@ -922,11 +1031,11 @@ async function main(argv: string[]): Promise<void> {
 				say({ event: "pim-cua-eval.failed", command, step: error.step, reason: error.reason, changed: error.changed }, "stderr");
 				process.exit(1);
 			}
-			say({ event: "pim-cua-eval.installed", evaluation: config.evaluation, commit: config.commit, units: [UNITS.desktop, UNITS.bridge] });
+			say({ event: "pim-cua-eval.installed", evaluation: config.evaluation, commit: config.commit, units: [UNITS.desktop, UNITS.bridge, ...(config.viewer ? [VIEWER_UNITS.spacesd, VIEWER_UNITS.ingress] : [])] });
 		} else if (command === "start") {
 			step = "start";
 			start(config, systemProbe(), systemHost().run);
-			say({ event: "pim-cua-eval.started", units: [UNITS.desktop, UNITS.bridge] });
+			say({ event: "pim-cua-eval.started", units: [UNITS.desktop, UNITS.bridge, ...(config.viewer ? [VIEWER_UNITS.spacesd, VIEWER_UNITS.ingress] : [])] });
 		} else {
 			step = "status";
 			say(status(config, systemProbe()));

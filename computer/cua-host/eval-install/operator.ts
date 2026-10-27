@@ -35,7 +35,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import * as zlib from "node:zlib";
-import { ACCOUNTS, BUNDLE_FILES, BUNDLE_FORMAT, type Config, isPlainPath, PATHS, parseConfig, Refusal, TOOLS, VIEWER_ASSET_DIR, VIEWER_ASSET_NAMES, VIEWER_ASSET_SHA256, VIEWER_BUNDLE_FILES, viewerBundleFiles } from "./config.ts";
+import { ACCOUNTS, BRIDGE_CERT_DAYS, BUNDLE_FILES, BUNDLE_FORMAT, type Config, isPlainPath, PATHS, parseConfig, Refusal, TOOLS, VIEWER_ASSET_DIR, VIEWER_ASSET_NAMES, VIEWER_ASSET_SHA256, VIEWER_BUNDLE_FILES, viewerBundleFiles } from "./config.ts";
 
 /** The repository's files a bundle holds, as they are at its commit. */
 export const BUNDLE_SOURCES = [
@@ -433,20 +433,100 @@ exec ${TOOLS.runuser} -u ${ACCOUNTS.bridge} -- "$NODE" "$BUNDLE/${BUNDLE_FILES.c
 	--public-key ${PATHS.publicKey} --fingerprint ${quote(config.evalKey.fingerprint)} \\
 	--token-file ${PATHS.token} </dev/null
 `;
-	// Only with a viewer: makes its journal once, as root, from the bundle's own copy of the program (docs/cua-viewer-first-startup.md).
-	const journal = `${prologue(config, "journal")}
-exec "$NODE" "$BUNDLE/${VIEWER_BUNDLE_FILES.provision}" <<'${HEREDOC}'
+	// Only with a viewer (docs/cua-viewer-first-startup.md): the journal and spacesd's root token, each made once, as root, from the bundle's own copy of the program;
+	// and the bridge's own private certificate, born on the VM so its key never travels.
+	const provision = (command: string) => `${prologue(config, command)}
+exec "$NODE" "$BUNDLE/${VIEWER_BUNDLE_FILES.provision}" ${command} <<'${HEREDOC}'
 ${json}
 ${HEREDOC}
 `;
+	const viewer = config.viewer;
+	const staging = path.posix.dirname(config.tls.cert);
+	const bridgeCert = viewer
+		? `${prologue(config, "bridge-cert")}
+trusted_file /usr/bin/openssl || fail tools
+# Once only, into a staging directory made here: new, root's, 0700. The certificate is the bridge's own, private, for the one name Caddy checks it for, valid ${BRIDGE_CERT_DAYS} days.
+trusted_dirs ${quote(path.posix.dirname(staging))} || fail staging-parent
+[[ ! -e ${quote(staging)} && ! -L ${quote(staging)} ]] || fail staging-exists
+mkdir -m 0700 -- ${quote(staging)}
+exec /usr/bin/openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days ${BRIDGE_CERT_DAYS} \\
+	-subj ${quote(`/CN=${viewer.backendName}`)} -addext ${quote(`subjectAltName=DNS:${viewer.backendName}`)} \\
+	-addext extendedKeyUsage=serverAuth -addext basicConstraints=critical,CA:false \\
+	-keyout ${quote(config.tls.key)} -out ${quote(config.tls.cert)}
+`
+		: "";
 	return {
 		"plan.sh": installer("plan"),
 		"install.sh": installer("install"),
 		"seal.sh": seal,
 		"start.sh": installer("start"),
 		"status.sh": installer("status"),
-		...(config.viewer ? { "journal.sh": journal } : {}),
+		...(viewer ? { "bridge-cert.sh": bridgeCert, "journal.sh": provision("journal"), "root-token.sh": provision("root-token") } : {}),
 	};
+}
+
+/** The desktop account's UID in the base: above a cloud's own admin user's (1000), and inside what the installer takes (1000 to 59999). */
+export const BASE_DESKTOP_UID = 1500;
+
+/**
+ * The ordinary desktop base (docs/cua-viewer-first-startup.md, "The base"), as cloud-init user data for the VM's
+ * creation: the desktop account (no group but its own, no sudo, no password), the packages an X11 desktop and
+ * Chrome and spacesd need, lingering so the account has its runtime directory and session bus, and two system
+ * services that run as that account: Xvfb on the configured display, then a window manager. It installs none of
+ * the pinned programs (Node, Chrome, Caddy, spacesd, the bundle): those are delivered root-owned with their
+ * digests, and the installer refuses a VM without them. The packages come from the Ubuntu archive at first boot,
+ * by name, not pinned by version; nothing here has been checked against the image.
+ */
+export function renderBaseCloudConfig(config: Config): string {
+	if (!config.viewer || config.desktop.display === null) throw new Refusal("config-viewer");
+	const uid = BASE_DESKTOP_UID;
+	const display = config.desktop.display;
+	const env = [`Environment=DISPLAY=${display}`, `Environment=XDG_RUNTIME_DIR=/run/user/${uid}`, `Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus`];
+	const unit = (description: string, after: string, exec: string) =>
+		["[Unit]", `Description=${description}`, `After=${after}`, `Requires=${after}`, "", "[Service]", "Type=simple", `User=${ACCOUNTS.desktop}`, `Group=${ACCOUNTS.desktop}`, ...env, `ExecStart=${exec}`, "Restart=no", "", "[Install]", "WantedBy=multi-user.target", ""].join("\n");
+	const xvfb = unit("Pim Cua evaluation X11 display", `user@${uid}.service`, `/usr/bin/Xvfb ${display} -screen 0 1920x1080x24 -nolisten tcp`);
+	const wm = unit("Pim Cua evaluation window manager", "pim-cua-xvfb.service", "/usr/bin/openbox");
+	const data = {
+		package_update: true,
+		package_upgrade: false,
+		disable_root: true,
+		ssh_pwauth: false,
+		users: ["default", { name: ACCOUNTS.desktop, uid, homedir: `/home/${ACCOUNTS.desktop}`, shell: "/bin/bash", lock_passwd: true, sudo: false }],
+		packages: [
+			"xvfb",
+			"openbox",
+			"dbus-user-session",
+			"x11-xserver-utils",
+			"openssl",
+			"ca-certificates",
+			"fonts-liberation",
+			"libnss3",
+			"libatk1.0-0t64",
+			"libatk-bridge2.0-0t64",
+			"libcups2t64",
+			"libdrm2",
+			"libxkbcommon0",
+			"libxcomposite1",
+			"libxdamage1",
+			"libxfixes3",
+			"libxrandr2",
+			"libgbm1",
+			"libasound2t64",
+			"libpango-1.0-0",
+			"libcairo2",
+			"libx11-6",
+			"libxext6",
+			"libxtst6",
+			"libxcb-shm0",
+			"libxcb-xfixes0",
+		],
+		write_files: [
+			{ path: "/etc/systemd/system/pim-cua-xvfb.service", owner: "root:root", permissions: "0644", content: xvfb },
+			{ path: "/etc/systemd/system/pim-cua-wm.service", owner: "root:root", permissions: "0644", content: wm },
+		],
+		runcmd: [["loginctl", "enable-linger", ACCOUNTS.desktop], ["systemctl", "daemon-reload"], ["systemctl", "enable", "--now", "pim-cua-xvfb.service", "pim-cua-wm.service"]],
+	};
+	return `#cloud-config\n${JSON.stringify(data, null, 2)}\n`;
 }
 
 /**
@@ -515,7 +595,7 @@ function render(configFile: string, out: string): string[] {
 	if (!stat.isFile() || stat.size > 64 * 1024) throw new Refusal("config");
 	const config = parseConfig(fs.readFileSync(configFile, "utf8"));
 	const scripts = renderScripts(config);
-	const files = { ...scripts, "cloud-config.yaml": renderCloudConfig(scripts) };
+	const files = { ...scripts, "cloud-config.yaml": renderCloudConfig(scripts), ...(config.viewer ? { "base-cloud-config.yaml": renderBaseCloudConfig(config) } : {}) };
 	writePrivate(out, new Map(Object.entries(files).map(([name, content]) => [name, Buffer.from(content)])));
 	return Object.keys(files);
 }

@@ -73,7 +73,25 @@ export const VIEWER_PATHS = {
 	journalLock: "/var/lib/pim-viewer/journal.lock",
 	/** Root's, `0444`, made before the journal and never removed or replaced by this tooling: a journal was provisioned, so none is provisioned again. */
 	tombstone: "/etc/pim-eval/journal-provisioned",
+	/** spacesd's own token file, in a root's directory: the desktop account's (it runs spacesd), `0600`. The value is the bridge's root token's, and is known to the desktop account by design. */
+	spacesdDir: "/etc/pim-spacesd",
+	spacesdToken: "/etc/pim-spacesd/token",
+	spacesdData: "/var/lib/pim-spacesd",
+	/** The TLS ingress: Caddy's configuration (root's), the bridge's own certificate it trusts (public part only), and its state (ACME account and certificate key), the ingress account's alone. */
+	ingressDir: "/etc/pim-ingress",
+	caddyfile: "/etc/pim-ingress/Caddyfile",
+	bridgeTrust: "/etc/pim-ingress/bridge-cert.pem",
+	ingressState: "/var/lib/pim-ingress",
+	spacesdUnit: "/etc/systemd/system/pim-cua-spacesd.service",
+	ingressUnit: "/etc/systemd/system/pim-cua-ingress.service",
 } as const;
+
+/** The viewer's two more services and the one more account they add. */
+export const VIEWER_UNITS = { spacesd: "pim-cua-spacesd.service", ingress: "pim-cua-ingress.service" } as const;
+export const VIEWER_ACCOUNTS = { ingress: "pim-ingress" } as const;
+
+/** What `bridge-cert.sh` makes on the VM, as the installer's staging: the bridge's own private certificate, which only Caddy trusts. Its key is born there and never travels. */
+export const BRIDGE_CERT_DAYS = 3;
 
 /** The files the viewer adds to the bundle, relative to its directory; `protobuf` is the pinned package's manifest. */
 export const VIEWER_BUNDLE_FILES = {
@@ -143,6 +161,12 @@ export type ViewerConfig = {
 	readonly embedOrigin: string;
 	/** The one display the viewer shows. */
 	readonly display: string;
+	/** The pinned spacesd binary (root's), run as the desktop account, loopback only. */
+	readonly spacesd: { readonly path: string; readonly sha256: string; readonly version: string };
+	/** The pinned Caddy binary (root's), the only public listener, run as its own account. */
+	readonly caddy: { readonly path: string; readonly sha256: string; readonly version: string };
+	/** The DNS name in the bridge's own certificate, which Caddy checks the bridge against (never skipped). */
+	readonly backendName: string;
 };
 
 /** A refusal with a fixed reason, the only thing said about it. */
@@ -166,6 +190,9 @@ const URL_COMPONENT = /^[A-Za-z0-9._~-]+$/;
 const DISPLAY = /^:[0-9]{1,2}$/;
 const SPACESD_ORIGIN = /^http:\/\/127\.0\.0\.1:[0-9]{2,5}$/;
 const VIEWER_DISPLAY = /^[A-Za-z0-9._:-]{1,128}$/;
+const DNS_NAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+const SEMVER = /^\d+\.\d+\.\d+$/;
+const V_SEMVER = /^v\d+\.\d+\.\d+$/;
 const PEM = /^-----BEGIN PUBLIC KEY-----\n(?:[A-Za-z0-9+/=]{1,64}\n){1,40}-----END PUBLIC KEY-----\n$/;
 
 /** Whether `value` is an absolute, normalized path of plain components, at most 255 bytes. */
@@ -247,7 +274,15 @@ export function parseConfig(text: string): Config {
 				path: (v) => typeof v === "string" && v.length <= 128 && v.startsWith("/") && v.slice(1).split("/").every((part) => URL_COMPONENT.test(part) && part !== "." && part !== ".."),
 			},
 			desktop: { headful: (v) => typeof v === "boolean", display: (v) => v === null || matches(DISPLAY)(v), xauthority: (v) => v === null || isPlainPath(v) },
-			viewer: { origin: matches(SPACESD_ORIGIN), publicOrigin: isHttpsOrigin, embedOrigin: isHttpsOrigin, display: matches(VIEWER_DISPLAY) },
+			viewer: {
+				origin: matches(SPACESD_ORIGIN),
+				publicOrigin: isHttpsOrigin,
+				embedOrigin: isHttpsOrigin,
+				display: matches(VIEWER_DISPLAY),
+				spacesd: { path: isPlainPath, sha256: matches(HEX64), version: matches(SEMVER) },
+				caddy: { path: isPlainPath, sha256: matches(HEX64), version: matches(V_SEMVER) },
+				backendName: (v) => typeof v === "string" && DNS_NAME.test(v) && net.isIP(v) === 0,
+			},
 		},
 		"object",
 		["viewer"],
@@ -271,9 +306,24 @@ export function parseConfig(text: string): Config {
 	// The two staged TLS files sit side by side in one staging directory, apart from everything the installation makes or runs.
 	if (path.posix.dirname(config.tls.cert) !== path.posix.dirname(config.tls.key) || config.tls.cert === config.tls.key) throw new Refusal("config-tls");
 	// The viewer's two origins are two different places: the bridge's own, and the Pim app's.
-	if (config.viewer && config.viewer.publicOrigin === config.viewer.embedOrigin) throw new Refusal("config-viewer");
-	const fixed = [PATHS.bridgeDir, PATHS.evalDir, PATHS.socketDir, PATHS.tmpfiles, PATHS.desktopUnit, PATHS.bridgeUnit, ...(config.viewer ? [VIEWER_PATHS.journalDir] : [])];
-	const own = [config.bundle.dir, config.workspace, path.posix.dirname(config.tls.cert), config.node.path, config.browser.path];
+	if (config.viewer) {
+		const viewer = config.viewer;
+		if (viewer.publicOrigin === viewer.embedOrigin) throw new Refusal("config-viewer");
+		// Caddy is the one public listener, on 443 for exactly the public host: the origin is written without a port, the bridge is private (loopback), and the display is the desktop's headful one.
+		if (new URL(viewer.publicOrigin).port !== "" || config.bridge.host !== "127.0.0.1" || !config.desktop.headful) throw new Refusal("config-viewer");
+		// The backend's name is a name of its own, never the public host or an address.
+		if (viewer.backendName === new URL(viewer.publicOrigin).hostname || new URL(viewer.origin).port === String(config.bridge.port)) throw new Refusal("config-viewer");
+	}
+	const fixed = [
+		PATHS.bridgeDir,
+		PATHS.evalDir,
+		PATHS.socketDir,
+		PATHS.tmpfiles,
+		PATHS.desktopUnit,
+		PATHS.bridgeUnit,
+		...(config.viewer ? [VIEWER_PATHS.journalDir, VIEWER_PATHS.spacesdDir, VIEWER_PATHS.spacesdData, VIEWER_PATHS.ingressDir, VIEWER_PATHS.ingressState, VIEWER_PATHS.spacesdUnit, VIEWER_PATHS.ingressUnit] : []),
+	];
+	const own = [config.bundle.dir, config.workspace, path.posix.dirname(config.tls.cert), config.node.path, config.browser.path, ...(config.viewer ? [config.viewer.spacesd.path, config.viewer.caddy.path] : [])];
 	for (const [i, a] of own.entries()) {
 		if (fixed.some((b) => within(a, b) || within(b, a))) throw new Refusal("config-overlap");
 		for (const b of own.slice(i + 1)) {
@@ -300,7 +350,7 @@ export function renderTmpfiles(): string {
  * socket: one an endpoint couldn't remove itself stays until a reboot
  * clears /run, and the next endpoint refuses to start over it.
  */
-export function renderUnits(config: Config, desktopUid: number): { desktop: string; bridge: string } {
+export function renderUnits(config: Config, desktopUid: number): { desktop: string; bridge: string; spacesd?: string; ingress?: string } {
 	const node = config.node.path;
 	const bundle = config.bundle.dir;
 	const headful = config.desktop.headful;
@@ -366,5 +416,127 @@ export function renderUnits(config: Config, desktopUid: number): { desktop: stri
 		"WantedBy=multi-user.target",
 		"",
 	].join("\n");
-	return { desktop, bridge };
+	if (!viewer) return { desktop, bridge };
+	// spacesd runs as the desktop account, on loopback only, with the pinned binary, no QUIC, no MCP or driver (native tools stay off) and no pointer probe;
+	// its token file is read only by that account. It is the desktop's own authority (docs/cua-viewer-first-startup.md, "spacesd").
+	const spacesd = [
+		"# Pim Cua evaluation (docs/cua-viewer-first-startup.md): spacesd, as the shared desktop account, loopback only.",
+		"[Unit]",
+		"Description=Pim Cua evaluation spacesd (view only through the bridge)",
+		"",
+		"[Service]",
+		"Type=simple",
+		`User=${ACCOUNTS.desktop}`,
+		`Group=${ACCOUNTS.desktop}`,
+		`WorkingDirectory=${config.workspace}`,
+		"Environment=PATH=/usr/local/bin:/usr/bin:/bin",
+		"Environment=LANG=C.UTF-8",
+		...display,
+		`ExecStart=${viewer.spacesd.path} serve --listen ${new URL(viewer.origin).host} --quic-port 0 --no-mcp --no-driver --cursor-probe false --token-file ${VIEWER_PATHS.spacesdToken} --data-dir ${VIEWER_PATHS.spacesdData}`,
+		"KillMode=process",
+		"Restart=no",
+		"",
+		"[Install]",
+		"WantedBy=multi-user.target",
+		"",
+	].join("\n");
+	// Caddy is the only public listener: its own account, state in its own directory, and the one capability it needs to bind 80 and 443.
+	const ingress = [
+		"# Pim Cua evaluation (docs/cua-viewer-first-startup.md): the TLS ingress, as its own account.",
+		"[Unit]",
+		"Description=Pim Cua evaluation TLS ingress",
+		"Wants=network-online.target",
+		"After=network-online.target",
+		"",
+		"[Service]",
+		"Type=simple",
+		`User=${VIEWER_ACCOUNTS.ingress}`,
+		`Group=${VIEWER_ACCOUNTS.ingress}`,
+		"WorkingDirectory=/",
+		"Environment=PATH=/usr/bin:/bin",
+		`Environment=XDG_DATA_HOME=${VIEWER_PATHS.ingressState}`,
+		`Environment=XDG_CONFIG_HOME=${VIEWER_PATHS.ingressState}`,
+		`ExecStart=${viewer.caddy.path} run --config ${VIEWER_PATHS.caddyfile} --adapter caddyfile`,
+		"AmbientCapabilities=CAP_NET_BIND_SERVICE",
+		"CapabilityBoundingSet=CAP_NET_BIND_SERVICE",
+		"KillMode=process",
+		"Restart=no",
+		"",
+		"[Install]",
+		"WantedBy=multi-user.target",
+		"",
+	].join("\n");
+	return { desktop, bridge, spacesd, ingress };
+}
+
+/**
+ * Caddy's configuration, for the one public hostname and nothing else
+ * (docs/cua-viewer-first-startup.md, "The ingress"):
+ *
+ * - **Certificate:** automatic, for exactly that name, by ACME HTTP-01 on port 80 (the TLS-ALPN
+ *   challenge is off). Caddy answers plain HTTP only with its own redirect.
+ * - **Forwarding:** only the relay's path, its three management paths, and the adapter's
+ *   `/<22 characters>/…` paths, each to the one private bridge on loopback; everything else is
+ *   `404`. No forward proxy, no other upstream, no other method of reaching anything.
+ * - **Backend TLS:** verified, always: the bridge's own certificate (public part, written by the
+ *   installer) is the only trust, and its name is checked (`tls_server_name`). Nothing here
+ *   skips verification.
+ * - **No log of a target or a header:** access and proxy-error entries are excluded, since a
+ *   media ticket is in the query and the launch credential in a header. Only warnings and errors
+ *   of Caddy itself (such as a failed ACME order) go to the journal.
+ * - **Same origin:** the viewer's page, calls and media socket are all this host, so no CORS
+ *   header is added and `Origin` passes unchanged to the bridge, which checks it.
+ */
+export function renderCaddyfile(config: Config): string {
+	const viewer = config.viewer;
+	if (!viewer) throw new Refusal("config-viewer");
+	const host = new URL(viewer.publicOrigin).hostname;
+	const relay = config.bridge.path;
+	return [
+		"# Pim Cua evaluation (docs/cua-viewer-first-startup.md): the TLS ingress. Written by the installer, never edited.",
+		"{",
+		"\tadmin off",
+		"\thttp_port 80",
+		"\thttps_port 443",
+		"\tlog {",
+		"\t\toutput stderr",
+		"\t\tlevel WARN",
+		"\t\texclude http.handlers.reverse_proxy http.log.access http.log.error",
+		"\t}",
+		"}",
+		"",
+		"(bridge) {",
+		"\trequest_body {",
+		"\t\tmax_size 16KB",
+		"\t}",
+		`\treverse_proxy https://127.0.0.1:${config.bridge.port} {`,
+		"\t\ttransport http {",
+		`\t\t\ttls_server_name ${viewer.backendName}`,
+		`\t\t\ttls_trust_pool file ${VIEWER_PATHS.bridgeTrust}`,
+		"\t\t}",
+		"\t\tflush_interval -1",
+		"\t}",
+		"}",
+		"",
+		`${host} {`,
+		"\ttls {",
+		"\t\tissuer acme {",
+		"\t\t\tdisable_tlsalpn_challenge",
+		"\t\t}",
+		"\t}",
+		`\t@bridge path ${relay} ${relay}/observations/launch ${relay}/observations/end ${relay}/observations/status`,
+		// Written out, not `{22}`: braces are placeholders in a Caddyfile.
+		`\t@viewer path_regexp ^/${"[A-Za-z0-9_-]".repeat(22)}/.+$`,
+		"\thandle @bridge {",
+		"\t\timport bridge",
+		"\t}",
+		"\thandle @viewer {",
+		"\t\timport bridge",
+		"\t}",
+		"\thandle {",
+		"\t\trespond 404",
+		"\t}",
+		"}",
+		"",
+	].join("\n");
 }

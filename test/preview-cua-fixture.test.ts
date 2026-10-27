@@ -77,13 +77,18 @@ const sent: string[] = [];
 async function space(username: string) {
 	const saved = ENV_KEYS.map((key) => [key, settings[key]] as const);
 	configure({});
-	const directory = env.Directory.getByName("directory");
-	const registered = await directory.register({ username, ip: "192.0.2.10", claim: { window: true }, policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 } });
-	if (!registered.ok) throw new Error(registered.error);
-	const owner = registered.account.ownerId;
-	await directory.activate(owner);
-	await (await getAgentByName(previews, owner)).provision({ ownerId: owner, username });
-	for (const [key, value] of saved) if (value !== undefined) settings[key] = value;
+	let owner = "";
+	try {
+		const directory = env.Directory.getByName("directory");
+		const registered = await directory.register({ username, ip: "192.0.2.10", claim: { window: true }, policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 } });
+		if (!registered.ok) throw new Error(registered.error);
+		owner = registered.account.ownerId;
+		await directory.activate(owner);
+		await (await getAgentByName(previews, owner)).provision({ ownerId: owner, username });
+	} finally {
+		// The fixture's settings come back however the registration ended, so a failure here leaves the next test as it found it.
+		for (const [key, value] of saved) if (value !== undefined) settings[key] = value;
+	}
 	const stub = previews.getByName(owner);
 	const within = <T>(fn: (instance: PreviewPim, state: DurableObjectState) => T | Promise<T>) => runInDurableObject(stub, fn);
 	/** What the space holds under the fixture's keys, read from its storage directly. */
@@ -1007,14 +1012,8 @@ describe("the preview's Cua evaluation mode", () => {
 					choices: [],
 					utility: { default: { provider: "preview", id: "preview-utility" } },
 				});
-				// No deploy date: no claim window, plain Cloudflare's or the evaluation's, and the sign-in page offers none.
-				expect(claimWindowOpen(Object.assign(Object.create(env as object) as object, { PIM_RUNTIME: "cloudflare" }) as Env, Date.now())).toBe(false);
-				await evaluation("cloudflare");
-				const session = await worker({ AUTH_LIMITER: limiter, API_LIMITER: limiter }).ask("/auth/session", { ingress: null });
-				expect(session.status).toBe(200);
-				expect(await session.json()).toMatchObject({ claimed: false, canClaim: false, registration: "closed" });
-
 				// For comparison, the local preview's KV namespace bound as `AI`: no KV call is made on it, but Pim takes it for Workers AI.
+				// Made here, before the evaluation mode is set below, whose Directory registers nobody without the operator's code.
 				const calls: string[] = [];
 				settings.AI = Object.fromEntries(
 					["get", "getWithMetadata", "put", "list", "delete"].map((name) => [
@@ -1028,6 +1027,14 @@ describe("the preview's Cua evaluation mode", () => {
 				const two = await space("evalkvai");
 				expect((await two.fetch("/model")).body).toMatchObject({ workersAi: true, model: { provider: "preview", id: "preview-model" } });
 				expect(calls).toEqual([]);
+				delete settings.AI;
+
+				// No deploy date: no claim window, plain Cloudflare's or the evaluation's, and the sign-in page offers none.
+				expect(claimWindowOpen(Object.assign(Object.create(env as object) as object, { PIM_RUNTIME: "cloudflare" }) as Env, Date.now())).toBe(false);
+				await evaluation("cloudflare");
+				const session = await worker({ AUTH_LIMITER: limiter, API_LIMITER: limiter }).ask("/auth/session", { ingress: null });
+				expect(session.status).toBe(200);
+				expect(await session.json()).toMatchObject({ claimed: false, canClaim: false, registration: "closed" });
 			},
 			// Only after everything above has settled, however it ended.
 			async () => {

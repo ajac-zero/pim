@@ -56,7 +56,7 @@ Another new test makes a preview space with `AI` and `CF_VERSION_METADATA` unbou
 - Settings → Model reports `workersAi: false`, with the stand-in as the default and chosen model and the utility model's default, and nothing else to choose;
 - no claim window opens, and the evaluation's sign-in page offers no claim.
 
-For comparison, it then binds a KV-shaped stand-in as `AI`, as the local preview does: no KV method is called, but Pim reports `workersAi: true`.
+For comparison, it then binds a KV-shaped stand-in as `AI`, as the local preview does: no KV method is called, but Pim reports `workersAi: true`. Both spaces are made before the test sets the evaluation mode, whose Directory registers nobody without the operator's code: at `245082f` the comparison space was made after it, was refused, and the run failed 19 of 20.
 
 Its coverage is narrow on purpose. It sends no chat and starts no run or background job, so all its work has settled before it puts the environment back, and its cleanup runs however its assertions end. It doesn't show that a chat, or a real agent, works without `AI`. The file has 20 tests.
 

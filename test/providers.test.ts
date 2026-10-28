@@ -230,7 +230,7 @@ describe("A person's own model providers", () => {
 		expect(calls[0]).toMatchObject({ url: "https://claude.test/v1/models", headers: expect.objectContaining({ "x-api-key": "proxy-key", "anthropic-version": "2023-06-01" }) });
 		expect((await put("/model", { provider: "own:proxy", id: "proxy-claude" })).status).toBe(200);
 		expect((await say("Hello?")).text).toBe("Hello from claude.test");
-		expect(calls.at(-1)).toMatchObject({ url: expect.stringMatching(/^https:\/\/claude.test\/v1\/messages/), headers: expect.objectContaining({ "x-api-key": "proxy-key" }) });
+		expect(calls.at(-1)).toMatchObject({ url: expect.stringMatching(/^https:\/\/claude.test\/v1\/messages/), headers: expect.objectContaining({ "x-api-key": "proxy-key", authorization: "Bearer proxy-key" }) });
 		// Saving again keeps the API it speaks.
 		expect((await put("/providers/proxy", { name: "Proxy 2" })).body.provider).toMatchObject({ api: "anthropic-messages" });
 		await api("/providers/proxy", { method: "DELETE" });

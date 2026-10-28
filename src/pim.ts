@@ -134,7 +134,7 @@ import {
 	toolName,
 	toText,
 } from "./extensions/mcp";
-import { MESSAGING_EXTENSION, messagingExtension, plainReply, SEND_TO_USER } from "./extensions/messaging";
+import { MESSAGING_EXTENSION, messagingExtension, NOT_DELIVERED, plainReply, SEND_TO_USER } from "./extensions/messaging";
 import { CREATE_MEMORY_SCOPE, createOptMem, type MemoryAccess, type MemoryScope, memoryWidgets } from "./extensions/optmem";
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
 import { byteLength, ENTRY_BYTES, EVERYONE_SCOPE, entryLine, MAX_NAMED_SCOPES, MAX_SCOPE_NAME, PRIVATE_SCOPE } from "./extensions/optmem/store";
@@ -1107,10 +1107,32 @@ export class Pim extends DurableAgent<Env> {
 					.filter((extension) => !extension.name.startsWith(VISIT_PREFIX) && !perPim(extension.name));
 			},
 			// 1, 2, 4, 8, 16 s: about 30 s for a rate-limited model to recover.
-			retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
+			// A model that still fails after that, such as one whose plan ran out, holds the run until the person says to try again.
+			retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000, suspend: (message, conversation) => this.#holdsRun(message, String(conversation)) },
 			// Fewer storage writes while streaming; a crash loses at most this window.
 			progress: { partialIntervalMs: 250, outputIntervalMs: 250 },
 		};
+	}
+
+	/**
+	 * Whether a run whose model failed for good is held for the person to try again. Only a chat is: a task or a review has
+	 * no one watching it, and its requester or caller needs the failure to go on.
+	 */
+	#holdsRun(message: { errorMessage?: string }, conversation: string): boolean {
+		if (message.errorMessage === NOT_DELIVERED || this.#tasks.of(conversation)) return false;
+		// The chat list stops showing it as working once the hold is committed, just after this answers.
+		setTimeout(() => this.broadcastMessage({ type: "sessions" }), 1000);
+		return true;
+	}
+
+	/** The conversations whose runs are held after a model error: not working, but waiting for the person to try again. */
+	async #heldSessions(): Promise<Set<string>> {
+		const { tasks } = await (await this.harness.pi()).inspect(BACKGROUND_CONTEXT);
+		return new Set(tasks.filter(({ record }) => this.#isHeld(record)).map(({ record }) => String(record.conversationId)));
+	}
+
+	#isHeld(record: { kind: string; state: { status: string; on?: readonly unknown[] } }): boolean {
+		return record.kind === "pi.generation" && record.state.status === "waiting" && record.state.on?.length === 0;
 	}
 
 	/** The model catalog pi resolves sessions' models against: Workers AI, and the ChatGPT plan. People's providers join it in `modelCatalog`. */
@@ -4260,7 +4282,9 @@ export class Pim extends DurableAgent<Env> {
 			async () => {
 				const hidden = this.#hiddenSessions();
 				const archiveBefore = Date.now() - ARCHIVE_AFTER_MS;
-				const all = await this.harness.sessions.list();
+				// A run held for the person to try again isn't at work.
+				const held = await this.#heldSessions();
+				const all = (await this.harness.sessions.list()).map((session) => ({ ...session, busy: session.busy && !held.has(session.id) }));
 				const busy = new Set(all.flatMap((session) => (session.busy ? [session.id] : [])));
 				const sessions = all.filter((session) => !hidden.has(session.id)).map((session) => {
 					const info = this.store.sessionInfo(session.id);
@@ -4269,6 +4293,7 @@ export class Pim extends DurableAgent<Env> {
 					return {
 						id: this.store.publicId(session.id),
 						busy: session.busy,
+						held: held.has(session.id),
 						title: info?.title ?? null,
 						createdAt: info?.createdAt ?? null,
 						updatedAt: info?.updatedAt ?? null,
@@ -4545,6 +4570,20 @@ export class Pim extends DurableAgent<Env> {
 				const task = await this.#taskOf(session!, id!);
 				await this.#cancelTask(task, "The person canceled it.");
 				return this.#publicTask(this.#tasks.get(task.id)!);
+			},
+		],
+		// Asks the model again in a chat held after a model error, picking up where it stopped, with whatever model the agent has now.
+		[
+			"POST",
+			"/sessions/:session/retry",
+			async ({ session }) => {
+				const id = await this.#session(session!);
+				const { tasks } = await (await this.harness.pi()).inspect(BACKGROUND_CONTEXT);
+				const held = tasks.find(({ record }) => String(record.conversationId) === id && this.#isHeld(record));
+				if (!held) throw new HttpError(409, "This chat isn't waiting to try again");
+				await this.harness.resumeTask(id, held.record.id);
+				this.broadcastMessage({ type: "sessions" });
+				return { session };
 			},
 		],
 		[

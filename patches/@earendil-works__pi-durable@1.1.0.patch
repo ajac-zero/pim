@@ -1,3 +1,26 @@
+diff --git a/dist/harness/generation.js b/dist/harness/generation.js
+index abb121be414e3cac5b94869a9688cee68534b77c..59573f22e6d3ab5c181dd820ef1e3dceab910d0e 100644
+--- a/dist/harness/generation.js
++++ b/dist/harness/generation.js
+@@ -368,9 +368,18 @@ async function classify(runtime, request, message, context) {
+         policy.enabled &&
+         attempt <= policy.maxRetries;
+     const until = retry ? runtime.now() + retryDelayMs(policy, attempt) : 0;
++    // With `suspend`, an error no retry can cure, such as a used-up plan, holds the run for a person instead of
++    // failing it: `Harness.resumeTask()` asks the model again, with the agent as it is then, and fresh retries.
++    const suspend = message.stopReason === "error" && !overflow && !retry && policy.suspend?.(message, conversationId) === true;
+     await runtime.commit(async (tx) => {
+         const live = await tx.doc(LiveDoc, conversationId);
+         await appendAssistant(tx, conversationId, message);
++        if (suspend) {
++            // A retry with no time to wait until: only `resumeTask()` ends it.
++            live.generation = { attempt, retry: { at: 0, error: message.errorMessage ?? "" } };
++            const checkpoint = { phase: "retry", attempt: 0, ...(compacted === undefined ? {} : { compacted }), until: 0 };
++            return { status: "waiting", checkpoint, on: [], policy: "allSettled" };
++        }
+         if (retry) {
+             live.generation = { attempt, retry: { at: until, error: message.errorMessage ?? "" } };
+             const checkpoint = {
 diff --git a/dist/harness/harness.js b/dist/harness/harness.js
 index fda8aa1e318bdecd77d11ca019217d6c43cfef01..c305ff5311d4f332aa83b1cadff77a7828d461b0 100644
 --- a/dist/harness/harness.js
@@ -13,6 +36,19 @@ index fda8aa1e318bdecd77d11ca019217d6c43cfef01..c305ff5311d4f332aa83b1cadff77a78
      waitForTask(id, context) {
          this.#tasks.resume();
          return this.#tasks.waitForTask(id, context);
+diff --git a/dist/harness/live.d.ts b/dist/harness/live.d.ts
+index 52052c9afdf262c307bd1b092d6a4da12f9e859d..e7620b5081bb1fd0e90abaed1040c908c7543aec 100644
+--- a/dist/harness/live.d.ts
++++ b/dist/harness/live.d.ts
+@@ -50,7 +50,7 @@ export type LiveState = {
+         attempt: number;
+         /** Committed throttled partial of the in-flight response. */
+         message?: JsonRepresentation<AssistantMessage>;
+-        /** Durable backoff before the next attempt. */
++        /** Durable backoff before the next attempt; `at` is 0 for a run held until `Harness.resumeTask()`. */
+         retry?: {
+             at: number;
+             error: string;
 diff --git a/dist/harness/scheduler.js b/dist/harness/scheduler.js
 index 6cfe05a35de48c02e98ad07806fb74f2ee80de59..c73723dde187ff67827be0bea9c677566227d2cd 100644
 --- a/dist/harness/scheduler.js
@@ -153,7 +189,7 @@ index 4a4c7f8a183971670752709803ea6b67a5d7a6ae..7cd7ad117352b21d8ce4bfa27ac74bd0
   * Throttled commits of what the tool reported into its `pi.live.tools` slot, each writing only what changed since the
   * last one.
 diff --git a/dist/harness/types.d.ts b/dist/harness/types.d.ts
-index b8c1e3749a808e9c91a8d9e0e987b0680cdcbe67..062306b662d0d96f680715263279ec9754f6086e 100644
+index b8c1e3749a808e9c91a8d9e0e987b0680cdcbe67..91e4e4422e7bb5a5c742c83e6acd55594a89ad9d 100644
 --- a/dist/harness/types.d.ts
 +++ b/dist/harness/types.d.ts
 @@ -83,6 +83,12 @@ export type ToolControl = {
@@ -169,7 +205,16 @@ index b8c1e3749a808e9c91a8d9e0e987b0680cdcbe67..062306b662d0d96f680715263279ec97
  };
  /** Remark about a call for the model and the UI, such as truncation or a spill path; never part of the tool's data. */
  export type ToolDiagnostic = {
-@@ -424,6 +430,10 @@ export type TaskInspection = {
+@@ -319,6 +325,8 @@ export type ConversationRetryPolicy = {
+     maxRetries: number;
+     baseDelayMs: number;
+     maxAgentDelayMs?: number;
++    /** Whether to hold a run whose model request failed for good until `Harness.resumeTask()` wakes it, instead of failing it. */
++    suspend?: (message: AssistantMessage, conversationId: ConversationId) => boolean;
+ };
+ /** Automatic compaction thresholds (spec §8.7); manual compaction ignores `enabled`. */
+ export type CompactionPolicy = {
+@@ -424,6 +432,10 @@ export type TaskInspection = {
          readonly kind: "waiting";
          readonly on: readonly TaskId[];
      }
@@ -180,7 +225,7 @@ index b8c1e3749a808e9c91a8d9e0e987b0680cdcbe67..062306b662d0d96f680715263279ec97
      /** Outcome held until its ordinary owned work drains. */
       | {
          readonly kind: "completing";
-@@ -530,6 +540,11 @@ export interface Harness extends Session {
+@@ -530,6 +542,11 @@ export interface Harness extends Session {
       * definition cannot take it settles as `orphaned` instead.
       */
      abortTask(id: TaskId, context: Context): Promise<"marked" | "terminal">;

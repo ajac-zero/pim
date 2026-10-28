@@ -151,7 +151,8 @@ export type SessionView = {
   tools: readonly RunningTool[];
   /** Messages queued behind the running work. */
   queued: number;
-  retry: { at: number } | null;
+  /** A failed model request to be asked again: at `at`, or, at 0, when the person says so. */
+  retry: { at: number; problem: ModelProblem } | null;
   error: ViewError | null;
   /**
    * The utility model's line for each tool call it described, by call id
@@ -548,7 +549,10 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
             })),
           queued: event.inbox.length,
           retry: event.generation?.retry
-            ? { at: event.generation.retry.at }
+            ? {
+                at: event.generation.retry.at,
+                problem: modelProblem(event.generation.retry.error),
+              }
             : null,
           error: null,
           lines: view.lines,
@@ -622,7 +626,10 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
     case "auto_retry_start":
       return {
         ...state,
-        view: { ...view, retry: { at: event.at } },
+        view: {
+          ...view,
+          retry: { at: event.at, problem: modelProblem(event.errorMessage) },
+        },
       };
     case "auto_retry_end":
       return { ...state, view: { ...view, retry: null } };

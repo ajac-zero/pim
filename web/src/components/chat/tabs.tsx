@@ -7,7 +7,7 @@ import {
   useAwaitingApproval,
 } from "~/components/app-sidebar";
 import { useI18n } from "~/components/i18n";
-import { Loader2, X } from "~/components/icons";
+import { AlertCircle, Loader2, X } from "~/components/icons";
 import type { Session } from "~/lib/pim-api";
 import { sessionsQuery } from "~/lib/queries";
 import {
@@ -110,6 +110,12 @@ export function ChatTabs({ activeId }: { activeId: string }) {
         className="size-3 shrink-0 text-primary motion-safe:animate-spin"
         role="img"
         aria-label={t("working")}
+      />
+    ) : session.held ? (
+      <AlertCircle
+        className="size-3 shrink-0 text-destructive"
+        role="img"
+        aria-label={t("waitingToTryAgain")}
       />
     ) : awaitingApproval.has(session.id) ? (
       <AwaitingApprovalMark className="ml-0" />

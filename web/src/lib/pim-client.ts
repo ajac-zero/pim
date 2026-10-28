@@ -206,7 +206,9 @@ class PimClient {
           synced: true,
           ...(placed && this.#state.pending !== null ? { pending: null } : {}),
         });
-        if (before.running !== view.running) {
+        // A run held for the person to try again isn't at work, though it is still running.
+        const held = (state: SessionView) => state.retry?.at === 0;
+        if (before.running !== view.running || held(before) !== held(view)) {
           this.handlers.onActivity?.(message.session);
         }
         return;

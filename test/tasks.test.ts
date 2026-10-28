@@ -1018,3 +1018,28 @@ describe("a group chat", () => {
 		expect((await messagesOf(session, "user")).filter((text) => text.startsWith("[From Coach]"))).toEqual(["[From Coach]\nHi, I'm Coach.", "[From Coach]\nRun 5 km."]);
 	});
 });
+
+describe("tasks whose model can't answer", () => {
+	it("fail for their requester, and their run ends instead of being held", async () => {
+		const agent = await planner("Failing trip planner");
+		const session = (await post("/sessions", { agent: agent.id })).body.id;
+		let update = "";
+		scripts({
+			lead: [
+				() => toolUse("delegate", { tasks: [{ to: "Researcher", task: "Find a flight." }] }),
+				() => toolUse("send_to_user", { message: "I asked." }),
+				(context) => {
+					update = lastUserText(context.messages);
+					return toolUse("send_to_user", { message: "It failed." });
+				},
+			],
+			Researcher: [() => fauxAssistantMessage("", { stopReason: "error", errorMessage: "subscription_sharing_usage_limit_exceeded" })],
+		});
+		await say("Find me a flight.", session);
+		await settled(session);
+		expect((await tasksOf(session)).map((task) => task.state)).toEqual(["failed"]);
+		expect(update).toContain("didn't finish");
+		// Not a word of the provider's own error reaches the agent.
+		expect(update).not.toContain("subscription_sharing");
+	});
+});

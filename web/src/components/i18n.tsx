@@ -558,8 +558,8 @@ const translations = {
       "Pim has used up its ChatGPT allowance, so it couldn't answer. That's either your plan's usage limit or Pim's own limit under App limits, which you can raise. Both reset on their own; ChatGPT's usage page shows when. Until then, you can switch to another model provider in Settings.",
     modelQuota:
       "Pim's daily usage quota is used up, so it couldn't answer. It resets at midnight UTC.",
-    modelSignIn:
-      "Pim couldn't use your ChatGPT connection, so it couldn't answer. Connect ChatGPT again in Settings.",
+    modelUnauthorized:
+      "The model provider rejected Pim's credentials (unauthorized), so it couldn't answer. Check the provider's API key in Settings, or connect ChatGPT again.",
     modelTooLong:
       "This chat is too long for the model, so Pim couldn't answer. Start a new chat.",
     modelBusy:
@@ -1607,8 +1607,8 @@ const translations = {
       "Pim agotó su asignación de ChatGPT, así que no pudo responder. Es el límite de uso de tu plan o el límite propio de Pim en Límites de apps, que puedes aumentar. Ambos se restablecen solos; la página de uso de ChatGPT muestra cuándo. Mientras tanto, puedes cambiar a otro proveedor de modelos en Configuración.",
     modelQuota:
       "La cuota diaria de uso de Pim se agotó, así que no pudo responder. Se restablece a medianoche UTC.",
-    modelSignIn:
-      "Pim no pudo usar tu conexión con ChatGPT, así que no pudo responder. Vuelve a conectar ChatGPT en Configuración.",
+    modelUnauthorized:
+      "El proveedor del modelo rechazó las credenciales de Pim (no autorizado), así que no pudo responder. Revisa la clave API del proveedor en Configuración, o vuelve a conectar ChatGPT.",
     modelTooLong:
       "Este chat es demasiado largo para el modelo, así que Pim no pudo responder. Empieza un chat nuevo.",
     modelBusy:

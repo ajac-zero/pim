@@ -84,7 +84,7 @@ function promptOf(call: FunctionCallItem): string | undefined {
 const PROBLEM_TEXT: Record<ModelProblem, TranslationKey> = {
   usage_limit: "modelUsageLimit",
   quota: "modelQuota",
-  sign_in: "modelSignIn",
+  unauthorized: "modelUnauthorized",
   too_long: "modelTooLong",
   busy: "modelBusy",
   other: "modelOther",
@@ -549,7 +549,7 @@ export const Thread = memo(function Thread({
                   <p>{t(PROBLEM_TEXT[shownError.problem])}</p>
                   {(held ||
                     shownError.problem === "usage_limit" ||
-                    shownError.problem === "sign_in" ||
+                    shownError.problem === "unauthorized" ||
                     shownError.problem === "other") && (
                     <div className="flex flex-wrap gap-2">
                       {/* The run is held where it stopped: this asks the model again, with whichever model the agent has now. */}

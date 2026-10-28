@@ -969,7 +969,16 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
     }
     expect(
       run([snapshot(), fault("pi.generation", unauthorized)]).view.error,
-    ).toEqual({ problem: "sign_in" });
+    ).toEqual({ problem: "unauthorized" });
+    expect(
+      run([
+        snapshot(),
+        fault(
+          "pi.generation",
+          'authentication_error: {"code":"missing_credentials"}',
+        ),
+      ]).view.error,
+    ).toEqual({ problem: "unauthorized" });
     expect(
       run([
         snapshot(),
@@ -992,7 +1001,7 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
         fault("pi.generation", "OpenAI API error (401): unauthorized"),
         settle("faulted"),
       ]).view.error,
-    ).toEqual({ problem: "sign_in" });
+    ).toEqual({ problem: "unauthorized" });
     expect(
       run([
         snapshot(),

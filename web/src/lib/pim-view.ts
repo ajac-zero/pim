@@ -168,7 +168,7 @@ export type SessionView = {
 export type ModelProblem =
   | "usage_limit"
   | "quota"
-  | "sign_in"
+  | "unauthorized"
   | "too_long"
   | "busy"
   | "other";
@@ -193,9 +193,10 @@ const MODEL_PROBLEMS: ReadonlyArray<[ModelProblem, RegExp]> = [
   ],
   // Pim's own daily limits (QUOTA_MESSAGE in src/usage.ts).
   ["quota", /^Pim usage quota exceeded\b/],
+  // The provider refused the credentials: a ChatGPT sign-in that lapsed, or a wrong or missing API key.
   [
-    "sign_in",
-    /OpenAI token request failed|refresh response|Sign in to ChatGPT|invalid_grant|\b401\b|unauthori[sz]ed/i,
+    "unauthorized",
+    /OpenAI token request failed|refresh response|Sign in to ChatGPT|invalid_grant|\b40[13]\b|unauthori[sz]ed|authentication_error|forbidden|invalid.{0,10}api.?key|missing_credentials/i,
   ],
   [
     "too_long",

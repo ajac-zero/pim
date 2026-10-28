@@ -642,6 +642,14 @@ export class Pim extends DurableAgent<Env> {
 		scheduleRefresh: (id, at) => this.#scheduleWatchRefresh(id, at),
 		submit: async (session, content, operationId) => {
 			await this.submitTo(session, content, { operationId }, "pim");
+			// A member's own conversation isn't the one the person reads, so the chat is told too.
+			const seat = this.#rooms.of(session);
+			if (seat && seat.conversation !== seat.room) {
+				const name = this.agents.get(seat.agent)?.name ?? "An agent";
+				const first = content.split("\n")[0]?.replace(/^\[App event\]\s*/, "") ?? "";
+				await this.#write(seat.room, `${ROOM_NOTICE} ${name} got an app event: ${first}`, `event:${operationId}`);
+				this.broadcastMessage({ type: "sessions" });
+			}
 		},
 		notify: async (title, body) => {
 			const notification = this.store.addNotification({ id: crypto.randomUUID(), session: null, title, body });

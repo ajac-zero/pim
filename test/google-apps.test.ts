@@ -326,7 +326,7 @@ const act = (name: string, body: unknown = {}, extra: Record<string, string> = {
 async function connect(ref: string) {
 	const started = await post("/mcp", { app: ref });
 	const params = Object.fromEntries(new URL(started.body.authUrl).searchParams);
-	expect(await (await comeBack({ state: params.state!, code: "good" }, cookie)).text()).toContain("Connected.");
+	expect(await (await comeBack({ state: params.state!, code: "good" }, cookie)).text()).toContain("<h1>Connected</h1>");
 	return params;
 }
 

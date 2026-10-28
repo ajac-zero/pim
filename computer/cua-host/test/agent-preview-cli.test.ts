@@ -108,7 +108,7 @@ describe("agent-preview-cli", () => {
 		const f = fake();
 		const c = capture();
 		assert.equal(await run(args(["--browser-channel", "chrome"]), c.streams, f.launcher), 0);
-		const flagged = [["--browser-channel", "chrome-beta"], ["--browser-channel", "Chrome"], ["--browser-channel", ""], ["--browser-channel", "/opt/google/chrome/chrome"], ["--browser-channel"], ["--executable-path", "/opt/google/chrome/chrome"], ["--browser-arg", "--no-sandbox"], ["--args", "--no-sandbox"], ["--channel", "chrome"]];
+		const flagged = [["--browser-channel", "chrome-beta"], ["--browser-channel", "Chrome"], ["--browser-channel", ""], ["--browser-channel", "/opt/google/chrome/chrome"], ["--browser-channel"], ["--executable-path", "/opt/google/chrome/chrome"], ["--browser-arg", "--no-sandbox"], ["--args", "--no-sandbox"], ["--channel", "chrome"], ["--browser-channel", "chrome", "--browser-channel", "chrome"], ["--browser-channel", "chrome", "--browser-channel", "chrome-beta"], ["--browser-channel", "chrome-beta", "--browser-channel", "chrome"]];
 		for (const extra of flagged) {
 			const g = fake();
 			const d = capture();

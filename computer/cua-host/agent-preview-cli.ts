@@ -30,8 +30,12 @@ export interface Streams {
 /** Runs the diagnosis and returns the exit code. `launcher` is only for tests; otherwise Playwright from `--playwright-dir`. */
 export async function run(argv: readonly string[], streams: Streams, launcher?: BrowserLauncher): Promise<number> {
 	let values: Record<string, string | undefined>;
+	let repeated = false;
 	try {
-		({ values } = parseArgs({ args: [...argv], options: { origin: { type: "string" }, "config-file": { type: "string" }, deadline: { type: "string" }, "playwright-dir": { type: "string" }, "browser-channel": { type: "string" } }, strict: true }));
+		let tokens;
+		({ values, tokens } = parseArgs({ args: [...argv], options: { origin: { type: "string" }, "config-file": { type: "string" }, deadline: { type: "string" }, "playwright-dir": { type: "string" }, "browser-channel": { type: "string" } }, strict: true, tokens: true }));
+		// parseArgs keeps only the last of a repeated option, so a repeat is refused here rather than silently resolved.
+		repeated = tokens.filter((t) => t.kind === "option" && t.name === "browser-channel").length > 1;
 	} catch {
 		streams.err(USAGE);
 		return 2;
@@ -43,7 +47,7 @@ export async function run(argv: readonly string[], streams: Streams, launcher?: 
 	}
 	// Only the exact word "chrome" selects the system Chrome; anything else, even an empty value, is refused before a browser is considered.
 	const channel = values["browser-channel"];
-	if (channel !== undefined && channel !== "chrome") {
+	if (repeated || (channel !== undefined && channel !== "chrome")) {
 		streams.err(USAGE);
 		return 2;
 	}

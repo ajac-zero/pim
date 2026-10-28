@@ -26,6 +26,8 @@ export class FakeFiles implements JournalFiles {
 	#descriptors = new Map<number, { node: Node; path: string }>();
 	#next = 10;
 	#ino = 1;
+	/** The process's umask: a file or directory made now has `mode & ~umask`, as the kernel makes it. 0 unless a test sets it. */
+	umask = 0;
 	/** The effective user of the process under test. */
 	user: number | undefined = OWNER_UID;
 
@@ -73,7 +75,7 @@ export class FakeFiles implements JournalFiles {
 		if (node && flags & fs.constants.O_CREAT && flags & fs.constants.O_EXCL) throw error("EEXIST");
 		if (!node) {
 			if (!(flags & fs.constants.O_CREAT)) throw error("ENOENT");
-			node = { kind: "file", ino: this.#ino++, uid: this.user ?? 0, mode, nlink: 1, data: Buffer.alloc(0) };
+			node = { kind: "file", ino: this.#ino++, uid: this.user ?? 0, mode: mode & ~this.umask, nlink: 1, data: Buffer.alloc(0) };
 			this.nodes.set(path, node);
 		}
 		const descriptor = this.#next++;
@@ -138,7 +140,7 @@ export class FakeFiles implements JournalFiles {
 	mkdir(path: string, mode: number): void {
 		this.#step("mkdir", path);
 		if (this.nodes.has(path)) throw error("EEXIST");
-		this.nodes.set(path, { kind: "dir", ino: this.#ino++, uid: this.user ?? 0, mode, nlink: 2, data: Buffer.alloc(0) });
+		this.nodes.set(path, { kind: "dir", ino: this.#ino++, uid: this.user ?? 0, mode: mode & ~this.umask, nlink: 2, data: Buffer.alloc(0) });
 	}
 
 	chown(path: string, uid: number, _gid: number): void {

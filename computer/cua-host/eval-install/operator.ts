@@ -43,9 +43,11 @@ export const BUNDLE_SOURCES = [
 	"package.json",
 	"computer/pim-computer.ts",
 	"computer/cua-bridge.ts",
+	"computer/native-outcome.ts",
 	"computer/cua-host/package.json",
 	"computer/cua-host/bridge.ts",
 	"computer/cua-host/desktop.ts",
+	"computer/cua-host/cua-credential.ts",
 	"computer/cua-host/session.ts",
 	"computer/cua-host/host.ts",
 	"computer/cua-host/origin.ts",
@@ -268,6 +270,72 @@ function addViewer(entries: Map<string, Buffer>, sources: ReadonlyMap<string, Bu
 	return `protobuf ${viewer.protobufVersion} ${viewer.protobufIntegrity}\n`;
 }
 
+// ---- The import closure ----
+
+const PACKAGES_DIR = "computer/cua-host/node_modules";
+
+/**
+ * Each runtime import of a TypeScript source, as Node would load it: static `import`/`export … from` and `import "x"`, and a dynamic `import("x")` of a string.
+ * An `import type`/`export type … from` is erased by Node's type stripping and is not one. An inline `import { type A } from "x"` is NOT erased whole (it becomes
+ * `import {} from "x"`, which still loads the module), so it counts. A `typeof import("x")` in a type position is read as a dynamic import and so counts too, which can only over-report.
+ */
+export function runtimeImports(source: string): { specifier: string; dynamic: boolean }[] {
+	const found: { specifier: string; dynamic: boolean }[] = [];
+	for (const match of source.matchAll(/^[ \t]*(?:import|export)\s+(type\s+)?[^;'"]*?\bfrom\s+["']([^"']+)["']/gm)) if (!match[1]) found.push({ specifier: match[2]!, dynamic: false });
+	for (const match of source.matchAll(/^[ \t]*import\s+["']([^"']+)["']/gm)) found.push({ specifier: match[1]!, dynamic: false });
+	for (const match of source.matchAll(/\bimport\(\s*["']([^"']+)["']\s*\)/g)) found.push({ specifier: match[1]!, dynamic: true });
+	return found;
+}
+
+/** The file a package's `exports` gives `subpath` (`.` or `./name`) under Node's `import` then `default` conditions, or null. */
+function exportTarget(exports: unknown, subpath: string): string | null {
+	const resolve = (value: unknown): string | null => {
+		if (typeof value === "string") return value;
+		if (value && typeof value === "object") for (const condition of ["import", "default"]) if (condition in value) return resolve((value as Record<string, unknown>)[condition]);
+		return null;
+	};
+	if (!exports || typeof exports !== "object" || Array.isArray(exports)) return null;
+	return Object.hasOwn(exports, subpath) ? resolve((exports as Record<string, unknown>)[subpath]) : null;
+}
+
+/**
+ * The runtime imports of the bundle's own TypeScript sources that its entries do not satisfy, each as `importer>specifier`: a relative import with no such
+ * entry, or a package (and subpath) that is not in the bundle's `node_modules` with its target file. Built-ins (`node:`) are not the bundle's. A dynamic import
+ * of one of the viewer's files is not required of a bundle with no viewer, which never loads it. Reads the assembled entries, not the repository.
+ */
+export function unresolvedImports(entries: ReadonlyMap<string, Buffer>, withViewer: boolean): string[] {
+	const viewerFiles = new Set<string>(VIEWER_SOURCES);
+	const missing: string[] = [];
+	for (const [file, content] of [...entries].sort(([a], [b]) => (a < b ? -1 : 1))) {
+		if (!file.endsWith(".ts") || file.startsWith(`${PACKAGES_DIR}/`)) continue;
+		for (const { specifier, dynamic } of runtimeImports(content.toString("utf8"))) {
+			if (specifier.startsWith("node:")) continue;
+			if (specifier.startsWith(".")) {
+				const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
+				if (entries.has(target) || (dynamic && !withViewer && viewerFiles.has(target))) continue;
+			} else {
+				const parts = specifier.split("/");
+				const name = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!;
+				const subpath = parts.length > (specifier.startsWith("@") ? 2 : 1) ? `./${parts.slice(specifier.startsWith("@") ? 2 : 1).join("/")}` : ".";
+				const manifest = entries.get(`${PACKAGES_DIR}/${name}/package.json`);
+				if (manifest) {
+					let exports: unknown;
+					try {
+						exports = (JSON.parse(manifest.toString("utf8")) as { exports?: unknown }).exports;
+					} catch {
+						exports = undefined;
+					}
+					const target = exportTarget(exports, subpath);
+					// With no `exports` the package's own entry is its `main`, which the pinned packages' manifests name; a subpath needs a map.
+					if (exports === undefined ? subpath === "." : target !== null && entries.has(path.posix.normalize(path.posix.join(PACKAGES_DIR, name, target)))) continue;
+				}
+			}
+			missing.push(`${file}>${specifier}`);
+		}
+	}
+	return missing;
+}
+
 /** Writes `entries` into `out`, a new directory: files 0644, directories 0755. */
 export function writeTree(out: string, entries: ReadonlyMap<string, Buffer>): void {
 	if (!path.isAbsolute(out) || path.normalize(out) !== out) throw new Refusal("out");
@@ -441,7 +509,9 @@ exec ${TOOLS.runuser} -u ${ACCOUNTS.bridge} -- "$NODE" "$BUNDLE/${BUNDLE_FILES.c
 `;
 	// Only with a viewer (docs/cua-viewer-first-startup.md): the journal and spacesd's root token, each made once, as root, from the bundle's own copy of the program;
 	// and the bridge's own private certificate, born on the VM so its key never travels.
-	const provision = (command: string) => `${prologue(config, command)}
+	// The journal's tombstone is asked for as 0444, and the umask every script starts with (077) would make it 0400. Only `journal` relaxes it, to 022, so the tombstone is 0444 and the journal (0600) and
+	// its directory (0700) are as asked; `root-token` stays at 077, with `seal` and the rest, for its 0600 files.
+	const provision = (command: string) => `${prologue(config, command)}${command === "journal" ? "umask 022\n" : ""}
 exec "$NODE" "$BUNDLE/${VIEWER_BUNDLE_FILES.provision}" ${command} <<'${HEREDOC}'
 ${json}
 ${HEREDOC}
@@ -936,7 +1006,11 @@ function bundle(commit: string, wsTarball: string, out: string, protobufTarball?
 		if (!isPlainPath(protobufTarball)) throw new Refusal("protobuf-tarball");
 		viewer = { protobufVersion: inputs.protobuf!.version, protobufIntegrity: inputs.protobuf!.integrity, protobufTarball: fs.readFileSync(protobufTarball) };
 	}
-	writeTree(out, bundleEntries({ commit, sources: inputs.sources, wsVersion: inputs.wsVersion, wsIntegrity: inputs.wsIntegrity, wsTarball: tarball, ...(viewer ? { viewer } : {}) }));
+	const entries = bundleEntries({ commit, sources: inputs.sources, wsVersion: inputs.wsVersion, wsIntegrity: inputs.wsIntegrity, wsTarball: tarball, ...(viewer ? { viewer } : {}) });
+	// The assembled bundle must be able to load everything its programs import: a defective one is refused here, before it is written, not found on a VM.
+	const unresolved = unresolvedImports(entries, viewer !== undefined);
+	if (unresolved.length > 0) throw new Refusal(`bundle-closure:${unresolved[0]}`);
+	writeTree(out, entries);
 	return treeDigest(out);
 }
 

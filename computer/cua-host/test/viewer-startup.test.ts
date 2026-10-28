@@ -32,7 +32,7 @@ import {
 } from "../eval-install/config.ts";
 import { checkAccounts, checkBackendName, checkUnits, type Facts, inspectedPaths, type PathFact, type Probe, plan, start } from "../eval-install/install.ts";
 import { initialJournalText, newRootToken, provisionJournal, provisionRootToken, ProvisionFailure, tombstoneText } from "../eval-install/journal-provision.ts";
-import { BASE_DESKTOP_UID, BUNDLE_SOURCES, bundleEntries, bundleInputs, lockedPackageIntegrity, renderBaseCloudConfig, renderCloudConfig, renderScripts, untarPackage, VIEWER_SOURCES } from "../eval-install/operator.ts";
+import { BASE_DESKTOP_UID, BUNDLE_SOURCES, bundleEntries, bundleInputs, lockedPackageIntegrity, renderBaseCloudConfig, renderCloudConfig, renderScripts, runtimeImports, unresolvedImports, untarPackage, VIEWER_SOURCES } from "../eval-install/operator.ts";
 import { integrityHex, missingPins, PINS, type Pins } from "../eval-install/pins.ts";
 import { isHttpsOrigin } from "../origin.ts";
 import { openJournalStore } from "../journal-store.ts";
@@ -656,6 +656,92 @@ describe("the viewer's bundle", () => {
 		refusedWith(() => untarPackage(ustar([{ name: "package/package.json", body: PROTOBUF_PACKAGE }], 5000), { maxEntries: 4096, reason: "protobuf-tarball" }), "protobuf-tarball");
 	});
 
+	/**
+	 * Packages with the `exports` the real ones have, built from what the sources import: `ws` with its `import` condition, and every `@bufbuild/protobuf` subpath
+	 * a source names. They stand in for the real tarballs, which a test must not download; the operator's own build runs the same check on the real ones.
+	 */
+	function packagesFor(): { ws: Buffer; protobuf: Buffer } {
+		const subpaths = new Set<string>();
+		for (const source of [...BUNDLE_SOURCES, ...VIEWER_SOURCES].filter((file) => file.endsWith(".ts"))) {
+			for (const { specifier } of runtimeImports(fs.readFileSync(path.join(REPOSITORY, source), "utf8"))) if (specifier.startsWith("@bufbuild/protobuf/")) subpaths.add(specifier.slice("@bufbuild/protobuf".length));
+		}
+		const exports: Record<string, unknown> = { ".": { import: { types: "./dist/esm/index.d.ts", default: "./dist/esm/index.js" }, require: { default: "./dist/commonjs/index.js" } } };
+		const files = [{ name: "package/dist/esm/index.js", body: "export {};\n" }];
+		for (const sub of subpaths) {
+			exports[`.${sub}`] = { import: { types: `./dist/esm${sub}/index.d.ts`, default: `./dist/esm${sub}/index.js` } };
+			files.push({ name: `package/dist/esm${sub}/index.js`, body: "export {};\n" });
+		}
+		return {
+			ws: ustar([{ name: "package/package.json", body: JSON.stringify({ name: "ws", version: "8.22.0", exports: { ".": { browser: "./browser.js", import: "./wrapper.mjs", require: "./index.js" }, "./package.json": "./package.json" } }) }, { name: "package/wrapper.mjs", body: "export {};\n" }, { name: "package/index.js", body: "module.exports = 1;\n" }]),
+			protobuf: ustar([{ name: "package/package.json", body: JSON.stringify({ name: "@bufbuild/protobuf", version: "2.15.0", exports }) }, ...files]),
+		};
+	}
+	const assembled = (withViewer: boolean) => {
+		const packages = packagesFor();
+		return bundleEntries({
+			commit: COMMIT,
+			sources: sources(),
+			wsVersion: "8.22.0",
+			wsIntegrity: integrity(packages.ws),
+			wsTarball: packages.ws,
+			...(withViewer ? { viewer: { protobufVersion: "2.15.0", protobufIntegrity: integrity(packages.protobuf), protobufTarball: packages.protobuf } } : {}),
+		});
+	};
+
+	it("holds every file the desktop endpoint imports, including `native-outcome.ts` and `cua-credential.ts`, which the first bundle left out", () => {
+		for (const file of ["computer/native-outcome.ts", "computer/cua-host/cua-credential.ts"]) {
+			assert.ok(BUNDLE_SOURCES.includes(file as never), file);
+			assert.equal(assembled(false).get(file)!.toString("utf8"), fs.readFileSync(path.join(REPOSITORY, file), "utf8"), file);
+		}
+		// What the real desktop.ts imports at runtime, read from the repository, and not what is type-only.
+		const desktop = runtimeImports(fs.readFileSync(path.join(REPOSITORY, "computer/cua-host/desktop.ts"), "utf8")).map((i) => i.specifier);
+		assert.ok(desktop.includes("../native-outcome.ts") && desktop.includes("./cua-credential.ts") && desktop.includes("./session.ts"));
+		assert.equal(desktop.includes("../cua-bridge.ts"), false, "`import type` is erased");
+	});
+
+	it("resolves every runtime import of the assembled bundle, with the viewer and without, from the entries themselves", () => {
+		assert.deepEqual(unresolvedImports(assembled(true), true), []);
+		assert.deepEqual(unresolvedImports(assembled(false), false), [], "the viewer's file is a dynamic import the base bundle never loads");
+		// The same bundle read as if it should hold the viewer is not complete: the base has none of the viewer's files.
+		assert.ok(unresolvedImports(assembled(false), true).length > 0);
+	});
+
+	it("reports the live failure: a bundle without those two files cannot load `desktop.ts`", () => {
+		const old = new Map(assembled(true));
+		old.delete("computer/native-outcome.ts");
+		assert.deepEqual(unresolvedImports(old, true), ["computer/cua-host/desktop.ts>../native-outcome.ts"]);
+		old.delete("computer/cua-host/cua-credential.ts");
+		assert.deepEqual(unresolvedImports(old, true), ["computer/cua-host/desktop.ts>../native-outcome.ts", "computer/cua-host/desktop.ts>./cua-credential.ts"]);
+	});
+
+	it("follows imports through the files the bundle holds, ignores type-only ones, and refuses a package without its target", () => {
+		const entries = (files: Record<string, string>) => new Map(Object.entries(files).map(([name, body]) => [name, Buffer.from(body)]));
+		const pkg = (exports: unknown) => JSON.stringify({ name: "p", exports });
+		// A chain a -> b -> c with c missing is reported at b, the file that needs it.
+		assert.deepEqual(unresolvedImports(entries({ "computer/a.ts": 'import { b } from "./b.ts";\n', "computer/b.ts": 'import * as c from "./c.ts";\nexport const b = c;\n' }), true), ["computer/b.ts>./c.ts"]);
+		// Type-only, in any form Node erases, is not a runtime import; an inline `type` specifier is not erased whole and is.
+		assert.deepEqual(unresolvedImports(entries({ "computer/a.ts": 'import type { X } from "./gone.ts";\nexport type { Y } from "./gone2.ts";\nimport type Z from "./gone3.ts";\n' }), true), []);
+		assert.deepEqual(unresolvedImports(entries({ "computer/a.ts": 'import { type X } from "./gone.ts";\n' }), true), ["computer/a.ts>./gone.ts"]);
+		// Several forms: multi-line, re-export, side effect, dynamic, and a built-in that is the runtime's.
+		assert.deepEqual(unresolvedImports(entries({ "computer/a.ts": 'import {\n\tone,\n\ttwo,\n} from "./m1.ts";\nexport * from "./m2.ts";\nimport "./m3.ts";\nawait import("./m4.ts");\nimport * as fs from "node:fs";\n' }), true), ["computer/a.ts>./m1.ts", "computer/a.ts>./m2.ts", "computer/a.ts>./m3.ts", "computer/a.ts>./m4.ts"]);
+		// A comment or a string that looks like an import is not one.
+		assert.deepEqual(unresolvedImports(entries({ "computer/a.ts": '// import x from "./gone.ts";\n/**\n * import y from "./gone2.ts"\n */\nconst s = "import z from \'./gone3.ts\'";\n' }), true), []);
+		// Packages: present with the target file; absent; subpath not exported; target file missing; a file inside `node_modules` is not scanned.
+		const good = { "computer/cua-host/node_modules/p/package.json": pkg({ ".": { import: "./i.mjs" }, "./sub": { import: { default: "./s.js" } } }), "computer/cua-host/node_modules/p/i.mjs": "", "computer/cua-host/node_modules/p/s.js": "" };
+		assert.deepEqual(unresolvedImports(entries({ ...good, "computer/a.ts": 'import "p";\nimport "p/sub";\n' }), true), []);
+		assert.deepEqual(unresolvedImports(entries({ ...good, "computer/a.ts": 'import "q";\nimport "p/other";\n' }), true), ["computer/a.ts>q", "computer/a.ts>p/other"]);
+		const { "computer/cua-host/node_modules/p/s.js": _dropped, ...noTarget } = good;
+		assert.deepEqual(unresolvedImports(entries({ ...noTarget, "computer/a.ts": 'import "p/sub";\n' }), true), ["computer/a.ts>p/sub"]);
+		assert.deepEqual(unresolvedImports(entries({ ...good, "computer/cua-host/node_modules/p/x.ts": 'import "./nothing.ts";\n' }), true), []);
+	});
+
+	it("is checked by the operator's own build before a bundle is written, so a defective one can't be made", () => {
+		const source = fs.readFileSync(path.join(REPOSITORY, "computer/cua-host/eval-install/operator.ts"), "utf8");
+		const check = source.indexOf("unresolvedImports(entries, viewer !== undefined)");
+		assert.ok(check > 0 && check < source.indexOf("writeTree(out, entries)"));
+		assert.ok(source.includes("throw new Refusal(`bundle-closure:${unresolved[0]}`)"));
+	});
+
 	it("finds a scoped package's locked integrity in the repository's own lockfile, and no other version's", () => {
 		const lockfile = fs.readFileSync(path.join(REPOSITORY, "pnpm-lock.yaml"), "utf8");
 		assert.match(lockedPackageIntegrity(lockfile, "@bufbuild/protobuf", "2.15.0"), /^sha512-[A-Za-z0-9+/]{86}==$/);
@@ -917,6 +1003,45 @@ describe("the rendered scripts with a viewer", () => {
 		assert.ok(script.includes("trusted_file /usr/bin/openssl || fail tools"));
 		assert.ok(script.indexOf("fail bundle-digest") < script.indexOf("\nexec "));
 		for (const forbidden of ["set -x", "cat ", "eval ", "curl ", "az ", "-days 3650"]) assert.equal(script.includes(forbidden), false, forbidden);
+	});
+
+	/** The umask a script runs its program under: the last `umask` line before its `exec`. */
+	const effectiveUmask = (script: string) => {
+		const lines = script.slice(0, script.indexOf("\nexec ")).split("\n").filter((line) => /^umask [0-7]{3}$/.test(line));
+		return parseInt(lines[lines.length - 1]!.slice("umask ".length), 8);
+	};
+
+	it("runs `journal` under a umask that leaves the tombstone 0444, and the other scripts at 077, with the effective modes as the program asks", () => {
+		const scripts = renderScripts(config(true), PINNED);
+		assert.equal(effectiveUmask(scripts["journal.sh"]!), 0o022);
+		for (const name of Object.keys(scripts).filter((n) => n !== "journal.sh")) assert.equal(effectiveUmask(scripts[name]!), 0o077, `${name} stays private`);
+		const cfg = config(true);
+		const BRIDGE = { uid: 998, gid: 998 };
+		const journalMachine = (umask: number) => {
+			const files = new FakeFiles();
+			files.user = 0;
+			files.umask = umask;
+			files.directory("/etc/pim-eval", 0o755, 0);
+			files.directory("/var/lib", 0o755, 0);
+			return files;
+		};
+		const modes = (files: FakeFiles) => [VIEWER_PATHS.tombstone, VIEWER_PATHS.journalDir, VIEWER_PATHS.journal].map((file) => files.nodes.get(file)!.mode);
+		// Under the umask the script sets: 0444 for the tombstone, 0700 for the directory, 0600 for the journal.
+		const made = journalMachine(effectiveUmask(scripts["journal.sh"]!));
+		provisionJournal(cfg, BRIDGE, made);
+		assert.deepEqual(modes(made), [0o444, 0o700, 0o600]);
+		// The control: under 077, which is what the script ran under, the tombstone was 0400. The journal and its directory were already private.
+		const before = journalMachine(0o077);
+		provisionJournal(cfg, BRIDGE, before);
+		assert.deepEqual(modes(before), [0o400, 0o700, 0o600]);
+		// The root token's two files, under its script's 077, are 0600 as before.
+		const tokens = new FakeFiles();
+		tokens.user = 0;
+		tokens.umask = effectiveUmask(scripts["root-token.sh"]!);
+		tokens.directory(PATHS.bridgeDir, 0o700, BRIDGE.uid);
+		tokens.directory(VIEWER_PATHS.spacesdDir, 0o755, 0);
+		provisionRootToken(cfg, { bridge: BRIDGE, desktop: { uid: 1500, gid: 1500 } }, tokens, (count) => Buffer.alloc(count, 9));
+		assert.deepEqual([VIEWER_PATHS.rootToken, VIEWER_PATHS.spacesdToken].map((file) => tokens.nodes.get(file)!.mode), [0o600, 0o600]);
 	});
 
 	it("travel in cloud-init data, which writes them and runs none", () => {

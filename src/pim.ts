@@ -238,6 +238,27 @@ const GUEST_APPROVAL_MS = 24 * 60 * 60 * 1000;
 /** How long a chat goes without activity before it is archived: listed apart, not deleted. */
 const ARCHIVE_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
 
+/** The page a browser lands on after signing in to an app: what happened, and a way back to Pim. */
+function signInResultPage(connected: boolean, home: string | undefined, error?: string): Response {
+	const escape = (text: string) => text.replace(/[&<>"']/g, (character) => `&#${character.charCodeAt(0)};`);
+	const title = connected ? "Connected" : "Not connected";
+	const detail = connected ? "The app is ready to use. You can close this tab or go back to Pim." : `Sign-in failed: ${escape(error ?? "unknown error")}`;
+	const back = home ? `<a href="${escape(home)}">Back to Pim</a>` : "";
+	const body = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
+<style>
+:root{color-scheme:light dark;font-family:system-ui,sans-serif}
+body{margin:0;min-height:100vh;display:grid;place-items:center;text-align:center;padding:1.5rem;box-sizing:border-box}
+main{max-width:22rem}
+.logo{width:4rem;display:block;margin:0 auto 2rem}
+.mark{width:3rem;height:3rem;border-radius:50%;margin:0 auto 1.25rem;display:grid;place-items:center;font-size:1.5rem;color:#fff;background:${connected ? "#2e9e5b" : "#d1434b"}}
+h1{font-size:1.25rem;margin:0 0 .5rem}
+p{margin:0 0 1.5rem;opacity:.7;line-height:1.5}
+a{display:inline-block;padding:.6rem 1.2rem;border-radius:999px;background:#3d59a1;color:#fff;text-decoration:none;font-weight:500}
+</style>
+<main><svg class="logo" viewBox="0 0 8 4" shape-rendering="crispEdges" aria-hidden="true"><path fill="#e48a7a" d="M0 0h3v1H0zM2 1h1v1H2z"/><path fill="#4f8eb3" d="M0 1h1v3H0zM1 2h1v1H1z"/><path fill="#eab65d" d="M3 2h1v2H3z"/><path fill="#a88cd6" d="M4 1h4v1H4zM5 2h1v2H5zM7 2h1v2H7z"/></svg><div class="mark">${connected ? "&#10003;" : "!"}</div><h1>${title}</h1><p>${detail}</p>${back}</main>`;
+	return new Response(body, { status: connected ? 200 : 400, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+}
+
 /** A circle's name as given: trimmed, not empty, not long. */
 function circleName(name: unknown): string {
 	if (typeof name !== "string" || name.trim() === "") throw new HttpError(400, "name must be a non-empty string");
@@ -1550,13 +1571,7 @@ export class Pim extends DurableAgent<Env> {
 
 	async onStart(): Promise<void> {
 		this.mcp.configureOAuthCallback({
-			customHandler: (result) =>
-				new Response(
-					result.authSuccess
-						? "<!doctype html><title>Connected</title><p>Connected. You can close this window and go back to Pim.</p>"
-						: `<!doctype html><title>Not connected</title><p>Sign-in failed: ${String(result.authError ?? "unknown error").replace(/[<&]/g, "")}</p>`,
-					{ status: result.authSuccess ? 200 : 400, headers: { "content-type": "text/html; charset=utf-8" } },
-				),
+			customHandler: (result) => signInResultPage(result.authSuccess, this.deployment().publicUrl ?? undefined, String(result.authError ?? "")),
 		});
 		// Sockets survive hibernation and restarts; their watches do not. They
 		// are restored without holding up startup, which answers no request
@@ -5603,13 +5618,7 @@ export class Pim extends DurableAgent<Env> {
 				const url = new URL(`${this.deployment().publicUrl}${APPS_CALLBACK_PATH}`);
 				for (const [name, value] of await request.formData()) if (typeof value === "string") url.searchParams.append(name, value);
 				const result = await this.nativeApps.finish(url);
-				const ok = "name" in result;
-				return new Response(
-					ok
-						? "<!doctype html><title>Connected</title><p>Connected. You can close this window and go back to Pim.</p>"
-						: `<!doctype html><title>Not connected</title><p>Sign-in failed: ${result.error.replace(/[&<>"']/g, (character) => `&#${character.charCodeAt(0)};`)}</p>`,
-					{ status: ok ? 200 : 400, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" } },
-				);
+				return "name" in result ? signInResultPage(true, this.deployment().publicUrl ?? undefined) : signInResultPage(false, this.deployment().publicUrl ?? undefined, result.error);
 			},
 		],
 		// An app's action, for the person in their own browser only (see `NativeAppDefinition.actions`), such as Drive's file picker.

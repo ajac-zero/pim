@@ -178,7 +178,7 @@ describe("apps extensions implement", () => {
 		// The service sends the person back, without Pim's API token, to their own signed-in browser.
 		const back = await comeBack({ state: params.state!, code: "good" }, cookie);
 		expect(back.status).toBe(200);
-		expect(await back.text()).toContain("Connected.");
+		expect(await back.text()).toContain("<h1>Connected</h1>");
 		expect(grants.at(-1)).toMatchObject({ grant_type: "authorization_code", code: "good" });
 		const [bank] = (await api("/mcp")).body.servers;
 		expect(bank).toMatchObject({ state: "ready", authUrl: null, approval: "writes" });
@@ -309,7 +309,7 @@ describe("Google apps", () => {
 
 		cookie = await signedIn();
 		const back = await comeBack({ state: params.state!, code: "good-mail" }, cookie);
-		expect(await back.text()).toContain("Connected.");
+		expect(await back.text()).toContain("<h1>Connected</h1>");
 		expect(google.grants).toEqual([expect.objectContaining({ client: "gmail", grant_type: "authorization_code", code: "good-mail" })]);
 		// Once only.
 		expect((await comeBack({ state: params.state!, code: "good-mail" }, cookie)).status).toBe(400);
@@ -348,7 +348,7 @@ describe("Google apps", () => {
 
 		// Google's scopes, in any order and spacing, are the app's exactly.
 		const { params } = await start("test.google/files");
-		expect(await (await comeBack({ state: params.state!, code: "spaced" }, cookie)).text()).toContain("Connected.");
+		expect(await (await comeBack({ state: params.state!, code: "spaced" }, cookie)).text()).toContain("<h1>Connected</h1>");
 		// Each app signs in with its own client.
 		expect(google.grants.filter((grant) => grant.grant_type === "authorization_code").map((grant) => grant.client)).toEqual(["drive", "drive", "drive"]);
 	});
@@ -420,7 +420,7 @@ describe("Google apps", () => {
 	it("keep each credential to its own connection", async () => {
 		// Mail connected again; its credential moved to Files' connection can't be read there.
 		const { params } = await start("test.google/mail");
-		expect(await (await comeBack({ state: params.state!, code: "good-mail" }, cookie)).text()).toContain("Connected.");
+		expect(await (await comeBack({ state: params.state!, code: "good-mail" }, cookie)).text()).toContain("<h1>Connected</h1>");
 		const files = (await stored("files"))!.credential;
 		await runInDurableObject(env.Pim.getByName(OWNER), (_instance: Pim, state) => {
 			state.storage.sql.exec("UPDATE pim_app_connections SET credential = (SELECT credential FROM pim_app_connections WHERE id = 'mail') WHERE id = 'files'");
@@ -453,7 +453,7 @@ describe("Google apps", () => {
 
 	it("disconnect one without the other: Pim forgets the credential, then revokes its grant at Google", async () => {
 		const { params } = await start("test.google/files");
-		expect(await (await comeBack({ state: params.state!, code: "good-files" }, cookie)).text()).toContain("Connected.");
+		expect(await (await comeBack({ state: params.state!, code: "good-files" }, cookie)).text()).toContain("<h1>Connected</h1>");
 
 		expect((await api("/mcp/mail", { method: "DELETE" })).body).toEqual({ deleted: true });
 		expect(google.revoked).toEqual(["gmail-refresh"]);
@@ -490,7 +490,7 @@ describe("Spotify, signing in with its own OAuth", () => {
 		expect((await comeBack({ state: params.state!, code: "spotify-code" })).status).toBe(403);
 		expect(spotify.grants).toEqual([]);
 		const back = await comeBack({ state: params.state!, code: "spotify-code" }, await signedIn());
-		expect(await back.text()).toContain("Connected.");
+		expect(await back.text()).toContain("<h1>Connected</h1>");
 		expect(spotify.grants).toEqual([expect.objectContaining({ grant_type: "authorization_code", code: "spotify-code" })]);
 		const row = (await stored("spotify"))!;
 		expect(row.state).toBe("ready");

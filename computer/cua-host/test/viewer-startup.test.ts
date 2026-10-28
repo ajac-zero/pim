@@ -1200,6 +1200,28 @@ describe("the pinned delivery", () => {
 		assert.deepEqual(pipesToShell(script), []);
 	});
 
+	it("runs `caddy version` and `caddy validate` in the same unprivileged environment as the ingress unit, with stderr still captured and the version exact", () => {
+		const script = renderScripts(config(true), PINNED)["support.sh"]!;
+		const env = "env -i PATH=/usr/bin:/bin XDG_DATA_HOME=/var/lib/pim-ingress XDG_CONFIG_HOME=/var/lib/pim-ingress";
+		const version = script.split("\n").filter((l) => l.includes('"$CADDY" version'));
+		const validate = script.split("\n").filter((l) => l.includes('"$CADDY" validate'));
+		assert.deepEqual(version, [`capture 20 /usr/sbin/runuser -u pim-ingress -- ${env} "$CADDY" version || bad caddy-version`]);
+		assert.equal(validate.length, 1);
+		assert.ok(validate[0]!.includes(`-u pim-ingress -- ${env} "$CADDY" validate`));
+		// The environment is the ingress unit's own: the same two variables, the same directory, and no HOME.
+		const unit = renderUnits(config(true), BASE_DESKTOP_UID).ingress!;
+		assert.ok(unit.includes("Environment=XDG_DATA_HOME=/var/lib/pim-ingress") && unit.includes("Environment=XDG_CONFIG_HOME=/var/lib/pim-ingress"));
+		for (const line of [...version, ...validate]) assert.equal(line.replace(/XDG_(?:DATA|CONFIG)_HOME=/g, "").includes("HOME="), false, "no HOME is set for Caddy");
+		// Not solved by dropping the warning or by changing who runs it or how the output is read.
+		const capture = bashFunction(script, "capture");
+		assert.ok(capture.includes('OUT="$(timeout --kill-after=5 "$limit" "$@" 2>&1)"'), "stderr is still captured with stdout");
+		assert.ok(script.includes('[[ "$OUT" == "$CADDY_VERSION "* ]] && ok caddy-version || bad caddy-version'));
+		assert.equal(/\bcaddy\b[^\n]*2>\s*\/dev\/null/.test(script) || /"\$CADDY" version[^\n]*2>/.test(script), false);
+		for (const line of [...version, ...validate]) assert.ok(line.includes("-u pim-ingress --"), "unprivileged, as the ingress account");
+		// Both are still bounded.
+		assert.deepEqual(unboundedRuns(script), []);
+	});
+
 	it("is fail-fast: the first failed check exits, nothing aggregates, and a cleanup failure is reported beside the original status", () => {
 		const script = renderScripts(config(true), PINNED)["support.sh"]!;
 		assert.equal(script.includes("FAILED"), false);

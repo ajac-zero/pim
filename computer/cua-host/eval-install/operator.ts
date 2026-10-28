@@ -740,6 +740,8 @@ printf '{"event":"pim-cua-eval.fetched","evaluation":"%s"}\\n' ${quote(config.ev
 function renderSupport(config: Config, viewer: NonNullable<Config["viewer"]>): string {
 	const packages = BASE_PACKAGES.map((name) => quote(name)).join(" ");
 	const runuser = `${TOOLS.runuser} -u`;
+	// One environment for every Caddy command, the ingress unit's own: Caddy warns on stderr when it has neither HOME nor XDG_CONFIG_HOME, and that warning would sit in front of the version.
+	const caddyEnv = `env -i PATH=/usr/bin:/bin XDG_DATA_HOME=${VIEWER_PATHS.ingressState} XDG_CONFIG_HOME=${VIEWER_PATHS.ingressState}`;
 	return `${prologue(config, "support")}
 trusted_file ${TOOLS.runuser} || fail tools
 for tool in dpkg-query ldd timeout mktemp chown grep rm basename; do trusted_file "/usr/bin/$tool" || fail tools; done
@@ -803,11 +805,11 @@ libraries "$BROWSER"
 
 capture 20 "$NODE" --version || bad node-version
 [[ "$OUT" == "$NODE_VERSION" ]] && ok node-version || bad node-version
-capture 20 ${runuser} ${VIEWER_ACCOUNTS.ingress} -- env -i PATH=/usr/bin:/bin "$CADDY" version || bad caddy-version
+capture 20 ${runuser} ${VIEWER_ACCOUNTS.ingress} -- ${caddyEnv} "$CADDY" version || bad caddy-version
 [[ "$OUT" == "$CADDY_VERSION "* ]] && ok caddy-version || bad caddy-version
 
 # Caddy parses and provisions the installed Caddyfile as its own account, as the unit does; nothing is started, no certificate is asked for.
-step caddy-validate 30 ${runuser} ${VIEWER_ACCOUNTS.ingress} -- env -i PATH=/usr/bin:/bin XDG_DATA_HOME=${VIEWER_PATHS.ingressState} XDG_CONFIG_HOME=${VIEWER_PATHS.ingressState} "$CADDY" validate --config ${VIEWER_PATHS.caddyfile} --adapter caddyfile
+step caddy-validate 30 ${runuser} ${VIEWER_ACCOUNTS.ingress} -- ${caddyEnv} "$CADDY" validate --config ${VIEWER_PATHS.caddyfile} --adapter caddyfile
 
 # spacesd runs, as the desktop account, as far as printing its help.
 step spacesd-runs 20 ${runuser} ${ACCOUNTS.desktop} -- env -i PATH=/usr/bin:/bin "$SPACESD" --help

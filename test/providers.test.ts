@@ -15,6 +15,7 @@ import { completionStream, faux, type Pim } from "./worker";
 type Call = { url: string; authorization: string | null; headers?: Record<string, string>; body: any };
 
 let calls: Call[];
+let claudeFails = false;
 
 const CLOUD_MODELS = [{ id: "gpt-4.1" }, ...Array.from({ length: 59 }, (_, n) => ({ id: `cloud-model-${n}` }))];
 
@@ -77,6 +78,7 @@ beforeEach(() => {
 			}
 			const body = await request.json<{ model: string }>();
 			calls.push({ url: request.url, authorization: request.headers.get("authorization"), headers: Object.fromEntries(request.headers), body });
+			if (claudeFails) return Response.json({ type: "error", error: { type: "invalid_request_error", message: "thinking is wrong" } }, { status: 400 });
 			return builtinStream(url, body.model);
 		}
 		if (url.origin !== "http://localhost:1234" && url.origin !== "https://models.test") return realFetch(input, init);
@@ -233,6 +235,20 @@ describe("A person's own model providers", () => {
 		expect(calls.at(-1)).toMatchObject({ url: expect.stringMatching(/^https:\/\/claude.test\/v1\/messages/), headers: expect.objectContaining({ "x-api-key": "proxy-key", authorization: "Bearer proxy-key" }) });
 		// A Claude model that only takes adaptive thinking is never sent a thinking budget, which its API refuses.
 		expect(calls.at(-1)!.body.thinking?.type).not.toBe("enabled");
+		// A failed request is logged with the API, the request's own settings, never its content.
+		claudeFails = true;
+		const warn = vi.spyOn(console, "warn");
+		const held = (await post("/sessions")).body.id;
+		await post(`/sessions/${held}/messages`, { content: "Secret words" });
+		const failure = await vi.waitFor(() => {
+			const line = warn.mock.calls.map(([text]) => JSON.parse(String(text))).find((entry) => entry.event === "pim.model_error" && entry.provider === "own:proxy");
+			expect(line).toBeDefined();
+			return line;
+		}, { timeout: 15_000 });
+		claudeFails = false;
+		await api(`/sessions/${held}`, { method: "DELETE" });
+		expect(failure).toMatchObject({ api: "anthropic-messages", baseUrl: "https://claude.test", request: { model: "claude-sonnet-5-5", thinking: { type: "adaptive" } } });
+		expect(JSON.stringify(failure)).not.toContain("Secret words");
 		// Saving again keeps the API it speaks.
 		expect((await put("/providers/proxy", { name: "Proxy 2" })).body.provider).toMatchObject({ api: "anthropic-messages" });
 		await api("/providers/proxy", { method: "DELETE" });

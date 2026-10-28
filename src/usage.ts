@@ -4,6 +4,7 @@ import {
 	type AssistantMessageEventStream,
 	createAssistantMessageEventStream,
 	type Model,
+	type StreamOptions,
 	type Usage as ModelUsage,
 } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
@@ -102,6 +103,25 @@ CREATE TABLE IF NOT EXISTS pim_usage_runs (
 
 /** Days of usage kept: enough for a monthly view. */
 const KEEP_DAYS = 90;
+
+/** What a model failure's log says about the model: which API it spoke and where. */
+function modelFacts(model: Model<Api>) {
+	return { provider: model.provider, model: model.id, api: model.api, baseUrl: model.baseUrl, reasoning: model.reasoning };
+}
+
+/** A request without its content: its settings, such as thinking and token limits, and how many messages and tools it carried. */
+function requestShape(value: unknown, depth = 0): Record<string, unknown> | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	const shape: Record<string, unknown> = {};
+	for (const [key, entry] of Object.entries(value)) {
+		if (key === "metadata") continue;
+		if (Array.isArray(entry)) shape[key] = `${entry.length} items`;
+		else if (typeof entry === "string") shape[key] = entry.length <= 40 ? entry : `${entry.length} characters`;
+		else if (typeof entry === "object" && entry !== null) shape[key] = depth < 2 ? requestShape(entry, depth + 1) : "object";
+		else shape[key] = entry;
+	}
+	return shape;
+}
 
 export type StreamFn = (model: Model<Api>, context: unknown, options?: unknown) => AssistantMessageEventStream;
 
@@ -330,13 +350,21 @@ export class UsageMeter {
 					events.end(message);
 					return events;
 				}
+				// What was sent, for a failure's log: the request without its content.
+				let sent: Record<string, unknown> | undefined;
+				const logged = { ...(options as StreamOptions | undefined) };
+				const onPayload = logged.onPayload;
+				logged.onPayload = async (payload, payloadModel) => {
+					sent = requestShape(payload);
+					return onPayload?.(payload, payloadModel);
+				};
 				let events: AssistantMessageEventStream;
 				try {
-					events = stream(model, context, options);
+					events = stream(model, context, logged);
 				} catch (error) {
 					// Never sent: it doesn't count.
 					this.releaseModel(reserved.reservation);
-					console.warn(JSON.stringify({ event: "pim.model_error", provider: model.provider, model: model.id, error: String(error).slice(0, 1000) }));
+					console.warn(JSON.stringify({ event: "pim.model_error", ...modelFacts(model), error: String(error).slice(0, 1000) }));
 					throw error;
 				}
 				// The stream settles once; a failed or aborted request keeps its count, with whatever tokens it reported.
@@ -345,10 +373,10 @@ export class UsageMeter {
 						this.settleModel(reserved.reservation, message.usage);
 						// The chat only says that a request failed; the provider's own words are for whoever runs the deployment.
 						if (message.stopReason !== "stop" && message.stopReason !== "toolUse" && message.stopReason !== "length") {
-							console.warn(JSON.stringify({ event: "pim.model_error", provider: model.provider, model: model.id, stopReason: message.stopReason, error: (message.errorMessage ?? "").slice(0, 1000) }));
+							console.warn(JSON.stringify({ event: "pim.model_error", ...modelFacts(model), request: sent, stopReason: message.stopReason, error: (message.errorMessage ?? "").slice(0, 1000) }));
 						}
 					},
-					(error) => console.warn(JSON.stringify({ event: "pim.model_error", provider: model.provider, model: model.id, error: String(error).slice(0, 1000) })),
+					(error) => console.warn(JSON.stringify({ event: "pim.model_error", ...modelFacts(model), request: sent, error: String(error).slice(0, 1000) })),
 				);
 				return events;
 			},

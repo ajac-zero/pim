@@ -21,6 +21,7 @@ import {
 	parseConfig,
 	renderCaddyfile,
 	renderUnits,
+	TOOLS,
 	UNITS,
 	VIEWER_ACCOUNTS,
 	VIEWER_ASSET_NAMES,
@@ -30,9 +31,10 @@ import {
 	VIEWER_UNITS,
 	viewerBundleFiles,
 } from "../eval-install/config.ts";
-import { checkAccounts, checkBackendName, checkUnits, type Facts, inspectedPaths, type PathFact, type Probe, plan, start } from "../eval-install/install.ts";
+import { checkAccounts, checkBackendName, checkUnits, cleanlyStopped, type Facts, inspectedPaths, type PathFact, type Probe, plan, SHOW_UNIT, start, unitState } from "../eval-install/install.ts";
+import { compareBundles, RECOVER_FILE, RECOVERY_ADDED, RECOVERY_MAX_RUN_US, type RecoveryHost, type RecoveryProbe, RecoveryFailure, recoverDesktop } from "../eval-install/recover.ts";
 import { initialJournalText, newRootToken, provisionJournal, provisionRootToken, ProvisionFailure, tombstoneText } from "../eval-install/journal-provision.ts";
-import { BASE_DESKTOP_UID, BUNDLE_SOURCES, bundleEntries, bundleInputs, lockedPackageIntegrity, renderBaseCloudConfig, renderCloudConfig, renderScripts, runtimeImports, unresolvedImports, untarPackage, VIEWER_SOURCES } from "../eval-install/operator.ts";
+import { BASE_DESKTOP_UID, BUNDLE_SOURCES, bundleEntries, bundleInputs, lockedPackageIntegrity, renderBaseCloudConfig, renderCloudConfig, renderRecoveryScripts, renderScripts, runtimeImports, unresolvedImports, untarPackage, VIEWER_SOURCES } from "../eval-install/operator.ts";
 import { integrityHex, missingPins, PINS, type Pins } from "../eval-install/pins.ts";
 import { isHttpsOrigin } from "../origin.ts";
 import { openJournalStore } from "../journal-store.ts";
@@ -735,6 +737,19 @@ describe("the viewer's bundle", () => {
 		assert.deepEqual(unresolvedImports(entries({ ...good, "computer/cua-host/node_modules/p/x.ts": 'import "./nothing.ts";\n' }), true), []);
 	});
 
+	it("makes the new bundle the old one plus the permitted files, from the assembled entries, so the recovery's comparison holds for a real bundle", () => {
+		const entries = assembled(true);
+		const digests = (map: Map<string, Buffer>) => Object.fromEntries([...map].map(([file, content]) => [file, crypto.createHash("sha256").update(content).digest("hex")]));
+		const old = new Map(entries);
+		for (const file of RECOVERY_ADDED) old.delete(file);
+		old.set("BUNDLE", Buffer.from("pim-cua-eval-bundle v1\ncommit afc9371a75f1c21b3b22627222b9791ef283692d\n"));
+		assert.equal(compareBundles(digests(old), digests(entries)), null);
+		assert.deepEqual(RECOVERY_ADDED.filter((file) => !entries.has(file)), []);
+		// An old bundle that is not a subset (a file of its own that the new one lacks) fails.
+		old.set("computer/only-in-old.ts", Buffer.from("x"));
+		assert.equal(compareBundles(digests(old), digests(entries)), "bundle-differs");
+	});
+
 	it("is checked by the operator's own build before a bundle is written, so a defective one can't be made", () => {
 		const source = fs.readFileSync(path.join(REPOSITORY, "computer/cua-host/eval-install/operator.ts"), "utf8");
 		const check = source.indexOf("unresolvedImports(entries, viewer !== undefined)");
@@ -1303,7 +1318,7 @@ describe("the pinned delivery", () => {
 	it("is the program of the operator a VM can run: neither it nor the files it imports reach `ws` or the bridge", () => {
 		const importsOf = (file: string) => [...fs.readFileSync(path.join(REPOSITORY, file), "utf8").matchAll(/^import .* from "([^"]+)"/gm)].map((m) => m[1]!);
 		assert.deepEqual(importsOf("computer/cua-host/origin.ts"), ["node:net"]);
-		for (const file of ["computer/cua-host/eval-install/config.ts", "computer/cua-host/eval-install/operator.ts", "computer/cua-host/eval-install/pins.ts"]) for (const specifier of importsOf(file)) assert.ok(specifier.startsWith("node:") || /^\.\/(config|pins)\.ts$|^\.\.\/origin\.ts$/.test(specifier), `${file}: ${specifier}`);
+		for (const file of ["computer/cua-host/eval-install/config.ts", "computer/cua-host/eval-install/operator.ts", "computer/cua-host/eval-install/pins.ts", "computer/cua-host/eval-install/recover.ts", "computer/cua-host/eval-install/install.ts"]) for (const specifier of importsOf(file)) assert.ok(specifier.startsWith("node:") || /^\.\/(config|pins|recover|install)\.ts$|^\.\.\/origin\.ts$/.test(specifier), `${file}: ${specifier}`);
 		assert.ok(BUNDLE_SOURCES.includes("computer/cua-host/origin.ts"));
 		for (const value of ["https://*.example.com", "https://example.com:443", "https://example.com/", "https://user@example.com", "https://EXAMPLE.com", ""]) assert.equal(isHttpsOrigin(value), false, value);
 		assert.equal(isHttpsOrigin("https://cua-eval.ajac-zero.com"), true);
@@ -1377,4 +1392,278 @@ describe("the pinned delivery", () => {
 		for (const program of ["NODE", "CADDY", "SPACESD", "BROWSER"]) assert.ok(script.includes(`libraries "$${program}"`), program);
 		assert.ok(script.includes('[[ "$OUT" == "$NODE_VERSION" ]] && ok node-version || bad node-version'));
 	});
+});
+
+describe("the recovery of a retained VM whose first bundle lacked two files", () => {
+	const OLD_DIR = "/opt/pim-cua/bundle";
+	const NEW_DIR = "/opt/pim-cua/bundle-2";
+	const NEW_SHA = "f".repeat(64);
+	const DESKTOP_UID = 1000;
+	const PASSWD = ["root:x:0:0:root:/root:/bin/bash", "pim-bridge:x:998:998::/nonexistent:/usr/sbin/nologin", `pim-desktop:x:${DESKTOP_UID}:${DESKTOP_UID}::/home/pim-desktop:/bin/bash`, ""].join("\n");
+	const oldConfig = config(true);
+	const newConfig = config(true, (raw) => {
+		raw.bundle = { dir: NEW_DIR, sha256: NEW_SHA };
+	});
+	const installed = renderUnits(oldConfig, DESKTOP_UID).desktop;
+	const next = renderUnits(newConfig, DESKTOP_UID).desktop;
+	const MISSING_LOG = [`Error [ERR_MODULE_NOT_FOUND]: Cannot find module '${OLD_DIR}/computer/native-outcome.ts' imported from ${OLD_DIR}/computer/cua-host/desktop.ts`, "    at finalizeResolution (node:internal/modules/esm/resolve:275:11)", "Node.js v22.18.0", ""].join("\n");
+
+	/** `systemctl show` for a unit: by default one that is loaded and has never run. */
+	const show = (change: Record<string, string> = {}) => ({
+		status: 0,
+		stdout: `${Object.entries({ LoadState: "loaded", ActiveState: "inactive", SubState: "dead", Result: "success", ExecMainPID: "0", ExecMainCode: "0", ExecMainStatus: "0", ExecMainStartTimestampMonotonic: "0", ExecMainExitTimestampMonotonic: "0", ...change })
+			.map(([name, value]) => `${name}=${value}`)
+			.join("\n")}\n`,
+	});
+	const RUNNING = { ActiveState: "active", SubState: "running", ExecMainPID: "4100", ExecMainCode: "0", ExecMainStartTimestampMonotonic: "100" };
+	/** What the incident left: failed, exited with status 1, 400 ms after it started. */
+	const FAILED = { ActiveState: "failed", SubState: "failed", Result: "exit-code", ExecMainPID: "4200", ExecMainCode: "1", ExecMainStatus: "1", ExecMainStartTimestampMonotonic: "100000000", ExecMainExitTimestampMonotonic: "100400000" };
+
+	const bundleFiles = (extra: Record<string, string> = {}) => ({ BUNDLE: "m", "computer/pim-computer.ts": "a".repeat(64), "computer/cua-host/desktop.ts": "b".repeat(64), ...extra });
+	const ADDED = Object.fromEntries(RECOVERY_ADDED.map((file, i) => [file, String(i + 1).repeat(64)]));
+
+	type Setup = {
+		units?: Record<string, ReturnType<typeof show>>;
+		files?: Record<string, ReturnType<typeof factFile>>;
+		unitText?: string | null;
+		cgroup?: { status: number; stdout: string };
+		cgroupProcs?: string | null;
+		journal?: { status: number | null; stdout: string };
+		digests?: Record<string, Record<string, string> | null>;
+	};
+	const factFile = (kind: "file" | "dir" | "socket", uid = 0, mode = 0o644) => ({ kind, uid, gid: uid, mode }) as NonNullable<PathFact>;
+
+	/** A VM as the incident left it, with `change` making it differ. */
+	function vm(change: (setup: Required<Setup>) => void = () => {}) {
+		const setup: Required<Setup> = {
+			units: { [UNITS.desktop]: show(FAILED), [UNITS.bridge]: show(RUNNING), [VIEWER_UNITS.spacesd]: show(RUNNING), [VIEWER_UNITS.ingress]: show(RUNNING) },
+			files: { [PATHS.desktopUnit]: factFile("file") },
+			unitText: installed,
+			cgroup: { status: 0, stdout: "MainPID=0\nControlGroup=/system.slice/pim-cua-desktop.service\n" },
+			cgroupProcs: "",
+			journal: { status: 0, stdout: MISSING_LOG },
+			digests: { [OLD_DIR]: bundleFiles(), [NEW_DIR]: bundleFiles({ BUNDLE: "n", ...ADDED }) },
+		};
+		change(setup);
+		const queries: string[][] = [];
+		const probe: RecoveryProbe = {
+			lstat: (file) => setup.files[file] ?? null,
+			readText: (file) => (file === "/etc/passwd" ? PASSWD : file === PATHS.desktopUnit ? setup.unitText : file === "/sys/fs/cgroup/system.slice/pim-cua-desktop.service/cgroup.procs" ? setup.cgroupProcs : null),
+			query: (argv) => {
+				queries.push([...argv]);
+				if (argv[1] === "show" && argv[2]!.startsWith("--property=MainPID")) return setup.cgroup;
+				if (argv[1] === "show") return setup.units[argv[argv.length - 1]!] ?? { status: 1, stdout: "" };
+				if (argv[0] === "/usr/bin/journalctl") return setup.journal;
+				return { status: 1, stdout: "" };
+			},
+			digests: (dir) => setup.digests[dir] ?? null,
+		};
+		const log: string[] = [];
+		const written: { file: string; text: string; mode: number; uid: number; gid: number }[] = [];
+		const fail = new Set<string>();
+		const host: RecoveryHost = {
+			writeNew(file, bytes, mode, uid, gid) {
+				log.push(`write ${file}`);
+				if (fail.has("write")) throw new Error("EIO");
+				written.push({ file, text: bytes.toString("utf8"), mode, uid, gid });
+			},
+			linkNew(existing, created) {
+				log.push(`link ${existing} ${created}`);
+				if (fail.has("link")) throw new Error("EEXIST");
+			},
+			renameOver(from, to) {
+				log.push(`rename ${from} ${to}`);
+				if (fail.has("rename")) throw new Error("EIO");
+			},
+			run(argv) {
+				log.push(`run ${argv.slice(1).join(" ")}`);
+				if (fail.has(argv[1]!)) throw new Error("exit 1");
+			},
+			query: (argv) => {
+				log.push(`query ${argv.slice(1).join(" ")}`);
+				const unit = argv[argv.length - 1]!;
+				const file = { [UNITS.desktop]: PATHS.desktopUnit, [UNITS.bridge]: PATHS.bridgeUnit, [VIEWER_UNITS.spacesd]: VIEWER_PATHS.spacesdUnit, [VIEWER_UNITS.ingress]: VIEWER_PATHS.ingressUnit }[unit]!;
+				const user = unit === VIEWER_UNITS.ingress ? "pim-ingress" : unit === UNITS.bridge ? "pim-bridge" : "pim-desktop";
+				return { status: 0, stdout: `FragmentPath=${file}\nDropInPaths=\nUser=${user}\nKillMode=process\n` };
+			},
+		};
+		return { probe, host, log, written, fail, queries };
+	}
+	const refusal = (change: (setup: Required<Setup>) => void) => {
+		const v = vm(change);
+		try {
+			recoverDesktop(newConfig, v.probe, v.host);
+		} catch (error) {
+			assert.deepEqual(v.log, [], "nothing was changed or even asked of the host");
+			return (error as { reason?: string }).reason;
+		}
+		return "recovered";
+	};
+
+	it("rewrites only the desktop unit, to the new bundle, keeps the old unit beside it, reloads and starts the desktop endpoint once, and touches nothing else", () => {
+		assert.notEqual(installed, next);
+		assert.equal(installed.split(OLD_DIR).join(NEW_DIR), next, "the two units differ in the bundle's directory and nowhere else");
+		const v = vm();
+		const done = recoverDesktop(newConfig, v.probe, v.host);
+		const superseded = `${PATHS.desktopUnit}.superseded-${crypto.createHash("sha256").update(installed).digest("hex").slice(0, 12)}`;
+		const staged = `${PATHS.desktopUnit}.next-${NEW_SHA.slice(0, 12)}`;
+		assert.deepEqual(v.written, [{ file: staged, text: next, mode: 0o644, uid: 0, gid: 0 }]);
+		// In this order, and only these: the new unit made exclusively, the old one kept by a new name, the new one moved over it, then systemd.
+		assert.deepEqual(
+			v.log.filter((entry) => !entry.startsWith("query")),
+			[`write ${staged}`, `link ${PATHS.desktopUnit} ${superseded}`, `rename ${staged} ${PATHS.desktopUnit}`, "run daemon-reload", `run start ${UNITS.desktop}`],
+		);
+		// The bridge, spacesd and the ingress are asked nothing but their unit's facts (a `show`), never started, stopped or reloaded one by one.
+		assert.equal(v.log.some((entry) => /run (start|stop|restart|reset-failed|kill)/.test(entry) && !entry.includes(UNITS.desktop)), false);
+		assert.deepEqual(done, { bundle: NEW_DIR, previousBundle: OLD_DIR, supersededUnit: superseded, desktop: { active: "failed", sub: "failed" } });
+	});
+
+	it("is not the start gate: `start` still refuses what this accepts, and the state it accepts is exactly the incident's", () => {
+		assert.equal(cleanlyStopped(unitState(() => show(FAILED), UNITS.desktop)), false, "install.ts's gate still refuses a desktop that exited 1, so `start.sh` can't restart it");
+		// A desktop that ended cleanly (inactive, exit 0) is `start`'s business, and this path refuses it.
+		const clean = { ExecMainPID: "4300", ExecMainCode: "1", ExecMainStatus: "0", ExecMainStartTimestampMonotonic: "100", ExecMainExitTimestampMonotonic: "200" };
+		assert.equal(cleanlyStopped(unitState(() => show(clean), UNITS.desktop)), true);
+		assert.equal(refusal((s) => (s.units[UNITS.desktop] = show(clean))), "desktop-state");
+	});
+
+	it("refuses unless the desktop endpoint failed by exiting 1, quickly, with nothing of its cgroup running and no socket", () => {
+		assert.equal(refusal((s) => (s.units[UNITS.desktop] = show(RUNNING))), "desktop-state", "running is left alone");
+		assert.equal(refusal((s) => (s.units[UNITS.desktop] = show())), "desktop-state", "never started");
+		assert.equal(refusal((s) => (s.units[UNITS.desktop] = show({ ...FAILED, Result: "signal", ExecMainCode: "2", ExecMainStatus: "15" }))), "desktop-state", "killed by a signal");
+		assert.equal(refusal((s) => (s.units[UNITS.desktop] = show({ ...FAILED, ExecMainStatus: "2" }))), "desktop-exit", "exit status 2 is not this failure");
+		assert.equal(refusal((s) => (s.units[UNITS.desktop] = show({ ...FAILED, ExecMainStatus: "0" }))), "desktop-exit");
+		assert.equal(refusal((s) => (s.units[UNITS.desktop] = show({ ...FAILED, ExecMainPID: "0" }))), "desktop-exit");
+		assert.equal(refusal((s) => (s.units[UNITS.desktop] = show({ ...FAILED, ExecMainExitTimestampMonotonic: String(100000000n + RECOVERY_MAX_RUN_US + 1n) }))), "desktop-exit", "one microsecond past the bound");
+		assert.equal(refusal((s) => (s.units[UNITS.desktop] = show({ ...FAILED, ExecMainExitTimestampMonotonic: String(100000000n + RECOVERY_MAX_RUN_US) }))), "recovered", "at the bound");
+		assert.equal(refusal((s) => (s.units[UNITS.desktop] = show({ ...FAILED, ExecMainExitTimestampMonotonic: "99999999" }))), "desktop-exit", "exited before it started");
+		assert.equal(refusal((s) => (s.units[UNITS.desktop] = { status: 1, stdout: "" })), "desktop-state");
+		assert.equal(refusal((s) => (s.cgroupProcs = "4301\n")), "desktop-processes", "a process still in the cgroup");
+		assert.equal(refusal((s) => (s.cgroup = { status: 0, stdout: "MainPID=4200\nControlGroup=/system.slice/pim-cua-desktop.service\n" })), "desktop-processes");
+		assert.equal(refusal((s) => (s.cgroup = { status: 0, stdout: "MainPID=0\nControlGroup=/system.slice/../../etc\n" })), "desktop-processes");
+		assert.equal(refusal((s) => (s.cgroup = { status: 1, stdout: "" })), "desktop-processes");
+		assert.equal(refusal((s) => (s.cgroup = { status: 0, stdout: "MainPID=0\nControlGroup=\n" })), "recovered", "no cgroup at all is nothing running");
+		assert.equal(refusal((s) => (s.cgroupProcs = null)), "recovered", "an unreadable member list is fine only when the cgroup is gone");
+		assert.equal(refusal((s) => { s.cgroupProcs = null; s.files["/sys/fs/cgroup/system.slice/pim-cua-desktop.service"] = factFile("dir"); }), "desktop-processes", "a cgroup that is there but unreadable is not proof");
+		assert.equal(refusal((s) => (s.files[PATHS.socket] = factFile("socket", DESKTOP_UID, 0o660))), "socket-present");
+	});
+
+	it("refuses unless its own journal says Node couldn't load one of the two files and the endpoint never spoke", () => {
+		assert.equal(refusal((s) => (s.journal = { status: 0, stdout: "" })), "failure-not-recognized");
+		assert.equal(refusal((s) => (s.journal = { status: 1, stdout: MISSING_LOG })), "failure-not-recognized");
+		assert.equal(refusal((s) => (s.journal = { status: null, stdout: "" })), "failure-not-recognized");
+		assert.equal(refusal((s) => (s.journal = { status: 0, stdout: "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/opt/other.ts'\n" })), "failure-not-recognized", "another module is another failure");
+		assert.equal(refusal((s) => (s.journal = { status: 0, stdout: `${MISSING_LOG}{"event":"endpoint.failed","reason":"listen"}\n` })), "failure-not-recognized", "the endpoint ran its own code");
+		assert.equal(refusal((s) => (s.journal = { status: 0, stdout: "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/opt/pim-cua/bundle/computer/cua-host/cua-credential.ts'\n" })), "recovered", "either file");
+	});
+
+	it("refuses unless the rest of the stack is running, and unless the unit is exactly the installer's for a different bundle", () => {
+		for (const unit of [UNITS.bridge, VIEWER_UNITS.spacesd, VIEWER_UNITS.ingress]) {
+			assert.equal(refusal((s) => (s.units[unit] = show(FAILED))), "stack-not-running", unit);
+			assert.equal(refusal((s) => (s.units[unit] = show())), "stack-not-running", unit);
+			assert.equal(refusal((s) => delete s.units[unit]), "stack-not-running", unit);
+		}
+		assert.equal(refusal((s) => (s.unitText = null)), "unit-missing");
+		assert.equal(refusal((s) => (s.files[PATHS.desktopUnit] = factFile("file", 0, 0o666))), "unit-missing");
+		assert.equal(refusal((s) => (s.files[PATHS.desktopUnit] = factFile("file", 1000, 0o644))), "unit-missing");
+		assert.equal(refusal((s) => delete s.files[PATHS.desktopUnit]), "unit-missing");
+		assert.equal(refusal((s) => (s.unitText = installed.replace("--headful", "--headful --extra"))), "unit-drift");
+		assert.equal(refusal((s) => (s.unitText = installed.replace("User=pim-desktop", "User=root"))), "unit-drift");
+		assert.equal(refusal((s) => (s.unitText = "[Service]\nExecStart=/bin/true\n")), "unit-drift");
+		assert.equal(refusal((s) => (s.unitText = next)), "already-recovered", "a second run, for a unit that already names the new bundle");
+	});
+
+	it("refuses unless the new bundle is the old one byte for byte but its marker, plus only the permitted files", () => {
+		const added = Object.fromEntries(RECOVERY_ADDED.map((file) => [file, "9".repeat(64)]));
+		assert.equal(refusal((s) => (s.digests[OLD_DIR] = null)), "bundle-unreadable", "the old bundle is evidence and must still be there");
+		assert.equal(refusal((s) => (s.digests[NEW_DIR] = null)), "bundle-unreadable");
+		assert.equal(refusal((s) => (s.digests[NEW_DIR] = bundleFiles({ BUNDLE: "n", ...added, "computer/cua-host/desktop.ts": "0".repeat(64) }))), "bundle-differs");
+		const { "computer/pim-computer.ts": _gone, ...withoutOne } = bundleFiles({ BUNDLE: "n", ...added });
+		assert.equal(refusal((s) => (s.digests[NEW_DIR] = withoutOne)), "bundle-differs", "a file of the old bundle missing from the new");
+		assert.equal(refusal((s) => (s.digests[NEW_DIR] = bundleFiles({ BUNDLE: "n", ...added, "computer/other.ts": "1".repeat(64) }))), "bundle-extra");
+		const { [RECOVERY_ADDED[0]]: _first, ...short } = added;
+		assert.equal(refusal((s) => (s.digests[NEW_DIR] = bundleFiles({ BUNDLE: "n", ...short }))), "bundle-incomplete", "the missing file isn't there");
+		const { BUNDLE: _marker, ...noMarker } = bundleFiles({ ...added });
+		assert.equal(refusal((s) => (s.digests[NEW_DIR] = noMarker)), "bundle-incomplete");
+		assert.deepEqual(compareBundles(bundleFiles(), bundleFiles({ BUNDLE: "n", ...added })), null);
+		// The old bundle's own marker is allowed to differ and nothing else is.
+		assert.equal(compareBundles(bundleFiles({ BUNDLE: "old" }), bundleFiles({ BUNDLE: "new", ...added })), null);
+		assert.equal(compareBundles({ ...bundleFiles(), [RECOVERY_ADDED[0]]: "5".repeat(64) }, bundleFiles({ BUNDLE: "n", ...added })), "bundle-differs", "an old copy of an added file must match too");
+	});
+
+	it("says where it stopped, whether anything had changed, and never retries or removes: a failed step is left as evidence", () => {
+		const trial = (what: string) => {
+			const v = vm();
+			v.fail.add(what);
+			try {
+				recoverDesktop(newConfig, v.probe, v.host);
+			} catch (error) {
+				assert.ok(error instanceof RecoveryFailure);
+				return { step: error.step, changed: error.changed, log: v.log.filter((e) => !e.startsWith("query")) };
+			}
+			throw new Error("didn't fail");
+		};
+		const staged = `${PATHS.desktopUnit}.next-${NEW_SHA.slice(0, 12)}`;
+		assert.deepEqual(trial("write"), { step: "write", changed: false, log: [`write ${staged}`] });
+		const link = trial("link");
+		assert.deepEqual([link.step, link.changed, link.log.length], ["keep", true, 2], "the new unit is staged, the old one untouched");
+		const rename = trial("rename");
+		assert.deepEqual([rename.step, rename.changed, rename.log.length], ["replace", true, 3]);
+		const reload = trial("daemon-reload");
+		assert.deepEqual([reload.step, reload.changed, reload.log.at(-1)], ["reload", true, "run daemon-reload"]);
+		const startFailed = trial("start");
+		assert.deepEqual([startFailed.step, startFailed.changed, startFailed.log.filter((e) => e === `run start ${UNITS.desktop}`).length], ["start", true, 1], "one start, no retry");
+		for (const result of [link, rename, reload, startFailed]) assert.equal(result.log.some((e) => /unlink|remove|rm /.test(e)), false);
+	});
+
+	it("is a bundle's own program, with its imports held by the bundle and nothing in it a bridge or ws import", () => {
+		assert.ok(BUNDLE_SOURCES.includes(RECOVER_FILE as never));
+		assert.deepEqual(RECOVERY_ADDED, ["computer/native-outcome.ts", "computer/cua-host/cua-credential.ts", RECOVER_FILE]);
+		const source = fs.readFileSync(path.join(REPOSITORY, RECOVER_FILE), "utf8");
+		// It reads no secret: no token, key or journal path is named in it.
+		for (const word of ["rootToken", "journalLock", "journal.json", "key.pem", "PATHS.token", "spacesdToken", "evalKey"]) assert.equal(source.includes(word), false, word);
+		// It changes one unit file and nothing else: the only writes are of that unit's own names.
+		assert.equal((source.match(/host\.(writeNew|linkNew|renameOver|run)\(/g) ?? []).length, 5);
+	});
+
+	it("renders the two recovery scripts from the new configuration only for a viewer and complete pins, and from pins that name the new commit", () => {
+		refusedWith(() => renderRecoveryScripts(config(false), PINNED), "config-viewer");
+		refusedWith(() => renderRecoveryScripts(newConfig, { ...PINNED, repository: { ...PINNED.repository, commit: "f".repeat(40) } }), "pin-commit");
+		refusedWith(() => renderRecoveryScripts(newConfig, { ...PINNED, repository: { ...PINNED.repository, sha256: null } }), "pin-missing:repository-sha256");
+		const scripts = renderRecoveryScripts(newConfig, PINNED);
+		assert.deepEqual(Object.keys(scripts), ["recover-fetch.sh", "recover-desktop.sh"]);
+		const fetch = renderScripts(config(true), PINNED)["fetch.sh"]!;
+		const recoverFetch = scripts["recover-fetch.sh"]!;
+		// The shared machinery is the same text, so what was shown to work on the first fetch is what runs.
+		for (const name of ["cleanup", "download", "publish_file", "list_tree", "prepare_tree", "publish_tree", "ensure_parent", "fail_path", "staged_ok"]) {
+			assert.ok(bashFunction(fetch, name).length > 0, name);
+			assert.equal(bashFunction(recoverFetch, name), bashFunction(fetch, name), name);
+		}
+		// It delivers a bundle and nothing else: three downloads, the VM's own Node, one tree published, nowhere else written.
+		assert.equal(recoverFetch.match(/^download '/gm)?.length, 3);
+		for (const name of ["repository", "ws", "protobuf"]) assert.ok(recoverFetch.includes(`download '${name}' `), name);
+		for (const absent of ["node.tar.gz", "caddy", "spacesd", "chrome", "dpkg-deb", "publish_file \"$", "ensure_parent \"$NODE_ROOT\""]) assert.equal(recoverFetch.includes(absent), false, absent);
+		assert.ok(recoverFetch.includes("readonly STAGE='/var/lib/pim-cua-recover-fetch'"));
+		assert.ok(recoverFetch.includes('trusted_file "$NODE" || fail node-path') && recoverFetch.includes('[[ "$(sum256 "$NODE")" == "$NODE_SHA256" ]] || fail node-digest'));
+		assert.ok(recoverFetch.includes('"$NODE" "$STAGE/src/computer/cua-host/eval-install/operator.ts" bundle --commit "$COMMIT" --source-dir "$STAGE/src"'));
+		assert.ok(recoverFetch.includes('absent "$BUNDLE" bundle'));
+		assert.deepEqual(recoverFetch.match(/^publish_(?:file|tree) "\$STAGE[^\n]*/gm), ['publish_tree "$STAGE/bundle" "$BUNDLE" bundle']);
+		assert.ok(recoverFetch.indexOf("prepare_tree \"$STAGE/bundle\" bundle") < recoverFetch.indexOf("\nPLACING=1\n"));
+		assert.ok(recoverFetch.includes('[[ "$(tree_digest "$BUNDLE")" == "$BUNDLE_SHA256" ]] || fail placed-bundle'));
+		assert.ok(recoverFetch.includes(`readonly BUNDLE='${NEW_DIR}'`) && recoverFetch.includes(`readonly BUNDLE_SHA256='${NEW_SHA}'`));
+		for (const forbidden of ["-k ", "--insecure", "--cacert", "Authorization", "--header", "--user", "--netrc", "http://", "--retry-", "sudo", "ssh", "set -x", "eval ", " mv ", "cp "]) assert.equal(recoverFetch.includes(forbidden), false, forbidden);
+		assert.deepEqual(pipesToShell(recoverFetch), []);
+		assert.deepEqual(unobservedSubstitutions(recoverFetch.slice(recoverFetch.indexOf("trusted_file /usr/bin/curl"))), []);
+		assert.equal(/printf '[^']*\n[^']*'/.test(recoverFetch), false);
+		assert.equal(recoverFetch.includes("\0"), false);
+		// The script that runs the recovery verifies the NEW bundle first, as every script does, then runs the program from it, once.
+		const recover = scripts["recover-desktop.sh"]!;
+		assert.equal(recover.match(/^exec .*/gm)?.length, 1);
+		assert.ok(recover.includes(`exec "$NODE" "$BUNDLE/${RECOVER_FILE}" <<'`));
+		for (const check of ["fail root-required", "fail node-digest", "fail bundle-digest"]) assert.ok(recover.indexOf(check) > 0 && recover.indexOf(check) < recover.indexOf("\nexec "), check);
+		assert.ok(recover.includes(`readonly BUNDLE='${NEW_DIR}'`) && recover.includes(`"dir":"${NEW_DIR}"`));
+		assert.ok(recover.includes("\numask 077\n") && !recover.includes("umask 022"), "private, as the other scripts but `journal`");
+		// The old bundle's and every secret's paths are not named in either script.
+		for (const text of [recover, recoverFetch]) for (const secret of [VIEWER_PATHS.rootToken, VIEWER_PATHS.spacesdToken, PATHS.token, PATHS.key, VIEWER_PATHS.journal, VIEWER_PATHS.journalLock]) assert.equal(text.includes(secret), false, secret);
+	});
+
 });

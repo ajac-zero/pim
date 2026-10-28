@@ -37,6 +37,7 @@ import { parseArgs } from "node:util";
 import * as zlib from "node:zlib";
 import { ACCOUNTS, BRIDGE_CERT_DAYS, BUNDLE_FILES, BUNDLE_FORMAT, type Config, isPlainPath, PATHS, parseConfig, Refusal, TOOLS, VIEWER_ACCOUNTS, VIEWER_ASSET_DIR, VIEWER_ASSET_NAMES, VIEWER_ASSET_SHA256, VIEWER_BUNDLE_FILES, VIEWER_PATHS, viewerBundleFiles } from "./config.ts";
 import { integrityHex, missingPins, PINS, type Pins } from "./pins.ts";
+import { RECOVER_FILE } from "./recover.ts";
 
 /** The repository's files a bundle holds, as they are at its commit. */
 export const BUNDLE_SOURCES = [
@@ -54,6 +55,7 @@ export const BUNDLE_SOURCES = [
 	"computer/cua-host/eval-credentials.ts",
 	"computer/cua-host/eval-install/config.ts",
 	"computer/cua-host/eval-install/install.ts",
+	"computer/cua-host/eval-install/recover.ts",
 ] as const;
 
 const WS_DIR = "computer/cua-host/node_modules/ws";
@@ -584,43 +586,8 @@ function checkPins(config: Config, viewer: NonNullable<Config["viewer"]>, pins: 
 	for (const url of [pins.node.url, pins.caddy.url, pins.spacesd.url, pins.chrome.url, pins.ws.url, pins.protobuf.url]) if (!url.startsWith("https://")) throw new Refusal("pin-mismatch");
 }
 
-/**
- * `fetch.sh`: delivers the pinned programs and the commit's bundle, once, as root, with nothing from the cloud's user data and no
- * credential. Every artifact is fetched over HTTPS only (no downgrade, TLS 1.2 or later, no proxy, no configuration file, no retry),
- * must answer 200, must be within its size bound (and exactly its size where that is pinned), and must match its pinned digest
- * before one byte of it is unpacked. Everything is staged in a directory made here (new, root's, 0700) and removed on exit, the
- * original failure still reported; a destination that exists is never replaced, and a half-delivered VM is not resumed.
- */
-function renderFetch(config: Config, viewer: NonNullable<Config["viewer"]>, pins: Pins): string {
-	const dest = fetchDestinations(config, viewer);
-	const repository = `https://codeload.github.com/ajac-zero/pim/tar.gz/${config.commit}`;
-	const download = (name: string, file: string, url: string, algo: "256" | "512", hex: string, bytes: number | null, max: number) =>
-		`download ${quote(name)} ${quote(file)} ${quote(url)} ${algo} ${quote(hex)} ${bytes === null ? "-" : bytes} ${max}\n`;
-	const downloads = [
-		download("node", "node.tar.gz", pins.node.url, "256", pins.node.sha256, null, pins.node.maxBytes),
-		download("caddy", "caddy.tar.gz", pins.caddy.url, "256", pins.caddy.sha256, null, pins.caddy.maxBytes),
-		download("spacesd", "spacesd", pins.spacesd.url, "256", pins.spacesd.sha256, pins.spacesd.bytes, pins.spacesd.maxBytes),
-		download("chrome", "chrome.deb", pins.chrome.url, "256", pins.chrome.sha256, pins.chrome.bytes, pins.chrome.maxBytes),
-		download("repository", "source.tar.gz", repository, "256", pins.repository.sha256!, null, pins.repository.maxBytes),
-		download("ws", "ws.tgz", pins.ws.url, "512", integrityHex(pins.ws.sha512), null, pins.ws.maxBytes),
-		download("protobuf", "protobuf.tgz", pins.protobuf.url, "512", integrityHex(pins.protobuf.sha512), null, pins.protobuf.maxBytes),
-	].join("");
-	const tools = ["curl", "tar", "dpkg-deb", "sha256sum", "sha512sum", "stat", "cut", "find", "chmod", "mkdir", "ln", "sort", "cmp", "readlink", "realpath", "tr", "rm", "install", "dirname"].map((tool) => `trusted_file /usr/bin/${tool} || fail tools`).join("\n");
-	return `${prologue(config, "fetch", false)}
-${tools}
-unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy NO_PROXY CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
-
-readonly STAGE=${quote(FETCH_STAGE)}
-readonly COMMIT=${quote(config.commit)}
-readonly NODE_ROOT=${quote(dest.nodeRoot)}
-readonly CADDY=${quote(dest.caddy)}
-readonly SPACESD=${quote(dest.spacesd)}
-readonly CHROME_DIR=${quote(dest.chrome)}
-readonly CADDY_SHA256=${quote(viewer.caddy.sha256)}
-readonly CHROME_SHA256=${quote(config.browser.sha256)}
-readonly SPACESD_SHA256=${quote(pins.spacesd.sha256)}
-
-# Only the stage this run made is removed, on any exit; a failed removal is reported without hiding why the run ended.
+/** The part of `fetch.sh` and `recover-fetch.sh` that is the same: cleanup that keeps evidence, one bounded download, no-replace publication, listings, staged checks. */
+const FETCH_SHARED = `# Only the stage this run made is removed, on any exit; a failed removal is reported without hiding why the run ended.
 # Once placing has begun, a failed run keeps the stage and whatever was placed as evidence, and nothing resumes from it: the next run refuses on both.
 CREATED=0
 PLACING=0
@@ -741,7 +708,45 @@ staged_ok() {
 			[[ "$(realpath -e -- "$entry")" == "$real"/* ]] || fail_path stage-link "$entry"
 		done <"$STAGE/m/links" || fail stage-link
 	done
-}
+}`;
+
+/**
+ * `fetch.sh`: delivers the pinned programs and the commit's bundle, once, as root, with nothing from the cloud's user data and no
+ * credential. Every artifact is fetched over HTTPS only (no downgrade, TLS 1.2 or later, no proxy, no configuration file, no retry),
+ * must answer 200, must be within its size bound (and exactly its size where that is pinned), and must match its pinned digest
+ * before one byte of it is unpacked. Everything is staged in a directory made here (new, root's, 0700) and removed on exit, the
+ * original failure still reported; a destination that exists is never replaced, and a half-delivered VM is not resumed.
+ */
+function renderFetch(config: Config, viewer: NonNullable<Config["viewer"]>, pins: Pins): string {
+	const dest = fetchDestinations(config, viewer);
+	const repository = `https://codeload.github.com/ajac-zero/pim/tar.gz/${config.commit}`;
+	const download = (name: string, file: string, url: string, algo: "256" | "512", hex: string, bytes: number | null, max: number) =>
+		`download ${quote(name)} ${quote(file)} ${quote(url)} ${algo} ${quote(hex)} ${bytes === null ? "-" : bytes} ${max}\n`;
+	const downloads = [
+		download("node", "node.tar.gz", pins.node.url, "256", pins.node.sha256, null, pins.node.maxBytes),
+		download("caddy", "caddy.tar.gz", pins.caddy.url, "256", pins.caddy.sha256, null, pins.caddy.maxBytes),
+		download("spacesd", "spacesd", pins.spacesd.url, "256", pins.spacesd.sha256, pins.spacesd.bytes, pins.spacesd.maxBytes),
+		download("chrome", "chrome.deb", pins.chrome.url, "256", pins.chrome.sha256, pins.chrome.bytes, pins.chrome.maxBytes),
+		download("repository", "source.tar.gz", repository, "256", pins.repository.sha256!, null, pins.repository.maxBytes),
+		download("ws", "ws.tgz", pins.ws.url, "512", integrityHex(pins.ws.sha512), null, pins.ws.maxBytes),
+		download("protobuf", "protobuf.tgz", pins.protobuf.url, "512", integrityHex(pins.protobuf.sha512), null, pins.protobuf.maxBytes),
+	].join("");
+	const tools = ["curl", "tar", "dpkg-deb", "sha256sum", "sha512sum", "stat", "cut", "find", "chmod", "mkdir", "ln", "sort", "cmp", "readlink", "realpath", "tr", "rm", "install", "dirname"].map((tool) => `trusted_file /usr/bin/${tool} || fail tools`).join("\n");
+	return `${prologue(config, "fetch", false)}
+${tools}
+unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy NO_PROXY CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
+
+readonly STAGE=${quote(FETCH_STAGE)}
+readonly COMMIT=${quote(config.commit)}
+readonly NODE_ROOT=${quote(dest.nodeRoot)}
+readonly CADDY=${quote(dest.caddy)}
+readonly SPACESD=${quote(dest.spacesd)}
+readonly CHROME_DIR=${quote(dest.chrome)}
+readonly CADDY_SHA256=${quote(viewer.caddy.sha256)}
+readonly CHROME_SHA256=${quote(config.browser.sha256)}
+readonly SPACESD_SHA256=${quote(pins.spacesd.sha256)}
+
+${FETCH_SHARED}
 
 # Nothing is replaced, and nothing is begun if anything is already there.
 absent "$NODE_ROOT" node
@@ -892,6 +897,86 @@ grep -q '<html' <<<"$OUT" && ok chrome-headless-sandboxed || bad chrome-headless
 `;
 }
 
+// ---- The recovery of a retained VM (viewer only) ----
+
+/** Where `recover-fetch.sh` stages: its own directory, so the first fetch's stage, if one was kept, is never touched or reused. */
+const RECOVER_STAGE = "/var/lib/pim-cua-recover-fetch";
+
+/**
+ * `recover-fetch.sh`: delivers ONLY a new bundle, into the new directory the configuration names (which must not exist), from the same pinned archive and
+ * packages `fetch.sh` uses, built with the VM's installed pinned Node (digest-checked here, as root). It does everything `fetch.sh` does to a bundle: HTTPS only, no
+ * retry, status, size and digest before unpacking, an exclusive stage, staged ownership, mode and link checks, listings made before placement, publication that
+ * never replaces, a whole-tree comparison after, and the tree digest before and after. It installs no program, touches no other path, and leaves the
+ * old bundle alone. It is what `recover-desktop.sh` then verifies and runs from (docs/cua-viewer-first-startup.md).
+ */
+function renderRecoverFetch(config: Config, pins: Pins): string {
+	const repository = `https://codeload.github.com/ajac-zero/pim/tar.gz/${config.commit}`;
+	const download = (name: string, file: string, url: string, algo: "256" | "512", hex: string, max: number) => `download ${quote(name)} ${quote(file)} ${quote(url)} ${algo} ${quote(hex)} - ${max}\n`;
+	const downloads = [
+		download("repository", "source.tar.gz", repository, "256", pins.repository.sha256!, pins.repository.maxBytes),
+		download("ws", "ws.tgz", pins.ws.url, "512", integrityHex(pins.ws.sha512), pins.ws.maxBytes),
+		download("protobuf", "protobuf.tgz", pins.protobuf.url, "512", integrityHex(pins.protobuf.sha512), pins.protobuf.maxBytes),
+	].join("");
+	const tools = ["curl", "tar", "sha256sum", "sha512sum", "stat", "cut", "find", "mkdir", "ln", "sort", "cmp", "readlink", "realpath", "tr", "rm", "dirname"].map((tool) => `trusted_file /usr/bin/${tool} || fail tools`).join("\n");
+	return `${prologue(config, "recover-fetch", false)}
+${tools}
+unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy NO_PROXY CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
+
+readonly STAGE=${quote(RECOVER_STAGE)}
+readonly COMMIT=${quote(config.commit)}
+
+${FETCH_SHARED}
+
+# The VM's own Node, the pinned one, is what builds the bundle: it is root's, in root's directories, and has the configured digest.
+trusted_file "$NODE" || fail node-path
+[[ "$(sum256 "$NODE")" == "$NODE_SHA256" ]] || fail node-digest
+# Nothing is replaced, and nothing is begun if the new directory, or a stage, is already there.
+absent "$BUNDLE" bundle
+trusted_dirs /var/lib || fail stage-parent
+mkdir -m 0700 -- "$STAGE" || fail stage-exists
+CREATED=1
+mkdir -m 0700 -- "$STAGE/m" "$STAGE/dl" "$STAGE/src"
+
+${downloads}
+tar --extract --gzip --file "$STAGE/dl/source.tar.gz" --directory "$STAGE/src" --strip-components=1 --no-same-owner || fail unpack-repository
+
+# The bundle is built from the pinned archive by the archive's own program, which refuses a bundle whose imports it does not hold, and must come to the configured tree digest.
+"$NODE" "$STAGE/src/computer/cua-host/eval-install/operator.ts" bundle --commit "$COMMIT" --source-dir "$STAGE/src" \\
+	--ws-tarball "$STAGE/dl/ws.tgz" --protobuf-tarball "$STAGE/dl/protobuf.tgz" --out "$STAGE/bundle" >/dev/null || fail bundle-build
+digest="$(tree_digest "$STAGE/bundle")" || fail bundle-digest
+[[ "$digest" == "$BUNDLE_SHA256" ]] || fail bundle-digest
+staged_ok "$STAGE/bundle"
+prepare_tree "$STAGE/bundle" bundle
+ensure_parent "$BUNDLE"
+PLACING=1
+publish_tree "$STAGE/bundle" "$BUNDLE" bundle
+[[ "$(tree_digest "$BUNDLE")" == "$BUNDLE_SHA256" ]] || fail placed-bundle
+PLACING=0
+printf '{"event":"pim-cua-eval.recover-fetched","evaluation":"%s"}\\n' ${quote(config.evaluation)}
+`;
+}
+
+/**
+ * The two scripts of the recovery, from the NEW configuration (the old one with only `commit`, `bundle.dir` and `bundle.sha256` changed, which
+ * `recover.ts` checks against the installed unit): `recover-fetch.sh`, then `recover-desktop.sh`, which verifies the new bundle as every script
+ * does and runs `recover.ts` from it. Neither starts anything but the desktop endpoint, and that only after every check of `recover.ts`.
+ */
+export function renderRecoveryScripts(config: Config, pins: Pins = PINS): Record<string, string> {
+	const viewer = config.viewer;
+	if (!viewer) throw new Refusal("config-viewer");
+	checkPins(config, viewer, pins);
+	const json = JSON.stringify(config);
+	if (json.split("\n").length !== 1 || json.includes(HEREDOC)) throw new Refusal("render-value");
+	return {
+		"recover-fetch.sh": renderRecoverFetch(config, pins),
+		"recover-desktop.sh": `${prologue(config, "recover-desktop")}
+exec "$NODE" "$BUNDLE/${RECOVER_FILE}" <<'${HEREDOC}'
+${json}
+${HEREDOC}
+`,
+	};
+}
+
 /** The desktop account's UID in the base: above a cloud's own admin user's (1000), and inside what the installer takes (1000 to 59999). */
 export const BASE_DESKTOP_UID = 1500;
 
@@ -1024,13 +1109,23 @@ function render(configFile: string, out: string): string[] {
 	return Object.keys(files);
 }
 
+/** The recovery's two scripts, from the new configuration, into a new private directory. */
+function renderRecovery(configFile: string, out: string): string[] {
+	const stat = fs.statSync(configFile);
+	if (!stat.isFile() || stat.size > 64 * 1024) throw new Refusal("config");
+	const scripts = renderRecoveryScripts(parseConfig(fs.readFileSync(configFile, "utf8")));
+	writePrivate(out, new Map(Object.entries(scripts).map(([name, content]) => [name, Buffer.from(content)])));
+	return Object.keys(scripts);
+}
+
 const USAGE = `The operator's side of a Cua evaluation VM's installation. See docs/cua-eval-install.md.
 
   node operator.ts bundle --commit <sha> --ws-tarball <file> --out <new directory> [--protobuf-tarball <file>] [--source-dir <directory>]
   node operator.ts digest --dir <directory>
-  node operator.ts render --config <file> --out <new directory>`;
+  node operator.ts render --config <file> --out <new directory>
+  node operator.ts render-recovery --config <new configuration> --out <new directory>`;
 
-const COMMANDS = { bundle: ["commit", "ws-tarball", "out"], digest: ["dir"], render: ["config", "out"] } as const;
+const COMMANDS = { bundle: ["commit", "ws-tarball", "out"], digest: ["dir"], render: ["config", "out"], "render-recovery": ["config", "out"] } as const;
 /** Options a command may also take; `--protobuf-tarball` makes the bundle carry the viewer, and `--source-dir` reads the sources from an unpacked archive instead of git. */
 const OPTIONAL: Record<string, readonly string[]> = { bundle: ["protobuf-tarball", "source-dir"] };
 
@@ -1052,6 +1147,8 @@ function main(argv: string[]): void {
 			process.stdout.write(`${JSON.stringify({ event: "pim-cua-eval.bundled", commit: values.commit, sha256 })}\n`);
 		} else if (command === "digest") {
 			process.stdout.write(`${JSON.stringify({ event: "pim-cua-eval.digest", sha256: treeDigest(values.dir!) })}\n`);
+		} else if (command === "render-recovery") {
+			process.stdout.write(`${JSON.stringify({ event: "pim-cua-eval.rendered-recovery", files: renderRecovery(values.config!, values.out!) })}\n`);
 		} else {
 			process.stdout.write(`${JSON.stringify({ event: "pim-cua-eval.rendered", files: render(values.config!, values.out!) })}\n`);
 		}

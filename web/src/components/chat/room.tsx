@@ -32,7 +32,7 @@ export function Speaker({ name, agent }: { name: string; agent?: Agent }) {
   );
 }
 
-/** The agents of a group chat other than its host that are at work in it now. */
+/** The agents of a group chat that are at work in it now, each with its icon. */
 export function MembersWorking({
   members,
   agents,

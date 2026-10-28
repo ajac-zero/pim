@@ -516,7 +516,14 @@ export const Thread = memo(function Thread({
           </div>
         )}
 
-        {view.running && !replying && !held && <ThinkingDot />}
+        {view.running &&
+          !replying &&
+          !held &&
+          (grouped && host ? (
+            <MembersWorking members={[host]} agents={agents} />
+          ) : (
+            <ThinkingDot />
+          ))}
 
         <MembersWorking members={working} agents={agents} />
 

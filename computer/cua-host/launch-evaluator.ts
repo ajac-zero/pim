@@ -338,7 +338,8 @@ export interface ViewerEvidence {
 /** What the run reports: fixed words, counts and statuses, and the fresh observation's ID. Never a secret, an address or a body. */
 export interface EvaluationReport {
 	outcome: Outcome;
-	launch: { status: number | null; phase: string | null; observation: { id: string; notAfter: number } | null; deadline: string | null };
+	/** `classification` is the Worker's fixed word for how the launch went (`LAUNCH_CLASSIFICATIONS`), or null when it gave none of them. */
+	launch: { status: number | null; phase: string | null; classification: string | null; observation: { id: string; notAfter: number } | null; deadline: string | null };
 	viewer: ViewerEvidence | null;
 	end: { sent: boolean; status: number | null; phase: string | null; observationStatus: string | null } | null;
 }
@@ -359,6 +360,8 @@ export interface EvaluateOptions {
 
 const realClock: Clock = { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>) };
 
+/** The Worker's fixed words for how a launch went: a certain open observation, or why it is uncertain. */
+export const LAUNCH_CLASSIFICATIONS = ["certain_open", "owner_space_rpc_failure", "space_answer_malformed", "space_launch_uncertain", "post_rpc_recording_failure"];
 const LAUNCH_PHASES = ["launch_refused", "launch_uncertain", "launching", "open", "expired", "ending", "ended", "end_refused", "end_uncertain"];
 /** Statuses the Worker answers only before it has claimed the grant's run or asked the space anything, or for a launch the space started nothing for. */
 const NOTHING_LAUNCHED = [401, 403, 404, 405, 409, 429];
@@ -501,17 +504,19 @@ export async function evaluateLaunch(options: EvaluateOptions): Promise<Evaluati
 			body = await response.json().catch(() => null);
 		} catch {
 			run.stop();
-			return scrub({ outcome: "launch-uncertain", launch: { status: null, phase: null, observation: null, deadline: null }, viewer: null, end: null }, secrets);
+			return scrub({ outcome: "launch-uncertain", launch: { status: null, phase: null, classification: null, observation: null, deadline: null }, viewer: null, end: null }, secrets);
 		}
 		const launched = readLaunch(status, body, clock.now());
+		const said = (body as { run?: { classification?: unknown } } | null)?.run?.classification;
+		const classification = typeof said === "string" && LAUNCH_CLASSIFICATIONS.includes(said) ? said : null;
 		if (launched.kind !== "open") {
 			run.stop();
-			return scrub({ outcome: launched.kind === "refused" ? "launch-refused" : "launch-uncertain", launch: { status, phase: launched.phase, observation: null, deadline: null }, viewer: null, end: null }, secrets);
+			return scrub({ outcome: launched.kind === "refused" ? "launch-refused" : "launch-uncertain", launch: { status, phase: launched.phase, classification, observation: null, deadline: null }, viewer: null, end: null }, secrets);
 		}
 		run.launched();
 		secrets.push(launched.runToken);
 		const endBy = Math.min(launched.deadline, clientDeadline);
-		const launch = { status, phase: "open", observation: { id: launched.id, notAfter: launched.notAfter }, deadline: new Date(launched.deadline).toISOString() };
+		const launch = { status, phase: "open", classification, observation: { id: launched.id, notAfter: launched.notAfter }, deadline: new Date(launched.deadline).toISOString() };
 
 		// 2. The viewer, for the new launch only. Any failure here still goes on to the End.
 		const address = viewerAddress(launched.viewer, config.viewerOrigin);

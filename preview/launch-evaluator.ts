@@ -95,6 +95,15 @@ export type EvaluatorGrant = {
 	readonly existingUnconfirmed: string | null;
 };
 
+/**
+ * Why a launch is what it is, in fixed words only: `certain_open`, or, for
+ * an uncertain one, whether the owner's space couldn't be reached or threw
+ * before answering, answered something malformed, answered that its own
+ * launch is uncertain, or answered a certain open observation that the
+ * Directory then couldn't record for the run.
+ */
+export type LaunchClassification = "certain_open" | "owner_space_rpc_failure" | "space_answer_malformed" | "space_launch_uncertain" | "post_rpc_recording_failure";
+
 export type EvaluatorPhase = "launching" | "open" | "launch_refused" | "launch_uncertain" | "expired" | "ending" | "ended" | "end_refused" | "end_uncertain";
 
 /** A run as the Directory keeps it: never the credential or the run token, only their digests. */
@@ -289,44 +298,57 @@ async function launch(request: Request, env: Env, grant: EvaluatorGrant, now: nu
 		log({ action: "launch", outcome: "refused", reason: claimed.reason });
 		return claimed.reason === "spent" ? fail(409, "This launch evaluator grant has run already; it runs once.", { run: { phase: claimed.phase } }) : fail(401, INVALID);
 	}
+	// Each uncertain launch says which of these fixed classes it was, and nothing else: no exception text, ID, token, address or record.
+	const uncertain = async (classification: Exclude<LaunchClassification, "certain_open">, observation: string | null, at: number) => {
+		try {
+			await directory(env).evaluatorLaunched(row.grant, "launch_uncertain", observation !== null && OBSERVATION_ID.test(observation) ? observation : null, null, at);
+		} catch {
+			// The run stays `launching`, which no End passes either.
+		}
+		log({ action: "launch", outcome: "launch_uncertain", classification });
+		return fail(502, "Whether an observation started is uncertain. Nothing is retried, and nothing may end it from here.", { run: { phase: "launch_uncertain", classification } });
+	};
 	let answer: SpaceLaunch;
 	try {
 		answer = await (await space(env, grant.owner)).launchForEvaluator();
 	} catch {
-		answer = { outcome: "uncertain", observation: null };
+		// The owner's space couldn't be looked up, or its RPC threw, before it answered.
+		return uncertain("owner_space_rpc_failure", null, Date.now());
 	}
 	const at = Date.now();
-	if (answer.outcome === "open" && OBSERVATION_ID.test(answer.observation.id)) {
-		const recorded = await directory(env).evaluatorLaunched(row.grant, "open", answer.observation.id, answer.alongside, at);
-		if (recorded) {
-			log({ action: "launch", outcome: "open", owner: grant.owner, observation: answer.observation.id, alongside: answer.alongside, deadline });
-			return json(
-				{
-					run: {
-						phase: "open",
-						deadline: new Date(deadline).toISOString(),
-						observation: { id: answer.observation.id, status: "open", notAfter: answer.observation.notAfter },
-						alongside: answer.alongside,
-					},
-					viewer: answer.viewer,
-					runToken: token,
-				},
-				201,
-			);
+	if (answer.outcome === "open") {
+		if (!OBSERVATION_ID.test(answer.observation.id)) return uncertain("space_answer_malformed", null, at);
+		let recorded = false;
+		try {
+			recorded = await directory(env).evaluatorLaunched(row.grant, "open", answer.observation.id, answer.alongside, at);
+		} catch {
+			recorded = false;
 		}
-		// The row moved under the launch (it can't, but if it did): the observation exists, and nothing may end it from here.
-		log({ action: "launch", outcome: "uncertain", reason: "row", owner: grant.owner });
-		return fail(502, "The launch's result couldn't be recorded; it is uncertain. Nothing is retried and nothing will end it from here.", { run: { phase: "launch_uncertain" } });
+		// The space started the observation, but the run can't name it: nothing may end it from here.
+		if (!recorded) return uncertain("post_rpc_recording_failure", answer.observation.id, at);
+		log({ action: "launch", outcome: "open", classification: "certain_open", owner: grant.owner, observation: answer.observation.id, alongside: answer.alongside, deadline });
+		return json(
+			{
+				run: {
+					phase: "open",
+					classification: "certain_open",
+					deadline: new Date(deadline).toISOString(),
+					observation: { id: answer.observation.id, status: "open", notAfter: answer.observation.notAfter },
+					alongside: answer.alongside,
+				},
+				viewer: answer.viewer,
+				runToken: token,
+			},
+			201,
+		);
 	}
 	if (answer.outcome === "refused") {
 		await directory(env).evaluatorLaunched(row.grant, "launch_refused", null, null, at);
 		log({ action: "launch", outcome: "launch_refused", reason: answer.reason, owner: grant.owner });
 		return fail(409, "The space started no observation.", { run: { phase: "launch_refused", reason: answer.reason } });
 	}
-	const observation = answer.outcome === "uncertain" ? answer.observation : null;
-	await directory(env).evaluatorLaunched(row.grant, "launch_uncertain", observation !== null && OBSERVATION_ID.test(observation) ? observation : null, null, at);
-	log({ action: "launch", outcome: "launch_uncertain", owner: grant.owner });
-	return fail(502, "Whether an observation started is uncertain. Nothing is retried, and nothing may end it from here.", { run: { phase: "launch_uncertain" } });
+	// The space itself answered that whether its launch started is uncertain.
+	return uncertain("space_launch_uncertain", answer.observation, at);
 }
 
 /** The one End: only of the run's recorded observation, with its run token, while the run is open and before its deadline. */

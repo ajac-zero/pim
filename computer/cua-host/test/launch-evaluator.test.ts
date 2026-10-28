@@ -89,7 +89,7 @@ function strict<T extends object>(name: string, object: T, allowed: string[]): T
 type Answer = { status: number; body: unknown } | "throw";
 const openAnswer = (overrides: Record<string, unknown> = {}, now = Date.now()): Answer => ({
 	status: 201,
-	body: { run: { phase: "open", deadline: new Date(now + 10 * 60_000).toISOString(), observation: { id: ID, status: "open", notAfter: now + 10 * 60_000 } }, viewer: VIEWER_URL, runToken: RUN, ...overrides },
+	body: { run: { phase: "open", classification: "certain_open", deadline: new Date(now + 10 * 60_000).toISOString(), observation: { id: ID, status: "open", notAfter: now + 10 * 60_000 } }, viewer: VIEWER_URL, runToken: RUN, ...overrides },
 });
 const endAnswer: Answer = { status: 202, body: { run: { phase: "ended", observation: { id: ID, status: "revoking" } } } };
 
@@ -327,7 +327,7 @@ describe("a qualified run", () => {
 		const report = await evaluate(fake);
 		assert.deepEqual(report, {
 			outcome: "qualified",
-			launch: { status: 201, phase: "open", observation: { id: ID, notAfter: (report.launch.observation as { notAfter: number }).notAfter }, deadline: report.launch.deadline },
+			launch: { status: 201, phase: "open", classification: "certain_open", observation: { id: ID, notAfter: (report.launch.observation as { notAfter: number }).notAfter }, deadline: report.launch.deadline },
 			viewer: { loaded: true, failure: null, mediaSockets: 1, sessionOpened: true, viewOnly: true, packets: 1, refusedRequests: 0, refusedSockets: 0, refusedMessages: 0 },
 			end: { sent: true, status: 202, phase: "ended", observationStatus: "revoking" },
 		});
@@ -413,6 +413,21 @@ describe("a launch that fails or is uncertain stops: no viewer and no End", () =
 			assertNoSecrets(JSON.stringify(report));
 		});
 	}
+});
+
+describe("an uncertain launch reports the Worker's fixed classification, and nothing else of its answer", () => {
+	it("passes each known classification through, and drops anything else", async () => {
+		for (const classification of ["owner_space_rpc_failure", "post_rpc_recording_failure", "space_launch_uncertain", "space_answer_malformed", `leaked ${CREDENTIAL}`, 42]) {
+			const fake = new Fake();
+			fake.launchAnswer = { status: 502, body: { error: "x", run: { phase: "launch_uncertain", classification } } };
+			const report = await evaluate(fake);
+			const known = typeof classification === "string" && !classification.startsWith("leaked");
+			assert.deepEqual(report.launch, { status: 502, phase: "launch_uncertain", classification: known ? classification : null, observation: null, deadline: null });
+			assert.deepEqual([report.outcome, report.end], ["launch-uncertain", null]);
+			assert.deepEqual(posted(fake), [LAUNCH_PATH]);
+			assertNoSecrets(JSON.stringify(report));
+		}
+	});
 });
 
 describe("after a certain launch, any viewer failure still ends that observation, exactly once", () => {

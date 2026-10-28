@@ -265,7 +265,12 @@ export class EvalDirectory extends RealDirectory {
 	/** Records what the space answered the run's launch: `launching` moves on once, to `open` with the fresh ID (and the unconfirmed record it started beside, if any) or to a refusal or uncertainty. */
 	evaluatorLaunched(grant: string, phase: "open" | "launch_refused" | "launch_uncertain", observation: string | null, alongside: string | null, now: number): boolean {
 		if (!evaluating(this.env)) return false;
-		return new LaunchEvaluatorLedger(this.ctx.storage.sql).move(grant, "launching", phase, now, { observation, alongside });
+		// A write that fails is answered as not recorded, so nothing of what SQLite said crosses the RPC.
+		try {
+			return new LaunchEvaluatorLedger(this.ctx.storage.sql).move(grant, "launching", phase, now, { observation, alongside });
+		} catch {
+			return false;
+		}
 	}
 
 	/**

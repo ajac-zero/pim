@@ -2,6 +2,7 @@ import { createExecutionContext, env, evictDurableObject, runInDurableObject, wa
 import * as fs from "node:fs";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { EvalDirectory } from "../preview/cua-eval";
+import { FIXTURE_KEY } from "../preview/cua-fixture";
 import { evaluatorAdmission, LaunchEvaluatorLedger } from "../preview/launch-evaluator";
 import previewWorker from "../preview/worker";
 import { applyObservationEvent, initialObservationState, type ObservationState } from "../src/cua-observation";
@@ -853,7 +854,9 @@ describe("the launch evaluator", () => {
 					? []
 					: state.storage.sql.exec("SELECT * FROM preview_launch_evaluator_runs").toArray(),
 			);
-		return { ...pim, secret, evaluatorGrant: grant, asked, launch, end, runs, records, oldRecord, before, authorization };
+		/** The evaluator's own log lines, parsed. */
+		const lines = () => logged.filter(([line]) => String(line).includes('"preview.launch-evaluator"')).map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
+		return { ...pim, secret, evaluatorGrant: grant, asked, launch, end, runs, records, oldRecord, before, authorization, space, lines };
 	}
 
 	type Launched = { run: { phase: string; deadline: string; observation: { id: string; status: string; notAfter: number } }; viewer: string; runToken: string };
@@ -871,7 +874,7 @@ describe("the launch evaluator", () => {
 		const fresh = launched.run.observation.id;
 		expect(fresh).not.toBe(OLD);
 		expect(launched).toEqual({
-			run: { phase: "open", deadline: new Date(now + 10 * MINUTE).toISOString(), observation: { id: fresh, status: "open", notAfter: expect.any(Number) }, alongside: null },
+			run: { phase: "open", classification: "certain_open", deadline: new Date(now + 10 * MINUTE).toISOString(), observation: { id: fresh, status: "open", notAfter: expect.any(Number) }, alongside: null },
 			viewer: `${BRIDGE}/${LAUNCH_ID}/viewer/#ticket=${TICKET}&clipboard=0`,
 			runToken: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
 		});
@@ -911,7 +914,7 @@ describe("the launch evaluator", () => {
 		const logs = JSON.stringify(logged);
 		for (const secret of [pim.secret, launched.runToken, TICKET, BRIDGE_TOKEN]) expect(logs).not.toContain(secret);
 		expect(logged.filter(([line]) => String(line).includes('"preview.launch-evaluator"')).map(([line]) => JSON.parse(String(line)))).toEqual([
-			{ event: "preview.launch-evaluator", action: "launch", outcome: "open", owner: pim.owner, observation: fresh, alongside: null, deadline: now + 10 * MINUTE },
+			{ event: "preview.launch-evaluator", action: "launch", outcome: "open", classification: "certain_open", owner: pim.owner, observation: fresh, alongside: null, deadline: now + 10 * MINUTE },
 			{ event: "preview.launch-evaluator", action: "end", outcome: "ended", owner: pim.owner, observation: fresh },
 			{ event: "preview.launch-evaluator", action: "launch", outcome: "refused", reason: "spent" },
 			{ event: "preview.launch-evaluator", action: "end", outcome: "refused", reason: "phase", phase: "ended" },
@@ -1073,7 +1076,7 @@ describe("the launch evaluator", () => {
 		const uncertain = await lost.launch();
 		expect([uncertain.status, await uncertain.json()]).toEqual([
 			502,
-			{ error: "Whether an observation started is uncertain. Nothing is retried, and nothing may end it from here.", run: { phase: "launch_uncertain" } },
+			{ error: "Whether an observation started is uncertain. Nothing is retried, and nothing may end it from here.", run: { phase: "launch_uncertain", classification: "space_launch_uncertain" } },
 		]);
 		const [record] = (await lost.records()).filter((one) => one.observationId !== OLD);
 		expect(record).toMatchObject({ status: "unconfirmed" });
@@ -1243,5 +1246,80 @@ describe("the launch evaluator", () => {
 		expect([seen.movedEarlier, seen.earlierAfter]).toEqual([true, { ...seen.kept, phase: "ending", updatedAt: 2000 }]);
 		expect([seen.claimed, seen.claimedTwice, seen.opened, seen.openedTwice]).toEqual([true, false, true, false]);
 		expect(seen.laterAfter).toEqual({ grant: later, ...identity, run: "d".repeat(64), phase: "open", observation: fresh, alongside: OLD, createdAt: 3000, deadline: 603000, updatedAt: 4000 });
+	});
+
+	const UNCERTAIN = "Whether an observation started is uncertain. Nothing is retried, and nothing may end it from here.";
+
+	it("reaches the owner's space through the real route, getAgentByName and Pim.launchForEvaluator, classifies the launch certain_open, and keeps the original-record exception with no third", async () => {
+		const pim = await evaluator({ old: "unconfirmed", existingUnconfirmed: OLD });
+		const answer = await pim.launch();
+		expect(answer.status).toBe(201);
+		const launched = (await answer.json()) as Launched & { run: { classification: string; alongside: string | null } };
+		const fresh = launched.run.observation.id;
+		expect([launched.run.phase, launched.run.classification, launched.run.alongside]).toEqual(["open", "certain_open", OLD]);
+		// The space's own Durable Object ran the launch: its stored ledger holds the original record exactly as it was, and the fresh one.
+		const stored = JSON.parse((await runInDurableObject(pim.space, (instance: PreviewPim) => instance.store.meta(OBSERVATION_KEY)))!) as ObservationState;
+		expect(stored.records.map((record) => [record.observationId, record.status])).toEqual([
+			[OLD, "unconfirmed"],
+			[fresh, "open"],
+		]);
+		expect(await pim.oldRecord()).toBe(pim.before);
+		expect(pim.asked.map(({ action, body }) => [action, body.key])).toEqual([["launch", fresh]]);
+		expect(pim.lines()).toEqual([expect.objectContaining({ action: "launch", outcome: "open", classification: "certain_open", alongside: OLD })]);
+		// No third: the grant is spent, and a new grant finds two unresolved records and starts nothing.
+		expect((await pim.launch()).status).toBe(409);
+		const renewed = credential();
+		await pim.evaluatorGrant({}, renewed);
+		expect(await (await pim.launch({ headers: pim.authorization(renewed) })).json()).toEqual({ error: "The space started no observation.", run: { phase: "launch_refused", reason: "unresolved" } });
+		expect(pim.asked).toHaveLength(1);
+		expect(await pim.oldRecord()).toBe(pim.before);
+	});
+
+	it("classifies a space that throws before answering as owner_space_rpc_failure, says nothing of what it threw, and never ends anything", async () => {
+		const pim = await evaluator({ old: "unconfirmed", existingUnconfirmed: OLD });
+		// A start the fixture began and didn't finish: the space's object now throws on construction, so every RPC to it rejects.
+		await runInDurableObject(pim.space, (instance: PreviewPim) => instance.store.setMeta(FIXTURE_KEY, "seeding"));
+		await evictDurableObject(pim.space).catch(() => undefined);
+		const answer = await pim.launch();
+		expect([answer.status, await answer.json()]).toEqual([502, { error: UNCERTAIN, run: { phase: "launch_uncertain", classification: "owner_space_rpc_failure" } }]);
+		expect(pim.asked).toEqual([]);
+		expect(await pim.runs()).toEqual([expect.objectContaining({ phase: "launch_uncertain", observation_id: null, alongside_id: null })]);
+		expect(pim.lines()).toEqual([{ event: "preview.launch-evaluator", action: "launch", outcome: "launch_uncertain", classification: "owner_space_rpc_failure" }]);
+		// Spent, and no End can name the run.
+		expect(await errorOf(await pim.launch())).toEqual([409, "This launch evaluator grant has run already; it runs once."]);
+		expect(await errorOf(await pim.end("r".repeat(43), OLD))).toEqual(NOT_VALID);
+		expect(pim.asked).toEqual([]);
+		expect(sent).toEqual([]);
+	});
+
+	it("classifies a certain open answer the Directory can't record as post_rpc_recording_failure, hands out nothing of it, and never ends it", async () => {
+		// The Directory's write of `open` fails, or writes nothing; the space's launch itself is certain.
+		for (const [failure, action] of [
+			["fails", "RAISE(ABORT, 'directory write failed for fresh-observation token')"],
+			["writes nothing", "RAISE(IGNORE)"],
+		] as const) {
+			logged.length = 0;
+			const pim = await evaluator({ old: "unconfirmed", existingUnconfirmed: OLD });
+			await runInDurableObject(pim.directory, (_instance, state) => {
+				new LaunchEvaluatorLedger(state.storage.sql);
+				state.storage.sql.exec(`CREATE TRIGGER refuse_open BEFORE UPDATE OF phase ON preview_launch_evaluator_runs WHEN NEW.phase = 'open' BEGIN SELECT ${action}; END`);
+			});
+			const answer = await pim.launch();
+			const body = await answer.json();
+			expect([failure, answer.status, body]).toEqual([failure, 502, { error: UNCERTAIN, run: { phase: "launch_uncertain", classification: "post_rpc_recording_failure" } }]);
+			// The space started it beside the original record, which is unchanged.
+			const [, fresh] = await pim.records();
+			expect([fresh?.status, pim.asked.map(({ action }) => action)]).toEqual(["open", ["launch"]]);
+			expect(await pim.oldRecord()).toBe(pim.before);
+			// The run keeps the fresh ID privately, as uncertain; no ID, viewer, token or cause left in the answer or the logs.
+			expect(await pim.runs()).toEqual([expect.objectContaining({ phase: "launch_uncertain", observation_id: fresh!.observationId, alongside_id: null })]);
+			expect(pim.lines()).toEqual([{ event: "preview.launch-evaluator", action: "launch", outcome: "launch_uncertain", classification: "post_rpc_recording_failure" }]);
+			const evaluatorText = JSON.stringify([body, pim.lines()]);
+			for (const kept of [fresh!.observationId, TICKET, BRIDGE, "directory write failed", OLD]) expect(evaluatorText).not.toContain(kept);
+			// Spent, and nothing ends it from here.
+			expect((await pim.launch()).status).toBe(409);
+			expect(await errorOf(await pim.end("r".repeat(43), fresh!.observationId))).toEqual(NOT_VALID);
+			expect(pim.asked).toHaveLength(1);
+		}
 	});
 });

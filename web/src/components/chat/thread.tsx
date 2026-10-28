@@ -22,6 +22,7 @@ import {
   UserMessage,
   WorkedSteps,
 } from "~/components/chat/items";
+import { mentionsUser, useUserNames } from "~/components/chat/markdown";
 import { sentImages } from "~/components/chat/reply-blocks";
 import { MembersWorking, Speaker } from "~/components/chat/room";
 import { TASK_POLL_MS, TaskCard, TaskJump } from "~/components/chat/tasks";
@@ -32,6 +33,7 @@ import { Button } from "~/components/ui/button";
 import {
   Conversation,
   ConversationContent,
+  ConversationMentionButton,
   ConversationScrollButton,
 } from "~/components/ui/conversation";
 import { SentWidgets, shownWidgets } from "~/components/widgets";
@@ -238,6 +240,10 @@ export const Thread = memo(function Thread({
   const grouped =
     (room?.members.length ?? 0) > 0 ||
     entries.some((entry) => entry.kind === "post");
+  /* A message that mentions the person is marked, for the button to the next one. */
+  const userNames = useUserNames();
+  const mention = (key: string, text: string) =>
+    !visit && mentionsUser(text, userNames) ? key : undefined;
   const working = room?.members.filter((member) => member.busy) ?? [];
   let lastSpeaker: string | null = null;
   const speaker = (name: string, id?: string) => {
@@ -347,6 +353,7 @@ export const Thread = memo(function Thread({
                   content: [{ type: "output_text", text: row.sent.message }],
                 }}
                 at={row.at}
+                mention={mention(row.key, row.sent.message)}
                 streaming={liveKeys.has(row.key)}
                 images={
                   outputs.has(row.call.call_id)
@@ -389,6 +396,7 @@ export const Thread = memo(function Thread({
                   content: [{ type: "output_text", text: entry.text }],
                 }}
                 at={entry.at}
+                mention={mention(entry.key, entry.text)}
                 images={postedImages(entry.text)}
               />
             );
@@ -563,6 +571,12 @@ export const Thread = memo(function Thread({
         bottomOffset={
           (composerCardHeight ?? DEFAULT_COMPOSER_CARD_HEIGHT) +
           SCROLL_BUTTON_GAP
+        }
+        mention={
+          <ConversationMentionButton
+            label={t("scrollToMention")}
+            changes={rows.length}
+          />
         }
       />
     </Conversation>

@@ -943,6 +943,35 @@ describe("a group chat", () => {
 		expect((await roomOf(session))?.members.map((member) => member.name)).toEqual(["Coach"]);
 	});
 
+	it("tells the person when an agent mentions them, as a notification of its own kind that reading the chat clears", async () => {
+		const session = (await post("/sessions", {})).body.id;
+		let prompt = "";
+		scripts({
+			lead: [
+				(context) => {
+					prompt = systemPrompt(context.messages);
+					return toolUse("send_to_user", { message: "Which flight, @Tester? Or mail me at tester@example.com." });
+				},
+			],
+		});
+		await say("Book my trip.", session);
+		await settled(session);
+		expect(prompt).toContain("mention them in a message you send, as @tester");
+		const host = (await agents()).find((other) => other.majordomo)!;
+		const notifications = () => api("/notifications").then((response) => (response.body.notifications as { kind: string; session: string; title: string; body: string; readAt: number | null }[]).filter((notification) => notification.session === session));
+		expect(await notifications()).toEqual([
+			expect.objectContaining({ kind: "mention", session, title: `${host.name} mentioned you`, body: "Which flight, @Tester? Or mail me at tester@example.com.", readAt: null }),
+		]);
+		// A message that has their name only in an address notifies no one.
+		scripts({ lead: [() => toolUse("send_to_user", { message: "Never mind, ask ada@tester.com." })] });
+		await say("Any flight.", session);
+		await settled(session);
+		expect(await notifications()).toHaveLength(1);
+		const { responseAt } = (await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === session);
+		await post(`/sessions/${session}/read`, { responseAt });
+		expect((await notifications())[0]!.readAt).not.toBeNull();
+	});
+
 	it("in an open room wakes every agent for everything said, each choosing whether to answer, unless it is asked", async () => {
 		const host = (await agents()).find((other) => other.majordomo)!;
 		await agent({ name: "Coach", description: "Plans runs", instructions: "Plan runs in kilometres." });

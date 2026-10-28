@@ -175,7 +175,7 @@ import {
 import { type Agent, type AgentInput, AgentStore, agentInput, checkContacts, freeName, MAX_AGENTS } from "./agents";
 import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessages } from "./chat-links";
 import type { AgentIcon, ArtifactToPublish, PublishedAgent } from "./gallery";
-import { MAX_ROOM_DEPTH, mentioned, ROOM_ENTRY, ROOM_HISTORY_CHARS, ROOM_NOTICE, ROOM_POST, type RoomMode, RoomStore, roomHistory, roomPost, roomsExtension, type Seat } from "./rooms";
+import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHARS, ROOM_NOTICE, ROOM_POST, type RoomMode, RoomStore, roomHistory, roomPost, roomsExtension, type Seat } from "./rooms";
 import { MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension, withPreferences } from "./majordomo";
 import { Progress } from "./progress";
@@ -358,6 +358,8 @@ const SUGGESTION_CHAT_CHARS = 2_000;
 const SUGGESTION_MEMORY_CHARS = 3_000;
 /** `pim_meta` keys the Worker sets: the owner's profile, a suspension, the space's own limits. */
 const PROFILE_KEY = "owner";
+/** What the person told their majordomo to call them, when they set it up. */
+const PERSON_NAME_KEY = "person_name";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
 /** Tools of the space the person talks with that an agent at work on a task doesn't get, though their extensions stay. */
@@ -706,6 +708,7 @@ export class Pim extends DurableAgent<Env> {
 					agent: (id) => this.agents.get(id),
 					invitable: (conversation) => this.#invitable(conversation),
 					remove: (seat) => this.#leave(seat),
+					person: () => this.#personNames(),
 					history: async (seat) => {
 						const said = projectEntries(await this.harness.session(seat.room).messages()).filter((message) => message.timestamp < seat.joinedAt);
 						return roomHistory(said, this.agents.ofSession(seat.room).name, ROOM_HISTORY_CHARS);
@@ -1864,7 +1867,8 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#closed()) return;
 		const shown = this.#publicNotification(notification);
 		if (options.sockets !== false) this.broadcastMessage({ type: "notification", notification: shown });
-		await this.#pushNotification(notification);
+		// A mention shows on a device unless its chat is on screen, as a reply does.
+		await this.#pushNotification({ ...notification, reply: notification.kind === "mention" });
 	}
 
 	/** This deployment's VAPID keys, made the first time a browser asks to subscribe. */
@@ -3004,6 +3008,7 @@ export class Pim extends DurableAgent<Env> {
 		if (!this.#rooms.of(conversation) && !this.#roomable(conversation)) return;
 		const room = this.#rooms.of(conversation)?.room ?? conversation;
 		const speaker = this.#roleOf(conversation).agent;
+		await this.#mentionPerson(room, speaker, message, at);
 		for (const agent of mentioned(message, this.#invitable(conversation))) await this.#join(room, agent);
 		// The chat shows the images as the sender's own message does, from Pim's copies.
 		const said = Object.entries(images).reduce((text, [url, copy]) => text.replaceAll(url, copy), message);
@@ -3018,6 +3023,30 @@ export class Pim extends DurableAgent<Env> {
 			const wake = (open || named.has(other.agent)) && depth < MAX_ROOM_DEPTH;
 			await this.#hear(other, roomPost(speaker.name, said), `post:${conversation}:${at}:${other.agent}`, wake, depth);
 		}
+	}
+
+	/** What an agent can call the person, from what this space knows: their username, and the name they gave their majordomo. */
+	#personNames(): string[] {
+		const username = this.profile()?.username;
+		return username ? [...new Set([username, this.store.meta(PERSON_NAME_KEY)].filter((name): name is string => !!name))] : [];
+	}
+
+	/** Those, and the display name on their public profile, which they can change in Settings. */
+	async #personNamesWithProfile(): Promise<string[]> {
+		const names = this.#personNames();
+		const username = this.profile()?.username;
+		if (!username) return names;
+		const shown = (await this.env.Gallery.getByName("gallery").profile(username).catch(() => null))?.displayName;
+		return shown ? [...new Set([...names, shown])] : names;
+	}
+
+	/** Tells the person an agent mentioned them, as `@username`: a notification of its own kind, once however often the message is replayed. */
+	async #mentionPerson(room: string, speaker: Agent, message: string, at: number): Promise<void> {
+		if (!message.includes("@") || !mentionsPerson(message, await this.#personNamesWithProfile())) return;
+		const id = `mention-${this.store.publicId(room)}-${speaker.id}-${at}`;
+		if (this.store.notification(id)) return;
+		const notification = this.store.addNotification({ id, kind: "mention", session: room, title: `${speaker.name} mentioned you`, body: plainReply(message).slice(0, 500) });
+		await this.deliverNotification(notification);
 	}
 
 	/**
@@ -4274,6 +4303,7 @@ export class Pim extends DurableAgent<Env> {
 				const { responseAt } = await readJson<{ responseAt: number }>(request);
 				if (typeof responseAt !== "number" || !Number.isSafeInteger(responseAt) || responseAt < 0) throw new HttpError(400, "responseAt must be a non-negative integer");
 				this.store.readSession(id, responseAt);
+				if (!this.store.sessionInfo(id)?.unread) this.store.readMentions(id);
 				this.broadcastMessage({ type: "sessions" });
 				return this.#sessionInfo(id);
 			},
@@ -5306,7 +5336,7 @@ export class Pim extends DurableAgent<Env> {
 			"/majordomo",
 			() => {
 				const agent = this.agents.majordomo();
-				return { agent, introduced: this.agents.introduced(), preferences: majordomoPreferences(agent.instructions) };
+				return { agent, introduced: this.agents.introduced(), preferences: majordomoPreferences(agent.instructions), yourName: this.store.meta(PERSON_NAME_KEY) ?? null };
 			},
 		],
 		[
@@ -5317,7 +5347,7 @@ export class Pim extends DurableAgent<Env> {
 				const majordomo = this.agents.majordomo();
 				const instructions = withPreferences(majordomo.instructions, await readJson<Record<string, unknown>>(request));
 				const agent = this.agents.update(majordomo.id, agentInput({ instructions }, majordomo));
-				return { agent, introduced: this.agents.introduced(), preferences: majordomoPreferences(agent.instructions) };
+				return { agent, introduced: this.agents.introduced(), preferences: majordomoPreferences(agent.instructions), yourName: this.store.meta(PERSON_NAME_KEY) ?? null };
 			},
 		],
 		[
@@ -5330,6 +5360,7 @@ export class Pim extends DurableAgent<Env> {
 				const majordomo = this.agents.majordomo();
 				const { name, symbol, color, instructions } = setup;
 				this.agents.update(majordomo.id, agentInput({ name, symbol, color, instructions }, majordomo));
+				if (setup.yourName) this.store.setMeta(PERSON_NAME_KEY, setup.yourName);
 				const memories = setupMemories(setup);
 				for (const { text, everyone } of memories) this.memory.store.append(text, this.memory.today(), { scope: everyone ? EVERYONE_SCOPE : PRIVATE_SCOPE });
 				if (memories.length > 0) await this.startMemoryNap();

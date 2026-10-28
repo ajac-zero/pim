@@ -210,10 +210,13 @@ export const AssistantMessage = memo(function AssistantMessage({
   untrusted,
   images = {},
   speaker,
+  mention,
 }: {
   item: MessageItem;
   /** Who wrote it, in a group chat. */
   speaker?: ReactNode;
+  /** Set when the message mentions the person: what the chat's button to mentions finds it by. */
+  mention?: string;
   /** When it was sent, in ms. */
   at: number;
   streaming?: boolean;
@@ -231,7 +234,11 @@ export const AssistantMessage = memo(function AssistantMessage({
   // text, tables and code. Its footer keeps its height while it streams, so
   // the time and actions don't push the thread when it finishes.
   return (
-    <div data-speaker="assistant" className="group/assistant w-full min-w-0">
+    <div
+      data-speaker="assistant"
+      data-mention={mention}
+      className="group/assistant w-full min-w-0"
+    >
       {speaker}
       <ReplyImages images={images} streaming={streaming ?? false}>
         <Markdown text={text} streaming={streaming} untrusted={untrusted} />

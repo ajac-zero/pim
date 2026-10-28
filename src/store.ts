@@ -105,6 +105,8 @@ export type ToolPermissionChoice = {
 
 export type Notification = {
 	readonly id: string;
+	/** `mention` when an agent tagged the person in a chat; every other notification is `general`. */
+	readonly kind: "general" | "mention";
 	readonly session: string | null;
 	readonly title: string;
 	readonly body: string;
@@ -282,6 +284,7 @@ CREATE TABLE IF NOT EXISTS pim_credentials (
 );
 CREATE TABLE IF NOT EXISTS pim_notifications (
 	id TEXT PRIMARY KEY,
+	kind TEXT NOT NULL DEFAULT 'general',
 	session TEXT,
 	title TEXT NOT NULL,
 	body TEXT NOT NULL,
@@ -346,6 +349,7 @@ function toolPermissionOf(row: Row): ToolPermissionChoice {
 function notificationOf(row: Row): Notification {
 	return {
 		id: String(row.id),
+		kind: row.kind === "mention" ? "mention" : "general",
 		session: row.session === null ? null : String(row.session),
 		title: String(row.title),
 		body: String(row.body),
@@ -435,6 +439,8 @@ export class PimStore {
 		if (!columns.includes("requested_by")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN requested_by TEXT");
 		if (!columns.includes("member")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN member TEXT");
 		if (!columns.includes("review")) this.#sql.exec("ALTER TABLE pim_approvals ADD COLUMN review TEXT");
+		const notificationColumns = this.#sql.exec("PRAGMA table_info(pim_notifications)").toArray().map((row) => String(row.name));
+		if (!notificationColumns.includes("kind")) this.#sql.exec("ALTER TABLE pim_notifications ADD COLUMN kind TEXT NOT NULL DEFAULT 'general'");
 		const sessionColumns = this.#sql.exec("PRAGMA table_info(pim_sessions)").toArray().map((row) => String(row.name));
 		if (!sessionColumns.includes("deleted_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN deleted_at INTEGER");
 		if (!sessionColumns.includes("summary")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN summary TEXT");
@@ -967,10 +973,11 @@ export class PimStore {
 
 	// Notifications
 
-	addNotification(input: { id: string; session: string | null; title: string; body: string }): Notification {
+	addNotification(input: { id: string; kind?: Notification["kind"]; session: string | null; title: string; body: string }): Notification {
 		this.#sql.exec(
-			"INSERT OR IGNORE INTO pim_notifications (id, session, title, body, created_at) VALUES (?, ?, ?, ?, ?)",
+			"INSERT OR IGNORE INTO pim_notifications (id, kind, session, title, body, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 			input.id,
+			input.kind ?? "general",
 			input.session,
 			input.title,
 			input.body,
@@ -990,6 +997,11 @@ export class PimStore {
 			.exec(`SELECT * FROM pim_notifications ${where} ORDER BY created_at DESC, rowid DESC LIMIT ?`, options.limit ?? 100)
 			.toArray()
 			.map(notificationOf);
+	}
+
+	/** The person has seen their chat: what it mentioned them in is read. */
+	readMentions(session: string): void {
+		this.#sql.exec("UPDATE pim_notifications SET read_at = ? WHERE kind = 'mention' AND session = ? AND read_at IS NULL", Date.now(), session);
 	}
 
 	markNotificationRead(id: string): boolean {

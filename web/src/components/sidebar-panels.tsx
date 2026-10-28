@@ -16,6 +16,7 @@ import {
 import { useI18n } from "~/components/i18n";
 import {
   ArrowLeft,
+  AtSign,
   CalendarClock,
   Check,
   CheckCheck,
@@ -244,19 +245,28 @@ function NotificationRow({
 }) {
   const { formatDate } = useI18n();
   const unread = notification.readAt === null;
+  const mention = notification.kind === "mention";
   const content = (
     <>
-      {notification.agent ? (
-        <AgentIcon agent={notification.agent} tile className="size-8" />
-      ) : (
-        <img
-          src="/icon-192.png"
-          alt=""
-          className="size-8 shrink-0 rounded-lg"
-        />
-      )}
+      <span className="relative shrink-0">
+        {notification.agent ? (
+          <AgentIcon agent={notification.agent} tile className="size-8" />
+        ) : (
+          <img
+            src="/icon-192.png"
+            alt=""
+            className="size-8 shrink-0 rounded-lg"
+          />
+        )}
+        {mention && (
+          <span className="-bottom-1 -right-1 absolute flex size-4 items-center justify-center rounded-full bg-link text-background ring-2 ring-background">
+            <AtSign className="size-2.5" />
+          </span>
+        )}
+      </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate">{notification.title}</span>
+
         <time
           dateTime={new Date(notification.createdAt).toISOString()}
           title={formatDate(new Date(notification.createdAt), {

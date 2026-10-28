@@ -134,6 +134,8 @@ export type MajordomoState = {
   introduced: boolean;
   /** How it talks and how much it handles on its own, read from its instructions. */
   preferences: MajordomoPreferences;
+  /** What you told it to call you at setup; agents can mention you by it. */
+  yourName: string | null;
 };
 
 /** How the majordomo talks with you and how much it handles on its own, as at setup. */
@@ -909,6 +911,8 @@ export type ToolPermissionInfo = {
 
 export type PimNotification = {
   id: string;
+  /** `mention` when an agent tagged you in a chat. */
+  kind: "general" | "mention";
   session: string | null;
   agent: Pick<Agent, "id" | "icon" | "symbol" | "color"> | null;
   title: string;

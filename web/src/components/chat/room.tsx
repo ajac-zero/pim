@@ -8,15 +8,18 @@ import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import { type Agent, pim } from "~/lib/pim-api";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
 
 /**
- * Group chats (see src/rooms.ts): a chat another of the person's agents was
- * brought into by an @mention. Each agent's messages say who wrote them, the
+ * Group chats (see src/rooms.ts): every chat is a room, with its host and any
+ * other of the person's agents brought in by an @mention or from the header.
+ * Each agent's messages say who wrote them, the
  * header lists who is in the chat, and the transcript shows who is at work.
  */
 
@@ -66,9 +69,8 @@ export function MembersWorking({
 }
 
 /**
- * Who is in a group chat, as their icons in the header. Each agent but the
- * host can be taken out of the chat from here. Nothing for a chat with one
- * agent.
+ * Who is in a chat, as their icons in the header. Each agent but the host
+ * can be taken out of the chat from here, and any other agent brought in.
  */
 export function RoomMenu({ sessionId }: { sessionId: string }) {
   const { t } = useI18n();
@@ -81,13 +83,21 @@ export function RoomMenu({ sessionId }: { sessionId: string }) {
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
     onError: (failure) => toast.error(failure.message),
   });
+  const add = useMutation({
+    mutationFn: (agent: string) => pim.addToRoom(sessionId, agent),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onError: (failure) => toast.error(failure.message),
+  });
   const room = session?.room;
-  if (!session?.agent || !room || room.members.length === 0) return null;
+  if (!session?.agent || !room) return null;
   const host = session.agent;
   const people = [
     { id: host.id, name: host.name, host: true },
     ...room.members.map((member) => ({ ...member, host: false })),
   ];
+  const absent = (agents ?? []).filter(
+    (agent) => !people.some((person) => person.id === agent.id),
+  );
   const look = (id: string) => agents?.find((agent) => agent.id === id);
   const label = t("inThisChat");
   return (
@@ -164,6 +174,31 @@ export function RoomMenu({ sessionId }: { sessionId: string }) {
             </div>
           );
         })}
+        {absent.length > 0 && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
+              {t("addToChat")}
+            </DropdownMenuLabel>
+            {absent.map((agent) => (
+              <DropdownMenuItem
+                key={agent.id}
+                disabled={add.isPending}
+                onSelect={(event) => {
+                  event.preventDefault();
+                  add.mutate(agent.id);
+                }}
+              >
+                <AgentIcon
+                  agent={agent}
+                  tile
+                  className="size-5 shrink-0 rounded-md"
+                />
+                <span className="min-w-0 flex-1 truncate">{agent.name}</span>
+              </DropdownMenuItem>
+            ))}
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -3176,10 +3176,10 @@ export class Pim extends DurableAgent<Env> {
 		this.broadcastMessage({ type: "sessions" });
 	}
 
-	/** What the chat list says of a room: how agents take turns, and who is in it besides the host, each with whether it is at work. */
+	/** What the chat list says of a room: how agents take turns, and who is in it besides the host, each with whether it is at work. Every chat of the person's with their own agents is a room, with no one but its host at first. */
 	#roomInfo(session: string, busy: ReadonlySet<string>): { mode: RoomMode; members: { id: string; name: string; busy: boolean }[] } | null {
 		const [host, ...members] = this.#rooms.seats(session);
-		if (!host) return null;
+		if (!host && !this.#roomable(session)) return null;
 		return {
 			mode: this.#rooms.mode(session),
 			members: members.flatMap((seat) => {
@@ -4384,6 +4384,20 @@ export class Pim extends DurableAgent<Env> {
 				this.#rooms.open(id, this.agents.ofSession(id).id);
 				this.#rooms.setMode(id, mode);
 				this.broadcastMessage({ type: "sessions" });
+				const busy = new Set((await this.harness.sessions.list()).flatMap((info) => (info.busy ? [info.id] : [])));
+				return { room: this.#roomInfo(id, busy) };
+			},
+		],
+		[
+			"POST",
+			"/sessions/:session/room/members",
+			async ({ session }, request) => {
+				const id = await this.#session(session!);
+				const { agent } = await readJson<{ agent: string }>(request);
+				const joining = typeof agent === "string" ? this.agents.get(agent) : undefined;
+				if (!joining) throw new HttpError(404, "No such agent");
+				if (!this.#roomable(id)) throw new HttpError(400, "Only a chat with your own agents can be a group chat");
+				if (joining.id !== this.agents.ofSession(id).id) await this.#join(id, joining);
 				const busy = new Set((await this.harness.sessions.list()).flatMap((info) => (info.busy ? [info.id] : [])));
 				return { room: this.#roomInfo(id, busy) };
 			},

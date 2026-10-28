@@ -1362,6 +1362,11 @@ export const pim = {
       `/sessions/${session}/messages`,
       { method: "POST", body: JSON.stringify({ content }) },
     ),
+  addToRoom: (session: string, agent: string) =>
+    call<{ room: Room | null }>(`/sessions/${session}/room/members`, {
+      method: "POST",
+      body: JSON.stringify({ agent }),
+    }).then((body) => body.room),
   removeFromRoom: (session: string, agent: string) =>
     call<{ room: Room | null }>(`/sessions/${session}/room/members/${agent}`, {
       method: "DELETE",

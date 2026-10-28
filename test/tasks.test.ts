@@ -832,7 +832,7 @@ describe("a group chat", () => {
 		scripts({ lead: [as("lead", "Happy to help you train.")] });
 		await say("I want to run a marathon.", session);
 		await quiet(session);
-		expect(await roomOf(session)).toBeNull();
+	expect(await roomOf(session)).toEqual({ mode: "mentions", members: [] });
 		const before = await chats();
 
 		// Mentioned, Coach joins knowing nothing of what was said before, reads it back, and answers in the chat; the host isn't woken.
@@ -936,6 +936,11 @@ describe("a group chat", () => {
 		expect((await api(`/sessions/${session}/room/members/${coach.id}`, { method: "DELETE" })).status).toBe(404);
 		expect((await api(`/sessions/${session}/room/members/${host.id}`, { method: "DELETE" })).status).toBe(404);
 		expect(await chats()).toBe(before);
+		// The person brings an agent in from the chat's menu, without mentioning it; the host is already there.
+		const adding = await api(`/sessions/${session}/room/members`, { method: "POST", body: JSON.stringify({ agent: coach.id }) });
+		expect((adding.body as { room: { members: { id: string }[] } }).room.members.map((member) => member.id)).toEqual([coach.id]);
+		expect((await api(`/sessions/${session}/room/members`, { method: "POST", body: JSON.stringify({ agent: "nobody" }) })).status).toBe(404);
+		await api(`/sessions/${session}/room/members/${coach.id}`, { method: "DELETE" });
 		scripts({ Coach: [as("Coach", "Back again.")] });
 		await say("@Coach come back", session);
 		await quiet(session);

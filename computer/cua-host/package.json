@@ -10,6 +10,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p .",
+    "agent-preview": "node agent-preview-cli.ts",
     "test": "node --test --test-concurrency=1 test/*.test.ts"
   },
   "dependencies": {

@@ -14,6 +14,7 @@ import {
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
+import { AgentPreviewBanner } from "~/components/agent-preview-banner";
 import {
   AppSidebar,
   SIDEBAR_PANELS,
@@ -91,23 +92,26 @@ function Root() {
   // Letting an MCP client in is a page of its own, between the client and the person,
   // and so is taking the agents' browser over.
   const alone = pathname === "/authorize" || pathname === "/browser";
+  const { data: session } = useQuery(authSessionQuery());
   return (
     <I18nProvider>
       <ThemeProvider>
-        {/* A chat's public link is for anyone, signed in or not. */}
-        {pathname.startsWith("/shared/") ? (
-          <Outlet />
-        ) : (
-          <SignedIn>
-            {alone ? (
-              <Outlet />
-            ) : (
-              <Introduced>
-                <AppLayout />
-              </Introduced>
-            )}
-          </SignedIn>
-        )}
+        <AgentPreviewBanner preview={session?.agentPreview}>
+          {/* A chat's public link is for anyone, signed in or not. */}
+          {pathname.startsWith("/shared/") ? (
+            <Outlet />
+          ) : (
+            <SignedIn>
+              {alone ? (
+                <Outlet />
+              ) : (
+                <Introduced>
+                  <AppLayout />
+                </Introduced>
+              )}
+            </SignedIn>
+          )}
+        </AgentPreviewBanner>
         <Toaster position="top-center" />
       </ThemeProvider>
     </I18nProvider>

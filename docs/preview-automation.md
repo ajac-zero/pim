@@ -78,7 +78,7 @@ Set-Cookie: __Host-pim-automation=<43 base64url characters>; Path=/; Secure; Htt
 - A wrong credential, owner, evaluation or deployment, a revoked grant, or any owner but the claimed active one all get the same answer: `401 That automation credential isn't valid for this preview.` A request from another origin gets `403`. A grant may hold 8 unexpired sessions at once; the next exchange gets `429`.
 - The exchange is under `/auth`, so the evaluation's auth rate limit counts it per client address.
 
-The runner can hand the cookie to its isolated browser (for example as an HTTP-only cookie set through the browser's automation protocol for the preview's host), and send it itself on API calls.
+The runner (`computer/cua-host/agent-preview.ts`, docs/agent-preview.md) makes the exchange through its isolated Playwright context's own request object, so the cookie lands in that context's jar, serves both its API reads and its pages, and is never handled by the runner or set through a browser protocol.
 
 ### Metadata: `GET /auth/automation/session`
 
@@ -171,6 +171,8 @@ Signing in, reading the metadata, ending and revoking write only the Directory's
 - socket handshakes on `/api/ws`, `/api/browser/live` and other paths, in either spelling, refused with no socket made; and refused with `401` after ending, revoking or expiry;
 - a seeded space holding one unresolved observation: signing in, reading the metadata, listing, ending and revoking leave the space's storage, the owner's tokens, passkeys and linked identities, and the account exactly as they were. Its status, a Watch and an End are refused, and nothing reaches the host.
 
+The same file runs the runner's first diagnosis (`openAgentPreview` with `parseAutomationConfig`, then `diagnoseObservations`) against this Worker, through fake Playwright objects whose requests reach the preview's Worker in the isolate. It checks that the runner's exchange, the cookie the Worker sets, the observation list and the banner's `/auth/session` work together; that the Worker is asked exactly the exchange, the list, `/` and `/auth/session`; that the page's request for one observation's status and its socket stop in the runner's context; and that the Worker refuses both on such a session anyway.
+
 Removing any one of the revocation recheck, the deadline cap or the refusal of observation status, or mounting the routes in `src/index.ts`, fails these tests.
 
 ## Not covered
@@ -178,4 +180,4 @@ Removing any one of the revocation recheck, the deadline cap or the refusal of o
 - Nothing here has run against the live evaluation, a real browser, a real runner, Cloudflare's runtime or its rate limits. Setting the variables in the live evaluation is a separate step that needs its own approval.
 - The list of refused reads is a list of known reads with side effects, not a proof that every other `GET` in the space has none.
 - On Cloudflare, removing or changing a variable takes effect when the new version serves. Revoking through the route takes effect on the next request.
-- The web app's `AuthSession` type doesn't name `method: "automation"` or `agentPreview` yet, and no banner shows them. That is the runner and banner work, which reads the fields above.
+- The runner and the banner (docs/agent-preview.md) have run against this Worker only with fake Playwright objects, in workerd: no real browser, Playwright install, page render or network.

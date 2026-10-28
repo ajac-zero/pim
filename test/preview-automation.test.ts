@@ -1,5 +1,6 @@
 import { createExecutionContext, env, evictDurableObject, runInDurableObject, waitOnExecutionContext } from "cloudflare:test";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import * as fs from "node:fs";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { EvalDirectory } from "../preview/cua-eval";
 import previewWorker from "../preview/worker";
 import { applyObservationEvent, initialObservationState, type ObservationState } from "../src/cua-observation";
@@ -35,6 +36,47 @@ const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((byte) => byt
 const sha256 = async (value: string) => hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
 /** A credential as the operator makes one: 32 random bytes, base64url. */
 const credential = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+
+/** Where the harness's test reads its configuration file from. */
+const HARNESS_DIR = "/tmp/pim-agent-preview-harness";
+
+// workerd's file system has no owners' modes: every file reads as 0666. The harness (computer/cua-host/agent-preview.ts)
+// takes its configuration only from a 0600 file in a 0700 directory, which its own tests check on a real file system, so
+// here files in HARNESS_DIR report the modes the operator gives them. Nothing else about the file system changes.
+vi.mock("node:fs", async (original) => {
+	const real = await original<typeof import("node:fs")>();
+	const dir = "/tmp/pim-agent-preview-harness";
+	const opened = new Set<number>();
+	const ours = (file: unknown) => String(file) === dir || String(file).startsWith(`${dir}/`);
+	const moded = (stat: import("node:fs").Stats, mode: number) =>
+		({
+			mode: (stat.mode & ~0o777) | mode,
+			uid: stat.uid,
+			nlink: stat.nlink,
+			size: stat.size,
+			isFile: () => stat.isFile(),
+			isDirectory: () => stat.isDirectory(),
+			isSymbolicLink: () => stat.isSymbolicLink(),
+		}) as import("node:fs").Stats;
+	const lstatSync = ((file: string, options?: object) => {
+		const stat = real.lstatSync(file, options as never);
+		return stat && ours(file) ? moded(stat, stat.isDirectory() ? 0o700 : 0o600) : stat;
+	}) as typeof real.lstatSync;
+	const openSync = ((file: string, flags: number) => {
+		const fd = real.openSync(file, flags);
+		if (ours(file)) opened.add(fd);
+		return fd;
+	}) as typeof real.openSync;
+	const fstatSync = ((fd: number, options?: object) => {
+		const stat = real.fstatSync(fd, options as never);
+		return opened.has(fd) ? moded(stat, 0o600) : stat;
+	}) as typeof real.fstatSync;
+	const closeSync = (fd: number) => {
+		opened.delete(fd);
+		real.closeSync(fd);
+	};
+	return { ...real, lstatSync, openSync, fstatSync, closeSync, default: { ...real, lstatSync, openSync, fstatSync, closeSync } };
+});
 
 const logged: unknown[][] = [];
 /** Every request that left the isolate. */
@@ -72,6 +114,8 @@ type Ask = {
 	/** The operator's credential, in its header. */
 	credential?: string;
 	at?: string;
+	/** Send only the headers given: no `Origin` on a write, as Playwright's request context sends none of its own. */
+	asIs?: true;
 };
 
 /**
@@ -100,7 +144,7 @@ async function evaluation(setUp: { grant?: boolean } = {}) {
 		if (init.credential !== undefined) headers.set("authorization", `Pim-Automation ${init.credential}`);
 		const method = init.method ?? (init.body === undefined ? "GET" : "POST");
 		if (init.body !== undefined) headers.set("content-type", "application/json");
-		if (method !== "GET" && method !== "HEAD" && !headers.has("origin")) headers.set("origin", ORIGIN);
+		if (method !== "GET" && method !== "HEAD" && !headers.has("origin") && !init.asIs) headers.set("origin", ORIGIN);
 		return new Request(`${init.at ?? ORIGIN}${path}`, { method, headers, ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }) });
 	};
 	const through = (worker: { fetch: (request: Request, env: Env, ctx: ExecutionContext) => Promise<Response> }) => async (path: string, init: Ask = {}) => {
@@ -499,5 +543,196 @@ describe("automation sign-in for the preview's evaluation", () => {
 		expect(await snapshot()).toEqual(before);
 		// No host, bridge or anything else was reached.
 		expect(sent).toEqual([]);
+	});
+});
+
+/**
+ * The isolated-browser harness (computer/cua-host/agent-preview.ts) and the
+ * web app's banner, run against this Worker. They are type-checked as their
+ * own projects (Node's, and the web app's), so they're imported by a path
+ * TypeScript doesn't follow, with only the shapes used here.
+ */
+type Session = { metadata(): unknown };
+type Harness = {
+	openAgentPreview(options: { configFile: string; parse(text: string): unknown; deadline: number; launcher: unknown }): Promise<Session>;
+	diagnoseObservations(session: Session): Promise<unknown>;
+};
+type Adapter = { parseAutomationConfig(text: string): unknown };
+type Banner = { agentPreviewText(preview: unknown, now: number): string | null };
+const load = <T>(path: string) => import(/* @vite-ignore */ path) as Promise<T>;
+
+type Cookie = { name: string; value: string; domain: string; path: string; expires: number; httpOnly: boolean; secure: boolean; sameSite: string };
+type Route = { request(): { url(): string; method(): string }; continue(): Promise<void>; abort(code?: string): Promise<void> };
+
+/**
+ * The parts of Playwright the harness uses, over this Worker: a context with
+ * one cookie jar, which keeps each `Set-Cookie` as Chromium does (host-only
+ * without `Domain`), and a page whose requests go through the context's route
+ * and WebSocket handlers first, as Playwright's do. Loading `/` makes the
+ * requests the app's shell makes as it starts (web/index.html's stylesheet,
+ * web/src/lib/auth.ts's `/auth/session`), then a read of one observation's
+ * status and a socket, as a page that wanted them would. The banner is the
+ * app's own text for what `/auth/session` answered. No browser, process or
+ * socket is started, and nothing leaves the isolate.
+ */
+function playwrightOver(ask: (path: string, init: Ask) => Promise<Response>, banner: Banner, record: string) {
+	/** Requests the Worker was asked, in order. */
+	const reached: string[] = [];
+	/** Page requests the context's route aborted. */
+	const aborted: string[] = [];
+	/** WebSockets the context answered itself. */
+	const sockets: string[] = [];
+	let jar: Cookie[] = [];
+	/** The jar as the context held it when the harness closed it. */
+	let closedWith: Cookie[] = [];
+	let route: ((route: Route) => Promise<void> | void) | undefined;
+	let socket: ((ws: { close(options?: { code?: number; reason?: string }): void }) => Promise<void> | void) | undefined;
+	const host = new URL(ORIGIN).hostname;
+
+	const keep = (answer: Response) => {
+		for (const line of answer.headers.getSetCookie()) {
+			const [pair = "", ...parts] = line.split(";").map((part) => part.trim());
+			const [name = "", ...value] = pair.split("=");
+			const attributes = new Map(parts.map((part) => [part.split("=")[0]!.toLowerCase(), part.split("=").slice(1).join("=")] as const));
+			const maxAge = attributes.get("max-age");
+			jar = jar.filter((cookie) => cookie.name !== name);
+			if (maxAge === "0") continue;
+			const sameSite = attributes.get("samesite")?.toLowerCase();
+			jar.push({
+				name,
+				value: value.join("="),
+				domain: attributes.has("domain") ? `.${attributes.get("domain")}` : host,
+				path: attributes.get("path") || "/",
+				expires: maxAge ? Math.floor(Date.now() / 1000) + Number(maxAge) : -1,
+				httpOnly: attributes.has("httponly"),
+				secure: attributes.has("secure"),
+				sameSite: sameSite === "strict" ? "Strict" : sameSite === "none" ? "None" : "Lax",
+			});
+		}
+	};
+	const send = async (method: string, url: string, headers: Record<string, string> = {}, data?: unknown) => {
+		const { origin, pathname, search } = new URL(url);
+		expect(origin).toBe(ORIGIN);
+		reached.push(`${method} ${pathname}${search}`);
+		const cookie = jar.map(({ name, value }) => `${name}=${value}`).join("; ");
+		const answer = await ask(`${pathname}${search}`, { method, headers, asIs: true, ...(cookie ? { cookie } : {}), ...(data === undefined ? {} : { body: data }) });
+		keep(answer);
+		return answer;
+	};
+	const api = (answer: Response) => ({ status: () => answer.status, json: () => answer.json() });
+	/** A page's request: the context's route decides first. */
+	const browse = async (path: string) => {
+		let verdict = "none";
+		await route!({ request: () => ({ url: () => `${ORIGIN}${path}`, method: () => "GET" }), continue: async () => void (verdict = "continue"), abort: async () => void (verdict = "abort") });
+		if (verdict === "continue") return send("GET", `${ORIGIN}${path}`);
+		aborted.push(`GET ${path}`);
+		return null;
+	};
+
+	let shown: string | null = null;
+	const context = {
+		request: {
+			post: async (url: string, options: { headers?: Record<string, string>; data?: unknown }) => api(await send("POST", url, options.headers, options.data)),
+			get: async (url: string, options: { headers?: Record<string, string> }) => api(await send("GET", url, options.headers)),
+		},
+		cookies: async (url: string) => jar.filter((cookie) => cookie.domain === new URL(url).hostname || (cookie.domain.startsWith(".") && new URL(url).hostname.endsWith(cookie.domain))),
+		route: async (_url: string, handler: typeof route) => void (route = handler),
+		routeWebSocket: async (_url: unknown, handler: typeof socket) => void (socket = handler),
+		newPage: async () => ({
+			goto: async (url: string) => {
+				await browse(new URL(url).pathname);
+				const session = await browse("/auth/session");
+				await browse("/api/themes.css");
+				await browse(`/api/observations/${record}`);
+				await socket!({ close: (options) => void sockets.push(`${ORIGIN.replace("https", "wss")}/api/ws ${options?.code} ${options?.reason}`) });
+				shown = banner.agentPreviewText(session ? ((await session.json()) as { agentPreview?: unknown }).agentPreview : undefined, Date.now());
+			},
+			url: () => `${ORIGIN}/`,
+			title: async () => "Pim",
+			locator: () => ({ first: () => ({ textContent: async () => shown }) }),
+			close: async () => undefined,
+		}),
+		close: async () => {
+			closedWith = jar;
+			jar = [];
+		},
+	};
+	const contexts: unknown[] = [];
+	const launcher = { launch: async () => ({ newContext: async (options: unknown) => (contexts.push(options), context), close: async () => undefined }) };
+	return { launcher, reached, aborted, sockets, contexts, jar: () => jar, closedWith: () => closedWith };
+}
+
+describe("the agent-preview harness against this Worker", () => {
+	it("makes its first diagnosis through the real exchange: the list, the app and its banner, and nothing else", async () => {
+		const pim = await evaluation();
+		// The owner's space holds one unresolved observation, as in the evaluation's other test above.
+		settings.PREVIEW_CUA_FIXTURE = "seed";
+		settings.PREVIEW_CUA_FIXTURE_OWNER = pim.owner;
+		settings.CUA_BRIDGES = JSON.stringify({ [pim.owner]: { url: `https://bridge.preview-automation.test/${pim.owner}`, token: "preview-automation-bridge-token-0123456789" } });
+		const space = previews.getByName(pim.owner);
+		await evictDurableObject(space).catch(() => undefined);
+		const id = "attempted-watch-0002";
+		const notAfter = Date.now() + 30 * MINUTE;
+		let ledger: ObservationState = initialObservationState(pim.owner);
+		ledger = applyObservationEvent(ledger, { type: "open_requested", owner: pim.owner, observationId: id, notAfter, now: Date.now() }).state;
+		ledger = applyObservationEvent(ledger, { type: "unconfirmed", observationId: id, evidence: "the host's answer to launch was lost (timeout)" }).state;
+		await runInDurableObject(space, (instance: PreviewPim) => instance.store.setMeta(OBSERVATION_KEY, JSON.stringify(ledger)));
+		await evictDurableObject(space).catch(() => undefined);
+		const held = () => runInDurableObject(space, (instance: PreviewPim) => instance.store.meta(OBSERVATION_KEY));
+		const before = await held();
+
+		// The runner's input, as scripts/preview-automation-grant.mjs writes it, in the operator's protected directory.
+		fs.mkdirSync(HARNESS_DIR, { recursive: true });
+		onTestFinished(() => fs.rmSync(HARNESS_DIR, { recursive: true, force: true }));
+		const file = `${HARNESS_DIR}/automation.json`;
+		fs.writeFileSync(file, `${JSON.stringify({ version: 1, origin: ORIGIN, ...pim.identity, credential: pim.secret })}\n`);
+		const deadline = JSON.parse(String(settings.PREVIEW_AUTOMATION_GRANT)).notAfter as string;
+
+		// What agent-preview-cli.ts runs, but its arguments: workerd has no `parseArgs`, and the harness's own tests run the entry point.
+		const { openAgentPreview, diagnoseObservations } = await load<Harness>("../computer/cua-host/agent-preview.ts");
+		const { parseAutomationConfig } = await load<Adapter>("../computer/cua-host/agent-preview-automation.ts");
+		const banner = await load<Banner>("../web/src/components/agent-preview-banner.tsx");
+		const browser = playwrightOver(pim.ask, banner, id);
+		const now = Date.now();
+		at(now);
+		const opened = await openAgentPreview({ configFile: file, parse: parseAutomationConfig, deadline: Date.parse(deadline), launcher: browser.launcher });
+		const metadata = opened.metadata();
+		const diagnosis = await diagnoseObservations(opened);
+
+		const ends = new Date(now + 30 * MINUTE);
+		const printed = JSON.stringify({ metadata, diagnosis });
+		expect({ metadata, diagnosis }).toEqual({
+			metadata: { origin: ORIGIN, expiresAt: ends.toISOString(), requestsLeft: 50 },
+			diagnosis: {
+				observations: { status: 200, blocked: null, observations: [{ id, status: "unconfirmed", notAfter, evidence: "the host's answer to launch was lost (timeout)", lostReason: "timeout" }] },
+				ui: { path: "/", title: "Pim", banner: `UNSAFE PREVIEW — agent access enabled · automation session ends ${ends.toISOString().slice(11, 16)} UTC` },
+			},
+		});
+		// One fresh context, and the Worker was asked exactly this: the exchange, the list, the page and the banner's session.
+		expect(browser.contexts).toHaveLength(1);
+		expect(browser.reached).toEqual(["POST /auth/automation/session", "GET /api/observations", "GET /", "GET /auth/session"]);
+		// The page's request for one observation's status (which may ask the host and settle the record) never reached the Worker, nor did any socket.
+		expect(browser.aborted).toEqual(["GET /api/themes.css", `GET /api/observations/${id}`]);
+		expect(browser.sockets).toEqual(["wss://pim.test/api/ws 1008 read only"]);
+
+		// The context held exactly the Worker's session cookie, and dropped it on closing. The Worker's session isn't ended: it lasts until it expires.
+		const [issued, ...others] = browser.closedWith();
+		expect([issued?.name, others, browser.jar()]).toEqual(["__Host-pim-automation", [], []]);
+		const cookie = `${issued!.name}=${issued!.value}`;
+		expect(await pim.rows()).toEqual([expect.objectContaining({ digest: await sha256(issued!.value), owner: pim.owner, evaluation: EVALUATION, deployment: DEPLOYMENT, origin: ORIGIN, expires_at: now + 30 * MINUTE, ended_at: null })]);
+
+		// Had the record's read or the socket got past the context, the Worker refuses both on that session.
+		const readOnly = [403, "An automation session only reads, and not this."];
+		expect(await errorOf(await pim.ask(`/api/observations/${id}`, { cookie }))).toEqual(readOnly);
+		for (const headers of [{ origin: ORIGIN }, {}] as Record<string, string>[]) {
+			const answer = await pim.ask("/api/ws", { cookie, headers: { upgrade: "websocket", connection: "Upgrade", "sec-websocket-version": "13", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==", ...headers } });
+			expect([answer.status, answer.webSocket ?? null]).toEqual([403, null]);
+		}
+
+		// Nothing about the record changed, nothing left the isolate, and the diagnosis holds neither the credential nor a cookie.
+		expect(await held()).toBe(before);
+		expect(sent).toEqual([]);
+		expect(printed).not.toContain(pim.secret);
+		expect(printed).not.toContain(issued!.value);
 	});
 });

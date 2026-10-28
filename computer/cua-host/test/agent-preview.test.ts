@@ -29,6 +29,7 @@ import {
 	playwrightChromium,
 	MAX_SESSION_MS,
 	openAgentPreview,
+	pageMayRequest,
 	readProtectedFile,
 } from "../agent-preview.ts";
 
@@ -78,6 +79,10 @@ class Fake {
 	wsHandlers: { pattern: unknown; handler: (ws: WebSocketRoute) => Promise<void> | void; before: string[] }[] = [];
 	events: string[] = [];
 	gotoThrows = false;
+	routeThrows = false;
+	wsThrows = false;
+	cookiesThrows = false;
+	newContextThrows = false;
 	launchThrows = false;
 	postStatus = 200;
 	getStatus = 200;
@@ -96,6 +101,7 @@ class Fake {
 
 	browser = (): Browser => ({
 			newContext: async (options) => {
+				if (this.newContextThrows) throw new Error(`context failure ${CREDENTIAL}`);
 				this.contexts++;
 				this.contextOptions.push({ ...options });
 				return this.context();
@@ -122,12 +128,17 @@ class Fake {
 					return { status: () => status, json: async () => fake.getBody };
 				},
 			},
-			cookies: async () => fake.jar,
+			cookies: async () => {
+				if (fake.cookiesThrows) throw new Error(`cookie jar failure ${COOKIE_VALUE}`);
+				return fake.jar;
+			},
 			route: async (_url, handler) => {
+				if (fake.routeThrows) throw new Error(`route failure ${CREDENTIAL}`);
 				fake.events.push("route");
 				fake.routeHandler = handler;
 			},
 			routeWebSocket: async (pattern, handler) => {
+				if (fake.wsThrows) throw new Error(`ws failure ${CREDENTIAL}`);
 				fake.events.push("routeWebSocket");
 				fake.wsHandlers.push({ pattern, handler, before: [...fake.events] });
 			},
@@ -246,7 +257,7 @@ describe("origin", () => {
 		const attempt = async (url: string, method: string) => {
 			await fake.routeHandler!({ request: () => ({ url: () => url, method: () => method }), abort: async () => void outcomes.push("abort"), continue: async () => void outcomes.push("continue") });
 		};
-		await attempt(`${ORIGIN}/app.js`, "GET");
+		await attempt(`${ORIGIN}/assets/app.js`, "GET");
 		await attempt("https://elsewhere.example.test/x", "GET");
 		await attempt("https://preview.example.test.evil.test/", "GET");
 		await attempt(`${ORIGIN}/api/observations`, "POST");
@@ -547,15 +558,80 @@ describe("WebSockets and bounds in the browser", () => {
 		const { fake } = await open();
 		const outcomes: string[] = [];
 		const attempt = (url: string) => fake.routeHandler!({ request: () => ({ url: () => url, method: () => "GET" }), abort: async () => void outcomes.push("abort"), continue: async () => void outcomes.push("continue") });
-		for (let i = 0; i < MAX_BROWSER_REQUESTS; i++) await attempt(`${ORIGIN}/asset-${i}.js`);
-		await attempt(`${ORIGIN}/one-too-many.js`);
+		for (let i = 0; i < MAX_BROWSER_REQUESTS; i++) await attempt(`${ORIGIN}/assets/asset-${i}.js`);
+		await attempt(`${ORIGIN}/assets/one-too-many.js`);
 		await attempt("not a url");
 		assert.equal(outcomes.filter((o) => o === "continue").length, MAX_BROWSER_REQUESTS);
 		assert.deepEqual(outcomes.slice(-2), ["abort", "abort"]);
 	});
 });
 
+describe("what a page may request", () => {
+	const origin = ORIGIN;
+	it("allows the shell, static files and the session answer, with no query, by GET or HEAD", () => {
+		for (const url of ["/", "/auth/session", "/favicon.svg", "/manifest.webmanifest", "/assets/index-abc123.js", "/assets/inter.woff2"]) {
+			assert.equal(pageMayRequest(`${ORIGIN}${url}`, "GET", origin), true, url);
+			assert.equal(pageMayRequest(`${ORIGIN}${url}`, "HEAD", origin), true, url);
+		}
+	});
+
+	it("refuses every /api path, other /auth and server routes, queries, other methods and other origins", () => {
+		for (const url of [`/api/observations/${ID}`, `/api/observations/${ID}/end`, "/api/observations", "/api/themes.css", "/api/ws", "/auth/passkeys", "/auth/automation/session", "/__dev/sign-in/ada", "/health", "/mcp", "/assets/a/b.js", "/assets/../api/x.js", "/assets/x.html", "/auth/session?x=1", "/#x"]) {
+			assert.equal(pageMayRequest(`${ORIGIN}${url}`, "GET", origin), false, url);
+		}
+		assert.equal(pageMayRequest(`${ORIGIN}/`, "POST", origin), false);
+		assert.equal(pageMayRequest("https://elsewhere.example.test/", "GET", origin), false);
+		assert.equal(pageMayRequest("not a url", "GET", origin), false);
+	});
+
+	it("aborts a page's request for one observation before it reaches the server", async () => {
+		const { fake } = await open();
+		const outcomes: string[] = [];
+		const callsBefore = fake.calls.length;
+		for (const url of [`/api/observations/${ID}`, "/api/observations", `/api/observations/${ID}/end`]) {
+			await fake.routeHandler!({ request: () => ({ url: () => `${ORIGIN}${url}`, method: () => "GET" }), abort: async () => void outcomes.push("abort"), continue: async () => void outcomes.push("continue") });
+		}
+		assert.deepEqual(outcomes, ["abort", "abort", "abort"]);
+		// The only way to the list is the session's own GET, which routes don't govern; the page made none.
+		assert.equal(fake.calls.length, callsBefore);
+	});
+
+	it("loads only the root page", async () => {
+		const { session } = await open();
+		for (const bad of ["/chat/x", "/api/observations", "/auth/session", ""]) assert.equal((await refusal(() => session.inspectPage(bad))).code, "path", bad);
+	});
+});
+
 describe("every failure is fixed text, and cleans up once", () => {
+	for (const [name, set] of [
+		["route setup throws", (f: Fake) => void (f.routeThrows = true)],
+		["routeWebSocket setup throws", (f: Fake) => void (f.wsThrows = true)],
+		["reading the cookies throws", (f: Fake) => void (f.cookiesThrows = true)],
+	] as const) {
+		it(`closes the context and browser exactly once, with fixed text, when ${name}`, async () => {
+			const fake = new Fake();
+			set(fake);
+			const error = await refusal(() => open(fake));
+			assert.equal(error.code, "harness");
+			assert.equal(`${error.message}${error.stack?.split("\n")[0]}`.match(/failure|credential-|cookie-value/), null);
+			assert.deepEqual(fake.closed, { browser: 1, context: 1, page: 0 });
+		});
+	}
+
+	it("closes the browser once when the context can't be made, and the context once when the timer can't be set", async () => {
+		const noContext = new Fake();
+		noContext.newContextThrows = true;
+		assert.equal((await refusal(() => open(noContext))).code, "harness");
+		assert.deepEqual(noContext.closed, { browser: 1, context: 0, page: 0 });
+		const fake = new Fake();
+		const clock = new FakeClock();
+		clock.setTimeout = () => {
+			throw new Error("timer failure");
+		};
+		assert.equal((await refusal(() => open(fake, clock))).code, "harness");
+		assert.deepEqual(fake.closed, { browser: 1, context: 1, page: 0 });
+	});
+
 	it("closes the session when a page navigation throws, without repeating what it threw", async () => {
 		const { fake, session } = await open();
 		fake.gotoThrows = true;
@@ -565,6 +641,8 @@ describe("every failure is fixed text, and cleans up once", () => {
 		assert.equal(`${error.message}`.includes("/home/operator"), false);
 		assert.deepEqual(fake.closed, { browser: 1, context: 1, page: 1 });
 		assert.equal((await refusal(() => session.inspectPage("/"))).code, "closed");
+		assert.equal(fake.closed.context, 1);
+		assert.equal(fake.closed.browser, 1);
 	});
 
 	it("reports a launcher failure as fixed text, with nothing the launcher said", async () => {

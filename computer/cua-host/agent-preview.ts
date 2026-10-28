@@ -31,9 +31,11 @@
  * - Reading only: the session has one `GET` of the observation list and a
  *   read-only page. It has no Watch, End, setup or enrollment, no read of a
  *   single observation (the Worker's `GET /api/observations/<id>` asks the
- *   computer and may change the ledger), and the context aborts a browser
- *   request that isn't a GET or HEAD and answers every WebSocket itself,
- *   without connecting it to the server, before any page loads.
+ *   computer and may change the ledger). The context aborts every browser
+ *   request but an allowlist (the app's shell, its static files and
+ *   `/auth/session`, GET or HEAD, no query; no `/api` at all) and answers
+ *   every WebSocket itself, without connecting it to the server, before any
+ *   page loads.
  * - Bounds: the session makes at most 50 API reads and page loads, and lets
  *   its pages make at most 300 browser requests (subresources included); a
  *   request over either bound is refused. Time bounds the rest.
@@ -304,7 +306,26 @@ const MAX_EVIDENCE_CHARS = 300;
 
 /** The observation list: the one route read. (One record's route asks the computer, and may change the ledger.) */
 const OBSERVATION_LIST = "/api/observations";
-const UI_PATH = /^\/[A-Za-z0-9._~\-/]*$/;
+
+/**
+ * The only requests a page may make: the app's own shell, its static files and
+ * the session answer that feeds the banner, with no query. Everything else,
+ * `/api` included (the observation list is read by `context.request`, which
+ * routes don't govern; a record's status is never read), is aborted before
+ * it reaches the server.
+ */
+const PAGE_FILES = ["/", "/auth/session", "/favicon.svg", "/manifest.webmanifest", "/apple-touch-icon.png", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png"];
+const PAGE_ASSET = /^\/assets\/[A-Za-z0-9._~-]+\.(?:js|css|woff2?|svg|png|webp|ico|json)$/;
+export function pageMayRequest(rawUrl: string, method: string, origin: string): boolean {
+	let url: URL;
+	try {
+		url = new URL(rawUrl);
+	} catch {
+		return false;
+	}
+	if (url.origin !== origin || url.search !== "" || url.hash !== "" || !["GET", "HEAD"].includes(method)) return false;
+	return PAGE_FILES.includes(url.pathname) || PAGE_ASSET.test(url.pathname);
+}
 
 export class AgentPreviewSession {
 	readonly #origin: string;
@@ -366,9 +387,7 @@ export class AgentPreviewSession {
 	 * answers WebSockets itself. Any failure closes the session.
 	 */
 	async inspectPage(pagePath: string): Promise<{ path: string; title: string; banner: string | null }> {
-		if (!UI_PATH.test(pagePath) || pagePath.startsWith("//") || pagePath.includes("..")) {
-			throw new AgentPreviewError("path", "A page path is a plain path on the preview's origin.");
-		}
+		if (pagePath !== "/") throw new AgentPreviewError("path", "Only the app's root page is loaded.");
 		this.#spend();
 		let page: BrowserPage | undefined;
 		try {
@@ -468,13 +487,7 @@ export async function openAgentPreview(options: OpenOptions): Promise<AgentPrevi
 		let browserRequests = 0;
 		await context.route("**/*", async (route) => {
 			const request = route.request();
-			let allowed = false;
-			try {
-				allowed = new URL(request.url()).origin === origin && ["GET", "HEAD"].includes(request.method()) && ++browserRequests <= MAX_BROWSER_REQUESTS;
-			} catch {
-				// An address that doesn't parse is not this origin.
-			}
-			if (allowed) await route.continue();
+			if (pageMayRequest(request.url(), request.method(), origin) && ++browserRequests <= MAX_BROWSER_REQUESTS) await route.continue();
 			else await route.abort("blockedbyclient");
 		});
 		const built = adapter.request();

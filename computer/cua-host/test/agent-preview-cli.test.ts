@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { stripTypeScriptTypes } from "node:module";
 import { after, describe, it } from "node:test";
 import type { Browser, BrowserCookie, BrowserLauncher } from "../agent-preview.ts";
 import { run, USAGE } from "../agent-preview-cli.ts";
@@ -54,6 +55,29 @@ const capture = () => {
 	const err: string[] = [];
 	return { out, err, streams: { out: (l: string) => void out.push(l), err: (l: string) => void err.push(l) } };
 };
+
+describe("running the entry point under Node's own type stripping", () => {
+	// `node agent-preview-cli.ts` has no build step, so every file it loads must be erasable TypeScript: no parameter properties, enums or namespaces.
+	for (const name of ["agent-preview.ts", "agent-preview-automation.ts", "agent-preview-cli.ts"]) {
+		it(`${name} strips without error`, () => {
+			const source = fs.readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
+			assert.doesNotThrow(() => stripTypeScriptTypes(source, { mode: "strip" }));
+		});
+	}
+
+	it("loads only Node's own modules and its siblings", () => {
+		for (const name of ["agent-preview.ts", "agent-preview-automation.ts", "agent-preview-cli.ts"]) {
+			const source = fs.readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
+			for (const [, specifier] of source.matchAll(/^import .* from "([^"]+)";/gm)) assert.match(specifier!, /^(node:[a-z:]+|\.\/agent-preview[a-z-]*\.ts)$/, `${name}: ${specifier}`);
+		}
+	});
+
+	it("does nothing when imported: it runs only as the entry point", () => {
+		// Running as the entry point would have set an exit code from the empty argument list (usage, 2).
+		assert.equal(process.exitCode, undefined);
+		assert.equal(typeof run, "function");
+	});
+});
 
 describe("agent-preview-cli", () => {
 	it("prints one metadata line for the read-only diagnosis, with nothing secret", async () => {

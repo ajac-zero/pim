@@ -24,7 +24,10 @@ import {
 } from "~/components/app-sidebar";
 import { AppsDialog } from "~/components/apps-dialog";
 import { ChatLinkMenu } from "~/components/chat/chat-link";
-import { CopyConversation } from "~/components/chat/copy-conversation";
+import {
+  CopyChatId,
+  CopyConversation,
+} from "~/components/chat/copy-conversation";
 import { SessionCostMenu } from "~/components/chat/session-cost";
 import { SummaryToggle } from "~/components/chat/summary";
 import { CommandPalette } from "~/components/command-palette";
@@ -327,6 +330,7 @@ function MobileTitle() {
       <span className="truncate">
         {session ? sessionTitle(session, t) : "Pim"}
       </span>
+      {session && <CopyChatId sessionId={session.id} className="size-7" />}
     </span>
   );
 }

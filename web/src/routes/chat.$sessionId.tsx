@@ -12,7 +12,10 @@ import { useNewChat } from "~/components/app-sidebar";
 import { ArtifactView } from "~/components/artifact-view";
 import { ChatLinkMenu } from "~/components/chat/chat-link";
 import { Composer } from "~/components/chat/composer";
-import { CopyConversation } from "~/components/chat/copy-conversation";
+import {
+  CopyChatId,
+  CopyConversation,
+} from "~/components/chat/copy-conversation";
 import { RoomMenu } from "~/components/chat/room";
 import { SessionCostMenu } from "~/components/chat/session-cost";
 import { SummaryBox, SummaryToggle } from "~/components/chat/summary";
@@ -213,6 +216,7 @@ function ChatPage() {
             </span>
           )}
           <RoomMenu sessionId={sessionId} />
+          {shelf && <CopyChatId sessionId={sessionId} />}
           <CopyConversation sessionId={sessionId} />
           <SessionCostMenu sessionId={sessionId} />
           <ChatLinkMenu sessionId={sessionId} />

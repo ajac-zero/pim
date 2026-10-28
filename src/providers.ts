@@ -34,6 +34,8 @@ export type ProviderModel = {
 	readonly reasoning: boolean;
 	/** A built-in model's full native definition as JSON, also safe to pass over Durable Object RPC. */
 	readonly native?: string;
+	/** For a Claude model on a custom Messages endpoint: pi-ai's compat flags and thinking levels for it, as JSON. The API refuses the wrong kind of thinking request, so these must match the model. */
+	readonly claude?: string;
 };
 
 /** A provider as it's kept: its key included. */
@@ -236,13 +238,15 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 		if (missing) throw new HttpError(400, `${url} doesn't list a model ${missing}`);
 	}
 	const known = await knownModels();
-	const models = (chosen ?? listed!.map((entry) => entry.id as string)).map((id) =>
-		describe(
+	const models = (chosen ?? listed!.map((entry) => entry.id as string)).map((id) => {
+		const model = describe(
 			id,
 			listed?.find((entry) => entry.id === id),
 			known.get(id),
-		),
-	);
+		);
+		const claude = known.get(id);
+		return api && claude?.api === "anthropic-messages" ? { ...model, claude: JSON.stringify({ compat: claude.compat, thinkingLevelMap: claude.thinkingLevelMap }) } : model;
+	});
 
 	let id = existing?.id;
 	if (!id) {
@@ -255,7 +259,7 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 }
 
 export function providerInfo({ key, ...provider }: CustomProvider): ProviderInfo {
-	return { ...provider, models: provider.models.map(({ native, ...model }) => model), hasKey: key !== null };
+	return { ...provider, models: provider.models.map(({ native, claude, ...model }) => model), hasKey: key !== null };
 }
 
 /**
@@ -264,6 +268,7 @@ export function providerInfo({ key, ...provider }: CustomProvider): ProviderInfo
  */
 export function providerModel(catalogId: string, provider: CustomProvider, model: ProviderModel): Model<Api> {
 	if (model.native) return { ...JSON.parse(model.native) as Model<Api>, provider: catalogId };
+	const claude = model.claude ? (JSON.parse(model.claude) as Pick<Model<Api>, "compat" | "thinkingLevelMap">) : undefined;
 	return {
 		id: model.id,
 		name: model.name,
@@ -275,7 +280,7 @@ export function providerModel(catalogId: string, provider: CustomProvider, model
 		contextWindow: model.contextWindow,
 		maxTokens: model.maxTokens,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		...(provider.api ? {} : { compat: { supportsDeveloperRole: false } }),
+		...(provider.api ? claude : { compat: { supportsDeveloperRole: false } }),
 	} as Model<Api>;
 }
 

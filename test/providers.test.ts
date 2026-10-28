@@ -73,7 +73,7 @@ beforeEach(() => {
 		if (url.origin === "https://claude.test") {
 			if (url.pathname === "/v1/models") {
 				calls.push({ url: request.url, authorization: request.headers.get("authorization"), headers: Object.fromEntries(request.headers), body: null });
-				return Response.json({ data: [{ id: "proxy-claude" }] });
+				return Response.json({ data: [{ id: "claude-sonnet-5-5" }] });
 			}
 			const body = await request.json<{ model: string }>();
 			calls.push({ url: request.url, authorization: request.headers.get("authorization"), headers: Object.fromEntries(request.headers), body });
@@ -226,11 +226,13 @@ describe("A person's own model providers", () => {
 	it("speaks the Anthropic Messages API to a custom endpoint that is set to", async () => {
 		expect((await post("/providers", { name: "Proxy", url: "https://claude.test", api: "gpt" })).status).toBe(400);
 		const added = await post("/providers", { name: "Proxy", url: "https://claude.test", key: "proxy-key", api: "anthropic-messages" });
-		expect(added.body.provider).toMatchObject({ id: "proxy", api: "anthropic-messages", models: [{ id: "proxy-claude" }] });
+		expect(added.body.provider).toMatchObject({ id: "proxy", api: "anthropic-messages", models: [{ id: "claude-sonnet-5-5" }] });
 		expect(calls[0]).toMatchObject({ url: "https://claude.test/v1/models", headers: expect.objectContaining({ "x-api-key": "proxy-key", "anthropic-version": "2023-06-01" }) });
-		expect((await put("/model", { provider: "own:proxy", id: "proxy-claude" })).status).toBe(200);
+		expect((await put("/model", { provider: "own:proxy", id: "claude-sonnet-5-5" })).status).toBe(200);
 		expect((await say("Hello?")).text).toBe("Hello from claude.test");
 		expect(calls.at(-1)).toMatchObject({ url: expect.stringMatching(/^https:\/\/claude.test\/v1\/messages/), headers: expect.objectContaining({ "x-api-key": "proxy-key", authorization: "Bearer proxy-key" }) });
+		// A Claude model that only takes adaptive thinking is never sent a thinking budget, which its API refuses.
+		expect(calls.at(-1)!.body.thinking?.type).not.toBe("enabled");
 		// Saving again keeps the API it speaks.
 		expect((await put("/providers/proxy", { name: "Proxy 2" })).body.provider).toMatchObject({ api: "anthropic-messages" });
 		await api("/providers/proxy", { method: "DELETE" });

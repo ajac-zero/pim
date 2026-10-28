@@ -14,6 +14,7 @@ import { serve } from "../src/gateway";
 import { OWNER_HEADER, Pim as RealPim, SIGNED_IN_HEADER } from "../src/pim";
 import { INTRODUCTION } from "../src/transcript";
 import { Authenticator } from "../test/webauthn";
+import { previewAutomation } from "./automation";
 import { closedInEvaluation, EVAL_MODE, evaluating, previewMode, throughIngress } from "./cua-eval";
 import { type FixtureResult, seedCuaFixture, starts } from "./cua-fixture";
 import { agentMode, VIEWER_FIRST } from "./cua-viewer-first";
@@ -49,7 +50,9 @@ export { EvalDirectory as Directory } from "./cua-eval";
  * and only requests at Pim's own address, through the operator's ingress
  * (`PIM_RUNTIME=celld`) or Cloudflare's (`PIM_RUNTIME=cloudflare`, a Worker
  * of its own, wrangler.cua-eval.jsonc). The stand-in model, the fixture and
- * watching are as above: a real model is a separate step.
+ * watching are as above: a real model is a separate step. Only this mode
+ * mounts automation sign-in, off unless its private environment grants it
+ * (./automation.ts, docs/preview-automation.md).
  */
 
 const PREVIEW_MODEL = "preview-model";
@@ -375,5 +378,5 @@ function evaluation(request: Request, env: Env, ctx: ExecutionContext): Promise<
 	const refuse = (status: number, error: string) => Promise.resolve(Response.json({ error }, { status, headers: { "cache-control": "no-store" } }));
 	if (closedInEvaluation(url.pathname)) return refuse(404, "Not found");
 	if (url.origin !== deploymentSettings(env).publicUrl) return refuse(421, "This preview answers only at its own address.");
-	return serve(request, env, ctx, { observations: watching(env) });
+	return serve(request, env, ctx, { observations: watching(env), automation: previewAutomation });
 }

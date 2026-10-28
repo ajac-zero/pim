@@ -1,5 +1,6 @@
 import { isHttpsOrigin } from "../src/cua-viewer";
-import { type ClaimCode, Directory as RealDirectory, type Registration } from "../src/directory";
+import { type Account, type ClaimCode, Directory as RealDirectory, type Registration } from "../src/directory";
+import { AutomationLedger, type AutomationRow, MAX_LIVE_SESSIONS } from "./automation";
 import { CLIENT_IP_HEADER, INGRESS_SECRET_HEADER, runtimeOf } from "../src/runtime";
 
 /**
@@ -13,7 +14,9 @@ import { CLIENT_IP_HEADER, INGRESS_SECRET_HEADER, runtimeOf } from "../src/runti
  * - **No sign-in without a passkey.** `/__dev/…` is not found, by any method or
  *   spelling, and no setup link is written to the logs (`/auth/setup-link` is
  *   not found), so a session comes only from a passkey ceremony at
- *   `PIM_PUBLIC_URL`, as in a deployment.
+ *   `PIM_PUBLIC_URL`, as in a deployment. The one exception is a runner's
+ *   short, read-only automation session, off unless the private environment
+ *   grants one for the claimed owner (./automation.ts).
  * - **One named runtime** (src/runtime.ts), `PIM_RUNTIME`, which must be set:
  *   - `celld`: the operator's ingress in front of a local Worker. Every request
  *     must carry `PIM_INGRESS_SECRET` and the client's address, as the ingress
@@ -203,6 +206,47 @@ export class EvalDirectory extends RealDirectory {
 		const ok = result.ok && result.account.role === "admin";
 		this.#finish(claims, ok ? "claimed" : "failed", ok ? result.account.ownerId : null);
 		return result;
+	}
+
+	/**
+	 * The account automation may sign in as (./automation.ts): only in the
+	 * evaluation, only the owner its claim set up, and only while active.
+	 */
+	#automatable(owner: string): Account | null {
+		if (!evaluating(this.env)) return null;
+		const claimed = new ClaimRecord(this.ctx.storage.sql).read();
+		const account = claimed?.state === "claimed" && claimed.ownerId === owner ? this.account(owner) : null;
+		return account?.status === "active" ? account : null;
+	}
+
+	/** Records an automation session, unless its grant was revoked, it names anyone but the claimed, active owner, or the grant has too many open. */
+	automationBegin(row: Omit<AutomationRow, "endedAt">): { ok: true; account: Account } | { ok: false; reason: "refused" | "revoked" | "full" } {
+		const account = this.#automatable(row.owner);
+		if (!account) return { ok: false, reason: "refused" };
+		const ledger = new AutomationLedger(this.ctx.storage.sql);
+		if (ledger.revoked(row.grant)) return { ok: false, reason: "revoked" };
+		if (ledger.live(row.grant, row.createdAt) >= MAX_LIVE_SESSIONS) return { ok: false, reason: "full" };
+		ledger.begin(row);
+		return { ok: true, account };
+	}
+
+	/** The automation session a cookie's SHA-256 names, if it is neither ended, expired nor of a revoked grant, and its owner can still sign in; read afresh every time. */
+	automationSession(digest: string, now: number): { session: AutomationRow; account: Account } | null {
+		if (!evaluating(this.env)) return null;
+		const ledger = new AutomationLedger(this.ctx.storage.sql);
+		const session = ledger.read(digest);
+		if (!session || session.endedAt !== null || session.expiresAt <= now || ledger.revoked(session.grant)) return null;
+		const account = this.#automatable(session.owner);
+		return account ? { session, account } : null;
+	}
+
+	automationEnd(digest: string, now: number): void {
+		if (evaluating(this.env)) new AutomationLedger(this.ctx.storage.sql).end(digest, now);
+	}
+
+	/** Revokes a grant for good: every session it made stops at once, and its credential makes no more. */
+	automationRevoke(grant: string, now: number): void {
+		if (evaluating(this.env)) new AutomationLedger(this.ctx.storage.sql).revoke(grant, now);
 	}
 
 	/** No claim code is made, or written to the logs, for an evaluation: the operator's is the only one. */

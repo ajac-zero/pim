@@ -547,7 +547,7 @@ const translations = {
     gotIt: "Got it",
     manageUsage: "Manage usage",
     modelUsageLimit:
-      "Pim has used up its ChatGPT allowance, so it couldn't answer. That's either your plan's usage limit or Pim's own limit under App limits, which you can raise. Both reset on their own; ChatGPT's usage page shows when. Until then, you can switch Pim to its Workers AI model in Settings.",
+      "Pim has used up its ChatGPT allowance, so it couldn't answer. That's either your plan's usage limit or Pim's own limit under App limits, which you can raise. Both reset on their own; ChatGPT's usage page shows when. Until then, you can switch to another model provider in Settings.",
     modelQuota:
       "Pim's daily usage quota is used up, so it couldn't answer. It resets at midnight UTC.",
     modelSignIn:
@@ -1583,7 +1583,7 @@ const translations = {
     gotIt: "Entendido",
     manageUsage: "Administrar uso",
     modelUsageLimit:
-      "Pim agotó su asignación de ChatGPT, así que no pudo responder. Es el límite de uso de tu plan o el límite propio de Pim en Límites de apps, que puedes aumentar. Ambos se restablecen solos; la página de uso de ChatGPT muestra cuándo. Mientras tanto, puedes cambiar Pim a su modelo de Workers AI en Configuración.",
+      "Pim agotó su asignación de ChatGPT, así que no pudo responder. Es el límite de uso de tu plan o el límite propio de Pim en Límites de apps, que puedes aumentar. Ambos se restablecen solos; la página de uso de ChatGPT muestra cuándo. Mientras tanto, puedes cambiar a otro proveedor de modelos en Configuración.",
     modelQuota:
       "La cuota diaria de uso de Pim se agotó, así que no pudo responder. Se restablece a medianoche UTC.",
     modelSignIn:

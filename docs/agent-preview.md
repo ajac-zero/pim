@@ -48,7 +48,7 @@ There is no build step and no runtime install of project dependencies. The entry
 ```sh
 node agent-preview-cli.ts --origin https://pim-cua-eval.ajac-zero.com \
   --config-file ~/.config/pim-agent-preview/automation.json \
-  --deadline 2026-10-30T01:20:50Z --playwright-dir ~/.local/share/pim-agent-preview
+  --deadline 2026-10-30T01:20:50Z --playwright-dir ~/.local/share/pim-agent-preview [--browser-channel chrome]
 ```
 
 (`pnpm run agent-preview -- <the same arguments>` is the same command.) Without arguments it prints the usage and exits 2. I ran the argument-less and missing-config cases under Node 26.12 here (they read no secret and start no browser); Node 22.18 and 24 are not tried.
@@ -63,7 +63,19 @@ npm init -y && npm install --save-exact playwright@1.59.1
 npx playwright install chromium
 ```
 
-This downloads Chromium and is for the operator to run after review; nothing here has. For more than the first diagnosis, a controller is a Playwright-side script that imports `openAgentPreview` with `parseAutomationConfig` and drives the returned session; the existing agent browser tool cannot attach to this context.
+### System Chrome instead of the bundled Chromium
+
+Playwright 1.59.1 cannot download its Chromium on Ubuntu 26.04. For that case only, add `--browser-channel chrome`. The harness then calls `chromium.launch({ headless: true, channel: "chrome" })`, Playwright's supported channel for the operating system's Google Chrome Stable. Without the option nothing changes: the bundled Chromium, `launch({ headless: true })`, no channel. Only the exact word `chrome` is accepted; any other value, an empty one or a repeated option is refused with the usage (exit 2) before a browser is considered. There is no option for an executable path, a launch argument or another channel, and the sandbox stays on (no `--no-sandbox`). The context is the same fresh `browser.newContext` as always: no user data directory, profile, storage state, CDP attach, extension, download, trace or video, and every origin, route, WebSocket and read-only control is unchanged. The Playwright pin stays 1.59.1.
+
+Chrome is a separate prerequisite, managed by the operating system, not by this repository, and not installed by `npm install playwright`. Before using the option the operator checks, statically and without running Chrome:
+
+- it came from the `google-chrome-stable` package from `dl.google.com` (for example `dpkg -S /opt/google/chrome/chrome` and `apt-cache policy google-chrome-stable`), at the version they intend (the build runner has 156.0.8078.47);
+- `/opt/google/chrome/chrome` and `/opt/google/chrome/chrome-sandbox` are owned by root, not writable by group or others, and `chrome-sandbox` is setuid (mode 4755);
+- no Playwright browser cache is expected to be used.
+
+If Chrome is missing or Playwright cannot drive this version, the launch fails with the same fixed sentence as any launch failure, which carries no path or Playwright text. Nothing here has launched Chrome: the tests use a fake Playwright module that records its launch options, so whether Playwright 1.59.1 drives Chrome 156 is unqualified until the operator's first real run.
+
+The bundled Chromium download is for the operator to run after review; nothing here has. For more than the first diagnosis, a controller is a Playwright-side script that imports `openAgentPreview` with `parseAutomationConfig` and drives the returned session; the existing agent browser tool cannot attach to this context.
 
 ## The banner
 
@@ -71,7 +83,7 @@ While the mode is on, every page shows **UNSAFE PREVIEW — agent access enabled
 
 ## Tests
 
-`pnpm --filter pim-cua-host test` runs `test/agent-preview.test.ts` (with the rest); `pnpm --filter pim-web test` runs the banner's. They prove, with fakes and records shaped like the Worker's real `ObservationView`: one context serves the exchange, an API read and a page; the credential only goes in the POST; isolated context options; origin rules, route aborts, the browser request bound and the WebSocket handler installed first and never connecting; file-permission refusals; fixed, redacted errors and cleanup on each failure path; the lifetime limits and timer close; no retry; the Playwright version check against a fake module; and that first use is read only.
+`pnpm --filter pim-cua-host test` runs `test/agent-preview.test.ts` (with the rest); `pnpm --filter pim-web test` runs the banner's. They prove, with fakes and records shaped like the Worker's real `ObservationView`: one context serves the exchange, an API read and a page; the credential only goes in the POST; isolated context options; origin rules, route aborts, the browser request bound and the WebSocket handler installed first and never connecting; file-permission refusals; fixed, redacted errors and cleanup on each failure path; the lifetime limits and timer close; no retry; the Playwright version check against a fake module; that the default launch is headless with no channel, that exactly `--browser-channel chrome` launches headless with `channel: "chrome"`, and that other values, executable-path or argument options are refused before any browser; and that first use is read only.
 
 ## Not done
 

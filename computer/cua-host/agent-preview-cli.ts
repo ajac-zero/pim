@@ -3,7 +3,8 @@
  * preview (docs/agent-preview.md):
  *
  *   node agent-preview-cli.ts --origin <https origin> --config-file <absolute path> \
- *     --deadline <ISO time, the evaluation's> --playwright-dir <runtime directory>
+ *     --deadline <ISO time, the evaluation's> --playwright-dir <runtime directory> \
+ *     [--browser-channel chrome]
  *
  * Nothing secret is an argument: the credential is a field of the protected
  * configuration file (agent-preview-automation.ts), and `--origin` must equal
@@ -19,7 +20,7 @@ import { parseArgs } from "node:util";
 import { AgentPreviewError, type BrowserLauncher, diagnoseObservations, openAgentPreview, playwrightChromium } from "./agent-preview.ts";
 import { parseAutomationConfig } from "./agent-preview-automation.ts";
 
-export const USAGE = "usage: agent-preview-cli --origin <https origin> --config-file <absolute path> --deadline <ISO time> --playwright-dir <absolute path>";
+export const USAGE = "usage: agent-preview-cli --origin <https origin> --config-file <absolute path> --deadline <ISO time> --playwright-dir <absolute path> [--browser-channel chrome]";
 
 export interface Streams {
 	out(line: string): void;
@@ -30,13 +31,19 @@ export interface Streams {
 export async function run(argv: readonly string[], streams: Streams, launcher?: BrowserLauncher): Promise<number> {
 	let values: Record<string, string | undefined>;
 	try {
-		({ values } = parseArgs({ args: [...argv], options: { origin: { type: "string" }, "config-file": { type: "string" }, deadline: { type: "string" }, "playwright-dir": { type: "string" } }, strict: true }));
+		({ values } = parseArgs({ args: [...argv], options: { origin: { type: "string" }, "config-file": { type: "string" }, deadline: { type: "string" }, "playwright-dir": { type: "string" }, "browser-channel": { type: "string" } }, strict: true }));
 	} catch {
 		streams.err(USAGE);
 		return 2;
 	}
 	const deadline = Date.parse(values.deadline ?? "");
 	if (!values.origin || !values["config-file"] || !values["playwright-dir"] || !Number.isFinite(deadline) || Date.now() >= deadline) {
+		streams.err(USAGE);
+		return 2;
+	}
+	// Only the exact word "chrome" selects the system Chrome; anything else, even an empty value, is refused before a browser is considered.
+	const channel = values["browser-channel"];
+	if (channel !== undefined && channel !== "chrome") {
 		streams.err(USAGE);
 		return 2;
 	}
@@ -50,7 +57,7 @@ export async function run(argv: readonly string[], streams: Streams, launcher?: 
 				return parsed;
 			},
 			deadline,
-			launcher: launcher ?? playwrightChromium(values["playwright-dir"]),
+			launcher: launcher ?? playwrightChromium(values["playwright-dir"], channel),
 		});
 		const meta = session.metadata();
 		const result = await diagnoseObservations(session);

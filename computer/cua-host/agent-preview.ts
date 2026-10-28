@@ -161,12 +161,23 @@ export interface Browser {
 	newContext(options: ContextOptions): Promise<BrowserContext>;
 	close(): Promise<void>;
 }
+interface Chromium {
+	launch(options: { headless: true; channel?: BrowserChannel }): Promise<Browser>;
+}
 export interface BrowserLauncher {
 	launch(): Promise<Browser>;
 }
 
 /**
- * Playwright's own Chromium, a fresh browser launched headless for this run,
+ * The only alternative to Playwright's bundled Chromium: the operating system's
+ * Google Chrome Stable, chosen by Playwright's `channel: "chrome"`. There is no
+ * executable path, launch argument or other channel.
+ */
+export type BrowserChannel = "chrome";
+
+/**
+ * Playwright's own Chromium (or, only when `channel` is exactly "chrome", the
+ * system Google Chrome Stable), a fresh browser launched headless for this run,
  * never attached to a human's browser (`connectOverCDP`) or profile
  * (`launchPersistentContext`). Playwright is not a dependency of this
  * repository: the operator installs exactly `PLAYWRIGHT_VERSION` in a
@@ -175,7 +186,7 @@ export interface BrowserLauncher {
  * failed: Playwright's errors carry paths and environment. No test launches
  * a real browser.
  */
-export function playwrightChromium(runtimeDir: string): BrowserLauncher {
+export function playwrightChromium(runtimeDir: string, channel?: BrowserChannel): BrowserLauncher {
 	return {
 		async launch() {
 			try {
@@ -183,12 +194,14 @@ export function playwrightChromium(runtimeDir: string): BrowserLauncher {
 				const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as { version?: unknown };
 				if (pkg.version !== PLAYWRIGHT_VERSION) throw new Error("version");
 				const entry = createRequire(path.join(runtimeDir, "package.json")).resolve("playwright");
-				const playwright = (await import(pathToFileURL(entry).href)) as { chromium?: { launch(options: { headless: true }): Promise<Browser> }; default?: { chromium?: { launch(options: { headless: true }): Promise<Browser> } } };
+				const playwright = (await import(pathToFileURL(entry).href)) as { chromium?: Chromium; default?: { chromium?: Chromium } };
 				const chromium = playwright.chromium ?? playwright.default?.chromium;
 				if (!chromium) throw new Error("chromium");
-				return await chromium.launch({ headless: true });
+				if (channel === undefined) return await chromium.launch({ headless: true });
+				if (channel !== "chrome") throw new Error("channel");
+				return await chromium.launch({ headless: true, channel: "chrome" });
 			} catch {
-				throw new AgentPreviewError("launch", `The browser could not be launched; it needs Playwright ${PLAYWRIGHT_VERSION} installed in the runtime directory.`);
+				throw new AgentPreviewError("launch", `The browser could not be launched; it needs Playwright ${PLAYWRIGHT_VERSION} installed in the runtime directory, and with a browser channel, a compatible system Chrome.`);
 			}
 		},
 	};

@@ -104,6 +104,21 @@ describe("agent-preview-cli", () => {
 		}
 	});
 
+	it("accepts exactly --browser-channel chrome, and refuses every other value or launch option before any browser", async () => {
+		const f = fake();
+		const c = capture();
+		assert.equal(await run(args(["--browser-channel", "chrome"]), c.streams, f.launcher), 0);
+		const flagged = [["--browser-channel", "chrome-beta"], ["--browser-channel", "Chrome"], ["--browser-channel", ""], ["--browser-channel", "/opt/google/chrome/chrome"], ["--browser-channel"], ["--executable-path", "/opt/google/chrome/chrome"], ["--browser-arg", "--no-sandbox"], ["--args", "--no-sandbox"], ["--channel", "chrome"]];
+		for (const extra of flagged) {
+			const g = fake();
+			const d = capture();
+			assert.equal(await run(args(extra), d.streams, g.launcher), 2, extra.join(" "));
+			assert.deepEqual(d.err, [USAGE]);
+			assert.deepEqual(g.calls, []);
+		}
+		assert.match(USAGE, /\[--browser-channel chrome\]/);
+	});
+
 	it("stops with one redacted failure line and no retry when the API refuses the session", async () => {
 		const f = fake(403);
 		const c = capture();

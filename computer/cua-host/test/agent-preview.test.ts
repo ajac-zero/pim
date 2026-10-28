@@ -693,6 +693,21 @@ describe("the Playwright runtime", () => {
 	it("loads exactly the pinned version from the runtime directory, and launches headless", async () => {
 		const launched = (await playwrightChromium(runtime(PLAYWRIGHT_VERSION)).launch()) as unknown as { fakeLaunch: unknown };
 		assert.deepEqual(launched.fakeLaunch, { headless: true });
+		assert.equal(Object.hasOwn(launched.fakeLaunch as object, "channel"), false);
+	});
+
+	it("launches the system Chrome only for exactly the chrome channel, with nothing else in the options", async () => {
+		const launched = (await playwrightChromium(runtime(PLAYWRIGHT_VERSION), "chrome").launch()) as unknown as { fakeLaunch: unknown };
+		assert.deepEqual(launched.fakeLaunch, { headless: true, channel: "chrome" });
+		assert.deepEqual(Object.keys(launched.fakeLaunch as object).sort(), ["channel", "headless"]);
+	});
+
+	it("refuses any other channel before the browser launches, with fixed text", async () => {
+		for (const other of ["chrome-beta", "msedge", "Chrome", "", "/opt/google/chrome/chrome"]) {
+			const error = await refusal(() => playwrightChromium(runtime(PLAYWRIGHT_VERSION), other as never).launch());
+			assert.equal(error.code, "launch");
+			assert.equal(error.message, (await refusal(() => playwrightChromium(runtime("1.0.0")).launch())).message);
+		}
 	});
 
 	it("refuses any other version", async () => {

@@ -610,7 +610,7 @@ prepare_tree() {
 	list_tree "$1" f "$STAGE/m/$2.files" || fail "manifest-$2"
 	for kind in dirs files; do
 		while IFS= read -r -d '' name; do
-			[[ "$name" =~ ^[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$ ]] || fail "manifest-$2"
+			[[ "$name" =~ ^[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$ ]] || fail_path "manifest-$2" "$name"
 		done <"$STAGE/m/$2.$kind" || fail "manifest-$2"
 	done
 }

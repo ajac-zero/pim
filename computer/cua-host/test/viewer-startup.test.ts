@@ -1145,6 +1145,7 @@ describe("the pinned delivery", () => {
 		assert.ok(body.includes('[[ -n "$target" && "$target" != /* ]] || fail_path stage-link "$entry"'));
 		assert.ok(body.includes('[[ "$(realpath -m -s -- "$(dirname -- "$entry")/$target")" == "$root"/* ]] || fail_path stage-link "$entry"'));
 		assert.ok(body.includes('[[ "$(realpath -e -- "$entry")" == "$real"/* ]] || fail_path stage-link "$entry"'));
+		assert.ok(bashFunction(script, "prepare_tree").includes('fail_path "manifest-$2" "$name"'), "an entry name outside the plain set is named in the failure");
 		assert.ok(body.includes('fail_path stage-ownership "$entry"') && body.includes('fail_path stage-mode "$entry"'));
 		// The diagnostic is the entry's name under the stage, with any odd character shown as ?, cut at 200, and nothing else.
 		const named = bashFunction(script, "fail_path");

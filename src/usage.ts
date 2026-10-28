@@ -335,6 +335,7 @@ export class UsageMeter {
 				} catch (error) {
 					// Never sent: it doesn't count.
 					this.releaseModel(reserved.reservation);
+					console.warn(JSON.stringify({ event: "pim.model_error", provider: model.provider, model: model.id, error: String(error).slice(0, 1000) }));
 					throw error;
 				}
 				// The stream settles once; a failed or aborted request keeps its count, with whatever tokens it reported.
@@ -342,11 +343,11 @@ export class UsageMeter {
 					(message) => {
 						this.settleModel(reserved.reservation, message.usage);
 						// The chat only says that a request failed; the provider's own words are for whoever runs the deployment.
-						if (message.stopReason === "error") {
-							console.warn(JSON.stringify({ event: "pim.model_error", provider: model.provider, model: model.id, error: (message.errorMessage ?? "").slice(0, 1000) }));
+						if (message.stopReason !== "stop" && message.stopReason !== "toolUse" && message.stopReason !== "length") {
+							console.warn(JSON.stringify({ event: "pim.model_error", provider: model.provider, model: model.id, stopReason: message.stopReason, error: (message.errorMessage ?? "").slice(0, 1000) }));
 						}
 					},
-					() => undefined,
+					(error) => console.warn(JSON.stringify({ event: "pim.model_error", provider: model.provider, model: model.id, error: String(error).slice(0, 1000) })),
 				);
 				return events;
 			},

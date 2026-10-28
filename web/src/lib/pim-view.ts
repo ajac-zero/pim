@@ -152,7 +152,7 @@ export type SessionView = {
   /** Messages queued behind the running work. */
   queued: number;
   /** A failed model request to be asked again: at `at`, or, at 0, when the person says so. */
-  retry: { at: number; problem: ModelProblem } | null;
+  retry: { at: number; problem: ModelProblem; code?: string } | null;
   error: ViewError | null;
   /**
    * The utility model's line for each tool call it described, by call id
@@ -175,7 +175,7 @@ export type ModelProblem =
 
 export type ViewError =
   /** A failed or faulted model request. */
-  | { problem: ModelProblem }
+  | { problem: ModelProblem; code?: string }
   /** Any other faulted task, such as a tool's. Its message is never shown. */
   | { taskFailed: true }
   /** pi's code for any other unanswered input. */
@@ -207,6 +207,26 @@ const MODEL_PROBLEMS: ReadonlyArray<[ModelProblem, RegExp]> = [
     /rate.?limit|too many requests|\b429\b|overloaded|capacity|\b50[0234]\b|unavailable|timed? ?out|network|fetch failed|connection/i,
   ],
 ];
+
+/**
+ * An unclassified model error's HTTP status and error type, such as
+ * "400 invalid_request_error": enough to tell what went wrong without
+ * showing the provider's own text.
+ */
+export function modelErrorCode(text: string): string | undefined {
+  const status = /\b([1-5]\d\d)\b/.exec(text)?.[1];
+  const kind = /"(?:type|code)"\s*:\s*"(?!error")([a-z][a-z_]{2,39})"/i.exec(
+    text,
+  )?.[1];
+  return [status, kind].filter(Boolean).join(" ") || undefined;
+}
+
+/** The error a model failure shows: its problem, and for an unclassified one its code. */
+function modelError(text: string): { problem: ModelProblem; code?: string } {
+  const problem = modelProblem(text);
+  const code = problem === "other" ? modelErrorCode(text) : undefined;
+  return code ? { problem, code } : { problem };
+}
 
 export function modelProblem(text: string): ModelProblem {
   return (
@@ -555,7 +575,7 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
           retry: event.generation?.retry
             ? {
                 at: event.generation.retry.at,
-                problem: modelProblem(event.generation.retry.error),
+                ...modelError(event.generation.retry.error),
               }
             : null,
           error: null,
@@ -632,7 +652,7 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
         ...state,
         view: {
           ...view,
-          retry: { at: event.at, problem: modelProblem(event.errorMessage) },
+          retry: { at: event.at, ...modelError(event.errorMessage) },
         },
       };
     case "auto_retry_end":
@@ -640,7 +660,7 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
     case "task_failed": {
       // A fault's message can be a provider's or OpenAI's raw response.
       const error: ViewError = MODEL_TASKS.has(event.kind)
-        ? { problem: modelProblem(event.message) }
+        ? modelError(event.message)
         : { taskFailed: true };
       return { ...state, view: { ...view, error } };
     }
@@ -657,7 +677,7 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
           const detail = typeof record.detail === "string" ? record.detail : "";
           return {
             ...state,
-            view: { ...view, error: { problem: modelProblem(detail) } },
+            view: { ...view, error: modelError(detail) },
           };
         }
         // Another reason, such as "faulted", follows the task_failed of the

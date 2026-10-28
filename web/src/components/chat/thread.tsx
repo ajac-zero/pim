@@ -146,7 +146,7 @@ export const Thread = memo(function Thread({
   const held = view.retry !== null && view.retry.at === 0;
   const shownError: ViewError | null =
     view.retry !== null && held
-      ? { problem: view.retry.problem }
+      ? { problem: view.retry.problem, code: view.retry.code }
       : view.running
         ? null
         : view.error;
@@ -547,6 +547,11 @@ export const Thread = memo(function Thread({
               {"problem" in shownError ? (
                 <>
                   <p>{t(PROBLEM_TEXT[shownError.problem])}</p>
+                  {"code" in shownError && shownError.code && (
+                    <p className="font-mono text-muted-foreground text-xs">
+                      {shownError.code}
+                    </p>
+                  )}
                   {(held ||
                     shownError.problem === "usage_limit" ||
                     shownError.problem === "unauthorized" ||

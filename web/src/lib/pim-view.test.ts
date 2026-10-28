@@ -912,8 +912,8 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
         message: leaky,
       }),
     ]);
-    expect(failed.view.error).toEqual({ problem: "other" });
-    expect(faulted.view.error).toEqual({ problem: "other" });
+    expect(failed.view.error).toEqual({ problem: "other", code: "400" });
+    expect(faulted.view.error).toEqual({ problem: "other", code: "400" });
     const states = [
       failed,
       faulted,
@@ -979,6 +979,15 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
         ),
       ]).view.error,
     ).toEqual({ problem: "unauthorized" });
+    expect(
+      run([
+        snapshot(),
+        fault(
+          "pi.generation",
+          '400 {"type":"error","error":{"type":"invalid_request_error","message":"secret detail"}}',
+        ),
+      ]).view.error,
+    ).toEqual({ problem: "other", code: "400 invalid_request_error" });
     expect(
       run([
         snapshot(),

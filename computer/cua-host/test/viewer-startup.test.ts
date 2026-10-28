@@ -1103,6 +1103,62 @@ describe("the pinned delivery", () => {
 		assert.ok(script.includes("trusted_file /usr/bin/cmp"));
 	});
 
+	// The staged tree's rule for links, as a model the script's text is then asserted to implement. The model runs no process and touches no file.
+	const MODEL_ROOT = "/var/lib/pim-cua-fetch/node";
+	/** The lexical half of the script's rule for a link at `link` (relative to the tree) with `target`: not empty, not absolute, and resolving to a place strictly inside the tree. */
+	const linkInside = (link: string, target: string, root = MODEL_ROOT) => {
+		if (target === "" || target.startsWith("/")) return false;
+		return path.posix.normalize(path.posix.join(root, path.posix.dirname(link), target)).startsWith(`${root}/`);
+	};
+	/** Whether the script's mode test (`! -type l \( -perm /022 -o -perm /6000 \)`) would flag an entry: links are never judged by their own bits. */
+	const modeFlagged = (kind: "file" | "dir" | "link", mode: number) => kind !== "link" && ((mode & 0o022) !== 0 || (mode & 0o6000) !== 0);
+
+	it("accepts the Node archive's three links, which are 0777 and point inside the tree, and refuses a link that leaves it, is absolute, empty or dangling-by-escape", () => {
+		for (const [link, target] of [["bin/npm", "../lib/node_modules/npm/bin/npm-cli.js"], ["bin/npx", "../lib/node_modules/npm/bin/npx-cli.js"], ["bin/corepack", "../lib/node_modules/corepack/dist/corepack.js"], ["lib/a/b", "../c/d"], ["bin/x", "../lib/../lib/y"]] as const) assert.equal(linkInside(link, target), true, `${link} -> ${target}`);
+		for (const [link, target] of [["bin/npm", "/etc/shadow"], ["bin/npm", "../../etc/passwd"], ["bin/npm", "../../../../../etc/passwd"], ["bin/npm", ""], ["bin/npm", ".."], ["bin/npm", "../../node-evil/x"], ["lib/a/b", "../../../outside"], ["bin/npm", "../lib/../../x"], ["top", "../node2/x"]] as const) assert.equal(linkInside(link, target), false, `${link} -> ${target}`);
+		// A sibling whose name starts with the root's is not inside it.
+		assert.equal(linkInside("bin/npm", "../../node2/x"), false);
+		// A link to a directory inside the tree is fine.
+		assert.equal(linkInside("bin/npm", "."), true);
+	});
+
+	it("judges a link by its target and everything else by its mode: 0777 on a link is normal, 0666 on a file or 0775 on a directory or a setuid bit is not", () => {
+		assert.equal(modeFlagged("link", 0o777), false);
+		assert.equal(modeFlagged("link", 0o4777), false);
+		for (const [kind, mode] of [["file", 0o666], ["file", 0o664], ["file", 0o646], ["dir", 0o775], ["dir", 0o757], ["file", 0o4755], ["file", 0o2755], ["dir", 0o2755], ["file", 0o4000]] as const) assert.equal(modeFlagged(kind, mode), true, `${kind} ${mode.toString(8)}`);
+		for (const [kind, mode] of [["file", 0o755], ["file", 0o644], ["file", 0o600], ["dir", 0o755], ["dir", 0o700], ["file", 0o555]] as const) assert.equal(modeFlagged(kind, mode), false, `${kind} ${mode.toString(8)}`);
+	});
+
+	it("implements that in `staged_ok`: ownership for every entry, modes only for non-links, each link checked lexically and as resolved, every failure naming its entry", () => {
+		const script = fetchScript();
+		const body = bashFunction(script, "staged_ok");
+		assert.ok(body.length > 0);
+		// The old test, which flagged a link's 0777, is gone; the ownership test covers links too (find does not follow them).
+		assert.equal(script.includes("\\( ! -uid 0 -o -perm /022"), false);
+		assert.ok(body.includes('find "$root" ! -uid 0 -print -quit'));
+		assert.ok(body.includes('find "$root" ! -type l \\( -perm /022 -o -perm /6000 \\) -print -quit'));
+		// The links are listed into a file of the stage, so a failing find is seen, and no process substitution is used.
+		assert.ok(body.includes('find "$root" -type l -print0 >"$STAGE/m/links" || fail stage-link'));
+		assert.ok(body.includes('done <"$STAGE/m/links" || fail stage-link'));
+		assert.deepEqual(unobservedSubstitutions(body), []);
+		// Relative, non-empty, inside lexically, and inside as the filesystem resolves it (a dangling link fails).
+		assert.ok(body.includes('[[ -n "$target" && "$target" != /* ]] || fail_path stage-link "$entry"'));
+		assert.ok(body.includes('[[ "$(realpath -m -s -- "$(dirname -- "$entry")/$target")" == "$root"/* ]] || fail_path stage-link "$entry"'));
+		assert.ok(body.includes('[[ "$(realpath -e -- "$entry")" == "$real"/* ]] || fail_path stage-link "$entry"'));
+		assert.ok(body.includes('fail_path stage-ownership "$entry"') && body.includes('fail_path stage-mode "$entry"'));
+		// The diagnostic is the entry's name under the stage, with any odd character shown as ?, cut at 200, and nothing else.
+		const named = bashFunction(script, "fail_path");
+		assert.ok(named.includes(`tr -c 'A-Za-z0-9._/@+-' '?'`));
+		assert.ok(named.includes('"path":"%s"') && named.includes("${shown:0:200}"));
+		assert.deepEqual(unobservedSubstitutions(named), []);
+		for (const tool of ["readlink", "realpath", "tr"]) assert.ok(script.includes(`trusted_file /usr/bin/${tool} || fail tools`), tool);
+		// Still run on the same five staged trees, before anything is placed.
+		for (const tree of ['"$STAGE/node" "$STAGE/caddy" "$STAGE/chrome$CHROME_DIR" "$STAGE/spacesd"', '"$STAGE/bundle"']) {
+			assert.ok(script.includes(`\nstaged_ok ${tree}\n`), tree);
+			assert.ok(script.indexOf(`\nstaged_ok ${tree}\n`) < script.indexOf("\nPLACING=1\n"), tree);
+		}
+	});
+
 	it("checks each unpacked program against the configured digest, then builds the bundle with the staged Node and checks its tree digest, before any move", () => {
 		const script = fetchScript();
 		const moves = script.indexOf("\nPLACING=1\n");

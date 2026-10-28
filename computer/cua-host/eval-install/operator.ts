@@ -535,7 +535,7 @@ function renderFetch(config: Config, viewer: NonNullable<Config["viewer"]>, pins
 		download("ws", "ws.tgz", pins.ws.url, "512", integrityHex(pins.ws.sha512), null, pins.ws.maxBytes),
 		download("protobuf", "protobuf.tgz", pins.protobuf.url, "512", integrityHex(pins.protobuf.sha512), null, pins.protobuf.maxBytes),
 	].join("");
-	const tools = ["curl", "tar", "dpkg-deb", "sha256sum", "sha512sum", "stat", "cut", "find", "chmod", "mkdir", "ln", "sort", "cmp", "rm", "install", "dirname"].map((tool) => `trusted_file /usr/bin/${tool} || fail tools`).join("\n");
+	const tools = ["curl", "tar", "dpkg-deb", "sha256sum", "sha512sum", "stat", "cut", "find", "chmod", "mkdir", "ln", "sort", "cmp", "readlink", "realpath", "tr", "rm", "install", "dirname"].map((tool) => `trusted_file /usr/bin/${tool} || fail tools`).join("\n");
 	return `${prologue(config, "fetch", false)}
 ${tools}
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy NO_PROXY CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
@@ -643,11 +643,34 @@ ensure_parent() {
 	trusted_dirs "$dir" || fail dest-parent
 }
 
-# A staged tree is all root's, with no write for group or others and no setuid or setgid.
+# A failure that names the entry. The name is under the stage, so it holds no secret; any character outside letters, digits and ._/@+- is shown as a question mark, and it is cut at 200.
+fail_path() {
+	local shown
+	shown="$(printf '%s' "$2" | tr -c 'A-Za-z0-9._/@+-' '?')" || shown="?"
+	printf '{"event":"pim-cua-eval.failed","command":"%s","reason":"%s","path":"%s"}\\n' "$COMMAND" "$1" "\${shown:0:200}" >&2
+	exit 1
+}
+
+# A staged tree is all root's. Its regular files and directories have no write for group or others and no setuid or setgid.
+# Its symbolic links are the one thing whose own mode means nothing (Linux gives every link 0777), so they are judged by where they point instead: a relative target,
+# which both lexically and as the filesystem really resolves it stays inside the same tree. A link out of the tree, an absolute one or a dangling one fails.
+# Each failure names the entry. The list of links is a file of the stage, so a failing find is seen.
 staged_ok() {
-	local unexpected
-	unexpected="$(find "$@" \\( ! -uid 0 -o -perm /022 -o -perm /6000 \\) -print -quit)" || fail "stage-ownership"
-	[[ -z "$unexpected" ]] || fail "stage-ownership"
+	local root real entry target
+	for root in "$@"; do
+		entry="$(find "$root" ! -uid 0 -print -quit)" || fail stage-ownership
+		[[ -z "$entry" ]] || fail_path stage-ownership "$entry"
+		entry="$(find "$root" ! -type l \\( -perm /022 -o -perm /6000 \\) -print -quit)" || fail stage-mode
+		[[ -z "$entry" ]] || fail_path stage-mode "$entry"
+		real="$(realpath -e -- "$root")" || fail_path stage-link "$root"
+		find "$root" -type l -print0 >"$STAGE/m/links" || fail stage-link
+		while IFS= read -r -d '' entry; do
+			target="$(readlink -- "$entry")" || fail_path stage-link "$entry"
+			[[ -n "$target" && "$target" != /* ]] || fail_path stage-link "$entry"
+			[[ "$(realpath -m -s -- "$(dirname -- "$entry")/$target")" == "$root"/* ]] || fail_path stage-link "$entry"
+			[[ "$(realpath -e -- "$entry")" == "$real"/* ]] || fail_path stage-link "$entry"
+		done <"$STAGE/m/links" || fail stage-link
+	done
 }
 
 # Nothing is replaced, and nothing is begun if anything is already there.

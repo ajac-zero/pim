@@ -301,6 +301,11 @@ const translations = {
     copyMessage: "Copy message",
     copyConversation: "Copy conversation as Markdown",
     couldNotCopyConversation: "Couldn't copy the conversation. Try again.",
+    sessionCost: "Cost of this chat",
+    sessionCostTotal: "Total: {amount}",
+    sessionCostRequests: "{count} requests",
+    sessionCostNone: "Nothing has been used in this chat yet.",
+    sessionCostTokens: "{input} in, {output} out, {cached} cached",
     chatLink: "Public link",
     chatLinkOn: "Public link: on",
     chatLinkHint:
@@ -1335,6 +1340,12 @@ const translations = {
     copyConversation: "Copiar conversación como Markdown",
     couldNotCopyConversation:
       "No se pudo copiar la conversación. Inténtalo de nuevo.",
+    sessionCost: "Costo de este chat",
+    sessionCostTotal: "Total: {amount}",
+    sessionCostRequests: "{count} solicitudes",
+    sessionCostNone: "Aún no se ha usado nada en este chat.",
+    sessionCostTokens:
+      "{input} de entrada, {output} de salida, {cached} en caché",
     chatLink: "Enlace público",
     chatLinkOn: "Enlace público: activado",
     chatLinkHint:

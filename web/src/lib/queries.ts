@@ -15,6 +15,12 @@ export const chatLinkQuery = (session: string) =>
     queryFn: () => pim.chatLink(session),
   });
 
+export const sessionCostQuery = (session: string) =>
+  queryOptions({
+    queryKey: ["session-cost", session],
+    queryFn: () => pim.sessionCost(session),
+  });
+
 export const approvalsQuery = () =>
   queryOptions({ queryKey: ["approvals"], queryFn: () => pim.approvals() });
 

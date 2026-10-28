@@ -182,7 +182,7 @@ import { Progress } from "./progress";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { projectEntries } from "./transcript";
 import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
-import { type Limits, parseLimits, UsageMeter } from "./usage";
+import { type Limits, parseLimits, sessionCost, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
 
 const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
@@ -4528,6 +4528,7 @@ export class Pim extends DurableAgent<Env> {
 				return { session, busy, pending, messages: projectEntries(entries) };
 			},
 		],
+		["GET", "/sessions/:session/cost", async ({ session }) => sessionCost(await this.harness.session(await this.#session(session!)).messages())],
 		[
 			"POST",
 			"/sessions/:session/messages",

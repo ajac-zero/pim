@@ -256,6 +256,7 @@ export const UserPlus = themedIcon(Lucide.UserPlus, Pixel.UserPlus);
 export const UserRound = themedIcon(Lucide.UserRound, Pixel.User);
 export const Users = themedIcon(Lucide.Users, Pixel.Users);
 export const Wallet = themedIcon(Lucide.Wallet, Pixel.Wallet);
+export const DollarSign = themedIcon(Lucide.DollarSign, Pixel.Dollar);
 export const Wrench = themedIcon(Lucide.Wrench, Pixel.Tools);
 export const X = themedIcon(Lucide.X, Pixel.Close);
 export const Zap = themedIcon(Lucide.Zap, Pixel.Zap);

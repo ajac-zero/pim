@@ -7,6 +7,7 @@ import {
 	type Usage as ModelUsage,
 } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
+import type { EntryRecord } from "@earendil-works/pi-durable";
 import { HttpError } from "./http";
 
 /**
@@ -353,4 +354,39 @@ export class UsageMeter {
 			},
 		);
 	}
+}
+
+export type SessionCost = {
+	/** Dollars, as the model catalog prices the tokens. Models without a price, such as a custom provider's, count as nothing. */
+	readonly total: number;
+	readonly models: readonly {
+		readonly provider: string;
+		readonly model: string;
+		readonly requests: number;
+		readonly input: number;
+		readonly output: number;
+		readonly cacheRead: number;
+		readonly cacheWrite: number;
+		readonly cost: number;
+	}[];
+};
+
+/** What the model requests in a conversation have cost, by model, from the usage each reply carries. */
+export function sessionCost(entries: readonly EntryRecord[]): SessionCost {
+	const models = new Map<string, { -readonly [K in keyof SessionCost["models"][number]]: SessionCost["models"][number][K] }>();
+	for (const entry of entries) {
+		const message = entry.model?.[0];
+		if (message?.role !== "assistant" || !message.usage) continue;
+		const key = `${message.provider}/${message.model}`;
+		const row = models.get(key) ?? { provider: message.provider, model: message.model, requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		row.requests += 1;
+		row.input += message.usage.input;
+		row.output += message.usage.output;
+		row.cacheRead += message.usage.cacheRead;
+		row.cacheWrite += message.usage.cacheWrite;
+		row.cost += message.usage.cost.total;
+		models.set(key, row);
+	}
+	const rows = [...models.values()].sort((a, b) => b.cost - a.cost);
+	return { total: rows.reduce((sum, row) => sum + row.cost, 0), models: rows };
 }

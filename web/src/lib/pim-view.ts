@@ -187,7 +187,10 @@ const MODEL_TASKS = new Set(["pi.generation", "pi.compaction"]);
 /** First match wins. */
 const MODEL_PROBLEMS: ReadonlyArray<[ModelProblem, RegExp]> = [
   // Sign in with ChatGPT: the plan's usage, or Pim's own App limit, is used up.
-  ["usage_limit", /subscription_sharing_usage_limit_exceeded/],
+  [
+    "usage_limit",
+    /subscription_sharing_usage_limit_exceeded|Subscription Sharing usage limit/i,
+  ],
   // Pim's own daily limits (QUOTA_MESSAGE in src/usage.ts).
   ["quota", /^Pim usage quota exceeded\b/],
   [

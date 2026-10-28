@@ -1126,13 +1126,13 @@ describe("the pinned delivery", () => {
 		refusedWith(() => bundleInputs((file) => { if (file === BUNDLE_SOURCES[3]) throw new Error("gone"); return inRepository(file); }, false), "source");
 	});
 
-	it("pins the bundle commit B and its archive, renders only for B, and refuses any empty or mismatched pin", () => {
-		const B = "afc9371a75f1c21b3b22627222b9791ef283692d";
-		assert.deepEqual(PINS.repository, { commit: B, sha256: "582716ed2cac76e546980d0e856160e45e6b5f64e2dfde0aa2b2173b3236aae8", maxBytes: 64 * 1024 * 1024 });
+	it("pins the bundle commit B′ and its archive, renders only for B, and refuses any empty or mismatched pin", () => {
+		const B = "1e236a9de21c10414bd6f2557ba6adecd466b3a5";
+		assert.deepEqual(PINS.repository, { commit: B, sha256: "09bee1ee7126b5f6a744f6450a3f8b0456248b99262e0441b7218379051e43de", maxBytes: 64 * 1024 * 1024 });
 		assert.deepEqual(missingPins(PINS), []);
 		assert.deepEqual(missingPins({ ...PINS, repository: { ...PINS.repository, commit: null, sha256: null } }), ["repository-commit", "repository-sha256"]);
 		const fetch = renderScripts(config(true, (raw) => { raw.commit = B; }), PINS)["fetch.sh"]!;
-		assert.ok(fetch.includes(`'https://codeload.github.com/ajac-zero/pim/tar.gz/${B}' 256 '582716ed2cac76e546980d0e856160e45e6b5f64e2dfde0aa2b2173b3236aae8'`));
+		assert.ok(fetch.includes(`'https://codeload.github.com/ajac-zero/pim/tar.gz/${B}' 256 '09bee1ee7126b5f6a744f6450a3f8b0456248b99262e0441b7218379051e43de'`));
 		// A configuration for any other commit is refused: the pin is for B alone.
 		refusedWith(() => renderScripts(config(true)), "pin-commit");
 		refusedWith(() => renderScripts(config(true), { ...PINNED, repository: { ...PINNED.repository, sha256: null } }), "pin-missing:repository-sha256");

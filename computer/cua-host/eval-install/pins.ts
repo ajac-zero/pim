@@ -60,40 +60,6 @@ export const PINS: Pins = {
 	// B′, the bundle-source commit (docs/cua-viewer-first-startup.md, "A live failure in the first bundle"): the archive GitHub's codeload serves for it, 2,716,890 bytes, taken on two machines.
 	// It replaces B (afc9371a…, whose bundle lacked two imported files); B and its digest stay in the docs as evidence.
 	repository: { commit: "1e236a9de21c10414bd6f2557ba6adecd466b3a5", sha256: "09bee1ee7126b5f6a744f6450a3f8b0456248b99262e0441b7218379051e43de", maxBytes: 64 * 1024 * 1024 },
-	/** The two npm packages the bundle carries, by SHA-512 integrity as pnpm-lock.yaml records it (the bundle build checks them against the lockfile too). */
-	readonly ws: { readonly url: string; readonly sha512: string; readonly maxBytes: number };
-	readonly protobuf: { readonly url: string; readonly sha512: string; readonly maxBytes: number };
-};
-
-export const PINS: Pins = {
-	node: {
-		version: "v22.18.0",
-		url: "https://nodejs.org/dist/v22.18.0/node-v22.18.0-linux-x64.tar.gz",
-		sha256: "a2e703725d8683be86bb5da967bf8272f4518bdaf10f21389e2b2c9eaeae8c8a",
-		maxBytes: 96 * 1024 * 1024,
-	},
-	caddy: {
-		version: "v2.11.7",
-		url: "https://github.com/caddyserver/caddy/releases/download/v2.11.7/caddy_2.11.7_linux_amd64.tar.gz",
-		sha256: "727b91701a392de6ebc5027509f548bf39979e5216340d0faed8fa5e69c84f8b",
-		maxBytes: 48 * 1024 * 1024,
-	},
-	spacesd: {
-		version: "0.7.0",
-		url: "https://github.com/trycua/cua/releases/download/cua-spacesd-v0.7.0/cua-spacesd-x86_64-unknown-linux-gnu",
-		sha256: "78622428711f3778127ad661ba2976ae27bf23ae5e05439d60d5b95511c808fd",
-		bytes: 121_121_848,
-		maxBytes: 121_121_848,
-	},
-	chrome: {
-		version: "156.0.8078.47-1",
-		url: "https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_156.0.8078.47-1_amd64.deb",
-		sha256: "6c92cd22e90c6e3e255d782991543fa2091db8614e8536a971a7433a5c4d7ac8",
-		bytes: 144_849_192,
-		maxBytes: 144_849_192,
-	},
-	// B, the bundle-source commit (docs/cua-viewer-first-startup.md, "The bundle-source candidate"): the archive GitHub's codeload serves for it, 2,693,038 bytes, taken on two machines.
-	repository: { commit: "afc9371a75f1c21b3b22627222b9791ef283692d", sha256: "582716ed2cac76e546980d0e856160e45e6b5f64e2dfde0aa2b2173b3236aae8", maxBytes: 64 * 1024 * 1024 },
 	ws: {
 		url: "https://registry.npmjs.org/ws/-/ws-8.22.0.tgz",
 		sha512: "Ydggc987+RO0AnWtZ/7Wq9FtNvcrL1b/RO0ud9mWjUPgDrsAAwQSF51sm2hm1XofbU/4jkpGEsLFsZZxU+1DOg==",

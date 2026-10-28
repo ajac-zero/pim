@@ -10,6 +10,8 @@ export type Session = {
   id: string;
   title: string | null;
   busy: boolean;
+  /** Its run waits for you to try again after a model error: not at work. */
+  held?: boolean;
   createdAt: number | null;
   updatedAt: number | null;
   responseAt: number | null;
@@ -1366,6 +1368,11 @@ export const pim = {
     }).then((body) => body.room),
   abort: (session: string) =>
     call<{ aborted: boolean }>(`/sessions/${session}/abort`, {
+      method: "POST",
+    }),
+  /** Asks the model again in a chat held after a model error. */
+  retry: (session: string) =>
+    call<{ session: string }>(`/sessions/${session}/retry`, {
       method: "POST",
     }),
   approvals: (status?: ApprovalStatus) =>

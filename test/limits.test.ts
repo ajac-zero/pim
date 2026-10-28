@@ -7,7 +7,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
 import { env, runInDurableObject } from "cloudflare:test";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type Limits, UNLIMITED, UsageMeter } from "../src/usage";
 import { exports } from "cloudflare:workers";
 import { api, apiUrl, OWNER, post, ROOT, say, TOKEN, toolUse, url } from "./helpers";
@@ -175,19 +175,34 @@ describe("limits", () => {
 		expect(refused.body.error).toMatch(/quota exceeded: today's \d+ runs are used up/);
 	});
 
-	it("stop a run once the model allowance is used up, without retrying it", async () => {
+	it("hold a run once the model allowance is used up, and pick it up again when the person says to", async () => {
 		const { modelRequests } = (await api<Usage>("/usage")).body.today;
 		await setLimits({ dailyModelRequests: modelRequests });
 		const started = Date.now();
 		// No scripted response: the model is never asked.
-		const answer = await say("Are you there?");
-		expect(answer).toMatchObject({ status: "unanswered", reason: "model_error" });
-		// The person reads why in the chat.
-		const { messages } = (await api(`/sessions/${ROOT}/messages`)).body;
-		expect(JSON.stringify(messages.at(-1))).toMatch(/quota exceeded: today's \d+ model requests are used up/);
+		const sent = await post(`/sessions/${ROOT}/messages`, { content: "Are you there?" });
+		// The person reads why in the chat, and the run is still theirs to continue.
+		const held = await vi.waitFor(async () => {
+			const { body } = await api(`/sessions/${ROOT}/messages`);
+			expect(JSON.stringify(body.messages.at(-1))).toMatch(/quota exceeded: today's \d+ model requests are used up/);
+			return body;
+		});
+		expect(held.busy).toBe(true);
+		// The chat list doesn't show it at work: it waits for the person.
+		const listed = (await api<{ sessions: { id: string; busy: boolean; held: boolean }[] }>("/sessions")).body.sessions;
+		expect(listed.find((session) => session.id === ROOT)).toMatchObject({ busy: false, held: true });
 		// Retries back off for seconds; a quota error is final.
 		expect(Date.now() - started).toBeLessThan(3_000);
 		expect((await api<Usage>("/usage")).body.today.modelRequests).toBe(modelRequests);
+
+		await setLimits(null);
+		faux.setResponses([toolUse("send_to_user", { message: "Back again." })]);
+		expect((await post(`/sessions/${ROOT}/retry`)).status).toBe(200);
+		const answer = await api(`/sessions/${ROOT}/operations/${sent.body.operationId}?timeout=20000`);
+		expect(answer.body).toMatchObject({ status: "done" });
+		expect((await api(`/sessions/${ROOT}/messages`)).body.busy).toBe(false);
+		// Nothing is held any more.
+		expect((await post(`/sessions/${ROOT}/retry`)).status).toBe(409);
 	});
 
 	it("cap open chats", async () => {

@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { useI18n } from "~/components/i18n";
 import {
+  AlertCircle,
   Archive,
   Bell,
   Blocks,
@@ -907,6 +908,13 @@ function SessionRow({
             className="order-first size-3 shrink-0 animate-spin text-primary motion-reduce:animate-none"
             role="img"
             aria-label={t("working")}
+          />
+        )}
+        {session.held && (
+          <AlertCircle
+            className="order-first size-3 shrink-0 text-destructive"
+            role="img"
+            aria-label={t("waitingToTryAgain")}
           />
         )}
         {awaitingApproval && (

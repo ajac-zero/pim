@@ -4,6 +4,9 @@ import { DELIVERY_REMINDER } from "../transcript";
 import { widgetMarkdown } from "./define";
 import { type PimServices, text } from "./services";
 
+/** Why a run fails when the agent keeps answering without send_to_user: trying the model again wouldn't help. */
+export const NOT_DELIVERED = "The agent did not deliver its reply with send_to_user.";
+
 /** The tool Pim speaks with: the person sees what it sends, and nothing else it writes. */
 export const SEND_TO_USER = "send_to_user";
 export const MESSAGING_EXTENSION = "pim.messaging";
@@ -274,7 +277,7 @@ export function messagingExtension(services: PimServices) {
 					if (answer.stopReason === "stop" || answer.stopReason === "length" || (answer.stopReason === "toolUse" && !answer.content.some((part) => part.type === "toolCall"))) {
 						// Hook throws are reported and ignored by pi; classify this as a non-retryable failure instead.
 						answer.stopReason = "error";
-						answer.errorMessage = "The agent did not deliver its reply with send_to_user.";
+						answer.errorMessage = NOT_DELIVERED;
 					}
 				},
 				async onYield(_answer, api, context) {

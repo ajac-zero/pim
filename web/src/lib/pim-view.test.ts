@@ -939,6 +939,24 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
     }
   });
 
+  it("shows a run held after a model error by its problem, and clears it once the run goes on", () => {
+    const held = run([
+      snapshot(),
+      event({
+        type: "auto_retry_start",
+        at: 0,
+        errorMessage: "subscription_sharing_usage_limit_exceeded",
+      }),
+    ]);
+    expect(held.view.retry).toEqual({ at: 0, problem: "usage_limit" });
+    const resumed = run([
+      snapshot(),
+      event({ type: "auto_retry_start", at: 0, errorMessage: "x" }),
+      event({ type: "auto_retry_end" }),
+    ]);
+    expect(resumed.view.retry).toBeNull();
+  });
+
   it("reads a fault as a model problem only for model tasks", () => {
     const fault = (kind: string, message: string) =>
       event({ type: "task_failed", taskId: "t", kind, message });

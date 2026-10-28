@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
   Fragment,
@@ -8,6 +8,7 @@ import {
   useMemo,
   useRef,
 } from "react";
+import { toast } from "sonner";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 import { PimMark } from "~/components/app-sidebar";
 import { ArtifactCard, artifactReference } from "~/components/artifact";
@@ -50,6 +51,7 @@ import {
   type ThreadEntry,
   taskHistory,
   userItem,
+  type ViewError,
 } from "~/lib/pim-view";
 import {
   agentsQuery,
@@ -138,6 +140,20 @@ export const Thread = memo(function Thread({
   composerCardHeight?: number;
 }) {
   const { t } = useI18n();
+
+  // A run whose model request failed for good waits where it stopped, for a
+  // person to ask again; its error shows like a failed run's.
+  const held = view.retry !== null && view.retry.at === 0;
+  const shownError: ViewError | null =
+    view.retry !== null && held
+      ? { problem: view.retry.problem }
+      : view.running
+        ? null
+        : view.error;
+  const retry = useMutation({
+    mutationFn: () => pim.retry(sessionId),
+    onError: (error) => toast.error(error.message),
+  });
 
   const entries = useMemo<ThreadEntry[]>(() => {
     const all = [...view.entries];
@@ -500,11 +516,11 @@ export const Thread = memo(function Thread({
           </div>
         )}
 
-        {view.running && !replying && <ThinkingDot />}
+        {view.running && !replying && !held && <ThinkingDot />}
 
         <MembersWorking members={working} agents={agents} />
 
-        {view.retry && (
+        {view.retry && !held && (
           <div className="flex items-center justify-center gap-2 text-muted-foreground text-[13px]">
             <Clock className="size-4 shrink-0" />
             {t("retryingAfterError")}
@@ -517,19 +533,30 @@ export const Thread = memo(function Thread({
           </div>
         )}
 
-        {view.error && !view.running && (
+        {shownError && (
           <div className="flex items-start gap-3 rounded-2xl bg-muted px-4 py-3 text-sm">
             <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
             <div className="flex-1 space-y-2">
-              {"problem" in view.error ? (
+              {"problem" in shownError ? (
                 <>
-                  <p>{t(PROBLEM_TEXT[view.error.problem])}</p>
-                  {(view.error.problem === "usage_limit" ||
-                    view.error.problem === "sign_in" ||
-                    view.error.problem === "other") && (
+                  <p>{t(PROBLEM_TEXT[shownError.problem])}</p>
+                  {(held ||
+                    shownError.problem === "usage_limit" ||
+                    shownError.problem === "sign_in" ||
+                    shownError.problem === "other") && (
                     <div className="flex flex-wrap gap-2">
+                      {/* The run is held where it stopped: this asks the model again, with whichever model the agent has now. */}
+                      {held && (
+                        <Button
+                          size="sm"
+                          disabled={retry.isPending}
+                          onClick={() => retry.mutate()}
+                        >
+                          {t("tryAgain")}
+                        </Button>
+                      )}
                       {/* OpenAI's settings show the plan's usage and Pim's App limit, and raise it. */}
-                      {view.error.problem === "usage_limit" && (
+                      {shownError.problem === "usage_limit" && (
                         <Button asChild size="sm" variant="outline">
                           <a
                             href={CHATGPT_USAGE_URL}
@@ -555,10 +582,10 @@ export const Thread = memo(function Thread({
                     </div>
                   )}
                 </>
-              ) : "taskFailed" in view.error ? (
+              ) : "taskFailed" in shownError ? (
                 <p>{t("taskFailed")}</p>
               ) : (
-                <p>{t("notAnswered", { reason: view.error.reason })}</p>
+                <p>{t("notAnswered", { reason: shownError.reason })}</p>
               )}
             </div>
           </div>

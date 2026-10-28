@@ -1,4 +1,3 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "vitest";
 import type { Goal } from "../src/store";
 import type { Message } from "@earendil-works/pi-ai";
@@ -11,7 +10,7 @@ describe("goals", () => {
 		const prompts: Message[][] = [];
 		const record = (context: { messages: Message[] }) => {
 			prompts.push(context.messages);
-			return fauxAssistantMessage("ok");
+			return toolUse("send_to_user", { message: "ok" });
 		};
 		faux.setResponses([record]);
 		await say("hi", session);
@@ -31,7 +30,7 @@ describe("goals", () => {
 	it("creates a goal with a plan and records progress", async () => {
 		faux.setResponses([
 			toolUse("create_goal", { title: "Run a 10k", steps: ["Buy shoes", "Run 3x a week", "Sign up for a race"] }),
-			fauxAssistantMessage("Plan made."),
+			toolUse("send_to_user", { message: "Plan made." }),
 		]);
 		await say("I want to run a 10k.");
 		const [goal] = (await api<{ goals: Goal[] }>("/goals")).body.goals;
@@ -42,7 +41,7 @@ describe("goals", () => {
 			toolUse("update_goal", { id: goal!.id, complete_steps: [1], note: "Bought trail shoes" }),
 			(context) => {
 				prompt = systemPrompt(context.messages);
-				return fauxAssistantMessage("Nice.");
+				return toolUse("send_to_user", { message: "Nice." });
 			},
 		]);
 		await say("I bought shoes!");

@@ -69,8 +69,12 @@ function givenToken(request: Request): string | null {
 	return header?.startsWith("Bearer ") ? header.slice(7) : new URL(request.url).searchParams.get("token");
 }
 
-/** Whose request this is, and whether it came with a browser's session (some things an API token can't do). */
-type Caller = { readonly account: Account; readonly viaSession: boolean };
+/**
+ * Whose request this is, and whether it came with a browser's session (some
+ * things an API token can't do), or with a composition's automation session,
+ * which is neither and only reads (`AutomationSessions`).
+ */
+type Caller = { readonly account: Account; readonly viaSession: boolean; readonly automated?: true };
 
 /** Why an account opens nothing, if it doesn't. */
 function closed(account: Account): Response | undefined {
@@ -80,14 +84,24 @@ function closed(account: Account): Response | undefined {
 	return undefined;
 }
 
-/** Who may call the API: a token holder, or a signed-in browser. */
-async function authorize(request: Request, env: Env): Promise<Caller | Response> {
+/** Who may call the API: a token holder, a browser an automation session signs in where one is mounted, or a signed-in browser. */
+async function authorize(request: Request, env: Env, automation?: AutomationSessions): Promise<Caller | Response> {
 	const token = givenToken(request);
 	const tokenAccount = token && tokenOwner(token) ? await resolveAccount(env, tokenOwner(token)!) : null;
 	if (token && tokenAccount) {
 		const refused = closed(tokenAccount);
 		if (refused) return refused;
 		if (await siteFor(env, tokenAccount).store.checkToken(token, Date.now())) return { account: tokenAccount, viaSession: false };
+	}
+	// Before a passkey's: a browser that carries a good automation session is that, and never the person's own session.
+	const automated = automation ? await automation.owner(request, env) : null;
+	if (automated) {
+		const account = await resolveAccount(env, automated);
+		if (!account) return fail(401, "Unauthorized");
+		const refused = closed(account);
+		if (refused) return refused;
+		if (fromAnotherSite(request)) return fail(403, "Requests must come from this app");
+		return { account, viaSession: false, automated: true };
 	}
 	const account = await signedIn(request, env);
 	if (account) return account instanceof Response ? account : { account, viaSession: true };
@@ -115,8 +129,8 @@ async function throttled(env: Env, account: Account): Promise<Response | undefin
 }
 
 /** Whose request this is, if they may make it now. */
-async function admit(request: Request, env: Env): Promise<Caller | Response> {
-	const caller = await authorize(request, env);
+async function admit(request: Request, env: Env, automation?: AutomationSessions): Promise<Caller | Response> {
+	const caller = await authorize(request, env, automation);
 	if (caller instanceof Response) return caller;
 	return (await throttled(env, caller.account)) ?? caller;
 }
@@ -356,11 +370,28 @@ function serveThemes(request: Request, path: string): Response {
 }
 
 /**
+ * Sessions a composition adds beside passkeys', for automation: only the
+ * preview's evaluation mounts them (preview/automation.ts,
+ * docs/preview-automation.md). Each request that carries one is checked by
+ * `owner` again, and an API request on one is answered only if `refuses`
+ * lets it, never as the person's browser session.
+ */
+export type AutomationSessions = {
+	/** Its own routes under `/auth`, and `/auth/session` for a browser it signs in; `undefined` for anything else, which `/auth` answers as before. */
+	auth(request: Request, env: Env): Promise<Response | undefined>;
+	/** The owner the request's automation session names, checked again now, or null when it carries none that is good. */
+	owner(request: Request, env: Env): Promise<string | null>;
+	/** Why it refuses an API request (`path` under `/api`) on such a session, if it does. */
+	refuses(path: string, request: Request): Response | undefined;
+};
+
+/**
  * Routes a composition adds to the API, which a deployment doesn't have: it
  * passes none (./index.ts). Only the preview mounts `observations`
- * (preview/worker.ts, docs/cua-viewer-first-preview.md).
+ * (preview/worker.ts, docs/cua-viewer-first-preview.md), and only its
+ * evaluation `automation`.
  */
-export type Mounts = { readonly observations?: boolean };
+export type Mounts = { readonly observations?: boolean; readonly automation?: AutomationSessions };
 
 /**
  * The person watching their Cua desktop, where mounted: `/api/observations/…`,
@@ -427,7 +458,11 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext, m
 		return serveConsent(request, env, account.ownerId, publicUrl, mcpAccess);
 	}
 
-	if (under(pathname, "/auth")) return (await handleRegistration(request, env, address)) ?? handleAuth(request, env, sites(env));
+	if (under(pathname, "/auth")) {
+		const automation = await mounts.automation?.auth(request, env);
+		if (automation) return automation;
+		return (await handleRegistration(request, env, address)) ?? handleAuth(request, env, sites(env));
+	}
 
 	if (pathname === "/authorize") {
 		// The app's page where the person lets an MCP client in, which no other site may frame.
@@ -462,9 +497,11 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext, m
 	const path = pathname.slice("/api".length) || "/";
 	if (path === "/health") return withCors(Response.json({ name: "pim", ok: true }));
 	if (path === "/computer/connect") return serveComputer(request, env);
-	const caller = await admit(request, env);
+	const caller = await admit(request, env, mounts.automation);
 	if (caller instanceof Response) return withCors(caller);
-	const { account, viaSession } = caller;
+	const { account, viaSession, automated } = caller;
+	const unread = automated && mounts.automation?.refuses(path, request);
+	if (unread) return withCors(unread);
 	const site = siteFor(env, account);
 	const extensions = [
 		accountApi(env, account, site, request, viaSession),
@@ -475,7 +512,8 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext, m
 		const answered = await extension(path, request);
 		if (answered) return withCors(answered);
 	}
-	if (mounts.observations && under(path, "/observations")) return serveObservation(request, env, account.ownerId, viaSession, path);
+	// An automation session reaches here only for the list, which `refuses` alone lets through: the space answers it from what it holds.
+	if (mounts.observations && under(path, "/observations")) return serveObservation(request, env, account.ownerId, viaSession || automated === true, path);
 	// The space accepts sockets on any path; keep them on one.
 	const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
 	if (upgrade !== (path === "/ws" || path === BROWSER_LIVE_PATH)) {

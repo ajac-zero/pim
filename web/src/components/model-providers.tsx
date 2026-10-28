@@ -221,6 +221,9 @@ function ProviderForm({
   const [structured, setStructured] = useState(
     provider?.structuredOutput ?? false,
   );
+  const [protocol, setProtocol] = useState<NonNullable<ProviderInput["api"]>>(
+    provider?.api ?? "openai-completions",
+  );
   const [kind, setKind] = useState(
     provider?.builtin ?? (provider ? "custom" : "anthropic"),
   );
@@ -253,6 +256,7 @@ function ProviderForm({
                 .map((id) => id.trim())
                 .filter(Boolean),
               structuredOutput: structured,
+              api: protocol,
             }),
         ...(key.trim() ? { key: key.trim() } : removeKey ? { key: "" } : {}),
       };
@@ -350,6 +354,27 @@ function ProviderForm({
               {t("providerAddressHint")}
             </span>
           </label>
+          <div className="space-y-1">
+            <span className="text-[13px] text-muted-foreground">
+              {t("providerApi")}
+            </span>
+            <Select
+              value={protocol}
+              onValueChange={(value) => setProtocol(value as typeof protocol)}
+            >
+              <SelectTrigger className="w-full" aria-label={t("providerApi")}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="openai-completions">
+                  {t("providerApiOpenai")}
+                </SelectItem>
+                <SelectItem value="anthropic-messages">
+                  {t("providerApiAnthropic")}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </>
       )}
       <div className="space-y-1">

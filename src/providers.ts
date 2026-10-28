@@ -49,13 +49,15 @@ export type CustomProvider = {
 	readonly models: readonly ProviderModel[];
 	/** Whether a custom endpoint's models can answer in a JSON schema (`response_format`); the person says so, and an absent flag is no. Built-in services are known (see `answersInSchema`). */
 	readonly structuredOutput?: boolean;
+	/** The API a custom endpoint speaks when it isn't OpenAI's chat completions; absent means chat completions. */
+	readonly api?: "anthropic-messages";
 };
 
 /** A provider as the API shows it: never its key. */
 export type ProviderInfo = Omit<CustomProvider, "key"> & { readonly hasKey: boolean };
 
 /** What adding or changing a provider gives; a missing field keeps what it was. */
-export type ProviderInput = { readonly builtin?: unknown; readonly name?: unknown; readonly url?: unknown; readonly key?: unknown; readonly models?: unknown; readonly structuredOutput?: unknown };
+export type ProviderInput = { readonly builtin?: unknown; readonly name?: unknown; readonly url?: unknown; readonly key?: unknown; readonly models?: unknown; readonly structuredOutput?: unknown; readonly api?: unknown };
 
 /** Known services need a key, not an address. Model definitions come from pi-ai. */
 const BUILTIN_PROVIDERS = [
@@ -144,10 +146,13 @@ function describe(id: string, listed: Record<string, unknown> | undefined, known
 }
 
 /** The models the server at `url` lists. Throws with why it couldn't. */
-async function listModels(url: string, key: string | null): Promise<Record<string, unknown>[]> {
+async function listModels(url: string, key: string | null, api: CustomProvider["api"]): Promise<Record<string, unknown>[]> {
 	let response: Response;
 	try {
-		response = await fetch(`${url}/models`, { headers: key ? { authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(10_000) });
+		// Anthropic's Messages API lists models under `/v1` and takes its key as `x-api-key`; proxies often take only one of the two headers.
+		const headers: Record<string, string> = key ? { authorization: `Bearer ${key}`, ...(api ? { "x-api-key": key } : {}) } : {};
+		if (api) headers["anthropic-version"] = "2023-06-01";
+		response = await fetch(api ? `${url}/v1/models` : `${url}/models`, { headers, signal: AbortSignal.timeout(10_000) });
 	} catch (error) {
 		throw new Error(error instanceof Error && error.name === "TimeoutError" ? "it didn't answer in 10 seconds" : "it couldn't be reached");
 	}
@@ -197,6 +202,8 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 		chosen = ids.length === 0 ? null : ids;
 	}
 	if (input.structuredOutput !== undefined && typeof input.structuredOutput !== "boolean") throw new HttpError(400, "structuredOutput must be true or false");
+	if (input.api !== undefined && input.api !== "openai-completions" && input.api !== "anthropic-messages") throw new HttpError(400, "api must be openai-completions or anthropic-messages");
+	if (preset && input.api !== undefined) throw new HttpError(400, "A built-in provider's API cannot be changed");
 	if (preset) {
 		const { getBuiltinModels } = await import("./provider-catalog");
 		const catalog = getBuiltinModels(preset.id) as Model<Api>[];
@@ -212,10 +219,11 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 		return { id, builtin: preset.id, name, url, key, chosen, models };
 	}
 
+	const api = input.api === undefined ? existing?.api : input.api === "anthropic-messages" ? "anthropic-messages" : undefined;
 	let listed: Record<string, unknown>[] | null = null;
 	let unlisted: string | null = null;
 	try {
-		listed = await listModels(url, key);
+		listed = await listModels(url, key, api);
 	} catch (error) {
 		unlisted = error instanceof Error ? error.message : String(error);
 	}
@@ -243,7 +251,7 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 		for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
 	}
 	const structuredOutput = input.structuredOutput === undefined ? existing?.structuredOutput === true : input.structuredOutput;
-	return { id, name, url, key, chosen, models, structuredOutput };
+	return { id, name, url, key, chosen, models, structuredOutput, ...(api && { api }) };
 }
 
 export function providerInfo({ key, ...provider }: CustomProvider): ProviderInfo {
@@ -259,7 +267,7 @@ export function providerModel(catalogId: string, provider: CustomProvider, model
 	return {
 		id: model.id,
 		name: model.name,
-		api: "openai-completions",
+		api: provider.api ?? "openai-completions",
 		provider: catalogId,
 		baseUrl: provider.url,
 		input: model.images ? ["text", "image"] : ["text"],
@@ -267,8 +275,8 @@ export function providerModel(catalogId: string, provider: CustomProvider, model
 		contextWindow: model.contextWindow,
 		maxTokens: model.maxTokens,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		compat: { supportsDeveloperRole: false },
-	};
+		...(provider.api ? {} : { compat: { supportsDeveloperRole: false } }),
+	} as Model<Api>;
 }
 
 /** A provider as pi-ai calls it, by its catalog id. A server without a key, as local ones usually are, is sent a placeholder. */

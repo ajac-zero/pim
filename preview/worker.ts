@@ -5,7 +5,7 @@ import type { ModelRef } from "@earendil-works/pi-durable";
 import type { PiModel } from "agents/harness/pi";
 import { ownedCode } from "../src/auth";
 import { bridgeFor } from "../src/cua";
-import { OBSERVATION_PATH_PREFIX, observationResponse } from "../src/cua-observation";
+import { OBSERVATION_PATH_PREFIX, type ObservationSummary, observationResponse, summarizeStoredObservations } from "../src/cua-observation";
 import { OBSERVATION_KEY, ObservationDesk } from "../src/cua-observation-runtime";
 import { appOrigin, CuaViewerClient } from "../src/cua-viewer";
 import { deploymentSettings } from "../src/deployment";
@@ -14,7 +14,7 @@ import { serve } from "../src/gateway";
 import { OWNER_HEADER, Pim as RealPim, SIGNED_IN_HEADER } from "../src/pim";
 import { INTRODUCTION } from "../src/transcript";
 import { Authenticator } from "../test/webauthn";
-import { previewAutomation } from "./automation";
+import { type AutomationSpace, automationGrant, previewAutomation } from "./automation";
 import { evaluatorAdmission, type EvaluatorSpace, launchEvaluatorGrant, previewLaunchEvaluator, type SpaceEnd, type SpaceLaunch } from "./launch-evaluator";
 import { closedInEvaluation, EVAL_MODE, evaluating, previewMode, throughIngress } from "./cua-eval";
 import { type FixtureResult, seedCuaFixture, starts } from "./cua-fixture";
@@ -204,9 +204,13 @@ function watches(fixture: FixtureResult, name: string | undefined, env: Env): na
 	return seeded && watching(env) && name !== undefined && (env as unknown as Record<string, unknown>).PREVIEW_CUA_FIXTURE_OWNER === name;
 }
 
-export class Pim extends RealPim implements EvaluatorSpace {
-	/** The space's observations of its Cua desktop: only in the one space the fixture seeded; null in every other. */
-	readonly #desk: ObservationDesk | null;
+export class Pim extends RealPim implements EvaluatorSpace, AutomationSpace {
+	/** The space's owner, from the Durable Object's own name. */
+	readonly #owner: string | undefined;
+	/** Makes the space's desk, in the one space the fixture seeded; null in every other. */
+	readonly #makeDesk: (() => ObservationDesk) | null;
+	/** The desk once made: undefined until something uses it. */
+	#madeDesk: ObservationDesk | null | undefined;
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -228,9 +232,11 @@ export class Pim extends RealPim implements EvaluatorSpace {
 				return "refused";
 			}
 		};
-		// The ledger is read here, and only the fixture's seed ever wrote one: a space without it can't watch (src/cua-observation-runtime.ts).
-		this.#desk = watches(fixture, owner, env)
-			? new ObservationDesk({
+		// Only the fixture's seed ever wrote a ledger: a space without it can't watch (src/cua-observation-runtime.ts). The desk
+		// reads it, and writes back any record it recovers, only when first used (`#desk`), so `observationSummary` never makes one.
+		this.#owner = owner;
+		this.#makeDesk = watches(fixture, owner, env)
+			? () => new ObservationDesk({
 					owner,
 					storage: {
 						read: () => this.store.meta(OBSERVATION_KEY),
@@ -243,6 +249,32 @@ export class Pim extends RealPim implements EvaluatorSpace {
 					listing: () => ({ agent: agentMode(this.chosenModel().provider), frame: frame() }),
 				})
 			: null;
+	}
+
+	/** The space's observations of its Cua desktop, made on first use: only in the one space the fixture seeded; null in every other. */
+	get #desk(): ObservationDesk | null {
+		if (this.#madeDesk === undefined) this.#madeDesk = this.#makeDesk?.() ?? null;
+		return this.#madeDesk;
+	}
+
+	/**
+	 * The evaluation's aggregate check of this space's stored observations,
+	 * over RPC only (preview/automation.ts's summary route): the ledger read
+	 * as it is stored and counted by status, `pending_open` and `revoking`
+	 * included. It never makes the desk, so nothing is restored, recovered,
+	 * written, flushed or asked of the host. Null, and nothing read, unless
+	 * this is the evaluation, its automation grant is on and names this
+	 * space's owner, and the space is the fixture's, active and not erased.
+	 *
+	 * It is synchronous on purpose: the agents library starts an agent's
+	 * lifecycle, which writes its own tables, before any async RPC method,
+	 * and only gives a synchronous one its context.
+	 */
+	observationSummary(): ObservationSummary | null {
+		const grant = automationGrant(this.env, Date.now());
+		if (!evaluating(this.env) || "off" in grant || this.#owner === undefined || grant.owner !== this.#owner) return null;
+		if (!this.#makeDesk || this.store.erasedAt() !== null || this.status() !== "active") return null;
+		return summarizeStoredObservations(this.store.meta(OBSERVATION_KEY), this.#owner);
 	}
 
 	/**

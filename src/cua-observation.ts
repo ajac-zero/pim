@@ -234,26 +234,22 @@ export function applyObservationEvent(state: ObservationState, event: Observatio
 	}
 }
 
-const STATUSES: readonly string[] = ["pending_open", "open", "revoking", "unconfirmed", "closed_observed", "not_opened", "reconciled"];
+/** Every status a stored record may have, in the order a summary counts them. */
+export const OBSERVATION_STATUSES = ["pending_open", "open", "revoking", "unconfirmed", "closed_observed", "not_opened", "reconciled"] as const satisfies readonly ObservationStatus[];
+const STATUSES: readonly string[] = OBSERVATION_STATUSES;
 
 export type ObservationRestore = { ok: true; state: ObservationState } | { ok: false; error: string };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 /**
- * Validates a stored ledger (as parsed JSON) and restores it conservatively.
+ * Validates a stored ledger (as parsed JSON) and gives it back with every
+ * record's status exactly as stored, `pending_open` and `revoking` included.
  * Anything missing, malformed, of another version or another owner is
- * refused, and the caller must then admit no observation: a missing ledger
- * is not an empty one, since records it held may still be open, and this
- * never invents one.
- *
- * A record `pending_open` was recorded by a process that may have died
- * before or after asking the host, and one `revoking` by a process that may
- * have died before or after the host ended it, so both come back
- * `unconfirmed`. An `open` record stays open: a restart of the space says
- * nothing about the host.
+ * refused. It changes nothing and decides nothing about recovery: that is
+ * `restoreObservationState`'s.
  */
-export function restoreObservationState(raw: unknown, owner: string): ObservationRestore {
+export function parseStoredObservationState(raw: unknown, owner: string): ObservationRestore {
 	const fail = (error: string): ObservationRestore => ({ ok: false, error });
 	if (raw === undefined || raw === null) return fail("no ledger is stored");
 	if (!isRecord(raw)) return fail("ledger is not an object");
@@ -280,14 +276,60 @@ export function restoreObservationState(raw: unknown, owner: string): Observatio
 		if (item.conflicting !== undefined && (item.conflicting !== true || status !== "unconfirmed" || !named)) return fail("invalid conflict");
 		const conflict = item.conflicting === true ? { conflicting: true as const } : {};
 		const base = { observationId: item.observationId, owner, notAfter: item.notAfter, hostLaunchId, hostGeneration, ...conflict };
-		if (status === "pending_open" || status === "revoking") {
-			records.push({ ...base, status: "unconfirmed", evidence: `restored while ${status}: the host may hold a launch for it` });
-		} else {
-			records.push({ ...base, status, ...(item.evidence === undefined ? {} : { evidence: item.evidence as string }) });
-		}
+		records.push({ ...base, status, ...(item.evidence === undefined ? {} : { evidence: item.evidence as string }) });
 	}
 	// More unresolved records than new observations may make is a state the events can reach (a late acknowledgment of a final record), so it is kept.
 	return { ok: true, state: { version: OBSERVATION_STATE_VERSION, owner, records } };
+}
+
+/**
+ * Validates a stored ledger (as parsed JSON) and restores it conservatively.
+ * Anything missing, malformed, of another version or another owner is
+ * refused, and the caller must then admit no observation: a missing ledger
+ * is not an empty one, since records it held may still be open, and this
+ * never invents one.
+ *
+ * A record `pending_open` was recorded by a process that may have died
+ * before or after asking the host, and one `revoking` by a process that may
+ * have died before or after the host ended it, so both come back
+ * `unconfirmed`. An `open` record stays open: a restart of the space says
+ * nothing about the host.
+ */
+export function restoreObservationState(raw: unknown, owner: string): ObservationRestore {
+	const parsed = parseStoredObservationState(raw, owner);
+	if (!parsed.ok) return parsed;
+	const records = parsed.state.records.map((record): ObservationRecord => {
+		if (record.status !== "pending_open" && record.status !== "revoking") return record;
+		const { status, evidence: _evidence, ...base } = record;
+		return { ...base, status: "unconfirmed", evidence: `restored while ${status}: the host may hold a launch for it` };
+	});
+	return { ok: true, state: { ...parsed.state, records } };
+}
+
+/**
+ * What an aggregate check may know of a stored ledger: whether it is there
+ * and valid, how many records it holds, and how many have each status, as
+ * stored. Never an ID, evidence, time, launch, generation or anything else of
+ * a record.
+ */
+export type ObservationSummary =
+	| { readonly ledger: "valid"; readonly total: number; readonly counts: Readonly<Record<ObservationStatus, number>> }
+	| { readonly ledger: "missing" | "invalid"; readonly total: null; readonly counts: null };
+
+/** Summarizes the ledger as stored (`stored` is the raw value, or undefined when none is), reading it only: no record is restored, recovered or written. */
+export function summarizeStoredObservations(stored: string | undefined, owner: string): ObservationSummary {
+	if (stored === undefined) return { ledger: "missing", total: null, counts: null };
+	let raw: unknown;
+	try {
+		raw = JSON.parse(stored);
+	} catch {
+		return { ledger: "invalid", total: null, counts: null };
+	}
+	const parsed = parseStoredObservationState(raw, owner);
+	if (!parsed.ok) return { ledger: "invalid", total: null, counts: null };
+	const counts = Object.fromEntries(OBSERVATION_STATUSES.map((status) => [status, 0])) as Record<ObservationStatus, number>;
+	for (const record of parsed.state.records) counts[record.status] += 1;
+	return { ledger: "valid", total: parsed.state.records.length, counts };
 }
 
 // ---------------------------------------------------------------- admission

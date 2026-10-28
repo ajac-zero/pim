@@ -1,3 +1,4 @@
+import { OBSERVATION_STATUSES, type ObservationSummary } from "../src/cua-observation";
 import { isHttpsOrigin } from "../src/cua-viewer";
 import { base64UrlEncode } from "../src/auth/encoding";
 import type { Account } from "../src/directory";
@@ -41,6 +42,14 @@ import type { EvalDirectory } from "./cua-eval";
  * it makes no token, passkey or account, and the space is never told it is
  * the person's browser, except for the list of observations, which the space
  * answers from what it holds.
+ *
+ * A session may also make one aggregate check of the owner's stored
+ * observations (`SUMMARY_PATH`): a plain GET, with no query, token or
+ * upgrade, answered from the space's `observationSummary` RPC, which reads
+ * the ledger as stored and never makes the space's desk, so nothing is
+ * restored, recovered or written. The answer is whether the ledger is there
+ * and valid, and how many records it holds of each status: never an ID, an
+ * evidence, a time, a launch or anything else of a record.
  */
 
 export const AUTOMATION_COOKIE = "__Host-pim-automation";
@@ -48,6 +57,8 @@ export const AUTOMATION_COOKIE = "__Host-pim-automation";
 export const AUTOMATION_SCHEME = "Pim-Automation";
 export const SESSION_PATH = "/auth/automation/session";
 export const REVOKE_PATH = "/auth/automation/revoke";
+/** The aggregate check of the owner's stored observations: counts by status only. */
+export const SUMMARY_PATH = "/auth/automation/observation-summary";
 /** The longest a session lasts. */
 export const MAX_SESSION_MS = 30 * 60 * 1000;
 /** Sessions a grant may hold open at once. */
@@ -182,6 +193,15 @@ const sha256 = async (value: string) => hex(await crypto.subtle.digest("SHA-256"
 
 const directory = (env: Env) => (env.Directory as unknown as DurableObjectNamespace<EvalDirectory>).getByName("directory");
 
+/** What the summary route asks of the owner's space (preview/worker.ts's `Pim`). */
+export type AutomationSpace = { observationSummary(): ObservationSummary | null };
+/**
+ * The owner's space, by a plain Durable Object stub: not `getAgentByName`,
+ * whose start-up writes the agent's own tables, so the summary's RPC is the
+ * only thing the space is asked.
+ */
+const space = (env: Env, owner: string) => (env.Pim as unknown as DurableObjectNamespace).getByName(owner) as unknown as { observationSummary(): Promise<ObservationSummary | null> };
+
 function readCookie(request: Request, name: string): string | null {
 	for (const part of (request.headers.get("cookie") ?? "").split(";")) {
 		const [key, ...value] = part.trim().split("=");
@@ -273,6 +293,48 @@ async function exchange(request: Request, env: Env, grant: AutomationGrant, now:
 	return json({ mode: "enabled", session: view({ grant, session, account: begun.account as Account }) }, 201, [cookie(value, Math.ceil((expiresAt - now) / 1000))]);
 }
 
+/** A summary as the space answered it, rebuilt from its fixed fields only, or null when it isn't one. */
+function summaryOf(answer: unknown): ObservationSummary | null {
+	if (!answer || typeof answer !== "object" || Array.isArray(answer)) return null;
+	const { ledger, total, counts } = answer as Record<string, unknown>;
+	if ((ledger === "missing" || ledger === "invalid") && total === null && counts === null) return { ledger, total: null, counts: null };
+	if (ledger !== "valid" || !Number.isSafeInteger(total) || !counts || typeof counts !== "object" || Array.isArray(counts)) return null;
+	const given = counts as Record<string, unknown>;
+	if (Object.keys(given).sort().join() !== [...OBSERVATION_STATUSES].sort().join()) return null;
+	const rebuilt = Object.fromEntries(OBSERVATION_STATUSES.map((status) => [status, given[status]])) as Record<(typeof OBSERVATION_STATUSES)[number], number>;
+	const values = Object.values(rebuilt);
+	if (!values.every((value) => Number.isSafeInteger(value) && value >= 0) || values.reduce((sum, value) => sum + value, 0) !== total) return null;
+	return { ledger, total: total as number, counts: rebuilt };
+}
+
+/**
+ * The aggregate check: for the request's automation session only, checked
+ * again in full now, as a plain GET with no query, `Authorization` or
+ * upgrade. Its answer and its log line hold only fixed words and counts.
+ */
+async function summary(request: Request, env: Env, now: number): Promise<Response> {
+	const refused = (status: number, error: string, reason: string) => {
+		log({ action: "observation-summary", outcome: "refused", reason });
+		return fail(status, error);
+	};
+	if (request.method !== "GET") return refused(405, `${SUMMARY_PATH} takes GET`, "method");
+	if (request.url.includes("?") || request.headers.has("upgrade")) return refused(400, "This summary takes a plain GET, with no query or upgrade.", "shape");
+	if (request.headers.has("authorization") || request.headers.get("sec-fetch-site") === "cross-site") return refused(401, "This summary is only for an automation session.", "caller");
+	const found = await current(request, env, now);
+	if (!found || found.account.status !== "active" || found.account.ownerId !== found.grant.owner) return refused(401, "This summary is only for an automation session.", "session");
+	let answer: unknown;
+	try {
+		answer = await space(env, found.grant.owner).observationSummary();
+	} catch {
+		return refused(503, "The space couldn't be asked for its summary.", "space");
+	}
+	if (answer === null) return refused(404, "This space has no observations to summarize.", "space-refused");
+	const checked = summaryOf(answer);
+	if (!checked) return refused(502, "The space's summary wasn't well formed.", "malformed");
+	log({ action: "observation-summary", outcome: "answered", ledger: checked.ledger });
+	return json({ kind: "observation-summary", ...checked });
+}
+
 /** The read-only boundary: requests an automation session may make of the API, by path under `/api`. */
 const READS = new Set(["GET", "HEAD"]);
 /** Reads it may not make: the observations' status and anything under them (which may ask the viewer's host and settle a record), the agent's browser, a model's suggestions, ChatGPT's sign-in, and the export of everything. */
@@ -301,7 +363,7 @@ export const previewAutomation: AutomationSessions = {
 				agentPreview: { enabled: true, expiresAt },
 			});
 		}
-		if (url.pathname !== SESSION_PATH && url.pathname !== REVOKE_PATH) return undefined;
+		if (url.pathname !== SESSION_PATH && url.pathname !== REVOKE_PATH && url.pathname !== SUMMARY_PATH) return undefined;
 		// Off, it isn't here: `/auth` answers these as a deployment does.
 		const grant = automationGrant(env, now);
 		if ("off" in grant) {
@@ -310,6 +372,7 @@ export const previewAutomation: AutomationSessions = {
 		}
 		const origin = request.headers.get("origin");
 		if (origin !== grant.origin && (origin !== null || !READS.has(request.method))) return fail(403, "Requests must come from this app");
+		if (url.pathname === SUMMARY_PATH) return summary(request, env, now);
 		if (route === `GET ${SESSION_PATH}`) {
 			const found = await current(request, env, now);
 			return json({ mode: "enabled", session: found ? view(found) : null });

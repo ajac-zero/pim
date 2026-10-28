@@ -206,11 +206,12 @@ afterEach(() => {
 });
 
 describe("the preview's Cua fixture", () => {
-	it("is no route, RPC method or tool: the preview's Pim adds nothing callable to the real one but the launch evaluator's two methods", () => {
+	it("is no route, RPC method or tool: the preview's Pim adds nothing callable to the real one but the launch evaluator's two methods and the automation summary", () => {
 		const own = Object.getOwnPropertyNames(PreviewPim.prototype).filter((name) => name !== "constructor");
-		// The one-use launch evaluator's RPC methods (preview/launch-evaluator.ts) are the only additions: no route reaches them,
-		// and they refuse unless the evaluation's evaluator is on (test/preview-automation.test.ts).
-		expect(own.filter((name) => !(name in RealPim.prototype)).sort()).toEqual(["endForEvaluator", "launchForEvaluator"]);
+		// The one-use launch evaluator's RPC methods (preview/launch-evaluator.ts) and the automation session's read-only summary
+		// (preview/automation.ts) are the only additions: no route reaches the space's methods directly, and each refuses unless
+		// the evaluation's own grant for it is on (test/preview-automation.test.ts).
+		expect(own.filter((name) => !(name in RealPim.prototype)).sort()).toEqual(["endForEvaluator", "launchForEvaluator", "observationSummary"]);
 		expect(own).not.toContain("seedCuaFixture");
 	});
 

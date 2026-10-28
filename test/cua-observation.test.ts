@@ -12,7 +12,9 @@ import {
 	type ObservationEvent,
 	type ObservationState,
 	observationResponse,
+	parseStoredObservationState,
 	restoreObservationState,
+	summarizeStoredObservations,
 } from "../src/cua-observation";
 
 /**
@@ -171,6 +173,82 @@ describe("the observation ledger", () => {
 		const over = applyObservationEvent(late, acked(1)).state;
 		expect(over.records.filter((r) => r.status !== "not_opened")).toHaveLength(3);
 		expect(restoreObservationState(JSON.parse(JSON.stringify(over)), "ada").ok).toBe(true);
+	});
+
+	it("reads a stored ledger with every status exactly as stored, and summarizes it as counts only", () => {
+		// Records of every status, as a ledger may hold them after a process died mid-launch and mid-end: counts that differ per
+		// status, one of them zero, so a summary that recovered `pending_open` or `revoking`, or counted one status as another, differs.
+		const launched = (n: number) => ({ hostLaunchId: `launch${n}`, hostGeneration: "gen-a" });
+		const stored = (n: number, status: string, extra: Record<string, unknown> = {}) => ({ observationId: id(n), owner: "ada", notAfter: NOW + n, hostLaunchId: null, hostGeneration: null, status, ...extra });
+		const raw = {
+			version: initialObservationState("ada").version,
+			owner: "ada",
+			records: [
+				stored(1, "pending_open"),
+				stored(2, "revoking", launched(2)),
+				stored(3, "pending_open", { evidence: "asked once" }),
+				stored(4, "open", launched(4)),
+				stored(5, "unconfirmed", { ...launched(5), evidence: "two launches answered", conflicting: true }),
+				stored(6, "revoking", launched(6)),
+				stored(7, "closed_observed", { ...launched(7), evidence: "every transport reported closed" }),
+				stored(8, "reconciled", { evidence: "the operator checked the host" }),
+				stored(9, "revoking", { evidence: "end asked" }),
+				stored(10, "unconfirmed", { evidence: "lost" }),
+			],
+		};
+		const text = JSON.stringify(raw);
+		const parsed = parseStoredObservationState(JSON.parse(text), "ada");
+		expect(parsed).toEqual({ ok: true, state: raw });
+		const summary = summarizeStoredObservations(text, "ada");
+		expect(summary).toEqual({ ledger: "valid", total: 10, counts: { pending_open: 2, open: 1, revoking: 3, unconfirmed: 2, closed_observed: 1, not_opened: 0, reconciled: 1 } });
+		// The summary is its three fixed fields and the seven counts: nothing of any record.
+		expect(Object.keys(summary)).toEqual(["ledger", "total", "counts"]);
+		for (const kept of ["observation-", "launch", "gen-a", "ada", String(NOW).slice(0, 6), "evidence", "asked", "lost", "operator"]) expect(JSON.stringify(summary)).not.toContain(kept);
+		// Reading changed nothing it was given, and restoring still recovers the transient records, as before.
+		expect(JSON.stringify(raw)).toBe(text);
+		const restored = restoreObservationState(JSON.parse(text), "ada");
+		expect(restored.ok && restored.state.records.map((r) => [r.observationId, r.status, r.evidence ?? null])).toEqual([
+			[id(1), "unconfirmed", "restored while pending_open: the host may hold a launch for it"],
+			[id(2), "unconfirmed", "restored while revoking: the host may hold a launch for it"],
+			[id(3), "unconfirmed", "restored while pending_open: the host may hold a launch for it"],
+			[id(4), "open", null],
+			[id(5), "unconfirmed", "two launches answered"],
+			[id(6), "unconfirmed", "restored while revoking: the host may hold a launch for it"],
+			[id(7), "closed_observed", "every transport reported closed"],
+			[id(8), "reconciled", "the operator checked the host"],
+			[id(9), "unconfirmed", "restored while revoking: the host may hold a launch for it"],
+			[id(10), "unconfirmed", "lost"],
+		]);
+		expect(summarizeStoredObservations(JSON.stringify(initialObservationState("ada")), "ada")).toEqual({
+			ledger: "valid",
+			total: 0,
+			counts: { pending_open: 0, open: 0, revoking: 0, unconfirmed: 0, closed_observed: 0, not_opened: 0, reconciled: 0 },
+		});
+
+		// Missing is not empty, and anything malformed is invalid, with nothing of what was stored.
+		expect(summarizeStoredObservations(undefined, "ada")).toEqual({ ledger: "missing", total: null, counts: null });
+		const [first] = raw.records;
+		const malformed: [string, string][] = [
+			["not JSON", `{"records": [${JSON.stringify(first)}`],
+			["null", "null"],
+			["an array", JSON.stringify([raw])],
+			["another owner's", JSON.stringify({ ...raw, owner: "grace" })],
+			["another owner's throughout", text.replaceAll('"ada"', '"grace"')],
+			["another version", JSON.stringify({ ...raw, version: 2 })],
+			["records not an array", JSON.stringify({ ...raw, records: { [id(1)]: first } })],
+			["too many records", JSON.stringify({ ...raw, records: Array.from({ length: MAX_OBSERVATION_RECORDS + 1 }, (_, n) => stored(n + 100, "not_opened", { evidence: "refused" })) })],
+			["an unknown status", JSON.stringify({ ...raw, records: [{ ...first, status: "closing" }] })],
+			["a pending record with a launch", JSON.stringify({ ...raw, records: [{ ...first, ...launched(1) }] })],
+			["an open record without one", JSON.stringify({ ...raw, records: [stored(4, "open")] })],
+			["a final record without evidence", JSON.stringify({ ...raw, records: [stored(8, "reconciled")] })],
+			["empty evidence", JSON.stringify({ ...raw, records: [{ ...first, evidence: " " }] })],
+			["a conflict on a pending record", JSON.stringify({ ...raw, records: [{ ...first, conflicting: true }] })],
+			["a duplicate ID", JSON.stringify({ ...raw, records: [first, first] })],
+			["an ID not shaped as one", JSON.stringify({ ...raw, records: [{ ...first, observationId: "x" }] })],
+		];
+		for (const [shape, value] of malformed) {
+			expect([shape, summarizeStoredObservations(value, "ada")]).toEqual([shape, { ledger: "invalid", total: null, counts: null }]);
+		}
 	});
 });
 

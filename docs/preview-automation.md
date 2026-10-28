@@ -124,6 +124,19 @@ Ends the session the request carries, recorded in the Directory, and clears the 
 
 This route takes the same header and body as the exchange. It records the grant's digest as revoked, for good. Every session the grant made stops on its next request, and the credential makes no more sessions.
 
+### Aggregate check of stored observations: `GET /auth/automation/observation-summary`
+
+For a future automation-only check of the owner's observation ledger, without touching any record. It answers only a plain `GET` (no query, no `Authorization` header, no `Upgrade`) that carries a current automation session for the grant's claimed, active owner, checked again in full as below; a passkey session, an API token, no session, another owner's grant, a revoked, ended or expired session, or a request from another site gets `401`, another method `405`, and a query or upgrade `400`. Off, in the local preview and in a deployment, the route isn't there.
+
+The Worker asks the owner's space over RPC (`observationSummary` on the preview's `Pim`, by a plain Durable Object stub). The space answers only in the evaluation, while the automation grant is on and names its owner, in the space the Cua fixture seeded, active and not erased. It reads the ledger as stored and counts it: it never makes the space's observation desk, so nothing is restored (`pending_open` and `revoking` are counted as they are, not as the `unconfirmed` the desk would recover them to), written, flushed or asked of the viewer's host. The RPC is synchronous so the agents library doesn't start the space's lifecycle, which writes its own tables. The person's list, Watch and End still make the desk on first use, and recover those records as before.
+
+```json
+{ "kind": "observation-summary", "ledger": "valid", "total": 3,
+  "counts": { "pending_open": 1, "open": 0, "revoking": 1, "unconfirmed": 1, "closed_observed": 0, "not_opened": 0, "reconciled": 0 } }
+```
+
+`ledger` is `valid`, `missing` (none is stored) or `invalid` (stored, but not a ledger the space could use); the last two have `total` and `counts` `null`. The answer and its log line never hold an observation ID, evidence, time, launch, generation, ticket, address, the owner, the cookie or the credential. There is no per-record route.
+
 ## Every request is checked again
 
 Each request that carries the cookie, socket upgrades included, is checked again in full. Nothing is cached between requests. The request is signed in only if all of these hold:
@@ -169,11 +182,12 @@ Signing in, reading the metadata, ending and revoking write only the Directory's
 - a passkey session unchanged but for `agentPreview`, and a browser that carries both counted as automation;
 - `agentPreview` for signed-out, passkey and automation browsers while on, and absent while off and in a deployment;
 - socket handshakes on `/api/ws`, `/api/browser/live` and other paths, in either spelling, refused with no socket made; and refused with `401` after ending, revoking or expiry;
+- the observation summary: every status counted as stored, through the Worker, the Directory and the owner's space, with no SQL write, `put`, `delete`, `sync`, transaction, alarm or metadata write in the space, its ledger byte for byte as stored, and no bridge reached; missing and malformed ledgers; the full refusal matrix above, off, in the local preview and in a deployment; the space's RPC refusing outside its grant; and the person's list, Watch and End still recovering `pending_open` and `revoking` records on the desk's first use;
 - a seeded space holding one unresolved observation: signing in, reading the metadata, listing, ending and revoking leave the space's storage, the owner's tokens, passkeys and linked identities, and the account exactly as they were. Its status, a Watch and an End are refused, and nothing reaches the host.
 
 The same file runs the runner's first diagnosis (`openAgentPreview` with `parseAutomationConfig`, then `diagnoseObservations`) against this Worker, through fake Playwright objects whose requests reach the preview's Worker in the isolate. It checks that the runner's exchange, the cookie the Worker sets, the observation list and the banner's `/auth/session` work together; that the Worker is asked exactly the exchange, the list, `/` and `/auth/session`; that the page's request for one observation's status and its socket stop in the runner's context; and that the Worker refuses both on such a session anyway.
 
-Removing any one of the revocation recheck, the deadline cap or the refusal of observation status, or mounting the routes in `src/index.ts`, fails these tests.
+Removing any one of the revocation recheck, the deadline cap or the refusal of observation status, or mounting the routes in `src/index.ts`, fails these tests. So does making the space's desk when the space starts rather than on first use, or making the summary's RPC async.
 
 ## Not covered
 

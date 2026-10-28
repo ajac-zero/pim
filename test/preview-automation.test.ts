@@ -1371,3 +1371,319 @@ describe("the launch evaluator", () => {
 		}
 	});
 });
+
+/**
+ * The automation session's aggregate check of the owner's stored
+ * observations (preview/automation.ts's `SUMMARY_PATH`, the space's
+ * `observationSummary`): through the real Worker, the Directory's session
+ * check and the owner's Durable Object, with a ledger stored as a process
+ * that died mid-launch and mid-end leaves it.
+ */
+describe("the automation session's observation summary", () => {
+	const SUMMARY = "/auth/automation/observation-summary";
+	const BRIDGE = "https://bridge.observation-summary.test";
+	const BRIDGE_TOKEN = "observation-summary-bridge-token-0123456789";
+	const ONLY = [401, "This summary is only for an automation session."];
+	const ID = {
+		pending: "summary-pending-00000001",
+		revoking: "summary-revoking-0000001",
+		revokingToo: "summary-revoking-0000002",
+		open: "summary-open-00000000001",
+		unconfirmed: "summary-unconfirmed-0001",
+		closed: "summary-closed-000000001",
+		refused: "summary-refused-00000001",
+		refusedToo: "summary-refused-00000002",
+		reconciled: "summary-reconciled-00001",
+	};
+	const EVIDENCE = ["evidence-marker-unconfirmed", "evidence-marker-closed", "evidence-marker-refused", "evidence-marker-reconciled"];
+	const NOT_AFTER = 1_900_000_000_123;
+	/** A record as the ledger stores it. */
+	const stored = (owner: string, observationId: string, status: string, extra: Record<string, unknown> = {}) => ({ observationId, owner, notAfter: NOT_AFTER, hostLaunchId: null, hostGeneration: null, status, ...extra });
+	const launched = (n: number) => ({ hostLaunchId: `SummaryLaunch${n}`.padEnd(22, "0"), hostGeneration: `summary-gen-${n}` });
+	/** Every status, transient ones included, in counts that differ: a summary that recovered or swapped any of them differs. */
+	const everyStatus = (owner: string) => [
+		stored(owner, ID.pending, "pending_open"),
+		stored(owner, ID.revoking, "revoking", launched(1)),
+		stored(owner, ID.revokingToo, "revoking", launched(2)),
+		stored(owner, ID.open, "open", launched(3)),
+		stored(owner, ID.unconfirmed, "unconfirmed", { evidence: EVIDENCE[0] }),
+		stored(owner, ID.closed, "closed_observed", { ...launched(4), evidence: EVIDENCE[1] }),
+		stored(owner, ID.refused, "not_opened", { evidence: EVIDENCE[2] }),
+		stored(owner, ID.refusedToo, "not_opened", { evidence: EVIDENCE[2] }),
+		stored(owner, ID.reconciled, "reconciled", { evidence: EVIDENCE[3] }),
+	];
+	const AS_STORED = { pending_open: 1, open: 1, revoking: 2, unconfirmed: 1, closed_observed: 1, not_opened: 2, reconciled: 1 };
+
+	/**
+	 * An evaluation whose owner's space the fixture seeded, holding `records`
+	 * as stored text, with a bridge that answers an end as requested and
+	 * counts every call. The space is evicted, so the next use constructs it.
+	 */
+	async function seeded(records: (owner: string) => Record<string, unknown>[] = everyStatus) {
+		const pim = await evaluation();
+		settings.PREVIEW_CUA_FIXTURE = "seed";
+		settings.PREVIEW_CUA_FIXTURE_OWNER = pim.owner;
+		settings.CUA_BRIDGES = JSON.stringify({ [pim.owner]: { url: `${BRIDGE}/${pim.owner}`, token: BRIDGE_TOKEN } });
+		const space = previews.getByName(pim.owner);
+		await evictDurableObject(space).catch(() => undefined);
+		const text = JSON.stringify({ version: initialObservationState(pim.owner).version, owner: pim.owner, records: records(pim.owner) });
+		await runInDurableObject(space, (instance: PreviewPim) => instance.store.setMeta(OBSERVATION_KEY, text));
+		await evictDurableObject(space).catch(() => undefined);
+		const asked: { action: string; body: Record<string, unknown> }[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			const prefix = `${BRIDGE}/${pim.owner}/observations/`;
+			if (!request.url.startsWith(prefix)) {
+				sent.push(request.url);
+				throw new Error("This test reaches only its bridge's management");
+			}
+			const action = request.url.slice(prefix.length);
+			asked.push({ action, body: JSON.parse(await request.text()) as Record<string, unknown> });
+			if (action === "end") return Response.json({ outcome: "requested", recorded: true });
+			throw new Error(`The test's bridge was asked for ${action}`);
+		});
+		const held = () => runInDurableObject(space, (instance: PreviewPim) => instance.store.meta(OBSERVATION_KEY));
+		const summary = (init: Ask = {}) => pim.ask(SUMMARY, init);
+		/** The summary route's own log lines, parsed. */
+		const lines = () => logged.map(([line]) => String(line)).filter((line) => line.includes('"observation-summary"')).map((line) => JSON.parse(line) as Record<string, unknown>);
+		return { ...pim, space, text, asked, held, summary, lines };
+	}
+
+	it("counts every status exactly as stored, through the Worker, the Directory and the owner's space, and writes, flushes and asks nothing", async () => {
+		const pim = await seeded();
+		const cookie = await pim.signIn();
+		// The space is constructed afresh before the check, and making it restored nothing: the desk isn't made until used.
+		const counted = { writes: [] as string[], put: 0, delete: 0, sync: 0, transaction: 0, setMeta: 0, alarm: 0 };
+		await runInDurableObject(pim.space, (instance: PreviewPim, state) => {
+			expect(instance.store.meta(OBSERVATION_KEY)).toBe(pim.text);
+			const exec = state.storage.sql.exec.bind(state.storage.sql);
+			vi.spyOn(state.storage.sql, "exec").mockImplementation(((query: string, ...bindings: unknown[]) => {
+				if (!/^\s*(SELECT|PRAGMA)\b/i.test(query)) counted.writes.push(query);
+				return exec(query, ...bindings);
+			}) as never);
+			for (const [method, key] of [["put", "put"], ["delete", "delete"], ["sync", "sync"], ["transactionSync", "transaction"], ["setAlarm", "alarm"], ["deleteAlarm", "alarm"], ["deleteAll", "delete"]] as const) {
+				const real = (state.storage[method] as (...args: unknown[]) => unknown).bind(state.storage);
+				vi.spyOn(state.storage, method).mockImplementation(((...args: unknown[]) => {
+					counted[key] += 1;
+					return real(...args);
+				}) as never);
+			}
+			const setMeta = instance.store.setMeta.bind(instance.store);
+			vi.spyOn(instance.store, "setMeta").mockImplementation((key, value) => {
+				counted.setMeta += 1;
+				setMeta(key, value);
+			});
+		});
+		const tables = () =>
+			runInDurableObject(pim.space, (_instance, state) =>
+				state.storage.sql
+					.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' ORDER BY name")
+					.toArray()
+					.map(({ name }) => [name, state.storage.sql.exec(`SELECT * FROM "${String(name)}"`).toArray()]),
+			);
+		const before = await tables();
+		counted.writes.length = 0;
+		logged.length = 0;
+
+		const answer = await pim.summary({ cookie });
+		expect(answer.status).toBe(200);
+		expect(answer.headers.get("cache-control")).toBe("no-store");
+		expect(answer.headers.getSetCookie()).toEqual([]);
+		const text = await answer.text();
+		expect(JSON.parse(text)).toEqual({ kind: "observation-summary", ledger: "valid", total: 9, counts: AS_STORED });
+		// Nothing was written or flushed in the space, its ledger is byte for byte as stored, and no bridge, host or client was reached.
+		expect(counted).toEqual({ writes: [], put: 0, delete: 0, sync: 0, transaction: 0, setMeta: 0, alarm: 0 });
+		expect(await pim.held()).toBe(pim.text);
+		expect(await tables()).toEqual(before);
+		expect([pim.asked, sent]).toEqual([[], []]);
+		// Asked again, the same: the check changes nothing that a later check would see.
+		expect(await (await pim.summary({ cookie, headers: { origin: ORIGIN } })).json()).toEqual(JSON.parse(text));
+		expect(await pim.held()).toBe(pim.text);
+
+		// Its answer and its log say nothing of any record, the owner, the session or the bridge.
+		expect(pim.lines()).toEqual([
+			{ event: "preview.automation", action: "observation-summary", outcome: "answered", ledger: "valid" },
+			{ event: "preview.automation", action: "observation-summary", outcome: "answered", ledger: "valid" },
+		]);
+		const said = JSON.stringify([text, logged]);
+		for (const kept of [...Object.values(ID), ...EVIDENCE, "SummaryLaunch", "summary-gen", String(NOT_AFTER), pim.owner, pim.secret, cookie.split("=")[1]!, BRIDGE, BRIDGE_TOKEN, "autoowner"]) {
+			expect([kept, said.includes(kept)]).toEqual([kept, false]);
+		}
+	});
+
+	it("says a missing or malformed ledger is so, with nothing of it, and still writes nothing", async () => {
+		for (const [ledger, write] of [
+			["missing", null],
+			["invalid", "{not json"],
+			["invalid", JSON.stringify({ version: 1, owner: "o_00000000000000000000000000", records: [] })],
+			["invalid", "evidence-marker-raw"],
+		] as const) {
+			const pim = await seeded();
+			await runInDurableObject(pim.space, (instance: PreviewPim, state) => {
+				if (write === null) state.storage.sql.exec("DELETE FROM pim_meta WHERE key = ?", OBSERVATION_KEY);
+				else instance.store.setMeta(OBSERVATION_KEY, write);
+			});
+			await evictDurableObject(pim.space).catch(() => undefined);
+			const cookie = await pim.signIn();
+			const answer = await pim.summary({ cookie });
+			const text = await answer.text();
+			expect([write, answer.status, JSON.parse(text)]).toEqual([write, 200, { kind: "observation-summary", ledger, total: null, counts: null }]);
+			expect(await pim.held()).toBe(write ?? undefined);
+			expect(text).not.toContain("evidence-marker");
+			expect(JSON.stringify(logged)).not.toContain("evidence-marker");
+			expect([pim.asked, sent]).toEqual([[], []]);
+		}
+	});
+
+	it("answers only a plain GET on a current automation session for the claimed, active owner, and is nowhere else", async () => {
+		const pim = await seeded();
+		const cookie = await pim.signIn();
+		// The control.
+		expect((await pim.summary({ cookie })).status).toBe(200);
+		logged.length = 0;
+
+		// No session, the owner's passkey session, an API token, or a token beside the session: none is an automation session.
+		const token = (await (await pim.ask("/auth/tokens", { cookie: pim.passkey, body: { name: "cli" } })).json()) as { token: string };
+		expect(await errorOf(await pim.summary())).toEqual(ONLY);
+		expect(await errorOf(await pim.summary({ cookie: pim.passkey }))).toEqual(ONLY);
+		expect(await errorOf(await pim.summary({ headers: { authorization: `Bearer ${token.token}` } }))).toEqual(ONLY);
+		expect(await errorOf(await pim.summary({ cookie, headers: { authorization: `Bearer ${token.token}` } }))).toEqual(ONLY);
+		expect(await errorOf(await pim.summary({ cookie, credential: pim.secret }))).toEqual(ONLY);
+		expect(await errorOf(await pim.summary({ cookie: `${pim.passkey}; __Host-pim-automation=${"a".repeat(43)}` }))).toEqual(ONLY);
+		expect(await errorOf(await pim.summary({ cookie, headers: { "sec-fetch-site": "cross-site" } }))).toEqual(ONLY);
+		// Only GET, from Pim's own origin or with none; no query, and no socket.
+		for (const method of ["HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+			const answer = await pim.summary({ cookie, method, headers: { origin: ORIGIN } });
+			expect([method, answer.status]).toEqual([method, 405]);
+		}
+		expect(await errorOf(await pim.summary({ cookie, method: "POST", asIs: true }))).toEqual([403, "Requests must come from this app"]);
+		expect(await errorOf(await pim.summary({ cookie, headers: { origin: "https://evil.example" } }))).toEqual([403, "Requests must come from this app"]);
+		const plain = [400, "This summary takes a plain GET, with no query or upgrade."];
+		for (const path of [`${SUMMARY}?`, `${SUMMARY}?owner=${pim.owner}`, `${SUMMARY}?id=${ID.pending}`]) expect([path, ...(await errorOf(await pim.ask(path, { cookie })))]).toEqual([path, ...plain]);
+		for (const upgrade of ["websocket", "WebSocket", "h2c"]) {
+			const answer = await pim.summary({ cookie, headers: { upgrade, connection: "Upgrade", "sec-websocket-version": "13", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==", origin: ORIGIN } });
+			expect([upgrade, answer.webSocket ?? null, ...(await errorOf(answer))]).toEqual([upgrade, null, ...plain]);
+		}
+		// No per-record route: anything under it is no route of the summary's.
+		for (const path of [`${SUMMARY}/${ID.pending}`, `${SUMMARY}/`]) expect([path, (await pim.ask(path, { cookie })).status]).toEqual([path, (await pim.production(path, { cookie })).status]);
+		// At any other address the evaluation answers nothing.
+		expect((await pim.summary({ cookie, at: "https://evil.example" })).status).toBe(421);
+
+		// A session past its 30 minutes, one ended, one of a revoked grant, or a grant for another owner: refused.
+		const now = Date.now();
+		at(now + 31 * MINUTE);
+		expect(await errorOf(await pim.summary({ cookie }))).toEqual(ONLY);
+		vi.mocked(Date.now).mockRestore();
+		const ended = await pim.signIn();
+		await pim.ask("/auth/automation/session", { cookie: ended, method: "DELETE" });
+		expect(await errorOf(await pim.summary({ cookie: ended }))).toEqual(ONLY);
+		await pim.grant({ owner: "o_00000000000000000000000000" });
+		expect(await errorOf(await pim.summary({ cookie }))).toEqual(ONLY);
+		await pim.grant();
+		const live = await pim.signIn();
+		expect((await pim.summary({ cookie: live })).status).toBe(200);
+		// A suspended owner's session opens nothing.
+		await runInDurableObject(pim.directory, (instance: EvalDirectory) => instance.setStatus(pim.owner, "suspended", "test"));
+		expect((await pim.summary({ cookie: live })).status).toBe(401);
+		await runInDurableObject(pim.directory, (instance: EvalDirectory) => instance.setStatus(pim.owner, "active", "test"));
+		expect((await pim.summary({ cookie: live })).status).toBe(200);
+		await pim.ask("/auth/automation/revoke", { body: pim.identity, credential: pim.secret });
+		expect(await errorOf(await pim.summary({ cookie: live }))).toEqual(ONLY);
+
+		// Off, it isn't there: `/auth` answers as a deployment's does, as does a deployment's entry point with everything copied.
+		const offAnswer = await errorOf(await pim.production(SUMMARY, { cookie }));
+		await pim.grant({}, credential());
+		const fresh = await pim.signIn().catch(() => null);
+		expect(fresh).toBeNull();
+		for (const [name, turnOff] of [
+			["no flag", async () => void delete settings.PREVIEW_AUTOMATION],
+			["another flag", async () => void (settings.PREVIEW_AUTOMATION = "true")],
+			["no grant", async () => void delete settings.PREVIEW_AUTOMATION_GRANT],
+			["another runtime", () => pim.grant({ deployment: "cua-eval@cloudflare" })],
+			["a past deadline", () => pim.grant({ notAfter: new Date(Date.now() - 1000).toISOString() })],
+		] as const) {
+			await pim.grant();
+			await turnOff();
+			expect([name, ...(await errorOf(await pim.summary({ cookie: live })))]).toEqual([name, ...offAnswer]);
+		}
+		await pim.grant();
+		expect(await errorOf(await pim.production(SUMMARY, { cookie: live }))).toEqual(offAnswer);
+		// Nor does the local preview mount it, whatever its environment says.
+		delete settings.PREVIEW_MODE;
+		delete settings.PIM_RUNTIME;
+		settings.PIM_PUBLIC_URL = "http://localhost:8787";
+		try {
+			const local = await previewWorker.fetch(new Request(`http://localhost:8787${SUMMARY}`, { headers: { cookie: live } }) as never, env as never, createExecutionContext());
+			expect(local.status).not.toBe(200);
+			expect(await local.text()).not.toContain("observation-summary");
+		} finally {
+			settings.PIM_PUBLIC_URL = ORIGIN;
+			settings.PREVIEW_MODE = "cua-eval";
+			settings.PIM_RUNTIME = "celld";
+		}
+
+		// The space's RPC answers nothing to anyone outside the evaluation's grant for its own owner, or in another space.
+		const direct = () => runInDurableObject(pim.space, (instance: PreviewPim) => instance.observationSummary());
+		await pim.grant();
+		expect(await direct()).toEqual({ ledger: "valid", total: 9, counts: AS_STORED });
+		delete settings.PREVIEW_AUTOMATION;
+		expect(await direct()).toBeNull();
+		await pim.grant({ owner: "o_00000000000000000000000000" });
+		expect(await direct()).toBeNull();
+		await pim.grant();
+		settings.PREVIEW_MODE = "local";
+		expect(await direct()).toBeNull();
+		settings.PREVIEW_MODE = "cua-eval";
+		const other = previews.getByName("o_11111111111111111111111111");
+		expect(await runInDurableObject(other, (instance: PreviewPim) => instance.observationSummary())).toBeNull();
+
+		// Through all of it the ledger stayed as stored, and nothing was asked of any bridge.
+		expect(await pim.held()).toBe(pim.text);
+		expect([pim.asked, sent]).toEqual([[], []]);
+		for (const line of pim.lines()) expect(Object.keys(line).sort()).toEqual(expect.arrayContaining(["action", "event", "outcome"]));
+		const said = JSON.stringify(logged);
+		for (const kept of [...Object.values(ID), pim.secret, live.split("=")[1]!, token.token]) expect([kept, said.includes(kept)]).toEqual([kept, false]);
+	});
+
+	it("leaves the person's list, Watch and End recovering transient records when the desk is first used, as before", async () => {
+		// The list: the first use of the desk restores both transient kinds as unconfirmed and writes them back.
+		const listed = await seeded();
+		const cookie = await listed.signIn();
+		expect(await (await listed.summary({ cookie })).json()).toMatchObject({ counts: AS_STORED });
+		const list = (await (await listed.ask("/api/observations", { cookie: listed.passkey })).json()) as { observations: { id: string; status: string; evidence: string | null }[] };
+		const recovered = (status: string) => `restored while ${status}: the host may hold a launch for it`;
+		expect(list.observations.filter(({ id }) => [ID.pending, ID.revoking, ID.revokingToo].includes(id))).toEqual([
+			expect.objectContaining({ id: ID.revokingToo, status: "unconfirmed", evidence: recovered("revoking") }),
+			expect.objectContaining({ id: ID.revoking, status: "unconfirmed", evidence: recovered("revoking") }),
+			expect.objectContaining({ id: ID.pending, status: "unconfirmed", evidence: recovered("pending_open") }),
+		]);
+		const written = JSON.parse((await listed.held())!) as ObservationState;
+		expect(written.records.map((record) => record.status)).toEqual(["unconfirmed", "unconfirmed", "unconfirmed", "open", "unconfirmed", "closed_observed", "not_opened", "not_opened", "reconciled"]);
+		// The summary reads what is stored now, which is what the desk wrote.
+		expect(await (await listed.summary({ cookie })).json()).toMatchObject({ total: 9, counts: { ...AS_STORED, pending_open: 0, revoking: 0, unconfirmed: 4 } });
+		expect(listed.asked).toEqual([]);
+
+		// Watch: with a record left pending, its first use restores it unconfirmed, and nothing new starts past it.
+		const watched = await seeded((owner) => [stored(owner, ID.pending, "pending_open")]);
+		const watch = await watched.ask("/api/observations", { cookie: watched.passkey, method: "POST" });
+		expect(watch.status).toBe(409);
+		expect((JSON.parse((await watched.held())!) as ObservationState).records).toEqual([expect.objectContaining({ observationId: ID.pending, status: "unconfirmed", evidence: recovered("pending_open") })]);
+		expect(watched.asked).toEqual([]);
+
+		// End: a record left revoking comes back unconfirmed, and its known launch is asked to end again; one left pending
+		// comes back unconfirmed with no launch to end, rather than as still starting.
+		const ending = await seeded((owner) => [stored(owner, ID.pending, "pending_open"), stored(owner, ID.revoking, "revoking", launched(1))]);
+		const end = await ending.ask(`/api/observations/${ID.revoking}/end`, { cookie: ending.passkey, method: "POST" });
+		expect(end.status).toBe(202);
+		expect(((await end.json()) as { observation: unknown }).observation).toEqual({ id: ID.revoking, status: "unconfirmed", notAfter: NOT_AFTER, evidence: recovered("revoking") });
+		expect(ending.asked).toEqual([{ action: "end", body: { owner: ending.owner, key: ID.revoking, generation: launched(1).hostGeneration } }]);
+		expect(await errorOf(await ending.ask(`/api/observations/${ID.pending}/end`, { cookie: ending.passkey, method: "POST" }))).toEqual([
+			409,
+			"The computer never named a launch for this observation, so there is nothing to ask it to end.",
+		]);
+		expect((JSON.parse((await ending.held())!) as ObservationState).records.map((record) => [record.observationId, record.status, record.evidence])).toEqual([
+			[ID.pending, "unconfirmed", recovered("pending_open")],
+			[ID.revoking, "unconfirmed", recovered("revoking")],
+		]);
+	});
+});

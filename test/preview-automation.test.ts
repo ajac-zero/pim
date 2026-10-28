@@ -26,7 +26,19 @@ const ORIGIN = "https://pim.test";
 const EVALUATION = "cua-eval-test-1";
 const DEPLOYMENT = "cua-eval@celld";
 const MINUTE = 60_000;
-const KEYS = ["PREVIEW_MODE", "PIM_RUNTIME", "PIM_INGRESS_SECRET", "PREVIEW_EVAL_CLAIM_SHA256", "PREVIEW_AUTOMATION", "PREVIEW_AUTOMATION_GRANT", "PREVIEW_CUA_FIXTURE", "PREVIEW_CUA_FIXTURE_OWNER", "CUA_BRIDGES"] as const;
+const KEYS = [
+	"PREVIEW_MODE",
+	"PIM_RUNTIME",
+	"PIM_INGRESS_SECRET",
+	"PREVIEW_EVAL_CLAIM_SHA256",
+	"PREVIEW_AUTOMATION",
+	"PREVIEW_AUTOMATION_GRANT",
+	"PREVIEW_LAUNCH_EVALUATOR",
+	"PREVIEW_LAUNCH_EVALUATOR_GRANT",
+	"PREVIEW_CUA_FIXTURE",
+	"PREVIEW_CUA_FIXTURE_OWNER",
+	"CUA_BRIDGES",
+] as const;
 
 const settings = env as unknown as Record<string, unknown>;
 const previews = (env as unknown as { PREVIEW_PIM: DurableObjectNamespace<PreviewPim> }).PREVIEW_PIM;
@@ -129,7 +141,7 @@ async function evaluation(setUp: { grant?: boolean } = {}) {
 	settings.PIM_RUNTIME = "celld";
 	settings.PIM_INGRESS_SECRET = SECRET;
 	settings.PREVIEW_EVAL_CLAIM_SHA256 = await sha256(CODE);
-	for (const key of ["PREVIEW_AUTOMATION", "PREVIEW_AUTOMATION_GRANT", "PREVIEW_CUA_FIXTURE", "PREVIEW_CUA_FIXTURE_OWNER", "CUA_BRIDGES"]) delete settings[key];
+	for (const key of ["PREVIEW_AUTOMATION", "PREVIEW_AUTOMATION_GRANT", "PREVIEW_LAUNCH_EVALUATOR", "PREVIEW_LAUNCH_EVALUATOR_GRANT", "PREVIEW_CUA_FIXTURE", "PREVIEW_CUA_FIXTURE_OWNER", "CUA_BRIDGES"]) delete settings[key];
 	const run = crypto.randomUUID();
 	const directory = previewDirectories.getByName(`${run}:directory`);
 	const target = Object.assign(Object.create(env as object) as object, {
@@ -734,5 +746,347 @@ describe("the agent-preview harness against this Worker", () => {
 		expect(sent).toEqual([]);
 		expect(printed).not.toContain(pim.secret);
 		expect(printed).not.toContain(issued!.value);
+	});
+});
+
+/**
+ * The one-use launch evaluator (preview/launch-evaluator.ts,
+ * docs/launch-evaluator.md) against the real preview Worker and the owner's
+ * seeded space, whose bridge is a `fetch` written here: it answers the viewer
+ * host's management for the owner's bridge and nothing else. No browser,
+ * socket or host is involved.
+ */
+describe("the launch evaluator", () => {
+	const BRIDGE = "https://bridge.launch-evaluator.test";
+	const BRIDGE_TOKEN = "launch-evaluator-bridge-token-0123456789";
+	const LAUNCH_ID = "EvaluatorLaunch0000001";
+	const TICKET = "evaluator-ticket-".padEnd(43, "q");
+	const OLD = "attempted-watch-0003-earlier";
+	const LAUNCH = "/auth/launch-evaluator/launch";
+	const END = "/auth/launch-evaluator/end";
+	const NOT_VALID = [401, "That launch evaluator credential isn't valid for this preview."];
+
+	type Host = { launch: "launched" | "lost" | "refused"; end: "requested" | "lost" };
+
+	/**
+	 * An evaluation whose owner's space the fixture seeded, holding one earlier
+	 * observation in `old`'s status, with an evaluator grant for its owner and
+	 * a bridge that answers as `host` says.
+	 */
+	async function evaluator(setUp: { old?: "not_opened" | "unconfirmed" | "open"; host?: Partial<Host> } = {}) {
+		const pim = await evaluation();
+		settings.PREVIEW_CUA_FIXTURE = "seed";
+		settings.PREVIEW_CUA_FIXTURE_OWNER = pim.owner;
+		settings.CUA_BRIDGES = JSON.stringify({ [pim.owner]: { url: `${BRIDGE}/${pim.owner}`, token: BRIDGE_TOKEN } });
+		const space = previews.getByName(pim.owner);
+		await evictDurableObject(space).catch(() => undefined);
+		const now = Date.now();
+		let ledger: ObservationState = initialObservationState(pim.owner);
+		ledger = applyObservationEvent(ledger, { type: "open_requested", owner: pim.owner, observationId: OLD, notAfter: now + 30 * MINUTE, now }).state;
+		const old = setUp.old ?? "not_opened";
+		if (old === "not_opened") ledger = applyObservationEvent(ledger, { type: "open_refused", observationId: OLD, evidence: "the host refused the launch (blocked)" }).state;
+		if (old === "unconfirmed") ledger = applyObservationEvent(ledger, { type: "unconfirmed", observationId: OLD, evidence: "the host's answer to launch was lost (timeout)" }).state;
+		if (old === "open") ledger = applyObservationEvent(ledger, { type: "open_acknowledged", observationId: OLD, hostLaunchId: "OldLaunch0000000000001", hostGeneration: "gen-0" }).state;
+		expect(ledger.records).toEqual([expect.objectContaining({ observationId: OLD, status: old })]);
+		await runInDurableObject(space, (instance: PreviewPim) => instance.store.setMeta(OBSERVATION_KEY, JSON.stringify(ledger)));
+		await evictDurableObject(space).catch(() => undefined);
+		const records = async () => (JSON.parse((await runInDurableObject(space, (instance: PreviewPim) => instance.store.meta(OBSERVATION_KEY)))!) as ObservationState).records;
+		const oldRecord = async () => JSON.stringify((await records()).find((record) => record.observationId === OLD));
+		const before = await oldRecord();
+
+		const secret = credential();
+		const grant = async (changes: Record<string, unknown> = {}, given = secret) => {
+			settings.PREVIEW_LAUNCH_EVALUATOR = "on";
+			settings.PREVIEW_LAUNCH_EVALUATOR_GRANT = JSON.stringify({
+				kind: "launch-evaluator",
+				owner: pim.owner,
+				evaluation: EVALUATION,
+				deployment: DEPLOYMENT,
+				origin: ORIGIN,
+				credentialSha256: await sha256(given),
+				notAfter: new Date(Date.now() + 6 * 60 * MINUTE).toISOString(),
+				...changes,
+			});
+		};
+		await grant();
+
+		// The bridge's viewer host: management for this owner only, answered as `host` says; everything else is refused and counted.
+		const host: Host = { launch: "launched", end: "requested", ...setUp.host };
+		const asked: { action: string; body: Record<string, unknown>; authorization: string | null }[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			const prefix = `${BRIDGE}/${pim.owner}/observations/`;
+			if (!request.url.startsWith(prefix)) {
+				sent.push(request.url);
+				throw new Error("This test reaches only its bridge's management");
+			}
+			const action = request.url.slice(prefix.length);
+			const body = JSON.parse(await request.text()) as Record<string, unknown>;
+			asked.push({ action, body, authorization: request.headers.get("authorization") });
+			if (action === "launch") {
+				if (host.launch === "lost") throw new Error("connection reset");
+				if (host.launch === "refused") return Response.json({ outcome: "refused", reason: "blocked" });
+				return Response.json({ outcome: "launched", key: body.key, launchId: LAUNCH_ID, generation: "gen-1", notAfter: body.notAfter, viewerPath: `/${LAUNCH_ID}/viewer/#ticket=${TICKET}&clipboard=0`, replayed: false });
+			}
+			if (action === "end") {
+				if (host.end === "lost") throw new Error("connection reset");
+				return Response.json({ outcome: "requested", recorded: true });
+			}
+			throw new Error(`The evaluator asked the bridge for ${action}`);
+		});
+
+		const authorization = (given = secret) => ({ authorization: `Pim-Launch-Evaluator ${given}` });
+		const launch = (init: Ask = {}) => pim.ask(LAUNCH, { body: pim.identity, ...init, headers: { ...authorization(), ...init.headers } });
+		const end = (run: string, observation: string, init: Ask = {}) =>
+			pim.ask(END, { body: { ...pim.identity, observation }, ...init, headers: { ...authorization(), "x-pim-launch-evaluator-run": run, ...init.headers } });
+		/** The evaluator's runs, as the Directory holds them. */
+		const runs = () =>
+			runInDurableObject(pim.directory, (_instance, state) =>
+				state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name = 'preview_launch_evaluator_runs'").toArray().length === 0
+					? []
+					: state.storage.sql.exec("SELECT * FROM preview_launch_evaluator_runs").toArray(),
+			);
+		return { ...pim, secret, evaluatorGrant: grant, asked, launch, end, runs, records, oldRecord, before, authorization };
+	}
+
+	type Launched = { run: { phase: string; deadline: string; observation: { id: string; status: string; notAfter: number } }; viewer: string; runToken: string };
+
+	it("launches one fresh observation for the claimed owner, ends exactly it once, and is then spent for good", async () => {
+		const pim = await evaluator();
+		const now = Date.now();
+		at(now);
+		const answer = await pim.launch();
+		expect(answer.status).toBe(201);
+		// No session: no cookie of any kind is set.
+		expect(answer.headers.getSetCookie()).toEqual([]);
+		expect(answer.headers.get("cache-control")).toBe("no-store");
+		const launched = (await answer.json()) as Launched;
+		const fresh = launched.run.observation.id;
+		expect(fresh).not.toBe(OLD);
+		expect(launched).toEqual({
+			run: { phase: "open", deadline: new Date(now + 10 * MINUTE).toISOString(), observation: { id: fresh, status: "open", notAfter: expect.any(Number) } },
+			viewer: `${BRIDGE}/${LAUNCH_ID}/viewer/#ticket=${TICKET}&clipboard=0`,
+			runToken: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+		});
+		// The space's own 10 minutes, by its own clock, which the test doesn't move.
+		const { notAfter } = launched.run.observation;
+		expect(Math.abs(notAfter - (now + 10 * MINUTE))).toBeLessThan(MINUTE);
+		// The bridge was asked once, for the fresh key, with the bridge's own token, which never reaches the evaluator.
+		expect(pim.asked).toEqual([{ action: "launch", body: { key: fresh, owner: pim.owner, notAfter }, authorization: `Bearer ${BRIDGE_TOKEN}` }]);
+		expect(JSON.stringify(launched)).not.toContain(BRIDGE_TOKEN);
+		const [row] = await pim.runs();
+		expect(row).toMatchObject({ grant_digest: await sha256(pim.secret), owner: pim.owner, evaluation: EVALUATION, deployment: DEPLOYMENT, origin: ORIGIN, run_digest: await sha256(launched.runToken), phase: "open", observation_id: fresh, deadline: now + 10 * MINUTE });
+		expect(JSON.stringify(row)).not.toContain(pim.secret);
+		expect(JSON.stringify(row)).not.toContain(launched.runToken);
+
+		// The one End: of the fresh observation, with the run token.
+		const ended = await pim.end(launched.runToken, fresh);
+		expect(ended.status).toBe(202);
+		expect(await ended.json()).toEqual({ run: { phase: "ended", observation: { id: fresh, status: "revoking" } } });
+		expect(pim.asked.map(({ action, body }) => [action, body.key])).toEqual([
+			["launch", fresh],
+			["end", fresh],
+		]);
+		expect(pim.asked[1]!.body).toEqual({ owner: pim.owner, key: fresh, generation: "gen-1" });
+		expect(await pim.runs()).toEqual([expect.objectContaining({ phase: "ended", observation_id: fresh })]);
+
+		// Spent: a second launch or End does nothing, and asks nothing.
+		expect(await errorOf(await pim.launch())).toEqual([409, "This launch evaluator grant has run already; it runs once."]);
+		expect(await errorOf(await pim.end(launched.runToken, fresh))).toEqual([409, "This run can't end that observation now."]);
+		expect(pim.asked).toHaveLength(2);
+		// The earlier observation is exactly as it was; the space holds it and the fresh one.
+		expect(await pim.oldRecord()).toBe(pim.before);
+		expect((await pim.records()).map((record) => [record.observationId, record.status])).toEqual([
+			[OLD, "not_opened"],
+			[fresh, "revoking"],
+		]);
+		// Nothing secret was logged, and nothing but the bridge's management was reached.
+		const logs = JSON.stringify(logged);
+		for (const secret of [pim.secret, launched.runToken, TICKET, BRIDGE_TOKEN]) expect(logs).not.toContain(secret);
+		expect(logged.filter(([line]) => String(line).includes('"preview.launch-evaluator"')).map(([line]) => JSON.parse(String(line)))).toEqual([
+			{ event: "preview.launch-evaluator", action: "launch", outcome: "open", owner: pim.owner, observation: fresh, deadline: now + 10 * MINUTE },
+			{ event: "preview.launch-evaluator", action: "end", outcome: "ended", owner: pim.owner, observation: fresh },
+			{ event: "preview.launch-evaluator", action: "launch", outcome: "refused", reason: "spent" },
+			{ event: "preview.launch-evaluator", action: "end", outcome: "refused", reason: "phase", phase: "ended" },
+		]);
+		expect(sent).toEqual([]);
+
+		// A new grant takes a new credential; the spent one then does nothing at all.
+		await pim.evaluatorGrant({}, credential());
+		expect(await errorOf(await pim.launch())).toEqual(NOT_VALID);
+		expect(pim.asked).toHaveLength(2);
+	});
+
+	it("refuses before anything is recorded or asked: another origin, credential, scheme, owner, evaluation or deployment, and any other route or method", async () => {
+		const pim = await evaluator();
+		for (const [init, expected] of [
+			[{ headers: { origin: "https://evil.example" } }, [403, "Requests must come from this app"]],
+			[{ asIs: true }, [403, "Requests must come from this app"]],
+			[{ headers: pim.authorization(credential()) }, NOT_VALID],
+			[{ headers: { authorization: `Pim-Automation ${pim.secret}` } }, NOT_VALID],
+			[{ headers: { authorization: `Bearer ${pim.secret}` } }, NOT_VALID],
+			[{ body: { ...pim.identity, owner: "o_00000000000000000000000000" } }, NOT_VALID],
+			[{ body: { ...pim.identity, evaluation: "cua-eval-test-2" } }, NOT_VALID],
+			[{ body: { ...pim.identity, deployment: "cua-eval@cloudflare" } }, NOT_VALID],
+			[{ body: { ...pim.identity, observation: OLD } }, NOT_VALID],
+			[{ body: { ...pim.identity, credential: pim.secret }, headers: { authorization: "" } }, NOT_VALID],
+		] as [Ask, unknown[]][]) {
+			expect(await errorOf(await pim.launch(init))).toEqual(expected);
+		}
+		expect((await pim.launch({ at: "https://evil.example" })).status).toBe(421);
+		expect(await errorOf(await pim.ask(LAUNCH, { headers: pim.authorization() }))).toEqual([405, "/auth/launch-evaluator/launch takes POST"]);
+		for (const path of ["/auth/launch-evaluator", "/auth/launch-evaluator/status", "/auth/launch-evaluator/reset", "/auth/launch-evaluator/reconcile", `/auth/launch-evaluator/observations/${OLD}`]) {
+			expect([path, (await pim.ask(path, { body: pim.identity, headers: pim.authorization() })).status]).toEqual([path, 404]);
+		}
+		expect((await pim.ask(`${LAUNCH}?observation=${OLD}`, { body: pim.identity, headers: pim.authorization() })).status).toBe(404);
+		expect((await pim.launch({ headers: { upgrade: "websocket", connection: "Upgrade" } })).status).toBe(404);
+
+		// Its credential is no API token or session, and the automation session gains nothing from the evaluator's existence.
+		expect((await pim.ask("/api/observations", { headers: pim.authorization() })).status).toBe(401);
+		expect((await pim.ask("/api/observations", { method: "POST", headers: pim.authorization() })).status).toBe(401);
+		await pim.grant();
+		const cookie = await pim.signIn();
+		const readOnly = [403, "An automation session only reads, and not this."];
+		expect(await errorOf(await pim.ask("/api/observations", { cookie, method: "POST" }))).toEqual(readOnly);
+		expect(await errorOf(await pim.ask(`/api/observations/${OLD}/end`, { cookie, method: "POST" }))).toEqual(readOnly);
+		expect(await errorOf(await pim.ask(`/api/observations/${OLD}`, { cookie }))).toEqual(readOnly);
+		expect(await errorOf(await pim.launch({ cookie, headers: { authorization: "" } }))).toEqual(NOT_VALID);
+		expect(await errorOf(await pim.launch({ headers: { authorization: `Pim-Launch-Evaluator ${pim.secret.replace(/./, "x")}` } }))).toEqual(NOT_VALID);
+		expect(await errorOf(await pim.end("r".repeat(43), OLD, { cookie }))).toEqual(NOT_VALID);
+
+		// Nothing was recorded or asked, the earlier record is as it was, and the grant still runs once.
+		expect(await pim.runs()).toEqual([]);
+		expect(pim.asked).toEqual([]);
+		expect(await pim.oldRecord()).toBe(pim.before);
+		expect((await pim.launch()).status).toBe(201);
+		expect(pim.asked).toHaveLength(1);
+	});
+
+	it("is off unless granted on its own terms, and a deployment's entry point never has it, even with every variable copied", async () => {
+		const pim = await evaluator();
+		// What a deployment's entry point answers at the evaluator's route, with the evaluator granted in the same environment.
+		const production = async () => errorOf(await pim.production(LAUNCH, { body: pim.identity, headers: pim.authorization() }));
+		const offAnswer = await production();
+		expect(offAnswer).toEqual([401, "Sign in to Pim"]);
+		const automation = credential();
+		await pim.grant({}, automation);
+		const off: [string, () => Promise<void>][] = [
+			["no flag", async () => void delete settings.PREVIEW_LAUNCH_EVALUATOR],
+			["another flag", async () => void (settings.PREVIEW_LAUNCH_EVALUATOR = "true")],
+			["no grant", async () => void delete settings.PREVIEW_LAUNCH_EVALUATOR_GRANT],
+			["an automation-shaped grant", async () => {
+				const grant = JSON.parse(String(settings.PREVIEW_LAUNCH_EVALUATOR_GRANT));
+				delete grant.kind;
+				settings.PREVIEW_LAUNCH_EVALUATOR_GRANT = JSON.stringify(grant);
+			}],
+			["another kind", () => pim.evaluatorGrant({ kind: "automation" })],
+			["an extra field", () => pim.evaluatorGrant({ observation: OLD })],
+			["the automation grant's credential", () => pim.evaluatorGrant({}, automation)],
+			["another owner", () => pim.evaluatorGrant({ owner: "o_00000000000000000000000000" })],
+			["another origin", () => pim.evaluatorGrant({ origin: "https://other.test" })],
+			["another runtime", () => pim.evaluatorGrant({ deployment: "cua-eval@cloudflare" })],
+			["a past deadline", () => pim.evaluatorGrant({ notAfter: new Date(Date.now() - 1000).toISOString() })],
+			["a deadline more than a day ahead", () => pim.evaluatorGrant({ notAfter: new Date(Date.now() + 25 * 60 * MINUTE).toISOString() })],
+		];
+		for (const [name, turnOff] of off) {
+			await pim.evaluatorGrant();
+			await turnOff();
+			const answer = name === "the automation grant's credential" ? await pim.launch({ headers: pim.authorization(automation) }) : await pim.launch();
+			// Off, the route isn't there: `/auth` answers as a deployment's does. A grant for another owner is on but signs in nobody.
+			if (name === "another owner") expect([name, ...(await errorOf(answer))]).toEqual([name, 401, NOT_VALID[1]]);
+			else expect([name, ...(await errorOf(answer))]).toEqual([name, ...offAnswer]);
+		}
+		// A deployment's entry point, with the evaluator granted in the same environment, has no such route either.
+		await pim.evaluatorGrant();
+		expect(await production()).toEqual(offAnswer);
+		expect(await errorOf(await pim.production(END, { body: { ...pim.identity, observation: OLD }, headers: { ...pim.authorization(), "x-pim-launch-evaluator-run": "r".repeat(43) } }))).toEqual(offAnswer);
+		// The space's own RPC methods refuse while the evaluator is off, whoever calls them.
+		delete settings.PREVIEW_LAUNCH_EVALUATOR;
+		const space = previews.getByName(pim.owner);
+		expect(await runInDurableObject(space, (instance: PreviewPim) => instance.launchForEvaluator())).toEqual({ outcome: "refused", reason: "off" });
+		expect(await runInDurableObject(space, (instance: PreviewPim) => instance.endForEvaluator(OLD))).toEqual({ outcome: "refused", status: null });
+		expect(await pim.runs()).toEqual([]);
+		expect(pim.asked).toEqual([]);
+		expect(await pim.oldRecord()).toBe(pim.before);
+		expect(sent).toEqual([]);
+	});
+
+	it("never touches an earlier observation: an unresolved or open one refuses the launch, which nothing retries", async () => {
+		for (const old of ["unconfirmed", "open"] as const) {
+			const pim = await evaluator({ old });
+			const refused = await pim.launch();
+			expect([old, refused.status, await refused.json()]).toEqual([old, 409, { error: "The space started no observation.", run: { phase: "launch_refused", reason: "unresolved" } }]);
+			// Not a replay of the open record, nor any request about the earlier one: the bridge was asked nothing.
+			expect(pim.asked).toEqual([]);
+			expect(await pim.oldRecord()).toBe(pim.before);
+			expect(await pim.records()).toHaveLength(1);
+			expect(await pim.runs()).toEqual([expect.objectContaining({ phase: "launch_refused", observation_id: null })]);
+			expect((await pim.launch()).status).toBe(409);
+			expect((await pim.end("r".repeat(43), OLD)).status).toBe(401);
+			expect(pim.asked).toEqual([]);
+		}
+	});
+
+	it("ends only the recorded observation, with its run token, while open and before the run's deadline", async () => {
+		const pim = await evaluator();
+		const now = Date.now();
+		at(now);
+		const launched = (await (await pim.launch()).json()) as Launched;
+		const fresh = launched.run.observation.id;
+		// The earlier observation, any other ID, another run token or none, and the automation session are all refused, and nothing is asked.
+		expect(await errorOf(await pim.end(launched.runToken, OLD))).toEqual([409, "This run can't end that observation now."]);
+		expect(await errorOf(await pim.end(launched.runToken, crypto.randomUUID()))).toEqual([409, "This run can't end that observation now."]);
+		expect(await errorOf(await pim.end("r".repeat(43), fresh))).toEqual(NOT_VALID);
+		expect(await errorOf(await pim.end("", fresh))).toEqual(NOT_VALID);
+		expect(await errorOf(await pim.end(launched.runToken, "../observations"))).toEqual(NOT_VALID);
+		expect(await errorOf(await pim.end(launched.runToken, fresh, { headers: { origin: "https://evil.example" } }))).toEqual([403, "Requests must come from this app"]);
+		expect(await errorOf(await pim.end(launched.runToken, fresh, { headers: pim.authorization(credential()) }))).toEqual(NOT_VALID);
+		expect(pim.asked.map(({ action }) => action)).toEqual(["launch"]);
+		expect(await pim.runs()).toEqual([expect.objectContaining({ phase: "open" })]);
+
+		// Past the run's deadline the run is over: it never ends from here, and stays so.
+		at(now + 10 * MINUTE);
+		expect(await (await pim.end(launched.runToken, fresh)).json()).toEqual({ error: "This run can't end that observation now.", run: { phase: "expired" } });
+		at(now);
+		expect(await (await pim.end(launched.runToken, fresh)).json()).toEqual({ error: "This run can't end that observation now.", run: { phase: "expired" } });
+		expect(pim.asked.map(({ action }) => action)).toEqual(["launch"]);
+		expect(await pim.runs()).toEqual([expect.objectContaining({ phase: "expired", observation_id: fresh })]);
+		expect((await pim.launch()).status).toBe(409);
+	});
+
+	it("stops at an uncertain or refused launch: no End is possible, and nothing is retried", async () => {
+		const lost = await evaluator({ host: { launch: "lost" } });
+		const uncertain = await lost.launch();
+		expect([uncertain.status, await uncertain.json()]).toEqual([
+			502,
+			{ error: "Whether an observation started is uncertain. Nothing is retried, and nothing may end it from here.", run: { phase: "launch_uncertain" } },
+		]);
+		const [record] = (await lost.records()).filter((one) => one.observationId !== OLD);
+		expect(record).toMatchObject({ status: "unconfirmed" });
+		expect(await lost.runs()).toEqual([expect.objectContaining({ phase: "launch_uncertain", observation_id: record!.observationId })]);
+		// No run token was answered, so no End can name the run; and the grant is spent.
+		expect((await lost.end("r".repeat(43), record!.observationId)).status).toBe(401);
+		expect((await lost.launch()).status).toBe(409);
+		expect(lost.asked.map(({ action }) => action)).toEqual(["launch"]);
+
+		const refusing = await evaluator({ host: { launch: "refused" } });
+		const refused = await refusing.launch();
+		expect([refused.status, await refused.json()]).toEqual([409, { error: "The space started no observation.", run: { phase: "launch_refused", reason: "not-opened" } }]);
+		expect(await refusing.runs()).toEqual([expect.objectContaining({ phase: "launch_refused", observation_id: null })]);
+		expect((await refusing.launch()).status).toBe(409);
+		expect(refusing.asked.map(({ action }) => action)).toEqual(["launch"]);
+	});
+
+	it("does not retry an End whose answer was lost, and the run is over", async () => {
+		const pim = await evaluator({ host: { end: "lost" } });
+		const launched = (await (await pim.launch()).json()) as Launched;
+		const fresh = launched.run.observation.id;
+		const ended = await pim.end(launched.runToken, fresh);
+		expect([ended.status, await ended.json()]).toEqual([502, { error: "Whether the end was asked for is uncertain. Nothing is retried.", run: { phase: "end_uncertain", observation: { id: fresh, status: "unconfirmed" } } }]);
+		expect(await errorOf(await pim.end(launched.runToken, fresh))).toEqual([409, "This run can't end that observation now."]);
+		expect((await pim.launch()).status).toBe(409);
+		expect(pim.asked.map(({ action }) => action)).toEqual(["launch", "end"]);
+		expect(await pim.runs()).toEqual([expect.objectContaining({ phase: "end_uncertain" })]);
+		expect(await pim.oldRecord()).toBe(pim.before);
 	});
 });

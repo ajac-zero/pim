@@ -1,0 +1,93 @@
+# The one-use launch evaluator for the preview's Cua evaluation
+
+**Status: under review, not accepted. Nothing here has run against a live preview, a real browser or a real host.** It qualifies exactly one new viewer observation for the evaluation's existing owner and space: one Watch, one view-only viewer load, one End. It is a separate grant, credential, route pair and command from automation sign-in (`docs/preview-automation.md`) and the read-only diagnosis (`docs/agent-preview.md`), which are unchanged and gain nothing from it. The Worker's half is `preview/launch-evaluator.ts` (with its Directory methods in `preview/cua-eval.ts` and the space's two RPC methods in `preview/worker.ts`); the runner's is `computer/cua-host/launch-evaluator.ts` and `launch-evaluator-cli.ts`.
+
+```diagram
+ operator dir (0700)            fresh headless Chromium, isolated context
+ └─ evaluator.json (0600) ─────▶ context.request ── 1. POST /auth/launch-evaluator/launch ──▶ Pim (exact origin)
+                                   │                   ◀── fresh ID, viewer address, run token     │ Directory: run "launching"→"open"
+                                   │                                                               │ space (RPC): fresh observation only
+                                   ├─ page ── 2. GET viewer, 7 view-only calls, 1 media socket ──▶ bridge host (the new launch only)
+                                   └─ context.request ── 3. POST /auth/launch-evaluator/end ─────▶ Pim: run "ending"→"ended"
+                                 4. browser closed; the grant is spent for good
+```
+
+## Off unless granted, and never in a deployment
+
+Only the evaluation mounts it (`evaluation` in `preview/worker.ts`, through `serve`'s `launchEvaluator` mount). A deployment's entry point (`src/index.ts`) passes no mount, so copying every variable into a deployment opens nothing: its routes answer `401 Sign in to Pim`, as any unknown `/auth` route does there. In the evaluation it is off unless both are set in the private environment:
+
+- `PREVIEW_LAUNCH_EVALUATOR=on`. Any other value means off.
+- `PREVIEW_LAUNCH_EVALUATOR_GRANT`, exactly:
+
+```json
+{
+  "kind": "launch-evaluator",
+  "owner": "o_…",
+  "evaluation": "cua-eval-…",
+  "deployment": "cua-eval@cloudflare",
+  "origin": "https://pim-cua-eval.ajac-zero.com",
+  "credentialSha256": "<64 lowercase hex digits>",
+  "notAfter": "2026-10-29T12:00:00Z"
+}
+```
+
+The rules are automation's (the claimed, active owner; `cua-eval@<PIM_RUNTIME>`; exactly `PIM_PUBLIC_URL`; a digest, never the credential), plus: `kind` must be `launch-evaluator`, so neither grant is accepted in the other's variable; the credential's digest must differ from `PREVIEW_AUTOMATION_GRANT`'s; and `notAfter`, the last moment a run may begin, is at most 24 hours ahead. Off, its routes aren't there, and the space's RPC methods refuse too. Turning automation on or off changes nothing here, and the reverse.
+
+The operator makes the credential and the runner's input with `scripts/preview-launch-evaluator-grant.mjs <evaluator file> <origin> <viewer origin> <owner> <evaluation> <deployment> <notAfter>`. It writes `{version: 1, kind: "launch-evaluator", origin, viewerOrigin, owner, evaluation, deployment, credential}` to a new `0600` file (never over anything) and prints only the grant. The viewer origin is the bridge's public HTTPS origin, which must be another host than Pim's. Nothing here has run that script.
+
+## The interface: two routes, no session
+
+Both are `POST` at Pim's exact origin, with `Origin: <origin>`, `Authorization: Pim-Launch-Evaluator <credential>` and a JSON body naming exactly the grant's owner, evaluation and deployment. Any other method is `405`; any other path under `/auth/launch-evaluator`, a query or an `Upgrade` header is `404`; another `Origin` is `403`; a wrong credential, scheme, field or value is `401 That launch evaluator credential isn't valid for this preview.` and records nothing. Neither route sets a cookie or makes a session or token: the credential means nothing on `/api`, a page or a socket, and the automation session's read-only limits are untouched (it still can't `POST /api/observations` or read or end `/api/observations/<id>`). Both count against the evaluation's `/auth` rate limit. Answers are `no-store` and `no-referrer`.
+
+**Launch: `POST /auth/launch-evaluator/launch`**, body `{owner, evaluation, deployment}`.
+
+1. The Directory inserts the grant's one run as `launching`, keyed by the credential's digest, for the claimed active owner only. A grant that has a run, whatever its phase, is spent: `409 This launch evaluator grant has run already; it runs once.`, and nothing is asked.
+2. The Worker calls the owner's space over Durable Object RPC (`launchForEvaluator`), never over HTTP, so no request a client builds can reach it. The space refuses unless the evaluator is on in its own environment, it is the fixture's seeded space, active, not erased, its ledger readable, and **nothing in its ledger is unresolved**. With nothing unresolved, the desk can't replay an open record, so nothing is asked of the host about any earlier observation. Nothing waits between that check and the desk recording its intent. The answer names the one record the launch added.
+3. The run moves once: to `open` with the fresh ID, `launch_refused` (nothing started: `409`, with `reason` such as `unresolved` or `not-opened`) or `launch_uncertain` (`502`). An uncertain run never ends from here.
+
+A `201` is `{run: {phase: "open", deadline, observation: {id, status: "open", notAfter}}, viewer, runToken}`. `deadline` is at most 10 minutes after the launch and never past the grant's `notAfter`. `viewer` is the host's address for this launch (`https://<bridge host>/<launch>/viewer/#ticket=…&clipboard=0`), and `runToken` is 32 random bytes the Directory keeps only as a digest. Both are in this answer only and never logged.
+
+**End: `POST /auth/launch-evaluator/end`**, body `{owner, evaluation, deployment, observation}`, with `x-pim-launch-evaluator-run: <run token>`.
+
+The Directory moves the run from `open` to `ending` only if the run token's digest matches, the run is `open`, its deadline hasn't come, the owner is still the claimed active one, and `observation` is exactly the ID it recorded. The earlier observation, any other ID, a second End, an End after an uncertain launch, or one past the deadline is refused before the space is asked (`409 This run can't end that observation now.`, or `401` without the run token); past the deadline the run becomes `expired`. The Worker then calls the space's `endForEvaluator` with the recorded ID, which asks the desk for its ordinary End only while that record is `open`. The run moves once more, to `ended` (`202`, a request, not closure), `end_refused` or `end_uncertain` (`502`), and is over for good.
+
+```diagram
+ launching ──▶ open ──▶ ending ──▶ ended | end_refused | end_uncertain
+     │           │
+     │           └──▶ expired
+     └──▶ launch_refused | launch_uncertain
+```
+
+Nothing here reads an observation's status, reconciles, resets, enrolls, changes an identity or a fixture, or retries. Logs are `preview.launch-evaluator` with an action, an outcome, the owner and the fresh ID, never a credential, token or address.
+
+## The runner: `launch-evaluator-cli.ts`
+
+```sh
+node computer/cua-host/launch-evaluator-cli.ts --origin https://pim-cua-eval.ajac-zero.com \
+  --viewer-origin https://<bridge host> --config-file ~/.config/pim-launch-evaluator/evaluator.json \
+  --deadline <the evaluation's ISO deadline> --playwright-dir ~/.local/share/pim-agent-preview [--browser-channel chrome]
+```
+
+It needs the same Playwright install and protected directory as the diagnosis (`docs/agent-preview.md`), and the same rules for `--browser-channel chrome`. Every option is given at most once; there is no option for an observation ID, an executable path, a launch argument, a profile, storage state or a CDP endpoint, and none for a retry. `--origin` and `--viewer-origin` must equal the file's. It refuses to begin with under two minutes left. It prints one JSON line, `launch-evaluator.result`, and exits 0 only for `qualified`; 1 for any other outcome or a failure before the launch (one fixed line on standard error); 2 for wrong arguments. The order is fixed:
+
+1. Launch a fresh headless browser (bundled Chromium, or exactly the system Chrome), make a new context with no downloads, service workers, permissions, stored state or recording, add a script that refuses microphone and screen capture, the clipboard and file pickers, and install the WebSocket and request routes. All of this before anything is sent: a failure here launches nothing.
+2. The launch, once, through the context's request object. A thrown request, a redirect, a `5xx`, a `409 launch_uncertain`, or a `201` lacking any of an open status, a well-formed fresh ID, a run token and a deadline within 10 minutes is `launch-uncertain`; a `401`, `403`, `404`, `405`, `429` or other `409` is `launch-refused`. Either stops the run with no viewer and no End.
+3. The viewer, for the new launch only. The address must be exactly the adapter's for one launch at `--viewer-origin`. While this step runs, the page may make only `GET`/`HEAD` of the launch's six viewer files and `POST` of its seven view-only calls (`GetCapabilities`, `ListTargets`, `OpenMedia`, `SetPreferences`, `RequestKeyframe`, `CloseMedia`, `Join`) on the viewer's origin, with no query; everything else, every Pim URL included, is aborted. Every WebSocket is answered by the context and closed (`1008`), but `wss://<viewer host>/<launch>/media?ticket=<token>`, at most 4 of them, which is connected. Up it go only `request_keyframe` and `frame_ack` text messages; anything else (input, actions, geometry, a binary microphone packet) is dropped and closes it. Down it, a `session_opened` that isn't `view_only` with observe-only geometry closes it. The viewer qualifies on a view-only `session_opened` and one frame, within 30 s and always leaving 20 s before the run's deadline for the End. The harness itself only loads, reads the page's URL and closes; its page type has no other method. Before and after this step, every request and socket is refused. The context must hold no cookie afterwards.
+4. The End, once, of the launch's own ID, whether the viewer qualified or failed, while the run's deadline (the earliest of the Worker's, `--deadline` and 10 minutes after starting) hasn't come; otherwise `expired`, with no End. A thrown End or a `5xx` is `end-uncertain`, a refusal `end-refused`; neither is retried.
+5. The browser closes, always, and a timer closes it at the run's deadline whatever is running.
+
+The report holds fixed words, counts, HTTP statuses, the run's phases and the fresh ID: never the credential, run token, viewer address, ticket or attach token, and it is checked for each before it is printed. No screenshot, trace or HAR is taken.
+
+## Before running it
+
+The space refuses the launch while any record in its ledger is unresolved (`pending_open`, `open`, `revoking` or `unconfirmed`): the desk admits one unresolved observation at a time, and the evaluator never replays, ends, reads or settles an earlier one. **If the earlier observation is still unresolved, the evaluator answers `launch_refused` (`unresolved`), launches nothing and spends its grant.** Check the earlier record's status with the read-only diagnosis first. Settling it is outside this change and needs its own reviewed procedure.
+
+## Tests
+
+- `computer/cua-host/test/launch-evaluator.test.ts` (49 tests, `node --test`): fake Playwright objects whose page, context, browser, routes and sockets are proxies that throw on any member the harness isn't meant to use. They cover the input file; the one-use order; a qualified run's exact sequence, headers, bodies and closing; every page request and socket refused but the new launch's, before, during and after the viewer step; twelve launch failures that stop with no viewer or End; ten viewer failures that each still send exactly one End; six End failures with no retry; the deadline (no start under two minutes, no End past it, the hard stop, the viewer's shortened window); the request, socket and message allowlists; the hardening script; type stripping, imports and a scan for input, clipboard, file, permission, profile, CDP and executable APIs; the bundled and `chrome` launches against a fake Playwright module; and the entry point's options.
+- `test/preview-automation.test.ts`, "the launch evaluator" (7 tests, workerd, the real preview Worker and seeded space, a bridge written in `fetch`): a full run and its spent grant, with the earlier record unchanged and no secret logged; refusals that record and ask nothing (origin, credential, scheme, owner, evaluation, deployment, route, method, query, upgrade, the automation session and credential); off for each grant fault and in a deployment's entry point; an unresolved or open earlier record refusing the launch with nothing asked of the host; End only of the recorded ID with the run token, and `expired` past the deadline; uncertain and refused launches that can't be ended; and a lost End that isn't retried.
+- The read-only diagnosis's 61 tests and the automation file's 8 are unchanged and pass.
+
+## Not covered
+
+Nothing here has run against the live evaluation, Cloudflare's runtime, a real bridge or host, or a real browser. In particular: whether Playwright 1.59.1's `routeWebSocket`/`connectToServer` carries the viewer's `rcdp.v2` subprotocol and binary frames through unchanged; whether the pinned viewer renders and qualifies in headless Chromium or Chrome 156 (WebCodecs, the worklets, the hardening script); whether the viewer makes requests outside the allowlist that it needs; the bridge's certificate and ingress for the media socket; real timings against the 30 s and 20 s windows; and Durable Object RPC between the Worker and the space on Cloudflare. Setting the variables, making the credential and running the command are separate, approved steps.

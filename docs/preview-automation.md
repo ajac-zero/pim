@@ -2,7 +2,7 @@
 
 The preview's Cua evaluation (`preview/cua-eval.ts`, `wrangler.cua-eval.jsonc`) signs people in only with a passkey. A runner the operator protects sometimes needs to look at the evaluation the way its owner does, in an isolated browser and through the API, without a passkey. This page describes how that runner signs in and the limits on what it can do. The code is in `preview/automation.ts`, with the mount in `src/gateway.ts` (`AutomationSessions`).
 
-It is not anonymous access, not an API token, and not `/__dev` sign-in, which the evaluation still refuses. Nobody is registered or enrolled, and no passkey, token or account is made. Ordinary passkey sessions don't change.
+It is not anonymous access, not an API token, and not `/__dev` sign-in, which the evaluation still refuses. Nor is it the one-use launch evaluator (`docs/launch-evaluator.md`), which has its own grant, credential and routes, makes no session, and gives an automation session nothing. Nobody is registered or enrolled, and no passkey, token or account is made. Ordinary passkey sessions don't change.
 
 ## Off unless the evaluation grants it
 

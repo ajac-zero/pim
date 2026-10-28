@@ -5,7 +5,7 @@ import type { ModelRef } from "@earendil-works/pi-durable";
 import type { PiModel } from "agents/harness/pi";
 import { ownedCode } from "../src/auth";
 import { bridgeFor } from "../src/cua";
-import { OBSERVATION_PATH_PREFIX, observationResponse } from "../src/cua-observation";
+import { OBSERVATION_PATH_PREFIX, observationResponse, unresolvedObservations } from "../src/cua-observation";
 import { OBSERVATION_KEY, ObservationDesk } from "../src/cua-observation-runtime";
 import { appOrigin, CuaViewerClient } from "../src/cua-viewer";
 import { deploymentSettings } from "../src/deployment";
@@ -15,6 +15,7 @@ import { OWNER_HEADER, Pim as RealPim, SIGNED_IN_HEADER } from "../src/pim";
 import { INTRODUCTION } from "../src/transcript";
 import { Authenticator } from "../test/webauthn";
 import { previewAutomation } from "./automation";
+import { type EvaluatorSpace, launchEvaluatorGrant, previewLaunchEvaluator, type SpaceEnd, type SpaceLaunch } from "./launch-evaluator";
 import { closedInEvaluation, EVAL_MODE, evaluating, previewMode, throughIngress } from "./cua-eval";
 import { type FixtureResult, seedCuaFixture, starts } from "./cua-fixture";
 import { agentMode, VIEWER_FIRST } from "./cua-viewer-first";
@@ -203,7 +204,7 @@ function watches(fixture: FixtureResult, name: string | undefined, env: Env): na
 	return seeded && watching(env) && name !== undefined && (env as unknown as Record<string, unknown>).PREVIEW_CUA_FIXTURE_OWNER === name;
 }
 
-export class Pim extends RealPim {
+export class Pim extends RealPim implements EvaluatorSpace {
 	/** The space's observations of its Cua desktop: only in the one space the fixture seeded; null in every other. */
 	readonly #desk: ObservationDesk | null;
 
@@ -260,6 +261,69 @@ export class Pim extends RealPim {
 		const publicUrl = deploymentSettings(this.env).publicUrl;
 		if (!this.#desk || !publicUrl) return refuse(404, "Not found");
 		return this.#desk.serve(request, { viaSession: request.headers.get(SIGNED_IN_HEADER) === "1" }, publicUrl);
+	}
+
+	/**
+	 * The desk the launch evaluator (./launch-evaluator.ts) may use, as `fetch`
+	 * checks a request, or why not: only in the evaluation, while its
+	 * evaluator is on, in the one space the fixture seeded, active, not
+	 * erased, with Pim's address set.
+	 */
+	#evaluated(): ObservationDesk | string {
+		if (!evaluating(this.env) || "off" in launchEvaluatorGrant(this.env, Date.now())) return "off";
+		if (!this.#desk) return "no-desk";
+		if (this.store.erasedAt() !== null) return "erased";
+		if (this.status() !== "active") return "suspended";
+		if (!deploymentSettings(this.env).publicUrl) return "address";
+		return this.#desk;
+	}
+
+	/**
+	 * The launch evaluator's one Watch, over RPC only (never a route): a
+	 * fresh observation, or nothing. While the ledger holds anything
+	 * unresolved, nothing is recorded or asked, so the desk never replays
+	 * an open record or touches any earlier one. Nothing waits between that
+	 * check and the desk recording its intent, so nothing can come between
+	 * them. The answer names the one record the launch added, and its viewer
+	 * only when the desk handed one out for exactly that record.
+	 */
+	async launchForEvaluator(): Promise<SpaceLaunch> {
+		const desk = this.#evaluated();
+		if (typeof desk === "string") return { outcome: "refused", reason: desk };
+		const before = desk.state;
+		if (!before) return { outcome: "refused", reason: "blocked" };
+		if (unresolvedObservations(before).length > 0) return { outcome: "refused", reason: "unresolved" };
+		const known = new Set(before.records.map((record) => record.observationId));
+		const answer = await desk.launch();
+		const added = (desk.state?.records ?? []).filter((record) => !known.has(record.observationId));
+		if (added.length === 0) return desk.blocked ? { outcome: "uncertain", observation: null } : { outcome: "refused", reason: "not-recorded" };
+		if (added.length > 1) return { outcome: "uncertain", observation: null };
+		const [fresh] = added;
+		if (answer.status === 200 && fresh!.status === "open") {
+			const body = (await answer.json().catch(() => null)) as { observation?: { id?: unknown }; viewer?: unknown } | null;
+			if (body?.observation?.id === fresh!.observationId && typeof body.viewer === "string") {
+				return { outcome: "open", observation: { id: fresh!.observationId, notAfter: fresh!.notAfter }, viewer: body.viewer };
+			}
+		}
+		if (fresh!.status === "not_opened") return { outcome: "refused", reason: "not-opened" };
+		return { outcome: "uncertain", observation: fresh!.observationId };
+	}
+
+	/**
+	 * The launch evaluator's one End, over RPC only, of the observation its
+	 * Directory recorded for the run (never one the caller names): asked only
+	 * while that record is open.
+	 */
+	async endForEvaluator(observation: string): Promise<SpaceEnd> {
+		const desk = this.#evaluated();
+		if (typeof desk === "string") return { outcome: "refused", status: null };
+		const record = desk.state?.records.find((one) => one.observationId === observation);
+		if (record?.status !== "open") return { outcome: "refused", status: record?.status ?? null };
+		const answer = await desk.end(observation);
+		const status = desk.state?.records.find((one) => one.observationId === observation)?.status ?? null;
+		if (answer.status === 202) return { outcome: "requested", status };
+		if (answer.status === 200) return { outcome: "final", status };
+		return { outcome: desk.blocked || status === "unconfirmed" ? "uncertain" : "refused", status };
 	}
 
 	/** The stand-in model, besides the real providers: the ChatGPT plan, and those people add, such as a model on this machine. */
@@ -378,5 +442,5 @@ function evaluation(request: Request, env: Env, ctx: ExecutionContext): Promise<
 	const refuse = (status: number, error: string) => Promise.resolve(Response.json({ error }, { status, headers: { "cache-control": "no-store" } }));
 	if (closedInEvaluation(url.pathname)) return refuse(404, "Not found");
 	if (url.origin !== deploymentSettings(env).publicUrl) return refuse(421, "This preview answers only at its own address.");
-	return serve(request, env, ctx, { observations: watching(env), automation: previewAutomation });
+	return serve(request, env, ctx, { observations: watching(env), automation: previewAutomation, launchEvaluator: previewLaunchEvaluator });
 }

@@ -69,6 +69,8 @@
   // PREVIEW_CUA_FIXTURE_OWNER (docs/cua-viewer-first-cloudflare.md). Automation sign-in stays off
   // unless PREVIEW_AUTOMATION=on and PREVIEW_AUTOMATION_GRANT (the credential's SHA-256, never the
   // credential) are set too (docs/preview-automation.md).
+  // The one-use launch evaluator stays off unless PREVIEW_LAUNCH_EVALUATOR=on and
+  // PREVIEW_LAUNCH_EVALUATOR_GRANT (its own credential's SHA-256) are set (docs/launch-evaluator.md).
   "vars": {
     "PREVIEW_MODE": "cua-eval",
     "PIM_RUNTIME": "cloudflare",

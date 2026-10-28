@@ -1,6 +1,7 @@
 import { isHttpsOrigin } from "../src/cua-viewer";
 import { type Account, type ClaimCode, Directory as RealDirectory, type Registration } from "../src/directory";
 import { AutomationLedger, type AutomationRow, MAX_LIVE_SESSIONS } from "./automation";
+import { type EvaluatorPhase, type EvaluatorRun, LaunchEvaluatorLedger } from "./launch-evaluator";
 import { CLIENT_IP_HEADER, INGRESS_SECRET_HEADER, runtimeOf } from "../src/runtime";
 
 /**
@@ -247,6 +248,58 @@ export class EvalDirectory extends RealDirectory {
 	/** Revokes a grant for good: every session it made stops at once, and its credential makes no more. */
 	automationRevoke(grant: string, now: number): void {
 		if (evaluating(this.env)) new AutomationLedger(this.ctx.storage.sql).revoke(grant, now);
+	}
+
+	/**
+	 * Begins a launch evaluator's one run (./launch-evaluator.ts) as
+	 * `launching`, for the claimed, active owner only. A grant that has a run
+	 * already, in any phase, is spent.
+	 */
+	evaluatorClaim(row: Omit<EvaluatorRun, "phase" | "observation" | "updatedAt">): { ok: true } | { ok: false; reason: "refused" } | { ok: false; reason: "spent"; phase: EvaluatorPhase } {
+		if (!this.#automatable(row.owner)) return { ok: false, reason: "refused" };
+		const ledger = new LaunchEvaluatorLedger(this.ctx.storage.sql);
+		if (ledger.claim(row)) return { ok: true };
+		return { ok: false, reason: "spent", phase: ledger.read(row.grant)!.phase };
+	}
+
+	/** Records what the space answered the run's launch: `launching` moves on once, to `open` with the fresh ID or to a refusal or uncertainty. */
+	evaluatorLaunched(grant: string, phase: "open" | "launch_refused" | "launch_uncertain", observation: string | null, now: number): boolean {
+		if (!evaluating(this.env)) return false;
+		return new LaunchEvaluatorLedger(this.ctx.storage.sql).move(grant, "launching", phase, now, observation);
+	}
+
+	/**
+	 * Moves the run to `ending` if, now, it may end: its run token's digest
+	 * matches, it is `open`, it names exactly `observation`, its owner is still
+	 * the claimed active one, and its deadline hasn't come. An open run past
+	 * its deadline becomes `expired` and never ends from here.
+	 */
+	evaluatorEnding(
+		grant: string,
+		run: string,
+		observation: string,
+		now: number,
+	): { ok: true; observation: string } | { ok: false; reason: "none" | "run" | "phase" | "observation" | "expired" | "refused"; phase: EvaluatorPhase | null } {
+		if (!evaluating(this.env)) return { ok: false, reason: "none", phase: null };
+		const ledger = new LaunchEvaluatorLedger(this.ctx.storage.sql);
+		const found = ledger.read(grant);
+		if (!found) return { ok: false, reason: "none", phase: null };
+		const bytes = new TextEncoder();
+		if (run.length !== found.run.length || !crypto.subtle.timingSafeEqual(bytes.encode(run), bytes.encode(found.run))) return { ok: false, reason: "run", phase: found.phase };
+		if (found.phase !== "open") return { ok: false, reason: "phase", phase: found.phase };
+		if (now >= found.deadline) {
+			ledger.move(grant, "open", "expired", now);
+			return { ok: false, reason: "expired", phase: "expired" };
+		}
+		if (found.observation === null || found.observation !== observation) return { ok: false, reason: "observation", phase: found.phase };
+		if (!this.#automatable(found.owner)) return { ok: false, reason: "refused", phase: found.phase };
+		return ledger.move(grant, "open", "ending", now) ? { ok: true, observation: found.observation } : { ok: false, reason: "phase", phase: found.phase };
+	}
+
+	/** Records how the run's one End went: `ending` moves on once, and the run is over for good. */
+	evaluatorEnded(grant: string, phase: "ended" | "end_refused" | "end_uncertain", now: number): boolean {
+		if (!evaluating(this.env)) return false;
+		return new LaunchEvaluatorLedger(this.ctx.storage.sql).move(grant, "ending", phase, now);
 	}
 
 	/** No claim code is made, or written to the logs, for an evaluation: the operator's is the only one. */

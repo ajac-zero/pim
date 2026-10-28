@@ -391,9 +391,15 @@ export type AutomationSessions = {
  * Routes a composition adds to the API, which a deployment doesn't have: it
  * passes none (./index.ts). Only the preview mounts `observations`
  * (preview/worker.ts, docs/cua-viewer-first-preview.md), and only its
- * evaluation `automation`.
+ * evaluation `automation` and `launchEvaluator` (preview/launch-evaluator.ts,
+ * docs/launch-evaluator.md): its own routes under `/auth`, or `undefined` for
+ * a request it doesn't answer, which `/auth` then answers as before.
  */
-export type Mounts = { readonly observations?: boolean; readonly automation?: AutomationSessions };
+export type Mounts = {
+	readonly observations?: boolean;
+	readonly automation?: AutomationSessions;
+	readonly launchEvaluator?: (request: Request, env: Env) => Promise<Response | undefined>;
+};
 
 /**
  * The person watching their Cua desktop, where mounted: `/api/observations/…`,
@@ -461,6 +467,8 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext, m
 	}
 
 	if (under(pathname, "/auth")) {
+		const evaluator = await mounts.launchEvaluator?.(request, env);
+		if (evaluator) return evaluator;
 		const automation = await mounts.automation?.auth(request, env);
 		if (automation) return automation;
 		const answer = (await handleRegistration(request, env, address)) ?? (await handleAuth(request, env, sites(env)));

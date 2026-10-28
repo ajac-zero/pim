@@ -187,6 +187,9 @@ export class LaunchEvaluatorLedger {
 		sql.exec(
 			"CREATE TABLE IF NOT EXISTS preview_launch_evaluator_runs (grant_digest TEXT PRIMARY KEY, owner TEXT NOT NULL, evaluation TEXT NOT NULL, deployment TEXT NOT NULL, origin TEXT NOT NULL, run_digest TEXT NOT NULL, phase TEXT NOT NULL, observation_id TEXT, alongside_id TEXT, created_at INTEGER NOT NULL, deadline INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
 		);
+		// A table made before `alongside_id` existed gains it, empty, once; its rows are kept as they are.
+		const columns = sql.exec("SELECT name FROM pragma_table_info('preview_launch_evaluator_runs')").toArray();
+		if (!columns.some((column) => column.name === "alongside_id")) sql.exec("ALTER TABLE preview_launch_evaluator_runs ADD COLUMN alongside_id TEXT");
 	}
 
 	read(grant: string): EvaluatorRun | null {

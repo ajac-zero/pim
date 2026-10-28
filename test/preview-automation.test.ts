@@ -2,7 +2,7 @@ import { createExecutionContext, env, evictDurableObject, runInDurableObject, wa
 import * as fs from "node:fs";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { EvalDirectory } from "../preview/cua-eval";
-import { evaluatorAdmission } from "../preview/launch-evaluator";
+import { evaluatorAdmission, LaunchEvaluatorLedger } from "../preview/launch-evaluator";
 import previewWorker from "../preview/worker";
 import { applyObservationEvent, initialObservationState, type ObservationState } from "../src/cua-observation";
 import { OBSERVATION_KEY } from "../src/cua-observation-runtime";
@@ -1196,5 +1196,52 @@ describe("the launch evaluator", () => {
 		expect(evaluatorAdmission(state, OTHER_OLD)).toEqual({ ok: false, reason: "unresolved" });
 		step({ type: "open_requested", owner: state.owner, observationId: OTHER_OLD, notAfter: now + MINUTE, now });
 		expect(evaluatorAdmission(state, OLD)).toEqual({ ok: false, reason: "unresolved" });
+	});
+
+	it("upgrades a runs table made by the evaluator's first schema, once, keeping its rows, then reads, claims and moves with the new column", async () => {
+		// Exactly the table `0ff78ce` made, before `alongside_id`, holding one run as that version left it.
+		const FIRST_SCHEMA =
+			"CREATE TABLE IF NOT EXISTS preview_launch_evaluator_runs (grant_digest TEXT PRIMARY KEY, owner TEXT NOT NULL, evaluation TEXT NOT NULL, deployment TEXT NOT NULL, origin TEXT NOT NULL, run_digest TEXT NOT NULL, phase TEXT NOT NULL, observation_id TEXT, created_at INTEGER NOT NULL, deadline INTEGER NOT NULL, updated_at INTEGER NOT NULL)";
+		const [earlier, later] = ["a".repeat(64), "b".repeat(64)];
+		const owner = "o_00000000000000000000000000";
+		const identity = { owner, evaluation: EVALUATION, deployment: DEPLOYMENT, origin: ORIGIN };
+		const fresh = "fresh-observation-0001";
+		const directory = previewDirectories.getByName(`${crypto.randomUUID()}:directory`);
+		const seen = await runInDurableObject(directory, (_instance, state) => {
+			const sql = state.storage.sql;
+			const columns = () => sql.exec("SELECT name FROM pragma_table_info('preview_launch_evaluator_runs')").toArray().map(({ name }) => String(name));
+			sql.exec(FIRST_SCHEMA);
+			sql.exec(
+				"INSERT INTO preview_launch_evaluator_runs (grant_digest, owner, evaluation, deployment, origin, run_digest, phase, observation_id, created_at, deadline, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, 1000, 601000, 1000)",
+				earlier,
+				owner,
+				EVALUATION,
+				DEPLOYMENT,
+				ORIGIN,
+				"c".repeat(64),
+				OLD,
+			);
+			const before = columns();
+			const ledger = new LaunchEvaluatorLedger(sql);
+			const upgraded = columns();
+			// Again, as every Directory call makes one: nothing more changes.
+			new LaunchEvaluatorLedger(sql);
+			const again = columns();
+			const kept = ledger.read(earlier);
+			// The earlier run moves on as it would have; a new run claims once and records what it started beside.
+			const movedEarlier = ledger.move(earlier, "open", "ending", 2000);
+			const claimed = ledger.claim({ grant: later, ...identity, run: "d".repeat(64), createdAt: 3000, deadline: 603000 });
+			const claimedTwice = ledger.claim({ grant: later, ...identity, run: "e".repeat(64), createdAt: 3001, deadline: 603001 });
+			const opened = ledger.move(later, "launching", "open", 4000, { observation: fresh, alongside: OLD });
+			const openedTwice = ledger.move(later, "launching", "open", 4001, { observation: "fresh-observation-0002", alongside: null });
+			return { before, upgraded, again, kept, movedEarlier, earlierAfter: ledger.read(earlier), claimed, claimedTwice, opened, openedTwice, laterAfter: ledger.read(later) };
+		});
+		expect(seen.before).not.toContain("alongside_id");
+		expect(seen.upgraded).toEqual([...seen.before, "alongside_id"]);
+		expect(seen.again).toEqual(seen.upgraded);
+		expect(seen.kept).toEqual({ grant: earlier, ...identity, run: "c".repeat(64), phase: "open", observation: OLD, alongside: null, createdAt: 1000, deadline: 601000, updatedAt: 1000 });
+		expect([seen.movedEarlier, seen.earlierAfter]).toEqual([true, { ...seen.kept, phase: "ending", updatedAt: 2000 }]);
+		expect([seen.claimed, seen.claimedTwice, seen.opened, seen.openedTwice]).toEqual([true, false, true, false]);
+		expect(seen.laterAfter).toEqual({ grant: later, ...identity, run: "d".repeat(64), phase: "open", observation: fresh, alongside: OLD, createdAt: 3000, deadline: 603000, updatedAt: 4000 });
 	});
 });

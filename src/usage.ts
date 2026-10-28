@@ -339,7 +339,13 @@ export class UsageMeter {
 				}
 				// The stream settles once; a failed or aborted request keeps its count, with whatever tokens it reported.
 				events.result().then(
-					(message) => this.settleModel(reserved.reservation, message.usage),
+					(message) => {
+						this.settleModel(reserved.reservation, message.usage);
+						// The chat only says that a request failed; the provider's own words are for whoever runs the deployment.
+						if (message.stopReason === "error") {
+							console.warn(JSON.stringify({ event: "pim.model_error", provider: model.provider, model: model.id, error: (message.errorMessage ?? "").slice(0, 1000) }));
+						}
+					},
 					() => undefined,
 				);
 				return events;

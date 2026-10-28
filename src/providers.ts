@@ -34,8 +34,6 @@ export type ProviderModel = {
 	readonly reasoning: boolean;
 	/** A built-in model's full native definition as JSON, also safe to pass over Durable Object RPC. */
 	readonly native?: string;
-	/** For a Claude model on a custom Messages endpoint: pi-ai's compat flags and thinking levels for it, as JSON. The API refuses the wrong kind of thinking request, so these must match the model. */
-	readonly claude?: string;
 };
 
 /** A provider as it's kept: its key included. */
@@ -238,15 +236,13 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 		if (missing) throw new HttpError(400, `${url} doesn't list a model ${missing}`);
 	}
 	const known = await knownModels();
-	const models = (chosen ?? listed!.map((entry) => entry.id as string)).map((id) => {
-		const model = describe(
+	const models = (chosen ?? listed!.map((entry) => entry.id as string)).map((id) =>
+		describe(
 			id,
 			listed?.find((entry) => entry.id === id),
 			known.get(id),
-		);
-		const claude = known.get(id);
-		return api && claude?.api === "anthropic-messages" ? { ...model, claude: JSON.stringify({ compat: claude.compat, thinkingLevelMap: claude.thinkingLevelMap }) } : model;
-	});
+		),
+	);
 
 	let id = existing?.id;
 	if (!id) {
@@ -259,7 +255,7 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 }
 
 export function providerInfo({ key, ...provider }: CustomProvider): ProviderInfo {
-	return { ...provider, models: provider.models.map(({ native, claude, ...model }) => model), hasKey: key !== null };
+	return { ...provider, models: provider.models.map(({ native, ...model }) => model), hasKey: key !== null };
 }
 
 /**
@@ -268,7 +264,6 @@ export function providerInfo({ key, ...provider }: CustomProvider): ProviderInfo
  */
 export function providerModel(catalogId: string, provider: CustomProvider, model: ProviderModel): Model<Api> {
 	if (model.native) return { ...JSON.parse(model.native) as Model<Api>, provider: catalogId };
-	const claude = model.claude ? (JSON.parse(model.claude) as Pick<Model<Api>, "compat" | "thinkingLevelMap">) : undefined;
 	return {
 		id: model.id,
 		name: model.name,
@@ -280,7 +275,7 @@ export function providerModel(catalogId: string, provider: CustomProvider, model
 		contextWindow: model.contextWindow,
 		maxTokens: model.maxTokens,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		...(provider.api ? claude : { compat: { supportsDeveloperRole: false } }),
+		...(provider.api ? {} : { compat: { supportsDeveloperRole: false } }),
 	} as Model<Api>;
 }
 
@@ -313,12 +308,29 @@ export function piProvider(catalogId: string, provider: CustomProvider): Provide
 			"mistral-conversations": mistralConversationsApi(),
 		},
 	});
+	if (provider.api) {
+		return { ...configured, stream: withKnownCompat(configured.stream), streamSimple: withKnownCompat(configured.streamSimple) };
+	}
 	if (!provider.builtin) return configured;
 	return {
 		...configured,
 		stream: nativeStream(configured.stream, provider.builtin),
 		streamSimple: nativeStream(configured.streamSimple, provider.builtin),
 	};
+}
+
+/**
+ * A Claude model on a custom Messages endpoint is sent the requests pi-ai
+ * makes for that model, which depend on its compat flags: a model that takes
+ * only adaptive thinking is refused a thinking budget. A custom model has
+ * none of its own, so they come from pi-ai's catalog when it knows the id.
+ */
+function withKnownCompat<T extends StreamOptions>(stream: StreamFunction<Api, T>): StreamFunction<Api, T> {
+	return (model, context, options) => lazyStream(model, async () => {
+		const known = (await knownModels()).get(model.id);
+		const catalogued = known?.api === "anthropic-messages" ? { ...model, compat: known.compat, thinkingLevelMap: known.thinkingLevelMap } : model;
+		return stream(catalogued, context, options);
+	});
 }
 
 /**

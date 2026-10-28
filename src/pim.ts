@@ -3027,12 +3027,19 @@ export class Pim extends DurableAgent<Env> {
 		const open = this.#rooms.mode(session) === "open";
 		const wakes = (seat: Seat) => open || named.has(seat.agent) || (seat.conversation === session && named.size === 0);
 		const [hosting, ...members] = seats as [Seat, ...Seat[]];
+		this.#logTurns("person", session, seats, named, wakes);
 		const receipt = wakes(hosting) ? await this.#submit(session, content, { ...options, operationId }, "user") : await this.#write(session, content, operationId);
 		// A message sent again reaches no one twice.
 		if (!receipt.accepted) return receipt;
 		if (wakes(hosting)) this.#rooms.setDepth(session, 0);
 		for (const seat of members) await this.#hear(seat, content, `${operationId}:${seat.agent}`, wakes(seat), 0);
 		return receipt;
+	}
+
+	/** Says in the log who a message in a room was for and who it woke, so a silent agent can be told from one that was never asked. */
+	#logTurns(from: string, room: string, seats: readonly Seat[], named: ReadonlySet<string>, wakes: (seat: Seat) => boolean, depth = 0): void {
+		const name = (seat: Seat) => this.agents.get(seat.agent)?.name ?? seat.agent;
+		console.log(JSON.stringify({ event: "pim.room", owner: this.name, room, from, depth, mode: this.#rooms.mode(room), mentioned: [...named].map((id) => this.agents.get(id)?.name ?? id), seats: seats.map(name), woke: seats.filter(wakes).map(name) }));
 	}
 
 	/**
@@ -3058,6 +3065,7 @@ export class Pim extends DurableAgent<Env> {
 		const named = new Set(mentioned(message, this.#seated(seats)).map((agent) => agent.id));
 		const open = this.#rooms.mode(room) === "open";
 		const depth = seat.depth + 1;
+		this.#logTurns(speaker.name, room, seats, named, (other) => other.conversation !== conversation && (open || named.has(other.agent)) && depth < MAX_ROOM_DEPTH, depth);
 		for (const other of seats) {
 			if (other.conversation === conversation) continue;
 			const wake = (open || named.has(other.agent)) && depth < MAX_ROOM_DEPTH;

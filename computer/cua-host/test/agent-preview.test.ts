@@ -12,15 +12,20 @@ import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import {
 	AgentPreviewError,
+	type Browser,
 	type BrowserContext,
 	type BrowserCookie,
 	type BrowserLauncher,
 	type BrowserRoute,
+	type WebSocketRoute,
 	type Clock,
 	diagnoseObservations,
 	type ExchangeAdapter,
 	exactOrigin,
+	MAX_BROWSER_REQUESTS,
 	MAX_REQUESTS,
+	PLAYWRIGHT_VERSION,
+	playwrightChromium,
 	MAX_SESSION_MS,
 	openAgentPreview,
 	readCredentialFile,
@@ -30,7 +35,9 @@ const ORIGIN = "https://preview.example.test";
 const CREDENTIAL = "credential-0123456789abcdef";
 const COOKIE_VALUE = "cookie-value-9876543210zyxw";
 const T0 = Date.UTC(2026, 9, 29, 12, 0);
-const ID = "obs_0123456789abcdef";
+const ID = "5b0b3f0e-9f0d-4c61-8c0e-2f0e8f6a1c11";
+/** What the Worker lists for one record: `ObservationView` (src/cua-observation-runtime.ts), with no launch, generation or viewer path. */
+const view = (overrides: Record<string, unknown> = {}) => ({ id: ID, status: "unconfirmed", notAfter: T0 + 60_000, evidence: "the host's answer to launch was lost (timeout)", ...overrides });
 
 const refusal = async (run: () => Promise<unknown> | unknown): Promise<AgentPreviewError> => {
 	try {
@@ -67,6 +74,10 @@ class Fake {
 	closed = { browser: 0, context: 0, page: 0 };
 	jar: BrowserCookie[] = [];
 	routeHandler: ((route: BrowserRoute) => Promise<void> | void) | undefined;
+	wsHandlers: { pattern: unknown; handler: (ws: WebSocketRoute) => Promise<void> | void; before: string[] }[] = [];
+	events: string[] = [];
+	gotoThrows = false;
+	launchThrows = false;
 	postStatus = 200;
 	getStatus = 200;
 	getBody: unknown = { blocked: null, observations: [] };
@@ -76,7 +87,13 @@ class Fake {
 	throwOnPost = false;
 
 	launcher: BrowserLauncher = {
-		launch: async () => ({
+		launch: async () => {
+			if (this.launchThrows) throw new Error(`spawn /home/operator/.cache/chromium ENOENT ${CREDENTIAL}`);
+			return this.browser();
+		},
+	};
+
+	browser = (): Browser => ({
 			newContext: async (options) => {
 				this.contexts++;
 				this.contextOptions.push({ ...options });
@@ -85,8 +102,7 @@ class Fake {
 			close: async () => {
 				this.closed.browser++;
 			},
-		}),
-	};
+		});
 
 	context(): BrowserContext {
 		const fake = this;
@@ -107,10 +123,18 @@ class Fake {
 			},
 			cookies: async () => fake.jar,
 			route: async (_url, handler) => {
+				fake.events.push("route");
 				fake.routeHandler = handler;
 			},
-			newPage: async () => ({
+			routeWebSocket: async (pattern, handler) => {
+				fake.events.push("routeWebSocket");
+				fake.wsHandlers.push({ pattern, handler, before: [...fake.events] });
+			},
+			newPage: async () => {
+				fake.events.push("newPage");
+				return {
 				goto: async (url) => {
+					if (fake.gotoThrows) throw new Error(`net::ERR at ${COOKIE_VALUE} /home/operator`);
 					fake.calls.push({ kind: "goto", url, method: fake.jar.length === 0 ? "no-cookie" : "cookie" });
 				},
 				url: () => fake.pageUrl,
@@ -119,7 +143,8 @@ class Fake {
 				close: async () => {
 					fake.closed.page++;
 				},
-			}),
+			};
+			},
 			close: async () => {
 				fake.closed.context++;
 			},
@@ -306,13 +331,46 @@ describe("redaction", () => {
 		assert.equal(error.cause, undefined);
 	});
 
-	it("reports observations without the host's launch identity, and caps free text", async () => {
+	it("reports the Worker's real view of a record, with its exact redacted evidence and no host certainty", async () => {
 		const { fake, session } = await open();
-		fake.getBody = { blocked: `bad ${COOKIE_VALUE}`, observations: [{ observationId: ID, status: "unconfirmed", notAfter: 5, hostLaunchId: "launch-secret-id", hostGeneration: "g", evidence: "free text", conflicting: true }] };
+		fake.getBody = {
+			blocked: `bad ${COOKIE_VALUE}`,
+			// A real list: newest first, `id` (not observationId), no launch fields, and a key a composition's `listing` may add.
+			observations: [view(), view({ id: "0b0b3f0e-9f0d-4c61-8c0e-2f0e8f6a1c22", status: "open", evidence: null }), view({ id: "1b0b3f0e-9f0d-4c61-8c0e-2f0e8f6a1c33", evidence: `the host's answer to end was lost (redirect) ${CREDENTIAL}` })],
+			agents: ["x"],
+		};
 		const report = await session.observations();
-		assert.deepEqual(report.records, [{ observationId: ID, status: "unconfirmed", notAfter: 5, conflicting: true, hasHostLaunch: true }]);
+		assert.deepEqual(report.observations[0], { id: ID, status: "unconfirmed", notAfter: T0 + 60_000, evidence: "the host's answer to launch was lost (timeout)", lostReason: "timeout" });
+		assert.deepEqual(report.observations[1], { id: "0b0b3f0e-9f0d-4c61-8c0e-2f0e8f6a1c22", status: "open", notAfter: T0 + 60_000, evidence: null, lostReason: null });
+		assert.equal(report.observations[2]?.evidence, "the host's answer to end was lost (redirect) [redacted]");
+		assert.equal(report.observations[2]?.lostReason, "redirect");
 		assert.equal(report.blocked, "bad [redacted]");
-		assert.equal(JSON.stringify(report).includes("launch-secret-id"), false);
+		assert.equal(JSON.stringify(report).includes("hasHostLaunch"), false);
+		assert.equal(JSON.stringify(report).includes("agents"), false);
+	});
+
+	it("recognizes every lost reason the Worker writes, and no others", async () => {
+		const { fake, session } = await open();
+		const reasons = ["timeout", "unreachable", "status", "malformed", "redirect"];
+		fake.getBody = { blocked: null, observations: [...reasons.map((r) => view({ evidence: `the host's answer to launch was lost (${r})` })), view({ evidence: "lost (other)" }), view({ evidence: "the host's status doesn't name this launch (found)" })] };
+		const report = await session.observations();
+		assert.deepEqual(
+			report.observations.map((one) => one.lostReason),
+			[...reasons, null, null],
+		);
+	});
+
+	it("closes the session on a record that isn't the Worker's shape, instead of guessing", async () => {
+		for (const bad of [{ observationId: ID, status: "open", notAfter: 1, evidence: null }, view({ status: "weird" }), view({ notAfter: "1" }), view({ id: "short" }), view({ evidence: 5 }), null, "x"]) {
+			const { fake, session } = await open();
+			fake.getBody = { blocked: null, observations: [bad] };
+			assert.equal((await refusal(() => session.observations())).code, "malformed");
+			assert.equal(fake.closed.context, 1);
+		}
+		const { fake, session } = await open();
+		fake.getBody = { observations: "none" };
+		assert.equal((await refusal(() => session.observations())).code, "malformed");
+		assert.equal(fake.closed.context, 1);
 	});
 });
 
@@ -401,7 +459,7 @@ describe("bounded lifecycle and no retry", () => {
 describe("read only first use", () => {
 	it("diagnoses with one GET /api/observations and one page of /, and closes", async () => {
 		const { fake, session } = await open();
-		fake.getBody = { blocked: null, observations: [{ observationId: ID, status: "unconfirmed", notAfter: 1 }] };
+		fake.getBody = { blocked: null, observations: [view()] };
 		const result = await diagnoseObservations(session);
 		assert.deepEqual(
 			fake.calls.map((call) => [call.kind, call.url]),
@@ -411,7 +469,7 @@ describe("read only first use", () => {
 				["goto", `${ORIGIN}/`],
 			],
 		);
-		assert.equal(result.observations.records[0]?.status, "unconfirmed");
+		assert.equal(result.observations.observations[0]?.status, "unconfirmed");
 		assert.equal(result.ui.banner, "UNSAFE PREVIEW — agent access enabled");
 		assert.equal(result.ui.title.includes(COOKIE_VALUE), false);
 		assert.deepEqual(fake.closed, { browser: 1, context: 1, page: 1 });
@@ -422,14 +480,11 @@ describe("read only first use", () => {
 		fake.getStatus = 500;
 		assert.equal((await refusal(() => diagnoseObservations(session))).code, "status");
 		assert.equal(fake.closed.context, 1);
+		assert.equal(fake.closed.browser, 1);
 	});
 
-	it("reads only the observation routes: no end, no query, no other path, no write method", async () => {
+	it("reads only the list: no single record (which asks the computer), no end, no query, no write method", async () => {
 		const { fake, session } = await open();
-		const reach = (id: string) => session.observation(id);
-		for (const bad of [`${ID}/end`, `${ID}?x=1`, "short", "../x", `${ID}/`]) {
-			assert.equal((await refusal(() => reach(bad))).code, "path", bad);
-		}
 		for (const bad of ["//elsewhere.example.test/", "/../x", "/a?b=1", "/a#b", "https://elsewhere.example.test/", "no-slash"]) {
 			assert.equal((await refusal(() => session.inspectPage(bad))).code, "path", bad);
 		}
@@ -437,9 +492,9 @@ describe("read only first use", () => {
 			fake.calls.map((call) => call.kind),
 			["post"],
 		);
-		for (const method of ["watch", "end", "launch", "post", "enroll", "setup", "put", "delete"]) assert.equal(method in session, false);
-		await session.observation(ID);
-		assert.equal(fake.calls.at(-1)?.url, `${ORIGIN}/api/observations/${ID}`);
+		await session.observations();
+		assert.equal(fake.calls.at(-1)?.url, `${ORIGIN}/api/observations`);
+		for (const method of ["observation", "watch", "end", "launch", "post", "enroll", "setup", "put", "delete", "storageState"]) assert.equal(method in session, false);
 	});
 
 	it("refuses an exchange path with a query or another origin", async () => {
@@ -449,5 +504,100 @@ describe("read only first use", () => {
 			assert.equal(error.code, "adapter", bad);
 			assert.equal(fake.contexts, 0);
 		}
+	});
+});
+
+describe("WebSockets and bounds in the browser", () => {
+	it("answers every WebSocket in the context before any page or request exists, and never connects it to the server", async () => {
+		const { fake } = await open();
+		assert.equal(fake.wsHandlers.length, 1);
+		const [installed] = fake.wsHandlers;
+		assert.ok(installed!.pattern instanceof RegExp && installed!.pattern.test("wss://preview.example.test/api/anything") && installed!.pattern.test("wss://elsewhere.example.test/"));
+		// Installed in the same step as the other interception, ahead of newPage and of any request made by the context.
+		assert.deepEqual(installed!.before, ["routeWebSocket"]);
+		const closes: unknown[] = [];
+		const ws = { close: (options: unknown) => void closes.push(options) } as unknown as WebSocketRoute;
+		await installed!.handler(ws);
+		assert.deepEqual(closes, [{ code: 1008, reason: "read only" }]);
+		// The route object given to the handler has no way to reach the server: the handler used only `close`.
+		assert.deepEqual(Object.keys(ws), ["close"]);
+	});
+
+	it("aborts browser requests past the context's bound, and ones that don't parse", async () => {
+		const { fake } = await open();
+		const outcomes: string[] = [];
+		const attempt = (url: string) => fake.routeHandler!({ request: () => ({ url: () => url, method: () => "GET" }), abort: async () => void outcomes.push("abort"), continue: async () => void outcomes.push("continue") });
+		for (let i = 0; i < MAX_BROWSER_REQUESTS; i++) await attempt(`${ORIGIN}/asset-${i}.js`);
+		await attempt(`${ORIGIN}/one-too-many.js`);
+		await attempt("not a url");
+		assert.equal(outcomes.filter((o) => o === "continue").length, MAX_BROWSER_REQUESTS);
+		assert.deepEqual(outcomes.slice(-2), ["abort", "abort"]);
+	});
+});
+
+describe("every failure is fixed text, and cleans up once", () => {
+	it("closes the session when a page navigation throws, without repeating what it threw", async () => {
+		const { fake, session } = await open();
+		fake.gotoThrows = true;
+		const error = await refusal(() => session.inspectPage("/"));
+		assert.equal(error.code, "page");
+		assert.equal(`${error.message}${error.stack?.split("\n")[0]}`.includes(COOKIE_VALUE), false);
+		assert.equal(`${error.message}`.includes("/home/operator"), false);
+		assert.deepEqual(fake.closed, { browser: 1, context: 1, page: 1 });
+		assert.equal((await refusal(() => session.inspectPage("/"))).code, "closed");
+	});
+
+	it("reports a launcher failure as fixed text, with nothing the launcher said", async () => {
+		const fake = new Fake();
+		fake.launchThrows = true;
+		const { file } = operatorFile();
+		const error = await refusal(() => openAgentPreview({ origin: ORIGIN, credentialFile: file, adapter, deadline: T0 + 1e6, launcher: fake.launcher, clock: new FakeClock() }));
+		assert.equal(error.code, "launch");
+		assert.equal(`${error.message}${error.stack?.split("\n")[0]}`.match(/ENOENT|operator|credential-/), null);
+		const real = playwrightChromium(fs.mkdtempSync(path.join(os.tmpdir(), "agent-preview-empty-")));
+		const failure = await refusal(() => real.launch());
+		assert.equal(failure.code, "launch");
+		assert.equal(failure.message.includes(os.tmpdir()), false);
+	});
+
+	it("reports a filesystem failure while checking the credential file as fixed text, without the path", () => {
+		const { dir } = operatorFile();
+		const file = path.join(dir, "x".repeat(300));
+		assert.throws(
+			() => readCredentialFile(file),
+			(error: unknown) => error instanceof AgentPreviewError && error.code === "credential-file" && !error.message.includes(dir) && !/ENAMETOOLONG/.test(error.message),
+		);
+	});
+
+	it("closes everything when the adapter or the cookie check throws", async () => {
+		const fake = new Fake();
+		const throwing: ExchangeAdapter = { ...adapter, accept: () => { throw new Error(`oops ${CREDENTIAL}`); } };
+		const error = await refusal(() => open(fake, new FakeClock(), { adapter: throwing }));
+		assert.equal(error.code, "harness");
+		assert.equal(error.message.includes(CREDENTIAL), false);
+		assert.deepEqual(fake.closed, { browser: 1, context: 1, page: 0 });
+	});
+});
+
+describe("the Playwright runtime", () => {
+	/** A directory laid out as `npm install playwright` would, holding a fake module that launches nothing. */
+	function runtime(version: string) {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-preview-runtime-"));
+		dirs.push(dir);
+		const module = path.join(dir, "node_modules", "playwright");
+		fs.mkdirSync(module, { recursive: true });
+		fs.writeFileSync(path.join(dir, "package.json"), "{}");
+		fs.writeFileSync(path.join(module, "package.json"), JSON.stringify({ name: "playwright", version, main: "index.cjs" }));
+		fs.writeFileSync(path.join(module, "index.cjs"), "exports.chromium = { launch: async (options) => ({ fakeLaunch: options }) };");
+		return dir;
+	}
+
+	it("loads exactly the pinned version from the runtime directory, and launches headless", async () => {
+		const launched = (await playwrightChromium(runtime(PLAYWRIGHT_VERSION)).launch()) as unknown as { fakeLaunch: unknown };
+		assert.deepEqual(launched.fakeLaunch, { headless: true });
+	});
+
+	it("refuses any other version", async () => {
+		assert.equal((await refusal(() => playwrightChromium(runtime("1.0.0")).launch())).code, "launch");
 	});
 });

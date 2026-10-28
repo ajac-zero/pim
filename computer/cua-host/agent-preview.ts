@@ -28,19 +28,31 @@
  *   closed by a timer, and closed at the first refused request.
  * - One attempt to authenticate. A failure closes everything and is
  *   reported without the credential, a cookie, a path or a response body.
- * - Reading only: the session has `GET`s of the observation routes and a
- *   read-only page. It has no Watch, End, setup or enrollment, and the
- *   context aborts a browser request that isn't a GET or HEAD.
+ * - Reading only: the session has one `GET` of the observation list and a
+ *   read-only page. It has no Watch, End, setup or enrollment, no read of a
+ *   single observation (the Worker's `GET /api/observations/<id>` asks the
+ *   computer and may change the ledger), and the context aborts a browser
+ *   request that isn't a GET or HEAD and answers every WebSocket itself,
+ *   without connecting it to the server, before any page loads.
+ * - Bounds: the session makes at most 50 API reads and page loads, and lets
+ *   its pages make at most 300 browser requests (subresources included); a
+ *   request over either bound is refused. Time bounds the rest.
  */
 
 import * as fs from "node:fs";
+import { createRequire } from "node:module";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 
 /** The longest a session lasts, whatever the Worker allows. */
 export const MAX_SESSION_MS = 30 * 60 * 1000;
 export const REQUEST_TIMEOUT_MS = 15_000;
-/** The most requests and pages one session makes before it closes itself. */
+/** The most API reads and page loads one session makes before it closes itself. */
 export const MAX_REQUESTS = 50;
+/** The most requests, subresources included, the browser's pages may make in one session; the rest are aborted. */
+export const MAX_BROWSER_REQUESTS = 300;
+/** The one Playwright release this harness is written for (`routeWebSocket` needs 1.48 or later). */
+export const PLAYWRIGHT_VERSION = "1.59.1";
 const MAX_CREDENTIAL_BYTES = 4096;
 const MIN_CREDENTIAL_CHARS = 16;
 /** How far past the session's end a cookie's own expiry may be, for clocks that differ a little. */
@@ -107,6 +119,9 @@ export interface BrowserRoute {
 	abort(errorCode?: string): Promise<void>;
 	continue(): Promise<void>;
 }
+export interface WebSocketRoute {
+	close(options?: { code?: number; reason?: string }): Promise<void> | void;
+}
 export interface BrowserPage {
 	goto(url: string, options: { timeout: number; waitUntil: "load" }): Promise<unknown>;
 	url(): string;
@@ -118,6 +133,7 @@ export interface BrowserContext {
 	readonly request: ApiContext;
 	cookies(urls: string): Promise<BrowserCookie[]>;
 	route(url: string, handler: (route: BrowserRoute) => Promise<void> | void): Promise<void>;
+	routeWebSocket(url: string | RegExp, handler: (ws: WebSocketRoute) => Promise<void> | void): Promise<void>;
 	newPage(): Promise<BrowserPage>;
 	close(): Promise<void>;
 }
@@ -143,16 +159,30 @@ export interface BrowserLauncher {
  * Playwright's own Chromium, a fresh browser launched headless for this run,
  * never attached to a human's browser (`connectOverCDP`) or profile
  * (`launchPersistentContext`). Playwright is not a dependency of this
- * repository: the operator installs it where the harness runs, and the
- * import is by name at call time. No test calls this.
+ * repository: the operator installs exactly `PLAYWRIGHT_VERSION` in a
+ * directory of their own (docs/agent-preview.md), and this loads it from
+ * there, refusing any other version. A failure says only that the launch
+ * failed: Playwright's errors carry paths and environment. No test launches
+ * a real browser.
  */
-export const playwrightChromium: BrowserLauncher = {
-	async launch() {
-		const name = "playwright";
-		const playwright = (await import(name)) as { chromium: { launch(options: { headless: true }): Promise<Browser> } };
-		return playwright.chromium.launch({ headless: true });
-	},
-};
+export function playwrightChromium(runtimeDir: string): BrowserLauncher {
+	return {
+		async launch() {
+			try {
+				const dir = path.join(runtimeDir, "node_modules", "playwright");
+				const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as { version?: unknown };
+				if (pkg.version !== PLAYWRIGHT_VERSION) throw new Error("version");
+				const entry = createRequire(path.join(runtimeDir, "package.json")).resolve("playwright");
+				const playwright = (await import(pathToFileURL(entry).href)) as { chromium?: { launch(options: { headless: true }): Promise<Browser> }; default?: { chromium?: { launch(options: { headless: true }): Promise<Browser> } } };
+				const chromium = playwright.chromium ?? playwright.default?.chromium;
+				if (!chromium) throw new Error("chromium");
+				return await chromium.launch({ headless: true });
+			} catch {
+				throw new AgentPreviewError("launch", `The browser could not be launched; it needs Playwright ${PLAYWRIGHT_VERSION} installed in the runtime directory.`);
+			}
+		},
+	};
+}
 
 // --- Origin and credential ----------------------------------------------------
 
@@ -183,13 +213,13 @@ export function readCredentialFile(file: string): string {
 	};
 	if (!path.isAbsolute(file) || path.normalize(file) !== file) return refuse("its path is not absolute and normalized");
 	const uid = process.getuid?.();
-	const dir = fs.lstatSync(path.dirname(file), { throwIfNoEntry: false });
-	if (!dir || !dir.isDirectory()) return refuse("its directory is missing or a link");
-	if ((dir.mode & 0o777) !== 0o700 || dir.uid !== uid) return refuse("its directory is not this account's with mode 0700");
-	const link = fs.lstatSync(file, { throwIfNoEntry: false });
-	if (!link || !link.isFile()) return refuse("it is missing, not a regular file or a link");
 	let fd: number | undefined;
 	try {
+		const dir = fs.lstatSync(path.dirname(file), { throwIfNoEntry: false });
+		if (!dir || !dir.isDirectory()) return refuse("its directory is missing or a link");
+		if ((dir.mode & 0o777) !== 0o700 || dir.uid !== uid) return refuse("its directory is not this account's with mode 0700");
+		const link = fs.lstatSync(file, { throwIfNoEntry: false });
+		if (!link || !link.isFile()) return refuse("it is missing, not a regular file or a link");
 		fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
 		const stat = fs.fstatSync(fd);
 		if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== uid) return refuse("it is not this account's with one link");
@@ -229,7 +259,8 @@ export interface OpenOptions {
 	adapter: ExchangeAdapter;
 	/** The evaluation's deadline in Unix milliseconds; the session never outlasts it. */
 	deadline: number;
-	launcher?: BrowserLauncher;
+	/** Playwright, from its runtime directory (`playwrightChromium(dir)`); tests give fakes. */
+	launcher: BrowserLauncher;
 	clock?: Clock;
 }
 
@@ -240,30 +271,34 @@ export interface SessionMetadata {
 	requestsLeft: number;
 }
 
-/** An observation record as the harness reports it: where it stands, and not the host's launch identity. */
+/**
+ * An observation as the Worker lists it (`ObservationView`, src/cua-observation-runtime.ts):
+ * its id, status, deadline and the evidence its last change was recorded with.
+ * The Worker deliberately omits the host's launch, generation and viewer path,
+ * so nothing here says whether the host holds anything.
+ */
 export interface ObservationSummary {
-	observationId: string;
+	id: string;
 	status: string;
-	notAfter: number | null;
-	conflicting: boolean;
-	hasHostLaunch: boolean;
+	notAfter: number;
+	/** The Worker's own evidence text, redacted and capped; null if it has none. */
+	evidence: string | null;
+	/** The reason in "… was lost (<reason>)" evidence: how the host's answer failed. */
+	lostReason: "timeout" | "unreachable" | "status" | "malformed" | "redirect" | null;
 }
 export interface ObservationsReport {
 	status: number;
 	blocked: string | null;
-	records: ObservationSummary[];
+	observations: ObservationSummary[];
 }
 
-const summarize = (one: Record<string, unknown>): ObservationSummary => ({
-	observationId: typeof one.observationId === "string" ? one.observationId : "?",
-	status: typeof one.status === "string" ? one.status : "?",
-	notAfter: typeof one.notAfter === "number" ? one.notAfter : null,
-	conflicting: one.conflicting === true,
-	hasHostLaunch: typeof one.hostLaunchId === "string",
-});
+const STATUSES = ["pending_open", "open", "revoking", "unconfirmed", "closed_observed", "not_opened", "reconciled"];
+const OBSERVATION_ID = /^[A-Za-z0-9_-]{16,64}$/;
+const LOST = /\blost \((timeout|unreachable|status|malformed|redirect)\)/;
+const MAX_EVIDENCE_CHARS = 300;
 
-/** The Worker's observation management routes (src/cua-observation-runtime.ts), the list and one record. */
-const OBSERVATION_PATH = /^\/api\/observations(\/[A-Za-z0-9_-]{16,64})?$/;
+/** The observation list: the one route read. (One record's route asks the computer, and may change the ledger.) */
+const OBSERVATION_LIST = "/api/observations";
 const UI_PATH = /^\/[A-Za-z0-9._~\-/]*$/;
 
 export class AgentPreviewSession {
@@ -297,45 +332,51 @@ export class AgentPreviewSession {
 		return this.#secrets.reduce((out, secret) => out.split(secret).join("[redacted]"), text);
 	}
 
-	/** `GET /api/observations`: the first request. Read only; no query, no body, and no other method exists here. */
+	/**
+	 * `GET /api/observations`: the first request. Read only: no query, no body,
+	 * and no other method or route exists here. Each record is checked against
+	 * the Worker's `ObservationView`; one that doesn't fit closes the session
+	 * rather than being guessed at.
+	 */
 	async observations(): Promise<ObservationsReport> {
-		const { status, body } = await this.#get("/api/observations");
-		const record = (body ?? {}) as { blocked?: unknown; observations?: unknown };
-		const list = Array.isArray(record.observations) ? (record.observations as Record<string, unknown>[]) : [];
-		return {
-			status,
-			blocked: typeof record.blocked === "string" ? this.redact(record.blocked).slice(0, 200) : null,
-			records: list.map(summarize),
-		};
-	}
-
-	/** `GET /api/observations/<id>`, for the status of one record. */
-	async observation(id: string): Promise<ObservationSummary> {
-		const { body } = await this.#get(`/api/observations/${id}`);
-		return summarize((body ?? {}) as Record<string, unknown>);
+		const body = await this.#get(OBSERVATION_LIST);
+		const record = body as { blocked?: unknown; observations?: unknown } | null;
+		if (!record || typeof record !== "object" || !Array.isArray(record.observations) || (record.blocked !== null && typeof record.blocked !== "string")) return this.#end("malformed", "The preview's observation list isn't in the expected shape; the session is closed.");
+		const observations: ObservationSummary[] = [];
+		for (const raw of record.observations as unknown[]) {
+			const one = raw as Record<string, unknown> | null;
+			if (!one || typeof one !== "object" || typeof one.id !== "string" || !OBSERVATION_ID.test(one.id) || typeof one.status !== "string" || !STATUSES.includes(one.status) || typeof one.notAfter !== "number" || !Number.isFinite(one.notAfter) || (one.evidence !== null && typeof one.evidence !== "string")) {
+				return this.#end("malformed", "An observation isn't in the expected shape; the session is closed.");
+			}
+			const evidence = typeof one.evidence === "string" ? this.redact(one.evidence).slice(0, MAX_EVIDENCE_CHARS) : null;
+			observations.push({ id: one.id, status: one.status, notAfter: one.notAfter, evidence, lostReason: (evidence === null ? null : LOST.exec(evidence)?.[1]) as ObservationSummary["lostReason"] ?? null });
+		}
+		return { status: 200, blocked: typeof record.blocked === "string" ? this.redact(record.blocked).slice(0, MAX_EVIDENCE_CHARS) : null, observations };
 	}
 
 	/**
 	 * Loads one page of the app in the session's context, reads its title and
 	 * the preview banner's text, and closes the page. A page is read only
-	 * here: the context aborts any request that isn't a GET or HEAD.
+	 * here: the context aborts any request that isn't a GET or HEAD, and
+	 * answers WebSockets itself. Any failure closes the session.
 	 */
 	async inspectPage(pagePath: string): Promise<{ path: string; title: string; banner: string | null }> {
 		if (!UI_PATH.test(pagePath) || pagePath.startsWith("//") || pagePath.includes("..")) {
 			throw new AgentPreviewError("path", "A page path is a plain path on the preview's origin.");
 		}
 		this.#spend();
-		const page = await this.#context.newPage();
+		let page: BrowserPage | undefined;
 		try {
+			page = await this.#context.newPage();
 			await page.goto(`${this.#origin}${pagePath}`, { timeout: REQUEST_TIMEOUT_MS, waitUntil: "load" });
-			if (new URL(page.url()).origin !== this.#origin) {
-				await this.close();
-				throw new AgentPreviewError("redirect", "The page left the preview's origin; the session is closed.");
-			}
+			if (new URL(page.url()).origin !== this.#origin) return await this.#end("redirect", "The page left the preview's origin; the session is closed.");
 			const banner = await page.locator("[data-agent-preview-banner]").first().textContent({ timeout: 2_000 }).catch(() => null);
 			return { path: pagePath, title: this.redact(await page.title()), banner: banner === null ? null : this.redact(banner).slice(0, 200) };
+		} catch (error) {
+			if (error instanceof AgentPreviewError) throw error;
+			return await this.#end("page", "The page could not be loaded; the session is closed and nothing is retried.");
 		} finally {
-			await page.close().catch(() => undefined);
+			await page?.close().catch(() => undefined);
 		}
 	}
 
@@ -360,28 +401,27 @@ export class AgentPreviewSession {
 		}
 	}
 
-	/** A GET of an observation route with the context's cookie: no authorization header, no query, no redirect, no retry. */
-	async #get(route: string): Promise<{ status: number; body: unknown }> {
-		if (!OBSERVATION_PATH.test(route)) throw new AgentPreviewError("path", "Only the observation routes are read.");
+	/** Closes the session, then throws the one fixed failure. */
+	async #end(code: string, message: string, status?: number): Promise<never> {
+		await this.close();
+		throw new AgentPreviewError(code, message, status);
+	}
+
+	/** A GET with the context's cookie: no authorization header, no query, no redirect, no retry. Any answer but 200 closes the session. */
+	async #get(route: string): Promise<unknown> {
+		if (route !== OBSERVATION_LIST) throw new AgentPreviewError("path", "Only the observation list is read.");
 		this.#spend();
 		let response: ApiResponse;
 		try {
 			response = await this.#context.request.get(`${this.#origin}${route}`, { headers: { accept: "application/json" }, maxRedirects: 0, failOnStatusCode: false, timeout: REQUEST_TIMEOUT_MS });
 		} catch {
-			await this.close();
-			throw new AgentPreviewError("network", "The request failed; the session is closed and nothing is retried.");
+			return this.#end("network", "The request failed; the session is closed and nothing is retried.");
 		}
 		const status = response.status();
-		if (status >= 300 && status < 400) {
-			await this.close();
-			throw new AgentPreviewError("redirect", "The preview redirected; the session is closed.", status);
-		}
-		if (status === 401 || status === 403) {
-			await this.close();
-			throw new AgentPreviewError("auth-refused", "The preview refused the session; it is closed and nothing is retried.", status);
-		}
-		if (status !== 200) throw new AgentPreviewError("status", "The preview answered with an unexpected status.", status);
-		return { status, body: await response.json().catch(() => null) };
+		if (status >= 300 && status < 400) return this.#end("redirect", "The preview redirected; the session is closed.", status);
+		if (status === 401 || status === 403) return this.#end("auth-refused", "The preview refused the session; it is closed and nothing is retried.", status);
+		if (status !== 200) return this.#end("status", "The preview answered with an unexpected status; the session is closed.", status);
+		return await response.json().catch(() => null);
 	}
 }
 
@@ -400,7 +440,9 @@ export async function openAgentPreview(options: OpenOptions): Promise<AgentPrevi
 	}
 	const clock = options.clock ?? realClock;
 	const credential = readCredentialFile(options.credentialFile);
-	const browser = await (options.launcher ?? playwrightChromium).launch();
+	const browser = await options.launcher.launch().catch(() => {
+		throw new AgentPreviewError("launch", "The browser could not be launched.");
+	});
 	let context: BrowserContext | undefined;
 	const fail = async (code: string, message: string, status?: number): Promise<never> => {
 		await context?.close().catch(() => undefined);
@@ -409,11 +451,19 @@ export async function openAgentPreview(options: OpenOptions): Promise<AgentPrevi
 	};
 	try {
 		context = await browser.newContext({ acceptDownloads: false, serviceWorkers: "block", ignoreHTTPSErrors: false, bypassCSP: false, javaScriptEnabled: true, permissions: [], baseURL: origin });
+		// Installed before any page exists. A WebSocket is answered here and closed without `connectToServer`, so the page never reaches the server through one.
+		await context.routeWebSocket(/.*/, (ws) => ws.close({ code: 1008, reason: "read only" }));
+		let browserRequests = 0;
 		await context.route("**/*", async (route) => {
 			const request = route.request();
-			const inside = new URL(request.url()).origin === origin;
-			if (!inside || !["GET", "HEAD"].includes(request.method())) await route.abort("blockedbyclient");
-			else await route.continue();
+			let allowed = false;
+			try {
+				allowed = new URL(request.url()).origin === origin && ["GET", "HEAD"].includes(request.method()) && ++browserRequests <= MAX_BROWSER_REQUESTS;
+			} catch {
+				// An address that doesn't parse is not this origin.
+			}
+			if (allowed) await route.continue();
+			else await route.abort("blockedbyclient");
 		});
 		const built = adapter.request(credential);
 		// A write to the Worker must name its own origin (src/cua-observation-runtime.ts), and Playwright's request context doesn't add one.

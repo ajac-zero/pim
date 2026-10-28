@@ -492,6 +492,16 @@ export function renderCaddyfile(config: Config): string {
 	if (!viewer) throw new Refusal("config-viewer");
 	const host = new URL(viewer.publicOrigin).hostname;
 	const relay = config.bridge.path;
+	const proxy = (matcher: string, headers: string[]) => [
+		`\treverse_proxy ${matcher}https://127.0.0.1:${config.bridge.port} {`,
+		"\t\ttransport http {",
+		`\t\t\ttls_server_name ${viewer.backendName}`,
+		`\t\t\ttls_trust_pool file ${VIEWER_PATHS.bridgeTrust}`,
+		"\t\t}",
+		...headers,
+		"\t\tflush_interval -1",
+		"\t}",
+	];
 	return [
 		"# Pim Cua evaluation (docs/cua-viewer-first-startup.md): the TLS ingress. Written by the installer, never edited.",
 		"{",
@@ -509,13 +519,12 @@ export function renderCaddyfile(config: Config): string {
 		"\trequest_body {",
 		"\t\tmax_size 16KB",
 		"\t}",
-		`\treverse_proxy https://127.0.0.1:${config.bridge.port} {`,
-		"\t\ttransport http {",
-		`\t\t\ttls_server_name ${viewer.backendName}`,
-		`\t\t\ttls_trust_pool file ${VIEWER_PATHS.bridgeTrust}`,
-		"\t\t}",
-		"\t\tflush_interval -1",
-		"\t}",
+		// Caddy re-adds Upgrade only when the request's Connection names it, so a WebSocket request that arrives without
+		// Connection would reach the bridge as plain HTTP (its 426). Only such a request, matched by the Upgrade header, gets
+		// the two literal headers; every other request goes to the second, identical proxy untouched.
+		"\t@upgrade header Upgrade websocket",
+		...proxy("@upgrade ", ["\t\theader_up Connection Upgrade", "\t\theader_up Upgrade websocket"]),
+		...proxy("", []),
 		"}",
 		"",
 		`${host} {`,

@@ -838,12 +838,29 @@ describe("the ingress, the units spacesd and Caddy run under, and the base", () 
 		assert.equal(viewer, `\t@viewer path_regexp ^/${"[A-Za-z0-9_-]".repeat(22)}/.+$`);
 		assert.ok(!viewer.includes("{"), "no braces: they are placeholders in a Caddyfile");
 		assert.ok(text.includes("\thandle {\n\t\trespond 404\n\t}"));
-		// One upstream, private, over TLS that is verified against the bridge's own certificate and name.
-		assert.equal(lines.filter((line) => line.trim().startsWith("reverse_proxy")).length, 1);
-		assert.ok(text.includes("reverse_proxy https://127.0.0.1:8443 {"));
-		assert.ok(text.includes("\t\t\ttls_server_name pim-cua-bridge.internal\n"));
-		assert.ok(text.includes(`\t\t\ttls_trust_pool file ${VIEWER_PATHS.bridgeTrust}\n`));
-		for (const forbidden of ["insecure_skip_verify", "tls_insecure", "forward_proxy", "header_up", "trusted_proxies", "handle_path", "file_server", "header Access-Control", "Access-Control"]) {
+		// One private upstream, in two identical proxies: over TLS verified against the bridge's own certificate and name.
+		const proxies = lines.map((line, i) => [line, i] as const).filter(([line]) => line.trim().startsWith("reverse_proxy"));
+		assert.deepEqual(proxies.map(([line]) => line), ["\treverse_proxy @upgrade https://127.0.0.1:8443 {", "\treverse_proxy https://127.0.0.1:8443 {"]);
+		for (const [, at] of proxies) {
+			const block = lines.slice(at, lines.indexOf("\t}", at)).join("\n");
+			assert.ok(block.includes("\t\t\ttls_server_name pim-cua-bridge.internal\n"));
+			assert.ok(block.includes(`\t\t\ttls_trust_pool file ${VIEWER_PATHS.bridgeTrust}\n`));
+			assert.ok(block.endsWith("\t\tflush_interval -1"));
+		}
+		assert.ok(text.includes("\trequest_body {\n\t\tmax_size 16KB\n\t}\n"));
+		// Only a request that already names a WebSocket upgrade gets Connection and Upgrade forwarded, as literals. The
+		// ordinary proxy has no header_up, so plain HTTP isn't rewritten into an Upgrade and still reaches the bridge's 426.
+		// (The renderer boundary can't prove Caddy's runtime behavior; that needs a real Caddy.)
+		assert.equal(lines.filter((line) => line.trim() === "@upgrade header Upgrade websocket").length, 1);
+		assert.deepEqual(
+			lines.filter((line) => line.includes("header_up")),
+			["\t\theader_up Connection Upgrade", "\t\theader_up Upgrade websocket"],
+		);
+		const ordinary = lines.slice(proxies[1]![1], lines.indexOf("\t}", proxies[1]![1])).join("\n");
+		assert.ok(!ordinary.includes("header_up") && !ordinary.includes("@upgrade"));
+		assert.ok(proxies[0]![1] < proxies[1]![1], "the upgrade proxy is tried first");
+		assert.ok(!text.replace(/#.*$/gm, "").includes("{http."), "no placeholders in the forwarded headers");
+		for (const forbidden of ["insecure_skip_verify", "tls_insecure", "forward_proxy", "trusted_proxies", "handle_path", "file_server", "header Access-Control", "Access-Control", "header_up X-", "header_up Host", "header_up Authorization", "header_up Origin"]) {
 			assert.equal(text.includes(forbidden), false, forbidden);
 		}
 		// A request's target and headers aren't logged: the access and proxy-error entries are excluded, and only warnings go out.

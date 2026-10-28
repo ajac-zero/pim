@@ -1,11 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useI18n } from "~/components/i18n";
-import { Copy } from "~/components/icons";
+import { Copy, Link2 } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { usePimClient } from "~/lib/pim-client";
 import { conversationMarkdown } from "~/lib/pim-view";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
+import { cn } from "~/lib/utils";
 
 /** Copies every message in the open conversation, including those above the viewport. */
 export function CopyConversation({ sessionId }: { sessionId: string }) {
@@ -45,6 +46,37 @@ export function CopyConversation({ sessionId }: { sessionId: string }) {
       }}
     >
       <Copy className="size-4.5" />
+    </Button>
+  );
+}
+
+/** Copies the chat's id, which an agent can read the chat by (the `read_chat` tool), to hand off to a new chat. */
+export function CopyChatId({
+  sessionId,
+  className,
+}: {
+  sessionId: string;
+  className?: string;
+}) {
+  const { t } = useI18n();
+  const label = t("copyChatId");
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className={cn("shrink-0 self-center", className)}
+      aria-label={label}
+      title={label}
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(sessionId);
+          toast.success(t("copied"));
+        } catch {
+          toast.error(t("couldNotCopyChatId"));
+        }
+      }}
+    >
+      <Link2 className="size-4.5" />
     </Button>
   );
 }

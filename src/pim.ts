@@ -110,6 +110,7 @@ import {
 	localize,
 	widgetMarkdown,
 } from "./extensions/define";
+import { chatsExtension } from "./extensions/chats";
 import { goalsExtension, goalsWidgets } from "./extensions/goals";
 import { DEFAULT_WIDGET_SIZE, dashboardExtension, MAX_DASHBOARD, UPDATE_DASHBOARD, WIDGET_SIZES, type WidgetSize } from "./extensions/dashboard";
 import {
@@ -355,6 +356,8 @@ const SUGGESTIONS_KEY = "suggestions:";
 /** What the utility model reads to suggest prompts: the latest chats, and how much of each and of memory. */
 const SUGGESTION_CHATS = 3;
 const SUGGESTION_CHAT_CHARS = 2_000;
+/** How much of a chat an agent reads with `read_chat`: its latest part. */
+const READ_CHAT_CHARS = 48_000;
 const SUGGESTION_MEMORY_CHARS = 3_000;
 /** `pim_meta` keys the Worker sets: the owner's profile, a suspension, the space's own limits. */
 const PROFILE_KEY = "owner";
@@ -701,6 +704,13 @@ export class Pim extends DurableAgent<Env> {
 			this.registry.install(goalsExtension(services));
 			this.registry.install(scheduleExtension(services, (session) => this.#roleOf(session), (id) => this.agents.get(id)));
 			this.registry.install(messagingExtension(services));
+			this.registry.install(
+				chatsExtension(async (id) => {
+					const session = await this.#session(id).catch(() => null);
+					if (session === null) return null;
+					return { title: this.store.sessionInfo(session)?.title ?? null, conversation: conversationText(projectEntries(await this.harness.session(session).messages()), READ_CHAT_CHARS) };
+				}),
+			);
 			this.registry.install(
 				tasksExtension({
 					roleOf: (session) => this.#roleOf(session),

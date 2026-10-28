@@ -6,6 +6,7 @@ import {
   sessionTitle,
   useAwaitingApproval,
 } from "~/components/app-sidebar";
+import { CopyChatId } from "~/components/chat/copy-conversation";
 import { useI18n } from "~/components/i18n";
 import { AlertCircle, Loader2, X } from "~/components/icons";
 import type { Session } from "~/lib/pim-api";
@@ -129,6 +130,7 @@ export function ChatTabs({ activeId }: { activeId: string }) {
       <div className="flex min-w-0 flex-1 items-center gap-2 pl-4 text-[15px]">
         {statusOf(session)}
         <span className="truncate">{sessionTitle(session, t)}</span>
+        <CopyChatId sessionId={session.id} className="size-7" />
       </div>
     );
   }

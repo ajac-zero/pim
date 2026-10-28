@@ -299,6 +299,7 @@ const translations = {
       "Pim answers only at that address, and passkeys belong to it, so choose one you'll keep. A custom domain must be attached to the Worker first.",
     copy: "Copy",
     copyMessage: "Copy message",
+    copyChatId: "Copy chat ID",
     copyConversation: "Copy conversation as Markdown",
     couldNotCopyConversation: "Couldn't copy the conversation. Try again.",
     sessionCost: "Cost of this chat",
@@ -306,6 +307,7 @@ const translations = {
     sessionCostRequests: "{count} requests",
     sessionCostNone: "Nothing has been used in this chat yet.",
     sessionCostTokens: "{input} in, {output} out, {cached} cached",
+    couldNotCopyChatId: "Couldn't copy the chat ID. Try again.",
     chatLink: "Public link",
     chatLinkOn: "Public link: on",
     chatLinkHint:
@@ -1337,6 +1339,7 @@ const translations = {
       "Pim solo responde en esa dirección y las llaves de acceso le pertenecen, así que elige una que vayas a conservar. Un dominio propio debe estar conectado al Worker antes.",
     copy: "Copiar",
     copyMessage: "Copiar mensaje",
+    copyChatId: "Copiar ID del chat",
     copyConversation: "Copiar conversación como Markdown",
     couldNotCopyConversation:
       "No se pudo copiar la conversación. Inténtalo de nuevo.",
@@ -1346,6 +1349,7 @@ const translations = {
     sessionCostNone: "Aún no se ha usado nada en este chat.",
     sessionCostTokens:
       "{input} de entrada, {output} de salida, {cached} en caché",
+    couldNotCopyChatId: "No se pudo copiar el ID del chat. Inténtalo de nuevo.",
     chatLink: "Enlace público",
     chatLinkOn: "Enlace público: activado",
     chatLinkHint:

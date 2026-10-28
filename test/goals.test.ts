@@ -52,4 +52,27 @@ describe("goals", () => {
 		expect(prompt).toContain("Run a 10k");
 		expect(prompt).toContain("1/3 steps done");
 	});
+
+	it("lets an agent read another chat by its id, but not one the person lacks", async () => {
+		const earlier = (await post("/sessions")).body.id;
+		faux.setResponses([toolUse("send_to_user", { message: "Pick the blue tent." })]);
+		await say("Which tent should I buy?", earlier);
+
+		const results: string[] = [];
+		const read = (id: string) => [
+			toolUse("read_chat", { id }),
+			(context: { messages: Message[] }) => {
+				results.push(JSON.stringify(context.messages.at(-1)));
+				return toolUse("send_to_user", { message: "ok" });
+			},
+		];
+		faux.setResponses(read(earlier));
+		await say("Carry on from that chat.");
+		faux.setResponses(read("no-such-chat"));
+		await say("And this one.");
+
+		expect(results[0]).toContain("Which tent should I buy?");
+		expect(results[0]).toContain("Pick the blue tent.");
+		expect(results[1]).toContain("no chat with id no-such-chat");
+	});
 });

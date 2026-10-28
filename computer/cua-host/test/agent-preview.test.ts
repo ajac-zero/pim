@@ -17,6 +17,7 @@ import {
 	type BrowserCookie,
 	type BrowserLauncher,
 	type BrowserRoute,
+	type ParsedConfig,
 	type WebSocketRoute,
 	type Clock,
 	diagnoseObservations,
@@ -28,7 +29,7 @@ import {
 	playwrightChromium,
 	MAX_SESSION_MS,
 	openAgentPreview,
-	readCredentialFile,
+	readProtectedFile,
 } from "../agent-preview.ts";
 
 const ORIGIN = "https://preview.example.test";
@@ -153,14 +154,18 @@ class Fake {
 }
 
 function cookie(overrides: Partial<BrowserCookie> = {}): BrowserCookie {
-	return { name: "pim_agent", value: COOKIE_VALUE, domain: "preview.example.test", path: "/", expires: (T0 + 10 * 60_000) / 1000, httpOnly: true, secure: true, ...overrides };
+	return { name: "pim_agent", value: COOKIE_VALUE, domain: "preview.example.test", path: "/", expires: (T0 + 10 * 60_000) / 1000, httpOnly: true, secure: true, sameSite: "Strict", ...overrides };
 }
 
 const adapter: ExchangeAdapter = {
 	path: "/test-exchange",
-	request: (credential) => ({ headers: { authorization: `Bearer ${credential}` }, data: { evaluation: "eval-1" } }),
+	cookieName: "pim_agent",
+	request: () => ({ headers: { authorization: `Bearer ${CREDENTIAL}` }, data: { evaluation: "eval-1" } }),
 	accept: (status) => (status === 200 ? { expiresAt: T0 + 10 * 60_000 } : null),
 };
+
+/** The parser a test's configuration file gets: it ignores the text, and gives the fake adapter and the credential to scrub. */
+const parseWith = (origin: string, using: ExchangeAdapter): ((text: string) => ParsedConfig) => () => ({ origin, adapter: using, secrets: [CREDENTIAL] });
 
 /** An operator directory (0700) and credential file (0600), as the harness requires. */
 const dirs: string[] = [];
@@ -179,7 +184,7 @@ afterEach(() => {
 
 async function open(fake = new Fake(), clock = new FakeClock(), overrides: { deadline?: number; origin?: string; adapter?: ExchangeAdapter } = {}) {
 	const { file } = operatorFile();
-	const session = await openAgentPreview({ origin: overrides.origin ?? ORIGIN, credentialFile: file, adapter: overrides.adapter ?? adapter, deadline: overrides.deadline ?? T0 + 3_600_000, launcher: fake.launcher, clock });
+	const session = await openAgentPreview({ configFile: file, parse: parseWith(overrides.origin ?? ORIGIN, overrides.adapter ?? adapter), deadline: overrides.deadline ?? T0 + 3_600_000, launcher: fake.launcher, clock });
 	return { fake, clock, session };
 }
 
@@ -265,9 +270,9 @@ describe("origin", () => {
 	});
 });
 
-describe("the credential file", () => {
-	it("reads a 0600 file in a 0700 directory, without its line end", () => {
-		assert.equal(readCredentialFile(operatorFile().file), CREDENTIAL);
+describe("the configuration file", () => {
+	it("reads a 0600 file in a 0700 directory", () => {
+		assert.equal(readProtectedFile(operatorFile().file), `${CREDENTIAL}\n`);
 	});
 
 	it("refuses loose modes, a loose directory, a link, a hard link, other content and relative paths, without saying the path", () => {
@@ -279,16 +284,12 @@ describe("the credential file", () => {
 		fs.symlinkSync(linked.file, path.join(linked.dir, "link"));
 		const hard = operatorFile();
 		fs.linkSync(hard.file, path.join(hard.dir, "second"));
-		const spaced = operatorFile("two words here that are long enough");
-		const short = operatorFile("short");
 		const empty = operatorFile("");
 		const cases: [string, string][] = [
 			[wrongFile.file, "mode"],
 			[wrongDir.file, "0700"],
 			[path.join(linked.dir, "link"), "link"],
 			[hard.file, "one link"],
-			[spaced.file, "printable"],
-			[short.file, "printable"],
 			[empty.file, "size"],
 			["relative/token.txt", "absolute"],
 			[`${os.tmpdir()}/nope/../x/token.txt`, "normalized"],
@@ -296,10 +297,26 @@ describe("the credential file", () => {
 		];
 		for (const [file, why] of cases) {
 			assert.throws(
-				() => readCredentialFile(file),
-				(error: unknown) => error instanceof AgentPreviewError && error.code === "credential-file" && error.message.includes(why) && !error.message.includes(file),
+				() => readProtectedFile(file),
+				(error: unknown) => error instanceof AgentPreviewError && error.code === "config-file" && error.message.includes(why) && !error.message.includes(file),
 				`${file}: ${why}`,
 			);
+		}
+	});
+
+	it("makes nothing, and says nothing of the content, when the parser refuses it or throws", async () => {
+		for (const parse of [
+			() => {
+				throw new Error(`bad ${CREDENTIAL}`);
+			},
+			() => ({ origin: "http://preview.example.test", adapter, secrets: [CREDENTIAL] }),
+		]) {
+			const fake = new Fake();
+			const { file } = operatorFile();
+			const error = await refusal(() => openAgentPreview({ configFile: file, parse, deadline: T0 + 1e6, launcher: fake.launcher, clock: new FakeClock() }));
+			assert.ok(error.code === "config" || error.code === "origin");
+			assert.equal(`${error.message}${error.stack?.split("\n")[0]}`.includes(CREDENTIAL), false);
+			assert.equal(fake.contexts, 0);
 		}
 	});
 
@@ -307,7 +324,7 @@ describe("the credential file", () => {
 		const fake = new Fake();
 		const { file } = operatorFile();
 		fs.chmodSync(file, 0o644);
-		await refusal(() => openAgentPreview({ origin: ORIGIN, credentialFile: file, adapter, deadline: T0 + 1e6, launcher: fake.launcher, clock: new FakeClock() }));
+		await refusal(() => openAgentPreview({ configFile: file, parse: parseWith(ORIGIN, adapter), deadline: T0 + 1e6, launcher: fake.launcher, clock: new FakeClock() }));
 		assert.equal(fake.contexts, 0);
 	});
 });
@@ -420,12 +437,15 @@ describe("bounded lifecycle and no retry", () => {
 	});
 
 	it("refuses cookies that aren't Secure HttpOnly for exactly the origin, or outlast the session", async () => {
-		for (const bad of [cookie({ secure: false }), cookie({ httpOnly: false }), cookie({ domain: ".preview.example.test" }), cookie({ domain: "other.example.test" }), cookie({ expires: (T0 + 3_600_000) / 1000 })]) {
+		for (const bad of [cookie({ name: "other" }), cookie({ sameSite: "Lax" }), cookie({ path: "/api" }), cookie({ secure: false }), cookie({ httpOnly: false }), cookie({ domain: ".preview.example.test" }), cookie({ domain: "other.example.test" }), cookie({ expires: (T0 + 3_600_000) / 1000 })]) {
 			const fake = new Fake();
 			fake.setCookie = [bad];
 			assert.equal((await refusal(() => open(fake))).code, "cookie");
 			assert.equal(fake.closed.context, 1);
 		}
+		const two = new Fake();
+		two.setCookie = [cookie(), cookie({ name: "extra" })];
+		assert.equal((await refusal(() => open(two))).code, "cookie");
 		const none = new Fake();
 		none.setCookie = [];
 		assert.equal((await refusal(() => open(none))).code, "cookie");
@@ -551,7 +571,7 @@ describe("every failure is fixed text, and cleans up once", () => {
 		const fake = new Fake();
 		fake.launchThrows = true;
 		const { file } = operatorFile();
-		const error = await refusal(() => openAgentPreview({ origin: ORIGIN, credentialFile: file, adapter, deadline: T0 + 1e6, launcher: fake.launcher, clock: new FakeClock() }));
+		const error = await refusal(() => openAgentPreview({ configFile: file, parse: parseWith(ORIGIN, adapter), deadline: T0 + 1e6, launcher: fake.launcher, clock: new FakeClock() }));
 		assert.equal(error.code, "launch");
 		assert.equal(`${error.message}${error.stack?.split("\n")[0]}`.match(/ENOENT|operator|credential-/), null);
 		const real = playwrightChromium(fs.mkdtempSync(path.join(os.tmpdir(), "agent-preview-empty-")));
@@ -564,8 +584,8 @@ describe("every failure is fixed text, and cleans up once", () => {
 		const { dir } = operatorFile();
 		const file = path.join(dir, "x".repeat(300));
 		assert.throws(
-			() => readCredentialFile(file),
-			(error: unknown) => error instanceof AgentPreviewError && error.code === "credential-file" && !error.message.includes(dir) && !/ENAMETOOLONG/.test(error.message),
+			() => readProtectedFile(file),
+			(error: unknown) => error instanceof AgentPreviewError && error.code === "config-file" && !error.message.includes(dir) && !/ENAMETOOLONG/.test(error.message),
 		);
 	});
 

@@ -11,11 +11,11 @@
  *
  * What this file does not do: decide the authentication protocol. The
  * exchange route, its request and its answer belong to the Worker's auth
- * (the `ExchangeAdapter` below is the whole interface; no default exists).
+ * (the `ExchangeAdapter` below is the whole interface; agent-preview-automation.ts is the one implementation).
  * It launches nothing when imported. Tests give it fake Playwright objects.
  *
  * What it holds to:
- * - One credential, read from a regular file of this account's, mode 0600,
+ * - One configuration file (the credential among its fields), read from a regular file of this account's, mode 0600,
  *   one link, in a directory of this account's, mode 0700. Never from the
  *   environment, an argument, a URL, or the chat.
  * - One origin, exactly as configured (https, no path). The exchange and
@@ -53,8 +53,7 @@ export const MAX_REQUESTS = 50;
 export const MAX_BROWSER_REQUESTS = 300;
 /** The one Playwright release this harness is written for (`routeWebSocket` needs 1.48 or later). */
 export const PLAYWRIGHT_VERSION = "1.59.1";
-const MAX_CREDENTIAL_BYTES = 4096;
-const MIN_CREDENTIAL_CHARS = 16;
+const MAX_CONFIG_BYTES = 4096;
 /** How far past the session's end a cookie's own expiry may be, for clocks that differ a little. */
 const COOKIE_SKEW_MS = 5_000;
 
@@ -73,18 +72,26 @@ export class AgentPreviewError extends Error {
 // --- The adapter the Worker's auth supplies ----------------------------------
 
 /**
- * The Worker's exchange, as the auth branch defines it. Expected to bind the
- * credential to the exact preview origin, the evaluation and the existing
- * owner, and to answer with a Secure HttpOnly cookie and its expiry. Until
- * that contract is supplied, no adapter exists and the harness cannot run.
+ * The Worker's exchange, as the auth branch defines it
+ * (agent-preview-automation.ts is the one adapter). It holds the credential
+ * itself, so the harness never handles it except to scrub it from output.
  */
 export interface ExchangeAdapter {
 	/** The exchange route's path on the configured origin. A path only: no query, no origin. */
 	readonly path: string;
-	/** The exchange's headers and JSON body for this credential. It is the only place the credential goes, and only in a POST. */
-	request(credential: string): { headers?: Record<string, string>; data?: unknown };
+	/** The one cookie the exchange must leave in the context, by name. */
+	readonly cookieName: string;
+	/** The exchange's headers and JSON body. The credential goes only here, and only in a POST. */
+	request(): { headers?: Record<string, string>; data?: unknown };
 	/** The session's end in Unix milliseconds if the Worker accepted the exchange; `null` if it refused. */
 	accept(status: number, body: unknown): { expiresAt: number } | null;
+}
+
+/** What a configuration file gives the harness: the origin, the adapter for it, and every secret in it, to scrub from output. */
+export interface ParsedConfig {
+	origin: string;
+	adapter: ExchangeAdapter;
+	secrets: readonly string[];
 }
 
 // --- The parts of Playwright used (structural, so tests can fake them) --------
@@ -113,6 +120,7 @@ export interface BrowserCookie {
 	expires: number;
 	httpOnly: boolean;
 	secure: boolean;
+	sameSite?: string;
 }
 export interface BrowserRoute {
 	request(): { url(): string; method(): string };
@@ -201,15 +209,15 @@ export function exactOrigin(configured: string): string {
 }
 
 /**
- * Reads the credential from `file`, and nothing else: an absolute, normalized
- * path; a directory of this account's with mode 0700, not a link; a regular
- * file of this account's with mode 0600 and one link, opened without
- * following a link; 16 to 4096 printable characters, with at most one line
- * end after them. Errors say what is wrong, never the path or content.
+ * Reads the protected configuration file, and nothing else: an absolute,
+ * normalized path; a directory of this account's with mode 0700, not a link;
+ * a regular file of this account's with mode 0600 and one link, opened
+ * without following a link; 1 to 4096 bytes of UTF-8. Errors say what is
+ * wrong, never the path or content. What the text means is the adapter's.
  */
-export function readCredentialFile(file: string): string {
+export function readProtectedFile(file: string): string {
 	const refuse = (why: string): never => {
-		throw new AgentPreviewError("credential-file", `The credential file is not usable: ${why}.`);
+		throw new AgentPreviewError("config-file", `The configuration file is not usable: ${why}.`);
 	};
 	if (!path.isAbsolute(file) || path.normalize(file) !== file) return refuse("its path is not absolute and normalized");
 	const uid = process.getuid?.();
@@ -224,10 +232,8 @@ export function readCredentialFile(file: string): string {
 		const stat = fs.fstatSync(fd);
 		if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== uid) return refuse("it is not this account's with one link");
 		if ((stat.mode & 0o777) !== 0o600) return refuse("its mode is not 0600");
-		if (stat.size === 0 || stat.size > MAX_CREDENTIAL_BYTES) return refuse("its size is not within bounds");
-		const text = fs.readFileSync(fd, "utf8").replace(/\r?\n$/, "");
-		if (text.length < MIN_CREDENTIAL_CHARS || !/^[\x21-\x7e]+$/.test(text)) return refuse("its content is not one printable token");
-		return text;
+		if (stat.size === 0 || stat.size > MAX_CONFIG_BYTES) return refuse("its size is not within bounds");
+		return fs.readFileSync(fd, "utf8");
 	} catch (error) {
 		if (error instanceof AgentPreviewError) throw error;
 		return refuse("it could not be read");
@@ -252,11 +258,10 @@ export interface Clock {
 const realClock: Clock = { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>) };
 
 export interface OpenOptions {
-	/** The preview's origin, exactly as configured. */
-	origin: string;
-	/** Absolute path of the 0600 credential file in the 0700 operator directory. */
-	credentialFile: string;
-	adapter: ExchangeAdapter;
+	/** Absolute path of the 0600 configuration file in the 0700 operator directory. */
+	configFile: string;
+	/** Makes sense of the file: the origin, the adapter and the secrets (agent-preview-automation.ts's `parseAutomationConfig`). */
+	parse(text: string): ParsedConfig;
 	/** The evaluation's deadline in Unix milliseconds; the session never outlasts it. */
 	deadline: number;
 	/** Playwright, from its runtime directory (`playwrightChromium(dir)`); tests give fakes. */
@@ -426,20 +431,27 @@ export class AgentPreviewSession {
 }
 
 /**
- * Opens the one session: validates the origin, reads the credential, makes
+ * Opens the one session: reads the configuration, validates the origin, makes
  * the private context, exchanges once through the context's own request
  * object, checks the cookie it set and the session's end, and returns the
  * session. Any failure closes what was made, once, and throws a redacted
  * `AgentPreviewError`. Nothing is retried.
  */
 export async function openAgentPreview(options: OpenOptions): Promise<AgentPreviewSession> {
-	const origin = exactOrigin(options.origin);
-	const { adapter } = options;
+	const clock = options.clock ?? realClock;
+	const text = readProtectedFile(options.configFile);
+	let parsed: ParsedConfig;
+	try {
+		parsed = options.parse(text);
+		exactOrigin(parsed.origin);
+	} catch (error) {
+		if (error instanceof AgentPreviewError) throw error;
+		throw new AgentPreviewError("config", "The configuration file's content is not valid.");
+	}
+	const { origin, adapter, secrets: configured } = parsed;
 	if (!adapter.path.startsWith("/") || adapter.path.startsWith("//") || /[?#]/.test(adapter.path)) {
 		throw new AgentPreviewError("adapter", "The exchange path must be a plain path.");
 	}
-	const clock = options.clock ?? realClock;
-	const credential = readCredentialFile(options.credentialFile);
 	const browser = await options.launcher.launch().catch(() => {
 		throw new AgentPreviewError("launch", "The browser could not be launched.");
 	});
@@ -465,7 +477,7 @@ export async function openAgentPreview(options: OpenOptions): Promise<AgentPrevi
 			if (allowed) await route.continue();
 			else await route.abort("blockedbyclient");
 		});
-		const built = adapter.request(credential);
+		const built = adapter.request();
 		// A write to the Worker must name its own origin (src/cua-observation-runtime.ts), and Playwright's request context doesn't add one.
 		const headers = { ...built.headers, origin };
 		let response: ApiResponse;
@@ -483,9 +495,9 @@ export async function openAgentPreview(options: OpenOptions): Promise<AgentPrevi
 		}
 		const cookies = await context.cookies(origin);
 		const host = new URL(origin).hostname;
-		const unsafe = (cookie: BrowserCookie) => !cookie.secure || !cookie.httpOnly || cookie.domain !== host || (cookie.expires > 0 && cookie.expires * 1000 > accepted.expiresAt + COOKIE_SKEW_MS);
-		if (cookies.length === 0 || cookies.some(unsafe)) return await fail("cookie", "The exchange did not leave only Secure HttpOnly cookies for the origin, ending with the session.");
-		const secrets = [credential, ...cookies.map((cookie) => cookie.value)].filter((value) => value.length > 0);
+		const unsafe = (cookie: BrowserCookie) => cookie.name !== adapter.cookieName || !cookie.secure || !cookie.httpOnly || cookie.sameSite !== "Strict" || cookie.domain !== host || cookie.path !== "/" || (cookie.expires > 0 && cookie.expires * 1000 > accepted.expiresAt + COOKIE_SKEW_MS);
+		if (cookies.length !== 1 || cookies.some(unsafe)) return await fail("cookie", "The exchange did not leave exactly the Secure HttpOnly SameSite=Strict host-only session cookie, ending with the session.");
+		const secrets = [...configured, ...cookies.map((cookie) => cookie.value)].filter((value) => value.length > 0);
 		return new AgentPreviewSession(origin, context, browser, clock, secrets, accepted.expiresAt);
 	} catch (error) {
 		if (error instanceof AgentPreviewError) throw error;

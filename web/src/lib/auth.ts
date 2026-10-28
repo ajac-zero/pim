@@ -13,8 +13,8 @@ export type Role = "admin" | "member";
 
 export type AuthSession = {
   signedIn: boolean;
-  /** `identity` is an account at another provider; `dev` is the dev server, which signs every request in itself. */
-  method: "passkey" | "identity" | "dev" | null;
+  /** `identity` is an account at another provider; `dev` is the dev server, which signs every request in itself; `automation` is the unsafe agent-driven preview's read-only session. */
+  method: "passkey" | "identity" | "dev" | "automation" | null;
   /** The passkey this browser signed in with. */
   passkey: string | null;
   /** The passkey or linked identity this browser signed in with. */
@@ -32,9 +32,10 @@ export type AuthSession = {
   /** Signed out: how people join once there is an admin. */
   registration?: "open" | "invite" | "closed";
   /**
-   * Present only in an unsafe agent-driven preview (docs/agent-preview.md),
-   * to everyone, signed in or not. `expiresAt` (Unix milliseconds) is set
-   * only for an automation session. Never a secret.
+   * Present only in the Cua evaluation preview while automation sign-in is
+   * on (docs/preview-automation.md), to everyone, signed in or not.
+   * `expiresAt` (Unix milliseconds) is set only for an automation session
+   * (`method: "automation"`). Never a secret.
    */
   agentPreview?: { enabled: true; expiresAt?: number | null };
 };

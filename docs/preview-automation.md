@@ -101,7 +101,20 @@ The runner can hand the cookie to its isolated browser (for example as an HTTP-o
 
 `session` is `null` when the request carries no good session. `expiresAt` is when the session ends, and `notAfter` is the grant's deadline. The answer never contains the credential or the cookie.
 
-`GET /auth/session`, which the web app reads, answers a browser with a good automation session as `{ "signedIn": true, "method": "automation", "passkey": null, "credential": null, "account": { "username", "role" }, "name": null, "providers": [], "automation": <the session above> }`. A passkey session's answer is unchanged (`method: "passkey"`, no `automation` field). So a banner can tell the two apart from `method`, and automation is never counted as evidence of a real passkey.
+### What the web app sees: `GET /auth/session`
+
+The web app already reads `GET /auth/session`. In the evaluation, while automation is on (the flag set and the grant good now), every answer gains one field, `agentPreview`, for a banner:
+
+| Browser | `method` | `agentPreview` | `automation` |
+| --- | --- | --- | --- |
+| Automation off, or a deployment, or the local preview | as before | absent | absent |
+| Signed out, automation on | `null` | `{ "enabled": true, "expiresAt": null }` | absent |
+| Passkey session, automation on | `"passkey"` | `{ "enabled": true, "expiresAt": null }` | absent |
+| Good automation session | `"automation"` | `{ "enabled": true, "expiresAt": <Unix ms> }` | the session object above |
+
+`agentPreview.expiresAt` is a number of Unix milliseconds, set only for an automation session: when that session ends, at most 30 minutes after the exchange and never past the grant's `notAfter`. It equals `Date.parse(automation.expiresAt)`. Nothing else in a signed-out or passkey answer changes.
+
+An automation session's full answer is `{ "signedIn": true, "method": "automation", "passkey": null, "credential": null, "account": { "username", "role" }, "name": null, "providers": [], "automation": <session>, "agentPreview": { "enabled": true, "expiresAt": <Unix ms> } }`. A banner tells automation from a person by `method` (or by a number in `agentPreview.expiresAt`), and automation is never counted as evidence of a real passkey. The answer never carries the credential or the cookie.
 
 ### End this session: `DELETE /auth/automation/session`
 
@@ -127,7 +140,7 @@ A browser that carries a good automation session counts as automation, even if i
 
 On `/api`, an automation session gets:
 
-- only `GET` and `HEAD`, and no socket (`403 An automation session only reads, and not this.`). Sockets are refused rather than rechecked per message, so no long-lived channel outlives a revocation;
+- only `GET` and `HEAD`, and no socket (`403 An automation session only reads, and not this.`; see below);
 - none of these reads: an observation's status or anything under `/api/observations/<id>` (a status may ask the viewer's host and settle a record), the agent's browser (`/api/browser…`), a model's suggestions, ChatGPT's sign-in, and either export;
 - the list of observations (`GET /api/observations`), which the space answers from what it holds. It never starts, ends, checks or reconciles an observation;
 - nothing that needs the person's own browser session. The space is never told the request is the person's browser (`x-pim-signed-in`), and account deletion and the admin API are refused.
@@ -135,6 +148,14 @@ On `/api`, an automation session gets:
 It manages no sign-in. Every `/auth` route but those above, such as tokens, passkeys, device links, recovery codes and MCP connections, answers it `401`, as it would a browser that isn't signed in. Approvals and tools are unchanged: an automation session can't approve anything, because approving is a write.
 
 Signing in, reading the metadata, ending and revoking write only the Directory's automation tables (`preview_automation_sessions`, `preview_automation_revoked`). They change no observation or journal record, no tool, approval, token, passkey, linked identity or account, and reach no host.
+
+## Sockets and revocation
+
+**The boundary.** An automation session never has an open socket. The gateway refuses a request that carries a good automation session and any `Upgrade` header (`/api/ws`, `/api/browser/live` or any other path, in any spelling), with `403`, after checking the session again and before any space sees the request. So no WebSocket, and no RPC over one, is ever established on an automation session. A revoked, ended or expired session's handshake gets `401`, as with no session. That is the backend's enforcement; a runner blocking sockets in its browser is a second layer, not a substitute.
+
+**Why refuse rather than recheck.** The space checks a socket only at its handshake, through the gateway. Once `/api/ws` is open, the space (`onMessage` in `src/pim.ts`) runs every command it is sent (`submit` a message, `abort` or `reset` a run, `follow` a chat) with no further check of the session that opened it, for passkey sessions too. Nothing ties an open connection to a session, so revoking a session, a grant or an account doesn't close it. Letting automation sockets through and revoking them reliably would need the space to record which session opened each connection, recheck it before each command or on a timer, and close its connections when the session, the grant or its deadline ends. That is a change to the space's socket handling for every connection, which this change doesn't make. Refusing every automation handshake is the complete enforcement within this scope.
+
+**What this doesn't cover.** A browser that also carries the owner's own passkey session, and whose automation session has ended, is signed in by that passkey session as before, sockets included: that is the person's own session, under its own rules. Passkey sockets outliving a signed-out or removed passkey is an existing property of Pim, unchanged here. Sockets that don't sign in with the browser's cookies (a computer's `/api/computer/connect` with its own token, and MCP clients with OAuth or API tokens) are unaffected.
 
 ## Tests
 
@@ -145,7 +166,9 @@ Signing in, reading the metadata, ending and revoking write only the Directory's
 - a deployment's entry point with every preview variable copied and a live session, which offers none of it, while the owner's passkey still works there;
 - ending one session; revoking the grant (at once, in the same isolate, and after the Directory restarts); changing or turning off the grant; a suspended owner; and expiry at 30 minutes;
 - the deadline cap, a deadline brought forward, and the limit of 8 sessions;
-- a passkey session unchanged, and a browser that carries both counted as automation;
+- a passkey session unchanged but for `agentPreview`, and a browser that carries both counted as automation;
+- `agentPreview` for signed-out, passkey and automation browsers while on, and absent while off and in a deployment;
+- socket handshakes on `/api/ws`, `/api/browser/live` and other paths, in either spelling, refused with no socket made; and refused with `401` after ending, revoking or expiry;
 - a seeded space holding one unresolved observation: signing in, reading the metadata, listing, ending and revoking leave the space's storage, the owner's tokens, passkeys and linked identities, and the account exactly as they were. Its status, a Watch and an End are refused, and nothing reaches the host.
 
 Removing any one of the revocation recheck, the deadline cap or the refusal of observation status, or mounting the routes in `src/index.ts`, fails these tests.
@@ -155,4 +178,4 @@ Removing any one of the revocation recheck, the deadline cap or the refusal of o
 - Nothing here has run against the live evaluation, a real browser, a real runner, Cloudflare's runtime or its rate limits. Setting the variables in the live evaluation is a separate step that needs its own approval.
 - The list of refused reads is a list of known reads with side effects, not a proof that every other `GET` in the space has none.
 - On Cloudflare, removing or changing a variable takes effect when the new version serves. Revoking through the route takes effect on the next request.
-- The web app's `AuthSession` type doesn't name `method: "automation"` yet, and no banner shows it. That is the runner and banner work, which reads the metadata above.
+- The web app's `AuthSession` type doesn't name `method: "automation"` or `agentPreview` yet, and no banner shows them. That is the runner and banner work, which reads the fields above.

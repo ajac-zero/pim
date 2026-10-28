@@ -32,9 +32,12 @@ import type { EvalDirectory } from "./cua-eval";
  * and active. Nothing is cached between requests, so revoking the grant, or
  * changing or removing it, ends every session it made at once.
  *
- * A session reads only: GET and HEAD, no socket, and none of the reads that
- * reach the computer, the browser, the viewer's host or a model, or export
- * everything. It is never a passkey session: `/auth` manages nothing for it,
+ * A session reads only: GET and HEAD, and none of the reads that reach the
+ * computer, the browser, the viewer's host or a model, or export everything.
+ * It opens no socket: every handshake on one is refused in the gateway,
+ * before any space sees it. The space checks a socket only at its handshake,
+ * for passkey sessions too, so an automation socket would outlive its
+ * session's revocation; refusing them leaves no such connection to miss. It is never a passkey session: `/auth` manages nothing for it,
  * it makes no token, passkey or account, and the space is never told it is
  * the person's browser, except for the list of observations, which the space
  * answers from what it holds.
@@ -285,7 +288,18 @@ export const previewAutomation: AutomationSessions = {
 			const found = await current(request, env, now);
 			if (!found) return undefined;
 			const { username, role } = found.account;
-			return json({ signedIn: true, method: "automation", passkey: null, credential: null, account: { username, role }, name: null, providers: [], automation: view(found) });
+			const expiresAt = Math.min(found.session.expiresAt, found.grant.notAfter);
+			return json({
+				signedIn: true,
+				method: "automation",
+				passkey: null,
+				credential: null,
+				account: { username, role },
+				name: null,
+				providers: [],
+				automation: view(found),
+				agentPreview: { enabled: true, expiresAt },
+			});
 		}
 		if (url.pathname !== SESSION_PATH && url.pathname !== REVOKE_PATH) return undefined;
 		// Off, it isn't here: `/auth` answers these as a deployment does.
@@ -320,6 +334,15 @@ export const previewAutomation: AutomationSessions = {
 			return json({ ok: true, revoked: true }, 200, [cookie("", 0)]);
 		}
 		return fail(405, `${url.pathname} takes ${url.pathname === SESSION_PATH ? "GET, POST and DELETE" : "POST"}`);
+	},
+
+	async describe(answer, env) {
+		if (!answer.ok || "off" in automationGrant(env, Date.now())) return answer;
+		const body = (await answer.json()) as Record<string, unknown>;
+		const headers = new Headers(answer.headers);
+		headers.delete("content-length");
+		headers.set("cache-control", "no-store");
+		return Response.json({ ...body, agentPreview: { enabled: true, expiresAt: null } }, { status: answer.status, headers });
 	},
 
 	async owner(request, env) {

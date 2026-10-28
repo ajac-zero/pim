@@ -198,7 +198,10 @@ describe("automation sign-in for the preview's evaluation", () => {
 			name: null,
 			providers: [],
 			automation: session,
+			agentPreview: { enabled: true, expiresAt: now + 30 * MINUTE },
 		});
+		// Every other browser's app learns only that automation is on here, with no expiry: signed out, as here, or a passkey's (below).
+		expect(await (await pim.ask("/auth/session")).json()).toMatchObject({ signedIn: false, agentPreview: { enabled: true, expiresAt: null } });
 		expect(await (await pim.ask("/auth/automation/session", { cookie })).json()).toEqual({ mode: "enabled", session });
 		expect(await (await pim.ask("/auth/automation/session")).json()).toEqual({ mode: "enabled", session: null });
 
@@ -210,7 +213,13 @@ describe("automation sign-in for the preview's evaluation", () => {
 		const readOnly = [403, "An automation session only reads, and not this."];
 		expect(await errorOf(await pim.ask("/api/settings", { cookie, method: "PUT", body: { theme: "dark" } }))).toEqual(readOnly);
 		expect(await errorOf(await pim.ask("/api/sessions/any/messages", { cookie, body: { content: "hello" } }))).toEqual(readOnly);
-		expect(await errorOf(await pim.ask("/api/ws", { cookie, headers: { upgrade: "websocket", origin: ORIGIN } }))).toEqual(readOnly);
+		// No socket opens, on any path or spelling: the gateway refuses the handshake before a space sees it.
+		for (const path of ["/api/ws", "/api/browser/live", "/api/observations", "/api/settings"]) {
+			for (const upgrade of ["websocket", "WebSocket"]) {
+				const answer = await pim.ask(path, { cookie, headers: { upgrade, connection: "Upgrade", "sec-websocket-version": "13", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==", origin: ORIGIN } });
+				expect([path, upgrade, answer.webSocket ?? null, ...(await errorOf(answer))]).toEqual([path, upgrade, null, ...readOnly]);
+			}
+		}
 		for (const path of ["/api/export", "/api/account/export", "/api/browser", "/api/browser/screenshot", "/api/chatgpt/login", "/api/agents/any/suggestions"]) {
 			expect([path, ...(await errorOf(await pim.ask(path, { cookie })))]).toEqual([path, ...readOnly]);
 		}
@@ -260,6 +269,10 @@ describe("automation sign-in for the preview's evaluation", () => {
 
 		// Off, it isn't there: the routes answer as a deployment's do.
 		const off = [401, "Sign in to Pim"];
+		await pim.grant();
+		delete settings.PREVIEW_AUTOMATION;
+		expect(await (await pim.ask("/auth/session")).json()).not.toHaveProperty("agentPreview");
+		expect(await (await pim.ask("/auth/session", { cookie: pim.passkey })).json()).not.toHaveProperty("agentPreview");
 		const grants: [string, () => Promise<void>][] = [
 			["no flag", async () => {
 				await pim.grant();
@@ -311,7 +324,10 @@ describe("automation sign-in for the preview's evaluation", () => {
 		expect((await pim.exchange({}, pim.production)).headers.getSetCookie()).toEqual([]);
 		expect((await pim.production("/auth/automation/session", { cookie })).status).toBe(401);
 		expect((await pim.production("/auth/automation/revoke", { body: pim.identity, credential: pim.secret })).status).toBe(401);
-		expect(await (await pim.production("/auth/session", { cookie })).json()).toMatchObject({ signedIn: false, method: null });
+		const deployed = await (await pim.production("/auth/session", { cookie })).json();
+		expect(deployed).toMatchObject({ signedIn: false, method: null });
+		expect(deployed).not.toHaveProperty("agentPreview");
+		expect(await (await pim.production("/auth/session", { cookie: pim.passkey })).json()).not.toHaveProperty("agentPreview");
 		expect((await pim.production("/api/settings", { cookie })).status).toBe(401);
 		expect((await pim.production("/api/settings", { cookie, headers: { upgrade: "websocket" } })).status).toBe(401);
 		// The owner's passkey still opens the deployment as it always has.
@@ -337,7 +353,7 @@ describe("automation sign-in for the preview's evaluation", () => {
 		expect(await reads(second)).toBe(200);
 		expect((await pim.ask("/auth/automation/revoke", { body: pim.identity, credential: pim.secret })).status).toBe(200);
 		expect(await reads(second)).toBe(401);
-		expect((await pim.ask("/api/ws", { cookie: second, headers: { upgrade: "websocket" } })).status).toBe(401);
+		for (const path of ["/api/ws", "/api/browser/live"]) expect([path, (await pim.ask(path, { cookie: second, headers: { upgrade: "websocket", origin: ORIGIN } })).status]).toEqual([path, 401]);
 		expect(await (await pim.ask("/auth/session", { cookie: second })).json()).toMatchObject({ signedIn: false });
 		expect((await pim.exchange()).status).toBe(401);
 		// Restarted, the Directory still holds the revocation.
@@ -377,6 +393,7 @@ describe("automation sign-in for the preview's evaluation", () => {
 		at(now + 30 * MINUTE + 1000);
 		expect(await reads(later)).toBe(401);
 		expect(await (await pim.ask("/auth/automation/session", { cookie: later })).json()).toEqual({ mode: "enabled", session: null });
+		expect((await pim.ask("/api/ws", { cookie: later, headers: { upgrade: "websocket", origin: ORIGIN } })).status).toBe(401);
 	});
 
 	it("never outlasts the evaluation's cleanup deadline, and holds no more than eight sessions at once", async () => {
@@ -413,7 +430,9 @@ describe("automation sign-in for the preview's evaluation", () => {
 		const pim = await evaluation();
 		const passkey = await pim.ask("/auth/session", { cookie: pim.passkey });
 		expect(await passkey.json()).toMatchObject({ signedIn: true, method: "passkey", account: { username: "autoowner", role: "admin" } });
-		expect(await (await pim.ask("/auth/session", { cookie: pim.passkey })).clone().json()).not.toHaveProperty("automation");
+		const human = await (await pim.ask("/auth/session", { cookie: pim.passkey })).json();
+		expect(human).not.toHaveProperty("automation");
+		expect(human).toMatchObject({ agentPreview: { enabled: true, expiresAt: null } });
 		expect((await pim.ask("/api/settings", { cookie: pim.passkey, method: "PUT", body: {} })).status).not.toBe(403);
 		const token = await pim.ask("/auth/tokens", { cookie: pim.passkey, body: { name: "cli" } });
 		expect(token.status).toBe(201);

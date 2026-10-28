@@ -379,6 +379,8 @@ function serveThemes(request: Request, path: string): Response {
 export type AutomationSessions = {
 	/** Its own routes under `/auth`, and `/auth/session` for a browser it signs in; `undefined` for anything else, which `/auth` answers as before. */
 	auth(request: Request, env: Env): Promise<Response | undefined>;
+	/** `/auth/session`'s answer for a browser it doesn't sign in, with what the app may know of automation added. */
+	describe(answer: Response, env: Env): Promise<Response>;
 	/** The owner the request's automation session names, checked again now, or null when it carries none that is good. */
 	owner(request: Request, env: Env): Promise<string | null>;
 	/** Why it refuses an API request (`path` under `/api`) on such a session, if it does. */
@@ -461,7 +463,8 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext, m
 	if (under(pathname, "/auth")) {
 		const automation = await mounts.automation?.auth(request, env);
 		if (automation) return automation;
-		return (await handleRegistration(request, env, address)) ?? handleAuth(request, env, sites(env));
+		const answer = (await handleRegistration(request, env, address)) ?? (await handleAuth(request, env, sites(env)));
+		return mounts.automation && request.method === "GET" && pathname === "/auth/session" ? mounts.automation.describe(answer, env) : answer;
 	}
 
 	if (pathname === "/authorize") {

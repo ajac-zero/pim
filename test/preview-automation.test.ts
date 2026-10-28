@@ -2,6 +2,7 @@ import { createExecutionContext, env, evictDurableObject, runInDurableObject, wa
 import * as fs from "node:fs";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { EvalDirectory } from "../preview/cua-eval";
+import { evaluatorAdmission } from "../preview/launch-evaluator";
 import previewWorker from "../preview/worker";
 import { applyObservationEvent, initialObservationState, type ObservationState } from "../src/cua-observation";
 import { OBSERVATION_KEY } from "../src/cua-observation-runtime";
@@ -762,6 +763,7 @@ describe("the launch evaluator", () => {
 	const LAUNCH_ID = "EvaluatorLaunch0000001";
 	const TICKET = "evaluator-ticket-".padEnd(43, "q");
 	const OLD = "attempted-watch-0003-earlier";
+	const OTHER_OLD = "attempted-watch-0004-another";
 	const LAUNCH = "/auth/launch-evaluator/launch";
 	const END = "/auth/launch-evaluator/end";
 	const NOT_VALID = [401, "That launch evaluator credential isn't valid for this preview."];
@@ -773,7 +775,7 @@ describe("the launch evaluator", () => {
 	 * observation in `old`'s status, with an evaluator grant for its owner and
 	 * a bridge that answers as `host` says.
 	 */
-	async function evaluator(setUp: { old?: "not_opened" | "unconfirmed" | "open"; host?: Partial<Host> } = {}) {
+	async function evaluator(setUp: { old?: "not_opened" | "unconfirmed" | "open" | "two-unconfirmed"; host?: Partial<Host>; existingUnconfirmed?: string } = {}) {
 		const pim = await evaluation();
 		settings.PREVIEW_CUA_FIXTURE = "seed";
 		settings.PREVIEW_CUA_FIXTURE_OWNER = pim.owner;
@@ -785,13 +787,17 @@ describe("the launch evaluator", () => {
 		ledger = applyObservationEvent(ledger, { type: "open_requested", owner: pim.owner, observationId: OLD, notAfter: now + 30 * MINUTE, now }).state;
 		const old = setUp.old ?? "not_opened";
 		if (old === "not_opened") ledger = applyObservationEvent(ledger, { type: "open_refused", observationId: OLD, evidence: "the host refused the launch (blocked)" }).state;
-		if (old === "unconfirmed") ledger = applyObservationEvent(ledger, { type: "unconfirmed", observationId: OLD, evidence: "the host's answer to launch was lost (timeout)" }).state;
+		if (old === "unconfirmed" || old === "two-unconfirmed") ledger = applyObservationEvent(ledger, { type: "unconfirmed", observationId: OLD, evidence: "the host's answer to launch was lost (timeout)" }).state;
+		if (old === "two-unconfirmed") {
+			ledger = applyObservationEvent(ledger, { type: "open_requested", owner: pim.owner, observationId: OTHER_OLD, notAfter: now + 30 * MINUTE, now }).state;
+			ledger = applyObservationEvent(ledger, { type: "unconfirmed", observationId: OTHER_OLD, evidence: "the host's answer to launch was lost (timeout)" }).state;
+		}
 		if (old === "open") ledger = applyObservationEvent(ledger, { type: "open_acknowledged", observationId: OLD, hostLaunchId: "OldLaunch0000000000001", hostGeneration: "gen-0" }).state;
-		expect(ledger.records).toEqual([expect.objectContaining({ observationId: OLD, status: old })]);
+		expect(ledger.records[0]).toEqual(expect.objectContaining({ observationId: OLD, status: old === "two-unconfirmed" ? "unconfirmed" : old }));
 		await runInDurableObject(space, (instance: PreviewPim) => instance.store.setMeta(OBSERVATION_KEY, JSON.stringify(ledger)));
 		await evictDurableObject(space).catch(() => undefined);
 		const records = async () => (JSON.parse((await runInDurableObject(space, (instance: PreviewPim) => instance.store.meta(OBSERVATION_KEY)))!) as ObservationState).records;
-		const oldRecord = async () => JSON.stringify((await records()).find((record) => record.observationId === OLD));
+		const oldRecord = async () => JSON.stringify((await records()).filter((record) => record.observationId === OLD || record.observationId === OTHER_OLD));
 		const before = await oldRecord();
 
 		const secret = credential();
@@ -805,6 +811,7 @@ describe("the launch evaluator", () => {
 				origin: ORIGIN,
 				credentialSha256: await sha256(given),
 				notAfter: new Date(Date.now() + 6 * 60 * MINUTE).toISOString(),
+				existingUnconfirmed: setUp.existingUnconfirmed ?? null,
 				...changes,
 			});
 		};
@@ -864,7 +871,7 @@ describe("the launch evaluator", () => {
 		const fresh = launched.run.observation.id;
 		expect(fresh).not.toBe(OLD);
 		expect(launched).toEqual({
-			run: { phase: "open", deadline: new Date(now + 10 * MINUTE).toISOString(), observation: { id: fresh, status: "open", notAfter: expect.any(Number) } },
+			run: { phase: "open", deadline: new Date(now + 10 * MINUTE).toISOString(), observation: { id: fresh, status: "open", notAfter: expect.any(Number) }, alongside: null },
 			viewer: `${BRIDGE}/${LAUNCH_ID}/viewer/#ticket=${TICKET}&clipboard=0`,
 			runToken: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
 		});
@@ -904,7 +911,7 @@ describe("the launch evaluator", () => {
 		const logs = JSON.stringify(logged);
 		for (const secret of [pim.secret, launched.runToken, TICKET, BRIDGE_TOKEN]) expect(logs).not.toContain(secret);
 		expect(logged.filter(([line]) => String(line).includes('"preview.launch-evaluator"')).map(([line]) => JSON.parse(String(line)))).toEqual([
-			{ event: "preview.launch-evaluator", action: "launch", outcome: "open", owner: pim.owner, observation: fresh, deadline: now + 10 * MINUTE },
+			{ event: "preview.launch-evaluator", action: "launch", outcome: "open", owner: pim.owner, observation: fresh, alongside: null, deadline: now + 10 * MINUTE },
 			{ event: "preview.launch-evaluator", action: "end", outcome: "ended", owner: pim.owner, observation: fresh },
 			{ event: "preview.launch-evaluator", action: "launch", outcome: "refused", reason: "spent" },
 			{ event: "preview.launch-evaluator", action: "end", outcome: "refused", reason: "phase", phase: "ended" },
@@ -981,6 +988,13 @@ describe("the launch evaluator", () => {
 			}],
 			["another kind", () => pim.evaluatorGrant({ kind: "automation" })],
 			["an extra field", () => pim.evaluatorGrant({ observation: OLD })],
+			["no existingUnconfirmed field", async () => {
+				const grant = JSON.parse(String(settings.PREVIEW_LAUNCH_EVALUATOR_GRANT));
+				delete grant.existingUnconfirmed;
+				settings.PREVIEW_LAUNCH_EVALUATOR_GRANT = JSON.stringify(grant);
+			}],
+			["a malformed existingUnconfirmed", () => pim.evaluatorGrant({ existingUnconfirmed: "../observations" })],
+			["an existingUnconfirmed of another type", () => pim.evaluatorGrant({ existingUnconfirmed: [OLD] })],
 			["the automation grant's credential", () => pim.evaluatorGrant({}, automation)],
 			["another owner", () => pim.evaluatorGrant({ owner: "o_00000000000000000000000000" })],
 			["another origin", () => pim.evaluatorGrant({ origin: "https://other.test" })],
@@ -1088,5 +1102,99 @@ describe("the launch evaluator", () => {
 		expect(pim.asked.map(({ action }) => action)).toEqual(["launch", "end"]);
 		expect(await pim.runs()).toEqual([expect.objectContaining({ phase: "end_uncertain" })]);
 		expect(await pim.oldRecord()).toBe(pim.before);
+	});
+
+	it("as the isolated preview's one exception, starts one fresh observation beside exactly the named unconfirmed record, leaves that record exactly as it was, and never a third", async () => {
+		const pim = await evaluator({ old: "unconfirmed", existingUnconfirmed: OLD });
+		// The person's Watch keeps the rule as it was: refused beside the unconfirmed record, with nothing asked.
+		expect((await pim.ask("/api/observations", { cookie: pim.passkey, method: "POST" })).status).toBe(409);
+		expect(pim.asked).toEqual([]);
+
+		const launched = (await (await pim.launch()).json()) as Launched & { run: { alongside: string | null } };
+		const fresh = launched.run.observation.id;
+		expect([launched.run.phase, launched.run.alongside, fresh === OLD]).toEqual(["open", OLD, false]);
+		expect(await pim.oldRecord()).toBe(pim.before);
+		expect((await pim.records()).map((record) => [record.observationId, record.status])).toEqual([
+			[OLD, "unconfirmed"],
+			[fresh, "open"],
+		]);
+		expect(await pim.runs()).toEqual([expect.objectContaining({ phase: "open", observation_id: fresh, alongside_id: OLD })]);
+
+		// The earlier record can't be ended, read in detail or reclassified through the run, and the person's Watch still starts nothing.
+		expect(await errorOf(await pim.end(launched.runToken, OLD))).toEqual([409, "This run can't end that observation now."]);
+		expect((await pim.ask("/api/observations", { cookie: pim.passkey, method: "POST" })).status).toBe(409);
+		await pim.grant();
+		const automation = await pim.signIn();
+		for (const [path, method] of [[`/api/observations/${OLD}`, "GET"], [`/api/observations/${OLD}/end`, "POST"], ["/api/observations", "POST"]] as const) {
+			expect([path, (await pim.ask(path, { cookie: automation, method })).status]).toEqual([path, 403]);
+		}
+		expect(pim.asked.map(({ action, body }) => [action, body.key])).toEqual([["launch", fresh]]);
+
+		// The one End, of the fresh record only; the earlier one is still exactly as it was.
+		expect((await pim.end(launched.runToken, fresh)).status).toBe(202);
+		expect(await pim.oldRecord()).toBe(pim.before);
+		expect(pim.asked.map(({ action, body }) => [action, body.key])).toEqual([
+			["launch", fresh],
+			["end", fresh],
+		]);
+
+		// No third: this grant is spent, and a new grant naming the same record finds two unresolved and starts nothing.
+		expect((await pim.launch()).status).toBe(409);
+		const renewed = credential();
+		await pim.evaluatorGrant({}, renewed);
+		const third = await pim.launch({ headers: pim.authorization(renewed) });
+		expect([third.status, await third.json()]).toEqual([409, { error: "The space started no observation.", run: { phase: "launch_refused", reason: "unresolved" } }]);
+		expect((await pim.launch({ headers: pim.authorization(renewed) })).status).toBe(409);
+		expect(pim.asked).toHaveLength(2);
+		expect(await pim.records()).toHaveLength(2);
+		expect(await pim.oldRecord()).toBe(pim.before);
+		// A deployment's entry point, with the same grant, has none of it.
+		expect(await errorOf(await pim.production(LAUNCH, { body: pim.identity, headers: pim.authorization(renewed) }))).toEqual([401, "Sign in to Pim"]);
+		expect(sent).toEqual([]);
+	});
+
+	it("refuses the exception beside an open record, beside two unresolved ones, beside another than the named one, or with nothing to stand beside, and spends the grant", async () => {
+		const cases = [
+			{ old: "open", existingUnconfirmed: OLD, reason: "named-not-unconfirmed" },
+			{ old: "two-unconfirmed", existingUnconfirmed: OLD, reason: "unresolved" },
+			{ old: "unconfirmed", existingUnconfirmed: OTHER_OLD, reason: "unresolved" },
+			{ old: "not_opened", existingUnconfirmed: OLD, reason: "named-not-found" },
+			{ old: "unconfirmed", existingUnconfirmed: undefined, reason: "unresolved" },
+		] as const;
+		for (const { old, existingUnconfirmed, reason } of cases) {
+			const pim = await evaluator({ old, ...(existingUnconfirmed ? { existingUnconfirmed } : {}) });
+			const refused = await pim.launch();
+			expect([old, existingUnconfirmed, refused.status, await refused.json()]).toEqual([old, existingUnconfirmed, 409, { error: "The space started no observation.", run: { phase: "launch_refused", reason } }]);
+			// Nothing was asked, replayed or recorded, and the earlier records are exactly as they were.
+			expect(pim.asked).toEqual([]);
+			expect(await pim.oldRecord()).toBe(pim.before);
+			expect(await pim.runs()).toEqual([expect.objectContaining({ phase: "launch_refused", observation_id: null, alongside_id: null })]);
+			// Spent: the same grant does nothing more.
+			expect(await errorOf(await pim.launch())).toEqual([409, "This launch evaluator grant has run already; it runs once."]);
+			// No run token was answered, so no End can name the run.
+			expect(await errorOf(await pim.end("r".repeat(43), OLD))).toEqual(NOT_VALID);
+			expect(pim.asked).toEqual([]);
+		}
+	});
+
+	it("admits only nothing unresolved, or exactly one named unconfirmed record: never beside one pending, open or revoking", () => {
+		const now = Date.now();
+		let state: ObservationState = initialObservationState("o_00000000000000000000000000");
+		const step = (event: Parameters<typeof applyObservationEvent>[1]) => (state = applyObservationEvent(state, event).state);
+		expect(evaluatorAdmission(state, null)).toEqual({ ok: true, alongside: null });
+		expect(evaluatorAdmission(state, OLD)).toEqual({ ok: false, reason: "named-not-found" });
+		step({ type: "open_requested", owner: state.owner, observationId: OLD, notAfter: now + MINUTE, now });
+		expect(evaluatorAdmission(state, OLD)).toEqual({ ok: false, reason: "named-not-unconfirmed" });
+		step({ type: "open_acknowledged", observationId: OLD, hostLaunchId: "OldLaunch0000000000001", hostGeneration: "gen-0" });
+		expect(evaluatorAdmission(state, OLD)).toEqual({ ok: false, reason: "named-not-unconfirmed" });
+		step({ type: "revoke_requested", observationId: OLD });
+		expect(state.records[0]!.status).toBe("revoking");
+		expect(evaluatorAdmission(state, OLD)).toEqual({ ok: false, reason: "named-not-unconfirmed" });
+		step({ type: "unconfirmed", observationId: OLD, evidence: "lost" });
+		expect(evaluatorAdmission(state, OLD)).toEqual({ ok: true, alongside: OLD });
+		expect(evaluatorAdmission(state, null)).toEqual({ ok: false, reason: "unresolved" });
+		expect(evaluatorAdmission(state, OTHER_OLD)).toEqual({ ok: false, reason: "unresolved" });
+		step({ type: "open_requested", owner: state.owner, observationId: OTHER_OLD, notAfter: now + MINUTE, now });
+		expect(evaluatorAdmission(state, OLD)).toEqual({ ok: false, reason: "unresolved" });
 	});
 });

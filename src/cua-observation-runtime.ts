@@ -31,7 +31,8 @@ import type { CuaViewerClient, HostReply, LaunchAnswer } from "./cua-viewer";
  *   another owner's or another version blocks every observation, and is
  *   left as it is. Nothing resets, evicts or recreates a ledger, and no
  *   fresh observation id escapes a record that is unconfirmed: while one is
- *   unresolved, no other observation starts.
+ *   unresolved, no other observation starts. The one exception is the
+ *   preview evaluation's launch evaluator (`launch`'s `alongsideUnconfirmed`).
  * - **Answers mapped, never guessed.** A lost answer makes a record
  *   `unconfirmed`; only the host's own report of closure, for the launch and
  *   generation the record names, closes one.
@@ -189,8 +190,17 @@ export class ObservationDesk {
 		return failure(404, "Not found");
 	}
 
-	/** Starts an observation, or gives back the open one's viewer, recording it before the host is asked. */
-	async launch(): Promise<Response> {
+	/**
+	 * Starts an observation, or gives back the open one's viewer, recording it before the host is asked.
+	 *
+	 * `alongsideUnconfirmed` is the preview evaluation's one exception
+	 * (preview/launch-evaluator.ts, docs/launch-evaluator.md), and nothing
+	 * else passes it: the person's Watch never does. With it, a fresh
+	 * observation starts only when the one unresolved record is exactly that
+	 * ID and `unconfirmed`, which stays as it is; anything else is refused,
+	 * and nothing is replayed or asked.
+	 */
+	async launch(alongsideUnconfirmed?: string): Promise<Response> {
 		if (!this.#state || this.#blocked) return failure(503, `Watching isn't available: ${this.#blocked}.`);
 		let client: CuaViewerClient;
 		try {
@@ -200,7 +210,12 @@ export class ObservationDesk {
 		}
 		const now = this.#now();
 		const unresolved = unresolvedObservations(this.#state);
-		if (unresolved.length >= this.#options.openObservations) {
+		if (alongsideUnconfirmed !== undefined) {
+			const [only] = unresolved;
+			if (unresolved.length !== 1 || only!.observationId !== alongsideUnconfirmed || only!.status !== "unconfirmed") {
+				return failure(409, "This exception starts an observation only beside the one named unconfirmed record.", { observations: unresolved.map(view) });
+			}
+		} else if (unresolved.length >= this.#options.openObservations) {
 			const [current] = unresolved;
 			if (unresolved.length === 1 && current!.status === "open" && now < current!.notAfter) return this.#replay(client, current!);
 			// Not a new id past an uncertain one: the record must settle first, by the host's status, an end, or an operator.

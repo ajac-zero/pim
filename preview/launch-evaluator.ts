@@ -1,5 +1,6 @@
 import { getAgentByName } from "agents";
 import { base64UrlEncode } from "../src/auth/encoding";
+import { type ObservationState, unresolvedObservations } from "../src/cua-observation";
 import { isHttpsOrigin } from "../src/cua-viewer";
 import type { EvalDirectory } from "./cua-eval";
 
@@ -22,7 +23,9 @@ import type { EvalDirectory } from "./cua-eval";
  * - `PREVIEW_LAUNCH_EVALUATOR_GRANT`, one JSON object: `kind`
  *   (`"launch-evaluator"`), the claimed owner, the evaluation, the deployment
  *   (`cua-eval@<PIM_RUNTIME>`), Pim's exact address, the SHA-256 of the
- *   operator's credential and the last moment a run may begin.
+ *   operator's credential, the last moment a run may begin, and
+ *   `existingUnconfirmed`: `null`, or the ID of the one earlier record the
+ *   operator found `unconfirmed` (below).
  *
  * A grant runs once. The Directory keeps one row per grant (keyed by the
  * credential's digest) and only moves it forward, in this order:
@@ -43,6 +46,19 @@ import type { EvalDirectory } from "./cua-eval";
  * refused, and to its final phase after. No route reads, ends or names any
  * other observation, and no route retries. A run's deadline is at most 10
  * minutes after it began, and never past the grant's `notAfter`.
+ *
+ * **The isolated-preview exception.** The space admits one unresolved
+ * observation at a time, and its earlier Watch left one `unconfirmed`, which
+ * stays so: nothing here reconciles, reads, ends or changes it. Only for this
+ * evaluator, and only when its grant names that record in
+ * `existingUnconfirmed`, the space starts one fresh observation beside it,
+ * if, at that moment, it is the one unresolved record and `unconfirmed`
+ * (`evaluatorAdmission`; the desk checks the same again). Beside a record
+ * `pending_open`, `open` or `revoking`, beside two, beside another than the
+ * named one, or without the name, nothing starts. The person's Watch and every
+ * other route keep the rule as it was, a deployment has none of this, and
+ * once the fresh record exists there are two unresolved, so no grant can
+ * start a third.
  */
 
 export const LAUNCH_EVALUATOR_PREFIX = "/auth/launch-evaluator";
@@ -64,7 +80,7 @@ const OWNER = /^o_[0-9a-z]{26}$/;
 const EVALUATION = /^[a-z0-9][a-z0-9-]{2,62}$/;
 /** An observation's ID, as the ledger allows them (src/cua-observation.ts). */
 const OBSERVATION_ID = /^[A-Za-z0-9_-]{16,64}$/;
-const GRANT_KEYS = ["credentialSha256", "deployment", "evaluation", "kind", "notAfter", "origin", "owner"];
+const GRANT_KEYS = ["credentialSha256", "deployment", "evaluation", "existingUnconfirmed", "kind", "notAfter", "origin", "owner"];
 const LAUNCH_KEYS = ["deployment", "evaluation", "owner"];
 const END_KEYS = ["deployment", "evaluation", "observation", "owner"];
 
@@ -75,6 +91,8 @@ export type EvaluatorGrant = {
 	readonly origin: string;
 	readonly credentialSha256: string;
 	readonly notAfter: number;
+	/** The one earlier `unconfirmed` record the fresh observation may start beside, or null for none. */
+	readonly existingUnconfirmed: string | null;
 };
 
 export type EvaluatorPhase = "launching" | "open" | "launch_refused" | "launch_uncertain" | "expired" | "ending" | "ended" | "end_refused" | "end_uncertain";
@@ -89,6 +107,8 @@ export type EvaluatorRun = {
 	readonly run: string;
 	readonly phase: EvaluatorPhase;
 	readonly observation: string | null;
+	/** The earlier unconfirmed record the fresh observation started beside, if it did. */
+	readonly alongside: string | null;
 	readonly createdAt: number;
 	readonly deadline: number;
 	readonly updatedAt: number;
@@ -96,7 +116,7 @@ export type EvaluatorRun = {
 
 /** What the owner's space answers the evaluator's launch, over RPC (preview/worker.ts's `Pim`). */
 export type SpaceLaunch =
-	| { readonly outcome: "open"; readonly observation: { readonly id: string; readonly notAfter: number }; readonly viewer: string }
+	| { readonly outcome: "open"; readonly observation: { readonly id: string; readonly notAfter: number }; readonly viewer: string; readonly alongside: string | null }
 	| { readonly outcome: "refused"; readonly reason: string }
 	| { readonly outcome: "uncertain"; readonly observation: string | null };
 /** What the owner's space answers the evaluator's End. */
@@ -128,7 +148,7 @@ export function launchEvaluatorGrant(env: Env, now: number): EvaluatorGrant | { 
 		return { off: "grant" };
 	}
 	if (!grant || typeof grant !== "object" || Array.isArray(grant) || Object.keys(grant).sort().join() !== GRANT_KEYS.join() || grant.kind !== KIND) return { off: "grant" };
-	const { owner, evaluation, deployment, origin, credentialSha256, notAfter } = grant;
+	const { owner, evaluation, deployment, origin, credentialSha256, notAfter, existingUnconfirmed } = grant;
 	const deadline = typeof notAfter === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,3})?Z$/.test(notAfter) ? Date.parse(notAfter) : Number.NaN;
 	if (typeof owner !== "string" || !OWNER.test(owner)) return { off: "owner" };
 	if (typeof evaluation !== "string" || !EVALUATION.test(evaluation)) return { off: "evaluation" };
@@ -138,7 +158,24 @@ export function launchEvaluatorGrant(env: Env, now: number): EvaluatorGrant | { 
 	if (credentialSha256 === automationDigest(env)) return { off: "shared-credential" };
 	if (!Number.isFinite(deadline) || deadline > now + MAX_GRANT_MS) return { off: "deadline" };
 	if (deadline <= now) return { off: "expired" };
-	return { owner, evaluation, deployment, origin, credentialSha256, notAfter: deadline };
+	if (existingUnconfirmed !== null && (typeof existingUnconfirmed !== "string" || !OBSERVATION_ID.test(existingUnconfirmed))) return { off: "existing" };
+	return { owner, evaluation, deployment, origin, credentialSha256, notAfter: deadline, existingUnconfirmed };
+}
+
+/**
+ * Whether the evaluator's one fresh observation may start in a ledger in
+ * `state`, and beside which record: with nothing unresolved, when the grant
+ * names none; or beside exactly `existingUnconfirmed`, when that is the one
+ * unresolved record and `unconfirmed`. Nothing else.
+ */
+export function evaluatorAdmission(state: ObservationState, existingUnconfirmed: string | null): { ok: true; alongside: string | null } | { ok: false; reason: "unresolved" | "named-not-found" | "named-not-unconfirmed" } {
+	const unresolved = unresolvedObservations(state);
+	if (existingUnconfirmed === null) return unresolved.length === 0 ? { ok: true, alongside: null } : { ok: false, reason: "unresolved" };
+	if (unresolved.length > 1) return { ok: false, reason: "unresolved" };
+	const [only] = unresolved;
+	if (only?.observationId !== existingUnconfirmed) return { ok: false, reason: only ? "unresolved" : "named-not-found" };
+	if (only.status !== "unconfirmed") return { ok: false, reason: "named-not-unconfirmed" };
+	return { ok: true, alongside: existingUnconfirmed };
 }
 
 /**
@@ -148,7 +185,7 @@ export function launchEvaluatorGrant(env: Env, now: number): EvaluatorGrant | { 
 export class LaunchEvaluatorLedger {
 	constructor(readonly sql: SqlStorage) {
 		sql.exec(
-			"CREATE TABLE IF NOT EXISTS preview_launch_evaluator_runs (grant_digest TEXT PRIMARY KEY, owner TEXT NOT NULL, evaluation TEXT NOT NULL, deployment TEXT NOT NULL, origin TEXT NOT NULL, run_digest TEXT NOT NULL, phase TEXT NOT NULL, observation_id TEXT, created_at INTEGER NOT NULL, deadline INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+			"CREATE TABLE IF NOT EXISTS preview_launch_evaluator_runs (grant_digest TEXT PRIMARY KEY, owner TEXT NOT NULL, evaluation TEXT NOT NULL, deployment TEXT NOT NULL, origin TEXT NOT NULL, run_digest TEXT NOT NULL, phase TEXT NOT NULL, observation_id TEXT, alongside_id TEXT, created_at INTEGER NOT NULL, deadline INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
 		);
 	}
 
@@ -164,6 +201,7 @@ export class LaunchEvaluatorLedger {
 			run: String(row.run_digest),
 			phase: String(row.phase) as EvaluatorPhase,
 			observation: row.observation_id === null ? null : String(row.observation_id),
+			alongside: row.alongside_id === null ? null : String(row.alongside_id),
 			createdAt: Number(row.created_at),
 			deadline: Number(row.deadline),
 			updatedAt: Number(row.updated_at),
@@ -171,7 +209,7 @@ export class LaunchEvaluatorLedger {
 	}
 
 	/** Inserts the grant's one run as `launching`; false if the grant has a run already, whatever its phase. */
-	claim(row: Omit<EvaluatorRun, "phase" | "observation" | "updatedAt">): boolean {
+	claim(row: Omit<EvaluatorRun, "phase" | "observation" | "alongside" | "updatedAt">): boolean {
 		return (
 			this.sql.exec(
 				"INSERT OR IGNORE INTO preview_launch_evaluator_runs (grant_digest, owner, evaluation, deployment, origin, run_digest, phase, observation_id, created_at, deadline, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'launching', NULL, ?, ?, ?)",
@@ -188,12 +226,20 @@ export class LaunchEvaluatorLedger {
 		);
 	}
 
-	/** Moves the run from exactly `from` to `to`, recording `observation` if given; false if it wasn't in `from`. */
-	move(grant: string, from: EvaluatorPhase, to: EvaluatorPhase, now: number, observation?: string | null): boolean {
+	/** Moves the run from exactly `from` to `to`, recording the launch's `observation` and what it started beside if given; false if it wasn't in `from`. */
+	move(grant: string, from: EvaluatorPhase, to: EvaluatorPhase, now: number, launched?: { observation: string | null; alongside: string | null }): boolean {
 		const cursor =
-			observation === undefined
+			launched === undefined
 				? this.sql.exec("UPDATE preview_launch_evaluator_runs SET phase = ?, updated_at = ? WHERE grant_digest = ? AND phase = ?", to, now, grant, from)
-				: this.sql.exec("UPDATE preview_launch_evaluator_runs SET phase = ?, observation_id = ?, updated_at = ? WHERE grant_digest = ? AND phase = ? AND observation_id IS NULL", to, observation, now, grant, from);
+				: this.sql.exec(
+						"UPDATE preview_launch_evaluator_runs SET phase = ?, observation_id = ?, alongside_id = ?, updated_at = ? WHERE grant_digest = ? AND phase = ? AND observation_id IS NULL",
+						to,
+						launched.observation,
+						launched.alongside,
+						now,
+						grant,
+						from,
+					);
 		return cursor.rowsWritten > 0;
 	}
 }
@@ -248,12 +294,17 @@ async function launch(request: Request, env: Env, grant: EvaluatorGrant, now: nu
 	}
 	const at = Date.now();
 	if (answer.outcome === "open" && OBSERVATION_ID.test(answer.observation.id)) {
-		const recorded = await directory(env).evaluatorLaunched(row.grant, "open", answer.observation.id, at);
+		const recorded = await directory(env).evaluatorLaunched(row.grant, "open", answer.observation.id, answer.alongside, at);
 		if (recorded) {
-			log({ action: "launch", outcome: "open", owner: grant.owner, observation: answer.observation.id, deadline });
+			log({ action: "launch", outcome: "open", owner: grant.owner, observation: answer.observation.id, alongside: answer.alongside, deadline });
 			return json(
 				{
-					run: { phase: "open", deadline: new Date(deadline).toISOString(), observation: { id: answer.observation.id, status: "open", notAfter: answer.observation.notAfter } },
+					run: {
+						phase: "open",
+						deadline: new Date(deadline).toISOString(),
+						observation: { id: answer.observation.id, status: "open", notAfter: answer.observation.notAfter },
+						alongside: answer.alongside,
+					},
 					viewer: answer.viewer,
 					runToken: token,
 				},
@@ -265,12 +316,12 @@ async function launch(request: Request, env: Env, grant: EvaluatorGrant, now: nu
 		return fail(502, "The launch's result couldn't be recorded; it is uncertain. Nothing is retried and nothing will end it from here.", { run: { phase: "launch_uncertain" } });
 	}
 	if (answer.outcome === "refused") {
-		await directory(env).evaluatorLaunched(row.grant, "launch_refused", null, at);
+		await directory(env).evaluatorLaunched(row.grant, "launch_refused", null, null, at);
 		log({ action: "launch", outcome: "launch_refused", reason: answer.reason, owner: grant.owner });
 		return fail(409, "The space started no observation.", { run: { phase: "launch_refused", reason: answer.reason } });
 	}
 	const observation = answer.outcome === "uncertain" ? answer.observation : null;
-	await directory(env).evaluatorLaunched(row.grant, "launch_uncertain", observation !== null && OBSERVATION_ID.test(observation) ? observation : null, at);
+	await directory(env).evaluatorLaunched(row.grant, "launch_uncertain", observation !== null && OBSERVATION_ID.test(observation) ? observation : null, null, at);
 	log({ action: "launch", outcome: "launch_uncertain", owner: grant.owner });
 	return fail(502, "Whether an observation started is uncertain. Nothing is retried, and nothing may end it from here.", { run: { phase: "launch_uncertain" } });
 }

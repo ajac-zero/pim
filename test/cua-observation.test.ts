@@ -792,6 +792,42 @@ describe("the desk: a space's observations, recorded before the host is asked", 
 		expect(t.records().every((record) => record.status === "not_opened")).toBe(true);
 	});
 
+	it("starts one observation beside exactly the named unconfirmed record only when asked so by name, leaving it as it was, and never a third", async () => {
+		const OLD = id(101);
+		const unconfirmed = ok(initialObservationState(SPACE), { type: "open_requested", owner: SPACE, observationId: OLD, notAfter: NOW + 60_000, now: NOW }, { type: "unconfirmed", observationId: OLD, evidence: "the host's answer to launch was lost (timeout)" });
+		const t = desk({ stored: JSON.stringify(unconfirmed), host: launched });
+		const old = JSON.stringify(t.records()[0]);
+		// The person's Watch, and the exception naming any other record, are refused as before, and nothing is asked.
+		expect((await t.desk.launch()).status).toBe(409);
+		expect((await t.desk.launch(id(102))).status).toBe(409);
+		expect(t.asked).toEqual([]);
+		// Named, a fresh observation starts beside it, and the unconfirmed record is exactly as it was.
+		const started = await t.desk.launch(OLD);
+		expect(started.status).toBe(200);
+		expect((await body(started)).observation).toMatchObject({ id: id(1), status: "open" });
+		expect(t.records().map((record) => [record.observationId, record.status])).toEqual([
+			[OLD, "unconfirmed"],
+			[id(1), "open"],
+		]);
+		expect(JSON.stringify(t.records()[0])).toBe(old);
+		expect(t.asked.map((asked) => JSON.parse(asked.body).key)).toEqual([id(1)]);
+		// No third: neither the exception again nor the person's Watch starts or replays anything.
+		expect((await t.desk.launch(OLD)).status).toBe(409);
+		expect((await t.desk.launch()).status).toBe(409);
+		expect(t.asked).toHaveLength(1);
+
+		// Beside an open record (which the person's Watch would replay), or two unresolved ones, the exception starts and asks nothing.
+		const open = ok(initialObservationState(SPACE), { type: "open_requested", owner: SPACE, observationId: OLD, notAfter: NOW + 60_000, now: NOW }, { type: "open_acknowledged", observationId: OLD, hostLaunchId: LAUNCH, hostGeneration: "gen-0" });
+		const two = ok(unconfirmed, { type: "open_requested", owner: SPACE, observationId: id(103), notAfter: NOW + 60_000, now: NOW }, { type: "unconfirmed", observationId: id(103), evidence: "lost" });
+		for (const stored of [open, two, initialObservationState(SPACE)]) {
+			const other = desk({ stored: JSON.stringify(stored), host: launched });
+			const before = other.store.value;
+			expect((await other.desk.launch(OLD)).status).toBe(409);
+			expect(other.asked).toEqual([]);
+			expect(other.store.value).toBe(before);
+		}
+	});
+
 	it("answers only management, for the owner's session from this app, and carries nothing of the viewer", async () => {
 		const t = desk({ stored: empty(), host: launched });
 		const serve = (path: string, init: RequestInit = {}, viaSession = true) => t.desk.serve(new Request(`${ORIGIN}${path}`, init), { viaSession }, ORIGIN);

@@ -255,17 +255,17 @@ export class EvalDirectory extends RealDirectory {
 	 * `launching`, for the claimed, active owner only. A grant that has a run
 	 * already, in any phase, is spent.
 	 */
-	evaluatorClaim(row: Omit<EvaluatorRun, "phase" | "observation" | "updatedAt">): { ok: true } | { ok: false; reason: "refused" } | { ok: false; reason: "spent"; phase: EvaluatorPhase } {
+	evaluatorClaim(row: Omit<EvaluatorRun, "phase" | "observation" | "alongside" | "updatedAt">): { ok: true } | { ok: false; reason: "refused" } | { ok: false; reason: "spent"; phase: EvaluatorPhase } {
 		if (!this.#automatable(row.owner)) return { ok: false, reason: "refused" };
 		const ledger = new LaunchEvaluatorLedger(this.ctx.storage.sql);
 		if (ledger.claim(row)) return { ok: true };
 		return { ok: false, reason: "spent", phase: ledger.read(row.grant)!.phase };
 	}
 
-	/** Records what the space answered the run's launch: `launching` moves on once, to `open` with the fresh ID or to a refusal or uncertainty. */
-	evaluatorLaunched(grant: string, phase: "open" | "launch_refused" | "launch_uncertain", observation: string | null, now: number): boolean {
+	/** Records what the space answered the run's launch: `launching` moves on once, to `open` with the fresh ID (and the unconfirmed record it started beside, if any) or to a refusal or uncertainty. */
+	evaluatorLaunched(grant: string, phase: "open" | "launch_refused" | "launch_uncertain", observation: string | null, alongside: string | null, now: number): boolean {
 		if (!evaluating(this.env)) return false;
-		return new LaunchEvaluatorLedger(this.ctx.storage.sql).move(grant, "launching", phase, now, observation);
+		return new LaunchEvaluatorLedger(this.ctx.storage.sql).move(grant, "launching", phase, now, { observation, alongside });
 	}
 
 	/**

@@ -6189,6 +6189,14 @@ export class Pim extends DurableAgent<Env> {
 		const id = this.store.publicId(session);
 		this.#send(connection, { type: "events", session: id, events: [stream.snapshot] });
 		stream.start(async (events) => {
+			// Chats only say that a request failed; the provider's own words are for whoever runs the deployment.
+			for (const event of events) {
+				if (event.type === "task_failed") {
+					console.warn(JSON.stringify({ event: "pim.task_failed", kind: event.kind, error: event.message.slice(0, 1000) }));
+				} else if (event.type === "submission" && event.record.status === "unanswered" && event.record.reason === "model_error") {
+					console.warn(JSON.stringify({ event: "pim.model_error", error: String(event.record.detail ?? "").slice(0, 1000) }));
+				}
+			}
 			if (connection.readyState !== WebSocket.OPEN) {
 				void this.#unwatch(connection.id);
 				return;

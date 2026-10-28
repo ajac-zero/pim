@@ -64,7 +64,7 @@ export interface ComposerProps {
   initialInput?: string;
   /** Keeps unsent text under this key, such as the chat's id, while other chats are open. */
   draftKey?: string;
-  /** The agents an @ offers to mention: mentioning one brings it into the chat. */
+  /** The agents in the chat, which an @ offers to mention. */
   mentions?: readonly Agent[];
 }
 

@@ -286,7 +286,17 @@ function ChatPage() {
                   }
                   onStop={stop}
                   busy={ready && (view.running || roomBusy)}
-                  mentions={session && !session.visit ? agents : undefined}
+                  mentions={
+                    session?.agent && session.room?.members.length
+                      ? agents?.filter(
+                          (agent) =>
+                            agent.id === session.agent?.id ||
+                            session.room?.members.some(
+                              (member) => member.id === agent.id,
+                            ),
+                        )
+                      : undefined
+                  }
                   disabled={!ready}
                   disclaimer={
                     session?.visit ? (

@@ -916,6 +916,15 @@ describe("a group chat", () => {
 		]);
 		expect(seen.Physio).toHaveLength(physioHeard);
 
+		// An agent whose model failed for good is held, and has no Try again of its own in a room: when it is mentioned again it answers, instead of queuing behind the error for good.
+		scripts({ Coach: [() => fauxAssistantMessage("", { stopReason: "error", errorMessage: "subscription_sharing_usage_limit_exceeded" })] });
+		await say("@Coach and Thursday?", session);
+		await quiet(session);
+		scripts({ Coach: [as("Coach", "Thursday is easy.")] });
+		await say("@Coach Thursday again?", session);
+		await quiet(session);
+		expect(await messagesOf(session, "user")).toContain("[From Coach]\nThursday is easy.");
+
 		// Only the host takes agents out; the person does through the API, and can bring one back, afresh.
 		const coachTried: string[] = [];
 		scripts({

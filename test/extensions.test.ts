@@ -387,6 +387,13 @@ describe("extensions", () => {
 			/^\[Introduction\] The person just joined and named you Alfred\. Their name is Anita\. They'd like a hand with work, money, travel, my garden and my taxes\./,
 		);
 		expect(prompt).toContain('"es"');
+		// The name they gave is one an agent can mention them by.
+		expect((await api("/majordomo")).body.yourName).toBe("Anita");
+		faux.setResponses([() => toolUse("send_to_user", { message: "Anita, which day suits you?" }), () => toolUse("send_to_user", { message: "@Anita, which day suits you?" })]);
+		await post(`/sessions/${ROOT}/messages`, { content: "Plan a trip.", wait: true });
+		expect((await api("/notifications")).body.notifications.filter((notification: { kind: string }) => notification.kind === "mention")).toEqual([]);
+		await post(`/sessions/${ROOT}/messages`, { content: "Any day.", wait: true });
+		expect((await api("/notifications")).body.notifications).toContainEqual(expect.objectContaining({ kind: "mention", body: "@Anita, which day suits you?" }));
 		// What they already chose, it doesn't ask again.
 		expect(prompt).not.toContain("what to call them");
 		expect(prompt).not.toContain("how they'd like you to talk");

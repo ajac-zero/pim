@@ -181,6 +181,13 @@ function usePimEvents() {
       },
       onNotification: (notification) => {
         queryClient.invalidateQueries({ queryKey: ["notifications"] });
+        // Mentioned in the chat on screen: the chat shows it, with a button to it.
+        if (
+          notification.kind === "mention" &&
+          location.pathname === `/chat/${notification.session}`
+        ) {
+          return;
+        }
         toast(notification.title, {
           icon: notification.agent ? (
             <AgentIcon agent={notification.agent} tile className="size-5" />
@@ -200,6 +207,8 @@ function usePimEvents() {
       },
       onSessions: () => {
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        // Reading a chat reads what mentioned you in it.
+        queryClient.invalidateQueries({ queryKey: ["notifications"] });
       },
       onTasks: (session) => {
         queryClient.invalidateQueries({ queryKey: ["tasks", session] });

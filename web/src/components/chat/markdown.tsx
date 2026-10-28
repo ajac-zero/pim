@@ -27,8 +27,13 @@ import {
   CodeBlockHeader,
   CodeBlockTitle,
 } from "~/components/ui/code-block";
-import { FILES_ROOT } from "~/lib/pim-api";
-import { agentsQuery, sessionsQuery } from "~/lib/queries";
+import { type Agent, FILES_ROOT } from "~/lib/pim-api";
+import {
+  agentsQuery,
+  majordomoQuery,
+  profileQuery,
+  sessionsQuery,
+} from "~/lib/queries";
 import { openTab } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
@@ -311,28 +316,64 @@ function ChatLink({
   );
 }
 
+/** The names an agent can mention you by: your username, the name you gave your majordomo and your profile's name. */
+export function useUserNames(): string[] {
+  const { data: profile } = useQuery(profileQuery());
+  const { data: majordomo } = useQuery(majordomoQuery());
+  return [
+    ...new Set(
+      [profile?.username, majordomo?.yourName, profile?.displayName].filter(
+        (name): name is string => !!name,
+      ),
+    ),
+  ];
+}
+
+/** Whether a text mentions the person, as `@` and any of their names, as the Worker decides it. */
+export function mentionsUser(text: string, names: readonly string[]): boolean {
+  const keys = names.map((name) => name.toLowerCase()).filter(Boolean);
+  const lower = text.toLowerCase();
+  for (const match of lower.matchAll(/@/g)) {
+    if (match.index > 0 && /[\p{L}\p{N}_]/u.test(lower[match.index - 1] ?? ""))
+      continue;
+    if (
+      keys.some(
+        (key) =>
+          lower.startsWith(key, match.index + 1) &&
+          !/[\p{L}\p{N}_]/u.test(lower[match.index + 1 + key.length] ?? ""),
+      )
+    )
+      return true;
+  }
+  return false;
+}
+
 /**
  * A text with agents mentioned in it, as `@Name` or `@Role` as Pim's agents
  * mention each other: each mention is shown as a chip, and opens that agent.
  * Names are matched as the Worker does, the longest first, and a name two
- * agents share mentions neither. What isn't an agent's name stays as written.
+ * agents share mentions neither. The person's own `@username` is a chip too,
+ * which opens nothing. What isn't a name stays as written.
  */
 function Mentions({ text, chip }: { text: string; chip: string }) {
   const { data: agents } = useQuery(agentsQuery());
+  const userNames = useUserNames();
   const names = new Map<string, number>();
   for (const agent of agents ?? []) {
     const key = agent.name.toLowerCase();
     names.set(key, (names.get(key) ?? 0) + 1);
   }
-  const keys = (agents ?? [])
-    .flatMap((agent) => [
-      { key: agent.role.toLowerCase(), agent },
-      ...(names.get(agent.name.toLowerCase()) === 1
-        ? [{ key: agent.name.toLowerCase(), agent }]
-        : []),
-    ])
-    .filter(({ key }) => key !== "")
-    .sort((a, b) => b.key.length - a.key.length);
+  const keys: { key: string; agent: Agent | undefined }[] = [
+    ...(agents ?? [])
+      .flatMap((agent) => [
+        { key: agent.role.toLowerCase(), agent },
+        ...(names.get(agent.name.toLowerCase()) === 1
+          ? [{ key: agent.name.toLowerCase(), agent }]
+          : []),
+      ])
+      .filter(({ key }) => key !== ""),
+    ...userNames.map((name) => ({ key: name.toLowerCase(), agent: undefined })),
+  ].sort((a, b) => b.key.length - a.key.length);
   const lower = text.toLowerCase();
   const nodes: ReactNode[] = [];
   let last = 0;
@@ -349,18 +390,27 @@ function Mentions({ text, chip }: { text: string; chip: string }) {
     const end = match.index + 1 + hit.key.length;
     if (match.index > last) nodes.push(text.slice(last, match.index));
     nodes.push(
-      <Link
-        key={match.index}
-        to="/agents/$agentId"
-        params={{ agentId: hit.agent.id }}
-        title={hit.agent.name}
-        className={cn(
-          "rounded px-1 font-medium no-underline transition-colors",
-          chip,
-        )}
-      >
-        {text.slice(match.index, end)}
-      </Link>,
+      hit.agent ? (
+        <Link
+          key={match.index}
+          to="/agents/$agentId"
+          params={{ agentId: hit.agent.id }}
+          title={hit.agent.name}
+          className={cn(
+            "rounded px-1 font-medium no-underline transition-colors",
+            chip,
+          )}
+        >
+          {text.slice(match.index, end)}
+        </Link>
+      ) : (
+        <span
+          key={match.index}
+          className={cn("rounded px-1 font-medium", chip)}
+        >
+          {text.slice(match.index, end)}
+        </span>
+      ),
     );
     last = end;
   }

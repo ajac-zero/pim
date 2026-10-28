@@ -67,6 +67,7 @@ it("shows only unseen notification titles, without their body previews", async (
   client.setQueryData(notificationsQuery().queryKey, [
     {
       id: "new",
+      kind: "general",
       session: "trip-chat",
       agent: { id: "planner", icon: 42, symbol: null, color: null },
       title: "Your trip is ready",
@@ -76,6 +77,7 @@ it("shows only unseen notification titles, without their body previews", async (
     },
     {
       id: "old",
+      kind: "general",
       session: null,
       agent: null,
       title: "Already seen",
@@ -85,6 +87,7 @@ it("shows only unseen notification titles, without their body previews", async (
     },
     {
       id: "system",
+      kind: "general",
       session: null,
       agent: null,
       title: "Account notice",

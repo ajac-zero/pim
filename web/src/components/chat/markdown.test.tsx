@@ -9,7 +9,11 @@ import {
 } from "@tanstack/react-router";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { Markdown, UNTRUSTED_SCHEMA } from "~/components/chat/markdown";
+import {
+  Markdown,
+  mentionsUser,
+  UNTRUSTED_SCHEMA,
+} from "~/components/chat/markdown";
 import { ReplyImages } from "~/components/chat/reply-blocks";
 import { embedAddress, youtubeId } from "~/components/chat/video-block";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
@@ -640,5 +644,20 @@ describe("videos an agent shows", () => {
     );
     expect(html).not.toContain("Play video");
     expect(html).toContain("youtu.be");
+  });
+});
+
+describe("mentions of the person", () => {
+  it("finds @ and a name as a word of its own, in any case, and not inside an address or a longer name", () => {
+    expect(mentionsUser("Which flight, @Ada?", ["ada"])).toBe(true);
+    expect(mentionsUser("@ada: which flight?", ["Ada"])).toBe(true);
+    expect(mentionsUser("Mail ada@example.com", ["ada"])).toBe(false);
+    expect(mentionsUser("Ask @adam", ["ada"])).toBe(false);
+    expect(mentionsUser("Ada, which flight?", ["ada"])).toBe(false);
+    // Any of their names counts, including one of several words.
+    expect(mentionsUser("Which flight, @Anita?", ["ana", "Anita"])).toBe(true);
+    expect(
+      mentionsUser("Which flight, @Ada Lovelace?", ["ada", "Ada Lovelace"]),
+    ).toBe(true);
   });
 });

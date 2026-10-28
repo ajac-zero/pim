@@ -1,8 +1,8 @@
 "use client";
 
-import { ArrowDownIcon } from "~/components/icons";
+import { ArrowDownIcon, AtSign } from "~/components/icons";
 import type { ComponentProps, ReactNode } from "react";
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 import { Button } from "~/components/ui/button";
 import { cn } from "~/lib/utils";
@@ -88,12 +88,15 @@ export type ConversationScrollButtonProps = ComponentProps<typeof Button> & {
    * omitted.
    */
   bottomOffset?: number;
+  /** A button beside this one, shown only while it has somewhere to go. */
+  mention?: ReactNode;
 };
 
 export const ConversationScrollButton = ({
   className,
   bottomOffset,
   style,
+  mention,
   ...props
 }: ConversationScrollButtonProps) => {
   const { isAtBottom, scrollToBottom } = useStickToBottomContext();
@@ -103,25 +106,103 @@ export const ConversationScrollButton = ({
   }, [scrollToBottom]);
 
   return (
-    <Button
+    <div
       className={cn(
-        "absolute left-[50%] z-20 size-8 rounded-full shadow-md transition-all duration-200 ease-out",
-        isAtBottom
-          ? "pointer-events-none translate-x-[-50%] translate-y-2 scale-90 opacity-0"
-          : "pointer-events-auto translate-x-[-50%] translate-y-0 scale-100 opacity-100",
+        "pointer-events-none absolute left-[50%] z-20 flex translate-x-[-50%] gap-2",
         bottomOffset === undefined && "bottom-4",
-        className,
       )}
-      style={bottomOffset === undefined ? style : { bottom: bottomOffset, ...style }}
-      onClick={handleScrollToBottom}
+      style={bottomOffset === undefined ? undefined : { bottom: bottomOffset }}
+    >
+      {mention}
+      <Button
+        className={cn(
+          "size-8 rounded-full shadow-md transition-all duration-200 ease-out",
+          isAtBottom
+            ? "pointer-events-none translate-y-2 scale-90 opacity-0"
+            : "pointer-events-auto translate-y-0 scale-100 opacity-100",
+          // Out of the row while hidden, so a mention button alone is centered.
+          isAtBottom && "absolute",
+          className,
+        )}
+        style={style}
+        onClick={handleScrollToBottom}
+        size="icon"
+        type="button"
+        variant="outline"
+        aria-hidden={isAtBottom}
+        tabIndex={isAtBottom ? -1 : 0}
+        {...props}
+      >
+        <ArrowDownIcon className="size-4" />
+      </Button>
+    </div>
+  );
+};
+
+/** The mentions the person has had in view on this page, by the key their messages carry. */
+const seenMentions = new Set<string>();
+
+/**
+ * Goes to the next message that mentions the person (the conversation's
+ * `[data-mention]` elements) below what is on screen, as a mention button
+ * does in a messaging app. A mention that has been on screen is read: it no
+ * longer counts. `changes` is anything that changes what the conversation
+ * holds, so the button looks again.
+ */
+export const ConversationMentionButton = ({
+  label,
+  changes,
+}: {
+  label: string;
+  changes: unknown;
+}) => {
+  const { scrollRef, contentRef } = useStickToBottomContext();
+  const [target, setTarget] = useState<HTMLElement | null>(null);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `changes` is what makes it look again.
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    const content = contentRef.current;
+    if (!scroller) return;
+    const look = () => {
+      const view = scroller.getBoundingClientRect();
+      let next: HTMLElement | null = null;
+      for (const element of scroller.querySelectorAll<HTMLElement>(
+        "[data-mention]",
+      )) {
+        const key = element.dataset.mention ?? "";
+        const box = element.getBoundingClientRect();
+        if (box.bottom > view.top && box.top < view.bottom) {
+          seenMentions.add(key);
+        } else if (box.top >= view.bottom && !seenMentions.has(key)) {
+          next ??= element;
+        }
+      }
+      setTarget(next);
+    };
+    look();
+    scroller.addEventListener("scroll", look, { passive: true });
+    const resize = new ResizeObserver(look);
+    if (content) resize.observe(content);
+    resize.observe(scroller);
+    return () => {
+      scroller.removeEventListener("scroll", look);
+      resize.disconnect();
+    };
+  }, [scrollRef, contentRef, changes]);
+
+  if (!target) return null;
+  return (
+    <Button
+      className="pointer-events-auto size-8 rounded-full shadow-md"
+      onClick={() => target.scrollIntoView({ behavior: "smooth", block: "center" })}
       size="icon"
       type="button"
       variant="outline"
-      aria-hidden={isAtBottom}
-      tabIndex={isAtBottom ? -1 : 0}
-      {...props}
+      aria-label={label}
+      title={label}
     >
-      <ArrowDownIcon className="size-4" />
+      <AtSign className="size-4" />
     </Button>
   );
 };

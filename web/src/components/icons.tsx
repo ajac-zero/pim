@@ -63,6 +63,7 @@ export const ArrowDownIcon = themedIcon(Lucide.ArrowDown, Pixel.ArrowDown);
 export const ArrowLeft = themedIcon(Lucide.ArrowLeft, Pixel.ArrowLeft);
 export const ArrowUp = themedIcon(Lucide.ArrowUp, Pixel.ArrowUp);
 export const ArrowUpRight = themedIcon(Lucide.ArrowUpRight, Pixel.ExternalLink);
+export const AtSign = themedIcon(Lucide.AtSign, Pixel.AtSign);
 export const Baby = themedIcon(
   Lucide.Baby,
   pixelPath(

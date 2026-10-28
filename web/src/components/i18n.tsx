@@ -126,6 +126,7 @@ const translations = {
     removeFromChat: "Remove {name} from the chat",
     agentWorking: "{name} is working",
     mentionAgent: "Mention an agent",
+    scrollToMention: "Go to the message that mentions you",
     discover: "Discover",
     discoverDescription:
       "Agents and artifacts people published. Make one your own: you get a copy of it, never anything of theirs.",
@@ -1156,6 +1157,7 @@ const translations = {
     removeFromChat: "Sacar a {name} del chat",
     agentWorking: "{name} está trabajando",
     mentionAgent: "Mencionar a un agente",
+    scrollToMention: "Ir al mensaje que te menciona",
     discover: "Descubrir",
     discoverDescription:
       "Agentes y artefactos que otros publicaron. Haz uno tuyo: recibes una copia, nunca nada suyo.",

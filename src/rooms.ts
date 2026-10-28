@@ -193,6 +193,17 @@ export function mentioned(text: string, agents: readonly Agent[]): Agent[] {
 	return found;
 }
 
+/** Whether a message mentions the person, as `@` and any of their names, by the same rules as `mentioned`. */
+export function mentionsPerson(text: string, names: readonly string[]): boolean {
+	const keys = names.map((name) => name.toLowerCase()).filter((name) => name !== "");
+	const lower = text.toLowerCase();
+	for (const match of lower.matchAll(/@/g)) {
+		if (match.index > 0 && WORD.test(lower[match.index - 1]!)) continue;
+		if (keys.some((key) => lower.startsWith(key, match.index + 1) && !WORD.test(lower[match.index + 1 + key.length] ?? ""))) return true;
+	}
+	return false;
+}
+
 /** How much of what was said before it joined an agent reads back, in characters: the end of a longer chat. */
 export const ROOM_HISTORY_CHARS = 24_000;
 
@@ -237,6 +248,8 @@ export type RoomsHost = {
 	remove(seat: Seat): Promise<void>;
 	/** What was said in a seat's room before its agent joined. */
 	history(seat: Seat): Promise<string>;
+	/** The names an agent mentions to get the person's attention: their username, and the name they gave their majordomo. Empty before they registered. */
+	person(): string[];
 };
 
 export const REMOVE_FROM_CHAT = "remove_from_chat";
@@ -317,6 +330,11 @@ export function roomsExtension(host: RoomsHost) {
 	return defineExtension({
 		name: ROOMS_EXTENSION,
 		sections: [
+			section("chat_person", ({ conversationId }) => {
+				const names = host.person();
+				if (names.length === 0 || !host.speaker(String(conversationId))) return undefined;
+				return `To get the person's attention, mention them in a message you send, as ${names.map((name) => `@${name}`).join(" or ")}: it notifies them, and the chat marks the message for them. Do it only when you need them, such as a question that blocks you or something that can't wait.`;
+			}),
 			section("chat_room", ({ conversationId }) => {
 				const conversation = String(conversationId);
 				const self = host.speaker(conversation);

@@ -283,6 +283,28 @@ async function presents(request: Request, grant: EvaluatorGrant, keys: string[])
 	return body;
 }
 
+/**
+ * Whether `answer` is exactly a `SpaceLaunch` the route can act on: an open
+ * answer with a fresh ID, a finite end, a viewer address, and either no
+ * earlier record or the one the grant names; a refusal with its reason; or
+ * an uncertain answer with an ID or none (one not shaped as an ID is kept as
+ * none).
+ */
+function wellFormed(answer: unknown, grant: EvaluatorGrant): answer is SpaceLaunch {
+	if (!answer || typeof answer !== "object" || Array.isArray(answer)) return false;
+	const given = answer as Record<string, unknown>;
+	if (given.outcome === "refused") return typeof given.reason === "string";
+	if (given.outcome === "uncertain") return given.observation === null || typeof given.observation === "string";
+	if (given.outcome !== "open") return false;
+	const observation = given.observation as Record<string, unknown> | null | undefined;
+	if (!observation || typeof observation !== "object" || Array.isArray(observation)) return false;
+	if (typeof observation.id !== "string" || !OBSERVATION_ID.test(observation.id)) return false;
+	if (typeof observation.notAfter !== "number" || !Number.isFinite(observation.notAfter)) return false;
+	if (typeof given.viewer !== "string" || given.viewer === "") return false;
+	if (given.alongside !== null && (given.alongside !== grant.existingUnconfirmed || given.alongside === observation.id)) return false;
+	return true;
+}
+
 /** The one launch: claims the grant's run, asks the space once for a fresh observation, and records what it answered. */
 async function launch(request: Request, env: Env, grant: EvaluatorGrant, now: number): Promise<Response> {
 	const body = await presents(request, grant, LAUNCH_KEYS);
@@ -316,8 +338,9 @@ async function launch(request: Request, env: Env, grant: EvaluatorGrant, now: nu
 		return uncertain("owner_space_rpc_failure", null, Date.now());
 	}
 	const at = Date.now();
+	// The RPC's answer is checked whole before any of it is read: an answer of any other shape is uncertain, and none of it is kept.
+	if (!wellFormed(answer, grant)) return uncertain("space_answer_malformed", null, at);
 	if (answer.outcome === "open") {
-		if (!OBSERVATION_ID.test(answer.observation.id)) return uncertain("space_answer_malformed", null, at);
 		let recorded = false;
 		try {
 			recorded = await directory(env).evaluatorLaunched(row.grant, "open", answer.observation.id, answer.alongside, at);

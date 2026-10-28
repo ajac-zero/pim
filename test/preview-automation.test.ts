@@ -9,7 +9,7 @@ import { applyObservationEvent, initialObservationState, type ObservationState }
 import { OBSERVATION_KEY } from "../src/cua-observation-runtime";
 import productionWorker from "../src/index";
 import { Authenticator } from "./webauthn";
-import type { PreviewPim } from "./worker";
+import { PreviewPim } from "./worker";
 
 /**
  * Automation sign-in for the preview's Cua evaluation (preview/automation.ts,
@@ -1320,6 +1320,54 @@ describe("the launch evaluator", () => {
 			expect((await pim.launch()).status).toBe(409);
 			expect(await errorOf(await pim.end("r".repeat(43), fresh!.observationId))).toEqual(NOT_VALID);
 			expect(pim.asked).toHaveLength(1);
+		}
+	});
+
+	it("classifies an RPC answer of any other shape as space_answer_malformed before reading it, keeps none of it, and never ends anything", async () => {
+		const RAW = "raw-answer-marker-0000000001";
+		const fresh = "fresh-observation-000000001";
+		const viewer = `${BRIDGE}/${LAUNCH_ID}/viewer/#ticket=${TICKET}&clipboard=0`;
+		const open = { outcome: "open", observation: { id: fresh, notAfter: Date.now() + 10 * MINUTE }, viewer, alongside: OLD };
+		const malformed: [string, unknown][] = [
+			["no answer", null],
+			["a string", RAW],
+			["an unknown outcome", { outcome: RAW, observation: { id: fresh } }],
+			["no observation", { ...open, observation: undefined }],
+			["a null observation", { ...open, observation: null }],
+			["a string observation", { ...open, observation: RAW }],
+			["an array observation", { ...open, observation: [fresh] }],
+			["an observation with no ID", { ...open, observation: { notAfter: open.observation.notAfter } }],
+			["an observation ID not shaped as one", { ...open, observation: { id: `${RAW}/../x`, notAfter: open.observation.notAfter } }],
+			["an end that isn't finite", { ...open, observation: { id: fresh, notAfter: Number.POSITIVE_INFINITY } }],
+			["an end that isn't a number", { ...open, observation: { id: fresh, notAfter: RAW } }],
+			["no viewer", { ...open, viewer: undefined }],
+			["an empty viewer", { ...open, viewer: "" }],
+			["a viewer that isn't a string", { ...open, viewer: { url: RAW } }],
+			["beside a record the grant doesn't name", { ...open, alongside: OTHER_OLD }],
+			["beside itself", { ...open, observation: { id: OLD, notAfter: open.observation.notAfter } }],
+			["beside a record of the wrong type", { ...open, alongside: 7 }],
+			["a refusal without a reason", { outcome: "refused", reason: { raw: RAW } }],
+			["an uncertain answer naming an object", { outcome: "uncertain", observation: { id: RAW } }],
+		];
+		for (const [shape, value] of malformed) {
+			logged.length = 0;
+			const pim = await evaluator({ old: "unconfirmed", existingUnconfirmed: OLD });
+			// The space's RPC answers `value` without asking the bridge.
+			vi.spyOn(PreviewPim.prototype, "launchForEvaluator").mockResolvedValue(value as never);
+			const answer = await pim.launch();
+			const body = await answer.json();
+			expect([shape, answer.status, body]).toEqual([shape, 502, { error: UNCERTAIN, run: { phase: "launch_uncertain", classification: "space_answer_malformed" } }]);
+			expect(await pim.runs()).toEqual([expect.objectContaining({ phase: "launch_uncertain", observation_id: null, alongside_id: null })]);
+			expect(pim.lines()).toEqual([{ event: "preview.launch-evaluator", action: "launch", outcome: "launch_uncertain", classification: "space_answer_malformed" }]);
+			const evaluatorText = JSON.stringify([body, logged]);
+			for (const kept of [RAW, fresh, TICKET, BRIDGE, OLD, pim.secret]) expect([shape, evaluatorText.includes(kept)]).toEqual([shape, false]);
+			// Spent, nothing ends from here, the bridge was never asked, and the original record is as it was.
+			expect((await pim.launch()).status).toBe(409);
+			expect(await errorOf(await pim.end("r".repeat(43), fresh))).toEqual(NOT_VALID);
+			expect(await errorOf(await pim.end("r".repeat(43), OLD))).toEqual(NOT_VALID);
+			expect(pim.asked).toEqual([]);
+			expect(sent).toEqual([]);
+			expect(await pim.oldRecord()).toBe(pim.before);
 		}
 	});
 });

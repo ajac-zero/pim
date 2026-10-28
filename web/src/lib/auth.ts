@@ -31,6 +31,12 @@ export type AuthSession = {
   canClaim?: boolean;
   /** Signed out: how people join once there is an admin. */
   registration?: "open" | "invite" | "closed";
+  /**
+   * Present only in an unsafe agent-driven preview (docs/agent-preview.md),
+   * to everyone, signed in or not. `expiresAt` (Unix milliseconds) is set
+   * only for an automation session. Never a secret.
+   */
+  agentPreview?: { enabled: true; expiresAt?: number | null };
 };
 
 export type ProviderId = "google" | "github" | "oidc";

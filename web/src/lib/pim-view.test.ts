@@ -1000,6 +1000,15 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
         settle("model_error", "subscription_sharing_usage_limit_exceeded"),
       ]).view.error,
     ).toEqual({ problem: "usage_limit" });
+    expect(
+      run([
+        snapshot(),
+        settle(
+          "model_error",
+          "The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.",
+        ),
+      ]).view.error,
+    ).toEqual({ problem: "usage_limit" });
   });
 
   it("clears the error when the next run starts", () => {

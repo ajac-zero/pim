@@ -1149,6 +1149,15 @@ export class Pim extends DurableAgent<Env> {
 		return new Set(tasks.filter(({ record }) => this.#isHeld(record)).map(({ record }) => String(record.conversationId)));
 	}
 
+	/** Asks the model again in a conversation whose run is held after a model error; false when none is. */
+	async #resumeHeld(conversation: string): Promise<boolean> {
+		const { tasks } = await (await this.harness.pi()).inspect(BACKGROUND_CONTEXT);
+		const held = tasks.find(({ record }) => String(record.conversationId) === conversation && this.#isHeld(record));
+		if (!held) return false;
+		await this.harness.resumeTask(conversation, held.record.id);
+		return true;
+	}
+
 	#isHeld(record: { kind: string; state: { status: string; on?: readonly unknown[] } }): boolean {
 		return record.kind === "pi.generation" && record.state.status === "waiting" && record.state.on?.length === 0;
 	}
@@ -3031,7 +3040,10 @@ export class Pim extends DurableAgent<Env> {
 		const receipt = wakes(hosting) ? await this.#submit(session, content, { ...options, operationId }, "user") : await this.#write(session, content, operationId);
 		// A message sent again reaches no one twice.
 		if (!receipt.accepted) return receipt;
-		if (wakes(hosting)) this.#rooms.setDepth(session, 0);
+		if (wakes(hosting)) {
+			await this.#resumeHeld(session);
+			this.#rooms.setDepth(session, 0);
+		}
 		for (const seat of members) await this.#hear(seat, content, `${operationId}:${seat.agent}`, wakes(seat), 0);
 		return receipt;
 	}
@@ -3111,6 +3123,8 @@ export class Pim extends DurableAgent<Env> {
 		await this.#selectAbilities(seat.conversation);
 		const receipt = await this.#submit(seat.conversation, content, { operationId, whenBusy: "followUp" }, "room");
 		if (!receipt.accepted) return;
+		// An agent whose run is held after a model error has no Try again of its own in a room: what it is now asked answers for it, or queues behind the error for good.
+		await this.#resumeHeld(seat.conversation);
 		this.#rooms.setDepth(seat.conversation, depth);
 		// The chat shows who is at work in it: its list changes as an agent starts, and again when it's done.
 		if (seat.conversation === seat.room) return;
@@ -4619,10 +4633,7 @@ export class Pim extends DurableAgent<Env> {
 			"/sessions/:session/retry",
 			async ({ session }) => {
 				const id = await this.#session(session!);
-				const { tasks } = await (await this.harness.pi()).inspect(BACKGROUND_CONTEXT);
-				const held = tasks.find(({ record }) => String(record.conversationId) === id && this.#isHeld(record));
-				if (!held) throw new HttpError(409, "This chat isn't waiting to try again");
-				await this.harness.resumeTask(id, held.record.id);
+				if (!(await this.#resumeHeld(id))) throw new HttpError(409, "This chat isn't waiting to try again");
 				this.broadcastMessage({ type: "sessions" });
 				return { session };
 			},

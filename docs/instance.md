@@ -89,6 +89,7 @@ The admin can't suspend or delete their own account from here; deleting it from 
 | `pim.registration_released`, `pim.released` | A registration given back (`why`: setup failed or lapsed), and its objects erased |
 | `pim.limit` | A person hit a limit: `limit` is `model` or `run` |
 | `pim.model_error` | A model request failed: `provider`, `model`, the `stopReason` when it ended and the provider's `error` text, which chats never show |
+| `pim.task_failed` | A task faulted while a person watched its chat, with its `kind` and `error` text, which chats never show |
 | `pim.passkey_created`, `pim.device_link_issued`, `pim.recovery_codes_replaced` | A passkey made from a setup link, recovery code or device link; a device link made; codes replaced |
 | `pim.identity_linked`, `pim.identity_unlinked` | Someone linked or unlinked an account at a `provider` |
 | `pim.circle_member_added` | Someone put another person in a circle |

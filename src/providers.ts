@@ -289,7 +289,13 @@ export function piProvider(catalogId: string, provider: CustomProvider): Provide
 			apiKey: {
 				name: `${provider.name} key`,
 				resolve: async () => ({
-					auth: provider.builtin === "openrouter" ? { headers: { Authorization: `Bearer ${provider.key}` } } : { apiKey: provider.key ?? "none" },
+					auth:
+						provider.builtin === "openrouter"
+							? { headers: { Authorization: `Bearer ${provider.key}` } }
+							: // A gateway in front of the Messages API may want the key as a bearer token rather than `x-api-key`, so a custom one gets both.
+								provider.api && provider.key
+								? { apiKey: provider.key, headers: { Authorization: `Bearer ${provider.key}` } }
+								: { apiKey: provider.key ?? "none" },
 				}),
 			},
 		},

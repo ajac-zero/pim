@@ -14,6 +14,7 @@ import { ChatLinkMenu } from "~/components/chat/chat-link";
 import { Composer } from "~/components/chat/composer";
 import { CopyConversation } from "~/components/chat/copy-conversation";
 import { RoomMenu } from "~/components/chat/room";
+import { SessionCostMenu } from "~/components/chat/session-cost";
 import { SummaryBox, SummaryToggle } from "~/components/chat/summary";
 import { ChatTabs, useChatDrop } from "~/components/chat/tabs";
 import { TaskView } from "~/components/chat/tasks";
@@ -213,6 +214,7 @@ function ChatPage() {
           )}
           <RoomMenu sessionId={sessionId} />
           <CopyConversation sessionId={sessionId} />
+          <SessionCostMenu sessionId={sessionId} />
           <ChatLinkMenu sessionId={sessionId} />
           <SummaryToggle
             sessionId={sessionId}

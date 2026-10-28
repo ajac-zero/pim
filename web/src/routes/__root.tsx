@@ -25,6 +25,7 @@ import {
 import { AppsDialog } from "~/components/apps-dialog";
 import { ChatLinkMenu } from "~/components/chat/chat-link";
 import { CopyConversation } from "~/components/chat/copy-conversation";
+import { SessionCostMenu } from "~/components/chat/session-cost";
 import { SummaryToggle } from "~/components/chat/summary";
 import { CommandPalette } from "~/components/command-palette";
 import { DiscoverDialog } from "~/components/discover-dialog";
@@ -418,6 +419,7 @@ function AppLayout() {
               {sessionId && (
                 <div className="ml-auto flex shrink-0 gap-2">
                   <CopyConversation sessionId={sessionId} />
+                  <SessionCostMenu sessionId={sessionId} />
                   <ChatLinkMenu sessionId={sessionId} />
                   <SummaryToggle sessionId={sessionId} />
                 </div>

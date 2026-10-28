@@ -281,6 +281,20 @@ export type ShownWidget = {
 } & WidgetContent;
 
 /** A chat's public link, as its owner sees it: `messages` counts what the copy holds, as of `sharedAt`. */
+export type SessionCost = {
+  total: number;
+  models: {
+    provider: string;
+    model: string;
+    requests: number;
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    cost: number;
+  }[];
+};
+
 export type ChatLink = {
   id: string;
   url: string;
@@ -1329,6 +1343,8 @@ export const pim = {
     call<Session>(`/sessions/${id}/archive`, { method: "POST" }),
   deleteSession: (id: string) =>
     call<{ deleted: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
+  /** What the model requests in a chat have cost, by model. */
+  sessionCost: (id: string) => call<SessionCost>(`/sessions/${id}/cost`),
   chatLink: (id: string) =>
     call<{ link: ChatLink | null }>(`/sessions/${id}/link`).then(
       (body) => body.link,

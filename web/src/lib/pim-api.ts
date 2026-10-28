@@ -1018,6 +1018,8 @@ export type ModelProvider = {
   shared: boolean;
   /** A custom endpoint's models answer in a JSON schema, which lets them be the utility model. */
   structuredOutput?: boolean;
+  /** A custom endpoint's API when it isn't OpenAI's chat completions. */
+  api?: "anthropic-messages";
 };
 
 /** A provider as adding or changing it answers. */
@@ -1031,6 +1033,7 @@ export type ProviderInput = {
   key?: string;
   models?: string[] | null;
   structuredOutput?: boolean;
+  api?: "openai-completions" | "anthropic-messages";
 };
 
 export type BuiltinProvider = {

@@ -6,7 +6,7 @@ This page is source and design only. **Groves rejected the earlier proposal**: s
 
 ## Executive decision (proposed)
 
-**Status: not acceptance-ready.** Groves chose acknowledged remote fencing for execution-time authority. Its protocol and staged plan are in `docs/cua-native-fence-protocol.md`, for review; nothing in it is accepted or implemented, and the upstream facts below are unverified.
+**Status: not acceptance-ready.** Groves chose acknowledged remote fencing for execution-time authority. Its protocol and staged plan are in `docs/cua-native-fence-protocol.md`, a draft that isn't acceptance-ready. It is blocked on the line-holding qualification and on exact resolution for a Stop with an `operationId`. Nothing in it is accepted or implemented, and the upstream facts below are unverified.
 
 - **Adopt as the design to qualify:** spacesd in its own non-root account; the token readable only by that account and the bridge's; native calls executed by a broker inside the bridge process, which already holds the token for the viewer. The bridge demuxes `native_tool` away from pim-computer. The desktop account gets no token, socket or child for native calls.
 - **Don't build it yet.** Two upstream facts decide whether it works at all, and neither is verified:
@@ -139,7 +139,8 @@ Specified in `docs/cua-native-fence-protocol.md`: acknowledged remote fencing (G
 - Stop closes the runs it stops, Delete the chat, and removing an agent that agent's calls. Each closes Pim's local admission at once and answers without waiting for the desktop.
 - A separate fence state is confirmed only when every broker instance that could still send a call Pim intended in the scope has latched it and acknowledged: no new broker sends in that scope. Sends already made, and other desktop programs, aren't covered.
 - An unavailable VM leaves the fence unconfirmed, never confirmed.
-- Pim's send gate holds the harness's line across the awaited durability of the call's intent, so no harness run end lands between its authority read and the send. Pim's own records are re-read synchronously just before it.
+- Pim's send gate would hold the harness's line across the awaited durability of the call's intent, so that no harness run end lands between its authority read and the send. Pim's own records are re-read synchronously just before it. **Holding the line across `ctx.storage.sync()` is an unqualified risk, not an accepted detail.**
+- The acknowledgment is the instance's latch alone, deduplicated per scope, with fence capacity reserved when each intent is written.
 - Pim never re-sends an action. The broker keeps no durable journal: an acknowledgment Pim recorded durably stays valid after its instance dies, and a missing one from a dead instance leaves the fence unconfirmed.
 
 **Withdrawn from revision `023a068`:**

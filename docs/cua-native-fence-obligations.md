@@ -64,18 +64,20 @@ Every call that could still be sent, or still be queued at a broker, is claimed 
 
 An `open` record of a stopped run whose Stop write was lost gets no fence after a restart. Every call of that run either had a known end, or is unknown and fenced, and the harness's marks refuse new ones. So no broker send of it can still be outstanding.
 
-## A failure keeps native calls closed, across restarts
+## After a fault: what is closed, and what survives a restart
 
-Any failed fence write or sync latches the process. That covers admission, a Stop's or an unknown end's fence, an acknowledgement, a lapse, or reading the faults. A latched process admits nothing, sends nothing, and asks and records nothing more.
+Any failed fence write or sync latches the process: admission, a Stop's or an unknown end's fence, an acknowledgement, a lapse, or reading the faults. A latched process admits nothing, sends nothing, and asks and records nothing more. **The latch itself is memory only.**
 
-The latch also writes a row to `pim_native_fence_faults`. Every later process reads it in `reconcile` and keeps the space's native calls closed. It still rebuilds and asks for fences, but admits nothing. **Nothing reopens them: a reconciliation policy is an open decision for Groves, and none is assumed.**
+The latch also tries to write a row to `pim_native_fence_faults` and sync it. That row goes to the store that just failed, so whether it survives is never certain, and nothing claims it did.
 
-The fault row is written to the store that just failed, so it may not be stored. Then the restart falls back on the binder-derived rule above, which is conservative for every write that could have been lost:
-- a lost admission record means its call was refused unsent;
-- a lost Stop fence is covered by the unknown rule, or wasn't needed;
-- a lost confirmation or lapse leaves the fence `pending`, and it is asked for again.
+What a restart finds:
 
-In that case new runs can be admitted after the restart, since nothing records that a fault happened.
+| What was stored | What the restart does |
+| --- | --- |
+| The fault row | Native calls stay closed. Fences are still rebuilt and asked for, but nothing is admitted. **Nothing reopens them: a reconciliation policy is an open decision for Groves, and none is assumed.** |
+| No fault row (its write or sync was lost too) | Nothing records that a fault happened. The restart rebuilds fences from the binder's records and admits new runs again. It is conservative for every write that could have been lost:<br>• a lost admission record means its call was refused unsent;<br>• a lost Stop fence is covered by the unknown rule, or wasn't needed;<br>• a lost confirmation or lapse leaves the fence `pending`, and it is asked for again. |
+
+In both cases, what survives is only what storage committed: the binder's claims, and whatever fence rows were synced. A write whose sync failed may or may not be there, and the rules above hold either way.
 
 ## Acknowledgements
 
@@ -90,17 +92,17 @@ In that case new runs can be admitted after the restart, since nothing records t
 | Marking commit fails | The Stop throws as `abort()` does. Nothing is required, and the call goes on. |
 | Crash after the mark, before Pim's write | The Stop's result is lost and **not reconstructed**. The restart turns the run's claimed call into `unknown`, fences it as `recovered` before admitting anything, and replays nothing. |
 | A fence is required, the broker instance changes, or a fault occurs while a call waits on admission's sync or the computer's wake | The send's own check refuses it. Nothing leaves, and the binding closes. |
-| Pim's fence write or its sync fails | The Stop still answers its boolean after idle. The process latches, the fault is stored, and native calls stay closed after restarts. |
+| Pim's fence write or its sync fails | The Stop still answers its boolean after idle. The process latches and tries to store the fault. Native calls stay closed after a restart only if it was stored. |
 | Acknowledgement with another fence ID, run or instance, extra fields, or a lost answer | Not counted, so `unconfirmed`. Asked again by the **same fence ID**. |
 | The broker never answers | `unconfirmed` once the ask's bound passes. Asked again later, by the same ID. A late answer still counts. |
-| The acknowledgement's sync fails | Never read as `confirmed`. The write is undone, the process latches, and the fault is stored. |
+| The acknowledgement's sync fails | Never read as `confirmed`. The write is undone, and the process latches and tries to store the fault. |
 | The broker comes back as another instance | The old run's fence can't be confirmed by asking the new instance, so it stays `unconfirmed`. A run admitted under one instance admits and sends nothing under another. A confirmed fence stays confirmed after its instance is gone. |
 | 512 records (`MAX_NATIVE_FENCES`) | New admission is refused before anything is sent. Nothing is evicted. Every record belongs to a run of a binding the binder accepted, and the binder accepts at most 512 in a space's life, so this limit is reached only by a store that is wrong. |
 
 **Known limits:**
 - Pim's SQL and the harness are two stores. No write here is in a transaction with a harness commit.
 - Whether `sync()` and workerd's output gate give the crash durability assumed here in production is **not established**.
-- A stored fault can't be guaranteed, as described above.
+- A stored fault can't be guaranteed, as described above. Without one, a restart reopens new runs.
 - The instance recorded at admission is what the stand-in transport says. The real native path doesn't go through a broker.
 
 ## Evidence
@@ -110,6 +112,15 @@ The lane, with no Browser Run binding, runs `test/native-fences.test.ts` in the 
 - the broker's fence channel.
 
 A restart is `ctx.abort()` on the instance. That is a reset in the local runtime that keeps committed storage, not a power loss. Injected failures are thrown before SQLite sees a write, or from `sync()` after the write reached storage. A held sync is a test's promise in place of `sync()`, not storage's own.
+
+Each of the four corrections has its own test:
+
+| Correction | Test | What it shows |
+| --- | --- | --- |
+| Check at the send | "checks the run's fence again at the send itself…" | A required fence, a broker instance change or a fault, made while the computer's wake or the admission's sync is held, sends nothing, and the binding closes. |
+| Confirmation only once durable | "counts a confirmation only once it is durable…" | While the confirmation's sync is held, SQLite holds `confirmed` and the fences read `pending`. A failed sync undoes the write. After a restart, storage holds `pending`, never `confirmed`. |
+| Restart after a fault | "after a fault, a restart stays closed only where the fault was stored…" | With the fault row stored, the restart stays closed. With it lost too, there is no fault row, the restart rebuilds from the binder and admits a new run, and nothing claims a stored latch. With a fence write kept but its sync failed, the restart re-asks it by its own ID and stays closed. |
+| Bounded wait | "waits a bounded time for an acknowledgement…" | An unanswering broker leaves the fence `unconfirmed`. It is asked again by the same ID, and a late answer still counts. |
 
 **Every path that stops a chat** is exercised with a held native call, and each must fence that call's run:
 - the Stop route's seats;

@@ -163,6 +163,38 @@ function holdNext(space: Desk, what: string, outcome: NativeOutcome = COMPLETED)
 
 const storageOf = (instance: Pim) => (instance as unknown as { ctx: DurableObjectState }).ctx.storage;
 
+/** A new chat's run whose call is held when it is stopped, while `broker` answers `answer`; resolves with the run once the Stop and turn end. */
+async function stoppedRun(space: Desk, scripted: ReturnType<typeof broker>, answer: (request: NativeFenceRequest) => Promise<unknown>) {
+	scripted.answer = answer;
+	const chat = await space.chat();
+	const call = holdNext(space, "a stopped run's call");
+	const before = space.computer.sent.length;
+	const turn = space.turn(chat);
+	await until(() => expect(space.computer.sent).toHaveLength(before + 1));
+	const run = await space.claimedRun();
+	const stopping = space.post(`/sessions/${chat}/abort`);
+	await until(async () => expect((await space.fence(run))?.state).not.toBe("open"));
+	call.open();
+	await bounded(stopping, 5_000, "the Stop");
+	await bounded(turn, 5_000, "the turn");
+	return run;
+}
+
+/** The fence's state as SQLite holds it now, synced or not. */
+const stored = (space: Desk, run: string) => space.within((instance) => String(storageOf(instance).sql.exec("SELECT state FROM pim_native_fences WHERE run = ?", run).one().state));
+/** The faults SQLite holds now. */
+const faults = (space: Desk) => space.within((instance) => storageOf(instance).sql.exec("SELECT why FROM pim_native_fence_faults").toArray());
+/** Makes SQL statements starting with any of `prefixes` throw before SQLite sees them, in the space's current instance. */
+const failWrites = (space: Desk, ...prefixes: string[]) =>
+	space.within((instance) => {
+		const sql = storageOf(instance).sql;
+		const exec = sql.exec.bind(sql);
+		vi.spyOn(sql, "exec").mockImplementation((query: string, ...bindings: unknown[]) => {
+			if (prefixes.some((prefix) => query.startsWith(prefix))) throw new Error("injected: the write failed");
+			return exec(query, ...bindings);
+		});
+	});
+
 afterEach(() => {
 	faux.setResponses([]);
 	vi.restoreAllMocks();
@@ -308,22 +340,7 @@ describe("native fences, through Pim's Stop and Delete", () => {
 	it("counts an acknowledgement only for its own fence, run and instance, once synced; asks again by the same fence ID after a lost answer; and a new instance clears nothing of the old", async () => {
 		const brokerA = broker("broker-A");
 		const space = await desk("fenceacks", { broker: brokerA });
-		/** A chat's run whose call is held when it is stopped, while the broker answers `answer`; resolves with the run. */
-		const stopped = async (answer: (request: NativeFenceRequest) => Promise<unknown>) => {
-			brokerA.answer = answer;
-			const chat = await space.chat();
-			const call = holdNext(space, "a stopped run's call");
-			const before = space.computer.sent.length;
-			const turn = space.turn(chat);
-			await until(() => expect(space.computer.sent).toHaveLength(before + 1));
-			const run = await space.claimedRun();
-			const stopping = space.post(`/sessions/${chat}/abort`);
-			await until(async () => expect((await space.fence(run))?.state).not.toBe("open"));
-			call.open();
-			await bounded(stopping, 5_000, "the Stop");
-			await bounded(turn, 5_000, "the turn");
-			return run;
-		};
+		const stopped = (answer: (request: NativeFenceRequest) => Promise<unknown>) => stoppedRun(space, brokerA, answer);
 		const echo = async (request: NativeFenceRequest) => ({ ...request });
 		const wrong: [string, (request: NativeFenceRequest) => Promise<unknown>][] = [
 			["another fence", async (request) => ({ ...request, fenceId: "another-fence" })],
@@ -369,10 +386,12 @@ describe("native fences, through Pim's Stop and Delete", () => {
 		// A run whose calls were admitted under the old instance admits none under the new one.
 		const older = (await space.fences()).find((record) => record.instance === "broker-A" && record.state === "open")!;
 		expect(await space.within((instance) => instance.nativeFences.admit(older.run))).toMatch(/admitted under another broker instance/);
+	});
 
-		// An echo is written, and read as the state before it until its sync resolves; then it reads confirmed.
-		/** The fence's state as SQLite holds it now, synced or not. */
-		const stored = (run: string) => space.within((instance) => String(storageOf(instance).sql.exec("SELECT state FROM pim_native_fences WHERE run = ?", run).one().state));
+	it("counts a confirmation only once it is durable: read as before while its sync is held, undone when the sync fails, and what storage keeps after a restart", async () => {
+		const brokerA = broker("broker-A");
+		const space = await desk("fencedurable", { broker: brokerA });
+		/** Holds the sync that follows the run's confirmation being written, then lets it resolve or fail. */
 		const holdConfirmingSync = async (run: string, then: "resolve" | "reject") => {
 			const held = waits().gate("the confirmation's sync");
 			await space.within((instance) => {
@@ -390,84 +409,70 @@ describe("native fences, through Pim's Stop and Delete", () => {
 			});
 			return held;
 		};
-		const ackHeld = waits().gate("the held echo");
-		const confirming = await stopped(async (request) => {
-			await ackHeld.opened;
-			return { ...request };
-		});
+		const heldEcho = () => {
+			const gate = waits().gate("the echo");
+			return { gate, answer: async (request: NativeFenceRequest) => (await gate.opened, { ...request }) };
+		};
+
+		// Its sync held: SQLite holds the confirmation, and the fences read pending until the sync resolves.
+		const first = heldEcho();
+		const confirming = await stoppedRun(space, brokerA, first.answer);
 		const synced = await holdConfirmingSync(confirming, "resolve");
-		ackHeld.open();
-		await until(async () => expect(await stored(confirming)).toBe("confirmed"));
+		first.gate.open();
+		await until(async () => expect(await stored(space, confirming)).toBe("confirmed"));
+		expect(await space.fence(confirming)).toMatchObject({ state: "pending", confirmedAt: null });
+		await sleep(50);
 		expect(await space.fence(confirming)).toMatchObject({ state: "pending", confirmedAt: null });
 		synced.open();
 		await until(async () => expect(await space.fence(confirming)).toMatchObject({ state: "confirmed", confirmedAt: expect.any(Number) }));
 		vi.restoreAllMocks();
 		await space.start();
 
-		// One whose sync fails isn't counted: it read pending throughout, the write is undone, and the fault is stored.
-		const ackFailing = waits().gate("the failing echo");
-		const failing = await stopped(async (request) => {
-			await ackFailing.opened;
-			return { ...request };
-		});
+		// Its sync failing: it reads pending throughout, the write is undone, and the process latches.
+		const second = heldEcho();
+		const failing = await stoppedRun(space, brokerA, second.answer);
 		const failed = await holdConfirmingSync(failing, "reject");
-		ackFailing.open();
-		await until(async () => expect(await stored(failing)).toBe("confirmed"));
+		second.gate.open();
+		await until(async () => expect(await stored(space, failing)).toBe("confirmed"));
 		expect(await space.fence(failing)).toMatchObject({ state: "pending", confirmedAt: null });
 		failed.open();
 		await until(async () => expect(await space.within((instance) => instance.nativeFences.blocked())).toMatch(/acknowledgement couldn't be stored/));
-		expect([await stored(failing), (await space.fence(failing))?.state]).toEqual(["pending", "pending"]);
-		const before = space.computer.sent.length;
-		await space.turn(await space.chat());
-		expect(space.computer.sent).toHaveLength(before);
+		expect([await stored(space, failing), (await space.fence(failing))?.state]).toEqual(["pending", "pending"]);
 
-		// After a restart: what storage kept is the undone write, pending, and the stored fault keeps native calls closed. The restart asks for the
-		// fence again by its own ID, and the echo it gets now, synced, confirms it; nothing is admitted all the same.
+		// After a restart, storage holds the undone write, pending, never a confirmation from the failed sync. The restart asks for the fence again
+		// by its own ID, and the echo it gets now, synced, confirms it. (Here the fault row was stored too, so nothing is admitted.)
 		vi.restoreAllMocks();
 		await space.restart();
-		expect(await stored(failing)).toBe("pending");
+		expect([await stored(space, failing), await stored(space, confirming)]).toEqual(["pending", "confirmed"]);
+		brokerA.answer = async (request) => ({ ...request });
 		await space.turn(await space.chat());
-		expect(space.computer.sent).toHaveLength(before);
-		expect(await space.within((instance) => instance.nativeFences.blocked())).toMatch(/stay closed until a reconciliation policy reopens them/);
 		await until(async () => expect(await space.fence(failing)).toMatchObject({ state: "confirmed" }));
+		expect(brokerA.asked.filter((request) => request.run === failing).map((request) => request.fenceId)).toEqual([(await space.fence(failing))!.fenceId, (await space.fence(failing))!.fenceId]);
 	});
 
-	it("fails closed when Pim's own record fails: a failed write or sync admits nothing more in the process, and quota saturation refuses admission and keeps every record", async () => {
-		// A Stop whose fence write is refused: the Stop answers as before, and nothing more is admitted in this process.
+	it("fails closed in the process when Pim's own record fails: a failed write or sync admits nothing more, and quota saturation refuses admission and keeps every record", async () => {
+		// A Stop whose fence write is refused: the Stop answers as before, nothing is asked of the broker, and nothing more is admitted.
 		const brokerA = broker("broker-A");
 		const written = await desk("fencewrite", { broker: brokerA });
 		let call = holdNext(written, "the call's answer");
 		let turn = written.turn(written.root);
 		await until(() => expect(written.computer.sent).toHaveLength(1));
 		const run = await written.claimedRun();
-		await written.within((instance) => {
-			const sql = storageOf(instance).sql;
-			const exec = sql.exec.bind(sql);
-			vi.spyOn(sql, "exec").mockImplementation((query: string, ...bindings: unknown[]) => {
-				if (query.startsWith("UPDATE pim_native_fences SET state = ?, fence_id")) throw new Error("injected: the write failed");
-				return exec(query, ...bindings);
-			});
-		});
+		await failWrites(written, "UPDATE pim_native_fences SET state = ?, fence_id");
 		let stopping = written.post(`/sessions/${written.root}/abort`);
 		await until(async () => expect(await written.within((instance) => instance.nativeFences.blocked())).toMatch(/couldn't be stored/));
 		call.open();
 		expect(await bounded(stopping, 5_000, "the Stop")).toEqual({ status: 200, body: { aborted: true } });
 		await bounded(turn, 5_000, "the turn");
 		vi.restoreAllMocks();
+		await written.start();
 		expect(await written.fence(run)).toMatchObject({ state: "open", fenceId: null });
 		expect(brokerA.asked).toEqual([]);
 		await written.turn(await written.chat());
 		expect(written.computer.sent).toHaveLength(1);
 		expect((await written.bindings()).map((binding) => binding.status)).toEqual(["closed", "closed"]);
-		// The fault was stored: after a restart, native calls stay closed. The Stop's own fence, lost with the write, isn't made up again.
-		expect(await written.within((instance) => storageOf(instance).sql.exec("SELECT why FROM pim_native_fence_faults").toArray())).toEqual([{ why: "a native fence couldn't be stored" }]);
-		await written.restart();
-		await written.turn(await written.chat());
-		expect(written.computer.sent).toHaveLength(1);
-		expect(await written.within((instance) => instance.nativeFences.blocked())).toMatch(/stay closed until a reconciliation policy reopens them/);
-		expect(await written.fence(run)).toMatchObject({ state: "open", fenceId: null });
 
-		// A Stop whose fence write is stored and whose sync fails: nothing is asked of the broker, and nothing more is admitted in this process.
+		// A Stop whose fence write is kept and whose sync fails: the same.
 		const brokerS = broker("broker-A");
 		const synced = await desk("fencesync", { broker: brokerS });
 		call = holdNext(synced, "the call's answer");
@@ -494,14 +499,6 @@ describe("native fences, through Pim's Stop and Delete", () => {
 		expect(brokerS.asked).toEqual([]);
 		await synced.turn(await synced.chat());
 		expect(synced.computer.sent).toHaveLength(1);
-		// The stand-in's failed sync didn't lose the write, so the restart finds the fence pending and asks for it, by its own ID;
-		// the stored fault keeps native calls closed all the same.
-		vi.restoreAllMocks();
-		await synced.restart();
-		await synced.turn(await synced.chat());
-		await until(async () => expect((await synced.fence(syncRun))?.state).toBe("confirmed"));
-		expect(brokerS.asked.map((request) => request.run)).toEqual([syncRun]);
-		expect(synced.computer.sent).toHaveLength(1);
 
 		// Every record kept: a run more is refused before anything is admitted or sent, and none is let go.
 		const full = await desk("fencefull", { broker: broker("broker-A") });
@@ -517,6 +514,79 @@ describe("native fences, through Pim's Stop and Delete", () => {
 		expect(full.computer.sent).toEqual([]);
 		expect((await full.bindings()).map((binding) => binding.status)).toEqual(["closed"]);
 		expect(await full.fences()).toEqual(seeded);
+	});
+
+	it("after a fault, a restart stays closed only where the fault was stored, and otherwise rebuilds from the binder and admits new runs", async () => {
+		/** A space whose Stop's fence write fails, with the fault row's own write failing too when `faultLost`; restarted after. */
+		const faulted = async (username: string, faultLost: boolean) => {
+			const scripted = broker("broker-A");
+			const space = await desk(username, { broker: scripted });
+			const call = holdNext(space, "the call's answer");
+			const turn = space.turn(space.root);
+			await until(() => expect(space.computer.sent).toHaveLength(1));
+			const run = await space.claimedRun();
+			await failWrites(space, "UPDATE pim_native_fences SET state = ?, fence_id", ...(faultLost ? ["INSERT INTO pim_native_fence_faults"] : []));
+			const stopping = space.post(`/sessions/${space.root}/abort`);
+			await until(async () => expect(await space.within((instance) => instance.nativeFences.blocked())).toMatch(/couldn't be stored/));
+			call.open();
+			await bounded(stopping, 5_000, "the Stop");
+			await bounded(turn, 5_000, "the turn");
+			vi.restoreAllMocks();
+			await space.restart();
+			return { space, run, scripted };
+		};
+
+		// The fault row was stored: the restart keeps native calls closed, and says why.
+		const kept = await faulted("fencekept", false);
+		expect(await faults(kept.space)).toEqual([{ why: "a native fence couldn't be stored" }]);
+		await kept.space.turn(await kept.space.chat());
+		expect(kept.space.computer.sent).toHaveLength(1);
+		expect(await kept.space.within((instance) => instance.nativeFences.blocked())).toMatch(/stay closed until a reconciliation policy reopens them/);
+		// The Stop's own fence, lost with its write, isn't made up again; the run's call had a known end, so nothing of it is outstanding.
+		expect(await kept.space.fence(kept.run)).toMatchObject({ state: "open", fenceId: null });
+		expect((await kept.space.bindings()).map((binding) => binding.status)).toEqual(["closed", "closed"]);
+
+		// The fault row was lost too: nothing records that a fault happened, so nothing claims a stored latch. The restart rebuilds from the binder,
+		// finds no call of unknown end, and admits a new run under the same instance.
+		const lost = await faulted("fencelost", true);
+		expect(await faults(lost.space)).toEqual([]);
+		await lost.space.turn(await lost.space.chat());
+		expect(lost.space.computer.sent).toHaveLength(2);
+		expect(await lost.space.within((instance) => instance.nativeFences.blocked())).toBeNull();
+		expect(await lost.space.fence(lost.run)).toMatchObject({ state: "open", fenceId: null });
+		expect(lost.scripted.asked).toEqual([]);
+
+		// A fence whose write was kept and whose sync failed: the restart finds it pending and asks for it by its own ID, and stays closed.
+		const scripted = broker("broker-A");
+		const space = await desk("fencekeptsync", { broker: scripted });
+		const call = holdNext(space, "the call's answer");
+		const turn = space.turn(space.root);
+		await until(() => expect(space.computer.sent).toHaveLength(1));
+		const run = await space.claimedRun();
+		await space.within((instance) => {
+			const storage = storageOf(instance);
+			const sync = storage.sync.bind(storage);
+			let armed = true;
+			vi.spyOn(storage, "sync").mockImplementation(async () => {
+				if (armed && instance.nativeFences.list().find((record) => record.run === run)?.state === "pending") {
+					armed = false;
+					throw new Error("injected: sync failed");
+				}
+				return sync();
+			});
+		});
+		const stopping = space.post(`/sessions/${space.root}/abort`);
+		await until(async () => expect(await space.within((instance) => instance.nativeFences.blocked())).toMatch(/couldn't be stored/));
+		call.open();
+		await bounded(stopping, 5_000, "the Stop");
+		await bounded(turn, 5_000, "the turn");
+		vi.restoreAllMocks();
+		await space.restart();
+		expect([await stored(space, run), await faults(space)]).toEqual(["pending", [{ why: "a native fence couldn't be stored" }]]);
+		await space.turn(await space.chat());
+		await until(async () => expect((await space.fence(run))?.state).toBe("confirmed"));
+		expect(scripted.asked.map((request) => request.run)).toEqual([run]);
+		expect(space.computer.sent).toHaveLength(1);
 	});
 
 	it("after a crash between the Stop's mark and Pim's write, the restart fences each run with a call claimed and unanswered, admits nothing before, and replays nothing", async () => {

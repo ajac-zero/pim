@@ -27,13 +27,14 @@ import { MAX_NATIVE_BINDINGS } from "./cua-native-identity";
  * Records live in the space's SQL storage, apart from the harness's, so no
  * write here is in a transaction with a harness commit. Every write is
  * followed by `sync`. A write or sync that fails latches this object, which
- * then admits, sends and records nothing more, and stores a fault that keeps
- * the space's native calls closed after a restart too, until a
- * reconciliation policy, which doesn't exist yet, reopens them. Where even
- * the fault can't be stored, a restart still admits nothing until
- * `reconcile` has rebuilt the fences the durable binder records require,
- * from records every possible send was claimed in before it left
- * (./cua-native-identity.ts).
+ * then admits, sends and records nothing more for as long as the process
+ * lives, and tries to store the fault. Only a fault that was stored keeps
+ * the space's native calls closed after a restart, until a reconciliation
+ * policy, which doesn't exist yet, reopens them; the fault goes to the store
+ * that just failed, so that is never certain. Whatever was stored, a restart
+ * admits nothing until `reconcile` has rebuilt the fences the durable binder
+ * records require, from records every possible send was claimed in before
+ * it left (./cua-native-identity.ts).
  */
 
 /** Asks a broker instance to send nothing more of a run. */

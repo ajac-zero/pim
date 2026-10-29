@@ -805,7 +805,7 @@ describe("the majordomo", () => {
 });
 
 describe("a group chat", () => {
-	type Member = { id: string; name: string; busy: boolean };
+	type Member = { id: string; name: string; busy: boolean; held: boolean; error: string | null };
 	const roomOf = async (session: string) =>
 		(await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === session)?.room as { mode: string; members: Member[] } | null;
 	/** Waits until every scripted response is used and no agent in the chat is at work. */
@@ -863,7 +863,7 @@ describe("a group chat", () => {
 			"@coach plan my first week",
 			"[From Coach]\nStart with 5 km on Monday.",
 		]);
-		expect(await roomOf(session)).toEqual({ mode: "mentions", members: [{ id: coach.id, name: "Coach", busy: false }] });
+		expect(await roomOf(session)).toEqual({ mode: "mentions", members: [{ id: coach.id, name: "Coach", busy: false, held: false, error: null }] });
 		// Coach's own conversation isn't one of the person's chats.
 		expect(await chats()).toBe(before);
 
@@ -920,10 +920,24 @@ describe("a group chat", () => {
 		scripts({ Coach: [() => fauxAssistantMessage("", { stopReason: "error", errorMessage: "subscription_sharing_usage_limit_exceeded" })] });
 		await say("@Coach and Thursday?", session);
 		await quiet(session);
+		// The chat shows it as held, with its error,, and asks it again as the host's Try again does.
+		expect((await roomOf(session))?.members).toEqual([{ id: coach.id, name: "Coach", busy: false, held: true, error: expect.stringContaining("subscription_sharing") }]);
+		expect((await api(`/sessions/${session}/room/members/${host.id}/retry`, { method: "POST" })).status).toBe(404);
 		scripts({ Coach: [as("Coach", "Thursday is easy.")] });
-		await say("@Coach Thursday again?", session);
+		expect((await api(`/sessions/${session}/room/members/${coach.id}/retry`, { method: "POST" })).status).toBe(200);
 		await quiet(session);
 		expect(await messagesOf(session, "user")).toContain("[From Coach]\nThursday is easy.");
+		expect((await api(`/sessions/${session}/room/members/${coach.id}/retry`, { method: "POST" })).status).toBe(409);
+		expect((await roomOf(session))?.members).toEqual([{ id: coach.id, name: "Coach", busy: false, held: false, error: null }]);
+
+		// Mentioned again while held, it answers too.
+		scripts({ Coach: [() => fauxAssistantMessage("", { stopReason: "error", errorMessage: "subscription_sharing_usage_limit_exceeded" })] });
+		await say("@Coach and Friday?", session);
+		await quiet(session);
+		scripts({ Coach: [as("Coach", "Friday is rest.")] });
+		await say("@Coach Friday again?", session);
+		await quiet(session);
+		expect(await messagesOf(session, "user")).toContain("[From Coach]\nFriday is rest.");
 
 		// Only the host takes agents out; the person does through the API, and can bring one back, afresh.
 		const coachTried: string[] = [];

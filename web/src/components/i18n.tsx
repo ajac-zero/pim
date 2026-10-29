@@ -679,7 +679,7 @@ const translations = {
     computerOpen: "Open",
     computerHost: "Computers",
     computerHostDescription:
-      "Pair a Linux machine with KVM that runs Cua, and Pim keeps a computer running Omarchy for everyone here, all the time, on it. Without one, people connect computers of their own.",
+      "Pair a Linux machine with KVM, and Pim keeps a computer running Omarchy for everyone here, all the time, on it. Without one, people connect computers of their own.",
     computerHostWaiting: "Waiting for the host to connect",
     computerHostMachines: "Computers: {count} · running: {running}",
     computerHostPending: "Waiting: {count}",
@@ -688,8 +688,8 @@ const translations = {
     computerHostRemoveConfirm:
       "Remove the computer host? Its token stops working, so it can't set up new computers. The computers it keeps go on running, connected to their spaces.",
     computerHostTokenOnce:
-      "Run this on the host, with Cua's cua command installed. It holds the host's token, shown only now.",
-    computerHostCommand: "With Node.js 22.18 or later:",
+      "Run this on the host, as the user who'll keep the computers. It checks for KVM, installs Cua and Node.js where they're missing, and keeps pim-host running from boot. It holds the host's token, shown only now.",
+    computerHostCommand: "In a terminal on the host:",
     computerHostNewTokenConfirm:
       "Make a new token? The one the host has now stops working.",
     computerHostPair: "Pair a computer host",
@@ -700,7 +700,8 @@ const translations = {
       "Start pim-computer on it again to bring it back. Lost its token? Make a new one.",
     computerTokenOnce:
       "Run one of these on the computer. They hold its token, shown only now: it lets that computer connect to your space, and nothing else.",
-    computerWithNode: "With Node.js 22.18 or later, on Linux or macOS:",
+    computerWithInstaller:
+      "On Linux or macOS, where it installs Node.js if needed and keeps pim-computer running:",
     computerWithDocker: "Or with Docker:",
     computerWaitingToConnect: "Waiting for it to connect…",
     connectComputer: "Connect a computer",
@@ -1753,7 +1754,7 @@ const translations = {
     computerOpen: "Abrir",
     computerHost: "Computadoras",
     computerHostDescription:
-      "Vincula una máquina Linux con KVM que ejecute Cua, y Pim mantendrá en ella una computadora con Omarchy para cada persona aquí, siempre encendida. Sin ella, cada quien conecta una computadora propia.",
+      "Vincula una máquina Linux con KVM, y Pim mantendrá en ella una computadora con Omarchy para cada persona aquí, siempre encendida. Sin ella, cada quien conecta una computadora propia.",
     computerHostWaiting: "Esperando a que el host se conecte",
     computerHostMachines: "Computadoras: {count} · encendidas: {running}",
     computerHostPending: "En espera: {count}",
@@ -1762,8 +1763,8 @@ const translations = {
     computerHostRemoveConfirm:
       "¿Quitar el host de computadoras? Su token deja de funcionar, así que no puede preparar computadoras nuevas. Las que mantiene siguen encendidas y conectadas a sus espacios.",
     computerHostTokenOnce:
-      "Ejecuta esto en el host, con el comando cua de Cua instalado. Lleva el token del host, que solo se muestra ahora.",
-    computerHostCommand: "Con Node.js 22.18 o posterior:",
+      "Ejecuta esto en el host, como el usuario que mantendrá las computadoras. Comprueba que haya KVM, instala Cua y Node.js si faltan, y mantiene pim-host en marcha desde el arranque. Lleva el token del host, que solo se muestra ahora.",
+    computerHostCommand: "En una terminal del host:",
     computerHostNewTokenConfirm:
       "¿Crear un token nuevo? El que tiene el host ahora deja de funcionar.",
     computerHostPair: "Vincular un host de computadoras",
@@ -1774,7 +1775,8 @@ const translations = {
       "Vuelve a iniciar pim-computer en ella para reconectarla. ¿Perdiste su token? Crea uno nuevo.",
     computerTokenOnce:
       "Ejecuta uno de estos en la computadora. Llevan su token, que solo se muestra ahora: permite que esa computadora se conecte a tu espacio, y nada más.",
-    computerWithNode: "Con Node.js 22.18 o posterior, en Linux o macOS:",
+    computerWithInstaller:
+      "En Linux o macOS, donde instala Node.js si hace falta y mantiene pim-computer en marcha:",
     computerWithDocker: "O con Docker:",
     computerWaitingToConnect: "Esperando a que se conecte…",
     connectComputer: "Conectar una computadora",

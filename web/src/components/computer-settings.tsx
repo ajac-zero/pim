@@ -12,13 +12,14 @@ import { computerHostQuery, computerQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 /**
- * The commands that start pim-computer with `token`: with Node.js, or in a
- * container, which installs Chromium the first time, for the agents' browser.
+ * The commands that start pim-computer with `token`: this Pim's install
+ * script, which keeps it running as the person's service, or a container,
+ * which installs Chromium the first time, for the agents' browser.
  */
 function commands(token: string) {
   const origin = window.location.origin;
   return {
-    node: `curl -fsSLO ${origin}/pim-computer.ts\nPIM_URL=${origin} PIM_COMPUTER_TOKEN=${token} node pim-computer.ts`,
+    install: `curl -fsSL ${origin}/install.sh | sh -s -- computer ${token}`,
     docker: `docker run -d --name pim-computer --restart unless-stopped \\\n  -e PIM_URL=${origin} -e PIM_COMPUTER_TOKEN=${token} \\\n  -e PIM_COMPUTER_ROOT=/workspace -v pim-files:/workspace \\\n  node:24 sh -c 'command -v chromium || (apt-get update && apt-get install -y --no-install-recommends chromium fonts-noto-color-emoji); curl -fsSLO $PIM_URL/pim-computer.ts && exec node pim-computer.ts'`,
   };
 }
@@ -198,7 +199,7 @@ export function ComputerSection() {
           )}
         >
           <p className="text-sm">{t("computerTokenOnce")}</p>
-          <Command label={t("computerWithNode")} text={shown.node} />
+          <Command label={t("computerWithInstaller")} text={shown.install} />
           <Command label={t("computerWithDocker")} text={shown.docker} />
           {status.state !== "online" && (
             <p className="flex items-center gap-2 text-[13px] text-muted-foreground">
@@ -235,7 +236,7 @@ export function ComputerSection() {
 /**
  * The machine that keeps everyone's computers: one of the operator's, with
  * KVM and Cua, that runs pim-host. Pairing it makes its token, shown once
- * with the command that starts pim-host with it. The admin's alone.
+ * with the command that installs pim-host with it. The admin's alone.
  */
 export function ComputerHostSection() {
   const { t, formatDate, formatNumber } = useI18n();
@@ -266,7 +267,7 @@ export function ComputerHostSection() {
   if (!host) return null;
   const origin = window.location.origin;
   const command = token
-    ? `curl -fsSLO ${origin}/pim-host.ts\nPIM_URL=${origin} PIM_HOST_TOKEN=${token} node pim-host.ts`
+    ? `curl -fsSL ${origin}/install.sh | sh -s -- host ${token}`
     : null;
 
   return (

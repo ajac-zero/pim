@@ -54,10 +54,38 @@ index abb121be414e3cac5b94869a9688cee68534b77c..95291af4b0733c01b1f031d613710c64
  /** A generation owned by its conversation. */
  function createGeneration(tx, conversationId) {
 diff --git a/dist/harness/harness.js b/dist/harness/harness.js
-index fda8aa1e318bdecd77d11ca019217d6c43cfef01..c305ff5311d4f332aa83b1cadff77a7828d461b0 100644
+index fda8aa1e318bdecd77d11ca019217d6c43cfef01..3c33d732df74785f259f12704dc1e3211948603b 100644
 --- a/dist/harness/harness.js
 +++ b/dist/harness/harness.js
-@@ -166,6 +166,10 @@ class HarnessImpl extends SessionImpl {
+@@ -5,7 +5,7 @@ import { ROOT_CONVERSATION_ID } from "../types.js";
+ import { AgentDoc, configure, createAgent, resolveAgent, resolveSettings } from "./agent.js";
+ import { createCompaction } from "./compaction.js";
+ import { readContext } from "./context.js";
+-import { InboxDoc, withdrawQueuedInputs } from "./inbox.js";
++import { InboxDoc, queuedInputRequests, withdrawQueuedInputs } from "./inbox.js";
+ import { LiveDoc, settleSchedulerOutcome } from "./live.js";
+ import { ProviderDoc } from "./provider.js";
+ import { BUILTIN_TASKS } from "./registry.js";
+@@ -66,6 +66,10 @@ class ConversationImpl {
+         this.#host.tasks.resume();
+         return this.#host.tasks.abortConversation(this.id, options?.background === true, context);
+     }
++    abortWithEffect(context, options) {
++        this.#host.tasks.resume();
++        return this.#host.tasks.abortConversationWithEffect(this.id, options?.background === true, context);
++    }
+     waitForIdle(context) {
+         this.#host.tasks.resume();
+         return this.#host.tasks.waitForIdle(this.id, context);
+@@ -106,6 +110,7 @@ class HarnessImpl extends SessionImpl {
+             report: this.#report,
+             settleOutcome: settleSchedulerOutcome,
+             withdrawInputs: withdrawQueuedInputs,
++            queuedInputs: queuedInputRequests,
+             conversation: async (id, binding, callContext) => {
+                 const record = await this.readOnLine(() => storage.conversation(id, callContext));
+                 return record === undefined ? undefined : boundConversation(id, binding, this.#submissions, this.#tasks);
+@@ -166,6 +171,10 @@ class HarnessImpl extends SessionImpl {
      abortTask(id, context) {
          return this.#tasks.abort(id, context);
      }
@@ -68,6 +96,70 @@ index fda8aa1e318bdecd77d11ca019217d6c43cfef01..c305ff5311d4f332aa83b1cadff77a78
      waitForTask(id, context) {
          this.#tasks.resume();
          return this.#tasks.waitForTask(id, context);
+diff --git a/dist/harness/inbox.d.ts b/dist/harness/inbox.d.ts
+index 68b16c8531ce16112d0be3f35d3e01671839c5a0..50329a2fd109175801e34a9b38a691cac65277c4 100644
+--- a/dist/harness/inbox.d.ts
++++ b/dist/harness/inbox.d.ts
+@@ -51,9 +51,15 @@ export declare function applyBoundary(tx: Tx, boundary: Boundary, at: "postTools
+ export declare function isStale(boundary: Boundary, entry: EntryDraft): boolean;
+ /** Remove a withdrawn submission's item; the caller settles the submission. */
+ export declare function removeInboxItem(tx: Tx, conversationId: ConversationId, id: SubmissionId): Promise<void>;
++/**
++ * The queued inputs of a conversation that `withdrawQueuedInputs()` would withdraw, with their request IDs. A table
++ * read, so a commit reads it before its first table write.
++ */
++export declare function queuedInputRequests(tx: Tx, conversationId: ConversationId): Promise<Map<SubmissionId, string | undefined>>;
+ /**
+  * Withdraw every queued input of a conversation, as `Conversation.abort()` and abort cascades do: each settles
+- * `unanswered` with `aborted` and leaves the inbox; queued writes stay for later placement.
++ * `unanswered` with `aborted` and leaves the inbox; queued writes stay for later placement. Returns the withdrawn
++ * submissions, in inbox order.
+  */
+-export declare function withdrawQueuedInputs(tx: Tx, conversationId: ConversationId): Promise<void>;
++export declare function withdrawQueuedInputs(tx: Tx, conversationId: ConversationId): Promise<SubmissionId[]>;
+ //# sourceMappingURL=inbox.d.ts.map
+\ No newline at end of file
+diff --git a/dist/harness/inbox.js b/dist/harness/inbox.js
+index b5cc026e536f75a8acc0feebdc33617d117f8228..7d6d0013875b482c49c7a74f23ee1ff4637e6bd9 100644
+--- a/dist/harness/inbox.js
++++ b/dist/harness/inbox.js
+@@ -80,18 +80,34 @@ export async function removeInboxItem(tx, conversationId, id) {
+     if (index >= 0)
+         items.splice(index, 1);
+ }
++/**
++ * The queued inputs of a conversation that `withdrawQueuedInputs()` would withdraw, with their request IDs. A table
++ * read, so a commit reads it before its first table write.
++ */
++export async function queuedInputRequests(tx, conversationId) {
++    const requests = new Map();
++    for (const item of (await tx.doc(InboxDoc, conversationId)).items) {
++        if (item.mode !== "write")
++            requests.set(item.id, (await tx.submission(item.id))?.requestId);
++    }
++    return requests;
++}
+ /**
+  * Withdraw every queued input of a conversation, as `Conversation.abort()` and abort cascades do: each settles
+- * `unanswered` with `aborted` and leaves the inbox; queued writes stay for later placement.
++ * `unanswered` with `aborted` and leaves the inbox; queued writes stay for later placement. Returns the withdrawn
++ * submissions, in inbox order.
+  */
+ export async function withdrawQueuedInputs(tx, conversationId) {
+     const items = (await tx.doc(InboxDoc, conversationId)).items;
++    const withdrawn = [];
+     for (let index = items.length - 1; index >= 0; index--) {
+         const item = items[index];
+         if (item.mode === "write")
+             continue;
+         tx.settleSubmission(item.id, { status: "unanswered", reason: "aborted" });
+         items.splice(index, 1);
++        withdrawn.unshift(item.id);
+     }
++    return withdrawn;
+ }
+ //# sourceMappingURL=inbox.js.map
+\ No newline at end of file
 diff --git a/dist/harness/live.d.ts b/dist/harness/live.d.ts
 index 52052c9afdf262c307bd1b092d6a4da12f9e859d..3224d34246a09f5de97a76bda697d516fd946bd9 100644
 --- a/dist/harness/live.d.ts
@@ -108,11 +200,60 @@ index 68a7d076f6e67effad32db2af3b1c854189e7a51..e1ece4f11f306c9e7c628322762aae8e
  /** Built-in task kinds that can own `pi.live.run`. */
  const RUN_TASK_KINDS = new Set(["pi.generation"]);
  const TOOL_TASK_KIND = "pi.tool";
+diff --git a/dist/harness/scheduler.d.ts b/dist/harness/scheduler.d.ts
+index c485fb9c12cceec9448762f7bc05b67d6ca916d2..d4f937df44030534193d2150b44cf7d2ce5161d1 100644
+--- a/dist/harness/scheduler.d.ts
++++ b/dist/harness/scheduler.d.ts
+@@ -3,8 +3,8 @@ import type { Models } from "@earendil-works/pi-ai";
+ import type { ExecutionEnv } from "../env/index.ts";
+ import type { SessionImpl } from "../session/session.ts";
+ import type { Transaction } from "../session/transaction.ts";
+-import type { ConversationId, Storage, TaskId, TaskOutcome, TaskRecord } from "../types.ts";
+-import type { Agent, ConversationHandle, HarnessInspection, RegistryReader, RegistrySnapshot, Settings, SettledTask, TaskInspection } from "./types.ts";
++import type { ConversationId, Storage, SubmissionId, TaskId, TaskOutcome, TaskRecord } from "../types.ts";
++import type { Agent, ConversationAbortEffect, ConversationHandle, HarnessInspection, RegistryReader, RegistrySnapshot, Settings, SettledTask, TaskInspection } from "./types.ts";
+ type AnyTaskRecord = TaskRecord<JsonValue, JsonValue, JsonValue>;
+ /** Terminal outcomes the scheduler writes without running task code. */
+ export type SchedulerOutcome = Extract<TaskOutcome<JsonValue>, {
+@@ -31,7 +31,9 @@ export type TaskSchedulerOptions = {
+     /** Harness cleanup staged in the commit that makes an outcome the scheduler wrote itself terminal. */
+     readonly settleOutcome: (tx: Transaction, record: AnyTaskRecord, outcome: SchedulerOutcome) => Promise<void>;
+     /** Withdraw a conversation's queued inputs, for conversation abort and abort cascades. */
+-    readonly withdrawInputs: (tx: Transaction, conversationId: ConversationId) => Promise<void>;
++    readonly withdrawInputs: (tx: Transaction, conversationId: ConversationId) => Promise<readonly SubmissionId[]>;
++    /** Read before a commit's first table write: the queued inputs `withdrawInputs` would withdraw, with their request IDs. */
++    readonly queuedInputs: (tx: Transaction, conversationId: ConversationId) => Promise<ReadonlyMap<SubmissionId, string | undefined>>;
+     /** Invocation-bound handle of an existing conversation, for task runtimes and tools. */
+     readonly conversation: (id: ConversationId, binding: InvocationBinding, context: Context) => Promise<ConversationHandle | undefined>;
+     /** Context for scheduler commits and invocations; carries no caller cancellation. */
+@@ -79,6 +81,14 @@ export declare class TaskScheduler {
+      * crosses background boundaries, and the wait also covers every task it reached.
+      */
+     abortConversation(conversationId: ConversationId, background: boolean, context: Context): Promise<void>;
++    /**
++     * `Conversation.abortWithEffect()`: the same commit as `abortConversation()`, and what it did. Resolves once that
++     * commit is written, with the effect and the wait `abortConversation()` resolves on.
++     */
++    abortConversationWithEffect(conversationId: ConversationId, background: boolean, context: Context): Promise<{
++        readonly effect: ConversationAbortEffect;
++        readonly idle: Promise<void>;
++    }>;
+     /**
+      * Scheduling state and every live task with its derived state, read on the Session line. Runs no task code: a
+      * pending migration shows as `ready` with `migrates`, and only a migration the scheduler already tried, or one that
 diff --git a/dist/harness/scheduler.js b/dist/harness/scheduler.js
-index 6cfe05a35de48c02e98ad07806fb74f2ee80de59..c73723dde187ff67827be0bea9c677566227d2cd 100644
+index 6cfe05a35de48c02e98ad07806fb74f2ee80de59..b9b8ed724bf530a70605978473104789c49de4ac 100644
 --- a/dist/harness/scheduler.js
 +++ b/dist/harness/scheduler.js
-@@ -62,6 +62,11 @@ export class TaskScheduler {
+@@ -34,6 +34,7 @@ export class TaskScheduler {
+     #report;
+     #settleOutcome;
+     #withdrawInputs;
++    #queuedInputs;
+     #conversation;
+     #context;
+     #live = new Map();
+@@ -62,6 +63,11 @@ export class TaskScheduler {
       * one of their tasks fails.
       */
      #failFastChecks = new Set();
@@ -124,7 +265,15 @@ index 6cfe05a35de48c02e98ad07806fb74f2ee80de59..c73723dde187ff67827be0bea9c67756
      #reconcileScheduled = false;
      #cascadePending = false;
      #unsubscribeRegistry = () => { };
-@@ -152,6 +157,26 @@ export class TaskScheduler {
+@@ -81,6 +87,7 @@ export class TaskScheduler {
+         this.#report = options.report;
+         this.#settleOutcome = options.settleOutcome;
+         this.#withdrawInputs = options.withdrawInputs;
++        this.#queuedInputs = options.queuedInputs;
+         this.#conversation = options.conversation;
+         this.#context = options.context;
+     }
+@@ -152,6 +159,26 @@ export class TaskScheduler {
              await awaitWithContext(marked.run.done, context);
          return marked.result;
      }
@@ -151,7 +300,85 @@ index 6cfe05a35de48c02e98ad07806fb74f2ee80de59..c73723dde187ff67827be0bea9c67756
      async waitForTask(id, context) {
          // Check and register on the line so no terminal publication falls between them.
          const found = await this.#session.readOnLine(async () => {
-@@ -223,6 +248,7 @@ export class TaskScheduler {
+@@ -184,29 +211,66 @@ export class TaskScheduler {
+      * crosses background boundaries, and the wait also covers every task it reached.
+      */
+     async abortConversation(conversationId, background, context) {
+-        const reached = await this.#session.commitWith(async (tx) => {
++        const { idle } = await this.abortConversationWithEffect(conversationId, background, context);
++        await idle;
++    }
++    /**
++     * `Conversation.abortWithEffect()`: the same commit as `abortConversation()`, and what it did. Resolves once that
++     * commit is written, with the effect and the wait `abortConversation()` resolves on.
++     */
++    async abortConversationWithEffect(conversationId, background, context) {
++        const { reached, effect } = await this.#session.commitWith(async (tx) => {
+             const queued = await this.#loadScopes(true);
+             const scope = { conversation: conversationId };
+-            const reached = [];
++            const records = [];
+             for (const record of this.#live.values()) {
+                 if (record.background && !background)
+                     continue;
+                 if (this.#inScope(parentOf(record), scope, background) !== true)
+                     continue;
++                records.push(record);
++            }
++            const withdrawing = [...queued].filter((id) => this.#inScope({ conversation: id }, scope, background) === true);
++            // Read before the first write, as a transaction requires: each reached conversation's run in this commit, the
++            // one its marked tasks belong to, and the request IDs of the inputs about to be withdrawn.
++            const runs = new Map();
++            for (const record of records) {
++                if (record.conversationId !== undefined && !runs.has(record.conversationId))
++                    runs.set(record.conversationId, (await tx.run(record.conversationId))?.id ?? null);
++            }
++            const requests = new Map();
++            for (const id of withdrawing)
++                for (const [submissionId, requestId] of await this.#queuedInputs(tx, id))
++                    requests.set(submissionId, requestId);
++            const reached = [];
++            const newlyMarked = new Map([...runs.keys()].map((id) => [id, 0]));
++            for (const record of records) {
+                 reached.push(record.id);
+-                if (!record.abortRequested)
++                if (!record.abortRequested) {
+                     tx.setTask({ ...record, abortRequested: true });
++                    if (record.conversationId !== undefined)
++                        newlyMarked.set(record.conversationId, newlyMarked.get(record.conversationId) + 1);
++                }
+             }
+-            for (const id of queued) {
+-                if (this.#inScope({ conversation: id }, scope, background) === true)
+-                    await this.#withdrawInputs(tx, id);
++            const withdrawn = [];
++            for (const id of withdrawing) {
++                for (const submissionId of await this.#withdrawInputs(tx, id)) {
++                    const requestId = requests.get(submissionId);
++                    withdrawn.push(requestId === undefined ? { conversationId: id, submissionId } : { conversationId: id, submissionId, requestId });
++                }
+             }
+-            return reached;
++            const marked = [...runs].map(([id, runId]) => ({ conversationId: id, runId, newlyMarked: newlyMarked.get(id) }));
++            return { reached, effect: { marked, withdrawn } };
+         }, context);
+-        if (background)
+-            for (const id of reached)
+-                await this.waitForTask(id, context);
+-        await this.waitForIdle(conversationId, context);
++        const idle = (async () => {
++            if (background)
++                for (const id of reached)
++                    await this.waitForTask(id, context);
++            await this.waitForIdle(conversationId, context);
++        })();
++        // Handled here so a caller that never waits for idle leaves no unhandled rejection; `idle` still rejects.
++        idle.catch(() => undefined);
++        return { effect, idle };
+     }
+     // ─── Scheduling ────────────────────────────────────────────────────────
+     #observe(publication) {
+@@ -223,6 +287,7 @@ export class TaskScheduler {
                  failed.push(record.id);
              if (record.state.status === "terminal") {
                  this.#live.delete(record.id);
@@ -159,7 +386,7 @@ index 6cfe05a35de48c02e98ad07806fb74f2ee80de59..c73723dde187ff67827be0bea9c67756
                  this.#failedMigrations.delete(record.id);
                  this.#failFastChecks.delete(record.id);
                  if (this.#conversationOwners.has(record.id))
-@@ -671,6 +697,9 @@ export class TaskScheduler {
+@@ -671,6 +736,9 @@ export class TaskScheduler {
                  for (const record of [...this.#live.values()]) {
                      if (this.#invocations.has(record.id) || this.#waitingOn(record, owned).length > 0)
                          continue;
@@ -169,7 +396,7 @@ index 6cfe05a35de48c02e98ad07806fb74f2ee80de59..c73723dde187ff67827be0bea9c67756
                      if (record.state.status === "completing")
                          continue;
                      const runnable = record;
-@@ -770,6 +799,8 @@ export class TaskScheduler {
+@@ -770,6 +838,8 @@ export class TaskScheduler {
              return { kind: "running" };
          if (record.state.status === "completing")
              return { kind: "completing" };
@@ -178,7 +405,7 @@ index 6cfe05a35de48c02e98ad07806fb74f2ee80de59..c73723dde187ff67827be0bea9c67756
          const on = this.#waitingOn(record, owned);
          if (on.length > 0)
              return { kind: "waiting", on };
-@@ -943,6 +974,11 @@ export class TaskScheduler {
+@@ -943,6 +1013,11 @@ export class TaskScheduler {
      async #commitState(tx, invocation, current, next) {
          if (next.status === "waiting")
              await this.#validateWait(tx, invocation, current, next.on, next.policy);
@@ -190,7 +417,7 @@ index 6cfe05a35de48c02e98ad07806fb74f2ee80de59..c73723dde187ff67827be0bea9c67756
          if (next.status === "terminal") {
              const overlay = overlayOf(tx);
              await this.#loadScopes(false);
-@@ -1187,6 +1223,10 @@ export class TaskScheduler {
+@@ -1187,6 +1262,10 @@ export class TaskScheduler {
      }
  }
  /** A live owner's durable cancellation intent: its abort mark, or a held outcome other than `completed`. */
@@ -278,10 +505,43 @@ index 4a4c7f8a183971670752709803ea6b67a5d7a6ae..e72be183b08c46fee1f911f3c7cf613b
   * Throttled commits of what the tool reported into its `pi.live.tools` slot, each writing only what changed since the
   * last one.
 diff --git a/dist/harness/types.d.ts b/dist/harness/types.d.ts
-index b8c1e3749a808e9c91a8d9e0e987b0680cdcbe67..062306b662d0d96f680715263279ec9754f6086e 100644
+index b8c1e3749a808e9c91a8d9e0e987b0680cdcbe67..e5a524a2cc91b058f13d3a34b34d0ef6e8e94686 100644
 --- a/dist/harness/types.d.ts
 +++ b/dist/harness/types.d.ts
-@@ -83,6 +83,12 @@ export type ToolControl = {
+@@ -1,7 +1,7 @@
+ import type { AttachedReplicatedState, Context, JsonValue } from "@earendil-works/chord";
+ import type { AssistantMessage, CacheRetention, Message, Models, ModelThinkingLevel, Static, Tool, ToolCall, ToolResultMessage, Transport, TSchema, Usage, UserMessage } from "@earendil-works/pi-ai";
+ import type { ExecutionEnv, ShellOutputSkip, ShellOutputWindow } from "../env/index.ts";
+-import type { ConversationId, ConversationOwnership, ConversationRecord, Cursor, DocumentObserver, DocumentReader, EntryDraft, EntryId, EntryQuery, EntryRecord, JsonObject, Page, Session, SubmissionId, SubmissionRecord, Task, TaskId, TaskOptions, TaskRecord, TaskState, Tx, WatchHandle } from "../types.ts";
++import type { ConversationId, ConversationOwnership, ConversationRecord, Cursor, DocumentObserver, DocumentReader, EntryDraft, EntryId, EntryQuery, EntryRecord, JsonObject, Page, RunId, Session, SubmissionId, SubmissionRecord, Task, TaskId, TaskOptions, TaskRecord, TaskState, Tx, WatchHandle } from "../types.ts";
+ import type { TaskGraph, TaskGraphWatch } from "./task-graph.ts";
+ import type { UsageState } from "./usage.ts";
+ import type { ConversationView } from "./view.ts";
+@@ -55,6 +55,23 @@ export type AnyTask = {
+         readonly hooks?: object;
+     };
+ };
++/**
++ * What one `Conversation.abort()` commit did, read in that commit. `marked` has one entry per conversation whose live
++ * tasks the traversal reached, with the run active there (`null` when none is, or the run began before run IDs) and the
++ * tasks this commit marked, not counting those an earlier abort marked. `withdrawn` lists the queued inputs it settled.
++ */
++export type ConversationAbortEffect = {
++    readonly marked: readonly {
++        readonly conversationId: ConversationId;
++        readonly runId: RunId | null;
++        readonly newlyMarked: number;
++    }[];
++    readonly withdrawn: readonly {
++        readonly conversationId: ConversationId;
++        readonly submissionId: SubmissionId;
++        readonly requestId?: string;
++    }[];
++};
+ /** Options of `Conversation.abort()`. */
+ export type ConversationAbortOptions = {
+     /**
+@@ -83,6 +100,12 @@ export type ToolControl = {
      readonly addTools?: readonly string[];
      readonly terminate?: true;
      readonly handoff?: string;
@@ -294,7 +554,7 @@ index b8c1e3749a808e9c91a8d9e0e987b0680cdcbe67..062306b662d0d96f680715263279ec97
  };
  /** Remark about a call for the model and the UI, such as truncation or a spill path; never part of the tool's data. */
  export type ToolDiagnostic = {
-@@ -424,6 +430,10 @@ export type TaskInspection = {
+@@ -424,6 +447,10 @@ export type TaskInspection = {
          readonly kind: "waiting";
          readonly on: readonly TaskId[];
      }
@@ -305,7 +565,22 @@ index b8c1e3749a808e9c91a8d9e0e987b0680cdcbe67..062306b662d0d96f680715263279ec97
      /** Outcome held until its ordinary owned work drains. */
       | {
          readonly kind: "completing";
-@@ -530,6 +540,11 @@ export interface Harness extends Session {
+@@ -492,6 +519,14 @@ export interface Conversation {
+      * signal them, and resolve once the scope is idle. Background subtrees survive unless `background` is set.
+      */
+     abort(context: Context, options?: ConversationAbortOptions): Promise<void>;
++    /**
++     * `abort()`, reporting what its one commit did. Resolves once that commit is written, before the scope is idle, with
++     * the effect and `idle`, which settles as `abort()` would. Marks, withdrawals and waits are `abort()`'s own.
++     */
++    abortWithEffect(context: Context, options?: ConversationAbortOptions): Promise<{
++        readonly effect: ConversationAbortEffect;
++        readonly idle: Promise<void>;
++    }>;
+     /**
+      * Resolve when the ordinary ownership scope has no live non-background task: this conversation and the conversations
+      * owned, transitively, by its non-background tasks.
+@@ -530,6 +565,11 @@ export interface Harness extends Session {
       * definition cannot take it settles as `orphaned` instead.
       */
      abortTask(id: TaskId, context: Context): Promise<"marked" | "terminal">;
@@ -318,10 +593,17 @@ index b8c1e3749a808e9c91a8d9e0e987b0680cdcbe67..062306b662d0d96f680715263279ec97
      waitForTask<R>(id: TaskId<R>, context: Context): Promise<SettledTask<R>>;
      /** Resolve when the ordinary ownership scope of every ownerless conversation has no live non-background task. */
 diff --git a/dist/index.d.ts b/dist/index.d.ts
-index 3ac769a57ec284452ad9a380f39eb429e9d2c7e9..696ed2290ddd372db8c4c2689bd409c26129347f 100644
+index 3ac769a57ec284452ad9a380f39eb429e9d2c7e9..cba96f05fd1c340a449ad09c6b8a20713ede2f1d 100644
 --- a/dist/index.d.ts
 +++ b/dist/index.d.ts
-@@ -19,6 +19,6 @@ export type { ConversationView } from "./harness/view.ts";
+@@ -13,12 +13,12 @@ export { ProviderDoc, type ProviderState } from "./harness/provider.ts";
+ export { createRegistry } from "./harness/registry.ts";
+ export type { TaskGraph, TaskGraphNode, TaskGraphState, TaskGraphWatch } from "./harness/task-graph.ts";
+ export { ToolTask, type ToolTaskCheckpoint, type ToolTaskInput, type ToolTaskResult } from "./harness/tool.ts";
+-export type { Agent, AgentChange, AgentState, AnyTask, CompactionHooks, CompactionPolicy, CompactionReason, CompactionResult, ContextView, Conversation, ConversationAbortOptions, ConversationCreateOptions, ConversationHandle, ConversationInit, ConversationRetryPolicy, ConversationStreamOptions, ConversationWatch, EnvTarget, Extension, GenerationHooks, HarnessInspection, HarnessOptions, HarnessSettings, HookApi, HookRegistration, HookResult, HooksOf, InputSubmissionDraft, ModelRef, ProgressPolicy, PromptInput, PromptSection, QueueMode, Registry, RegistryReader, RegistrySnapshot, Settings, SettledSubmissionRecord, SettledTask, Submission, SubmissionDraft, TaskInspection, ToolControl, ToolDiagnostic, ToolExecutionApi, ToolExecutionMode, ToolExecutionResult, ToolHooks, ToolRegistration, UserInput, Wrap, } from "./harness/types.ts";
++export type { Agent, AgentChange, AgentState, AnyTask, CompactionHooks, CompactionPolicy, CompactionReason, CompactionResult, ContextView, Conversation, ConversationAbortEffect, ConversationAbortOptions, ConversationCreateOptions, ConversationHandle, ConversationInit, ConversationRetryPolicy, ConversationStreamOptions, ConversationWatch, EnvTarget, Extension, GenerationHooks, HarnessInspection, HarnessOptions, HarnessSettings, HookApi, HookRegistration, HookResult, HooksOf, InputSubmissionDraft, ModelRef, ProgressPolicy, PromptInput, PromptSection, QueueMode, Registry, RegistryReader, RegistrySnapshot, Settings, SettledSubmissionRecord, SettledTask, Submission, SubmissionDraft, TaskInspection, ToolControl, ToolDiagnostic, ToolExecutionApi, ToolExecutionMode, ToolExecutionResult, ToolHooks, ToolRegistration, UserInput, Wrap, } from "./harness/types.ts";
+ export { UsageDoc, type UsageState } from "./harness/usage.ts";
+ export type { ConversationView } from "./harness/view.ts";
  export { createSession } from "./session/session.ts";
  export { MemoryStorage } from "./storage/memory.ts";
  export { defineTask } from "./tasks.ts";

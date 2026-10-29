@@ -1,6 +1,6 @@
-# Proposal: a Stop that reports its effect (interface only; not implemented)
+# A Stop that reports its effect
 
-**Status: proposal for review.** No patch, no production change, and native calls stay off. The fence draft stays frozen at d1ee74d. This answers blocker 2 in `docs/cua-native-fence-prerequisites.md` (6e6e939): an operation's Stop can't be classified exactly today. The fix proposed is not to classify better beforehand, but to have the commits that actually mark and withdraw report what they did.
+**Status: implemented in Pim's local patches, for review.** Nothing in Pim calls the companions: there is no route integration and no production change, and native calls stay off. See "Implementation and evidence" at the end. The interface below is the one accepted at c4fefa5. The fence draft stays frozen at d1ee74d. This answers blocker 2 in `docs/cua-native-fence-prerequisites.md` (6e6e939): an operation's Stop can't be classified exactly today. The fix proposed is not to classify better beforehand, but to have the commits that actually mark and withdraw report what they did.
 
 Pinned sources: `@earendil-works/pi-durable` 1.1.0 with Pim's patch (paths under `dist/harness/`), and `agents` (`dist/harness/pi/index.js`).
 
@@ -143,3 +143,46 @@ A task's `abortRequested`, or its run no longer being live, shows that a run wit
 2. Whether the plain Stop also moves to after-the-fact fencing, which closes d1ee74d's pre-closure gap.
 
 Until an interface like this is accepted and implemented, blocker 2 stays failed, and native calls stay off.
+
+## Implementation and evidence
+
+**Where it lives:**
+- **pi-durable** (`patches/@earendil-works__pi-durable@1.1.0.patch`):
+  - `TaskScheduler.abortConversationWithEffect` is the one marking commit. `abortConversation` is now that commit followed by awaiting its `idle`.
+  - It reads each reached conversation's run (`Tx.run`) and the withdrawn inputs' request IDs (`queuedInputRequests` in `inbox.js`) before its first write, since a transaction refuses table reads after a write.
+  - `withdrawQueuedInputs` returns the IDs it settled.
+  - `Conversation.abortWithEffect`, the `ConversationAbortEffect` type and its export.
+  - The companion attaches a handler to `idle`, so an `idle` nobody awaits leaves no unhandled rejection. The promise still rejects for callers that await it.
+- **agents 0.27.0** (`patches/agents@0.27.0.patch`): `PiHarness.withdrawWithEffect` and `PiSession.abortWithEffect`, with the `PiAbortEffect` and `PiAbortHandle` types. `withdraw()` and `abort()` now await the companions' `idle` and return `effect.aborted`, so each keeps one code path.
+
+**Tests:** `pnpm exec vitest run -c vitest.native-prereq.config.ts` runs this lane: the abort-effect and prerequisite tests, plus the existing tests whose Stops and aborts the patches touch. The lane's Worker has no Browser Run binding, no preview objects and no live mode.
+
+`test/abort-effect.test.ts` covers:
+- **pi-durable over in-memory storage:**
+  - a child conversation owned by a tool task, reached by the traversal, with its own run;
+  - a withdrawn input's request ID;
+  - a resolve before idle, and an `idle` rejected by the caller's signal;
+  - a repeat that newly marks nothing;
+  - a legacy run reported as `null`;
+  - a refused marking commit that rejects with nothing marked, alike for `abort()`.
+- **The agents adapter in Pim's Durable Object:**
+  - a queued input withdrawn alone;
+  - a placed input aborting its run and withdrawing unrelated queued inputs;
+  - a resolve before idle;
+  - settled, missing, empty and other-chat operations;
+  - the plain Stop;
+  - an input queued then placed into a new run, reported as that run;
+  - `abort()`'s booleans.
+
+**Mutations, each caught:**
+- counting every reached task as newly marked;
+- no handler on `idle`, which the run reports as an unhandled rejection;
+- no withdrawn list;
+- the adapter awaiting `idle` before it resolves;
+- no run read.
+
+**Not exercised:**
+- a run replaced between `abortSubmission`'s commit and the conversation abort's (no deterministic interleaving);
+- `background: true` traversal;
+- a crash between the marking commit and a caller's own record.
+

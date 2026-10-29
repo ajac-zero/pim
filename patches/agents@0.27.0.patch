@@ -1,8 +1,12 @@
 diff --git a/dist/harness/pi/index.d.ts b/dist/harness/pi/index.d.ts
-index 36ac5754a0615b307e0ad69362bc1a19cff08069..cf133a42382d3c313bea7ac17d3550f65e25b75c 100644
+index 36ac5754a0615b307e0ad69362bc1a19cff08069..cb9ceb50ce78db9fdc702f401e5c34025be0f77f 100644
 --- a/dist/harness/pi/index.d.ts
 +++ b/dist/harness/pi/index.d.ts
-@@ -12,6 +12,7 @@ import {
+@@ -9,9 +9,11 @@ import {
+   AgentChange,
+   AgentEventStream,
+   Conversation,
++  ConversationAbortEffect,
    EntryRecord,
    Extension,
    Harness,
@@ -10,7 +14,7 @@ index 36ac5754a0615b307e0ad69362bc1a19cff08069..cf133a42382d3c313bea7ac17d3550f6
    ToolRegistration,
    UserInput
  } from "@earendil-works/pi-durable";
-@@ -202,6 +203,14 @@ declare class PiHarness extends LifecycleCapability {
+@@ -202,6 +204,14 @@ declare class PiHarness extends LifecycleCapability {
    messages(options?: PiSessionOptions): Promise<EntryRecord[]>;
    /** Submissions pi has not settled yet, oldest first. */
    pending(options?: PiSessionOptions): Promise<PiPendingOperation[]>;
@@ -25,8 +29,72 @@ index 36ac5754a0615b307e0ad69362bc1a19cff08069..cf133a42382d3c313bea7ac17d3550f6
    /** The opened pi Harness, for anything the interface does not cover. */
    pi(): Promise<Harness>;
    /** @internal */
+@@ -216,6 +226,15 @@ declare class PiHarness extends LifecycleCapability {
+   ): Promise<PiReceipt>;
+   /** @internal Withdraw a queued input, or abort the run it joined. */
+   withdraw(session: PiSessionId, operationId: string): Promise<boolean>;
++  /**
++   * @internal `withdraw()`, reporting what each of its commits did. Resolves
++   * after its last commit, with the effect and the wait `withdraw()` then
++   * does, if any.
++   */
++  withdrawWithEffect(
++    session: PiSessionId,
++    operationId: string
++  ): Promise<PiAbortHandle>;
+   /** @internal Wait for pi to settle an operation, by its request id. */
+   settled(
+     session: PiSessionId,
+@@ -225,6 +244,24 @@ declare class PiHarness extends LifecycleCapability {
+   /** @internal The per-conversation defaults supported by pi-durable. */
+   agentDefaults(): AgentChange;
+ }
++/** What one `PiSession.abort()` did, from the commits that did it. */
++type PiAbortEffect = {
++  /** What `abort()` returns. */
++  readonly aborted: boolean;
++  /** The operation's own withdrawal, when one was named: from its commit, or from a read of a final state. */
++  readonly operation?: {
++    readonly operationId: string;
++    readonly outcome: "withdrawn" | "placed" | "settled" | "not_found";
++  };
++  /** The conversation's abort, when one ran: with no operation, or for a placed one. */
++  readonly conversation?: ConversationAbortEffect;
++};
++/** `PiSession.abortWithEffect()`'s result, once its last commit is written. */
++type PiAbortHandle = {
++  readonly effect: PiAbortEffect;
++  /** Settles as `abort()` would after that commit; already resolved when no conversation abort ran. */
++  readonly idle: Promise<void>;
++};
+ /** One pi conversation, addressed through the harness. */
+ declare class PiSession {
+   #private;
+@@ -250,6 +287,13 @@ declare class PiSession {
+    * running work.
+    */
+   abort(operationId?: string): Promise<boolean>;
++  /**
++   * `abort()`, reporting what its commits did: the operation's own
++   * withdrawal, and the conversation's abort when one ran. Resolves after the
++   * last commit, before the session is idle, with the effect and `idle`,
++   * which settles as `abort()` would.
++   */
++  abortWithEffect(operationId?: string): Promise<PiAbortHandle>;
+   /** Start a new context, optionally from a handoff note. */
+   reset(handoff?: string): Promise<void>;
+   /**
+@@ -320,6 +364,8 @@ declare function openPiSessionStore(
+ declare function skills(sources: readonly SkillSource[]): Promise<Extension>;
+ //#endregion
+ export {
++  type PiAbortEffect,
++  type PiAbortHandle,
+   PiHarness,
+   type PiHarnessContext,
+   type PiHarnessFactory,
 diff --git a/dist/harness/pi/index.js b/dist/harness/pi/index.js
-index 74e18490d21addac297ac627880e316b326795db..d598e005742751ef51d3c1d7fa25daf2deeb8faf 100644
+index 74e18490d21addac297ac627880e316b326795db..f82ad57237c86aba327cd374cf66fbd1aa9fec64 100644
 --- a/dist/harness/pi/index.js
 +++ b/dist/harness/pi/index.js
 @@ -273,6 +273,14 @@ function wakeJobId(session) {
@@ -62,7 +130,63 @@ index 74e18490d21addac297ac627880e316b326795db..d598e005742751ef51d3c1d7fa25daf2
  	/** The opened pi Harness, for anything the interface does not cover. */
  	async pi() {
  		return (await _assertClassBrand(_PiHarness_brand, this, _open).call(this)).pi;
-@@ -486,6 +505,7 @@ async function _wakeStep(session) {
+@@ -432,13 +451,52 @@ var PiHarness = class extends LifecycleCapability {
+ 	}
+ 	/** @internal Withdraw a queued input, or abort the run it joined. */
+ 	async withdraw(session, operationId) {
++		const { effect, idle } = await this.withdrawWithEffect(session, operationId);
++		await idle;
++		return effect.aborted;
++	}
++	/**
++	* @internal `withdraw()`, reporting what each of its commits did. Resolves
++	* after its last commit, with the effect and the wait `withdraw()` then
++	* does, if any.
++	*/
++	async withdrawWithEffect(session, operationId) {
+ 		const { pi, storage } = await _assertClassBrand(_PiHarness_brand, this, _open).call(this);
+ 		const id = conversationId(session);
+ 		const record = await storage.submissionByRequest(id, operationId, BG);
+-		if (!record || record.status === "done" || record.status === "unanswered") return false;
++		if (!record || record.status === "done" || record.status === "unanswered") return {
++			effect: {
++				aborted: false,
++				operation: {
++					operationId,
++					outcome: record ? "settled" : "not_found"
++				}
++			},
++			idle: Promise.resolve()
++		};
+ 		const withdrawn = await pi.abortSubmission(record.id, BG, id);
+-		if (withdrawn === "already_placed") await (await pi.conversation(id, BG))?.abort(BG);
+-		return withdrawn !== "settled" && withdrawn !== "not_found";
++		const operation = {
++			operationId,
++			outcome: withdrawn === "aborted" ? "withdrawn" : withdrawn === "already_placed" ? "placed" : withdrawn
++		};
++		const aborted = withdrawn !== "settled" && withdrawn !== "not_found";
++		const conversation = withdrawn === "already_placed" ? await pi.conversation(id, BG) : void 0;
++		if (!conversation) return {
++			effect: {
++				aborted,
++				operation
++			},
++			idle: Promise.resolve()
++		};
++		const { effect, idle } = await conversation.abortWithEffect(BG);
++		return {
++			effect: {
++				aborted,
++				operation,
++				conversation: effect
++			},
++			idle
++		};
+ 	}
+ 	/** @internal Wait for pi to settle an operation, by its request id. */
+ 	async settled(session, operationId, signal) {
+@@ -486,6 +544,7 @@ async function _wakeStep(session) {
  	if (!conversation) return void 0;
  	const tasks = (await pi.inspect(BG)).tasks.filter((task) => task.record.conversationId === conversation.id);
  	if (tasks.length === 0) return _classPrivateFieldGet2(_admitting, this).has(session) ? heartbeat : void 0;
@@ -70,7 +194,7 @@ index 74e18490d21addac297ac627880e316b326795db..d598e005742751ef51d3c1d7fa25daf2
  	const wakeAt = await _assertClassBrand(_PiHarness_brand, this, _longWait).call(this, pi, conversation.id, BG);
  	if (wakeAt !== void 0) return { rescheduleAt: wakeAt };
  	if (tasks.every((task) => task.record.background)) return heartbeat;
-@@ -498,8 +518,14 @@ async function _wakeStep(session) {
+@@ -498,8 +557,14 @@ async function _wakeStep(session) {
  	return heartbeat;
  }
  async function _waitForIdle(conversation) {
@@ -85,7 +209,7 @@ index 74e18490d21addac297ac627880e316b326795db..d598e005742751ef51d3c1d7fa25daf2
  	try {
  		await conversation.waitForIdle(withAbortSignal(budget.signal, BG));
  	} catch (error) {
-@@ -509,6 +535,7 @@ async function _waitForIdle(conversation) {
+@@ -509,6 +574,7 @@ async function _waitForIdle(conversation) {
  		});
  	} finally {
  		clearTimeout(timer);
@@ -93,3 +217,33 @@ index 74e18490d21addac297ac627880e316b326795db..d598e005742751ef51d3c1d7fa25daf2
  	}
  }
  /**
+@@ -609,9 +675,26 @@ var PiSession = class {
+ 	* running work.
+ 	*/
+ 	async abort(operationId) {
+-		if (operationId !== void 0) return _classPrivateFieldGet2(_harness, this).withdraw(this.id, operationId);
+-		await (await _classPrivateFieldGet2(_harness, this).conversation(this.id)).abort(BG);
+-		return true;
++		const { effect, idle } = await this.abortWithEffect(operationId);
++		await idle;
++		return effect.aborted;
++	}
++	/**
++	* `abort()`, reporting what its commits did: the operation's own
++	* withdrawal, and the conversation's abort when one ran. Resolves after the
++	* last commit, before the session is idle, with the effect and `idle`,
++	* which settles as `abort()` would.
++	*/
++	async abortWithEffect(operationId) {
++		if (operationId !== void 0) return _classPrivateFieldGet2(_harness, this).withdrawWithEffect(this.id, operationId);
++		const { effect, idle } = await (await _classPrivateFieldGet2(_harness, this).conversation(this.id)).abortWithEffect(BG);
++		return {
++			effect: {
++				aborted: true,
++				conversation: effect
++			},
++			idle
++		};
+ 	}
+ 	/** Start a new context, optionally from a handoff note. */
+ 	async reset(handoff) {

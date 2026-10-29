@@ -1,6 +1,6 @@
 # The ordinary smoke test of an evaluation's Cua computer (plan; not run)
 
-This is the plan for one manual run of an evaluation's Cua computer through Pim's ordinary tools: `shell`, the file tools and the structured browser, with one approval granted, one denied, and cleanup. **It has not been run, and running it is a separate authorization.** It doesn't depend on native-app calls, which stay off (`docs/cua-native-host-plan.md`).
+This is the plan for one manual run of an evaluation's Cua computer through Pim's ordinary tools: `shell`, the file tools and the structured browser, with one approval granted, one denied, and cleanup. **It has not been run, and running it is a separate authorization.** It is ready for source validation on its own. It doesn't depend on native-app calls, which stay off, or on the native host design, which is not acceptance-ready (`docs/cua-native-host-plan.md`).
 
 **What it qualifies:** transport and approvals end to end, meaning Pim's link through the bridge to pim-computer, the approval flow, and the computer's effects on its files and browser. **It is not a qualification of an autonomous model.** The preview's stand-in model calls exactly the tool a message names (`/tool <name> {json}`, `preview/worker.ts` L69–70) and decides nothing.
 

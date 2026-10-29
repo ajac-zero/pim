@@ -514,7 +514,8 @@ or, with --native on, the Cua computer, with a native-app dispatcher for this VM
   node desktop.ts --socket <path> --root <folder> --browser <path> --pim-computer <path> [--headful]
     [--native on --cua-computer <path> --cua-owner <space> --cua-origin <spacesd origin> --cua-credential <file>]
 
-Each setting is given at most once. --native off, or no --native, starts pim-computer and takes no Cua setting.
+--native off, or no --native, starts pim-computer and takes no Cua setting; an ordinary setting given twice keeps its last value.
+With --native on, every setting is given exactly once, and --native and the Cua settings are never given twice.
 Run it as the desktop user, never as root. See docs/cua-bridge.md.`;
 
 /** The Cua computer's settings, each given with `--native on` and only then. */
@@ -532,8 +533,11 @@ export type EndpointArguments = {
 };
 
 /**
- * Reads the endpoint program's arguments. `usage` for an unknown, repeated or
- * missing setting; `native-settings` for a Cua setting without `--native on`,
+ * Reads the endpoint program's arguments. `usage` for an unknown or missing
+ * setting, `--native` or a Cua setting given twice, or any setting given
+ * twice with `--native on`; without it, an ordinary setting given twice keeps
+ * its last value, as the program always has. `native-settings` for a Cua
+ * setting without `--native on`,
  * `--native on` without all four, an empty one, or `--native` other than `on`
  * or `off`. Nothing is checked on disk here: `createDesktopEndpoint` checks
  * the Cua computer's program, owner, origin and credential file.
@@ -545,10 +549,13 @@ export function readEndpointArguments(argv: readonly string[]): EndpointArgument
 	} catch {
 		throw new EndpointRefused("usage", USAGE);
 	}
+	const values = parsed.values;
+	// An ordinary setting given twice keeps its last value, as the program always has, unless --native is on;
+	// --native and the Cua settings are never taken twice, and with --native on no setting is.
 	const counts = new Map<string, number>();
 	for (const token of parsed.tokens) if (token.kind === "option") counts.set(token.name, (counts.get(token.name) ?? 0) + 1);
-	if ([...counts.values()].some((count) => count > 1)) throw new EndpointRefused("usage", USAGE);
-	const values = parsed.values;
+	const strict = new Set<string>(values.native === "on" ? counts.keys() : ["native", ...CUA_FLAGS]);
+	if ([...counts].some(([name, count]) => count > 1 && strict.has(name))) throw new EndpointRefused("usage", USAGE);
 	const { socket, root, browser } = values;
 	const pimComputer = values["pim-computer"];
 	if (!socket || !root || !browser || !pimComputer) throw new EndpointRefused("usage", USAGE);

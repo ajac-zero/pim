@@ -46,6 +46,7 @@ import * as path from "node:path";
 import { Duplex, PassThrough } from "node:stream";
 import { afterEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 import type { NativeCall, ServeSettings } from "../../pim-computer.ts";
 import { CuaComputerRefused, startCuaComputer } from "../cua-computer.ts";
 import { type CredentialFiles, type CredentialReader, type CredentialStat, MAX_CREDENTIAL_BYTES } from "../cua-credential.ts";
@@ -327,6 +328,26 @@ describe("the endpoint program's native settings", () => {
 		}
 	});
 
+	it("keeps an ordinary setting's last value when it is given twice without --native on, as the program always has", () => {
+		// What the program read before --native existed: Node's parseArgs with its five settings, the last value of each kept.
+		const before = (argv: string[]) => {
+			const { values } = parseArgs({
+				args: argv,
+				options: { socket: { type: "string" }, root: { type: "string" }, browser: { type: "string" }, "pim-computer": { type: "string" }, headful: { type: "boolean" } },
+			});
+			return { socketPath: values.socket, root: values.root, browser: values.browser, pimComputer: values["pim-computer"], headful: values.headful === true };
+		};
+		const repeated = [
+			"--socket", "/run/first/session.sock", "--root", "/home/desktop/first", "--browser", "/opt/first-chrome", "--pim-computer", "/opt/first/pim-computer.ts", "--headful",
+			...base, "--headful", "--root", "/home/desktop/last",
+		];
+		for (const argv of [repeated, [...repeated, "--native", "off"], ["--native", "off", ...repeated]]) {
+			const settings = readEndpointArguments(argv);
+			assert.deepEqual(settings, before(argv.filter((_, index) => argv[index] !== "--native" && argv[index - 1] !== "--native")), argv.join(" "));
+			assert.deepEqual(settings, { socketPath: "/run/pim/session.sock", root: "/home/desktop/last", browser: "/opt/chrome", pimComputer: "/opt/pim/pim-computer.ts", headful: true });
+		}
+	});
+
 	it("takes the Cua computer's four settings with --native on, and only all of them", () => {
 		assert.deepEqual(readEndpointArguments([...base, "--native", "on", ...cua]).cua, {
 			program: "/opt/pim/cua-computer.ts",
@@ -346,6 +367,15 @@ describe("the endpoint program's native settings", () => {
 			["--native empty", [...base, "--native", "", ...cua], "native-settings"],
 			["a Cua setting empty", [...base, "--native", "on", ...cua.slice(0, 3), "", ...cua.slice(4)], "native-settings"],
 			["--native repeated", [...base, "--native", "on", "--native", "on", ...cua], "usage"],
+			["--native off, then on", [...base, "--native", "off", "--native", "on", ...cua], "usage"],
+			["--native on, then off", [...base, "--native", "on", "--native", "off", ...cua], "usage"],
+			["--native off repeated", [...base, "--native", "off", "--native", "off"], "usage"],
+			["--native on, then inline", [...base, "--native", "on", "--native=on", ...cua], "usage"],
+			["a Cua setting repeated with --native off", [...base, "--native", "off", "--cua-owner", OWNER, "--cua-owner", OWNER], "usage"],
+			["a Cua setting repeated without --native", [...base, "--cua-credential", "/a", "--cua-credential", "/b"], "usage"],
+			["an ordinary setting repeated with --native on", [...base, "--native", "on", ...cua, "--root", "/home/desktop/other"], "usage"],
+			["--headful repeated with --native on", [...base, "--headful", "--native", "on", ...cua, "--headful"], "usage"],
+			["a Cua setting with no value", [...base, "--native", "on", ...cua.slice(0, 6), "--cua-credential"], "usage"],
 			["a Cua setting repeated", [...base, "--native", "on", ...cua, "--cua-origin", "https://elsewhere.test"], "usage"],
 			["--native as a flag", [...base, "--native", ...cua], "usage"],
 			["an unknown setting", [...base, "--native", "on", ...cua, "--cua-token", TOKEN_A], "usage"],
@@ -363,7 +393,9 @@ describe("the native-capable host start, composed", () => {
 	it("starts pim-computer exactly as before without --native, and never opens the credential", async () => {
 		const where = placeWithCua();
 		const credentials = standInFiles({ [where.credential]: { bytes: TOKEN_A } });
-		for (const argv of [where.ordinary, [...where.ordinary, "--native", "off"]]) {
+		// Given twice, the first values pointing at nothing: the last are the ones checked and started, as before.
+		const twice = ["--root", "/nowhere/root", "--browser", "/nowhere/browser", "--pim-computer", "/nowhere/pim-computer.ts", ...where.ordinary];
+		for (const argv of [where.ordinary, [...where.ordinary, "--native", "off"], twice, ["--native", "off", ...twice]]) {
 			const host = hostFrom(argv, credentials);
 			const socket = host.connect();
 			await until(() => host.started.length === 1, "the child");

@@ -6,7 +6,7 @@ This page is source and design only. **Groves rejected the earlier proposal**: s
 
 ## Executive decision (proposed)
 
-**Status: not acceptance-ready.** Execution-time authority now rests on a chosen protocol (prepare, then a `go` committed by Pim's send gate; see "Execution-time authority: the choice"). That protocol is argued here, not reviewed, specified to the message, or tested, and the upstream facts below are unverified.
+**Status: not acceptance-ready.** Groves chose acknowledged remote fencing for execution-time authority. Its protocol and staged plan are in `docs/cua-native-fence-protocol.md`, for review; nothing in it is accepted or implemented, and the upstream facts below are unverified.
 
 - **Adopt as the design to qualify:** spacesd in its own non-root account; the token readable only by that account and the bridge's; native calls executed by a broker inside the bridge process, which already holds the token for the viewer. The bridge demuxes `native_tool` away from pim-computer. The desktop account gets no token, socket or child for native calls.
 - **Don't build it yet.** Two upstream facts decide whether it works at all, and neither is verified:
@@ -75,7 +75,7 @@ Three different things are easy to run together. Only the first two exist, and t
 1. **Ordinary full agent OS access (exists).** Every agent of the space acts as `pim-desktop`.
    - `shell`, once approved, or unasked where the person let it run, runs any command as that user and may leave programs running detached (`src/extensions/files.ts`). Such a program outlives its approval, its chat and any change of control.
    - pim-computer passes the session's `DISPLAY` and `XAUTHORITY` to what it starts (`KEPT_ENVIRONMENT` in `desktop.ts`), so a command is a client of the person's X display. That such a client can inject input (XTEST, or `XSendEvent` as the driver itself uses) is general X11 behaviour, **not verified on the evaluation's Xvfb**.
-2. **The curated-tool approval experience (exists, behind `nativeDesktop`).** Pim's approvals, its control state's admissions and lease, the run identity, the send fence and, in the protected design, the `go` that fence commits before the broker may send decide whether a given native call is sent, and record what was. spacesd, X11 and the kernel never consult them.
+2. **The curated-tool approval experience (exists, behind `nativeDesktop`).** Pim's approvals, its control state's admissions and lease, the run identity, the send fence and, in the protected design, the broker's fence latches (`docs/cua-native-fence-protocol.md`) decide whether a given native call is sent, and record what was. spacesd, X11 and the kernel never consult them.
 3. **Global takeover exclusion (does not exist; unproven).** That while the person controls the desktop, nothing an agent started acts on it. A takeover in Pim's control state only closes Pim's own admissions and drops the lease. `inputQuiescence` is always `unproven` (`src/computer-control.ts`, `docs/computer-control-state.md`), no takeover or resume is exposed, and **human takeover is unavailable**.
 
 **Do same-user direct spacesd calls bypass Pim's approvals and a human-control pause?**
@@ -127,62 +127,29 @@ If the accessibility tree can't be had without a session-bus grant Groves reject
 ### Request identity and authentication
 
 - **Authentication:** Pim's messages reach the bridge over the existing channel: TLS (Caddy, then the bridge's own certificate), the bridge's bearer token and the space check (`check` in `cua-bridge.ts`). The desktop side can't write into it, since the demux reads only Pim's half. While the broker is in the bridge, a signature adds no authenticity; it would if the broker were a separate process.
-- **The prepared call is bound exactly:**
+- **A native call is bound exactly** (the fields of `native.execute`):
   - Pim's frozen native request: owner, agent, run ID, call ID (the request ID) and the tool's arguments. The broker reads it once into its own frozen copy (`readNativeRequest`), and only that copy is ever sent.
-  - The arguments' canonical SHA-256 (`canonical` in `native-mcp.ts`), the coordinator's epoch and lease, and the bridge instance it is meant for.
+  - The arguments' canonical SHA-256 (`canonical` in `native-mcp.ts`), the coordinator's epoch, and the broker instance it is meant for.
 
   Anything that doesn't match exactly is refused unsent.
 
-### Execution-time authority: the choice
+### Execution-time authority
 
-**Not acceptance-ready.** Revision `70a6e0e` had the broker check a permit and a local table of revocations that Pim sends asynchronously. That doesn't give execution-time authority: a lifecycle change committed in Pim can precede the broker's actual `tools/call` while its `revoke` is still in transit, so a send under a stale permit is possible after Pim's commit. **No design here claims that a locally committed abort forbids a remote send under a permit already handed over.** Two protocols would give a stated guarantee.
+Specified in `docs/cua-native-fence-protocol.md`: acknowledged remote fencing (Groves's choice). In short:
+- Stop and Delete close Pim's local admission at once and answer without waiting for the desktop.
+- A separate fence state is confirmed only when every broker instance that held a call in the scope acknowledges, after latching, that it will make no further upstream send in it.
+- An unavailable VM leaves the fence unconfirmed, never confirmed.
+- Pim awaits the durability of a call's intent before sending it, and never re-sends an action. The broker keeps no durable journal: each acknowledgment speaks only for its own living instance.
 
-**A. Acknowledged revocation as the end of the lifecycle step.**
-- **Two states:** a lifecycle change (deleting the chat, changing its agent, stopping or aborting the run) has a local `requested` state and a `fenced` state, and the two are distinct.
-  - `requested` commits in Pim and stops new permits.
-  - `fenced` is reached only when the broker has answered, for every permit it held in that scope, `revoked` (nothing sent) or `sent`.
-- **The linearization point** is the broker's handling of the fence in its serialized queue: a `tools/call` before it in that order may have run, and none after it is sent.
-- **The cost:** a lifecycle step doesn't complete until the bridge answers. While the bridge is unreachable it stays `requested`, and the broker's outstanding permits stay live. Only a new bridge instance (the old process gone) or an answer ends that, and Pim can't observe the old process's end directly. Deletion and stop then depend on the VM's availability for their completion.
+**Withdrawn from revision `023a068`:**
+- the prepare-then-`go` protocol (B), with its claims that it put "the authority's commit at the broker's send";
+- that a request is "recorded as sent in the same transaction that transmits its go".
 
-**B. Prepared call, then authorization at the send (chosen).**
-- **Prepare:** Pim sends the bound call. The broker checks it, sets up the run if needed (`initialize`, `notifications/initialized`, `tools/list`; no tool called), and answers `ready` with a fresh random nonce. **The broker never sends a `tools/call` without a `go`.** A prepared call that gets no `go` within its bound is dropped, and nothing was sent.
-- **Authorize:** on `ready`, Pim runs the existing send gate (`docs/cua-native-identity.md`, "Authorized again at the send") in one harness transaction, as it does today at `Computer.native`'s `transmit`:
-  - it reads the call's tool task and run, and then the chat's deletion and agent synchronously;
-  - it checks the lease and control state;
-  - it records the request as sent, and so possibly run;
-  - in the same synchronous step, it transmits `go` (request ID, instance, the nonce).
-
-  A refusal sends no `go`, and Pim settles the request `rejected`. This is definitive, since no `go` exists for it.
-- **Send:** on `go`, synchronously and with no await before `fetch`, the broker checks that the nonce and instance match a prepared, unconsumed call, marks it consumed, and hands the `tools/call` to `fetch`.
-- **The guarantee:** each native call has exactly one authorization commit in Pim's serialized order, and the broker sends only after it.
-  - **A lifecycle change that commits before it** makes the gate refuse, so no `go` is sent and nothing ever is.
-  - **One that commits after it** finds the call recorded as sent, and treats it as possibly run (`unknown` until its outcome).
-
-  So no `tools/call` is sent whose authorization wasn't committed before every conflicting lifecycle commit, and the setup gap is no longer between authorization and send. The `go`'s transit remains, but it is ordered: a change committed during it is after the authorization, and sees the call in flight.
-- **Why B:** it puts the authority's commit at the broker's send, after setup, without making deletion or stop wait on the VM. `revoke` messages become an optimization (drop prepared calls early), not part of the guarantee. It reuses the gate and harness ordering already accepted at `b347372`, moved from the computer's wake to the broker's `ready`.
-- **What B costs:** one more round trip per call (`ready` and `go`). The broker keeps prepared-call state, bounded in count and time. The protocol adds `ready` and `go` to the link, and Pim must refuse to send native calls to a bridge that doesn't declare them.
-- **What B doesn't give:**
-  - **Not immediate revocation.** A call whose `go` was committed goes, even if a change commits a moment later; Pim records it as possibly run.
-  - **Acceptance isn't input.** spacesd accepting or answering a `tools/call` doesn't mean the input reached the window or finished. `XSendEvent` delivery is asynchronous, so a call may act after the person did.
-  - **No fence for anything else on the display** (above).
-
-### Single use across crashes and restarts
-
-The broker keeps **no durable journal**, and doesn't need one for single use. Under protocol B, three things hold it:
-
-- **Pim's claim is durable and once only.** The request is recorded as sent in the same transaction that transmits its one `go`, and the coordinator never mints a request ID twice. If Pim's process ends after the commit and before or after the transmit, restore reads the request as `unknown` and never authorizes it again. A `go` for a request ID is sent at most once, ever.
-- **The broker instance never repeats.** Each bridge process start draws a 128-bit instance ID from a CSPRNG, never stored or reused. Prepared calls, nonces and the consumed set live only in that process.
-  - **After a crash or restart,** a `go` naming the old instance, or a nonce the new process never issued, is refused unsent, and Pim learns the new instance when it reconnects.
-  - **Duplicates:** a duplicated `go` to the same instance finds its call consumed.
-- **Outcomes across a crash:**
-  - **A prepared call with no `go`** was never sent: it is `rejected`, definitively, because the broker never sends without a `go`.
-  - **A `go` with no outcome** is `unknown`. Its run is latched in the binder and the coordinator, and stays latched after the broker restarts and forgets its own latch. No new run ID or request ID is minted to escape it, and nothing is replayed.
-- **spacesd doesn't deduplicate.** It keeps no state per call and takes no request ID, so replay safety is entirely Pim's and the broker's.
-- **Assumed, not proven:** one bridge process at a time; there is one unit, with `Restart=no`. If two could run, single use would still hold, since Pim sends one `go` over one connection to one instance. But which process acted would be unknown.
+The send gate accepted at `b347372` transmits inside a harness commit's callback, before that commit resolves, and no write there is awaited as durable before the send. Its tests qualify the local order of reads in workerd with stand-ins, not a remote protocol.
 
 ### Unknown, and no replay
 
-Unchanged: once Pim has committed a call's `go`, any outcome that isn't a valid answer is `unknown`, whether lost in transit, at the broker, or after `fetch`. The request stays unknown until reconciled, its run is latched in the binder and the coordinator (and in the broker while it lives), and nothing is sent again (`docs/cua-native-mcp.md`, "Outcomes and the commit point").
+Unchanged: once Pim may have transmitted a call's `native.execute` (its intent is durable), any outcome that isn't a valid answer is `unknown`, whether lost in transit, at the broker, or after `fetch`. The request stays unknown until reconciled, its run is latched in the binder and the coordinator (and in the broker while it lives), it stays outstanding for fences, and nothing is sent again (`docs/cua-native-mcp.md`, "Outcomes and the commit point").
 
 ### Costs and limits
 
@@ -192,7 +159,7 @@ Unchanged: once Pim has committed a call's `go`, any outcome that isn't a valid 
   - the token's two files owned by two accounts;
   - message parsing in the internet-facing bridge;
   - the broker declaration;
-  - the prepare, `ready` and `go` messages on both sides, and the broker's bounded prepared-call state;
+  - the fence protocol's messages and records on both sides, and the broker's bounded queue, latches and request set;
   - tests for each.
 - **Probable losses** under another UID: terminal typing, and accessibility trees unless the bus is granted.
 - **The bridge becomes the native executor.** A compromised bridge already has the root token through the viewer, so the design adds code, not authority.
@@ -206,7 +173,13 @@ Unchanged: once Pim has committed a call's `go`, any outcome that isn't a valid 
   - **`--await-token-file`:** polls the file (`token_file.rs` L26 [`a900991c82bc`]). Replacing or emptying it drops every session (`context.rs` L349–382 [`f0ac88edb9df`]), and `Init` is disabled. Under placement A that made the desktop-owned file a live control; under this design only `pim-spacesd` and root can write it, so it becomes a usable revocation. The bridge's copy must be replaced too, or the viewer and broker stop.
 - **Revocation in an evaluation:** stop the bridge, which ends Pim's reach, the broker and the viewer host; then stop spacesd; then discard the VM. A native call in flight ends `unknown` and latches. Tickets die with spacesd's token. **Limit:** this ends the token's holders, not what agents started as `pim-desktop`; that ends only with the VM.
 
-## Rejected: the desktop-owned placement (record)
+## Rejected (record)
+
+- **Asynchronous revocation (`70a6e0e`):** a permit checked against revocations Pim sends asynchronously. A lifecycle change committed in Pim could precede the broker's send while its revocation was still in transit.
+- **Prepare, then an irrevocable `go` (protocol B, `023a068`):** rejected by Groves in favour of acknowledged fencing. Its claims are withdrawn above.
+- **The desktop-owned placement:** below.
+
+### The desktop-owned placement
 
 The earlier proposal would have started the endpoint with `--native on`, handed it `/etc/pim-spacesd/token` (the desktop's own file), and dropped `--no-mcp` from a spacesd running as `pim-desktop`. Groves rejected it: the token's whole authority would be every same-user process's, and spacesd's in-memory copy would be in the desktop's UID. What it surfaced still holds:
 - the bundle lacks `cua-computer.ts`, `native-mcp.ts` and `native-mcp-upstream.ts`;
@@ -233,7 +206,7 @@ The fixtures in `computer/cua-host/qualification/` (`fd3-inheritance.ts`, `fd3-c
 1. **Accessibility across accounts.** A session-bus policy admitting `pim-spacesd`, or native calls without accessibility trees, or no native calls.
 2. **The X authorization grant**, and whether Xvfb's owner is the desktop account.
 3. **Broker placement:** in the bridge (proposed), or a separate process if viewer ticket minting is also to leave the bridge.
-4. **The execution protocol:** B (prepare, then a gate-committed `go`, proposed) or A (acknowledged fences). Either needs its messages specified and its interleavings tested with stand-ins before acceptance.
+4. **The execution protocol:** decided, acknowledged remote fencing. Its spec (`docs/cua-native-fence-protocol.md`) awaits review, and its interleavings need stand-in tests once implemented.
 5. **Unverified upstream, from reading only:**
    - X11 access and MIT-SHM capture from another UID;
    - AT-SPI from another UID;

@@ -56,6 +56,9 @@ import type { Fetch, NativeOutcome } from "../native-mcp.ts";
 
 /** The endpoint checks the real temporary folders as the desktop user's, so the stand-in credential is this user's too. */
 const UID = process.geteuid!();
+/** Another user, whatever user runs the tests: the endpoint refuses to run as root, so `UID` is at least 1 and this is never it. */
+const FOREIGN_UID = UID + 1;
+assert.notEqual(FOREIGN_UID, UID);
 const OWNER = "o_cua-native-space";
 const ORIGIN = "http://127.0.0.1:7443";
 const TOKEN_A = "spacesd-stand-in-token-A-0123456789abcdef";
@@ -461,7 +464,8 @@ describe("the native-capable host start, composed", () => {
 			["a missing credential", where.native, { bytes: TOKEN_A, missing: true }, "credential"],
 			["a credential that is a link", where.native, { bytes: TOKEN_A, linkedTo: "/elsewhere/token" }, "credential"],
 			["a credential others can read", where.native, { bytes: TOKEN_A, stat: { mode: 0o100644 } }, "credential"],
-			["a credential of another user", where.native, { bytes: TOKEN_A, stat: { uid: 1001 } }, "credential"],
+			["a credential of another user", where.native, { bytes: TOKEN_A, stat: { uid: FOREIGN_UID } }, "credential"],
+			["a credential of root's", where.native, { bytes: TOKEN_A, stat: { uid: 0 } }, "credential"],
 			["a credential with two names", where.native, { bytes: TOKEN_A, stat: { nlink: 2 } }, "credential"],
 			["a credential that isn't a file", where.native, { bytes: TOKEN_A, stat: { isFile: false } }, "credential"],
 			["an empty credential", where.native, { bytes: "" }, "credential"],

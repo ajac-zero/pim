@@ -160,6 +160,7 @@ export const ImagePlus = themedIcon(Lucide.ImagePlus, Pixel.Image2Plus);
 export const KeyRound = themedIcon(Lucide.KeyRound, Pixel.Key);
 export const Leaf = themedIcon(Lucide.Leaf, Pixel.Leaf);
 export const Lightbulb = themedIcon(Lucide.Lightbulb, Pixel.Lightbulb);
+export const Lock = themedIcon(Lucide.Lock, Pixel.Lock);
 export const Link2 = themedIcon(Lucide.Link2, Pixel.Link);
 export const ListChecks = themedIcon(Lucide.ListChecks, Pixel.ListBox);
 export const ListFilter = themedIcon(Lucide.ListFilter, Pixel.Filter);

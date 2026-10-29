@@ -211,8 +211,8 @@ export class Computer {
 	readonly #selected: () => Selection | null;
 	/** What the space reaches its computer by now, which a link must have been made under; throws when that can't be read. */
 	readonly #binding: () => string;
-	/** Whether native-app calls may be sent (`native`): only when the one who makes the computer says so, which Pim doesn't yet. */
-	readonly #nativeApps: boolean;
+	/** Whether native-app calls may be sent (`native`): only when the one who makes the computer says so, which Pim does only where its code gives a run authority, and none does yet. */
+	readonly #nativeApps: () => boolean;
 	/** pim-computer on the computer Pim started, while the space holds on to it. */
 	#link: ComputerLink | null = null;
 	/** What `#link` was made under (`#binding`), kept in memory only. */
@@ -230,8 +230,8 @@ export class Computer {
 		inUse: () => boolean;
 		selected?: () => Selection | null;
 		binding?: () => string;
-		/** Lets `native` send native-app calls to the operator's Cua computer. Off unless given. */
-		nativeApps?: boolean;
+		/** Lets `native` send native-app calls to the operator's Cua computer, asked at each call. Off unless given. */
+		nativeApps?: () => boolean;
 	}) {
 		this.#meta = options.meta;
 		this.#sockets = options.sockets;
@@ -239,7 +239,7 @@ export class Computer {
 		this.#inUse = options.inUse;
 		this.#selected = options.selected ?? (() => null);
 		this.#binding = options.binding ?? (() => "default");
-		this.#nativeApps = options.nativeApps === true;
+		this.#nativeApps = options.nativeApps ?? (() => false);
 	}
 
 	/** The computer the space's operator chose, if any (./cua.ts). */
@@ -500,7 +500,7 @@ export class Computer {
 	 */
 	async native(tool: unknown, args: unknown, timeoutMs = NATIVE_CALL_MS): Promise<NativeOutcome> {
 		const refuse = (why: string) => new HttpError(409, `${why}, so no native-app call was sent.`);
-		if (!this.#nativeApps) throw refuse("Native-app calls are off for this computer");
+		if (this.#nativeApps() !== true) throw refuse("Native-app calls are off for this computer");
 		if (this.#selected() !== "cua") throw refuse("Only an operator's Cua computer takes native-app calls");
 		const trace = currentTrace();
 		const admitted = trace?.request;

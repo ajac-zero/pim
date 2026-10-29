@@ -15,7 +15,8 @@ import { ControlRefused } from "./computer-control-runtime";
  * run ID from a call, conversation, task or usage ID. Pim has no authority
  * yet, because the harness doesn't promise a run identity a tool call can be
  * checked against (see "The harness's run" in the doc), so nothing makes a
- * binder: no tool, route, approval or startup code imports this file.
+ * binder outside tests: the desktop's tools (./extensions/desktop.ts) make
+ * one only where `Pim.nativeIdentityAuthority()` gives an authority.
  *
  * Every refusal is before anything is sent. A binding is dispatched at most
  * once, after the authority confirms the identity again, the lease is still

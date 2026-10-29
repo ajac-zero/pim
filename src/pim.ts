@@ -155,7 +155,10 @@ import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidget
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import type { ControlEvent } from "./computer-control";
-import { ControlCoordinator, ControlRefused } from "./computer-control-runtime";
+import { ControlCoordinator, ControlRefused, currentTrace } from "./computer-control-runtime";
+import { type NativeBinding, type NativeIdentityAuthority, NativeIdentityBinder } from "./cua-native-identity";
+import { DESKTOP_ACTIONS, DESKTOP_EXTENSION, describeOutcome, desktopActions, desktopExtension } from "./extensions/desktop";
+import type { NativeOutcome } from "../computer/native-outcome";
 import { asPersonRead, COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerLink, type ComputerStatus } from "./computer";
 import { bridgeFor, Cua, type CuaBridge, PROVIDER_KEY, selection } from "./cua";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
@@ -196,6 +199,8 @@ const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory", "pim.artifa
 const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, BROWSER_CLICK, BROWSER_TYPE]);
 /** Where the space keeps its computer's control state, if it opted in (see ./computer-control-runtime.ts). */
 const CONTROL_KEY = "computer_control";
+/** Where the space keeps its native-app calls' bindings, once it has a run authority (see ./cua-native-identity.ts). */
+const DESKTOP_BINDINGS_KEY = "native_bindings";
 /** What someone trying to take the browser over hears in a space under control state, where nobody can. */
 const TAKE_OVER_UNAVAILABLE =
 	"Taking over the browser isn't available in this space: Pim can't make sure its agents have stopped using it, so nothing you do is sent to it.";
@@ -504,6 +509,8 @@ export class Pim extends DurableAgent<Env> {
 		inUse: () => this.browser.watched(),
 		selected: () => selection(this.store.meta(PROVIDER_KEY), this.name),
 		binding: () => this.#computerBinding(),
+		// Only with a run authority, which Pim's own code doesn't give (`nativeIdentityAuthority`).
+		nativeApps: () => this.nativeIdentityAuthority() !== null,
 	});
 	/** The person's files, on their computer, which they and their agents share (see ./files.ts). */
 	readonly files = new Files(this.computer);
@@ -519,8 +526,11 @@ export class Pim extends DurableAgent<Env> {
 		}));
 	}
 	#control: ControlCoordinator | undefined;
-	/** Sends an agent's request to the computer, if the control state admits it; the agent is the one the server knows `session` talks as. */
-	async #controlled<T>(session: string, requestId: string, send: () => Promise<T>, bindingId?: string): Promise<T> {
+	/**
+	 * Sends an agent's request to the computer, if the control state admits it; the agent is the one the server knows `session` talks as.
+	 * `runId` is a native-app call's run, from its binding's authority (`#desktopSend`), never a model's.
+	 */
+	async #controlled<T>(session: string, requestId: string, send: () => Promise<T>, bindingId?: string, runId?: string): Promise<T> {
 		if (!this.control.enabled) {
 			// The operator's computer takes only what the control state admits; without one, nothing.
 			if (this.computer.selected()) throw new ControlRefused("not_enabled", "this space's computer takes only requests its control state admits, and it has none");
@@ -529,7 +539,92 @@ export class Pim extends DurableAgent<Env> {
 		// A live view of the browser opened before the space opted in is recorded and ended first, and one that can't be recorded refuses the request.
 		for (const connection of this.getConnections<SocketState>(BROWSER_TAG)) this.#revokeView(connection);
 		const agentId = this.#roleOf(session).agent.id;
-		return this.control.dispatch({ space: this.name, agentId, requestId, ...(bindingId ? { bindingId } : {}) }, send);
+		return this.control.dispatch({ space: this.name, agentId, requestId, ...(bindingId ? { bindingId } : {}), ...(runId === undefined ? {} : { runId }) }, send);
+	}
+
+	/**
+	 * What vouches for a native-app call's run (./cua-native-identity.ts): none.
+	 * The harness publishes no run identity a tool call can be checked against
+	 * (docs/pi-durable-run-identity.md), and none may be made up from a call,
+	 * task or conversation, so the desktop's tools are offered nowhere and
+	 * `Computer.native` stays off. Only tests give one, a stand-in.
+	 */
+	protected nativeIdentityAuthority(): NativeIdentityAuthority | null {
+		return null;
+	}
+
+	#desktopBinder: NativeIdentityBinder | undefined;
+	/**
+	 * The space's native-call binder, while it has a run authority and its
+	 * computer is the operator's Cua VM; otherwise null, and nothing native is
+	 * offered, bound or sent. A paired computer or a Sprite never gets one.
+	 */
+	#desktop(): NativeIdentityBinder | null {
+		const authority = this.nativeIdentityAuthority();
+		if (!authority || this.computer.selected() !== "cua") return null;
+		return (this.#desktopBinder ??= new NativeIdentityBinder(
+			this.name,
+			{ read: () => this.store.meta(DESKTOP_BINDINGS_KEY), write: (value) => this.store.setMeta(DESKTOP_BINDINGS_KEY, value) },
+			{
+				authority,
+				lease: () => {
+					const state = this.control.state;
+					return state?.owner === "agent" ? state.lease : null;
+				},
+			},
+		));
+	}
+
+	/**
+	 * Sends a bound native-app call as one request the control state admits:
+	 * its chat's, as the agent the server knows that chat talks as, which must
+	 * be the one its binding was vouched for, in the binding's run. A refusal
+	 * before anything left the space is a `ControlRefused`, which closes the
+	 * binding; anything after may have run.
+	 */
+	async #desktopSend(binding: NativeBinding, session: string, requestId: string, approvalId?: string): Promise<NativeOutcome> {
+		const { conversationId, agentId, runAnchor } = binding.identity;
+		if (conversationId !== session || this.#roleOf(session).agent.id !== agentId) {
+			throw new ControlRefused("identity", "the call's chat or agent isn't the one asking");
+		}
+		return this.#controlled(
+			session,
+			requestId,
+			() =>
+				this.computer.native(binding.tool, binding.arguments).catch((error: unknown) => {
+					if (currentTrace()?.sent === false) throw new ControlRefused("not_sent", errorMessage(error));
+					throw error;
+				}),
+			approvalId,
+			runAnchor,
+		);
+	}
+
+	/** Runs an approved desktop action: its binding, once, as the approval's request, under the lease it was filed under. */
+	async #desktopDecide(bindingId: string, request: { readonly session: string; readonly approval?: string }): Promise<string> {
+		const desktop = this.#desktop();
+		if (!desktop || !request.approval) return "The desktop's apps aren't available to agents in this space now, so nothing was sent.";
+		const approval = request.approval;
+		const sent = await desktop.dispatch(bindingId, (binding) => this.#desktopSend(binding, request.session, `approval:${approval}`, approval));
+		if (!sent.ok) return sent.message;
+		const said = describeOutcome(sent.outcome);
+		return said.images.length > 0 ? `${said.text}\n(${said.images.length} image(s) left out.)` : said.text;
+	}
+
+	/** The desktop's tools, while the space has a binder (`#desktop`); acting on the desktop follows its permissions. */
+	#installDesktop(services: PimServices): void {
+		const desktop = this.#desktop();
+		if (!desktop) {
+			this.registry.install(defineExtension({ name: DESKTOP_EXTENSION, tools: [] }));
+			return;
+		}
+		this.registry.install(
+			desktopExtension(services, {
+				bind: (claim, tool, args) => desktop.bind(claim, tool, args),
+				read: (binding) =>
+					desktop.dispatch(binding.id, (bound) => this.#desktopSend(bound, bound.identity.conversationId, `call:${bound.identity.conversationId}:${bound.identity.callId}`)),
+			}),
+		);
 	}
 	readonly #files: FileServices = {
 		computer: this.computer,
@@ -693,6 +788,7 @@ export class Pim extends DurableAgent<Env> {
 		browserClickAction(this.browser, (conversation) => this.#browserWindowOf(conversation)),
 		browserTypeAction(this.browser, (conversation) => this.#browserWindowOf(conversation)),
 		writeSkillAction(this.skills, this.#skillWriters, this.files),
+		...desktopActions((bindingId, request) => this.#desktopDecide(bindingId, request)),
 	];
 
 	/**
@@ -702,8 +798,11 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	#offeredActions(): GatedAction[] {
 		const computer = this.computer.paired();
+		const desktop = this.#desktop() !== null;
 		const admin = this.store.meta(OWNER_ADMIN_KEY) === "1";
-		return this.#ownActions.filter((action) => (computer || !COMPUTER_ACTIONS.has(action.name)) && (admin || action.name !== ADD_CUSTOM_APP));
+		return this.#ownActions.filter(
+			(action) => (computer || !COMPUTER_ACTIONS.has(action.name)) && (desktop || !DESKTOP_ACTIONS.has(action.name)) && (admin || action.name !== ADD_CUSTOM_APP),
+		);
 	}
 
 	/** Every action an approval can be for: Pim's own, and the extensions'. */
@@ -764,6 +863,7 @@ export class Pim extends DurableAgent<Env> {
 			);
 			this.#installImageGeneration();
 			this.#installBrowser(services);
+			this.#installDesktop(services);
 			// Restored connections reconnect in the background after a wake; give them a moment.
 			await this.mcp.waitForConnections({ timeout: 5_000 });
 			this.#migrateAlwaysApproved();
@@ -1971,7 +2071,7 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	async #approvalFiled(approval: Approval, isNew: boolean): Promise<string | null> {
 		// The lease the request is filed under, so a takeover before it's decided is found out when it runs.
-		if (isNew && COMPUTER_ACTIONS.has(approval.action)) {
+		if (isNew && (COMPUTER_ACTIONS.has(approval.action) || DESKTOP_ACTIONS.has(approval.action))) {
 			try {
 				this.control.bind(approval.id);
 			} catch (error) {
@@ -2071,13 +2171,15 @@ export class Pim extends DurableAgent<Env> {
 		if (!this.store.decideApproval(id, decision === "approve" ? "approved" : "denied", note ?? null, auto ?? "user")) {
 			throw new HttpError(409, `Approval ${id} is already ${approval.status}`);
 		}
+		// A desktop action denied, timed out or stopped is never sent: its binding is closed.
+		if (decision === "deny" && DESKTOP_ACTIONS.has(approval.action)) this.#desktop()?.release(String((approval.args as { binding?: unknown }).binding));
 		if (decision === "approve") {
 			const action = this.actions.find((candidate) => candidate.name === approval.action);
 			let result: string;
 			try {
 				result = action
 					? await this.keepAliveWhile(() => {
-							const run = () => action.run(approval.args as never, { session: approval.session });
+							const run = () => action.run(approval.args as never, { session: approval.session, approval: id });
 							// Checked now, after the decision, not when it was asked: the person may have taken over since.
 							return COMPUTER_ACTIONS.has(action.name) ? this.#controlled(approval.session, `approval:${id}`, run, id) : run();
 						})
@@ -5863,6 +5965,7 @@ export class Pim extends DurableAgent<Env> {
 		this.registry.install(this.#skillsExtension(services));
 		this.registry.install(approvalsExtension(services, this.#offeredActions()));
 		this.#installBrowser(services);
+		this.#installDesktop(services);
 		this.#installAbilities(services);
 		this.#installApps();
 	}

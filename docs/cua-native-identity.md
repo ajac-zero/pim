@@ -2,7 +2,7 @@
 
 `src/cua-native-identity.ts` binds a native-app call (docs/cua-native-mcp.md) to who makes it before anyone is asked to approve it. The binding records the space, agent, conversation, tool task, call and run, the curated tool with a frozen copy of its arguments, and the agent's control lease. It is stored before it is returned. An approval filed after it, or approved automatically, can only be about that exact call. The binding is sent at most once, only when asked to, and only after the call's identity, lease and run are checked again. Every binding is kept, so a spent tool task or call is never bound again.
 
-**Nothing uses it.** No tool, route, approval, setting or startup code imports the file, and Pim has no identity authority to give it. The harness doesn't publish a run identity that a tool call can be checked against (see "The harness's run"). `Computer.native` keeps its guards: `nativeApps` is off unless given, it needs a trace that `ControlCoordinator.dispatch` made with a `runId`, it needs the operator's Cua computer, and it makes one call per request. `Computer.call` still refuses `native_tool`. `#controlled` in `src/pim.ts` still passes no `runId`, and the stored approvals (`Approval` in `src/store.ts`) and the coordinator's lease bindings are unchanged.
+**Wired, with no authority.** The desktop's tools (`src/extensions/desktop.ts`, "The space's desktop tools" in docs/cua-native-mcp.md) make a binder per space and use it as steps 3 to 6 below describe, but only when `Pim.nativeIdentityAuthority()` gives an authority, and Pim's returns null: the harness doesn't publish a run identity that a tool call can be checked against (see "The harness's run"). So no deployment or preview makes a binder, offers the tools or turns `Computer.native` on. Only the tests give a stand-in authority. `Computer.native` keeps its guards: it needs a trace that `ControlCoordinator.dispatch` made with a `runId`, it needs the operator's Cua computer, and it makes one call per request. `Computer.call` still refuses `native_tool`.
 
 ## The harness's run
 
@@ -125,7 +125,7 @@ On loading, the document is checked whole: its size, its JSON, its version, its 
 
 ## What a wiring change would need
 
-This is for a separate, reviewed change, after the harness's run is settled as above:
+Steps 3 to 6 are wired behind the authority (docs/cua-native-mcp.md, "The space's desktop tools"), and tested only with a stand-in authority. Steps 1 and 2 remain, and nothing may give Pim an authority until both are done:
 
 1. An authority for Pim's harness that meets the contract, with its own tests against the real harness.
 2. **Required:** the authority's check and the claim made in one harness transaction, as "The gap between the authority and the claim" describes. The binder's document lives in the harness as a Pim-defined document. The present binder takes synchronous storage and calls the authority in a separate step, so its document logic has to run inside that transaction instead. That is a reviewed change to the binder, with tests for an abort, a reset and a deletion committed on each side of the claim.

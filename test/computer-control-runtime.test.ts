@@ -503,7 +503,7 @@ describe("a native-app call, through Computer.call and the coordinator", () => {
 		let link: ComputerLink | null = null;
 		const computer: Computer = new Computer({
 			selected: () => (sprite ? null : "cua"),
-			nativeApps,
+			nativeApps: () => nativeApps,
 			meta: { meta: (key) => meta.get(key), setMeta: (key, value) => void meta.set(key, value), deleteMeta: (key) => void meta.delete(key) },
 			sockets: () => [],
 			wake: async () => {

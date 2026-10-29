@@ -621,7 +621,7 @@ export class Pim extends DurableAgent<Env> {
 			session,
 			requestId,
 			() =>
-				this.computer.native(binding.tool, binding.arguments, undefined, gate).catch((error: unknown) => {
+				this.computer.native(binding.tool, binding.arguments, gate).catch((error: unknown) => {
 					if (currentTrace()?.sent === false) throw new ControlRefused("not_sent", errorMessage(error));
 					throw error;
 				}),

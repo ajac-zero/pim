@@ -505,14 +505,15 @@ export class Computer {
 	 * convert (a getter, `toJSON`, a date) is refused, not converted. The host
 	 * checks the arguments against the tool's curated schema.
 	 *
-	 * `gate` is the caller's last word on the call, at the send itself: after
-	 * every wait for the computer, the call is handed to it as `transmit`,
-	 * which checks the link and sends in one synchronous step. The gate calls
-	 * it, at most once, only once it has authorized the call, with nothing
-	 * awaited between its last check and that call; a gate that throws, or
-	 * returns without calling it, leaves the call unsent.
+	 * `gate` is the caller's last word on the call, at the send itself, and
+	 * every native-app call has one: a call without it is refused, unsent.
+	 * After every wait for the computer, the call is handed to it as
+	 * `transmit`, which checks the link and sends in one synchronous step.
+	 * The gate calls it, at most once, only once it has authorized the call,
+	 * with nothing awaited between its last check and that call; a gate that
+	 * throws, or returns without calling it, leaves the call unsent.
 	 */
-	async native(tool: unknown, args: unknown, timeoutMs = NATIVE_CALL_MS, gate?: NativeGate): Promise<NativeOutcome> {
+	async native(tool: unknown, args: unknown, gate: NativeGate, timeoutMs = NATIVE_CALL_MS): Promise<NativeOutcome> {
 		const refuse = (why: string) => new HttpError(409, `${why}, so no native-app call was sent.`);
 		if (this.#nativeApps() !== true) throw refuse("Native-app calls are off for this computer");
 		if (this.#selected() !== "cua") throw refuse("Only an operator's Cua computer takes native-app calls");
@@ -521,6 +522,7 @@ export class Computer {
 		if (!trace || !admitted) throw refuse("A native-app call is made only within a request the control state admitted");
 		if (admitted.runId === undefined) throw refuse("The request names no run");
 		if (trace.native) throw refuse("This request has made its native-app call already");
+		if (typeof gate !== "function") throw refuse("A native-app call is sent only through its caller's gate");
 		// The shared reader copies the arguments as plain JSON data, read once each, and refuses anything else; it never throws.
 		const request = readNativeRequest({ owner: admitted.space, agentId: admitted.agentId, runId: admitted.runId, callId: admitted.requestId, tool, arguments: args });
 		if (!request) throw new HttpError(400, "The native-app call names no curated tool, or its arguments aren't a plain JSON object of a bounded size, so nothing was sent.");
@@ -530,6 +532,7 @@ export class Computer {
 	}
 
 	async #call<T>(op: string, args: Record<string, unknown>, timeoutMs: number, counts = true, gate?: NativeGate): Promise<T> {
+		// Only `native` passes a gate, and it always does; other calls send as they always have.
 		if (!this.paired()) throw new HttpError(404, "No computer is connected. The person can connect one in Settings → Computer.");
 		const refused = this.#refusal(op);
 		if (refused) throw refused;

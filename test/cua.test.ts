@@ -1240,7 +1240,7 @@ describe("a space whose operator chose its Cua VM", () => {
 
 			// A space that isn't turned on, which is every real one: nothing offered, Computer.native off.
 			expect(await cua.within(desktopTools)).toEqual([]);
-			expect(await cua.within((instance) => instance.computer.native("list_apps", {}).catch((error: Error) => error.message))).toMatch(/Native-app calls are off/);
+			expect(await cua.within((instance) => instance.computer.native("list_apps", {}, async (transmit) => transmit()).catch((error: Error) => error.message))).toMatch(/Native-app calls are off/);
 
 			// A Sprite, turned on: nothing offered, and no native-app call goes to it.
 			const sprite = await space(
@@ -1249,7 +1249,7 @@ describe("a space whose operator chose its Cua VM", () => {
 				(owner) => desktopSpaces.add(owner),
 			);
 			expect(await sprite.within(desktopTools)).toEqual([]);
-			expect(await sprite.within((instance) => instance.computer.native("list_apps", {}).catch((error: Error) => error.message))).toMatch(
+			expect(await sprite.within((instance) => instance.computer.native("list_apps", {}, async (transmit) => transmit()).catch((error: Error) => error.message))).toMatch(
 				/Only an operator's Cua computer takes native-app calls/,
 			);
 
@@ -1727,7 +1727,7 @@ describe("a space whose operator chose its Cua VM", () => {
 								selected: instance.computer.selected(),
 								offered: tools.some(({ tool }) => tool.name === "file_read"),
 								desktop: desktopTools(instance as unknown as Pim),
-								native: await instance.computer.native("list_apps", {}).then(
+								native: await instance.computer.native("list_apps", {}, async (transmit) => transmit()).then(
 									() => "sent",
 									(error: Error) => error.message,
 								),

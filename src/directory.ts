@@ -2,6 +2,7 @@ import { getAgentByName } from "agents";
 import { DurableObject } from "cloudflare:workers";
 import { base64UrlEncode } from "./auth/encoding";
 import { digestHex } from "./auth/store";
+import { HOST_SEEN_MS, HOST_TOKEN_PREFIX, type HostRequest, type HostStatus, type HostSync, RETAKE_MS } from "./computer-host";
 
 /**
  * The accounts on this Pim: which owner each username belongs to, who the
@@ -29,6 +30,9 @@ import { digestHex } from "./auth/store";
  * erased (it then refuses every request, however late) and both objects are
  * checked empty. An account being deleted is `deleting` until then, and
  * already opens nothing.
+ *
+ * It also keeps this Pim's computer host, the machine that keeps people's
+ * computers, and what it is asked to do (./computer-host.ts).
  */
 
 export type AccountStatus = "pending" | "active" | "suspended" | "deleting" | "deleted";
@@ -145,6 +149,15 @@ CREATE TABLE IF NOT EXISTS rate_limits (
 	PRIMARY KEY (name, key)
 );
 CREATE INDEX IF NOT EXISTS rate_limits_by_end ON rate_limits (window_ends);
+CREATE TABLE IF NOT EXISTS computer_requests (
+	owner_id TEXT PRIMARY KEY,
+	id TEXT NOT NULL UNIQUE,
+	op TEXT NOT NULL,
+	name TEXT NOT NULL,
+	token TEXT,
+	requested_at INTEGER NOT NULL,
+	taken_at INTEGER
+);
 `;
 
 type Row = Record<string, SqlStorageValue>;
@@ -622,6 +635,113 @@ export class Directory extends DurableObject<Env> {
 			registrationsLastDay: Number(this.#sql("SELECT COUNT(*) AS n FROM accounts WHERE created_at >= ?", now - DAY_MS).one().n),
 			invitesUnused: Number(this.#sql("SELECT COUNT(*) AS n FROM invites WHERE used_at IS NULL").one().n),
 			cleanups: { queued: Number(cleanups.queued), failing: Number(cleanups.failing ?? 0) },
+		};
+	}
+
+	// The computer host (./computer-host.ts)
+
+	/** Pairs a computer host, in place of any other: its token is returned only here, and only its digest is kept. */
+	async pairComputerHost(now = Date.now()): Promise<string> {
+		const token = `${HOST_TOKEN_PREFIX}${base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)))}`;
+		this.#setMeta("computer_host_token", await digestHex(token));
+		this.#setMeta("computer_host", JSON.stringify({ pairedAt: now }));
+		log("computer_host_paired", {});
+		return token;
+	}
+
+	/** Forgets the computer host: its token stops working. The computers it keeps go on, connected to their spaces. */
+	forgetComputerHost(): void {
+		this.#setMeta("computer_host_token", null);
+		this.#setMeta("computer_host", null);
+		log("computer_host_forgotten", {});
+	}
+
+	/** Whether this Pim has a computer host, so each space's computer is one it keeps. */
+	hasComputerHost(): boolean {
+		return this.#meta("computer_host_token") !== null;
+	}
+
+	computerHost(now = Date.now()): HostStatus {
+		const stored = this.#meta("computer_host");
+		const host = stored ? (JSON.parse(stored) as { pairedAt: number; seenAt?: number; image?: string; version?: string; machines?: number; running?: number }) : null;
+		return {
+			paired: host !== null,
+			pairedAt: host?.pairedAt ?? null,
+			seenAt: host?.seenAt ?? null,
+			connected: host?.seenAt !== undefined && now - host.seenAt < HOST_SEEN_MS,
+			image: host?.image ?? null,
+			version: host?.version ?? null,
+			machines: host?.machines ?? 0,
+			running: host?.running ?? 0,
+			pending: Number(this.#sql("SELECT COUNT(*) AS n FROM computer_requests").one().n),
+		};
+	}
+
+	/** Asks the host to make `ownerId`'s computer, `name`, which connects with `token`, in place of anything asked for them before. */
+	requestComputer(ownerId: string, name: string, token: string, now = Date.now()): void {
+		this.#request(ownerId, "create", name, token, now);
+	}
+
+	/** Asks the host to remove `ownerId`'s computer, `name`, with everything on it. */
+	requestComputerRemoval(ownerId: string, name: string, now = Date.now()): void {
+		this.#request(ownerId, "delete", name, null, now);
+	}
+
+	#request(ownerId: string, op: HostRequest["op"], name: string, token: string | null, now: number): void {
+		this.#sql(
+			"INSERT OR REPLACE INTO computer_requests (owner_id, id, op, name, token, requested_at, taken_at) VALUES (?, ?, ?, ?, ?, ?, NULL)",
+			ownerId,
+			crypto.randomUUID(),
+			op,
+			name,
+			token,
+			now,
+		);
+		log("computer_requested", { owner: ownerId, op });
+	}
+
+	/**
+	 * The host asked for work, with its token, and reported what it did with
+	 * work it took before: done requests go, and a space whose computer
+	 * couldn't be made hears why. Returns the requests to do now, or null for
+	 * a token that isn't the host's.
+	 */
+	async syncComputerHost(token: string, sync: HostSync, now = Date.now()): Promise<{ requests: HostRequest[] } | null> {
+		const known = this.#meta("computer_host_token");
+		if (!known || !token.startsWith(HOST_TOKEN_PREFIX) || (await digestHex(token)) !== known) return null;
+		const stored = JSON.parse(this.#meta("computer_host") ?? "{}") as Record<string, unknown>;
+		this.#setMeta(
+			"computer_host",
+			JSON.stringify({
+				...stored,
+				seenAt: now,
+				...(sync.image ? { image: sync.image } : {}),
+				...(sync.version ? { version: sync.version } : {}),
+				...(sync.machines ? { machines: sync.machines.length, running: sync.machines.filter((machine) => machine.running).length } : {}),
+			}),
+		);
+		for (const result of sync.results) {
+			const row = this.#sql("SELECT owner_id, op FROM computer_requests WHERE id = ?", result.id).toArray()[0];
+			if (!row) continue;
+			const ownerId = String(row.owner_id);
+			log("computer_request_done", { owner: ownerId, op: row.op, ...(result.error ? { error: result.error } : {}) });
+			// A removal that failed is given again later; a computer that couldn't be made is the space's to ask for again.
+			if (result.error && row.op === "delete") continue;
+			this.#sql("DELETE FROM computer_requests WHERE id = ?", result.id);
+			if (result.error) {
+				await (await getAgentByName(this.env.Pim, ownerId)).computerSetupFailed(result.error).catch((error: unknown) => {
+					console.error("telling a space its computer couldn't be made", error);
+				});
+			}
+		}
+		const due = this.#sql("SELECT * FROM computer_requests WHERE taken_at IS NULL OR taken_at <= ? ORDER BY requested_at LIMIT 20", now - RETAKE_MS).toArray();
+		for (const row of due) this.#sql("UPDATE computer_requests SET taken_at = ? WHERE id = ?", now, row.id);
+		return {
+			requests: due.map((row): HostRequest =>
+				row.op === "create"
+					? { id: String(row.id), op: "create", name: String(row.name), token: String(row.token) }
+					: { id: String(row.id), op: "delete", name: String(row.name) },
+			),
 		};
 	}
 

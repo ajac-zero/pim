@@ -544,6 +544,16 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 			}
 			if (route === "GET /sign-in") return json({ providers: signInProviders(env, url.origin) });
 			if (route === "GET /deployment") return json(readDeployment(env));
+			// The machine that keeps everyone's computers (./computer-host.ts): its token is shown only when it's paired.
+			if (route === "GET /computer-host") return json(await dir.computerHost());
+			if (route === "POST /computer-host") {
+				const token = await dir.pairComputerHost();
+				return json({ ...(await dir.computerHost()), token }, 201);
+			}
+			if (route === "DELETE /computer-host") {
+				await dir.forgetComputerHost();
+				return json(await dir.computerHost());
+			}
 			if (route === "GET /default-agent") return json({ agent: await gallery(env).defaultAgent() });
 			if (route === "PUT /default-agent") {
 				const id = (await body()).agent;

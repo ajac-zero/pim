@@ -652,22 +652,47 @@ const translations = {
     settingsComputer: "Computer",
     computerDescription:
       "Connect a computer of yours, such as a server, a VM or a box at home, and your agents run commands, browse and keep your files there. Files shows its folder.",
-    computerDescriptionStartable:
-      "Your agents run commands, browse and keep your files on a computer: one Pim starts for you, or one of yours, such as a server, a VM or a box at home. Files shows its folder.",
+    computerDescriptionManaged:
+      "This Pim keeps a computer for you, running Omarchy, all the time. Your agents run commands, browse and keep your files there, and you can use it yourself from Computer: sign in to sites in its browser, or take over from an agent at any time. Files shows its folder.",
     computerWaiting: "Waiting for its first connection",
     computerOnline: "Online",
     computerOffline: "Offline",
     computerFilesIn: "files in {folder}",
     computerNoBrowser: "no browser: install Chrome there",
     computerPairedOn: "Token made {date}",
-    computerStarting: "Starting your computer…",
-    computerStartedOn: "Started {date}; it connects in a minute or two",
-    computerStartedByPim: "started by Pim",
-    computerAsleep: "Asleep",
-    startComputer: "Start a computer for me",
-    connectOwnComputer: "Connect my own",
-    removeStartedComputerConfirm:
-      "Remove this computer? Pim deletes it, with your files and everything installed there. This can't be undone.",
+    computerSettingUp: "Setting up your computer…",
+    computerSettingUpHint:
+      "The first time takes a few minutes. It shows up here once it's ready.",
+    computerSetupFailed: "Your computer couldn't be set up.",
+    computerNotSetUp: "Not set up",
+    computerNone:
+      "You have no computer yet. Connect one in Settings, and you can use its desktop here.",
+    computerOfflineManaged:
+      "Your computer isn't connected right now. It comes back on its own; if it doesn't, tell whoever runs this Pim.",
+    computerNoScreen:
+      "Your computer doesn't share its desktop. Run pim-computer in its desktop session, with cua-spacesd, to use it here.",
+    computerFullScreen: "Full screen",
+    computerConnecting: "Connecting to your computer…",
+    computerCantPlay:
+      "This browser can't show your computer's desktop. Try a recent Chrome, Edge, Safari or Firefox.",
+    computerDesktop: "Your computer's desktop",
+    computerOpen: "Open",
+    computerHost: "Computers",
+    computerHostDescription:
+      "Pair a Linux machine with KVM that runs Cua, and Pim keeps a computer running Omarchy for everyone here, all the time, on it. Without one, people connect computers of their own.",
+    computerHostWaiting: "Waiting for the host to connect",
+    computerHostMachines: "Computers: {count} · running: {running}",
+    computerHostPending: "Waiting: {count}",
+    computerHostSeen: "last seen {date}",
+    computerHostRemove: "Remove computer host",
+    computerHostRemoveConfirm:
+      "Remove the computer host? Its token stops working, so it can't set up new computers. The computers it keeps go on running, connected to their spaces.",
+    computerHostTokenOnce:
+      "Run this on the host, with Cua's cua command installed. It holds the host's token, shown only now.",
+    computerHostCommand: "With Node.js 22.18 or later:",
+    computerHostNewTokenConfirm:
+      "Make a new token? The one the host has now stops working.",
+    computerHostPair: "Pair a computer host",
     removeComputer: "Remove computer",
     removeComputerConfirm:
       "Remove this computer? Its token stops working, and your agents can't use it anymore. Your files stay on it.",
@@ -702,8 +727,6 @@ const translations = {
     browserKeyboard: "Type into the page",
     browserConnecting: "Connecting to the browser on your computer…",
     browserGone: "This window closed. Reload this page to open it again.",
-    browserAsleep:
-      "Your computer is asleep. Take over wakes it and opens this page again.",
     noFilePreview: "There's no preview for this file. Download it to open it.",
     deleteFileNamed: "Delete {name}",
     deleteFileConfirm:
@@ -1703,22 +1726,47 @@ const translations = {
     settingsComputer: "Computadora",
     computerDescription:
       "Conecta una computadora tuya, como un servidor, una máquina virtual o un equipo en casa, y tus agentes ejecutarán comandos, navegarán y guardarán tus archivos allí. Archivos muestra su carpeta.",
-    computerDescriptionStartable:
-      "Tus agentes ejecutan comandos, navegan y guardan tus archivos en una computadora: una que Pim inicia para ti, o una tuya, como un servidor, una máquina virtual o un equipo en casa. Archivos muestra su carpeta.",
+    computerDescriptionManaged:
+      "Este Pim mantiene una computadora para ti, con Omarchy, siempre encendida. Tus agentes ejecutan comandos, navegan y guardan tus archivos allí, y puedes usarla tú desde Computadora: inicia sesión en sitios en su navegador o toma el control de un agente cuando quieras. Archivos muestra su carpeta.",
     computerWaiting: "Esperando su primera conexión",
     computerOnline: "En línea",
     computerOffline: "Sin conexión",
     computerFilesIn: "archivos en {folder}",
     computerNoBrowser: "sin navegador: instala Chrome allí",
     computerPairedOn: "Token creado el {date}",
-    computerStarting: "Iniciando tu computadora…",
-    computerStartedOn: "Iniciada el {date}; se conecta en uno o dos minutos",
-    computerStartedByPim: "iniciada por Pim",
-    computerAsleep: "Dormida",
-    startComputer: "Iniciar una computadora para mí",
-    connectOwnComputer: "Conectar la mía",
-    removeStartedComputerConfirm:
-      "¿Quitar esta computadora? Pim la elimina, con tus archivos y todo lo instalado en ella. No se puede deshacer.",
+    computerSettingUp: "Preparando tu computadora…",
+    computerSettingUpHint:
+      "La primera vez tarda unos minutos. Aparece aquí cuando está lista.",
+    computerSetupFailed: "No se pudo preparar tu computadora.",
+    computerNotSetUp: "Sin preparar",
+    computerNone:
+      "Aún no tienes computadora. Conecta una en Configuración y podrás usar su escritorio aquí.",
+    computerOfflineManaged:
+      "Tu computadora no está conectada ahora. Vuelve sola; si no, avisa a quien administra este Pim.",
+    computerNoScreen:
+      "Tu computadora no comparte su escritorio. Ejecuta pim-computer en su sesión de escritorio, con cua-spacesd, para usarla aquí.",
+    computerFullScreen: "Pantalla completa",
+    computerConnecting: "Conectando con tu computadora…",
+    computerCantPlay:
+      "Este navegador no puede mostrar el escritorio de tu computadora. Prueba un Chrome, Edge, Safari o Firefox reciente.",
+    computerDesktop: "El escritorio de tu computadora",
+    computerOpen: "Abrir",
+    computerHost: "Computadoras",
+    computerHostDescription:
+      "Vincula una máquina Linux con KVM que ejecute Cua, y Pim mantendrá en ella una computadora con Omarchy para cada persona aquí, siempre encendida. Sin ella, cada quien conecta una computadora propia.",
+    computerHostWaiting: "Esperando a que el host se conecte",
+    computerHostMachines: "Computadoras: {count} · encendidas: {running}",
+    computerHostPending: "En espera: {count}",
+    computerHostSeen: "visto por última vez {date}",
+    computerHostRemove: "Quitar el host de computadoras",
+    computerHostRemoveConfirm:
+      "¿Quitar el host de computadoras? Su token deja de funcionar, así que no puede preparar computadoras nuevas. Las que mantiene siguen encendidas y conectadas a sus espacios.",
+    computerHostTokenOnce:
+      "Ejecuta esto en el host, con el comando cua de Cua instalado. Lleva el token del host, que solo se muestra ahora.",
+    computerHostCommand: "Con Node.js 22.18 o posterior:",
+    computerHostNewTokenConfirm:
+      "¿Crear un token nuevo? El que tiene el host ahora deja de funcionar.",
+    computerHostPair: "Vincular un host de computadoras",
     removeComputer: "Quitar computadora",
     removeComputerConfirm:
       "¿Quitar esta computadora? Su token deja de funcionar y tus agentes ya no pueden usarla. Tus archivos se quedan en ella.",
@@ -1754,8 +1802,6 @@ const translations = {
     browserConnecting: "Conectando con el navegador de tu computadora…",
     browserGone:
       "Esta ventana se cerró. Recarga esta página para abrirla de nuevo.",
-    browserAsleep:
-      "Tu computadora está dormida. Tomar el control la despierta y vuelve a abrir esta página.",
     noFilePreview:
       "Este archivo no tiene vista previa. Descárgalo para abrirlo.",
     deleteFileNamed: "Eliminar {name}",

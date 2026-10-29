@@ -55,16 +55,19 @@ export default defineConfig(({ mode }) => {
         },
       },
       {
-        // pim-computer, which people download from their Pim to connect a computer (../computer).
+        // pim-computer, which people download from their Pim to connect a computer, and pim-host,
+        // which the admin downloads to keep everyone's computers (../computer).
         name: "pim-computer",
         generateBundle() {
-          this.emitFile({
-            type: "asset",
-            fileName: "pim-computer.ts",
-            source: readFileSync(
-              new URL("../computer/pim-computer.ts", import.meta.url),
-            ),
-          });
+          for (const file of ["pim-computer.ts", "pim-host.ts"]) {
+            this.emitFile({
+              type: "asset",
+              fileName: file,
+              source: readFileSync(
+                new URL(`../computer/${file}`, import.meta.url),
+              ),
+            });
+          }
         },
       },
       tanstackRouter({ target: "react", autoCodeSplitting: true }),

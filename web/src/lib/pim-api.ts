@@ -802,11 +802,11 @@ export const fileContentUrl = (path: string, download = false) =>
  */
 export type ComputerStatus = {
   state: "none" | "offline" | "online";
-  /** Whether Pim started it: it sleeps when unused and wakes when needed, so offline is asleep. */
+  /** Whether it's the one this Pim's computer host keeps for you: permanent, and set up for you. */
   managed: boolean;
-  /** Whether this Pim starts computers for people, so you needn't bring one. */
-  startable?: boolean;
   pairedAt: number | null;
+  /** Why the computer host couldn't set it up, until it connects. */
+  error: string | null;
   /** What it said about itself when it last connected. */
   computer: {
     agent: string;
@@ -818,15 +818,31 @@ export type ComputerStatus = {
     root: string;
     /** The Chrome your agents browse with there, or null where it has none. */
     browser: string | null;
+    /** Whether it streams its desktop, for you to use on the Computer page. */
+    screen: boolean;
     connectedAt: number;
   } | null;
+};
+
+/** The machine that keeps everyone's computers, as the admin sees it. */
+export type ComputerHostStatus = {
+  paired: boolean;
+  pairedAt: number | null;
+  /** When it last asked for work, and whether that's recent enough to call it connected. */
+  seenAt: number | null;
+  connected: boolean;
+  image: string | null;
+  version: string | null;
+  machines: number;
+  running: number;
+  pending: number;
 };
 
 /** The browser your agents share: whether this Pim has one, and the page a chat's window shows when it's open. */
 export type BrowserStatus = {
   available: boolean;
-  /** The page it shows; `asleep` while the computer Pim started sleeps, which taking it over wakes. */
-  page: { url: string; title: string; asleep?: boolean } | null;
+  /** The page it shows. */
+  page: { url: string; title: string } | null;
 };
 
 /** A picture of the page a chat's window shows, as fetched at `at`. */
@@ -1237,8 +1253,8 @@ export const pim = {
   /** Pairs a computer in place of any other; its token is shown only now. */
   pairComputer: () =>
     call<ComputerStatus & { token: string }>("/computer", { method: "POST" }),
-  /** Has Pim start a computer for you; it connects once it has booted. */
-  startComputer: () =>
+  /** Asks the computer host to set up the computer it keeps for you again, after it couldn't. */
+  setUpComputer: () =>
     call<ComputerStatus>("/computer", {
       method: "POST",
       body: JSON.stringify({ managed: true }),
@@ -1741,6 +1757,15 @@ export const admin = {
     call<{ providers: SignInProviderSettings[] }>("/admin/sign-in").then(
       (body) => body.providers,
     ),
+  /** The machine that keeps everyone's computers. */
+  computerHost: () => call<ComputerHostStatus>("/admin/computer-host"),
+  /** Pairs a computer host in place of any other; its token is shown only now. */
+  pairComputerHost: () =>
+    call<ComputerHostStatus & { token: string }>("/admin/computer-host", {
+      method: "POST",
+    }),
+  forgetComputerHost: () =>
+    call<ComputerHostStatus>("/admin/computer-host", { method: "DELETE" }),
   /** How this deployment runs, and the variables that say so. */
   deployment: () =>
     call<{ settings: DeploymentSettings; variables: DeploymentVariable[] }>(

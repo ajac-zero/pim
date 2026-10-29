@@ -18,7 +18,6 @@ export default defineConfig({
 			// Spotify's client, so its sign-in is tested as the deployment offers it.
 			// A content origin, so public artifact links are on.
 			// Traces with their content, so the tests check what an operator who opts in would see.
-			// Computers Pim starts as Fly.io Sprites, whose API the tests stand in for.
 			// A local Chrome, which the tests' computers browse with (test/helpers.ts's `testBrowser`).
 			miniflare: {
 				browserRendering: { binding: "BROWSER" },
@@ -47,7 +46,6 @@ export default defineConfig({
 					SPOTIFY_CLIENT_ID: "spotify-client",
 					SPOTIFY_CLIENT_SECRET: "spotify-secret",
 					OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "true",
-					SPRITES_TOKEN: "sprites-test-token",
 				},
 			},
 		}),

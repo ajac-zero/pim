@@ -74,7 +74,6 @@ import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
 import { skillTools } from "./extensions/app-skills";
 import { INSTALL_SKILL, type SkillWriters, skillsExtension, skillsSwitch, WRITE_SKILL, writeSkillAction } from "./extensions/skills";
 import { SKILL_NAME, SkillStore } from "./skills";
-import { type SpriteLink, Sprites } from "./sprites";
 import {
 	approvalsExtension,
 	gatedTools,
@@ -155,7 +154,8 @@ import {
 import { describeSchedule, SCHEDULE_EXTENSION, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
-import { COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerStatus } from "./computer";
+import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, SCREEN_TAG } from "./computer";
+import { machineName } from "./computer-host";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
 import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
@@ -402,7 +402,8 @@ function noStore(value: unknown, status = 200): Response {
 }
 const GOAL_STATUSES: readonly GoalStatus[] = ["active", "paused", "done", "abandoned"];
 
-type SocketState = { readonly session: string };
+/** A socket's chat, or for an app showing the computer's desktop, the channel its stream comes on. */
+type SocketState = { readonly session: string; readonly channel?: number };
 
 function clipTitle(text: string): string {
 	const line = text.trim().split(/\r?\n/)[0]!.trim();
@@ -490,22 +491,11 @@ export class Pim extends DurableAgent<Env> {
 		owner: () => this.name,
 		storageRoom: () => this.#storageRoom(),
 	});
-	/** The person's computer, which their agents use, if they connected one (see ./computer.ts). */
+	/** The person's computer, which their agents use, if they have one (see ./computer.ts). */
 	readonly computer: Computer = new Computer({
 		meta: this.store,
 		sockets: () => [...this.getConnections(COMPUTER_TAG)],
-		wake: (): Promise<SpriteLink> => {
-			const sprites = this.#sprites();
-			const machine = this.computer.machine();
-			if (!sprites || !machine) throw new HttpError(503, "This Pim no longer reaches the computer it started.");
-			return sprites.connect(
-				machine,
-				this.deployment().publicUrl!,
-				(line) => this.#computerSaid(line),
-				() => this.#computerDisconnected(),
-			);
-		},
-		inUse: () => this.browser.watched(),
+		screen: (channel, data) => this.#screenSaid(channel, data),
 	});
 	/** The person's files, on their computer, which they and their agents share (see ./files.ts). */
 	readonly files = new Files(this.computer);
@@ -804,6 +794,8 @@ export class Pim extends DurableAgent<Env> {
 		defaults: { model: this.defaultModel(), thinkingLevel: "low" },
 	});
 
+	/** Streams of the desktop whose socket went, which have been asked to close. */
+	readonly #orphanedScreens = new Set<number>();
 	/** pi agent-event watches, by connection id. In memory: rebuilt in `onStart`. */
 	readonly #watches = new Map<string, AgentEventStream>();
 	/** Each connection's latest watch request: one that finishes setting up after a newer one is dropped. */
@@ -1663,6 +1655,9 @@ export class Pim extends DurableAgent<Env> {
 			}
 		}
 		void this.#resumeTasks().catch((error) => console.warn("resuming tasks failed", error));
+		// A Sprite Pim started before it kept computers with a host is out of reach: the space has no computer until it gets another.
+		const sprite = this.computer.forgetSprite();
+		if (sprite) console.warn(JSON.stringify({ event: "pim.sprite_forgotten", owner: this.name, sprite }));
 	}
 
 	/**
@@ -5083,8 +5078,16 @@ export class Pim extends DurableAgent<Env> {
 					return new Response((await this.artifacts.read(artifact.id, found.version, [path])).get(path)!.bytes, { headers });
 				}),
 		],
-		// The person's computer (see ./computer.ts): whether one is connected, pairing one or starting one, and removing it.
-		["GET", "/computer", () => noStore({ ...this.computer.status(), startable: this.#sprites() !== null })],
+		// The person's computer (see ./computer.ts): whether one is connected, and pairing or removing their own.
+		// Where this Pim has a computer host, the space's computer is the one it keeps, asked for the first time it's looked at.
+		[
+			"GET",
+			"/computer",
+			async () => {
+				if (!this.computer.paired() && !this.#closed() && (await this.#directory().hasComputerHost())) await this.#provideComputer();
+				return noStore(this.computer.status());
+			},
+		],
 		[
 			"POST",
 			"/computer",
@@ -5092,20 +5095,25 @@ export class Pim extends DurableAgent<Env> {
 				this.#assertOpen();
 				const body = await request.text();
 				const { managed } = (body ? JSON.parse(body) : {}) as { managed?: unknown };
-				if (this.computer.machine()) throw new HttpError(409, "Pim started this computer: remove it to connect another.");
-				if (managed !== true) {
-					const token = await this.computer.pair(this.name, Date.now());
-					this.#computerChanged();
-					return noStore({ ...this.computer.status(), token }, 201);
+				// Asking for the host's computer again sets it up again, as after it failed to be.
+				if (managed === true) {
+					if (!(await this.#directory().hasComputerHost())) throw new HttpError(404, "This Pim has no computer host to keep a computer for you. Connect one of your own.");
+					await this.#provideComputer();
+					return noStore(this.computer.status(), 201);
 				}
-				return noStore(await this.#startComputer(), 201);
+				if (this.computer.machine() || (await this.#directory().hasComputerHost())) {
+					throw new HttpError(409, "This Pim keeps a computer for you, so you can't connect another.");
+				}
+				const token = await this.computer.pair(this.name, Date.now());
+				this.#computerChanged();
+				return noStore({ ...this.computer.status(), token }, 201);
 			},
 		],
 		[
 			"DELETE",
 			"/computer",
 			async () => {
-				await this.#removeMachine();
+				if (this.computer.machine()) throw new HttpError(409, "This Pim keeps this computer for you for as long as you're here: it can't be removed.");
 				this.computer.forget();
 				this.#computerChanged();
 				return noStore(this.computer.status());
@@ -6009,35 +6017,32 @@ export class Pim extends DurableAgent<Env> {
 		this.#reinstallApprovals();
 	}
 
-	/** Where this deployment starts computers for people (./sprites.ts), or null where it starts none. */
-	#sprites(): Sprites | null {
-		const token = (this.env as unknown as { SPRITES_TOKEN?: string }).SPRITES_TOKEN;
-		return this.deployment().publicUrl && token ? new Sprites(token) : null;
+	#directory() {
+		return this.env.Directory.getByName("directory");
 	}
 
 	/**
-	 * Starts a computer for the person, in place of any they connected: a
-	 * Sprite, set up and woken once, so it says what it is; then it sleeps
-	 * until it's needed.
+	 * Asks this Pim's computer host for the space's computer (./computer-host.ts),
+	 * with a new token for it to connect with: the host makes it, or sets up
+	 * the one it has again. It is paired from now, offline until it connects.
 	 */
-	async #startComputer(): Promise<ComputerStatus> {
-		const sprites = this.#sprites();
-		if (!sprites) throw new HttpError(404, "This Pim doesn't start computers. Connect one of your own.");
-		const name = `pim-${this.name.replace(/_/g, "-")}-${Date.now().toString(36)}`;
-		await sprites.create(name);
-		this.computer.started(name, Date.now());
+	async #provideComputer(): Promise<void> {
+		const name = machineName(this.name);
+		const token = await this.computer.provide(this.name, name, Date.now());
+		await this.#directory().requestComputer(this.name, name, token);
 		this.#computerChanged();
-		await this.computer.wake().catch((error) => console.warn("waking the new computer", error));
-		return this.computer.status();
 	}
 
-	/** Removes the Sprite of a computer Pim started, with everything on it. */
+	/** The computer host couldn't set the space's computer up: the person hears why, and can ask again. */
+	async computerSetupFailed(message: string): Promise<void> {
+		this.computer.setupFailed(message);
+		this.broadcastMessage({ type: "computer" });
+	}
+
+	/** Asks the computer host to remove the space's computer, with everything on it, when it keeps one. */
 	async #removeMachine(): Promise<void> {
 		const machine = this.computer.machine();
-		if (!machine) return;
-		const sprites = this.#sprites();
-		if (!sprites) throw new HttpError(503, "This Pim no longer reaches the computers it started; its admin can remove the Sprite on Fly.io.");
-		await sprites.destroy(machine);
+		if (machine) await this.#directory().requestComputerRemoval(this.name, machine);
 	}
 
 	/** The browser's tools, while the person has a computer; clicking and typing follow their permissions. */
@@ -6124,6 +6129,7 @@ export class Pim extends DurableAgent<Env> {
 	/** The computer's connection is tagged, so the space finds it, and leaves it out of what it tells the app. */
 	override getConnectionTags(_connection: Connection, ctx: ConnectionContext): string[] {
 		const { pathname } = new URL(ctx.request.url);
+		if (pathname === COMPUTER_SCREEN_PATH) return [SCREEN_TAG];
 		return pathname === COMPUTER_PATH ? [COMPUTER_TAG] : pathname === BROWSER_LIVE_PATH ? [BROWSER_TAG] : [];
 	}
 
@@ -6133,6 +6139,47 @@ export class Pim extends DurableAgent<Env> {
 
 	#isBrowserWatcher(connection: Connection): boolean {
 		return connection.tags.includes(BROWSER_TAG);
+	}
+
+	#isScreenViewer(connection: Connection): boolean {
+		return connection.tags.includes(SCREEN_TAG);
+	}
+
+	/**
+	 * An app shows the computer's desktop on this socket: a stream of it
+	 * opens on a channel of its own, numbered here and kept as the socket's
+	 * state, so the stream finds its socket after the space slept. What the
+	 * stream says goes to the socket as it is, and what the app sends goes to
+	 * the stream (Cua's media plane, rcdp wire v2).
+	 */
+	async #viewScreen(connection: Connection<SocketState>): Promise<void> {
+		const channel = crypto.getRandomValues(new Uint32Array(1))[0]! || 1;
+		connection.setState({ session: ROOT_SESSION, channel });
+		try {
+			const status = this.computer.status();
+			if (status.state === "none") throw new Error("This space has no computer.");
+			if (status.state === "offline") throw new Error("The computer is offline.");
+			if (!status.computer?.screen) throw new Error("This computer doesn't stream its desktop.");
+			await this.computer.openScreen(channel);
+		} catch (error) {
+			connection.close(4004, errorMessage(error).slice(0, 120));
+		}
+	}
+
+	/** What a stream of the desktop said, for the socket it's for; null when it closed. */
+	#screenSaid(channel: number, data: string | ArrayBuffer | null): void {
+		const viewer = [...this.getConnections<SocketState>(SCREEN_TAG)].find((connection) => connection.state?.channel === channel);
+		if (!viewer) {
+			// Its socket went: the stream goes too, asked once.
+			if (data !== null && !this.#orphanedScreens.has(channel)) {
+				this.#orphanedScreens.add(channel);
+				this.computer.closeScreen(channel);
+			}
+			if (data === null) this.#orphanedScreens.delete(channel);
+			return;
+		}
+		if (data === null) viewer.close(4000, "The computer's desktop closed");
+		else if (viewer.readyState === WebSocket.OPEN) viewer.send(data);
 	}
 
 	/**
@@ -6170,6 +6217,10 @@ export class Pim extends DurableAgent<Env> {
 			await this.#watchBrowser(connection, ctx.request);
 			return;
 		}
+		if (this.#isScreenViewer(connection)) {
+			await this.#viewScreen(connection);
+			return;
+		}
 		const requested = new URL(ctx.request.url).searchParams.get("session");
 		let session: string;
 		try {
@@ -6185,8 +6236,12 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	async onMessage(connection: Connection<SocketState>, raw: WSMessage): Promise<void> {
-		if (typeof raw !== "string") return;
 		if (this.#isComputer(connection)) return this.#computerSaid(raw);
+		if (typeof raw !== "string") return;
+		if (this.#isScreenViewer(connection)) {
+			if (connection.state?.channel) this.computer.screenInput(connection.state.channel, raw);
+			return;
+		}
 		if (this.#isBrowserWatcher(connection)) {
 			// A space that slept since forgot who was watching: they go on where they were.
 			if (!this.browser.watching(connection.id) && !(await this.#watchBrowser(connection))) return;
@@ -6220,6 +6275,7 @@ export class Pim extends DurableAgent<Env> {
 	async onClose(connection: Connection): Promise<void> {
 		if (this.#isComputer(connection)) return this.#computerDisconnected();
 		if (this.#isBrowserWatcher(connection)) return this.browser.unwatch(connection.id);
+		if (this.#isScreenViewer(connection)) return this.#stopViewing(connection);
 		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
 	}
@@ -6227,14 +6283,22 @@ export class Pim extends DurableAgent<Env> {
 	async onError(connection: Connection): Promise<void> {
 		if (this.#isComputer(connection)) return this.#computerDisconnected();
 		if (this.#isBrowserWatcher(connection)) return this.browser.unwatch(connection.id);
+		if (this.#isScreenViewer(connection)) return this.#stopViewing(connection);
 		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
 	}
 
-	/** A message from the computer: what it is, when it has just connected, or an answer. */
-	#computerSaid(raw: string): void {
-		this.computer.receive(raw);
-		if (raw.startsWith('{"type":"hello"')) this.#computerConnected();
+	/** The app stopped showing the desktop: its stream closes. */
+	#stopViewing(connection: Connection): void {
+		const { channel } = (connection.state ?? {}) as Partial<SocketState>;
+		if (channel) this.computer.closeScreen(channel);
+	}
+
+	/** A message from the computer: what it is, when it has just connected, an answer, or what a stream of its desktop says. */
+	#computerSaid(raw: string | ArrayBuffer | ArrayBufferView): void {
+		const message = typeof raw === "string" || raw instanceof ArrayBuffer ? raw : (raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer);
+		this.computer.receive(message);
+		if (typeof message === "string" && message.startsWith('{"type":"hello"')) this.#computerConnected();
 	}
 
 	/**
@@ -6353,11 +6417,11 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	/** Tells every open app; the computer's connection, and those taking the browser over, speak other protocols. */
+	/** Tells every open app; the computer's connection, and those taking the browser over or showing the desktop, speak other protocols. */
 	broadcastMessage(message: ServerMessage): void {
 		this.broadcast(
 			JSON.stringify(message),
-			[...this.getConnections(COMPUTER_TAG), ...this.getConnections(BROWSER_TAG)].map((connection) => connection.id),
+			[...this.getConnections(COMPUTER_TAG), ...this.getConnections(BROWSER_TAG), ...this.getConnections(SCREEN_TAG)].map((connection) => connection.id),
 		);
 	}
 }

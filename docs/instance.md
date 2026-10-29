@@ -63,6 +63,7 @@ How the Pim runs for everyone is its variables, set in the Cloudflare dashboard 
 | POST | `/api/admin/accounts/:username/suspend` | `{ reason? }` | Stops the agent at once: its runs abort, sockets close, requests get `403` |
 | POST | `/api/admin/accounts/:username/unsuspend` | | Restores it |
 | GET | `/api/admin/deployment` | | How the deployment runs, from its variables, and why Pim can't read any it can't |
+| GET, POST, DELETE | `/api/admin/computer-host` | | The machine that keeps everyone's computers: its status; pairing it, which returns its token once; or forgetting it (see [Computers Pim keeps](reference.md#computers-pim-keeps)) |
 | PUT | `/api/admin/accounts/:username/limits` | `{ limits }` or `{ limits: null }` | One person's limits over the `PIM_LIMIT_*` variables |
 | POST | `/api/admin/accounts/:username/setup-link` | | A one-hour link that adds a passkey, for recovery |
 | DELETE | `/api/admin/accounts/:username` | `{ reason? }` | Deletes it as the owner would: `200` once erased, `202` while the cleanup is still queued. Run it again to retry at once |

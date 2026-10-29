@@ -11,6 +11,9 @@
  * who runs this, with that folder as their working directory. Where the
  * computer has Chrome or Chromium, it is the agents' browser too: the space
  * drives it over the DevTools protocol, through this connection (`Link`).
+ * Where it runs Cua's cua-spacesd, as the computers a Pim's host keeps do
+ * (./pim-host.ts), its desktop is streamed to the person through this
+ * connection too (`spacesdScreen`).
  *
  * Runs on Node.js 22.18 or later, with nothing to install:
  *
@@ -18,10 +21,6 @@
  *
  * Settings take flags too: `--url`, `--token`, `--root`, `--chrome`. The token can also
  * be in a file named by `PIM_COMPUTER_TOKEN_FILE`.
- *
- * With `--stdio`, it connects nowhere: it speaks the same messages, a line
- * each, over its input and output. The space starts it so on a computer Pim
- * started (src/sprites.ts), and it quits when its input ends.
  */
 
 import { Buffer } from "node:buffer";
@@ -70,7 +69,21 @@ export type Machine = {
 	exec(args: ExecArgs, cwd: string): Promise<ExecResult>;
 	/** The browser the space's agents use, or none where this computer has no Chrome. */
 	readonly browser?: BrowserHost;
+	/** Its desktop, for the person to see and use, or none where nothing streams it. */
+	readonly screen?: ScreenHost;
 };
+
+/**
+ * The computer's desktop as a stream the person's app plays: Cua's media
+ * plane (rcdp wire v2), whose messages pass through this program and the
+ * space unread, text as text and video as binary.
+ */
+export type ScreenHost = {
+	/** Opens a stream of the desktop, with the person's input going back into it. */
+	open(onMessage: (data: string | Uint8Array) => void, onClose: () => void): Promise<ScreenChannel>;
+};
+
+export type ScreenChannel = { send(data: string): void; close(): void };
 
 /**
  * A Chrome on this computer, which the space drives over the DevTools
@@ -90,22 +103,25 @@ export type BrowserChannel = { send(data: string): void; close(): void };
 
 /**
  * One connection to the space: answers its calls, and carries DevTools
- * messages between it and the browser. The space has one DevTools
- * connection at a time; opening another closes the one before, which may
- * have been left by a space that went to sleep.
+ * messages between it and the browser, and the desktop's stream between it
+ * and the person's app. The space has one DevTools connection at a time;
+ * opening another closes the one before, which may have been left by a
+ * space that went to sleep. It may have several streams of the desktop,
+ * one for each app showing it.
  */
 export class Link {
 	readonly #machine: Machine;
-	readonly #send: (message: string) => void;
+	readonly #send: (message: string | Uint8Array) => void;
 	#channel: { id: number; browser: BrowserChannel } | null = null;
 	#next = 1;
+	readonly #screens = new Map<number, ScreenChannel>();
 
-	constructor(machine: Machine, send: (message: string) => void) {
+	constructor(machine: Machine, send: (message: string | Uint8Array) => void) {
 		this.#machine = machine;
 		this.#send = send;
 	}
 
-	/** A message from the space: a call, which gets a reply, or a DevTools message for the browser. */
+	/** A message from the space: a call, which gets a reply, a DevTools message for the browser, or the person's input to the desktop. */
 	receive(raw: string): void {
 		let message: { type?: unknown; id?: unknown; op?: unknown; args?: unknown; channel?: unknown; data?: unknown };
 		try {
@@ -117,6 +133,10 @@ export class Link {
 			if (this.#channel && message.channel === this.#channel.id && typeof message.data === "string") this.#channel.browser.send(message.data);
 			return;
 		}
+		if (message.type === "screen") {
+			if (typeof message.data === "string") this.#screens.get(Number(message.channel))?.send(message.data);
+			return;
+		}
 		if (message.type !== "call" || typeof message.id !== "string" || typeof message.op !== "string") return;
 		const { id } = message;
 		this.#call(message.op, (message.args ?? {}) as Args).then(
@@ -125,13 +145,58 @@ export class Link {
 		);
 	}
 
-	/** The space went away: its DevTools connection closes, and the browser goes on running. */
+	/** The space went away: its DevTools connection and the desktop's streams close, and the browser goes on running. */
 	close(): void {
 		this.#channel?.browser.close();
 		this.#channel = null;
+		for (const screen of this.#screens.values()) screen.close();
+		this.#screens.clear();
+	}
+
+	/**
+	 * Opens a stream of the desktop on the channel the space numbered, so it
+	 * knows the stream's first messages. Its text messages go to the space
+	 * as `screen` messages; its binary ones as binary, after the channel's
+	 * number in four bytes.
+	 */
+	async #openScreen(channel: unknown): Promise<null> {
+		const screen = this.#machine.screen;
+		if (!screen) throw new CallError("This computer doesn't stream its desktop: it needs Cua's cua-spacesd.", "ENOSYS");
+		if (typeof channel !== "number" || !Number.isInteger(channel) || channel < 1 || channel > 0xffffffff || this.#screens.has(channel)) {
+			throw new CallError(`${String(channel)} isn't a channel for a new stream`, "EINVAL");
+		}
+		let closed = false;
+		const opened = await screen.open(
+			(data) => {
+				if (closed) return;
+				if (typeof data === "string") {
+					this.#send(JSON.stringify({ type: "screen", channel, data }));
+					return;
+				}
+				const framed = new Uint8Array(data.byteLength + 4);
+				new DataView(framed.buffer).setUint32(0, channel);
+				framed.set(data, 4);
+				this.#send(framed);
+			},
+			() => {
+				if (closed) return;
+				closed = true;
+				this.#screens.delete(channel);
+				this.#send(JSON.stringify({ type: "screen_closed", channel }));
+			},
+		);
+		if (!closed) this.#screens.set(channel, opened);
+		return null;
 	}
 
 	async #call(op: string, args: Args): Promise<unknown> {
+		if (op === "screen_open") return this.#openScreen(args.channel);
+		if (op === "screen_close") {
+			const screen = this.#screens.get(Number(args.channel));
+			this.#screens.delete(Number(args.channel));
+			screen?.close();
+			return null;
+		}
 		if (!op.startsWith("browser_")) return handle(this.#machine, op, args);
 		const browser = this.#machine.browser;
 		if (op === "browser_status") return { available: browser !== undefined, running: browser ? await browser.running() : false };
@@ -542,9 +607,11 @@ async function keepSessions(profile: string): Promise<void> {
 /**
  * The computer's own Chrome, with a profile of its own that keeps what's
  * signed in there between runs. It starts when the space first connects to
- * it, headless unless asked otherwise, and quits after `BROWSER_IDLE_MS`
- * with nobody connected. A Chrome left running with the profile, by an
- * earlier run of this program, is used as it is.
+ * it, headless unless asked otherwise. Headless, it quits after
+ * `BROWSER_IDLE_MS` with nobody connected; with its windows on a desktop,
+ * where the person may be using it too, it stays open. A Chrome running
+ * with the profile, left by an earlier run of this program or opened by
+ * the person, is used as it is.
  */
 function localBrowser(executable: string, profile: string, headful: boolean, log: (line: string) => void): BrowserHost {
 	let child: import("node:child_process").ChildProcess | undefined;
@@ -644,7 +711,7 @@ function localBrowser(executable: string, profile: string, headful: boolean, log
 			const closed = () => {
 				if (!open) return;
 				open = false;
-				if (--connections === 0) {
+				if (--connections === 0 && !headful) {
 					clearTimeout(idle);
 					idle = setTimeout(() => {
 						log("Nobody has used the browser for a while, so it quits.");
@@ -668,6 +735,143 @@ function localBrowser(executable: string, profile: string, headful: boolean, log
 	};
 }
 
+/** A protobuf field's key: its number and wire type. */
+function protoKey(field: number, wire: number): number[] {
+	return protoVarint(field * 8 + wire);
+}
+
+function protoVarint(value: number): number[] {
+	const bytes = [];
+	while (value > 127) {
+		bytes.push((value % 128) | 128);
+		value = Math.floor(value / 128);
+	}
+	bytes.push(value);
+	return bytes;
+}
+
+/** A length-delimited field: a string or a message. */
+function protoBytes(field: number, bytes: number[] | Uint8Array): number[] {
+	return [...protoKey(field, 2), ...protoVarint(bytes.length), ...bytes];
+}
+
+/** The fields of a protobuf message that are strings or messages, by number; the last of each. */
+function protoFields(message: Uint8Array): Map<number, Uint8Array> {
+	const fields = new Map<number, Uint8Array>();
+	let at = 0;
+	const varint = () => {
+		let value = 0;
+		for (let scale = 1; ; scale *= 128) {
+			const byte = message[at++];
+			if (byte === undefined) throw new Error("A cut-off protobuf message");
+			value += (byte & 127) * scale;
+			if (byte < 128) return value;
+		}
+	};
+	while (at < message.length) {
+		const key = varint();
+		const wire = key % 8;
+		if (wire === 0) varint();
+		else if (wire === 1) at += 8;
+		else if (wire === 5) at += 4;
+		else if (wire === 2) {
+			const length = varint();
+			fields.set(Math.floor(key / 8), message.subarray(at, at + length));
+			at += length;
+		} else throw new Error(`A protobuf wire type this doesn't read: ${wire}`);
+	}
+	return fields;
+}
+
+/** Calls a method of cua-spacesd over gRPC-Web, with a message already encoded; its answer, encoded. */
+async function grpcWeb(base: string, token: string, method: string, message: number[]): Promise<Uint8Array> {
+	const body = new Uint8Array(5 + message.length);
+	new DataView(body.buffer).setUint32(1, message.length);
+	body.set(message, 5);
+	const response = await fetch(new URL(`/${method}`, base), {
+		method: "POST",
+		headers: { "content-type": "application/grpc-web+proto", "x-grpc-web": "1", authorization: `Bearer ${token}` },
+		body,
+		signal: AbortSignal.timeout(15_000),
+	});
+	const bytes = new Uint8Array(await response.arrayBuffer());
+	let answer: Uint8Array | undefined;
+	let trailers = response.headers.get("grpc-status") === null ? "" : `grpc-status:${response.headers.get("grpc-status")}\r\ngrpc-message:${response.headers.get("grpc-message") ?? ""}`;
+	for (let at = 0; at + 5 <= bytes.length; ) {
+		const length = new DataView(bytes.buffer, bytes.byteOffset + at + 1, 4).getUint32(0);
+		const part = bytes.subarray(at + 5, at + 5 + length);
+		if ((bytes[at]! & 0x80) !== 0) trailers = new TextDecoder().decode(part);
+		else answer = part;
+		at += 5 + length;
+	}
+	const status = /grpc-status:\s*(\d+)/.exec(trailers)?.[1];
+	if (!response.ok || status !== "0" || !answer) {
+		const why = decodeURIComponent(/grpc-message:\s*([^\r\n]*)/.exec(trailers)?.[1] ?? "") || `HTTP ${response.status}`;
+		throw new CallError(`cua-spacesd refused ${method}: ${why}`, "ESPACESD");
+	}
+	return answer;
+}
+
+/**
+ * The desktop as Cua's cua-spacesd on this computer streams it, at `base`
+ * with the token in `tokenFile` (Cua's images keep it at /run/cua/env-token,
+ * readable by the desktop's user). Each stream is a media session of its
+ * own: H.264 of the whole display, with the person's input allowed to
+ * activate windows, as at the computer itself.
+ */
+export function spacesdScreen(base: string, tokenFile: string): ScreenHost {
+	return {
+		async open(onMessage, onClose) {
+			let token: string;
+			try {
+				token = (await fs.readFile(tokenFile, "utf8")).trim();
+			} catch {
+				throw new CallError(`This computer doesn't stream its desktop: there's no cua-spacesd token at ${tokenFile}.`, "ENOSYS");
+			}
+			// OpenMediaRequest: the primary display, H.264, at most 30 frames a second and 3 Mbit/s,
+			// input that may activate windows, and a minute to attach.
+			const request = [
+				...protoBytes(1, protoBytes(1, new TextEncoder().encode("primary"))),
+				...protoKey(2, 0),
+				1,
+				...protoKey(3, 0),
+				30,
+				...protoKey(5, 0),
+				...protoVarint(3000),
+				...protoKey(6, 0),
+				3,
+				...protoBytes(8, [...protoKey(1, 0), 60]),
+			];
+			const opened = protoFields(await grpcWeb(base, token, "cua.env.v1.StreamService/OpenMedia", request));
+			const session = new TextDecoder().decode(opened.get(1));
+			const path = new TextDecoder().decode(opened.get(4));
+			const closeSession = () => {
+				const message = protoBytes(1, new TextEncoder().encode(session));
+				void grpcWeb(base, token, "cua.env.v1.StreamService/CloseMedia", message).catch(() => undefined);
+			};
+			const socket = new WebSocket(new URL(path, base.replace(/^http/, "ws")).href, ["rcdp.v2"]);
+			socket.binaryType = "arraybuffer";
+			// The stream speaks first, as soon as it's open, so it's listened to from the start.
+			socket.addEventListener("message", (event) => onMessage(typeof event.data === "string" ? event.data : new Uint8Array(event.data as ArrayBuffer)));
+			socket.addEventListener("error", () => {});
+			await new Promise<void>((resolve, reject) => {
+				socket.addEventListener("open", () => resolve(), { once: true });
+				socket.addEventListener("close", () => {
+					closeSession();
+					reject(new CallError("cua-spacesd closed the desktop's stream as it opened.", "ESPACESD"));
+					onClose();
+				});
+			});
+			return {
+				send: (data) => {
+					if (socket.readyState === WebSocket.OPEN) socket.send(data);
+				},
+				close: () => socket.close(1000),
+			};
+		},
+	};
+}
+
 const USAGE = `pim-computer ${VERSION}: connects this machine to your Pim, for your agents to use.
 
   PIM_URL=https://pim.example.com PIM_COMPUTER_TOKEN=pimc_… node pim-computer.ts
@@ -677,8 +881,9 @@ Options (or the environment variables in brackets):
   --token <token>   The token from Settings → Computer (PIM_COMPUTER_TOKEN, or a file named by PIM_COMPUTER_TOKEN_FILE)
   --root <folder>   The folder your files are kept in (PIM_COMPUTER_ROOT; ~/pim unless set)
   --chrome <path>   The Chrome or Chromium your agents browse with (PIM_CHROME; found where it usually is unless set)
-  --headful         Show the browser's window rather than running it headless (PIM_BROWSER_HEADFUL=1)
-  --stdio           Speak with the space over standard input and output, as Pim starts it on computers it starts
+  --headful         Show the browser's windows rather than running it headless (PIM_BROWSER_HEADFUL=1)
+  --spacesd <url>   Where Cua's cua-spacesd streams this computer's desktop (PIM_SPACESD_URL; http://127.0.0.1:3211),
+                    with its token in the file PIM_SPACESD_TOKEN_FILE names (/run/cua/env-token)
 
 The browser keeps its profile, with what you sign in to there, in ~/.pim-computer/browser.`;
 
@@ -692,7 +897,7 @@ async function main(): Promise<void> {
 			root: { type: "string" },
 			chrome: { type: "string" },
 			headful: { type: "boolean" },
-			stdio: { type: "boolean" },
+			spacesd: { type: "string" },
 			help: { type: "boolean" },
 		},
 	});
@@ -700,20 +905,25 @@ async function main(): Promise<void> {
 	const tokenFile = env.PIM_COMPUTER_TOKEN_FILE;
 	const url = values.url ?? env.PIM_URL;
 	const token = values.token ?? env.PIM_COMPUTER_TOKEN ?? (tokenFile ? (await fs.readFile(tokenFile, "utf8")).trim() : undefined);
-	if (values.help || (!values.stdio && (!url || !token))) {
+	if (values.help || !url || !token) {
 		console.log(USAGE);
 		process.exit(values.help ? 0 : 1);
 	}
 	const folder = path.resolve(values.root ?? env.PIM_COMPUTER_ROOT ?? path.join(os.homedir(), "pim"));
 	await fs.mkdir(folder, { recursive: true });
 	const root = await fs.realpath(folder);
-	// Standard output is the space's, with --stdio.
-	const log = (line: string) => (values.stdio ? console.error : console.log)(`${new Date().toISOString()} ${line}`);
+	const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
 	const chrome = values.chrome ?? env.PIM_CHROME ?? (await findChrome());
 	const headful = values.headful === true || env.PIM_BROWSER_HEADFUL === "1";
 	const browser = chrome ? localBrowser(chrome, path.join(os.homedir(), ".pim-computer", "browser"), headful, log) : undefined;
 	if (!chrome) log("No Chrome or Chromium found, so your agents have no browser here. Install one, or name it with --chrome.");
-	const machine: Machine = { root, exec: (args, cwd) => runCommand(args, cwd, root), ...(browser ? { browser } : {}) };
+	// The desktop streams where cua-spacesd runs, as it does on the computers a Pim's host keeps: its token is the sign.
+	const spacesdTokenFile = env.PIM_SPACESD_TOKEN_FILE ?? "/run/cua/env-token";
+	const screen = await fs
+		.access(spacesdTokenFile, fs.constants.R_OK)
+		.then(() => spacesdScreen(values.spacesd ?? env.PIM_SPACESD_URL ?? "http://127.0.0.1:3211", spacesdTokenFile))
+		.catch(() => undefined);
+	const machine: Machine = { root, exec: (args, cwd) => runCommand(args, cwd, root), ...(browser ? { browser } : {}), ...(screen ? { screen } : {}) };
 	const hello = {
 		type: "hello",
 		version: 1,
@@ -726,6 +936,7 @@ async function main(): Promise<void> {
 		root: machine.root,
 		shell: env.SHELL || "/bin/bash",
 		browser: chrome ?? null,
+		screen: screen !== undefined,
 	};
 	const logRun = (message: string) => {
 		if (message.startsWith('{"type":"call"') && message.includes('"op":"exec"')) {
@@ -733,23 +944,6 @@ async function main(): Promise<void> {
 			log(`Running: ${String(call.args?.command)}`);
 		}
 	};
-	if (values.stdio) {
-		const link = new Link(machine, (message) => process.stdout.write(`${message}\n`));
-		process.stdout.write(`${JSON.stringify(hello)}\n`);
-		const { createInterface } = await import("node:readline");
-		const lines = createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
-		lines.on("line", (line) => {
-			logRun(line);
-			link.receive(line);
-		});
-		// The space let go: the browser quits, so what's signed in there is saved, and so does this.
-		lines.on("close", async () => {
-			link.close();
-			await browser?.stop().catch(() => undefined);
-			process.exit(0);
-		});
-		return;
-	}
 	const address = new URL("/api/computer/connect", url!.replace(/^http/, "ws"));
 	let wait = 1_000;
 	const connect = () => {

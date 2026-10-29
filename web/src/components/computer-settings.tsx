@@ -1,13 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { toast } from "sonner";
 import { CopyButton, Section } from "~/components/account-settings";
 import { useI18n } from "~/components/i18n";
-import { Loader2, Server, Trash2 } from "~/components/icons";
+import { AlertCircle, Loader2, Server, Trash2 } from "~/components/icons";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
-import { type ComputerStatus, pim } from "~/lib/pim-api";
-import { computerQuery } from "~/lib/queries";
+import { admin, type ComputerStatus, pim } from "~/lib/pim-api";
+import { computerHostQuery, computerQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 /**
@@ -35,9 +36,12 @@ function Command({ label, text }: { label: string; text: string }) {
 }
 
 /**
- * Your computer: a machine of yours that runs pim-computer, where your
- * agents run commands and keep your files. Connecting one makes a token,
- * shown once with the commands that start pim-computer with it.
+ * Your computer: where your agents run commands, browse and keep your
+ * files. Where this Pim has a computer host, it's the one the host keeps for
+ * you, which you can't remove; this says while it's being set up, and why it
+ * couldn't be. Otherwise it's a machine of yours that runs pim-computer:
+ * connecting one makes a token, shown once with the commands that start
+ * pim-computer with it.
  */
 export function ComputerSection() {
   const { t, formatDate } = useI18n();
@@ -65,8 +69,8 @@ export function ComputerSection() {
     },
     onError: (error) => toast.error(error.message),
   });
-  const start = useMutation({
-    mutationFn: pim.startComputer,
+  const setUp = useMutation({
+    mutationFn: pim.setUpComputer,
     onSuccess: settle,
     onError: (error) => toast.error(error.message),
   });
@@ -81,76 +85,109 @@ export function ComputerSection() {
   if (!status) return null;
   const machine = status.computer;
   const shown = token ? commands(token) : null;
+  const settingUp = status.managed && !machine && !status.error;
 
   return (
     <Section
       title={t("computer")}
       description={t(
-        status.startable
-          ? "computerDescriptionStartable"
-          : "computerDescription",
+        status.managed ? "computerDescriptionManaged" : "computerDescription",
       )}
     >
-      {status.state !== "none" && (
+      {/* One that couldn't be set up is only the error below. */}
+      {status.state !== "none" && (machine || !status.error) && (
         <div className="flex items-center gap-3 rounded-2xl border bg-muted/20 px-4 py-3">
           <Server className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-2">
               <span className="truncate font-medium text-sm">
                 {machine?.hostname ??
-                  t(status.managed ? "computerStarting" : "computerWaiting")}
+                  t(status.managed ? "computerSettingUp" : "computerWaiting")}
               </span>
               {machine && (
                 <Badge
                   variant={status.state === "online" ? "success" : "secondary"}
                   className="text-[11px]"
                 >
-                  {status.state === "online"
-                    ? t("computerOnline")
-                    : t(status.managed ? "computerAsleep" : "computerOffline")}
+                  {t(
+                    status.state === "online"
+                      ? "computerOnline"
+                      : "computerOffline",
+                  )}
                 </Badge>
               )}
             </span>
             <span className="block truncate text-muted-foreground text-xs">
               {machine
                 ? [
-                    ...(status.managed ? [t("computerStartedByPim")] : []),
                     `${machine.platform} ${machine.arch}`,
                     machine.user,
                     t("computerFilesIn", { folder: machine.root }),
                     ...(machine.browser ? [] : [t("computerNoBrowser")]),
                   ].join(" · ")
-                : t(status.managed ? "computerStartedOn" : "computerPairedOn", {
-                    date: formatDate(new Date(status.pairedAt ?? 0), {
-                      dateStyle: "medium",
-                    }),
-                  })}
+                : settingUp
+                  ? t("computerSettingUpHint")
+                  : t("computerPairedOn", {
+                      date: formatDate(new Date(status.pairedAt ?? 0), {
+                        dateStyle: "medium",
+                      }),
+                    })}
+            </span>
+          </span>
+          {settingUp && (
+            <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
+          )}
+          {machine?.screen && status.state === "online" && (
+            <Button variant="secondary" size="sm" asChild>
+              <Link to="/computer">{t("computerOpen")}</Link>
+            </Button>
+          )}
+          {!status.managed && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="text-muted-foreground"
+              aria-label={t("removeComputer")}
+              disabled={remove.isPending}
+              onClick={() => {
+                if (window.confirm(t("removeComputerConfirm"))) remove.mutate();
+              }}
+            >
+              {remove.isPending ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <Trash2 />
+              )}
+            </Button>
+          )}
+        </div>
+      )}
+      {status.error && (
+        <div
+          role="alert"
+          className="flex items-start gap-3 rounded-2xl border border-destructive/30 bg-destructive/5 px-4 py-3"
+        >
+          <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
+          <span className="min-w-0 flex-1 space-y-1">
+            <span className="block text-sm">{t("computerSetupFailed")}</span>
+            <span className="block break-words text-muted-foreground text-xs">
+              {status.error}
             </span>
           </span>
           <Button
-            variant="ghost"
-            size="icon-sm"
-            className="text-muted-foreground"
-            aria-label={t("removeComputer")}
-            disabled={remove.isPending}
-            onClick={() => {
-              const confirm = status.managed
-                ? "removeStartedComputerConfirm"
-                : "removeComputerConfirm";
-              if (window.confirm(t(confirm))) remove.mutate();
-            }}
+            variant="secondary"
+            size="sm"
+            onClick={() => setUp.mutate()}
+            disabled={setUp.isPending}
           >
-            {remove.isPending ? (
-              <Loader2 className="animate-spin" />
-            ) : (
-              <Trash2 />
-            )}
+            {setUp.isPending && <Loader2 className="animate-spin" />}
+            {t("tryAgain")}
           </Button>
         </div>
       )}
-      {status.state === "offline" && !status.managed && !shown && (
+      {status.state === "offline" && !shown && machine && (
         <p className="text-[13px] text-muted-foreground">
-          {t("computerOfflineHint")}
+          {t(status.managed ? "computerOfflineManaged" : "computerOfflineHint")}
         </p>
       )}
       {shown && (
@@ -172,22 +209,10 @@ export function ComputerSection() {
         </div>
       )}
       {status.state === "none" ? (
-        <div className="flex flex-wrap gap-2">
-          {status.startable && (
-            <Button onClick={() => start.mutate()} disabled={start.isPending}>
-              {start.isPending && <Loader2 className="animate-spin" />}
-              {t("startComputer")}
-            </Button>
-          )}
-          <Button
-            variant={status.startable ? "secondary" : "default"}
-            onClick={() => pair.mutate()}
-            disabled={pair.isPending}
-          >
-            {pair.isPending && <Loader2 className="animate-spin" />}
-            {t(status.startable ? "connectOwnComputer" : "connectComputer")}
-          </Button>
-        </div>
+        <Button onClick={() => pair.mutate()} disabled={pair.isPending}>
+          {pair.isPending && <Loader2 className="animate-spin" />}
+          {t("connectComputer")}
+        </Button>
       ) : (
         !shown &&
         !status.managed && (
@@ -202,6 +227,150 @@ export function ComputerSection() {
             {t("newComputerToken")}
           </Button>
         )
+      )}
+    </Section>
+  );
+}
+
+/**
+ * The machine that keeps everyone's computers: one of the operator's, with
+ * KVM and Cua, that runs pim-host. Pairing it makes its token, shown once
+ * with the command that starts pim-host with it. The admin's alone.
+ */
+export function ComputerHostSection() {
+  const { t, formatDate, formatNumber } = useI18n();
+  const queryClient = useQueryClient();
+  const [token, setToken] = useState<string | null>(null);
+  const { data: host } = useQuery({
+    ...computerHostQuery(),
+    // While a new token waits for the host, look now and then.
+    refetchInterval: (query) =>
+      token && !query.state.data?.connected ? 5_000 : false,
+  });
+  const pair = useMutation({
+    mutationFn: admin.pairComputerHost,
+    onSuccess: ({ token: made, ...next }) => {
+      setToken(made);
+      queryClient.setQueryData(["computer-host"], next);
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const forget = useMutation({
+    mutationFn: admin.forgetComputerHost,
+    onSuccess: (next) => {
+      setToken(null);
+      queryClient.setQueryData(["computer-host"], next);
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  if (!host) return null;
+  const origin = window.location.origin;
+  const command = token
+    ? `curl -fsSLO ${origin}/pim-host.ts\nPIM_URL=${origin} PIM_HOST_TOKEN=${token} node pim-host.ts`
+    : null;
+
+  return (
+    <Section
+      title={t("computerHost")}
+      description={t("computerHostDescription")}
+    >
+      {host.paired && (
+        <div className="flex items-center gap-3 rounded-2xl border bg-muted/20 px-4 py-3">
+          <Server className="size-11 shrink-0 rounded-xl bg-muted p-3 text-muted-foreground" />
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-2">
+              <span className="truncate font-medium text-sm">
+                {host.image ?? t("computerHostWaiting")}
+              </span>
+              {host.seenAt !== null && (
+                <Badge
+                  variant={host.connected ? "success" : "secondary"}
+                  className="text-[11px]"
+                >
+                  {t(host.connected ? "computerOnline" : "computerOffline")}
+                </Badge>
+              )}
+            </span>
+            <span className="block truncate text-muted-foreground text-xs">
+              {host.seenAt === null
+                ? t("computerPairedOn", {
+                    date: formatDate(new Date(host.pairedAt ?? 0), {
+                      dateStyle: "medium",
+                    }),
+                  })
+                : [
+                    t("computerHostMachines", {
+                      count: formatNumber(host.machines),
+                      running: formatNumber(host.running),
+                    }),
+                    ...(host.pending > 0
+                      ? [
+                          t("computerHostPending", {
+                            count: formatNumber(host.pending),
+                          }),
+                        ]
+                      : []),
+                    t("computerHostSeen", {
+                      date: formatDate(new Date(host.seenAt), {
+                        dateStyle: "medium",
+                        timeStyle: "short",
+                      }),
+                    }),
+                    ...(host.version ? [`pim-host ${host.version}`] : []),
+                  ].join(" · ")}
+            </span>
+          </span>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="text-muted-foreground"
+            aria-label={t("computerHostRemove")}
+            disabled={forget.isPending}
+            onClick={() => {
+              if (window.confirm(t("computerHostRemoveConfirm")))
+                forget.mutate();
+            }}
+          >
+            {forget.isPending ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Trash2 />
+            )}
+          </Button>
+        </div>
+      )}
+      {command && (
+        <div
+          className={cn(
+            "space-y-4 rounded-2xl border px-4 py-4",
+            !host.connected && "border-primary/40 bg-primary/5",
+          )}
+        >
+          <p className="text-sm">{t("computerHostTokenOnce")}</p>
+          <Command label={t("computerHostCommand")} text={command} />
+          {!host.connected && (
+            <p className="flex items-center gap-2 text-[13px] text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" />
+              {t("computerWaitingToConnect")}
+            </p>
+          )}
+        </div>
+      )}
+      {!command && (
+        <Button
+          variant={host.paired ? "secondary" : "default"}
+          onClick={() => {
+            if (
+              !host.paired ||
+              window.confirm(t("computerHostNewTokenConfirm"))
+            )
+              pair.mutate();
+          }}
+          disabled={pair.isPending}
+        >
+          {pair.isPending && <Loader2 className="animate-spin" />}
+          {t(host.paired ? "newComputerToken" : "computerHostPair")}
+        </Button>
       )}
     </Section>
   );

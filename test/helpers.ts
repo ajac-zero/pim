@@ -5,7 +5,7 @@ import { getAgentByName } from "agents";
 import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, expect, vi } from "vitest";
-import { type BrowserHost, type ExecArgs, type ExecResult, Link, type Machine } from "../computer/pim-computer";
+import { type BrowserHost, type ExecArgs, type ExecResult, Link, type Machine, type ScreenHost } from "../computer/pim-computer";
 import { ownedCode } from "../src/auth";
 import type { Approval } from "../src/store";
 import type { TranscriptMessage } from "../src/transcript";
@@ -249,11 +249,12 @@ export function testBrowser(): BrowserHost {
 /**
  * A computer as pim-computer is one: its own `Link`, over a folder in this
  * test's /tmp, connected with `token`. Commands go to `exec`: tests can't
- * start processes. Its browser, if it has one, is `testBrowser`'s.
+ * start processes. Its browser, if it has one, is `testBrowser`'s, and its
+ * desktop, if it streams one, the `screen` the test gives.
  */
-export async function connectTestComputer(token: string, root: string, exec: (args: ExecArgs) => Promise<ExecResult>, browser?: BrowserHost) {
+export async function connectTestComputer(token: string, root: string, exec: (args: ExecArgs) => Promise<ExecResult>, browser?: BrowserHost, screen?: ScreenHost) {
 	await fs.mkdir(root, { recursive: true });
-	const machine: Machine = { root: await fs.realpath(root), exec, ...(browser ? { browser } : {}) };
+	const machine: Machine = { root: await fs.realpath(root), exec, ...(browser ? { browser } : {}), ...(screen ? { screen } : {}) };
 	const response = await opens("/computer/connect", token);
 	expect(response.status).toBe(101);
 	const socket = response.webSocket!;
@@ -273,6 +274,7 @@ export async function connectTestComputer(token: string, root: string, exec: (ar
 			user: "ada",
 			root: machine.root,
 			browser: browser ? "chrome" : null,
+			screen: screen !== undefined,
 		}),
 	);
 	await vi.waitFor(async () => expect((await api("/computer")).body.state).toBe("online"));

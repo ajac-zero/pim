@@ -3,7 +3,8 @@ import pimConfig from "../pim.config";
 import { diagramPage } from "./artifacts";
 import { deploymentSettings } from "./deployment";
 import { accountApi, adminApi, contentOrigin, handleRegistration, resolveAccount, servePublicArtifact, siteFor, sites, socialApi } from "./accounts";
-import { COMPUTER_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
+import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
+import { readSync } from "./computer-host";
 import { BROWSER_LIVE_PATH } from "./browser";
 import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER, SIGNED_IN_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
@@ -39,6 +40,8 @@ import { PimThemes } from "./themes";
  * - `/api/computer/connect`: the person's computer (./computer.ts), which
  *   connects with its own token, `pimc_<owner>_<secret>`. The token opens only
  *   this connection, and the owner's space checks it.
+ * - `/api/computer-host/sync`: this Pim's computer host (./computer-host.ts),
+ *   with its own token, `pimh_<secret>`, which opens only this.
  * - `/mcp/callback/<owner>`, `/mcp/events/<owner>/<watch>`: public, for
  *   connected apps. Each is checked another way: the OAuth state, and the
  *   watch's signing secret.
@@ -342,6 +345,16 @@ async function serveComputer(request: Request, env: Env): Promise<Response> {
 	return toAgent(forwarded, env, account.ownerId, COMPUTER_PATH);
 }
 
+/** The computer host asking for work, with its own token, which the Directory checks. */
+async function serveComputerHost(request: Request, env: Env): Promise<Response> {
+	if (request.method !== "POST") return fail(405, "/api/computer-host/sync takes POST");
+	const token = givenToken(request);
+	if (!token) return fail(401, "Unauthorized");
+	const sync = readSync(await request.json().catch(() => ({})));
+	const work = await env.Directory.getByName("directory").syncComputerHost(token, sync);
+	return work ? Response.json(work, { headers: { "cache-control": "no-store" } }) : fail(401, "This isn't this Pim's computer host token");
+}
+
 let deployedThemes: PimThemes | undefined;
 
 /** The color themes, listed (`/themes`) or as the stylesheet the app loads before it draws (`/themes.css`). */
@@ -435,6 +448,7 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 	const path = pathname.slice("/api".length) || "/";
 	if (path === "/health") return withCors(Response.json({ name: "pim", ok: true }));
 	if (path === "/computer/connect") return serveComputer(request, env);
+	if (path === "/computer-host/sync") return serveComputerHost(request, env);
 	const caller = await admit(request, env);
 	if (caller instanceof Response) return withCors(caller);
 	const { account, viaSession } = caller;
@@ -450,8 +464,10 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 	}
 	// The space accepts sockets on any path; keep them on one.
 	const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
-	if (upgrade !== (path === "/ws" || path === BROWSER_LIVE_PATH)) {
+	if (upgrade !== (path === "/ws" || path === BROWSER_LIVE_PATH || path === COMPUTER_SCREEN_PATH)) {
 		return withCors(fail(upgrade ? 404 : 426, upgrade ? "WebSockets connect at /api/ws" : "/api/ws expects a WebSocket upgrade"));
 	}
+	// The desktop takes input as if at the computer itself: only the person, signed in in their browser, uses it.
+	if (path === COMPUTER_SCREEN_PATH && !viaSession) return withCors(fail(403, "Only the person, signed in to Pim in their browser, can use the computer's desktop"));
 	return withCors(await toAgent(request, env, account.ownerId, path, viaSession));
 }

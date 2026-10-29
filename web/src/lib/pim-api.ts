@@ -234,6 +234,8 @@ export type Agent = {
   skills: string[];
   /** Your other agents it hands tasks to, by id; your majordomo's is empty, as it hands tasks to all of them. */
   contacts: string[];
+  /** The model it runs on; null follows the default model (Settings → Model). */
+  model: { provider: string; id: string } | null;
   /** The blueprint it builds on, as `<extension>/<blueprint>`, which brings its dashboard; null for none. */
   blueprint: string | null;
   /** The template it was made from. */
@@ -981,7 +983,7 @@ export type UserContent =
 export type ChatGPTStatus = { connected: boolean; email: string | null };
 
 export type ModelSettings = {
-  /** The model every session uses. */
+  /** The model of agents that have none of their own. */
   model: ModelInfo;
   /** The deployment's own model, used when nothing else is chosen. */
   default: ModelInfo;
@@ -1523,6 +1525,15 @@ export const pim = {
     call<{ model: ModelInfo }>("/model", {
       method: "PUT",
       body: JSON.stringify(model),
+    }),
+  /** Null follows the default model again. */
+  chooseAgentModel: (
+    agent: string,
+    model: Pick<ModelInfo, "provider" | "id"> | null,
+  ) =>
+    call<Agent>(`/agents/${encodeURIComponent(agent)}/model`, {
+      method: "PUT",
+      body: JSON.stringify(model ?? { provider: null, id: null }),
     }),
   chooseUtilityModel: (model: Pick<ModelInfo, "provider" | "id">) =>
     call<{ model: ModelInfo | null }>("/model/utility", {

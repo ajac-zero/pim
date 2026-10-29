@@ -256,6 +256,7 @@ function DashboardPage() {
             disabled={sent !== null}
             placeholder={t("messageAgent", { name: agent.name })}
             promptSuggestions={suggestions}
+            agent={agent}
           />
         </div>
       </div>

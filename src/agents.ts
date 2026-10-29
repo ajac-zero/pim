@@ -50,6 +50,8 @@ export type Agent = {
 	readonly memoryScope: string;
 	/** The person's named memory scopes it reads besides its own and everyone's, by key. */
 	readonly memoryScopes: readonly string[];
+	/** The model it runs on, by provider and id; null follows the space's own choice (Settings → Model), else the deployment's. */
+	readonly model: AgentModel | null;
 	/** The blueprint it builds on, as `<extension>/<blueprint>`; null for none. */
 	readonly blueprint: string | null;
 	/** The template it was made from. */
@@ -75,6 +77,9 @@ export type Agent = {
 	readonly createdAt: number;
 	readonly updatedAt: number;
 };
+
+/** A model as an agent keeps it: where pi's catalog finds it. */
+export type AgentModel = { readonly provider: string; readonly id: string };
 
 export type AgentInput = {
 	readonly name: string;
@@ -137,6 +142,7 @@ CREATE TABLE IF NOT EXISTS pim_agents (
 	contacts TEXT NOT NULL DEFAULT '[]',
 	memory_scope TEXT,
 	memory_scopes TEXT NOT NULL DEFAULT '[]',
+	model TEXT,
 	copy_of TEXT
 );
 CREATE TABLE IF NOT EXISTS pim_agent_icons (
@@ -206,6 +212,7 @@ const agentOf = (row: Row, directory: () => readonly DirectoryApp[]): Agent => (
 	contacts: JSON.parse(String(row.contacts)) as string[],
 	memoryScope: String(row.memory_scope),
 	memoryScopes: JSON.parse(String(row.memory_scopes)) as string[],
+	model: row.model ? (JSON.parse(String(row.model)) as AgentModel) : null,
 	blueprint: row.blueprint === null ? null : String(row.blueprint),
 	source: row.source ? (JSON.parse(String(row.source)) as Agent["source"]) : null,
 	published: row.published === null ? null : String(row.published),
@@ -370,6 +377,7 @@ export class AgentStore {
 		if (!columns.includes("contacts")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN contacts TEXT NOT NULL DEFAULT '[]'");
 		if (!columns.includes("memory_scope")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN memory_scope TEXT");
 		if (!columns.includes("memory_scopes")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN memory_scopes TEXT NOT NULL DEFAULT '[]'");
+		if (!columns.includes("model")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN model TEXT");
 		if (!columns.includes("copy_of")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN copy_of TEXT");
 		// Agents were called by their role: it is their name, until the person gives them another.
 		if (!columns.includes("role")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN role TEXT");
@@ -539,6 +547,12 @@ export class AgentStore {
 		if (input.symbol !== undefined) this.#sql.exec("UPDATE pim_agents SET symbol = ? WHERE id = ?", input.symbol, id);
 		if (input.color !== undefined) this.#sql.exec("UPDATE pim_agents SET color = ? WHERE id = ?", input.color, id);
 		if (input.memoryScopes !== undefined) this.#sql.exec("UPDATE pim_agents SET memory_scopes = ? WHERE id = ?", JSON.stringify(input.memoryScopes), id);
+		return this.get(id)!;
+	}
+
+	/** Sets the model it runs on, checked by the space; null follows the space's choice. */
+	setModel(id: string, model: AgentModel | null): Agent {
+		this.#sql.exec("UPDATE pim_agents SET model = ? WHERE id = ?", model && JSON.stringify({ provider: model.provider, id: model.id }), id);
 		return this.get(id)!;
 	}
 

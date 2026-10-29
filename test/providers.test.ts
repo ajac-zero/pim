@@ -225,6 +225,43 @@ describe("A person's own model providers", () => {
 		expect((await api("/providers/home-server", { method: "DELETE" })).status).toBe(404);
 	});
 
+	it("runs each agent on its own model, and follows the default model for agents that have none", async () => {
+		expect((await post("/providers", { name: "Home server", url: "http://localhost:1234/v1/" })).status).toBe(200);
+		const coach = (await post("/agents", { name: "Coach", instructions: "x" })).body;
+		const other = (await post("/agents", { name: "Writer", instructions: "x" })).body;
+		expect(coach.model).toBeNull();
+		const agentPut = (agent: string, body: unknown) => put(`/agents/${agent}/model`, body);
+		expect((await agentPut(coach.id, { provider: "own:home-server", id: "nope" })).status).toBe(400);
+		expect((await agentPut(coach.id, { provider: "own:home-server" })).status).toBe(400);
+		expect((await agentPut(coach.id, { provider: "own:home-server", id: "vision-model" })).body.model).toEqual({ provider: "own:home-server", id: "vision-model" });
+		expect((await api("/agents")).body.agents.find((agent: { id: string }) => agent.id === coach.id).model).toEqual({ provider: "own:home-server", id: "vision-model" });
+
+		// Only the coach's chats go to the home server; the writer's stay on the default model.
+		const coachChat = (await post("/sessions", { agent: coach.id })).body.id;
+		const writerChat = (await post("/sessions", { agent: other.id })).body.id;
+		expect((await say("Hello?", coachChat)).text).toBe("Hello from home");
+		expect(calls.at(-1)!.body).toMatchObject({ model: "vision-model" });
+		faux.setResponses([toolUse("send_to_user", { message: "Writer here." })]);
+		expect((await say("Hello?", writerChat)).text).toBe("Writer here.");
+
+		// Choosing the default model moves the writer, not the coach, and an earlier chat follows its agent.
+		expect((await put("/model", { provider: "own:home-server", id: "local-model" })).status).toBe(200);
+		expect((await say("Again?", writerChat)).text).toBe("Hello from home");
+		expect(calls.at(-1)!.body).toMatchObject({ model: "local-model" });
+		expect((await say("Again?", coachChat)).text).toBe("Hello from home");
+		expect(calls.at(-1)!.body).toMatchObject({ model: "vision-model" });
+
+		// Null follows the default again; a provider that goes takes its agents' models with it.
+		expect((await agentPut(coach.id, { provider: null, id: null })).body.model).toBeNull();
+		expect((await say("Once more?", coachChat)).text).toBe("Hello from home");
+		expect(calls.at(-1)!.body).toMatchObject({ model: "local-model" });
+		await agentPut(other.id, { provider: "own:home-server", id: "served-model" });
+		expect((await api("/providers/home-server", { method: "DELETE" })).status).toBe(200);
+		expect((await api(`/agents/${other.id}`)).body.model).toBeNull();
+		faux.setResponses([toolUse("send_to_user", { message: "Back on the default." })]);
+		expect((await say("Still there?", writerChat)).text).toBe("Back on the default.");
+	});
+
 	it("speaks the Anthropic Messages API to a custom endpoint that is set to", async () => {
 		expect((await post("/providers", { name: "Proxy", url: "https://claude.test", api: "gpt" })).status).toBe(400);
 		const added = await post("/providers", { name: "Proxy", url: "https://claude.test", key: "proxy-key", api: "anthropic-messages" });

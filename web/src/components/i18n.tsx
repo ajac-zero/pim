@@ -569,9 +569,10 @@ const translations = {
     notAnswered: "Not answered: {reason}",
     taskFailed: "Something went wrong, so Pim couldn't finish. Try again.",
     model: "Model",
-    modelChanged: "Pim now uses {model}",
+    modelChanged: "Agents without a model of their own now use {model}",
     chooseModel: "Model: {model}",
-    modelForEveryChat: "Model for every chat",
+    modelForAgent: "Model for {name}",
+    defaultModelTag: "Default",
     moreModels: "More models",
     utilityModel: "Utility model",
     utilityModelHint:
@@ -1619,9 +1620,10 @@ const translations = {
     taskFailed:
       "Algo salió mal, así que Pim no pudo terminar. Inténtalo de nuevo.",
     model: "Modelo",
-    modelChanged: "Pim ahora usa {model}",
+    modelChanged: "Los agentes sin modelo propio ahora usan {model}",
     chooseModel: "Modelo: {model}",
-    modelForEveryChat: "Modelo para todos los chats",
+    modelForAgent: "Modelo de {name}",
+    defaultModelTag: "Predeterminado",
     moreModels: "Más modelos",
     utilityModel: "Modelo de utilidades",
     utilityModelHint:

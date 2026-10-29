@@ -2,6 +2,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { ThinkingDot } from "~/components/chat/items";
+import {
+  ModelMark,
+  ModelMenuItems,
+  useAgentModel,
+} from "~/components/chat/model-menu";
 import { useI18n } from "~/components/i18n";
 import { X } from "~/components/icons";
 import { Button } from "~/components/ui/button";
@@ -11,6 +16,9 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import { type Agent, pim } from "~/lib/pim-api";
@@ -140,40 +148,15 @@ export function RoomMenu({ sessionId }: { sessionId: string }) {
         <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
           {label}
         </DropdownMenuLabel>
-        {people.map((person) => {
-          const agent = look(person.id);
-          return (
-            <div
-              key={person.id}
-              className="flex items-center gap-2 px-2 py-1.5 text-sm"
-            >
-              {agent && (
-                <AgentIcon
-                  agent={agent}
-                  tile
-                  className="size-5 shrink-0 rounded-md"
-                />
-              )}
-              <span className="min-w-0 flex-1 truncate">{person.name}</span>
-              {person.host ? (
-                <span className="text-muted-foreground text-xs">
-                  {t("roomHost")}
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  className="-my-1 rounded-full p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
-                  aria-label={t("removeFromChat", { name: person.name })}
-                  title={t("removeFromChat", { name: person.name })}
-                  disabled={remove.isPending}
-                  onClick={() => remove.mutate(person.id)}
-                >
-                  <X className="size-3.5" />
-                </button>
-              )}
-            </div>
-          );
-        })}
+        {people.map((person) => (
+          <Person
+            key={person.id}
+            person={person}
+            agent={look(person.id)}
+            removing={remove.isPending}
+            onRemove={() => remove.mutate(person.id)}
+          />
+        ))}
         {absent.length > 0 && (
           <>
             <DropdownMenuSeparator />
@@ -201,5 +184,80 @@ export function RoomMenu({ sessionId }: { sessionId: string }) {
         )}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/**
+ * One agent in the chat: its icon and name, and the model it runs on, which
+ * opens a list to choose another for it. Any but the host can be taken out.
+ */
+function Person({
+  person,
+  agent,
+  removing,
+  onRemove,
+}: {
+  person: { id: string; name: string; host: boolean };
+  agent: Agent | undefined;
+  removing: boolean;
+  onRemove: () => void;
+}) {
+  const { t } = useI18n();
+  const { settings, current, pinned, choose } = useAgentModel(person.id);
+  return (
+    <div className="flex items-center">
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger
+          className="min-w-0 flex-1 gap-2"
+          aria-label={t("chooseModel", { model: current?.name ?? "" })}
+        >
+          {agent && (
+            <AgentIcon
+              agent={agent}
+              tile
+              className="size-5 shrink-0 rounded-md"
+            />
+          )}
+          <span className="min-w-0 flex-1 truncate">{person.name}</span>
+          {person.host && (
+            <span className="text-muted-foreground text-xs">
+              {t("roomHost")}
+            </span>
+          )}
+          {settings && current && (
+            <ModelMark
+              settings={settings}
+              model={current}
+              className="size-4 shrink-0 text-muted-foreground"
+            />
+          )}
+        </DropdownMenuSubTrigger>
+        {settings && current && (
+          <DropdownMenuSubContent className="w-72 max-w-[calc(100vw-2rem)]">
+            <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
+              {t("modelForAgent", { name: person.name })}
+            </DropdownMenuLabel>
+            <ModelMenuItems
+              settings={settings}
+              current={current}
+              pinned={pinned}
+              choose={choose.mutate}
+            />
+          </DropdownMenuSubContent>
+        )}
+      </DropdownMenuSub>
+      {!person.host && (
+        <button
+          type="button"
+          className="mr-1 rounded-full p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+          aria-label={t("removeFromChat", { name: person.name })}
+          title={t("removeFromChat", { name: person.name })}
+          disabled={removing}
+          onClick={onRemove}
+        >
+          <X className="size-3.5" />
+        </button>
+      )}
+    </div>
   );
 }

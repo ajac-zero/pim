@@ -14,5 +14,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["*.ts", "eval-install/*.ts", "test/*.ts"]
+  "include": ["*.ts", "eval-install/*.ts", "qualification/*.ts", "test/*.ts"]
 }

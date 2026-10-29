@@ -2,186 +2,264 @@
 
 **Status: specification for review. Nothing here is implemented, accepted or active.** Groves chose acknowledged remote fencing as the direction for native-app calls in the protected-account design (`docs/cua-native-host-plan.md`). Two directions were rejected: a prepare-then-irrevocable-`go` dispatch, and asynchronous revocation (see the plan's record). Pim's `nativeDesktop()` stays false. **Human takeover is unavailable, and nothing here is a takeover or quiescence claim.**
 
+This revision answers the review of `7ef5ab5`: scopes no longer close an agent or a chat for good on a stop or reassignment, every harness run end is accounted for, the fence step and its answers are defined exactly, messages have a discriminator and per-type bounds, retention has real quotas, and the wording is narrowed.
+
 ## The contract
 
-- **Local admission closes immediately.** Stop and Delete close the scope's local admission in Pim when they are asked, and before they answer. From then on, Pim records no new native intent and sends no `native.execute` in that scope. This is permanent: a closed scope never reopens (no resurrection).
-- **Two separate things are reported.** One is that the chat is stopped or deleted locally. The other is that the desktop has confirmed the fence.
-- **A confirmed fence means exactly this:** every broker instance that Pim ever handed a call in that scope has acknowledged that it will make no further upstream send in the scope.
+- **Local admission closes at once.** Stop, Delete, an agent's removal and an epoch change each close their scope in Pim before their route answers. From then on Pim records no new native intent and sends no `native.execute` in that scope.
+- **Scopes are as narrow as the change.** Stop closes the runs it stops, not the chat: the chat's next run works as before. Delete closes the chat for good. Removing an agent closes that agent's calls; its chats go on with the majordomo, as today. A queued reset is unchanged: it is not a closure until the harness applies it. Unaffected chats and agents are untouched. See "Scopes".
+- **Two things are reported separately:** the local change (stopped, deleted), and the state of the desktop fence.
+- **A confirmed fence means exactly this:** the broker instances that could still send any call Pim intended in the scope have each latched the scope and acknowledged it. So the broker sends nothing more in that scope, including calls whose outcome is `unknown`.
 - **It does not cover:**
-  - input already sent to spacesd, which may still act;
-  - calls Pim records as `unknown`;
-  - any process on the desktop;
+  - input already handed to spacesd, which may still act, or the outcome of an `unknown` call;
+  - any other process on the desktop;
   - the person's control of the display.
-- **No false success.** If the VM or an instance is unavailable, the fence stays unconfirmed, or is reported `unconfirmed` past its bound. It never becomes confirmed by time passing, a new instance, or Pim's own local close.
-- **What is preserved from today:**
-  - Deleting still hides the chat (`deleted_at`, `store.deleteSession`) and aborts it as now.
-  - Stop still aborts the harness conversation (`POST /sessions/:session/abort`).
-  - The binder's tombstones and run latches are kept, never released.
+- **No false success.** An unavailable VM or instance leaves the fence `pending` and then `unconfirmed`. Time passing, a new instance or Pim's local close never makes it `confirmed`.
+- **Preserved from today:**
+  - Delete still hides the chat (`deleted_at`) and aborts it, its seats and the tasks it handed out.
+  - Stop still aborts through `Conversation.abort()`.
+  - The binder's tombstones and run latches are never released.
 
 **Previous semantics vs added ones.** Today Stop and Delete are local only:
-- the harness aborts the conversation, and Delete hides the chat;
+- the harness aborts, and Delete hides;
 - the binder and the send gate refuse a call that hasn't left (`docs/cua-native-identity.md`);
 - nothing is said about the desktop.
 
-This protocol adds a remote statement, reported separately and possibly never confirmed. It takes nothing from the local semantics.
+This protocol adds a remote statement, reported separately and possibly never confirmed, and narrows nothing local.
 
 ## A correction to earlier claims
 
-The accepted send gate (`#desktopSend` in `src/pim.ts`, accepted at `b347372`) is a **local** qualification. It reads the authority in a harness commit, then reads Pim's deletion and agent records synchronously and calls `transmit()` inside that commit's callback, before the commit resolves. The coordinator's admission is written before the send in program order, and its durability is not awaited before the socket send.
-- **What its tests showed:** the order of reads against store writes queued in its awaits, in workerd with stand-ins.
-- **What they didn't show:** that any record is durable before the message leaves, or anything about a remote executor.
+The accepted send gate (`#desktopSend` in `src/pim.ts`, accepted at `b347372`) is a **local** qualification. It reads the authority in a harness commit, then reads Pim's deletion and agent records synchronously, and calls `transmit()` inside that commit's callback, before the commit resolves. Nothing there is awaited as durable before the send. Its tests showed the order of reads against store writes queued in its awaits, in workerd with stand-ins, and nothing about a remote executor.
 
-`docs/cua-native-host-plan.md` at `023a068` said protocol B put "the authority's commit at the broker's send". It also treated recording a call inside the transaction callback as its durable commit. **Both are withdrawn.** A callback's return is not a durable commit. Cloudflare documents output gates for Durable Object storage, but nothing here verified that they hold this WebSocket send behind the harness's and coordinator's writes, so this protocol doesn't rely on them: it **awaits** the durability of each record that must precede a message.
+`docs/cua-native-host-plan.md` at `023a068` said protocol B put "the authority's commit at the broker's send", and treated recording inside the commit callback as a durable commit. **Both are withdrawn.** A callback's return is not a durable commit. Cloudflare documents output gates for Durable Object storage, but nothing here verified that they hold this WebSocket send behind these writes, so this protocol awaits durability explicitly wherever a record must precede a message.
 
 ## Parties and trust boundaries
 
 | Party | Account | Trusted for | Not trusted for |
 | --- | --- | --- | --- |
-| Pim (the space's Durable Object) | Cloudflare | Authority: intents, scopes, fences, the durable record | Anything on the VM |
-| The link | TLS through Caddy to the bridge, the bridge's bearer, `x-pim-space` | Authenticity and order of messages within one connection | Delivery across connections; a lost message is lost |
-| The bridge and broker | `pim-bridge` | Executing only what Pim sent it, latching fences, reporting truthfully | Durability: its memory dies with its process |
-| pim-computer | `pim-desktop` | Its ordinary ops | Anything native. The demux drops every `native.*` message from its side and ends the session |
-| spacesd | `pim-spacesd` | Running the curated tool it is sent | Deduplication, cancellation, or reporting when input lands |
+| Pim (the space's Durable Object) | Cloudflare | Authority: intents, closures, fences, the durable record | Anything on the VM |
+| The link | TLS through Caddy to the bridge, the bridge's bearer, `x-pim-space` | Authenticity and order of messages within one connection | Delivery across connections |
+| The bridge and broker | `pim-bridge` | Executing only what Pim sent, latching, reporting truthfully | Durability: its memory dies with its process |
+| pim-computer | `pim-desktop` | Its ordinary ops | Anything native. The demux drops every `native.*` from its side and ends the session |
+| spacesd | `pim-spacesd` | Running the curated tool it is sent | Deduplication, cancellation, or saying when input lands |
 
-The broker is reached only through the bridge's link, from Pim's side. No desktop-owned socket or child takes part.
+## Scopes, and who mints their keys
 
-## Identifiers
+Every intent records each key below, read from Pim's or the harness's own records, never from a model, the bridge or the desktop.
 
-- `owner`, `agentId`, `runId` (the harness-minted run ID), `conversationId` and `requestId` (`call:…` or `approval:…`, the coordinator's): each matches `NATIVE_IDENTITY`, as Pim's records hold them. None comes from a model, and none is ever re-minted to replace another.
-- `instance`: 128 bits from a CSPRNG, drawn by the broker at process start and never stored or reused, written as 22 characters of base64url.
-- `epoch`: the coordinator's control epoch, which already advances on every ownership change.
-- `fenceId`: 128 random bits, minted by Pim with the fence record.
-- `argsSha256`: SHA-256 of the arguments' canonical JSON (`canonical` in `native-mcp.ts`).
+| Scope | Key | Minted by | Closed by | Never reused because |
+| --- | --- | --- | --- | --- |
+| Run | harness run ID | pi-durable's `Storage.mintId()` in the commit that starts a run (Pim's patch, `docs/pi-durable-run-identity.md`) | Stop, Delete (the runs of seats and handed-out tasks), an `unknown` call (its run) | One global numeric namespace, never reused after a committed write |
+| Conversation | harness conversation ID | the harness | Delete (`deleted_at`, the existing record) | Harness IDs come from the same namespace |
+| Assignment | (conversation, agent ID, generation); `assignment` in an execute is the generation, 0 until a reassignment route exists | Pim's `AgentStore` and task records; the generation by Pim's store | A change of the chat's agent | The generation only grows |
+| Agent | agent ID | `newAgentId` in `src/agents.ts` (48 random bits) | Removing the agent (`DELETE /agents/:agent`) | Stage 1 redraws a new agent ID equal to any `agentId` in Pim's intents or tombstones, which are bounded (below) |
+| Epoch | the coordinator's control epoch | `ControlCoordinator` | Each change of ownership | Epochs only grow |
+
+**Reassignment vs removal.**
+- **Today no route reassigns a live chat.** `AgentStore.setSession` runs only when a conversation is created (`src/pim.ts` L1992, L3038, L3288). The one way a chat's agent changes is removal: `AgentStore.delete` drops the agent's `pim_agent_sessions` rows, and its chats talk as the majordomo from then on. Task conversations fall back to the majordomo too (`#roleOf`, `src/pim.ts` L2934).
+- **Removal closes the agent scope:** every call by that agent, in every chat. The agent no longer exists, so no ordinary use is lost. The chats themselves stay open under the majordomo.
+- **A future reassignment route** closes only the (conversation, old agent) assignment. It must also bump a per-conversation assignment generation, which Pim's store increments in the same SQL write as the row change, and which every intent records. Then a chat moved back to an earlier agent isn't blocked by the old closure. The agent's other chats are unaffected.
+- **The local check needs no new record:** the gate already refuses a call whose binding's agent isn't `#roleOf(session).agent.id`.
+
+**Stop never closes the conversation or the agent.** A later message starts a new run with a new run ID, which no closure names.
+
+## Local invalidation: every run end, before the send
+
+Two kinds of change can make a call stale between its authority read and its send. They are ordered against the send differently, and both orderings are needed.
+
+### Harness run ends: ordered by the harness's line
+
+Every change to a run in pinned pi-durable 1.1.0, as patched, is a harness commit on the session's mutation line (`Session.commitWith`, `dist/session/session.js` L53–60, `#enqueue`). Each conversation's `commit` maps onto it (`dist/harness/harness.js` L47–48), and so do the scheduler's commits (`dist/harness/scheduler.js` L97, L134, L166, L212).
+
+| Path | Where (dist/harness) | What it does |
+| --- | --- | --- |
+| Natural completion | `generation.js` L423, L504 | `endRun(… "done")` |
+| Model error, no model | `generation.js` L232, L244, L389 | `endRun(… "unanswered")` |
+| Reset applied | `generation.js` L512 | `endRun(… "reset")` at the run's boundary |
+| Abort | `scheduler.js` L207–212 | `Conversation.abort()`: in one commit, withdraws queued inputs and marks live tasks |
+| Abort settled, task faulted | `live.js` L86–106 (`settleSchedulerOutcome`) | `endRun` for the run's task |
+| Next run, replacement | `generation.js` L425, L506, L514; `submissions.js` L156, L172 | `startRun` with a new run ID |
+| Handover | `generation.js` L419, L520 | Not a run end: the run ID stays |
+
+**The gate holds that line from its authority read to its send.** It runs inside one harness commit, so every row above lands wholly before the gate's read (which then refuses: the run has ended, the task is terminal or marked for abort, or a newer run doesn't own the task) or wholly after the send. The change from today is that the intent's durability await (step 4 below) also happens inside that commit. So the line is held across it, and no harness run end can land between the authority read and the send.
+
+- **Cost:** every harness commit of the space waits behind one storage sync per native call.
+- **Unverified:** that awaiting `ctx.storage.sync()` inside a harness commit callback neither deadlocks nor is refused, in workerd and in production. Stage 2 must show this in workerd. If it fails, the design returns to review. It doesn't fall back to releasing the line.
+- **Review rule for upgrades:** every `endRun` and `startRun` in the pinned, patched dist must be inside a commit callback. The stage 2 reviewer greps for them, and so does any reviewer of a pi-durable upgrade.
+
+### Pim's own records: re-read with nothing awaited before the send
+
+Deletion (`deleted_at`), an agent's removal, a chat's agent, Pim's run closures and the coordinator's epoch are written outside the harness's line. They can land during any await, including the durability await. So the gate reads them again **after the last await, synchronously, immediately before `transmit()`**.
+
+### Why routes alone wouldn't do
+
+A closure written only by the Stop and Delete routes would miss the harness's own run ends: completion, an applied reset, a model error, a fault and replacement. Those are covered by holding the line, not by closures. Pim's run closures exist for the remote fence, and for one window: between Stop's closure commit and its abort commit (below).
 
 ## Messages
 
-Every message is one JSON object with exactly the listed keys, at most `NATIVE_ARGUMENTS_CHARS` plus 4 KiB long. Any other shape is refused with a fixed reason and changes no state. The broker sends `native.*` only to Pim's side, and the demux drops any `native.*` from pim-computer's side and ends that session.
+Every message is one JSON object with a `type` discriminator, `v: 1`, and exactly the listed keys. A message over its type's bound, of another shape, or of an unknown type is refused with a fixed reason and changes no state. The broker sends `native.*` only to Pim's side, and the demux drops any `native.*` from pim-computer's side and ends that session. The link's frame cap stays `BRIDGE_MESSAGE_CHARS` (16 MiB).
 
-| Message | Direction | Keys | Meaning |
-| --- | --- | --- | --- |
-| `native.hello` | broker → Pim, first on each connection | `v: 1`, `instance` | The broker is present, and which instance this is. Pim sends no `native.execute` to a connection without it |
-| `native.execute` | Pim → broker | `v`, `requestId`, `owner`, `agentId`, `runId`, `conversationId`, `epoch`, `instance`, `tool`, `arguments`, `argsSha256`, `boundMs` | The one action message. It is never re-sent. `boundMs` is at most 60,000, measured by the broker from receipt |
-| `native.result` | broker → Pim | `v`, `requestId`, `instance`, `outcome` (a `NativeOutcome`), `sent` (boolean) | The outcome. `sent: false` only when the broker refused before handing the call to `fetch` |
-| `native.fence` | Pim → broker | `v`, `fenceId`, `instance`, `scope` (`{ kind: "conversation", conversationId }`, `{ kind: "run", runId }`, `{ kind: "agent", agentId }` or `{ kind: "epoch", epoch }`) | Latch the scope. It is idempotent and may be re-sent; re-sending is a status request, not an action |
-| `native.fenced` | broker → Pim | `v`, `fenceId`, `instance`, `scope`, `sent` (request IDs it handed to `fetch` in scope), `refused` (request IDs it refused unsent in scope) | Sent only after the latch is set. Every `native.fence` for the same `fenceId` gets the same answer |
+| `type` | Direction | Keys | Bound | Meaning |
+| --- | --- | --- | --- | --- |
+| `native.hello` | broker → Pim, first on each connection | `instance` | 256 chars | Which instance this is. Pim sends no execute or fence to a connection without one |
+| `native.execute` | Pim → broker | `requestId`, `owner`, `agentId`, `conversationId`, `runId`, `assignment`, `epoch`, `instance`, `tool`, `arguments`, `argsSha256`, `boundMs` | `NATIVE_ARGUMENTS_CHARS` (32 KiB) + 4 KiB | The one action message, never re-sent. `boundMs` ≤ 60,000, from the broker's receipt |
+| `native.result` | broker → Pim | `requestId`, `instance`, `sent`, `outcome` | The outcome ≤ `NATIVE_WIRE_LIMITS.maxOutcomeChars`, the rest ≤ `REPLY_RESERVE_CHARS` | Exactly one per execute the broker read, unless it dies. `sent: false` only if it refused before handing the call to `fetch`. Screenshots fit, as now |
+| `native.fence` | Pim → broker | `fenceId`, `instance`, `scope` | 1 KiB | Latch the scope. Idempotent; re-sending it is a status request |
+| `native.fenced` | broker → Pim | `fenceId`, `instance`, `scope`, `latch` (`scope` or `space`), `sentCount`, `refusedCount`, `digest` | 1 KiB | Sent only after the latch is set. Every repeat for the same `fenceId` is identical |
 
-There are no other phases. Status of an action is never asked by re-sending it.
+**Scope objects:** `{ kind: "run", runId }`, `{ kind: "conversation", conversationId }`, `{ kind: "assignment", conversationId, agentId, generation }`, `{ kind: "agent", agentId }`, `{ kind: "epoch", epoch }`.
+
+**The fence answer doesn't list actions.** Each call's own disposition arrives in its `native.result`. The acknowledgment proves only the latch, with counts for consistency:
+- `sentCount` and `refusedCount` count the calls in scope at the fence step;
+- `digest` is SHA-256 over the sorted lines `requestId:disposition` for those calls.
+
+Pim checks that `sentCount + refusedCount` is at most the intents it transmitted to that instance in scope, and that each count is at least the results of that kind it has. Once every result in scope has arrived, it also checks the digest. A mismatch marks the fence `unconfirmed`, and a later answer can't clear it.
 
 ## Pim's side
 
-### Records (durable, in Pim's store)
+### Records, in Pim's SQL storage
 
-- **Native intent**, keyed by `requestId`: every field of `native.execute`, frozen, plus `state`.
-  - `intended`: written and its durability awaited before any `native.execute` exists.
-  - `refused`: the broker said `sent: false`, or Pim knows it never transmitted.
-  - `completed`: a valid `native.result` with `sent: true`.
+- **Intent**, keyed by `requestId`. It holds every field of `native.execute`, frozen, and a `state`:
+  - `intended`: written, and durable before any execute exists;
+  - `refused`: the broker said `sent: false`, or Pim knows it never transmitted;
+  - `completed`: a valid result with `sent: true`;
   - `unknown`: anything else.
 
-  `refused`, `completed` and `unknown` are final, and `unknown` latches the run in the binder and the coordinator, as today. Final means the call's outcome never changes; an `unknown` call still counts as outstanding for fences.
-- **Scope closure**, keyed by scope: written in the same synchronous store write as the change that closes it (a chat's `deleted_at`, a stop, an agent change, an epoch change). Every intent check reads it.
-- **Fence**, keyed by `fenceId`, with its scope and the set of instances that must acknowledge it.
-  - **Who must acknowledge:** every instance named by an intent in the scope that is `intended` or `unknown`. `unknown` counts: Pim settles a call `unknown` when its own wait ends, but the broker measures `boundMs` from receipt, so a delayed execute can still be sent after Pim gave up on it.
-  - **States:** `pending`, `confirmed` (every required acknowledgment durably recorded) or `unconfirmed` (past its bound, or a required instance is no longer the one connected).
-  - **Not needed:** a scope with no `intended` or `unknown` intent needs no fence, and none is recorded. Nothing in it is outstanding at any broker, and the local closure stops new executes.
-  - **Late confirmation:** an `unconfirmed` fence can become `confirmed` only if its own missing instances acknowledge it later.
+  The last three are final: an outcome never changes once settled. `unknown` latches the run in the binder and the coordinator, as today. **An `unknown` intent still counts as outstanding for fences**, because Pim settles it when its own wait ends, while the broker measures `boundMs` from receipt. A delayed execute can therefore still be sent.
+- **Run closure**, keyed by run ID. Written by Stop and Delete (below). It can be compacted once Pim has observed that run ended in a harness commit, since the authority then refuses its calls for good (`stopped`, or `not_run_owned` for any later run).
+- **Fence**, keyed by `fenceId`:
+  - its scope;
+  - its required instances, the distinct `instance` of every intent in scope that is `intended` or `unknown`;
+  - its acknowledgments;
+  - its state, `pending`, `confirmed` or `unconfirmed`.
+
+  A scope with no `intended` or `unknown` intent needs no fence, and none is recorded.
+
+The other closures already exist: `deleted_at`, the agent's absence from `AgentStore` (with the redraw rule above), and the coordinator's epoch.
+
+### One closure boundary
+
+Each change that closes a scope does, in **one synchronous step** with nothing awaited:
+1. its own write (`deleteSession`, `agents.delete`, or the run closures);
+2. a scan of every intent in the scope;
+3. the fence record, with required instances from that scan.
+
+An intent written after that step can't be in the scope, because step 3 of the call path re-reads the closures before writing one. An intent written before it is in the scan, whatever its state.
 
 ### A call's path, with every await
 
-1. **Binding and approval**, as today.
-2. **The authority:** Pim's run authority reads the call's tool task and run in a harness commit (awaited), as in `#desktopSend` today. The coordinator admits the request (synchronous write).
-3. **Synchronous re-read, then the intent:** Pim reads the chat's deletion, its agent, the scope closures for the conversation, run, agent and epoch, and the connection's `instance`. If all pass, it writes the intent `intended` in the same synchronous step.
-4. **Await the intent's durability** (the store's sync). No `native.execute` exists yet.
-5. **Synchronous re-read of the closures, then transmit:** if any scope closed during step 4, the intent becomes `refused` (Pim knows it never transmitted) and nothing is sent. Otherwise `native.execute` is transmitted on the current connection, with nothing awaited between the re-read and the send.
-6. **Await the result**, bounded by `boundMs` plus transit. A valid `native.result` settles the intent `completed`, or `refused` if `sent: false`. Anything else (none, malformed, another instance, a closed connection) settles it `unknown`.
+1. **Binding and approval**, as today. The binder's claim is its own harness commit, as today.
+2. **The gate's harness commit starts.** Pim's authority reads the tool task and run (`tx.task`, `tx.run`) and `await`s its answer, as today. The coordinator has admitted the request.
+3. **Synchronous step:** read the deletion, the chat's agent and assignment, the run closures, the epoch, and the connection's `instance`. If all pass, write the intent `intended`.
+4. **Await the intent's durability** (`ctx.storage.sync()`), still inside the gate's commit, so no harness run end can land. Pim's own records can.
+5. **Synchronous step, then transmit:** read the records of step 3 again. If anything changed, settle the intent `refused` (Pim knows it never transmitted) and send nothing. Otherwise transmit `native.execute` on the same connection, with nothing awaited between the read and the send.
+6. **The commit ends.** Await the result, bounded by `boundMs` plus transit:
+   - a valid result settles the intent `completed`, or `refused` if `sent: false`;
+   - anything else (none, malformed, another instance, a closed connection) settles it `unknown`, and records a run fence for its run (below).
 
-There is no cross-store transaction. The harness's records, Pim's store and the coordinator's state are read in an order, and each later step re-reads what an earlier await could have let change.
+There is no cross-store transaction. The harness's records, Pim's SQL and the coordinator's state are read in this order, and each later step re-reads what an earlier await could have let change.
 
-### Stop, Delete, and agent or epoch changes
+### Stop, Delete, removal, epoch, unknown
 
-1. **One synchronous write closes the local scope** with the change itself: `deleted_at` and the conversation closure; a stop and the run closures of the conversation's live runs; an agent change and the agent closure; an epoch change and the epoch closure. It also records a fence `pending` with its required instances, unless the scope has no intents. **Local admission is closed from this write on.**
-2. **The route answers after that write is durable** (awaited), with the local result and the fence's ID and state. It doesn't wait for the desktop. Then, as today: the harness abort, task cancellation and the rest, each awaited in order.
-3. **In the background**, Pim sends `native.fence` to the current connection, and again on every reconnect while the fence is `pending`. Re-sending is idempotent.
-4. **On `native.fenced` from a required instance,** Pim checks the fence ID, instance and scope, then records the acknowledgment durably (awaited) before counting it. For each request it lists, `refused` settles an `intended` intent `refused`, and is recorded beside an `unknown` one as evidence without changing it; `sent` settles nothing (it stays `intended` until a result, or `unknown`). A listed request Pim has no intent for is a protocol error and marks the fence `unconfirmed`.
-5. **When every required instance has acknowledged, durably,** the fence is `confirmed`.
-6. **At its bound** (proposed: 2 minutes from the close, kept while the VM is reachable), or as soon as a required instance is not the instance connected, a `pending` fence becomes `unconfirmed`. It goes on accepting late acknowledgments from its own instances.
+- **Stop** (`POST /sessions/:session/abort` without an `operationId`):
+  1. One Pim harness commit reads the live run of the chat and of each seat (`tx.run`). In one synchronous step inside it, it writes their run closures, scans their intents and records the fence.
+  2. The route awaits durability, then runs the existing aborts.
+  3. It answers `{ aborted, desktopFence }` without waiting for the desktop.
 
-**A new instance proves nothing about an old one.** A `native.hello` with another instance ID shows that a different process answers. It doesn't show that the old process has stopped, or that its calls already sent have finished or been dropped by spacesd. So:
-- a fence that needs an old instance's acknowledgment stays `unconfirmed` until that instance itself answers;
-- no rule clears it optimistically;
-- a new instance isn't asked to acknowledge, because it refuses every execute naming another instance and so holds nothing in the scope.
+  Because step 1 is on the harness line, a gate is wholly before it (its call is out, and the fence orders it) or after it (its step 3 or 5 finds the closure). **A run that starts after step 1 is a new run** (for example from a queued input reaching its turn) and isn't closed or fenced by this Stop. The existing abort may still end it locally, as today. A Stop with an `operationId` either withdraws a queued input, or aborts the run that input joined (`abort` in `agents/harness/pi`). In the second case it closes and fences that run as above. Stage 1 tells the two apart by reading the run's inputs in the closure commit. Where it can't, it closes the live run: a native-call-only over-closure of a run in a chat the person was stopping work in.
+- **Delete:**
+  1. `deleteSession` runs first, as now. In the same synchronous step it scans the chat's intents and records its conversation fence.
+  2. Then a harness commit, as for Stop, closes and fences the live runs of its seats and of the tasks it handed out. Their later runs are unaffected, as today.
+  3. Then the existing steps run.
+- **Removing an agent:** after the existing task cancellations, `agents.delete` and the agent's fence record share one synchronous step.
+- **An epoch change** records an epoch fence for the old epoch if it has outstanding intents.
+- **An `unknown` call:** in the step that settles it, Pim records a run fence for its run. That covers the delayed-execute case after natural completion, a reset or replacement, with no hook into those paths.
+- **Fence delivery:** Pim sends `native.fence` to the connection whenever a required instance is connected, and again on each reconnect while the fence is `pending`.
+- **On `native.fenced`:** Pim checks that the `fenceId` is known, that the instance is required and not yet recorded, and that the scope is equal. It then records the acknowledgment durably (awaited) before counting it.
+- **States:**
+  - **confirmed:** all required instances have acknowledged durably;
+  - **unconfirmed:** after 2 minutes (proposed), or as soon as the connection belongs to another instance while one is missing. It still accepts late acknowledgments from its own missing instances.
 
 ## The broker's side
 
-### State (in memory, per instance, bounded)
+### State: in memory, per instance, bounded
 
-- **Received request IDs:** every `requestId` it accepted, at most 10,000 per instance. Past that it refuses new executes (`unavailable`, `sent: false`).
-- **Latches:** scopes it has latched, at most 1,000. Past that it latches the whole space and refuses every execute from then on.
-- **Calls in progress:** at most one per run (`busy`, as today) and `MAX_RUNS` (256) runs.
-- **Run latches:** for runs whose call ended `unknown`, as `createNativeDispatcher` keeps them.
+- **Calls:** each execute read, keyed by `requestId`. State is `setup`, `sent` or `refused`, at most 1,024 per instance. Past that, executes are refused (`sent: false`).
+- **Latches:** each with its stored fence answer, at most 1,024. Past that, the next fence sets the space latch (one flag) and answers `latch: "space"`. The space latch refuses every later execute, and that instance needs replacing before native calls resume.
+- **Calls in progress:** at most one per run (`busy`) and `MAX_RUNS` (256) runs, as `createNativeDispatcher` keeps them, with its run latches.
 
-**No durable journal is needed for the acknowledgment's meaning,** because an acknowledgment speaks only for its own instance and is valid only while that process lives:
-- Its claim, "this instance will make no further upstream send in the scope", holds while the process lives, because the latch is checked at every send.
-- It also holds after the process dies, because a dead process sends nothing, and no later instance accepts an execute naming it.
-- If the process were stopped and resumed rather than restarted, it keeps its memory, and the latch with it.
-
-What a crash loses is the ability to acknowledge again. A fence whose acknowledgment Pim hadn't recorded before the crash stays `unconfirmed`, as above. A journal would let a restarted process repeat its predecessor's acknowledgment, but it couldn't vouch for what that predecessor did after its last write, so it isn't proposed.
+These bounds sit above Pim's lifetime quota (below), so in a correct Pim they aren't reached. They exist against a faulty peer, and they fail closed.
 
 ### One serialized queue per space
 
-Run setup (`initialize`, `notifications/initialized`, `tools/list`) is awaited outside the queue. Two steps happen inside it, each synchronous and never interleaved:
+Run setup (`initialize`, `notifications/initialized`, `tools/list`) is awaited outside the queue. Two steps happen inside it, each one synchronous with nothing awaited:
 
-- **The send step** for a call whose setup has finished:
-  - check that its `instance` is this one;
-  - check that `boundMs` hasn't passed since receipt;
-  - check that no latch covers its conversation, run, agent, epoch or the space;
-  - check that its request ID isn't consumed.
+- **Send step**, for a call whose setup finished. The call must be `setup` (not `refused`), its `instance` must be this one, `boundMs` must not have passed, and no latch may cover any of its keys or the space. If so, it is marked `sent` and the `tools/call` is handed to `fetch`, with no await before the handoff. Otherwise it is marked `refused` and its `native.result` says `sent: false`.
+- **Fence step:**
+  1. If the `fenceId` is known with an equal scope, resend the stored answer. With a different scope, reply `fence_conflict` and change nothing.
+  2. Otherwise, set the latch.
+  3. Scan every call in the scope. Any in `setup` is marked `refused` now: irrevocably, before the answer exists, so its setup continuation finds it refused and never reaches `fetch`.
+  4. Compute the counts and digest over the scope's calls (`sent` or `refused`), store the answer with the latch, and send it.
 
-  Then it marks the call consumed and hands the `tools/call` to `fetch`, with no await before the handoff. A failed check refuses it with `sent: false`.
-- **The fence step:** set the latch, then build `sent` and `refused` for the scope from the received set, then send `native.fenced`. **The latch is set before the acknowledgment exists.** Any call in that scope that is still in setup, or arrives later, finds the latch at its send step, and is refused.
+  A call in scope that arrives after the fence step is refused by the latch, and reported in its own `native.result`. It isn't added to the stored answer, which describes the fence step only.
 
-So within one instance, every send and fence has one place in the queue. A send before the fence's place may have run, and nothing in the scope is sent after it. **This order is the broker's, not Pim's:** Pim's local close can come before a send that the broker's queue places before the fence. That send is what `sent` lists. **The protocol doesn't claim that Pim's committed close forbids a remote send under an execute already handed over.**
+So within one instance, every send and fence step has one place in the queue. A send before the fence step may have run, and is counted `sent`. Nothing in the scope is sent after it. **This order is the broker's, not Pim's:** a send placed before the fence step can follow Pim's local close in real time, if the execute left before the close. The protocol doesn't claim that Pim's close forbids a remote send of an execute already transmitted.
+
+### What an acknowledgment proves, and for how long
+
+An acknowledgment says: "this instance has latched the scope, and sends nothing more in it". **Once Pim has recorded it durably, it stays true for good.** While that process lives, the latch is checked at every send. After it dies, it sends nothing. A later instance refuses every execute naming another instance, and Pim never transmits an old execute again. So a recorded acknowledgment remains valid after its instance dies, and across restarts of the bridge and of Pim.
+
+What a crash loses is the ability to acknowledge again. If an instance dies before Pim recorded its acknowledgment, its fence stays `unconfirmed` for good, because no one can speak for what that process did. **The broker needs no durable journal:** a journal would let a successor repeat an acknowledgment, but couldn't vouch for its predecessor's last moments.
+
+A process that is suspended and resumed, not restarted, keeps its memory and latches.
 
 ## Crashes, losses and replay
 
-| Event | What Pim records | Why |
+| Event | Pim records | Why |
 | --- | --- | --- |
-| Pim ends after the intent is durable, before transmit | `unknown` | It can't prove the message didn't leave |
-| Pim ends after transmit | `unknown` | |
-| `native.execute` lost (connection closed) | `unknown` | No result arrives on a new connection. The action is never re-sent |
-| The broker ends after receipt, before `fetch` | `unknown` | A new instance can't say what the old one did |
-| The broker ends after `fetch` | `unknown` | |
-| Result lost | `unknown` | A late result changes nothing, as today |
-| `native.fenced` lost | Fence `pending`, then re-sent | A fence re-send is a status request: the same instance answers from its latch |
-| `native.fenced` lost and the instance ended | Fence `unconfirmed` | Its acknowledgment can't be obtained |
-| Pim settled a call `unknown` by its timeout, and the delayed execute reaches the broker later | Stays `unknown`. The fence still requires that instance | The broker's bound starts at receipt |
-| Pim's durable write of an acknowledgment fails | Not counted. The fence stays `pending` or `unconfirmed`, and is re-sent | Only a durable acknowledgment counts |
-| Old and new broker both alive | Each instance acknowledges for itself, and a missing old one leaves the fence `unconfirmed` | No clearance by succession |
+| Pim ends after the intent is durable, before transmit | On restore every `intended` intent becomes `unknown`, with a run fence | It can't prove nothing left |
+| Pim ends after transmit | `unknown`, and a run fence | |
+| Pim ends before the intent is durable | If the intent survived, `unknown` and a run fence; if not, no intent. Either way the binding comes back `unknown` (`docs/cua-native-identity.md`, "Restarts") | Nothing was transmitted, but restore can't tell |
+| Execute lost (connection closed) | `unknown` | Never re-sent |
+| Broker ends before or after `fetch` | `unknown`. Fences that need it stay `unconfirmed` | A new instance can't say what the old one did |
+| Result lost | `unknown` | A late result changes nothing |
+| Pim gave up, and the delayed execute arrives later | Stays `unknown`. Its run fence requires that instance | The broker's bound starts at receipt |
+| `native.fenced` lost, instance alive | `pending`, re-sent, answered from the stored answer | Re-sending the fence is a status request |
+| `native.fenced` lost, instance dead | `unconfirmed` | |
+| Pim's durable write of an acknowledgment fails | Not counted. Re-sent while the instance lives | Only a durable acknowledgment counts |
+| Old and new instance both alive | Each answers for itself. A silent required one leaves the fence `unconfirmed` | No clearance by succession |
 
 **No replay:**
-- No `native.execute` is ever sent twice.
-- A request ID, run ID or identity is never re-minted to escape `unknown`.
-- A closed scope blocks every future call in its conversation, run, agent or epoch, permanently.
+- No `native.execute` is sent twice.
+- No request, run or assignment key is minted again to escape `unknown`.
+- A closed scope blocks every later call in it.
 
-**Re-sending a fence** is the only re-sent message. It changes nothing but the latch it repeats. **Expiry never proves absence:** `boundMs` passing at the broker refuses a call it hadn't sent and says so, but Pim's own timers never turn `unknown` into `refused`.
+Re-sending a fence is the only repeated message, and it changes nothing beyond the latch it repeats. **Expiry never proves absence:** Pim's timers never turn `unknown` into `refused`.
 
-## Retention
+## Retention and quotas
 
-- **Pim:** intents until final and their fences confirmed, then compacted to a tombstone (request ID, state). `unknown` intents, scope closures and fences are kept indefinitely, like the binder's tombstones. Growth is bounded by the space's chats, runs and calls.
-- **The broker:** the bounds above. Saturation fails closed (refuse, or latch the space), never open.
+- **Intents:** at most one per binding. The binder already holds at most `MAX_NATIVE_BINDINGS` (512) bindings **over the space's lifetime**, and never lets one go. So Pim stores at most 512 intents, each frozen at most `NATIVE_ARGUMENTS_CHARS` + 4 KiB. A final intent whose fences are all settled is compacted to a tombstone (request ID, keys, state). Tombstones are never removed, since they back the no-replay rule.
+- **Fences:** only for scopes with outstanding intents, so at most 512 per lifetime, each a fixed-size record with at most 512 required instances. They're kept for good.
+- **Run closures:** one per run a Stop or Delete closed, compacted once the run's end is observed. The live ones are bounded by the space's live conversations.
+- **Removed agents:** no new record. `MAX_AGENTS` (50) bounds agents at a time, not over the lifetime, so removals aren't listed. Instead a new agent ID never equals an `agentId` in the bounded intents and tombstones.
+- **At any cap,** Pim refuses new native calls (`full`), as the binder does. Nothing that backs no-replay is ever expired.
+- **The broker:** the bounds above, failing closed.
 
 ## What the person sees, and the API
 
-| State | Chat or Settings line | API |
+| State | Line in the chat or Settings | API |
 | --- | --- | --- |
-| No `intended` or `unknown` intent in scope | Nothing about the desktop | `desktopFence: null` |
-| Stopped or deleted, fence pending | "Stopped. Making sure the desktop takes no further actions from this chat…" | `desktopFence: { id, state: "pending" }` |
-| Confirmed | "The desktop confirmed it will take no further actions from this chat. Actions it already took may still finish." | `state: "confirmed"` |
-| Unconfirmed | "Stopped here, but the desktop didn't confirm. Pim sends nothing more; actions already sent may still run, and other programs on the desktop aren't affected." | `state: "unconfirmed"` |
-| A call `unknown` | "This action may have run." Never "cancelled" | The intent's `state: "unknown"` |
+| No outstanding intent in scope | Nothing about the desktop | `desktopFence: null` |
+| Fence pending | "Stopped here. Waiting for the native broker to confirm it will send nothing more from this chat…" | `{ id, state: "pending" }` |
+| Confirmed | "Native broker fence confirmed: no new broker sends from this chat. Actions already sent may still finish; other programs on the desktop are unaffected." | `state: "confirmed"` |
+| Unconfirmed | "Stopped here, but the native broker didn't confirm. Pim sends nothing more; actions already sent may still run, and other programs on the desktop are unaffected." | `state: "unconfirmed"` |
+| A call `unknown` | "This action may have run." Never "cancelled" | the intent's `state: "unknown"` |
 
-- **The routes answer after the local change is durable:** `DELETE /sessions/:session` and `POST /sessions/:session/abort`, each with `desktopFence`. They never wait for the desktop.
-- **A fence is read by its ID,** through `GET /computer/native/fences/:id` (owner only). That works for a deleted chat too, and returns only the scope's kind, the state and counts, nothing of the chat, so the chat stays hidden.
-- **The wording never says "safe" or "taken over",** or anything about the desktop beyond the broker's sends.
+"This chat" names the scope: "this run", "this chat" or "this agent".
+
+- **The routes answer after the local change is durable and the existing local steps are done:** `DELETE /sessions/:session`, `POST /sessions/:session/abort` and `DELETE /agents/:agent`. Each adds `desktopFence`, and none waits on the desktop.
+- **A fence can be read** at `GET /computer/native/fences/:id`, owner only. It returns the scope's kind, the state and the counts, and nothing of a deleted chat.
+- **The wording never says "safe", "taken over" or "the desktop stopped".**
 
 ## Not assumed
 
@@ -189,58 +267,63 @@ No new driver capability, no grant beyond the protected-account plan's open deci
 
 ## Test plan (not written, not run)
 
-Each row is a test to write against stand-ins: Pim in workerd with a scripted bridge and broker, and the broker in-process with a stand-in spacesd. Nothing here can be run before the code exists.
+Stand-ins only: Pim in workerd with a scripted bridge and broker, and the broker in-process with a stand-in spacesd. Nothing can run before the code exists.
 
 | Case | Expected |
 | --- | --- |
-| Setup held, then Delete, then setup finishes | Broker refuses at the send step (`sent: false`). The fence lists the call as `refused`, and the intent ends `refused` |
-| Wake or transit held, then Stop | Either the closure is found at step 5 (`refused`, nothing transmitted), or the execute is out and the fence orders it |
-| Send before the fence in the broker's queue | `fenced.sent` lists it, and the intent stays `unknown` or `completed` by its result. Never `refused` |
-| Fence before the send | Refused at the send step. No `fetch` call reaches the stand-in |
-| A deletion, an agent change and an abort, each racing a call | Each closes its scope, and later intents in the scope are refused locally |
-| `native.execute` lost | `unknown`, the run latched, no re-send, no new ID |
-| Result lost | `unknown`. A late result changes nothing |
-| `native.fenced` lost | `pending`, then a re-send answered from the latch, then `confirmed` |
-| Pim fails to commit the intent | Nothing transmitted. The call is `ControlRefused` before sending |
-| Pim fails to commit the acknowledgment | Not counted, and re-sent later |
-| Pim restarts between the durable intent and transmit | `unknown`, not `refused` |
-| The broker restarts with a call in setup | `unknown`. The new instance refuses an execute naming the old one. A fence needing the old instance is `unconfirmed` |
-| Old and new broker both answering | Each acknowledges for itself. A fence needing the silent old one stays `unconfirmed` |
-| VM unavailable at Stop | The route answers locally. The fence is `pending`, then `unconfirmed`. Never `confirmed` |
-| Duplicate `native.fenced`; duplicate or late `native.result` | Idempotent. No state moves backward |
-| Malformed, wrong-version, wrong-instance or unknown-fence messages | Refused with fixed reasons, no state change |
-| A `native.*` message from pim-computer's side | Dropped and the session ended. Pim sees nothing of it |
-| A closed scope, any later call | Refused locally. No intent, no transmit |
-| Saturated broker bounds | Executes refused, or the space latched. Fences still acknowledged |
-| UI and API wording | No "cancelled" for `unknown`, no "confirmed" without durable acknowledgments, and the routes answer without waiting for the desktop |
+| Gate holds the line through the durability await. A harness abort, an applied reset or a natural completion is queued during it | Lands after the transmit. A fresh call afterwards is refused by the authority |
+| Delete, agent removal or epoch change during the durability await | Step 5 refuses. Intent `refused`, nothing transmitted |
+| Stop's closure commit before or after a gate commit | Before: refused at step 3 or 5. After: the call is out and counted by the fence |
+| A queued input starts a new run after Stop's closure | The new run's calls work. Stop's fence doesn't name it |
+| Stop, then the chat's next message | Its run's calls work |
+| Removing agent A while A has chats and task conversations; agent B's chats | A's calls refused everywhere. B is unaffected. The chats go on as the majordomo |
+| (Future route) reassigning a chat and back again | Only the old generation is closed |
+| Setup held at the broker, then a fence | Marked `refused` at the fence step. Setup finishes, and nothing reaches `fetch` |
+| Send step before the fence step | Counted `sent`. The intent settles by its result |
+| Same `fenceId` twice; same `fenceId` with another scope | Identical answer; `fence_conflict` with no latch change |
+| A call in scope after the fence | Refused by the latch, and the stored answer is unchanged |
+| Execute lost, result lost, delayed execute after Pim's timeout | `unknown`, a run fence, no re-send |
+| `native.fenced` lost | Re-sent, and answered from the stored answer |
+| Pim fails to commit an intent, or an acknowledgment | Nothing transmitted; or not counted, and re-sent |
+| Pim restarts between intent durability and transmit | `unknown`, not `refused` |
+| Broker restarts with a call in setup; old and new both alive | `unknown`. A fence needing the old one stays `unconfirmed`, and a recorded old acknowledgment stays valid |
+| VM unavailable at Stop | The route answers locally. `pending`, then `unconfirmed`. Never `confirmed` |
+| Wrong `type` or `v`, oversize per type, unknown keys, forged instance or fence | Refused with a fixed reason, no state change |
+| A `native.*` from pim-computer's side | Dropped and the session ended |
+| Counts or digest disagree with results | `unconfirmed` for good |
+| Pim at 512 intents; broker at its bounds | Refused (`full`); executes refused or the space latched, and fences still answered |
+| UI and API | The exact lines above; never "cancelled" for `unknown`; the routes never wait on the desktop |
 
-Mutations each must fail:
-- no latch before the acknowledgment;
+Mutations, each of which must fail a test:
+- the line released before the durability await;
 - a send step that awaits after its checks;
+- a setup call listed refused without being marked so;
+- a latch set after the answer;
 - a re-sent execute;
-- a new instance clearing an old instance's fence;
-- `unknown` settled `refused` by a timer or by a fence's `refused` list;
-- a fence's required set that leaves out `unknown` intents;
-- an acknowledgment counted before it is durable;
-- a closure written after the route answers.
+- a successor clearing an old fence;
+- `unknown` settled by a timer or a fence;
+- a required set without `unknown` intents;
+- a counted acknowledgment that isn't durable;
+- Stop closing the conversation;
+- removal closing another agent's calls.
 
 ## Acceptance gates
 
-1. This spec reviewed and accepted, with the message schemas and state transitions as written, or as amended.
-2. The protected-account placement's upstream facts verified on a disposable VM under separate authorization: X11, accessibility and the input paths from `pim-spacesd`.
-3. Each implementation stage below passes its focused stand-in tests and mutations, and an independent review of its boundary.
-4. A composed stand-in run of Pim, the relay with its demux, the broker and a stand-in spacesd passes the whole table above.
-5. Only then a separately authorized live qualification. Native calls stay off until a decision after it.
+1. This spec reviewed and accepted, as written or amended.
+2. The protected-account placement's upstream facts verified on a disposable VM under separate authorization.
+3. Each stage passes its focused stand-in tests and mutations, and an independent review of its boundary.
+4. A composed stand-in run of Pim, the relay with its demux, the broker and a stand-in spacesd passes the whole table.
+5. Only then, a separately authorized live qualification. Native calls stay off until a decision after it.
 
 ## Implementation plan (staged; nothing started)
 
 | Stage | Scope | Size | Depends on | Review boundary |
 | --- | --- | --- | --- | --- |
-| 1 | Pim's records (intents, closures, fences), the closures in Stop, Delete and agent and epoch changes, the API's `desktopFence` and the fence route, behind `nativeDesktop` | Medium to large | Gate 1 | Pim's store and routes. Reviewer checks durability awaits and no-resurrection |
-| 2 | The call path's steps 2–6 against a scripted bridge in workerd, replacing the gate's in-callback transmit for brokered calls | Medium | 1 | `#desktopSend` and `Computer.native`'s link |
-| 3 | The relay's demux and `native.hello` (`computer/cua-bridge.ts`, `host.ts`) | Small to medium | Gate 1 | The internet-facing bridge. Reviewer checks parsing limits and drop-and-end |
-| 4 | The broker: queue, latches, bounds, around `createNativeDispatcher`, with a stand-in spacesd | Medium | 3 | `computer/cua-host/`. Reviewer checks the synchronous send and fence steps |
-| 5 | The composed stand-in lane over 1–4 | Medium | 2, 4 | Whole table; mutations |
-| 6 | The UI states | Small | 1 | `web/`. Screenshots of each state, wording as above |
+| 1 | Pim's intents, run closures, fences and quotas; the closure steps in Stop, Delete, removal, epoch and `unknown`; `desktopFence` and the fence route; all behind `nativeDesktop` | Large | Gate 1 | Pim's store and routes: one closure boundary, durability awaits, no resurrection, quotas |
+| 2 | The gate's steps 2–6, with the line held across `ctx.storage.sync()`, against a scripted bridge in workerd; the grep of run ends | Medium | 1 | `#desktopSend` and `Computer.native` |
+| 3 | The demux, `native.hello` and the message parser with per-type bounds (`computer/cua-bridge.ts`, `host.ts`) | Small to medium | Gate 1 | The internet-facing bridge |
+| 4 | The broker's queue, latches, fence answers and bounds, around `createNativeDispatcher`, with a stand-in spacesd | Medium | 3 | `computer/cua-host/`: the synchronous steps |
+| 5 | The composed stand-in lane over 1–4 | Medium | 2, 4 | The whole table and the mutations |
+| 6 | The UI states | Small | 1 | `web/`: a screenshot of each state |
 
 Each stage is its own branch and review. No stage turns on `nativeDesktop`, changes the installer, or makes a service, account or token.

@@ -136,10 +136,11 @@ If the accessibility tree can't be had without a session-bus grant Groves reject
 ### Execution-time authority
 
 Specified in `docs/cua-native-fence-protocol.md`: acknowledged remote fencing (Groves's choice). In short:
-- Stop and Delete close Pim's local admission at once and answer without waiting for the desktop.
-- A separate fence state is confirmed only when every broker instance that held a call in the scope acknowledges, after latching, that it will make no further upstream send in it.
+- Stop closes the runs it stops, Delete the chat, and removing an agent that agent's calls. Each closes Pim's local admission at once and answers without waiting for the desktop.
+- A separate fence state is confirmed only when every broker instance that could still send a call Pim intended in the scope has latched it and acknowledged: no new broker sends in that scope. Sends already made, and other desktop programs, aren't covered.
 - An unavailable VM leaves the fence unconfirmed, never confirmed.
-- Pim awaits the durability of a call's intent before sending it, and never re-sends an action. The broker keeps no durable journal: each acknowledgment speaks only for its own living instance.
+- Pim's send gate holds the harness's line across the awaited durability of the call's intent, so no harness run end lands between its authority read and the send. Pim's own records are re-read synchronously just before it.
+- Pim never re-sends an action. The broker keeps no durable journal: an acknowledgment Pim recorded durably stays valid after its instance dies, and a missing one from a dead instance leaves the fence unconfirmed.
 
 **Withdrawn from revision `023a068`:**
 - the prepare-then-`go` protocol (B), with its claims that it put "the authority's commit at the broker's send";

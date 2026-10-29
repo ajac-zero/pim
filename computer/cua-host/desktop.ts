@@ -29,22 +29,32 @@
  * agents: anything running as the desktop user can connect to it, as it can
  * run pim-computer itself.
  *
- * Code that makes an endpoint may give it `cua`, and its program never does:
- * then it starts the Cua computer (./cua-computer.ts), pim-computer with a
+ * An endpoint may be given `cua`: its program gives it only with `--native on`
+ * and all four of the Cua computer's settings (`readEndpointArguments`), and
+ * refuses to start on anything partial or malformed; without `--native`, or
+ * with `--native off`, it starts pim-computer exactly as before. With `cua`,
+ * it starts the Cua computer (./cua-computer.ts), pim-computer with a
  * native-app dispatcher for the VM's spacesd, in pim-computer's place, with
- * the same folder, environment, limits and one-at-a-time rule. spacesd's token
- * is the one secret it hands on, and only as a descriptor: for each child it
- * opens the desktop user's credential file (./cua-credential.ts), checks it,
- * hands it over as descriptor 3, and closes its own, once, as soon as the
- * spawn returns or throws, never reading it. A close that fails is not taken
- * as closed: the endpoint refuses every later connection for good, and a child
- * it started then gets its input ended and is watched to its exit as any
- * other, keeping the endpoint busy until then. A descriptor keeps the token
- * out of arguments, environments and logs; it doesn't keep it from the agents,
- * which run as the desktop user and can read the file.
+ * the same folder, environment, limits and one-at-a-time rule, and never
+ * pim-computer: a Cua computer that fails to start is not replaced by one.
+ * spacesd's token is the one secret it hands on, and only as a descriptor:
+ * for each child it opens the desktop user's credential file
+ * (./cua-credential.ts), checks it, hands it over as descriptor 3, and closes
+ * its own, once, as soon as the spawn returns or throws, never reading it. A
+ * close that fails is not taken as closed: the endpoint refuses every later
+ * connection for good, and a child it started then gets its input ended and
+ * is watched to its exit as any other, keeping the endpoint busy until then.
+ * A descriptor keeps the token out of arguments, environments and logs; it
+ * doesn't keep it from the agents, which run as the desktop user and can read
+ * the file. The file is opened
+ * again for each connection, so a token rotated by replacing the file is
+ * used from the next connection on; a child already started keeps the token
+ * it read.
  *
  *   node desktop.ts --socket /run/pim-session/session.sock --root /home/desktop/workspace \
- *     --browser /opt/google/chrome/chrome --pim-computer /opt/pim/pim-computer.ts [--headful]
+ *     --browser /opt/google/chrome/chrome --pim-computer /opt/pim/pim-computer.ts [--headful] \
+ *     [--native on --cua-computer /opt/pim/cua-host/cua-computer.ts --cua-owner <space> \
+ *      --cua-origin http://127.0.0.1:7443 --cua-credential /home/desktop/.config/pim/spacesd-token]
  *
  * Importing it does nothing; `createDesktopEndpoint(...).listen()` serves.
  */
@@ -56,6 +66,7 @@ import * as net from "node:net";
 import * as path from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
+import { parseArgs } from "node:util";
 import type { LogEntry } from "../cua-bridge.ts";
 import { NATIVE_IDENTITY } from "../native-outcome.ts";
 import { type CredentialFiles, CredentialRefused, closeCredential, NODE_CREDENTIAL_FILES, openCredential } from "./cua-credential.ts";
@@ -155,14 +166,19 @@ export type EndpointOptions = {
 	/**
 	 * Starts the Cua computer (./cua-computer.ts) in place of pim-computer,
 	 * with a native-app dispatcher for this VM's spacesd. Absent, as the
-	 * endpoint's own program leaves it, the endpoint starts pim-computer
-	 * exactly as before. Only code that makes an endpoint can give it: no
-	 * flag, variable or installer step does.
+	 * endpoint's program leaves it without `--native on`, the endpoint starts
+	 * pim-computer exactly as before. No variable, installer step or service
+	 * gives it.
 	 */
 	readonly cua?: CuaChild;
 	/** What the credential file is opened with; Node's `fs` unless a test gives its own. */
 	readonly credentialFiles?: CredentialFiles;
+	/** What takes the socket's connections; `net.createServer()` unless a test gives its own, which then hands it connections without listening. */
+	readonly listener?: EndpointListener;
 };
+
+/** What the endpoint takes connections from: a `net.Server`, or a test's stand-in. */
+export type EndpointListener = Pick<net.Server, "on" | "once" | "off" | "listen" | "close"> & { maxConnections: number };
 
 /**
  * The Cua computer's fixed settings. The owner and origin go in its
@@ -299,7 +315,7 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 	const spawn: Spawn = options.spawn ?? ((file, argv, spawnOptions) => spawnProcess(file, argv, spawnOptions) as ChildProcess & Child);
 	const log = options.log ?? ((entry: LogEntry) => console.error(JSON.stringify(entry)));
 
-	const server = net.createServer();
+	const server: EndpointListener = options.listener ?? net.createServer();
 	server.maxConnections = limits.maxConnections;
 	let closing = false;
 	/** The pim-computer this endpoint started last, until it has exited. */
@@ -492,30 +508,101 @@ export function createDesktopEndpoint(options: EndpointOptions): Endpoint {
 	};
 }
 
-const USAGE = `The desktop session endpoint of a Cua bridge: starts pim-computer --stdio for each connection on a Unix socket.
+const USAGE = `The desktop session endpoint of a Cua bridge: starts pim-computer --stdio for each connection on a Unix socket,
+or, with --native on, the Cua computer, with a native-app dispatcher for this VM's spacesd.
 
   node desktop.ts --socket <path> --root <folder> --browser <path> --pim-computer <path> [--headful]
+    [--native on --cua-computer <path> --cua-owner <space> --cua-origin <spacesd origin> --cua-credential <file>]
 
+Each setting is given at most once. --native off, or no --native, starts pim-computer and takes no Cua setting.
 Run it as the desktop user, never as root. See docs/cua-bridge.md.`;
 
-async function main(): Promise<void> {
-	const { parseArgs } = await import("node:util");
-	let values: { socket?: string; root?: string; browser?: string; "pim-computer"?: string; headful?: boolean };
+/** The Cua computer's settings, each given with `--native on` and only then. */
+const CUA_FLAGS = ["cua-computer", "cua-owner", "cua-origin", "cua-credential"] as const;
+
+/** What the endpoint's program was asked to start, read from its arguments. */
+export type EndpointArguments = {
+	readonly socketPath: string;
+	readonly root: string;
+	readonly browser: string;
+	readonly pimComputer: string;
+	readonly headful: boolean;
+	/** The Cua computer's settings with `--native on`; absent otherwise, and pim-computer starts as before. */
+	readonly cua?: CuaChild;
+};
+
+/**
+ * Reads the endpoint program's arguments. `usage` for an unknown, repeated or
+ * missing setting; `native-settings` for a Cua setting without `--native on`,
+ * `--native on` without all four, an empty one, or `--native` other than `on`
+ * or `off`. Nothing is checked on disk here: `createDesktopEndpoint` checks
+ * the Cua computer's program, owner, origin and credential file.
+ */
+export function readEndpointArguments(argv: readonly string[]): EndpointArguments {
+	let parsed: ReturnType<typeof parseEndpointArguments>;
 	try {
-		({ values } = parseArgs({
-			options: { socket: { type: "string" }, root: { type: "string" }, browser: { type: "string" }, "pim-computer": { type: "string" }, headful: { type: "boolean" } },
-		}));
+		parsed = parseEndpointArguments(argv);
 	} catch {
-		values = {};
+		throw new EndpointRefused("usage", USAGE);
 	}
-	if (!values.socket || !values.root || !values.browser || !values["pim-computer"]) {
-		console.error(USAGE);
+	const counts = new Map<string, number>();
+	for (const token of parsed.tokens) if (token.kind === "option") counts.set(token.name, (counts.get(token.name) ?? 0) + 1);
+	if ([...counts.values()].some((count) => count > 1)) throw new EndpointRefused("usage", USAGE);
+	const values = parsed.values;
+	const { socket, root, browser } = values;
+	const pimComputer = values["pim-computer"];
+	if (!socket || !root || !browser || !pimComputer) throw new EndpointRefused("usage", USAGE);
+	const base = { socketPath: socket, root, browser, pimComputer, headful: values.headful === true };
+	const given = CUA_FLAGS.filter((name) => values[name] !== undefined);
+	if (values.native === undefined || values.native === "off") {
+		if (given.length > 0) throw new EndpointRefused("native-settings", "The Cua computer's settings are taken only with --native on.");
+		return base;
+	}
+	if (values.native !== "on") throw new EndpointRefused("native-settings", "--native is on or off.");
+	if (given.length !== CUA_FLAGS.length || CUA_FLAGS.some((name) => values[name] === "")) {
+		throw new EndpointRefused("native-settings", "With --native on, --cua-computer, --cua-owner, --cua-origin and --cua-credential are each given.");
+	}
+	return {
+		...base,
+		cua: { program: values["cua-computer"]!, owner: values["cua-owner"]!, origin: values["cua-origin"]!, credentialFile: values["cua-credential"]! },
+	};
+}
+
+function parseEndpointArguments(argv: readonly string[]) {
+	return parseArgs({
+		args: [...argv],
+		strict: true,
+		allowPositionals: false,
+		tokens: true,
+		options: {
+			socket: { type: "string" },
+			root: { type: "string" },
+			browser: { type: "string" },
+			"pim-computer": { type: "string" },
+			headful: { type: "boolean" },
+			native: { type: "string" },
+			"cua-computer": { type: "string" },
+			"cua-owner": { type: "string" },
+			"cua-origin": { type: "string" },
+			"cua-credential": { type: "string" },
+		},
+	});
+}
+
+async function main(): Promise<void> {
+	let settings: EndpointArguments;
+	try {
+		settings = readEndpointArguments(process.argv.slice(2));
+	} catch (error) {
+		const reason = error instanceof EndpointRefused ? error.reason : "usage";
+		if (reason === "usage") console.error(USAGE);
+		else console.error(JSON.stringify({ event: "endpoint.failed", reason }));
 		process.exit(2);
 	}
 	let endpoint: Endpoint;
 	let stage = "settings";
 	try {
-		endpoint = createDesktopEndpoint({ socketPath: values.socket, root: values.root, browser: values.browser, pimComputer: values["pim-computer"], headful: values.headful === true });
+		endpoint = createDesktopEndpoint({ ...settings });
 		stage = "listen";
 		await endpoint.listen();
 	} catch (error) {

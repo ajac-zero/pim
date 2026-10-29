@@ -5,10 +5,11 @@
  * that VM's spacesd. pim-computer itself imports nothing of this, and Sprites
  * and paired computers serve as before.
  *
- * Nothing starts it yet. The desktop endpoint (./desktop.ts) starts it in
- * place of pim-computer only when the code that makes the endpoint gives
- * `cua`; the endpoint's own program doesn't, and no flag, variable, installer
- * step or service does. It would run as the desktop user, as pim-computer does:
+ * The desktop endpoint (./desktop.ts) starts it in place of pim-computer
+ * only when it is given `cua`, which its program gives only with `--native on`
+ * and all four Cua settings; no variable, installer step or service passes
+ * them, so nothing starts it yet. It runs as the desktop user, as
+ * pim-computer does:
  *
  *   node cua-computer.ts --root <folder> --chrome <browser> --owner <space> --origin <spacesd origin> [--headful]
  *

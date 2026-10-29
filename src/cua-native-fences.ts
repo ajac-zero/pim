@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS pim_native_fences (
 	fence_id TEXT UNIQUE,
 	reason TEXT,
 	required_at INTEGER,
+	acked_at INTEGER,
 	confirmed_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS pim_native_fence_faults (
@@ -110,8 +111,8 @@ export class NativeFences {
 	#reconciling: Promise<string | null> | undefined;
 	/** Fences being asked for now, so one isn't asked twice at once. */
 	readonly #asking = new Set<string>();
-	/** Runs whose confirmation is written and not yet synced, with the state they had: read as that state until it is. */
-	readonly #confirming = new Map<string, NativeFenceState>();
+	/** Runs whose acknowledgement is being recorded now, so one isn't recorded twice at once. */
+	readonly #confirming = new Set<string>();
 
 	constructor(options: {
 		sql: SqlStorage;
@@ -130,16 +131,9 @@ export class NativeFences {
 		this.#now = options.now ?? Date.now;
 	}
 
-	/**
-	 * Every record, by run, as synced: a confirmation not yet synced reads as
-	 * the state before it. Creates the tables the first time, which nothing
-	 * does where the desktop's tools are off.
-	 */
+	/** Every record, by run. Creates the tables the first time, which nothing does where the desktop's tools are off. */
 	list(): NativeFenceRecord[] {
-		return this.#rows("SELECT * FROM pim_native_fences ORDER BY run").map((row) => {
-			const before = this.#confirming.get(row.run);
-			return before === undefined ? row : { ...row, state: before, confirmedAt: null };
-		});
+		return this.#rows("SELECT * FROM pim_native_fences ORDER BY run");
 	}
 
 	/** Why nothing is admitted or sent, or null. */
@@ -149,10 +143,15 @@ export class NativeFences {
 
 	/**
 	 * Rebuilds, once per process and before anything is admitted, the fences
-	 * the durable binder records require: every run with a call whose end is
-	 * unknown, which includes every call claimed by a process that ended.
-	 * `unknownRuns` reads them (`NativeIdentityBinder.unknownRuns`) and
-	 * answers why it can't, as text. Fences required before and not
+	 * an earlier process may have owed: every run with a call whose end is
+	 * unknown, which includes every call claimed by a process that ended
+	 * (`unknownRuns` reads them, `NativeIdentityBinder.unknownRuns`, and
+	 * answers why it can't, as text); and every run whose record is still
+	 * `open`, since a Stop of it may have marked it and lost its fence's write.
+	 * Each record was synced before any call of its run could be sent, so no
+	 * run that may have sent anything is missed. A run still going after the
+	 * restart sends nothing more natively, the cost of not reconstructing
+	 * which Stops happened. Fences required before and not
 	 * confirmed are asked for again, by the same fence ID: asking again for a
 	 * fence's status is not sending a call again. A fault stored by an earlier
 	 * process keeps native calls closed. Resolves with why nothing may be
@@ -179,7 +178,13 @@ export class NativeFences {
 			} catch {
 				this.#latch("the native fence faults couldn't be read");
 			}
-			if (!(await this.#require(runs, "recovered"))) return this.blocked();
+			let open: string[];
+			try {
+				open = this.#rows("SELECT * FROM pim_native_fences WHERE state = 'open'").map((row) => row.run);
+			} catch {
+				return this.#latch("the native fences couldn't be read");
+			}
+			if (!(await this.#require([...runs, ...open], "recovered"))) return this.blocked();
 			this.#ready = true;
 			this.#askAll();
 			return this.blocked();
@@ -338,25 +343,35 @@ export class NativeFences {
 	}
 
 	/**
-	 * Counts an acknowledgement `#ask` checked against its request, only while
-	 * its fence is still required. It is written, read as the state before it
-	 * until synced, and counted only then; if the sync fails, the write is
-	 * undone and this object latches.
+	 * Records an acknowledgement `#ask` checked against its request, while its
+	 * fence is still required, in two steps. First the acknowledgement alone
+	 * (`acked_at`), which leaves the state as it was, and is synced; only once
+	 * that sync has resolved is the state written `confirmed`. So `confirmed`
+	 * is never read before the acknowledgement's sync resolved, in this
+	 * process or, from what is on disk, after a restart. An `acked_at` whose
+	 * state isn't `confirmed` counts for nothing: its fence is asked for
+	 * again. If the first sync fails, the acknowledgement is undone; either
+	 * failure latches this object.
 	 */
 	async #confirm(request: NativeFenceRequest): Promise<void> {
 		if (this.#fault || this.#confirming.has(request.run)) return;
-		let before: NativeFenceRecord | undefined;
+		this.#confirming.add(request.run);
+		let acknowledged = false;
 		try {
-			before = this.#row(request.run);
-			if (!before || before.fenceId !== request.fenceId || (before.state !== "pending" && before.state !== "unconfirmed")) return;
-			this.#confirming.set(request.run, before.state);
-			this.#sql.exec("UPDATE pim_native_fences SET state = 'confirmed', confirmed_at = ? WHERE run = ? AND fence_id = ?", this.#now(), request.run, request.fenceId);
+			const row = this.#row(request.run);
+			if (!row || row.fenceId !== request.fenceId || (row.state !== "pending" && row.state !== "unconfirmed")) return;
+			this.#sql.exec("UPDATE pim_native_fences SET acked_at = ? WHERE run = ? AND fence_id = ?", this.#now(), request.run, request.fenceId);
+			await this.#sync();
+			acknowledged = true;
+			this.#sql.exec("UPDATE pim_native_fences SET state = 'confirmed', confirmed_at = acked_at WHERE run = ? AND fence_id = ?", request.run, request.fenceId);
 			await this.#sync();
 		} catch {
-			try {
-				if (before) this.#sql.exec("UPDATE pim_native_fences SET state = ?, confirmed_at = NULL WHERE run = ? AND fence_id = ?", before.state, request.run, request.fenceId);
-			} catch {
-				// The latch below stands either way.
+			if (!acknowledged) {
+				try {
+					this.#sql.exec("UPDATE pim_native_fences SET acked_at = NULL WHERE run = ? AND fence_id = ?", request.run, request.fenceId);
+				} catch {
+					// The latch below stands either way, and an `acked_at` alone counts for nothing.
+				}
 			}
 			this.#latch("a native fence's acknowledgement couldn't be stored");
 		} finally {

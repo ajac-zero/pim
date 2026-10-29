@@ -57,12 +57,14 @@ A Stop's marks are committed before the Stop learns its effect, and the send's o
 
 A new process admits nothing until `reconcile` has done three things:
 - read the binder's records, which turns every claim it isn't sending into `unknown`;
-- required a `recovered` fence for every run with an unknown call;
+- required a `recovered` fence for every run with an unknown call, **and for every run whose record is still `open`**;
 - synced.
 
 Every call that could still be sent, or still be queued at a broker, is claimed or unknown in the binder. So the restore fences its run even when the Stop's own record was never written. **There's no new durable effect record:** the binder's claims are the pre-operation marker.
 
-An `open` record of a stopped run whose Stop write was lost gets no fence after a restart. Every call of that run either had a known end, or is unknown and fenced, and the harness's marks refuse new ones. So no broker send of it can still be outstanding.
+**Why every open record is fenced.** An `open` record that survives a restart may belong to a run whose Stop marked it in the harness while the Stop's fence write was lost. The obligation is a fence on the broker's sends for that run, whether or not any of its calls' outcomes are unresolved. Pim doesn't reconstruct which Stops happened. Instead it fences every surviving open record, and each of those was synced before any call of its run could be sent. If the instance the run was admitted under is no longer the transport's, the fence stays `unconfirmed`.
+
+The cost is that a run still going across a restart sends nothing more natively. Whether new runs are admitted after the restart is a separate question, decided by the stored fault below.
 
 ## After a fault: what is closed, and what survives a restart
 
@@ -75,13 +77,19 @@ What a restart finds:
 | What was stored | What the restart does |
 | --- | --- |
 | The fault row | Native calls stay closed. Fences are still rebuilt and asked for, but nothing is admitted. **Nothing reopens them: a reconciliation policy is an open decision for Groves, and none is assumed.** |
-| No fault row (its write or sync was lost too) | Nothing records that a fault happened. The restart rebuilds fences from the binder's records and admits new runs again. It is conservative for every write that could have been lost:<br>• a lost admission record means its call was refused unsent;<br>• a lost Stop fence is covered by the unknown rule, or wasn't needed;<br>• a lost confirmation or lapse leaves the fence `pending`, and it is asked for again. |
+| No fault row (its write or sync was lost too) | Nothing records that a fault happened, so new runs are admitted again. Before that, the restart fences every run with an unknown call and every run still `open`. That is conservative for every write that could have been lost:<br>• a lost admission record means its call was refused unsent;<br>• a lost Stop fence leaves the run `open`, which is fenced now;<br>• a lost acknowledgement or lapse leaves the fence `pending`, and it is asked for again. |
 
 In both cases, what survives is only what storage committed: the binder's claims, and whatever fence rows were synced. A write whose sync failed may or may not be there, and the rules above hold either way.
 
 ## Acknowledgements
 
-**A confirmation counts only once it is durable.** `#confirm` writes `confirmed`, but `list()` reads the state before it until the sync resolves. If the sync fails, the write is undone and the process latches. After a restart, `confirmed` is on disk only for an echo that was actually received from the right instance.
+**An acknowledgement is recorded in two steps.**
+1. `#confirm` writes the acknowledgement alone (`acked_at`) and leaves the state as it was. It then syncs.
+2. Only once that sync has resolved does it write `confirmed`, and sync again.
+
+So `confirmed` is never written before the acknowledgement's own sync has resolved. This holds in the process, and in what is on disk after a crash. An `acked_at` whose state isn't `confirmed` counts for nothing, and its fence is asked for again. If the first sync fails, the acknowledgement is undone. Either failure latches the process.
+
+**What this qualifies, and what it doesn't.** The tests show the ordering in this process, and what the local runtime keeps after `ctx.abort()` during either sync. They rest on one assumption: that `sync()` resolving means the write is durable. That is **not established** for production storage or its output gate. Nothing here relies on in-process state surviving a crash.
 
 **Each ask is bounded** by `nativeFenceAskMs()`, 30 s by default. Unanswered, the fence becomes `unconfirmed`, its ask is released, and it is asked for again, by the same fence ID, the next time fences are asked for. That happens on another fence's requirement or on a restart, and re-asks for a fence's status; no action is replayed. An answer arriving after the bound is still checked and counted.
 
@@ -95,7 +103,9 @@ In both cases, what survives is only what storage committed: the binder's claims
 | Pim's fence write or its sync fails | The Stop still answers its boolean after idle. The process latches and tries to store the fault. Native calls stay closed after a restart only if it was stored. |
 | Acknowledgement with another fence ID, run or instance, extra fields, or a lost answer | Not counted, so `unconfirmed`. Asked again by the **same fence ID**. |
 | The broker never answers | `unconfirmed` once the ask's bound passes. Asked again later, by the same ID. A late answer still counts. |
-| The acknowledgement's sync fails | Never read as `confirmed`. The write is undone, and the process latches and tries to store the fault. |
+| The acknowledgement's first sync fails | Never `confirmed`. The acknowledgement is undone, and the process latches and tries to store the fault. |
+| The process ends during the acknowledgement's first sync | The state on disk is still `pending`, and any `acked_at` counts for nothing. The restart asks for the fence again by its own ID. |
+| The process ends during the second sync | `confirmed` may be on disk. It was written only after the first sync had resolved. |
 | The broker comes back as another instance | The old run's fence can't be confirmed by asking the new instance, so it stays `unconfirmed`. A run admitted under one instance admits and sends nothing under another. A confirmed fence stays confirmed after its instance is gone. |
 | 512 records (`MAX_NATIVE_FENCES`) | New admission is refused before anything is sent. Nothing is evicted. Every record belongs to a run of a binding the binder accepted, and the binder accepts at most 512 in a space's life, so this limit is reached only by a store that is wrong. |
 
@@ -118,8 +128,8 @@ Each of the four corrections has its own test:
 | Correction | Test | What it shows |
 | --- | --- | --- |
 | Check at the send | "checks the run's fence again at the send itself…" | A required fence, a broker instance change or a fault, made while the computer's wake or the admission's sync is held, sends nothing, and the binding closes. |
-| Confirmation only once durable | "counts a confirmation only once it is durable…" | While the confirmation's sync is held, SQLite holds `confirmed` and the fences read `pending`. A failed sync undoes the write. After a restart, storage holds `pending`, never `confirmed`. |
-| Restart after a fault | "after a fault, a restart stays closed only where the fault was stored…" | With the fault row stored, the restart stays closed. With it lost too, there is no fault row, the restart rebuilds from the binder and admits a new run, and nothing claims a stored latch. With a fence write kept but its sync failed, the restart re-asks it by its own ID and stays closed. |
+| Acknowledgement only after its own sync | "counts an acknowledgement only after its own sync resolved, in two steps…" | **Held first sync:** SQLite holds the acknowledgement with the state still `pending`, and it reads `pending`. **First sync failing:** the acknowledgement is undone, and after a restart the fence is `pending` and asked for again. **Crash during the first sync:** the restart reads `pending` and asks for it again by the same ID, and nothing is sent again. **Crash during the second sync:** `confirmed`, with its acknowledgement on disk. |
+| Restart after a fault | "after a fault, a restart fences every run still open…" | **Fault row stored:** the restart stays closed. The old open run is fenced as recovered, and stays `unconfirmed` under a new instance. **Fault row lost too:** the old run, whose call completed and whose Stop write was lost, is fenced as recovered and confirmed; a new run is admitted, and nothing is replayed. **Fence write kept, sync failed:** re-asked by its own ID, and the space stays closed. |
 | Bounded wait | "waits a bounded time for an acknowledgement…" | An unanswering broker leaves the fence `unconfirmed`. It is asked again by the same ID, and a late answer still counts. |
 
 **Every path that stops a chat** is exercised with a held native call, and each must fence that call's run:

@@ -281,9 +281,12 @@ export class Pim extends RealPim {
 		return utility.getModel();
 	}
 
-	/** The desktop's tools, with Pim's real run authority, only in a space a test named in `desktopSpaces`. */
+	/**
+	 * The desktop's tools, with Pim's real run authority, in a space a test
+	 * named in `desktopSpaces`; anywhere else, as Pim's own default says.
+	 */
 	protected override nativeDesktop(): boolean {
-		return desktopSpaces.has(this.name);
+		return desktopSpaces.has(this.name) || super.nativeDesktop();
 	}
 
 	/** The deployment's default image model, on the stand-in for Workers AI. */

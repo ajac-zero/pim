@@ -4,7 +4,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type ConversationId, LiveDoc } from "@earendil-works/pi-durable";
 import { NativeBindingsDoc } from "../src/cua-native-identity";
 import { getAgentByName } from "agents";
-import { env, runInDurableObject } from "cloudflare:test";
+import { env, evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { type BrowserHost, type ExecArgs, type ExecResult, Link, type Machine } from "../computer/pim-computer";
 import { Computer, IDLE_MS } from "../src/computer";
@@ -15,7 +15,8 @@ import type { Approval } from "../src/store";
 import { exports } from "cloudflare:workers";
 import { api, apiUrl, connectTestComputer, fakeChrome, lastUserText, OWNER, opens, post, setup, toolUse, waits } from "./helpers";
 import { requestLabel } from "./waits";
-import { desktopSpaces, faux, type Pim } from "./worker";
+import { OWNER_HEADER } from "../src/pim";
+import { desktopSpaces, faux, type Pim, type PreviewPim } from "./worker";
 
 /**
  * The Cua bridge's link (src/cua.ts), on its own and in a space whose
@@ -1531,6 +1532,114 @@ describe("a space whose operator chose its Cua VM", () => {
 			expect((await natives()).filter((request) => request.requestId === `approval:${stoppedApproval.id}`)).toEqual([expect.objectContaining({ status: "completed" })]);
 			faux.setResponses([]);
 			expect(elsewhere).toEqual([]);
+		});
+
+		it("is off in Pim's own space, the preview's, whatever its environment tries: no tool, no native call, not even from a chat asking for one", async () => {
+			// The preview's Pim (preview/worker.ts) keeps Pim's own `nativeDesktop`; the tests' Pim is the only one that says otherwise.
+			const previews = (env as unknown as { PREVIEW_PIM: DurableObjectNamespace<PreviewPim> }).PREVIEW_PIM;
+			const settings = env as unknown as Record<string, unknown>;
+			const directory = env.Directory.getByName("directory");
+			const registered = await waits().start("gate: register", () =>
+				directory.register({ username: "cuagate", ip: "192.0.2.9", claim: { window: true }, policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 } }),
+			);
+			if (!registered.ok) throw new Error(registered.error);
+			const owner = registered.account.ownerId;
+			await waits().start("gate: activate", () => directory.activate(owner));
+			const stub = previews.getByName(owner);
+			const inGate = <T>(fn: (instance: PreviewPim) => T | Promise<T>) => waits().start("in the gate space", () => runInDurableObject(stub, fn));
+			const ask = <T = any>(path: string, init: RequestInit = {}) =>
+				waits().start("gate: request", async () => {
+					const response = await stub.fetch(new Request(`https://pim.test${path}`, { ...init, headers: { [OWNER_HEADER]: owner, "content-type": "application/json" } }));
+					return { status: response.status, body: (await response.json()) as T };
+				});
+			// What a deployment could be given as settings, by every name such a switch might have; Pim reads none of them.
+			const NAMES = ["PIM_NATIVE_DESKTOP", "NATIVE_DESKTOP", "PIM_DESKTOP_TOOLS", "CUA_NATIVE_APPS"];
+			const ATTEMPTS: Record<string, (string | undefined)[]> = {
+				absent: [undefined],
+				malformed: ["{not json", "", "\u0000yes", "tru e"],
+				off: ["false", "0", "off", "no"],
+				on: ["true", "1", "on", '["desktop_click"]'],
+			};
+			const saved = [...NAMES, "CUA_BRIDGES"].map((name) => [name, settings[name]] as const);
+			try {
+				// The operator's Cua computer, chosen and reachable, with the host's real native-app dispatcher behind it.
+				const known = typeof settings.CUA_BRIDGES === "string" ? (JSON.parse(settings.CUA_BRIDGES) as Record<string, unknown>) : {};
+				settings.CUA_BRIDGES = bridges({ ...known, [owner]: bridgeOf(owner) });
+				await inGate((instance) => {
+					(instance as unknown as { env: Record<string, unknown> }).env.CUA_BRIDGES = settings.CUA_BRIDGES;
+					instance.store.setMeta(PROVIDER_KEY, choice(owner));
+				});
+				await waits().start("gate: provision", async () => (await getAgentByName(previews, owner)).provision({ ownerId: owner, username: "cuagate" }));
+				const dispatcher = dispatcherFor(owner);
+				const gateFixture = await fixtureFor(owner, (request) => dispatcher.dispatch(request));
+				const executed = upstream.executed.length;
+
+				for (const [attempt, values] of Object.entries(ATTEMPTS)) {
+					for (const value of values) {
+						for (const name of NAMES) {
+							if (value === undefined) delete settings[name];
+							else settings[name] = value;
+						}
+						// A new instance, made with those settings, as a deployment's would be.
+						await waits().start("gate: restart", () => evictDurableObject(stub).catch(() => undefined));
+						const seen = await inGate(async (instance) => {
+							(instance as unknown as { env: Record<string, unknown> }).env.CUA_BRIDGES = settings.CUA_BRIDGES;
+							await instance.harness.pi();
+							const tools = instance.registry.snapshot().tools();
+							return {
+								gate: (instance as unknown as { nativeDesktop(): boolean }).nativeDesktop(),
+								selected: instance.computer.selected(),
+								offered: tools.some(({ tool }) => tool.name === "file_read"),
+								desktop: desktopTools(instance as unknown as Pim),
+								native: await instance.computer.native("list_apps", {}).then(
+									() => "sent",
+									(error: Error) => error.message,
+								),
+							};
+						});
+						expect({ attempt, value, ...seen }).toEqual({
+							attempt,
+							value,
+							gate: false,
+							selected: "cua",
+							offered: true,
+							desktop: [],
+							native: expect.stringMatching(/Native-app calls are off/),
+						});
+					}
+				}
+
+				// A chat asks the preview's model for the desktop's tools by name: there are none to call, and nothing is bound, filed or sent.
+				const gateRoot: string = (await ask("/")).body.rootSession;
+				await ask(`/sessions/${gateRoot}/messages`, {
+					method: "POST",
+					body: JSON.stringify({ content: '/tool desktop_click {"pid": 4242, "x": 1, "y": 2}' }),
+				});
+				const said = await vi.waitFor(
+					async () => {
+						const transcript = JSON.stringify((await ask(`/sessions/${gateRoot}/messages`)).body);
+						expect(transcript).toMatch(/Tool desktop_click is not available/);
+						return transcript;
+					},
+					{ timeout: 15_000, interval: 200 },
+				);
+				expect(said).not.toMatch(/desktop_list_apps|binding/);
+				await ask(`/sessions/${gateRoot}/abort`, { method: "POST" });
+				expect((await ask<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals).toEqual([]);
+				const left = await inGate(async (instance) => ({
+					bindings: await (await instance.harness.pi()).commit(async (tx) => (await tx.doc(NativeBindingsDoc)).text ?? null, BACKGROUND_CONTEXT),
+					requests: instance.control.state?.requests ?? [],
+				}));
+				expect(left).toEqual({ bindings: null, requests: [] });
+				expect(upstream.executed.length).toBe(executed);
+				expect(gateFixture.calls).not.toHaveBeenCalled();
+				expect(elsewhere).toEqual([]);
+			} finally {
+				for (const [name, value] of saved) {
+					if (value === undefined) delete settings[name];
+					else settings[name] = value;
+				}
+			}
 		});
 	});
 });

@@ -1,3 +1,58 @@
+diff --git a/dist/harness/generation.js b/dist/harness/generation.js
+index abb121be414e3cac5b94869a9688cee68534b77c..95291af4b0733c01b1f031d613710c6447c42a03 100644
+--- a/dist/harness/generation.js
++++ b/dist/harness/generation.js
+@@ -151,7 +151,7 @@ export const GenerationTask = defineTask({
+             // Sequential round: start the next call and wait for it.
+             await runtime.commit(async (tx) => {
+                 const live = await tx.doc(LiveDoc, runtime.conversationId);
+-                const taskId = await createToolTask(tx, runtime, assistant, next);
++                const taskId = await createToolTask(tx, runtime, live, assistant, next);
+                 const slot = live.tools?.find((slot) => slot.callId === next && slot.taskId === undefined);
+                 if (slot !== undefined)
+                     slot.taskId = taskId;
+@@ -201,9 +201,13 @@ async function readCalls(runtime, assistant, callIds, context) {
+     const calls = message?.role === "assistant" ? message.content.filter((content) => content.type === "toolCall") : [];
+     return callIds.flatMap((id) => calls.filter((call) => call.id === id).slice(0, 1));
+ }
+-/** A tool task for call `callId`, owned by the generation. */
+-function createToolTask(tx, runtime, assistant, callId) {
+-    return tx.createTask(ToolTask, { assistant, callId }, { ownership: { kind: "task", taskId: runtime.taskId } });
++/**
++ * A tool task for call `callId`, owned by the generation. It carries the run's ID when the generation holds run control
++ * in this commit, and keeps it for good; a call of a run without one (begun before run IDs) carries none.
++ */
++function createToolTask(tx, runtime, live, assistant, callId) {
++    const run = live.run?.taskId === runtime.taskId && typeof live.run.id === "number" ? { runId: live.run.id } : {};
++    return tx.createTask(ToolTask, { assistant, callId, ...run }, { ownership: { kind: "task", taskId: runtime.taskId } });
+ }
+ /**
+  * Which threshold compaction preparation starts before its request (spec §8.3): `blocking` above
+@@ -453,7 +457,7 @@ async function startToolRound(runtime, request, message, calls, context) {
+                 slots.push({ callId: call.id, name: call.name, status: "pending" });
+                 continue;
+             }
+-            const taskId = await createToolTask(tx, runtime, entry.id, call.id);
++            const taskId = await createToolTask(tx, runtime, live, entry.id, call.id);
+             tools.push(taskId);
+             slots.push({ callId: call.id, name: call.name, taskId, status: "pending" });
+         }
+@@ -527,9 +531,13 @@ async function appendAssistant(tx, conversationId, message) {
+     await recordUsage(tx, conversationId, "models", `${message.provider}/${message.model}`, message.usage);
+     return tx.appendEntry(AssistantEntry, conversationId, { model: [message] });
+ }
+-/** Start a run for `inputs`, placed input submissions: a new generation takes `pi.live.run`. */
++/**
++ * Start a run for `inputs`, placed input submissions: a new generation takes `pi.live.run`, under a run ID minted here
++ * and nowhere else. Handover, steering and continuations keep it; every way a run ends removes it with `run`.
++ */
+ export async function startRun(tx, conversationId, live, inputs) {
+-    live.run = { taskId: await createGeneration(tx, conversationId), inputs };
++    const id = await tx.mintRunId();
++    live.run = { id, taskId: await createGeneration(tx, conversationId), inputs };
+ }
+ /** A generation owned by its conversation. */
+ function createGeneration(tx, conversationId) {
 diff --git a/dist/harness/harness.js b/dist/harness/harness.js
 index fda8aa1e318bdecd77d11ca019217d6c43cfef01..c305ff5311d4f332aa83b1cadff77a7828d461b0 100644
 --- a/dist/harness/harness.js
@@ -13,6 +68,46 @@ index fda8aa1e318bdecd77d11ca019217d6c43cfef01..c305ff5311d4f332aa83b1cadff77a78
      waitForTask(id, context) {
          this.#tasks.resume();
          return this.#tasks.waitForTask(id, context);
+diff --git a/dist/harness/live.d.ts b/dist/harness/live.d.ts
+index 52052c9afdf262c307bd1b092d6a4da12f9e859d..3224d34246a09f5de97a76bda697d516fd946bd9 100644
+--- a/dist/harness/live.d.ts
++++ b/dist/harness/live.d.ts
+@@ -1,7 +1,7 @@
+ import type { Draft, JsonRepresentation, JsonValue } from "@earendil-works/chord";
+ import type { AssistantMessage } from "@earendil-works/pi-ai";
+ import type { Transaction } from "../session/transaction.ts";
+-import type { EntryId, SubmissionId, SubmissionSettlement, TaskId, TaskRecord, Tx } from "../types.ts";
++import type { EntryId, RunId, SubmissionId, SubmissionSettlement, TaskId, TaskRecord, Tx } from "../types.ts";
+ import type { SchedulerOutcome } from "./scheduler.ts";
+ import type { CompactionReason, CompactionResult, ToolDiagnostic } from "./types.ts";
+ /** Presentation of one tool call of the current round. */
+@@ -42,6 +42,8 @@ export type CompactionStatus = {
+ export type LiveState = {
+     /** Run control: the task that settles the run's inputs, and those inputs; present exactly while busy. */
+     run?: {
++        /** The run's identity, minted when it started. Absent only on a run that began before run IDs, and never filled in. */
++        id?: RunId;
+         taskId: TaskId;
+         inputs: SubmissionId[];
+     };
+diff --git a/dist/harness/live.js b/dist/harness/live.js
+index 68a7d076f6e67effad32db2af3b1c854189e7a51..e1ece4f11f306c9e7c628322762aae8e8346ee3d 100644
+--- a/dist/harness/live.js
++++ b/dist/harness/live.js
+@@ -1,4 +1,5 @@
+ import { defineDoc } from "../documents.js";
++import { registerRunDocument } from "../session/transaction.js";
+ import { convertPartial } from "./generation.js";
+ export const LiveDoc = defineDoc({
+     kind: "pi.live",
+@@ -13,6 +14,7 @@ export const LiveDoc = defineDoc({
+     // running, so every base is small. Do not add a delta-count bound; the tool output benchmark checks this rule.
+     checkpointWhen: (value) => value.generation === undefined && !(value.tools ?? []).some((slot) => slot.status === "running"),
+ });
++registerRunDocument(LiveDoc);
+ /** Built-in task kinds that can own `pi.live.run`. */
+ const RUN_TASK_KINDS = new Set(["pi.generation"]);
+ const TOOL_TASK_KIND = "pi.tool";
 diff --git a/dist/harness/scheduler.js b/dist/harness/scheduler.js
 index 6cfe05a35de48c02e98ad07806fb74f2ee80de59..c73723dde187ff67827be0bea9c677566227d2cd 100644
 --- a/dist/harness/scheduler.js
@@ -106,11 +201,41 @@ index 6cfe05a35de48c02e98ad07806fb74f2ee80de59..c73723dde187ff67827be0bea9c67756
  function cancellationIntent(record) {
      return record.state.status !== "terminal" && (record.abortRequested || failedOutcome(record));
  }
+diff --git a/dist/harness/tool.d.ts b/dist/harness/tool.d.ts
+index e8b22d6f710e7cc18083801878198cf2f5f85b01..5f75c201c2b42f3b2c91ef8570ab14fa95c4c163 100644
+--- a/dist/harness/tool.d.ts
++++ b/dist/harness/tool.d.ts
+@@ -1,9 +1,11 @@
+ import type { ToolCall } from "@earendil-works/pi-ai";
+-import type { ConversationId, EntryId, JsonObject, Task, Tx, TypedEntry } from "../types.ts";
++import type { ConversationId, EntryId, JsonObject, RunId, Task, Tx, TypedEntry } from "../types.ts";
+ import type { ToolControl, ToolDiagnostic, ToolExecutionResult, ToolHooks } from "./types.ts";
+ export type ToolTaskInput = {
+     assistant: EntryId;
+     callId: string;
++    /** The run whose generation created this call, from `pi.live.run.id` in the creating commit. Absent on calls created before run IDs. Immutable. */
++    runId?: RunId;
+ };
+ export type ToolTaskCheckpoint = {
+     phase: "call";
 diff --git a/dist/harness/tool.js b/dist/harness/tool.js
-index 4a4c7f8a183971670752709803ea6b67a5d7a6ae..7cd7ad117352b21d8ce4bfa27ac74bd0f0b0cde0 100644
+index 4a4c7f8a183971670752709803ea6b67a5d7a6ae..e72be183b08c46fee1f911f3c7cf613b769f2436 100644
 --- a/dist/harness/tool.js
 +++ b/dist/harness/tool.js
-@@ -225,6 +225,11 @@ async function run(runtime, call, tool, args, context) {
+@@ -16,8 +16,11 @@ import { recordUsage } from "./usage.js";
+  */
+ export const ToolTask = defineTask({
+     name: "pi.tool",
+-    version: 1,
++    version: 2,
+     initial: () => ({ phase: "call" }),
++    // Version 2 adds `runId`, set only when the task is created. A task from version 1 keeps its input as it is: it has
++    // no run ID, and none is ever added.
++    migrate: (input, checkpoint) => ({ input, checkpoint }),
+     phases: {
+         call: async (task, runtime, context) => {
+             const call = await readCall(runtime, task.input, context);
+@@ -225,6 +228,11 @@ async function run(runtime, call, tool, args, context) {
          // is already in the result entry.
          ending = { status: "failed", message: `Tool ${call.name} threw` };
      }
@@ -122,7 +247,7 @@ index 4a4c7f8a183971670752709803ea6b67a5d7a6ae..7cd7ad117352b21d8ce4bfa27ac74bd0
      ended = true;
      reported.output.end();
      // Details still waiting for a progress commit settle with the terminal commit, the final flush.
-@@ -241,6 +246,29 @@ async function run(runtime, call, tool, args, context) {
+@@ -241,6 +249,29 @@ async function run(runtime, call, tool, args, context) {
      for (const waiter of pending)
          waiter.resolve();
  }
@@ -192,3 +317,151 @@ index b8c1e3749a808e9c91a8d9e0e987b0680cdcbe67..062306b662d0d96f680715263279ec97
      /** Resolve with the terminal receipt; cancelling `context` cancels only this wait. */
      waitForTask<R>(id: TaskId<R>, context: Context): Promise<SettledTask<R>>;
      /** Resolve when the ordinary ownership scope of every ownerless conversation has no live non-background task. */
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 3ac769a57ec284452ad9a380f39eb429e9d2c7e9..696ed2290ddd372db8c4c2689bd409c26129347f 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -19,6 +19,6 @@ export type { ConversationView } from "./harness/view.ts";
+ export { createSession } from "./session/session.ts";
+ export { MemoryStorage } from "./storage/memory.ts";
+ export { defineTask } from "./tasks.ts";
+-export type { CheckpointInfo, CommitChange, CommitPublication, CommonDocDefinition, ContextEdit, ConversationDocFamilyToken, ConversationDocToken, ConversationId, ConversationOwnership, ConversationQuery, ConversationRecord, Cursor, DocDefinition, DocFamilyDefinition, DocFamilyToken, DocToken, DocumentAddress, DocumentCommitChange, DocumentContent, DocumentCopySource, DocumentCreate, DocumentId, DocumentObserver, DocumentPoint, DocumentQuery, DocumentReader, DocumentRecord, DocumentSemantics, DocumentState, DocumentWatch, Entry, EntryDraft, EntryId, EntryQuery, EntryRecord, HookRunner, Id, JoinPolicy, JsonObject, LatestConversationSemantics, NextTaskState, Page, PhaseHandler, RewindableConversationDocFamilyToken, RewindableConversationDocToken, RewindableConversationSemantics, RunningTask, ScanOrder, Seq, Session, SessionDocFamilyToken, SessionDocToken, Storage, StorageWrite, StoredDocument, SubmissionCreate, SubmissionId, SubmissionQuery, SubmissionRecord, SubmissionSettlement, TableCommitChange, Task, TaskDefinition, TaskDocFamilyToken, TaskDocToken, TaskId, TaskOptions, TaskOutcome, TaskOutcomeError, TaskOwnership, TaskQuery, TaskRecord, TaskRuntime, TaskState, Tx, TypedEntry, TypedEntryDraft, WatchEnd, WatchHandle, } from "./types.ts";
++export type { CheckpointInfo, CommitChange, CommitPublication, CommonDocDefinition, ContextEdit, ConversationDocFamilyToken, ConversationDocToken, ConversationId, ConversationOwnership, ConversationQuery, ConversationRecord, Cursor, DocDefinition, DocFamilyDefinition, DocFamilyToken, DocToken, DocumentAddress, DocumentCommitChange, DocumentContent, DocumentCopySource, DocumentCreate, DocumentId, DocumentObserver, DocumentPoint, DocumentQuery, DocumentReader, DocumentRecord, DocumentSemantics, DocumentState, DocumentWatch, Entry, EntryDraft, EntryId, EntryQuery, EntryRecord, HookRunner, Id, JoinPolicy, JsonObject, LatestConversationSemantics, NextTaskState, Page, PhaseHandler, RewindableConversationDocFamilyToken, RewindableConversationDocToken, RewindableConversationSemantics, RunningTask, RunId, ScanOrder, Seq, Session, SessionDocFamilyToken, SessionDocToken, Storage, StorageWrite, StoredDocument, SubmissionCreate, SubmissionId, SubmissionQuery, SubmissionRecord, SubmissionSettlement, TableCommitChange, Task, TaskDefinition, TaskDocFamilyToken, TaskDocToken, TaskId, TaskOptions, TaskOutcome, TaskOutcomeError, TaskOwnership, TaskQuery, TaskRecord, TaskRuntime, TaskState, Tx, TypedEntry, TypedEntryDraft, WatchEnd, WatchHandle, } from "./types.ts";
+ export { ROOT_CONVERSATION_ID } from "./types.ts";
+ //# sourceMappingURL=index.d.ts.map
+\ No newline at end of file
+diff --git a/dist/session/transaction.d.ts b/dist/session/transaction.d.ts
+index e32932460ce5ef231dc9ee09249266f0e57396e2..27de556ee997c8d2536c964af9411cbd185afdb6 100644
+--- a/dist/session/transaction.d.ts
++++ b/dist/session/transaction.d.ts
+@@ -1,7 +1,7 @@
+ import { type Context, type Draft, type JsonValue } from "@earendil-works/chord";
+ import { type Tracker } from "@earendil-works/chord/delta";
+ import { type AnyDocDefinition } from "../documents.ts";
+-import type { ConversationDocFamilyToken, ConversationDocToken, ConversationId, ConversationOwnership, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentCommitChange, DocumentId, DocumentRecord, Entry, EntryDraft, EntryId, EntryQuery, EntryRecord, JsonObject, Seq, SessionDocFamilyToken, SessionDocToken, Storage, StorageWrite, SubmissionCreate, SubmissionId, SubmissionRecord, SubmissionSettlement, Task, TaskDocFamilyToken, TaskDocToken, TaskId, TaskOptions, TaskQuery, TaskRecord, Tx, TypedEntry, TypedEntryDraft } from "../types.ts";
++import type { ConversationDocFamilyToken, ConversationDocToken, ConversationId, ConversationOwnership, ConversationQuery, ConversationRecord, Cursor, DocumentAddress, DocumentCommitChange, DocumentId, DocumentRecord, Entry, EntryDraft, EntryId, EntryQuery, EntryRecord, JsonObject, RunId, Seq, SessionDocFamilyToken, SessionDocToken, Storage, StorageWrite, SubmissionCreate, SubmissionId, SubmissionRecord, SubmissionSettlement, Task, TaskDocFamilyToken, TaskDocToken, TaskId, TaskOptions, TaskQuery, TaskRecord, Tx, TypedEntry, TypedEntryDraft } from "../types.ts";
+ type AnyTaskRecord = TaskRecord<JsonValue, JsonValue, JsonValue>;
+ /** One committed document incarnation owned by the Session tracker cache. */
+ export type LoadedDocument = {
+@@ -43,6 +43,8 @@ export type TransactionScope = {
+  * Every asynchronous operation is tracked so callback settlement can reject and drain unfinished work. Session calls
+  * one settlement method, then either discards prepared changes or adopts them once after Storage succeeds.
+  */
++/** Internal: register the run control document `Tx.run()` reads. */
++export declare function registerRunDocument(token: ConversationDocToken<JsonObject>): void;
+ export declare class Transaction implements Tx {
+     #private;
+     constructor(host: TransactionHost, context: Context, scope?: TransactionScope);
+@@ -50,6 +52,12 @@ export declare class Transaction implements Tx {
+     entry(id: EntryId): Promise<EntryRecord | undefined>;
+     entry<D extends JsonValue>(token: Entry<D>, id: EntryId): Promise<TypedEntry<D> | undefined>;
+     task(id: TaskId): Promise<AnyTaskRecord | undefined>;
++    run(conversationId: ConversationId): Promise<Readonly<{
++        id: RunId | null;
++        taskId: TaskId;
++    }> | undefined>;
++    /** Internal: a fresh run ID, minted only by the commit that starts a run. */
++    mintRunId(): Promise<RunId>;
+     scanConversations(query: ConversationQuery, limit: number, cursor?: Cursor): Promise<import("../types.ts").Page<ConversationRecord, Readonly<Record<string, JsonValue>>>>;
+     scanEntries(query: EntryQuery, limit: number, cursor?: Cursor): Promise<import("../types.ts").Page<EntryRecord, Readonly<Record<string, JsonValue>>>>;
+     latestHeadMarker(conversationId: ConversationId): Promise<(EntryRecord & {
+diff --git a/dist/session/transaction.js b/dist/session/transaction.js
+index a0589a36fde0c0e88819e682cc68e45c0d6f8e29..b002cc7f211662306b6224a3e8705f226387f842 100644
+--- a/dist/session/transaction.js
++++ b/dist/session/transaction.js
+@@ -32,6 +32,12 @@ const TABLE_JSON_COPY_OPTIONS = { omitUndefinedProperties: true };
+  * Every asynchronous operation is tracked so callback settlement can reject and drain unfinished work. Session calls
+  * one settlement method, then either discards prepared changes or adopts them once after Storage succeeds.
+  */
++/** The document that holds run control (`pi.live`), registered by the harness so this layer imports nothing of it. */
++let runDocument;
++/** Internal: register the run control document `Tx.run()` reads. */
++export function registerRunDocument(token) {
++    runDocument = token;
++}
+ export class Transaction {
+     #host;
+     #context;
+@@ -61,6 +67,54 @@ export class Transaction {
+         this.#context = context;
+         this.#scope = scope;
+     }
++    /**
++     * The conversation's active run as this transaction reads it, or undefined while it is idle. `id` is null for a run
++     * that began before run IDs. Read-only: it creates and writes nothing, and sees this transaction's own changes.
++     */
++    run(conversationId) {
++        try {
++            this.#assertOpen();
++            if (runDocument === undefined)
++                throw new Error("Tx.run() needs the harness's run document");
++            return this.#track(this.#readRun(runDocument, conversationId));
++        }
++        catch (error) {
++            return Promise.reject(error);
++        }
++    }
++    async #readRun(token, conversationId) {
++        const definition = token.definition;
++        const resolved = resolveAddress(definition, [conversationId]);
++        const latest = this.#latestDocumentByAddress.get(resolved.id);
++        let value;
++        if (latest !== undefined) {
++            if (latest.retireOnCommit)
++                return undefined;
++            // Acquired in this transaction: read its draft, with this transaction's changes.
++            value = await (latest.draftPromise ?? this.doc(token, conversationId));
++        }
++        else {
++            const loaded = await this.#host.load(definition, resolved.id, resolved.address, this.#context);
++            this.#assertOpen();
++            if (loaded === undefined)
++                return undefined;
++            checkRecordScope(definition, loaded.record);
++            checkRecordVersion(definition, loaded.record, loaded.storedVersion);
++            value = loaded.tracker.value;
++        }
++        const run = value?.run;
++        if (run === undefined)
++            return undefined;
++        return Object.freeze({ id: typeof run.id === "number" ? run.id : null, taskId: run.taskId });
++    }
++    /** Internal: a fresh run ID from the Session's numeric namespace, minted only by the commit that starts a run. */
++    mintRunId() {
++        return this.#write(async () => {
++            const id = await this.#host.storage.mintId();
++            this.#assertOpen();
++            return id;
++        });
++    }
+     // ─── Table reads ────────────────────────────────────────────────────────
+     conversation(id) {
+         return this.#read("conversation", () => this.#host.storage.conversation(id, this.#context));
+diff --git a/dist/types.d.ts b/dist/types.d.ts
+index 254dcd8026e463ada2d0865ac8210cb0b6e1692b..c29b9e23d9b6670a80dd00e9f82669e17e6495c2 100644
+--- a/dist/types.d.ts
++++ b/dist/types.d.ts
+@@ -19,6 +19,8 @@ export type ConversationId = Id<"conversation">;
+ export type EntryId = Id<"entry">;
+ export type TaskId<Result = unknown> = Id<"task", Result>;
+ export type SubmissionId = Id<"submission">;
++/** One run of one conversation, minted by the Session when the run starts; never reused. */
++export type RunId = Id<"run">;
+ export type DocumentId = Id<"document">;
+ declare const seqBrand: unique symbol;
+ /** Strictly increasing sequence assigned to one atomic storage commit; gaps are permitted. */
+@@ -689,6 +691,14 @@ export interface Tx {
+     /** Undefined when the entry is absent or has another kind. */
+     entry<D extends JsonValue>(token: Entry<D>, id: EntryId): Promise<TypedEntry<D> | undefined>;
+     task(id: TaskId): Promise<TaskRecord<JsonValue, JsonValue, JsonValue> | undefined>;
++    /**
++     * The conversation's active run as this transaction reads it, or undefined while it is idle. `id` is null for a run
++     * that began before run IDs. Read-only: it creates and writes nothing.
++     */
++    run(conversationId: ConversationId): Promise<Readonly<{
++        id: RunId | null;
++        taskId: TaskId;
++    }> | undefined>;
+     scanConversations(query: ConversationQuery, limit: number, cursor?: Cursor): Promise<Page<ConversationRecord, Cursor>>;
+     scanEntries(query: EntryQuery, limit: number, cursor?: Cursor): Promise<Page<EntryRecord, Cursor>>;
+     /** Newest visible entry of the conversation that carries a `head`. */

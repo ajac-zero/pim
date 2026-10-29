@@ -22,6 +22,8 @@ export const CUA_STANDIN_FILES = [
 	"test/preview-cua-fixture.test.ts",
 	"test/computer-native-handler.test.ts",
 	"test/waits.test.ts",
+	"test/pi-durable-run-identity.test.ts",
+	"test/cua-native-identity.test.ts",
 ];
 
 /** What no file in the lane may name: the tests' Chrome and the binding behind it, or live checks. */

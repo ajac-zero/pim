@@ -1,8 +1,8 @@
 # Proposal: an authoritative run identity in pi-durable
 
-**This is a proposal only.** Nothing in this change patches `@earendil-works/pi-durable`, and Pim doesn't depend on anything here. The native-call binder (docs/cua-native-identity.md) needs a run identity the harness publishes and types, and pi-durable 1.1.0 has none. Its README defines a run, its design document mentions one only through events, and `pi.live.run` names a run's controlling task and inputs but not the run itself. The first-input derivation from that document's experimental §9.4 remains unaccepted, and nothing below relies on it.
+**Implemented locally, not upstream.** Pim's own patch of pi-durable 1.1.0 (`patches/@earendil-works__pi-durable@1.1.0.patch`, applied by pnpm's `patchedDependencies`) carries the change below; see "The local patch". Nothing is published or sent upstream. The native-call binder (docs/cua-native-identity.md) needs a run identity the harness publishes and types, and pi-durable 1.1.0 has none. Its README defines a run, its design document mentions one only through events, and `pi.live.run` names a run's controlling task and inputs but not the run itself. The first-input derivation from that document's experimental §9.4 remains unaccepted, and nothing below relies on it.
 
-The change below is the smallest one that would let Pim check, in one transaction, that a tool call belongs to the run that is going now and has belonged to it since it was created. It adds one ID type, one field each on two records, and one read. It needs an upstream release and a reviewed pin before Pim may use it.
+The change below is the smallest one that lets Pim check, in one transaction, that a tool call belongs to the run that is going now and has belonged to it since it was created. It adds one ID type, one field each on two records, and one read. An upstream release with the same contract would replace the local patch.
 
 ## The change
 
@@ -113,6 +113,15 @@ This is for a later, reviewed wiring change. Pim's identity authority (docs/cua-
 - Legacy runs and calls reporting `null` or absent, never filled in.
 - Forks and child conversations starting with no run.
 
-## Pim until then
+## The local patch
 
-The real authority stays blocked. When an upstream release has this contract, Pim would pin it, review it, and implement the authority with its own tests against the real harness. The binder wouldn't change: its run anchor would be the run ID as a string.
+The patch edits the published `dist` files, as Pim's earlier changes to this package do (`resumeTask` and suspension):
+
+- `dist/session/transaction.js`: `Tx.run(conversationId)`, which reads `pi.live` read-only: this transaction's draft if it acquired one, otherwise the committed document through the transaction's host, with no draft staged. `mintRunId()`, an internal method that mints from `Storage.mintId()`. The run document is registered by `dist/harness/live.js` (`registerRunDocument`), so the session layer imports nothing of the harness.
+- `dist/harness/generation.js`: `startRun` mints the ID, the only place one is minted. `createToolTask` copies `pi.live.run.id` into `ToolTaskInput.runId`, only while the creating generation holds run control in that commit, so a call can't take another run's ID.
+- `dist/harness/tool.js`: `pi.tool` version 2, whose `migrate` returns the input as it is: a version-1 call has no run ID, and none is added.
+- The `.d.ts` files: `RunId`, `Tx.run`, `LiveState.run.id` and `ToolTaskInput.runId`, as above. Source maps are not updated.
+
+Handover, steering, `onYield` continuations, reconciliation and faults are unchanged, so they keep or end the ID as the contract says without code of their own. To reproduce the patch: `pnpm patch @earendil-works/pi-durable@1.1.0`, apply the hunks to the directory it prints, and `pnpm patch-commit <dir>`; pnpm checks the file against its SHA-256 in `pnpm-lock.yaml` (`patchedDependencies`) when it installs. `pnpm install --frozen-lockfile` applies it.
+
+`test/pi-durable-run-identity.test.ts` runs the real harness over its in-memory storage with a scripted model. It shows that each run gets one ID that its tool tasks carry and that its later tool rounds keep, and that the next run gets another. The ID survives steering, an `onYield` continuation, a suspended call and a restart with a new harness over the same storage, and the woken call keeps it. An abort and a queued reset each end the run, and a later run gets a new ID. A run whose stored control has no ID reads as `null`, and its calls carry none. A version-1 call stored mid-run migrates and runs without one. A fork starts with no run. Under deliberate mutations it failed for: no ID minted, a new ID minted at handover, and a migration that adds one.

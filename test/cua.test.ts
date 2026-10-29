@@ -1185,7 +1185,7 @@ describe("a space whose operator chose its Cua VM", () => {
 		const bindings = async () =>
 			JSON.parse(
 				(await desk.within(async (instance) => (await instance.harness.pi()).commit(async (tx) => (await tx.doc(NativeBindingsDoc)).text, BACKGROUND_CONTEXT))) ?? '{"records":[]}',
-			).records as { id: string; status: string; identity: { runAnchor: string; conversationId: string } }[];
+			).records as { id: string; status: string; identity: { runAnchor: string; conversationId: string; toolTaskId: string } }[];
 		const natives = async () => (await desk.stateOf()).requests.filter((request) => request.runId !== undefined);
 
 		/** One turn in which the agent calls each of `calls` in order, in one run; resolves with what each call returned. */
@@ -1526,15 +1526,15 @@ describe("a space whose operator chose its Cua VM", () => {
 			await vi.waitFor(() => expect(order).toContain("stopped"), { timeout: 10_000 });
 			unspy();
 			expect(order).toEqual(["stop asked", "claim read the call", "stopped"]);
-			// The claim won: the call was sent, once, and its outcome recorded, though its chat was stopped right after.
-			expect(upstream.executed.length).toBe(sent + 1);
+			// The claim won, and its request was admitted; the stop, committed after it, is seen at the send, which it refuses: nothing is sent.
+			expect(upstream.executed.length).toBe(sent);
 			expect(await statusOf(stoppedApproval)).toBe("closed");
-			expect((await natives()).filter((request) => request.requestId === `approval:${stoppedApproval.id}`)).toEqual([expect.objectContaining({ status: "completed" })]);
+			expect((await natives()).filter((request) => request.requestId === `approval:${stoppedApproval.id}`)).toEqual([expect.objectContaining({ status: "rejected" })]);
 			faux.setResponses([]);
 			expect(elsewhere).toEqual([]);
 		});
 
-		it("fences the send itself: a chat deleted, or its agent removed, while the computer wakes after admission sends nothing; a stop or a reset then is after the claim, and the call goes once", async () => {
+		it("authorizes the send itself, after the computer wakes: a chat deleted, its agent removed or the chat stopped by then sends nothing, a queued reset doesn't end the run first, and nothing comes between the authorization and the send", async () => {
 			const chat = async (agent?: string) => (await desk.post<{ id: string }>("/sessions", agent ? { agent } : {})).body.id;
 			const statusOf = async (approval: Approval) => (await bindings()).find((binding) => binding.id === (approval.args as { binding: string }).binding)?.status;
 			const nativeSent = () => deskFixture.connections.flatMap((connection) => connection.received).filter((message) => message.includes('"op":"native_tool"')).length;
@@ -1588,19 +1588,83 @@ describe("a space whose operator chose its Cua VM", () => {
 			expect(upstream.executed.length).toBe(executed);
 			expect(nativeSent()).toBe(sentBefore);
 
-			// Stopped, or reset, while the computer wakes: both are the harness's, committed after the claim, which was the commit point; the call goes, once.
+			// Stopped through the person's route while the computer wakes: the stop commits before the send's authorization, which refuses it.
 			const stopped = await chat();
 			const stop = await whileWaking(stopped, 23, async () => expect((await desk.post(`/sessions/${stopped}/abort`)).status).toBe(200));
+			expect(stop.result).toMatch(NOT_SENT);
+			expect(await statusOf(stop.approval)).toBe("closed");
+			expect((await natives()).find((request) => request.requestId === `approval:${stop.approval.id}`)).toMatchObject({ status: "rejected" });
+			expect(upstream.executed.length).toBe(executed);
+			expect(nativeSent()).toBe(sentBefore);
+
+			// Reset through the person's route while the computer wakes: a reset is a queued input the harness applies at the run's next boundary,
+			// after the call, so at the send the run and its call are still live, the authority says so, and the call goes, once.
 			const reset = await chat();
 			const resetting = await whileWaking(reset, 24, async () => expect((await desk.post(`/sessions/${reset}/reset`)).status).toBe(200));
-			for (const { approval, result } of [stop, resetting]) {
-				expect(result).toBe("done");
-				expect(await statusOf(approval)).toBe("closed");
-				expect((await natives()).find((request) => request.requestId === `approval:${approval.id}`)).toMatchObject({ status: "completed" });
-			}
+			expect(resetting.result).toBe("done");
+			expect(await statusOf(resetting.approval)).toBe("closed");
+			expect((await natives()).find((request) => request.requestId === `approval:${resetting.approval.id}`)).toMatchObject({ status: "completed" });
+
+			// Stopped while the send's own authorization is open, between its read of the call and the send: the stop waits on the harness's line,
+			// so the read and the send are one step it can't come between. The call goes once, and the stop is after it.
+			const raced = await chat();
+			const racing = waits().start("turn: click 25", () => {
+				faux.setResponses([() => toolUse("desktop_click", { pid: 4242, x: 25, y: 1 })]);
+				return desk.post(`/sessions/${raced}/messages`, { content: "Click 25", wait: true });
+			});
+			const racedApproval = await desk.pending();
+			const racedTask = (await bindings()).find((binding) => binding.id === (racedApproval.args as { binding: string }).binding)!.identity.toolTaskId;
+			const order: string[] = [];
+			const spies: { mockRestore(): void }[] = [];
+			await desk.within(async (instance) => {
+				const proto = await (await instance.harness.pi()).commit((tx) => Object.getPrototypeOf(tx) as { task: (id: number) => Promise<unknown> }, BACKGROUND_CONTEXT);
+				const read = proto.task;
+				const sessions = Object.getPrototypeOf(instance.harness.session(raced)) as { abort: (operationId?: string) => Promise<boolean> };
+				const abort = sessions.abort;
+				spies.push(
+					vi.spyOn(sessions, "abort").mockImplementation(async function (this: unknown, operationId?: string) {
+						order.push("stop asked");
+						try {
+							return await abort.call(this, operationId);
+						} finally {
+							order.push("stopped");
+						}
+					}),
+				);
+				// The moment the space hands the call to its socket.
+				const send = WebSocket.prototype.send;
+				spies.push(
+					vi.spyOn(WebSocket.prototype, "send").mockImplementation(function (this: WebSocket, message: string | ArrayBuffer | ArrayBufferView) {
+						if (typeof message === "string" && message.includes('"op":"native_tool"') && message.includes('"x":25')) order.push("sent");
+						return send.call(this, message);
+					}),
+				);
+				// The claim reads the call first; the second read is the send's.
+				let reads = 0;
+				spies.push(
+					vi.spyOn(proto, "task").mockImplementation(async function (this: unknown, id: number) {
+						if (String(id) === racedTask && ++reads === 2) {
+							void exports.default.fetch(
+								new Request(apiUrl(`/sessions/${raced}/abort`), { method: "POST", body: "{}", headers: { Authorization: `Bearer ${desk.token}`, "content-type": "application/json" } }),
+							);
+							await vi.waitFor(() => expect(order).toContain("stop asked"), { timeout: 5_000, interval: 5 });
+							await new Promise((resolve) => setTimeout(resolve, 50));
+							order.push("send read the call");
+						}
+						return read.call(this, id);
+					}),
+				);
+			});
+			const racedDecision = await desk.decide(racedApproval.id);
+			await racing.catch(() => undefined);
+			await vi.waitFor(() => expect(order).toContain("stopped"), { timeout: 10_000 });
+			for (const spy of spies) spy.mockRestore();
+			faux.setResponses([]);
+			expect(order).toEqual(["stop asked", "send read the call", "sent", "stopped"]);
+			expect((racedDecision.body as Approval).result).toBe("done");
 			expect(upstream.executed.slice(executed).map((call) => call.arguments)).toEqual([
-				{ pid: 4242, x: 23, y: 1 },
 				{ pid: 4242, x: 24, y: 1 },
+				{ pid: 4242, x: 25, y: 1 },
 			]);
 			expect(nativeSent()).toBe(sentBefore + 2);
 			expect(elsewhere).toEqual([]);

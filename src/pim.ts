@@ -15,6 +15,7 @@ import {
 	type HarnessSettings,
 	type ModelRef,
 	type TaskId,
+	type Tx,
 	ROOT_CONVERSATION_ID,
 } from "@earendil-works/pi-durable";
 import { type AgentMcpOAuthProvider, Agent as DurableAgent, type Connection, type ConnectionContext, DurableObjectOAuthClientProvider, getAgentByName, type Schedule, type WSMessage } from "agents";
@@ -159,7 +160,7 @@ import { ControlCoordinator, ControlRefused, currentTrace } from "./computer-con
 import { harnessAuthority, harnessScope, type NativeBinding, NativeIdentityBinder, type Transact } from "./cua-native-identity";
 import { DESKTOP_ACTIONS, DESKTOP_EXTENSION, describeOutcome, desktopActions, desktopExtension } from "./extensions/desktop";
 import type { NativeOutcome } from "../computer/native-outcome";
-import { asPersonRead, COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerLink, type ComputerStatus } from "./computer";
+import { asPersonRead, COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerLink, type ComputerStatus, type NativeGate } from "./computer";
 import { bridgeFor, Cua, type CuaBridge, PROVIDER_KEY, selection } from "./cua";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
@@ -574,16 +575,16 @@ export class Pim extends DurableAgent<Env> {
 	 * a chat's deletion commits wholly before it or wholly after.
 	 */
 	readonly #transact: Transact = async (work) =>
-		(await this.harness.pi()).commit(async (tx) => {
-			const scope = await harnessScope(tx, (read) =>
-				harnessAuthority(read, {
-					owner: this.name,
-					agentOf: (conversation) => this.#roleOf(conversation).agent.id,
-					deleted: (conversation) => this.store.deletedSessions().has(conversation),
-				}),
-			);
-			return work(scope);
-		}, BACKGROUND_CONTEXT);
+		(await this.harness.pi()).commit(async (tx) => work(await harnessScope(tx, (read) => this.#authority(read))), BACKGROUND_CONTEXT);
+
+	/** Pim's run authority, reading harness transaction `tx` (./cua-native-identity.ts). */
+	#authority(tx: Tx) {
+		return harnessAuthority(tx, {
+			owner: this.name,
+			agentOf: (conversation) => this.#roleOf(conversation).agent.id,
+			deleted: (conversation) => this.store.deletedSessions().has(conversation),
+		});
+	}
 
 	/**
 	 * Sends a bound native-app call as one request the control state admits:
@@ -592,30 +593,35 @@ export class Pim extends DurableAgent<Env> {
 	 * before anything left the space is a `ControlRefused`, which closes the
 	 * binding; anything after may have run.
 	 *
-	 * A chat's deletion and its agent are Pim's own records, not the harness's,
-	 * so they aren't on the commit line the claim is. They are checked here,
-	 * before admission, and again as the computer's fence, in the same turn as
-	 * the call is sent, after every wait for the computer: a deletion or an
-	 * agent's removal before the send leaves it unsent, and one after it comes
-	 * after the send. A stop or reset of the chat is the harness's, ordered by
-	 * the claim's commit: before it, nothing is claimed; after it, the call is
-	 * taken as possibly sent, and goes.
+	 * The call is authorized again at the send itself (`NativeGate`): in one
+	 * harness commit, which holds the harness's commit line, Pim's authority
+	 * reads the call's tool task and run, and Pim's own records of the chat's
+	 * deletion and agent, and then, with nothing awaited after its last read,
+	 * the computer checks its link and sends. A stop or a run's end committed
+	 * before that commit leaves the call unsent, and one asked for during it
+	 * waits on the line until the call has left. Pim's records are read
+	 * synchronously in the same step, so a deletion or an agent's removal
+	 * there is wholly before the send, which it refuses, or after it.
 	 */
 	async #desktopSend(binding: NativeBinding, session: string, requestId: string, approvalId?: string): Promise<NativeOutcome> {
-		const { conversationId, agentId, runAnchor } = binding.identity;
-		const fence = () =>
-			conversationId !== session || this.#roleOf(session).agent.id !== agentId
-				? "the call's chat or agent isn't the one it was bound for"
-				: this.store.deletedSessions().has(session)
-					? "the call's chat was deleted"
-					: null;
-		const early = fence();
-		if (early) throw new ControlRefused("identity", early);
+		const { conversationId, toolTaskId, callId, agentId, runAnchor } = binding.identity;
+		// Refused early, before admission; the gate below decides at the send.
+		if (conversationId !== session || this.#roleOf(session).agent.id !== agentId) {
+			throw new ControlRefused("identity", "the call's chat or agent isn't the one it was bound for");
+		}
+		if (this.store.deletedSessions().has(session)) throw new ControlRefused("stopped", "the call's chat was deleted");
+		const gate: NativeGate = async (transmit) =>
+			(await this.harness.pi()).commit(async (tx) => {
+				const answer = await this.#authority(tx).verify({ conversationId, toolTaskId, callId });
+				if (answer.status !== "verified") throw new HttpError(409, `The call's run can't be shown at the moment of sending (${answer.reason})`);
+				if (answer.identity.agentId !== agentId || answer.identity.runAnchor !== runAnchor) throw new HttpError(409, "The call isn't the one it was bound as");
+				transmit();
+			}, BACKGROUND_CONTEXT);
 		return this.#controlled(
 			session,
 			requestId,
 			() =>
-				this.computer.native(binding.tool, binding.arguments, undefined, fence).catch((error: unknown) => {
+				this.computer.native(binding.tool, binding.arguments, undefined, gate).catch((error: unknown) => {
 					if (currentTrace()?.sent === false) throw new ControlRefused("not_sent", errorMessage(error));
 					throw error;
 				}),

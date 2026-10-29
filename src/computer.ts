@@ -140,6 +140,13 @@ export type ComputerStatus = {
  * whether pim-computer got it or ran it: only a reply does. It sends nothing
  * again after an end, and keeps nothing to send later.
  */
+/**
+ * Where a native-app call is sent from (`Computer.native`): the caller's own
+ * serialized section, which authorizes the call and then calls `transmit`,
+ * the link's synchronous check-and-send, with nothing awaited between.
+ */
+export type NativeGate = (transmit: () => void) => Promise<void>;
+
 export type ComputerLink = {
 	readonly readyState: number;
 	send(message: string): void;
@@ -498,12 +505,14 @@ export class Computer {
 	 * convert (a getter, `toJSON`, a date) is refused, not converted. The host
 	 * checks the arguments against the tool's curated schema.
 	 *
-	 * `fence` is the caller's last word on the call: it is read once more
-	 * after every wait, in the same synchronous turn as the send, so nothing
-	 * can come between it and the call leaving. A reason it gives refuses the
-	 * call, unsent.
+	 * `gate` is the caller's last word on the call, at the send itself: after
+	 * every wait for the computer, the call is handed to it as `transmit`,
+	 * which checks the link and sends in one synchronous step. The gate calls
+	 * it, at most once, only once it has authorized the call, with nothing
+	 * awaited between its last check and that call; a gate that throws, or
+	 * returns without calling it, leaves the call unsent.
 	 */
-	async native(tool: unknown, args: unknown, timeoutMs = NATIVE_CALL_MS, fence?: () => string | null): Promise<NativeOutcome> {
+	async native(tool: unknown, args: unknown, timeoutMs = NATIVE_CALL_MS, gate?: NativeGate): Promise<NativeOutcome> {
 		const refuse = (why: string) => new HttpError(409, `${why}, so no native-app call was sent.`);
 		if (this.#nativeApps() !== true) throw refuse("Native-app calls are off for this computer");
 		if (this.#selected() !== "cua") throw refuse("Only an operator's Cua computer takes native-app calls");
@@ -517,45 +526,61 @@ export class Computer {
 		if (!request) throw new HttpError(400, "The native-app call names no curated tool, or its arguments aren't a plain JSON object of a bounded size, so nothing was sent.");
 		// Spent now, whatever comes: the request's one call ID is taken.
 		trace.native = true;
-		return this.#call<NativeOutcome>(NATIVE_TOOL_OP, request, timeoutMs, true, fence);
+		return this.#call<NativeOutcome>(NATIVE_TOOL_OP, request, timeoutMs, true, gate);
 	}
 
-	async #call<T>(op: string, args: Record<string, unknown>, timeoutMs: number, counts = true, fence?: () => string | null): Promise<T> {
+	async #call<T>(op: string, args: Record<string, unknown>, timeoutMs: number, counts = true, gate?: NativeGate): Promise<T> {
 		if (!this.paired()) throw new HttpError(404, "No computer is connected. The person can connect one in Settings → Computer.");
 		const refused = this.#refusal(op);
 		if (refused) throw refused;
 		// A link made under another choice or bridge is let go, and waking makes one under the space's now.
 		if (this.#stale()) this.#letGo();
 		await this.wake();
-		// Checked again after the wait, right before sending: the choice, or the bridge, may have changed meanwhile.
-		const stale = this.#stale();
-		if (stale) {
-			this.#letGo();
-			throw stale;
+		// Checked again after the wait, and after the gate's, right before sending: the choice, or the bridge, may have changed meanwhile.
+		const transmit = (): Promise<T> => {
+			const stale = this.#stale();
+			if (stale) {
+				this.#letGo();
+				throw stale;
+			}
+			const late = this.#refusal(op);
+			if (late) throw late;
+			const socket = this.#socket();
+			if (!socket) throw new HttpError(503, "The computer is offline: pim-computer isn't connected. Ask the person to start it again.");
+			if (counts) this.#use();
+			const id = crypto.randomUUID();
+			// A request the control state admitted (see ./computer-control-runtime.ts) learns what became of its calls.
+			const trace = currentTrace();
+			const native = op === NATIVE_TOOL_OP ? { trace, key: `native:${id}` } : undefined;
+			return new Promise<T>((resolve, reject) => {
+				const timer = setTimeout(() => {
+					this.#pending.delete(id);
+					reject(new HttpError(504, `The computer didn't answer within ${Math.round(timeoutMs / 1000)} seconds.`));
+				}, timeoutMs);
+				this.#pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, ...(native ? { native } : {}) });
+				socket.send(JSON.stringify({ type: "call", id, op, args }));
+				if (trace) trace.sent = true;
+				// Settled before its reply, the request is unknown: the app may yet be acted on.
+				if (trace && native) trace.awaiting.add(native.key);
+			});
+		};
+		const sent: { answer?: Promise<T> } = {};
+		if (gate) {
+			try {
+				await gate(() => {
+					if (sent.answer) throw new Error("A native-app call is transmitted once.");
+					sent.answer = transmit();
+				});
+			} catch (error) {
+				// A gate that fails after the call left has still sent it: its answer, or its unknown end, is the call's.
+				if (!sent.answer) throw error;
+			}
+			if (!sent.answer) throw new HttpError(409, "The call wasn't authorized at the moment of sending, so no native-app call was sent.");
+		} else {
+			sent.answer = transmit();
 		}
-		const late = this.#refusal(op);
-		if (late) throw late;
-		const socket = this.#socket();
-		if (!socket) throw new HttpError(503, "The computer is offline: pim-computer isn't connected. Ask the person to start it again.");
-		// The caller's fence, with no await from here to the send.
-		const fenced = fence?.();
-		if (fenced) throw new HttpError(409, `${fenced}, so no native-app call was sent.`);
-		if (counts) this.#use();
-		const id = crypto.randomUUID();
-		// A request the control state admitted (see ./computer-control-runtime.ts) learns what became of its calls.
+		const answer = sent.answer;
 		const trace = currentTrace();
-		const native = op === NATIVE_TOOL_OP ? { trace, key: `native:${id}` } : undefined;
-		const answer = new Promise<T>((resolve, reject) => {
-			const timer = setTimeout(() => {
-				this.#pending.delete(id);
-				reject(new HttpError(504, `The computer didn't answer within ${Math.round(timeoutMs / 1000)} seconds.`));
-			}, timeoutMs);
-			this.#pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, ...(native ? { native } : {}) });
-			socket.send(JSON.stringify({ type: "call", id, op, args }));
-			if (trace) trace.sent = true;
-			// Settled before its reply, the request is unknown: the app may yet be acted on.
-			if (trace && native) trace.awaiting.add(native.key);
-		});
 		// A call that was sent and wasn't answered, by a timeout or a disconnect, may have run.
 		return trace
 			? answer.catch((error: unknown) => {

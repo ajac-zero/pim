@@ -591,12 +591,20 @@ export class Pim extends DurableAgent<Env> {
 	 * be the one its binding was vouched for, in the binding's run. A refusal
 	 * before anything left the space is a `ControlRefused`, which closes the
 	 * binding; anything after may have run.
+	 *
+	 * A chat's deletion and its agent are Pim's own records, not the harness's,
+	 * so they aren't on the commit line the claim is: a deletion marked after
+	 * the authority read them, while the claim commits, would otherwise not
+	 * stop the call. Both are read again here, with no await before the
+	 * control state's synchronous admission, so a deletion marked before that
+	 * admission sends nothing, and one marked after it comes after the send.
 	 */
 	async #desktopSend(binding: NativeBinding, session: string, requestId: string, approvalId?: string): Promise<NativeOutcome> {
 		const { conversationId, agentId, runAnchor } = binding.identity;
 		if (conversationId !== session || this.#roleOf(session).agent.id !== agentId) {
 			throw new ControlRefused("identity", "the call's chat or agent isn't the one asking");
 		}
+		if (this.store.deletedSessions().has(session)) throw new ControlRefused("stopped", "the call's chat was deleted");
 		return this.#controlled(
 			session,
 			requestId,

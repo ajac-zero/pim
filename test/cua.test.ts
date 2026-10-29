@@ -1178,6 +1178,8 @@ describe("a space whose operator chose its Cua VM", () => {
 		let desk: Awaited<ReturnType<typeof space>>;
 		let deskFixture: Fixture;
 		let upstream: ReturnType<typeof spacesd>;
+		/** The host's real native-app dispatcher for `owner`'s space, over the stand-in spacesd. */
+		let dispatcherFor: (owner: string) => { dispatch: NonNullable<Machine["native"]> };
 		let root: string;
 		const bindings = async () =>
 			JSON.parse(
@@ -1218,7 +1220,8 @@ describe("a space whose operator chose its Cua VM", () => {
 					(owner) => desktopSpaces.add(owner),
 				);
 				root = (await desk.api("/")).body.rootSession;
-				const dispatcher = createNativeDispatcher({ origin: SPACESD, token: SPACESD_TOKEN, owner: desk.owner, fetch: upstream.fetch, limits: { callMs: 2_000 } });
+				dispatcherFor = (owner) => createNativeDispatcher({ origin: SPACESD, token: SPACESD_TOKEN, owner, fetch: upstream.fetch, limits: { callMs: 2_000 } });
+				const dispatcher = dispatcherFor(desk.owner);
 				deskFixture = await fixtureFor(desk.owner, (request) => dispatcher.dispatch(request));
 				await desk.within((instance) => instance.control.enable());
 				await desk.grant("desk-lease-1");
@@ -1322,7 +1325,11 @@ describe("a space whose operator chose its Cua VM", () => {
 			const admitted = (await natives()).length;
 
 			// The run's ID is gone by the time the approval is decided, as for a run from before run IDs: refused at the claim.
-			const legacy = desk.uses("desktop_click", { pid: 4242, x: 1, y: 2 });
+			// The run's next call, made after, carries no run ID either, and is refused before anything is bound.
+			const legacy = turn([
+				["desktop_click", { pid: 4242, x: 1, y: 2 }],
+				["desktop_list_apps", {}],
+			]);
 			const unproven = await desk.pending();
 			const conversation = (await bindings()).find((binding) => binding.id === (unproven.args as { binding: string }).binding)!.identity.conversationId;
 			await desk.within(async (instance) =>
@@ -1331,10 +1338,15 @@ describe("a space whose operator chose its Cua VM", () => {
 					delete (live.run as { id?: unknown }).id;
 				}, BACKGROUND_CONTEXT),
 			);
+			const bound = (await bindings()).length;
 			await desk.decide(unproven.id);
 			await legacy.turn;
-			expect(legacy.result()).toMatch(/couldn't be established \(legacy\), so no native-app call was bound or sent/);
+			expect(legacy.results).toEqual([
+				expect.stringMatching(/couldn't be established \(legacy\), so no native-app call was bound or sent/),
+				expect.stringMatching(/couldn't be established \(legacy\), so no native-app call was bound or sent/),
+			]);
 			expect((await bindings()).find((binding) => binding.id === (unproven.args as { binding: string }).binding)?.status).toBe("closed");
+			expect((await bindings()).length).toBe(bound);
 
 			// The person denies: the binding is closed, and nothing is sent.
 			const typing = desk.uses("desktop_type_text", { pid: 4242, text: "rm -rf ~" });
@@ -1404,6 +1416,120 @@ describe("a space whose operator chose its Cua VM", () => {
 			expect(nextRun.result()).toBe("done");
 			expect((await natives()).at(-1)).toMatchObject({ status: "completed" });
 			expect((await natives()).at(-1)!.runId).not.toBe(unknown.runId);
+			expect(elsewhere).toEqual([]);
+		});
+
+		it("orders a chat's deletion and its stop against the claim, through Pim's own routes: before it nothing is sent, and during it the stop waits and the deletion is caught at admission", async () => {
+			const sent = upstream.executed.length;
+			const chat = async () => (await desk.post<{ id: string }>("/sessions", {})).body.id;
+			/** The agent asks to click in `session`; `more` scripts the model's answer after the call, for a run that goes on. */
+			const click = (session: string, x: number, more = false) =>
+				waits().start(`turn: click ${x}`, () => {
+					faux.setResponses([() => toolUse("desktop_click", { pid: 4242, x, y: 1 }), ...(more ? [() => toolUse("send_to_user", { message: "Ok." })] : [])]);
+					return desk.post(`/sessions/${session}/messages`, { content: `Click ${x}`, wait: true });
+				});
+			/** This test's own spies, undone without touching the suite's stand-ins (`fetch`). */
+			const spies: { mockRestore(): void }[] = [];
+			const unspy = () => {
+				for (const spy of spies.splice(0)) spy.mockRestore();
+			};
+			const statusOf = async (approval: Approval) => (await bindings()).find((binding) => binding.id === (approval.args as { binding: string }).binding)?.status;
+
+			// Deleted, through the person's route, while its approval waits: the approval is denied and nothing is sent.
+			const gone = await chat();
+			const goneTurn = click(gone, 11);
+			const goneApproval = await desk.pending();
+			expect((await desk.api(`/sessions/${gone}`, { method: "DELETE" })).status).toBe(200);
+			await goneTurn.catch(() => undefined);
+			await vi.waitFor(async () => expect((await desk.api<Approval>(`/approvals/${goneApproval.id}`)).body.status).toBe("denied"), { timeout: 10_000 });
+			expect((await desk.decide(goneApproval.id)).status).toBe(409);
+			expect(await statusOf(goneApproval)).toBe("closed");
+
+			// Deleted as the claim commits: the route's first step, its mark in Pim's own records, lands just after the authority read them.
+			// The claim stands, and the mark is read again at admission, so nothing is sent.
+			const marked = await chat();
+			const markedTurn = click(marked, 12, true);
+			const markedApproval = await desk.pending();
+			const conversation = (await bindings()).find((binding) => binding.id === (markedApproval.args as { binding: string }).binding)!.identity.conversationId;
+			await desk.within(async (instance) => {
+				const proto = await (await instance.harness.pi()).commit((tx) => Object.getPrototypeOf(tx) as { run: (id: number) => Promise<unknown> }, BACKGROUND_CONTEXT);
+				const run = proto.run;
+				let next = false;
+				spies.push(
+					vi.spyOn(proto, "run").mockImplementation(async function (this: unknown, id: number) {
+						const read = await run.call(this, id);
+						if (String(id) === conversation) next = true;
+						return read;
+					}),
+				);
+				const deleted = instance.store.deletedSessions.bind(instance.store);
+				spies.push(
+					vi.spyOn(instance.store, "deletedSessions").mockImplementation(() => {
+						const read = deleted();
+						if (next) {
+							next = false;
+							instance.store.deleteSession(conversation);
+						}
+						return read;
+					}),
+				);
+			});
+			await desk.decide(markedApproval.id);
+			await markedTurn;
+			unspy();
+			expect(await statusOf(markedApproval)).toBe("closed");
+			expect(await desk.within((instance) => instance.store.deletedSessions().has(conversation))).toBe(true);
+			expect((await natives()).filter((request) => request.requestId === `approval:${markedApproval.id}`)).toEqual([]);
+			// To the person, the chat is gone from the moment of that mark.
+			expect((await desk.api(`/sessions/${marked}/messages`)).status).toBe(404);
+
+			// Stopped, through the person's route, while the claim's transaction is open: the stop waits for it on the harness's line.
+			// It was asked for before the claim read the call's tool task, so a stop that didn't wait would have been read, and refused the call.
+			const stopped = await chat();
+			const stoppedTurn = click(stopped, 13);
+			const stoppedApproval = await desk.pending();
+			const task = (await bindings()).find((binding) => binding.id === (stoppedApproval.args as { binding: string }).binding)!.identity as unknown as { toolTaskId: string };
+			const order: string[] = [];
+			await desk.within(async (instance) => {
+				const harness = await instance.harness.pi();
+				const proto = await harness.commit((tx) => Object.getPrototypeOf(tx) as { task: (id: number) => Promise<unknown> }, BACKGROUND_CONTEXT);
+				const read = proto.task;
+				const sessions = Object.getPrototypeOf(instance.harness.session(stopped)) as { abort: (operationId?: string) => Promise<boolean> };
+				const abort = sessions.abort;
+				spies.push(vi.spyOn(sessions, "abort").mockImplementation(async function (this: unknown, operationId?: string) {
+					order.push("stop asked");
+					try {
+						return await abort.call(this, operationId);
+					} finally {
+						order.push("stopped");
+					}
+				}));
+				let armed = true;
+				spies.push(vi.spyOn(proto, "task").mockImplementation(async function (this: unknown, id: number) {
+					if (armed && String(id) === task.toolTaskId) {
+						armed = false;
+						// The person's stop, as its own request; not through the test's waits, which this code, inside the space's decision, isn't one of.
+						void exports.default.fetch(
+							new Request(apiUrl(`/sessions/${stopped}/abort`), { method: "POST", body: "{}", headers: { Authorization: `Bearer ${desk.token}`, "content-type": "application/json" } }),
+						);
+						await vi.waitFor(() => expect(order).toContain("stop asked"), { timeout: 5_000, interval: 5 });
+						// Time for a stop that didn't wait to commit.
+						await new Promise((resolve) => setTimeout(resolve, 50));
+						order.push("claim read the call");
+					}
+					return read.call(this, id);
+				}));
+			});
+			await desk.decide(stoppedApproval.id);
+			await stoppedTurn.catch(() => undefined);
+			await vi.waitFor(() => expect(order).toContain("stopped"), { timeout: 10_000 });
+			unspy();
+			expect(order).toEqual(["stop asked", "claim read the call", "stopped"]);
+			// The claim won: the call was sent, once, and its outcome recorded, though its chat was stopped right after.
+			expect(upstream.executed.length).toBe(sent + 1);
+			expect(await statusOf(stoppedApproval)).toBe("closed");
+			expect((await natives()).filter((request) => request.requestId === `approval:${stoppedApproval.id}`)).toEqual([expect.objectContaining({ status: "completed" })]);
+			faux.setResponses([]);
 			expect(elsewhere).toEqual([]);
 		});
 	});

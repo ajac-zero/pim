@@ -87,6 +87,10 @@ export const filesQuery = (path: string) =>
 export const computerQuery = () =>
   queryOptions({ queryKey: ["computer"], queryFn: pim.computer });
 
+/** The machine that keeps everyone's computers: the admin's view. */
+export const computerHostQuery = () =>
+  queryOptions({ queryKey: ["computer-host"], queryFn: admin.computerHost });
+
 /** A chat's window in the agents' browser: its own, or that of a task it handed out. */
 export const browserQuery = (sessionId: string) =>
   queryOptions({

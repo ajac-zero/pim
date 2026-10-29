@@ -4,10 +4,9 @@ import type { Message } from "@earendil-works/pi-ai";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
-import { type ExecArgs, type ExecResult, Link, type Machine } from "../computer/pim-computer";
-import { IDLE_MS } from "../src/computer";
+import type { ExecArgs, ExecResult, ScreenHost } from "../computer/pim-computer";
 import type { Approval } from "../src/store";
-import { api, apiUrl, connectTestComputer, opens, OWNER, pendingApproval, post, say, TOKEN, testBrowser, toolUse } from "./helpers";
+import { api, apiUrl, connectTestComputer, opens, OWNER, pendingApproval, post, say, signedIn, TOKEN, toolUse } from "./helpers";
 import { faux, paintings, type Pim } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
@@ -82,7 +81,7 @@ let token = "";
 
 describe("a space without a computer", () => {
 	it("has no files, and no tools that need them", async () => {
-		expect(await status()).toEqual({ state: "none", managed: false, pairedAt: null, computer: null, startable: true });
+		expect(await status()).toEqual({ state: "none", managed: false, pairedAt: null, computer: null, error: null });
 		expect((await api("/files")).status).toBe(404);
 		const tools = await offeredTools();
 		expect(tools).toContain("send_to_user");
@@ -285,7 +284,7 @@ describe("the computer", () => {
 	it("is removed with its tools, and its token stops working; its files stay on it", async () => {
 		expect((await raw("/computer", { method: "DELETE" })).status).toBe(200);
 		expect((await computer.closed).code).toBe(4409);
-		expect(await status()).toEqual({ state: "none", managed: false, pairedAt: null, computer: null, startable: true });
+		expect(await status()).toEqual({ state: "none", managed: false, pairedAt: null, computer: null, error: null });
 		expect((await opens("/computer/connect", token)).status).toBe(401);
 		expect(await offeredTools()).not.toContain("file_read");
 		expect((await api("/files")).status).toBe(404);
@@ -293,117 +292,107 @@ describe("the computer", () => {
 	});
 });
 
-describe("a computer Pim starts", () => {
-	it("is a Sprite, set up once, woken when needed and let go when unused, and removed with everything on it", async () => {
-		const requests: string[] = [];
-		const launches: { cmd: string[]; letGo: boolean; closed: boolean; server: WebSocket }[] = [];
-		const root = `/tmp/computer-${crypto.randomUUID()}`;
-		// Its Chrome, which goes on running in these tests where a Sprite's would quit and open its pages again.
-		const browser = testBrowser();
-		/** A frame of an exec's output: its stream, then its bytes. */
-		const frame = (stream: number, text: string) => {
-			const bytes = new TextEncoder().encode(text);
-			const framed = new Uint8Array(bytes.byteLength + 1);
-			framed[0] = stream;
-			framed.set(bytes, 1);
-			return framed;
-		};
-		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-			const request = new Request(input, init);
-			const url = new URL(request.url);
-			if (url.host !== "api.sprites.dev") throw new Error(`This test reaches only Sprites, not ${url}`);
-			expect(request.headers.get("Authorization")).toBe("Bearer sprites-test-token");
-			requests.push(`${request.method} ${url.pathname}`);
-			if (url.pathname === "/v1/sprites" && request.method === "POST") return Response.json({ name: (await request.json<{ name: string }>()).name, status: "cold" }, { status: 201 });
-			if (!url.pathname.endsWith("/exec")) return new Response(null, { status: 204 });
-			const cmd = url.searchParams.getAll("cmd");
-			const { 0: client, 1: server } = new WebSocketPair();
-			server.binaryType = "arraybuffer";
-			server.accept();
-			if (!cmd.some((arg) => arg.includes("--stdio"))) {
-				// Setting it up, which succeeds.
-				server.send(Uint8Array.of(3, 0));
-				return new Response(null, { status: 101, webSocket: client });
-			}
-			// pim-computer --stdio: the real Link, over the test's folder, a line at a time.
-			await fs.mkdir(root, { recursive: true });
-			const machine: Machine = {
-				root: await fs.realpath(root),
-				exec: async () => {
-					throw new Error("This test's computer runs no commands.");
-				},
-				browser,
-			};
-			const launch = { cmd, letGo: false, closed: false, server };
-			launches.push(launch);
-			const link = new Link(machine, (message) => server.send(frame(1, `${message}\n`)));
-			server.addEventListener("message", (event) => {
-				const data = new Uint8Array(event.data as ArrayBuffer);
-				if (data[0] === 4) {
-					// Its input ended: it exits, as pim-computer does.
-					launch.letGo = true;
-					server.send(Uint8Array.of(3, 0));
-					server.close(1000);
-				} else for (const line of new TextDecoder().decode(data.subarray(1)).split("\n")) if (line) link.receive(line);
-			});
-			server.addEventListener("close", () => {
-				launch.closed = true;
-				link.close();
-			});
-			const hello = { type: "hello", version: 1, agent: "pim-computer/test", hostname: "sprite", platform: "linux", arch: "x64", user: "sprite", root: machine.root, browser: "chrome" };
-			server.send(frame(1, `${JSON.stringify(hello)}\n`));
-			return new Response(null, { status: 101, webSocket: client });
-		});
+describe("a computer this Pim's host keeps", () => {
+	const directory = () => env.Directory.getByName("directory");
+	const sync = (token: string, body: unknown) =>
+		exports.default.fetch(new Request("https://pim.test/api/computer-host/sync", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify(body) }));
+	type Requests = { requests: { id: string; op: string; name: string; token?: string }[] };
 
-		expect(await status()).toMatchObject({ state: "none", startable: true });
-		const started = await post<Record<string, unknown>>("/computer", { managed: true });
-		expect(started.status).toBe(201);
-		// It's set up, then woken once, so it says what it is.
-		expect(started.body).toMatchObject({ state: "online", managed: true, computer: { hostname: "sprite" } });
-		expect(started.body.token).toBeUndefined();
-		const name = new RegExp(`^GET /v1/sprites/pim-${OWNER.replace("_", "-")}-[0-9a-z]+/exec$`);
-		expect(requests).toEqual(["POST /v1/sprites", expect.stringMatching(name), expect.stringMatching(name)]);
-		const sprite = requests[1]!.slice("GET ".length, -"/exec".length);
-		// pim-computer comes from this Pim.
-		expect(launches[0]!.cmd.at(-1)).toBe("https://pim.test");
-		// Another can't be paired in its place.
+	it("is asked of the host for each space, connects with its own token, and can't be replaced or removed", async () => {
+		expect(await status()).toMatchObject({ state: "none" });
+		const host = await directory().pairComputerHost();
+		expect(host).toMatch(/^pimh_/);
+
+		// Looked at, the space's computer is asked of the host, and is the space's from then on.
+		expect(await status()).toMatchObject({ state: "offline", managed: true, computer: null, error: null });
 		expect((await post("/computer")).status).toBe(409);
+		expect((await raw("/computer", { method: "DELETE" })).status).toBe(409);
 		expect(await offeredTools()).toContain("shell");
 
-		// What's asked of it is done there, through pim-computer's input and output.
-		expect((await upload("/workspace/notes.md", "Started")).status).toBe(201);
-		expect(await (await raw(`/files/content?path=${encodeURIComponent("/workspace/notes.md")}`)).text()).toBe("Started");
+		// Only the host's token opens its work, which it gets once, until it says how it went.
+		expect((await sync(`${host.slice(0, -2)}xx`, { results: [] })).status).toBe(401);
+		expect((await sync(token, { results: [] })).status).toBe(401);
+		const first = await sync(host, { results: [], machines: [], image: "ghcr.io/trycua/omarchy:edge", version: "0.1.0" });
+		expect(first.status).toBe(200);
+		const { requests } = await first.json<Requests>();
+		const name = `pim-${OWNER.replace("_", "-")}`;
+		expect(requests).toEqual([{ id: expect.any(String), op: "create", name, token: expect.stringMatching(new RegExp(`^pimc_${OWNER}_`)) }]);
+		expect((await (await sync(host, { results: [] })).json<Requests>()).requests).toEqual([]);
 
-		// Just used, the space holds on to it; unused, it lets go, and the Sprite sleeps.
-		await runInDurableObject(agent(), (instance: Pim) => instance.computer.letGoIfIdle());
-		expect(launches[0]).toMatchObject({ letGo: false, closed: false });
-		await runInDurableObject(agent(), (instance: Pim) => instance.computer.letGoIfIdle(Date.now() + IDLE_MS));
-		await vi.waitFor(() => expect(launches[0]).toMatchObject({ letGo: true, closed: true }));
-		expect(await status()).toMatchObject({ state: "offline", managed: true, computer: { hostname: "sprite" } });
+		// It couldn't be made: the person hears why, and asking again gives the host a new token, which the old one doesn't open.
+		await sync(host, { results: [{ id: requests[0]!.id, error: "No room on the machine for another computer" }] });
+		expect(await status()).toMatchObject({ state: "offline", managed: true, error: "No room on the machine for another computer" });
+		expect((await post("/computer", { managed: true })).status).toBe(201);
+		const [again] = (await (await sync(host, { results: [] })).json<Requests>()).requests;
+		expect(again).toMatchObject({ op: "create", name });
+		expect(again!.token).not.toBe(requests[0]!.token);
+		expect((await opens("/computer/connect", requests[0]!.token!)).status).toBe(401);
+		await sync(host, { results: [{ id: again!.id }], machines: [{ name, running: true }] });
+		expect(await directory().computerHost()).toMatchObject({ paired: true, connected: true, image: "ghcr.io/trycua/omarchy:edge", machines: 1, running: 1, pending: 0 });
 
-		// Needed, it's woken again, and what was asked of it is done.
-		expect((await upload("/workspace/notes.md", "Woke up")).status).toBe(201);
-		expect(launches.length).toBe(2);
-		expect(await (await raw(`/files/content?path=${encodeURIComponent("/workspace/notes.md")}`)).text()).toBe("Woke up");
+		// Set up, it connects with its token, with its desktop to show.
+		const streams: { heard: string[]; closed: boolean; say(data: string | Uint8Array): void }[] = [];
+		const screen: ScreenHost = {
+			async open(onMessage, onClose) {
+				const stream = { heard: [] as string[], closed: false, say: onMessage };
+				streams.push(stream);
+				// The media plane speaks first, as soon as it opens.
+				onMessage(JSON.stringify({ type: "hello", payload: { protocol: "rcdp" } }));
+				return {
+					send: (data) => stream.heard.push(data),
+					close: () => {
+						stream.closed = true;
+						onClose();
+					},
+				};
+			},
+		};
+		const hosted = await connectTestComputer(again!.token!, `/tmp/computer-${crypto.randomUUID()}`, async () => answer({ command: "true" }), undefined, screen);
+		expect(await status()).toMatchObject({ state: "online", managed: true, error: null, computer: { screen: true } });
 
-		// The agents browse there. Asleep, its browser isn't running: the person sees the page it showed, and taking it over wakes it there.
-		const notes = `data:text/html;charset=utf-8,${encodeURIComponent("<title>Notes</title><p>Woke up</p>")}`;
-		await callTool("browser_open", { url: notes });
-		// The Sprite goes away, as when it sleeps; its socket is the space's, so it's closed there.
-		await runInDurableObject(agent(), () => launches[1]!.server.close(1000));
-		await vi.waitFor(async () => expect((await api("/browser")).body.page).toEqual({ url: notes, title: "Notes", asleep: true }));
-		const watching = await opens("/browser/live", TOKEN);
-		const heard: { type: string }[] = [];
-		watching.webSocket!.addEventListener("message", (event) => heard.push(JSON.parse(event.data as string)));
-		watching.webSocket!.accept();
-		await vi.waitFor(() => expect(heard).toContainEqual({ type: "page", url: notes, title: "Notes" }));
-		expect(launches.length).toBe(3);
-		expect((await api("/browser")).body.page).toEqual({ url: notes, title: "Notes" });
+		// Only the person's own signed-in browser shows the desktop, which takes input as if at the computer: not an API token.
+		expect((await opens("/computer/screen", TOKEN)).status).toBe(403);
+		const viewer = await exports.default.fetch(
+			new Request(apiUrl("/computer/screen"), { headers: { Upgrade: "websocket", origin: "https://pim.test", cookie: await signedIn() } }),
+		);
+		expect(viewer.status).toBe(101);
 
-		// Removing it removes the Sprite, with everything on it.
-		expect((await raw("/computer", { method: "DELETE" })).status).toBe(200);
-		expect(requests.at(-1)).toBe(`DELETE ${sprite}`);
-		await vi.waitFor(() => expect(launches[2]).toMatchObject({ letGo: true, closed: true }));
+		// The app shows its desktop: what the stream says reaches the app as it is, video as binary, and the app's input reaches the stream.
+		const shown: (string | Uint8Array)[] = [];
+		viewer.webSocket!.binaryType = "arraybuffer";
+		viewer.webSocket!.addEventListener("message", (event) => {
+			shown.push(typeof event.data === "string" ? event.data : new Uint8Array(event.data as ArrayBuffer));
+		});
+		viewer.webSocket!.accept();
+		await vi.waitFor(() => expect(shown).toEqual([JSON.stringify({ type: "hello", payload: { protocol: "rcdp" } })]));
+		const packet = Uint8Array.of(0, 0, 0, 2, 0, 0, 0, 3, 123, 125, 0xff, 0x00, 0x7f);
+		streams[0]!.say(packet);
+		await vi.waitFor(() => expect(shown[1]).toEqual(packet));
+		const input = JSON.stringify({ type: "interactive_input", payload: { first_sequence: 1, events: [{ kind: "text_commit", text: "hi" }] } });
+		viewer.webSocket!.send(input);
+		await vi.waitFor(() => expect(streams[0]!.heard).toEqual([input]));
+
+		// Closing the app closes the stream.
+		viewer.webSocket!.close(1000);
+		await vi.waitFor(() => expect(streams[0]!.closed).toBe(true));
+		hosted.socket.close(1000);
+		await hosted.closed;
+
+		// Without a host, people connect their own computer again.
+		await directory().forgetComputerHost();
+		expect(await directory().computerHost()).toMatchObject({ paired: false });
+		await runInDurableObject(agent(), (instance: Pim) => instance.computer.forget());
 		expect(await status()).toMatchObject({ state: "none", managed: false });
+	});
+
+	it("is forgotten when it was a Sprite Pim started before, which nothing reaches anymore", async () => {
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			instance.store.setMeta("computer_machine", "pim-o-sprite");
+			await instance.onStart();
+		});
+		expect(await status()).toEqual({ state: "none", managed: false, pairedAt: null, computer: null, error: null });
+		// So the person can connect a computer of their own again.
+		expect((await post("/computer")).status).toBe(201);
+		await runInDurableObject(agent(), (instance: Pim) => instance.computer.forget());
 	});
 });

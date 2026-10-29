@@ -24,6 +24,7 @@ import {
   Folder,
   Loader2,
   MessagesSquare,
+  Monitor,
   MoreHorizontal,
   Pencil,
   RotateCcw,
@@ -160,6 +161,8 @@ export function useNavigationState() {
     account,
     profile,
     hasComputer: !!computer && computer.state !== "none",
+    // The Computer page shows its desktop: the one this Pim keeps for you, or yours when it streams it.
+    hasDesktop: !!computer && (computer.managed || !!computer.computer?.screen),
     // Alone on this Pim, there is nobody to share with or discover.
     withOthers: !!account && !account.alone,
     awaitingApproval: useAwaitingApproval(),
@@ -220,6 +223,7 @@ export function AppSidebar({
     account,
     profile,
     hasComputer,
+    hasDesktop,
     withOthers,
     awaitingApproval,
     guestRequests,
@@ -272,6 +276,22 @@ export function AppSidebar({
               icon={<Folder className="size-4.5" />}
               label={t("files")}
             />
+          )}
+          {hasDesktop && (
+            <RailItem
+              icon={<Monitor className="size-4.5" />}
+              label={t("computer")}
+            >
+              {(content) => (
+                <Link
+                  to="/computer"
+                  className={cn(RAIL_ITEM_CLASS, RAIL_ACTIVE_CLASS)}
+                  aria-label={t("computer")}
+                >
+                  {content}
+                </Link>
+              )}
+            </RailItem>
           )}
           <RailPanel
             {...railPanel}

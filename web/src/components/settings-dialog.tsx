@@ -11,7 +11,10 @@ import {
 } from "~/components/account-settings";
 import { AddDevice } from "~/components/add-device";
 import { ChatGPTLogo } from "~/components/chatgpt-logo";
-import { ComputerSection } from "~/components/computer-settings";
+import {
+  ComputerHostSection,
+  ComputerSection,
+} from "~/components/computer-settings";
 import { DeploymentSection } from "~/components/deployment-settings";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
@@ -221,7 +224,12 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
             <SignInMethodsSection />
           </>
         )}
-        {tab === "deployment" && <DeploymentSection />}
+        {tab === "deployment" && (
+          <>
+            <DeploymentSection />
+            <ComputerHostSection />
+          </>
+        )}
       </div>
     </>
   );

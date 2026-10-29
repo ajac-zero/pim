@@ -239,19 +239,10 @@ export class PimBrowser {
 		});
 	}
 
-	/**
-	 * The address and title of the page the chat's window shows, or null
-	 * when it has none open or the computer is offline. While a computer
-	 * Pim started is asleep, its browser isn't running, and this is the page
-	 * the window showed, `asleep`: taking it over wakes the computer and
-	 * opens it there again.
-	 */
-	async current(chat: string): Promise<{ url: string; title: string; asleep?: true } | null> {
+	/** The address and title of the page the chat's window shows, or null when it has none open or the computer is offline. */
+	async current(chat: string): Promise<{ url: string; title: string } | null> {
 		const shown = await this.#use(chat, "existing", async (page) => this.#remember(chat, page, await page.title()));
-		if (shown) return { url: shown.url, title: shown.title };
-		const status = this.#computer.status();
-		const record = this.#records()[chat];
-		return status.managed && status.state === "offline" && record ? { url: record.url, title: record.title, asleep: true } : null;
+		return shown ? { url: shown.url, title: shown.title } : null;
 	}
 
 	/** Of `chats`, the one whose window was used last: a chat and the tasks it handed out, whose windows it shows. */
@@ -303,7 +294,7 @@ export class PimBrowser {
 	 * Starts sending the chat's window to `watcher` as pictures, for the
 	 * person to take it over, under `id` (one per watching socket). A window
 	 * that isn't open opens where it was, starting the browser if it isn't
-	 * running and waking its computer if it's asleep.
+	 * running.
 	 */
 	async watch(chat: string, id: string, watcher: Watcher): Promise<void> {
 		this.#watching.set(id, chat);
@@ -359,11 +350,6 @@ export class PimBrowser {
 		screencast.page.removeAllListeners("load");
 		screencast.page.removeAllListeners("close");
 		this.#letGoLater();
-	}
-
-	/** Whether someone is taking a window over now. */
-	watched(): boolean {
-		return this.#screencasts.size > 0;
 	}
 
 	/** Whether `id` is watching, as far as this instance knows: a space that woke again has forgotten. */
@@ -571,7 +557,6 @@ export class PimBrowser {
 		const connecting = (this.#connecting ??= (async () => {
 			this.#browser = undefined;
 			this.#pages.clear();
-			// Asking doesn't wake a computer that's asleep; connecting does.
 			const { running } = await this.#computer.browserStatus();
 			if (!running && !start) return undefined;
 			const transport = await this.#computer.connectBrowser();

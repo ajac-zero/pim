@@ -19,6 +19,7 @@ import {
   Contact,
   Folder,
   MessagesSquare,
+  Monitor,
   MoreHorizontal,
   ScrollText,
   Settings,
@@ -203,6 +204,7 @@ function MoreSheet({
   account,
   profile,
   hasComputer,
+  hasDesktop,
   withOthers,
   guestRequests,
   open,
@@ -294,6 +296,19 @@ function MoreSheet({
         )}
         {hasComputer &&
           panelRow("files", <Folder className={ROW_ICON_CLASS} />, t("files"))}
+        {hasDesktop && (
+          <Link
+            to="/computer"
+            onClick={() => {
+              close();
+              onHideList();
+            }}
+            className={ROW_CLASS}
+          >
+            <Monitor className={ROW_ICON_CLASS} />
+            {t("computer")}
+          </Link>
+        )}
         {panelRow(
           "skills",
           <ScrollText className={ROW_ICON_CLASS} />,

@@ -52,17 +52,11 @@ export function BrowserView({
               {hostOf(page.url)}
             </p>
           </div>
-          {page.asleep ? (
-            <p className="rounded-lg border bg-muted/30 px-3 py-6 text-center text-muted-foreground text-xs">
-              {t("browserAsleep")}
-            </p>
-          ) : (
-            <img
-              src={browserScreenshotUrl(sessionId, updatedAt)}
-              alt={t("browserPicture", { title })}
-              className="w-full rounded-lg border bg-background"
-            />
-          )}
+          <img
+            src={browserScreenshotUrl(sessionId, updatedAt)}
+            alt={t("browserPicture", { title })}
+            className="w-full rounded-lg border bg-background"
+          />
           <div className="grid grid-cols-[3fr_1fr] gap-2">
             <Button className="w-full" asChild>
               {/* A page of its own, beside the chat, where the person uses the browser. */}
